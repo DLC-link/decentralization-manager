@@ -1,6 +1,7 @@
 use std::{collections::HashMap, time::Duration};
 
 use actix_web::{HttpRequest, HttpResponse, Responder, get, post, web};
+use serde::Deserialize;
 use sqlx::SqlitePool;
 
 use crate::{
@@ -15,9 +16,10 @@ use crate::{
         AppState, mark_failed_via_pool,
         middleware::require_admin,
         types::{
-            DeclineInvitationPayload, ErrorResponse, InvitationActionRequest, MessageResponse,
-            PeerJob, PendingInvitation, PendingInvitationsResponse, RequestDarPayload,
-            WorkflowKind, WorkflowProgress, WorkflowRole, WorkflowRun,
+            DeclineInvitationPayload, ErrorResponse, HandledInvitationsResponse,
+            InvitationActionRequest, InvitationOutcome, MessageResponse, PeerJob,
+            PendingInvitation, PendingInvitationsResponse, RequestDarPayload, WorkflowKind,
+            WorkflowProgress, WorkflowRole, WorkflowRun,
         },
     },
     workflow::{
@@ -26,16 +28,63 @@ use crate::{
     },
 };
 
-async fn delete_persisted_invitation(data: &web::Data<AppState>, id: &str) {
-    match data.db.begin_transaction().await {
-        Ok(mut tx) => {
-            if let Err(e) = tx.delete_pending_invitation(id).await {
-                tracing::warn!("Failed to delete persisted invitation {id}: {e}");
-            } else if let Err(e) = Commitable::commit(tx).await {
-                tracing::warn!("Failed to commit invitation deletion {id}: {e}");
-            }
+/// Handled invitations kept as history. Invitations arrive one per workflow
+/// run, so this covers months of activity, and it is also the most the
+/// notification feed asks for. The bound is a row count, so it holds however
+/// fast invitations arrive.
+pub(crate) const MAX_HANDLED_INVITATIONS: i64 = 200;
+
+/// Keep an accepted or declined invitation as history instead of deleting it,
+/// and trim the history to [`MAX_HANDLED_INVITATIONS`] in the same transaction.
+///
+/// A database failure is logged and the answer goes ahead, as it did when
+/// this step only deleted the row.
+async fn persist_handled_invitation(
+    data: &web::Data<AppState>,
+    invitation: &PendingInvitation,
+    outcome: InvitationOutcome,
+) {
+    let id = &invitation.id;
+    let handled_at = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    let mut tx = match data.db.begin_transaction().await {
+        Ok(tx) => tx,
+        Err(e) => {
+            tracing::warn!("Failed to begin tx to record invitation {id}: {e}");
+            return;
         }
-        Err(e) => tracing::warn!("Failed to begin tx to delete invitation {id}: {e}"),
+    };
+    let marked = match tx.mark_invitation_handled(id, outcome, handled_at).await {
+        Ok(marked) => marked,
+        Err(e) => {
+            tracing::warn!(
+                "Failed to record invitation {id} as {}: {e}",
+                outcome.as_str()
+            );
+            return;
+        }
+    };
+    // No pending row: persisting the invitation on receipt failed, and only
+    // the in-memory card was left. Write the answered invitation in full.
+    if !marked
+        && let Err(e) = tx
+            .insert_handled_invitation(invitation, outcome, handled_at)
+            .await
+    {
+        tracing::warn!(
+            "Failed to record invitation {id} as {}: {e}",
+            outcome.as_str()
+        );
+        return;
+    }
+    if let Err(e) = tx.prune_handled_invitations(MAX_HANDLED_INVITATIONS).await {
+        tracing::warn!("Failed to prune handled invitations: {e}");
+        return;
+    }
+    if let Err(e) = Commitable::commit(tx).await {
+        tracing::warn!("Failed to commit handled invitation {id}: {e}");
     }
 }
 
@@ -43,7 +92,8 @@ async fn delete_persisted_invitation(data: &web::Data<AppState>, id: &str) {
 /// part-way: removal happens FIRST (under the write lock, so a double accept
 /// 404s), which means a failure after that point would otherwise strand the
 /// run — the card is gone, the operator can't retry, and the coordinator's
-/// human-paced WaitingForPeers waits forever.
+/// human-paced WaitingForPeers waits forever. The upsert also turns the row
+/// recorded as accepted back into a pending one.
 async fn restore_invitation(data: &web::Data<AppState>, invitation: &PendingInvitation) {
     match data.db.begin_transaction().await {
         Ok(mut tx) => {
@@ -211,6 +261,60 @@ pub async fn get_invitations(data: web::Data<AppState>) -> impl Responder {
     })
 }
 
+/// Query parameters for the handled invitations endpoint
+#[derive(Debug, Deserialize, utoipa::IntoParams)]
+pub struct HandledInvitationsQuery {
+    /// Most invitations to return (default 50, at most 200)
+    #[serde(default)]
+    pub limit: Option<i64>,
+}
+
+/// Get recently accepted and declined invitations, newest first
+#[utoipa::path(
+    tag = "Invitations",
+    params(HandledInvitationsQuery),
+    responses(
+        (status = 200, description = "Handled invitations, newest first", body = HandledInvitationsResponse),
+        (status = 500, description = "Internal server error", body = ErrorResponse)
+    )
+)]
+#[get("/invitations/handled")]
+pub async fn list_handled_invitations(
+    data: web::Data<AppState>,
+    query: web::Query<HandledInvitationsQuery>,
+) -> impl Responder {
+    let limit = query.limit.unwrap_or(50).clamp(1, MAX_HANDLED_INVITATIONS);
+    let handled = match data.db.get_handled_invitations(limit).await {
+        Ok(handled) => handled,
+        Err(e) => {
+            tracing::error!("Failed to read handled invitations: {e}");
+            return HttpResponse::InternalServerError().json(ErrorResponse {
+                error: format!("Failed to read handled invitations: {e}"),
+            });
+        }
+    };
+
+    let pubkey_to_name: HashMap<String, String> = data
+        .db
+        .get_all_peers()
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .map(|p| (p.public_key, p.name))
+        .collect();
+    let invitations = handled
+        .into_iter()
+        .map(|mut h| {
+            h.invitation.coordinator_name = pubkey_to_name
+                .get(&h.invitation.coordinator_pubkey)
+                .cloned();
+            h
+        })
+        .collect();
+
+    HttpResponse::Ok().json(HandledInvitationsResponse { invitations })
+}
+
 /// Accept a pending invitation and trigger the workflow
 #[utoipa::path(
     tag = "Invitations",
@@ -244,7 +348,7 @@ pub async fn accept_invitation(
         }
     };
 
-    delete_persisted_invitation(&data, &invitation.id).await;
+    persist_handled_invitation(&data, &invitation, InvitationOutcome::Accepted).await;
 
     // Refuse a second accept for a run we're already driving: a resurrected
     // card (e.g. an in-flight invite delivered after a scoped cancel, or a
@@ -356,7 +460,7 @@ pub async fn decline_invitation(
         }
     };
 
-    delete_persisted_invitation(&data, &invitation.id).await;
+    persist_handled_invitation(&data, &invitation, InvitationOutcome::Declined).await;
 
     // Best-effort: tell the coordinator we declined so they can fail their
     // matching in-progress run immediately instead of waiting until timeout.
@@ -725,5 +829,300 @@ mod tests {
         let response = dar_response("pkg.dar", vec![1, 2, 3], false);
 
         assert!(response.headers().get(UNPINNED_DAR_HEADER).is_none());
+    }
+}
+
+#[cfg(test)]
+mod handled_invitation_tests {
+    use actix_web::{App, HttpMessage, http::StatusCode, test as actix_test};
+    use serde_json::{Value, json};
+
+    use super::*;
+    use crate::{auth::Principal, db::MIGRATOR, server::InvitationType};
+
+    fn invitation(id: &str) -> PendingInvitation {
+        PendingInvitation {
+            id: id.to_string(),
+            invitation_type: InvitationType::Onboarding,
+            coordinator_pubkey: "c0ffee".repeat(8),
+            coordinator_name: None,
+            received_at: 1000,
+            prefix: Some("party-x".to_string()),
+            participants: Vec::new(),
+            dar_filenames: Vec::new(),
+            dar_hashes: Vec::new(),
+            kicked_participant: None,
+            new_participant: None,
+            new_threshold: None,
+            previous_threshold: None,
+            dec_party_id: None,
+            package_names: Vec::new(),
+            contract_intents: Vec::new(),
+            workflow_instance: Some("run-1".to_string()),
+        }
+    }
+
+    /// App state on a migrated database holding `pending` as a received invite.
+    async fn state_with(
+        pool: &SqlitePool,
+        pending: &PendingInvitation,
+    ) -> anyhow::Result<web::Data<AppState>> {
+        let state = AppState::for_test_on(None, pool.clone());
+        let mut tx = pool.begin_transaction().await?;
+        tx.upsert_pending_invitation(pending).await?;
+        Commitable::commit(tx).await?;
+        state
+            .pending_invitations
+            .write()
+            .await
+            .push(pending.clone());
+        Ok(state)
+    }
+
+    /// A POST of `{ "id": id }` to `uri` from an authenticated operator. A
+    /// macro because the built request's type is not nameable from here.
+    macro_rules! post {
+        ($uri:expr, $id:expr) => {{
+            let request = actix_test::TestRequest::post()
+                .uri($uri)
+                .set_json(json!({ "id": $id }))
+                .to_request();
+            request.extensions_mut().insert(Principal {
+                sub: "admin".to_string(),
+                issuer: "test".to_string(),
+                roles: Vec::new(),
+                email: None,
+            });
+            request
+        }};
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_declined_invitation_is_kept_and_cannot_be_answered_again(
+        pool: SqlitePool,
+    ) -> anyhow::Result<()> {
+        let state = state_with(&pool, &invitation("inv-1")).await?;
+        let app = actix_test::init_service(
+            App::new()
+                .app_data(state)
+                .service(get_invitations)
+                .service(accept_invitation)
+                .service(decline_invitation),
+        )
+        .await;
+
+        let declined = actix_test::call_service(&app, post!("/invitations/decline", "inv-1")).await;
+        assert_eq!(declined.status(), StatusCode::OK);
+
+        let listed: Value = actix_test::call_and_read_body_json(
+            &app,
+            actix_test::TestRequest::get()
+                .uri("/invitations")
+                .to_request(),
+        )
+        .await;
+        assert_eq!(listed, json!({ "invitations": [] }));
+        let handled = pool.get_handled_invitations(50).await?;
+        assert_eq!(handled.len(), 1);
+        assert_eq!(handled[0].invitation.id, "inv-1");
+        assert_eq!(handled[0].outcome, InvitationOutcome::Declined);
+
+        for uri in ["/invitations/decline", "/invitations/accept"] {
+            let again = actix_test::call_service(&app, post!(uri, "inv-1")).await;
+            assert_eq!(again.status(), StatusCode::NOT_FOUND, "{uri}");
+        }
+        assert_eq!(pool.get_handled_invitations(50).await?.len(), 1);
+        Ok(())
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn the_handled_list_is_newest_first_and_names_the_coordinator(
+        pool: SqlitePool,
+    ) -> anyhow::Result<()> {
+        let older = invitation("inv-1");
+        let state = state_with(&pool, &older).await?;
+        let mut tx = pool.begin_transaction().await?;
+        tx.upsert_pending_invitation(&invitation("inv-2")).await?;
+        // Still pending, so not listed.
+        tx.upsert_pending_invitation(&invitation("inv-3")).await?;
+        tx.mark_invitation_handled("inv-1", InvitationOutcome::Declined, 5000)
+            .await?;
+        tx.mark_invitation_handled("inv-2", InvitationOutcome::Accepted, 6000)
+            .await?;
+        tx.insert_peer(&crate::config::Peer {
+            participant_id: crate::canton_id::CantonId::parse(&format!(
+                "coordinator::1220{}",
+                "ab".repeat(32)
+            ))?,
+            name: "Coordinator One".to_string(),
+            address: "localhost".to_string(),
+            port: 1,
+            public_key: older.coordinator_pubkey.clone(),
+            party: None,
+        })
+        .await?;
+        Commitable::commit(tx).await?;
+        let app =
+            actix_test::init_service(App::new().app_data(state).service(list_handled_invitations))
+                .await;
+
+        let all: Value = actix_test::call_and_read_body_json(
+            &app,
+            actix_test::TestRequest::get()
+                .uri("/invitations/handled")
+                .to_request(),
+        )
+        .await;
+        let newest: Value = actix_test::call_and_read_body_json(
+            &app,
+            actix_test::TestRequest::get()
+                .uri("/invitations/handled?limit=1")
+                .to_request(),
+        )
+        .await;
+
+        let summary: Vec<(&str, &str, i64)> = all["invitations"]
+            .as_array()
+            .map(|list| {
+                list.iter()
+                    .map(|h| {
+                        (
+                            h["invitation"]["id"].as_str().unwrap_or_default(),
+                            h["outcome"].as_str().unwrap_or_default(),
+                            h["handled_at"].as_i64().unwrap_or_default(),
+                        )
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        assert_eq!(
+            summary,
+            vec![("inv-2", "accepted", 6000), ("inv-1", "declined", 5000)]
+        );
+        assert_eq!(
+            all["invitations"][0]["invitation"]["coordinator_name"],
+            json!("Coordinator One")
+        );
+        assert_eq!(newest["invitations"].as_array().map(Vec::len), Some(1));
+        assert_eq!(newest["invitations"][0]["invitation"]["id"], json!("inv-2"));
+        Ok(())
+    }
+
+    /// A card whose persist failed on receipt lives only in memory. Its
+    /// answer must still reach the history.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn an_answer_to_a_card_kept_only_in_memory_reaches_the_history(
+        pool: SqlitePool,
+    ) -> anyhow::Result<()> {
+        let (state, mut peer_jobs) = AppState::for_test_with_peer_jobs(None, pool.clone());
+        state
+            .pending_invitations
+            .write()
+            .await
+            .extend([invitation("inv-a"), invitation("inv-d")]);
+        let app = actix_test::init_service(
+            App::new()
+                .app_data(state)
+                .service(accept_invitation)
+                .service(decline_invitation)
+                .service(list_handled_invitations),
+        )
+        .await;
+
+        let accepted = actix_test::call_service(&app, post!("/invitations/accept", "inv-a")).await;
+        let declined = actix_test::call_service(&app, post!("/invitations/decline", "inv-d")).await;
+
+        assert_eq!(accepted.status(), StatusCode::OK);
+        assert_eq!(declined.status(), StatusCode::OK);
+        assert!(
+            peer_jobs.try_recv().is_ok(),
+            "the accept enqueued no peer job"
+        );
+        let listed: Value = actix_test::call_and_read_body_json(
+            &app,
+            actix_test::TestRequest::get()
+                .uri("/invitations/handled")
+                .to_request(),
+        )
+        .await;
+        let mut answers: Vec<(String, String, String)> = listed["invitations"]
+            .as_array()
+            .map(|list| {
+                list.iter()
+                    .map(|h| {
+                        (
+                            h["invitation"]["id"]
+                                .as_str()
+                                .unwrap_or_default()
+                                .to_string(),
+                            h["outcome"].as_str().unwrap_or_default().to_string(),
+                            h["invitation"]["prefix"]
+                                .as_str()
+                                .unwrap_or_default()
+                                .to_string(),
+                        )
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        answers.sort();
+        assert_eq!(
+            answers,
+            vec![
+                ("inv-a".into(), "accepted".into(), "party-x".into()),
+                ("inv-d".into(), "declined".into(), "party-x".into()),
+            ]
+        );
+        assert!(pool.get_all_pending_invitations().await?.is_empty());
+        Ok(())
+    }
+
+    /// Before history, a failed delete was logged and the decline went ahead.
+    /// A failed history write must not fail the decline either.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_database_failure_does_not_fail_the_decline(pool: SqlitePool) -> anyhow::Result<()> {
+        let state = AppState::for_test_on(None, pool.clone());
+        state
+            .pending_invitations
+            .write()
+            .await
+            .push(invitation("inv-1"));
+        let app = actix_test::init_service(
+            App::new()
+                .app_data(state.clone())
+                .service(decline_invitation),
+        )
+        .await;
+        pool.close().await;
+
+        let declined = actix_test::call_service(&app, post!("/invitations/decline", "inv-1")).await;
+
+        assert_eq!(declined.status(), StatusCode::OK);
+        assert!(state.pending_invitations.read().await.is_empty());
+        Ok(())
+    }
+
+    /// The test state has no peer listener, so the accept fails after the
+    /// invitation was recorded as accepted. The operator must get the card
+    /// back, and the history must not claim an accept that did not happen.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_failed_accept_leaves_the_invitation_pending(pool: SqlitePool) -> anyhow::Result<()> {
+        let state = state_with(&pool, &invitation("inv-1")).await?;
+        let app = actix_test::init_service(
+            App::new()
+                .app_data(state.clone())
+                .service(accept_invitation),
+        )
+        .await;
+
+        let accepted = actix_test::call_service(&app, post!("/invitations/accept", "inv-1")).await;
+
+        assert_eq!(accepted.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let pending = pool.get_all_pending_invitations().await?;
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].id, "inv-1");
+        assert!(pool.get_handled_invitations(50).await?.is_empty());
+        assert_eq!(state.pending_invitations.read().await.len(), 1);
+        Ok(())
     }
 }

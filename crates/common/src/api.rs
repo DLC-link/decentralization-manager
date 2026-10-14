@@ -16,8 +16,8 @@ use serde::{Deserialize, Serialize};
 use crate::{
     canton_id::CantonId,
     types::{
-        AuditLogEntry, DecentralizedParty, PendingInvitation, Permission, WorkflowKind,
-        WorkflowProgress, WorkflowRun,
+        AuditLogEntry, DecentralizedParty, HandledInvitation, PendingInvitation, Permission,
+        WorkflowKind, WorkflowProgress, WorkflowRun,
     },
 };
 
@@ -984,6 +984,14 @@ pub struct ContractDeploymentIntent {
 #[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 pub struct PendingInvitationsResponse {
     pub invitations: Vec<PendingInvitation>,
+}
+
+/// Response for the handled invitations endpoint, newest first
+#[derive(Deserialize, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
+pub struct HandledInvitationsResponse {
+    pub invitations: Vec<HandledInvitation>,
 }
 
 /// Request to accept or decline an invitation
