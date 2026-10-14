@@ -5,6 +5,8 @@ import { SnackbarProvider } from "../contexts";
 import type {
   AuditLogEntry,
   DomainGovernanceAction,
+  HandledInvitation,
+  PendingInvitation,
   WorkflowRun,
 } from "../types";
 import { NotificationsView, type PartyActions } from "./NotificationsView";
@@ -80,18 +82,23 @@ const renderFeed = ({
   partyActions = [loadedParty()],
   governanceAudit = [],
   workflowRuns = [],
+  pendingInvitations = [],
+  handledInvitations = [],
 }: {
   partyActions?: PartyActions[];
   governanceAudit?: AuditLogEntry[];
   workflowRuns?: WorkflowRun[];
+  pendingInvitations?: PendingInvitation[];
+  handledInvitations?: HandledInvitation[];
 }) =>
   render(
     <SnackbarProvider>
       <NotificationsView
-        pendingInvitations={[]}
+        pendingInvitations={pendingInvitations}
         partyActions={partyActions}
         workflowRuns={workflowRuns}
         governanceAudit={governanceAudit}
+        handledInvitations={handledInvitations}
         loading={false}
         onInvitationsChanged={() => {}}
         onActionsChanged={() => {}}
@@ -274,5 +281,104 @@ describe("Completed governance proposals", () => {
 
     expect(completedRows()).toHaveLength(25);
     expect(screen.getByText("1–25 of 30")).toBeTruthy();
+  });
+});
+
+const invitation = (
+  id: string,
+  overrides: Partial<PendingInvitation> = {},
+): PendingInvitation => ({
+  id,
+  invitation_type: "Onboarding",
+  coordinator_pubkey: "c0ffee".repeat(8),
+  coordinator_name: "Coordinator One",
+  received_at: 1_700_000_000,
+  prefix: `party-${id}`,
+  participants: [],
+  dar_filenames: [],
+  dar_hashes: [],
+  package_names: [],
+  contract_intents: [],
+  workflow_instance: `run-${id}`,
+  ...overrides,
+});
+
+const handled = (
+  id: string,
+  outcome: HandledInvitation["outcome"],
+  overrides: Partial<PendingInvitation> = {},
+): HandledInvitation => ({
+  invitation: invitation(id, overrides),
+  outcome,
+  handled_at: 1_700_000_100,
+});
+
+const handledRows = () => screen.queryAllByTestId("handled-invitation");
+
+describe("Completed invitations", () => {
+  it("lists an accepted invitation with its outcome", () => {
+    renderFeed({ handledInvitations: [handled("a", "accepted")] });
+
+    expect(chipCount("Completed")).toBe("1");
+    showCompleted();
+
+    const [row] = handledRows();
+    expect(row.getAttribute("data-outcome")).toBe("accepted");
+    expect(within(row).getByText("Onboarding invitation")).toBeTruthy();
+    expect(within(row).getByText("party-a")).toBeTruthy();
+    expect(within(row).getByText("Accepted")).toBeTruthy();
+  });
+
+  it("lists a declined invitation, naming its party or else its sender", () => {
+    renderFeed({
+      handledInvitations: [
+        handled("kick", "declined", {
+          invitation_type: "Kick",
+          prefix: undefined,
+          dec_party_id: partyId,
+        }),
+        handled("dars", "declined", { invitation_type: "Dars", prefix: undefined }),
+      ],
+    });
+
+    showCompleted();
+
+    const rows = handledRows();
+    expect(rows).toHaveLength(2);
+    for (const row of rows) {
+      expect(within(row).getByText("Declined")).toBeTruthy();
+    }
+    expect(within(rows[0]).getByText(/^shared::/)).toBeTruthy();
+    expect(within(rows[1]).getByText("from Coordinator One")).toBeTruthy();
+  });
+
+  it("fills Completed with the Invitations chip", () => {
+    renderFeed({
+      governanceAudit: [domainRow("execute", "00done")],
+      pendingInvitations: [invitation("waiting")],
+      handledInvitations: [handled("a", "accepted"), handled("b", "declined")],
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Invitations" }));
+
+    expect(chipCount("Completed")).toBe("2");
+    expect(chipCount("Needs you")).toBe("1");
+    showCompleted();
+    expect(handledRows()).toHaveLength(2);
+    expect(completedRows()).toHaveLength(0);
+    expect(screen.queryByTestId("invitation-card")).toBeNull();
+  });
+
+  it("leaves out an answered invitation the coordinator has sent again", () => {
+    renderFeed({
+      pendingInvitations: [invitation("a")],
+      handledInvitations: [handled("a", "declined"), handled("b", "accepted")],
+    });
+
+    expect(chipCount("Completed")).toBe("1");
+    showCompleted();
+    const rows = handledRows();
+    expect(rows).toHaveLength(1);
+    expect(rows[0].getAttribute("data-outcome")).toBe("accepted");
   });
 });

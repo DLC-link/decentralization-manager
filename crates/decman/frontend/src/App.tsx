@@ -55,6 +55,8 @@ import type {
   KeyStatusResponse,
   Peer,
   PendingInvitation,
+  HandledInvitation,
+  HandledInvitationsResponse,
   PartyAuthStatus,
   AuthStatusResponse,
   WorkflowRun,
@@ -67,6 +69,9 @@ const ACTIONS_BATCH = 25;
 /// Newest audit rows the Completed section reads, across every party. Several
 /// rows can belong to one proposal, so this bounds rows, not entries.
 const AUDIT_FEED_LIMIT = 200;
+
+/// Newest accepted and declined invitations the Completed section shows.
+const HANDLED_INVITATIONS_LIMIT = 50;
 
 // Saved in index.html <script> before any modules load.
 // Strip Keycloak OAuth params that get appended to the hash during check-sso.
@@ -156,6 +161,12 @@ const App = () => {
   const [workflowRunsLoaded, setWorkflowRunsLoaded] = useState(false);
   const [governanceAudit, setGovernanceAudit] = useState<AuditLogEntry[]>([]);
   const [governanceAuditLoaded, setGovernanceAuditLoaded] = useState(false);
+  const handledInvitationsSeq = useRef(0);
+  const [handledInvitations, setHandledInvitations] = useState<
+    HandledInvitation[]
+  >([]);
+  const [handledInvitationsLoaded, setHandledInvitationsLoaded] =
+    useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [partyFilter, setPartyFilter] = useState(
@@ -598,6 +609,38 @@ const App = () => {
     const interval = window.setInterval(poll, 10_000);
     return () => clearInterval(interval);
   }, [refreshGovernanceAudit]);
+
+  const refreshHandledInvitations = useCallback(async () => {
+    const seq = ++handledInvitationsSeq.current;
+    try {
+      const res = await authenticatedFetch(
+        `${API_BASE}/invitations/handled?limit=${HANDLED_INVITATIONS_LIMIT}`,
+      );
+      if (!res.ok) return;
+      const data: Partial<HandledInvitationsResponse> = await res.json();
+      if (seq !== handledInvitationsSeq.current) return;
+      setHandledInvitations(data.invitations ?? []);
+    } catch {
+      // Ignore polling errors
+    } finally {
+      setHandledInvitationsLoaded(true);
+    }
+  }, []);
+
+  // Slower than the pending poll: the list changes when an operator answers,
+  // and this page refreshes it by hand when its own operator does.
+  useEffect(() => {
+    const poll = pollGuard(refreshHandledInvitations);
+    poll();
+    const interval = window.setInterval(poll, 10_000);
+    return () => clearInterval(interval);
+  }, [refreshHandledInvitations]);
+
+  // An accept or decline moves the invitation from one list to the other.
+  const refreshInvitationLists = useCallback(() => {
+    void refreshInvitations();
+    void refreshHandledInvitations();
+  }, [refreshInvitations, refreshHandledInvitations]);
 
   // Watch for workflow runs transitioning out of `inprogress` and surface a
   // snackbar — the run card in the feed updates too, but a transient toast
@@ -1303,6 +1346,7 @@ const App = () => {
             partyActions={partyActions}
             workflowRuns={workflowRuns}
             governanceAudit={governanceAudit}
+            handledInvitations={handledInvitations}
             pendingLive={!actionsAccumulated}
             fetching={partyActionsFetching}
             onLoadMore={loadMoreActions}
@@ -1312,9 +1356,10 @@ const App = () => {
               !invitationsLoaded ||
               !partyActionsLoaded ||
               !workflowRunsLoaded ||
-              !governanceAuditLoaded
+              !governanceAuditLoaded ||
+              !handledInvitationsLoaded
             }
-            onInvitationsChanged={refreshInvitations}
+            onInvitationsChanged={refreshInvitationLists}
             onActionsChanged={refreshActionsAndAudit}
             onWorkflowsChanged={refreshWorkflowRuns}
             onSelectParty={(partyId) => {
