@@ -12,6 +12,7 @@ mod audit;
 mod chain_audit;
 mod event_filters;
 mod external_parties;
+mod governance_poller;
 mod handlers;
 mod ledger_paging;
 mod middleware;
@@ -1205,6 +1206,15 @@ pub async fn start_server(
         },
     );
 
+    let governance_poller_state = app_state.clone();
+    spawn_supervised(
+        "governance poller",
+        "the pending-governance gauges stop updating until this node restarts",
+        async move {
+            governance_poller::run_governance_poller(governance_poller_state).await;
+        },
+    );
+
     // Single peer-job listener: drains the queue and spawns one
     // `workflow::start_peer` per accepted / retried / resumed invite, so this
     // node can be a peer in many concurrent workflows at once.
@@ -1276,6 +1286,8 @@ pub async fn start_server(
     node_health::register_metrics();
     handlers::register_run_metrics();
     peer_status::register_metrics();
+    handlers::register_governance_metrics();
+    governance_poller::register_metrics();
 
     // Separate from the API server, whose ingress forwards every path. 0 disables it.
     let metrics_port = config.metrics_port;
