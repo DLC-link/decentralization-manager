@@ -538,6 +538,20 @@ impl ProposalType {
             Self::OffboardInstrumentIssuers(p) => Some(p),
         }
     }
+
+    /// The payload of a variant whose template mints governance credentials.
+    /// `propose_action` submits these through `WithCredentialIdNonce` with
+    /// a fresh nonce, so the request carries no nonce field.
+    pub fn credential_minting_payload(
+        &self,
+    ) -> Option<&dyn decman_lib::catalog::proposals::utility::MintsCredentials> {
+        match self {
+            Self::OnboardRegistrar(p) => Some(p),
+            Self::ProvisionInstrument(p) => Some(p),
+            Self::OnboardInstrumentIssuers(p) => Some(p),
+            _ => None,
+        }
+    }
 }
 
 /// Request to propose a governance domain action (creates proposal contract)
@@ -1613,6 +1627,26 @@ mod tests {
                 proposal.grpc_payload().is_none(),
                 is_transfer_variant,
                 "{proposal:?}: grpc_payload() Some/None must match transfer-variant status"
+            );
+        }
+    }
+
+    /// Exactly the three variants whose templates mint governance
+    /// credentials submit with a credential id nonce. A minting variant
+    /// left out would mint ids that can collide again (#345).
+    #[test]
+    fn credential_minting_payload_is_some_only_for_minting_variants() {
+        for proposal in one_of_each_proposal_type() {
+            let mints = matches!(
+                proposal,
+                ProposalType::OnboardRegistrar(_)
+                    | ProposalType::ProvisionInstrument(_)
+                    | ProposalType::OnboardInstrumentIssuers(_)
+            );
+            assert_eq!(
+                proposal.credential_minting_payload().is_some(),
+                mints,
+                "{proposal:?}: credential_minting_payload() Some/None must match minting status"
             );
         }
     }
