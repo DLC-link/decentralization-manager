@@ -108,6 +108,7 @@ common = { path = "crates/common" }
 decman-lib = { path = "crates/decman-lib" }
 decman-wallet = { path = "crates/decman-wallet" }
 keycloak = { git = "https://github.com/DLC-link/canton-lib", rev = "651ea5221b4794f55bd152e9f3e762a92af69afd" }
+penelope = { git = "https://github.com/DLC-link/penelope", rev = "8f36b2dfda5932c8310ec6891ff3b72d416118dc" }
 
 [patch.crates-io]
 # hyper-noise 0.0.3, changed only to require tokio-noise 0.0.6, so the pin below reaches it.

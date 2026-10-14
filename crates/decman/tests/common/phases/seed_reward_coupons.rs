@@ -2,11 +2,15 @@
 //! coupon-reassignment phase can exercise the assign + 0.8/0.2 split
 //! deterministically in CI — no devnet, no reward-round issuance.
 //!
-//! On localnet the harness controls the DSO (it substitutes `p1_member`; see
-//! `token_custody`). `RewardCouponV2`'s sole signatory is `dso`, so we create
-//! the coupon directly via the participant's JSON Ledger API as `ledger-api-user`
-//! acting as `p1_member`. `provider = decparty` + `providerIsObserver = true`
-//! makes it visible to the decparty (the reassignment authority), and
+//! On localnet the harness controls the DSO. `RewardCouponV2`'s sole signatory
+//! is `dso`, so we allocate a dedicated DSO party and create the coupons
+//! directly via the participant's JSON Ledger API as `ledger-api-user` acting
+//! as it. The delegation then names that party as its `dso`. Keeping it
+//! distinct from every member party is what lets one more coupon, minted by a
+//! member instead, stand for a coupon from a foreign DSO (see
+//! [`FOREIGN_TTL_HOURS`]).
+//! `provider = decparty` + `providerIsObserver = true` makes each coupon
+//! visible to the decparty (the reassignment authority), and
 //! `beneficiary = null` marks it unassigned (what the automation looks for).
 //! `expiresAt = now + 36h` mirrors a freshly issued coupon at the real TTL, so
 //! the phase exercises the automation on the same shape production sees.
@@ -36,6 +40,26 @@ pub const SEED_AMOUNT: f64 = 100.0;
 /// an e2e poll cannot distinguish one draining sweep from several chunking ones.)
 pub const SEED_COUPON_COUNT: usize = 60;
 
+/// Seeded coupons on top of [`SEED_COUPON_COUNT`] that every sweep leaves
+/// unassigned: the unassignable one and the foreign-DSO one.
+pub const SEEDED_SURVIVORS: usize = 2;
+
+/// Hours until every coupon the DSO mints expires: a fresh coupon's real TTL.
+pub const SEED_TTL_HOURS: i64 = 36;
+
+/// Hours until the foreign-DSO coupon expires.
+///
+/// That coupon names `provider = decparty` like the rest, but a member party
+/// minted it as `dso`. `RewardCouponV2` lets anyone do that, so the reward
+/// automation must leave it alone. Two layers enforce it: the coupon reader
+/// drops it, and `Delegation_Assign` asserts on it.
+///
+/// It expires before every other seeded coupon, so it is the most urgent coupon
+/// a reader could admit. A reader that admitted it would report its expiry on
+/// the oldest-unassigned gauge, and would put it first in the first chunk. The
+/// coupon-reassignment phase relies on both.
+pub const FOREIGN_TTL_HOURS: i64 = 12;
+
 /// Coupons per seed transaction. Keeps each seeding submission near the size
 /// devnet has proven (72 creates) so the seed itself is never the thing that
 /// fails when the point of the test is what the automation does afterwards.
@@ -56,6 +80,12 @@ const SEED_TX_SIZE: usize = 20;
 /// mechanism, which unit tests alone cover, not to model a live risk.
 pub const UNASSIGNABLE_AMOUNT: &str = "0.0000000001";
 
+fn expires_in(hours: i64) -> String {
+    (Utc::now() + chrono::Duration::hours(hours))
+        .format("%Y-%m-%dT%H:%M:%SZ")
+        .to_string()
+}
+
 pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
     if f.target != TestTarget::Localnet {
         info!("seed_reward_coupons: skipped (localnet-only)");
@@ -64,7 +94,11 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
     info!("Phase: seed_reward_coupons (localnet)");
 
     let decparty = f.party_id()?.to_string();
-    let dso = f.p1_member_party()?.to_string(); // localnet DSO stand-in
+    let dso = allocate_party(&*f, P1_JSON_API, "reward-dso", "participant-1").await?;
+    grant_rights(&*f, P1_JSON_API, &dso, "participant-1").await?;
+    // The member that mints the foreign-DSO coupon. ledger-api-user can already
+    // act as p1_member on participant-1, so this needs no extra party.
+    let foreign_dso = f.p1_member_party()?.to_string();
 
     // Two fresh non-assigner beneficiary parties on participant-1, with
     // ledger-api-user granted read so the split assertion can read their coupons.
@@ -78,9 +112,7 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
     // Freshly issued coupons at the real 36h TTL: well clear of the expiry
     // margin, so select_assignable takes them on the next sweep. Distinct rounds
     // keep the seeded contracts distinguishable in a failure dump.
-    let expires_at = (Utc::now() + chrono::Duration::hours(36))
-        .format("%Y-%m-%dT%H:%M:%SZ")
-        .to_string();
+    let expires_at = expires_in(SEED_TTL_HOURS);
     let mut seeds: Vec<SeedCoupon> = (0..SEED_COUPON_COUNT)
         .map(|i| SeedCoupon {
             dso: dso.clone(),
@@ -107,11 +139,44 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
             .with_context(|| format!("create seeded RewardCouponV2 batch {batch}"))?;
     }
 
+    // The foreign-DSO coupon gets its own transaction, because one transaction
+    // acts as one dso. See FOREIGN_TTL_HOURS.
+    let foreign = SeedCoupon {
+        dso: foreign_dso.clone(),
+        provider: decparty.clone(),
+        amount: format!("{SEED_AMOUNT:.1}"),
+        expires_at: expires_in(FOREIGN_TTL_HOURS),
+        round: (SEED_COUPON_COUNT + 1) as i64,
+    };
+    let cmd = reward_coupon_create_command(
+        std::slice::from_ref(&foreign),
+        &format!("seed-foreign-coupon-{}", f.run_id),
+    );
+    f.submit_create(P1_JSON_API, &cmd)
+        .await
+        .context("create the foreign-DSO RewardCouponV2")?;
+    let foreign_cids: Vec<String> = f
+        .active_reward_coupons(P1_JSON_API, &decparty)
+        .await?
+        .into_iter()
+        .filter(|c| c.dso == foreign_dso)
+        .map(|c| c.contract_id)
+        .collect();
+    let [foreign_cid] = foreign_cids.as_slice() else {
+        anyhow::bail!(
+            "expected one coupon minted by {foreign_dso} for {decparty}, found {}",
+            foreign_cids.len()
+        );
+    };
+
     info!(
         "seed_reward_coupons: created {SEED_COUPON_COUNT} unassigned RewardCouponV2 plus one \
-         unassignable at {UNASSIGNABLE_AMOUNT} for {decparty} \
+         unassignable at {UNASSIGNABLE_AMOUNT} for {decparty} as DSO {dso}, and foreign-DSO \
+         coupon {foreign_cid} as {foreign_dso} \
          (beneficiary={beneficiary_party}, operator={operator_party})"
     );
+    f.reward_foreign_coupon_cid = Some(foreign_cid.clone());
+    f.reward_dso_party = Some(dso);
     f.reward_beneficiary_party = Some(beneficiary_party);
     f.reward_operator_party = Some(operator_party);
     Ok(())

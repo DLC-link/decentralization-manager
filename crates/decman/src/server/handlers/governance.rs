@@ -26,7 +26,9 @@ use decman_lib::catalog::proposals::custody::{
     AcceptTransfer, AcceptTransferWithContext, Transfer, TransferWithContext,
 };
 use decman_lib::catalog::proposals::rewards::SetupCouponReassignmentDelegation;
-use decman_lib::catalog::proposals::utility::RequestDevNetFeaturedAppRight;
+use decman_lib::catalog::proposals::utility::{
+    RequestDevNetFeaturedAppRight, WithCredentialIdNonce,
+};
 use decman_lib::catalog::templates::{
     domain_confirmation_template, governable_action_interface, governance_rules_template,
     self_confirmation_template,
@@ -61,10 +63,11 @@ use crate::{
             ActionType, ActiveCouponReassignmentDelegation, AuditLogEntry, AuditLogQuery,
             AuditLogResponse, AuditScope, CancelConfirmationRequest, CancelProposalRequest,
             ChainAuditEntry, ChainAuditQuery, ChainAuditResponse, ConfirmActionRequest,
-            CouponReassignmentDelegationSummary, ErrorResponse, ExecuteActionRequest,
-            ExpireConfirmationRequest, GovernanceResponse, GovernanceStateResponse, GovernanceType,
-            KnownMember, KnownMembersResponse, MessageResponse, ProposalType,
-            ProposalsPageResponse, ProposeActionRequest, chain_audit_entry_from_row,
+            CouponReassignmentDelegationSummary, DomainGovernanceAction, ErrorResponse,
+            ExecuteActionRequest, ExpireConfirmationRequest, GovernanceResponse,
+            GovernanceStateResponse, GovernanceType, KnownMember, KnownMembersResponse,
+            MessageResponse, ProposalType, ProposalsPageResponse, ProposeActionRequest,
+            chain_audit_entry_from_row,
         },
     },
     utils,
@@ -73,6 +76,18 @@ use crate::{
 // ============================================================================
 // Read Endpoints
 // ============================================================================
+
+/// Drop each proposal's full payload from a confirmations response.
+///
+/// v1 lets every authenticated caller read any party on the node. Only an
+/// admin may confirm or execute, so only an admin needs every field of what
+/// they would sign. The summary fields stay for everyone.
+fn withhold_payloads(domain_actions: &mut [DomainGovernanceAction]) {
+    for action in domain_actions {
+        action.proposal_payload = None;
+        action.proposal_template_id = None;
+    }
+}
 
 /// Get governance confirmations with parsed actions
 #[utoipa::path(
@@ -85,10 +100,12 @@ use crate::{
 )]
 #[get("/governance/confirmations")]
 pub async fn get_governance(
+    http_req: HttpRequest,
     data: web::Data<AppState>,
     query: web::Query<GovernanceQuery>,
 ) -> impl Responder {
     let party_id = &query.party_id;
+    let may_act = require_admin(&http_req, data.admin_role.as_deref()).is_ok();
 
     let token = get_party_token(&data, party_id).await;
 
@@ -133,16 +150,21 @@ pub async fn get_governance(
     )
     .await
     {
-        Ok((actions, domain_actions, next)) => HttpResponse::Ok().json(GovernanceResponse {
-            actions,
-            next_cursor: next.as_ref().and_then(encode_cursor),
-            domain_actions,
-            threshold,
-            member_party_id,
-            rules_contract_id: gov_state.as_ref().map(|state| state.contract_id.clone()),
-            gov_core_out_of_date: gov_state.as_ref().is_some_and(|state| state.out_of_date),
-            gov_core_package_ref: gov_state.and_then(|state| state.package_ref),
-        }),
+        Ok((actions, mut domain_actions, next)) => {
+            if !may_act {
+                withhold_payloads(&mut domain_actions);
+            }
+            HttpResponse::Ok().json(GovernanceResponse {
+                actions,
+                next_cursor: next.as_ref().and_then(encode_cursor),
+                domain_actions,
+                threshold,
+                member_party_id,
+                rules_contract_id: gov_state.as_ref().map(|state| state.contract_id.clone()),
+                gov_core_out_of_date: gov_state.as_ref().is_some_and(|state| state.out_of_date),
+                gov_core_package_ref: gov_state.and_then(|state| state.package_ref),
+            })
+        }
         Err(e) => {
             tracing::error!("Failed to fetch governance confirmations: {e}");
             HttpResponse::InternalServerError().json(ErrorResponse {
@@ -633,6 +655,17 @@ fn may_create_second_delegation(proposal: &ProposalType) -> bool {
     )
 }
 
+/// A fresh nonce for a proposal whose template mints governance
+/// credentials: the first 12 hex digits of a v4 UUID, which carry 48 random
+/// bits. The template folds it into each credential id, so two such
+/// proposals that mint for one subject at one ledger time still mint
+/// distinct ids.
+fn credential_id_nonce() -> String {
+    let mut nonce = uuid::Uuid::new_v4().simple().to_string();
+    nonce.truncate(12);
+    nonce
+}
+
 /// Propose a domain governance action (creates a GovernableAction proposal contract)
 #[utoipa::path(
     tag = "Governance",
@@ -876,8 +909,10 @@ pub async fn propose_action(
     // The two transfer variants carry runtime data that is not a payload
     // field — the registry choice context, the validity window, and the
     // on-chain `sender` (the governance party) — so they submit through
-    // their wrapper structs. Every other variant is its own complete
-    // payload, reached through `grpc_payload()` without re-listing 29 arms.
+    // their wrapper structs. The credential-minting variants carry a fresh
+    // credential id nonce through theirs. Every other variant is its own
+    // complete payload, reached through `grpc_payload()` without
+    // re-listing every arm.
     let command_id = uuid::Uuid::new_v4().to_string();
     let commands = match &resolved_proposal {
         ProposalType::Transfer(t) => build_propose(
@@ -902,12 +937,22 @@ pub async fn propose_action(
             &packages,
             command_id,
         ),
-        other => match other.grpc_payload() {
-            Some(p) => build_propose(p, party_id, &member_party_id, &packages, command_id),
+        other => match (other.credential_minting_payload(), other.grpc_payload()) {
+            (Some(p), _) => build_propose(
+                &WithCredentialIdNonce {
+                    proposal: p,
+                    nonce: &credential_id_nonce(),
+                },
+                party_id,
+                &member_party_id,
+                &packages,
+                command_id,
+            ),
+            (None, Some(p)) => build_propose(p, party_id, &member_party_id, &packages, command_id),
             // No variant reaches this today: `grpc_payload` returns `None`
             // only for the two transfer variants, and both match above. A
             // new variant that returns `None` gets a 500, not a panic.
-            None => {
+            (None, None) => {
                 tracing::error!("Proposal variant has no gRPC payload: {other:?}");
                 return HttpResponse::InternalServerError().json(ErrorResponse {
                     error: "Unsupported proposal type".to_string(),
@@ -2300,6 +2345,31 @@ mod propose_guard_tests {
 mod tests {
     use super::*;
 
+    #[test]
+    fn withholding_drops_the_payload_and_keeps_the_summary() -> anyhow::Result<()> {
+        let mut actions: Vec<DomainGovernanceAction> =
+            vec![serde_json::from_value(serde_json::json!({
+                "proposal_cid": "00proposal",
+                "action_label": "GenericVote",
+                "description": "vote on it",
+                "confirmations": [],
+                "confirmation_count": 0,
+                "executable_confirmation_cids": [],
+                "can_execute": false,
+                "proposal_template_id": "pkg:Governance.GenericVote:GenericVoteProposal",
+                "proposal_payload": {"description": "vote on it", "secret": "x"},
+            }))?];
+
+        withhold_payloads(&mut actions);
+
+        let wire = serde_json::to_value(&actions[0])?;
+        assert!(wire.get("proposal_payload").is_none(), "{wire}");
+        assert!(wire.get("proposal_template_id").is_none(), "{wire}");
+        assert_eq!(wire["description"], "vote on it");
+        assert_eq!(wire["proposal_cid"], "00proposal");
+        Ok(())
+    }
+
     fn amulet_rules(contract_id: &str, created_event_blob: &str) -> AmuletRulesContract {
         AmuletRulesContract {
             dso: CantonId::parse(
@@ -2482,6 +2552,23 @@ mod tests {
         let response = cached_chain_audit_page(rows, 2).expect("non-empty rows are a hit");
         assert_eq!(response.total_returned, 3);
         assert_eq!(response.next_before_offset, Some(20));
+    }
+
+    /// Each nonce is 12 lowercase hex digits, which the template's ensure
+    /// clause accepts (non-empty, no "/"), and no two draws repeat.
+    #[test]
+    fn credential_id_nonces_are_distinct_lowercase_hex() {
+        let nonces: HashSet<String> = (0..1000).map(|_| credential_id_nonce()).collect();
+        assert_eq!(nonces.len(), 1000, "a nonce repeated");
+        for nonce in &nonces {
+            assert_eq!(nonce.len(), 12, "{nonce}");
+            assert!(
+                nonce
+                    .chars()
+                    .all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c)),
+                "{nonce}"
+            );
+        }
     }
 }
 
