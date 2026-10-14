@@ -39,6 +39,11 @@ import { columnSx } from "../styles";
 import { PaginationControls } from "./Pagination";
 import { usePagination } from "../usePagination";
 import {
+  completedProposals,
+  type CompletedProposal,
+  type ProposalOutcome,
+} from "../completedProposals";
+import {
   AcsTransferMeter,
   ApprovalCard,
   ConfirmAvatars,
@@ -53,6 +58,7 @@ import {
   workflowKindLabel,
 } from "../workflowSteps";
 import type {
+  AuditLogEntry,
   CancelConfirmationRequest,
   ConfirmActionRequest,
   DisclosedContractInput,
@@ -86,6 +92,9 @@ interface NotificationsViewProps {
   partyActions: PartyActions[];
   /** Live + recently-terminal workflow runs (coordinator-side for now). */
   workflowRuns: WorkflowRun[];
+  /** This node's newest governance audit rows across every party. The
+   *  Completed section reads finished proposals from them. */
+  governanceAudit?: AuditLogEntry[];
   /** True while any feed source is still loading its initial response. */
   loading: boolean;
   /** True while a refetch is in flight, initial or not. Keeps an empty list
@@ -2113,10 +2122,89 @@ const WorkflowRunCard = ({
   );
 };
 
+const OUTCOME_PILLS: Record<
+  ProposalOutcome,
+  { label: string; tone: "success" | "neutral" }
+> = {
+  executed: { label: "Executed", tone: "success" },
+  cancelled: { label: "Cancelled", tone: "neutral" },
+  proposed: { label: "You proposed", tone: "neutral" },
+  confirmed: { label: "You confirmed", tone: "neutral" },
+};
+
+/**
+ * A finished proposal in the Completed section, in the same row shape as a
+ * finished workflow run. "You proposed" and "You confirmed" are this node's
+ * last recorded action: the node logs only what it did itself, so an execute
+ * by another member, or an expiry, does not appear.
+ */
+const CompletedProposalRow = ({ proposal }: { proposal: CompletedProposal }) => {
+  const pill = OUTCOME_PILLS[proposal.outcome];
+  const endedElsewhere =
+    proposal.outcome === "proposed" || proposal.outcome === "confirmed";
+  return (
+    <RowCard
+      dataAttrs={{
+        "data-testid": "completed-proposal",
+        "data-outcome": proposal.outcome,
+      }}
+    >
+      <Typography
+        title={proposal.label}
+        sx={{
+          fontSize: 14,
+          fontWeight: 500,
+          whiteSpace: "nowrap",
+          overflow: "hidden",
+          textOverflow: "ellipsis",
+          flexShrink: 0,
+          width: 168,
+        }}
+      >
+        {proposal.label}
+      </Typography>
+      <Typography
+        sx={{
+          fontFamily: "var(--font-mono)",
+          fontSize: 12,
+          color: "text.secondary",
+          flex: 1,
+          minWidth: 0,
+          overflow: "hidden",
+          textOverflow: "ellipsis",
+          whiteSpace: "nowrap",
+        }}
+      >
+        {truncatePartyId(proposal.partyId)}
+        {endedElsewhere && " · no longer pending"}
+      </Typography>
+      <Box sx={{ width: 96, flexShrink: 0 }}>
+        <Pill label={pill.label} tone={pill.tone} />
+      </Box>
+      <Typography
+        sx={{
+          fontFamily: "var(--font-mono)",
+          fontSize: 12,
+          color: "text.secondary",
+          whiteSpace: "nowrap",
+          width: 52,
+          textAlign: "right",
+          flexShrink: 0,
+        }}
+      >
+        {formatRelativeTime(proposal.ts)}
+      </Typography>
+      {/* Empty actions column, so the row lines up with workflow rows. */}
+      <Box sx={{ width: 128, flexShrink: 0 }} />
+    </RowCard>
+  );
+};
+
 export const NotificationsView = ({
   pendingInvitations,
   partyActions,
   workflowRuns,
+  governanceAudit = [],
   loading,
   fetching = false,
   onLoadMore,
@@ -2273,6 +2361,19 @@ export const NotificationsView = ({
           compact={terminal}
         />
       ),
+    });
+  }
+
+  // A proposal leaves the pending feed once it is finished, so the Completed
+  // section reads it from this node's audit log instead.
+  for (const proposal of completedProposals(governanceAudit, partyActions)) {
+    entries.push({
+      partyId: proposal.partyId,
+      key: `done-${proposal.key}`,
+      group: "done",
+      kind: "gov",
+      ts: proposal.ts,
+      node: <CompletedProposalRow proposal={proposal} />,
     });
   }
 

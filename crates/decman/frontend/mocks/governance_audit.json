@@ -1,0 +1,136 @@
+{
+  "entries": [
+    {
+      "id": 9,
+      "timestamp": 1782120000,
+      "event_type": "execute",
+      "party_id": "cbtc-network::1220b1cfb0b06e502d45400a5b7bd6b2c4d8c8ea377cd022c8d45b4ccb4f2eede33b",
+      "member_party_id": "ibtc-member-fra1::1220a1acf8c8e3be7e4a0a6f2cac5a620d1a6a8362671f665a372ef73d5c9427bac7",
+      "governance_type": "core_domain",
+      "action_summary": "governance_set_threshold",
+      "details": {
+        "action": { "new_threshold": 0, "type": "governance_set_threshold" },
+        "confirmation_cids": ["0011aa22bb33cc44dd55ee66ff77001122334455667788990011aa22bb33cc44dd"],
+        "disclosed_contracts": [],
+        "governance_type": "core_domain",
+        "party_id": "cbtc-network::1220b1cfb0b06e502d45400a5b7bd6b2c4d8c8ea377cd022c8d45b4ccb4f2eede33b",
+        "proposal_cid": "00f1e2d3c4b5a69788796a5b4c3d2e1f00112233445566778899aabbccddeeff00",
+        "rules_contract_id": "0099887766554433221100ffeeddccbbaa99887766554433221100ffeeddccbbaa"
+      },
+      "status": "success",
+      "created_at": 1782120000
+    },
+    {
+      "id": 8,
+      "timestamp": 1782115000,
+      "event_type": "confirm",
+      "party_id": "cbtc-network::1220b1cfb0b06e502d45400a5b7bd6b2c4d8c8ea377cd022c8d45b4ccb4f2eede33b",
+      "member_party_id": "ibtc-member-fra1::1220a1acf8c8e3be7e4a0a6f2cac5a620d1a6a8362671f665a372ef73d5c9427bac7",
+      "governance_type": "core_domain",
+      "action_summary": "governance_set_threshold",
+      "details": {
+        "action": { "new_threshold": 0, "type": "governance_set_threshold" },
+        "governance_type": "core_domain",
+        "party_id": "cbtc-network::1220b1cfb0b06e502d45400a5b7bd6b2c4d8c8ea377cd022c8d45b4ccb4f2eede33b",
+        "proposal_cid": "00c0ffee00112233445566778899aabbccddeeff00112233445566778899aabbcc",
+        "rules_contract_id": "0099887766554433221100ffeeddccbbaa99887766554433221100ffeeddccbbaa"
+      },
+      "status": "success",
+      "created_at": 1782115000
+    },
+    {
+      "id": 7,
+      "timestamp": 1782110000,
+      "event_type": "propose",
+      "party_id": "cbtc-network::1220b1cfb0b06e502d45400a5b7bd6b2c4d8c8ea377cd022c8d45b4ccb4f2eede33b",
+      "member_party_id": "ibtc-member-fra1::1220a1acf8c8e3be7e4a0a6f2cac5a620d1a6a8362671f665a372ef73d5c9427bac7",
+      "governance_type": "core_domain",
+      "action_summary": "transfer",
+      "details": {
+        "party_id": "cbtc-network::1220b1cfb0b06e502d45400a5b7bd6b2c4d8c8ea377cd022c8d45b4ccb4f2eede33b",
+        "proposal": {
+          "amount": "100.0",
+          "description": "Quarterly treasury rebalance",
+          "receiver": "dec-treasury::1220670469f0ab795a6ac2583f18267dad591fbda2a493e4dc956e932c913e00ddf4",
+          "type": "transfer"
+        },
+        "proposal_cid": "00f1e2d3c4b5a69788796a5b4c3d2e1f00112233445566778899aabbccddeeff00",
+        "rules_contract_id": "0099887766554433221100ffeeddccbbaa99887766554433221100ffeeddccbbaa"
+      },
+      "status": "success",
+      "created_at": 1782110000
+    },
+    {
+      "id": 6,
+      "timestamp": 1782108000,
+      "event_type": "cancel_proposal",
+      "party_id": "ibtc-admin::12206b74fe7904ce2f7e9458941081a2cdbb85529f1ef1716d9a8a22efb46f15714c",
+      "member_party_id": "ibtc-member-fra1::1220a1acf8c8e3be7e4a0a6f2cac5a620d1a6a8362671f665a372ef73d5c9427bac7",
+      "governance_type": "core_domain",
+      "action_summary": "cancel_proposal",
+      "details": {
+        "confirmation_cid": "00aa11bb22cc33dd44ee55ff6600112233445566778899aabbccddeeff00112233",
+        "party_id": "ibtc-admin::12206b74fe7904ce2f7e9458941081a2cdbb85529f1ef1716d9a8a22efb46f15714c",
+        "proposal_cid": "00dead00beef00112233445566778899aabbccddeeff00112233445566778899aa"
+      },
+      "status": "success",
+      "created_at": 1782108000
+    },
+    {
+      "id": 5,
+      "timestamp": 1782107000,
+      "event_type": "propose",
+      "party_id": "ibtc-admin::12206b74fe7904ce2f7e9458941081a2cdbb85529f1ef1716d9a8a22efb46f15714c",
+      "member_party_id": "ibtc-member-fra1::1220a1acf8c8e3be7e4a0a6f2cac5a620d1a6a8362671f665a372ef73d5c9427bac7",
+      "governance_type": "core_domain",
+      "action_summary": "generic_vote",
+      "details": {
+        "party_id": "ibtc-admin::12206b74fe7904ce2f7e9458941081a2cdbb85529f1ef1716d9a8a22efb46f15714c",
+        "proposal": { "description": "Adopt the new fee schedule", "type": "generic_vote" },
+        "proposal_cid": "00dead00beef00112233445566778899aabbccddeeff00112233445566778899aa",
+        "rules_contract_id": "00abcdef00112233445566778899aabbccddeeff00112233445566778899aabbcc"
+      },
+      "status": "success",
+      "created_at": 1782107000
+    },
+    {
+      "id": 4,
+      "timestamp": 1782105000,
+      "event_type": "execute",
+      "party_id": "ibtc-admin::12206b74fe7904ce2f7e9458941081a2cdbb85529f1ef1716d9a8a22efb46f15714c",
+      "member_party_id": "ibtc-member-fra1::1220a1acf8c8e3be7e4a0a6f2cac5a620d1a6a8362671f665a372ef73d5c9427bac7",
+      "governance_type": "core_self",
+      "action_summary": "governance_set_timeout",
+      "details": {
+        "action": { "new_timeout_microseconds": 86400000000, "type": "governance_set_timeout" },
+        "confirmation_cids": ["00bb22cc33dd44ee55ff66007711223344556677889900aabbccddeeff00112233"],
+        "disclosed_contracts": [],
+        "governance_type": "core_self",
+        "party_id": "ibtc-admin::12206b74fe7904ce2f7e9458941081a2cdbb85529f1ef1716d9a8a22efb46f15714c",
+        "proposal_cid": null,
+        "rules_contract_id": "00abcdef00112233445566778899aabbccddeeff00112233445566778899aabbcc"
+      },
+      "status": "success",
+      "created_at": 1782105000
+    },
+    {
+      "id": 3,
+      "timestamp": 1782100000,
+      "event_type": "confirm",
+      "party_id": "ibtc-admin::12206b74fe7904ce2f7e9458941081a2cdbb85529f1ef1716d9a8a22efb46f15714c",
+      "member_party_id": "ibtc-member-fra1::1220a1acf8c8e3be7e4a0a6f2cac5a620d1a6a8362671f665a372ef73d5c9427bac7",
+      "governance_type": "core_self",
+      "action_summary": "governance_set_timeout",
+      "details": {
+        "action": { "new_timeout_microseconds": 86400000000, "type": "governance_set_timeout" },
+        "governance_type": "core_self",
+        "party_id": "ibtc-admin::12206b74fe7904ce2f7e9458941081a2cdbb85529f1ef1716d9a8a22efb46f15714c",
+        "proposal_cid": null,
+        "rules_contract_id": "00abcdef00112233445566778899aabbccddeeff00112233445566778899aabbcc"
+      },
+      "status": "success",
+      "created_at": 1782100000
+    }
+  ],
+  "total_returned": 7
+}

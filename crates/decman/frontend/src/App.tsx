@@ -45,6 +45,8 @@ import { TAB_HASHES, buildHash, parseHash } from "./hashRoute";
 import { workflowKindLabel } from "./workflowSteps";
 import { columnSx } from "./styles";
 import type {
+  AuditLogEntry,
+  AuditLogResponse,
   DecentralizedParty,
   DecentralizedPartiesResponse,
   NodeConfig,
@@ -61,6 +63,10 @@ import type {
 /// Proposals fetched per request. The feed grows a batch at a time rather
 /// than reading a party's whole proposal set at once.
 const ACTIONS_BATCH = 25;
+
+/// Newest audit rows the Completed section reads, across every party. Several
+/// rows can belong to one proposal, so this bounds rows, not entries.
+const AUDIT_FEED_LIMIT = 200;
 
 // Saved in index.html <script> before any modules load.
 // Strip Keycloak OAuth params that get appended to the hash during check-sso.
@@ -142,11 +148,14 @@ const App = () => {
   // discard everything scrolled and snap back to the first batch.
   const [actionsAccumulated, setActionsAccumulated] = useState(false);
   const [workflowRuns, setWorkflowRuns] = useState<WorkflowRun[]>([]);
-  // Request counters for the two feeds, so a slower earlier answer cannot
+  // Request counters for the feeds, so a slower earlier answer cannot
   // overwrite a later one.
   const invitationsSeq = useRef(0);
   const workflowRunsSeq = useRef(0);
+  const governanceAuditSeq = useRef(0);
   const [workflowRunsLoaded, setWorkflowRunsLoaded] = useState(false);
+  const [governanceAudit, setGovernanceAudit] = useState<AuditLogEntry[]>([]);
+  const [governanceAuditLoaded, setGovernanceAuditLoaded] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [partyFilter, setPartyFilter] = useState(
@@ -564,6 +573,32 @@ const App = () => {
     return () => clearInterval(interval);
   }, [refreshWorkflowRuns]);
 
+  const refreshGovernanceAudit = useCallback(async () => {
+    const seq = ++governanceAuditSeq.current;
+    try {
+      const res = await authenticatedFetch(
+        `${API_BASE}/governance/audit?limit=${AUDIT_FEED_LIMIT}`,
+      );
+      if (!res.ok) return;
+      const data: Partial<AuditLogResponse> = await res.json();
+      if (seq !== governanceAuditSeq.current) return;
+      setGovernanceAudit(data.entries ?? []);
+    } catch {
+      // Ignore polling errors
+    } finally {
+      setGovernanceAuditLoaded(true);
+    }
+  }, []);
+
+  // Same cadence as the governance actions below: the Completed section reads
+  // the two together to tell a finished proposal from a pending one.
+  useEffect(() => {
+    const poll = pollGuard(refreshGovernanceAudit);
+    poll();
+    const interval = window.setInterval(poll, 10_000);
+    return () => clearInterval(interval);
+  }, [refreshGovernanceAudit]);
+
   // Watch for workflow runs transitioning out of `inprogress` and surface a
   // snackbar — the run card in the feed updates too, but a transient toast
   // gives the user a top-level signal without making them go look. First
@@ -708,6 +743,9 @@ const App = () => {
           );
           return {
             ...entry,
+            // Kept current so the feed can tell when a party's proposals are
+            // all loaded.
+            nextCursor: batch.nextCursor,
             domainActions: [
               ...entry.domainActions,
               ...batch.domainActions.filter(
@@ -731,6 +769,12 @@ const App = () => {
   }, [actionCursors, loadingMoreActions]);
 
   const hasMoreActions = Object.values(actionCursors).some(Boolean);
+
+  // A confirm, execute or cancel changes what is pending and what is logged.
+  const refreshActionsAndAudit = useCallback(() => {
+    void refreshPartyActions();
+    void refreshGovernanceAudit();
+  }, [refreshPartyActions, refreshGovernanceAudit]);
 
   // Poll governance actions across configured parties (only after parties load)
   useEffect(() => {
@@ -1258,15 +1302,19 @@ const App = () => {
             pendingInvitations={pendingInvitations}
             partyActions={partyActions}
             workflowRuns={workflowRuns}
+            governanceAudit={governanceAudit}
             fetching={partyActionsFetching}
             onLoadMore={loadMoreActions}
             hasMore={hasMoreActions}
             loadingMore={loadingMoreActions}
             loading={
-              !invitationsLoaded || !partyActionsLoaded || !workflowRunsLoaded
+              !invitationsLoaded ||
+              !partyActionsLoaded ||
+              !workflowRunsLoaded ||
+              !governanceAuditLoaded
             }
             onInvitationsChanged={refreshInvitations}
-            onActionsChanged={refreshPartyActions}
+            onActionsChanged={refreshActionsAndAudit}
             onWorkflowsChanged={refreshWorkflowRuns}
             onSelectParty={(partyId) => {
               setSelectedPartyId(partyId);
