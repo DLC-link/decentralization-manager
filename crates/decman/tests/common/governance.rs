@@ -1,7 +1,7 @@
-use std::time::Duration;
+use std::{collections::HashSet, time::Duration};
 
 use anyhow::Context;
-use dec_party_manager::server::GovernanceResponse;
+use dec_party_manager::server::{DomainGovernanceAction, GovernanceResponse};
 use serde_json::{Value, json};
 
 use crate::common::{Fixture, scenario::Scenario};
@@ -10,6 +10,52 @@ use crate::common::{Fixture, scenario::Scenario};
 pub struct ProposalCycleCtx {
     pub proposal_cid: Option<String>,
     pub confirmation_cids: Vec<String>,
+    /// Proposals already pending on P1 just before this cycle proposed.
+    pending_before: HashSet<String>,
+}
+
+/// The confirmations read that finds this cycle's proposal. It asks for the
+/// endpoint's largest page, so one read lists every pending proposal.
+/// [`whole_page`] fails the read when it does not.
+fn all_pending_path(party_id: &str) -> String {
+    format!("/governance/confirmations?party_id={party_id}&limit=200")
+}
+
+/// The pending proposals in `s`. Errors when the page was cut short, because a
+/// partial list cannot show which proposal is new.
+fn whole_page(s: GovernanceResponse) -> anyhow::Result<Vec<DomainGovernanceAction>> {
+    anyhow::ensure!(
+        s.next_cursor.is_none(),
+        "more proposals are pending than one /governance/confirmations page holds"
+    );
+    Ok(s.domain_actions)
+}
+
+/// The cid of the one proposal labelled `label` that `before` lacks.
+///
+/// `Ok(None)` means it is not visible yet. Two or more is an error, because
+/// the cycle cannot tell which one it created.
+fn new_proposal_cid(
+    before: &HashSet<String>,
+    pending: &[DomainGovernanceAction],
+    label: &str,
+) -> anyhow::Result<Option<String>> {
+    let mut fresh: Vec<&str> = pending
+        .iter()
+        .filter(|a| a.action_label == label && !before.contains(&a.proposal_cid))
+        .map(|a| a.proposal_cid.as_str())
+        .collect();
+    match fresh.as_slice() {
+        [] => Ok(None),
+        [cid] => Ok(Some(cid.to_string())),
+        _ => {
+            fresh.sort_unstable();
+            anyhow::bail!(
+                "{} new proposals are labelled {label}, expected one: {fresh:?}",
+                fresh.len()
+            )
+        }
+    }
 }
 
 /// This enum names the decparty a governance cycle runs on.
@@ -56,6 +102,11 @@ impl CycleParty {
 /// named decparty: P1 proposes, P2 confirms, P3 executes. The scenario asserts
 /// that no pending action remains for this proposal.
 ///
+/// Every step after the propose tracks the proposal by cid. The propose
+/// endpoint returns no cid, so the cycle records the pending set first. It
+/// then takes the one new proposal labelled `label`, and fails if there are
+/// two or more.
+///
 /// The scenario includes cross-participant visibility steps. They stop a WHEN
 /// step from running before the confirmer or the executor sees the proposal on
 /// its own ledger view.
@@ -79,11 +130,17 @@ pub fn propose_confirm_execute_on(
         .when(format!("P1 proposes {label}"), {
             let proposal = proposal.clone();
             let party = party.clone();
-            move |f, _ctx| {
+            move |f, ctx| {
                 let proposal = proposal.clone();
                 let party = party.clone();
                 Box::pin(async move {
                     let (party_id, rules_contract_id) = party.resolve(f)?;
+                    // The propose response carries no cid. Note what is
+                    // already pending so the next step can pick out the new one.
+                    let s: GovernanceResponse =
+                        f.get_json(f.p1.http, &all_pending_path(&party_id)).await?;
+                    ctx.pending_before =
+                        whole_page(s)?.into_iter().map(|a| a.proposal_cid).collect();
                     let req = json!({
                         "party_id": party_id,
                         "rules_contract_id": rules_contract_id,
@@ -108,18 +165,26 @@ pub fn propose_confirm_execute_on(
                             Ok((p, _)) => p,
                             Err(e) => return Some(Err(e)),
                         };
-                        let path = format!("/governance/confirmations?party_id={party_id}");
-                        let s: GovernanceResponse = f.probe_get_json(f.p1.http, &path).await?;
-                        // Match THIS cycle's proposal by action label rather than
-                        // assuming it is the only pending domain action. A prior
-                        // phase (e.g. notification_feed) can leave an unrelated
-                        // proposal pending, so `len() == 1` is not a safe gate.
-                        let action = s
-                            .domain_actions
-                            .into_iter()
-                            .find(|a| a.action_label == label_p1)?;
-                        ctx.proposal_cid = Some(action.proposal_cid);
-                        Some(Ok(()))
+                        let s: GovernanceResponse = f
+                            .probe_get_json(f.p1.http, &all_pending_path(&party_id))
+                            .await?;
+                        // THIS cycle's proposal is the one with our label that
+                        // was not pending before we proposed. A prior phase (e.g.
+                        // notification_feed) can leave an unrelated proposal
+                        // pending, so neither `len() == 1` nor the label alone is
+                        // a safe gate.
+                        let pending = match whole_page(s) {
+                            Ok(p) => p,
+                            Err(e) => return Some(Err(e)),
+                        };
+                        match new_proposal_cid(&ctx.pending_before, &pending, &label_p1) {
+                            Ok(Some(cid)) => {
+                                ctx.proposal_cid = Some(cid);
+                                Some(Ok(()))
+                            }
+                            Ok(None) => None,
+                            Err(e) => Some(Err(e)),
+                        }
                     })
                 }
             },
@@ -286,4 +351,79 @@ pub fn propose_confirm_execute_on(
 /// Drive one cycle on the decparty the fixture holds.
 pub fn propose_confirm_execute(label: &str, proposal: Value) -> Scenario<ProposalCycleCtx> {
     propose_confirm_execute_on(CycleParty::Primary, label, proposal)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A pending action as `/governance/confirmations` sends it.
+    fn action(cid: &str, label: &str) -> DomainGovernanceAction {
+        serde_json::from_value(json!({
+            "proposal_cid": cid,
+            "action_label": label,
+            "confirmations": [],
+            "confirmation_count": 1,
+            "executable_confirmation_cids": [],
+            "can_execute": false,
+        }))
+        .expect("wire-shaped DomainGovernanceAction")
+    }
+
+    fn cids(list: &[&str]) -> HashSet<String> {
+        list.iter().map(|c| c.to_string()).collect()
+    }
+
+    #[test]
+    fn new_proposal_cid_picks_the_one_new_proposal_with_the_label() {
+        let before = cids(&["old-vote", "old-preapproval"]);
+        let pending = [
+            action("old-vote", "GenericVote"),
+            action("old-preapproval", "SetupCcPreapproval"),
+            action("new-preapproval", "SetupCcPreapproval"),
+            action("new-vote", "GenericVote"),
+        ];
+        let got = new_proposal_cid(&before, &pending, "GenericVote").unwrap();
+        assert_eq!(got.as_deref(), Some("new-vote"));
+    }
+
+    #[test]
+    fn new_proposal_cid_waits_while_only_older_proposals_carry_the_label() {
+        let before = cids(&["old-vote"]);
+        let pending = [
+            action("old-vote", "GenericVote"),
+            action("new-preapproval", "SetupCcPreapproval"),
+        ];
+        assert_eq!(
+            new_proposal_cid(&before, &pending, "GenericVote").unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn new_proposal_cid_rejects_two_new_proposals_with_the_label() {
+        let pending = [
+            action("new-b", "GenericVote"),
+            action("new-a", "GenericVote"),
+        ];
+        let err = new_proposal_cid(&HashSet::new(), &pending, "GenericVote").unwrap_err();
+        assert!(err.to_string().contains(r#"["new-a", "new-b"]"#), "{err}");
+    }
+
+    #[test]
+    fn whole_page_rejects_a_page_with_more_to_follow() {
+        let page = |next_cursor: Option<&str>| -> GovernanceResponse {
+            serde_json::from_value(json!({
+                "actions": [],
+                "next_cursor": next_cursor,
+                "domain_actions": [action("p1", "GenericVote")],
+                "threshold": 2,
+            }))
+            .expect("wire-shaped GovernanceResponse")
+        };
+        assert!(whole_page(page(Some("eyJvZmZzZXQiOjF9"))).is_err());
+        let pending = whole_page(page(None)).unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].proposal_cid, "p1");
+    }
 }
