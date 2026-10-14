@@ -1432,6 +1432,7 @@ pub async fn start_server(
             .service(handlers::cancel_workflow_instance)
             .service(handlers::get_key_status)
             .service(handlers::get_invitations)
+            .service(handlers::list_handled_invitations)
             .service(handlers::get_invitation_dar)
             .service(handlers::accept_invitation)
             .service(handlers::decline_invitation)

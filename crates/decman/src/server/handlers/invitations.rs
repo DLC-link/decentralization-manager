@@ -1,6 +1,7 @@
 use std::{collections::HashMap, time::Duration};
 
 use actix_web::{HttpRequest, HttpResponse, Responder, get, post, web};
+use serde::Deserialize;
 use sqlx::SqlitePool;
 
 use crate::{
@@ -15,9 +16,10 @@ use crate::{
         AppState, mark_failed_via_pool,
         middleware::require_admin,
         types::{
-            DeclineInvitationPayload, ErrorResponse, InvitationActionRequest, InvitationOutcome,
-            MessageResponse, PeerJob, PendingInvitation, PendingInvitationsResponse,
-            RequestDarPayload, WorkflowKind, WorkflowProgress, WorkflowRole, WorkflowRun,
+            DeclineInvitationPayload, ErrorResponse, HandledInvitationsResponse,
+            InvitationActionRequest, InvitationOutcome, MessageResponse, PeerJob,
+            PendingInvitation, PendingInvitationsResponse, RequestDarPayload, WorkflowKind,
+            WorkflowProgress, WorkflowRole, WorkflowRun,
         },
     },
     workflow::{
@@ -237,6 +239,60 @@ pub async fn get_invitations(data: web::Data<AppState>) -> impl Responder {
     HttpResponse::Ok().json(PendingInvitationsResponse {
         invitations: invitations_with_names,
     })
+}
+
+/// Query parameters for the handled invitations endpoint
+#[derive(Debug, Deserialize, utoipa::IntoParams)]
+pub struct HandledInvitationsQuery {
+    /// Most invitations to return (default 50, at most 200)
+    #[serde(default)]
+    pub limit: Option<i64>,
+}
+
+/// Get recently accepted and declined invitations, newest first
+#[utoipa::path(
+    tag = "Invitations",
+    params(HandledInvitationsQuery),
+    responses(
+        (status = 200, description = "Handled invitations, newest first", body = HandledInvitationsResponse),
+        (status = 500, description = "Internal server error", body = ErrorResponse)
+    )
+)]
+#[get("/invitations/handled")]
+pub async fn list_handled_invitations(
+    data: web::Data<AppState>,
+    query: web::Query<HandledInvitationsQuery>,
+) -> impl Responder {
+    let limit = query.limit.unwrap_or(50).clamp(1, MAX_HANDLED_INVITATIONS);
+    let handled = match data.db.get_handled_invitations(limit).await {
+        Ok(handled) => handled,
+        Err(e) => {
+            tracing::error!("Failed to read handled invitations: {e}");
+            return HttpResponse::InternalServerError().json(ErrorResponse {
+                error: format!("Failed to read handled invitations: {e}"),
+            });
+        }
+    };
+
+    let pubkey_to_name: HashMap<String, String> = data
+        .db
+        .get_all_peers()
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .map(|p| (p.public_key, p.name))
+        .collect();
+    let invitations = handled
+        .into_iter()
+        .map(|mut h| {
+            h.invitation.coordinator_name = pubkey_to_name
+                .get(&h.invitation.coordinator_pubkey)
+                .cloned();
+            h
+        })
+        .collect();
+
+    HttpResponse::Ok().json(HandledInvitationsResponse { invitations })
 }
 
 /// Accept a pending invitation and trigger the workflow
@@ -856,6 +912,79 @@ mod handled_invitation_tests {
             assert_eq!(again.status(), StatusCode::NOT_FOUND, "{uri}");
         }
         assert_eq!(pool.get_handled_invitations(50).await?.len(), 1);
+        Ok(())
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn the_handled_list_is_newest_first_and_names_the_coordinator(
+        pool: SqlitePool,
+    ) -> anyhow::Result<()> {
+        let older = invitation("inv-1");
+        let state = state_with(&pool, &older).await?;
+        let mut tx = pool.begin_transaction().await?;
+        tx.upsert_pending_invitation(&invitation("inv-2")).await?;
+        // Still pending, so not listed.
+        tx.upsert_pending_invitation(&invitation("inv-3")).await?;
+        tx.mark_invitation_handled("inv-1", InvitationOutcome::Declined, 5000)
+            .await?;
+        tx.mark_invitation_handled("inv-2", InvitationOutcome::Accepted, 6000)
+            .await?;
+        tx.insert_peer(&crate::config::Peer {
+            participant_id: crate::canton_id::CantonId::parse(&format!(
+                "coordinator::1220{}",
+                "ab".repeat(32)
+            ))?,
+            name: "Coordinator One".to_string(),
+            address: "localhost".to_string(),
+            port: 1,
+            public_key: older.coordinator_pubkey.clone(),
+            party: None,
+        })
+        .await?;
+        Commitable::commit(tx).await?;
+        let app =
+            actix_test::init_service(App::new().app_data(state).service(list_handled_invitations))
+                .await;
+
+        let all: Value = actix_test::call_and_read_body_json(
+            &app,
+            actix_test::TestRequest::get()
+                .uri("/invitations/handled")
+                .to_request(),
+        )
+        .await;
+        let newest: Value = actix_test::call_and_read_body_json(
+            &app,
+            actix_test::TestRequest::get()
+                .uri("/invitations/handled?limit=1")
+                .to_request(),
+        )
+        .await;
+
+        let summary: Vec<(&str, &str, i64)> = all["invitations"]
+            .as_array()
+            .map(|list| {
+                list.iter()
+                    .map(|h| {
+                        (
+                            h["invitation"]["id"].as_str().unwrap_or_default(),
+                            h["outcome"].as_str().unwrap_or_default(),
+                            h["handled_at"].as_i64().unwrap_or_default(),
+                        )
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        assert_eq!(
+            summary,
+            vec![("inv-2", "accepted", 6000), ("inv-1", "declined", 5000)]
+        );
+        assert_eq!(
+            all["invitations"][0]["invitation"]["coordinator_name"],
+            json!("Coordinator One")
+        );
+        assert_eq!(newest["invitations"].as_array().map(Vec::len), Some(1));
+        assert_eq!(newest["invitations"][0]["invitation"]["id"], json!("inv-2"));
         Ok(())
     }
 

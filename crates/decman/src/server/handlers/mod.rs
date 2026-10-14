@@ -29,6 +29,7 @@ pub(crate) use governance::{
 pub(crate) use governance::{get_party_credentials, packages};
 pub(crate) use invitations::{
     accept_invitation, decline_invitation, get_invitation_dar, get_invitations,
+    list_handled_invitations,
 };
 pub(crate) use keys::get_key_status;
 pub(crate) use parties::{
