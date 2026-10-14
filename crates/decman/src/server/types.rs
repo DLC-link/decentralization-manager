@@ -643,8 +643,9 @@ pub struct DomainGovernanceAction {
     /// fields. Same JSON shape as the chain audit's `details`: record fields
     /// keep their labels, numerics and parties are strings, a variant is
     /// `{"_variant": ..., "value": ...}`. Absent on an orphaned card, where
-    /// the proposal contract is no longer readable, and for a caller without
-    /// the admin role, who cannot confirm or execute.
+    /// the proposal contract is no longer readable. Also absent for a caller
+    /// without `DECPM_ADMIN_ROLE`, when that role is configured. With no role
+    /// configured, every authenticated caller passes the admin check.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "typegen", ts(type = "unknown"))]
     pub proposal_payload: Option<serde_json::Value>,
