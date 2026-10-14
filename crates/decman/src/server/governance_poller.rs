@@ -32,7 +32,7 @@ const READ_LIMIT: usize = FETCH_CHUNK as usize;
 static PENDING: LazyLock<IntGaugeVec> = LazyLock::new(|| {
     prometheus::register_int_gauge_vec!(
         "decman_governance_pending",
-        "Open governance actions at the last successful read. awaiting_approvals needs more confirmations; executable has enough to execute.",
+        "Open governance actions at the last successful read. awaiting_approvals needs more confirmations; executable has enough to execute. A lower bound while decman_governance_queue_truncated is 1.",
         &["decparty", "state"]
     )
     .expect("metric name is a unique literal")
@@ -41,7 +41,16 @@ static PENDING: LazyLock<IntGaugeVec> = LazyLock::new(|| {
 static OLDEST_EXPIRES_IN: LazyLock<GaugeVec> = LazyLock::new(|| {
     prometheus::register_gauge_vec!(
         "decman_governance_oldest_pending_expires_in_seconds",
-        "Seconds until the earliest live confirmation on an open governance action expires. Absent when no open action has a live confirmation. Keeps falling while reads fail.",
+        "Seconds until the earliest live confirmation on an open governance action expires. Absent when no open action has a live confirmation, and while decman_governance_queue_truncated is 1. Keeps falling while reads fail.",
+        &["decparty"]
+    )
+    .expect("metric name is a unique literal")
+});
+
+static TRUNCATED: LazyLock<IntGaugeVec> = LazyLock::new(|| {
+    prometheus::register_int_gauge_vec!(
+        "decman_governance_queue_truncated",
+        "1 when the last successful read covered only part of the open proposals. The pending counts are then a lower bound, and the countdown is unknown and absent. 0 when the read covered them all.",
         &["decparty"]
     )
     .expect("metric name is a unique literal")
@@ -94,6 +103,7 @@ impl PollOutcome {
 pub(crate) fn register_metrics() {
     LazyLock::force(&PENDING);
     LazyLock::force(&OLDEST_EXPIRES_IN);
+    LazyLock::force(&TRUNCATED);
     for outcome in PollOutcome::ALL {
         POLLS.with_label_values(&[outcome.label()]).inc_by(0);
     }
@@ -106,6 +116,8 @@ struct PendingSummary {
     executable: i64,
     /// Unix seconds of the earliest live confirmation expiry.
     oldest_expires_at: Option<i64>,
+    /// Whether open proposals were left unread.
+    truncated: bool,
 }
 
 /// Counts the open actions in a queue and finds their earliest live expiry
@@ -113,7 +125,8 @@ struct PendingSummary {
 ///
 /// An `expires_at` of 0 is unresolved: it counts as live, as it does on the
 /// feed, but it has no countdown. An expiry at or before `now` has passed and
-/// never sets the countdown.
+/// never sets the countdown. A truncated queue reports no countdown at all: an
+/// unread proposal may expire sooner than any read one.
 fn summarize(queue: &GovernanceQueue, now: i64) -> PendingSummary {
     // Only its confirmations keep a self-management action open. Once they
     // have all expired, it waits for cleanup, not for approvals.
@@ -141,6 +154,10 @@ fn summarize(queue: &GovernanceQueue, now: i64) -> PendingSummary {
         }
         let soonest = expiries.into_iter().filter(|&e| e > now).min();
         summary.oldest_expires_at = summary.oldest_expires_at.into_iter().chain(soonest).min();
+    }
+    if queue.next_cursor.is_some() {
+        summary.truncated = true;
+        summary.oldest_expires_at = None;
     }
     summary
 }
@@ -206,8 +223,9 @@ struct PollState {
 }
 
 impl PollState {
-    /// Publishes a successful read. Only a read that found no live expiry drops
-    /// the countdown series; a failed read never reaches here.
+    /// Publishes a successful read. Only a read that found no live expiry, or
+    /// could not know it, drops the countdown series. A failed read never
+    /// reaches here.
     fn apply(&mut self, decparty: &CantonId, summary: &PendingSummary) {
         let label = decparty.to_string();
         for (state, count) in [
@@ -218,6 +236,9 @@ impl PollState {
                 .with_label_values(&[label.as_str(), state.label()])
                 .set(count);
         }
+        TRUNCATED
+            .with_label_values(&[label.as_str()])
+            .set(i64::from(summary.truncated));
         match summary.oldest_expires_at {
             Some(expires_at) => {
                 self.oldest.insert(decparty.clone(), expires_at);
@@ -240,6 +261,7 @@ impl PollState {
                     let _ = PENDING.remove_label_values(&[label.as_str(), state.label()]);
                 }
                 let _ = OLDEST_EXPIRES_IN.remove_label_values(&[label.as_str()]);
+                let _ = TRUNCATED.remove_label_values(&[label.as_str()]);
             }
             still_served
         });
@@ -273,11 +295,9 @@ async fn poll_once(data: &web::Data<AppState>, state: &mut PollState) -> PollOut
         let previous = state.health.get(&decparty).copied();
         let current = match read_queue(data, &decparty).await {
             Ok(queue) => {
-                state.apply(
-                    &decparty,
-                    &summarize(&queue, chrono::Utc::now().timestamp()),
-                );
-                if queue.next_cursor.is_none() {
+                let summary = summarize(&queue, chrono::Utc::now().timestamp());
+                state.apply(&decparty, &summary);
+                if !summary.truncated {
                     if previous == Some(ReadHealth::Failed) {
                         tracing::info!(%decparty, "governance queue read recovered");
                     }
@@ -287,7 +307,7 @@ async fn poll_once(data: &web::Data<AppState>, state: &mut PollState) -> PollOut
                         tracing::warn!(
                             %decparty,
                             limit = READ_LIMIT,
-                            "more open proposals than one read covers; the pending gauges are a lower bound"
+                            "more open proposals than one read covers; the pending counts are a lower bound and the countdown is unknown"
                         );
                     }
                     ReadHealth::Truncated
@@ -337,9 +357,12 @@ mod tests {
     use crate::{
         auth::{MockAuthRegistry, WorkflowAuth},
         config::{KeycloakConfig, PackageConfig, PartyCredentials},
-        server::types::{
-            ActionType, DomainConfirmation, DomainGovernanceAction, GovernanceAction,
-            GovernanceConfirmation,
+        server::{
+            ledger_paging::AcsCursor,
+            types::{
+                ActionType, DomainConfirmation, DomainGovernanceAction, GovernanceAction,
+                GovernanceConfirmation,
+            },
         },
     };
 
@@ -357,6 +380,7 @@ mod tests {
             awaiting_approvals: awaiting,
             executable,
             oldest_expires_at: oldest,
+            truncated: false,
         }
     }
 
@@ -479,6 +503,25 @@ mod tests {
         Ok(())
     }
 
+    /// The unread proposals may expire before any read one, so the page's
+    /// earliest expiry is not the queue's.
+    #[test]
+    fn a_truncated_queue_counts_a_lower_bound_and_has_no_countdown() -> anyhow::Result<()> {
+        let mut q = queue(vec![], vec![proposal(false, false, &[NOW + 60])?]);
+        q.next_cursor = Some(AcsCursor {
+            offset: 0,
+            page_token: vec![1],
+        });
+        assert_eq!(
+            summarize(&q, NOW),
+            PendingSummary {
+                truncated: true,
+                ..summary(1, 0, None)
+            }
+        );
+        Ok(())
+    }
+
     #[test]
     fn the_poll_counter_exists_before_the_first_pass() -> anyhow::Result<()> {
         register_metrics();
@@ -526,6 +569,34 @@ mod tests {
     }
 
     #[test]
+    fn a_truncated_read_drops_the_countdown_and_says_so() -> anyhow::Result<()> {
+        let decparty = party("truncated")?;
+        let label = decparty.to_string();
+        let truncated = || TRUNCATED.get_metric_with_label_values(&[label.as_str()]);
+        let mut state = PollState::default();
+
+        state.apply(&decparty, &summary(2, 0, Some(NOW + 600)));
+        state.report_oldest_expiry(NOW);
+        assert_eq!(truncated()?.get(), 0);
+        assert_eq!(series_count(OLDEST, &decparty), 1);
+
+        let partial = PendingSummary {
+            truncated: true,
+            ..summary(5, 0, None)
+        };
+        state.apply(&decparty, &partial);
+        state.report_oldest_expiry(NOW);
+        assert_eq!(truncated()?.get(), 1);
+        assert_eq!(
+            series_count(OLDEST, &decparty),
+            0,
+            "the last complete read's countdown is no longer the queue's"
+        );
+        assert!(state.oldest.is_empty());
+        Ok(())
+    }
+
+    #[test]
     fn an_unserved_decparty_loses_every_series() -> anyhow::Result<()> {
         let decparty = party("pruned")?;
         let mut state = PollState::default();
@@ -535,8 +606,13 @@ mod tests {
 
         state.prune_unserved(&[]);
 
-        assert_eq!(series_count("decman_governance_pending", &decparty), 0);
-        assert_eq!(series_count(OLDEST, &decparty), 0);
+        for family in [
+            "decman_governance_pending",
+            OLDEST,
+            "decman_governance_queue_truncated",
+        ] {
+            assert_eq!(series_count(family, &decparty), 0, "{family}");
+        }
         assert!(state.oldest.is_empty() && state.health.is_empty());
         Ok(())
     }
