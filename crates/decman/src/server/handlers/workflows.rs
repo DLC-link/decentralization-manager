@@ -67,6 +67,13 @@ fn now_secs() -> i64 {
         .unwrap_or(0)
 }
 
+fn add_party_instance_name(party_prefix: &str, timestamp: i64) -> String {
+    format!(
+        "{party_prefix}-add-party-{timestamp}-{}",
+        uuid::Uuid::new_v4()
+    )
+}
+
 /// Insert the coordinator-side `workflow_runs` row for a freshly-started run.
 /// Duplicate-instance protection lives in the registry insert that precedes
 /// this call (migration 000013 dropped the one-InProgress-per-(kind, role)
@@ -1020,7 +1027,7 @@ pub async fn start_add_party(
     invitees.push(new_participant_id.clone());
 
     let timestamp = now_secs();
-    let instance_name = format!("{}-add-party-{timestamp}", decentralized_party_id.prefix);
+    let instance_name = add_party_instance_name(&decentralized_party_id.prefix, timestamp);
 
     let instance = WorkflowInstance::new(
         instance_name.clone(),
@@ -4121,6 +4128,36 @@ mod tests {
             created_at: 0,
             updated_at: 0,
         }
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn add_party_runs_in_the_same_second_keep_separate_history(pool: SqlitePool) -> Result {
+        let party = pid(7)?;
+        let timestamp = 1_791_982_745;
+        let cancelled_instance = add_party_instance_name(&party.prefix, timestamp);
+        let mut cancelled = in_progress_run(&cancelled_instance, &party);
+        cancelled.kind = WorkflowKind::AddParty;
+        cancelled.status = WorkflowProgress::Cancelled;
+        cancelled.dismissed = true;
+        let mut tx = pool.begin_transaction().await?;
+        tx.upsert_workflow_run(&cancelled).await?;
+        Commitable::commit(tx).await?;
+
+        let next_instance = add_party_instance_name(&party.prefix, timestamp);
+        let mut next = in_progress_run(&next_instance, &party);
+        next.kind = WorkflowKind::AddParty;
+        let mut tx = pool.begin_transaction().await?;
+        tx.upsert_workflow_run(&next).await?;
+        Commitable::commit(tx).await?;
+
+        let previous = pool.get_workflow_run(&cancelled_instance).await?.unwrap();
+        assert_eq!(previous.status, WorkflowProgress::Cancelled);
+        assert!(previous.dismissed);
+        assert_eq!(
+            find_inprogress_run_for_party(&pool, &party).await,
+            Some((next_instance, WorkflowKind::AddParty))
+        );
+        Ok(())
     }
 
     /// The invariant the completion ordering rests on: once a run row is

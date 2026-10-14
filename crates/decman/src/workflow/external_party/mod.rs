@@ -13,6 +13,8 @@
 //! last host signs, so a partial failure leaves a pending party, never a
 //! half-created one — the wallet just retries the host that failed.
 
+mod discovery;
+
 pub mod add_hosts;
 pub mod keys;
 pub mod local_party;
