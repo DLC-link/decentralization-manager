@@ -88,6 +88,9 @@ pub fn archive_command(
 
 /// Build the `/v2/state/active-contracts` body for every active contract
 /// visible to `party`, whatever its template, as of `offset`.
+///
+/// Not verbose, unlike [`active_contracts_request`]. Its only parser reads
+/// event metadata and never the payload, so field labels do not matter here.
 pub fn active_contracts_request_all(party: &str, offset: i64) -> Value {
     json!({
         "eventFormat": {
@@ -160,8 +163,14 @@ pub fn parse_active_contracts(acs_response: &Value) -> Vec<ActiveContract> {
         .collect()
 }
 
-/// Build the `/v2/state/active-contracts` body: active `RewardCouponV2`
+/// Build the `/v2/state/active-contracts` body: active `template_id`
 /// contracts visible to `party`, as of `offset`.
+///
+/// The event format is verbose because the parsers read the payload by field
+/// label. The localnet Canton labels the payload either way. Other Canton
+/// versions may drop the labels from a non-verbose read. The top-level
+/// `verbose` is a legacy flag and must stay `false`. Canton rejects a request
+/// that sets it together with `eventFormat`.
 pub fn active_contracts_request(party: &str, template_id: &str, offset: i64) -> Value {
     json!({
         "eventFormat": {
@@ -179,7 +188,7 @@ pub fn active_contracts_request(party: &str, template_id: &str, offset: i64) -> 
                     }]
                 }
             },
-            "verbose": false
+            "verbose": true
         },
         "verbose": false,
         "activeAtOffset": offset,
@@ -377,6 +386,98 @@ mod tests {
         let f = &v["eventFormat"]["filtersByParty"]["benef::1220"]["cumulative"][0]["identifierFilter"]
             ["TemplateFilter"]["value"];
         assert_eq!(f["templateId"], "#dummy:Mod:Ent");
+    }
+
+    #[test]
+    fn active_contracts_request_asks_for_labelled_payloads() {
+        let v = active_contracts_request("benef::1220", "#dummy:Mod:Ent", 42);
+        // The coupon parsers read the payload by field label.
+        assert_eq!(v["eventFormat"]["verbose"], true);
+        // Canton rejects the legacy top-level flag alongside `eventFormat`.
+        assert_eq!(v["verbose"], false);
+    }
+
+    /// One `/v2/state/active-contracts` entry for a `RewardCouponV2`, shaped
+    /// the way the localnet Canton (Splice 0.6.12) renders a verbose read.
+    /// Records are keyed by field label. `Int64` and `Numeric` values are
+    /// strings. A `None` in a record's last field is left out of the record.
+    fn verbose_coupon_entry(
+        contract_id: &str,
+        round: &str,
+        amount: &str,
+        beneficiary: Option<&str>,
+    ) -> Value {
+        let mut payload = json!({
+            "dso": "dso::1220",
+            "provider": "decparty::1220",
+            "round": {"number": round},
+            "amount": amount,
+            "expiresAt": "2026-07-24T20:00:00Z",
+            "providerIsObserver": true,
+        });
+        let mut observers = vec!["decparty::1220"];
+        if let Some(b) = beneficiary {
+            payload["beneficiary"] = json!(b);
+            observers.push(b);
+        }
+        json!({
+            "workflowId": "",
+            "contractEntry": {"JsActiveContract": {
+                "createdEvent": {
+                    "offset": 42,
+                    "nodeId": 0,
+                    "contractId": contract_id,
+                    "templateId": "fb10433a:Splice.Amulet:RewardCouponV2",
+                    "contractKey": null,
+                    "createArgument": payload,
+                    "createdEventBlob": "",
+                    "interfaceViews": [],
+                    "witnessParties": ["decparty::1220"],
+                    "signatories": ["dso::1220"],
+                    "observers": observers,
+                    "createdAt": "2026-07-23T20:00:00Z",
+                    "packageName": "splice-amulet",
+                    "representativePackageId": "fb10433a",
+                    "acsDelta": true,
+                },
+                "synchronizerId": "global-domain::1220",
+                "reassignmentCounter": 0,
+            }},
+        })
+    }
+
+    #[test]
+    fn parsers_read_a_verbose_acs_response() {
+        let mut resp = json!([
+            verbose_coupon_entry("00aa", "7", "80.0000000000", Some("benef::1220")),
+            // Unassigned. `beneficiary` is the template's last field, so Canton
+            // leaves it out instead of sending null.
+            verbose_coupon_entry("00bb", "8", "20.0000000000", None),
+        ]);
+        assert_eq!(
+            parse_coupon_amounts(&resp),
+            vec![
+                (Some("benef::1220".to_string()), "80.0000000000".to_string()),
+                (None, "20.0000000000".to_string()),
+            ]
+        );
+        assert_eq!(
+            parse_coupon_ids(&resp),
+            vec![("00aa".to_string(), 7), ("00bb".to_string(), 8)]
+        );
+        let all = parse_active_contracts(&resp);
+        assert_eq!(all.len(), 2);
+        assert_eq!(all[0].contract_id, "00aa");
+        assert_eq!(all[0].template_id, "fb10433a:Splice.Amulet:RewardCouponV2");
+        assert_eq!(
+            all[0].stakeholders,
+            ["dso::1220", "decparty::1220", "benef::1220"]
+        );
+
+        // An explicit null reads as unassigned too.
+        resp[1]["contractEntry"]["JsActiveContract"]["createdEvent"]["createArgument"]["beneficiary"] =
+            Value::Null;
+        assert_eq!(parse_coupon_amounts(&resp)[1].0, None);
     }
 
     #[test]
