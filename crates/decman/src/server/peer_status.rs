@@ -50,7 +50,7 @@ pub fn bump(map: &mut HashMap<String, Instant>, id: String, now: Instant) {
 static REACHABLE: LazyLock<IntGaugeVec> = LazyLock::new(|| {
     prometheus::register_int_gauge_vec!(
         "decman_peer_reachable",
-        "Whether this node can reach the peer: 1 reachable, 0 unreachable. The Noise ping loop sets it every 5s. Traffic heard from the peer in the last 15s also counts as reachable.",
+        "Whether this node can reach the peer: 1 reachable, 0 unreachable. The peer liveness check sets it every 5s. Traffic heard from the peer in the last 15s also counts as reachable.",
         &["peer"]
     )
     .expect("metric name is a unique literal")
