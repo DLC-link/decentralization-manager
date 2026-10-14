@@ -619,6 +619,21 @@ pub struct DomainGovernanceAction {
     /// card, where the proposal contract is no longer readable.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub created_at: Option<i64>,
+    /// Template of the proposal contract, as `package-id:Module:Entity`.
+    /// Absent on an orphaned card, where the proposal contract is no longer
+    /// readable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proposal_template_id: Option<String>,
+    /// Every create argument of the proposal contract, so a member can read
+    /// all of what they confirm or execute rather than only the summary
+    /// fields. Same JSON shape as the chain audit's `details`: record fields
+    /// keep their labels, numerics and parties are strings, a variant is
+    /// `{"_variant": ..., "value": ...}`. Absent on an orphaned card, where
+    /// the proposal contract is no longer readable, and for a caller without
+    /// the admin role, who cannot confirm or execute.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "typegen", ts(type = "unknown"))]
+    pub proposal_payload: Option<serde_json::Value>,
 }
 
 /// Request to submit a confirmation for an action with structured type
@@ -1281,6 +1296,8 @@ mod tests {
                 proposer: None,
                 proposer_not_authorized: false,
                 created_at: None,
+                proposal_template_id: None,
+                proposal_payload: None,
             }],
             threshold: 2,
             member_party_id: None,
@@ -1291,7 +1308,10 @@ mod tests {
 
         let json = serde_json::to_string(&response)?;
         assert!(
-            !json.contains("member_party_id") && !json.contains("\"proposer\""),
+            !json.contains("member_party_id")
+                && !json.contains("\"proposer\"")
+                && !json.contains("proposal_template_id")
+                && !json.contains("proposal_payload"),
             "optional fields must be omitted on the wire: {json}"
         );
 
@@ -1358,6 +1378,8 @@ mod tests {
                 proposer: None,
                 proposer_not_authorized: false,
                 created_at: None,
+                proposal_template_id: None,
+                proposal_payload: None,
             }],
             threshold: 2,
             member_party_id: None,

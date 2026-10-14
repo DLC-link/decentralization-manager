@@ -11,7 +11,7 @@ use std::cmp::Reverse;
 use std::collections::{HashMap, HashSet};
 
 use canton_common::decimal::DamlDecimal;
-use canton_proto_rs::com::daml::ledger::api::v2::{CreatedEvent, Record};
+use canton_proto_rs::com::daml::ledger::api::v2::{CreatedEvent, Identifier, Record};
 use common::canton_id::CantonId;
 
 use crate::catalog::action::ActionType;
@@ -252,7 +252,7 @@ fn description_preview(text: String) -> String {
 /// follow-up `GetEventsByContractId` per cid against the
 /// `Splice.Api.Token.TransferInstructionV1:TransferInstruction` interface so
 /// the pending-approval card can render sender/amount/instrument.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct ProposalInfo {
     pub description: Option<String>,
     pub transfer: Option<TransferProposalDetails>,
@@ -275,6 +275,13 @@ pub struct ProposalInfo {
     /// cards on this, so a proposal keeps its place across refreshes even
     /// before its first confirmation exists.
     pub created_at: Option<i64>,
+    /// The template the proposal contract was created from, as the event
+    /// names it.
+    pub template_id: Option<Identifier>,
+    /// The proposal contract's create arguments, kept whole. A member who
+    /// confirms or executes the proposal acts on every field here, not only
+    /// on the ones the summary fields above pick out.
+    pub create_arguments: Option<Record>,
 }
 
 /// Pull the `GovernableAction` interface view off a created event. Canton
@@ -409,6 +416,8 @@ pub fn extract_proposal_info(
             action_label,
             proposer,
             created_at: created.created_at.as_ref().map(|t| t.seconds),
+            template_id: created.template_id.clone(),
+            create_arguments: created.create_arguments.clone(),
         },
     ))
 }
@@ -570,6 +579,10 @@ pub struct DomainAction {
     pub service_request_details: Option<ServiceRequestDetails>,
     pub proposer: Option<CantonId>,
     pub created_at: Option<i64>,
+    /// See [`ProposalInfo::template_id`]. `None` on an orphan.
+    pub template_id: Option<Identifier>,
+    /// See [`ProposalInfo::create_arguments`]. `None` on an orphan.
+    pub create_arguments: Option<Record>,
 }
 
 /// Merge confirmed domain proposals with the full active-proposal set.
@@ -604,26 +617,9 @@ pub fn assemble_domain_actions(
         .map(|(proposal_cid, (action_label, confirmations))| {
             let unique_confirmations =
                 dedupe_newest_per_party(confirmations, |c| &c.confirming_party, |c| c.created_at);
-            let (
-                description,
-                transfer_details,
-                accept_transfer_details,
-                service_request_details,
-                proposer,
-                created_at,
-                orphaned,
-            ) = match proposal_infos.remove(&proposal_cid) {
-                Some(info) => (
-                    info.description,
-                    info.transfer,
-                    info.accept_transfer,
-                    info.service_request,
-                    info.proposer,
-                    info.created_at,
-                    false,
-                ),
-                None => (None, None, None, None, None, None, proposal_infos_complete),
-            };
+            let info = proposal_infos.remove(&proposal_cid);
+            let orphaned = info.is_none() && proposal_infos_complete;
+            let info = info.unwrap_or_default();
             let executable_confirmation_cids: Vec<String> = unique_confirmations
                 .iter()
                 .filter(|c| {
@@ -635,18 +631,20 @@ pub fn assemble_domain_actions(
             DomainAction {
                 proposal_cid,
                 action_label,
-                description,
+                description: info.description,
                 confirmations: unique_confirmations,
                 confirmation_count,
                 executable_confirmation_cids,
                 // Orphans can't be executed regardless of threshold.
                 can_execute: !orphaned && confirmation_count >= threshold,
                 orphaned,
-                transfer_details,
-                accept_transfer_details,
-                service_request_details,
-                proposer,
-                created_at,
+                transfer_details: info.transfer,
+                accept_transfer_details: info.accept_transfer,
+                service_request_details: info.service_request,
+                proposer: info.proposer,
+                created_at: info.created_at,
+                template_id: info.template_id,
+                create_arguments: info.create_arguments,
             }
         })
         .collect();
@@ -673,6 +671,8 @@ pub fn assemble_domain_actions(
                 // other.
                 proposer: info.proposer,
                 created_at: info.created_at,
+                template_id: info.template_id,
+                create_arguments: info.create_arguments,
             });
         }
     }
@@ -1353,6 +1353,16 @@ mod tests {
             action_label: action_label.map(str::to_string),
             proposer: Some(cid(GOV)),
             created_at: Some(1_700_000_000),
+            template_id: Some(Identifier {
+                package_id: "#governance-core".to_string(),
+                module_name: "Governance.Action".to_string(),
+                entity_name: "GenericVoteProposal".to_string(),
+            }),
+            create_arguments: Some(record_of(vec![
+                field("governanceParty", make_party(GOV)),
+                field("proposer", make_party(GOV)),
+                field("description", make_text("a description")),
+            ])),
         }
     }
 
@@ -1692,6 +1702,74 @@ mod tests {
         assert!(action.transfer_details.is_none());
         assert!(action.accept_transfer_details.is_none());
         assert!(action.service_request_details.is_none());
+        let fixture = proposal_info_fixture(Some("SetupCcPreapproval"));
+        assert_eq!(action.template_id, fixture.template_id);
+        assert_eq!(action.create_arguments, fixture.create_arguments);
+    }
+
+    #[test]
+    fn proposal_info_keeps_the_whole_create_arguments_and_template() {
+        // `nonce` is a field no summary reads. The member still signs it, so
+        // it has to survive the parse.
+        let record = record_of(vec![
+            field("governanceParty", make_party(GOV)),
+            field("proposer", make_party(ALICE)),
+            field("nonce", make_int64(42)),
+        ]);
+        let view = governable_action_interface_view(vec![
+            field("actionLabel", make_text("GenericVote")),
+            field("proposer", make_party(ALICE)),
+            field("governanceParty", make_party(GOV)),
+        ]);
+        let created = proposal_created_event(
+            "proposal-full",
+            vec![view],
+            Some(record.clone()),
+            Some("GenericVoteProposal"),
+        );
+
+        let (_, info) = extract_proposal_info(&created, &cid(GOV)).expect("parses");
+
+        assert_eq!(info.create_arguments, Some(record));
+        assert_eq!(info.template_id, created.template_id);
+    }
+
+    #[test]
+    fn a_confirmed_card_carries_its_proposal_contract_and_an_orphan_none() {
+        let mut infos = HashMap::new();
+        infos.insert(
+            "live-cid".to_string(),
+            proposal_info_fixture(Some("Action")),
+        );
+        let mut confirmations = confirmations_map(
+            "live-cid",
+            "Action",
+            vec![domain_confirmation("c1", "live-cid", ALICE, 100, 0)],
+        );
+        confirmations.extend(confirmations_map(
+            "gone-cid",
+            "Action",
+            vec![domain_confirmation("c2", "gone-cid", BOB, 100, 0)],
+        ));
+
+        let actions = assemble_domain_actions(confirmations, infos, true, true, 2, None, 0);
+
+        let live = actions
+            .iter()
+            .find(|a| a.proposal_cid == "live-cid")
+            .expect("the live proposal has a card");
+        let fixture = proposal_info_fixture(Some("Action"));
+        assert!(!live.orphaned);
+        assert_eq!(live.template_id, fixture.template_id);
+        assert_eq!(live.create_arguments, fixture.create_arguments);
+
+        let orphan = actions
+            .iter()
+            .find(|a| a.proposal_cid == "gone-cid")
+            .expect("the orphan keeps a dismiss-only card");
+        assert!(orphan.orphaned);
+        assert_eq!(orphan.template_id, None);
+        assert_eq!(orphan.create_arguments, None);
     }
 
     #[test]

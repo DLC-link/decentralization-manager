@@ -504,7 +504,7 @@ The `action` field is required by the request schema but is **not used** when `g
 curl 'http://localhost:8080/governance/confirmations?party_id=my-domain-network::1220abc...'
 ```
 
-The response groups domain actions under `domain_actions[]`, keyed by `proposal_cid`, with `action_label`, `description`, the per-member `confirmations[]`, and a `can_execute` boolean.
+The response groups domain actions under `domain_actions[]`, keyed by `proposal_cid`, with `action_label`, `description`, the per-member `confirmations[]`, and a `can_execute` boolean. Each entry also carries `proposal_template_id` and `proposal_payload`, which hold the proposal's template and every one of its create arguments as JSON. The UI shows this payload under Review, so members see every field of your template before they confirm or execute. Both fields are absent on an orphaned entry, whose proposal contract is gone. They are also absent for a caller without the admin role, because only an admin can confirm or execute.
 
 ### Execute (any member, once `can_execute` is true)
 

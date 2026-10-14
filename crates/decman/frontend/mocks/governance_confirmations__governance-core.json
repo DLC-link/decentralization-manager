@@ -86,7 +86,13 @@
         "0201b8f4c1a37d29e506cb8e3f71d42a69f18bc5d93e07a426fb1d8e35c9a2f401"
       ],
       "confirmation_count": 2,
-      "can_execute": true
+      "can_execute": true,
+      "proposal_template_id": "9a3c1f7e2b5d4c8a6e0f1b2d3c4a5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d:Governance.GenericVote:GenericVoteProposal",
+      "proposal_payload": {
+        "governanceParty": "governance-core::12207c6069f4e2396e1ca65deddfe9781c4e4b07b77206c23dd29a47a1ebd4fa7970",
+        "proposer": "cbtc-network::1220b1cfb0b06e502d45400a5b7bd6b2c4d8c8ea377cd022c8d45b4ccb4f2eede33b",
+        "description": "Ratify validator set rotation"
+      }
     }
   ]
 }
