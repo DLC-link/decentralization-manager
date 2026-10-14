@@ -2808,60 +2808,125 @@ mod action_metrics_tests {
         Ok(())
     }
 
-    // The two tests below move different steps: every test in this binary
-    // shares one registry, and they run in parallel.
-    #[actix_web::test]
-    async fn a_submission_the_ledger_refuses_counts_once_as_an_error() -> Result<()> {
-        let data = state_with_ledger_down().await?;
-        let app =
-            actix_test::init_service(App::new().app_data(data).service(cancel_confirmation)).await;
-        let step = ActionStep::CancelConfirmation;
-        let ok_before = count(step, ActionOutcome::Ok);
-        let error_before = count(step, ActionOutcome::Error);
+    // The handler tests below read and move the same series, so they take
+    // turns: every test in this binary shares one registry and runs in parallel.
+    static SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
-        let request = actix_test::TestRequest::post()
-            .uri("/governance/cancel")
-            .set_json(serde_json::json!({
-                "party_id": party_id()?.to_string(),
-                "confirmation_cid": "00c0ffee",
-            }))
-            .to_request();
-        let response = actix_test::call_service(&app, request).await;
-
-        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
-        assert_eq!(count(step, ActionOutcome::Error), error_before + 1);
-        assert_eq!(count(step, ActionOutcome::Ok), ok_before);
-        Ok(())
-    }
-
-    #[actix_web::test]
-    async fn a_request_refused_before_submission_does_not_count() -> Result<()> {
+    /// Posts `body` as an admin through all six governance write handlers.
+    async fn post(uri: &str, body: serde_json::Value) -> Result<StatusCode> {
         let data = state_with_ledger_down().await?;
         // The middleware attaches the principal that `require_admin` checks.
         let app = actix_test::init_service(
             App::new()
                 .app_data(data)
                 .wrap(AuthMiddleware)
-                .service(confirm_action),
+                .service(propose_action)
+                .service(confirm_action)
+                .service(execute_action)
+                .service(expire_confirmation)
+                .service(cancel_confirmation)
+                .service(cancel_proposal),
         )
         .await;
-        let step = ActionStep::Confirm;
-        let ok_before = count(step, ActionOutcome::Ok);
+        let request = actix_test::TestRequest::post()
+            .uri(uri)
+            .insert_header((AUTHORIZATION, "Bearer any-token"))
+            .set_json(body)
+            .to_request();
+        Ok(actix_test::call_service(&app, request).await.status())
+    }
+
+    /// How far a step's `error` and `ok` series moved while `uri` was posted.
+    async fn moved(step: ActionStep, uri: &str, body: serde_json::Value) -> Result<(u64, u64)> {
         let error_before = count(step, ActionOutcome::Error);
+        let ok_before = count(step, ActionOutcome::Ok);
+        let status = post(uri, body).await?;
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{step:?}");
+        Ok((
+            count(step, ActionOutcome::Error) - error_before,
+            count(step, ActionOutcome::Ok) - ok_before,
+        ))
+    }
+
+    #[actix_web::test]
+    async fn every_step_counts_an_attempt_the_ledger_never_answered_as_one_error() -> Result<()> {
+        let _serial = SERIAL.lock().await;
+        let party = party_id()?.to_string();
+        let action = serde_json::json!({ "type": "governance_set_threshold", "new_threshold": 2 });
+        let cases = [
+            (
+                ActionStep::Propose,
+                "/governance/propose",
+                serde_json::json!({
+                    "party_id": party,
+                    "rules_contract_id": "00rules",
+                    "proposal": { "type": "generic_vote", "description": "metrics" },
+                }),
+            ),
+            (
+                ActionStep::Confirm,
+                "/governance/confirm",
+                serde_json::json!({
+                    "party_id": party,
+                    "rules_contract_id": "00rules",
+                    "action": action,
+                }),
+            ),
+            (
+                ActionStep::Execute,
+                "/governance/execute",
+                serde_json::json!({
+                    "party_id": party,
+                    "rules_contract_id": "00rules",
+                    "action": action,
+                    "confirmation_cids": ["00c0ffee"],
+                }),
+            ),
+            (
+                ActionStep::Expire,
+                "/governance/expire",
+                serde_json::json!({
+                    "party_id": party,
+                    "rules_contract_id": "00rules",
+                    "confirmation_cid": "00c0ffee",
+                }),
+            ),
+            (
+                ActionStep::CancelConfirmation,
+                "/governance/cancel",
+                serde_json::json!({ "party_id": party, "confirmation_cid": "00c0ffee" }),
+            ),
+            (
+                ActionStep::CancelProposal,
+                "/governance/cancel-proposal",
+                serde_json::json!({ "party_id": party, "proposal_cid": "00p" }),
+            ),
+        ];
+        for (step, uri, body) in cases {
+            assert_eq!(moved(step, uri, body).await?, (1, 0), "{step:?}");
+        }
+        Ok(())
+    }
+
+    #[actix_web::test]
+    async fn a_request_refused_before_submission_does_not_count() -> Result<()> {
+        let _serial = SERIAL.lock().await;
+        let step = ActionStep::Confirm;
+        let error_before = count(step, ActionOutcome::Error);
+        let ok_before = count(step, ActionOutcome::Ok);
 
         // A threshold of 0 fails the inline validation, which runs first.
-        let request = actix_test::TestRequest::post()
-            .uri("/governance/confirm")
-            .insert_header((AUTHORIZATION, "Bearer any-token"))
-            .set_json(serde_json::json!({
+        let status = post(
+            "/governance/confirm",
+            serde_json::json!({
                 "party_id": party_id()?.to_string(),
                 "rules_contract_id": "00rules",
                 "action": { "type": "governance_set_threshold", "new_threshold": 0 },
-            }))
-            .to_request();
-        let response = actix_test::call_service(&app, request).await;
+            }),
+        )
+        .await?;
 
-        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(status, StatusCode::BAD_REQUEST);
         assert_eq!(count(step, ActionOutcome::Error), error_before);
         assert_eq!(count(step, ActionOutcome::Ok), ok_before);
         Ok(())
