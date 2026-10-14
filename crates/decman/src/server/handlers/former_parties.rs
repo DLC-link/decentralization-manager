@@ -9,6 +9,7 @@ use crate::{
     db::schema::{SchemaRead, SchemaWrite},
     server::{
         AppState,
+        audit::{AuditActor, AuditEvent, log_purge_audit},
         former_parties::{self, Refusal},
         middleware::require_admin,
         types::{
@@ -151,9 +152,10 @@ pub async fn purge_former_party(
     data: web::Data<AppState>,
     body: web::Json<PurgeFormerPartyRequest>,
 ) -> impl Responder {
-    if let Err(resp) = require_admin(&http_req, data.admin_role.as_deref()) {
-        return resp;
-    }
+    let actor = match require_admin(&http_req, data.admin_role.as_deref()) {
+        Ok(principal) => AuditActor::from(&principal),
+        Err(resp) => return resp,
+    };
     let Ok(party_id) = CantonId::parse(&body.party_id) else {
         return bad_party_id();
     };
@@ -182,11 +184,21 @@ pub async fn purge_former_party(
         Err(e) => return internal("Failed to start the purge", e),
     }
 
+    log_purge_audit(
+        &data.db,
+        AuditEvent::PurgeStart,
+        &party_id,
+        &actor,
+        None,
+        None,
+    )
+    .await;
     tokio::spawn(former_parties::run_purge(
         data.config.clone(),
         data.db.clone(),
         token,
         party_id.clone(),
+        actor,
     ));
     HttpResponse::Accepted().json(MessageResponse {
         message: format!("Purge of {party_id} started"),

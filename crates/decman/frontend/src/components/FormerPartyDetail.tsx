@@ -24,6 +24,7 @@ import DeleteSweepIcon from "@mui/icons-material/DeleteSweep";
 import ExpandMoreIcon from "@mui/icons-material/ExpandMore";
 import VisibilityOffIcon from "@mui/icons-material/VisibilityOff";
 import { CopyableText } from "./CopyableText";
+import { GovernanceAuditTrail } from "./GovernanceAuditTrail";
 import { StatCard } from "./StatCard";
 import { ADMIN_ACCESS, API_BASE } from "../constants";
 import { authenticatedFetch } from "../api";
@@ -346,6 +347,25 @@ export const FormerPartyDetail = ({
           )
         }
       />
+
+      <Accordion
+        disableGutters
+        variant="outlined"
+        slotProps={{ transition: { unmountOnExit: true } }}
+      >
+        <AccordionSummary expandIcon={<ExpandMoreIcon />}>
+          <Typography sx={{ fontWeight: 600 }}>Local log</Typography>
+        </AccordionSummary>
+        <AccordionDetails sx={{ p: 0 }}>
+          {/* A purge writes a row when it starts and when it ends, so the
+              log remounts and refetches on every status change. */}
+          <GovernanceAuditTrail
+            key={status}
+            partyId={party.party_id}
+            localOnly
+          />
+        </AccordionDetails>
+      </Accordion>
 
       {(status === "none" || status === "failed") && (
         <Accordion
