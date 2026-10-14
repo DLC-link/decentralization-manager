@@ -230,8 +230,9 @@ pub trait SchemaWrite {
 
     /// Mark every running purge as failed with `error`. Run at startup: a
     /// purge runs inside this process, so one still marked running there was
-    /// cut off by the restart.
-    async fn fail_interrupted_purges(&self, error: &str) -> Result<u64>;
+    /// cut off by the restart. Returns the ids of the parties whose purge
+    /// it marked as failed.
+    async fn fail_interrupted_purges(&self, error: &str) -> Result<Vec<String>>;
 
     /// Hide a former party whose purge succeeded. Returns whether a row
     /// changed.

@@ -118,8 +118,9 @@ After a successful purge, click **Dismiss** to hide the party from the list.
 The **Local log** section on the same page records each purge. One row marks
 the start and one row marks the end. Each row names the admin user who started
 the purge. The end row holds the number of contracts the purge deleted and
-kept, or the error when the purge failed. The API returns the same rows from
-`GET /governance/audit?party_id=<party>`.
+kept, or the error when the purge failed. When DecMan restarts during a purge,
+the restart writes the end row and names no user. The API returns the same
+rows from `GET /governance/audit?party_id=<party>`.
 
 ## Run it with the API
 

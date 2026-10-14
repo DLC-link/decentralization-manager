@@ -134,6 +134,14 @@ export const FormerPartyDetail = ({
 
   const prefix = party.party_id.split("::")[0];
   const status = party.purge_status;
+  // A purge writes an audit row when it starts and when it ends, so the local
+  // log refetches on each status change.
+  const [seenStatus, setSeenStatus] = useState(status);
+  const [auditNonce, setAuditNonce] = useState(0);
+  if (seenStatus !== status) {
+    setSeenStatus(status);
+    setAuditNonce((n) => n + 1);
+  }
   const nothingToPurge = preview?.purge_count === 0;
   // Nothing is deleted and nothing goes offline when the count is 0.
   const confirmed =
@@ -357,10 +365,8 @@ export const FormerPartyDetail = ({
           <Typography sx={{ fontWeight: 600 }}>Local log</Typography>
         </AccordionSummary>
         <AccordionDetails sx={{ p: 0 }}>
-          {/* A purge writes a row when it starts and when it ends, so the
-              log remounts and refetches on every status change. */}
           <GovernanceAuditTrail
-            key={status}
+            refreshNonce={auditNonce}
             partyId={party.party_id}
             localOnly
           />

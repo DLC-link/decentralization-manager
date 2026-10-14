@@ -44,7 +44,7 @@ use crate::{
     },
     error::Result,
     server::{
-        audit::{AuditActor, AuditEvent, log_purge_audit},
+        audit::{AuditActor, PurgeAuditEvent, log_purge_audit},
         event_filters::{party_event_format, wildcard_filter},
         ledger_paging::fetch_active_contracts_filtered,
         types::{FormerParty, PurgeStatus},
@@ -460,22 +460,18 @@ pub(crate) async fn run_purge(
             db.fail_former_party_purge(&party, &format!("{e:#}")).await
         }
     };
-    if let Err(e) = recorded {
-        tracing::error!(%party, "Could not record the purge outcome: {e}");
-    }
-    let (counts, error) = match &outcome {
-        Ok(counts) => (Some(*counts), None),
-        Err(e) => (None, Some(format!("{e:#}"))),
+    // The audit row must not claim a success the party's record does not hold.
+    let end = match (outcome, recorded) {
+        (Ok(counts), Ok(())) => Ok(counts),
+        (Err(e), _) => Err(format!("{e:#}")),
+        (Ok(_), Err(e)) => {
+            tracing::error!(%party, "Could not record the purge outcome: {e}");
+            Err(format!(
+                "The purge completed but its outcome could not be recorded: {e}"
+            ))
+        }
     };
-    log_purge_audit(
-        &db,
-        AuditEvent::PurgeEnd,
-        &party,
-        &actor,
-        counts,
-        error.as_deref(),
-    )
-    .await;
+    log_purge_audit(&db, PurgeAuditEvent::End(end), &party, Some(&actor)).await;
 }
 
 /// Returns how many contracts were purged and how many were kept.

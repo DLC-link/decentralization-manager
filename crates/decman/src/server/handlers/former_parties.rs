@@ -9,7 +9,7 @@ use crate::{
     db::schema::{SchemaRead, SchemaWrite},
     server::{
         AppState,
-        audit::{AuditActor, AuditEvent, log_purge_audit},
+        audit::{AuditActor, PurgeAuditEvent, log_purge_audit},
         former_parties::{self, Refusal},
         middleware::require_admin,
         types::{
@@ -184,15 +184,7 @@ pub async fn purge_former_party(
         Err(e) => return internal("Failed to start the purge", e),
     }
 
-    log_purge_audit(
-        &data.db,
-        AuditEvent::PurgeStart,
-        &party_id,
-        &actor,
-        None,
-        None,
-    )
-    .await;
+    log_purge_audit(&data.db, PurgeAuditEvent::Start, &party_id, Some(&actor)).await;
     tokio::spawn(former_parties::run_purge(
         data.config.clone(),
         data.db.clone(),

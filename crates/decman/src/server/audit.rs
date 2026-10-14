@@ -70,14 +70,16 @@ async fn log_governance_audit(pool: &SqlitePool, params: AuditParams) {
         .unwrap_or_else(|| "core_self".to_string());
     insert_audit_row(
         pool,
-        params.event_type,
-        &params.party_id,
-        &params.member_party_id,
-        &gov_type,
-        &params.action_summary,
-        &params.details,
-        params.status,
-        params.error_message.as_deref(),
+        AuditRow {
+            event_type: params.event_type,
+            party_id: &params.party_id,
+            member_party_id: &params.member_party_id,
+            governance_type: &gov_type,
+            action_summary: &params.action_summary,
+            details: &params.details,
+            status: params.status,
+            error_message: params.error_message.as_deref(),
+        },
     )
     .await;
 }
@@ -85,59 +87,69 @@ async fn log_governance_audit(pool: &SqlitePool, params: AuditParams) {
 /// The `governance_type` of a row that no governance package produced.
 const NO_GOVERNANCE_TYPE: &str = "none";
 
-/// Write the row for a purge of a former party's leftover contracts. The party
-/// is both the subject and the "member": no other party takes part. `counts`
-/// is `(purged, kept)`, known only when the purge ended.
+/// A step of a purge of a former party's leftover contracts. The end carries
+/// `(purged, kept)` on success and the error otherwise.
+#[derive(Clone, Debug)]
+pub enum PurgeAuditEvent {
+    Start,
+    End(Result<(usize, usize), String>),
+}
+
+/// Write the row for one step of a purge. The party is both the subject and
+/// the "member": no other party takes part. `actor` is `None` when the step
+/// is written by a restart that found the purge cut off, so no request
+/// carried the admin user.
 ///
-/// Waits for the write, unlike [`spawn_audit_log`], so the row exists before
-/// the purge disconnects the participant and before its outcome is reported.
+/// Waits for the write, unlike [`spawn_audit_log`], so the start row exists
+/// before the purge disconnects the participant.
 pub async fn log_purge_audit(
     pool: &SqlitePool,
-    event_type: AuditEvent,
+    event: PurgeAuditEvent,
     party_id: &CantonId,
-    actor: &AuditActor,
-    counts: Option<(usize, usize)>,
-    error_message: Option<&str>,
+    actor: Option<&AuditActor>,
 ) {
-    let status = match (event_type, error_message) {
-        (AuditEvent::PurgeStart, _) => "started",
-        (_, None) => "success",
-        (_, Some(_)) => "failed",
-    };
     let mut details = serde_json::json!({
-        "admin_sub": actor.sub,
-        "admin_email": actor.email,
+        "admin_sub": actor.map(|a| a.sub.as_str()),
+        "admin_email": actor.and_then(|a| a.email.as_deref()),
     });
-    if let Some((purged, kept)) = counts {
-        details["purged_count"] = purged.into();
-        details["kept_count"] = kept.into();
-    }
+    let (event_type, status, error_message) = match &event {
+        PurgeAuditEvent::Start => (AuditEvent::PurgeStart, "started", None),
+        PurgeAuditEvent::End(Ok((purged, kept))) => {
+            details["purged_count"] = (*purged).into();
+            details["kept_count"] = (*kept).into();
+            (AuditEvent::PurgeEnd, "success", None)
+        }
+        PurgeAuditEvent::End(Err(e)) => (AuditEvent::PurgeEnd, "failed", Some(e.as_str())),
+    };
     insert_audit_row(
         pool,
-        event_type,
-        party_id,
-        party_id,
-        NO_GOVERNANCE_TYPE,
-        "purge_former_party",
-        &details.to_string(),
-        status,
-        error_message,
+        AuditRow {
+            event_type,
+            party_id,
+            member_party_id: party_id,
+            governance_type: NO_GOVERNANCE_TYPE,
+            action_summary: "purge_former_party",
+            details: &details.to_string(),
+            status,
+            error_message,
+        },
     )
     .await;
 }
 
-#[allow(clippy::too_many_arguments)]
-async fn insert_audit_row(
-    pool: &SqlitePool,
+/// One `governance_audit` row as it is bound.
+struct AuditRow<'a> {
     event_type: AuditEvent,
-    party_id: &CantonId,
-    member_party_id: &CantonId,
-    governance_type: &str,
-    action_summary: &str,
-    details: &str,
-    status: &str,
-    error_message: Option<&str>,
-) {
+    party_id: &'a CantonId,
+    member_party_id: &'a CantonId,
+    governance_type: &'a str,
+    action_summary: &'a str,
+    details: &'a str,
+    status: &'a str,
+    error_message: Option<&'a str>,
+}
+
+async fn insert_audit_row(pool: &SqlitePool, row: AuditRow<'_>) {
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
@@ -153,20 +165,20 @@ async fn insert_audit_row(
         ",
     )
     .bind(now)
-    .bind(event_type.as_str())
-    .bind(party_id.to_string())
-    .bind(member_party_id.to_string())
-    .bind(governance_type)
-    .bind(action_summary)
-    .bind(details)
-    .bind(status)
-    .bind(error_message)
+    .bind(row.event_type.as_str())
+    .bind(row.party_id.to_string())
+    .bind(row.member_party_id.to_string())
+    .bind(row.governance_type)
+    .bind(row.action_summary)
+    .bind(row.details)
+    .bind(row.status)
+    .bind(row.error_message)
     .bind(now)
     .execute(pool)
     .await;
 
     if let Err(e) = result {
-        tracing::warn!("Failed to write governance audit log: {e}");
+        tracing::error!("Failed to write governance audit log: {e}");
     }
 }
 
@@ -215,23 +227,20 @@ mod tests {
     #[sqlx::test(migrator = "MIGRATOR")]
     async fn purge_rows_record_actor_counts_and_outcome(pool: SqlitePool) {
         let party = party();
-        log_purge_audit(&pool, AuditEvent::PurgeStart, &party, &actor(), None, None).await;
+        let actor = actor();
+        log_purge_audit(&pool, PurgeAuditEvent::Start, &party, Some(&actor)).await;
         log_purge_audit(
             &pool,
-            AuditEvent::PurgeEnd,
+            PurgeAuditEvent::End(Ok((3, 2))),
             &party,
-            &actor(),
-            Some((3, 2)),
-            None,
+            Some(&actor),
         )
         .await;
         log_purge_audit(
             &pool,
-            AuditEvent::PurgeEnd,
+            PurgeAuditEvent::End(Err("disconnect failed".to_string())),
             &party,
-            &actor(),
             None,
-            Some("disconnect failed"),
         )
         .await;
 
@@ -263,6 +272,8 @@ mod tests {
         let failed = by_type("purge_end", "failed");
         assert_eq!(failed.error_message.as_deref(), Some("disconnect failed"));
         let details: serde_json::Value = serde_json::from_str(&failed.details).unwrap();
+        assert!(details["admin_sub"].is_null());
+        assert!(details["admin_email"].is_null());
         assert!(details.get("purged_count").is_none());
     }
 }
