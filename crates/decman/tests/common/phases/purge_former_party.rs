@@ -34,8 +34,12 @@ use canton_proto_rs::com::digitalasset::canton::admin::participant::v30::{
     synchronizer_connectivity_service_client::SynchronizerConnectivityServiceClient,
 };
 use chrono::Utc;
-use common::api::{
-    DecentralizedPartiesResponse, FormerPartiesResponse, FormerParty, PurgePreview, PurgeStatus,
+use common::{
+    api::{
+        AuditLogResponse, DecentralizedPartiesResponse, FormerPartiesResponse, FormerParty,
+        PurgePreview, PurgeStatus,
+    },
+    types::AuditLogEntry,
 };
 use reqwest::StatusCode;
 use serde_json::json;
@@ -521,6 +525,74 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
                 if !not_of_party.is_empty() {
                     return Some(Err(anyhow::anyhow!(
                         "purged contract(s) the main party is no stakeholder of: {not_of_party:?}"
+                    )));
+                }
+                Some(Ok(()))
+            })
+        },
+    )
+    .then(
+        "the audit trail records who started the purge and what it removed",
+        Duration::from_secs(30),
+        |f, ctx| {
+            Box::pin(async move {
+                let party = f.party_id().ok()?.to_string();
+                let path = format!("/governance/audit?party_id={party}");
+                let trail: AuditLogResponse = f.probe_get_json(f.p3.http, &path).await?;
+                let purges: Vec<&AuditLogEntry> = trail
+                    .entries
+                    .iter()
+                    .filter(|e| e.action_summary == "purge_former_party")
+                    .collect();
+                // The cut-off purge was injected into the database, not
+                // started through the API, so only this purge wrote a start
+                // row. The restart wrote a failed end row for the cut-off one.
+                let starts = purges
+                    .iter()
+                    .filter(|e| e.event_type == "purge_start")
+                    .count();
+                if starts != 1 {
+                    return Some(Err(anyhow::anyhow!(
+                        "expected one purge_start row, found {starts}: {purges:?}"
+                    )));
+                }
+                let ends: Vec<&&AuditLogEntry> = purges
+                    .iter()
+                    .filter(|e| e.event_type == "purge_end")
+                    .collect();
+                // Newest first.
+                let [end, interrupted] = ends[..] else {
+                    return Some(Err(anyhow::anyhow!(
+                        "expected two purge_end rows, found {}: {purges:?}",
+                        ends.len()
+                    )));
+                };
+                if interrupted.status != "failed" {
+                    return Some(Err(anyhow::anyhow!(
+                        "the cut-off purge's end row is {}, not failed: {interrupted:?}",
+                        interrupted.status
+                    )));
+                }
+                if end.status != "success" {
+                    return Some(Err(anyhow::anyhow!(
+                        "the purge_end row is {}, not success: {end:?}",
+                        end.status
+                    )));
+                }
+                let expected = ctx.expected_purge.len() as u64;
+                if end.details["purged_count"].as_u64() != Some(expected) {
+                    return Some(Err(anyhow::anyhow!(
+                        "purge_end records {} purged, expected {expected}",
+                        end.details["purged_count"]
+                    )));
+                }
+                if end.details["admin_sub"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .is_empty()
+                {
+                    return Some(Err(anyhow::anyhow!(
+                        "purge_end records no admin user: {end:?}"
                     )));
                 }
                 Some(Ok(()))

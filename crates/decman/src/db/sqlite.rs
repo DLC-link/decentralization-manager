@@ -382,7 +382,7 @@ impl SchemaRead for SqlitePool {
             r"
             SELECT * FROM governance_audit
             WHERE party_id = ?
-            ORDER BY created_at DESC
+            ORDER BY created_at DESC, id DESC
             LIMIT ? OFFSET ?
             ",
         )
@@ -723,17 +723,18 @@ impl SchemaWrite for SqlitePool {
         Ok(())
     }
 
-    async fn fail_interrupted_purges(&self, error: &str) -> Result<u64> {
-        let result = sqlx::query(
+    async fn fail_interrupted_purges(&self, error: &str) -> Result<Vec<String>> {
+        let rows: Vec<(String,)> = sqlx::query_as(
             "UPDATE former_dec_party \
              SET purge_status = 'failed', purge_finished_at = ?, purge_error = ? \
-             WHERE purge_status = 'running'",
+             WHERE purge_status = 'running' \
+             RETURNING party_id",
         )
         .bind(chrono::Utc::now().timestamp())
         .bind(error)
-        .execute(self)
+        .fetch_all(self)
         .await?;
-        Ok(result.rows_affected())
+        Ok(rows.into_iter().map(|(party_id,)| party_id).collect())
     }
 
     async fn dismiss_former_dec_party(&self, party_id: &CantonId) -> Result<bool> {
@@ -1824,7 +1825,10 @@ mod tests {
         pool.record_former_dec_party(&running, 1).await?;
         pool.claim_former_party_purge(&running).await?;
 
-        assert_eq!(pool.fail_interrupted_purges("restarted").await?, 1);
+        assert_eq!(
+            pool.fail_interrupted_purges("restarted").await?,
+            vec![running.to_string()]
+        );
         let row = pool.get_former_dec_party(&running).await?.unwrap();
         assert_eq!(row.purge_status, "failed");
         assert_eq!(row.purge_error.as_deref(), Some("restarted"));
