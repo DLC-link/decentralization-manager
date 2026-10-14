@@ -23,7 +23,7 @@ use tracing::info;
 
 use crate::common::{
     Fixture, db,
-    governance::{all_pending_path, probe_all_pending},
+    governance::{all_pending_path, probe_all_pending, whole_page},
     scenario::Scenario,
 };
 
@@ -301,7 +301,10 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
                 let party_id = f.party_id()?.to_string();
                 let s: GovernanceResponse =
                     f.get_json(f.p1.http, &all_pending_path(&party_id)).await?;
-                if let Some(action) = s.domain_actions.iter().find(|a| a.proposal_cid == cid)
+                // A cut-short page fails here, so a cleanup that missed the
+                // proposal cannot pass silently.
+                let pending = whole_page(s)?;
+                if let Some(action) = pending.iter().find(|a| a.proposal_cid == cid)
                     && let Some(conf) = action.confirmations.first()
                 {
                     let req = json!({

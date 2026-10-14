@@ -14,8 +14,8 @@ pub struct ProposalCycleCtx {
     pending_before: HashSet<String>,
 }
 
-/// The confirmations read every step of the cycle uses. It asks for the
-/// endpoint's largest page, so one read lists every pending proposal.
+/// Builds the path for each confirmations read in the cycle. The path asks
+/// for the endpoint's largest page, so one read lists every pending proposal.
 /// [`whole_page`] fails the read when it does not.
 pub fn all_pending_path(party_id: &str) -> String {
     format!("/governance/confirmations?party_id={party_id}&limit=200")
@@ -23,7 +23,7 @@ pub fn all_pending_path(party_id: &str) -> String {
 
 /// The pending proposals in `s`. Errors when the page was cut short, because a
 /// partial list cannot show whether a proposal is pending or new.
-fn whole_page(s: GovernanceResponse) -> anyhow::Result<Vec<DomainGovernanceAction>> {
+pub fn whole_page(s: GovernanceResponse) -> anyhow::Result<Vec<DomainGovernanceAction>> {
     anyhow::ensure!(
         s.next_cursor.is_none(),
         "more proposals are pending than one /governance/confirmations page holds"
