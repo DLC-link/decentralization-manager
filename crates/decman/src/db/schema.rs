@@ -7,8 +7,8 @@ use crate::{
     config::{PartyCredentials, Peer},
     error::Result,
     server::{
-        InvitationType, PendingInvitation, WorkflowKind, WorkflowProgress, WorkflowRole,
-        WorkflowRun,
+        HandledInvitation, InvitationOutcome, InvitationType, PendingInvitation, WorkflowKind,
+        WorkflowProgress, WorkflowRole, WorkflowRun,
     },
 };
 
@@ -110,8 +110,12 @@ pub trait SchemaRead {
         before_offset: Option<i64>,
     ) -> Result<Vec<ChainAuditCacheRow>>;
 
-    /// Get all persisted pending invitations
+    /// Get all persisted pending invitations. Accepted and declined ones are
+    /// history and not included.
     async fn get_all_pending_invitations(&self) -> Result<Vec<PendingInvitation>>;
+
+    /// Get the most recently accepted or declined invitations, newest first.
+    async fn get_handled_invitations(&self, limit: i64) -> Result<Vec<HandledInvitation>>;
 
     /// Get every workflow run that's currently in progress (any role).
     /// Used at startup to drive recovery.
@@ -271,13 +275,15 @@ pub trait Commitable {
         signing_key: &str,
     ) -> Result;
 
-    /// Insert or replace a pending invitation
+    /// Insert or replace a pending invitation. A handled invitation with the
+    /// same id becomes pending again: the coordinator sent it anew.
     async fn upsert_pending_invitation(&mut self, inv: &PendingInvitation) -> Result;
 
-    /// Delete a pending invitation by its id (no-op if absent)
+    /// Delete a pending invitation by its id (no-op if absent or handled)
     async fn delete_pending_invitation(&mut self, id: &str) -> Result;
 
-    /// Delete every pending invitation matching a coordinator's Noise pubkey
+    /// Delete every pending invitation matching a coordinator's Noise pubkey.
+    /// Handled invitations are history and stay.
     async fn delete_pending_invitations_by_coordinator(
         &mut self,
         coordinator_pubkey: &str,
@@ -285,11 +291,26 @@ pub trait Commitable {
 
     /// Delete every pending invitation of one type from one coordinator —
     /// used to replace a superseded invite when a fresh one arrives.
+    /// Handled invitations are history and stay.
     async fn delete_pending_invitations_by_type_and_coordinator(
         &mut self,
         invitation_type: InvitationType,
         coordinator_pubkey: &str,
     ) -> Result;
+
+    /// Record that the operator accepted or declined a pending invitation.
+    /// Returns false, and changes nothing, when no pending invitation has
+    /// this id.
+    async fn mark_invitation_handled(
+        &mut self,
+        id: &str,
+        outcome: InvitationOutcome,
+        handled_at: i64,
+    ) -> Result<bool>;
+
+    /// Delete handled invitations beyond the newest `keep`. Pending ones are
+    /// never touched. Returns how many rows were deleted.
+    async fn prune_handled_invitations(&mut self, keep: i64) -> Result<u64>;
 
     /// Insert or replace a workflow run. Used on initial start, on every
     /// state-machine advance, and on resume.

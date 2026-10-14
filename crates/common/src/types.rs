@@ -623,6 +623,50 @@ pub struct PendingInvitation {
     pub workflow_instance: Option<String>,
 }
 
+/// What the operator did with an invitation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
+#[serde(rename_all = "lowercase")]
+pub enum InvitationOutcome {
+    Accepted,
+    Declined,
+}
+
+impl InvitationOutcome {
+    /// Stable string label used for DB storage. Matches the lowercase serde repr.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Accepted => "accepted",
+            Self::Declined => "declined",
+        }
+    }
+}
+
+impl std::str::FromStr for InvitationOutcome {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        match s {
+            "accepted" => Ok(Self::Accepted),
+            "declined" => Ok(Self::Declined),
+            other => Err(anyhow::anyhow!("unknown invitation outcome: {other}")),
+        }
+    }
+}
+
+/// An invitation the operator accepted or declined, kept so the notification
+/// feed can list it under Completed.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
+pub struct HandledInvitation {
+    pub invitation: PendingInvitation,
+    pub outcome: InvitationOutcome,
+    /// Unix seconds when the operator accepted or declined it.
+    pub handled_at: i64,
+}
+
 /// Frontend authentication configuration response
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]

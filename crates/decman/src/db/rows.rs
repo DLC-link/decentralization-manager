@@ -8,8 +8,8 @@ use crate::{
     db::crypto,
     error::Result,
     server::{
-        InvitationType, PendingInvitation, WorkflowKind, WorkflowProgress, WorkflowRole,
-        WorkflowRun,
+        HandledInvitation, InvitationOutcome, InvitationType, PendingInvitation, WorkflowKind,
+        WorkflowProgress, WorkflowRole, WorkflowRun,
     },
 };
 
@@ -305,6 +305,33 @@ impl PendingInvitationRow {
             package_names,
             contract_intents,
             workflow_instance: self.workflow_instance,
+        })
+    }
+}
+
+/// A `pending_invitations` row the operator accepted or declined.
+#[derive(Debug, sqlx::FromRow)]
+pub struct HandledInvitationRow {
+    #[sqlx(flatten)]
+    pub invitation: PendingInvitationRow,
+    pub status: String,
+    pub handled_at: i64,
+}
+
+impl HandledInvitationRow {
+    /// Decode a row read from the database back into a domain object.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `status` is not an outcome, or if the invitation
+    /// columns fail to decode (see [`PendingInvitationRow::into_domain`]).
+    pub fn into_domain(self) -> Result<HandledInvitation> {
+        let outcome = InvitationOutcome::from_str(&self.status)
+            .with_context(|| format!("invalid status for invitation {}", self.invitation.id))?;
+        Ok(HandledInvitation {
+            invitation: self.invitation.into_domain()?,
+            outcome,
+            handled_at: self.handled_at,
         })
     }
 }

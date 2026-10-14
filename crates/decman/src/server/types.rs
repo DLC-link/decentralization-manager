@@ -45,10 +45,11 @@ pub use common::api::{
 };
 pub use common::types::{
     AcsTransferProgress, AuditLogEntry, AuthConfigResponse, ConnectionStatus, ContractInfo,
-    DecentralizedParty, ExpectedPackageVersion, ExpectedVersionsResponse, InvitationType,
-    PackageInfo, ParticipantInfo, ParticipantStatus, ParticipantsStatusResponse, PartyMetadata,
-    PeerErrorKind, PeerPackageComparison, PeerPackageResult, PendingInvitation, Permission,
-    VettedPackageInfo, WorkflowKind, WorkflowProgress, WorkflowRole, WorkflowRun,
+    DecentralizedParty, ExpectedPackageVersion, ExpectedVersionsResponse, HandledInvitation,
+    InvitationOutcome, InvitationType, PackageInfo, ParticipantInfo, ParticipantStatus,
+    ParticipantsStatusResponse, PartyMetadata, PeerErrorKind, PeerPackageComparison,
+    PeerPackageResult, PendingInvitation, Permission, VettedPackageInfo, WorkflowKind,
+    WorkflowProgress, WorkflowRole, WorkflowRun,
 };
 pub use decman_lib::catalog::types::{
     AcceptTransferDetails, AppRewardBeneficiary, BillingParams, ServiceRequestDetails,
