@@ -1255,6 +1255,7 @@ pub async fn start_server(
 
     reward_automation::register_metrics();
     node_health::register_metrics();
+    handlers::register_governance_metrics();
 
     // Separate from the API server, whose ingress forwards every path. 0 disables it.
     let metrics_port = config.metrics_port;

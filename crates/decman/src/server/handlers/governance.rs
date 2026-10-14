@@ -1,8 +1,9 @@
-use std::collections::HashSet;
+use std::{collections::HashSet, sync::LazyLock};
 
 use actix_web::{HttpRequest, HttpResponse, Responder, get, post, web};
 use anyhow::Context;
 use base64::Engine;
+use prometheus::IntCounterVec;
 use serde::Deserialize;
 
 use crate::server::ledger_paging::AcsCursor;
@@ -610,6 +611,94 @@ pub async fn get_governance_chain_audit(
 // Action Endpoints
 // ============================================================================
 
+static ACTIONS: LazyLock<IntCounterVec> = LazyLock::new(|| {
+    prometheus::register_int_counter_vec!(
+        "decman_governance_actions_total",
+        "Governance actions this node submitted to the ledger, by step and outcome. A request rejected before submission does not count.",
+        &["step", "outcome"]
+    )
+    .expect("metric name is a unique literal")
+});
+
+/// A governance write this node submits for its member party.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ActionStep {
+    Propose,
+    Confirm,
+    Execute,
+    Expire,
+    CancelConfirmation,
+    CancelProposal,
+}
+
+impl ActionStep {
+    const ALL: [Self; 6] = [
+        Self::Propose,
+        Self::Confirm,
+        Self::Execute,
+        Self::Expire,
+        Self::CancelConfirmation,
+        Self::CancelProposal,
+    ];
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Propose => "propose",
+            Self::Confirm => "confirm",
+            Self::Execute => "execute",
+            Self::Expire => "expire",
+            Self::CancelConfirmation => "cancel_confirmation",
+            Self::CancelProposal => "cancel_proposal",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ActionOutcome {
+    Ok,
+    Error,
+}
+
+impl ActionOutcome {
+    const ALL: [Self; 2] = [Self::Ok, Self::Error];
+
+    fn of<T>(result: &Result<T>) -> Self {
+        if result.is_ok() {
+            Self::Ok
+        } else {
+            Self::Error
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Ok => "ok",
+            Self::Error => "error",
+        }
+    }
+}
+
+/// Exports every step and outcome at zero, so a rate query reads 0 rather than
+/// nothing before the first submission.
+pub(crate) fn register_metrics() {
+    for step in ActionStep::ALL {
+        for outcome in ActionOutcome::ALL {
+            ACTIONS
+                .with_label_values(&[step.label(), outcome.label()])
+                .inc_by(0);
+        }
+    }
+}
+
+/// Counts one request that reached the ledger: from the `execute_*` call for a
+/// choice step, and from the Ledger API connect for propose. A request the
+/// handler refuses before that point is a caller error and does not count.
+fn count_action(step: ActionStep, outcome: ActionOutcome) {
+    ACTIONS
+        .with_label_values(&[step.label(), outcome.label()])
+        .inc();
+}
+
 /// True when this proposal, on a decparty that already has a live
 /// `CouponReassignmentDelegation`, would create a SECOND one.
 ///
@@ -935,6 +1024,7 @@ pub async fn propose_action(
     let channel = match data.config.ledger_channel().await {
         Ok(channel) => channel,
         Err(e) => {
+            count_action(ActionStep::Propose, ActionOutcome::Error);
             return HttpResponse::InternalServerError().json(ErrorResponse {
                 error: format!("Failed to connect to ledger API: {e:#}"),
             });
@@ -964,6 +1054,7 @@ pub async fn propose_action(
             {
                 Some(cid) => cid,
                 None => {
+                    count_action(ActionStep::Propose, ActionOutcome::Error);
                     return HttpResponse::InternalServerError().json(ErrorResponse {
                         error: "Proposal created but could not extract contract ID".to_string(),
                     });
@@ -972,6 +1063,7 @@ pub async fn propose_action(
         }
         Err(e) => {
             tracing::error!("Failed to create proposal: {e}");
+            count_action(ActionStep::Propose, ActionOutcome::Error);
             spawn_audit_log(
                 audit_pool,
                 AuditParams {
@@ -1003,6 +1095,7 @@ pub async fn propose_action(
     let mut rules = match governance_rules_template(&packages) {
         Ok(rules) => rules,
         Err(_) => {
+            count_action(ActionStep::Propose, ActionOutcome::Error);
             return HttpResponse::ServiceUnavailable().json(ErrorResponse {
                 error: format!(
                     "Proposal {proposal_cid} was created but could not be confirmed: \
@@ -1043,6 +1136,7 @@ pub async fn propose_action(
     match client.submit_and_wait(confirm_req).await {
         Ok(_) => {
             tracing::info!("Proposal {proposal_cid} confirmed by proposer");
+            count_action(ActionStep::Propose, ActionOutcome::Ok);
             spawn_audit_log(
                 audit_pool,
                 AuditParams {
@@ -1062,6 +1156,7 @@ pub async fn propose_action(
         }
         Err(e) => {
             tracing::error!("Proposal created but confirmation failed: {e}");
+            count_action(ActionStep::Propose, ActionOutcome::Error);
             spawn_audit_log(
                 audit_pool,
                 AuditParams {
@@ -1169,7 +1264,10 @@ pub async fn confirm_action(
 
     let packages = packages();
 
-    match execute_confirm_action(&data.config, &body, &token, &member_party_id, &packages).await {
+    let result =
+        execute_confirm_action(&data.config, &body, &token, &member_party_id, &packages).await;
+    count_action(ActionStep::Confirm, ActionOutcome::of(&result));
+    match result {
         Ok(()) => {
             spawn_audit_log(
                 audit_pool,
@@ -1267,7 +1365,7 @@ pub async fn execute_action(
 
     let packages = packages();
 
-    match execute_confirmed_action(
+    let result = execute_confirmed_action(
         &data.config,
         &data.http_client,
         &body,
@@ -1275,8 +1373,9 @@ pub async fn execute_action(
         &member_party_id,
         &packages,
     )
-    .await
-    {
+    .await;
+    count_action(ActionStep::Execute, ActionOutcome::of(&result));
+    match result {
         Ok(()) => {
             spawn_audit_log(
                 audit_pool,
@@ -1363,9 +1462,10 @@ pub async fn expire_confirmation(
 
     let packages = packages();
 
-    match execute_expire_confirmation(&data.config, &body, &token, &member_party_id, &packages)
-        .await
-    {
+    let result =
+        execute_expire_confirmation(&data.config, &body, &token, &member_party_id, &packages).await;
+    count_action(ActionStep::Expire, ActionOutcome::of(&result));
+    match result {
         Ok(()) => {
             spawn_audit_log(
                 audit_pool,
@@ -1446,9 +1546,10 @@ pub async fn cancel_confirmation(
 
     let packages = packages();
 
-    match execute_cancel_confirmation(&data.config, &body, &token, &member_party_id, &packages)
-        .await
-    {
+    let result =
+        execute_cancel_confirmation(&data.config, &body, &token, &member_party_id, &packages).await;
+    count_action(ActionStep::CancelConfirmation, ActionOutcome::of(&result));
+    match result {
         Ok(()) => {
             spawn_audit_log(
                 audit_pool,
@@ -1533,7 +1634,10 @@ pub async fn cancel_proposal(
 
     let packages = packages();
 
-    match execute_cancel_proposal(&data.config, &body, &token, &member_party_id, &packages).await {
+    let result =
+        execute_cancel_proposal(&data.config, &body, &token, &member_party_id, &packages).await;
+    count_action(ActionStep::CancelProposal, ActionOutcome::of(&result));
+    match result {
         Ok(()) => {
             spawn_audit_log(
                 audit_pool,
@@ -2618,6 +2722,146 @@ mod get_party_credentials_tests {
             logs.contains(&id.to_string()),
             "the log omits the party id: {logs}"
         );
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod action_metrics_tests {
+    use std::sync::Arc;
+
+    use actix_web::{
+        App,
+        http::{StatusCode, header::AUTHORIZATION},
+        test as actix_test,
+    };
+
+    use super::*;
+    use crate::{auth::MockAuthRegistry, server::middleware::AuthMiddleware};
+
+    fn party_id() -> Result<CantonId> {
+        CantonId::parse(&format!("p::{}", "0".repeat(68)))
+    }
+
+    fn count(step: ActionStep, outcome: ActionOutcome) -> u64 {
+        ACTIONS
+            .with_label_values(&[step.label(), outcome.label()])
+            .get()
+    }
+
+    /// Mock credentials and a Ledger API on port 1, where nothing listens, so
+    /// every submission reaches the ledger path and fails there.
+    async fn state_with_ledger_down() -> Result<web::Data<AppState>> {
+        let mut state = AppState::for_test(None).await?.into_inner();
+        Arc::get_mut(&mut state)
+            .context("a fresh test state has one owner")?
+            .config
+            .canton
+            .ledger_api_port = 1;
+        let mock = MockAuthRegistry::new(state.party_credentials.clone());
+        *state.auth.write().await = Some(WorkflowAuth::Mock(Arc::new(mock)));
+        Ok(web::Data::from(state))
+    }
+
+    #[test]
+    fn labels_are_the_strings_dashboards_query() {
+        assert_eq!(
+            ActionStep::ALL.map(ActionStep::label),
+            [
+                "propose",
+                "confirm",
+                "execute",
+                "expire",
+                "cancel_confirmation",
+                "cancel_proposal"
+            ]
+        );
+        assert_eq!(
+            ActionOutcome::ALL.map(ActionOutcome::label),
+            ["ok", "error"]
+        );
+    }
+
+    #[test]
+    fn every_step_and_outcome_is_exported_before_its_first_submission() -> Result<()> {
+        register_metrics();
+        let family = prometheus::gather()
+            .into_iter()
+            .find(|f| f.name() == "decman_governance_actions_total")
+            .context("the family is not registered")?;
+        let series: Vec<Vec<&str>> = family
+            .get_metric()
+            .iter()
+            .map(|m| m.get_label().iter().map(|l| l.value()).collect())
+            .collect();
+        for step in ActionStep::ALL {
+            for outcome in ActionOutcome::ALL {
+                assert!(
+                    series.iter().any(|labels| labels.contains(&step.label())
+                        && labels.contains(&outcome.label())),
+                    "no series for {step:?}/{outcome:?}"
+                );
+            }
+        }
+        Ok(())
+    }
+
+    // The two tests below move different steps: every test in this binary
+    // shares one registry, and they run in parallel.
+    #[actix_web::test]
+    async fn a_submission_the_ledger_refuses_counts_once_as_an_error() -> Result<()> {
+        let data = state_with_ledger_down().await?;
+        let app =
+            actix_test::init_service(App::new().app_data(data).service(cancel_confirmation)).await;
+        let step = ActionStep::CancelConfirmation;
+        let ok_before = count(step, ActionOutcome::Ok);
+        let error_before = count(step, ActionOutcome::Error);
+
+        let request = actix_test::TestRequest::post()
+            .uri("/governance/cancel")
+            .set_json(serde_json::json!({
+                "party_id": party_id()?.to_string(),
+                "confirmation_cid": "00c0ffee",
+            }))
+            .to_request();
+        let response = actix_test::call_service(&app, request).await;
+
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(count(step, ActionOutcome::Error), error_before + 1);
+        assert_eq!(count(step, ActionOutcome::Ok), ok_before);
+        Ok(())
+    }
+
+    #[actix_web::test]
+    async fn a_request_refused_before_submission_does_not_count() -> Result<()> {
+        let data = state_with_ledger_down().await?;
+        // The middleware attaches the principal that `require_admin` checks.
+        let app = actix_test::init_service(
+            App::new()
+                .app_data(data)
+                .wrap(AuthMiddleware)
+                .service(confirm_action),
+        )
+        .await;
+        let step = ActionStep::Confirm;
+        let ok_before = count(step, ActionOutcome::Ok);
+        let error_before = count(step, ActionOutcome::Error);
+
+        // A threshold of 0 fails the inline validation, which runs first.
+        let request = actix_test::TestRequest::post()
+            .uri("/governance/confirm")
+            .insert_header((AUTHORIZATION, "Bearer any-token"))
+            .set_json(serde_json::json!({
+                "party_id": party_id()?.to_string(),
+                "rules_contract_id": "00rules",
+                "action": { "type": "governance_set_threshold", "new_threshold": 0 },
+            }))
+            .to_request();
+        let response = actix_test::call_service(&app, request).await;
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(count(step, ActionOutcome::Error), error_before);
+        assert_eq!(count(step, ActionOutcome::Ok), ok_before);
         Ok(())
     }
 }

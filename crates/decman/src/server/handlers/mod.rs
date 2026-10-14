@@ -27,6 +27,8 @@ pub(crate) use governance::{
 // re-exported here so they are reachable through the private `governance`
 // submodule.
 pub(crate) use governance::{get_party_credentials, packages};
+// Server startup forces the governance action counter through this.
+pub(crate) use governance::register_metrics as register_governance_metrics;
 pub(crate) use invitations::{
     accept_invitation, decline_invitation, get_invitation_dar, get_invitations,
 };
