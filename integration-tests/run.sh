@@ -46,7 +46,8 @@ Options:
                   the cargo test runner, and the e2e crate. Useful when
                   diagnosing a stuck or failing run. Sets:
                   RUST_LOG=dec_party_manager=info,tokio_noise=error,
-                          hyper_noise=error,governance_workflows=info
+                          hyper_noise=error,governance_workflows=info,
+                          penelope=info
 
   --target <localnet|devnet>
                   Which target to test against (default: localnet).
@@ -118,20 +119,21 @@ check_decman_ports_free
 # process. An externally-set RUST_LOG always overrides this preset.
 if [ -z "${RUST_LOG:-}" ]; then
     if [ "$VERBOSE" = 1 ]; then
-        export RUST_LOG="dec_party_manager=info,tokio_noise=error,hyper_noise=error,governance_workflows=info"
+        export RUST_LOG="dec_party_manager=info,tokio_noise=error,hyper_noise=error,governance_workflows=info,penelope=info"
     else
         # Quiet default: only WARN+ from everything except the GWT scenario
-        # DSL output and per-phase headers from the test crate. The test
-        # crate's helpers (invitations, http) stay at WARN — readers see the
-        # scenario structure without helper-internal chatter. Pass --verbose
-        # to surface the helpers and the dec-party-manager INFO stream.
+        # DSL output (the `penelope` crate) and per-phase headers from the
+        # test crate. The test crate's helpers (invitations, http) stay at
+        # WARN — readers see the scenario structure without helper-internal
+        # chatter. Pass --verbose to surface the helpers and the
+        # dec-party-manager INFO stream.
         #
         # `hyper_noise::server` is pinned to ERROR rather than WARN: it logs
         # one warning per failed Noise handshake, and during the
         # configure_peers restart window stale clients spam ~20 of these
         # over ~50s while the mesh converges. They're not actionable for
         # readers of a passing test; --verbose surfaces them.
-        export RUST_LOG="warn,hyper_noise::server=error,governance_workflows::common::scenario=info,governance_workflows::common::phases=info,governance_workflows::common::chaos=info"
+        export RUST_LOG="warn,hyper_noise::server=error,penelope=info,governance_workflows::common::phases=info,governance_workflows::common::chaos=info"
     fi
 fi
 

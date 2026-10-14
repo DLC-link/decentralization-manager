@@ -1831,6 +1831,7 @@ dependencies = [
  "keycloak",
  "mime_guess",
  "p256",
+ "penelope",
  "prometheus",
  "prost",
  "prost-types",
@@ -3832,6 +3833,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "88b39c9bfcfc231068454382784bb460aae594343fb030d46e9f50a645418412"
 dependencies = [
  "base64ct",
+]
+
+[[package]]
+name = "penelope"
+version = "0.1.0"
+source = "git+https://github.com/DLC-link/penelope?rev=8f36b2dfda5932c8310ec6891ff3b72d416118dc#8f36b2dfda5932c8310ec6891ff3b72d416118dc"
+dependencies = [
+ "anyhow",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]

@@ -265,6 +265,14 @@ pub fn make_optional_bool(opt: &Option<bool>) -> Value {
     }
 }
 
+pub fn make_optional_text(opt: Option<&str>) -> Value {
+    Value {
+        sum: Some(value::Sum::Optional(Box::new(Optional {
+            value: opt.map(|t| Box::new(make_text(t))),
+        }))),
+    }
+}
+
 pub fn serialize_claim(claim: &Claim) -> Value {
     make_record(vec![
         field("subject", make_text(&claim.subject)),

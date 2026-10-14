@@ -6,7 +6,7 @@ module Governance.UtilityOnboarding.Utils where
 
 import DA.Date (Month(Jan), date)
 import DA.Set qualified as Set
-import DA.Text (intercalate)
+import DA.Text (intercalate, isInfixOf)
 import DA.Time (convertRelTimeToMicroseconds, subTime, time)
 
 import Splice.Util (require)
@@ -32,16 +32,31 @@ selfIssuedRequirementsHaveClaims governanceParty =
     requirement.issuer /= governanceParty
       || not (null requirement.requiredClaims))
 
+-- | True when a credential id nonce is absent, or present, non-empty and
+-- free of "/". Readers split credential ids on "/", so a nonce holding one
+-- would shift the segments after it. Proposal templates that mint use this
+-- in their `ensure` clause, so a bad nonce fails before any vote.
+validCredentialIdNonce : Optional Text -> Bool
+validCredentialIdNonce =
+  optional True (\nonce -> nonce /= "" && not ("/" `isInfixOf` nonce))
+
 -- | Render a governance-minted credential id:
--- {roleTag}/{subject}/{timestamp}-{index}. The timestamp is the minting
--- transaction's ledger time in seconds since epoch: onboarding actions are
--- low-frequency, so second resolution keeps ids distinct across
--- transactions in practice. The index separates credentials minted for the
--- same subject within one transaction.
-mkCredentialId : Text -> Party -> Time -> Int -> Text
-mkCredentialId roleTag subject now index =
+--
+-- * with a nonce: {roleTag}/{subject}/{timestamp}-{nonce}-{index}
+-- * without one: {roleTag}/{subject}/{timestamp}-{index}
+--
+-- The timestamp is the minting transaction's ledger time in seconds since
+-- epoch. The index separates credentials minted for the same subject within
+-- one transaction. The nonce comes from the proposal and separates actions
+-- that mint for the same subject and role tag at the same timestamp. Daml
+-- exposes no transaction id, and a finer timestamp would not help: Canton
+-- raises a transaction's ledger time to that of its inputs, so two
+-- transactions can share one ledger time.
+mkCredentialId : Text -> Party -> Time -> Optional Text -> Int -> Text
+mkCredentialId roleTag subject now nonce index =
   roleTag <> "/" <> partyToText subject <> "/"
     <> show (convertRelTimeToMicroseconds (subTime now epoch) / 1000000)
+    <> optional "" ("-" <>) nonce
     <> "-" <> show index
   where
     epoch = time (date 1970 Jan 1) 0 0 0
@@ -67,10 +82,12 @@ mintCredentialsMeetingRequirements
   -> Text
     -- ^ Role tag used in the credential id, e.g. "registrar-credential"
     -- or "{symbol}-instrument-issuer-credential".
+  -> Optional Text
+    -- ^ The proposal's credential id nonce. See `mkCredentialId`.
   -> [PartyCredentialRequirement]
     -- ^ Full requirement list. Filtered internally.
   -> Update [ContractId Credential]
-mintCredentialsMeetingRequirements governanceParty subject roleTag requirements = do
+mintCredentialsMeetingRequirements governanceParty subject roleTag nonce requirements = do
   now <- getTime
   let selfIssuable = filter (\requirement -> requirement.issuer == governanceParty) requirements
       mkClaim (property, value) = Claim with
@@ -85,7 +102,7 @@ mintCredentialsMeetingRequirements governanceParty subject roleTag requirements 
     create Credential with
       issuer = governanceParty
       holder = governanceParty
-      id = mkCredentialId roleTag subject now index
+      id = mkCredentialId roleTag subject now nonce index
       description = "Governance-minted " <> roleTag <> " for " <> partyToText subject
       validFrom = None
       validUntil = None

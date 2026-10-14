@@ -16,7 +16,8 @@ import Utility.Registry.App.V0.Service.Registrar
   (RegistrarServiceRequest, RegistrarServiceRequest_Accept(..))
 
 import Governance.Action
-import Governance.UtilityOnboarding.Utils (mintCredentialsMeetingRequirements)
+import Governance.UtilityOnboarding.Utils
+  (mintCredentialsMeetingRequirements, validCredentialIdNonce)
 
 template OnboardRegistrar
   with
@@ -26,9 +27,14 @@ template OnboardRegistrar
     providerServiceCid : ContractId ProviderService
     registrarServiceRequestCid : ContractId RegistrarServiceRequest
     providerConfigurationCid : ContractId ProviderConfiguration
+    credentialIdNonce : Optional Text
+      -- ^ Folded into the id of every credential this action mints. See
+      -- `mkCredentialId`. Optional and last so contracts created without it
+      -- upgrade with None, which mints the nonce-free id format.
   where
     signatory proposer
     observer governanceParty
+    ensure validCredentialIdNonce credentialIdNonce
 
     interface instance GovernableAction for OnboardRegistrar where
       view = GovernableActionView with
@@ -45,7 +51,7 @@ template OnboardRegistrar
         require "OnboardRegistrar: provider configuration provider does not match the governance party"
           (providerConfiguration.provider == governanceParty)
         mintedCredentialCids <- mintCredentialsMeetingRequirements
-          governanceParty request.registrar "registrar-credential"
+          governanceParty request.registrar "registrar-credential" credentialIdNonce
           providerConfiguration.registrarRequirements
         _ <- exercise providerServiceCid ProviderService_AcceptRegistrarServiceRequest with
           cid = registrarServiceRequestCid
