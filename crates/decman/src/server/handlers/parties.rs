@@ -59,6 +59,7 @@ use crate::{
         },
     },
     utils,
+    workflow::topology::{MAX_HOSTED_PARTIES, read, timed_request},
 };
 
 /// How many parties [`fetch_decentralized_parties`] reads at once.
@@ -415,20 +416,6 @@ async fn bounded_call<T>(
 ) -> Result<T> {
     match tokio::time::timeout(TOPOLOGY_READ_TIMEOUT, call).await {
         Ok(result) => result,
-        Err(_) => anyhow::bail!(
-            "{what} did not answer within {secs}s",
-            secs = TOPOLOGY_READ_TIMEOUT.as_secs()
-        ),
-    }
-}
-
-/// Run one topology read under [`TOPOLOGY_READ_TIMEOUT`].
-async fn bounded_read<T>(
-    what: &str,
-    read: impl std::future::Future<Output = std::result::Result<T, tonic::Status>>,
-) -> Result<T> {
-    match tokio::time::timeout(TOPOLOGY_READ_TIMEOUT, read).await {
-        Ok(result) => Ok(result?),
         Err(_) => anyhow::bail!(
             "{what} did not answer within {secs}s",
             secs = TOPOLOGY_READ_TIMEOUT.as_secs()
@@ -1242,15 +1229,6 @@ async fn store_parties_to_db(
     Commitable::commit(tx).await
 }
 
-/// Most parties `ListParties` returns for one participant.
-///
-/// The RPC takes a limit and offers no cursor, so this truncates rather than
-/// pages. It sits far above any realistic number of parties on one
-/// participant; a node holding more would discover the first
-/// `MAX_HOSTED_PARTIES` of them, and the exact-ID path covers the rest as soon
-/// as one is known locally.
-const MAX_HOSTED_PARTIES: i32 = 5_000;
-
 /// The full IDs of the decentralized parties this node hosts, found without
 /// reading every party on the synchronizer.
 ///
@@ -1287,16 +1265,15 @@ async fn discover_hosted_party_ids(
         }
     };
 
-    let response = bounded_read(
+    let response = read(
         "list_parties",
-        aggregation_client.list_parties(tonic::Request::new(build_list_parties_request(
-            synchronizer_ids,
-            prefix_filter,
-            participant_id,
-        ))),
+        TOPOLOGY_READ_TIMEOUT,
+        aggregation_client.list_parties(timed_request(
+            build_list_parties_request(synchronizer_ids, prefix_filter, participant_id),
+            TOPOLOGY_READ_TIMEOUT,
+        )),
     )
-    .await?
-    .into_inner();
+    .await?;
 
     // The RPC truncates at the limit and says nothing, so a full page is the
     // only signal that parties were left behind. It has no cursor, so there is
@@ -1380,15 +1357,18 @@ fn parties_in_namespaces(
 async fn my_namespace_fingerprints(
     vault_client: &mut VaultServiceClient<tonic::transport::Channel>,
 ) -> Result<HashSet<String>> {
-    let response = bounded_read(
+    let response = read(
         "list_my_keys",
-        vault_client.list_my_keys(tonic::Request::new(ListMyKeysRequest {
-            filters: None,
-            base_request: None,
-        })),
+        TOPOLOGY_READ_TIMEOUT,
+        vault_client.list_my_keys(timed_request(
+            ListMyKeysRequest {
+                filters: None,
+                base_request: None,
+            },
+            TOPOLOGY_READ_TIMEOUT,
+        )),
     )
-    .await?
-    .into_inner();
+    .await?;
 
     let mut fingerprints = HashSet::new();
     for key_meta in response.private_keys_metadata {
@@ -1417,14 +1397,15 @@ async fn owned_decentralized_namespaces(
     synchronizer_id: &str,
     my_fingerprints: &HashSet<String>,
 ) -> Result<Vec<DecentralizedNamespaceDefinition>> {
-    let response = bounded_read(
+    let response = read(
         "list_decentralized_namespace_definition",
-        topology_client.list_decentralized_namespace_definition(tonic::Request::new(
+        TOPOLOGY_READ_TIMEOUT,
+        topology_client.list_decentralized_namespace_definition(timed_request(
             build_decentralized_namespace_request(synchronizer_id, ""),
+            TOPOLOGY_READ_TIMEOUT,
         )),
     )
-    .await?
-    .into_inner();
+    .await?;
 
     let mut owned: Vec<_> = response
         .results
@@ -1659,18 +1640,19 @@ async fn fetch_decentralized_parties(
     // the namespace, so two filters can return the same party.
     let mut seen_parties: HashSet<String> = HashSet::new();
     for party_filter in party_filters {
-        let response = bounded_read(
+        let response = read(
             "list_party_to_participant",
-            topology_client.list_party_to_participant(tonic::Request::new(
+            TOPOLOGY_READ_TIMEOUT,
+            topology_client.list_party_to_participant(timed_request(
                 build_party_to_participant_request(
                     &synchronizer_id,
                     Some(party_filter.as_str()),
                     &participant_id,
                 ),
+                TOPOLOGY_READ_TIMEOUT,
             )),
         )
-        .await?
-        .into_inner();
+        .await?;
 
         for result in response.results {
             let Some(P2pItem::V30(party_mapping)) = result.item else {
@@ -1706,14 +1688,15 @@ async fn fetch_decentralized_parties(
         .collect();
     namespaces.sort();
     for namespace in namespaces {
-        let response = bounded_read(
+        let response = read(
             "list_decentralized_namespace_definition",
-            topology_client.list_decentralized_namespace_definition(tonic::Request::new(
+            TOPOLOGY_READ_TIMEOUT,
+            topology_client.list_decentralized_namespace_definition(timed_request(
                 build_decentralized_namespace_request(&synchronizer_id, &namespace),
+                TOPOLOGY_READ_TIMEOUT,
             )),
         )
-        .await?
-        .into_inner();
+        .await?;
         definitions.extend(
             response
                 .results

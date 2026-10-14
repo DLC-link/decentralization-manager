@@ -13,6 +13,7 @@ use std::{
     time::Duration,
 };
 
+use anyhow::Context;
 use canton_proto_rs::com::digitalasset::canton::{
     protocol::v30::{
         DecentralizedNamespaceDefinition, PartyToKeyMapping, PartyToParticipant,
@@ -30,6 +31,7 @@ use canton_proto_rs::com::digitalasset::canton::{
     },
 };
 use sqlx::SqlitePool;
+use tonic::{Request, Response};
 
 use crate::{
     canton_id::CantonId,
@@ -41,6 +43,29 @@ use crate::{
     utils,
     workflow::storage::WorkflowStorage,
 };
+
+/// Shared `ListParties` limit. Canton truncates results and provides no cursor.
+pub(crate) const MAX_HOSTED_PARTIES: i32 = 5_000;
+
+/// Attach a server-side gRPC deadline to a topology request.
+pub(crate) fn timed_request<T>(message: T, timeout: Duration) -> Request<T> {
+    let mut request = Request::new(message);
+    request.set_timeout(timeout);
+    request
+}
+
+/// Bound a topology read locally and include the operation in any error.
+pub(crate) async fn read<T>(
+    operation: &str,
+    timeout: Duration,
+    call: impl Future<Output = std::result::Result<Response<T>, tonic::Status>>,
+) -> Result<T> {
+    tokio::time::timeout(timeout, call)
+        .await
+        .with_context(|| format!("{operation} exceeded {}s", timeout.as_secs()))?
+        .with_context(|| format!("{operation} failed"))
+        .map(Response::into_inner)
+}
 
 /// Call `sign_transactions` on the participant's TopologyManagerWriteService,
 /// retrying only when Canton returns

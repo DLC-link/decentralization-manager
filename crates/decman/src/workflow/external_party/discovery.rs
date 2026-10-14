@@ -2,7 +2,7 @@
 //! only those mappings. A participant filter on ListPartyToParticipant is
 //! applied after the entire synchronizer's mappings have been materialized.
 
-use std::{collections::HashMap, future::Future, time::Duration};
+use std::{collections::HashMap, time::Duration};
 
 use anyhow::{Context, Result};
 use canton_proto_rs::com::digitalasset::canton::{
@@ -16,16 +16,17 @@ use canton_proto_rs::com::digitalasset::canton::{
         topology_manager_read_service_client::TopologyManagerReadServiceClient,
     },
 };
-use tonic::{Request, Response, transport::Channel};
+use tonic::transport::Channel;
 
 use super::steps::{
     HostedExternalParty, HostedExternalPartyHost, party_query, timestamp_to_rfc3339,
 };
-use crate::{config::NodeConfig, utils};
+use crate::{
+    config::NodeConfig,
+    utils,
+    workflow::topology::{MAX_HOSTED_PARTIES, read, timed_request},
+};
 
-// Reject a full result to avoid an incomplete snapshot: unlike decentralized
-// discovery, known parties are not queried separately by exact ID.
-const MAX_HOSTED_PARTIES: i32 = 5_000;
 // Hosted-party enumeration walks the synchronizer in batches: devnet took
 // 103s even with a small final response. Leave room for that work while the
 // cache still bounds the complete scan to ten minutes.
@@ -48,24 +49,6 @@ trait DiscoveryReader {
 struct CantonReader {
     aggregation: TopologyAggregationServiceClient<Channel>,
     topology: TopologyManagerReadServiceClient<Channel>,
-}
-
-fn timed_request<T>(message: T, timeout: Duration) -> Request<T> {
-    let mut request = Request::new(message);
-    request.set_timeout(timeout);
-    request
-}
-
-async fn read<T>(
-    operation: &str,
-    timeout: Duration,
-    call: impl Future<Output = std::result::Result<Response<T>, tonic::Status>>,
-) -> Result<T> {
-    tokio::time::timeout(timeout, call)
-        .await
-        .with_context(|| format!("{operation} exceeded {}s", timeout.as_secs()))?
-        .with_context(|| format!("{operation} failed"))
-        .map(Response::into_inner)
 }
 
 #[async_trait::async_trait]
@@ -152,6 +135,8 @@ async fn discover(
             filter_participant: participant_id.to_string(),
         })
         .await?;
+    // Reject a full result to avoid an incomplete snapshot: unlike decentralized
+    // discovery, known parties are not queried separately by exact ID.
     anyhow::ensure!(
         response.results.len() < MAX_HOSTED_PARTIES as usize,
         "External party discovery reached the {MAX_HOSTED_PARTIES}-party limit; \
@@ -241,6 +226,8 @@ async fn discover(
 
 #[cfg(test)]
 mod tests {
+    use tonic::Response;
+
     use super::*;
     use canton_proto_rs::com::digitalasset::canton::{
         protocol::v30::{
