@@ -203,8 +203,20 @@ impl AppState {
     pub(crate) async fn for_test(
         auth: Option<crate::auth::WorkflowAuth>,
     ) -> anyhow::Result<actix_web::web::Data<Self>> {
-        Ok(actix_web::web::Data::new(Self {
-            db: SqlitePool::connect("sqlite::memory:").await?,
+        Ok(Self::for_test_on(
+            auth,
+            SqlitePool::connect("sqlite::memory:").await?,
+        ))
+    }
+
+    /// As [`Self::for_test`], on a database the test prepared, such as an
+    /// `#[sqlx::test]` pool that already has the migrations applied.
+    pub(crate) fn for_test_on(
+        auth: Option<crate::auth::WorkflowAuth>,
+        db: SqlitePool,
+    ) -> actix_web::web::Data<Self> {
+        actix_web::web::Data::new(Self {
+            db,
             config: NodeConfig::default(),
             peer_status: Arc::new(RwLock::new(HashMap::new())),
             last_seen: Arc::new(RwLock::new(HashMap::new())),
@@ -231,7 +243,7 @@ impl AppState {
             http_client: reqwest::Client::new(),
             health_cache: HealthCache::new(),
             external_parties: Default::default(),
-        }))
+        })
     }
 }
 

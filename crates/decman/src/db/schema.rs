@@ -94,6 +94,14 @@ pub trait SchemaRead {
         offset: i64,
     ) -> Result<Vec<GovernanceAuditRow>>;
 
+    /// Get paginated governance audit entries across every party, newest first.
+    /// Entries recorded in the same second keep their insertion order.
+    async fn get_recent_governance_audit(
+        &self,
+        limit: i64,
+        offset: i64,
+    ) -> Result<Vec<GovernanceAuditRow>>;
+
     /// Get cached chain audit entries for a party, newest first
     async fn get_chain_audit_cache(
         &self,

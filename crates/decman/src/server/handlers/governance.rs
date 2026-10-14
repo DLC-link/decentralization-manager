@@ -63,8 +63,8 @@ use crate::{
             ChainAuditEntry, ChainAuditQuery, ChainAuditResponse, ConfirmActionRequest,
             CouponReassignmentDelegationSummary, ErrorResponse, ExecuteActionRequest,
             ExpireConfirmationRequest, GovernanceResponse, GovernanceStateResponse, GovernanceType,
-            KnownMember, KnownMembersResponse, MessageResponse, ProposalType,
-            ProposalsPageResponse, ProposeActionRequest, chain_audit_entry_from_row,
+            KnownMember, KnownMembersResponse, MAX_RECENT_AUDIT_LIMIT, MessageResponse,
+            ProposalType, ProposalsPageResponse, ProposeActionRequest, chain_audit_entry_from_row,
         },
     },
     utils,
@@ -407,6 +407,10 @@ async fn collect_known_members(
 }
 
 /// Get paginated governance audit trail
+///
+/// Scoped to `party_id` when given. Without it, returns this node's newest
+/// entries across every party, which is how the notification feed fills its
+/// Completed section without one ledger read per party.
 #[utoipa::path(
     tag = "Governance",
     params(AuditLogQuery),
@@ -420,11 +424,22 @@ pub async fn get_governance_audit(
     data: web::Data<AppState>,
     query: web::Query<AuditLogQuery>,
 ) -> impl Responder {
-    match data
-        .db
-        .get_governance_audit(&query.party_id, query.limit, query.offset)
-        .await
-    {
+    let rows = match &query.party_id {
+        Some(party_id) => {
+            data.db
+                .get_governance_audit(party_id, query.limit, query.offset)
+                .await
+        }
+        None => {
+            data.db
+                .get_recent_governance_audit(
+                    query.limit.clamp(1, MAX_RECENT_AUDIT_LIMIT),
+                    query.offset.max(0),
+                )
+                .await
+        }
+    };
+    match rows {
         Ok(rows) => {
             let entries: Vec<AuditLogEntry> = rows
                 .into_iter()
@@ -2482,6 +2497,128 @@ mod tests {
         let response = cached_chain_audit_page(rows, 2).expect("non-empty rows are a hit");
         assert_eq!(response.total_returned, 3);
         assert_eq!(response.next_before_offset, Some(20));
+    }
+}
+
+#[cfg(test)]
+mod governance_audit_endpoint_tests {
+    use actix_web::{App, http::StatusCode, test as actix_test};
+    use serde_json::Value;
+    use sqlx::SqlitePool;
+
+    use super::*;
+    use crate::db::MIGRATOR;
+
+    fn party(prefix: &str) -> Result<CantonId> {
+        CantonId::parse(&format!("{prefix}::1220{}", "ab".repeat(32)))
+    }
+
+    async fn log_row(
+        pool: &SqlitePool,
+        party_id: &CantonId,
+        event_type: &str,
+        created_at: i64,
+    ) -> Result {
+        sqlx::query(
+            r"
+            INSERT INTO governance_audit (
+                timestamp, event_type, party_id, member_party_id,
+                governance_type, action_summary, details, status,
+                error_message, created_at
+            ) VALUES (?, ?, ?, ?, 'core_domain', 'transfer', '{}', 'success', NULL, ?)
+            ",
+        )
+        .bind(created_at)
+        .bind(event_type)
+        .bind(party_id.to_string())
+        .bind(party("member")?.to_string())
+        .bind(created_at)
+        .execute(pool)
+        .await?;
+        Ok(())
+    }
+
+    /// `(party_id, created_at)` of every entry the endpoint returns for `uri`.
+    async fn fetch(pool: &SqlitePool, uri: &str) -> Result<Vec<(String, i64)>> {
+        let app = actix_test::init_service(
+            App::new()
+                .app_data(AppState::for_test_on(None, pool.clone()))
+                .service(get_governance_audit),
+        )
+        .await;
+        let response =
+            actix_test::call_service(&app, actix_test::TestRequest::get().uri(uri).to_request())
+                .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body: Value = actix_test::read_body_json(response).await;
+        let entries = body["entries"]
+            .as_array()
+            .ok_or_else(|| anyhow::anyhow!("no entries array in {body}"))?;
+        assert_eq!(body["total_returned"].as_u64(), Some(entries.len() as u64));
+        entries
+            .iter()
+            .map(|e| {
+                let party_id = e["party_id"]
+                    .as_str()
+                    .ok_or_else(|| anyhow::anyhow!("entry without party_id: {e}"))?;
+                let created_at = e["created_at"]
+                    .as_i64()
+                    .ok_or_else(|| anyhow::anyhow!("entry without created_at: {e}"))?;
+                Ok((party_id.to_string(), created_at))
+            })
+            .collect()
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn without_a_party_it_lists_every_party_newest_first(pool: SqlitePool) -> Result {
+        let (a, b) = (party("party-a")?, party("party-b")?);
+        log_row(&pool, &a, "propose", 1000).await?;
+        log_row(&pool, &b, "confirm", 2000).await?;
+        log_row(&pool, &a, "execute", 3000).await?;
+
+        let entries = fetch(&pool, "/governance/audit").await?;
+
+        assert_eq!(
+            entries,
+            vec![
+                (a.to_string(), 3000),
+                (b.to_string(), 2000),
+                (a.to_string(), 1000),
+            ]
+        );
+        Ok(())
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn with_a_party_it_lists_only_that_party(pool: SqlitePool) -> Result {
+        let (a, b) = (party("party-a")?, party("party-b")?);
+        log_row(&pool, &a, "propose", 1000).await?;
+        log_row(&pool, &b, "confirm", 2000).await?;
+        log_row(&pool, &a, "execute", 3000).await?;
+
+        let uri = format!("/governance/audit?party_id={a}&limit=1&offset=1");
+        let entries = fetch(&pool, &uri).await?;
+
+        assert_eq!(entries, vec![(a.to_string(), 1000)]);
+        Ok(())
+    }
+
+    /// SQLite reads a negative LIMIT as "no limit", so an unscoped read must
+    /// clamp the value rather than pass it through.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn without_a_party_the_limit_is_bounded(pool: SqlitePool) -> Result {
+        let a = party("party-a")?;
+        for created_at in 0..=MAX_RECENT_AUDIT_LIMIT {
+            log_row(&pool, &a, "confirm", created_at).await?;
+        }
+
+        let huge = fetch(&pool, "/governance/audit?limit=100000").await?;
+        assert_eq!(huge.len() as i64, MAX_RECENT_AUDIT_LIMIT);
+        assert_eq!(huge[0].1, MAX_RECENT_AUDIT_LIMIT);
+
+        let negative = fetch(&pool, "/governance/audit?limit=-1&offset=-5").await?;
+        assert_eq!(negative, vec![(a.to_string(), MAX_RECENT_AUDIT_LIMIT)]);
+        Ok(())
     }
 }
 

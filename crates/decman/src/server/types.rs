@@ -869,8 +869,11 @@ pub struct HoldingsResponse {
 /// Query parameters for the governance audit endpoint
 #[derive(Debug, Deserialize, utoipa::IntoParams)]
 pub struct AuditLogQuery {
-    /// Decentralized party ID to filter audit entries
-    pub party_id: CantonId,
+    /// Decentralized party ID to filter audit entries. Without it, the newest
+    /// entries across every party are returned, and `limit` is capped at
+    /// [`MAX_RECENT_AUDIT_LIMIT`].
+    #[serde(default)]
+    pub party_id: Option<CantonId>,
     /// Maximum number of entries to return (default 50)
     #[serde(default = "default_audit_limit")]
     pub limit: i64,
@@ -882,6 +885,10 @@ pub struct AuditLogQuery {
 fn default_audit_limit() -> i64 {
     50
 }
+
+/// Most entries one cross-party audit read returns. The table grows with every
+/// party on the node, so an unscoped read must not be able to ask for all of it.
+pub const MAX_RECENT_AUDIT_LIMIT: i64 = 500;
 
 // ============================================================================
 // Chain Audit Trail Types

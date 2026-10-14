@@ -28,6 +28,14 @@ use crate::{
 
 pub static MIGRATOR: Migrator = sqlx::migrate!("./migrations");
 
+/// The newest audit rows across every party. Shared with the test that checks
+/// it walks `idx_governance_audit_created` instead of sorting the table.
+const RECENT_GOVERNANCE_AUDIT_SQL: &str = r"
+    SELECT * FROM governance_audit
+    ORDER BY created_at DESC, id DESC
+    LIMIT ? OFFSET ?
+";
+
 /// Checksum rewrites for migration files that were edited in place after
 /// operators had already applied them: (version, checksum recorded by the old
 /// file, checksum of the current file). Every entry must be a semantically
@@ -367,6 +375,20 @@ impl SchemaRead for SqlitePool {
         .bind(offset)
         .fetch_all(self)
         .await?;
+
+        Ok(rows)
+    }
+
+    async fn get_recent_governance_audit(
+        &self,
+        limit: i64,
+        offset: i64,
+    ) -> Result<Vec<GovernanceAuditRow>> {
+        let rows = sqlx::query_as::<_, GovernanceAuditRow>(RECENT_GOVERNANCE_AUDIT_SQL)
+            .bind(limit)
+            .bind(offset)
+            .fetch_all(self)
+            .await?;
 
         Ok(rows)
     }
@@ -1309,7 +1331,10 @@ mod tests {
         workflow::storage::WorkflowStorage,
     };
 
-    use super::{MIGRATION_CHECKSUM_REPAIRS, MIGRATOR, repair_migration_checksums};
+    use super::{
+        MIGRATION_CHECKSUM_REPAIRS, MIGRATOR, RECENT_GOVERNANCE_AUDIT_SQL,
+        repair_migration_checksums,
+    };
 
     const TEST_NS: &str = "1220aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 
@@ -2172,6 +2197,101 @@ mod tests {
         // Beyond end
         let entries = pool.get_governance_audit(&party_id, 50, 5).await?;
         assert!(entries.is_empty());
+
+        Ok(())
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn test_recent_governance_audit_spans_parties_newest_first(pool: SqlitePool) -> Result {
+        let party_a = test_party_id("party-a").to_string();
+        let party_b = test_party_id("party-b").to_string();
+        let party_c = test_party_id("party-c").to_string();
+
+        assert!(pool.get_recent_governance_audit(50, 0).await?.is_empty());
+
+        // Inserted out of time order, so the result order comes from the query.
+        insert_audit_entry(&pool, &party_b, "confirm", "success", 2000).await?;
+        insert_audit_entry(&pool, &party_a, "propose", "success", 1000).await?;
+        insert_audit_entry(&pool, &party_c, "execute", "failed", 3000).await?;
+        insert_audit_entry(&pool, &party_a, "execute", "success", 4000).await?;
+
+        let entries = pool.get_recent_governance_audit(50, 0).await?;
+        let seen: Vec<(&str, &str, i64)> = entries
+            .iter()
+            .map(|e| (e.party_id.as_str(), e.event_type.as_str(), e.created_at))
+            .collect();
+        assert_eq!(
+            seen,
+            vec![
+                (party_a.as_str(), "execute", 4000),
+                (party_c.as_str(), "execute", 3000),
+                (party_b.as_str(), "confirm", 2000),
+                (party_a.as_str(), "propose", 1000),
+            ]
+        );
+
+        Ok(())
+    }
+
+    /// Rows logged in the same second must still come back in a fixed order,
+    /// or a page boundary could repeat one row and skip another.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn test_recent_governance_audit_breaks_ties_by_insertion(pool: SqlitePool) -> Result {
+        let party_a = test_party_id("party-a").to_string();
+        let party_b = test_party_id("party-b").to_string();
+
+        insert_audit_entry(&pool, &party_a, "propose", "success", 1000).await?;
+        insert_audit_entry(&pool, &party_b, "confirm", "success", 1000).await?;
+        insert_audit_entry(&pool, &party_a, "execute", "success", 1000).await?;
+
+        let entries = pool.get_recent_governance_audit(50, 0).await?;
+        let events: Vec<&str> = entries.iter().map(|e| e.event_type.as_str()).collect();
+        assert_eq!(events, vec!["execute", "confirm", "propose"]);
+        assert!(entries.windows(2).all(|w| w[0].id > w[1].id));
+
+        Ok(())
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn test_recent_governance_audit_pagination(pool: SqlitePool) -> Result {
+        for i in 0..5 {
+            let party = test_party_id(&format!("party-{i}")).to_string();
+            insert_audit_entry(&pool, &party, "confirm", "success", 1000 + i).await?;
+        }
+
+        let first = pool.get_recent_governance_audit(2, 0).await?;
+        let created: Vec<i64> = first.iter().map(|e| e.created_at).collect();
+        assert_eq!(created, vec![1004, 1003]);
+
+        let middle = pool.get_recent_governance_audit(2, 2).await?;
+        let created: Vec<i64> = middle.iter().map(|e| e.created_at).collect();
+        assert_eq!(created, vec![1002, 1001]);
+
+        let last = pool.get_recent_governance_audit(2, 4).await?;
+        let created: Vec<i64> = last.iter().map(|e| e.created_at).collect();
+        assert_eq!(created, vec![1000]);
+
+        assert!(pool.get_recent_governance_audit(2, 5).await?.is_empty());
+
+        Ok(())
+    }
+
+    /// The cross-party read runs on every feed poll, so it must walk the
+    /// `created_at` index rather than sort the whole table.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn test_recent_governance_audit_reads_the_created_index(pool: SqlitePool) -> Result {
+        let rows = sqlx::query_as::<_, (i64, i64, i64, String)>(&format!(
+            "EXPLAIN QUERY PLAN {RECENT_GOVERNANCE_AUDIT_SQL}"
+        ))
+        .bind(50_i64)
+        .bind(0_i64)
+        .fetch_all(&pool)
+        .await?;
+        let plan: Vec<String> = rows.into_iter().map(|(_, _, _, detail)| detail).collect();
+        let plan = plan.join("\n");
+
+        assert!(plan.contains("idx_governance_audit_created"), "{plan}");
+        assert!(!plan.contains("TEMP B-TREE"), "{plan}");
 
         Ok(())
     }
