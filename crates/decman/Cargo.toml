@@ -97,6 +97,8 @@ keycloak = { workspace = true }
 # never holds a party key.
 decman-wallet = { workspace = true }
 insta = { workspace = true }
+# The Given/When/Then runner the integration suite's phases are written in.
+penelope = { workspace = true }
 # rcgen + tokio-rustls back the e2e suite's TLS terminator
 # (tests/common/tls_proxy.rs), which puts a Canton admin API behind TLS so the
 # TLS client path has coverage on a plaintext localnet. Test-only.
