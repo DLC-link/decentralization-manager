@@ -535,11 +535,7 @@ pub async fn get_governance_confirmations(
     packages: &PackageConfig,
     limit: usize,
     cursor: Option<AcsCursor>,
-) -> Result<(
-    Vec<GovernanceAction>,
-    Vec<DomainGovernanceAction>,
-    Option<AcsCursor>,
-)> {
+) -> Result<GovernanceQueue> {
     // Collect confirmations grouped by action hash (core self-management)
     let mut confirmations_by_hash: HashMap<String, (ActionType, Vec<ParsedConfirmation>)> =
         HashMap::new();
@@ -652,7 +648,22 @@ pub async fn get_governance_confirmations(
     })
     .collect();
 
-    Ok((actions, domain_actions, next_cursor))
+    Ok(GovernanceQueue {
+        actions,
+        domain_actions,
+        next_cursor,
+        complete: proposal_infos_complete && domain_confirmations_complete,
+    })
+}
+
+/// One batch of a party's governance queue.
+pub struct GovernanceQueue {
+    pub actions: Vec<GovernanceAction>,
+    pub domain_actions: Vec<DomainGovernanceAction>,
+    pub next_cursor: Option<AcsCursor>,
+    /// False when a read behind the batch failed and left cards out. A caller
+    /// that counts the queue must not take an incomplete batch as empty.
+    pub complete: bool,
 }
 
 /// Whether `GovernanceRules_ConfirmAction` rejects every confirmation of a

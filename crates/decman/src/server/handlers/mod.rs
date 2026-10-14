@@ -23,10 +23,10 @@ pub(crate) use governance::{
     get_governance_chain_audit, get_governance_state, get_known_members, get_proposals_page,
     propose_action,
 };
-// Crate-internal governance helpers reused by the reward-automation module,
-// re-exported here so they are reachable through the private `governance`
-// submodule.
-pub(crate) use governance::{get_party_credentials, packages};
+// Crate-internal governance helpers reused by the reward-automation and
+// governance-poller modules, re-exported here so they are reachable through the
+// private `governance` submodule.
+pub(crate) use governance::{get_party_credentials, packages, rules_and_threshold};
 // Server startup forces the governance action counter through this.
 pub(crate) use governance::register_metrics as register_governance_metrics;
 pub(crate) use invitations::{

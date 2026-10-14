@@ -50,8 +50,9 @@ use crate::{
         chain_audit,
         middleware::require_admin,
         queries::{
-            get_governance_confirmations, get_governance_state as query_governance_state,
-            resolve_contract_package_ref, select_input_holdings,
+            GovernanceQueue, get_governance_confirmations,
+            get_governance_state as query_governance_state, resolve_contract_package_ref,
+            select_input_holdings,
         },
         transfer_context::{
             AcceptTransferContext, ProposeTransferArgs, fetch as fetch_accept_transfer_context,
@@ -63,9 +64,10 @@ use crate::{
             AuditLogResponse, AuditScope, CancelConfirmationRequest, CancelProposalRequest,
             ChainAuditEntry, ChainAuditQuery, ChainAuditResponse, ConfirmActionRequest,
             CouponReassignmentDelegationSummary, ErrorResponse, ExecuteActionRequest,
-            ExpireConfirmationRequest, GovernanceResponse, GovernanceStateResponse, GovernanceType,
-            KnownMember, KnownMembersResponse, MessageResponse, ProposalType,
-            ProposalsPageResponse, ProposeActionRequest, chain_audit_entry_from_row,
+            ExpireConfirmationRequest, GovernanceResponse, GovernanceState,
+            GovernanceStateResponse, GovernanceType, KnownMember, KnownMembersResponse,
+            MessageResponse, ProposalType, ProposalsPageResponse, ProposeActionRequest,
+            chain_audit_entry_from_row,
         },
     },
     utils,
@@ -96,25 +98,8 @@ pub async fn get_governance(
     let member_party_id = get_member_party_id(&data, party_id).await;
     let packages = packages();
 
-    // Pull `(rules_contract_id, threshold)` off the active GovernanceRules /
-    // rules contract. The Daml `ExecuteGovernanceAction`
-    // choice gates on THIS threshold ("Enough member confirmations to
-    // execute action") — not the decentralized-namespace topology
-    // threshold, which is a separate value used for signing
-    // PartyToParticipant updates. Falling back to the DNS threshold for
-    // historical compatibility only when the gov state isn't reachable.
-    let gov_state =
-        match query_governance_state(&data.config, party_id, token.clone(), &packages).await {
-            Ok(state) => state,
-            Err(e) => {
-                tracing::warn!("Failed to fetch active rules contract: {e}");
-                None
-            }
-        };
-    let threshold = match &gov_state {
-        Some(state) => state.threshold as usize,
-        None => get_party_threshold(&data, party_id).await.unwrap_or(2),
-    };
+    let (gov_state, threshold) =
+        rules_and_threshold(&data, party_id, token.clone(), &packages).await;
 
     let batch = query.limit.unwrap_or(25).clamp(1, 200);
     let from = match &query.cursor {
@@ -134,9 +119,14 @@ pub async fn get_governance(
     )
     .await
     {
-        Ok((actions, domain_actions, next)) => HttpResponse::Ok().json(GovernanceResponse {
+        Ok(GovernanceQueue {
             actions,
-            next_cursor: next.as_ref().and_then(encode_cursor),
+            domain_actions,
+            next_cursor,
+            ..
+        }) => HttpResponse::Ok().json(GovernanceResponse {
+            actions,
+            next_cursor: next_cursor.as_ref().and_then(encode_cursor),
             domain_actions,
             threshold,
             member_party_id,
@@ -1767,6 +1757,33 @@ pub(crate) async fn get_party_token(
         }
         None => None,
     }
+}
+
+/// The active rules contract and the Execute threshold for a party.
+///
+/// The Daml `ExecuteGovernanceAction` choice gates on the rules contract's
+/// threshold ("Enough member confirmations to execute action"). The
+/// decentralized-namespace topology threshold is a separate value used for
+/// signing PartyToParticipant updates. It stands in, for historical
+/// compatibility, only when the rules contract cannot be read.
+pub(crate) async fn rules_and_threshold(
+    data: &web::Data<AppState>,
+    party_id: &CantonId,
+    token: Option<String>,
+    packages: &PackageConfig,
+) -> (Option<GovernanceState>, usize) {
+    let gov_state = match query_governance_state(&data.config, party_id, token, packages).await {
+        Ok(state) => state,
+        Err(e) => {
+            tracing::warn!("Failed to fetch active rules contract: {e}");
+            None
+        }
+    };
+    let threshold = match &gov_state {
+        Some(state) => state.threshold as usize,
+        None => get_party_threshold(data, party_id).await.unwrap_or(2),
+    };
+    (gov_state, threshold)
 }
 
 /// Get threshold for a decentralized party
