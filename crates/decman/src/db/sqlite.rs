@@ -1276,6 +1276,51 @@ impl Commitable for sqlx::Transaction<'static, sqlx::Sqlite> {
         Ok(())
     }
 
+    async fn finish_workflow_run(
+        &mut self,
+        instance_name: &str,
+        status: WorkflowProgress,
+        error: Option<&str>,
+        updated_at: i64,
+    ) -> Result<bool> {
+        // Failed keeps its artefacts for a post-mortem, as in `set_workflow_run_status`.
+        let clears_artifacts = match status {
+            WorkflowProgress::Completed | WorkflowProgress::Cancelled => true,
+            WorkflowProgress::Failed => false,
+            WorkflowProgress::Idle | WorkflowProgress::InProgress => {
+                anyhow::bail!("{status} is not a terminal workflow status")
+            }
+        };
+
+        let moved = sqlx::query(
+            r"
+            UPDATE workflow_runs
+            SET status = ?,
+                error = ?,
+                updated_at = ?
+            WHERE instance_name = ?
+              AND status IN ('idle', 'inprogress')
+            ",
+        )
+        .bind(status.as_str())
+        .bind(error)
+        .bind(updated_at)
+        .bind(instance_name)
+        .execute(&mut **self)
+        .await?
+        .rows_affected()
+            == 1;
+
+        if moved && clears_artifacts {
+            sqlx::query("DELETE FROM workflow_artifacts WHERE instance_name = ?")
+                .bind(instance_name)
+                .execute(&mut **self)
+                .await?;
+        }
+
+        Ok(moved)
+    }
+
     async fn set_workflow_run_dec_party_id(
         &mut self,
         instance_name: &str,

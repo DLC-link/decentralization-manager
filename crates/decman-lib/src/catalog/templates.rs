@@ -194,10 +194,10 @@ mod tests {
     }
 
     /// One assertion per catalog proposal struct — all 29 `TemplateInfo`
-    /// impls under `catalog::proposals`. `TransferWithContext` and
-    /// `AcceptTransferWithContext` are excluded: they delegate
-    /// `template_id` to the `Transfer` / `AcceptTransfer` they wrap, so
-    /// their string is already covered here.
+    /// impls under `catalog::proposals`. `TransferWithContext`,
+    /// `AcceptTransferWithContext` and `WithCredentialIdNonce` are excluded:
+    /// they delegate `template_id` to the proposal they wrap, so their
+    /// string is already covered here.
     ///
     /// Every expected string is a literal, not built from the struct's own
     /// `MODULE`/`ENTITY` consts, so a typo in either const still fails this

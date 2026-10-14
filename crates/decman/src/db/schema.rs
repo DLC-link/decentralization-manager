@@ -335,6 +335,17 @@ pub trait Commitable {
         updated_at: i64,
     ) -> Result;
 
+    /// Move a run that is still Idle or InProgress to the terminal `status`.
+    /// Returns whether this call moved it. `false` means a terminal status was
+    /// already recorded and stays: the first terminal write wins.
+    async fn finish_workflow_run(
+        &mut self,
+        instance_name: &str,
+        status: WorkflowProgress,
+        error: Option<&str>,
+        updated_at: i64,
+    ) -> Result<bool>;
+
     /// Persist the resolved party id on a run whose party is created mid-workflow
     /// (e.g. an external party, whose id isn't known until its key is generated).
     /// Unlike `workflow_artifacts` — wiped when the run reaches a terminal state —

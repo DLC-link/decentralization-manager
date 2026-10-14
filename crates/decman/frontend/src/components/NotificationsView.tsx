@@ -48,6 +48,7 @@ import {
   ApprovalCard,
   ConfirmAvatars,
   ConfirmRing,
+  FullPayload,
   Pill,
   StatusPill,
   WorkflowPipeline,
@@ -976,6 +977,9 @@ const ActionCard = ({
                 </Tooltip>
               </Box>
             </Box>
+            <Box sx={{ mt: 1.5 }}>
+              <FullPayload value={action.action} />
+            </Box>
           </>
         }
       />
@@ -1586,7 +1590,17 @@ const DomainActionCard = ({
         </Tooltip>
       </Box>
 
-
+      {/* The contract id and template sit beside the arguments so the JSON
+          names the exact contract the member acts on. */}
+      {domainAction.proposal_payload != null && (
+        <FullPayload
+          value={{
+            contract_id: domainAction.proposal_cid,
+            template_id: domainAction.proposal_template_id,
+            create_arguments: domainAction.proposal_payload,
+          }}
+        />
+      )}
         </Box>
       }
     />

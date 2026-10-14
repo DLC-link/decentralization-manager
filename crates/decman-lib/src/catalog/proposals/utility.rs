@@ -13,7 +13,7 @@ use crate::catalog::types::{AppRewardBeneficiary, make_optional_beneficiaries};
 use crate::error::Error;
 use crate::framework::encode::{
     field, make_bool, make_contract_id, make_empty_metadata, make_list, make_numeric,
-    make_optional_bool, make_optional_list, make_party, make_record, make_text,
+    make_optional_bool, make_optional_list, make_optional_text, make_party, make_record, make_text,
     serialize_instrument_id, serialize_instrument_identifier,
     serialize_party_credential_requirements,
 };
@@ -22,7 +22,8 @@ use crate::framework::validate::{
     validate_self_issued_requirements_have_claims, validate_unique_issuers,
 };
 use crate::framework::{
-    DamlProtoEncode, PackageResolver, TemplateId, TemplateInfo, Validate, ValidationCtx,
+    DamlProtoEncode, GrpcPayload, PackageResolver, TemplateId, TemplateInfo, Validate,
+    ValidationCtx,
 };
 
 /// Provision a Utility-Registry `ProviderService` with `operator = proposer`
@@ -888,6 +889,50 @@ impl Validate for OnboardInstrumentIssuers {
     }
 }
 
+/// A proposal whose template mints governance credentials through
+/// `mintCredentialsMeetingRequirements`. The template ends with a
+/// `credentialIdNonce : Optional Text` field that the payload leaves out.
+/// Submit it through [`WithCredentialIdNonce`] to set that field.
+pub trait MintsCredentials: GrpcPayload {}
+
+impl MintsCredentials for OnboardRegistrar {}
+impl MintsCredentials for ProvisionInstrument {}
+impl MintsCredentials for OnboardInstrumentIssuers {}
+
+/// Encode input for a [`MintsCredentials`] proposal. The nonce is runtime
+/// data, not an HTTP payload field: the caller draws a fresh one for each
+/// proposal. The template folds it into every credential id it mints, so
+/// two actions minting for one subject at one ledger time still produce
+/// distinct ids. The template's `ensure` clause refuses an empty nonce and
+/// one that contains `/`.
+pub struct WithCredentialIdNonce<'a, P: ?Sized> {
+    pub proposal: &'a P,
+    pub nonce: &'a str,
+}
+
+impl<P: MintsCredentials + ?Sized> DamlProtoEncode for WithCredentialIdNonce<'_, P> {
+    fn to_daml_proto(&self) -> Result<Value, Error> {
+        let Some(value::Sum::Record(mut record)) = self.proposal.to_daml_proto()?.sum else {
+            return Err(Error::Encode(
+                "credential-minting proposal must encode to a Record".into(),
+            ));
+        };
+        record.fields.push(field(
+            "credentialIdNonce",
+            make_optional_text(Some(self.nonce)),
+        ));
+        Ok(Value {
+            sum: Some(value::Sum::Record(record)),
+        })
+    }
+}
+
+impl<P: MintsCredentials + ?Sized> TemplateInfo for WithCredentialIdNonce<'_, P> {
+    fn template_id(&self, pkgs: &dyn PackageResolver) -> Result<TemplateId, Error> {
+        self.proposal.template_id(pkgs)
+    }
+}
+
 /// Revoke the credentials the governance party issued for instrument
 /// issuers, removing their issuing privileges. Each row names one issuer
 /// and lists that issuer's credentials.
@@ -979,6 +1024,7 @@ mod tests {
     use common::api::RequiredClaim;
 
     use super::*;
+    use crate::framework::commands::proposal_create_arguments;
 
     /// Any valid `CantonId` — the exact value is irrelevant to these
     /// encode-shape snapshots.
@@ -1272,6 +1318,85 @@ mod tests {
             .to_daml_proto()
             .expect("payload encodes")
         );
+        insta::assert_debug_snapshot!(
+            "onboard_instrument_issuers_with_credential_id_nonce",
+            WithCredentialIdNonce {
+                proposal: &OnboardInstrumentIssuers {
+                    instrument_configuration_cid: "00icc".to_string(),
+                    instrument_issuers: vec![cid("iss1"), cid("iss2")],
+                },
+                nonce: NONCE,
+            }
+            .to_daml_proto()
+            .expect("payload encodes")
+        );
+    }
+
+    /// A fixed nonce keeps the encodings deterministic. The server draws a
+    /// random one per proposal.
+    const NONCE: &str = "0123456789ab";
+
+    /// One instance of each `MintsCredentials` proposal.
+    fn credential_minting_proposals() -> Vec<Box<dyn MintsCredentials>> {
+        vec![
+            Box::new(OnboardRegistrar {
+                provider_service_cid: "00psc".to_string(),
+                registrar_service_request_cid: "00rsrc".to_string(),
+                provider_configuration_cid: "00pcc".to_string(),
+            }),
+            Box::new(ProvisionInstrument {
+                registrar_service_cid: "00rsc".to_string(),
+                instrument_id_text: "uuid-1".to_string(),
+                additional_identifiers: vec![],
+                issuer_requirements: vec![],
+                holder_requirements: vec![],
+                initial_instrument_issuers: vec![cid("issuer")],
+            }),
+            Box::new(OnboardInstrumentIssuers {
+                instrument_configuration_cid: "00icc".to_string(),
+                instrument_issuers: vec![cid("issuer")],
+            }),
+        ]
+    }
+
+    #[test]
+    fn credential_id_nonce_is_the_last_create_argument() {
+        let gov = cid("gov");
+        let member = cid("member");
+        for proposal in credential_minting_proposals() {
+            let bare = proposal_create_arguments(proposal.as_ref(), &gov, &member)
+                .expect("proposal arguments encode");
+            let wrapped = proposal_create_arguments(
+                &WithCredentialIdNonce {
+                    proposal: proposal.as_ref(),
+                    nonce: NONCE,
+                },
+                &gov,
+                &member,
+            )
+            .expect("proposal arguments encode");
+            let (last, rest) = wrapped
+                .fields
+                .split_last()
+                .expect("create arguments carry fields");
+            assert_eq!(rest, bare.fields.as_slice(), "other fields unchanged");
+            assert_eq!(last.label, "credentialIdNonce");
+            assert_eq!(last.value, Some(make_optional_text(Some(NONCE))));
+        }
+    }
+
+    #[test]
+    fn credential_id_nonce_keeps_the_proposal_template() {
+        for proposal in credential_minting_proposals() {
+            let wrapped = WithCredentialIdNonce {
+                proposal: proposal.as_ref(),
+                nonce: NONCE,
+            };
+            assert_eq!(
+                wrapped.template_id(&"#pkg").expect("template id resolves"),
+                proposal.template_id(&"#pkg").expect("template id resolves"),
+            );
+        }
     }
 
     #[test]

@@ -17,7 +17,7 @@ use common::{
     api::WorkflowRunsResponse,
     types::{WorkflowKind, WorkflowProgress, WorkflowRole},
 };
-use dec_party_manager::server::GovernanceResponse;
+use dec_party_manager::server::{DomainGovernanceAction, GovernanceResponse};
 use serde_json::{Value, json};
 use tracing::info;
 
@@ -222,6 +222,52 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
                 let last = s.domain_actions.last()?;
                 ctx.proposal_cid = Some(last.proposal_cid.clone());
                 Some(Ok(()))
+            })
+        },
+    )
+    // The proposal page reads through the GovernableAction interface filter.
+    // This pins that the participant still sends the create arguments, which
+    // the Review panel shows in full.
+    .then(
+        "the proposal's full payload reaches P1",
+        Duration::from_secs(30),
+        |f, _| {
+            Box::pin(async move {
+                let party_id = match f.party_id() {
+                    Ok(v) => v.to_string(),
+                    Err(e) => return Some(Err(e)),
+                };
+                let path = format!("/governance/confirmations?party_id={party_id}&limit=200");
+                let s: GovernanceResponse = f.probe_get_json(f.p1.http, &path).await?;
+                let is_probe = |a: &DomainGovernanceAction| {
+                    let description = a
+                        .proposal_payload
+                        .as_ref()
+                        .and_then(|p| p.get("description"))
+                        .and_then(Value::as_str);
+                    description.is_some_and(|d| d.starts_with("notification-feed visibility probe"))
+                        && a.proposal_template_id
+                            .as_deref()
+                            .is_some_and(|t| t.ends_with(":GenericVoteProposal"))
+                };
+                if s.domain_actions.iter().any(is_probe) {
+                    return Some(Ok(()));
+                }
+                // A live proposal with no payload at all means the read dropped
+                // the create arguments; polling would not change that.
+                let bare: Vec<&str> = s
+                    .domain_actions
+                    .iter()
+                    .filter(|a| !a.orphaned && a.proposal_payload.is_none())
+                    .map(|a| a.proposal_cid.as_str())
+                    .collect();
+                if bare.is_empty() {
+                    None
+                } else {
+                    Some(Err(anyhow::anyhow!(
+                        "live proposals arrived without their create arguments: {bare:?}"
+                    )))
+                }
             })
         },
     )
