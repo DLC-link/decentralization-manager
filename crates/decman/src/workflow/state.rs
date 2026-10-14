@@ -20,7 +20,7 @@ use crate::{
     db::schema::{Commitable, SchemaWrite},
     error::Result,
     noise::MessageType,
-    server::{WorkflowKind, WorkflowProgress},
+    server::WorkflowKind,
     workflow::party_replication::pipe::{ExportSession, PipeBlock},
 };
 
@@ -477,7 +477,7 @@ impl<S: WorkflowStep + 'static> WorkflowState<S> {
     /// Mark the run as Failed with an error message. Used when a workflow
     /// step returns an error.
     pub async fn mark_failed(&self, error: impl Into<String>) {
-        self.persist_status(WorkflowProgress::Failed, Some(error.into()))
+        crate::server::mark_run_failed(&self.db, S::kind(), &self.instance_name, &error.into())
             .await;
     }
 
@@ -516,40 +516,6 @@ impl<S: WorkflowStep + 'static> WorkflowState<S> {
         if let Err(e) = Commitable::commit(tx).await {
             tracing::warn!(
                 "persist_step_progress: commit failed for {}: {e}",
-                self.instance_name
-            );
-        }
-    }
-
-    async fn persist_status(&self, status: WorkflowProgress, error: Option<String>) {
-        let updated_at = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs() as i64)
-            .unwrap_or(0);
-
-        let mut tx = match self.db.begin_transaction().await {
-            Ok(t) => t,
-            Err(e) => {
-                tracing::warn!(
-                    "persist_status: begin_transaction failed for {}: {e}",
-                    self.instance_name
-                );
-                return;
-            }
-        };
-        if let Err(e) = tx
-            .set_workflow_run_status(&self.instance_name, status, error.as_deref(), updated_at)
-            .await
-        {
-            tracing::warn!(
-                "persist_status: update failed for {}: {e}",
-                self.instance_name
-            );
-            return;
-        }
-        if let Err(e) = Commitable::commit(tx).await {
-            tracing::warn!(
-                "persist_status: commit failed for {}: {e}",
                 self.instance_name
             );
         }

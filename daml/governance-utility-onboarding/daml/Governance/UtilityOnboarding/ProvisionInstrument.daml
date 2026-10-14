@@ -19,7 +19,8 @@ import Utility.Registry.Holding.V0.Types (InstrumentIdentifier)
 
 import Governance.Action
 import Governance.UtilityOnboarding.Utils
-  (mintCredentialsMeetingRequirements, partyList, selfIssuedRequirementsHaveClaims)
+  ( mintCredentialsMeetingRequirements, partyList, selfIssuedRequirementsHaveClaims
+  , validCredentialIdNonce )
 
 template ProvisionInstrument
   with
@@ -32,6 +33,10 @@ template ProvisionInstrument
     issuerRequirements : [PartyCredentialRequirement]
     holderRequirements : [PartyCredentialRequirement]
     initialInstrumentIssuers : [Party]
+    credentialIdNonce : Optional Text
+      -- ^ Folded into the id of every credential this action mints. See
+      -- `mkCredentialId`. Optional and last so contracts created without it
+      -- upgrade with None, which mints the nonce-free id format.
   where
     signatory proposer
     observer governanceParty
@@ -39,6 +44,7 @@ template ProvisionInstrument
     -- into credentials that have no subject (as subject is marked on only the claims in this case).
     ensure selfIssuedRequirementsHaveClaims governanceParty issuerRequirements
         && unique initialInstrumentIssuers
+        && validCredentialIdNonce credentialIdNonce
 
     interface instance GovernableAction for ProvisionInstrument where
       view = GovernableActionView with
@@ -67,4 +73,5 @@ template ProvisionInstrument
           mintCredentialsMeetingRequirements
             governanceParty instrumentIssuer
             (instrumentIdText <> "-instrument-issuer-credential")
+            credentialIdNonce
             issuerRequirements

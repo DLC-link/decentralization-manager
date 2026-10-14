@@ -22,7 +22,9 @@ use canton_proto_rs::com::{
     },
 };
 use decman_lib::{
-    catalog::interpret::{self, ParsedConfirmation, ParsedDomainConfirmation, ProposalInfo},
+    catalog::interpret::{
+        self, DomainAction, ParsedConfirmation, ParsedDomainConfirmation, ProposalInfo,
+    },
     framework::record::{field_numeric, field_party, field_text, field_timestamp},
 };
 
@@ -623,29 +625,7 @@ pub async fn get_governance_confirmations(
         now_seconds,
     )
     .into_iter()
-    .map(|action| {
-        let not_authorized = proposer_not_authorized(action.proposer.as_ref(), rules);
-        DomainGovernanceAction {
-            proposal_cid: action.proposal_cid,
-            action_label: action.action_label,
-            description: action.description,
-            confirmations: action
-                .confirmations
-                .into_iter()
-                .map(domain_confirmation_dto)
-                .collect(),
-            confirmation_count: action.confirmation_count,
-            executable_confirmation_cids: action.executable_confirmation_cids,
-            can_execute: action.can_execute,
-            orphaned: action.orphaned,
-            transfer_details: action.transfer_details,
-            accept_transfer_details: action.accept_transfer_details,
-            service_request_details: action.service_request_details,
-            proposer: action.proposer,
-            proposer_not_authorized: not_authorized,
-            created_at: action.created_at,
-        }
-    })
+    .map(|action| domain_action_dto(action, rules))
     .collect();
 
     Ok(GovernanceQueue {
@@ -664,6 +644,45 @@ pub struct GovernanceQueue {
     /// False when a read behind the batch failed and left cards out. A caller
     /// that counts the queue must not take an incomplete batch as empty.
     pub complete: bool,
+}
+
+/// Map an assembled domain proposal onto the wire DTO.
+///
+/// The payload is rendered from the create arguments the proposal read already
+/// holds, so it adds no ledger read. `rules` is the live rules contract, or
+/// `None` when it could not be read.
+fn domain_action_dto(
+    action: DomainAction,
+    rules: Option<&GovernanceState>,
+) -> DomainGovernanceAction {
+    let not_authorized = proposer_not_authorized(action.proposer.as_ref(), rules);
+    DomainGovernanceAction {
+        proposal_cid: action.proposal_cid,
+        action_label: action.action_label,
+        description: action.description,
+        confirmations: action
+            .confirmations
+            .into_iter()
+            .map(domain_confirmation_dto)
+            .collect(),
+        confirmation_count: action.confirmation_count,
+        executable_confirmation_cids: action.executable_confirmation_cids,
+        can_execute: action.can_execute,
+        orphaned: action.orphaned,
+        transfer_details: action.transfer_details,
+        accept_transfer_details: action.accept_transfer_details,
+        service_request_details: action.service_request_details,
+        proposer: action.proposer,
+        proposer_not_authorized: not_authorized,
+        created_at: action.created_at,
+        proposal_template_id: action
+            .template_id
+            .map(|t| format!("{}:{}:{}", t.package_id, t.module_name, t.entity_name)),
+        proposal_payload: action
+            .create_arguments
+            .is_some()
+            .then(|| record_to_json(&action.create_arguments)),
+    }
 }
 
 /// Whether `GovernanceRules_ConfirmAction` rejects every confirmation of a
@@ -2753,7 +2772,7 @@ mod tests {
     // ------------------------------------------------------------------------
 
     use canton_proto_rs::com::daml::ledger::api::v2::{
-        InterfaceView, List, Optional, RecordField, Variant,
+        InterfaceView, List, Optional, RecordField, TextMap, Variant, text_map,
     };
 
     fn field(label: &str, value: Value) -> RecordField {
@@ -3761,6 +3780,212 @@ mod tests {
             read_governance_state(&config, &party, None, &packages)
                 .await
                 .is_err()
+        );
+        Ok(())
+    }
+
+    // ------------------------------------------------------------------------
+    // domain_action_dto
+    //
+    // Review shows `proposal_payload` as the whole of what a member confirms
+    // or executes, so it has to carry every create argument of the proposal.
+    // ------------------------------------------------------------------------
+
+    fn contract_id_value(cid: &str) -> Value {
+        Value {
+            sum: Some(value::Sum::ContractId(cid.to_string())),
+        }
+    }
+
+    fn text_map_value(entries: &[(&str, Value)]) -> Value {
+        Value {
+            sum: Some(value::Sum::TextMap(TextMap {
+                entries: entries
+                    .iter()
+                    .map(|(key, value)| text_map::Entry {
+                        key: (*key).to_string(),
+                        value: Some(value.clone()),
+                    })
+                    .collect(),
+            })),
+        }
+    }
+
+    /// A `TransferProposal` the way the proposal read returns it: the
+    /// `GovernableAction` view beside the template's create arguments.
+    fn transfer_proposal_event(gov: &CantonId, proposer: &CantonId) -> Result<CreatedEvent> {
+        let admin = party("dso", "dd")?.to_string();
+        let receiver = party("bob", "ee")?.to_string();
+        let transfer = record_value(vec![
+            field("sender", party_value(&gov.to_string())),
+            field("receiver", party_value(&receiver)),
+            field("amount", numeric_value("12.5000000000")),
+            field(
+                "instrumentId",
+                record_value(vec![
+                    field("admin", party_value(&admin)),
+                    field("id", text_value("Amulet")),
+                ]),
+            ),
+            field("requestedAt", timestamp_value(1_700_000_000_000_000)),
+            field("executeBefore", timestamp_value(1_700_086_400_000_000)),
+            field(
+                "inputHoldingCids",
+                list_value(vec![contract_id_value("00holding")]),
+            ),
+            field(
+                "meta",
+                record_value(vec![field(
+                    "values",
+                    text_map_value(&[("memo", text_value("March rent"))]),
+                )]),
+            ),
+        ]);
+        let empty_metadata = || record_value(vec![field("values", text_map_value(&[]))]);
+        Ok(CreatedEvent {
+            contract_id: "00transfer-proposal".to_string(),
+            template_id: Some(Identifier {
+                package_id: "4d1f".to_string(),
+                module_name: "Governance.TokenCustody.TransferProposal".to_string(),
+                entity_name: "TransferProposal".to_string(),
+            }),
+            create_arguments: Some(Record {
+                record_id: None,
+                fields: vec![
+                    field("governanceParty", party_value(&gov.to_string())),
+                    field("proposer", party_value(&proposer.to_string())),
+                    field("transferFactoryCid", contract_id_value("00factory")),
+                    field("expectedAdmin", party_value(&admin)),
+                    field("transfer", transfer),
+                    field(
+                        "extraArgs",
+                        record_value(vec![
+                            field("context", empty_metadata()),
+                            field("meta", empty_metadata()),
+                        ]),
+                    ),
+                ],
+            }),
+            interface_views: vec![InterfaceView {
+                interface_id: Some(Identifier {
+                    package_id: "#governance-action".to_string(),
+                    module_name: "Governance.Action".to_string(),
+                    entity_name: "GovernableAction".to_string(),
+                }),
+                view_status: None,
+                view_value: Some(Record {
+                    record_id: None,
+                    fields: vec![
+                        field("governanceParty", party_value(&gov.to_string())),
+                        field("proposer", party_value(&proposer.to_string())),
+                        field("actionLabel", text_value("Transfer")),
+                        field("description", text_value("Pay March rent")),
+                    ],
+                }),
+                implementation_package_id: String::new(),
+            }],
+            created_at: Some(prost_types::Timestamp {
+                seconds: 1_700_000_000,
+                nanos: 0,
+            }),
+            ..Default::default()
+        })
+    }
+
+    #[test]
+    fn a_domain_action_carries_every_create_argument_as_json() -> Result {
+        let gov = party("gov", "aa")?;
+        let proposer = party("member", "bb")?;
+        let created = transfer_proposal_event(&gov, &proposer)?;
+        let (cid, info) = interpret::extract_proposal_info(&created, &gov)
+            .ok_or_else(|| anyhow::anyhow!("a proposal our party governs parses"))?;
+
+        let actions = interpret::assemble_domain_actions(
+            HashMap::new(),
+            HashMap::from([(cid, info)]),
+            true,
+            true,
+            2,
+            None,
+            0,
+        );
+        let action = actions
+            .into_iter()
+            .next()
+            .ok_or_else(|| anyhow::anyhow!("the unconfirmed proposal gets a card"))?;
+        let dto = domain_action_dto(action, None);
+
+        assert_eq!(dto.proposal_cid, "00transfer-proposal");
+        assert_eq!(
+            dto.proposal_template_id.as_deref(),
+            Some("4d1f:Governance.TokenCustody.TransferProposal:TransferProposal")
+        );
+        let admin = party("dso", "dd")?.to_string();
+        assert_eq!(
+            dto.proposal_payload,
+            Some(serde_json::json!({
+                "governanceParty": gov.to_string(),
+                "proposer": proposer.to_string(),
+                "transferFactoryCid": "00factory",
+                "expectedAdmin": admin,
+                "transfer": {
+                    "sender": gov.to_string(),
+                    "receiver": party("bob", "ee")?.to_string(),
+                    "amount": "12.5000000000",
+                    "instrumentId": { "admin": admin, "id": "Amulet" },
+                    "requestedAt": 1_700_000_000_000_000_i64,
+                    "executeBefore": 1_700_086_400_000_000_i64,
+                    "inputHoldingCids": ["00holding"],
+                    "meta": { "values": { "memo": "March rent" } },
+                },
+                "extraArgs": {
+                    "context": { "values": {} },
+                    "meta": { "values": {} },
+                },
+            }))
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn an_orphaned_domain_action_has_no_payload() -> Result {
+        let confirmations = HashMap::from([(
+            "00gone".to_string(),
+            (
+                "Transfer".to_string(),
+                vec![ParsedDomainConfirmation {
+                    contract_id: "00conf".to_string(),
+                    proposal_cid: "00gone".to_string(),
+                    action_label: "Transfer".to_string(),
+                    confirming_party: party("member", "bb")?,
+                    created_at: 100,
+                    expires_at: 0,
+                }],
+            ),
+        )]);
+
+        let actions = interpret::assemble_domain_actions(
+            confirmations,
+            HashMap::new(),
+            true,
+            true,
+            2,
+            None,
+            0,
+        );
+        let action = actions
+            .into_iter()
+            .next()
+            .ok_or_else(|| anyhow::anyhow!("the orphan keeps a dismiss-only card"))?;
+        let dto = domain_action_dto(action, None);
+
+        assert!(dto.orphaned);
+        assert_eq!(dto.proposal_template_id, None);
+        assert_eq!(dto.proposal_payload, None);
+        let wire = serde_json::to_value(&dto)?;
+        assert!(
+            wire.get("proposal_payload").is_none() && wire.get("proposal_template_id").is_none(),
+            "an orphan omits both fields on the wire: {wire}"
         );
         Ok(())
     }

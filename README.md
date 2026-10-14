@@ -574,11 +574,12 @@ The suite is organised into two layers:
   `kick`), the add-party and external-party flows, and the chaos phases
   (restart / resume, cancel cascades, concurrent workflows).
 - **Scenarios** — Given-When-Then story arcs built with the
-  [`Scenario`](crates/decman/tests/common/scenario.rs) DSL. Each scenario has
-  its own header, indented step trace, and completion line. A phase runs one
-  or more scenarios: most run a single one, while `utility_onboarding` runs
-  eight (four propose-confirm-execute cycles — ProvisionProviderService,
-  SetupUtility, Mint, Burn — plus four side-effect assertion scenarios).
+  [`Scenario`](https://github.com/DLC-link/penelope) DSL from the `penelope`
+  crate. Each scenario has its own header, indented step trace, and
+  completion line. A phase runs one or more scenarios: most run a single
+  one, while `utility_onboarding` runs eight (four propose-confirm-execute
+  cycles — ProvisionProviderService, SetupUtility, Mint, Burn — plus four
+  side-effect assertion scenarios).
 
 A scenario may omit `Given` and/or `When` and contain only `Then`s.
 That happens when the action has already been taken by an earlier
@@ -642,15 +643,17 @@ Integration tests completed successfully!
 Each scenario follows the Given-When-Then DSL: `Given` is a precondition,
 `When` is the test action, `Then` is the postcondition assertion (its
 probe is polled until it observes the expected state or the per-step
-deadline elapses). A failure renders as
+deadline elapses). The deadline also cancels a probe call that is still
+running when it passes. A failure renders as
 `ERROR Scenario "<name>" failed at <KIND> "<step>"` with a chained
 `anyhow` cause trail pinpointing the failing HTTP call.
 
 The exact `RUST_LOG` quiet preset is:
 ```
 warn,hyper_noise::server=error,
-governance_workflows::common::scenario=info,
-governance_workflows::common::phases=info
+penelope=info,
+governance_workflows::common::phases=info,
+governance_workflows::common::chaos=info
 ```
 
 The trace itself is rendered with a minimal format locally — just the message text, no timestamps, targets, levels, or structured fields. CI runs (auto-detected via the `CI` env var that GitHub Actions sets) get the full structured format with timestamps + structured fields for log archives and JSON parsing. To force the full format locally, set `INTEGRATION_TEST_FULL_LOG=1`.
@@ -660,7 +663,7 @@ The trace itself is rendered with a minimal format locally — just the message 
 Use `--verbose` when diagnosing a stuck or failing run. Sets:
 ```
 dec_party_manager=info,tokio_noise=error,hyper_noise=error,
-governance_workflows=info
+governance_workflows=info,penelope=info
 ```
 
 Surfaces all dec-party-manager INFO output (peer connections, Noise
