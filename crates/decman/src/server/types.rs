@@ -637,7 +637,7 @@ pub struct DomainGovernanceAction {
     pub created_at: Option<i64>,
     /// Template of the proposal contract, as `package-id:Module:Entity`.
     /// Absent on an orphaned card, where the proposal contract is no longer
-    /// readable.
+    /// readable. Withheld like `proposal_payload`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub proposal_template_id: Option<String>,
     /// Every create argument of the proposal contract, so a member can read
@@ -645,8 +645,10 @@ pub struct DomainGovernanceAction {
     /// fields. Same JSON shape as the chain audit's `details`: record fields
     /// keep their labels, numerics and parties are strings, a variant is
     /// `{"_variant": ..., "value": ...}`. Absent on an orphaned card, where
-    /// the proposal contract is no longer readable, and for a caller without
-    /// the admin role, who cannot confirm or execute.
+    /// the proposal contract is no longer readable. When `DECPM_ADMIN_ROLE`
+    /// names a role, a caller that lacks that role gets neither this field
+    /// nor `proposal_template_id`. When it is unset, every authenticated
+    /// caller passes the admin check and gets both.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "typegen", ts(type = "unknown"))]
     pub proposal_payload: Option<serde_json::Value>,
