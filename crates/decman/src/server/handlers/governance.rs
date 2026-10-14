@@ -61,10 +61,11 @@ use crate::{
             ActionType, ActiveCouponReassignmentDelegation, AuditLogEntry, AuditLogQuery,
             AuditLogResponse, AuditScope, CancelConfirmationRequest, CancelProposalRequest,
             ChainAuditEntry, ChainAuditQuery, ChainAuditResponse, ConfirmActionRequest,
-            CouponReassignmentDelegationSummary, ErrorResponse, ExecuteActionRequest,
-            ExpireConfirmationRequest, GovernanceResponse, GovernanceStateResponse, GovernanceType,
-            KnownMember, KnownMembersResponse, MessageResponse, ProposalType,
-            ProposalsPageResponse, ProposeActionRequest, chain_audit_entry_from_row,
+            CouponReassignmentDelegationSummary, DomainGovernanceAction, ErrorResponse,
+            ExecuteActionRequest, ExpireConfirmationRequest, GovernanceResponse,
+            GovernanceStateResponse, GovernanceType, KnownMember, KnownMembersResponse,
+            MessageResponse, ProposalType, ProposalsPageResponse, ProposeActionRequest,
+            chain_audit_entry_from_row,
         },
     },
     utils,
@@ -73,6 +74,18 @@ use crate::{
 // ============================================================================
 // Read Endpoints
 // ============================================================================
+
+/// Drop each proposal's full payload from a confirmations response.
+///
+/// v1 lets every authenticated caller read any party on the node. Only an
+/// admin may confirm or execute, so only an admin needs every field of what
+/// they would sign. The summary fields stay for everyone.
+fn withhold_payloads(domain_actions: &mut [DomainGovernanceAction]) {
+    for action in domain_actions {
+        action.proposal_payload = None;
+        action.proposal_template_id = None;
+    }
+}
 
 /// Get governance confirmations with parsed actions
 #[utoipa::path(
@@ -85,10 +98,12 @@ use crate::{
 )]
 #[get("/governance/confirmations")]
 pub async fn get_governance(
+    http_req: HttpRequest,
     data: web::Data<AppState>,
     query: web::Query<GovernanceQuery>,
 ) -> impl Responder {
     let party_id = &query.party_id;
+    let may_act = require_admin(&http_req, data.admin_role.as_deref()).is_ok();
 
     let token = get_party_token(&data, party_id).await;
 
@@ -133,16 +148,21 @@ pub async fn get_governance(
     )
     .await
     {
-        Ok((actions, domain_actions, next)) => HttpResponse::Ok().json(GovernanceResponse {
-            actions,
-            next_cursor: next.as_ref().and_then(encode_cursor),
-            domain_actions,
-            threshold,
-            member_party_id,
-            rules_contract_id: gov_state.as_ref().map(|state| state.contract_id.clone()),
-            gov_core_out_of_date: gov_state.as_ref().is_some_and(|state| state.out_of_date),
-            gov_core_package_ref: gov_state.and_then(|state| state.package_ref),
-        }),
+        Ok((actions, mut domain_actions, next)) => {
+            if !may_act {
+                withhold_payloads(&mut domain_actions);
+            }
+            HttpResponse::Ok().json(GovernanceResponse {
+                actions,
+                next_cursor: next.as_ref().and_then(encode_cursor),
+                domain_actions,
+                threshold,
+                member_party_id,
+                rules_contract_id: gov_state.as_ref().map(|state| state.contract_id.clone()),
+                gov_core_out_of_date: gov_state.as_ref().is_some_and(|state| state.out_of_date),
+                gov_core_package_ref: gov_state.and_then(|state| state.package_ref),
+            })
+        }
         Err(e) => {
             tracing::error!("Failed to fetch governance confirmations: {e}");
             HttpResponse::InternalServerError().json(ErrorResponse {
@@ -2299,6 +2319,31 @@ mod propose_guard_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn withholding_drops_the_payload_and_keeps_the_summary() -> anyhow::Result<()> {
+        let mut actions: Vec<DomainGovernanceAction> =
+            vec![serde_json::from_value(serde_json::json!({
+                "proposal_cid": "00proposal",
+                "action_label": "GenericVote",
+                "description": "vote on it",
+                "confirmations": [],
+                "confirmation_count": 0,
+                "executable_confirmation_cids": [],
+                "can_execute": false,
+                "proposal_template_id": "pkg:Governance.GenericVote:GenericVoteProposal",
+                "proposal_payload": {"description": "vote on it", "secret": "x"},
+            }))?];
+
+        withhold_payloads(&mut actions);
+
+        let wire = serde_json::to_value(&actions[0])?;
+        assert!(wire.get("proposal_payload").is_none(), "{wire}");
+        assert!(wire.get("proposal_template_id").is_none(), "{wire}");
+        assert_eq!(wire["description"], "vote on it");
+        assert_eq!(wire["proposal_cid"], "00proposal");
+        Ok(())
+    }
 
     fn amulet_rules(contract_id: &str, created_event_blob: &str) -> AmuletRulesContract {
         AmuletRulesContract {
