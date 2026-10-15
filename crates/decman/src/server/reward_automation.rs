@@ -1386,12 +1386,45 @@ fn counts_as_unreadable_enablement(read: &Enablement, served: usize) -> bool {
     *read == Enablement::Unreadable && served > 0
 }
 
+/// How long the package check of a pass that no token could read may take. The
+/// check runs on the task that carries the heartbeat.
+const PACKAGE_CHECK_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// What a pass that no token could read concludes from the participant's
+/// packages, given as `package id -> name` (pure).
+///
+/// Only a confirmed absence is [`Enablement::Off`]. A present package leaves the
+/// set unknown. `rewards` is a `#name` reference or a package id, as in
+/// [`PackageConfig`].
+fn enablement_without_a_token(
+    rewards: Option<&str>,
+    packages: &HashMap<String, String>,
+) -> Enablement {
+    let present = match rewards {
+        // No rewards package is configured, so no delegation can name this node.
+        None => false,
+        Some(reference) => match reference.strip_prefix('#') {
+            Some(name) => packages.values().any(|n| n == name),
+            None => packages.contains_key(reference),
+        },
+    };
+    if present {
+        Enablement::Unreadable
+    } else {
+        Enablement::Off
+    }
+}
+
 /// The decparties this node is a named assigner for.
 ///
 /// Tries each served decparty in turn: the read needs any one working token, not
 /// that decparty's own. A node whose every credential fails cannot ask, and
 /// [`Enablement::Unreadable`] says so rather than claiming an empty set. An
 /// empty set would read as "nothing is enabled" and silence a real fault.
+///
+/// When no token can read the set, the participant's admin API still lists its
+/// packages without one. A participant without the rewards DAR is then
+/// [`Enablement::Off`]. A failed package list stays [`Enablement::Unreadable`].
 async fn read_enablement(
     data: &actix_web::web::Data<AppState>,
     parties: &[CantonId],
@@ -1419,7 +1452,24 @@ async fn read_enablement(
             }
         }
     }
-    Enablement::Unreadable
+    let listed = tokio::time::timeout(
+        PACKAGE_CHECK_TIMEOUT,
+        fetch_package_id_to_name(&data.config),
+    )
+    .await;
+    match listed {
+        Ok(Ok(packages)) => {
+            enablement_without_a_token(pkgs.governance_rewards.as_deref(), &packages)
+        }
+        Ok(Err(e)) => {
+            tracing::debug!(error = %e, "listing the participant's packages failed");
+            Enablement::Unreadable
+        }
+        Err(_) => {
+            tracing::debug!("listing the participant's packages timed out");
+            Enablement::Unreadable
+        }
+    }
 }
 
 /// Per-node background loop. It records a heartbeat every [`HEARTBEAT_INTERVAL`] and
@@ -2947,10 +2997,20 @@ mod tests {
     }
 
     /// `auth: None` gives every decparty the `Ok(None)` of a party whose auth
-    /// failed at boot, so no credential can ask.
+    /// failed at boot, so no credential can ask. The admin API port is closed,
+    /// so the package check fails too, and nothing confirms that rewards are off.
     #[tokio::test]
-    async fn a_node_with_no_working_credential_cannot_read_its_enablement() -> anyhow::Result<()> {
-        let data = AppState::for_test(None).await?;
+    async fn a_node_that_can_neither_ask_nor_list_packages_cannot_read_its_enablement()
+    -> anyhow::Result<()> {
+        let closed_port = {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
+            listener.local_addr()?.port()
+        };
+        let mut state = Arc::try_unwrap(AppState::for_test(None).await?.into_inner())
+            .map_err(|_| anyhow::anyhow!("the test state is shared"))?;
+        state.config.canton.admin_api_host = "127.0.0.1".to_string();
+        state.config.canton.admin_api_port = closed_port;
+        let data = actix_web::web::Data::new(state);
         let parties = [CantonId::parse(DAVE)?, CantonId::parse(EVE)?];
 
         assert_eq!(
@@ -2958,6 +3018,49 @@ mod tests {
             Enablement::Unreadable
         );
         Ok(())
+    }
+
+    fn package_list(entries: &[(&str, &str)]) -> HashMap<String, String> {
+        entries
+            .iter()
+            .map(|(id, name)| (id.to_string(), name.to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn a_participant_without_the_rewards_package_is_off_without_a_token() {
+        let packages = package_list(&[("abc123", "governance-core")]);
+        assert_eq!(
+            enablement_without_a_token(Some("#governance-rewards-automation-v1"), &packages),
+            Enablement::Off
+        );
+        assert_eq!(
+            enablement_without_a_token(Some("def456"), &packages),
+            Enablement::Off
+        );
+    }
+
+    #[test]
+    fn a_participant_with_the_rewards_package_stays_unreadable_without_a_token() {
+        // The DAR is there, so a delegation may name this node. Only a token can
+        // tell, and none worked.
+        let packages = package_list(&[("def456", "governance-rewards-automation-v1")]);
+        assert_eq!(
+            enablement_without_a_token(Some("#governance-rewards-automation-v1"), &packages),
+            Enablement::Unreadable
+        );
+        assert_eq!(
+            enablement_without_a_token(Some("def456"), &packages),
+            Enablement::Unreadable
+        );
+    }
+
+    #[test]
+    fn no_configured_rewards_package_is_off_without_a_token() {
+        assert_eq!(
+            enablement_without_a_token(None, &package_list(&[])),
+            Enablement::Off
+        );
     }
 
     #[test]
