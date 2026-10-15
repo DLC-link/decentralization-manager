@@ -332,3 +332,71 @@ test_setup_too_many_beneficiaries_rejected = script do
     given = given_governance
     when = \f -> setupExecuteMustFail f [f.parties.member1] (replicate 21 (rb f.parties.member2 0.05))
     then_ = then_gov_nothing
+
+-- ============================================================================
+-- Template precondition: the split and assigner rules hold for a direct create
+-- by the decparty, not only on the SetupCouponReassignmentDelegation path (#286).
+-- Each test breaks exactly one rule.
+-- ============================================================================
+
+given_parties : Script TestParties
+given_parties = allocateRewardsTestParties
+
+then_parties_nothing : TestParties -> () -> Script Failures
+then_parties_nothing _ _ = pure []
+
+createMustFail : TestParties -> [Party] -> [RewardBeneficiary] -> Script ()
+createMustFail p assigners split =
+  submitMustFail p.governanceParty $ createCmd CouponReassignmentDelegation with
+    decparty = p.governanceParty; dso = p.dso; assigners; split
+
+-- A split every rule accepts, so the assigner tests fail on the assigners alone.
+validSplit : TestParties -> [RewardBeneficiary]
+validSplit p = [rb p.member2 0.8, rb p.member3 0.2]
+
+test_when_direct_create_has_empty_split_then_rejected = script do
+  run Test with
+    given = given_parties
+    when = \p -> createMustFail p [p.member1] []
+    then_ = then_parties_nothing
+
+test_when_direct_create_has_21_beneficiaries_then_rejected = script do
+  run Test with
+    given = given_parties
+    when = \p -> do
+      -- Distinct parties whose shares sum to exactly 1.0: 0.2 + 20 x 0.04.
+      first <- allocateParty "beneficiary0"
+      rest <- forA [1 .. 20 : Int] $ \i -> allocateParty ("beneficiary" <> show i)
+      let split = rb first 0.2 :: map (`rb` 0.04) rest
+      createMustFail p [p.member1] split
+    then_ = then_parties_nothing
+
+test_when_direct_create_has_zero_percentage_then_rejected = script do
+  run Test with
+    given = given_parties
+    when = \p -> createMustFail p [p.member1] [rb p.member2 1.0, rb p.member3 0.0]
+    then_ = then_parties_nothing
+
+test_when_direct_create_repeats_a_beneficiary_then_rejected = script do
+  run Test with
+    given = given_parties
+    when = \p -> createMustFail p [p.member1] [rb p.member2 0.5, rb p.member2 0.5]
+    then_ = then_parties_nothing
+
+test_when_direct_create_split_misses_1_then_rejected = script do
+  run Test with
+    given = given_parties
+    when = \p -> createMustFail p [p.member1] [rb p.member2 0.5]
+    then_ = then_parties_nothing
+
+test_when_direct_create_has_no_assigner_then_rejected = script do
+  run Test with
+    given = given_parties
+    when = \p -> createMustFail p [] (validSplit p)
+    then_ = then_parties_nothing
+
+test_when_direct_create_repeats_an_assigner_then_rejected = script do
+  run Test with
+    given = given_parties
+    when = \p -> createMustFail p [p.member1, p.member1] (validSplit p)
+    then_ = then_parties_nothing
