@@ -24,9 +24,11 @@ use serde_json::{Value, json};
 use tracing::info;
 
 use crate::common::{
-    Fixture, db,
+    Fixture, chaos, db,
     http::probe_workflow_status,
-    invitations::{InvitationIds, post_accept_invitation, probe_pending_invitation},
+    invitations::{
+        InvitationIds, post_accept_invitation, probe_pending_invitation, probe_run_invitation,
+    },
     scenario::Scenario,
 };
 
@@ -201,7 +203,7 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
         },
     )
     // 4. Re-add P3 — its participant lacks orphan-marker.
-    .when("P1 re-adds P3", |f, _| {
+    .when("P1 re-adds P3", |f, ctx| {
         Box::pin(async move {
             let party_id = f.party_id()?.to_string();
             let req = json!({
@@ -210,10 +212,7 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
                 "new_threshold": 2_i64,
                 "previous_threshold": 2_i64,
             });
-            let _: Value = f
-                .post_json(f.p1.http, "/add-party", &req)
-                .await
-                .context("POST /add-party")?;
+            ctx.run = Some(chaos::start_workflow_on(f, f.p1.http, "/add-party", &req).await?);
             Ok(())
         })
     })
@@ -222,7 +221,8 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
         Duration::from_secs(60),
         |f, ctx| {
             Box::pin(async move {
-                let id = probe_pending_invitation(f, f.p2.http, InvitationType::AddParty).await?;
+                let run = ctx.run.as_deref()?;
+                let id = probe_run_invitation(f, f.p2.http, run).await?;
                 ctx.p2 = Some(id);
                 Some(Ok(()))
             })
@@ -233,7 +233,8 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
         Duration::from_secs(60),
         |f, ctx| {
             Box::pin(async move {
-                let id = probe_pending_invitation(f, f.p3.http, InvitationType::AddParty).await?;
+                let run = ctx.run.as_deref()?;
+                let id = probe_run_invitation(f, f.p3.http, run).await?;
                 ctx.p3 = Some(id);
                 Some(Ok(()))
             })
