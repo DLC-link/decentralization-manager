@@ -1148,6 +1148,19 @@ fn package_absent(e: &anyhow::Error) -> bool {
     canton_error_id(e).as_deref() == Some("PACKAGE_NAMES_NOT_FOUND")
 }
 
+/// The transient ids that another assigner causes by reaching the coupons first.
+///
+/// On a decparty with several assigners, every node but one loses each round.
+/// That is the design working, so these log at `debug`. The other transient ids
+/// are timeouts and backpressure. They stay at `warn`, because they point at the
+/// synchronizer.
+const CONTENTION_ERROR_IDS: &[&str] = &[
+    "LOCAL_VERDICT_LOCKED_CONTRACTS",
+    "LOCAL_VERDICT_INACTIVE_CONTRACTS",
+    "UNKNOWN_CONTRACT_SYNCHRONIZERS",
+    "CONTRACT_NOT_FOUND",
+];
+
 /// Whether a fresh read on the next sweep is the cure.
 ///
 /// A non-ledger failure (config, transport, auth) is transient here too: it is
@@ -1156,6 +1169,28 @@ fn assign_failure_is_transient(e: &anyhow::Error) -> bool {
     match canton_error_id(e) {
         Some(id) => TRANSIENT_ASSIGN_ERROR_IDS.contains(&id.as_str()),
         None => true,
+    }
+}
+
+/// Whether another assigner reaching the coupons first explains the failure.
+fn assign_failure_is_contention(e: &anyhow::Error) -> bool {
+    canton_error_id(e).is_some_and(|id| CONTENTION_ERROR_IDS.contains(&id.as_str()))
+}
+
+/// Logs a transient failure that ends the sweep: contention at `debug`, and
+/// anything else at `warn`.
+fn log_sweep_end(
+    e: &anyhow::Error,
+    decparty: &CantonId,
+    coupon: &str,
+    assigned: usize,
+    remaining: usize,
+    message: &str,
+) {
+    if assign_failure_is_contention(e) {
+        tracing::debug!(%decparty, error = %e, coupon, assigned, remaining, "{message}");
+    } else {
+        tracing::warn!(%decparty, error = %e, coupon, assigned, remaining, "{message}");
     }
 }
 
@@ -1216,13 +1251,13 @@ where
                 continue;
             }
             Err(e) if assign_failure_is_transient(&e) => {
-                tracing::warn!(
-                    %decparty,
-                    error = %e,
-                    coupon = %primary,
+                log_sweep_end(
+                    &e,
+                    decparty,
+                    primary,
                     assigned,
-                    remaining = assignable.len() - lo,
-                    "assign chunk failed; ending the sweep to re-read the ledger"
+                    assignable.len() - lo,
+                    "assign chunk failed; ending the sweep to re-read the ledger",
                 );
                 break;
             }
@@ -1253,13 +1288,13 @@ where
             match submit(coupon, alone).await {
                 Ok(()) => assigned += 1,
                 Err(e) if assign_failure_is_transient(&e) => {
-                    tracing::warn!(
-                        %decparty,
-                        error = %e,
-                        coupon = %coupon,
+                    log_sweep_end(
+                        &e,
+                        decparty,
+                        coupon,
                         assigned,
-                        remaining = assignable.len() - (lo + i),
-                        "assign failed mid fan-out; ending the sweep to re-read the ledger"
+                        assignable.len() - (lo + i),
+                        "assign failed mid fan-out; ending the sweep to re-read the ledger",
                     );
                     break 'chunks;
                 }
@@ -2493,6 +2528,35 @@ mod tests {
             assign_failure_is_transient(&e),
             "a mediator timeout is not attributable to the coupon"
         );
+    }
+
+    #[test]
+    fn contention_is_told_apart_from_the_other_transient_failures() {
+        // Two of three devnet assigners lose every round, so contention must
+        // not log at warn. A timeout still does: it points at the synchronizer.
+        for id in CONTENTION_ERROR_IDS {
+            let e = canton_err(id);
+            assert!(assign_failure_is_contention(&e), "{id} is contention");
+            assert!(
+                assign_failure_is_transient(&e),
+                "{id} must still end the sweep"
+            );
+        }
+        for id in TRANSIENT_ASSIGN_ERROR_IDS
+            .iter()
+            .filter(|id| !CONTENTION_ERROR_IDS.contains(id))
+        {
+            assert!(
+                !assign_failure_is_contention(&canton_err(id)),
+                "{id} is not contention"
+            );
+        }
+        assert!(!assign_failure_is_contention(&canton_err(
+            "DAML_INTERPRETATION_ERROR"
+        )));
+        assert!(!assign_failure_is_contention(&anyhow::anyhow!(
+            "connection refused"
+        )));
     }
 
     #[test]
