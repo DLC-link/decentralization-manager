@@ -1400,9 +1400,9 @@ fn counts_as_unreadable_enablement(read: &Enablement, served: usize) -> bool {
     *read == Enablement::Unreadable && served > 0
 }
 
-/// How long the package check of a pass that no token could read may take. The
-/// check runs on the task that carries the heartbeat.
-const PACKAGE_CHECK_TIMEOUT: Duration = Duration::from_secs(15);
+/// How long a read that only feeds a diagnostic may take. These reads run on the
+/// task that carries the heartbeat, so a hung one must not stop the sweep.
+const DIAGNOSTIC_READ_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// What a pass that no token could read concludes from the participant's
 /// packages, given as `package id -> name` (pure).
@@ -1467,7 +1467,7 @@ async fn read_enablement(
         }
     }
     let listed = tokio::time::timeout(
-        PACKAGE_CHECK_TIMEOUT,
+        DIAGNOSTIC_READ_TIMEOUT,
         fetch_package_id_to_name(&data.config),
     )
     .await;
@@ -1665,8 +1665,8 @@ fn assigners_not_members(assigners: &[CantonId], members: &[CantonId]) -> Vec<Ca
 }
 
 /// Counts and logs a sweep whose delegation names an assigner that is no longer
-/// a governance member. A failed rules read reports nothing, because the
-/// membership is then unknown.
+/// a governance member. A failed or slow rules read reports nothing, because
+/// the membership is then unknown.
 async fn report_assigners_not_members(
     data: &actix_web::web::Data<AppState>,
     decparty: &CantonId,
@@ -1674,15 +1674,23 @@ async fn report_assigners_not_members(
     token: &str,
     pkgs: &PackageConfig,
 ) {
-    let rules =
-        match read_governance_state(&data.config, decparty, Some(token.to_string()), pkgs).await {
-            Ok(Some(rules)) => rules,
-            Ok(None) => return,
-            Err(e) => {
-                tracing::debug!(%decparty, error = %e, "reading the governance members failed");
-                return;
-            }
-        };
+    let read = tokio::time::timeout(
+        DIAGNOSTIC_READ_TIMEOUT,
+        read_governance_state(&data.config, decparty, Some(token.to_string()), pkgs),
+    )
+    .await;
+    let rules = match read {
+        Ok(Ok(Some(rules))) => rules,
+        Ok(Ok(None)) => return,
+        Ok(Err(e)) => {
+            tracing::debug!(%decparty, error = %e, "reading the governance members failed");
+            return;
+        }
+        Err(_) => {
+            tracing::debug!(%decparty, "reading the governance members timed out");
+            return;
+        }
+    };
     let stale = assigners_not_members(&delegation.assigners, &rules.members);
     if !stale.is_empty() {
         ASSIGNER_NOT_MEMBER
