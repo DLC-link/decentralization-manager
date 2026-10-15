@@ -707,6 +707,16 @@ static AUTH_UNREGISTERED: LazyLock<IntCounterVec> = LazyLock::new(|| {
     .expect("metric name is a unique literal")
 });
 
+// Carries no decparty label: one enablement read serves every decparty this
+// node holds credentials for, and a pass that fails reads none of them.
+static ENABLEMENT_UNREADABLE: LazyLock<IntCounter> = LazyLock::new(|| {
+    prometheus::register_int_counter!(
+        "decman_reward_enablement_unreadable_total",
+        "Passes that could not read which decparties delegate to this node, so no auth fault was attributable to any of them."
+    )
+    .expect("metric name is a unique literal")
+});
+
 static OLDEST_EXPIRES_IN: LazyLock<GaugeVec> = LazyLock::new(|| {
     prometheus::register_gauge_vec!(
         "decman_reward_oldest_unassigned_expires_in_seconds",
@@ -727,6 +737,7 @@ pub(crate) fn register_metrics() {
     LazyLock::force(&EXPIRY_READS);
     LazyLock::force(&CREDENTIALS_UNAVAILABLE);
     LazyLock::force(&AUTH_UNREGISTERED);
+    LazyLock::force(&ENABLEMENT_UNREADABLE);
     LazyLock::force(&OLDEST_EXPIRES_IN);
 }
 
@@ -1137,6 +1148,19 @@ fn package_absent(e: &anyhow::Error) -> bool {
     canton_error_id(e).as_deref() == Some("PACKAGE_NAMES_NOT_FOUND")
 }
 
+/// The transient ids that another assigner causes by reaching the coupons first.
+///
+/// On a decparty with several assigners, every node but one loses each round.
+/// That is the design working, so these log at `debug`. The other transient ids
+/// are timeouts and backpressure. They stay at `warn`, because they point at the
+/// synchronizer.
+const CONTENTION_ERROR_IDS: &[&str] = &[
+    "LOCAL_VERDICT_LOCKED_CONTRACTS",
+    "LOCAL_VERDICT_INACTIVE_CONTRACTS",
+    "UNKNOWN_CONTRACT_SYNCHRONIZERS",
+    "CONTRACT_NOT_FOUND",
+];
+
 /// Whether a fresh read on the next sweep is the cure.
 ///
 /// A non-ledger failure (config, transport, auth) is transient here too: it is
@@ -1145,6 +1169,28 @@ fn assign_failure_is_transient(e: &anyhow::Error) -> bool {
     match canton_error_id(e) {
         Some(id) => TRANSIENT_ASSIGN_ERROR_IDS.contains(&id.as_str()),
         None => true,
+    }
+}
+
+/// Whether another assigner reaching the coupons first explains the failure.
+fn assign_failure_is_contention(e: &anyhow::Error) -> bool {
+    canton_error_id(e).is_some_and(|id| CONTENTION_ERROR_IDS.contains(&id.as_str()))
+}
+
+/// Logs a transient failure that ends the sweep: contention at `debug`, and
+/// anything else at `warn`.
+fn log_sweep_end(
+    e: &anyhow::Error,
+    decparty: &CantonId,
+    coupon: &str,
+    assigned: usize,
+    remaining: usize,
+    message: &str,
+) {
+    if assign_failure_is_contention(e) {
+        tracing::debug!(%decparty, error = %e, coupon, assigned, remaining, "{message}");
+    } else {
+        tracing::warn!(%decparty, error = %e, coupon, assigned, remaining, "{message}");
     }
 }
 
@@ -1205,13 +1251,13 @@ where
                 continue;
             }
             Err(e) if assign_failure_is_transient(&e) => {
-                tracing::warn!(
-                    %decparty,
-                    error = %e,
-                    coupon = %primary,
+                log_sweep_end(
+                    &e,
+                    decparty,
+                    primary,
                     assigned,
-                    remaining = assignable.len() - lo,
-                    "assign chunk failed; ending the sweep to re-read the ledger"
+                    assignable.len() - lo,
+                    "assign chunk failed; ending the sweep to re-read the ledger",
                 );
                 break;
             }
@@ -1242,13 +1288,13 @@ where
             match submit(coupon, alone).await {
                 Ok(()) => assigned += 1,
                 Err(e) if assign_failure_is_transient(&e) => {
-                    tracing::warn!(
-                        %decparty,
-                        error = %e,
-                        coupon = %coupon,
+                    log_sweep_end(
+                        &e,
+                        decparty,
+                        coupon,
                         assigned,
-                        remaining = assignable.len() - (lo + i),
-                        "assign failed mid fan-out; ending the sweep to re-read the ledger"
+                        assignable.len() - (lo + i),
+                        "assign failed mid fan-out; ending the sweep to re-read the ledger",
                     );
                     break 'chunks;
                 }
@@ -1316,30 +1362,89 @@ fn counts_as_auth_fault(
     ) && enabled.is_some_and(|set| set.contains(decparty))
 }
 
-/// The decparties this node is a named assigner for, or `None` when no token
-/// could be obtained to ask with.
+/// What one pass learned about the decparties whose delegations name this node.
+#[derive(Debug, PartialEq, Eq)]
+enum Enablement {
+    /// The decparties this node is a named assigner for.
+    Read(HashSet<CantonId>),
+    /// This participant holds no rewards DAR, so no delegation can name it.
+    Off,
+    /// No credential could read the set.
+    Unreadable,
+}
+
+/// Whether a pass that could not read the enablement set is a fault (pure).
+///
+/// [`counts_as_auth_fault`] attributes an auth fault only to a decparty in the
+/// set, so a pass holding no set attributes nothing. A node whose every
+/// credential fails would then count no auth fault at all, while the loop keeps
+/// beating. This counter is that pass's only signal.
+///
+/// A node serving no decparty has nothing to read, and a node without the
+/// rewards DAR is off by design, so neither counts.
+fn counts_as_unreadable_enablement(read: &Enablement, served: usize) -> bool {
+    *read == Enablement::Unreadable && served > 0
+}
+
+/// How long the package check of a pass that no token could read may take. The
+/// check runs on the task that carries the heartbeat.
+const PACKAGE_CHECK_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// What a pass that no token could read concludes from the participant's
+/// packages, given as `package id -> name` (pure).
+///
+/// Only a confirmed absence is [`Enablement::Off`]. A present package leaves the
+/// set unknown. `rewards` is a `#name` reference or a package id, as in
+/// [`PackageConfig`].
+fn enablement_without_a_token(
+    rewards: Option<&str>,
+    packages: &HashMap<String, String>,
+) -> Enablement {
+    let present = match rewards {
+        // No rewards package is configured, so no delegation can name this node.
+        None => false,
+        Some(reference) => match reference.strip_prefix('#') {
+            Some(name) => packages.values().any(|n| n == name),
+            None => packages.contains_key(reference),
+        },
+    };
+    if present {
+        Enablement::Unreadable
+    } else {
+        Enablement::Off
+    }
+}
+
+/// The decparties this node is a named assigner for.
 ///
 /// Tries each served decparty in turn: the read needs any one working token, not
 /// that decparty's own. A node whose every credential fails cannot ask, and
-/// `None` says so rather than claiming an empty set — an empty set would read as
-/// "nothing is enabled" and silence a real fault.
+/// [`Enablement::Unreadable`] says so rather than claiming an empty set. An
+/// empty set would read as "nothing is enabled" and silence a real fault.
+///
+/// When no token can read the set, the participant's admin API still lists its
+/// packages without one. A participant without the rewards DAR is then
+/// [`Enablement::Off`]. A failed package list stays [`Enablement::Unreadable`].
 async fn read_enablement(
     data: &actix_web::web::Data<AppState>,
     parties: &[CantonId],
-) -> Option<HashSet<CantonId>> {
+) -> Enablement {
     let pkgs = packages();
     for decparty in parties {
         let Ok(Some((token, member))) = get_party_credentials(data, decparty).await else {
             continue;
         };
         match delegated_decparties(&data.config, &pkgs, data.test_mode, &member, &token).await {
-            Ok(set) => return Some(set),
+            Ok(set) => return Enablement::Read(set),
+            // The package store belongs to the participant, so every other
+            // token gets the same answer.
             Err(e) if package_absent(&e) => {
                 tracing::trace!(
                     %member,
                     error = %e,
                     "reward automation is off: this participant holds no rewards DAR"
                 );
+                return Enablement::Off;
             }
             Err(e) => {
                 // Another decparty's token may still work, so try the rest.
@@ -1347,7 +1452,24 @@ async fn read_enablement(
             }
         }
     }
-    None
+    let listed = tokio::time::timeout(
+        PACKAGE_CHECK_TIMEOUT,
+        fetch_package_id_to_name(&data.config),
+    )
+    .await;
+    match listed {
+        Ok(Ok(packages)) => {
+            enablement_without_a_token(pkgs.governance_rewards.as_deref(), &packages)
+        }
+        Ok(Err(e)) => {
+            tracing::debug!(error = %e, "listing the participant's packages failed");
+            Enablement::Unreadable
+        }
+        Err(_) => {
+            tracing::debug!("listing the participant's packages timed out");
+            Enablement::Unreadable
+        }
+    }
 }
 
 /// Per-node background loop. It records a heartbeat every [`HEARTBEAT_INTERVAL`] and
@@ -1417,7 +1539,16 @@ pub(crate) async fn run_reward_automation_loop(data: actix_web::web::Data<AppSta
 
         prune_unserved(&mut oldest, &parties);
 
-        if let Some(set) = read_enablement(&data, &parties).await {
+        let read = read_enablement(&data, &parties).await;
+        if counts_as_unreadable_enablement(&read, parties.len()) {
+            ENABLEMENT_UNREADABLE.inc();
+            tracing::warn!(
+                served = parties.len(),
+                "no credential could read the delegated decparties; until one can, this node \
+                 attributes no auth fault to any of them"
+            );
+        }
+        if let Enablement::Read(set) = read {
             enabled = Some(set);
         }
 
@@ -2450,6 +2581,35 @@ mod tests {
     }
 
     #[test]
+    fn contention_is_told_apart_from_the_other_transient_failures() {
+        // Two of three devnet assigners lose every round, so contention must
+        // not log at warn. A timeout still does: it points at the synchronizer.
+        for id in CONTENTION_ERROR_IDS {
+            let e = canton_err(id);
+            assert!(assign_failure_is_contention(&e), "{id} is contention");
+            assert!(
+                assign_failure_is_transient(&e),
+                "{id} must still end the sweep"
+            );
+        }
+        for id in TRANSIENT_ASSIGN_ERROR_IDS
+            .iter()
+            .filter(|id| !CONTENTION_ERROR_IDS.contains(id))
+        {
+            assert!(
+                !assign_failure_is_contention(&canton_err(id)),
+                "{id} is not contention"
+            );
+        }
+        assert!(!assign_failure_is_contention(&canton_err(
+            "DAML_INTERPRETATION_ERROR"
+        )));
+        assert!(!assign_failure_is_contention(&anyhow::anyhow!(
+            "connection refused"
+        )));
+    }
+
+    #[test]
     fn canton_error_id_survives_added_context() {
         // A future `.context(..)` on the submit call must not silently turn
         // every rejection into an unclassifiable one.
@@ -2542,6 +2702,18 @@ mod tests {
             gathered_family_names()
                 .iter()
                 .any(|n| n == "decman_reward_heartbeat_total")
+        );
+    }
+
+    #[test]
+    fn the_unreadable_enablement_counter_is_exposed_before_any_pass_runs() {
+        // Unlabelled, so `gather()` exports it from boot. An alert on its
+        // increase needs a zero to increase from.
+        register_metrics();
+        assert!(
+            gathered_family_names()
+                .iter()
+                .any(|n| n == "decman_reward_enablement_unreadable_total")
         );
     }
 
@@ -2788,6 +2960,107 @@ mod tests {
             &decparty,
             None
         ));
+    }
+
+    #[test]
+    fn an_unreadable_enablement_set_counts_on_a_serving_node() {
+        // The blind pass attributes no auth fault to any decparty. Without this
+        // counter, a node whose every credential fails reports nothing.
+        assert!(counts_as_unreadable_enablement(&Enablement::Unreadable, 17));
+    }
+
+    #[test]
+    fn an_unreadable_enablement_set_counts_nothing_on_an_idle_node() {
+        // A node serving no decparty has nothing to read.
+        assert!(!counts_as_unreadable_enablement(&Enablement::Unreadable, 0));
+    }
+
+    #[test]
+    fn a_node_without_the_rewards_dar_counts_no_unreadable_enablement() {
+        // Such a node is off by design. Counting it would page every node that
+        // never took part in reward reassignment.
+        assert!(!counts_as_unreadable_enablement(&Enablement::Off, 17));
+    }
+
+    #[test]
+    fn a_read_enablement_set_counts_nothing() {
+        let decparty = CantonId::parse(GOV).expect("GOV is a valid canton id");
+        let enabled: HashSet<CantonId> = std::iter::once(decparty).collect();
+        assert!(!counts_as_unreadable_enablement(
+            &Enablement::Read(enabled),
+            17
+        ));
+        assert!(!counts_as_unreadable_enablement(
+            &Enablement::Read(HashSet::new()),
+            17
+        ));
+    }
+
+    /// `auth: None` gives every decparty the `Ok(None)` of a party whose auth
+    /// failed at boot, so no credential can ask. The admin API port is closed,
+    /// so the package check fails too, and nothing confirms that rewards are off.
+    #[tokio::test]
+    async fn a_node_that_can_neither_ask_nor_list_packages_cannot_read_its_enablement()
+    -> anyhow::Result<()> {
+        let closed_port = {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
+            listener.local_addr()?.port()
+        };
+        let mut state = Arc::try_unwrap(AppState::for_test(None).await?.into_inner())
+            .map_err(|_| anyhow::anyhow!("the test state is shared"))?;
+        state.config.canton.admin_api_host = "127.0.0.1".to_string();
+        state.config.canton.admin_api_port = closed_port;
+        let data = actix_web::web::Data::new(state);
+        let parties = [CantonId::parse(DAVE)?, CantonId::parse(EVE)?];
+
+        assert_eq!(
+            read_enablement(&data, &parties).await,
+            Enablement::Unreadable
+        );
+        Ok(())
+    }
+
+    fn package_list(entries: &[(&str, &str)]) -> HashMap<String, String> {
+        entries
+            .iter()
+            .map(|(id, name)| (id.to_string(), name.to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn a_participant_without_the_rewards_package_is_off_without_a_token() {
+        let packages = package_list(&[("abc123", "governance-core")]);
+        assert_eq!(
+            enablement_without_a_token(Some("#governance-rewards-automation-v1"), &packages),
+            Enablement::Off
+        );
+        assert_eq!(
+            enablement_without_a_token(Some("def456"), &packages),
+            Enablement::Off
+        );
+    }
+
+    #[test]
+    fn a_participant_with_the_rewards_package_stays_unreadable_without_a_token() {
+        // The DAR is there, so a delegation may name this node. Only a token can
+        // tell, and none worked.
+        let packages = package_list(&[("def456", "governance-rewards-automation-v1")]);
+        assert_eq!(
+            enablement_without_a_token(Some("#governance-rewards-automation-v1"), &packages),
+            Enablement::Unreadable
+        );
+        assert_eq!(
+            enablement_without_a_token(Some("def456"), &packages),
+            Enablement::Unreadable
+        );
+    }
+
+    #[test]
+    fn no_configured_rewards_package_is_off_without_a_token() {
+        assert_eq!(
+            enablement_without_a_token(None, &package_list(&[])),
+            Enablement::Off
+        );
     }
 
     #[test]

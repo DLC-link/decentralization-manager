@@ -44,9 +44,21 @@ pub enum AuthError {
 
     #[error("No credentials configured for party: {0}")]
     NoCredentials(String),
+
+    #[error("Token request timed out after {0:?}")]
+    TimedOut(Duration),
 }
 
 type Result<T> = std::result::Result<T, AuthError>;
+
+/// How long one call to the IdP may take before it fails.
+///
+/// A refresh holds the party's token lock for the whole call, and the reward
+/// loop fetches tokens from the task that carries its heartbeat. Without a
+/// bound, an IdP that accepts the connection and never answers blocks every
+/// caller for the party and stops the heartbeat. 15s matches the decman-cli
+/// client.
+const TOKEN_REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
 
 struct TokenState {
     access_token: String,
@@ -74,6 +86,8 @@ pub struct TokenManager {
     member_party_id: CantonId,
     state: RwLock<TokenState>,
     http: reqwest::Client,
+    /// The bound on each call to the IdP.
+    request_timeout: Duration,
 }
 
 impl TokenManager {
@@ -89,13 +103,14 @@ impl TokenManager {
     ) -> Result<Self> {
         let source = TokenSource::Keycloak(config);
         let http = reqwest::Client::new();
-        let state = Self::authenticate(&source, &http).await?;
+        let state = Self::authenticate(&source, &http, TOKEN_REQUEST_TIMEOUT).await?;
         Ok(Self {
             source,
             user_id,
             member_party_id,
             state: RwLock::new(state),
             http,
+            request_timeout: TOKEN_REQUEST_TIMEOUT,
         })
     }
 
@@ -111,13 +126,14 @@ impl TokenManager {
     ) -> Result<Self> {
         let source = TokenSource::Auth0(config);
         let http = reqwest::Client::new();
-        let state = Self::authenticate(&source, &http).await?;
+        let state = Self::authenticate(&source, &http, TOKEN_REQUEST_TIMEOUT).await?;
         Ok(Self {
             source,
             user_id,
             member_party_id,
             state: RwLock::new(state),
             http,
+            request_timeout: TOKEN_REQUEST_TIMEOUT,
         })
     }
 
@@ -150,11 +166,20 @@ impl TokenManager {
         Ok(state.access_token.clone())
     }
 
-    async fn authenticate(source: &TokenSource, http: &reqwest::Client) -> Result<TokenState> {
-        match source {
-            TokenSource::Keycloak(config) => Self::authenticate_keycloak(config).await,
-            TokenSource::Auth0(config) => Self::authenticate_auth0(config, http).await,
-        }
+    async fn authenticate(
+        source: &TokenSource,
+        http: &reqwest::Client,
+        timeout: Duration,
+    ) -> Result<TokenState> {
+        let call = async {
+            match source {
+                TokenSource::Keycloak(config) => Self::authenticate_keycloak(config).await,
+                TokenSource::Auth0(config) => Self::authenticate_auth0(config, http).await,
+            }
+        };
+        tokio::time::timeout(timeout, call)
+            .await
+            .map_err(|_| AuthError::TimedOut(timeout))?
     }
 
     async fn authenticate_keycloak(config: &KeycloakConfig) -> Result<TokenState> {
@@ -224,25 +249,29 @@ impl TokenManager {
         // M2M auth doesn't have refresh tokens, just re-authenticate
         if state.is_m2m {
             tracing::debug!("M2M token expired, re-authenticating");
-            *state = Self::authenticate(&self.source, &self.http).await?;
+            *state = Self::authenticate(&self.source, &self.http, self.request_timeout).await?;
             return Ok(());
         }
 
         // Password flow only applies to Keycloak source
         let TokenSource::Keycloak(ref config) = self.source else {
-            *state = Self::authenticate(&self.source, &self.http).await?;
+            *state = Self::authenticate(&self.source, &self.http, self.request_timeout).await?;
             return Ok(());
         };
 
         let url = keycloak::login::token_url(&config.url, &config.realm);
 
-        match keycloak::login::refresh(RefreshParams {
-            client_id: config.client_id.clone(),
-            refresh_token: state.refresh_token.clone(),
-            url,
-        })
+        let refreshed = tokio::time::timeout(
+            self.request_timeout,
+            keycloak::login::refresh(RefreshParams {
+                client_id: config.client_id.clone(),
+                refresh_token: state.refresh_token.clone(),
+                url,
+            }),
+        )
         .await
-        {
+        .map_err(|_| AuthError::TimedOut(self.request_timeout))?;
+        match refreshed {
             Ok(response) => {
                 let expires_in_secs = (response.expires_in.saturating_sub(60)) as u64;
                 state.access_token = response.access_token;
@@ -253,7 +282,7 @@ impl TokenManager {
             }
             Err(e) if e.contains("Token is not active") => {
                 tracing::warn!("Refresh token expired, re-authenticating");
-                *state = Self::authenticate(&self.source, &self.http).await?;
+                *state = Self::authenticate(&self.source, &self.http, self.request_timeout).await?;
             }
             Err(e) => {
                 return Err(AuthError::RefreshFailed(e));
@@ -479,7 +508,10 @@ impl WorkflowAuth {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::{Arc, Mutex};
+    use std::{
+        sync::{Arc, Mutex},
+        time::{Duration, Instant, SystemTime},
+    };
 
     use anyhow::anyhow;
     use common::canton_id::{NAMESPACE_LENGTH, Namespace};
@@ -490,8 +522,8 @@ mod tests {
     };
 
     use super::{
-        AuthRegistry, CantonId, KeycloakConfig, MAX_LOGGED_BODY_BYTES, PartyCredentials,
-        truncate_for_log,
+        AuthError, AuthRegistry, CantonId, KeycloakConfig, MAX_LOGGED_BODY_BYTES, PartyCredentials,
+        TokenManager, TokenSource, TokenState, truncate_for_log,
     };
 
     /// A writer the test reads back once the subscriber has written to it.
@@ -649,6 +681,77 @@ mod tests {
             !logs.contains("ERROR"),
             "an empty party list logged an error: {logs}"
         );
+        Ok(())
+    }
+
+    /// A Keycloak stand-in that accepts every token request and answers only
+    /// after a minute, longer than any test waits.
+    async fn keycloak_hanging() -> MockServer {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path_regex(r".*/token$"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({"access_token": "t"}))
+                    .set_delay(Duration::from_secs(60)),
+            )
+            .mount(&server)
+            .await;
+        server
+    }
+
+    const SHORT_TIMEOUT: Duration = Duration::from_millis(200);
+
+    #[tokio::test]
+    async fn a_login_the_idp_never_answers_times_out() -> anyhow::Result<()> {
+        let server = keycloak_hanging().await;
+        let source = TokenSource::Keycloak(party(1, &server.uri()).keycloak);
+
+        let started = Instant::now();
+        let result =
+            TokenManager::authenticate(&source, &reqwest::Client::new(), SHORT_TIMEOUT).await;
+
+        assert!(
+            matches!(result, Err(AuthError::TimedOut(t)) if t == SHORT_TIMEOUT),
+            "the login did not time out"
+        );
+        assert!(started.elapsed() < Duration::from_secs(10));
+        Ok(())
+    }
+
+    /// The refresh path holds the token lock, so a hung refresh would block
+    /// every caller for the party.
+    #[tokio::test]
+    async fn a_refresh_the_idp_never_answers_times_out() -> anyhow::Result<()> {
+        let server = keycloak_hanging().await;
+        let party = party(1, &server.uri());
+        let manager = TokenManager {
+            source: TokenSource::Keycloak(KeycloakConfig {
+                client_secret: None,
+                username: Some("user".to_string()),
+                password: Some("password".to_string()),
+                ..party.keycloak
+            }),
+            user_id: party.user_id,
+            member_party_id: party.member_party_id,
+            state: tokio::sync::RwLock::new(TokenState {
+                access_token: "expired".to_string(),
+                refresh_token: "refresh".to_string(),
+                expires_at: SystemTime::UNIX_EPOCH,
+                is_m2m: false,
+            }),
+            http: reqwest::Client::new(),
+            request_timeout: SHORT_TIMEOUT,
+        };
+
+        let started = Instant::now();
+        let result = manager.get_token().await;
+
+        assert!(
+            matches!(result, Err(AuthError::TimedOut(t)) if t == SHORT_TIMEOUT),
+            "the refresh did not time out"
+        );
+        assert!(started.elapsed() < Duration::from_secs(10));
         Ok(())
     }
 
