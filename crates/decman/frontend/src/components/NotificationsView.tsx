@@ -504,7 +504,7 @@ const InvitationCard = ({
                   <>
                     <Box
                       component="span"
-                      sx={{ color: "text.secondary", textDecoration: "line-through" }}
+                      sx={{ color: "text.secondary" }}
                     >
                       {invitation.previous_threshold}
                     </Box>{" "}
@@ -931,10 +931,7 @@ const ActionCard = ({
                       <>
                         <Box
                           component="span"
-                          sx={{
-                            color: "text.disabled",
-                            textDecoration: "line-through",
-                          }}
+                          sx={{ color: "text.disabled" }}
                         >
                           {d.before}
                         </Box>{" "}
@@ -2110,7 +2107,7 @@ const WorkflowRunCard = ({
                   <>
                     <Box
                       component="span"
-                      sx={{ color: "text.secondary", textDecoration: "line-through" }}
+                      sx={{ color: "text.secondary" }}
                     >
                       {run.previous_threshold}
                     </Box>{" "}
