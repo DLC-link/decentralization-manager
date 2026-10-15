@@ -7,7 +7,7 @@
 module Governance.Rewards.SetupCouponReassignmentDelegation where
 
 import DA.Foldable (forA_)
-import DA.List (unique)
+import DA.Optional (whenSome)
 import Splice.Api.RewardAssignmentV1 (RewardBeneficiary(..))
 import Governance.Rewards.CouponReassignmentDelegation
 import Governance.Action
@@ -35,15 +35,9 @@ template SetupCouponReassignmentDelegation
         description = "Create (or replace) the coupon-reassignment delegation."
 
       executeImpl = do
-        assertMsg "beneficiaries must not be empty" (not (null beneficiaries))
-        assertMsg "at most 20 beneficiaries" (length beneficiaries <= 20)
-        assertMsg "each percentage must be in (0,1]"
-          (all (\b -> b.percentage > 0.0 && b.percentage <= 1.0) beneficiaries)
-        assertMsg "beneficiaries must be unique" (unique (map (.beneficiary) beneficiaries))
-        let total = sum (map (.percentage) beneficiaries)
-        assertMsg "percentages must sum to 1.0" (total == 1.0)   -- exact Decimal
-        assertMsg "assigners must not be empty" (not (null assigners))
-        assertMsg "assigners must be unique" (unique assigners)
+        -- The delegation's `ensure` would reject the create anyway. Checking
+        -- first makes the failure name the rule instead of the template.
+        whenSome (delegationRuleBroken assigners beneficiaries) abort
         forA_ priorDelegation (`exercise` Delegation_Revoke)      -- atomic replace when Some
         _ <- create CouponReassignmentDelegation with
                decparty = governanceParty; dso; assigners; split = beneficiaries

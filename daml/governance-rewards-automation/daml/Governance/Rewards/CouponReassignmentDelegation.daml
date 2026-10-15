@@ -8,11 +8,29 @@
 module Governance.Rewards.CouponReassignmentDelegation where
 
 import DA.Foldable (forA_)
+import DA.List (unique)
+import DA.Optional (isNone)
 
 import Splice.Amulet (RewardCouponV2)
 import Splice.Api.RewardAssignmentV1
   (RewardCoupon, RewardBeneficiary, RewardCoupon_AssignBeneficiaries(..))
 import Splice.Api.Token.MetadataV1 (ExtraArgs)
+
+-- | The first rule that `assigners` and `split` break, or `None`.
+-- The template's `ensure` applies these rules to every creation path.
+-- `RewardCoupon_AssignBeneficiaries` requires unique beneficiaries, so a
+-- delegation that repeats one could never assign a coupon.
+delegationRuleBroken : [Party] -> [RewardBeneficiary] -> Optional Text
+delegationRuleBroken assigners split
+  | null split = Some "beneficiaries must not be empty"
+  | length split > 20 = Some "at most 20 beneficiaries"
+  | not (all (\b -> b.percentage > 0.0 && b.percentage <= 1.0) split) =
+      Some "each percentage must be in (0,1]"
+  | not (unique (map (.beneficiary) split)) = Some "beneficiaries must be unique"
+  | sum (map (.percentage) split) /= 1.0 = Some "percentages must sum to 1.0"   -- exact Decimal
+  | null assigners = Some "assigners must not be empty"
+  | not (unique assigners) = Some "assigners must be unique"
+  | otherwise = None
 
 template CouponReassignmentDelegation
   with
@@ -23,6 +41,7 @@ template CouponReassignmentDelegation
   where
     signatory decparty
     observer assigners
+    ensure isNone (delegationRuleBroken assigners split)
 
     nonconsuming choice Delegation_Assign : ()
       with
