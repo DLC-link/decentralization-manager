@@ -18,7 +18,7 @@ const DAR_FILES: &[&str] = &[
     "governance-core-v1-0.1.0.dar",
     "governance-token-custody-v1-0.1.0.dar",
     "governance-utility-onboarding-v1-0.5.0.dar",
-    "governance-rewards-automation-v1-0.1.0.dar",
+    "governance-rewards-automation-v1-0.2.0.dar",
 ];
 
 /// Map of expected package_id → (module_name, entity_name) of a well-known
@@ -66,31 +66,40 @@ async fn dar_present_on(f: &Fixture, port: u16, pkg: &str, module: &str, entity:
     f.get_json::<serde_json::Value>(port, &path).await.is_ok()
 }
 
-/// Daml package names of the distributed DARs — each filename is
+/// Daml package names and versions of the distributed DARs. Each filename is
 /// `<package-name>-<version>.dar`.
-fn distributed_package_names() -> Vec<&'static str> {
+fn distributed_packages() -> Vec<(&'static str, &'static str)> {
     DAR_FILES
         .iter()
         .filter_map(|file| file.strip_suffix(".dar"))
-        .filter_map(|name| name.rsplit_once('-').map(|(package, _version)| package))
+        .filter_map(|name| name.rsplit_once('-'))
         .collect()
 }
 
+/// Whether `vetted` lists every distributed package at its distributed version.
+///
+/// Both matches are exact. A substring would also accept sibling families like
+/// `governance-core-test`. A name alone would accept an older version that a
+/// warm environment kept from an earlier run, and the phase would then skip the
+/// upload of the new one.
+fn all_distributed_vetted(vetted: &[Value]) -> bool {
+    distributed_packages().into_iter().all(|(name, version)| {
+        vetted.iter().any(|p| {
+            p["package_name"].as_str() == Some(name)
+                && p["package_version"].as_str() == Some(version)
+        })
+    })
+}
+
 /// Whether `/packages/vetted` on `port` reports every distributed package as
-/// vetted. Exact name match — a substring would also accept sibling families
-/// like `governance-core-test`.
+/// vetted at its distributed version.
 async fn dars_vetted_on(f: &Fixture, port: u16) -> bool {
     let Some(vetted) = f.probe_get_json::<Value>(port, "/packages/vetted").await else {
         return false;
     };
-    let Some(packages) = vetted.as_array() else {
-        return false;
-    };
-    distributed_package_names().into_iter().all(|expected| {
-        packages
-            .iter()
-            .any(|p| p["package_name"].as_str() == Some(expected))
-    })
+    vetted
+        .as_array()
+        .is_some_and(|packages| all_distributed_vetted(packages))
 }
 
 async fn all_dars_present(f: &Fixture) -> bool {
@@ -280,4 +289,51 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
         )
         .run(f)
         .await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn vetted(name: &str, version: &str) -> Value {
+        json!({ "package_id": "00", "package_name": name, "package_version": version })
+    }
+
+    /// Every distributed package at its distributed version.
+    fn current() -> Vec<Value> {
+        distributed_packages()
+            .into_iter()
+            .map(|(name, version)| vetted(name, version))
+            .collect()
+    }
+
+    #[test]
+    fn every_distributed_package_at_its_version_counts_as_vetted() {
+        assert!(all_distributed_vetted(&current()));
+    }
+
+    #[test]
+    fn an_older_version_left_on_a_warm_environment_does_not_count() {
+        let mut packages = current();
+        for p in &mut packages {
+            if p["package_name"] == "governance-rewards-automation-v1" {
+                p["package_version"] = json!("0.1.0");
+            }
+        }
+        assert!(!all_distributed_vetted(&packages));
+
+        // The new version vetted beside the old one is enough.
+        packages.push(vetted("governance-rewards-automation-v1", "0.2.0"));
+        assert!(all_distributed_vetted(&packages));
+    }
+
+    #[test]
+    fn a_sibling_package_does_not_stand_in_for_a_distributed_one() {
+        let mut packages: Vec<Value> = current()
+            .into_iter()
+            .filter(|p| p["package_name"] != "governance-core-v1")
+            .collect();
+        packages.push(vetted("governance-core-test", "0.1.0"));
+        assert!(!all_distributed_vetted(&packages));
+    }
 }
