@@ -28,4 +28,23 @@ ignore = [
   # Drop when hyper-noise moves off hyper 0.14 or actix-web ships an h2 0.4
   # release. Tracked in #351.
   "RUSTSEC-2026-0258",
+  # zip 8.6.0 can write unsafe files when `ZipArchive::extract` or
+  # `ZipStreamReader::extract` unpacks an attacker-controlled archive: it keeps
+  # SUID/SGID bits (RUSTSEC-2026-0367), creates symlinks pointing outside the
+  # destination (RUSTSEC-2026-0368), and applies permissions through them
+  # (RUSTSEC-2026-0369).
+  #
+  # Unfixable by updating: the fixes are only in zip 9, and there is no
+  # patched 8.x. zip is a build dependency of utoipa-swagger-ui, whose latest
+  # release (10.0.1) requires `zip ^8.6`. Its build script unpacks one
+  # archive, the Swagger UI v5.32.6 release it downloads from GitHub (we set
+  # no SWAGGER_UI_DOWNLOAD_URL), and never calls either `extract`: it walks
+  # the entries itself and writes each as a regular file under its
+  # `enclosed_name`, so it makes no symlinks. Nothing in decman uses zip at
+  # runtime.
+  #
+  # Drop these when utoipa-swagger-ui allows zip 9.
+  "RUSTSEC-2026-0367",
+  "RUSTSEC-2026-0368",
+  "RUSTSEC-2026-0369",
 ]
