@@ -283,6 +283,8 @@ fn all_proposal_fixtures() -> Vec<ProposalType> {
             provider_service_cid: "00psc".into(),
             registrar_service_request_cid: "00rsr".into(),
             provider_configuration_cid: "00pcc".into(),
+            credential_valid_from_micros: None,
+            credential_valid_until_micros: None,
         }),
         ProposalType::ProvisionInstrument(ProvisionInstrument {
             registrar_service_cid: "00rsc".into(),
@@ -295,10 +297,14 @@ fn all_proposal_fixtures() -> Vec<ProposalType> {
             issuer_requirements: vec![requirement("gov")],
             holder_requirements: vec![],
             initial_instrument_issuers: vec![cid("iss1")],
+            credential_valid_from_micros: None,
+            credential_valid_until_micros: None,
         }),
         ProposalType::OnboardInstrumentIssuers(OnboardInstrumentIssuers {
             instrument_configuration_cid: "00icc".into(),
             instrument_issuers: vec![cid("iss1"), cid("iss2")],
+            credential_valid_from_micros: None,
+            credential_valid_until_micros: None,
         }),
         ProposalType::OffboardInstrumentIssuers(OffboardInstrumentIssuers {
             instrument_issuers: vec![InstrumentIssuerCredentials {
@@ -371,6 +377,8 @@ fn minimal_option_fixtures() -> Vec<ProposalType> {
             issuer_requirements: vec![],
             holder_requirements: vec![],
             initial_instrument_issuers: vec![],
+            credential_valid_from_micros: None,
+            credential_valid_until_micros: None,
         }),
     ]
 }

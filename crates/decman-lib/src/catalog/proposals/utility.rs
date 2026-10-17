@@ -13,12 +13,12 @@ use crate::catalog::types::{AppRewardBeneficiary, make_optional_beneficiaries};
 use crate::error::Error;
 use crate::framework::encode::{
     field, make_bool, make_contract_id, make_empty_metadata, make_list, make_numeric,
-    make_optional_bool, make_optional_list, make_optional_text, make_party, make_record, make_text,
-    serialize_instrument_id, serialize_instrument_identifier,
+    make_optional_bool, make_optional_list, make_optional_text, make_optional_timestamp,
+    make_party, make_record, make_text, serialize_instrument_id, serialize_instrument_identifier,
     serialize_party_credential_requirements,
 };
 use crate::framework::validate::{
-    validate_beneficiary_weights, validate_positive_amount,
+    validate_beneficiary_weights, validate_credential_validity, validate_positive_amount,
     validate_self_issued_requirements_have_claims, validate_unique_issuers,
 };
 use crate::framework::{
@@ -715,6 +715,15 @@ pub struct OnboardRegistrar {
     pub provider_service_cid: String,
     pub registrar_service_request_cid: String,
     pub provider_configuration_cid: String,
+    /// `validFrom` of every credential this action mints, as microseconds
+    /// since epoch. None: valid from creation.
+    #[serde(default)]
+    pub credential_valid_from_micros: Option<i64>,
+    /// `validUntil` of every credential this action mints, as microseconds
+    /// since epoch. None: never expires, so ending it takes an
+    /// `OffboardInstrumentIssuers` vote.
+    #[serde(default)]
+    pub credential_valid_until_micros: Option<i64>,
 }
 
 impl OnboardRegistrar {
@@ -750,7 +759,15 @@ impl DamlProtoEncode for OnboardRegistrar {
     }
 }
 
-impl Validate for OnboardRegistrar {}
+impl Validate for OnboardRegistrar {
+    fn validate(&self, ctx: &ValidationCtx) -> Result<(), Error> {
+        validate_credential_validity(
+            self.credential_valid_from_micros,
+            self.credential_valid_until_micros,
+            ctx.now_micros,
+        )
+    }
+}
 
 /// Create an `InstrumentConfiguration` on the registrar decparty and
 /// credential the initial instrument issuers against its issuer
@@ -769,6 +786,15 @@ pub struct ProvisionInstrument {
     pub holder_requirements: Vec<PartyCredentialRequirement>,
     #[serde(default)]
     pub initial_instrument_issuers: Vec<CantonId>,
+    /// `validFrom` of every credential this action mints, as microseconds
+    /// since epoch. None: valid from creation.
+    #[serde(default)]
+    pub credential_valid_from_micros: Option<i64>,
+    /// `validUntil` of every credential this action mints, as microseconds
+    /// since epoch. None: never expires, so ending it takes an
+    /// `OffboardInstrumentIssuers` vote.
+    #[serde(default)]
+    pub credential_valid_until_micros: Option<i64>,
 }
 
 impl ProvisionInstrument {
@@ -833,6 +859,11 @@ impl Validate for ProvisionInstrument {
         validate_unique_issuers(
             &self.initial_instrument_issuers,
             "initial_instrument_issuers",
+        )?;
+        validate_credential_validity(
+            self.credential_valid_from_micros,
+            self.credential_valid_until_micros,
+            ctx.now_micros,
         )
     }
 }
@@ -845,6 +876,15 @@ impl Validate for ProvisionInstrument {
 pub struct OnboardInstrumentIssuers {
     pub instrument_configuration_cid: String,
     pub instrument_issuers: Vec<CantonId>,
+    /// `validFrom` of every credential this action mints, as microseconds
+    /// since epoch. None: valid from creation.
+    #[serde(default)]
+    pub credential_valid_from_micros: Option<i64>,
+    /// `validUntil` of every credential this action mints, as microseconds
+    /// since epoch. None: never expires, so ending it takes an
+    /// `OffboardInstrumentIssuers` vote.
+    #[serde(default)]
+    pub credential_valid_until_micros: Option<i64>,
 }
 
 impl OnboardInstrumentIssuers {
@@ -877,7 +917,7 @@ impl DamlProtoEncode for OnboardInstrumentIssuers {
 }
 
 impl Validate for OnboardInstrumentIssuers {
-    fn validate(&self, _ctx: &ValidationCtx) -> Result<(), Error> {
+    fn validate(&self, ctx: &ValidationCtx) -> Result<(), Error> {
         // Mirrors the template's `ensure not (null instrumentIssuers)` so the
         // rejection surfaces as a 400 before the ledger sees the proposal.
         if self.instrument_issuers.is_empty() {
@@ -885,26 +925,61 @@ impl Validate for OnboardInstrumentIssuers {
                 "instrument_issuers must not be empty".to_string(),
             ));
         }
-        validate_unique_issuers(&self.instrument_issuers, "instrument_issuers")
+        validate_unique_issuers(&self.instrument_issuers, "instrument_issuers")?;
+        validate_credential_validity(
+            self.credential_valid_from_micros,
+            self.credential_valid_until_micros,
+            ctx.now_micros,
+        )
     }
 }
 
 /// A proposal whose template mints governance credentials through
-/// `mintCredentialsMeetingRequirements`. The template ends with a
-/// `credentialIdNonce : Optional Text` field that the payload leaves out.
-/// Submit it through [`WithCredentialIdNonce`] to set that field.
-pub trait MintsCredentials: GrpcPayload {}
+/// `mintCredentialsMeetingRequirements`. The template ends with
+/// `credentialIdNonce : Optional Text`, `credentialValidFrom : Optional Time`
+/// and `credentialValidUntil : Optional Time`, in that order, and the
+/// payload's own encoding leaves all three out. Submit it through
+/// [`WithCredentialIdNonce`] to set them.
+pub trait MintsCredentials: GrpcPayload {
+    /// The `(validFrom, validUntil)` window, in microseconds since epoch,
+    /// copied onto every credential the action mints.
+    fn credential_validity_micros(&self) -> (Option<i64>, Option<i64>);
+}
 
-impl MintsCredentials for OnboardRegistrar {}
-impl MintsCredentials for ProvisionInstrument {}
-impl MintsCredentials for OnboardInstrumentIssuers {}
+impl MintsCredentials for OnboardRegistrar {
+    fn credential_validity_micros(&self) -> (Option<i64>, Option<i64>) {
+        (
+            self.credential_valid_from_micros,
+            self.credential_valid_until_micros,
+        )
+    }
+}
+
+impl MintsCredentials for ProvisionInstrument {
+    fn credential_validity_micros(&self) -> (Option<i64>, Option<i64>) {
+        (
+            self.credential_valid_from_micros,
+            self.credential_valid_until_micros,
+        )
+    }
+}
+
+impl MintsCredentials for OnboardInstrumentIssuers {
+    fn credential_validity_micros(&self) -> (Option<i64>, Option<i64>) {
+        (
+            self.credential_valid_from_micros,
+            self.credential_valid_until_micros,
+        )
+    }
+}
 
 /// Encode input for a [`MintsCredentials`] proposal. The nonce is runtime
 /// data, not an HTTP payload field: the caller draws a fresh one for each
 /// proposal. The template folds it into every credential id it mints, so
 /// two actions minting for one subject at one ledger time still produce
 /// distinct ids. The template's `ensure` clause refuses an empty nonce and
-/// one that contains `/`.
+/// one that contains `/`. The proposal's credential validity window follows
+/// the nonce, because the template declares it after the nonce.
 pub struct WithCredentialIdNonce<'a, P: ?Sized> {
     pub proposal: &'a P,
     pub nonce: &'a str,
@@ -917,9 +992,18 @@ impl<P: MintsCredentials + ?Sized> DamlProtoEncode for WithCredentialIdNonce<'_,
                 "credential-minting proposal must encode to a Record".into(),
             ));
         };
+        let (valid_from, valid_until) = self.proposal.credential_validity_micros();
         record.fields.push(field(
             "credentialIdNonce",
             make_optional_text(Some(self.nonce)),
+        ));
+        record.fields.push(field(
+            "credentialValidFrom",
+            make_optional_timestamp(valid_from),
+        ));
+        record.fields.push(field(
+            "credentialValidUntil",
+            make_optional_timestamp(valid_until),
         ));
         Ok(Value {
             sum: Some(value::Sum::Record(record)),
@@ -1261,6 +1345,8 @@ mod tests {
                 provider_service_cid: "00psc".to_string(),
                 registrar_service_request_cid: "00rsrc".to_string(),
                 provider_configuration_cid: "00pcc".to_string(),
+                credential_valid_from_micros: None,
+                credential_valid_until_micros: None,
             }
             .to_daml_proto()
             .expect("payload encodes")
@@ -1281,6 +1367,8 @@ mod tests {
                 )],
                 holder_requirements: vec![requirement(&cid("issuer"), &[("role", "holder")])],
                 initial_instrument_issuers: vec![cid("issuer")],
+                credential_valid_from_micros: None,
+                credential_valid_until_micros: None,
             }
             .to_daml_proto()
             .expect("payload encodes")
@@ -1294,6 +1382,8 @@ mod tests {
                 issuer_requirements: vec![],
                 holder_requirements: vec![],
                 initial_instrument_issuers: vec![],
+                credential_valid_from_micros: None,
+                credential_valid_until_micros: None,
             }
             .to_daml_proto()
             .expect("payload encodes")
@@ -1303,6 +1393,8 @@ mod tests {
             OnboardInstrumentIssuers {
                 instrument_configuration_cid: "00icc".to_string(),
                 instrument_issuers: vec![cid("iss1"), cid("iss2")],
+                credential_valid_from_micros: None,
+                credential_valid_until_micros: None,
             }
             .to_daml_proto()
             .expect("payload encodes")
@@ -1324,6 +1416,8 @@ mod tests {
                 proposal: &OnboardInstrumentIssuers {
                     instrument_configuration_cid: "00icc".to_string(),
                     instrument_issuers: vec![cid("iss1"), cid("iss2")],
+                    credential_valid_from_micros: None,
+                    credential_valid_until_micros: None,
                 },
                 nonce: NONCE,
             }
@@ -1343,6 +1437,8 @@ mod tests {
                 provider_service_cid: "00psc".to_string(),
                 registrar_service_request_cid: "00rsrc".to_string(),
                 provider_configuration_cid: "00pcc".to_string(),
+                credential_valid_from_micros: None,
+                credential_valid_until_micros: None,
             }),
             Box::new(ProvisionInstrument {
                 registrar_service_cid: "00rsc".to_string(),
@@ -1351,16 +1447,22 @@ mod tests {
                 issuer_requirements: vec![],
                 holder_requirements: vec![],
                 initial_instrument_issuers: vec![cid("issuer")],
+                credential_valid_from_micros: Some(1_700_000_000_000_000),
+                credential_valid_until_micros: Some(1_800_000_000_000_000),
             }),
             Box::new(OnboardInstrumentIssuers {
                 instrument_configuration_cid: "00icc".to_string(),
                 instrument_issuers: vec![cid("issuer")],
+                credential_valid_from_micros: None,
+                credential_valid_until_micros: None,
             }),
         ]
     }
 
+    /// The nonce and the validity window close the create arguments, in the
+    /// order the templates declare them. Every other field is unchanged.
     #[test]
-    fn credential_id_nonce_is_the_last_create_argument() {
+    fn credential_id_nonce_and_validity_are_the_last_create_arguments() {
         let gov = cid("gov");
         let member = cid("member");
         for proposal in credential_minting_proposals() {
@@ -1375,13 +1477,21 @@ mod tests {
                 &member,
             )
             .expect("proposal arguments encode");
-            let (last, rest) = wrapped
-                .fields
-                .split_last()
-                .expect("create arguments carry fields");
-            assert_eq!(rest, bare.fields.as_slice(), "other fields unchanged");
-            assert_eq!(last.label, "credentialIdNonce");
-            assert_eq!(last.value, Some(make_optional_text(Some(NONCE))));
+            let (head, tail) = wrapped.fields.split_at(wrapped.fields.len() - 3);
+            assert_eq!(head, bare.fields.as_slice(), "other fields unchanged");
+            let labels: Vec<&str> = tail.iter().map(|f| f.label.as_str()).collect();
+            assert_eq!(
+                labels,
+                [
+                    "credentialIdNonce",
+                    "credentialValidFrom",
+                    "credentialValidUntil"
+                ]
+            );
+            assert_eq!(tail[0].value, Some(make_optional_text(Some(NONCE))));
+            let (valid_from, valid_until) = proposal.credential_validity_micros();
+            assert_eq!(tail[1].value, Some(make_optional_timestamp(valid_from)));
+            assert_eq!(tail[2].value, Some(make_optional_timestamp(valid_until)));
         }
     }
 
@@ -1399,6 +1509,76 @@ mod tests {
         }
     }
 
+    /// Each minting proposal mirrors the templates' window checks: a window
+    /// that does not start before it ends is refused, and so is one that has
+    /// already ended, which execution would refuse after the vote.
+    #[test]
+    fn minting_proposals_validate_the_credential_validity_window() {
+        let gov = cid("gov");
+        let now = 1_750_000_000_000_000;
+        let with_window = |from: Option<i64>, until: Option<i64>| -> Vec<Box<dyn Validate>> {
+            vec![
+                Box::new(OnboardRegistrar {
+                    provider_service_cid: "00psc".to_string(),
+                    registrar_service_request_cid: "00rsrc".to_string(),
+                    provider_configuration_cid: "00pcc".to_string(),
+                    credential_valid_from_micros: from,
+                    credential_valid_until_micros: until,
+                }),
+                Box::new(ProvisionInstrument {
+                    registrar_service_cid: "00rsc".to_string(),
+                    instrument_id_text: "uuid-1".to_string(),
+                    additional_identifiers: vec![],
+                    issuer_requirements: vec![],
+                    holder_requirements: vec![],
+                    initial_instrument_issuers: vec![cid("issuer")],
+                    credential_valid_from_micros: from,
+                    credential_valid_until_micros: until,
+                }),
+                Box::new(OnboardInstrumentIssuers {
+                    instrument_configuration_cid: "00icc".to_string(),
+                    instrument_issuers: vec![cid("issuer")],
+                    credential_valid_from_micros: from,
+                    credential_valid_until_micros: until,
+                }),
+            ]
+        };
+        let accepted = [
+            (None, None),
+            (Some(now - 1), None),
+            (None, Some(now + 1)),
+            (Some(now - 1), Some(now + 1)),
+            // A window that opens after now is the operator's call.
+            (Some(now + 10), Some(now + 20)),
+        ];
+        let refused = [
+            // Already ended: execution would mint expired credentials.
+            (None, Some(now)),
+            (Some(now - 20), Some(now - 10)),
+            // Empty or inverted window: the ensure clause refuses it.
+            (Some(now + 10), Some(now + 10)),
+            (Some(now + 20), Some(now + 10)),
+            // Not a timestamp after the epoch.
+            (Some(0), None),
+        ];
+        for (from, until) in accepted {
+            for proposal in with_window(from, until) {
+                assert!(
+                    proposal.validate(&ctx(&gov, now)).is_ok(),
+                    "{from:?}..{until:?} should be accepted"
+                );
+            }
+        }
+        for (from, until) in refused {
+            for proposal in with_window(from, until) {
+                assert!(
+                    proposal.validate(&ctx(&gov, now)).is_err(),
+                    "{from:?}..{until:?} should be refused"
+                );
+            }
+        }
+    }
+
     #[test]
     fn onboard_instrument_issuers_rejects_empty_issuer_list() {
         // Mirrors the template's `ensure not (null instrumentIssuers)` so the
@@ -1407,6 +1587,8 @@ mod tests {
         let mk = |issuers: Vec<CantonId>| OnboardInstrumentIssuers {
             instrument_configuration_cid: "icc".to_string(),
             instrument_issuers: issuers,
+            credential_valid_from_micros: None,
+            credential_valid_until_micros: None,
         };
         assert!(mk(Vec::new()).validate(&ctx(&gov, 0)).is_err());
         assert!(mk(vec![cid("issuer")]).validate(&ctx(&gov, 0)).is_ok());
@@ -1423,6 +1605,8 @@ mod tests {
         let mk = |issuers: Vec<CantonId>| OnboardInstrumentIssuers {
             instrument_configuration_cid: "icc".to_string(),
             instrument_issuers: issuers,
+            credential_valid_from_micros: None,
+            credential_valid_until_micros: None,
         };
         assert!(
             mk(vec![issuer_a.clone(), issuer_a.clone()])
@@ -1503,6 +1687,8 @@ mod tests {
             issuer_requirements: vec![],
             holder_requirements: vec![],
             initial_instrument_issuers: issuers,
+            credential_valid_from_micros: None,
+            credential_valid_until_micros: None,
         };
         assert!(
             mk(vec![issuer_a.clone(), issuer_a.clone()])
@@ -1527,6 +1713,8 @@ mod tests {
             }],
             holder_requirements: vec![],
             initial_instrument_issuers: vec![],
+            credential_valid_from_micros: None,
+            credential_valid_until_micros: None,
         };
         let claim = RequiredClaim {
             property: "role".to_string(),

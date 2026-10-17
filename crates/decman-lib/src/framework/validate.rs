@@ -92,6 +92,36 @@ pub fn validate_future_micros(micros: i64, now_micros: i64, field: &str) -> Resu
     Ok(())
 }
 
+/// Validate a governance-minted credential validity window, mirroring the
+/// minting templates: their `ensure` clause refuses a window that does not
+/// start before it ends, and execution refuses one that has already ended.
+/// Checking the end against `now_micros` here surfaces that as a 400 before
+/// any vote. Either bound may be absent.
+pub fn validate_credential_validity(
+    valid_from_micros: Option<i64>,
+    valid_until_micros: Option<i64>,
+    now_micros: i64,
+) -> Result<(), Error> {
+    if let Some(from) = valid_from_micros
+        && from <= 0
+    {
+        return Err(Error::Validation(format!(
+            "credential_valid_from_micros must be positive, got {from}"
+        )));
+    }
+    if let Some(until) = valid_until_micros {
+        validate_future_micros(until, now_micros, "credential_valid_until_micros")?;
+    }
+    if let (Some(from), Some(until)) = (valid_from_micros, valid_until_micros)
+        && from >= until
+    {
+        return Err(Error::Validation(format!(
+            "credential_valid_from_micros must be before credential_valid_until_micros, got {from} and {until}"
+        )));
+    }
+    Ok(())
+}
+
 pub fn validate_positive_amount(amount: &DamlDecimal, field: &str) -> Result<(), Error> {
     // `DamlDecimal` itself doesn't implement `PartialOrd`; compare via the
     // inner `rust_decimal::Decimal` returned by `value()` against the zero

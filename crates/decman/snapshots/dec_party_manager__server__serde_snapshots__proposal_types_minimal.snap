@@ -75,6 +75,8 @@ expression: minimal_option_fixtures()
     "additional_identifiers": [],
     "issuer_requirements": [],
     "holder_requirements": [],
-    "initial_instrument_issuers": []
+    "initial_instrument_issuers": [],
+    "credential_valid_from_micros": null,
+    "credential_valid_until_micros": null
   }
 ]

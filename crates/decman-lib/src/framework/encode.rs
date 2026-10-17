@@ -273,6 +273,19 @@ pub fn make_optional_text(opt: Option<&str>) -> Value {
     }
 }
 
+/// A Daml `Optional Time`, from microseconds since epoch.
+pub fn make_optional_timestamp(opt: Option<i64>) -> Value {
+    Value {
+        sum: Some(value::Sum::Optional(Box::new(Optional {
+            value: opt.map(|micros| {
+                Box::new(Value {
+                    sum: Some(value::Sum::Timestamp(micros)),
+                })
+            }),
+        }))),
+    }
+}
+
 pub fn serialize_claim(claim: &Claim) -> Value {
     make_record(vec![
         field("subject", make_text(&claim.subject)),
