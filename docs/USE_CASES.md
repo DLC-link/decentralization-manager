@@ -477,6 +477,21 @@ Credential new issuers against the existing configuration whenever they join aft
 }
 ```
 
+Steps 4, 5 and 6 mint credentials that never expire unless the proposal says otherwise. To issue time-limited credentials, add `credential_valid_from_micros` and/or `credential_valid_until_micros` (microseconds since epoch) to any of the three:
+
+```json
+{
+  "proposal": {
+    "type": "onboard_instrument_issuers",
+    "instrument_configuration_cid": "<instrument-configuration-cid>",
+    "instrument_issuers": ["issuer-2::1220..."],
+    "credential_valid_until_micros": 1798761600000000
+  }
+}
+```
+
+Every credential the action mints carries the window, and the proposal description states it, so voters see the expiry they approve. DecMan refuses a window that has already ended or does not start before it ends. The ledger also refuses execution once the end has passed, because the action would mint credentials that are expired on creation. The SDK checks a registrar credential inside the same accept, so an `onboard_registrar` window must already be open when the action executes. Without an expiry, ending an issuer's rights takes an offboard vote (step 7).
+
 **7. Offboard instrument issuers (registrar decparty):**
 
 Revoke the credentials the registrar decparty self-issued for the offboarded issuers:

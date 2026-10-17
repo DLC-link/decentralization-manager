@@ -154,6 +154,12 @@ export const GovernanceSection = ({
     useState("");
   const [proposalAmuletMergeLimit, setProposalAmuletMergeLimit] =
     useState("10");
+  // Optional validity window of the credentials a minting proposal mints.
+  // datetime-local strings; empty means unbounded on that side.
+  const [proposalCredentialValidFrom, setProposalCredentialValidFrom] =
+    useState("");
+  const [proposalCredentialValidUntil, setProposalCredentialValidUntil] =
+    useState("");
   const [proposalOperator, setProposalOperator] = useState(
     defaultOperatorParty || "",
   );
@@ -1720,6 +1726,8 @@ export const GovernanceSection = ({
     setProposalExternalPartySetupCid("");
     setProposalInstrumentIssuersText("");
     setProposalOffboardRows([]);
+    setProposalCredentialValidFrom("");
+    setProposalCredentialValidUntil("");
   };
 
   // A beneficiary list the template would reject: submitting it would only
@@ -1736,6 +1744,30 @@ export const GovernanceSection = ({
 
     try {
       let proposal: ProposalType;
+      // The credential validity window of the three minting proposals, in
+      // micros since epoch. An empty input leaves that side unbounded.
+      const credentialValidity = () => {
+        const toMicros = (value: string, label: string) => {
+          if (!value) return undefined;
+          const ms = new Date(value).getTime();
+          if (!Number.isFinite(ms)) {
+            throw new Error(`${label} must be a valid date and time`);
+          }
+          if (!Number.isSafeInteger(ms * 1000)) {
+            throw new Error(`${label} is too far in the future`);
+          }
+          return ms * 1000;
+        };
+        const from = toMicros(proposalCredentialValidFrom, "Credentials Valid From");
+        const until = toMicros(proposalCredentialValidUntil, "Credentials Valid Until");
+        if (from !== undefined && until !== undefined && from >= until) {
+          throw new Error("Credentials Valid From must be before Credentials Valid Until");
+        }
+        return {
+          credential_valid_from_micros: from,
+          credential_valid_until_micros: until,
+        };
+      };
       switch (proposalType) {
         case "setup_cc_preapproval":
           proposal = {
@@ -2024,6 +2056,7 @@ export const GovernanceSection = ({
             provider_service_cid: proposalProviderServiceCid,
             registrar_service_request_cid: proposalRegistrarServiceRequestCid,
             provider_configuration_cid: proposalProviderConfigurationCid,
+            ...credentialValidity(),
           };
           break;
         case "provision_instrument":
@@ -2045,6 +2078,7 @@ export const GovernanceSection = ({
             initial_instrument_issuers: parsePartyLines(
               proposalInitialInstrumentIssuersText,
             ),
+            ...credentialValidity(),
           };
           break;
         case "onboard_instrument_issuers":
@@ -2052,6 +2086,7 @@ export const GovernanceSection = ({
             type: "onboard_instrument_issuers",
             instrument_configuration_cid: proposalInstrumentConfigurationCid,
             instrument_issuers: parsePartyLines(proposalInstrumentIssuersText),
+            ...credentialValidity(),
           };
           break;
         case "offboard_instrument_issuers":
@@ -5110,6 +5145,47 @@ export const GovernanceSection = ({
                         endAdornment: fieldHelpAdornment(
                           "Parties to credential as instrument issuers, one party id per line. At least one is required.",
                           "Help for Instrument Issuers",
+                        ),
+                      },
+                    }}
+                  />
+                </>
+              )}
+
+              {(proposalType === "onboard_registrar" ||
+                proposalType === "provision_instrument" ||
+                proposalType === "onboard_instrument_issuers") && (
+                <>
+                  <TextField
+                    size="small"
+                    label="Credentials Valid From (optional)"
+                    type="datetime-local"
+                    value={proposalCredentialValidFrom}
+                    onChange={(e) => setProposalCredentialValidFrom(e.target.value)}
+                    fullWidth
+                    slotProps={{
+                      inputLabel: { shrink: true },
+                      input: {
+                        endAdornment: fieldHelpAdornment(
+                          "When the minted credentials start to be valid. Leave empty for valid from the moment the action executes.",
+                          "Help for Credentials Valid From",
+                        ),
+                      },
+                    }}
+                  />
+                  <TextField
+                    size="small"
+                    label="Credentials Valid Until (optional)"
+                    type="datetime-local"
+                    value={proposalCredentialValidUntil}
+                    onChange={(e) => setProposalCredentialValidUntil(e.target.value)}
+                    fullWidth
+                    slotProps={{
+                      inputLabel: { shrink: true },
+                      input: {
+                        endAdornment: fieldHelpAdornment(
+                          "When the minted credentials expire. Leave empty for credentials that never expire; ending those takes an Offboard Instrument Issuers vote. The proposal description shows this window to voters, and execution is refused once it has passed.",
+                          "Help for Credentials Valid Until",
                         ),
                       },
                     }}
