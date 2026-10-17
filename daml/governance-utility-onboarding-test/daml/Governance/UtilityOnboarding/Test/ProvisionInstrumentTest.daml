@@ -3,12 +3,14 @@
 
 -- | These tests cover ProvisionInstrument: the happy path, the claimless,
 -- duplicate-issuer and nonce ensure guards, the proposer-owned-service
--- check, and the credential id layout with and without a nonce.
+-- check, the credential id layout with and without a nonce, and the
+-- credential validity window.
 module Governance.UtilityOnboarding.Test.ProvisionInstrumentTest where
 
+import DA.Assert ((===))
 import DA.Date (Month(Jan), date)
 import DA.Text qualified as Text
-import DA.Time (convertRelTimeToMicroseconds, subTime, time)
+import DA.Time (addRelTime, convertRelTimeToMicroseconds, days, seconds, subTime, time)
 import Daml.Script
 
 import Utility.Credential.V0.Credential (Claim(..), Credential(..), PartyCredentialRequirement(..))
@@ -21,7 +23,7 @@ import Governance.ExecutionResult ()
 
 import Governance.UtilityOnboarding.DualDecpartyTestUtils
 import Governance.UtilityOnboarding.ProvisionInstrument
-import Governance.UtilityOnboarding.Utils (mkCredentialId)
+import Governance.UtilityOnboarding.Utils (credentialValidityText, mkCredentialId)
 
 import TestHarness
 
@@ -55,6 +57,8 @@ provisionProposalWithNonce fx credentialIdNonce issuerRequirements initialInstru
     holderRequirements = []
     initialInstrumentIssuers
     credentialIdNonce
+    credentialValidFrom = None
+    credentialValidUntil = None
   pure (toInterfaceContractId proposalCid)
 
 -- * Happy path: configuration created, initial issuer credentialed.
@@ -172,6 +176,8 @@ when_provision_claimless_requirement fx =
     holderRequirements = []
     initialInstrumentIssuers = []
     credentialIdNonce = None
+    credentialValidFrom = None
+    credentialValidUntil = None
 
 then_nothing_provisioned : Fixture -> () -> Script Failures
 then_nothing_provisioned fx _ = do
@@ -228,6 +234,8 @@ when_provision_claimless_holder_requirement fx = do
       requiredClaims = []]
     initialInstrumentIssuers = []
     credentialIdNonce = None
+    credentialValidFrom = None
+    credentialValidUntil = None
   let proposalInterfaceCid : ContractId GovernableAction = toInterfaceContractId proposalCid
   _ <- confirmAndExecuteAs fx.f.parties fx.f.registrarStack proposalInterfaceCid
   pure ()
@@ -268,6 +276,8 @@ when_provision_against_proposer_owned_service fx = do
     holderRequirements = []
     initialInstrumentIssuers = [parties.issuer1]
     credentialIdNonce = None
+    credentialValidFrom = None
+    credentialValidUntil = None
   confirmThenExecuteMustFail fx.f.parties fx.f.registrarStack (toInterfaceContractId proposalCid)
 
 then_no_credentials_minted : Fixture -> () -> Script Failures
@@ -341,6 +351,8 @@ when_provision_duplicate_initial_issuers fx =
     holderRequirements = []
     initialInstrumentIssuers = [fx.f.parties.issuer1, fx.f.parties.issuer1]
     credentialIdNonce = None
+    credentialValidFrom = None
+    credentialValidUntil = None
 
 test_when_duplicate_initial_issuers_then_create_fails = script do
   run Test with
@@ -442,6 +454,8 @@ proposeWithNonceMustFail fx credentialIdNonce =
     holderRequirements = []
     initialInstrumentIssuers = [fx.f.parties.issuer1]
     credentialIdNonce
+    credentialValidFrom = None
+    credentialValidUntil = None
 
 when_propose_with_empty_nonce : Fixture -> Script ()
 when_propose_with_empty_nonce fx = proposeWithNonceMustFail fx (Some "")
@@ -460,3 +474,160 @@ test_when_nonce_has_slash_then_create_fails = script do
     given = given_onboarded_registrar
     when = when_propose_with_slash_nonce
     then_ = then_nothing_provisioned
+
+-- * Credential validity window. The proposal's window is copied onto every
+-- credential it mints. Without one the credentials never expire, which is
+-- what every earlier package version minted (#346).
+
+provisionProposalWithValidity
+  : Fixture -> Optional Time -> Optional Time -> Script (ContractId GovernableAction)
+provisionProposalWithValidity fx credentialValidFrom credentialValidUntil = do
+  proposalCid <- submit fx.f.registrarStack.member1 $ createCmd ProvisionInstrument with
+    governanceParty = fx.f.parties.registrarGov
+    proposer = fx.f.registrarStack.member1
+    registrarServiceCid = fx.onboarded.registrarServiceCid
+    instrumentIdText = "LAUNCH-TOKEN"
+    additionalIdentifiers = []
+    issuerRequirements = [defaultIssuerRequirement fx.f.parties]
+    holderRequirements = []
+    initialInstrumentIssuers = [fx.f.parties.issuer1]
+    credentialIdNonce = provisionInstrumentNonce
+    credentialValidFrom
+    credentialValidUntil
+  pure (toInterfaceContractId proposalCid)
+
+-- | Assert issuer1 holds one credential with the given window.
+issuer1CredentialValidityIs : Fixture -> Optional Time -> Optional Time -> Script Failures
+issuer1CredentialValidityIs fx validFrom validUntil = do
+  credentials <- query @Credential fx.f.parties.issuer1
+  case credentials of
+    [(_, credential)] -> pure $
+      shouldBe "credential.validFrom" validFrom credential.validFrom <>
+      shouldBe "credential.validUntil" validUntil credential.validUntil
+    _ -> pure $ shouldBe "Credential count for issuer1" 1 (length credentials)
+
+when_provision_with_validity_window : Fixture -> Script ()
+when_provision_with_validity_window fx = do
+  now <- getTime
+  proposalCid <- provisionProposalWithValidity fx
+    (Some (addRelTime now (days (-1)))) (Some (addRelTime now (days 30)))
+  _ <- confirmAndExecuteAs fx.f.parties fx.f.registrarStack proposalCid
+  pure ()
+
+-- Script time is static, so getTime here equals the time the window was
+-- built from.
+then_credential_carries_validity_window : Fixture -> () -> Script Failures
+then_credential_carries_validity_window fx _ = do
+  now <- getTime
+  issuer1CredentialValidityIs fx
+    (Some (addRelTime now (days (-1)))) (Some (addRelTime now (days 30)))
+
+test_when_validity_window_then_credential_carries_it = script do
+  run Test with
+    given = given_onboarded_registrar
+    when = when_provision_with_validity_window
+    then_ = then_credential_carries_validity_window
+
+when_provision_with_expiry_only : Fixture -> Script ()
+when_provision_with_expiry_only fx = do
+  now <- getTime
+  proposalCid <- provisionProposalWithValidity fx None (Some (addRelTime now (days 30)))
+  _ <- confirmAndExecuteAs fx.f.parties fx.f.registrarStack proposalCid
+  pure ()
+
+then_credential_expires_only : Fixture -> () -> Script Failures
+then_credential_expires_only fx _ = do
+  now <- getTime
+  issuer1CredentialValidityIs fx None (Some (addRelTime now (days 30)))
+
+test_when_expiry_only_then_credential_valid_from_creation = script do
+  run Test with
+    given = given_onboarded_registrar
+    when = when_provision_with_expiry_only
+    then_ = then_credential_expires_only
+
+then_credential_never_expires : Fixture -> () -> Script Failures
+then_credential_never_expires fx _ = issuer1CredentialValidityIs fx None None
+
+test_when_no_validity_window_then_credential_never_expires = script do
+  run Test with
+    given = given_onboarded_registrar
+    when = when_provision_with_initial_issuer
+    then_ = then_credential_never_expires
+
+-- * A window that starts at or after its end is refused at creation, before
+-- any vote.
+
+proposeWithValidityMustFail : Fixture -> Optional Time -> Optional Time -> Script ()
+proposeWithValidityMustFail fx credentialValidFrom credentialValidUntil =
+  submitMustFail fx.f.registrarStack.member1 $ createCmd ProvisionInstrument with
+    governanceParty = fx.f.parties.registrarGov
+    proposer = fx.f.registrarStack.member1
+    registrarServiceCid = fx.onboarded.registrarServiceCid
+    instrumentIdText = "LAUNCH-TOKEN"
+    additionalIdentifiers = []
+    issuerRequirements = [defaultIssuerRequirement fx.f.parties]
+    holderRequirements = []
+    initialInstrumentIssuers = [fx.f.parties.issuer1]
+    credentialIdNonce = provisionInstrumentNonce
+    credentialValidFrom
+    credentialValidUntil
+
+when_propose_with_empty_window : Fixture -> Script ()
+when_propose_with_empty_window fx = do
+  now <- getTime
+  let at = addRelTime now (days 1)
+  proposeWithValidityMustFail fx (Some at) (Some at)
+
+when_propose_with_inverted_window : Fixture -> Script ()
+when_propose_with_inverted_window fx = do
+  now <- getTime
+  proposeWithValidityMustFail fx
+    (Some (addRelTime now (days 2))) (Some (addRelTime now (days 1)))
+
+test_when_window_is_empty_then_proposal_refused = script do
+  run Test with
+    given = given_onboarded_registrar
+    when = when_propose_with_empty_window
+    then_ = then_nothing_provisioned
+
+test_when_window_is_inverted_then_proposal_refused = script do
+  run Test with
+    given = given_onboarded_registrar
+    when = when_propose_with_inverted_window
+    then_ = then_nothing_provisioned
+
+-- * A window that has already ended by execution is refused at execution:
+-- the ensure clause cannot read the ledger clock, so it passes the vote,
+-- and execution would otherwise mint credentials expired on creation.
+
+when_execute_after_window_ended : Fixture -> Script ()
+when_execute_after_window_ended fx = do
+  now <- getTime
+  proposalCid <- provisionProposalWithValidity fx None (Some (addRelTime now (seconds (-1))))
+  confirmThenExecuteMustFail fx.f.parties fx.f.registrarStack proposalCid
+
+-- The refused execution rolls back whole: no configuration, no credential.
+then_nothing_provisioned_or_minted : Fixture -> () -> Script Failures
+then_nothing_provisioned_or_minted fx _ = do
+  credentials <- query @Credential fx.f.parties.issuer1
+  nothingProvisioned <- then_nothing_provisioned fx ()
+  pure $ nothingProvisioned <>
+    shouldBe "issuer1 credentials" 0 (length credentials)
+
+test_when_window_ended_then_execution_refused = script do
+  run Test with
+    given = given_onboarded_registrar
+    when = when_execute_after_window_ended
+    then_ = then_nothing_provisioned_or_minted
+
+-- * Voters see only the description, so it states the window.
+
+test_validity_text_states_the_window = script do
+  let t1 = time (date 2027 Jan 1) 0 0 0
+      t2 = time (date 2027 Jan 31) 0 0 0
+  credentialValidityText None None === ""
+  credentialValidityText None (Some t2) === ("; credentials valid until " <> show t2)
+  credentialValidityText (Some t1) None === ("; credentials valid from " <> show t1)
+  credentialValidityText (Some t1) (Some t2)
+    === ("; credentials valid from " <> show t1 <> " until " <> show t2)

@@ -17,7 +17,8 @@ import Utility.Registry.App.V0.Service.Registrar
 
 import Governance.Action
 import Governance.UtilityOnboarding.Utils
-  (mintCredentialsMeetingRequirements, validCredentialIdNonce)
+  ( credentialValidityText, mintCredentialsMeetingRequirements, validCredentialIdNonce
+  , validCredentialValidity )
 
 template OnboardRegistrar
   with
@@ -31,10 +32,19 @@ template OnboardRegistrar
       -- ^ Folded into the id of every credential this action mints. See
       -- `mkCredentialId`. Optional and last so contracts created without it
       -- upgrade with None, which mints the nonce-free id format.
+    credentialValidFrom : Optional Time
+      -- ^ validFrom of every credential this action mints. None: valid from
+      -- creation. Optional and after the nonce so contracts created without
+      -- it upgrade with None, which mints the open-ended credentials of
+      -- earlier versions.
+    credentialValidUntil : Optional Time
+      -- ^ validUntil of every credential this action mints. None: never
+      -- expires.
   where
     signatory proposer
     observer governanceParty
     ensure validCredentialIdNonce credentialIdNonce
+        && validCredentialValidity credentialValidFrom credentialValidUntil
 
     interface instance GovernableAction for OnboardRegistrar where
       view = GovernableActionView with
@@ -42,6 +52,7 @@ template OnboardRegistrar
         proposer
         actionLabel = "OnboardRegistrar"
         description = "Onboard the registrar named in the service request"
+          <> credentialValidityText credentialValidFrom credentialValidUntil
 
       executeImpl = do
         request <- fetch registrarServiceRequestCid
@@ -52,6 +63,7 @@ template OnboardRegistrar
           (providerConfiguration.provider == governanceParty)
         mintedCredentialCids <- mintCredentialsMeetingRequirements
           governanceParty request.registrar "registrar-credential" credentialIdNonce
+          credentialValidFrom credentialValidUntil
           providerConfiguration.registrarRequirements
         _ <- exercise providerServiceCid ProviderService_AcceptRegistrarServiceRequest with
           cid = registrarServiceRequestCid

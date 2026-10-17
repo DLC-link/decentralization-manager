@@ -40,6 +40,23 @@ validCredentialIdNonce : Optional Text -> Bool
 validCredentialIdNonce =
   optional True (\nonce -> nonce /= "" && not ("/" `isInfixOf` nonce))
 
+-- | True when a credential validity window is open-ended on either side,
+-- or starts strictly before it ends. Proposal templates that mint use this
+-- in their `ensure` clause, so an empty window fails before any vote.
+validCredentialValidity : Optional Time -> Optional Time -> Bool
+validCredentialValidity (Some validFrom) (Some validUntil) = validFrom < validUntil
+validCredentialValidity _ _ = True
+
+-- | Describe a credential validity window for a proposal description, with a
+-- leading separator, or nothing when the window is unbounded. Voters see
+-- only the description, and an expiry is part of what they approve.
+credentialValidityText : Optional Time -> Optional Time -> Text
+credentialValidityText None None = ""
+credentialValidityText validFrom validUntil =
+  "; credentials valid"
+    <> optional "" (\t -> " from " <> show t) validFrom
+    <> optional "" (\t -> " until " <> show t) validUntil
+
 -- | Render a governance-minted credential id:
 --
 -- * with a nonce: {roleTag}/{subject}/{timestamp}-{nonce}-{index}
@@ -74,6 +91,11 @@ mkCredentialId roleTag subject now nonce index =
 --
 -- A self-issuable requirement with no required claims is refused: the
 -- resulting claimless credential would attest for nobody.
+--
+-- The validity window comes from the proposal and is copied onto every
+-- minted credential. `None` on both sides mints credentials that never
+-- expire. A window that has already ended when the action executes is
+-- refused, because it would mint credentials that are expired on creation.
 mintCredentialsMeetingRequirements
   : Party
     -- ^ Governance party. Issuer and holder of every minted credential.
@@ -84,11 +106,19 @@ mintCredentialsMeetingRequirements
     -- or "{symbol}-instrument-issuer-credential".
   -> Optional Text
     -- ^ The proposal's credential id nonce. See `mkCredentialId`.
+  -> Optional Time
+    -- ^ The proposal's credential validFrom. None: valid from creation.
+  -> Optional Time
+    -- ^ The proposal's credential validUntil. None: never expires.
   -> [PartyCredentialRequirement]
     -- ^ Full requirement list. Filtered internally.
   -> Update [ContractId Credential]
-mintCredentialsMeetingRequirements governanceParty subject roleTag nonce requirements = do
+mintCredentialsMeetingRequirements governanceParty subject roleTag nonce validFrom validUntil requirements = do
   now <- getTime
+  require
+    ("mintCredentialsMeetingRequirements: credential validity ended at " <> show validUntil
+      <> ", before execution at " <> show now)
+    (optional True (now <) validUntil)
   let selfIssuable = filter (\requirement -> requirement.issuer == governanceParty) requirements
       mkClaim (property, value) = Claim with
         subject = partyToText subject
@@ -104,7 +134,7 @@ mintCredentialsMeetingRequirements governanceParty subject roleTag nonce require
       holder = governanceParty
       id = mkCredentialId roleTag subject now nonce index
       description = "Governance-minted " <> roleTag <> " for " <> partyToText subject
-      validFrom = None
-      validUntil = None
+      validFrom
+      validUntil
       claims = map mkClaim requirement.requiredClaims
       observers = Set.fromList [subject]
