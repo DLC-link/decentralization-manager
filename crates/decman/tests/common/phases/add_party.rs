@@ -4,15 +4,15 @@ use anyhow::Context;
 use common::{
     api::DecentralizedPartiesResponse,
     canton_id::CantonId,
-    types::{InvitationType, WorkflowKind, WorkflowProgress, WorkflowRole},
+    types::{WorkflowKind, WorkflowProgress, WorkflowRole},
 };
-use serde_json::{Value, json};
+use serde_json::json;
 use tracing::info;
 
 use crate::common::{
-    Fixture,
+    Fixture, chaos,
     http::{probe_workflow_run_visible, probe_workflow_status},
-    invitations::{InvitationIds, post_accept_invitation, probe_pending_invitation},
+    invitations::{InvitationIds, post_accept_invitation, probe_run_invitation},
     scenario::Scenario,
 };
 
@@ -39,7 +39,7 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
                 Ok(())
             })
         })
-        .when("P1 posts /add-party", |f, _| {
+        .when("P1 posts /add-party", |f, ctx| {
             Box::pin(async move {
                 let party_id = f.party_id()?.to_string();
                 let p3_uid = f.p3.participant_id.clone();
@@ -57,10 +57,7 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
                     "new_threshold": 2_i64,
                     "previous_threshold": 2_i64,
                 });
-                let _: Value = f
-                    .post_json(f.p1.http, "/add-party", &req)
-                    .await
-                    .context("POST /add-party")?;
+                ctx.run = Some(chaos::start_workflow_on(f, f.p1.http, "/add-party", &req).await?);
                 Ok(())
             })
         })
@@ -124,8 +121,11 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
             Duration::from_secs(60),
             |f, ctx| {
                 Box::pin(async move {
-                    let id =
-                        probe_pending_invitation(f, f.p2.http, InvitationType::AddParty).await?;
+                    // `add_party_edge_cases` cancels an AddParty run just
+                    // before this phase, and its invitation may still be
+                    // pending (#549).
+                    let run = ctx.run.as_deref()?;
+                    let id = probe_run_invitation(f, f.p2.http, run).await?;
                     ctx.p2 = Some(id);
                     Some(Ok(()))
                 })
@@ -136,8 +136,8 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
             Duration::from_secs(60),
             |f, ctx| {
                 Box::pin(async move {
-                    let id =
-                        probe_pending_invitation(f, f.p3.http, InvitationType::AddParty).await?;
+                    let run = ctx.run.as_deref()?;
+                    let id = probe_run_invitation(f, f.p3.http, run).await?;
                     ctx.p3 = Some(id);
                     Some(Ok(()))
                 })
