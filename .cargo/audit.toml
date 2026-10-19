@@ -1,8 +1,10 @@
 # cargo-audit reads Cargo.lock directly and flags every advisory it finds,
 # even for crates that are gated behind disabled features and never compiled
 # in this workspace. cargo-deny respects feature gating and does not flag
-# them, so each ignore here documents exactly why the audit-only finding is
-# not reachable.
+# those, so for them each ignore here documents why the audit-only finding is
+# not reachable. The h2 and zip entries are different: both tools flag them,
+# because they are in the compiled graph. Those mirror deny.toml and say why
+# they cannot be fixed by updating.
 
 [advisories]
 ignore = [
@@ -45,20 +47,26 @@ ignore = [
   # Drop this ignore when hyper-noise moves off hyper 0.14, or actix-web
   # ships an h2 0.4 release. Tracked in #351.
   "RUSTSEC-2026-0258",
-  # zip 8.6.0: `ZipArchive::extract` and `ZipStreamReader::extract` keep
-  # SUID/SGID bits (RUSTSEC-2026-0367), create symlinks pointing outside the
-  # destination (RUSTSEC-2026-0368), and apply permissions through them
+  # zip 8.6.0: zip's own `ZipArchive::extract` and `ZipStreamReader::extract`
+  # keep SUID/SGID bits (RUSTSEC-2026-0367), create symlinks pointing outside
+  # the destination (RUSTSEC-2026-0368), and apply permissions through them
   # (RUSTSEC-2026-0369) when unpacking an attacker-controlled archive. The
   # fixes are only in zip 9, with no patched 8.x.
   #
   # zip is a build dependency of utoipa-swagger-ui, whose latest release
   # (10.0.1) requires `zip ^8.6`, so this cannot be resolved by updating. Its
   # build script unpacks only the Swagger UI v5.32.6 release it downloads
-  # from GitHub, and never calls either `extract`. It writes each entry as a
-  # regular file under its `enclosed_name`, so no symlink is created. Nothing
-  # in decman uses zip at runtime. Mirrors the ignore in deny.toml.
+  # from GitHub, and never calls zip's `extract` functions. Its own inner
+  # `fn extract` writes each entry as a regular file under its
+  # `enclosed_name`, so no symlink is created. That loop applies each entry's
+  # `unix_mode()` unmasked, so a malicious archive could still set SUID bits
+  # there, whatever the zip version. The pinned upstream archive is what
+  # keeps the build safe. Nothing in decman uses zip at runtime. Mirrors the
+  # ignore in deny.toml.
   #
-  # Drop these ignores when utoipa-swagger-ui allows zip 9.
+  # juhaku/utoipa#1645 moves the build dependency to zip 9. It merged on
+  # 2026-10-17 but is not in a release yet. Drop these ignores once the
+  # utoipa-swagger-ui release that ships #1645 is out and we update to it.
   "RUSTSEC-2026-0367",
   "RUSTSEC-2026-0368",
   "RUSTSEC-2026-0369",
