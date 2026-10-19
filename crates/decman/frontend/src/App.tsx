@@ -1375,7 +1375,11 @@ const App = () => {
                     <Chip
                       size="small"
                       label={`Shared with ${participantName(sharedWith, networkConfig?.peers)}`}
-                      onDelete={() => navigate(0, partyFilter || null)}
+                      onDelete={() => {
+                        // `navigate` keeps the filter for a prefix slug.
+                        setSharedWith(null);
+                        navigate(0, partyFilter || null);
+                      }}
                       data-testid="shared-scope-chip"
                     />
                   </Tooltip>

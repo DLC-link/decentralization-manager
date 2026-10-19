@@ -206,6 +206,23 @@ describe("shared parties deep link", () => {
     expect(screen.queryByText(/Shared with/)).toBeNull();
     expect(listedParty("beta")).toBeTruthy();
   });
+
+  it("keeps a prefix searched in the shared view when the chip clears", async () => {
+    await renderApp(`#parties/shared/${bravo}`);
+    const chip = await screen.findByTestId("shared-scope-chip");
+    await waitFor(() => expect(listedParty("beta")).toBeTruthy());
+
+    const [filter] = screen.getAllByPlaceholderText(/Filter by full prefix/);
+    fireEvent.change(filter, { target: { value: "alpha" } });
+    fireEvent.keyDown(filter, { key: "Enter" });
+    await waitFor(() => expect(listedParty("beta")).toBeNull());
+
+    fireEvent.click(within(chip).getByTestId("CancelIcon"));
+
+    expect(window.location.hash).toBe("#parties/alpha");
+    expect(screen.queryByTestId("shared-scope-chip")).toBeNull();
+    expect(listedParty("alpha")).toBeTruthy();
+  });
 });
 
 describe("peer config to shared parties", () => {
