@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState, useCallback, useRef } from "react";
 import {
   Badge,
+  Chip,
   Container,
   Box,
   Alert,
@@ -46,7 +47,8 @@ import {
   nextAuditSnapshot,
   type AuditSnapshot,
 } from "./completedProposals";
-import { TAB_HASHES, buildHash, parseHash } from "./hashRoute";
+import { TAB_HASHES, buildHash, parseHash, sharedWithSlug } from "./hashRoute";
+import { participantName, partiesSharedWith } from "./sharedParties";
 import { workflowKindLabel } from "./workflowSteps";
 import { columnSx } from "./styles";
 import type {
@@ -208,6 +210,15 @@ const App = () => {
   const [packagesPartyId, setPackagesPartyId] = useState<string | null>(
     INITIAL_ROUTE.packagesPartyId,
   );
+  // The participant whose shared parties the list shows. It narrows the list
+  // on top of the prefix, and stays set while a party opened from it is shown,
+  // so Back returns to the same list.
+  const [sharedWith, setSharedWith] = useState<string | null>(
+    INITIAL_ROUTE.sharedWith,
+  );
+  const [configPeerId, setConfigPeerId] = useState<string | null>(
+    INITIAL_ROUTE.configPeerId,
+  );
   // The party the packages tab was opened for, when the parties list does not
   // hold it: a deep link loads the packages tab without reading any parties.
   const [fetchedPackagesParty, setFetchedPackagesParty] =
@@ -219,23 +230,57 @@ const App = () => {
   // Only the Configuration tab shows node health, and only it pays for the
   // poll: the probe stops the moment the operator moves to another tab.
   const nodeHealth = useNodeHealth(activeTab === 2);
+  const listedParties = useMemo(
+    () => (sharedWith ? partiesSharedWith(parties, sharedWith) : parties),
+    [parties, sharedWith],
+  );
   // Starred parties first, before the list paginates, so they land on page one.
   const visibleParties = useMemo(
     () =>
       favoritesFirst(
-        showHidden ? parties : parties.filter((p) => !isHidden(p.party_id)),
+        showHidden
+          ? listedParties
+          : listedParties.filter((p) => !isHidden(p.party_id)),
         favorites,
       ),
-    [parties, showHidden, isHidden, favorites],
+    [listedParties, showHidden, isHidden, favorites],
   );
   const hiddenCount = useMemo(
-    () => parties.filter((p) => isHidden(p.party_id)).length,
-    [parties, isHidden],
+    () => listedParties.filter((p) => isHidden(p.party_id)).length,
+    [listedParties, isHidden],
   );
   const lastScrollY = useRef(0);
   const savedScrollY = useRef(0);
   const pendingSlug = useRef<string | null>(INITIAL_ROUTE.partySlug);
+  const partiesLoaded = useRef(INITIAL_ROUTE.tab === 0);
   const { showSnackbar } = useSnackbar();
+
+  const loadParties = useCallback(
+    async (prefix: string, force = false) => {
+      setRefreshingParties(true);
+      try {
+        const qs = new URLSearchParams();
+        if (prefix) qs.set("prefix", prefix);
+        if (force) qs.set("refresh", "true");
+        const params = qs.toString() ? `?${qs.toString()}` : "";
+        const res = await authenticatedFetch(`${API_BASE}/decentralized-parties${params}`);
+        if (res.ok) {
+          const data: DecentralizedPartiesResponse = await res.json();
+          setParties(data.parties);
+        } else {
+          showSnackbar("Failed to refresh parties", "error");
+        }
+      } catch (err) {
+        showSnackbar(
+          err instanceof Error ? err.message : "Failed to refresh parties",
+          "error",
+        );
+      } finally {
+        setRefreshingParties(false);
+      }
+    },
+    [showSnackbar],
+  );
 
   // --- Hash-based routing ---
 
@@ -243,10 +288,36 @@ const App = () => {
     (tab: number, partySlug?: string | null) => {
       setActiveTab(tab);
       if (tab !== 0) setSelectedPartyId(null);
+      // Only a parties-tab slug keeps the shared filter: the shared list
+      // itself, or a party opened from it.
+      if (tab !== 0 || !partySlug) setSharedWith(null);
       setPackagesPartyId(tab === 1 ? (partySlug ?? null) : null);
+      setConfigPeerId(tab === 2 ? (partySlug ?? null) : null);
       window.history.pushState(null, "", buildHash(tab, partySlug));
     },
     [],
+  );
+
+  // Show the parties `participantId` also hosts. The list is read again
+  // without a prefix, because a prefix would hide some of them.
+  const enterSharedView = useCallback(
+    (participantId: string) => {
+      setSelectedPartyId(null);
+      setSharedWith(participantId);
+      setPartyFilter("");
+      partiesLoaded.current = true;
+      void loadParties("");
+    },
+    [loadParties],
+  );
+
+  const showSharedParties = useCallback(
+    (participantId: string) => {
+      navigate(0, sharedWithSlug(participantId));
+      enterSharedView(participantId);
+      window.scrollTo(0, 0);
+    },
+    [navigate, enterSharedView],
   );
 
   // Jump to the notifications tab after a successful workflow / governance
@@ -297,28 +368,34 @@ const App = () => {
   // Listen for back/forward browser navigation
   useEffect(() => {
     const onPopState = () => {
-      const { tab, partySlug, packagesPartyId } = parseHash(
-        window.location.hash,
-      );
+      const { tab, partySlug, packagesPartyId, sharedWith, configPeerId } =
+        parseHash(window.location.hash);
       setActiveTab(tab);
       setPackagesPartyId(packagesPartyId);
+      setConfigPeerId(configPeerId);
       if (tab === 0) {
+        if (sharedWith) {
+          enterSharedView(sharedWith);
+          return;
+        }
         const exactMatch = parties.find((p) => p.party_id === partySlug);
         if (exactMatch) {
           setSelectedPartyId(partySlug);
         } else {
           setSelectedPartyId(null);
+          setSharedWith(null);
           if (partySlug && !partySlug.includes("::")) {
             setPartyFilter(partySlug);
           }
         }
       } else {
         setSelectedPartyId(null);
+        setSharedWith(null);
       }
     };
     window.addEventListener("popstate", onPopState);
     return () => window.removeEventListener("popstate", onPopState);
-  }, [parties]);
+  }, [parties, enterSharedView]);
 
   useEffect(() => {
     if ("scrollRestoration" in history) {
@@ -354,35 +431,18 @@ const App = () => {
 
   const refreshParties = useCallback(
     async (force = false) => {
-      setRefreshingParties(true);
       // Update hash to reflect the current filter
       window.history.replaceState(
         null,
         "",
-        buildHash(0, partyFilter || null),
+        buildHash(
+          0,
+          sharedWith ? sharedWithSlug(sharedWith) : partyFilter || null,
+        ),
       );
-      try {
-        const qs = new URLSearchParams();
-        if (partyFilter) qs.set("prefix", partyFilter);
-        if (force) qs.set("refresh", "true");
-        const params = qs.toString() ? `?${qs.toString()}` : "";
-        const res = await authenticatedFetch(`${API_BASE}/decentralized-parties${params}`);
-        if (res.ok) {
-          const data: DecentralizedPartiesResponse = await res.json();
-          setParties(data.parties);
-        } else {
-          showSnackbar("Failed to refresh parties", "error");
-        }
-      } catch (err) {
-        showSnackbar(
-          err instanceof Error ? err.message : "Failed to refresh parties",
-          "error",
-        );
-      } finally {
-        setRefreshingParties(false);
-      }
+      await loadParties(partyFilter, force);
     },
-    [showSnackbar, partyFilter],
+    [loadParties, partyFilter, sharedWith],
   );
 
   const savePeers = useCallback(
@@ -488,7 +548,6 @@ const App = () => {
   }, []);
 
   // Lazy-load parties when switching to parties tab (if not loaded on init)
-  const partiesLoaded = useRef(INITIAL_ROUTE.tab === 0);
   useEffect(() => {
     if (activeTab !== 0 || partiesLoaded.current) return;
     partiesLoaded.current = true;
@@ -513,6 +572,21 @@ const App = () => {
     };
     fetchConfigData();
   }, [activeTab, networkConfig, keyStatus]);
+
+  // The shared view's filter chip names the participant by its peer name.
+  useEffect(() => {
+    if (!sharedWith || networkConfig) return;
+    let cancelled = false;
+    authenticatedFetch(`${API_BASE}/network-config`)
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data: NetworkConfig | null) => {
+        if (!cancelled && data) setNetworkConfig(data);
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [sharedWith, networkConfig]);
 
   // Poll participant statuses every 2 seconds, and on the same cadence measure
   // our own round-trip to the backend so the "you" row of the peers table shows
@@ -1196,7 +1270,10 @@ const App = () => {
               party={parties.find((p) => p.party_id === selectedPartyId)!}
               onBack={() => {
                 setSelectedPartyId(null);
-                navigate(0, partyFilter || null);
+                navigate(
+                  0,
+                  sharedWith ? sharedWithSlug(sharedWith) : partyFilter || null,
+                );
                 window.scrollTo(0, savedScrollY.current);
               }}
               onRefresh={() => refreshParties(true)}
@@ -1209,6 +1286,8 @@ const App = () => {
               operatorParty={operatorParty}
               network={nodeConfig?.canton.network}
               onCheckDars={() => navigate(1, selectedPartyId)}
+              onOpenPeerConfig={(participantId) => navigate(2, participantId)}
+              onShowSharedParties={showSharedParties}
             />
           ) : (
             <>
@@ -1288,6 +1367,19 @@ const App = () => {
                 <Tab value="decentralized" label="Decentralized Parties" />
                 <Tab value="external" label="External Parties" />
               </Tabs>
+
+              {partiesView === "decentralized" && sharedWith && (
+                <Box sx={{ ...columnSx, mb: 1 }}>
+                  <Tooltip title={sharedWith} describeChild>
+                    <Chip
+                      size="small"
+                      label={`Shared with ${participantName(sharedWith, networkConfig?.peers)}`}
+                      onDelete={() => navigate(0, partyFilter || null)}
+                      data-testid="shared-scope-chip"
+                    />
+                  </Tooltip>
+                </Box>
+              )}
 
               {partiesView === "decentralized" ? (
                 <PartyList
@@ -1372,6 +1464,8 @@ const App = () => {
                   participantStatuses={participantStatuses}
                   selfLatencyMs={selfLatency.ms}
                   onSave={savePeers}
+                  focusParticipantId={configPeerId}
+                  onShowSharedParties={showSharedParties}
                 />
               ) : (
                 <Box sx={{ p: 3 }}>
