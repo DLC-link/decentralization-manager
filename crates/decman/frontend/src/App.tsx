@@ -87,6 +87,14 @@ const SAVED_HASH = (
 ).replace(/[&?#](state|session_state|iss|code)=.*/i, "");
 const INITIAL_ROUTE = parseHash(SAVED_HASH);
 
+/**
+ * The shared scope a party's history entry was opened in. A party's URL is
+ * the same in every scope, so `navigate` keeps the scope in the entry's state.
+ */
+function historyScope(state: unknown): string | null {
+  return (state as { sharedWith?: string | null } | null)?.sharedWith ?? null;
+}
+
 /** This node's newest audit rows across every party, or null on failure. */
 async function fetchGovernanceAudit(): Promise<AuditLogEntry[] | null> {
   try {
@@ -285,7 +293,7 @@ const App = () => {
   // --- Hash-based routing ---
 
   const navigate = useCallback(
-    (tab: number, partySlug?: string | null) => {
+    (tab: number, partySlug?: string | null, sharedScope: string | null = null) => {
       setActiveTab(tab);
       if (tab !== 0) setSelectedPartyId(null);
       // Only a parties-tab slug keeps the shared filter: the shared list
@@ -293,7 +301,11 @@ const App = () => {
       if (tab !== 0 || !partySlug) setSharedWith(null);
       setPackagesPartyId(tab === 1 ? (partySlug ?? null) : null);
       setConfigPeerId(tab === 2 ? (partySlug ?? null) : null);
-      window.history.pushState(null, "", buildHash(tab, partySlug));
+      window.history.pushState(
+        { sharedWith: sharedScope },
+        "",
+        buildHash(tab, partySlug),
+      );
     },
     [],
   );
@@ -368,7 +380,7 @@ const App = () => {
 
   // Listen for back/forward browser navigation
   useEffect(() => {
-    const onPopState = () => {
+    const onPopState = (event: PopStateEvent) => {
       const { tab, partySlug, packagesPartyId, sharedWith, configPeerId } =
         parseHash(window.location.hash);
       setActiveTab(tab);
@@ -382,6 +394,7 @@ const App = () => {
         const exactMatch = parties.find((p) => p.party_id === partySlug);
         if (exactMatch) {
           setSelectedPartyId(partySlug);
+          setSharedWith(historyScope(event.state));
         } else {
           setSelectedPartyId(null);
           setSharedWith(null);
@@ -1393,7 +1406,7 @@ const App = () => {
                   onSelectParty={(id) => {
                     savedScrollY.current = window.scrollY;
                     setSelectedPartyId(id);
-                    navigate(0, id);
+                    navigate(0, id, sharedWith);
                     window.scrollTo(0, 0);
                   }}
                   isHidden={isHidden}

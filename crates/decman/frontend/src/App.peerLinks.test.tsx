@@ -186,6 +186,32 @@ describe("party details to shared parties", () => {
 
     expect(await screen.findAllByTestId("participant-row")).toHaveLength(3);
     expect(screen.queryByText("Shared with charlie")).toBeNull();
+
+    // The party was opened from the plain list, so its Back arrow goes there.
+    fireEvent.click(screen.getByRole("button", { name: "Back to parties" }));
+    expect(window.location.hash).toBe("#parties");
+    expect(screen.queryByTestId("shared-scope-chip")).toBeNull();
+  });
+
+  it("restores the shared scope of a party on browser Back", async () => {
+    await renderApp(`#parties/shared/${bravo}`);
+    fireEvent.click(await screen.findByRole("button", { name: `Open party ${partyId("alpha")}` }));
+    fireEvent.click(
+      await within(await participantRow(charlie)).findByRole("button", { name: "2 shared" }),
+    );
+    await screen.findByText("Shared with charlie");
+
+    await act(async () => {
+      window.history.back();
+      await new Promise((resolve) => window.addEventListener("popstate", resolve, { once: true }));
+    });
+    await screen.findAllByTestId("participant-row");
+
+    fireEvent.click(screen.getByRole("button", { name: "Back to parties" }));
+    expect(window.location.hash).toBe(`#parties/shared/${bravo}`);
+    expect((await screen.findByTestId("shared-scope-chip")).textContent).toBe(
+      "Shared with Bravo",
+    );
   });
 });
 
