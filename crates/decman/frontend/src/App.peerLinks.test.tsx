@@ -62,6 +62,8 @@ function backend(input: RequestInfo | URL) {
           { participant_id: bravo, name: "Bravo", address: "b", port: 1, public_key: "" },
         ],
       });
+    case "/keys/status":
+      return json({ has_keys: true, public_key: "" });
     case "/auth/status":
       return json({ parties: [] });
     case "/participants-status":
@@ -203,6 +205,29 @@ describe("shared parties deep link", () => {
     expect(window.location.hash).toBe("#parties");
     expect(screen.queryByText(/Shared with/)).toBeNull();
     expect(listedParty("beta")).toBeTruthy();
+  });
+});
+
+describe("peer config to shared parties", () => {
+  it("shows the decentralized list even when the external one was open", async () => {
+    await renderApp("#parties");
+    fireEvent.click(await screen.findByRole("tab", { name: "External Parties" }));
+    await act(async () => {
+      window.history.pushState(null, "", "#config");
+      window.dispatchEvent(new PopStateEvent("popstate"));
+    });
+    const bravoRow = await waitFor(() => {
+      const row = document.querySelector<HTMLElement>(
+        `tr[data-participant-uid="${bravo}"]`,
+      );
+      expect(row).toBeTruthy();
+      return row!;
+    });
+
+    fireEvent.click(await within(bravoRow).findByRole("button", { name: "3 shared" }));
+
+    expect(await screen.findByTestId("shared-scope-chip")).toBeTruthy();
+    await waitFor(() => expect(listedParty("beta")).toBeTruthy());
   });
 });
 

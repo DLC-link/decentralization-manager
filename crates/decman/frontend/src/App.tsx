@@ -303,6 +303,7 @@ const App = () => {
   const enterSharedView = useCallback(
     (participantId: string) => {
       setSelectedPartyId(null);
+      setPartiesView("decentralized");
       setSharedWith(participantId);
       setPartyFilter("");
       partiesLoaded.current = true;
