@@ -65,7 +65,10 @@ use super::record::{
     field_decimal, field_list_len, field_optional_is_none, field_party_id, field_party_list,
     field_time,
 };
-use super::{package_inventory::fetch_package_id_to_name, queries::fetch_contract_template_id};
+use super::{
+    package_inventory::fetch_package_id_to_name,
+    queries::{fetch_contract_template_id, read_governance_state},
+};
 
 // ============================================================================
 // Shared decoded ACS read
@@ -707,6 +710,15 @@ static AUTH_UNREGISTERED: LazyLock<IntCounterVec> = LazyLock::new(|| {
     .expect("metric name is a unique literal")
 });
 
+static ASSIGNER_NOT_MEMBER: LazyLock<IntCounterVec> = LazyLock::new(|| {
+    prometheus::register_int_counter_vec!(
+        "decman_reward_assigner_not_member_total",
+        "Sweeps that found an assigner on the delegation who is no longer a governance member of the decparty.",
+        &["decparty"]
+    )
+    .expect("metric name is a unique literal")
+});
+
 // Carries no decparty label: one enablement read serves every decparty this
 // node holds credentials for, and a pass that fails reads none of them.
 static ENABLEMENT_UNREADABLE: LazyLock<IntCounter> = LazyLock::new(|| {
@@ -737,6 +749,7 @@ pub(crate) fn register_metrics() {
     LazyLock::force(&EXPIRY_READS);
     LazyLock::force(&CREDENTIALS_UNAVAILABLE);
     LazyLock::force(&AUTH_UNREGISTERED);
+    LazyLock::force(&ASSIGNER_NOT_MEMBER);
     LazyLock::force(&ENABLEMENT_UNREADABLE);
     LazyLock::force(&OLDEST_EXPIRES_IN);
 }
@@ -753,6 +766,7 @@ fn ensure_outcome_series(label: &str) {
         &*EXPIRY_READS,
         &*CREDENTIALS_UNAVAILABLE,
         &*AUTH_UNREGISTERED,
+        &*ASSIGNER_NOT_MEMBER,
     ] {
         counter.with_label_values(&[label]).inc_by(0);
     }
@@ -1386,9 +1400,9 @@ fn counts_as_unreadable_enablement(read: &Enablement, served: usize) -> bool {
     *read == Enablement::Unreadable && served > 0
 }
 
-/// How long the package check of a pass that no token could read may take. The
-/// check runs on the task that carries the heartbeat.
-const PACKAGE_CHECK_TIMEOUT: Duration = Duration::from_secs(15);
+/// How long a read that only feeds a diagnostic may take. These reads run on the
+/// task that carries the heartbeat, so a hung one must not stop the sweep.
+const DIAGNOSTIC_READ_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// What a pass that no token could read concludes from the participant's
 /// packages, given as `package id -> name` (pure).
@@ -1453,7 +1467,7 @@ async fn read_enablement(
         }
     }
     let listed = tokio::time::timeout(
-        PACKAGE_CHECK_TIMEOUT,
+        DIAGNOSTIC_READ_TIMEOUT,
         fetch_package_id_to_name(&data.config),
     )
     .await;
@@ -1636,6 +1650,61 @@ fn role_for(delegation: &ActiveDelegation, member: &CantonId) -> Role {
     }
 }
 
+/// The delegation's assigners that are not governance members (pure).
+///
+/// `Delegation_Assign` checks the assigner against the list fixed by the vote, so
+/// a removed member keeps assigning until a new vote replaces the delegation
+/// (#285). The reverse is not reported: a member need not be an assigner, and a
+/// decparty may name a single assigner on purpose.
+fn assigners_not_members(assigners: &[CantonId], members: &[CantonId]) -> Vec<CantonId> {
+    assigners
+        .iter()
+        .filter(|a| !members.contains(a))
+        .cloned()
+        .collect()
+}
+
+/// Counts and logs a sweep whose delegation names an assigner that is no longer
+/// a governance member. A failed or slow rules read reports nothing, because
+/// the membership is then unknown.
+async fn report_assigners_not_members(
+    data: &actix_web::web::Data<AppState>,
+    decparty: &CantonId,
+    delegation: &ActiveDelegation,
+    token: &str,
+    pkgs: &PackageConfig,
+) {
+    let read = tokio::time::timeout(
+        DIAGNOSTIC_READ_TIMEOUT,
+        read_governance_state(&data.config, decparty, Some(token.to_string()), pkgs),
+    )
+    .await;
+    let rules = match read {
+        Ok(Ok(Some(rules))) => rules,
+        Ok(Ok(None)) => return,
+        Ok(Err(e)) => {
+            tracing::debug!(%decparty, error = %e, "reading the governance members failed");
+            return;
+        }
+        Err(_) => {
+            tracing::debug!(%decparty, "reading the governance members timed out");
+            return;
+        }
+    };
+    let stale = assigners_not_members(&delegation.assigners, &rules.members);
+    if !stale.is_empty() {
+        ASSIGNER_NOT_MEMBER
+            .with_label_values(&[&decparty.to_string()])
+            .inc();
+        tracing::warn!(
+            %decparty,
+            assigners = ?stale,
+            "the delegation still names assigners that are no longer governance members; \
+             a new SetupCouponReassignmentDelegation vote removes them"
+        );
+    }
+}
+
 /// What a pass over the served decparties does.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Pass {
@@ -1801,6 +1870,9 @@ async fn run_once_for_party(
     else {
         return Ok(SweepOutcome::Empty);
     };
+    if pass == Pass::Sweep {
+        report_assigners_not_members(data, decparty, &delegation, &token, &pkgs).await;
+    }
     let role = role_for(&delegation, &member);
     if role == Role::ReportOnly {
         tracing::warn!(
@@ -2731,9 +2803,37 @@ mod tests {
     }
 
     #[test]
+    fn a_removed_member_is_reported_while_the_delegation_names_it() -> anyhow::Result<()> {
+        // DAVE left the committee after the vote that named him.
+        let assigners = [CantonId::parse(ALICE)?, CantonId::parse(DAVE)?];
+        let members = [CantonId::parse(ALICE)?, CantonId::parse(BOB)?];
+
+        assert_eq!(
+            assigners_not_members(&assigners, &members),
+            vec![CantonId::parse(DAVE)?]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn a_member_who_is_not_an_assigner_is_not_reported() -> anyhow::Result<()> {
+        // A delegation may name one assigner on purpose, as mainnet's
+        // cbtc-network does. A new member is not named until a new vote either.
+        let assigners = [CantonId::parse(ALICE)?];
+        let members = [
+            CantonId::parse(ALICE)?,
+            CantonId::parse(BOB)?,
+            CantonId::parse(EVE)?,
+        ];
+
+        assert!(assigners_not_members(&assigners, &members).is_empty());
+        Ok(())
+    }
+
+    #[test]
     fn the_outcome_counters_read_zero_before_their_first_event() {
         // A dashboard cannot tell a missing family from a node that never failed,
-        // so a served decparty exports all seven at zero from its first sweep.
+        // so a served decparty exports all eight at zero from its first sweep.
         // The read counter needs this most: a node whose sweep interval is
         // shorter than its read interval never increments it at all.
         register_metrics();
@@ -2749,6 +2849,7 @@ mod tests {
             "decman_reward_expiry_read_total",
             "decman_reward_credentials_unavailable_total",
             "decman_reward_auth_unregistered_total",
+            "decman_reward_assigner_not_member_total",
         ] {
             let family = families
                 .iter()
