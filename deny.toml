@@ -19,8 +19,8 @@ ignore = [
   # the patch landed only in 0.4.16. It arrives via actix-http (actix-web 4,
   # `http2` on by default) and via hyper 0.14, which hyper-noise 0.0.3 requires
   # with `features = ["full"]` — so the feature cannot be switched off from
-  # here either. Unlike the other entries in this file, cargo-deny flags this
-  # one too, i.e. it really is in the compiled graph, not just the lockfile.
+  # here either. Unlike `paste` above, cargo-deny flags this one too, i.e. it
+  # really is in the compiled graph, not just the lockfile.
   #
   # The separate h2 0.4 instance (AWS SDK / hyper 1.x) is fixed by the 0.4.16
   # bump that accompanies this ignore.
@@ -28,4 +28,29 @@ ignore = [
   # Drop when hyper-noise moves off hyper 0.14 or actix-web ships an h2 0.4
   # release. Tracked in #351.
   "RUSTSEC-2026-0258",
+  # zip 8.6.0 can write unsafe files when zip's own `ZipArchive::extract` or
+  # `ZipStreamReader::extract` unpacks an attacker-controlled archive: it keeps
+  # SUID/SGID bits (RUSTSEC-2026-0367), creates symlinks pointing outside the
+  # destination (RUSTSEC-2026-0368), and applies permissions through them
+  # (RUSTSEC-2026-0369). Like h2, cargo-deny flags these too: zip is in the
+  # build graph.
+  #
+  # Unfixable by updating: the fixes are only in zip 9, and there is no
+  # patched 8.x. zip is a build dependency of utoipa-swagger-ui, whose latest
+  # release (10.0.1) requires `zip ^8.6`. Its build script unpacks one
+  # archive, the Swagger UI v5.32.6 release it downloads from GitHub (we set
+  # no SWAGGER_UI_DOWNLOAD_URL). It never calls zip's `extract` functions:
+  # its own inner `fn extract` walks the entries and writes each as a regular
+  # file under its `enclosed_name`, so it makes no symlinks. That loop does
+  # apply each entry's `unix_mode()` unmasked, so a malicious archive could
+  # still set SUID bits there, whatever the zip version. What keeps the build
+  # safe is that the archive is the pinned upstream Swagger UI release.
+  # Nothing in decman uses zip at runtime.
+  #
+  # juhaku/utoipa#1645 moves the build dependency to zip 9. It merged on
+  # 2026-10-17 but is not in a release yet. Drop these once the
+  # utoipa-swagger-ui release that ships #1645 is out and we update to it.
+  "RUSTSEC-2026-0367",
+  "RUSTSEC-2026-0368",
+  "RUSTSEC-2026-0369",
 ]
