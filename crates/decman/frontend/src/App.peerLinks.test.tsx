@@ -274,6 +274,40 @@ describe("peer config to shared parties", () => {
   });
 });
 
+describe("browser Back out of a shared view", () => {
+  it("reads the prefix list again", async () => {
+    await renderApp("#parties/alpha");
+    await waitFor(() => expect(listedParty("alpha")).toBeTruthy());
+    await act(async () => {
+      window.history.pushState(null, "", "#config");
+      window.dispatchEvent(new PopStateEvent("popstate"));
+    });
+    const bravoRow = await waitFor(() => {
+      const row = document.querySelector<HTMLElement>(
+        `tr[data-participant-uid="${bravo}"]`,
+      );
+      expect(row).toBeTruthy();
+      return row!;
+    });
+    fireEvent.click(await within(bravoRow).findByRole("button", { name: "3 shared" }));
+    await waitFor(() => expect(listedParty("beta")).toBeTruthy());
+
+    for (let i = 0; i < 2; i++) {
+      await act(async () => {
+        window.history.back();
+        await new Promise((resolve) =>
+          window.addEventListener("popstate", resolve, { once: true }),
+        );
+      });
+    }
+
+    expect(window.location.hash).toBe("#parties/alpha");
+    await waitFor(() => expect(listedParty("beta")).toBeNull());
+    expect(listedParty("alpha")).toBeTruthy();
+    expect(partyListCalls().at(-1)).toBe("/decentralized-parties?prefix=alpha");
+  });
+});
+
 describe("party details to peer config", () => {
   it("opens the configuration tab at the peer's row", async () => {
     await renderApp(`#parties/${partyId("alpha")}`);

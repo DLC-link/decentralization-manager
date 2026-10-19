@@ -261,6 +261,8 @@ const App = () => {
   const savedScrollY = useRef(0);
   const pendingSlug = useRef<string | null>(INITIAL_ROUTE.partySlug);
   const partiesLoaded = useRef(INITIAL_ROUTE.tab === 0);
+  // The prefix the loaded list was read with, or null before the first read.
+  const listPrefix = useRef<string | null>(null);
   const { showSnackbar } = useSnackbar();
 
   const loadParties = useCallback(
@@ -275,6 +277,7 @@ const App = () => {
         if (res.ok) {
           const data: DecentralizedPartiesResponse = await res.json();
           setParties(data.parties);
+          listPrefix.current = prefix;
         } else {
           showSnackbar("Failed to refresh parties", "error");
         }
@@ -398,8 +401,13 @@ const App = () => {
         } else {
           setSelectedPartyId(null);
           setSharedWith(null);
-          if (partySlug && !partySlug.includes("::")) {
-            setPartyFilter(partySlug);
+          const prefix =
+            partySlug && !partySlug.includes("::") ? partySlug : "";
+          setPartyFilter(prefix);
+          // A shared view reads the whole list, so the loaded list can belong
+          // to another query than this entry's.
+          if (listPrefix.current !== null && listPrefix.current !== prefix) {
+            void loadParties(prefix);
           }
         }
       } else {
@@ -409,7 +417,7 @@ const App = () => {
     };
     window.addEventListener("popstate", onPopState);
     return () => window.removeEventListener("popstate", onPopState);
-  }, [parties, enterSharedView]);
+  }, [parties, enterSharedView, loadParties]);
 
   useEffect(() => {
     if ("scrollRestoration" in history) {
@@ -540,6 +548,7 @@ const App = () => {
           const partiesData: DecentralizedPartiesResponse =
             await partiesRes.json();
           setParties(partiesData.parties);
+          listPrefix.current = hashSlug ?? "";
         }
 
         if (authStatusRes.ok) {
