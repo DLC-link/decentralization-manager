@@ -246,9 +246,7 @@ expression: all_proposal_fixtures()
     "type": "onboard_registrar",
     "provider_service_cid": "00psc",
     "registrar_service_request_cid": "00rsr",
-    "provider_configuration_cid": "00pcc",
-    "credential_valid_from_micros": null,
-    "credential_valid_until_micros": null
+    "provider_configuration_cid": "00pcc"
   },
   {
     "type": "provision_instrument",

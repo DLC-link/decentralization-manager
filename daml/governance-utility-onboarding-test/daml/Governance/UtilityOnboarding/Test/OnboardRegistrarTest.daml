@@ -2,12 +2,11 @@
 -- SPDX-License-Identifier: Apache-2.0
 
 -- | These tests cover OnboardRegistrar: the happy path, the external and
--- provider-mismatch requirement checks, the nonce ensure guard, the
--- outsider-confirm rejection, and the credential validity window.
+-- provider-mismatch requirement checks, the nonce ensure guard, and the
+-- outsider-confirm rejection.
 module Governance.UtilityOnboarding.Test.OnboardRegistrarTest where
 
 import DA.Set qualified as Set
-import DA.Time (addRelTime, days)
 import Daml.Script
 
 import Utility.Credential.V0.Credential (Claim(..), Credential(..), PartyCredentialRequirement(..))
@@ -42,8 +41,6 @@ onboardProposal fx = do
     registrarServiceRequestCid = fx.requestCid
     providerConfigurationCid = fx.providerConfigurationCid
     credentialIdNonce = onboardRegistrarNonce
-    credentialValidFrom = None
-    credentialValidUntil = None
   pure (toInterfaceContractId proposalCid)
 
 -- * Happy path: credential minted, service created, request consumed.
@@ -163,8 +160,6 @@ when_onboard_foreign_provider_request fx = do
     registrarServiceRequestCid = foreignRequestCid
     providerConfigurationCid = fx.providerConfigurationCid
     credentialIdNonce = None
-    credentialValidFrom = None
-    credentialValidUntil = None
   confirmThenExecuteMustFail fx.f.parties fx.f.providerStack (toInterfaceContractId proposalCid)
 
 test_when_request_provider_mismatch_then_execute_fails = script do
@@ -192,8 +187,6 @@ when_onboard_foreign_configuration fx = do
     registrarServiceRequestCid = fx.requestCid
     providerConfigurationCid = foreignConfigurationCid
     credentialIdNonce = None
-    credentialValidFrom = None
-    credentialValidUntil = None
   confirmThenExecuteMustFail fx.f.parties fx.f.providerStack (toInterfaceContractId proposalCid)
 
 test_when_configuration_provider_mismatch_then_execute_fails = script do
@@ -230,82 +223,9 @@ when_propose_with_slash_nonce fx =
     registrarServiceRequestCid = fx.requestCid
     providerConfigurationCid = fx.providerConfigurationCid
     credentialIdNonce = Some "a/b"
-    credentialValidFrom = None
-    credentialValidUntil = None
 
 test_when_nonce_has_slash_then_create_fails = script do
   run Test with
     given = given_with_default_requirement
     when = when_propose_with_slash_nonce
     then_ = then_no_service
-
--- * Credential validity window. The SDK checks the minted registrar
--- credential inside the same accept, so these pin how it treats a window.
-
-onboardProposalWithValidity
-  : Fixture -> Optional Time -> Optional Time -> Script (ContractId GovernableAction)
-onboardProposalWithValidity fx credentialValidFrom credentialValidUntil = do
-  proposalCid <- submit fx.f.providerStack.member1 $ createCmd OnboardRegistrar with
-    governanceParty = fx.f.parties.providerGov
-    proposer = fx.f.providerStack.member1
-    providerServiceCid = fx.providerServiceCid
-    registrarServiceRequestCid = fx.requestCid
-    providerConfigurationCid = fx.providerConfigurationCid
-    credentialIdNonce = onboardRegistrarNonce
-    credentialValidFrom
-    credentialValidUntil
-  pure (toInterfaceContractId proposalCid)
-
-when_onboard_with_validity_window : Fixture -> Script ()
-when_onboard_with_validity_window fx = do
-  now <- getTime
-  proposalCid <- onboardProposalWithValidity fx
-    (Some (addRelTime now (days (-1)))) (Some (addRelTime now (days 30)))
-  _ <- confirmAndExecuteAs fx.f.parties fx.f.providerStack proposalCid
-  pure ()
-
--- Script time is static, so getTime here equals the time the window was
--- built from.
-then_registrar_onboarded_with_window : Fixture -> () -> Script Failures
-then_registrar_onboarded_with_window fx _ = do
-  now <- getTime
-  services <- query @RegistrarService fx.f.parties.registrarGov
-  credentials <- query @Credential fx.f.parties.registrarGov
-  let credentialChecks = case credentials of
-        [(_, credential)] ->
-          shouldBe "credential.validFrom" (Some (addRelTime now (days (-1)))) credential.validFrom <>
-          shouldBe "credential.validUntil" (Some (addRelTime now (days 30))) credential.validUntil
-        _ -> shouldBe "Credential count seen by registrar" 1 (length credentials)
-  pure $
-    shouldBe "RegistrarService count" 1 (length services) <>
-    credentialChecks
-
-test_when_validity_window_then_registrar_onboarded_with_it = script do
-  run Test with
-    given = given_with_default_requirement
-    when = when_onboard_with_validity_window
-    then_ = then_registrar_onboarded_with_window
-
--- A window that opens after execution mints a credential that is not yet
--- valid. The SDK's requirement check inside the accept refuses it, so the
--- whole action rolls back.
-
-when_onboard_with_future_window : Fixture -> Script ()
-when_onboard_with_future_window fx = do
-  now <- getTime
-  proposalCid <- onboardProposalWithValidity fx (Some (addRelTime now (days 1))) None
-  confirmThenExecuteMustFail fx.f.parties fx.f.providerStack proposalCid
-
-then_registrar_not_onboarded : Fixture -> () -> Script Failures
-then_registrar_not_onboarded fx _ = do
-  services <- query @RegistrarService fx.f.parties.registrarGov
-  credentials <- query @Credential fx.f.parties.registrarGov
-  pure $
-    shouldBe "RegistrarService count" 0 (length services) <>
-    shouldBe "Credential count seen by registrar" 0 (length credentials)
-
-test_when_window_opens_after_execution_then_onboard_refused = script do
-  run Test with
-    given = given_with_default_requirement
-    when = when_onboard_with_future_window
-    then_ = then_registrar_not_onboarded

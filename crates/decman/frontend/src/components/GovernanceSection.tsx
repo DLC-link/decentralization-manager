@@ -1744,8 +1744,9 @@ export const GovernanceSection = ({
 
     try {
       let proposal: ProposalType;
-      // The credential validity window of the three minting proposals, in
+      // The credential validity window of the two instrument proposals, in
       // micros since epoch. An empty input leaves that side unbounded.
+      // Onboard Registrar has none: its credential is checked only once.
       const credentialValidity = () => {
         const toMicros = (value: string, label: string) => {
           if (!value) return undefined;
@@ -2056,7 +2057,6 @@ export const GovernanceSection = ({
             provider_service_cid: proposalProviderServiceCid,
             registrar_service_request_cid: proposalRegistrarServiceRequestCid,
             provider_configuration_cid: proposalProviderConfigurationCid,
-            ...credentialValidity(),
           };
           break;
         case "provision_instrument":
@@ -5152,8 +5152,7 @@ export const GovernanceSection = ({
                 </>
               )}
 
-              {(proposalType === "onboard_registrar" ||
-                proposalType === "provision_instrument" ||
+              {(proposalType === "provision_instrument" ||
                 proposalType === "onboard_instrument_issuers") && (
                 <>
                   <TextField

@@ -17,8 +17,7 @@ import Utility.Registry.App.V0.Service.Registrar
 
 import Governance.Action
 import Governance.UtilityOnboarding.Utils
-  ( credentialValidityText, mintCredentialsMeetingRequirements, validCredentialIdNonce
-  , validCredentialValidity )
+  (mintCredentialsMeetingRequirements, validCredentialIdNonce)
 
 template OnboardRegistrar
   with
@@ -32,19 +31,10 @@ template OnboardRegistrar
       -- ^ Folded into the id of every credential this action mints. See
       -- `mkCredentialId`. Optional and last so contracts created without it
       -- upgrade with None, which mints the nonce-free id format.
-    credentialValidFrom : Optional Time
-      -- ^ validFrom of every credential this action mints. None: valid from
-      -- creation. Optional and after the nonce so contracts created without
-      -- it upgrade with None, which mints the open-ended credentials of
-      -- earlier versions.
-    credentialValidUntil : Optional Time
-      -- ^ validUntil of every credential this action mints. None: never
-      -- expires.
   where
     signatory proposer
     observer governanceParty
     ensure validCredentialIdNonce credentialIdNonce
-        && validCredentialValidity credentialValidFrom credentialValidUntil
 
     interface instance GovernableAction for OnboardRegistrar where
       view = GovernableActionView with
@@ -52,7 +42,6 @@ template OnboardRegistrar
         proposer
         actionLabel = "OnboardRegistrar"
         description = "Onboard the registrar named in the service request"
-          <> credentialValidityText credentialValidFrom credentialValidUntil
 
       executeImpl = do
         request <- fetch registrarServiceRequestCid
@@ -61,9 +50,14 @@ template OnboardRegistrar
         providerConfiguration <- fetch providerConfigurationCid
         require "OnboardRegistrar: provider configuration provider does not match the governance party"
           (providerConfiguration.provider == governanceParty)
+        -- No validity window, unlike the issuer actions. The SDK checks the
+        -- registrar credential only inside RegistrarServiceRequest_Accept, and
+        -- the RegistrarService keeps working after it expires, so an expiry
+        -- here would end nothing. A start after execution would only roll the
+        -- accept back.
         mintedCredentialCids <- mintCredentialsMeetingRequirements
           governanceParty request.registrar "registrar-credential" credentialIdNonce
-          credentialValidFrom credentialValidUntil
+          None None
           providerConfiguration.registrarRequirements
         _ <- exercise providerServiceCid ProviderService_AcceptRegistrarServiceRequest with
           cid = registrarServiceRequestCid

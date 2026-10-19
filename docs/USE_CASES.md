@@ -477,7 +477,7 @@ Credential new issuers against the existing configuration whenever they join aft
 }
 ```
 
-Steps 4, 5 and 6 mint credentials that never expire unless the proposal says otherwise. To issue time-limited credentials, add `credential_valid_from_micros` and/or `credential_valid_until_micros` (microseconds since epoch) to any of the three:
+Steps 5 and 6 mint issuer credentials that never expire unless the proposal says otherwise. To issue time-limited ones, add `credential_valid_from_micros` and/or `credential_valid_until_micros` (microseconds since epoch) to either:
 
 ```json
 {
@@ -490,7 +490,9 @@ Steps 4, 5 and 6 mint credentials that never expire unless the proposal says oth
 }
 ```
 
-Every credential the action mints carries the window, and the proposal description states it, so voters see the expiry they approve. DecMan refuses a window that has already ended or does not start before it ends. The ledger also refuses execution once the end has passed, because the action would mint credentials that are expired on creation. The SDK checks a registrar credential inside the same accept, so an `onboard_registrar` window must already be open when the action executes. Without an expiry, ending an issuer's rights takes an offboard vote (step 7).
+Every credential the action mints carries the window, and the proposal description states it, so voters see the expiry they approve. DecMan refuses a window that has already ended or does not start before it ends. The ledger also refuses execution once the end has passed, because the action would mint credentials that are expired on creation. The SDK checks issuer credentials on every mint and burn, so an expired one ends that issuer's rights. Without an expiry, ending them takes an offboard vote (step 7).
+
+`onboard_registrar` (step 4) takes no window. The SDK checks the registrar credential only inside the accept, and the `RegistrarService` keeps working after it expires, so an expiry would end nothing.
 
 **7. Offboard instrument issuers (registrar decparty):**
 

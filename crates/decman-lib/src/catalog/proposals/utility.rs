@@ -715,15 +715,6 @@ pub struct OnboardRegistrar {
     pub provider_service_cid: String,
     pub registrar_service_request_cid: String,
     pub provider_configuration_cid: String,
-    /// `validFrom` of every credential this action mints, as microseconds
-    /// since epoch. None: valid from creation.
-    #[serde(default)]
-    pub credential_valid_from_micros: Option<i64>,
-    /// `validUntil` of every credential this action mints, as microseconds
-    /// since epoch. None: never expires, so ending it takes an
-    /// `OffboardInstrumentIssuers` vote.
-    #[serde(default)]
-    pub credential_valid_until_micros: Option<i64>,
 }
 
 impl OnboardRegistrar {
@@ -759,15 +750,7 @@ impl DamlProtoEncode for OnboardRegistrar {
     }
 }
 
-impl Validate for OnboardRegistrar {
-    fn validate(&self, ctx: &ValidationCtx) -> Result<(), Error> {
-        validate_credential_validity(
-            self.credential_valid_from_micros,
-            self.credential_valid_until_micros,
-            ctx.now_micros,
-        )
-    }
-}
+impl Validate for OnboardRegistrar {}
 
 /// Create an `InstrumentConfiguration` on the registrar decparty and
 /// credential the initial instrument issuers against its issuer
@@ -936,40 +919,41 @@ impl Validate for OnboardInstrumentIssuers {
 
 /// A proposal whose template mints governance credentials through
 /// `mintCredentialsMeetingRequirements`. The template ends with
-/// `credentialIdNonce : Optional Text`, `credentialValidFrom : Optional Time`
-/// and `credentialValidUntil : Optional Time`, in that order, and the
-/// payload's own encoding leaves all three out. Submit it through
+/// `credentialIdNonce : Optional Text`, which the payload's own encoding
+/// leaves out. The two issuer templates follow it with
+/// `credentialValidFrom : Optional Time` and
+/// `credentialValidUntil : Optional Time`. Submit it through
 /// [`WithCredentialIdNonce`] to set them.
 pub trait MintsCredentials: GrpcPayload {
     /// The `(validFrom, validUntil)` window, in microseconds since epoch,
-    /// copied onto every credential the action mints.
-    fn credential_validity_micros(&self) -> (Option<i64>, Option<i64>);
+    /// copied onto every credential the action mints. `None` for a template
+    /// that declares no window fields, so none are sent.
+    fn credential_validity_micros(&self) -> Option<(Option<i64>, Option<i64>)>;
 }
 
+/// No window: the SDK checks the registrar credential only inside the
+/// accept, and the `RegistrarService` keeps working after it expires.
 impl MintsCredentials for OnboardRegistrar {
-    fn credential_validity_micros(&self) -> (Option<i64>, Option<i64>) {
-        (
-            self.credential_valid_from_micros,
-            self.credential_valid_until_micros,
-        )
+    fn credential_validity_micros(&self) -> Option<(Option<i64>, Option<i64>)> {
+        None
     }
 }
 
 impl MintsCredentials for ProvisionInstrument {
-    fn credential_validity_micros(&self) -> (Option<i64>, Option<i64>) {
-        (
+    fn credential_validity_micros(&self) -> Option<(Option<i64>, Option<i64>)> {
+        Some((
             self.credential_valid_from_micros,
             self.credential_valid_until_micros,
-        )
+        ))
     }
 }
 
 impl MintsCredentials for OnboardInstrumentIssuers {
-    fn credential_validity_micros(&self) -> (Option<i64>, Option<i64>) {
-        (
+    fn credential_validity_micros(&self) -> Option<(Option<i64>, Option<i64>)> {
+        Some((
             self.credential_valid_from_micros,
             self.credential_valid_until_micros,
-        )
+        ))
     }
 }
 
@@ -978,8 +962,8 @@ impl MintsCredentials for OnboardInstrumentIssuers {
 /// proposal. The template folds it into every credential id it mints, so
 /// two actions minting for one subject at one ledger time still produce
 /// distinct ids. The template's `ensure` clause refuses an empty nonce and
-/// one that contains `/`. The proposal's credential validity window follows
-/// the nonce, because the template declares it after the nonce.
+/// one that contains `/`. For the issuer templates the credential validity
+/// window follows the nonce, because they declare it after the nonce.
 pub struct WithCredentialIdNonce<'a, P: ?Sized> {
     pub proposal: &'a P,
     pub nonce: &'a str,
@@ -992,19 +976,20 @@ impl<P: MintsCredentials + ?Sized> DamlProtoEncode for WithCredentialIdNonce<'_,
                 "credential-minting proposal must encode to a Record".into(),
             ));
         };
-        let (valid_from, valid_until) = self.proposal.credential_validity_micros();
         record.fields.push(field(
             "credentialIdNonce",
             make_optional_text(Some(self.nonce)),
         ));
-        record.fields.push(field(
-            "credentialValidFrom",
-            make_optional_timestamp(valid_from),
-        ));
-        record.fields.push(field(
-            "credentialValidUntil",
-            make_optional_timestamp(valid_until),
-        ));
+        if let Some((valid_from, valid_until)) = self.proposal.credential_validity_micros() {
+            record.fields.push(field(
+                "credentialValidFrom",
+                make_optional_timestamp(valid_from),
+            ));
+            record.fields.push(field(
+                "credentialValidUntil",
+                make_optional_timestamp(valid_until),
+            ));
+        }
         Ok(Value {
             sum: Some(value::Sum::Record(record)),
         })
@@ -1345,8 +1330,6 @@ mod tests {
                 provider_service_cid: "00psc".to_string(),
                 registrar_service_request_cid: "00rsrc".to_string(),
                 provider_configuration_cid: "00pcc".to_string(),
-                credential_valid_from_micros: None,
-                credential_valid_until_micros: None,
             }
             .to_daml_proto()
             .expect("payload encodes")
@@ -1437,8 +1420,6 @@ mod tests {
                 provider_service_cid: "00psc".to_string(),
                 registrar_service_request_cid: "00rsrc".to_string(),
                 provider_configuration_cid: "00pcc".to_string(),
-                credential_valid_from_micros: None,
-                credential_valid_until_micros: None,
             }),
             Box::new(ProvisionInstrument {
                 registrar_service_cid: "00rsc".to_string(),
@@ -1459,8 +1440,10 @@ mod tests {
         ]
     }
 
-    /// The nonce and the validity window close the create arguments, in the
-    /// order the templates declare them. Every other field is unchanged.
+    /// The nonce closes the create arguments, followed by the validity window
+    /// on the templates that declare one, in the order they declare them.
+    /// `OnboardRegistrar` declares none, so it gets the nonce alone. Every
+    /// other field is unchanged.
     #[test]
     fn credential_id_nonce_and_validity_are_the_last_create_arguments() {
         let gov = cid("gov");
@@ -1477,21 +1460,26 @@ mod tests {
                 &member,
             )
             .expect("proposal arguments encode");
-            let (head, tail) = wrapped.fields.split_at(wrapped.fields.len() - 3);
+            let window = proposal.credential_validity_micros();
+            let added = if window.is_some() { 3 } else { 1 };
+            let (head, tail) = wrapped.fields.split_at(wrapped.fields.len() - added);
             assert_eq!(head, bare.fields.as_slice(), "other fields unchanged");
             let labels: Vec<&str> = tail.iter().map(|f| f.label.as_str()).collect();
-            assert_eq!(
-                labels,
-                [
+            let expected: &[&str] = if window.is_some() {
+                &[
                     "credentialIdNonce",
                     "credentialValidFrom",
-                    "credentialValidUntil"
+                    "credentialValidUntil",
                 ]
-            );
+            } else {
+                &["credentialIdNonce"]
+            };
+            assert_eq!(labels, expected);
             assert_eq!(tail[0].value, Some(make_optional_text(Some(NONCE))));
-            let (valid_from, valid_until) = proposal.credential_validity_micros();
-            assert_eq!(tail[1].value, Some(make_optional_timestamp(valid_from)));
-            assert_eq!(tail[2].value, Some(make_optional_timestamp(valid_until)));
+            if let Some((valid_from, valid_until)) = window {
+                assert_eq!(tail[1].value, Some(make_optional_timestamp(valid_from)));
+                assert_eq!(tail[2].value, Some(make_optional_timestamp(valid_until)));
+            }
         }
     }
 
@@ -1509,7 +1497,7 @@ mod tests {
         }
     }
 
-    /// Each minting proposal mirrors the templates' window checks: a window
+    /// Both issuer proposals mirror the templates' window checks: a window
     /// that does not start before it ends is refused, and so is one that has
     /// already ended, which execution would refuse after the vote.
     #[test]
@@ -1518,13 +1506,6 @@ mod tests {
         let now = 1_750_000_000_000_000;
         let with_window = |from: Option<i64>, until: Option<i64>| -> Vec<Box<dyn Validate>> {
             vec![
-                Box::new(OnboardRegistrar {
-                    provider_service_cid: "00psc".to_string(),
-                    registrar_service_request_cid: "00rsrc".to_string(),
-                    provider_configuration_cid: "00pcc".to_string(),
-                    credential_valid_from_micros: from,
-                    credential_valid_until_micros: until,
-                }),
                 Box::new(ProvisionInstrument {
                     registrar_service_cid: "00rsc".to_string(),
                     instrument_id_text: "uuid-1".to_string(),

@@ -5,6 +5,7 @@
 module Governance.UtilityOnboarding.Utils where
 
 import DA.Date (Month(Jan), date)
+import DA.Foldable (forA_)
 import DA.Set qualified as Set
 import DA.Text (intercalate, isInfixOf)
 import DA.Time (convertRelTimeToMicroseconds, subTime, time)
@@ -115,10 +116,11 @@ mintCredentialsMeetingRequirements
   -> Update [ContractId Credential]
 mintCredentialsMeetingRequirements governanceParty subject roleTag nonce validFrom validUntil requirements = do
   now <- getTime
-  require
-    ("mintCredentialsMeetingRequirements: credential validity ended at " <> show validUntil
-      <> ", before execution at " <> show now)
-    (optional True (now <) validUntil)
+  forA_ validUntil \until ->
+    require
+      ("mintCredentialsMeetingRequirements: credential validity ended at " <> show until
+        <> ", before execution at " <> show now)
+      (now < until)
   let selfIssuable = filter (\requirement -> requirement.issuer == governanceParty) requirements
       mkClaim (property, value) = Claim with
         subject = partyToText subject

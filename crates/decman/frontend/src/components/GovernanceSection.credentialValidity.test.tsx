@@ -4,9 +4,9 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { SnackbarProvider } from "../contexts";
 import { GovernanceSection } from "./GovernanceSection";
 
-// The three proposals that mint credentials carry an optional validity
-// window (#346). These tests drive the Onboard Instrument Issuers form to a
-// submit and read the request body the form posts.
+// The two instrument proposals that mint issuer credentials carry an
+// optional validity window (#346). These tests drive the Onboard Instrument
+// Issuers form to a submit and read the request body the form posts.
 const ns = "a".repeat(68);
 const self = `gov::${ns}`;
 const issuer = `issuer::${ns}`;
@@ -132,7 +132,7 @@ describe("credential validity window", { timeout: 20_000 }, () => {
     ).toBe(false);
   });
 
-  it("shows the window only on the minting proposals and clears it on a type change", async () => {
+  it("shows the window only on the instrument proposals and clears it on a type change", async () => {
     renderForm();
     await chooseType("Onboard Instrument Issuers (as Registrar)");
     fireEvent.change(screen.getByLabelText(/^Credentials Valid Until/), {
@@ -140,6 +140,11 @@ describe("credential validity window", { timeout: 20_000 }, () => {
     });
 
     await chooseType("Generic Vote");
+    expect(screen.queryByLabelText(/^Credentials Valid Until/)).toBeNull();
+
+    // The SDK checks the registrar credential only once, so there is no window.
+    await chooseType("5. Onboard Registrar (as Provider)");
+    expect(screen.queryByLabelText(/^Credentials Valid From/)).toBeNull();
     expect(screen.queryByLabelText(/^Credentials Valid Until/)).toBeNull();
 
     await chooseType("6. Provision Instrument (as Registrar)");

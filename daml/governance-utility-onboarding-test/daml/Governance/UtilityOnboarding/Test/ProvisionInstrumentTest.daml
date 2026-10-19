@@ -631,3 +631,64 @@ test_validity_text_states_the_window = script do
   credentialValidityText (Some t1) None === ("; credentials valid from " <> show t1)
   credentialValidityText (Some t1) (Some t2)
     === ("; credentials valid from " <> show t1 <> " until " <> show t2)
+
+-- The executed description carries the window when the action mints for
+-- initial issuers, and leaves it out when there are none, since then
+-- nothing is minted for it to limit.
+
+provisionWithExpiryCapturingDescription : Fixture -> [Party] -> Script Text
+provisionWithExpiryCapturingDescription fx initialInstrumentIssuers = do
+  now <- getTime
+  proposalCid <- submit fx.f.registrarStack.member1 $ createCmd ProvisionInstrument with
+    governanceParty = fx.f.parties.registrarGov
+    proposer = fx.f.registrarStack.member1
+    registrarServiceCid = fx.onboarded.registrarServiceCid
+    instrumentIdText = "LAUNCH-TOKEN"
+    additionalIdentifiers = []
+    issuerRequirements = [defaultIssuerRequirement fx.f.parties]
+    holderRequirements = []
+    initialInstrumentIssuers
+    credentialIdNonce = provisionInstrumentNonce
+    credentialValidFrom = None
+    credentialValidUntil = Some (addRelTime now (days 30))
+  result <- confirmAndExecuteAs fx.f.parties fx.f.registrarStack (toInterfaceContractId proposalCid)
+  Some executionResult <-
+    queryContractId fx.f.parties.registrarGov result.executionResultCid
+  pure executionResult.description
+
+when_provision_issuer_with_expiry_capturing_description : Fixture -> Script Text
+when_provision_issuer_with_expiry_capturing_description fx =
+  provisionWithExpiryCapturingDescription fx [fx.f.parties.issuer1]
+
+-- Script time is static, so getTime here equals the time the expiry was
+-- built from.
+then_description_states_the_expiry : Fixture -> Text -> Script Failures
+then_description_states_the_expiry fx description = do
+  now <- getTime
+  pure $ shouldBe "executed description"
+    ("Provision instrument LAUNCH-TOKEN, initial issuers "
+       <> show fx.f.parties.issuer1
+       <> "; credentials valid until " <> show (addRelTime now (days 30)))
+    description
+
+test_when_issuers_and_expiry_then_description_states_it = script do
+  run Test with
+    given = given_onboarded_registrar
+    when = when_provision_issuer_with_expiry_capturing_description
+    then_ = then_description_states_the_expiry
+
+when_provision_no_issuers_with_expiry_capturing_description : Fixture -> Script Text
+when_provision_no_issuers_with_expiry_capturing_description fx =
+  provisionWithExpiryCapturingDescription fx []
+
+then_description_has_no_window : Fixture -> Text -> Script Failures
+then_description_has_no_window _ description =
+  pure $ shouldBe "executed description"
+    "Provision instrument LAUNCH-TOKEN, no initial issuers"
+    description
+
+test_when_no_issuers_then_description_has_no_window = script do
+  run Test with
+    given = given_onboarded_registrar
+    when = when_provision_no_issuers_with_expiry_capturing_description
+    then_ = then_description_has_no_window

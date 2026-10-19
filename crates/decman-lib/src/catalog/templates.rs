@@ -505,8 +505,6 @@ mod tests {
                     provider_service_cid: "psc".to_string(),
                     registrar_service_request_cid: "rsrc".to_string(),
                     provider_configuration_cid: "pcc".to_string(),
-                    credential_valid_from_micros: None,
-                    credential_valid_until_micros: None,
                 }
                 .template_id(&pkgs)
                 .expect("template id resolves")

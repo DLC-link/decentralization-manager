@@ -62,10 +62,12 @@ template ProvisionInstrument
         actionLabel = "ProvisionInstrument"
         -- Voters see only this text; name every party gaining minting rights.
         description = "Provision instrument " <> instrumentIdText
+          -- With no initial issuers nothing is minted, so the window is left
+          -- out: it would read as a limit on something.
           <> case initialInstrumentIssuers of
                [] -> ", no initial issuers"
                issuers -> ", initial issuers " <> partyList issuers
-          <> credentialValidityText credentialValidFrom credentialValidUntil
+                 <> credentialValidityText credentialValidFrom credentialValidUntil
 
       executeImpl = do
         -- The proposer's authority is in scope during execution. Controller
