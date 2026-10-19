@@ -1,4 +1,4 @@
-FROM rust:slim-bookworm AS builder
+FROM rust:slim-trixie AS builder
 
 RUN apt-get update && apt-get install -y curl ca-certificates
 RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash -

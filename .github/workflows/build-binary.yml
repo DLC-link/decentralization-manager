@@ -5,8 +5,8 @@ name: Build Binary
 # named "dec-party-manager". Callers (build.yml, release.yml) then wrap it in
 # the tiny Dockerfile.runtime image and push it to their respective ECR repo.
 #
-# Runs in rust:slim-bookworm so the binary links against the same glibc/openssl
-# that the distroless/cc-debian12 runtime image ships.
+# Runs in rust:slim-trixie so the binary links against the same glibc/openssl
+# that the distroless/cc-debian13 runtime image ships.
 on:
   workflow_call:
     inputs:
@@ -19,7 +19,7 @@ jobs:
   binary:
     name: Build Binary (${{ inputs.profile }})
     runs-on: ubuntu-latest
-    container: rust:slim-bookworm
+    container: rust:slim-trixie
     # mold is a much faster linker. Set at job level so every cargo invocation
     # (gen-types + the binary build) shares one fingerprint and reuses the
     # compiled dependency graph.
