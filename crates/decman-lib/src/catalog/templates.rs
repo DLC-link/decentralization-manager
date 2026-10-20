@@ -519,6 +519,8 @@ mod tests {
                     issuer_requirements: vec![],
                     holder_requirements: vec![],
                     initial_instrument_issuers: vec![],
+                    credential_valid_from_micros: None,
+                    credential_valid_until_micros: None,
                 }
                 .template_id(&pkgs)
                 .expect("template id resolves")
@@ -529,6 +531,8 @@ mod tests {
                 OnboardInstrumentIssuers {
                     instrument_configuration_cid: "icc".to_string(),
                     instrument_issuers: vec![cid("issuer")],
+                    credential_valid_from_micros: None,
+                    credential_valid_until_micros: None,
                 }
                 .template_id(&pkgs)
                 .expect("template id resolves")

@@ -205,6 +205,8 @@ when_issuer2_onboarded_then_mints fx = do
     instrumentConfigurationCid = fx.artifacts.instrumentConfigurationCid
     instrumentIssuers = [fx.f.parties.issuer2]
     credentialIdNonce = Some "onboard-issuer2"
+    credentialValidFrom = None
+    credentialValidUntil = None
   let proposalInterfaceCid : ContractId GovernableAction = toInterfaceContractId proposalCid
   _ <- confirmAndExecuteAs fx.f.parties fx.f.registrarStack proposalInterfaceCid
   mintRequestCid <- requestMintAs fx fx.f.parties.issuer2 25.0

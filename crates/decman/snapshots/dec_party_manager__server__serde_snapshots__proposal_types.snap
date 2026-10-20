@@ -273,7 +273,9 @@ expression: all_proposal_fixtures()
     "holder_requirements": [],
     "initial_instrument_issuers": [
       "iss1::1220c4010d6883f367c7f45d55b2449501620130f9b21e96379f17dea455ac7a5892"
-    ]
+    ],
+    "credential_valid_from_micros": null,
+    "credential_valid_until_micros": null
   },
   {
     "type": "onboard_instrument_issuers",
@@ -281,7 +283,9 @@ expression: all_proposal_fixtures()
     "instrument_issuers": [
       "iss1::1220c4010d6883f367c7f45d55b2449501620130f9b21e96379f17dea455ac7a5892",
       "iss2::1220c4010d6883f367c7f45d55b2449501620130f9b21e96379f17dea455ac7a5892"
-    ]
+    ],
+    "credential_valid_from_micros": null,
+    "credential_valid_until_micros": null
   },
   {
     "type": "offboard_instrument_issuers",

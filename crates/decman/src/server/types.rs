@@ -1609,10 +1609,14 @@ mod tests {
                 issuer_requirements: vec![],
                 holder_requirements: vec![],
                 initial_instrument_issuers: vec![],
+                credential_valid_from_micros: None,
+                credential_valid_until_micros: None,
             }),
             ProposalType::OnboardInstrumentIssuers(OnboardInstrumentIssuers {
                 instrument_configuration_cid: "00icc".into(),
                 instrument_issuers: vec![],
+                credential_valid_from_micros: None,
+                credential_valid_until_micros: None,
             }),
             ProposalType::OffboardInstrumentIssuers(OffboardInstrumentIssuers {
                 instrument_issuers: vec![],

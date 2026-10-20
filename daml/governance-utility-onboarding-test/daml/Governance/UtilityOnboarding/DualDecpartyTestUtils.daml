@@ -264,6 +264,8 @@ setupProvisionedInstrument f issuerRequirements initialInstrumentIssuers = do
     holderRequirements = []
     initialInstrumentIssuers
     credentialIdNonce = provisionInstrumentNonce
+    credentialValidFrom = None
+    credentialValidUntil = None
   let proposalInterfaceCid : ContractId GovernableAction = toInterfaceContractId proposalCid
   _ <- confirmAndExecuteAs f.parties f.registrarStack proposalInterfaceCid
   [(instrumentConfigurationCid, _)] <- query @InstrumentConfiguration f.parties.registrarGov

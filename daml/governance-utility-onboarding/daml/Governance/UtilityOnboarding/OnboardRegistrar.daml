@@ -50,8 +50,14 @@ template OnboardRegistrar
         providerConfiguration <- fetch providerConfigurationCid
         require "OnboardRegistrar: provider configuration provider does not match the governance party"
           (providerConfiguration.provider == governanceParty)
+        -- No validity window, unlike the issuer actions. The SDK checks the
+        -- registrar credential only inside RegistrarServiceRequest_Accept, and
+        -- the RegistrarService keeps working after it expires, so an expiry
+        -- here would end nothing. A start after execution would only roll the
+        -- accept back.
         mintedCredentialCids <- mintCredentialsMeetingRequirements
           governanceParty request.registrar "registrar-credential" credentialIdNonce
+          None None
           providerConfiguration.registrarRequirements
         _ <- exercise providerServiceCid ProviderService_AcceptRegistrarServiceRequest with
           cid = registrarServiceRequestCid

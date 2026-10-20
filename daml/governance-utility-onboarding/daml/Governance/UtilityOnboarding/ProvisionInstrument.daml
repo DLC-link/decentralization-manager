@@ -20,7 +20,7 @@ import Utility.Registry.Holding.V0.Types (InstrumentIdentifier)
 import Governance.Action
 import Governance.UtilityOnboarding.Utils
   ( mintCredentialsMeetingRequirements, partyList, selfIssuedRequirementsHaveClaims
-  , validCredentialIdNonce )
+  , credentialValidityText, validCredentialIdNonce, validCredentialValidity )
 
 template ProvisionInstrument
   with
@@ -37,6 +37,14 @@ template ProvisionInstrument
       -- ^ Folded into the id of every credential this action mints. See
       -- `mkCredentialId`. Optional and last so contracts created without it
       -- upgrade with None, which mints the nonce-free id format.
+    credentialValidFrom : Optional Time
+      -- ^ validFrom of every credential this action mints. None: valid from
+      -- creation. Optional and after the nonce so contracts created without
+      -- it upgrade with None, which mints the open-ended credentials of
+      -- earlier versions.
+    credentialValidUntil : Optional Time
+      -- ^ validUntil of every credential this action mints. None: never
+      -- expires, so ending it needs an OffboardInstrumentIssuers vote.
   where
     signatory proposer
     observer governanceParty
@@ -45,6 +53,7 @@ template ProvisionInstrument
     ensure selfIssuedRequirementsHaveClaims governanceParty issuerRequirements
         && unique initialInstrumentIssuers
         && validCredentialIdNonce credentialIdNonce
+        && validCredentialValidity credentialValidFrom credentialValidUntil
 
     interface instance GovernableAction for ProvisionInstrument where
       view = GovernableActionView with
@@ -53,9 +62,12 @@ template ProvisionInstrument
         actionLabel = "ProvisionInstrument"
         -- Voters see only this text; name every party gaining minting rights.
         description = "Provision instrument " <> instrumentIdText
+          -- With no initial issuers nothing is minted, so the window is left
+          -- out: it would read as a limit on something.
           <> case initialInstrumentIssuers of
                [] -> ", no initial issuers"
                issuers -> ", initial issuers " <> partyList issuers
+                 <> credentialValidityText credentialValidFrom credentialValidUntil
 
       executeImpl = do
         -- The proposer's authority is in scope during execution. Controller
@@ -74,4 +86,5 @@ template ProvisionInstrument
             governanceParty instrumentIssuer
             (instrumentIdText <> "-instrument-issuer-credential")
             credentialIdNonce
+            credentialValidFrom credentialValidUntil
             issuerRequirements
