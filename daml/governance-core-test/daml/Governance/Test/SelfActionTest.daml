@@ -217,6 +217,7 @@ testRemoveAdditionalProposer = script do
     threshold = 2
     actionConfirmationTimeout = minutes 30
     additionalProposers = Some (Set.singleton parties.outsider)
+    disclosureObservers = None
 
   let action = SelfAction_RemoveAdditionalProposer with
         additionalProposer = parties.outsider
@@ -245,6 +246,7 @@ testAdditionalProposerSeedsSelfAction = script do
     threshold = 2
     actionConfirmationTimeout = minutes 30
     additionalProposers = Some (Set.singleton parties.outsider)
+    disclosureObservers = None
 
   let action = SelfAction_SetThreshold with updatedThreshold = 3
 
@@ -276,6 +278,7 @@ testAdditionalProposerAloneCannotExecute = script do
     threshold = 2
     actionConfirmationTimeout = minutes 30
     additionalProposers = Some (Set.singleton parties.outsider)
+    disclosureObservers = None
 
   let action = SelfAction_SetThreshold with updatedThreshold = 3
 
@@ -302,6 +305,7 @@ testStrangerCannotConfirmSelfAction = script do
     threshold = 2
     actionConfirmationTimeout = minutes 30
     additionalProposers = Some (Set.singleton somePropParty)
+    disclosureObservers = None
 
   let action = SelfAction_SetThreshold with updatedThreshold = 3
 
@@ -322,6 +326,7 @@ testRejectAddMemberWhoIsAdditionalProposer = script do
     threshold = 2
     actionConfirmationTimeout = minutes 30
     additionalProposers = Some (Set.singleton parties.outsider)
+    disclosureObservers = None
 
   let action = SelfAction_AddMemberAndSetThreshold with
         newMember = parties.outsider

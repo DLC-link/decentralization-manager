@@ -1,5 +1,5 @@
 use canton_proto_rs::com::digitalasset::canton::{
-    protocol::v30::DecentralizedNamespaceDefinition,
+    protocol::v30::{DecentralizedNamespaceDefinition, PartyToParticipant},
     topology::admin::v30::{
         ListDecentralizedNamespaceDefinitionRequest, ListPartyToParticipantRequest,
         list_party_to_participant_response::result::Item as P2pItem,
@@ -16,7 +16,9 @@ use crate::{
     error::Result,
     utils,
     workflow::{
+        change_threshold::ChangeThresholdConfig,
         storage::{WorkflowStorage, artifact_kinds},
+        thresholds::PartyThresholds,
         topology,
     },
 };
@@ -32,6 +34,7 @@ pub async fn submit_change(
     config: &NodeConfig,
     storage: &SqlitePool,
     instance_name: &str,
+    change_config: &ChangeThresholdConfig,
 ) -> Result {
     tracing::info!("Submitting change-threshold to synchronizer...");
 
@@ -114,7 +117,7 @@ pub async fn submit_change(
                 config,
                 &synchronizer_id,
                 &party_id,
-                new_namespace_def.threshold as u32,
+                change_config.thresholds(),
             )
         },
     )
@@ -177,14 +180,15 @@ async fn wait_for_dns_in_topology(
     )
 }
 
-/// Wait until the party mapping's head-state threshold equals
-/// `expected_threshold`. Like the DNS poll, the mapping already exists (the
-/// party id is stable), so we poll on the threshold value, not existence.
+/// Wait until the party mapping's head state carries both `expected`
+/// thresholds. Like the DNS poll, the mapping already exists (the party id is
+/// stable), so we poll on the threshold values, not existence. Either one can
+/// be the only one that moves.
 async fn wait_for_p2p_in_topology(
     config: &NodeConfig,
     synchronizer_id: &str,
     party_id: &CantonId,
-    expected_threshold: u32,
+    expected: PartyThresholds,
 ) -> Result {
     let party_id_str = party_id.to_string();
     let mut topology_read_client =
@@ -208,23 +212,69 @@ async fn wait_for_p2p_in_topology(
         if response
             .results
             .iter()
-            .any(|r| matches!(&r.item, Some(P2pItem::V30(p)) if p.threshold == expected_threshold))
+            .any(|r| matches!(&r.item, Some(P2pItem::V30(p)) if carries_thresholds(p, expected)))
         {
             tracing::info!(
-                "P2P threshold {expected_threshold} confirmed in topology after {attempt} attempt(s)"
+                "P2P thresholds {expected:?} confirmed in topology after {attempt} attempt(s)"
             );
             return Ok(());
         }
 
         if attempt < max_attempts {
             tracing::debug!(
-                "P2P threshold not yet {expected_threshold}, attempt {attempt}/{max_attempts}, retrying in {retry_delay:?}..."
+                "P2P thresholds not yet {expected:?}, attempt {attempt}/{max_attempts}, retrying in {retry_delay:?}..."
             );
             time::sleep(retry_delay).await;
         }
     }
 
     anyhow::bail!(
-        "P2P threshold did not become {expected_threshold} in topology after {max_attempts} attempts"
+        "P2P thresholds did not become {expected:?} in topology after {max_attempts} attempts"
     )
+}
+
+/// The confirmation threshold sits on the mapping, the namespace one on its
+/// signing keys.
+fn carries_thresholds(mapping: &PartyToParticipant, expected: PartyThresholds) -> bool {
+    i32::try_from(mapping.threshold) == Ok(expected.confirmation)
+        && mapping
+            .party_signing_keys
+            .as_ref()
+            .is_some_and(|keys| i32::try_from(keys.threshold) == Ok(expected.namespace))
+}
+
+#[cfg(test)]
+mod tests {
+    use canton_proto_rs::com::digitalasset::canton::crypto::v30::SigningKeysWithThreshold;
+
+    use super::*;
+
+    fn mapping(confirmation: u32, signing: u32) -> PartyToParticipant {
+        PartyToParticipant {
+            party: "party".to_string(),
+            threshold: confirmation,
+            participants: Vec::new(),
+            party_signing_keys: Some(SigningKeysWithThreshold {
+                keys: Vec::new(),
+                threshold: signing,
+            }),
+        }
+    }
+
+    /// A run that moves only the namespace threshold leaves the mapping's own
+    /// threshold where it was, so that alone cannot say the change landed.
+    #[test]
+    fn waits_for_both_thresholds() {
+        let expected = PartyThresholds::new(1, Some(3));
+        assert!(carries_thresholds(&mapping(3, 1), expected));
+        assert!(!carries_thresholds(&mapping(3, 3), expected));
+        assert!(!carries_thresholds(&mapping(1, 1), expected));
+        assert!(!carries_thresholds(
+            &PartyToParticipant {
+                party_signing_keys: None,
+                ..mapping(3, 1)
+            },
+            expected
+        ));
+    }
 }

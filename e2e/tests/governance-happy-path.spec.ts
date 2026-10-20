@@ -145,7 +145,7 @@ test.describe.serial("governance happy path", () => {
     const darDir = "../releases/v1";
     const dars = [
       "governance-action-v1-0.1.0.dar",
-      "governance-core-v1-0.1.0.dar",
+      "governance-core-v1-0.2.0.dar",
       "governance-token-custody-v1-0.1.0.dar",
       "governance-utility-onboarding-v1-0.6.0.dar",
     ].map((f) => `${darDir}/${f}`);

@@ -44,7 +44,12 @@ use crate::{
     utils,
     workflow::{
         self, AddPartyStep, ChangeThresholdStep, ContractsStep, DarsStep, KickStep, OnboardingStep,
-        contracts::DarFile, state::WorkflowStep, storage::WorkflowStorage,
+        contracts::DarFile,
+        state::WorkflowStep,
+        storage::WorkflowStorage,
+        thresholds::{
+            PartyThresholds, carried_confirmation_threshold, check_confirmation_threshold,
+        },
     },
 };
 
@@ -360,6 +365,30 @@ fn party_member_count(members: &HashSet<CantonId>, self_id: &CantonId) -> usize 
     members.len() + usize::from(!members.contains(self_id))
 }
 
+/// The confirmation threshold a kick or add-party carries over, worked out
+/// from the cached party. A party missing from the cache counts as one whose
+/// thresholds match; the coordinator checks the chain before it signs.
+async fn cached_confirmation_threshold(
+    db: &SqlitePool,
+    party: &CantonId,
+    host_count: usize,
+) -> Result<Option<i32>> {
+    let party_id = party.to_string();
+    let Some(row) = db
+        .get_dec_parties_by_prefix(&party.prefix)
+        .await?
+        .into_iter()
+        .find(|row| row.party_id == party_id)
+    else {
+        return Ok(None);
+    };
+    let current = PartyThresholds::new(
+        i32::try_from(row.threshold)?,
+        row.confirmation_threshold.map(i32::try_from).transpose()?,
+    );
+    Ok(carried_confirmation_threshold(current, host_count))
+}
+
 /// Start a kick workflow to remove a participant from a decentralized party
 #[utoipa::path(
     tag = "Workflows",
@@ -532,6 +561,22 @@ pub async fn start_kick(
         });
     }
 
+    let confirmation_threshold = match cached_confirmation_threshold(
+        &data.db,
+        &decentralized_party_id,
+        post_kick_member_count as usize,
+    )
+    .await
+    {
+        Ok(threshold) => threshold,
+        Err(e) => {
+            tracing::error!("Failed to read the cached thresholds for kick: {e}");
+            return HttpResponse::InternalServerError().json(ErrorResponse {
+                error: "Failed to read the party's cached thresholds".to_string(),
+            });
+        }
+    };
+
     // Compute peers we're going to invite — every peer except self + the kicked participant.
     // Done before the InProgress flip so a concurrent /kick/cancel cannot observe
     // InProgress while we're still preparing.
@@ -561,6 +606,7 @@ pub async fn start_kick(
         participant_id.clone(),
         namespace_fingerprint,
         body.new_threshold,
+        confirmation_threshold,
         body.previous_threshold,
         instance_name.clone(),
     );
@@ -792,6 +838,7 @@ async fn send_kick_invites(
         kicked_participant: kicked_participant.clone(),
         new_threshold: kick_config.new_threshold,
         previous_threshold: kick_config.previous_threshold,
+        confirmation_threshold: kick_config.confirmation_threshold,
         participants: invitees.to_vec(),
         workflow_instance: Some(kick_config.instance_name.clone()),
     };
@@ -1011,6 +1058,22 @@ pub async fn start_add_party(
         });
     }
 
+    let confirmation_threshold = match cached_confirmation_threshold(
+        &data.db,
+        &decentralized_party_id,
+        party_member_ids.len() + 1,
+    )
+    .await
+    {
+        Ok(threshold) => threshold,
+        Err(e) => {
+            tracing::error!("Failed to read the cached thresholds for add-party: {e}");
+            return HttpResponse::InternalServerError().json(ErrorResponse {
+                error: "Failed to read the party's cached thresholds".to_string(),
+            });
+        }
+    };
+
     // Invitees: every existing member except self, plus the new member.
     let mut invitees: Vec<CantonId> = peers
         .into_iter()
@@ -1033,6 +1096,7 @@ pub async fn start_add_party(
         decentralized_party_id.clone(),
         new_participant_id.clone(),
         body.new_threshold,
+        confirmation_threshold,
         body.previous_threshold,
         instance_name.clone(),
     );
@@ -1229,6 +1293,7 @@ async fn send_add_party_invites(
         new_participant: add_party_config.new_participant_id.clone(),
         new_threshold: add_party_config.new_threshold,
         previous_threshold: add_party_config.previous_threshold,
+        confirmation_threshold: add_party_config.confirmation_threshold,
         participants,
         workflow_instance: Some(add_party_config.instance_name.clone()),
     };
@@ -1298,14 +1363,15 @@ async fn send_add_party_invites(
 // Change-Threshold Workflow
 // ============================================================================
 
-/// Start a change-threshold workflow to change the signing threshold of an
-/// existing decentralized party (namespace + P2P), keeping its membership.
+/// Start a change-threshold workflow to change the namespace and
+/// confirmation thresholds of an existing decentralized party, keeping its
+/// membership.
 #[utoipa::path(
     tag = "Workflows",
     request_body = ChangeThresholdRequest,
     responses(
         (status = 202, description = "Change-threshold workflow started", body = WorkflowResponse),
-        (status = 400, description = "Bad request", body = ErrorResponse),
+        (status = 400, description = "Bad request, such as a threshold or confirmation threshold out of range", body = ErrorResponse),
         (status = 409, description = "Workflow already in progress for this party", body = ErrorResponse),
         (status = 500, description = "Internal server error", body = ErrorResponse)
     )
@@ -1321,10 +1387,11 @@ pub async fn start_change_threshold(
     }
 
     tracing::info!(
-        "Change-threshold request received: party={}, threshold={}->{}",
+        "Change-threshold request received: party={}, threshold={}->{}, confirmation={:?}",
         body.decentralized_party_id,
         body.previous_threshold,
-        body.new_threshold
+        body.new_threshold,
+        body.confirmation_threshold
     );
 
     let decentralized_party_id = body.decentralized_party_id.clone();
@@ -1387,6 +1454,15 @@ pub async fn start_change_threshold(
             ),
         });
     }
+    // Every member hosts the party, so the member count bounds the
+    // confirmation threshold too.
+    if let Some(confirmation) = body.confirmation_threshold
+        && let Err(e) = check_confirmation_threshold(confirmation, party_member_ids.len())
+    {
+        return HttpResponse::BadRequest().json(ErrorResponse {
+            error: e.to_string(),
+        });
+    }
 
     // Invitees: every member except self — they all sign.
     let invitees: Vec<CantonId> = match data.db.get_all_peers().await {
@@ -1419,6 +1495,7 @@ pub async fn start_change_threshold(
     let change_config = workflow::ChangeThresholdConfig::new(
         decentralized_party_id.clone(),
         body.new_threshold,
+        body.confirmation_threshold,
         body.previous_threshold,
         instance_name.clone(),
     );
@@ -1612,6 +1689,7 @@ async fn send_change_threshold_invites(
         dec_party_id: change_config.decentralized_party_id.clone(),
         new_threshold: change_config.new_threshold,
         previous_threshold: change_config.previous_threshold,
+        confirmation_threshold: change_config.confirmation_threshold,
         participants,
         workflow_instance: Some(change_config.instance_name.clone()),
     };
@@ -1716,6 +1794,7 @@ pub(crate) fn validate_confirmation_threshold(
     request_body = OnboardingRequest,
     responses(
         (status = 202, description = "Onboarding workflow started", body = WorkflowResponse),
+        (status = 400, description = "Invalid party prefix, threshold or confirmation threshold", body = ErrorResponse),
         (status = 401, description = "Unauthorized", body = ErrorResponse),
         (status = 403, description = "Forbidden: admin role required", body = ErrorResponse),
         (status = 409, description = "Workflow already in progress", body = ErrorResponse),
@@ -1813,11 +1892,21 @@ pub async fn start_onboarding(
             ),
         });
     }
+    // Every owner's node also hosts the party, so the same count bounds the
+    // confirmation threshold.
+    if let Some(confirmation) = body.confirmation_threshold
+        && let Err(e) = check_confirmation_threshold(confirmation, owner_count as usize)
+    {
+        return HttpResponse::BadRequest().json(ErrorResponse {
+            error: e.to_string(),
+        });
+    }
 
     let onboarding_config = workflow::OnboardingConfig::new(
         party_id_prefix.clone(),
         instance_name.clone(),
         body.threshold,
+        body.confirmation_threshold,
     );
 
     // Refuse onboarding when a party with this prefix already exists. The
@@ -1897,6 +1986,7 @@ pub async fn start_onboarding(
             &peer_ids,
             &party_id_prefix,
             onboarding_config.threshold,
+            onboarding_config.confirmation_threshold,
             &instance_for_task,
         )
         .await;
@@ -2094,6 +2184,7 @@ async fn send_onboarding_invites(
     peer_ids: &[CantonId],
     party_id_prefix: &str,
     threshold: Option<i32>,
+    confirmation_threshold: Option<i32>,
     instance_name: &str,
 ) -> Result {
     let network_config = NetworkConfig::from_peers(db.get_all_peers().await?);
@@ -2109,6 +2200,7 @@ async fn send_onboarding_invites(
         prefix: party_id_prefix.to_string(),
         participants: peer_ids.to_vec(),
         threshold: Some(effective_threshold),
+        confirmation_threshold,
         workflow_instance: Some(instance_name.to_string()),
     };
     let payload_bytes = serde_json::to_vec(&payload)?;
@@ -4235,6 +4327,65 @@ mod tests {
         let bound = party_member_count(&cached_without_self, &me) as i32 - 1;
         assert_eq!(bound, 3, "a 4-member party leaves 3 after a kick");
         assert!(bound >= 3, "threshold 3 must be expressible");
+        Ok(())
+    }
+
+    async fn cache_party(
+        pool: &SqlitePool,
+        party: &CantonId,
+        threshold: i64,
+        confirmation_threshold: Option<i64>,
+    ) -> Result {
+        let mut tx = pool.begin_transaction().await?;
+        tx.upsert_dec_party(&crate::db::rows::DecPartyRow {
+            party_id: party.to_string(),
+            prefix: party.prefix.clone(),
+            threshold,
+            updated_at: 0,
+            my_owner_key: None,
+            confirmation_threshold,
+        })
+        .await?;
+        Commitable::commit(tx).await
+    }
+
+    /// Kick and add-party read the party's two thresholds from the cache.
+    /// Matching ones stay matched, so the run asks for no confirmation
+    /// threshold of its own and the invite is what an older peer expects.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_cached_party_with_matching_thresholds_carries_none(pool: SqlitePool) -> Result {
+        let party = pid(9)?;
+        cache_party(&pool, &party, 2, Some(2)).await?;
+        assert_eq!(cached_confirmation_threshold(&pool, &party, 4).await?, None);
+
+        // A row cached before the column existed reads the same way.
+        cache_party(&pool, &party, 2, None).await?;
+        assert_eq!(cached_confirmation_threshold(&pool, &party, 4).await?, None);
+
+        // So does a party that is not cached at all.
+        assert_eq!(
+            cached_confirmation_threshold(&pool, &pid(10)?, 4).await?,
+            None
+        );
+        Ok(())
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_cached_party_with_distinct_thresholds_keeps_its_confirmation_threshold(
+        pool: SqlitePool,
+    ) -> Result {
+        let party = pid(11)?;
+        cache_party(&pool, &party, 1, Some(3)).await?;
+        // Add-party grows the host set, so the threshold stays as it is.
+        assert_eq!(
+            cached_confirmation_threshold(&pool, &party, 4).await?,
+            Some(3)
+        );
+        // A kick down to two hosts caps it at two.
+        assert_eq!(
+            cached_confirmation_threshold(&pool, &party, 2).await?,
+            Some(2)
+        );
         Ok(())
     }
 

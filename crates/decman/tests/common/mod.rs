@@ -9,6 +9,7 @@ pub mod invitations;
 pub mod ledger_api;
 pub mod operator;
 pub mod phases;
+pub mod pqs;
 pub mod probe;
 pub mod processes;
 pub mod scenario;
@@ -59,6 +60,17 @@ impl TestTarget {
             Ok(other) => {
                 anyhow::bail!("invalid DECPM_IT_TARGET value: {other}; expected localnet|devnet")
             }
+        }
+    }
+
+    /// The base URL of an HTTP service the harness drives: DecMan's API and
+    /// metrics, and the JSON Ledger API on localnet.
+    ///
+    /// Both targets run DecMan as local processes. On devnet only Canton is
+    /// remote, and its ports reach this host through kubectl tunnels.
+    pub fn http_base(self, port: u16) -> String {
+        match self {
+            TestTarget::Localnet | TestTarget::Devnet => format!("http://localhost:{port}"),
         }
     }
 }

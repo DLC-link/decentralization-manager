@@ -103,6 +103,9 @@ penelope = { workspace = true }
 # (tests/common/tls_proxy.rs), which puts a Canton admin API behind TLS so the
 # TLS client path has coverage on a plaintext localnet. Test-only.
 rcgen = { workspace = true }
+# The devnet reward e2e reads devnet's PQS, which is Postgres. The lockfile
+# already carries sqlx-postgres, so this adds no new crate. Test-only.
+sqlx = { workspace = true, features = ["postgres"] }
 static_assertions = { workspace = true }
 tempfile = { workspace = true }
 tokio-rustls = { workspace = true }

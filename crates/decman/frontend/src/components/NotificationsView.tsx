@@ -521,6 +521,22 @@ const InvitationCard = ({
               </Typography>
             </Box>
           )}
+          {invitation.confirmation_threshold != null && (
+            <Box sx={{ display: "flex", alignItems: "baseline", gap: 1 }}>
+              <Typography
+                variant="caption"
+                color="text.secondary"
+                sx={{ minWidth: 96 }}
+              >
+                Confirmation
+              </Typography>
+              <Typography variant="body2">
+                <Box component="span" sx={{ fontWeight: 600 }}>
+                  {invitation.confirmation_threshold}
+                </Box>
+              </Typography>
+            </Box>
+          )}
           {invitation.participants && invitation.participants.length > 0 && (
             <Box sx={{ display: "flex", alignItems: "baseline", gap: 1 }}>
               <Typography
@@ -748,7 +764,18 @@ const ActionCard = ({
     }
   };
 
-  const details = formatActionDetails(action.action, party.threshold);
+  const details = formatActionDetails(
+    action.action,
+    party.threshold,
+    party.domainActions,
+  );
+  const cancelledCid =
+    action.action.type === "governance_cancel_action"
+      ? action.action.proposal_cid
+      : undefined;
+  const cancelledProposal = cancelledCid
+    ? party.domainActions.find((d) => d.proposal_cid === cancelledCid)
+    : undefined;
   const needsYou = action.can_execute || !ownConfirmation;
 
   return (
@@ -980,6 +1007,19 @@ const ActionCard = ({
                 </Tooltip>
               </Box>
             </Box>
+            {cancelledProposal?.description && (
+              <Box sx={{ mt: 1.5 }}>
+                <Typography variant="caption" color="text.secondary">
+                  Description of the proposal this vote cancels
+                </Typography>
+                <Typography
+                  variant="body2"
+                  sx={{ mt: 0.5, px: 1.25, py: 1, bgcolor: "action.hover", borderRadius: 1 }}
+                >
+                  {cancelledProposal.description}
+                </Typography>
+              </Box>
+            )}
             <Box sx={{ mt: 1.5 }}>
               <FullPayload value={action.action} />
             </Box>
@@ -1034,6 +1074,22 @@ const DomainActionCard = ({
   // pressing the button would just collect a ledger rejection.
   const canCancelProposal =
     !!domainAction.proposer && domainAction.proposer === party.memberPartyId;
+  // A cancellation vote is a self-action, so it shows up among the party's
+  // self-action cards while members vote on it.
+  const cancellationOpen = party.actions.some(
+    (a) =>
+      a.action.type === "governance_cancel_action" &&
+      a.action.proposal_cid === domainAction.proposal_cid,
+  );
+  // The ledger rejects every confirmation of this proposal, so members vote
+  // to archive it instead. Its proposer can retract it without a vote.
+  const canProposeCancellation =
+    domainAction.proposer_not_authorized &&
+    !domainAction.orphaned &&
+    !canCancelProposal &&
+    !cancellationOpen &&
+    !!party.memberPartyId;
+  const [cancelDialogOpen, setCancelDialogOpen] = useState(false);
 
   // The on-chain proposal already encodes the action — server only needs the
   // proposal_cid and governance_type to confirm/execute. action is a
@@ -1047,7 +1103,7 @@ const DomainActionCard = ({
     endpoint: string,
     body: T,
     successMsg: string,
-  ): Promise<void> => {
+  ): Promise<boolean> => {
     // Only the endpoints that exercise a choice on the rules contract need it.
     // Cancelling a confirmation or a proposal goes straight to the contract
     // being archived, so it stays available when the rules cid is unknown.
@@ -1055,7 +1111,7 @@ const DomainActionCard = ({
       typeof body === "object" && body !== null && "rules_contract_id" in body;
     if (needsRulesContract && !party.rulesContractId) {
       showSnackbar("Governance rules contract is not set", "error");
-      return;
+      return false;
     }
     setBusy(true);
     try {
@@ -1070,11 +1126,13 @@ const DomainActionCard = ({
       }
       showSnackbar(successMsg);
       onAfter();
+      return true;
     } catch (err) {
       showSnackbar(
         err instanceof Error ? err.message : `Failed: ${endpoint}`,
         "error",
       );
+      return false;
     } finally {
       setBusy(false);
     }
@@ -1132,6 +1190,24 @@ const DomainActionCard = ({
       "Proposal cancelled",
     );
 
+  // The first member confirmation of a self-action proposes it.
+  const handleProposeCancellation = async () => {
+    const proposed = await post(
+      "confirm",
+      {
+        party_id: party.partyId,
+        rules_contract_id: party.rulesContractId,
+        action: {
+          type: "governance_cancel_action" as const,
+          proposal_cid: domainAction.proposal_cid,
+        },
+        governance_type: "core_self" as const,
+      },
+      "Cancellation proposed",
+    );
+    if (proposed) setCancelDialogOpen(false);
+  };
+
   // For orphaned actions (underlying proposal is gone) the only valid
   // operation is to clear the stranded Confirmation contracts off the ledger.
   // Our own goes through Revoke instead, and another member's live one is not
@@ -1166,6 +1242,7 @@ const DomainActionCard = ({
     domainAction.can_execute || !!domainAction.orphaned || !ownConfirmation;
 
   return (
+    <>
     <ApprovalCard
       accent={needsYou}
       // As on the action card: a pill only where no button says it already.
@@ -1308,6 +1385,17 @@ const DomainActionCard = ({
                 Cancel proposal
               </Button>
             )}
+            {canProposeCancellation && (
+              <Button
+                size="small"
+                variant="outlined"
+                color="error"
+                onClick={() => setCancelDialogOpen(true)}
+                disabled={busy || !party.rulesContractId}
+              >
+                Propose cancellation
+              </Button>
+            )}
             {domainAction.can_execute && (
               <Button
                 size="small"
@@ -1351,7 +1439,10 @@ const DomainActionCard = ({
             ? truncatePartyId(domainAction.proposer)
             : "the proposer"}{" "}
           as a member or an additional proposer, so the ledger rejects every
-          new confirmation of this proposal. Only the proposer can cancel it.
+          new confirmation of this proposal.{" "}
+          {cancellationOpen
+            ? "Members are voting to cancel it."
+            : "The proposer can cancel it. Members can also vote to cancel it."}
         </Alert>
       )}
 
@@ -1607,6 +1698,64 @@ const DomainActionCard = ({
         </Box>
       }
     />
+    <Dialog
+      open={cancelDialogOpen}
+      onClose={() => setCancelDialogOpen(false)}
+      maxWidth="sm"
+      fullWidth
+    >
+      <DialogTitle>Propose cancellation</DialogTitle>
+      <DialogContent>
+        <Typography variant="body2" sx={{ mb: 2 }}>
+          Members vote on this cancellation like any other governance action.
+          If the vote passes, the ledger archives this proposal.
+        </Typography>
+        <Box
+          sx={{
+            display: "flex",
+            flexDirection: "column",
+            gap: 0.75,
+            px: 1.25,
+            py: 1,
+            bgcolor: "action.hover",
+            borderRadius: 1,
+          }}
+        >
+          {[
+            { label: "Proposal", value: domainAction.action_label },
+            { label: "Proposer", value: domainAction.proposer ?? "Unknown" },
+            {
+              label: "Description",
+              value: domainAction.description || "No description",
+            },
+            { label: "Contract", value: domainAction.proposal_cid },
+          ].map((row) => (
+            <Box key={row.label} sx={{ display: "flex", alignItems: "baseline", gap: 1 }}>
+              <Typography variant="caption" color="text.secondary" sx={{ minWidth: 90 }}>
+                {row.label}
+              </Typography>
+              <Typography variant="body2" sx={{ overflowWrap: "anywhere" }}>
+                {row.value}
+              </Typography>
+            </Box>
+          ))}
+        </Box>
+      </DialogContent>
+      <DialogActions>
+        <Button onClick={() => setCancelDialogOpen(false)} disabled={busy}>
+          Back
+        </Button>
+        <Button
+          variant="contained"
+          color="error"
+          onClick={handleProposeCancellation}
+          disabled={busy || !party.rulesContractId}
+        >
+          Propose cancellation
+        </Button>
+      </DialogActions>
+    </Dialog>
+    </>
   );
 };
 

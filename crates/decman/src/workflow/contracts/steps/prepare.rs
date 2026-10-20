@@ -497,6 +497,7 @@ mod commitment_tests {
             threshold,
             updated_at: 0,
             my_owner_key: None,
+            confirmation_threshold: None,
         })
         .await?;
         Commitable::commit(tx).await

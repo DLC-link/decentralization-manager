@@ -64,6 +64,7 @@ createTestGovernance parties =
     threshold = 2
     actionConfirmationTimeout = minutes 30
     additionalProposers = None
+    disclosureObservers = None
 
 submitConfirmations
   : Party -> ContractId GovernanceRules -> ContractId GovernableAction -> [Party]

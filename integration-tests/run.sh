@@ -78,6 +78,13 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # path below assumes repo root == SCRIPT_DIR.
 cd "$SCRIPT_DIR"
 
+# devnet_reward_e2e acts on a shared decparty's live coupons. Check its inputs
+# here, before the build and the bring-up spend minutes.
+if [ "${DECPM_E2E_TEST:-}" = "devnet_reward_e2e" ] && [ "$TARGET" != "devnet" ]; then
+    echo "ERROR: devnet_reward_e2e runs against devnet only. Add --target devnet." >&2
+    exit 1
+fi
+
 case "$TARGET" in
     localnet)
         ENV_FILE="$SCRIPT_DIR/integration-tests/env.sh"
@@ -92,6 +99,17 @@ case "$TARGET" in
 esac
 
 source "$ENV_FILE"
+
+# Checked after the env file, because the .env files it sources may set them.
+if [ "${DECPM_E2E_TEST:-}" = "devnet_reward_e2e" ]; then
+    for _v in DECPM_IT_REWARD DECPM_IT_REWARD_DECPARTY DECPM_IT_PQS_URL; do
+        if [ -z "${!_v:-}" ]; then
+            echo "ERROR: devnet_reward_e2e needs $_v. See the README's devnet section." >&2
+            exit 1
+        fi
+    done
+    unset _v
+fi
 
 trap cleanup EXIT
 

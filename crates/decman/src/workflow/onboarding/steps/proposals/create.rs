@@ -1,9 +1,9 @@
 use std::collections::HashSet;
 
 use canton_proto_rs::com::digitalasset::canton::{
-    crypto::v30::{SigningKeysWithThreshold, SigningPublicKey},
+    crypto::v30::SigningPublicKey,
     protocol::v30::{
-        DecentralizedNamespaceDefinition, PartyToParticipant, TopologyMapping, enums,
+        DecentralizedNamespaceDefinition, TopologyMapping, enums,
         party_to_participant::HostingParticipant, topology_mapping,
     },
     topology::admin::v30::{
@@ -22,6 +22,7 @@ use crate::{
     workflow::{
         onboarding::OnboardingConfig,
         storage::{WorkflowStorage, artifact_kinds, identity_kinds},
+        thresholds::{PartyThresholds, check_confirmation_threshold},
     },
 };
 
@@ -140,22 +141,17 @@ pub async fn create_proposals(
         );
     }
 
-    // Step 5: Determine threshold. Use the operator-configured value when set
-    // (validated against the resolved owner count — the topology is the source
-    // of truth); otherwise fall back to the default majority algorithm. The
-    // frontend pre-computes this same default, so an untouched field arrives
-    // here carrying the majority value.
+    // Step 5: Determine the thresholds, validated against the resolved owner
+    // and host counts — the topology is the source of truth.
     let owner_count = namespaces.len();
-    let threshold = match onboarding_config.threshold {
-        Some(t) if (1..=owner_count as i32).contains(&t) => t as u32,
-        Some(t) => {
-            anyhow::bail!("configured threshold {t} out of range 1..={owner_count} (owner count)",)
-        }
-        None => owner_count.div_ceil(2).max(1) as u32,
-    };
+    let thresholds = resolve_thresholds(onboarding_config, owner_count, participant_ids.len())?;
     tracing::info!(
-        "Using threshold {threshold} for {owner_count} participants (configured: {configured:?})",
+        "Using namespace threshold {namespace} and confirmation threshold {confirmation} for \
+         {owner_count} participants (configured: {configured:?}, {configured_confirmation:?})",
+        namespace = thresholds.namespace,
+        confirmation = thresholds.confirmation,
         configured = onboarding_config.threshold,
+        configured_confirmation = onboarding_config.confirmation_threshold,
     );
 
     // Step 6: Compute decentralized namespace
@@ -169,7 +165,7 @@ pub async fn create_proposals(
 
     let namespace_def = DecentralizedNamespaceDefinition {
         decentralized_namespace: decentralized_namespace.clone(),
-        threshold: threshold as i32,
+        threshold: thresholds.namespace,
         owners: owners_vec,
     };
 
@@ -222,10 +218,9 @@ pub async fn create_proposals(
     // Step 9: Create PartyToParticipant mapping
     // PartyToParticipant carries the signing keys (Canton 3.4+); the standalone
     // PartyToKeyMapping is formally deprecated as of Canton 3.5.
-    let p2p_mapping = PartyToParticipant {
-        party: party_id_str.clone(),
-        threshold,
-        participants: participant_ids
+    let p2p_mapping = thresholds.party_to_participant(
+        party_id_str.clone(),
+        participant_ids
             .iter()
             .map(|pid| HostingParticipant {
                 participant_uid: pid.to_string(),
@@ -233,11 +228,8 @@ pub async fn create_proposals(
                 onboarding: None,
             })
             .collect(),
-        party_signing_keys: Some(SigningKeysWithThreshold {
-            keys: daml_keys.clone(),
-            threshold,
-        }),
-    };
+        daml_keys.clone(),
+    )?;
 
     // Debug: Log all Daml key fingerprints being added to P2P mapping
     tracing::info!(
@@ -339,6 +331,27 @@ pub async fn create_proposals(
     Ok(())
 }
 
+/// The operator-configured namespace threshold when set, otherwise the
+/// default majority algorithm. The frontend pre-computes this same default, so
+/// an untouched field arrives here carrying the majority value. The
+/// confirmation threshold takes the namespace threshold unless configured.
+fn resolve_thresholds(
+    onboarding_config: &OnboardingConfig,
+    owner_count: usize,
+    host_count: usize,
+) -> Result<PartyThresholds> {
+    let namespace = match onboarding_config.threshold {
+        Some(t) if (1..=owner_count as i32).contains(&t) => t,
+        Some(t) => {
+            anyhow::bail!("configured threshold {t} out of range 1..={owner_count} (owner count)",)
+        }
+        None => owner_count.div_ceil(2).max(1) as i32,
+    };
+    let thresholds = PartyThresholds::new(namespace, onboarding_config.confirmation_threshold);
+    check_confirmation_threshold(thresholds.confirmation, host_count)?;
+    Ok(thresholds)
+}
+
 /// Decode a payload produced by `generate_keys::encode_keys_payload` —
 /// two consecutive `varint(len)||SigningPublicKey` messages.
 ///
@@ -410,4 +423,65 @@ pub(crate) fn compute_decentralized_namespace(namespaces: &HashSet<String>) -> S
         "{MULTIHASH_SHA256_PREFIX}{hash}",
         hash = hex::encode(hash_result)
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn config(threshold: Option<i32>, confirmation: Option<i32>) -> OnboardingConfig {
+        OnboardingConfig::new(
+            "xyz".to_string(),
+            "xyz-creation".to_string(),
+            threshold,
+            confirmation,
+        )
+    }
+
+    /// A request from decman-cli, or one with the UI field untouched, carries
+    /// no confirmation threshold, so both mappings get the same value.
+    #[test]
+    fn an_omitted_confirmation_threshold_matches_the_namespace_one() -> Result {
+        assert_eq!(
+            resolve_thresholds(&config(Some(3), None), 4, 4)?,
+            PartyThresholds {
+                namespace: 3,
+                confirmation: 3
+            }
+        );
+        assert_eq!(
+            resolve_thresholds(&config(None, None), 4, 4)?,
+            PartyThresholds {
+                namespace: 2,
+                confirmation: 2
+            }
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn a_configured_confirmation_threshold_is_used_as_given() -> Result {
+        assert_eq!(
+            resolve_thresholds(&config(Some(1), Some(3)), 3, 3)?,
+            PartyThresholds {
+                namespace: 1,
+                confirmation: 3
+            }
+        );
+        // The majority default still applies to the namespace threshold.
+        assert_eq!(
+            resolve_thresholds(&config(None, Some(1)), 3, 3)?,
+            PartyThresholds {
+                namespace: 2,
+                confirmation: 1
+            }
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn a_confirmation_threshold_above_the_hosts_is_refused() {
+        assert!(resolve_thresholds(&config(Some(1), Some(4)), 3, 3).is_err());
+        assert!(resolve_thresholds(&config(Some(1), Some(0)), 3, 3).is_err());
+    }
 }

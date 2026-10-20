@@ -177,6 +177,7 @@ pub(crate) async fn insert_peer_run(
             "participant_id": invitation.kicked_participant,
             "new_participant_id": invitation.new_participant,
             "new_threshold": invitation.new_threshold,
+            "confirmation_threshold": invitation.confirmation_threshold,
             "previous_threshold": invitation.previous_threshold,
             "package_names": invitation.package_names,
             "contract_intents": invitation.contract_intents,
@@ -855,6 +856,7 @@ mod handled_invitation_tests {
             new_participant: None,
             new_threshold: None,
             previous_threshold: None,
+            confirmation_threshold: None,
             dec_party_id: None,
             package_names: Vec::new(),
             contract_intents: Vec::new(),
@@ -1123,6 +1125,46 @@ mod handled_invitation_tests {
         assert_eq!(pending[0].id, "inv-1");
         assert!(pool.get_handled_invitations(50).await?.is_empty());
         assert_eq!(state.pending_invitations.read().await.len(), 1);
+        Ok(())
+    }
+
+    /// The confirmation threshold an operator accepts is the one the peer
+    /// later holds the P2P proposal to.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn an_accepted_confirmation_threshold_reaches_the_peer_checks(
+        pool: SqlitePool,
+    ) -> anyhow::Result<()> {
+        let party = crate::canton_id::CantonId::parse(&format!("party::1220{}", "ab".repeat(32)))?;
+        let coordinator =
+            crate::canton_id::CantonId::parse(&format!("coordinator::1220{}", "cd".repeat(32)))?;
+        let invite = PendingInvitation {
+            invitation_type: InvitationType::ChangeThreshold,
+            prefix: None,
+            dec_party_id: Some(party),
+            new_threshold: Some(1),
+            confirmation_threshold: Some(3),
+            ..invitation("inv-1")
+        };
+
+        let mut node_config = crate::config::NodeConfig::default();
+        node_config.node.participant_id = Some(crate::canton_id::CantonId::parse(&format!(
+            "peer::1220{}",
+            "ef".repeat(32)
+        ))?);
+
+        let instance = insert_peer_run(&pool, &invite)
+            .await
+            .ok_or_else(|| anyhow::anyhow!("the peer run was not recorded"))?;
+        let expectations = crate::workflow::validation::PeerExpectations::load(
+            &pool,
+            &instance,
+            &node_config,
+            &coordinator,
+        )
+        .await?;
+
+        assert_eq!(expectations.threshold, Some(1));
+        assert_eq!(expectations.confirmation_threshold, Some(3));
         Ok(())
     }
 }

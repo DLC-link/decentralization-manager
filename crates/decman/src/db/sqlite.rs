@@ -675,13 +675,14 @@ async fn write_invitation(
             new_participant,
             new_threshold,
             previous_threshold,
+            confirmation_threshold,
             dec_party_id,
             package_names,
             contract_intents,
             workflow_instance,
             status,
             handled_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ",
     )
     .bind(&row.id)
@@ -696,6 +697,7 @@ async fn write_invitation(
     .bind(&row.new_participant)
     .bind(row.new_threshold)
     .bind(row.previous_threshold)
+    .bind(row.confirmation_threshold)
     .bind(&row.dec_party_id)
     .bind(&row.package_names)
     .bind(&row.contract_intents)
@@ -803,13 +805,15 @@ impl Commitable for sqlx::Transaction<'static, sqlx::Sqlite> {
                 prefix,
                 threshold,
                 updated_at,
-                my_owner_key
-            ) VALUES (?, ?, ?, ?, ?)
+                my_owner_key,
+                confirmation_threshold
+            ) VALUES (?, ?, ?, ?, ?, ?)
             ON CONFLICT(party_id) DO UPDATE SET
                 prefix = excluded.prefix,
                 threshold = excluded.threshold,
                 updated_at = excluded.updated_at,
-                my_owner_key = excluded.my_owner_key
+                my_owner_key = excluded.my_owner_key,
+                confirmation_threshold = excluded.confirmation_threshold
             ",
         )
         .bind(&row.party_id)
@@ -817,6 +821,7 @@ impl Commitable for sqlx::Transaction<'static, sqlx::Sqlite> {
         .bind(row.threshold)
         .bind(row.updated_at)
         .bind(&row.my_owner_key)
+        .bind(row.confirmation_threshold)
         .execute(&mut **self)
         .await?;
 
@@ -1516,6 +1521,7 @@ mod tests {
             threshold: 2,
             updated_at: 1000,
             my_owner_key: None,
+            confirmation_threshold: None,
         }
     }
 
@@ -1755,7 +1761,11 @@ mod tests {
     #[sqlx::test(migrator = "MIGRATOR")]
     async fn test_insert_and_get_dec_parties(pool: SqlitePool) -> Result {
         let mut tx = pool.begin_transaction().await?;
-        tx.upsert_dec_party(&test_dec_party("net-a")).await?;
+        tx.upsert_dec_party(&DecPartyRow {
+            confirmation_threshold: Some(3),
+            ..test_dec_party("net-a")
+        })
+        .await?;
         tx.upsert_dec_party(&test_dec_party("net-b")).await?;
         Commitable::commit(tx).await?;
 
@@ -1765,6 +1775,11 @@ mod tests {
         let filtered = pool.get_dec_parties_by_prefix("net-a").await?;
         assert_eq!(filtered.len(), 1);
         assert_eq!(filtered[0].threshold, 2);
+        assert_eq!(filtered[0].confirmation_threshold, Some(3));
+        assert_eq!(
+            pool.get_dec_parties_by_prefix("net-b").await?[0].confirmation_threshold,
+            None
+        );
 
         assert!(
             pool.get_dec_parties_by_prefix("nonexistent")
@@ -2596,6 +2611,7 @@ mod tests {
             new_participant: None,
             new_threshold: None,
             previous_threshold: None,
+            confirmation_threshold: None,
             dec_party_id: None,
             package_names: Vec::new(),
             contract_intents: Vec::new(),
@@ -2615,6 +2631,7 @@ mod tests {
             new_participant: None,
             new_threshold: Some(2),
             previous_threshold: Some(3),
+            confirmation_threshold: Some(1),
             dec_party_id: Some(CantonId::parse(&format!("dec::{TEST_NS}")).unwrap()),
             package_names: Vec::new(),
             contract_intents: Vec::new(),
@@ -2640,6 +2657,7 @@ mod tests {
             new_participant: None,
             new_threshold: None,
             previous_threshold: None,
+            confirmation_threshold: None,
             dec_party_id: None,
             package_names: Vec::new(),
             contract_intents: Vec::new(),
@@ -2654,7 +2672,9 @@ mod tests {
         assert_eq!(loaded[0].id, inv_a.id);
         assert_eq!(loaded[0].prefix.as_deref(), Some("my-party"));
         assert_eq!(loaded[0].participants.len(), 2);
+        assert_eq!(loaded[0].confirmation_threshold, None);
         assert_eq!(loaded[1].invitation_type, InvitationType::Kick);
+        assert_eq!(loaded[1].confirmation_threshold, Some(1));
         assert!(loaded[1].prefix.is_none());
         assert!(loaded[1].participants.is_empty());
         assert_eq!(loaded[2].invitation_type, InvitationType::Dars);
@@ -2696,6 +2716,7 @@ mod tests {
             new_participant: None,
             new_threshold: None,
             previous_threshold: None,
+            confirmation_threshold: None,
             dec_party_id: None,
             package_names: Vec::new(),
             contract_intents: Vec::new(),
@@ -2946,6 +2967,7 @@ mod tests {
             new_participant: None,
             new_threshold: None,
             previous_threshold: None,
+            confirmation_threshold: None,
             dec_party_id: Some(CantonId::parse(&format!("dec::{TEST_NS}")).unwrap()),
             package_names: vec!["Governance Core".to_string(), "Token Custody".to_string()],
             contract_intents: vec![common::api::ContractDeploymentIntent {
@@ -3266,6 +3288,7 @@ mod tests {
             threshold: 2,
             updated_at: 1000,
             my_owner_key: None,
+            confirmation_threshold: None,
         }
     }
 
@@ -3541,6 +3564,7 @@ mod tests {
             new_participant: None,
             new_threshold: None,
             previous_threshold: None,
+            confirmation_threshold: None,
             dec_party_id: None,
             package_names: Vec::new(),
             contract_intents: Vec::new(),
@@ -3560,6 +3584,7 @@ mod tests {
             new_participant: None,
             new_threshold: None,
             previous_threshold: None,
+            confirmation_threshold: None,
             dec_party_id: None,
             package_names: Vec::new(),
             contract_intents: Vec::new(),

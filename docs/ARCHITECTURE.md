@@ -42,6 +42,7 @@ The system defaults to a majority threshold for both topology changes and govern
 | Operation | Threshold |
 |-----------|-----------|
 | Topology changes (DNS/P2P) | `ceil(n/2)` of namespace owners must sign by default (bare majority for even `n`); set at creation and adjustable via the change-threshold workflow |
+| Transaction confirmation (P2P) | Hosting participants that must confirm; equal to the namespace threshold unless set apart at creation or by change-threshold. Kick and add-party keep the two equal when they already are |
 | Governance actions | Configurable per `GovernanceRules` contract |
 
 ### Key Types
@@ -205,10 +206,11 @@ everything that follows (`workflow::validation::PeerExpectations`).
   cannot be used to drive a kick.
 - Topology proposals decode to the expected mapping kind, target the accepted
   party, carry exactly the accepted member set, keep this node's namespace
-  among the owners, and use the accepted threshold. For onboarding — where the
-  party does not exist yet — the peer instead checks that the decentralized
-  namespace really is the hash of the proposed owner set, and that the P2P
-  proposal is for the namespace it signed in the DNS step.
+  among the owners, and use the accepted namespace and confirmation
+  thresholds. For onboarding — where the party does not exist yet — the peer
+  instead checks that the decentralized namespace really is the hash of the
+  proposed owner set, and that the P2P proposal is for the namespace it signed
+  in the DNS step.
 - For kick / add-party / change-threshold, the peer reads the party's current
   namespace definition and `PartyToParticipant` from the synchronizer and
   requires each proposal to be exactly the expected change: change-threshold
@@ -293,6 +295,10 @@ and they are load-bearing enough to state rather than imply:
   peer then checks filenames only and logs a warning, so a network mid-upgrade
   keeps working. This is the only leniency left for an absent field, alongside
   the onboarding threshold; every other absent pin fails closed.
+- **An older peer refuses two different thresholds.** A peer built before the
+  confirmation threshold holds both P2P thresholds to the namespace threshold.
+  It refuses to sign any proposal that sets them apart. A proposal that keeps
+  them equal is exactly what it expects.
 
 Governance confirm/execute is not covered here and does not need to be: the peer
 builds those commands locally and the Daml layer re-validates them against the
@@ -541,7 +547,9 @@ external party. It fails at `ExportState` for any other party type.
 
 ### Change Threshold
 
-Changes the signing threshold of an existing decentralized party's namespace.
+Changes the namespace threshold, the confirmation threshold, or both, of an
+existing decentralized party. An omitted confirmation threshold takes the
+namespace one.
 
 **Steps:**
 
@@ -689,10 +697,13 @@ GovernanceRules {
     threshold                : Int                    -- Minimum confirmations required (1 <= threshold <= |members|)
     actionConfirmationTimeout : RelTime               -- Confirmation validity period (minimum 10 seconds)
     additionalProposers      : Optional (Set Party)   -- Allowlist of non-member proposers; None means "no allowlist"
+    disclosureObservers      : Optional (Set Party)   -- Opt-in observers of this contract; None means "no observers"
 }
 ```
 
 The `additionalProposers` field (added in `v1`) lets a committee grant propose-only rights to parties that are not full voting members — for example, an admin console, a monitoring script, or a regulatory officer. The authoritative on-chain proposer set is `members ∪ fromOptional Set.empty additionalProposers`. `GovernanceRules_ConfirmAction` enforces that every proposal's `proposer` is in this set; outsider proposals are rejected at confirm time even if a member tries to confirm them. The two `SelfAction_*AdditionalProposer` variants below mutate this allowlist under the same threshold consensus as committee changes.
+
+The `disclosureObservers` field (added in governance-core 0.2.0, #165) names parties that observe the rules contract. Members see it because they host the governance party. An observer sees it without hosting that party, for example an additional proposer on another participant. Observing grants no right to confirm or execute. Rules contracts created under 0.1.0 read as `None`. They gain observers only when `SelfAction_SetDisclosureObservers` replaces them.
 
 The contract provides two distinct paths for governance actions:
 
@@ -708,6 +719,8 @@ Self-management actions modify the `GovernanceRules` contract itself. They use a
 | `SelfAction_SetTimeout` | updatedTimeout | Change the confirmation expiry timeout |
 | `SelfAction_AddAdditionalProposer` | additionalProposer | Grant propose-only rights to a non-member party |
 | `SelfAction_RemoveAdditionalProposer` | additionalProposer | Revoke propose-only rights from a party (normalizes the allowlist back to `None` when it becomes empty) |
+| `SelfAction_SetDisclosureObservers` | updatedDisclosureObservers | Replace the disclosure observers (an empty set normalizes to `None`) |
+| `SelfAction_CancelAction` | actionProposalCid | Archive a `GovernableAction` proposal of this governance, e.g. one whose proposer the rules no longer authorize (the rules contract is unchanged) |
 
 Choices on `GovernanceRules` for self-management:
 - `GovernanceRules_ConfirmGovernanceAction` -- Submit a self-action confirmation

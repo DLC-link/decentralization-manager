@@ -1293,6 +1293,7 @@ async fn load_cached_parties(
         parties.push(DecentralizedParty {
             party_id: CantonId::parse(&row.party_id)?,
             threshold: row.threshold as i32,
+            confirmation_threshold: row.confirmation_threshold.map(|t| t as i32),
             owners: owners_map.remove(&row.party_id).unwrap_or_default(),
             my_owner_key: row.my_owner_key,
             participants: participants_map.remove(&row.party_id).unwrap_or_default(),
@@ -1340,6 +1341,7 @@ async fn store_parties_to_db(
             threshold: party.threshold as i64,
             updated_at: now,
             my_owner_key: party.my_owner_key.clone(),
+            confirmation_threshold: party.confirmation_threshold.map(i64::from),
         };
         tx.upsert_dec_party(&row).await?;
 
@@ -2000,6 +2002,7 @@ async fn fetch_decentralized_parties(
                 Ok::<_, anyhow::Error>(DecentralizedParty {
                     party_id,
                     threshold: item.threshold,
+                    confirmation_threshold: i32::try_from(p2p.threshold).ok(),
                     owners: item.owners,
                     my_owner_key: Some(my_owner_key),
                     participants,
@@ -3063,6 +3066,7 @@ mod tests {
                 "cbtc::1220c4010d6883f367c7f45d55b2449501620130f9b21e96379f17dea455ac7a5892",
             )?,
             threshold: 1,
+            confirmation_threshold: None,
             owners: Vec::new(),
             my_owner_key: None,
             participants: Vec::new(),

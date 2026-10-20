@@ -73,6 +73,7 @@ mod tests {
             threshold: 2,
             updated_at: 1000,
             my_owner_key: None,
+            confirmation_threshold: None,
         })
         .await?;
         tx.replace_dec_party_participants(&party_id, &participants)

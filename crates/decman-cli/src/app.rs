@@ -3515,6 +3515,7 @@ mod tests {
         DecentralizedParty {
             party_id: CantonId::parse(&format!("{name}::{NS}")).unwrap(),
             threshold: 1,
+            confirmation_threshold: None,
             owners: Vec::new(),
             my_owner_key: None,
             participants: Vec::new(),

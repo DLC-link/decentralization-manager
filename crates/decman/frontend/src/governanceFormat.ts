@@ -1,4 +1,4 @@
-import type { ActionType, Network } from "./types";
+import type { ActionType, DomainGovernanceAction, Network } from "./types";
 
 export interface ActionTypeOption {
   value: ActionType["type"];
@@ -45,6 +45,16 @@ export const getActionTypeOptions = (network?: Network): ActionTypeOption[] => [
   {
     value: "governance_set_timeout",
     label: "Set Governance Timeout",
+    hidden: true,
+  },
+  {
+    value: "governance_set_disclosure_observers",
+    label: "Set Disclosure Observers",
+    hidden: true,
+  },
+  {
+    value: "governance_cancel_action",
+    label: "Cancel Governance Action",
     hidden: true,
   },
   {
@@ -96,10 +106,12 @@ export interface ActionDetail {
  * Build a small list of human-readable detail rows for an action.
  * Returns the most relevant fields per action type — typically the parameter
  * being changed and, when known, the current value the change is replacing.
+ * `proposals` names the proposal a cancellation vote targets, when loaded.
  */
 export const formatActionDetails = (
   action: ActionType,
   currentThreshold: number,
+  proposals: DomainGovernanceAction[] = [],
 ): ActionDetail[] => {
   switch (action.type) {
     case "governance_add_member":
@@ -135,6 +147,29 @@ export const formatActionDetails = (
           after: formatMicroseconds(action.new_timeout_microseconds),
         },
       ];
+    case "governance_set_disclosure_observers": {
+      const observers = action.disclosure_observers ?? [];
+      return [
+        {
+          label: "Observers",
+          after:
+            observers.length > 0
+              ? observers.map(truncatePartyId).join(", ")
+              : "None",
+        },
+      ];
+    }
+    case "governance_cancel_action": {
+      const cid = action.proposal_cid;
+      const target = proposals.find((p) => p.proposal_cid === cid);
+      return [
+        { label: "Proposal", after: target?.action_label ?? "Proposal not loaded" },
+        ...(target?.proposer
+          ? [{ label: "Proposer", after: truncatePartyId(target.proposer) }]
+          : []),
+        { label: "Contract", after: `${cid.slice(0, 12)}…` },
+      ];
+    }
     case "credential_offer_free":
       return [
         { label: "Holder", after: truncatePartyId(action.holder) },

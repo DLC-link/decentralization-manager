@@ -20,6 +20,7 @@ const state = (over: Partial<GovernanceState> = {}): GovernanceState => ({
   members: [alice, bob],
   threshold: 2,
   additional_proposers: [],
+  disclosure_observers: [],
   out_of_date: false,
   ...over,
 });
@@ -39,6 +40,23 @@ describe("GovernanceRules", () => {
     expect(listed[0].party).toContain("alice::");
     expect(listed[2].party).toContain("carol::");
     expect(screen.queryByText(/No additional proposers/)).toBeNull();
+  });
+
+  it("lists disclosure observers with their role", () => {
+    render(<GovernanceRules state={state({ disclosure_observers: [carol] })} />);
+    const listed = rows();
+    expect(listed.map((r) => r.role)).toEqual(["Member", "Member", "Disclosure observer"]);
+    expect(listed[2].party).toContain("carol::");
+    expect(screen.queryByText(/No disclosure observers/)).toBeNull();
+  });
+
+  it("says when only hosting nodes can see the rules", () => {
+    render(<GovernanceRules state={state()} />);
+    expect(
+      screen.getByText(
+        "No disclosure observers: only nodes that host the governance party can see these rules.",
+      ),
+    ).toBeTruthy();
   });
 
   it("says when only members can propose", () => {

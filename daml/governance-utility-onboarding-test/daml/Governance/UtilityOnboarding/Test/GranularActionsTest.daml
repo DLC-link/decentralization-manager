@@ -69,6 +69,7 @@ given_governance_with_operator_as_additional_proposer = do
     threshold = 2
     actionConfirmationTimeout = minutes 30
     additionalProposers = Some (Set.singleton parties.operator)
+    disclosureObservers = None
   pure GovFixture with ..
 
 when_provision_provider_service : GovFixture -> Script ()

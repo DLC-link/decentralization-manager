@@ -92,7 +92,9 @@ So ask the members to accept the invitation before you start.
 ## Choose the new threshold
 
 The threshold is how many owners must sign a topology change for the party.
-DecMan also uses it as the party's confirmation threshold.
+The confirmation threshold is how many hosts must confirm a transaction. If the
+two are equal, the add moves both to the new value. If they differ, the
+confirmation threshold stays as it is.
 
 The new threshold must be between 1 and the **current** number of owners. The
 new member does not count yet, because it cannot sign until its import

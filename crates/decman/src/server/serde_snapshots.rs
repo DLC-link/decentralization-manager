@@ -64,8 +64,8 @@ fn requirement(issuer: &str) -> PartyCredentialRequirement {
     }
 }
 
-/// One populated instance per `ActionType` variant (13). No variant carries
-/// an `Option`, so there is no minimal-form counterpart to this fixture.
+/// One populated instance per `ActionType` variant (15), plus the `None` form
+/// of `GovernanceSetDisclosureObservers`, the one variant with an `Option`.
 fn all_action_fixtures() -> Vec<ActionType> {
     vec![
         ActionType::GovernanceAddMember {
@@ -85,6 +85,15 @@ fn all_action_fixtures() -> Vec<ActionType> {
         },
         ActionType::GovernanceRemoveAdditionalProposer {
             additional_proposer: cid("p1"),
+        },
+        ActionType::GovernanceSetDisclosureObservers {
+            disclosure_observers: Some(vec![cid("o1")]),
+        },
+        ActionType::GovernanceSetDisclosureObservers {
+            disclosure_observers: None,
+        },
+        ActionType::GovernanceCancelAction {
+            proposal_cid: "00proposal".into(),
         },
         ActionType::UtilityCreateProviderRequest {
             operator: cid("op"),

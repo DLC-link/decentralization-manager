@@ -8,8 +8,10 @@ use canton_common::{
     decimal::DamlDecimal,
     transfer_factory::{Context as ChoiceContext, ContextValue},
 };
+use std::collections::BTreeSet;
+
 use canton_proto_rs::com::daml::ledger::api::v2::{
-    List, Optional, Record, RecordField, TextMap, Value, Variant, text_map, value,
+    GenMap, List, Optional, Record, RecordField, TextMap, Value, Variant, gen_map, text_map, value,
 };
 use common::api::{Claim, InstrumentId, InstrumentIdentifier, PartyCredentialRequirement};
 
@@ -229,6 +231,35 @@ pub fn serialize_instrument_id(id: &InstrumentId) -> Value {
     ])
 }
 
+/// A Daml `Set Party`: a record whose `map` field maps each party to `Unit`.
+/// Duplicates collapse and the parties come out sorted, as Daml holds them.
+pub fn make_party_set(parties: &[impl std::fmt::Display]) -> Value {
+    let unique: BTreeSet<String> = parties.iter().map(ToString::to_string).collect();
+    let entries = unique
+        .into_iter()
+        .map(|party| gen_map::Entry {
+            key: Some(make_party(party)),
+            value: Some(Value {
+                sum: Some(value::Sum::Unit(())),
+            }),
+        })
+        .collect();
+    make_record(vec![field(
+        "map",
+        Value {
+            sum: Some(value::Sum::GenMap(GenMap { entries })),
+        },
+    )])
+}
+
+pub fn make_optional_party_set(opt: Option<&[impl std::fmt::Display]>) -> Value {
+    Value {
+        sum: Some(value::Sum::Optional(Box::new(Optional {
+            value: opt.map(|parties| Box::new(make_party_set(parties))),
+        }))),
+    }
+}
+
 pub fn make_optional_list(values: Vec<Value>) -> Value {
     Value {
         sum: Some(value::Sum::Optional(Box::new(Optional {
@@ -346,6 +377,16 @@ mod tests {
     use std::collections::HashMap;
 
     use super::*;
+    use crate::framework::record::extract_party_set;
+
+    #[test]
+    fn party_set_is_sorted_and_deduplicated() {
+        let set = make_party_set(&["bob::1220", "alice::1220", "bob::1220"]);
+        assert_eq!(
+            extract_party_set(&set),
+            Some(vec!["alice::1220".to_string(), "bob::1220".to_string()])
+        );
+    }
 
     // Locks the AV_* constructor strings against the on-ledger
     // `Splice.Api.Token.MetadataV1.AnyValue` definition. A typo here would

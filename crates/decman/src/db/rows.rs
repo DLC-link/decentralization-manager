@@ -139,6 +139,8 @@ pub struct DecPartyRow {
     pub threshold: i64,
     pub updated_at: i64,
     pub my_owner_key: Option<String>,
+    /// `NULL` for rows cached before the column existed.
+    pub confirmation_threshold: Option<i64>,
 }
 
 #[derive(Debug, sqlx::FromRow)]
@@ -199,6 +201,7 @@ pub struct PendingInvitationRow {
     pub new_participant: Option<String>,
     pub new_threshold: Option<i64>,
     pub previous_threshold: Option<i64>,
+    pub confirmation_threshold: Option<i64>,
     pub dec_party_id: Option<String>,
     pub package_names: Option<String>,
     pub contract_intents: Option<String>,
@@ -248,6 +251,7 @@ impl PendingInvitationRow {
             new_participant: inv.new_participant.as_ref().map(|p| p.to_string()),
             new_threshold: inv.new_threshold.map(i64::from),
             previous_threshold: inv.previous_threshold.map(i64::from),
+            confirmation_threshold: inv.confirmation_threshold.map(i64::from),
             dec_party_id: inv.dec_party_id.as_ref().map(|p| p.to_string()),
             package_names: encode_list(&inv.package_names, "pending invitation package_names")?,
             contract_intents: encode_list(
@@ -301,6 +305,7 @@ impl PendingInvitationRow {
             new_participant,
             new_threshold: self.new_threshold.map(|v| v as i32),
             previous_threshold: self.previous_threshold.map(|v| v as i32),
+            confirmation_threshold: self.confirmation_threshold.map(|v| v as i32),
             dec_party_id,
             package_names,
             contract_intents,
@@ -509,6 +514,7 @@ mod tests {
             new_participant: None,
             new_threshold: None,
             previous_threshold: None,
+            confirmation_threshold: None,
             dec_party_id: None,
             package_names: None,
             contract_intents: None,

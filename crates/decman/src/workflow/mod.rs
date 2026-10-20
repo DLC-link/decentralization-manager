@@ -10,6 +10,7 @@ pub mod proposal_store;
 pub mod signing_keys;
 pub mod state;
 pub mod storage;
+pub mod thresholds;
 pub mod topology;
 pub mod validation;
 

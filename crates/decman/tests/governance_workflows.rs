@@ -134,7 +134,7 @@ async fn governance_workflows_e2e() -> anyhow::Result<()> {
     // kick, because the provider decparty needs all three members.
     //
     // Devnet is a shared network. Each run leaves a second decparty on it.
-    // Devnet is therefore opt-in, the same way coupon_reassignment is.
+    // Devnet is therefore opt-in, through DECPM_IT_DUAL_GOV.
     match f.target {
         common::TestTarget::Localnet => {
             phases::dual_governance_onboarding::run(&mut f).await?;
@@ -227,23 +227,15 @@ async fn governance_workflows_e2e() -> anyhow::Result<()> {
     // Onboarding + DARs coordinators on every node.
     phases::concurrent_cross_workflows::run(&mut f).await?; // G11
 
-    // CIP-104 Mode A coupon-reassignment e2e (delegation model).
-    // On localnet the harness seeds its own unassigned RewardCouponV2 coupons,
-    // so the assign + 0.8/0.2 split run and assert on EVERY CI run. On devnet
-    // there is no way to synthesize coupons, so it stays opt-in
-    // (DECPM_IT_REWARD) and depends on live preconditions (Mode-B paused) —
-    // see issue #271. See the phase module doc for the full operational
-    // preconditions.
-    match f.target {
-        common::TestTarget::Localnet => {
-            phases::seed_reward_coupons::run(&mut f).await?;
-            phases::coupon_reassignment::run(&mut f).await?;
-        }
-        common::TestTarget::Devnet => {
-            if std::env::var("DECPM_IT_REWARD").is_ok() {
-                phases::coupon_reassignment::run(&mut f).await?;
-            }
-        }
+    // CIP-104 Mode A coupon-reassignment e2e (delegation model). The harness
+    // seeds its own unassigned RewardCouponV2 coupons on localnet, so the assign
+    // + 0.8/0.2 split run and assert on EVERY CI run. Devnet cannot synthesize
+    // coupons, and the decparty this suite creates earns none. The devnet check
+    // is therefore its own entrypoint, `devnet_reward_e2e`, which uses the
+    // deployed cbtc-network decparty.
+    if f.target == common::TestTarget::Localnet {
+        phases::seed_reward_coupons::run(&mut f).await?;
+        phases::coupon_reassignment::run(&mut f).await?;
     }
 
     // Runs dead last: kicks P3, seeds contracts of a package P3 lacks, and
@@ -299,4 +291,35 @@ async fn dual_governance_e2e() -> anyhow::Result<()> {
     phases::utility_onboarding::run(&mut f).await?;
     phases::dual_governance_onboarding::run(&mut f).await?;
     Ok(())
+}
+
+/// Runs ONLY the CIP-104 reward phase, against a decparty that is already
+/// deployed on devnet (`cbtc-network`). It onboards nothing and votes nothing.
+/// The harness nodes assign the decparty's live coupons through its active
+/// delegation, and the phase checks the split by value in PQS.
+///
+/// Devnet only, and opt-in twice over: it acts on a shared decparty's coupons.
+/// The README's devnet section lists the inputs and the operational
+/// preconditions.
+///
+/// Invoke with `DECPM_IT_REWARD=1 DECPM_E2E_TEST=devnet_reward_e2e
+/// ./integration-tests/run.sh --target devnet`.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires devnet and live cbtc-network coupons — invoke via integration-tests/run.sh --target devnet"]
+async fn devnet_reward_e2e() -> anyhow::Result<()> {
+    init_tracing();
+
+    let mut f = Fixture::from_env()?;
+    anyhow::ensure!(
+        f.target == common::TestTarget::Devnet,
+        "devnet_reward_e2e runs against devnet only; set DECPM_IT_TARGET=devnet \
+         (./integration-tests/run.sh --target devnet)"
+    );
+    anyhow::ensure!(
+        std::env::var("DECPM_IT_REWARD").is_ok_and(|v| !v.is_empty()),
+        "devnet_reward_e2e assigns a shared decparty's live coupons; set DECPM_IT_REWARD=1 to \
+         confirm"
+    );
+    f.discover_network_parties().await?;
+    phases::coupon_reassignment_deployed::run(&mut f).await
 }

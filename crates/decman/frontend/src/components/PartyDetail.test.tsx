@@ -94,6 +94,33 @@ describe("PartyDetail read-only sections", () => {
   });
 });
 
+describe("PartyDetail thresholds", () => {
+  it("shows the confirmation threshold beside the threshold", () => {
+    const host = (tag: string) => ({
+      participant_uid: `${tag}::${ns}`,
+      permission: "confirmation" as const,
+    });
+    render(
+      detail(authStatus(), {
+        ...party,
+        confirmation_threshold: 3,
+        participants: [host("p1"), host("p2"), host("p3")],
+      }),
+    );
+
+    expect(screen.getByTestId("party-threshold").textContent).toBe("2");
+    expect(
+      screen.getByTestId("party-confirmation-threshold").textContent,
+    ).toBe("3");
+  });
+
+  it("leaves it out when the party list does not report one", () => {
+    renderDetail(authStatus());
+
+    expect(screen.queryByTestId("party-confirmation-threshold")).toBeNull();
+  });
+});
+
 describe("PartyDetail Check DARs", () => {
   it("opens the package comparison for this party", () => {
     const onCheckDars = vi.fn();
@@ -131,6 +158,7 @@ describe("PartyDetail governance membership", () => {
         members,
         threshold: 1,
         additional_proposers: [],
+        disclosure_observers: [],
         out_of_date: false,
       },
     });
@@ -175,6 +203,7 @@ describe("PartyDetail governance membership", () => {
         members: [status.member_party_id],
         threshold: 1,
         additional_proposers: [],
+        disclosure_observers: [],
         out_of_date: false,
       },
     };

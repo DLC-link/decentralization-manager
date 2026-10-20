@@ -170,6 +170,9 @@ const getGovernanceCoreContracts = (
         // contract level. Operators can add proposer parties up front, or
         // grow the set later via the Add/Remove governance self-actions.
         { type: "optional", inner: { type: "party_set", parties: [] } },
+        // disclosureObservers : Optional (Set Party). Submitted as None while
+        // empty; see `withEmptyObserversAsNone`.
+        { type: "optional", inner: { type: "party_set", parties: [] } },
       ],
       fieldLabels: [
         "Dec. Party",
@@ -177,9 +180,30 @@ const getGovernanceCoreContracts = (
         "Threshold",
         "Proposal Timeout",
         "Additional Proposers",
+        "Disclosure Observers",
       ],
     },
   ];
+};
+
+// An empty disclosure-observer list goes out as None. A node that has only
+// governance-core 0.1.0 drops a trailing None field, but refuses a Some.
+const withEmptyObserversAsNone = (
+  contract: ContractDefinition,
+): ContractDefinition => {
+  if (contract.id !== "create-governance-rules") return contract;
+  const observersIndex = contract.fields.length - 1;
+  const observers = contract.fields[observersIndex];
+  if (
+    observers?.type !== "optional" ||
+    observers.inner.type !== "party_set" ||
+    observers.inner.parties.length > 0
+  ) {
+    return contract;
+  }
+  const fields = [...contract.fields];
+  fields[observersIndex] = { type: "none" };
+  return { ...contract, fields };
 };
 
 // CBTC contract definitions
@@ -582,14 +606,24 @@ const FieldEditor = ({
               >
                 <TextField
                   size="small"
-                  placeholder="Paste party ID, press Enter or click away (leave empty for no extra proposers)"
+                  placeholder={
+                    label === "Disclosure Observers"
+                      ? "Paste party ID, press Enter or click away (leave empty for no observers)"
+                      : "Paste party ID, press Enter or click away (leave empty for no extra proposers)"
+                  }
                   fullWidth
                   slotProps={{
                     input: {
-                      endAdornment: fieldHelpAdornment(
-                        "Additional parties allowed to propose governance actions, beyond the regular members. Leave empty to keep the proposer allowlist at its default.",
-                        "Help for Additional Proposers",
-                      ),
+                      endAdornment:
+                        label === "Disclosure Observers"
+                          ? fieldHelpAdornment(
+                              "Parties that can see the rules contract without hosting the governance party. They cannot confirm or execute actions. Leave empty for none.",
+                              "Help for Disclosure Observers",
+                            )
+                          : fieldHelpAdornment(
+                              "Additional parties allowed to propose governance actions, beyond the regular members. Leave empty to keep the proposer allowlist at its default.",
+                              "Help for Additional Proposers",
+                            ),
                     },
                   }}
                   onKeyDown={(e) => {
@@ -1512,7 +1546,7 @@ export const ContractsDialog = ({
         participant_ids: participantIds,
         participant_parties: submittedParticipantParties,
         operator_party: operatorParty,
-        contracts: contracts,
+        contracts: contracts.map(withEmptyObserversAsNone),
       };
 
       const res = await authenticatedFetch(`${API_BASE}/contracts`, {

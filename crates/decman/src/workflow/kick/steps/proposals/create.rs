@@ -1,7 +1,4 @@
-use canton_proto_rs::com::digitalasset::canton::{
-    crypto::v30::SigningKeysWithThreshold,
-    protocol::v30::{DecentralizedNamespaceDefinition, PartyToParticipant},
-};
+use canton_proto_rs::com::digitalasset::canton::protocol::v30::DecentralizedNamespaceDefinition;
 use sqlx::SqlitePool;
 
 use crate::{
@@ -16,6 +13,7 @@ use crate::{
             adopt_legacy_signing_keys, known_signing_keys_by_member, signing_keys_without_member,
         },
         storage::{WorkflowStorage, artifact_kinds},
+        thresholds::{PartyThresholds, ensure_carried_from},
         topology,
     },
 };
@@ -25,8 +23,10 @@ use crate::{
 /// This step creates:
 /// - DNS proposal to update namespace (remove kicked owner) — `KICK_DNS_PROPOSAL`
 /// - P2P proposal to remove participant from mapping, with the kicked
-///   member's Daml key taken out of `party_signing_keys` and both thresholds
-///   moved to the new one — `KICK_P2P_PROPOSAL`
+///   member's Daml key taken out of `party_signing_keys`, the signing
+///   threshold moved to the new one, and the confirmation threshold set by
+///   [`carried_confirmation_threshold`](crate::workflow::thresholds::carried_confirmation_threshold)
+///   — `KICK_P2P_PROPOSAL`
 /// - New namespace definition — `KICK_NEW_NAMESPACE_DEF` (used by submit)
 /// - Full party id — `KICK_PARTY_ID` (used by submit)
 pub async fn create_proposals(
@@ -72,7 +72,8 @@ pub async fn create_proposals(
         .trim()
         .parse()
         .map_err(|e| anyhow::anyhow!("Failed to parse new threshold: {e}"))?;
-    tracing::info!("New threshold: {new_threshold}");
+    let thresholds = PartyThresholds::new(new_threshold, kick_config.confirmation_threshold);
+    tracing::info!("New thresholds: {thresholds:?}");
 
     // Create new owner set without kicked member
     let new_owners: Vec<String> = current_namespace_def
@@ -122,6 +123,10 @@ pub async fn create_proposals(
     // Create new P2P mapping without kicked participant
     let kick_participant_str = kick_config.participant_id.to_string();
     let member_count = current_p2p.participants.len();
+    let on_chain = PartyThresholds::new(
+        current_namespace_def.threshold,
+        Some(i32::try_from(current_p2p.threshold)?),
+    );
     let new_participants: Vec<_> = current_p2p
         .participants
         .into_iter()
@@ -136,11 +141,13 @@ pub async fn create_proposals(
     if new_participants.is_empty() {
         anyhow::bail!("Cannot remove all participants from party mapping");
     }
+    ensure_carried_from(on_chain, new_participants.len(), thresholds)?;
 
-    // Both thresholds move together, and the kicked member's Daml key comes
-    // out. Carrying `party_signing_keys` over verbatim left the removed
-    // member's key counting towards the party's signing threshold and left
-    // that threshold at its old value, which every peer refuses to sign (#428).
+    // The signing threshold moves with the namespace one, and the kicked
+    // member's Daml key comes out. Carrying `party_signing_keys` over verbatim
+    // left the removed member's key counting towards the party's signing
+    // threshold and left that threshold at its old value, which every peer
+    // refuses to sign (#428).
     let current_signing_keys = current_p2p
         .party_signing_keys
         .map(|sk| sk.keys)
@@ -184,15 +191,11 @@ pub async fn create_proposals(
         );
     }
 
-    let new_p2p = PartyToParticipant {
-        party: party_id_str.clone(),
-        threshold: new_threshold.try_into()?,
-        participants: new_participants,
-        party_signing_keys: Some(SigningKeysWithThreshold {
-            keys: new_signing_keys,
-            threshold: new_threshold.try_into()?,
-        }),
-    };
+    let new_p2p = thresholds.party_to_participant(
+        party_id_str.clone(),
+        new_participants,
+        new_signing_keys,
+    )?;
 
     // Signed without being published: nothing reaches the synchronizer until
     // submit, so a member that never signs leaves the party unchanged (#448).

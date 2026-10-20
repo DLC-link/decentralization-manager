@@ -45,6 +45,12 @@ data GovernanceSelfAction
   | SelfAction_RemoveAdditionalProposer
       { additionalProposer : Party
       }
+  | SelfAction_SetDisclosureObservers
+      { updatedDisclosureObservers : Optional (Set Party)
+      }
+  | SelfAction_CancelAction
+      { actionProposalCid : ContractId GovernableAction
+      }
   deriving (Show, Eq)
 
 -- | A confirmation for a governance self-management action.
@@ -110,6 +116,10 @@ data GovernanceRules_RemoveAdditionalProposerResult = GovernanceRules_RemoveAddi
   with governanceRulesCid : ContractId GovernanceRules
   deriving (Show, Eq)
 
+data GovernanceRules_SetDisclosureObserversResult = GovernanceRules_SetDisclosureObserversResult
+  with governanceRulesCid : ContractId GovernanceRules
+  deriving (Show, Eq)
+
 data GovernanceRules_ConfirmGovernanceActionResult = GovernanceRules_ConfirmGovernanceActionResult
   with confirmationCid : ContractId GovernanceSelfConfirmation
   deriving (Show, Eq)
@@ -156,11 +166,21 @@ template GovernanceRules
       -- set is @members ∪ fromOptional Set.empty additionalProposers@.
       -- @None@ is the canonical form for "no allowlist"; the Add/Remove
       -- self-actions normalize the set back to @None@ when it becomes empty.
+    disclosureObservers : Optional (Set Party)
+      -- ^ Optional parties that observe this contract without hosting the
+      -- governance party, such as an additional proposer on another
+      -- participant (#165). Observing grants no right to confirm or execute.
+      -- @None@ is the canonical form for "no observers". A contract created
+      -- before this field existed reads as @None@ and gains observers only
+      -- when `SelfAction_SetDisclosureObservers` replaces it.
   where
     signatory governanceParty
     -- Note: members are NOT observers. In Canton, each member hosts the
     -- governance party on their participant with readAs rights. This keeps
     -- visibility as a topology concern rather than a contract modeling concern.
+    -- `disclosureObservers` is the opt-in exception for parties that do not
+    -- host the governance party.
+    observer fromOptional Set.empty disclosureObservers
     ensure not (Set.null members)
         && threshold >= 1
         && threshold <= Set.size members
@@ -261,6 +281,19 @@ template GovernanceRules
         governanceRulesCid <- create this with additionalProposers = normalized
         pure GovernanceRules_RemoveAdditionalProposerResult with governanceRulesCid
 
+    -- | Replace the disclosure observers. An empty set normalizes to @None@.
+    choice GovernanceRules_SetDisclosureObservers
+        : GovernanceRules_SetDisclosureObserversResult
+      with
+        newDisclosureObservers : Optional (Set Party)
+      controller governanceParty
+      do
+        let normalized = case newDisclosureObservers of
+              Some observers | Set.null observers -> None
+              _ -> newDisclosureObservers
+        governanceRulesCid <- create this with disclosureObservers = normalized
+        pure GovernanceRules_SetDisclosureObserversResult with governanceRulesCid
+
     -- ════════════════════════════════════════════════════════════════════════
     -- BUILT-IN: Self-management confirm & execute
     -- Uses GovernanceSelfAction (closed enum) for value-based matching.
@@ -353,6 +386,19 @@ template GovernanceRules
             result <- exercise self GovernanceRules_RemoveAdditionalProposer with
               additionalProposer
             pure result.governanceRulesCid
+
+          SelfAction_SetDisclosureObservers updatedDisclosureObservers -> do
+            result <- exercise self GovernanceRules_SetDisclosureObservers with
+              newDisclosureObservers = updatedDisclosureObservers
+            pure result.governanceRulesCid
+
+          -- See the cancellation note below. The rules contract is unchanged.
+          SelfAction_CancelAction actionProposalCid -> do
+            actionView <- view <$> fetch actionProposalCid
+            require "Cancelled proposal targets this governance"
+              (actionView.governanceParty == governanceParty)
+            exercise actionProposalCid GovernableAction_Cancel
+            pure self
         pure GovernanceRules_ExecuteGovernanceActionResult with ..
 
     -- | Expire a stale self-management confirmation.
@@ -445,8 +491,17 @@ template GovernanceRules
     --   * GovernableAction_ProposerCancel — controlled by the proposer, lets
     --     them retract their own proposal without a governance vote.
     --   * GovernableAction_Cancel — controlled by governanceParty, used when
-    --     governance needs to clean up a stale proposal (typically via the
-    --     standard vote flow as a GovernableAction itself).
+    --     governance needs to clean up a stale proposal. Members reach it by
+    --     voting `SelfAction_CancelAction`, e.g. for a proposal whose proposer
+    --     the rules no longer authorize (#518).
+    -- Cancelling leaves the proposal's confirmations in place. They reference
+    -- an archived contract, so ExecuteConfirmedAction fails on them; each
+    -- confirmer cancels its own, or a member expires them later.
+    -- A cancellation vote has no proposer, so a change in proposer rights
+    -- cannot strand it. Its confirmations name the action, not a rules
+    -- contract, so they survive a membership change, and execution counts
+    -- only current members. If the proposal is archived first, execution
+    -- fails and the cancellation's confirmations expire unused.
 
     -- | Expire a stale action confirmation.
     nonconsuming choice GovernanceRules_ExpireConfirmation : ()

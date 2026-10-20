@@ -88,13 +88,6 @@ pub async fn export_state(
         );
     }
 
-    if change_config.new_threshold == namespace_def.threshold {
-        anyhow::bail!(
-            "new_threshold {t} is already the current threshold — nothing to change",
-            t = change_config.new_threshold,
-        );
-    }
-
     // Save namespace definition as a length-prefixed protobuf — same byte
     // shape as the file written by `utils::write_message_to_file`.
     let namespace_bytes = utils::encode_length_prefixed_message(namespace_def);

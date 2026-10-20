@@ -68,6 +68,12 @@ export const OnboardingDialog = ({
   // selected-peer set changes, until the operator edits the field.
   const [threshold, setThreshold] = useState(1);
   const [thresholdTouched, setThresholdTouched] = useState(false);
+  // Confirmation threshold. Follows the threshold until the operator edits
+  // it; only a different value is sent.
+  const [confirmationEdit, setConfirmationEdit] = useState<number | null>(
+    null,
+  );
+  const confirmationThreshold = confirmationEdit ?? threshold;
   const { showSnackbar } = useSnackbar();
 
   // Owners = the selected peers plus this node (always an owner of a party it
@@ -80,6 +86,10 @@ export const OnboardingDialog = ({
   useEffect(() => {
     if (!thresholdTouched) setThreshold(defaultThreshold);
   }, [defaultThreshold, thresholdTouched]);
+
+  // Every owner's node hosts the party, so owners and hosts are one count.
+  const confirmationOutOfRange =
+    confirmationThreshold < 1 || confirmationThreshold > ownerCount;
 
   // Fetch peers when dialog opens
   useEffect(() => {
@@ -121,6 +131,7 @@ export const OnboardingDialog = ({
       setSelectedPeerIds(new Set());
       setFilter("");
       setThresholdTouched(false);
+      setConfirmationEdit(null);
     }
   }, [open]);
 
@@ -235,6 +246,11 @@ export const OnboardingDialog = ({
       return;
     }
 
+    if (confirmationOutOfRange) {
+      setError(`Confirmation threshold must be between 1 and ${ownerCount}`);
+      return;
+    }
+
     setLoading(true);
     setError(null);
     setMeshErrors(null);
@@ -247,6 +263,9 @@ export const OnboardingDialog = ({
           party_id_prefix: partyIdPrefix.trim(),
           peer_ids: Array.from(selectedPeerIds),
           threshold,
+          ...(confirmationThreshold !== threshold
+            ? { confirmation_threshold: confirmationThreshold }
+            : {}),
         }),
       });
 
@@ -669,7 +688,7 @@ export const OnboardingDialog = ({
               htmlInput: { min: 1, max: ownerCount },
               input: {
                 endAdornment: fieldHelpAdornment(
-                  "The decentralized-namespace threshold: how many of the party's owners must sign topology changes (it's also set as the party-to-participant confirmation threshold). Owners are you plus the peers you invite. Defaults to a majority; edit to override. Separate from the governance threshold.",
+                  "How many of the party's owners must sign a topology change. The party's signing keys use the same threshold. Owners are you plus the peers you invite. Defaults to a majority. Separate from the governance threshold.",
                   "Help for Threshold",
                 ),
               },
@@ -684,6 +703,32 @@ export const OnboardingDialog = ({
                   } peer${
                     selectedPeerIds.size === 1 ? "" : "s"
                   }). Default: majority (${defaultThreshold}).`
+            }
+          />
+          <TextField
+            label="Confirmation threshold"
+            type="number"
+            value={confirmationThreshold}
+            onChange={(e) =>
+              setConfirmationEdit(Math.max(1, parseInt(e.target.value) || 1))
+            }
+            fullWidth
+            disabled={controlsDisabled}
+            error={confirmationOutOfRange}
+            sx={{ mt: 2, "& input": { fontFamily: "var(--font-mono)" } }}
+            slotProps={{
+              htmlInput: { min: 1, max: ownerCount },
+              input: {
+                endAdornment: fieldHelpAdornment(
+                  "How many of the nodes hosting the party must confirm each of its transactions. Defaults to the threshold above.",
+                  "Help for Confirmation threshold",
+                ),
+              },
+            }}
+            helperText={
+              confirmationOutOfRange
+                ? `Must be between 1 and ${ownerCount}`
+                : "Threshold counts owners who sign topology changes. Confirmation threshold counts hosts that confirm transactions."
             }
           />
         </Box>
@@ -837,7 +882,8 @@ export const OnboardingDialog = ({
               !!partyPrefixError(partyIdPrefix.trim()) ||
               selectedPeerIds.size === 0 ||
               threshold < 1 ||
-              threshold > ownerCount
+              threshold > ownerCount ||
+              confirmationOutOfRange
             }
           >
             {loading ? <CircularProgress size={20} /> : "Start onboarding"}

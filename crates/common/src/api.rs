@@ -227,16 +227,21 @@ pub struct AddPartyRequest {
     pub previous_threshold: i32,
 }
 
-/// Request to change the signing threshold of an existing decentralized party.
-/// Re-issues the namespace + party mappings with `new_threshold`; membership is
-/// unchanged.
+/// Request to change the thresholds of an existing decentralized party.
+/// Re-issues the namespace + party mappings; membership is unchanged.
 #[derive(Clone, Debug, Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(deny_unknown_fields)]
 #[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 pub struct ChangeThresholdRequest {
     pub decentralized_party_id: CantonId,
+    /// How many namespace owners must sign a topology change. The party's
+    /// signing keys use the same threshold.
     pub new_threshold: i32,
+    /// How many hosting participants must confirm a transaction for the
+    /// party. Omitted means the same value as `new_threshold`.
+    #[serde(default)]
+    pub confirmation_threshold: Option<i32>,
     /// The party's threshold *before* the change. Display-only — surfaced on
     /// the workflow run card as "old → new". Defaults to 0 (rendered as just
     /// the new value) when an older client omits it.
@@ -253,13 +258,18 @@ pub struct OnboardingRequest {
     pub party_id_prefix: String,
     /// List of peer IDs to invite to the decentralized party
     pub peer_ids: Vec<CantonId>,
-    /// Initial signing threshold for the new party (applied to both the
-    /// decentralized-namespace and party-to-participant mappings). Optional:
-    /// when omitted the coordinator falls back to the default majority
-    /// algorithm (`ceil(owner_count / 2)`, min 1). The frontend pre-fills this
-    /// with the same default so the operator can see and adjust it.
+    /// Initial namespace threshold for the new party: how many owners must
+    /// sign a topology change. The party's signing keys use the same value.
+    /// Optional: when omitted the coordinator falls back to the default
+    /// majority algorithm (`ceil(owner_count / 2)`, min 1). The frontend
+    /// pre-fills this with the same default so the operator can see and
+    /// adjust it.
     #[serde(default)]
     pub threshold: Option<i32>,
+    /// How many hosting participants must confirm a transaction for the new
+    /// party. Omitted means the same value as the namespace threshold.
+    #[serde(default)]
+    pub confirmation_threshold: Option<i32>,
 }
 
 /// Why a directed edge was reported missing. The frontend renders different
@@ -819,6 +829,10 @@ pub struct OnboardingInvitePayload {
     /// an older coordinator that predates the field (the card then omits it).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub threshold: Option<i32>,
+    /// The confirmation threshold the coordinator will propose. `None` means
+    /// it equals `threshold`, which is all an older coordinator sends.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub confirmation_threshold: Option<i32>,
     /// The coordinator's `workflow_runs` instance name for this run. Echoed
     /// back in `DeclineInvitationPayload` so the coordinator can tell a
     /// decline of THIS run apart from a stale invite of an earlier run.
@@ -896,6 +910,10 @@ pub struct KickInvitePayload {
     pub kicked_participant: CantonId,
     pub new_threshold: i32,
     pub previous_threshold: i32,
+    /// The confirmation threshold the coordinator will propose. `None` means
+    /// it equals `new_threshold`, which is all an older coordinator sends.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub confirmation_threshold: Option<i32>,
     /// The surviving member set the kick targets, so the peer card renders
     /// the same participant list the coordinator shows.
     #[serde(default)]
@@ -917,6 +935,10 @@ pub struct AddPartyInvitePayload {
     pub new_participant: CantonId,
     pub new_threshold: i32,
     pub previous_threshold: i32,
+    /// The confirmation threshold the coordinator will propose. `None` means
+    /// it equals `new_threshold`, which is all an older coordinator sends.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub confirmation_threshold: Option<i32>,
     /// The full post-add member set, so the peer card renders the same
     /// participant list the coordinator shows.
     #[serde(default)]
@@ -936,6 +958,10 @@ pub struct ChangeThresholdInvitePayload {
     pub dec_party_id: CantonId,
     pub new_threshold: i32,
     pub previous_threshold: i32,
+    /// The confirmation threshold the coordinator will propose. `None` means
+    /// it equals `new_threshold`, which is all an older coordinator sends.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub confirmation_threshold: Option<i32>,
     /// The party's member set, so the peer card renders the same participant
     /// list the coordinator shows.
     #[serde(default)]
@@ -1332,6 +1358,12 @@ pub struct GovernanceState {
     /// predates the field.
     #[serde(default)]
     pub additional_proposers: Vec<CantonId>,
+    /// Parties that observe the rules contract without hosting the governance
+    /// party (`GovernanceRules.disclosureObservers`). Empty when the rules
+    /// contract sets none or predates the field; `default` accepts a response
+    /// from a node that predates it.
+    #[serde(default)]
+    pub disclosure_observers: Vec<CantonId>,
     // Optional on the wire: older governance rules contracts predate this field.
     // `skip_serializing_if` omits it when None and `default` accepts it missing;
     // ts-rs renders it as an optional TS property via the type's `optional_fields`.
@@ -1851,6 +1883,7 @@ mod tests {
             members: vec![party("m1")?],
             threshold: 2,
             additional_proposers: vec![],
+            disclosure_observers: vec![],
             action_confirmation_timeout_microseconds: None,
             package_ref: None,
             out_of_date: false,
@@ -1861,14 +1894,15 @@ mod tests {
         assert_eq!(back.contract_id, state.contract_id);
         assert_eq!(back.package_ref, None);
 
-        // A node that predates `additional_proposers` omits it entirely.
+        // A node that predates `additional_proposers` or
+        // `disclosure_observers` omits it entirely.
         let mut older = serde_json::to_value(&state)?;
-        older
-            .as_object_mut()
-            .expect("an object")
-            .remove("additional_proposers");
+        let fields = older.as_object_mut().expect("an object");
+        fields.remove("additional_proposers");
+        fields.remove("disclosure_observers");
         let back: GovernanceState = serde_json::from_value(older)?;
         assert!(back.additional_proposers.is_empty());
+        assert!(back.disclosure_observers.is_empty());
 
         let json = serde_json::to_string(&GovernanceStateResponse { state: None })?;
         let back: GovernanceStateResponse = serde_json::from_str(&json)?;

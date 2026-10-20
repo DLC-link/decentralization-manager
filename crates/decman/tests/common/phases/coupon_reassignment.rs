@@ -1,6 +1,7 @@
-//! CIP-104 Mode A coupon-reassignment e2e. Runs on **localnet**
-//! every CI run (the harness seeds its own coupons — see `seed_reward_coupons`)
-//! and, opt-in, against **devnet**.
+//! CIP-104 Mode A coupon-reassignment e2e. Runs on **localnet** every CI run
+//! (the harness seeds its own coupons — see `seed_reward_coupons`). Devnet has
+//! its own phase, `coupon_reassignment_deployed`, which reads a delegation that
+//! is already deployed instead of voting one in.
 //!
 //! Exercises the **delegation model** end-to-end. One threshold governance
 //! vote (`SetupCouponReassignmentDelegation`) records the split and the
@@ -12,56 +13,19 @@
 //! reassign the decparty's unassigned `RewardCouponV2` coupons to the
 //! baked-in beneficiaries. Only ONE member instance needs to run to reassign.
 //!
-//! ## Why this cannot run in normal CI (and how it stays harmless)
-//!
-//! Gated two ways:
-//!   1. **Opt-in env var** `DECPM_IT_REWARD` in `governance_workflows.rs` — the
-//!      phase is not called at all unless that is set.
-//!   2. **Runtime precondition skip** (below) — **devnet-only**: if the
-//!      decparty has no `RewardCouponV2` coupons, the phase logs a SKIP line
-//!      and returns `Ok(())`. On **localnet** the phase seeds its own coupons
-//!      (`seed_reward_coupons`) and hard-fails instead of skipping if none are
-//!      visible after a short poll — there is no silent no-op path there.
-//!
-//! To actually observe reassignment on devnet, operational preconditions must
-//! hold — none are reproducible from this harness:
-//!   - The decparty (`f.party_id()`) must be an app-provider whose coupons
-//!     carry `provider == decparty` and are **unassigned** (`beneficiary =
-//!     null`). On devnet that is `cbtc-network`; a fresh harness-allocated
-//!     decparty earns no coupons, so the live run must target a decparty that
-//!     does.
-//!   - **Mode-B collection must be paused** for that decparty (coordinate with
-//!     the team) so coupons re-accumulate unassigned instead of being swept to
-//!     0. Coupons reappear within ~one round.
-//!   - The test nodes must run with a **short reward-automation interval** so
-//!     the loop reassigns within the poll deadline. The default is 300s; set
-//!     `DECPM_REWARD_AUTOMATION_INTERVAL_SECS` (or `--reward-automation-interval-secs`,
-//!     e.g. 15-30s) on the test nodes — the loop's own heartbeat timer scales
-//!     down to match, so a sub-60s interval genuinely beats at that rate.
-//!   - At least one of the delegation's `assigners` must be a member party this
-//!     node holds credentials for (else the loop skips the decparty). Here the
-//!     assigners are `[p1_member, p2_member]`; on the live `cbtc-network` run
-//!     they are the active attestors (`attestor-1`, `attestor-2`).
-//!
-//! ## Field-level split assertions need PQS, not this harness
+//! ## Field-level split assertions read the JSON Ledger API
 //!
 //! The DecMan `/contracts/query` HTTP endpoint returns only `{contract_id}` per
 //! contract (`ContractQueryResponse`) — it does **not** expose decoded fields.
 //! So this phase observes, at the HTTP layer: delegation **presence** (the
 //! keyless-singleton invariant: exactly one `CouponReassignmentDelegation`) and
 //! coupon **archival** (an originally-visible unassigned coupon cid is gone
-//! after a sweep). It **cannot** assert, at the HTTP layer, that each resulting
-//! coupon carries a specific `beneficiary` or the 0.8 / 0.2 `amount` shares.
+//! after a sweep).
 //!
-//! On **localnet**, the split IS asserted by value: each beneficiary party is
-//! an observer of its own assigned `RewardCouponV2`, so the phase reads the
-//! decoded amount via the JSON Ledger API (`active_reward_coupons`) and checks
-//! the 80.0 / 20.0 shares directly — no PQS needed. On **devnet**, the
-//! per-beneficiary field checks still require decoded reads not exposed by
-//! `/contracts/query` and must be verified against devnet PQS `pqs_cbtc` on the
-//! real run (issue #271) — see the TODO on the final assertion. Beneficiary
-//! self-minting is a separate precondition (the beneficiaries' own agents) and
-//! is likewise verified out-of-band.
+//! The split IS asserted by value: each beneficiary party is an observer of its
+//! own assigned `RewardCouponV2`, so the phase reads the decoded amount via the
+//! JSON Ledger API (`active_reward_coupons`) and checks the 80.0 / 20.0 shares
+//! directly. Devnet tunnels no JSON Ledger API, so its phase reads PQS instead.
 //!
 //! ## Security property
 //!
@@ -105,29 +69,16 @@ use crate::common::{
     scenario::Scenario,
 };
 
-/// `#splice-api-reward-assignment-v1`, URL-encoded — the `RewardCoupon`
-/// interface package (concrete implementer on devnet: `RewardCouponV2`).
-const REWARD_ASSIGN_PKG: &str = "%23splice-api-reward-assignment-v1";
 /// `#governance-rewards-automation-v1`, URL-encoded — holds the
 /// `CouponReassignmentDelegation` template.
 const GOVERNANCE_REWARDS_PKG: &str = "%23governance-rewards-automation-v1";
 
 /// Generous ceiling for the reassignment step. Under a short
-/// `DECPM_REWARD_AUTOMATION_INTERVAL_SECS` (see the module doc) the loop
-/// reassigns within seconds — the loop's heartbeat timer scales down to match
-/// rather than flooring at its own 60s cadence; this only bites when the
-/// nodes are misconfigured (still on the 300s default) or paused Mode-B
-/// collection was not arranged.
-const REASSIGN_TIMEOUT: Duration = Duration::from_secs(600);
-
-/// Devnet query: the `RewardCoupon` *interface* (matches any implementer; on
-/// cbtc-network that is `RewardCouponV2`). Real auth supports InterfaceFilter.
-fn reward_coupon_query_path(party_id: &str) -> String {
-    format!(
-        "/contracts/query?party_id={party_id}&package_id={REWARD_ASSIGN_PKG}\
-         &module_name=Splice.Api.RewardAssignmentV1&entity_name=RewardCoupon&interface=true"
-    )
-}
+/// `DECPM_REWARD_AUTOMATION_INTERVAL_SECS` the loop reassigns within seconds —
+/// the loop's heartbeat timer scales down to match rather than flooring at its
+/// own 60s cadence; this only bites when the nodes are misconfigured (still on
+/// the 300s default) or, on devnet, Mode-B collection was not paused.
+pub(crate) const REASSIGN_TIMEOUT: Duration = Duration::from_secs(600);
 
 /// Localnet query: the *concrete* `Splice.Amulet:RewardCouponV2` template.
 /// Localnet builds DecMan with `--features test-mode`, where `/contracts/query`
@@ -150,26 +101,19 @@ fn delegation_query_path(party_id: &str) -> String {
     )
 }
 
-/// Contract ids of the decparty's `RewardCoupon` contracts (cid-only; the HTTP
-/// endpoint does not surface decoded fields, so we cannot filter by
+/// Contract ids of the decparty's `RewardCouponV2` contracts (cid-only; the
+/// HTTP endpoint does not surface decoded fields, so we cannot filter by
 /// `beneficiary == null` here — see the module doc).
-fn reward_coupon_path(f: &Fixture, party_id: &str) -> String {
-    match f.target {
-        crate::common::TestTarget::Localnet => reward_coupon_v2_query_path(party_id),
-        crate::common::TestTarget::Devnet => reward_coupon_query_path(party_id),
-    }
-}
-
 async fn query_reward_coupons(f: &Fixture, party_id: &str) -> anyhow::Result<HashSet<String>> {
     let r: ContractQueryResponse = f
-        .get_json(f.p1.http, &reward_coupon_path(f, party_id))
+        .get_json(f.p1.http, &reward_coupon_v2_query_path(party_id))
         .await?;
     Ok(r.contracts.into_iter().map(|c| c.contract_id).collect())
 }
 
 async fn probe_reward_coupons(f: &Fixture, party_id: &str) -> Option<HashSet<String>> {
     let r: ContractQueryResponse = f
-        .probe_get_json(f.p1.http, &reward_coupon_path(f, party_id))
+        .probe_get_json(f.p1.http, &reward_coupon_v2_query_path(party_id))
         .await?;
     Some(r.contracts.into_iter().map(|c| c.contract_id).collect())
 }
@@ -247,17 +191,21 @@ struct AssignmentMetrics {
     expiry: Option<f64>,
 }
 
+/// One decparty's value of the metric `name` in a `/metrics` body. `None` when
+/// the node has no such series yet.
+pub(crate) fn decparty_metric(body: &str, name: &str, party: &str) -> anyhow::Result<Option<f64>> {
+    let prefix = format!("{name}{{decparty=\"{party}\"}} ");
+    body.lines()
+        .find_map(|line| line.strip_prefix(&prefix))
+        .map(|value| value.parse::<f64>().map_err(Into::into))
+        .transpose()
+}
+
 async fn assignment_metrics(f: &Fixture, party: &str) -> anyhow::Result<Vec<AssignmentMetrics>> {
     let mut values = Vec::new();
     for port in [f.p1.metrics, f.p2.metrics] {
         let body = f.get_text(port, "/metrics").await?;
-        let metric = |name: &str| -> anyhow::Result<Option<f64>> {
-            let prefix = format!("{name}{{decparty=\"{party}\"}} ");
-            body.lines()
-                .find_map(|line| line.strip_prefix(&prefix))
-                .map(|value| value.parse::<f64>().map_err(Into::into))
-                .transpose()
-        };
+        let metric = |name: &str| decparty_metric(&body, name, party);
         values.push(AssignmentMetrics {
             zero: metric("decman_reward_sweep_zero_assigned_total")?.unwrap_or(0.0),
             skipped: metric("decman_reward_coupons_skipped_total")?.unwrap_or(0.0),
@@ -308,69 +256,53 @@ async fn assert_assignment_fault(
 
 pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
     info!("Phase: coupon_reassignment (CIP-104 Mode A delegation model)");
+    anyhow::ensure!(
+        f.target == crate::common::TestTarget::Localnet,
+        "coupon_reassignment seeds coupons and votes in its own delegation, so it runs on \
+         localnet only; devnet runs coupon_reassignment_deployed (devnet_reward_e2e)"
+    );
 
     let decparty = f.party_id()?.to_string();
-    // Localnet only: the seeded coupon a member minted as `dso`. No sweep may
-    // assign it (see `seed_reward_coupons::FOREIGN_TTL_HOURS`).
-    let foreign_cid = match f.target {
-        crate::common::TestTarget::Localnet => Some(f.reward_foreign_coupon_cid()?.to_string()),
-        crate::common::TestTarget::Devnet => None,
-    };
+    // The seeded coupon a member minted as `dso`. No sweep may assign it (see
+    // `seed_reward_coupons::FOREIGN_TTL_HOURS`).
+    let foreign_cid = f.reward_foreign_coupon_cid()?.to_string();
 
     // ------------------------------------------------------------------
-    // Precondition check (the runtime half of the gate). Target-aware:
-    // - Localnet: seed_reward_coupons committed coupons; empty here is a
-    //   hard failure after brief poll (no silent no-op).
-    // - Devnet: empty coupons log SKIP and return Ok(()).
-    // (Ordered before delegation setup so early exit avoids governance work.)
+    // Precondition check, ordered before delegation setup so a failure here
+    // costs no governance work. seed_reward_coupons committed the coupons
+    // synchronously; poll only to absorb any ledger->DecMan read lag, then
+    // hard-fail. A silent skip here would turn the whole phase into a
+    // false-positive no-op.
+    //
+    // Wait for the FULL seeded set, not merely a non-empty one: the seed
+    // commits in several transactions, so an early read can return a subset,
+    // and the "every seeded coupon archived" assertion below would then be
+    // evaluated over that subset instead of all of them.
     // ------------------------------------------------------------------
-    let initial_coupon_cids = match f.target {
-        crate::common::TestTarget::Localnet => {
-            // seed_reward_coupons committed the coupons synchronously; poll only
-            // to absorb any ledger->DecMan read lag, then hard-fail. A silent
-            // skip here would turn the whole phase into a false-positive no-op.
-            //
-            // Wait for the FULL seeded set, not merely a non-empty one: the seed
-            // commits in several transactions, so an early read can return a
-            // subset, and the "every seeded coupon archived" assertion below
-            // would then be evaluated over that subset instead of all of them.
-            let seeded = SEED_COUPON_COUNT + SEEDED_SURVIVORS;
-            let deadline = std::time::Instant::now() + Duration::from_secs(60);
-            let cids = loop {
-                let cids = query_reward_coupons(f, &decparty).await?;
-                if cids.len() >= seeded || std::time::Instant::now() >= deadline {
-                    break cids;
-                }
-                tokio::time::sleep(Duration::from_secs(2)).await;
-            };
-            anyhow::ensure!(
-                cids.len() >= seeded,
-                "coupon_reassignment (localnet): saw {} unassigned RewardCouponV2 for {decparty}, \
-                 expected the {seeded} seeded — seed_reward_coupons must run first \
-                 and commit them all",
-                cids.len()
-            );
-            if let Some(foreign) = &foreign_cid {
-                anyhow::ensure!(
-                    cids.contains(foreign),
-                    "coupon_reassignment (localnet): the foreign-DSO coupon {foreign} is not \
-                     among the {} coupons DecMan reports for {decparty}",
-                    cids.len()
-                );
-            }
-            cids
-        }
-        crate::common::TestTarget::Devnet => {
+    let initial_coupon_cids = {
+        let seeded = SEED_COUPON_COUNT + SEEDED_SURVIVORS;
+        let deadline = std::time::Instant::now() + Duration::from_secs(60);
+        let cids = loop {
             let cids = query_reward_coupons(f, &decparty).await?;
-            if cids.is_empty() {
-                warn!(
-                    "coupon_reassignment IT SKIPPED: no unassigned RewardCouponV2 for {decparty} — \
-                     needs live coupons with Mode-B collection paused (precondition)"
-                );
-                return Ok(());
+            if cids.len() >= seeded || std::time::Instant::now() >= deadline {
+                break cids;
             }
-            cids
-        }
+            tokio::time::sleep(Duration::from_secs(2)).await;
+        };
+        anyhow::ensure!(
+            cids.len() >= seeded,
+            "coupon_reassignment (localnet): saw {} unassigned RewardCouponV2 for {decparty}, \
+             expected the {seeded} seeded — seed_reward_coupons must run first \
+             and commit them all",
+            cids.len()
+        );
+        anyhow::ensure!(
+            cids.contains(&foreign_cid),
+            "coupon_reassignment (localnet): the foreign-DSO coupon {foreign_cid} is not \
+             among the {} coupons DecMan reports for {decparty}",
+            cids.len()
+        );
+        cids
     };
     info!(
         "coupon_reassignment: {} candidate coupon(s) visible for {decparty}",
@@ -382,53 +314,25 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
     // (propose -> confirm -> execute), recording the assigners and the
     // baked-in 0.8 / 0.2 split. `prior_delegation = null` (first delegation).
     //
-    // Party roles:
-    //   On localnet, assigners = [p1_member, p2_member], and beneficiaries are
-    //   the two dedicated non-assigner parties the seed phase allocated
-    //   ([reward_beneficiary_party @ 0.8, reward_operator_party @ 0.2]) — kept
-    //   disjoint from the assigners so the split-by-value assertion below
-    //   observes each beneficiary's own coupons unambiguously. The dso is the
-    //   dedicated party the seed phase minted its coupons as. It differs from
-    //   p1_member, which minted the one foreign-DSO coupon.
-    //
-    //   On devnet (harness stand-ins; the live cbtc-network run uses the real
-    //   devnet parties per the operational preconditions):
-    //     dso            = p1_member
-    //     assigners      = [p1_member, p2_member]  -> attestor-1, attestor-2
-    //     beneficiaries  = [p2_member @ 0.8, p3_member @ 0.2] -> cbtc-beneficiary,
-    //                       operator
-    //   p3_member is deliberately NOT an assigner — it is the non-assigner used
-    //   by the security note below. (A beneficiary is not thereby an assigner.)
+    // Party roles: assigners = [p1_member, p2_member], and beneficiaries are
+    // the two dedicated non-assigner parties the seed phase allocated
+    // ([reward_beneficiary_party @ 0.8, reward_operator_party @ 0.2]) — kept
+    // disjoint from the assigners so the split-by-value assertion below
+    // observes each beneficiary's own coupons unambiguously. The dso is the
+    // dedicated party the seed phase minted its coupons as. It differs from
+    // p1_member, which minted the one foreign-DSO coupon. p3_member is
+    // deliberately NOT an assigner — it is the non-assigner used by the
+    // security note below.
     // ------------------------------------------------------------------
     let assigner_a = f.p1_member_party()?.to_string();
     let assigner_b = f.p2_member_party()?.to_string();
-    // Beneficiaries must be disjoint from assigners. On localnet the seed phase
-    // allocated two dedicated non-assigner parties; on devnet keep the existing
-    // stand-ins (issue #271 wires the real cbtc-beneficiary/operator).
-    let (dso_party, benef_a, benef_b) = match f.target {
-        crate::common::TestTarget::Localnet => (
-            f.reward_dso_party()?.to_string(),
-            f.reward_beneficiary_party()?.to_string(),
-            f.reward_operator_party()?.to_string(),
-        ),
-        crate::common::TestTarget::Devnet => (
-            f.p1_member_party()?.to_string(),
-            f.p2_member_party()?.to_string(),
-            f.p3_member_party()?.to_string(),
-        ),
-    };
+    let dso_party = f.reward_dso_party()?.to_string();
+    let benef_a = f.reward_beneficiary_party()?.to_string();
+    let benef_b = f.reward_operator_party()?.to_string();
     // Install the fault on both assigners before enabling the loop, so no
     // healthy node can drain the coupons before the failure assertions run.
-    let fault = if matches!(f.target, crate::common::TestTarget::Localnet) {
-        Some(AssignmentFault::install(f, &decparty)?)
-    } else {
-        None
-    };
-    let baseline = if fault.is_some() {
-        assignment_metrics(f, &decparty).await?
-    } else {
-        Vec::new()
-    };
+    let fault = AssignmentFault::install(f, &decparty)?;
+    let baseline = assignment_metrics(f, &decparty).await?;
     propose_confirm_execute(
         "SetupCouponReassignmentDelegation",
         json!({
@@ -447,14 +351,12 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
     .run(f)
     .await?;
 
-    if let Some(fault) = fault {
-        assert_assignment_fault(f, &decparty, &baseline, true).await?;
-        let after_contention = assignment_metrics(f, &decparty).await?;
-        fault.set(&decparty, "COMMAND_PREPROCESSING_FAILED")?;
-        assert_assignment_fault(f, &decparty, &after_contention, false).await?;
-        drop(fault);
-        info!("assignment failure metrics verified; restored real ledger submission");
-    }
+    assert_assignment_fault(f, &decparty, &baseline, true).await?;
+    let after_contention = assignment_metrics(f, &decparty).await?;
+    fault.set(&decparty, "COMMAND_PREPROCESSING_FAILED")?;
+    assert_assignment_fault(f, &decparty, &after_contention, false).await?;
+    drop(fault);
+    info!("assignment failure metrics verified; restored real ledger submission");
 
     Scenario::new("CouponReassignmentDelegation present")
         .then(
@@ -531,306 +433,287 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
         .await?;
 
     // ------------------------------------------------------------------
-    // When + Then (happy path): with the delegation in place and Mode-B
-    // collection paused, each node's background loop reads the delegation and
-    // (for a node whose member is a listed assigner) exercises
-    // Delegation_Assign on its own — no vote per round. Proof-at-the-HTTP-layer:
-    // at least one originally-visible unassigned coupon cid is now archived.
+    // When + Then (happy path): with the delegation in place, each node's
+    // background loop reads the delegation and (for a node whose member is a
+    // listed assigner) exercises Delegation_Assign on its own — no vote per
+    // round. Proof-at-the-HTTP-layer: the seeded coupon cids are now archived.
     // ------------------------------------------------------------------
-    // On localnet the seeded set spans more than one chunk (see
+    // The seeded set spans more than one chunk (see
     // `seed_reward_coupons::SEED_COUPON_COUNT`), so requiring *every* seeded
     // coupon to be archived exercises the drain loop across chunk boundaries —
-    // a single-chunk assertion would pass while later chunks were dropped. On
-    // devnet the coupon set is whatever the ledger happens to hold and other
-    // automation may touch it, so one archived coupon remains the bar there.
+    // a single-chunk assertion would pass while later chunks were dropped.
     //
     // The seed also plants ONE coupon the ledger refuses to assign
-    // (`UNASSIGNABLE_AMOUNT`), so on localnet the bar is every seeded coupon
-    // *except that one*. Requiring all of them would fail by construction, and
-    // requiring merely "one or more" would pass while the fan-out dropped a
-    // whole chunk. Exempting exactly one is what proves a bad coupon costs only
-    // itself.
+    // (`UNASSIGNABLE_AMOUNT`), so the bar is every seeded coupon *except that
+    // one*. Requiring all of them would fail by construction, and requiring
+    // merely "one or more" would pass while the fan-out dropped a whole chunk.
+    // Exempting exactly one is what proves a bad coupon costs only itself.
     //
     // The seed plants one more survivor: a coupon a member minted as `dso`,
     // while the delegation names another DSO. No sweep may assign it, so the bar
     // also exempts it, by contract id. It is the most urgent coupon a reader
     // could admit, so a sweep that wrongly assigns it does so before the rest
     // drain. Its archival therefore fails this step at once, not at the deadline.
-    let require_all_archived = f.target == crate::common::TestTarget::Localnet;
-    let archived_criterion = if require_all_archived {
-        "every seeded coupon but the unassignable and foreign-DSO ones archived (spans >1 chunk)"
-    } else {
-        "at least one candidate coupon archived by Delegation_Assign"
-    };
     Scenario::new("delegation-model reassignment")
-        .then(archived_criterion, REASSIGN_TIMEOUT, {
-            let initial = initial_coupon_cids.clone();
-            let foreign = foreign_cid.clone();
+        .then(
+            "every seeded coupon but the unassignable and foreign-DSO ones archived (spans >1 chunk)",
+            REASSIGN_TIMEOUT,
+            {
+                let initial = initial_coupon_cids.clone();
+                let foreign = foreign_cid.clone();
+                move |f, _| {
+                    let initial = initial.clone();
+                    let foreign = foreign.clone();
+                    Box::pin(async move {
+                        let party_id = match f.party_id() {
+                            Ok(p) => p,
+                            Err(e) => return Some(Err(e)),
+                        };
+                        let current = probe_reward_coupons(f, party_id).await?;
+                        // Delegation_Assign archives each targeted unassigned
+                        // coupon and creates one per beneficiary. The split is
+                        // asserted by value in the next scenario.
+                        if !current.contains(&foreign) {
+                            return Some(Err(anyhow::anyhow!(
+                                "the foreign-DSO coupon {foreign} was archived: a sweep assigned \
+                                 a coupon whose dso is not the delegation's"
+                            )));
+                        }
+                        // Every seeded coupon but the unassignable and
+                        // foreign-DSO ones.
+                        initial
+                            .iter()
+                            .filter(|c| !current.contains(*c))
+                            .count()
+                            .eq(&(initial.len() - SEEDED_SURVIVORS))
+                            .then_some(Ok(()))
+                    })
+                }
+            },
+        )
+        .run(f)
+        .await?;
+
+    // Assert the 0.8 / 0.2 split BY VALUE. Each beneficiary party is an observer
+    // of its own assigned RewardCouponV2, so we read the decoded amount via the
+    // JSON Ledger API.
+    let benef = f.reward_beneficiary_party()?.to_string();
+    let operator = f.reward_operator_party()?.to_string();
+    // Totals over the whole seeded set, so the split is checked across chunk
+    // boundaries rather than on one coupon.
+    let seeded_total = SEED_COUPON_COUNT as f64 * SEED_AMOUNT;
+    let expect_benef = seeded_total * 0.8;
+    let expect_operator = seeded_total * 0.2;
+    Scenario::new("0.8/0.2 split by value")
+        .then(
+            "beneficiary total ~4x operator total across all seeded coupons",
+            Duration::from_secs(120),
             move |f, _| {
-                let initial = initial.clone();
-                let foreign = foreign.clone();
+                let benef = benef.clone();
+                let operator = operator.clone();
+                Box::pin(async move {
+                    let b = f.probe_diag.ok(
+                        "split assertion: read beneficiary coupons",
+                        f.active_reward_coupons(P1_JSON_API, &benef).await,
+                    )?;
+                    let o = f.probe_diag.ok(
+                        "split assertion: read operator coupons",
+                        f.active_reward_coupons(P1_JSON_API, &operator).await,
+                    )?;
+                    let sum = |v: &[ActiveCoupon], who: &str| -> f64 {
+                        v.iter()
+                            .filter(|c| c.beneficiary.as_deref() == Some(who))
+                            .filter_map(|c| c.amount.parse::<f64>().ok())
+                            .sum()
+                    };
+                    let b_total = sum(&b, &benef);
+                    let o_total = sum(&o, &operator);
+                    // Wait until both beneficiary coupons exist, then assert.
+                    if b_total <= 0.0 || o_total <= 0.0 {
+                        return None;
+                    }
+                    // Wait for the full seeded total before judging: a
+                    // partial read mid-drain would look like a bad split.
+                    if b_total + o_total < seeded_total - 0.05 {
+                        return None;
+                    }
+                    let ok = crate::common::ledger_api::split_ok(b_total, o_total, 0.01)
+                        && (b_total - expect_benef).abs() < 0.05
+                        && (o_total - expect_operator).abs() < 0.05;
+                    Some(if ok {
+                        Ok(())
+                    } else {
+                        Err(anyhow::anyhow!(
+                            "split mismatch: beneficiary={b_total} operator={o_total} \
+                             (expected {expect_benef} / {expect_operator})"
+                        ))
+                    })
+                })
+            },
+        )
+        .run(f)
+        .await?;
+
+    // The bad coupon costs only itself. The seed planted one coupon the
+    // ledger admits and then refuses to assign, so `Delegation_Assign` failed
+    // for the chunk holding it and the drain re-submitted that chunk one
+    // coupon at a time. What proves the fan-out worked is the pair of facts:
+    // every healthy coupon was paid (asserted above, and by the split totals
+    // which already reconcile to the full seeded amount), and this one is
+    // still sitting there unassigned rather than having wedged the sweep.
+    // Only the delegation's DSO's coupons count: the foreign-DSO coupon is
+    // unassigned too, by design, and the drain step already pinned it.
+    let dso = dso_party.clone();
+    Scenario::new("an unassignable coupon is isolated, not fatal")
+        .then(
+            "exactly one of the DSO's coupons remains, unassigned, at the unassignable amount",
+            Duration::from_secs(120),
+            move |f, _| {
+                let dso = dso.clone();
                 Box::pin(async move {
                     let party_id = match f.party_id() {
                         Ok(p) => p,
                         Err(e) => return Some(Err(e)),
                     };
-                    let current = probe_reward_coupons(f, party_id).await?;
-                    // Delegation_Assign archives each targeted unassigned
-                    // coupon and creates one per beneficiary.
-                    //
-                    // TODO(devnet/PQS): the per-beneficiary field-level
-                    // checks (one RewardCouponV2 per
-                    // beneficiary with `beneficiary ∈ {benef_a, benef_b}` and
-                    // the 0.8 / 0.2 `amount` shares) require decoded reads not
-                    // exposed by /contracts/query — verify them against devnet
-                    // PQS `pqs_cbtc` on the real run.
-                    if let Some(foreign) = &foreign
-                        && !current.contains(foreign)
-                    {
+                    let all = f.probe_diag.ok(
+                        "unassignable assertion: read coupons",
+                        f.active_reward_coupons(P1_JSON_API, party_id).await,
+                    )?;
+                    let unassigned: Vec<&String> = all
+                        .iter()
+                        .filter(|c| c.dso == dso && c.beneficiary.is_none())
+                        .map(|c| &c.amount)
+                        .collect();
+                    // The drain may still be mid-sweep; keep polling until the
+                    // healthy set has drained away.
+                    if unassigned.len() > 1 {
+                        return None;
+                    }
+                    let [amount] = unassigned.as_slice() else {
                         return Some(Err(anyhow::anyhow!(
-                            "the foreign-DSO coupon {foreign} was archived: a sweep assigned a \
-                             coupon whose dso is not the delegation's"
+                            "no unassigned coupon left; the unassignable one should survive \
+                             every sweep, since nothing quarantines it"
                         )));
-                    }
-                    let mut gone = initial.iter().filter(|c| !current.contains(*c));
-                    if require_all_archived {
-                        // Every seeded coupon but the unassignable and
-                        // foreign-DSO ones.
-                        gone.count()
-                            .eq(&(initial.len() - SEEDED_SURVIVORS))
-                            .then_some(Ok(()))
+                    };
+                    let wanted: f64 = UNASSIGNABLE_AMOUNT.parse().unwrap_or(f64::NAN);
+                    let got: f64 = amount.parse().unwrap_or(f64::NAN);
+                    Some(if (got - wanted).abs() < 1e-12 {
+                        Ok(())
                     } else {
-                        gone.next().map(|_| Ok(()))
-                    }
+                        Err(anyhow::anyhow!(
+                            "the surviving unassigned coupon is {amount}, not the \
+                             unassignable {UNASSIGNABLE_AMOUNT} — a healthy coupon was \
+                             skipped instead"
+                        ))
+                    })
                 })
-            }
-        })
+            },
+        )
         .run(f)
         .await?;
 
-    // Localnet: assert the 0.8 / 0.2 split BY VALUE (the automated replacement
-    // for the devnet/PQS TODO). Each beneficiary party is an observer of its own
-    // assigned RewardCouponV2, so we read the decoded amount via the JSON Ledger
-    // API. On devnet this stays a PQS check on the real run (issue #271).
-    if f.target == crate::common::TestTarget::Localnet {
-        let benef = f.reward_beneficiary_party()?.to_string();
-        let operator = f.reward_operator_party()?.to_string();
-        // Totals over the whole seeded set, so the split is checked across chunk
-        // boundaries rather than on one coupon.
-        let seeded_total = SEED_COUPON_COUNT as f64 * SEED_AMOUNT;
-        let expect_benef = seeded_total * 0.8;
-        let expect_operator = seeded_total * 0.2;
-        Scenario::new("0.8/0.2 split by value")
-            .then(
-                "beneficiary total ~4x operator total across all seeded coupons",
-                Duration::from_secs(120),
-                move |f, _| {
-                    let benef = benef.clone();
-                    let operator = operator.clone();
-                    Box::pin(async move {
-                        let b = f.probe_diag.ok(
-                            "split assertion: read beneficiary coupons",
-                            f.active_reward_coupons(P1_JSON_API, &benef).await,
-                        )?;
-                        let o = f.probe_diag.ok(
-                            "split assertion: read operator coupons",
-                            f.active_reward_coupons(P1_JSON_API, &operator).await,
-                        )?;
-                        let sum = |v: &[ActiveCoupon], who: &str| -> f64 {
-                            v.iter()
-                                .filter(|c| c.beneficiary.as_deref() == Some(who))
-                                .filter_map(|c| c.amount.parse::<f64>().ok())
-                                .sum()
-                        };
-                        let b_total = sum(&b, &benef);
-                        let o_total = sum(&o, &operator);
-                        // Wait until both beneficiary coupons exist, then assert.
-                        if b_total <= 0.0 || o_total <= 0.0 {
-                            return None;
-                        }
-                        // Wait for the full seeded total before judging: a
-                        // partial read mid-drain would look like a bad split.
-                        if b_total + o_total < seeded_total - 0.05 {
-                            return None;
-                        }
-                        let ok = crate::common::ledger_api::split_ok(b_total, o_total, 0.01)
-                            && (b_total - expect_benef).abs() < 0.05
-                            && (o_total - expect_operator).abs() < 0.05;
-                        Some(if ok {
-                            Ok(())
-                        } else {
-                            Err(anyhow::anyhow!(
-                                "split mismatch: beneficiary={b_total} operator={o_total} \
-                                 (expected {expect_benef} / {expect_operator})"
-                            ))
-                        })
+    // The coupon reader drops the foreign-DSO coupon. The drain step cannot
+    // show that alone: if the reader admitted the coupon, the dso assert in
+    // `Delegation_Assign` would still reject it, and it would survive either
+    // way. The expiry gauge tells the two apart. The foreign coupon expires
+    // first, so a reader that admitted it would report its expiry. The
+    // DSO's own survivor, the unassignable coupon, expires much later.
+    let floor_secs = ((SEED_TTL_HOURS + FOREIGN_TTL_HOURS) * 3600 / 2) as f64;
+    Scenario::new("the coupon reader ignores a foreign-DSO coupon")
+        .then(
+            "every assigner's expiry gauge is past the foreign coupon's expiry",
+            Duration::from_secs(120),
+            move |f, _| {
+                Box::pin(async move {
+                    let party_id = match f.party_id() {
+                        Ok(p) => p,
+                        Err(e) => return Some(Err(e)),
+                    };
+                    let metrics = f.probe_diag.ok(
+                        "foreign-DSO gauge assertion: read /metrics",
+                        assignment_metrics(f, party_id).await,
+                    )?;
+                    let mut expiries = Vec::with_capacity(metrics.len());
+                    for node in &metrics {
+                        // Wait for every assigner to publish the gauge.
+                        expiries.push(node.expiry?);
+                    }
+                    Some(if expiries.iter().all(|e| *e > floor_secs) {
+                        Ok(())
+                    } else {
+                        Err(anyhow::anyhow!(
+                            "oldest-unassigned gauge {expiries:?} is not past {floor_secs}s: \
+                             the reader counted the foreign-DSO coupon, which expires \
+                             {FOREIGN_TTL_HOURS}h after seeding"
+                        ))
                     })
-                },
-            )
-            .run(f)
-            .await?;
+                })
+            },
+        )
+        .run(f)
+        .await?;
 
-        // The bad coupon costs only itself. The seed planted one coupon the
-        // ledger admits and then refuses to assign, so `Delegation_Assign` failed
-        // for the chunk holding it and the drain re-submitted that chunk one
-        // coupon at a time. What proves the fan-out worked is the pair of facts:
-        // every healthy coupon was paid (asserted above, and by the split totals
-        // which already reconcile to the full seeded amount), and this one is
-        // still sitting there unassigned rather than having wedged the sweep.
-        // Only the delegation's DSO's coupons count: the foreign-DSO coupon is
-        // unassigned too, by design, and the drain step already pinned it.
-        let dso = dso_party.clone();
-        Scenario::new("an unassignable coupon is isolated, not fatal")
-            .then(
-                "exactly one of the DSO's coupons remains, unassigned, at the unassignable amount",
-                Duration::from_secs(120),
-                move |f, _| {
-                    let dso = dso.clone();
-                    Box::pin(async move {
-                        let party_id = match f.party_id() {
-                            Ok(p) => p,
-                            Err(e) => return Some(Err(e)),
-                        };
-                        let all = f.probe_diag.ok(
-                            "unassignable assertion: read coupons",
-                            f.active_reward_coupons(P1_JSON_API, party_id).await,
-                        )?;
-                        let unassigned: Vec<&String> = all
-                            .iter()
-                            .filter(|c| c.dso == dso && c.beneficiary.is_none())
-                            .map(|c| &c.amount)
-                            .collect();
-                        // The drain may still be mid-sweep; keep polling until the
-                        // healthy set has drained away.
-                        if unassigned.len() > 1 {
+    // The instruments the alerts read, proven end to end: a real sweep
+    // assigned real coupons and the counters moved.
+    let assigner_metrics = [f.p1.metrics, f.p2.metrics];
+    Scenario::new("the reward counters move")
+        .then(
+            "assigned counts every healthy coupon, and the refused one is counted skipped",
+            Duration::from_secs(120),
+            move |f, _| {
+                Box::pin(async move {
+                    let assigned = match counter_total(
+                        f,
+                        &assigner_metrics,
+                        "decman_reward_coupons_assigned_total",
+                    )
+                    .await
+                    {
+                        Ok(v) => v,
+                        Err(e) => {
+                            warn!("counter assertion: reading /metrics failed: {e:#}");
                             return None;
                         }
-                        let [amount] = unassigned.as_slice() else {
-                            return Some(Err(anyhow::anyhow!(
-                                "no unassigned coupon left; the unassignable one should survive \
-                                 every sweep, since nothing quarantines it"
-                            )));
-                        };
-                        let wanted: f64 = UNASSIGNABLE_AMOUNT.parse().unwrap_or(f64::NAN);
-                        let got: f64 = amount.parse().unwrap_or(f64::NAN);
-                        Some(if (got - wanted).abs() < 1e-12 {
-                            Ok(())
-                        } else {
-                            Err(anyhow::anyhow!(
-                                "the surviving unassigned coupon is {amount}, not the \
-                                 unassignable {UNASSIGNABLE_AMOUNT} — a healthy coupon was \
-                                 skipped instead"
-                            ))
-                        })
-                    })
-                },
-            )
-            .run(f)
-            .await?;
-
-        // The coupon reader drops the foreign-DSO coupon. The drain step cannot
-        // show that alone: if the reader admitted the coupon, the dso assert in
-        // `Delegation_Assign` would still reject it, and it would survive either
-        // way. The expiry gauge tells the two apart. The foreign coupon expires
-        // first, so a reader that admitted it would report its expiry. The
-        // DSO's own survivor, the unassignable coupon, expires much later.
-        let floor_secs = ((SEED_TTL_HOURS + FOREIGN_TTL_HOURS) * 3600 / 2) as f64;
-        Scenario::new("the coupon reader ignores a foreign-DSO coupon")
-            .then(
-                "every assigner's expiry gauge is past the foreign coupon's expiry",
-                Duration::from_secs(120),
-                move |f, _| {
-                    Box::pin(async move {
-                        let party_id = match f.party_id() {
-                            Ok(p) => p,
-                            Err(e) => return Some(Err(e)),
-                        };
-                        let metrics = f.probe_diag.ok(
-                            "foreign-DSO gauge assertion: read /metrics",
-                            assignment_metrics(f, party_id).await,
-                        )?;
-                        let mut expiries = Vec::with_capacity(metrics.len());
-                        for node in &metrics {
-                            // Wait for every assigner to publish the gauge.
-                            expiries.push(node.expiry?);
-                        }
-                        Some(if expiries.iter().all(|e| *e > floor_secs) {
-                            Ok(())
-                        } else {
-                            Err(anyhow::anyhow!(
-                                "oldest-unassigned gauge {expiries:?} is not past {floor_secs}s: \
-                                 the reader counted the foreign-DSO coupon, which expires \
-                                 {FOREIGN_TTL_HOURS}h after seeding"
-                            ))
-                        })
-                    })
-                },
-            )
-            .run(f)
-            .await?;
-
-        // The instruments the alerts read, proven end to end: a real sweep
-        // assigned real coupons and the counters moved.
-        let assigner_metrics = [f.p1.metrics, f.p2.metrics];
-        Scenario::new("the reward counters move")
-            .then(
-                "assigned counts every healthy coupon, and the refused one is counted skipped",
-                Duration::from_secs(120),
-                move |f, _| {
-                    Box::pin(async move {
-                        let assigned = match counter_total(
-                            f,
-                            &assigner_metrics,
-                            "decman_reward_coupons_assigned_total",
-                        )
-                        .await
-                        {
-                            Ok(v) => v,
-                            Err(e) => {
-                                warn!("counter assertion: reading /metrics failed: {e:#}");
-                                return None;
-                            }
-                        };
-                        // The tail of `drain_assignable` runs just after the
-                        // commit the split assertion already saw, so keep polling.
-                        if assigned < SEED_COUPON_COUNT as f64 {
+                    };
+                    // The tail of `drain_assignable` runs just after the
+                    // commit the split assertion already saw, so keep polling.
+                    if assigned < SEED_COUPON_COUNT as f64 {
+                        return None;
+                    }
+                    let skipped = match counter_total(
+                        f,
+                        &assigner_metrics,
+                        "decman_reward_coupons_skipped_total",
+                    )
+                    .await
+                    {
+                        Ok(v) => v,
+                        Err(e) => {
+                            warn!("counter assertion: reading /metrics failed: {e:#}");
                             return None;
                         }
-                        let skipped = match counter_total(
-                            f,
-                            &assigner_metrics,
-                            "decman_reward_coupons_skipped_total",
-                        )
-                        .await
-                        {
-                            Ok(v) => v,
-                            Err(e) => {
-                                warn!("counter assertion: reading /metrics failed: {e:#}");
-                                return None;
-                            }
-                        };
-                        if skipped >= 1.0 {
-                            Some(Ok(()))
-                        } else {
-                            // Reachable, not just theoretical: the drain's fan-out can
-                            // `break 'chunks` on a transient error, and if that lands on
-                            // the unassignable coupon's isolated submission after the
-                            // healthy coupons already committed, the sweep ends with
-                            // `assigned` complete and `skipped` still 0. Nothing
-                            // quarantines that coupon, so retry within the deadline
-                            // instead of failing the run — the next sweep re-finds it.
-                            warn!(
-                                "counter assertion: assigned reached {assigned} but skipped \
-                                 is still {skipped}; retrying"
-                            );
-                            None
-                        }
-                    })
-                },
-            )
-            .run(f)
-            .await?;
-    }
+                    };
+                    if skipped >= 1.0 {
+                        Some(Ok(()))
+                    } else {
+                        // Reachable, not just theoretical: the drain's fan-out can
+                        // `break 'chunks` on a transient error, and if that lands on
+                        // the unassignable coupon's isolated submission after the
+                        // healthy coupons already committed, the sweep ends with
+                        // `assigned` complete and `skipped` still 0. Nothing
+                        // quarantines that coupon, so retry within the deadline
+                        // instead of failing the run — the next sweep re-finds it.
+                        warn!(
+                            "counter assertion: assigned reached {assigned} but skipped \
+                             is still {skipped}; retrying"
+                        );
+                        None
+                    }
+                })
+            },
+        )
+        .run(f)
+        .await?;
 
     // ------------------------------------------------------------------
     // Negative (security property). See the module doc: the
@@ -866,4 +749,36 @@ async fn run_negative_case(f: &Fixture, decparty: &str) -> anyhow::Result<()> {
          arbitrary party)."
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::decparty_metric;
+
+    const BODY: &str = "\
+# TYPE decman_reward_coupons_assigned_total counter
+decman_reward_coupons_assigned_total{decparty=\"other::1220\"} 9
+decman_reward_coupons_assigned_total{decparty=\"gov::1220\"} 3
+decman_reward_coupons_assigned_total_extra{decparty=\"gov::1220\"} 7
+decman_reward_oldest_unassigned_expires_in_seconds{decparty=\"gov::1220\"} bad
+";
+
+    #[test]
+    fn reads_one_decpartys_series_of_one_family() {
+        let got = decparty_metric(BODY, "decman_reward_coupons_assigned_total", "gov::1220")
+            .expect("parses");
+        assert_eq!(got, Some(3.0));
+    }
+
+    #[test]
+    fn a_missing_series_is_none_and_a_bad_value_is_an_error() {
+        let missing = decparty_metric(BODY, "decman_reward_coupons_assigned_total", "new::1220");
+        assert_eq!(missing.expect("parses"), None);
+        let bad = decparty_metric(
+            BODY,
+            "decman_reward_oldest_unassigned_expires_in_seconds",
+            "gov::1220",
+        );
+        assert!(bad.is_err());
+    }
 }

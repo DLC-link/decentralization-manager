@@ -1,0 +1,218 @@
+-- Copyright (c) 2026 DLC-Link, Inc. and/or its affiliates. All rights reserved.
+-- SPDX-License-Identifier: Apache-2.0
+
+-- | Tests for the opt-in disclosure observers on GovernanceRules (#165).
+module Governance.Test.DisclosureObserversTest where
+
+import DA.Optional (isSome)
+import DA.Set as Set hiding (filter)
+import DA.Time (minutes)
+import Daml.Script
+
+import Governance.Rules
+import Governance.TestUtils
+
+import TestHarness
+
+-- ============================================================================
+-- Fixtures
+-- ============================================================================
+
+data DisclosureFixture = DisclosureFixture
+  with
+    parties : TestParties
+    observer : Party
+    rulesCid : ContractId GovernanceRules
+  deriving (Eq, Show)
+
+-- | One rules contract as the governance party reads it, and whether the
+-- parties under test can see it at all.
+data Visibility = Visibility
+  with
+    rules : GovernanceRules
+    observerSees : Bool
+    outsiderSees : Bool
+  deriving (Eq, Show)
+
+createRules : TestParties -> Optional (Set Party) -> Optional (Set Party) -> Script (ContractId GovernanceRules)
+createRules parties additionalProposers disclosureObservers =
+  submit parties.governanceParty $ createCmd GovernanceRules with
+    governanceParty = parties.governanceParty
+    members = getMembers parties
+    threshold = 2
+    actionConfirmationTimeout = minutes 30
+    additionalProposers
+    disclosureObservers
+
+setObservers : DisclosureFixture -> Optional (Set Party) -> Script (ContractId GovernanceRules)
+setObservers f observers =
+  confirmAndExecuteSelf f.parties f.rulesCid
+    (SelfAction_SetDisclosureObservers with updatedDisclosureObservers = observers)
+    [f.parties.member1, f.parties.member2] f.parties.member1
+
+visibilityOf : DisclosureFixture -> ContractId GovernanceRules -> Script Visibility
+visibilityOf f cid = do
+  Some rules <- queryContractId f.parties.governanceParty cid
+  observerSees <- isSome <$> queryContractId f.observer cid
+  outsiderSees <- isSome <$> queryContractId f.parties.outsider cid
+  pure Visibility with ..
+
+-- ============================================================================
+-- Given
+-- ============================================================================
+
+given_rules_without_observers : Script DisclosureFixture
+given_rules_without_observers = do
+  parties <- allocateTestParties
+  observer <- allocateParty "Observer"
+  rulesCid <- createTestGovernance parties
+  pure DisclosureFixture with ..
+
+given_rules_seen_by_observer : Script DisclosureFixture
+given_rules_seen_by_observer = do
+  f <- given_rules_without_observers
+  observedCid <- setObservers f (Some (Set.singleton f.observer))
+  pure f with rulesCid = observedCid
+
+-- | The observer is an additional proposer hosted away from the governance
+-- party, so it never reads as that party.
+given_remote_proposer_listed_as_observer : Script DisclosureFixture
+given_remote_proposer_listed_as_observer = do
+  parties <- allocateTestParties
+  observer <- allocateParty "RemoteProposer"
+  rulesCid <- createRules parties (Some (Set.singleton observer)) (Some (Set.singleton observer))
+  pure DisclosureFixture with ..
+
+given_remote_proposer_not_listed_as_observer : Script DisclosureFixture
+given_remote_proposer_not_listed_as_observer = do
+  parties <- allocateTestParties
+  observer <- allocateParty "RemoteProposer"
+  rulesCid <- createRules parties (Some (Set.singleton observer)) None
+  pure DisclosureFixture with ..
+
+-- ============================================================================
+-- When
+-- ============================================================================
+
+when_rules_read : DisclosureFixture -> Script Visibility
+when_rules_read f = visibilityOf f f.rulesCid
+
+when_observer_listed : DisclosureFixture -> Script Visibility
+when_observer_listed f =
+  setObservers f (Some (Set.singleton f.observer)) >>= visibilityOf f
+
+when_observers_cleared : DisclosureFixture -> Script Visibility
+when_observers_cleared f = setObservers f None >>= visibilityOf f
+
+when_observers_set_to_empty_set : DisclosureFixture -> Script Visibility
+when_observers_set_to_empty_set f = setObservers f (Some Set.empty) >>= visibilityOf f
+
+when_threshold_changed : DisclosureFixture -> Script Visibility
+when_threshold_changed f =
+  confirmAndExecuteSelf f.parties f.rulesCid
+    (SelfAction_SetThreshold with updatedThreshold = 3)
+    [f.parties.member1, f.parties.member2] f.parties.member1
+  >>= visibilityOf f
+
+when_observer_confirms_as_member : DisclosureFixture -> Script ()
+when_observer_confirms_as_member f =
+  submitMustFail f.observer $
+    exerciseCmd f.rulesCid GovernanceRules_ConfirmGovernanceAction with
+      confirmer = f.observer
+      action = SelfAction_SetThreshold with updatedThreshold = 3
+
+-- | Submitted as the proposer alone, without readAs on the governance party.
+when_remote_proposer_seeds_self_action : DisclosureFixture -> Script GovernanceRules_ConfirmGovernanceActionResult
+when_remote_proposer_seeds_self_action f =
+  submit f.observer $
+    exerciseCmd f.rulesCid GovernanceRules_ConfirmGovernanceAction with
+      confirmer = f.observer
+      action = SelfAction_SetThreshold with updatedThreshold = 3
+
+when_unlisted_remote_proposer_seeds_self_action : DisclosureFixture -> Script ()
+when_unlisted_remote_proposer_seeds_self_action f =
+  submitMustFail f.observer $
+    exerciseCmd f.rulesCid GovernanceRules_ConfirmGovernanceAction with
+      confirmer = f.observer
+      action = SelfAction_SetThreshold with updatedThreshold = 3
+
+-- ============================================================================
+-- Then
+-- ============================================================================
+
+then_only_governance_party_sees_rules : DisclosureFixture -> Visibility -> Script Failures
+then_only_governance_party_sees_rules _ v = pure $
+  shouldBe "disclosureObservers" None v.rules.disclosureObservers <>
+  shouldBe "observer sees rules" False v.observerSees <>
+  shouldBe "outsider sees rules" False v.outsiderSees
+
+then_listed_observer_sees_rules : DisclosureFixture -> Visibility -> Script Failures
+then_listed_observer_sees_rules f v = pure $
+  shouldBe "disclosureObservers" (Some (Set.singleton f.observer)) v.rules.disclosureObservers <>
+  shouldBe "observer sees rules" True v.observerSees <>
+  shouldBe "outsider sees rules" False v.outsiderSees
+
+then_observer_kept_through_threshold_change : DisclosureFixture -> Visibility -> Script Failures
+then_observer_kept_through_threshold_change f v = do
+  failures <- then_listed_observer_sees_rules f v
+  pure $ failures <> shouldBe "threshold" 3 v.rules.threshold
+
+then_nothing : DisclosureFixture -> () -> Script Failures
+then_nothing _ _ = pure []
+
+then_seed_recorded : DisclosureFixture -> GovernanceRules_ConfirmGovernanceActionResult -> Script Failures
+then_seed_recorded f result = do
+  Some confirmation <- queryContractId f.parties.governanceParty result.confirmationCid
+  pure $ shouldBe "confirmer" f.observer confirmation.confirmer
+
+-- ============================================================================
+-- Tests
+-- ============================================================================
+
+test_when_rules_have_no_observers_then_only_governance_party_sees_them = script do
+  run Test with
+    given = given_rules_without_observers
+    when = when_rules_read
+    then_ = then_only_governance_party_sees_rules
+
+test_when_observer_listed_then_it_sees_the_new_rules = script do
+  run Test with
+    given = given_rules_without_observers
+    when = when_observer_listed
+    then_ = then_listed_observer_sees_rules
+
+test_when_observers_cleared_then_observer_loses_sight = script do
+  run Test with
+    given = given_rules_seen_by_observer
+    when = when_observers_cleared
+    then_ = then_only_governance_party_sees_rules
+
+test_when_observers_set_to_empty_set_then_normalized_to_none = script do
+  run Test with
+    given = given_rules_seen_by_observer
+    when = when_observers_set_to_empty_set
+    then_ = then_only_governance_party_sees_rules
+
+test_when_threshold_changed_then_observers_carry_over = script do
+  run Test with
+    given = given_rules_seen_by_observer
+    when = when_threshold_changed
+    then_ = then_observer_kept_through_threshold_change
+
+test_when_observer_confirms_then_rejected = script do
+  run Test with
+    given = given_rules_seen_by_observer
+    when = when_observer_confirms_as_member
+    then_ = then_nothing
+
+test_when_listed_remote_proposer_seeds_self_action_then_accepted = script do
+  run Test with
+    given = given_remote_proposer_listed_as_observer
+    when = when_remote_proposer_seeds_self_action
+    then_ = then_seed_recorded
+
+test_when_unlisted_remote_proposer_seeds_self_action_then_rejected = script do
+  run Test with
+    given = given_remote_proposer_not_listed_as_observer
+    when = when_unlisted_remote_proposer_seeds_self_action
+    then_ = then_nothing

@@ -31,12 +31,14 @@ const Fact = ({ label, children }: { label: string; children: ReactNode }) => (
 
 /**
  * The active GovernanceRules contract: who governs the party, how many of
- * them must confirm an action, and who else may propose one.
+ * them must confirm an action, who else may propose one, and who else may
+ * see the contract.
  */
 export const GovernanceRules = ({ state, memberPartyId }: GovernanceRulesProps) => {
   const rows = [
     ...state.members.map((party) => ({ party, role: "Member" })),
     ...state.additional_proposers.map((party) => ({ party, role: "Additional proposer" })),
+    ...state.disclosure_observers.map((party) => ({ party, role: "Disclosure observer" })),
   ];
   return (
     <>
@@ -83,7 +85,7 @@ export const GovernanceRules = ({ state, memberPartyId }: GovernanceRulesProps) 
         </Fact>
       </Box>
       <Box sx={{ overflowX: "auto", ...cardTableSx }}>
-        <Table size="small" aria-label="Governance members and proposers">
+        <Table size="small" aria-label="Governance members, proposers and observers">
           <TableHead>
             <TableRow>
               <TableCell sx={{ py: 1 }}>Party</TableCell>
@@ -107,6 +109,15 @@ export const GovernanceRules = ({ state, memberPartyId }: GovernanceRulesProps) 
                 <TableCell colSpan={2} sx={{ py: 1 }}>
                   <Typography variant="body2" color="text.secondary">
                     No additional proposers: only members can propose actions.
+                  </Typography>
+                </TableCell>
+              </TableRow>
+            )}
+            {state.disclosure_observers.length === 0 && (
+              <TableRow>
+                <TableCell colSpan={2} sx={{ py: 1 }}>
+                  <Typography variant="body2" color="text.secondary">
+                    No disclosure observers: only nodes that host the governance party can see these rules.
                   </Typography>
                 </TableCell>
               </TableRow>

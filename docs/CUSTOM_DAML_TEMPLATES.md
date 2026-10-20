@@ -361,7 +361,7 @@ aliases in DecMan and rebuilding it.
 
 ## Bootstrapping a `GovernanceRules` for your domain
 
-If your decentralized party doesn't yet have a `GovernanceRules` contract, create one through the `/contracts` workflow before any custom proposal can be confirmed. The template lives in `governance-core` and takes **five** fields, in this order (see [`Governance.Rules`](../daml/governance-core/daml/Governance/Rules.daml)):
+If your decentralized party doesn't yet have a `GovernanceRules` contract, create one through the `/contracts` workflow before any custom proposal can be confirmed. The template lives in `governance-core` and takes **six** fields, in this order (see [`Governance.Rules`](../daml/governance-core/daml/Governance/Rules.daml)):
 
 | # | Field | Daml type | Field-type JSON |
 |---|---|---|---|
@@ -370,6 +370,7 @@ If your decentralized party doesn't yet have a `GovernanceRules` contract, creat
 | 3 | `threshold` | `Int` | `{ "type": "int64", "value": N }` (or `{ "type": "governance_threshold" }` for the calculated majority) |
 | 4 | `actionConfirmationTimeout` | `RelTime` | `{ "type": "rel_time", "microseconds": ... }` |
 | 5 | `additionalProposers` | `Optional (Set Party)` | `{ "type": "none" }` (start empty; grow later via the self-action below) |
+| 6 | `disclosureObservers` | `Optional (Set Party)` | `{ "type": "none" }` (only parties that host the governance party see the contract) |
 
 > ⚠️ Do **not** use `{ "type": "attestors_set" }` for `members`. Despite the name, that variant emits a raw `GenMap<Party, Unit>` (used by some CBTC-style templates), not the `DA.Set.Types:Set Party` record wrapper that `members` expects. Always use `party_set` for `Set Party` fields. See the field-type table below.
 
@@ -394,13 +395,14 @@ curl -X POST http://coordinator:8080/contracts \
         { "type": "party_set", "parties": ["member1::1220...", "member2::1220...", "member3::1220..."] },
         { "type": "int64", "value": 2 },
         { "type": "rel_time", "microseconds": 1800000000 },
+        { "type": "none" },
         { "type": "none" }
       ]
     }]
   }'
 ```
 
-The 5th field is **not** optional in the JSON — leaving it off produces a malformed `Optional` value at submission time. Use `{ "type": "none" }` for "no additional proposers".
+The 5th field is **not** optional in the JSON — leaving it off produces a malformed `Optional` value at submission time. Use `{ "type": "none" }` for "no additional proposers". Send the 6th field as `{ "type": "none" }` too when there are no observers. A node with only governance-core 0.1.0 drops a trailing `None`, but refuses a `Some`.
 
 Once this is on the ledger, every member node sees the `GovernanceRules` contract id under `GET /governance/state?party_id=...` and can reuse it for every subsequent custom action — see the callout near the top of this guide.
 
@@ -670,7 +672,7 @@ If you only added a Daml package and no DecMan code, no Rust tests are required.
 - **A raised threshold or removed proposer can strand a proposal.** Remaining members must either gather more confirmations under the new rules or expire the stale ones and re-propose.
 - **An expired confirmation aborts execution; it is not skipped.** `GovernanceConfirmation_Consume` rejects any confirmation past its `expiresAt`, so the executor must leave stale ones out of the list it passes. `GovernanceRules_ExpireConfirmation` cleans them off the ledger.
 - **`actionConfirmationTimeout` changes don't retroactively re-stamp `expiresAt`.** Each `GovernanceConfirmation` was minted with `now + oldTimeout` at confirm time; that expiry stays.
-- **Removed `additionalProposers` lose confirmability of their in-flight proposals.** `GovernanceRules_ConfirmAction` re-checks `proposer ∈ members ∪ additionalProposers` against the *current* rules state at every confirm. Confirmations already on the ledger stay consumable at execute time (execute only re-checks confirmer membership), but no new confirmations can be added once the proposer's authorization is revoked. Practically: if you've removed an additional proposer, expire their in-flight proposals or have a member re-file them.
+- **Removed `additionalProposers` lose confirmability of their in-flight proposals.** `GovernanceRules_ConfirmAction` re-checks `proposer ∈ members ∪ additionalProposers` against the *current* rules state at every confirm. Confirmations already on the ledger stay consumable at execute time (execute only re-checks confirmer membership), but no new confirmations can be added once the proposer's authorization is revoked. Practically: if you've removed an additional proposer, have members vote `SelfAction_CancelAction` on their in-flight proposals, or have a member re-file them.
 
 Practical implication for custom templates: prefer short `actionConfirmationTimeout` values (minutes to a few hours) for any proposal that touches mutable state. Long timeouts amplify the surface area for member changes to interleave with in-flight votes.
 

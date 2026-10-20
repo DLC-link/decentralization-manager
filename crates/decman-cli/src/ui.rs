@@ -2697,6 +2697,7 @@ mod tests {
         DecentralizedParty {
             party_id: canton_id("cbtc-network"),
             threshold: 2,
+            confirmation_threshold: None,
             owners: vec!["a".to_owned(), "b".to_owned()],
             my_owner_key: None,
             participants: Vec::new(),
@@ -2852,6 +2853,7 @@ mod tests {
                 kicked_participant: None,
                 new_threshold: None,
                 previous_threshold: None,
+                confirmation_threshold: None,
                 dec_party_id: None,
                 new_participant: None,
                 package_names: Vec::new(),
@@ -2956,6 +2958,7 @@ mod tests {
         let party = DecentralizedParty {
             party_id: party_id.clone(),
             threshold: 2,
+            confirmation_threshold: None,
             owners: vec!["a".to_owned()],
             my_owner_key: Some("1220deadbeef".to_owned()),
             participants: vec![ParticipantInfo {

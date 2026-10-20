@@ -190,7 +190,12 @@ pub struct PartyMetadata {
 #[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 pub struct DecentralizedParty {
     pub party_id: CantonId,
+    /// How many namespace owners must sign a topology change.
     pub threshold: i32,
+    /// How many hosting participants must confirm a transaction for the
+    /// party. `None` when the cached row predates the field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub confirmation_threshold: Option<i32>,
     pub owners: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub my_owner_key: Option<String>,
@@ -604,6 +609,10 @@ pub struct PendingInvitation {
     /// Kick-only: threshold before the kick.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub previous_threshold: Option<i32>,
+    /// The confirmation threshold the coordinator will propose. `None` means
+    /// it equals `new_threshold`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub confirmation_threshold: Option<i32>,
     /// Kick-only: dec party the kick targets. Lets the peer card render the
     /// same "Dec party" row the coordinator shows.
     #[serde(default, skip_serializing_if = "Option::is_none")]
