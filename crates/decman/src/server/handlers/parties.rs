@@ -889,8 +889,12 @@ pub async fn resolve_owner_keys_from_peers(
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum OwnerKeysFailureKind {
     BadPublicKey,
-    RequestFailed,
+    Unreachable,
     TimedOut,
+    HandshakeFailed,
+    Denied,
+    ConnectionBroken,
+    BadPeerConfig,
     EmptyReply,
     Refused,
     UnexpectedReply,
@@ -946,7 +950,7 @@ async fn request_owner_keys(
         Ok(Ok(bytes)) => bytes,
         Ok(Err(e)) => {
             return Err(OwnerKeysFailure::new(
-                Kind::RequestFailed,
+                request_failure_kind(&e),
                 format!(
                     "RequestOwnerKeys failed: {e} — {hint}",
                     hint = peer_failure_hint(&e)
@@ -1025,6 +1029,32 @@ async fn request_owner_keys(
             format!("Failed to deserialize owner keys from {peer_uid}: {e}"),
         )
     })
+}
+
+/// Groups transport errors the way [`peer_failure_hint`] does, so a change
+/// of cause, such as a peer that comes back but denies the request, warns
+/// again.
+fn request_failure_kind(err: &NoiseError) -> OwnerKeysFailureKind {
+    use OwnerKeysFailureKind as Kind;
+
+    match err {
+        NoiseError::TcpConnectionTimeout(_) | NoiseError::TcpConnectionFailed(_) => {
+            Kind::Unreachable
+        }
+        NoiseError::RequestTimeout => Kind::TimedOut,
+        NoiseError::Noise(_) | NoiseError::HandshakeFailed | NoiseError::DecryptionError => {
+            Kind::HandshakeFailed
+        }
+        NoiseError::BadStatusCode(..) => Kind::Denied,
+        NoiseError::InvalidMessage => Kind::UnparsableReply,
+        NoiseError::JsonSerialization(_) => Kind::BadPayload,
+        NoiseError::Io(_) | NoiseError::Hyper(_) => Kind::ConnectionBroken,
+        NoiseError::Http(_)
+        | NoiseError::InvalidUri(_)
+        | NoiseError::UriParsingError(_)
+        | NoiseError::UnknownPeer(_)
+        | NoiseError::Anyhow(_) => Kind::BadPeerConfig,
+    }
 }
 
 /// The last failure kind of each peer whose owner-keys request is failing.
@@ -3169,6 +3199,27 @@ mod tests {
         // A new cause is news, even while the peer is still failing.
         assert_eq!(next(Some(Refused)), OwnerKeysLog::Warn);
         assert_eq!(next(Some(Refused)), OwnerKeysLog::Debug);
+    }
+
+    /// A peer that comes back but refuses the request has a new problem, and
+    /// its reason must reach the operator at warn.
+    #[test]
+    fn a_new_transport_cause_warns_again() {
+        let mut failures = HashMap::new();
+        let mut next = |e: &NoiseError| {
+            record_owner_keys_outcome(&mut failures, "p2", Some(request_failure_kind(e)))
+        };
+
+        let down = NoiseError::TcpConnectionFailed("refused".into());
+        let denied = NoiseError::BadStatusCode(
+            StatusCode::SERVICE_UNAVAILABLE,
+            Some("not a registered peer".into()),
+        );
+        assert_eq!(next(&down), OwnerKeysLog::Warn);
+        assert_eq!(next(&down), OwnerKeysLog::Debug);
+        assert_eq!(next(&denied), OwnerKeysLog::Warn);
+        assert_eq!(next(&NoiseError::HandshakeFailed), OwnerKeysLog::Warn);
+        assert_eq!(next(&NoiseError::DecryptionError), OwnerKeysLog::Debug);
     }
 
     #[test]
