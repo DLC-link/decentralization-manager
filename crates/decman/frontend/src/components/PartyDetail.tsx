@@ -63,6 +63,9 @@ import type {
  * too small to read at a glance, which is the whole point of a summary.
  */
 const GOVERNANCE_STATE_POLL_MS = 10_000;
+// Slower than the governance poll: a delegation changes only by a vote, and
+// under mock auth each read scans the party's whole ACS.
+const REWARD_STATUS_POLL_MS = 30_000;
 
 const StatCard = ({
   label,
@@ -376,7 +379,8 @@ export const PartyDetail = ({
 
   // The reward status reads the ledger as the party, so it needs the same
   // rights as the other read-only sections. A failed read stays an error: it
-  // must never look like a missing DAR or a missing delegation.
+  // must never look like a missing DAR or a missing delegation. The poll picks
+  // up a new delegation, and clears an error once a read succeeds.
   useEffect(() => {
     if (!canRead) return;
     let cancelled = false;
@@ -400,8 +404,10 @@ export const PartyDetail = ({
         setLoadedRewards({ partyId: party.party_id, status, error });
     };
     void load();
+    const interval = setInterval(() => void load(), REWARD_STATUS_POLL_MS);
     return () => {
       cancelled = true;
+      clearInterval(interval);
     };
   }, [party.party_id, canRead]);
 

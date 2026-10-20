@@ -225,4 +225,52 @@ describe("PartyDetail rewards", () => {
     );
     expect(screen.queryByText(/rewards DAR/)).toBeNull();
   });
+
+  it("replaces a failed read with the next poll's status", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    const responses = [
+      new Response(JSON.stringify({ error: "ledger unavailable" }), {
+        status: 503,
+      }),
+      new Response(
+        JSON.stringify({
+          rewards_dar_resolvable: false,
+          delegation: null,
+          member_party_id: authStatus().member_party_id,
+          member_is_assigner: false,
+          beneficiaries: [],
+        }),
+      ),
+    ];
+    let calls = 0;
+    vi.mocked(authenticatedFetch).mockImplementation((url) => {
+      if (!String(url).includes("/reward-status")) return new Promise(() => {});
+      const response = responses[Math.min(calls, responses.length - 1)];
+      calls += 1;
+      return Promise.resolve(response.clone());
+    });
+
+    try {
+      renderDetail(authStatus({ dec_party_read_as: true }));
+      await waitFor(() =>
+        expect(
+          screen.getByText("Could not load the reward status: ledger unavailable"),
+        ).toBeTruthy(),
+      );
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(30_000);
+      });
+
+      await waitFor(() =>
+        expect(
+          screen.getByText("This participant does not have the rewards DAR"),
+        ).toBeTruthy(),
+      );
+      expect(screen.queryByText(/Could not load the reward status/)).toBeNull();
+      expect(calls).toBe(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });
