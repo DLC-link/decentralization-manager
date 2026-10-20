@@ -1,6 +1,6 @@
 use std::{
     collections::{HashMap, HashSet},
-    sync::Arc,
+    sync::{Arc, LazyLock, Mutex},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
@@ -776,21 +776,14 @@ pub async fn resolve_owner_keys_from_peers(
     let current_participant_id = config.participant_id().to_string();
     let known_party_ids: HashSet<String> = parties.iter().map(|p| p.party_id.to_string()).collect();
 
+    forget_removed_peers(&peers);
+
     for peer in &peers {
         let peer_uid = peer.participant_id.to_string();
         if peer_uid == current_participant_id || peer.public_key.is_empty() {
             continue;
         }
 
-        let peer_pub_key = match parse_public_key(&peer.public_key) {
-            Ok(pk) => pk,
-            Err(e) => {
-                tracing::warn!("Failed to parse public key for {peer_uid}: {e}");
-                continue;
-            }
-        };
-
-        let psk = keypair.derive_psk(&peer_pub_key);
         // Tell the peer which parties we want owner_keys for. See #149: peer
         // used to enumerate the whole synchronizer to build a namespace→party
         // map; we now pass the namespaces (via the full party_ids) directly so
@@ -807,103 +800,16 @@ pub async fn resolve_owner_keys_from_peers(
                 continue;
             }
         };
-        let msg = Message::new(MessageType::RequestOwnerKeys, request_payload);
 
-        tracing::debug!("Requesting owner keys from {peer_uid}");
-        let response = match tokio::time::timeout(
-            Duration::from_secs(10),
-            send_noise_message(
-                &peer.address,
-                peer.port,
-                &psk,
-                current_participant_id.as_bytes(),
-                &msg,
-            ),
-        )
-        .await
-        {
-            Ok(Ok(bytes)) => bytes,
-            Ok(Err(e)) => {
-                tracing::warn!(
-                    peer = %peer_uid,
-                    endpoint = %format!("{}:{}", peer.address, peer.port),
-                    "RequestOwnerKeys failed: {e} — {hint}",
-                    hint = peer_failure_hint(&e)
-                );
-                continue;
-            }
-            Err(_) => {
-                tracing::warn!(
-                    peer = %peer_uid,
-                    endpoint = %format!("{}:{}", peer.address, peer.port),
-                    "RequestOwnerKeys timed out after 10s — {hint}",
-                    hint = peer_failure_hint(&NoiseError::RequestTimeout)
-                );
-                continue;
-            }
-        };
-
-        // A 200 with an empty body. The peer accepted the request and then
-        // said nothing, which used to surface as "message too short: got 0" and
-        // read like a protocol bug in the peer.
-        //
-        // A denied request is NOT this case: it arrives as a 503, so
-        // `send_noise_message` returns `BadStatusCode` above and never reaches
-        // here. This arm is a peer that answered 200 with no frame at all, or a
-        // proxy that terminated the request and returned an empty 200.
-        if response.is_empty() {
-            tracing::warn!(
-                peer = %peer_uid,
-                endpoint = %format!("{}:{}", peer.address, peer.port),
-                "RequestOwnerKeys got an empty reply — {hint}",
-                hint = peer_failure_hint(&NoiseError::InvalidMessage)
-            );
+        let outcome =
+            request_owner_keys(peer, &keypair, &current_participant_id, request_payload).await;
+        report_owner_keys_outcome(
+            &peer_uid,
+            &format!("{}:{}", peer.address, peer.port),
+            outcome.as_ref().err(),
+        );
+        let Ok(entries) = outcome else {
             continue;
-        }
-
-        let response_msg = match Message::from_bytes(&response) {
-            Ok(m) if m.msg_type == MessageType::OwnerKeys => m,
-            Ok(m) if m.msg_type == MessageType::Error => {
-                // An Error frame under 200 OK. The listener's own deny paths
-                // send that frame with a 503, so those surface as
-                // `BadStatusCode(_, Some(reason))` above rather than here. This
-                // arm catches a peer that reports the error in the body while
-                // still answering 200. Either way, prefer its words to a guess.
-                tracing::warn!(
-                    peer = %peer_uid,
-                    endpoint = %format!("{}:{}", peer.address, peer.port),
-                    "RequestOwnerKeys refused by the peer: {reason}",
-                    reason = String::from_utf8_lossy(&m.payload)
-                );
-                continue;
-            }
-            Ok(m) => {
-                tracing::warn!(
-                    peer = %peer_uid,
-                    endpoint = %format!("{}:{}", peer.address, peer.port),
-                    "RequestOwnerKeys got an unexpected response type {:?} — the peer may be on a \
-                     different wire format",
-                    m.msg_type
-                );
-                continue;
-            }
-            Err(e) => {
-                tracing::warn!(
-                    peer = %peer_uid,
-                    endpoint = %format!("{}:{}", peer.address, peer.port),
-                    "RequestOwnerKeys reply did not parse: {e} — {hint}",
-                    hint = peer_failure_hint(&NoiseError::InvalidMessage)
-                );
-                continue;
-            }
-        };
-
-        let entries: Vec<serde_json::Value> = match serde_json::from_slice(&response_msg.payload) {
-            Ok(e) => e,
-            Err(e) => {
-                tracing::warn!("Failed to deserialize owner keys from {peer_uid}: {e}");
-                continue;
-            }
         };
 
         tracing::debug!(
@@ -912,7 +818,6 @@ pub async fn resolve_owner_keys_from_peers(
         );
 
         // Update DB with the owner keys
-        let peer_uid = peer.participant_id.to_string();
         if let Ok(mut tx) = db.begin_transaction().await {
             for entry in &entries {
                 let Some(party_id) = entry["party_id"].as_str() else {
@@ -968,6 +873,213 @@ pub async fn resolve_owner_keys_from_peers(
     if let Err(e) = supplement_owner_keys_from_topology(config, db, parties).await {
         tracing::debug!("Topology-based owner-key fallback skipped: {e:#}");
     }
+}
+
+/// Why one peer did not supply its owner keys. A change of kind is reported
+/// again; the same kind on the next refresh is not.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OwnerKeysFailureKind {
+    BadPublicKey,
+    RequestFailed,
+    TimedOut,
+    EmptyReply,
+    Refused,
+    UnexpectedReply,
+    UnparsableReply,
+    BadPayload,
+}
+
+#[derive(Debug)]
+struct OwnerKeysFailure {
+    kind: OwnerKeysFailureKind,
+    message: String,
+}
+
+impl OwnerKeysFailure {
+    fn new(kind: OwnerKeysFailureKind, message: String) -> Self {
+        Self { kind, message }
+    }
+}
+
+/// Asks one peer for the owner keys of the parties in `request_payload`.
+async fn request_owner_keys(
+    peer: &Peer,
+    keypair: &NoiseKeypair,
+    current_participant_id: &str,
+    request_payload: Vec<u8>,
+) -> std::result::Result<Vec<serde_json::Value>, OwnerKeysFailure> {
+    use OwnerKeysFailureKind as Kind;
+
+    let peer_uid = peer.participant_id.to_string();
+    let peer_pub_key = parse_public_key(&peer.public_key).map_err(|e| {
+        OwnerKeysFailure::new(
+            Kind::BadPublicKey,
+            format!("Failed to parse public key for {peer_uid}: {e}"),
+        )
+    })?;
+
+    let psk = keypair.derive_psk(&peer_pub_key);
+    let msg = Message::new(MessageType::RequestOwnerKeys, request_payload);
+
+    tracing::debug!("Requesting owner keys from {peer_uid}");
+    let response = match tokio::time::timeout(
+        Duration::from_secs(10),
+        send_noise_message(
+            &peer.address,
+            peer.port,
+            &psk,
+            current_participant_id.as_bytes(),
+            &msg,
+        ),
+    )
+    .await
+    {
+        Ok(Ok(bytes)) => bytes,
+        Ok(Err(e)) => {
+            return Err(OwnerKeysFailure::new(
+                Kind::RequestFailed,
+                format!(
+                    "RequestOwnerKeys failed: {e} — {hint}",
+                    hint = peer_failure_hint(&e)
+                ),
+            ));
+        }
+        Err(_) => {
+            return Err(OwnerKeysFailure::new(
+                Kind::TimedOut,
+                format!(
+                    "RequestOwnerKeys timed out after 10s — {hint}",
+                    hint = peer_failure_hint(&NoiseError::RequestTimeout)
+                ),
+            ));
+        }
+    };
+
+    // A 200 with an empty body. The peer accepted the request and then
+    // said nothing, which used to surface as "message too short: got 0" and
+    // read like a protocol bug in the peer.
+    //
+    // A denied request is NOT this case: it arrives as a 503, so
+    // `send_noise_message` returns `BadStatusCode` above and never reaches
+    // here. This arm is a peer that answered 200 with no frame at all, or a
+    // proxy that terminated the request and returned an empty 200.
+    if response.is_empty() {
+        return Err(OwnerKeysFailure::new(
+            Kind::EmptyReply,
+            format!(
+                "RequestOwnerKeys got an empty reply — {hint}",
+                hint = peer_failure_hint(&NoiseError::InvalidMessage)
+            ),
+        ));
+    }
+
+    let response_msg = match Message::from_bytes(&response) {
+        Ok(m) if m.msg_type == MessageType::OwnerKeys => m,
+        Ok(m) if m.msg_type == MessageType::Error => {
+            // An Error frame under 200 OK. The listener's own deny paths
+            // send that frame with a 503, so those surface as
+            // `BadStatusCode(_, Some(reason))` above rather than here. This
+            // arm catches a peer that reports the error in the body while
+            // still answering 200. Either way, prefer its words to a guess.
+            return Err(OwnerKeysFailure::new(
+                Kind::Refused,
+                format!(
+                    "RequestOwnerKeys refused by the peer: {reason}",
+                    reason = String::from_utf8_lossy(&m.payload)
+                ),
+            ));
+        }
+        Ok(m) => {
+            return Err(OwnerKeysFailure::new(
+                Kind::UnexpectedReply,
+                format!(
+                    "RequestOwnerKeys got an unexpected response type {:?} — the peer may be on \
+                     a different wire format",
+                    m.msg_type
+                ),
+            ));
+        }
+        Err(e) => {
+            return Err(OwnerKeysFailure::new(
+                Kind::UnparsableReply,
+                format!(
+                    "RequestOwnerKeys reply did not parse: {e} — {hint}",
+                    hint = peer_failure_hint(&NoiseError::InvalidMessage)
+                ),
+            ));
+        }
+    };
+
+    serde_json::from_slice(&response_msg.payload).map_err(|e| {
+        OwnerKeysFailure::new(
+            Kind::BadPayload,
+            format!("Failed to deserialize owner keys from {peer_uid}: {e}"),
+        )
+    })
+}
+
+/// The last failure kind of each peer whose owner-keys request is failing.
+///
+/// The parties view refreshes about once a minute while it is open, and each
+/// refresh asks every peer again. Without this record, an unreachable peer
+/// logged the same warning on every refresh (#332).
+static OWNER_KEYS_FAILURES: LazyLock<Mutex<HashMap<String, OwnerKeysFailureKind>>> =
+    LazyLock::new(Default::default);
+
+/// How to log one peer's owner-keys outcome.
+#[derive(Debug, PartialEq, Eq)]
+enum OwnerKeysLog {
+    Warn,
+    Debug,
+    Recovered,
+    Quiet,
+}
+
+/// Records one peer's outcome in `failures` and decides how to log it. A new
+/// or changed failure warns, a repeated one logs at debug, and the first
+/// success after a failure logs at info.
+fn record_owner_keys_outcome(
+    failures: &mut HashMap<String, OwnerKeysFailureKind>,
+    peer: &str,
+    now: Option<OwnerKeysFailureKind>,
+) -> OwnerKeysLog {
+    let previous = match now {
+        Some(kind) => failures.insert(peer.to_string(), kind),
+        None => failures.remove(peer),
+    };
+    match (previous, now) {
+        (previous, Some(kind)) if previous == Some(kind) => OwnerKeysLog::Debug,
+        (_, Some(_)) => OwnerKeysLog::Warn,
+        (Some(_), None) => OwnerKeysLog::Recovered,
+        (None, None) => OwnerKeysLog::Quiet,
+    }
+}
+
+fn report_owner_keys_outcome(peer: &str, endpoint: &str, failure: Option<&OwnerKeysFailure>) {
+    let log = record_owner_keys_outcome(
+        &mut OWNER_KEYS_FAILURES
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()),
+        peer,
+        failure.map(|f| f.kind),
+    );
+    match (log, failure) {
+        (OwnerKeysLog::Warn, Some(f)) => tracing::warn!(peer, endpoint, "{}", f.message),
+        (OwnerKeysLog::Debug, Some(f)) => tracing::debug!(peer, endpoint, "{}", f.message),
+        (OwnerKeysLog::Recovered, _) => {
+            tracing::info!(peer, endpoint, "RequestOwnerKeys answered again")
+        }
+        _ => {}
+    }
+}
+
+/// Drops the record of peers that are no longer configured.
+fn forget_removed_peers(peers: &[Peer]) {
+    let listed: HashSet<String> = peers.iter().map(|p| p.participant_id.to_string()).collect();
+    OWNER_KEYS_FAILURES
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .retain(|peer, _| listed.contains(peer));
 }
 
 /// Fill in missing `dec_party_participant.owner_key` rows by reading public
@@ -3026,6 +3138,50 @@ mod tests {
         assert_ne!(
             peer_failure_hint(&NoiseError::InvalidMessage),
             peer_failure_hint(&NoiseError::TcpConnectionFailed("x".into())),
+        );
+    }
+
+    /// The parties view asks every peer again about once a minute. A peer
+    /// that keeps failing must warn once, not on every refresh (#332).
+    #[test]
+    fn a_failing_peer_warns_once_until_it_recovers() {
+        use OwnerKeysFailureKind::{Refused, TimedOut};
+
+        let mut failures = HashMap::new();
+        let mut next = |now| record_owner_keys_outcome(&mut failures, "p2", now);
+
+        assert_eq!(next(None), OwnerKeysLog::Quiet);
+        assert_eq!(next(Some(TimedOut)), OwnerKeysLog::Warn);
+        assert_eq!(next(Some(TimedOut)), OwnerKeysLog::Debug);
+        assert_eq!(next(Some(TimedOut)), OwnerKeysLog::Debug);
+        assert_eq!(next(None), OwnerKeysLog::Recovered);
+        assert_eq!(next(None), OwnerKeysLog::Quiet);
+        assert_eq!(next(Some(TimedOut)), OwnerKeysLog::Warn);
+        // A new cause is news, even while the peer is still failing.
+        assert_eq!(next(Some(Refused)), OwnerKeysLog::Warn);
+        assert_eq!(next(Some(Refused)), OwnerKeysLog::Debug);
+    }
+
+    #[test]
+    fn each_peer_keeps_its_own_failure_record() {
+        let mut failures = HashMap::new();
+        let failed = Some(OwnerKeysFailureKind::EmptyReply);
+
+        assert_eq!(
+            record_owner_keys_outcome(&mut failures, "p2", failed),
+            OwnerKeysLog::Warn
+        );
+        assert_eq!(
+            record_owner_keys_outcome(&mut failures, "p3", failed),
+            OwnerKeysLog::Warn
+        );
+        assert_eq!(
+            record_owner_keys_outcome(&mut failures, "p2", None),
+            OwnerKeysLog::Recovered
+        );
+        assert_eq!(
+            record_owner_keys_outcome(&mut failures, "p3", failed),
+            OwnerKeysLog::Debug
         );
     }
 
