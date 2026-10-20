@@ -90,11 +90,9 @@ interface LinkRowProps {
   /** History token: changes on every observation of this link. */
   token: string | number;
   bands: { good: number; warn: number };
-  /** Self is always reachable if the page rendered at all. */
-  dotStatus: "Connected" | "CurrentNode" | "Unreachable";
 }
 
-const LinkRow = ({ label, probe, link, token, bands, dotStatus }: LinkRowProps) => {
+const LinkRow = ({ label, probe, link, token, bands }: LinkRowProps) => {
   const history = useLatencyHistory(link.reachable ? link.latency_ms : null, token);
   const tone = link.reachable ? toneFor(link.latency_ms, bands) : "bad";
   const reading = link.reachable && link.latency_ms != null ? `${link.latency_ms} ms` : "no reply";
@@ -117,7 +115,7 @@ const LinkRow = ({ label, probe, link, token, bands, dotStatus }: LinkRowProps) 
         borderColor: "divider",
       }}
     >
-      <StatusDot status={link.reachable ? dotStatus : "Unreachable"} title={tooltip} />
+      <StatusDot status={link.reachable ? "Connected" : "Unreachable"} title={tooltip} />
       <Box sx={{ minWidth: 0 }}>
         <Typography sx={{ fontSize: "0.85rem" }}>{label}</Typography>
         <Typography
@@ -324,7 +322,14 @@ export const NodeHealthCard = ({ config, health, selfLatency }: NodeHealthCardPr
                 py: 0.9,
               }}
             >
-              <StatusDot status="CurrentNode" title="Round-trip from this browser to your node" />
+              <StatusDot
+                status={selfLatency.ms != null ? "Connected" : "Unreachable"}
+                title={
+                  selfLatency.ms != null
+                    ? "GET /healthz — round-trip from this browser to your node"
+                    : "GET /healthz — no reply from your node"
+                }
+              />
               <Box sx={{ minWidth: 0 }}>
                 <Typography sx={{ fontSize: "0.85rem" }}>Browser → DecMan</Typography>
                 <Typography
@@ -373,7 +378,6 @@ export const NodeHealthCard = ({ config, health, selfLatency }: NodeHealthCardPr
                   link={health.admin_api}
                   token={health.checked_at}
                   bands={CANTON_BANDS}
-                  dotStatus="Connected"
                 />
                 <LinkRow
                   label="DecMan → Ledger API"
@@ -381,7 +385,6 @@ export const NodeHealthCard = ({ config, health, selfLatency }: NodeHealthCardPr
                   link={health.ledger_api}
                   token={health.checked_at}
                   bands={CANTON_BANDS}
-                  dotStatus="Connected"
                 />
               </>
             )}
