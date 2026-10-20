@@ -131,7 +131,7 @@ mod tests {
 
         Mock::given(method("POST"))
             .and(path(
-                "/auth/realms/test-realm/protocol/openid-connect/token",
+                "/realms/test-realm/protocol/openid-connect/token",
             ))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 "access_token": "fresh-1",
@@ -173,7 +173,7 @@ mod tests {
         // Both calls return immediately-expired tokens (expires_in: 0).
         Mock::given(method("POST"))
             .and(path(
-                "/auth/realms/test-realm/protocol/openid-connect/token",
+                "/realms/test-realm/protocol/openid-connect/token",
             ))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 "access_token": "first",
@@ -185,7 +185,7 @@ mod tests {
 
         Mock::given(method("POST"))
             .and(path(
-                "/auth/realms/test-realm/protocol/openid-connect/token",
+                "/realms/test-realm/protocol/openid-connect/token",
             ))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 "access_token": "second",
