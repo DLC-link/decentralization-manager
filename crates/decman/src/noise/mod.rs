@@ -900,9 +900,10 @@ pub(crate) fn is_transient(err: &NoiseError) -> bool {
 
 /// Run `op` up to `config.max_attempts` times, retrying only when the returned
 /// `NoiseError` is classified as transient by `is_transient`. Sleeps
-/// `config.backoff()` between attempts. Per-attempt failures are logged at
-/// `warn`; terminal failures (after retry exhaustion) are logged at `error`.
-/// `peer_label` is used as a structured field in the log lines.
+/// `config.backoff()` between attempts. Every failure is logged at `warn`,
+/// including the final one: each caller handles the returned error, so the
+/// caller decides whether it is worth an `error`. `peer_label` is used as a
+/// structured field in the log lines.
 async fn retry_loop<F, Fut>(
     peer_label: &str,
     config: &NoiseRetryConfig,
@@ -960,7 +961,7 @@ where
     // Loop ran `max_attempts >= 1` iterations; the only way out without
     // returning is the transient branch, which sets `last_err`.
     let final_err = last_err.expect("retry_loop ran zero attempts");
-    tracing::error!(
+    tracing::warn!(
         peer = peer_label,
         attempts = config.max_attempts,
         error = %final_err,
@@ -978,8 +979,8 @@ where
 /// retried. Deterministic errors (handshake failure, bad status, decode
 /// errors, configuration mistakes) return immediately.
 ///
-/// Per-attempt failures log at `tracing::warn!`; terminal failures (after
-/// retry exhaustion) log an additional `tracing::error!`.
+/// Every failure logs at `tracing::warn!`, and retry exhaustion logs one more
+/// `warn` line. The caller logs the returned error at the level it deserves.
 pub async fn send_noise_message_with_retry(
     peer_address: &str,
     peer_port: u16,
@@ -1434,6 +1435,54 @@ mod tests {
         .await;
         assert!(matches!(result, Err(NoiseError::TcpConnectionTimeout(_))));
         assert_eq!(calls.load(Ordering::SeqCst), config.max_attempts);
+    }
+
+    /// Records the level of every event it sees.
+    struct Levels(Arc<std::sync::Mutex<Vec<tracing::Level>>>);
+
+    impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for Levels {
+        fn on_event(
+            &self,
+            event: &tracing::Event<'_>,
+            _: tracing_subscriber::layer::Context<'_, S>,
+        ) {
+            if let Ok(mut levels) = self.0.lock() {
+                levels.push(*event.metadata().level());
+            }
+        }
+    }
+
+    /// An unreachable peer is routine, and every caller handles the error on
+    /// its own terms. An `error` here once made up every decman error line on
+    /// devnet, so a decman-wide error alert would fire all day (#362).
+    #[tokio::test]
+    async fn retry_exhaustion_logs_no_error() -> anyhow::Result<()> {
+        use tracing_subscriber::layer::SubscriberExt;
+
+        let levels = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let subscriber = tracing_subscriber::registry().with(Levels(levels.clone()));
+        let _guard = tracing::subscriber::set_default(subscriber);
+        let config = NoiseRetryConfig {
+            per_attempt_timeout_secs: 5,
+            max_attempts: 2,
+            backoff_ms: 0,
+        };
+
+        let result = retry_loop("test-peer", &config, || async {
+            Err::<Bytes, _>(NoiseError::TcpConnectionTimeout("test".into()))
+        })
+        .await;
+
+        assert!(result.is_err());
+        let levels = levels
+            .lock()
+            .map_err(|_| anyhow::anyhow!("the level log is poisoned"))?;
+        assert!(!levels.is_empty(), "the failures logged nothing");
+        assert!(
+            !levels.contains(&tracing::Level::ERROR),
+            "retry exhaustion logged an error: {levels:?}"
+        );
+        Ok(())
     }
 
     #[tokio::test]
