@@ -99,4 +99,38 @@ that account. Signatures are still verified against the registered public key.
   example MPCH) also reports a `kms_key_id`; signing then fails with a clear
   KMS error until a dedicated backend exists.
 - Parties created before this feature hold Ed25519 vault keys on JCE nodes;
-  those continue to sign through the export path with no changes.
+  those continue to sign through the export path with no changes. The next
+  section explains why that path stays.
+
+## Signing on a node without KMS
+
+A participant with the JCE crypto provider keeps exportable keys in its vault.
+On such a node decman uses `VaultExportSigner`. It exports the party's Daml key
+with `VaultService.ExportKeyPair` and signs each hash locally with Ed25519.
+This path stays as the supported fallback. The team chose it in #241.
+
+The reasons:
+
+- Canton offers no public RPC that signs a submission hash with a vault key.
+  On a JCE node, the only other option is a key that decman holds outside the
+  vault.
+- A key outside the vault makes every operator store and back up a private key.
+  The vault already stores the key with the rest of the participant's state.
+- decman already has access to the participant's admin API, and that API
+  allows key export. The export path gives decman no new access.
+- Each member exports only its own key, into its own decman. No private key
+  goes to another node.
+- Canton does not document the export format, so decman searches the exported
+  bytes. It keeps a candidate only when the derived public key matches the
+  registered key. A format change therefore fails the signing step, and it
+  cannot produce a wrong signature.
+- Existing parties hold their Daml keys in the vault. A move away from export
+  would need a key rotation for every party.
+
+Revisit this choice when one of these happens:
+
+- Canton disables key export, or encrypts exported keys by default.
+- Canton adds a public RPC that signs with a vault key.
+- A deployment requires that the private key never leaves the participant.
+  Such a deployment should run a KMS node instead.
+

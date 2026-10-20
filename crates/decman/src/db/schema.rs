@@ -3,7 +3,7 @@ use super::rows::{
     GovernanceAuditRow,
 };
 use crate::{
-    canton_id::CantonId,
+    canton_id::{CantonId, Fingerprint},
     config::{PartyCredentials, Peer},
     error::Result,
     server::{
@@ -272,7 +272,7 @@ pub trait Commitable {
         &mut self,
         party_id: &CantonId,
         participant_uid: &str,
-        signing_key: &str,
+        signing_key: &Fingerprint,
     ) -> Result;
 
     /// Insert or replace a pending invitation. A handled invitation with the

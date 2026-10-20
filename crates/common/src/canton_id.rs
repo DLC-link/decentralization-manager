@@ -3,7 +3,7 @@ use std::{fmt, marker::PhantomData};
 use serde::{Deserialize, Serialize};
 use serde_big_array::BigArray;
 
-use crate::error::Result;
+use crate::{error::Result, fingerprint::MULTIHASH_SHA256_PREFIX};
 
 /// Length of a namespace: 2 bytes multihash prefix + 32 bytes SHA-256 hash
 pub const NAMESPACE_LENGTH: usize = 34;
@@ -55,6 +55,89 @@ impl Namespace {
 impl fmt::Display for Namespace {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self.to_hex())
+    }
+}
+
+/// Length of a fingerprint string: a [`Namespace`]-sized multihash, hex-encoded.
+const FINGERPRINT_LENGTH: usize = 2 * NAMESPACE_LENGTH;
+
+/// Canton fingerprint of a public key: the `1220` SHA-256 multihash prefix
+/// followed by 64 lowercase hex characters.
+///
+/// It keeps Canton's text form because every boundary carries it as text:
+/// `signed_by`, topology owner lists, vault filters, DB columns and JSON.
+/// Uppercase hex is rejected: Canton only emits lowercase, and those
+/// boundaries compare fingerprints as exact strings.
+#[derive(Clone, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(try_from = "String", into = "String")]
+pub struct Fingerprint(String);
+
+impl Fingerprint {
+    /// Build the fingerprint whose hash part is `digest`.
+    pub(crate) fn from_sha256(digest: [u8; 32]) -> Self {
+        Self(format!(
+            "{MULTIHASH_SHA256_PREFIX}{hash}",
+            hash = hex::encode(digest)
+        ))
+    }
+
+    /// The fingerprint in Canton's text form.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl TryFrom<String> for Fingerprint {
+    type Error = anyhow::Error;
+
+    fn try_from(s: String) -> Result<Self> {
+        if s.len() != FINGERPRINT_LENGTH {
+            anyhow::bail!(
+                "Invalid fingerprint length: expected {FINGERPRINT_LENGTH} characters, got {count}",
+                count = s.len()
+            );
+        }
+        let Some(hash) = s.strip_prefix(MULTIHASH_SHA256_PREFIX) else {
+            anyhow::bail!(
+                "Invalid fingerprint '{s}': expected the {MULTIHASH_SHA256_PREFIX} multihash prefix"
+            );
+        };
+        if !hash.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')) {
+            anyhow::bail!("Invalid fingerprint '{s}': expected lowercase hex after the prefix");
+        }
+        Ok(Self(s))
+    }
+}
+
+impl std::str::FromStr for Fingerprint {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self> {
+        s.to_owned().try_into()
+    }
+}
+
+impl From<Fingerprint> for String {
+    fn from(fingerprint: Fingerprint) -> Self {
+        fingerprint.0
+    }
+}
+
+impl PartialEq<&str> for Fingerprint {
+    fn eq(&self, other: &&str) -> bool {
+        self.0 == *other
+    }
+}
+
+impl PartialEq<String> for Fingerprint {
+    fn eq(&self, other: &String) -> bool {
+        self.0 == *other
+    }
+}
+
+impl fmt::Display for Fingerprint {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
     }
 }
 
@@ -408,5 +491,49 @@ mod tests {
         assert_eq!(id.prefix, "participant");
         assert_eq!(id.namespace.to_hex(), VALID_NS);
         Ok(())
+    }
+
+    #[test]
+    fn fingerprint_accepts_canonical_value() -> Result {
+        let fingerprint: Fingerprint = VALID_NS.parse()?;
+        assert_eq!(fingerprint.to_string(), VALID_NS);
+        assert_eq!(Fingerprint::try_from(VALID_NS.to_string())?, fingerprint);
+        Ok(())
+    }
+
+    #[test]
+    fn fingerprint_rejects_malformed_input() {
+        let hash = &VALID_NS[4..];
+        let bad_inputs = [
+            "".to_string(),
+            format!("1221{hash}"),             // wrong multihash prefix
+            format!("{hash}abcd"),             // right length, no prefix
+            VALID_NS[..67].to_string(),        // one character short
+            format!("{VALID_NS}0"),            // one character long
+            format!("1220{}", "g".repeat(64)), // non-hex
+            VALID_NS.to_uppercase(),           // Canton only emits lowercase
+            format!("1220{}", "é".repeat(32)), // 68 bytes, not hex
+        ];
+        for bad in &bad_inputs {
+            assert!(
+                bad.parse::<Fingerprint>().is_err(),
+                "expected {bad:?} to be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn fingerprint_serializes_as_plain_string() -> Result {
+        let fingerprint: Fingerprint = VALID_NS.parse()?;
+        let json = serde_json::to_string(&fingerprint)?;
+        assert_eq!(json, format!("\"{VALID_NS}\""));
+        assert_eq!(serde_json::from_str::<Fingerprint>(&json)?, fingerprint);
+        Ok(())
+    }
+
+    #[test]
+    fn fingerprint_deserialize_validates() {
+        assert!(serde_json::from_str::<Fingerprint>("\"1220abcd\"").is_err());
+        assert!(serde_json::from_str::<Fingerprint>("[18, 32]").is_err());
     }
 }

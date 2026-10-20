@@ -74,7 +74,7 @@ impl ExternalKeyPair {
     /// The Canton namespace fingerprint of the public key (the `{fingerprint}`
     /// segment of the party id, and the `signed_by` the tenant API expects).
     pub fn fingerprint(&self) -> String {
-        fingerprint_from_public_key(&self.public_key_bytes())
+        fingerprint_from_public_key(&self.public_key_bytes()).into()
     }
 
     /// The external party id: `{hint}::{fingerprint}`.

@@ -725,7 +725,8 @@ faces — auth shape, topology propagation, namespace ownership, etc.
 
 The bringup is structurally identical to localnet (three bare-process DecMan
 instances, same `wait_for_server` and `configure_peers` flow), except:
-- No Docker localnet — Canton is the production-shaped cluster in `ieu-devnet`.
+- No Docker localnet — Canton is the production-shaped cluster in the `devnet`
+  EKS cluster, one participant per `canton-node-{1,2,3}` namespace.
 - Canton gRPC admin (5002/5012/5022) and ledger (5001/5011/5021) ports are
   tunneled to localhost via `kubectl port-forward` (managed by
   `devnet.env.sh`'s `start_canton_tunnels`).
@@ -741,7 +742,7 @@ instances, same `wait_for_server` and `configure_peers` flow), except:
 
 Beyond the localnet prerequisites listed above, you'll need:
 
-1. **AWS SSO authenticated** against the account that owns the `ieu-devnet`
+1. **AWS SSO authenticated** against the account that owns the `devnet`
    cluster:
    ```bash
    aws sso login --profile bs-np   # or whichever profile your org uses
@@ -750,12 +751,15 @@ Beyond the localnet prerequisites listed above, you'll need:
    are kubectl probes that hang or return "Token has expired"; the
    `start_canton_tunnels` step prints a clear error in that case.
 
-2. **kubectl configured** with the `ieu-devnet` context:
+2. **kubectl configured** with the `devnet` context:
    ```bash
-   aws eks update-kubeconfig --name devnet-cluster --region us-east-1        --profile bs-np
+   aws eks update-kubeconfig --name devnet-cluster --region us-east-1 \
+     --profile bs-np --alias devnet
    ```
-   The expected context name (`ieu-devnet`) and namespace (`catalyst-canton`)
-   are overridable via `KUBE_CONTEXT_DEVNET` / `KUBE_NS_CANTON` env vars.
+   Each participant runs as `svc/participant` in its own namespace,
+   `canton-node-1` to `canton-node-3`. Override the context, the namespace
+   prefix and the service name with `KUBE_CONTEXT_DEVNET`,
+   `KUBE_NS_CANTON_PREFIX` and `KUBE_CANTON_SVC`.
 
 3. **`kubectl` and `nc` on `$PATH`** (in addition to `jq`/`curl`/`lsof`).
    Docker is **not** required for the devnet path even though the current
@@ -777,7 +781,8 @@ Beyond the localnet prerequisites listed above, you'll need:
    The real `.env` files are gitignored; only `.env.example` is tracked.
    Keys required by the integration test:
    - **Shared** (identical across all three): `DECPM_KEYCLOAK_URL`
-     (with or without `/auth` — both forms tolerated by `token_url`),
+     (DecMan and the runner append `/realms/{realm}`; include `/auth` only
+     when the Keycloak still serves that legacy prefix),
      `DECPM_KEYCLOAK_REALM`, `DECPM_KEYCLOAK_CLIENT_ID`,
      `DECPM_KEYCLOAK_USERNAME`, `DECPM_KEYCLOAK_PASSWORD`.
    - **Per-participant** (`P{N}_*`): `MEMBER_PARTY_ID`, `MEMBER_USER_ID`,
@@ -787,7 +792,13 @@ Beyond the localnet prerequisites listed above, you'll need:
 
 The bringup performs a Keycloak password-grant smoke check before spending
 time on `cargo build`, so misconfigured credentials fail fast with a
-human-readable error.
+human-readable error. To take a Keycloak value from a secret manager instead
+of the `.env` files, set `DECPM_KEYCLOAK_URL_OVERRIDE`,
+`DECPM_KEYCLOAK_USERNAME_OVERRIDE` or `DECPM_KEYCLOAK_PASSWORD_OVERRIDE`:
+```bash
+DECPM_KEYCLOAK_PASSWORD_OVERRIDE=$(op read op://vault/item/password) \
+  ./integration-tests/run.sh --target devnet
+```
 
 #### Known issues
 

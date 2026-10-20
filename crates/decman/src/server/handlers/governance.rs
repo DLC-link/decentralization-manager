@@ -65,11 +65,11 @@ use crate::{
             ActionType, ActiveCouponReassignmentDelegation, AuditLogEntry, AuditLogQuery,
             AuditLogResponse, AuditScope, CancelConfirmationRequest, CancelProposalRequest,
             ChainAuditEntry, ChainAuditQuery, ChainAuditResponse, ConfirmActionRequest,
-            CouponReassignmentDelegationSummary, DomainGovernanceAction, ErrorResponse,
-            ExecuteActionRequest, ExpireConfirmationRequest, GovernanceResponse,
-            GovernanceStateResponse, GovernanceType, KnownMember, KnownMembersResponse,
-            MAX_RECENT_AUDIT_LIMIT, MessageResponse, ProposalType, ProposalsPageResponse,
-            ProposeActionRequest, chain_audit_entry_from_row,
+            DomainGovernanceAction, ErrorResponse, ExecuteActionRequest, ExpireConfirmationRequest,
+            GovernanceResponse, GovernanceStateResponse, GovernanceType, KnownMember,
+            KnownMembersResponse, MAX_RECENT_AUDIT_LIMIT, MessageResponse, ProposalType,
+            ProposalsPageResponse, ProposeActionRequest, RewardStatusResponse,
+            chain_audit_entry_from_row,
         },
     },
     utils,
@@ -1796,15 +1796,7 @@ pub async fn get_coupon_reassignment_delegation(
     .await
     {
         Ok(active) => HttpResponse::Ok().json(ActiveCouponReassignmentDelegation {
-            delegations: active
-                .into_iter()
-                .map(|d| CouponReassignmentDelegationSummary {
-                    cid: d.cid,
-                    dso: d.dso,
-                    assigners: d.assigners,
-                    beneficiary_count: d.beneficiary_count,
-                })
-                .collect(),
+            delegations: active.into_iter().map(Into::into).collect(),
         }),
         // Never report a failed read as an empty list. The setup form would
         // prefill a blank `prior_delegation` and hit the propose-time 409 after
@@ -1813,6 +1805,66 @@ pub async fn get_coupon_reassignment_delegation(
             tracing::warn!(%party_id, error = %e, "active delegation read failed");
             HttpResponse::ServiceUnavailable().json(ErrorResponse {
                 error: format!("cannot read this party's current delegations: {e}"),
+            })
+        }
+    }
+}
+
+/// Get the decparty's reward automation status on this node
+///
+/// Says whether this participant resolves the rewards DAR, which delegation is
+/// active, and whether it lists this node's member party as an assigner. A
+/// missing DAR is a 200 with `rewards_dar_resolvable: false`, not an error.
+#[utoipa::path(
+    tag = "Governance",
+    params(GovernanceQuery),
+    responses(
+        (
+            status = 200,
+            description = "The reward status; `rewards_dar_resolvable` is false when this participant lacks the rewards DAR",
+            body = RewardStatusResponse
+        ),
+        (status = 401, description = "Unauthorized", body = ErrorResponse),
+        (status = 404, description = "No credentials configured for party", body = ErrorResponse),
+        (status = 500, description = "Failed to fetch an auth token for party", body = ErrorResponse),
+        (status = 503, description = "The reward status could not be read", body = ErrorResponse)
+    )
+)]
+#[get("/reward-status")]
+pub async fn get_reward_status(
+    data: web::Data<AppState>,
+    query: web::Query<GovernanceQuery>,
+) -> impl Responder {
+    let party_id = &query.party_id;
+    let (token, member) = match get_party_credentials(&data, party_id).await {
+        Ok(Some(creds)) => creds,
+        Ok(None) => {
+            return HttpResponse::NotFound().json(ErrorResponse {
+                error: "No credentials configured for party".to_string(),
+            });
+        }
+        Err(e) => {
+            return HttpResponse::InternalServerError().json(ErrorResponse {
+                error: format!("Failed to fetch auth token for party: {e}"),
+            });
+        }
+    };
+
+    match crate::server::reward_automation::reward_status(
+        &data.config,
+        &packages(),
+        data.test_mode,
+        party_id,
+        &member,
+        &token,
+    )
+    .await
+    {
+        Ok(status) => HttpResponse::Ok().json(status),
+        Err(e) => {
+            tracing::warn!(%party_id, error = %e, "reward status read failed");
+            HttpResponse::ServiceUnavailable().json(ErrorResponse {
+                error: format!("cannot read this party's reward status: {e}"),
             })
         }
     }

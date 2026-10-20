@@ -68,13 +68,12 @@ impl Refresher {
 }
 
 async fn fetch_token(client: &Client, creds: &KeycloakCreds) -> anyhow::Result<TokenState> {
-    // Tolerate base URLs configured both with and without a trailing `/auth`.
-    // Mirrors src/auth/mod.rs::token_url so the test runner and DecMan agree on
-    // the endpoint regardless of how DECPM_KEYCLOAK_URL is set.
+    // Same shape as DecMan's issuer (`oidc_issuer_of` in
+    // src/auth/validators/common.rs): `{url}/realms/{realm}`. A Keycloak that
+    // still serves the legacy `/auth` prefix carries it in DECPM_KEYCLOAK_URL.
     let kc_base = creds.url.trim_end_matches('/');
-    let kc_base = kc_base.strip_suffix("/auth").unwrap_or(kc_base);
     let url = format!(
-        "{kc_base}/auth/realms/{realm}/protocol/openid-connect/token",
+        "{kc_base}/realms/{realm}/protocol/openid-connect/token",
         realm = creds.realm,
     );
     let resp: serde_json::Value = client
@@ -131,9 +130,7 @@ mod tests {
         let server = MockServer::start().await;
 
         Mock::given(method("POST"))
-            .and(path(
-                "/auth/realms/test-realm/protocol/openid-connect/token",
-            ))
+            .and(path("/realms/test-realm/protocol/openid-connect/token"))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 "access_token": "fresh-1",
                 "expires_in": 3600
@@ -173,9 +170,7 @@ mod tests {
 
         // Both calls return immediately-expired tokens (expires_in: 0).
         Mock::given(method("POST"))
-            .and(path(
-                "/auth/realms/test-realm/protocol/openid-connect/token",
-            ))
+            .and(path("/realms/test-realm/protocol/openid-connect/token"))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 "access_token": "first",
                 "expires_in": 0
@@ -185,9 +180,7 @@ mod tests {
             .await;
 
         Mock::given(method("POST"))
-            .and(path(
-                "/auth/realms/test-realm/protocol/openid-connect/token",
-            ))
+            .and(path("/realms/test-realm/protocol/openid-connect/token"))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 "access_token": "second",
                 "expires_in": 0

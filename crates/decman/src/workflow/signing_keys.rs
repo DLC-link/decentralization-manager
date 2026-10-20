@@ -36,7 +36,7 @@ use canton_proto_rs::com::digitalasset::canton::crypto::{
 use sqlx::SqlitePool;
 
 use crate::{
-    canton_id::CantonId,
+    canton_id::{CantonId, Fingerprint},
     config::NodeConfig,
     db::schema::SchemaRead,
     error::Result,
@@ -61,7 +61,7 @@ pub fn party_daml_key_name(party_id_prefix: &str) -> String {
 /// # Errors
 ///
 /// Errors when the vault cannot be listed.
-pub async fn vault_holds(config: &NodeConfig, fingerprint: &str) -> Result<bool> {
+pub async fn vault_holds(config: &NodeConfig, fingerprint: &Fingerprint) -> Result<bool> {
     let mut vault_client = VaultServiceClient::new(config.admin_channel().await?);
     let response = vault_client
         .list_my_keys(tonic::Request::new(ListMyKeysRequest {
@@ -125,7 +125,7 @@ pub async fn own_namespace_key(
         if let Some(private_key_metadata::PublicKeyWithName::V30(named)) = meta.public_key_with_name
             && let Some(pk) = named.public_key
             && let Some(public_key::Key::SigningPublicKey(signing_key)) = pk.key
-            && owners.contains(&utils::compute_fingerprint(&signing_key))
+            && owners.contains(&utils::compute_fingerprint(&signing_key).into())
         {
             return Ok(Some(signing_key));
         }
@@ -146,7 +146,7 @@ async fn own_signing_key_fingerprint(
     db: &SqlitePool,
     dec_party_id: &CantonId,
     candidates: &[SigningPublicKey],
-) -> Result<Option<String>> {
+) -> Result<Option<Fingerprint>> {
     let self_id = config.participant_id().to_string();
     if let Some(payload) = db
         .read_identity(dec_party_id, identity_kinds::PEER_PUBLIC_KEYS, &self_id)
@@ -226,8 +226,8 @@ async fn own_signing_key_fingerprint(
             count = considered.len(),
             all = considered
                 .iter()
-                .map(|key| utils::compute_fingerprint(key))
-                .collect::<Vec<_>>()
+                .map(|key| utils::compute_fingerprint(key).into())
+                .collect::<Vec<String>>()
                 .join(", ")
         );
     } else {
@@ -251,12 +251,21 @@ pub async fn known_signing_keys_by_member(
     db: &SqlitePool,
     dec_party_id: &CantonId,
     candidates: &[SigningPublicKey],
-) -> Result<BTreeMap<String, String>> {
+) -> Result<BTreeMap<String, Fingerprint>> {
     let mut claims = BTreeMap::new();
 
     for participant in db.get_dec_party_participants(dec_party_id).await? {
-        if let Some(fingerprint) = participant.signing_key {
-            claims.insert(participant.participant_uid, fingerprint);
+        let Some(stored) = participant.signing_key else {
+            continue;
+        };
+        match stored.parse::<Fingerprint>() {
+            Ok(fingerprint) => {
+                claims.insert(participant.participant_uid, fingerprint);
+            }
+            Err(e) => tracing::warn!(
+                "Ignoring the stored Daml signing key of {uid} on {dec_party_id}: {e:#}",
+                uid = participant.participant_uid
+            ),
         }
     }
 
@@ -275,7 +284,7 @@ pub async fn known_signing_keys_by_member(
                 // the second is evidence the peer can still sign, so a
                 // disagreement is worth saying out loud before the row wins.
                 if let Some(attested) = claims.get(&peer_id)
-                    && attested != &recorded
+                    && *attested != recorded
                 {
                     tracing::warn!(
                         "{peer_id} reports Daml signing key {attested} for {dec_party_id} but \
@@ -324,9 +333,9 @@ pub fn signing_keys_without_member(
     current: &[SigningPublicKey],
     removed: &str,
     survivors: &[String],
-    claims: &BTreeMap<String, String>,
+    claims: &BTreeMap<String, Fingerprint>,
 ) -> Result<Vec<SigningPublicKey>> {
-    let fingerprints: Vec<String> = current.iter().map(utils::compute_fingerprint).collect();
+    let fingerprints: Vec<Fingerprint> = current.iter().map(utils::compute_fingerprint).collect();
 
     let claimed_by_removed = claims.get(removed).filter(|f| fingerprints.contains(f));
     let target = match claimed_by_removed {
@@ -335,9 +344,9 @@ pub fn signing_keys_without_member(
             fingerprint.clone()
         }
         None => {
-            let survivor_claims: BTreeSet<&String> =
+            let survivor_claims: BTreeSet<&Fingerprint> =
                 survivors.iter().filter_map(|uid| claims.get(uid)).collect();
-            let unclaimed: Vec<&String> = fingerprints
+            let unclaimed: Vec<&Fingerprint> = fingerprints
                 .iter()
                 .filter(|f| !survivor_claims.contains(f))
                 .collect();
@@ -440,7 +449,8 @@ pub async fn adopt_legacy_signing_keys(
 
     // Deduped by fingerprint so a key held in both places is one candidate.
     let mut candidates = legacy_keys;
-    let mut seen: BTreeSet<String> = candidates.iter().map(utils::compute_fingerprint).collect();
+    let mut seen: BTreeSet<Fingerprint> =
+        candidates.iter().map(utils::compute_fingerprint).collect();
     for key in inline {
         if seen.insert(utils::compute_fingerprint(key)) {
             candidates.push(key.clone());
@@ -477,9 +487,9 @@ pub async fn adopt_legacy_signing_keys(
 pub fn legacy_signing_keys_for_members(
     legacy_keys: &[SigningPublicKey],
     members: &[String],
-    claims: &BTreeMap<String, String>,
+    claims: &BTreeMap<String, Fingerprint>,
 ) -> Result<Vec<SigningPublicKey>> {
-    let by_fingerprint: HashMap<String, &SigningPublicKey> = legacy_keys
+    let by_fingerprint: HashMap<Fingerprint, &SigningPublicKey> = legacy_keys
         .iter()
         .map(|key| (utils::compute_fingerprint(key), key))
         .collect();
@@ -566,11 +576,11 @@ mod tests {
         }
     }
 
-    fn fingerprint(seed: u8) -> String {
+    fn fingerprint(seed: u8) -> Fingerprint {
         utils::compute_fingerprint(&key(seed))
     }
 
-    fn claims(entries: &[(&str, u8)]) -> BTreeMap<String, String> {
+    fn claims(entries: &[(&str, u8)]) -> BTreeMap<String, Fingerprint> {
         entries
             .iter()
             .map(|(uid, seed)| ((*uid).to_string(), fingerprint(*seed)))
@@ -809,7 +819,7 @@ mod tests {
         let claims = claims(&[("p1", 1), ("p2", 2), ("p3", 3)]);
 
         let mut candidates = legacy;
-        let mut seen: BTreeSet<String> =
+        let mut seen: BTreeSet<Fingerprint> =
             candidates.iter().map(utils::compute_fingerprint).collect();
         for k in &inline {
             if seen.insert(utils::compute_fingerprint(k)) {

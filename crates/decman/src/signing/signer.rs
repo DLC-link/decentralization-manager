@@ -3,6 +3,7 @@ use canton_proto_rs::com::digitalasset::canton::crypto::v30::{Signature, Signing
 use tonic::transport::Channel;
 
 use crate::{
+    canton_id::Fingerprint,
     error::Result,
     signing::{SigningError, aws_kms::AwsKmsSigner, vault_export::VaultExportSigner},
 };
@@ -32,7 +33,7 @@ impl PreparedTransactionHash {
 pub struct SigningKeyContext {
     /// Canton fingerprint of the key. Goes into [`Signature::signed_by`] and is
     /// how Canton selects the verifying key from the party's topology.
-    pub fingerprint: String,
+    pub fingerprint: Fingerprint,
     /// The public key (format, key spec, bytes). A backend uses this to choose
     /// the signature algorithm/format, and the export backend uses it to verify
     /// the recovered private key.

@@ -156,7 +156,7 @@ pub async fn sign_submissions(
     let keys_response = vault_client
         .list_my_keys(tonic::Request::new(ListMyKeysRequest {
             filters: Some(ListKeysFilters {
-                fingerprint: key_fingerprint.clone(),
+                fingerprint: key_fingerprint.to_string(),
                 name: String::new(), // Search by fingerprint, not name
                 purpose: vec![],
                 usage_v30: vec![],

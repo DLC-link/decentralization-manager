@@ -1,10 +1,10 @@
 //! Signing backend that exports the private key from the participant's vault
 //! and signs locally with Ed25519.
 //!
-//! This is the historical decman behaviour and works only for the JCE crypto
-//! provider, whose keys are exportable. It is unusable on a KMS-backed node
-//! (the private key cannot leave the KMS) — that case needs a KMS signing
-//! backend instead (see [`crate::signing`]).
+//! This is the supported path for the JCE crypto provider, whose keys are
+//! exportable; `docs/KMS_SIGNING.md` records why it stays. It is unusable on a
+//! KMS-backed node (the private key cannot leave the KMS) — that case needs a
+//! KMS signing backend instead (see [`crate::signing`]).
 
 use async_trait::async_trait;
 use canton_proto_rs::com::digitalasset::canton::crypto::{
@@ -57,7 +57,7 @@ impl TransactionSigner for VaultExportSigner {
 
         let mut export_response = vault_client
             .export_key_pair(tonic::Request::new(ExportKeyPairRequest {
-                fingerprint: key_fingerprint.clone(),
+                fingerprint: key_fingerprint.to_string(),
                 protocol_version: CANTON_PROTOCOL_VERSION,
                 password: String::new(), // Empty: the exported key pair is not passphrase-protected.
             }))
@@ -215,7 +215,7 @@ impl TransactionSigner for VaultExportSigner {
                 hash.as_bytes(),
                 &signature_bytes,
                 idx,
-                key_fingerprint,
+                key_fingerprint.as_str(),
             )?;
             tracing::info!("Signature {index} verified locally", index = idx + 1);
 
@@ -224,7 +224,7 @@ impl TransactionSigner for VaultExportSigner {
             signatures.push(Signature {
                 format: SignatureFormat::Concat as i32,
                 signature: signature_bytes.to_vec(),
-                signed_by: key_fingerprint.clone(),
+                signed_by: key_fingerprint.to_string(),
                 signing_algorithm_spec: SigningAlgorithmSpec::Ed25519 as i32,
                 signature_delegation: None,
             });
