@@ -151,7 +151,7 @@ pub async fn start_coordinator(
                         }
                         workflow_state.clear_peer_data().await;
 
-                        submit_change(&node_config, &db, &instance_name).await?;
+                        submit_change(&node_config, &db, &instance_name, &change_config).await?;
                         workflow_state.advance_step().await;
                     }
                     ChangeThresholdStep::RetireLegacyKeys => {

@@ -81,6 +81,9 @@ pub struct PeerExpectations {
     pub prefix: Option<String>,
     /// The threshold the topology should end up with.
     pub threshold: Option<i32>,
+    /// The confirmation threshold the P2P mapping should end up with. `None`
+    /// means it equals `threshold`, which is all an older coordinator sends.
+    pub confirmation_threshold: Option<i32>,
     /// Kick only: the participant being removed.
     pub kicked_participant: Option<CantonId>,
     /// Add-party only: the participant being added.
@@ -114,6 +117,8 @@ struct PeerRunConfig {
     new_participant_id: Option<CantonId>,
     #[serde(default)]
     new_threshold: Option<i32>,
+    #[serde(default)]
+    confirmation_threshold: Option<i32>,
 }
 
 impl PeerExpectations {
@@ -148,6 +153,7 @@ impl PeerExpectations {
             dec_party_id: run.dec_party_id,
             prefix: config.prefix,
             threshold: config.new_threshold,
+            confirmation_threshold: config.confirmation_threshold,
             kicked_participant: config.participant_id,
             new_participant: config.new_participant_id,
             dar_filenames: config.dar_filenames,
@@ -775,18 +781,23 @@ impl PeerExpectations {
     /// A `PartyToParticipant` mapping carries two thresholds: how many hosting
     /// participants must confirm, and how many of the party's signing keys
     /// authorize a transaction for it. Both are pinned — leaving the signing
-    /// threshold unchecked would let a coordinator raise a hosting threshold
-    /// the operator agreed to while quietly dropping the signing one to 1.
+    /// threshold unchecked would let a coordinator raise a confirmation
+    /// threshold the operator agreed to while quietly dropping the signing one
+    /// to 1.
+    ///
+    /// The confirmation threshold is held to the accepted confirmation
+    /// threshold, and the signing one to the accepted namespace threshold.
     ///
     /// The size of the key set is pinned with them, because a threshold only
     /// means what the operator agreed to if the set it counts over does. Two
     /// of three member keys is the accepted 2; two of a set that still holds
     /// a kicked member's key is not (#428).
     fn check_p2p_thresholds(&self, mapping: &PartyToParticipant) -> Result {
-        self.check_threshold(
-            "hosting",
+        self.check_threshold_against(
+            "confirmation",
             i32::try_from(mapping.threshold)?,
             self.members.len(),
+            self.confirmation_threshold.or(self.threshold),
         )?;
 
         // Signing a mapping with no party signing keys does not merely leave a
@@ -830,15 +841,27 @@ impl PeerExpectations {
     /// the owner count would either need no signatures or deadlock the party.
     ///
     /// `kind` names which threshold is being checked. A mapping carries a
-    /// hosting and a signing threshold and both come through here, so a
+    /// confirmation and a signing threshold and both come through here, so a
     /// message that named neither read as though the coordinator had ignored
     /// the operator's input when in fact the other one was wrong.
     fn check_threshold(&self, kind: &str, threshold: i32, owner_count: usize) -> Result {
+        self.check_threshold_against(kind, threshold, owner_count, self.threshold)
+    }
+
+    /// [`check_threshold`](Self::check_threshold) against an `expected`
+    /// value other than the namespace threshold.
+    fn check_threshold_against(
+        &self,
+        kind: &str,
+        threshold: i32,
+        owner_count: usize,
+        expected: Option<i32>,
+    ) -> Result {
         let owner_count = i32::try_from(owner_count)?;
         if !(1..=owner_count).contains(&threshold) {
             anyhow::bail!("proposed {kind} threshold {threshold} is outside 1..={owner_count}");
         }
-        match self.threshold {
+        match expected {
             Some(expected) if expected != threshold => {
                 anyhow::bail!(
                     "proposed {kind} threshold {threshold} differs from the accepted {expected}"
@@ -1394,6 +1417,7 @@ mod tests {
             dec_party_id: None,
             prefix: None,
             threshold: Some(2),
+            confirmation_threshold: None,
             kicked_participant: None,
             new_participant: None,
             dar_filenames: Vec::new(),
@@ -1884,6 +1908,95 @@ mod tests {
             error.contains("signing threshold 3 differs from the accepted 2"),
             "unexpected error: {error}"
         );
+        Ok(())
+    }
+
+    fn three_members_at(threshold: i32, confirmation: Option<i32>) -> Result<PeerExpectations> {
+        let (a, b, c) = (
+            canton_id("p1", 1)?,
+            canton_id("p2", 2)?,
+            canton_id("p3", 3)?,
+        );
+        let mut expectations = expectations(vec![a.clone(), b, c], a);
+        expectations.threshold = Some(threshold);
+        expectations.confirmation_threshold = confirmation;
+        Ok(expectations)
+    }
+
+    fn three_host_mapping(confirmation: u32, signing: u32) -> Result<PartyToParticipant> {
+        let hosts = [
+            canton_id("p1", 1)?,
+            canton_id("p2", 2)?,
+            canton_id("p3", 3)?,
+        ];
+        let mut mapping = p2p("dec::x", &hosts, confirmation);
+        mapping.party_signing_keys = Some(signing_keys(3, signing));
+        Ok(mapping)
+    }
+
+    /// An invitation that named two different thresholds is signed when the
+    /// proposal carries exactly those two, each in its own place.
+    #[test]
+    fn accepts_the_two_thresholds_the_invitation_named() -> Result {
+        three_members_at(1, Some(3))?.check_p2p_thresholds(&three_host_mapping(3, 1)?)
+    }
+
+    /// Each threshold is held to its own accepted value, so neither can be
+    /// moved, nor the two swapped.
+    #[test]
+    fn refuses_thresholds_the_invitation_did_not_name() -> Result {
+        let expectations = three_members_at(1, Some(3))?;
+        for (confirmation, signing, expected) in [
+            (2, 1, "confirmation threshold 2 differs from the accepted 3"),
+            (3, 3, "signing threshold 3 differs from the accepted 1"),
+            (1, 3, "confirmation threshold 1 differs from the accepted 3"),
+        ] {
+            let error = expectations
+                .check_p2p_thresholds(&three_host_mapping(confirmation, signing)?)
+                .err()
+                .map(|e| e.to_string())
+                .unwrap_or_default();
+            assert!(error.contains(expected), "unexpected error: {error}");
+        }
+        Ok(())
+    }
+
+    /// An invitation without a confirmation threshold comes from a
+    /// coordinator that always proposes one value, so a differing pair is
+    /// refused. A peer built before the field applies the same rule to every
+    /// invitation, so it refuses a differing pair too.
+    #[test]
+    fn an_invitation_without_a_confirmation_threshold_refuses_a_differing_pair() -> Result {
+        let expectations = three_members_at(1, None)?;
+        expectations.check_p2p_thresholds(&three_host_mapping(1, 1)?)?;
+
+        let error = expectations
+            .check_p2p_thresholds(&three_host_mapping(3, 1)?)
+            .err()
+            .map(|e| e.to_string())
+            .unwrap_or_default();
+        assert!(
+            error.contains("confirmation threshold 3 differs from the accepted 1"),
+            "unexpected error: {error}"
+        );
+        Ok(())
+    }
+
+    /// Peer runs accepted before the field existed have no confirmation
+    /// threshold in their stored invitation, and still load.
+    #[test]
+    fn a_stored_invitation_without_a_confirmation_threshold_still_decodes() -> Result {
+        let before: PeerRunConfig = serde_json::from_str(
+            r#"{"prefix":null,"participants":[],"dar_filenames":[],"dar_hashes":[],
+               "participant_id":null,"new_participant_id":null,"new_threshold":2,
+               "previous_threshold":3,"package_names":[],"contract_intents":[]}"#,
+        )?;
+        assert_eq!(before.new_threshold, Some(2));
+        assert_eq!(before.confirmation_threshold, None);
+
+        let after: PeerRunConfig =
+            serde_json::from_str(r#"{"new_threshold":2,"confirmation_threshold":3}"#)?;
+        assert_eq!(after.confirmation_threshold, Some(3));
         Ok(())
     }
 

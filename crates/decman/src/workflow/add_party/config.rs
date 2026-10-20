@@ -7,6 +7,7 @@ use crate::{
     workflow::{
         party_replication::{ArtifactStore, ReplicationArtifacts, ReplicationTarget},
         storage::artifact_kinds,
+        thresholds::PartyThresholds,
     },
 };
 
@@ -30,8 +31,14 @@ pub struct AddPartyConfig {
     /// Participant ID of the new member
     pub new_participant_id: CantonId,
 
-    /// New threshold after the add (configured by user)
+    /// New namespace threshold after the add (configured by user)
     pub new_threshold: i32,
+
+    /// Confirmation threshold after the add, set when the party's two
+    /// thresholds differ. `None` means the same as `new_threshold`, which is
+    /// also what configs persisted before this field existed decode to.
+    #[serde(default)]
+    pub confirmation_threshold: Option<i32>,
 
     /// The party's threshold before the add. Display-only — carried through
     /// to the workflow run card so the operator sees "old → new". Defaults to
@@ -50,6 +57,7 @@ impl AddPartyConfig {
         decentralized_party_id: CantonId,
         new_participant_id: CantonId,
         new_threshold: i32,
+        confirmation_threshold: Option<i32>,
         previous_threshold: i32,
         instance_name: String,
     ) -> Self {
@@ -57,10 +65,16 @@ impl AddPartyConfig {
             decentralized_party_id,
             new_participant_id,
             new_threshold,
+            confirmation_threshold,
             previous_threshold,
             instance_name,
             _p: PhantomData,
         }
+    }
+
+    /// The thresholds the proposals write.
+    pub fn thresholds(&self) -> PartyThresholds {
+        PartyThresholds::new(self.new_threshold, self.confirmation_threshold)
     }
 
     /// Namespace key name for the new member — same derivation onboarding
@@ -87,5 +101,28 @@ impl AddPartyConfig {
             ADD_PARTY_REPLICATION_ARTIFACTS,
             ArtifactStore::WorkflowRun,
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A run persisted before the confirmation threshold existed resumes
+    /// with both thresholds equal, as it was started.
+    #[test]
+    fn a_config_persisted_before_the_confirmation_threshold_still_decodes() -> crate::error::Result
+    {
+        let config: AddPartyConfig = serde_json::from_value(serde_json::json!({
+            "decentralized_party_id": format!("xyz::1220{}", "ab".repeat(32)),
+            "new_participant_id": format!("p4::1220{}", "cd".repeat(32)),
+            "new_threshold": 2,
+            "previous_threshold": 2,
+            "instance_name": "xyz-add-party-1",
+            "_p": null,
+        }))?;
+        assert_eq!(config.confirmation_threshold, None);
+        assert_eq!(config.thresholds(), PartyThresholds::new(2, Some(2)));
+        Ok(())
     }
 }

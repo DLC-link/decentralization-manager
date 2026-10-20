@@ -24,6 +24,9 @@ interface ChangeThresholdDialogProps {
   partyId: string;
   currentThreshold: number;
   currentOwnerCount: number;
+  /// Absent when the party list predates the field.
+  currentConfirmationThreshold?: number;
+  currentHostCount: number;
 }
 
 export const ChangeThresholdDialog = ({
@@ -33,8 +36,16 @@ export const ChangeThresholdDialog = ({
   partyId,
   currentThreshold,
   currentOwnerCount,
+  currentConfirmationThreshold,
+  currentHostCount,
 }: ChangeThresholdDialogProps) => {
   const [newThreshold, setNewThreshold] = useState(currentThreshold);
+  // Follows the new threshold until the operator edits it; only a different
+  // value is sent.
+  const [confirmationEdit, setConfirmationEdit] = useState<number | null>(
+    null,
+  );
+  const confirmationThreshold = confirmationEdit ?? newThreshold;
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [status, setStatus] = useState<ChangeThresholdStatusResponse | null>(
@@ -46,6 +57,7 @@ export const ChangeThresholdDialog = ({
     // Seed with the current threshold each time the dialog opens with fresh
     // party data; the user edits from there.
     setNewThreshold(currentThreshold);
+    setConfirmationEdit(null);
   }, [currentThreshold, open]);
 
   useEffect(() => {
@@ -94,8 +106,13 @@ export const ChangeThresholdDialog = ({
     };
   }, [status?.status, pollStatus]);
 
-  const unchanged = newThreshold === currentThreshold;
+  const currentConfirmation = currentConfirmationThreshold ?? currentThreshold;
+  const unchanged =
+    newThreshold === currentThreshold &&
+    confirmationThreshold === currentConfirmation;
   const outOfRange = newThreshold < 1 || newThreshold > currentOwnerCount;
+  const confirmationOutOfRange =
+    confirmationThreshold < 1 || confirmationThreshold > currentHostCount;
 
   const handleSubmit = async () => {
     setLoading(true);
@@ -105,6 +122,9 @@ export const ChangeThresholdDialog = ({
       decentralized_party_id: partyId,
       new_threshold: newThreshold,
       previous_threshold: currentThreshold,
+      ...(confirmationThreshold !== newThreshold
+        ? { confirmation_threshold: confirmationThreshold }
+        : {}),
     };
 
     try {
@@ -166,8 +186,9 @@ export const ChangeThresholdDialog = ({
       <DialogContent>
         <Box sx={{ display: "flex", flexDirection: "column", gap: 2, mt: 1 }}>
           <Typography variant="body2" color="text.secondary">
-            Change the signing threshold of this decentralized party — how many
-            of its {currentOwnerCount} owners must sign topology changes.
+            The threshold is how many of the party's {currentOwnerCount} owners
+            must sign a topology change. The confirmation threshold is how many
+            of its {currentHostCount} hosts must confirm a transaction.
             Membership is unchanged. This action requires coordination with the
             other participants.
           </Typography>
@@ -218,10 +239,37 @@ export const ChangeThresholdDialog = ({
             }}
             helperText={
               unchanged
-                ? "Pick a value different from the current threshold"
+                ? "Change the threshold or the confirmation threshold"
                 : outOfRange
                   ? `Must be between 1 and ${currentOwnerCount}`
                   : `New threshold (max: ${currentOwnerCount})`
+            }
+          />
+
+          <TextField
+            label="Confirmation Threshold"
+            type="number"
+            value={confirmationThreshold}
+            onChange={(e) =>
+              setConfirmationEdit(Math.max(1, parseInt(e.target.value) || 1))
+            }
+            fullWidth
+            size="small"
+            disabled={loading}
+            error={unchanged || confirmationOutOfRange}
+            slotProps={{
+              htmlInput: { min: 1, max: currentHostCount },
+              input: {
+                endAdornment: fieldHelpAdornment(
+                  "How many of the nodes hosting the party must confirm each of its transactions. Defaults to the new threshold.",
+                  "Help for Confirmation Threshold",
+                ),
+              },
+            }}
+            helperText={
+              confirmationOutOfRange
+                ? `Must be between 1 and ${currentHostCount}`
+                : `Hosts that must confirm a transaction. Now ${currentConfirmation} of ${currentHostCount}.`
             }
           />
 
@@ -276,7 +324,9 @@ export const ChangeThresholdDialog = ({
           <Button
             onClick={handleSubmit}
             variant="contained"
-            disabled={loading || unchanged || outOfRange}
+            disabled={
+              loading || unchanged || outOfRange || confirmationOutOfRange
+            }
           >
             {loading ? <CircularProgress size={20} /> : "Change Threshold"}
           </Button>

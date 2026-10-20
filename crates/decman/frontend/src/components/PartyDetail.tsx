@@ -503,6 +503,15 @@ export const PartyDetail = ({
           helpText="Number of decentralized-namespace owners that must sign topology changes for this party (separate from the governance threshold)."
           testId="party-threshold"
         />
+        {party.confirmation_threshold != null && (
+          <StatCard
+            label="Confirmation Threshold"
+            value={party.confirmation_threshold}
+            unit={`of ${party.participants.length}`}
+            helpText="Number of hosting participants that must confirm each transaction for this party."
+            testId="party-confirmation-threshold"
+          />
+        )}
         {governanceState && (
           <StatCard
             label="Gov Threshold"
@@ -892,6 +901,8 @@ export const PartyDetail = ({
         partyId={party.party_id}
         currentThreshold={party.threshold}
         currentOwnerCount={party.owners.length}
+        currentConfirmationThreshold={party.confirmation_threshold}
+        currentHostCount={party.participants.length}
       />
 
       <ContractsDialog

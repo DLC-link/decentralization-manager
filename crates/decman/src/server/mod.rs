@@ -621,6 +621,7 @@ impl WorkflowTriggers {
         let mut new_participant = None;
         let mut new_threshold = None;
         let mut previous_threshold = None;
+        let mut confirmation_threshold = None;
         let mut dec_party_id = None;
         let mut package_names = Vec::new();
         let mut contract_intents = Vec::new();
@@ -631,6 +632,7 @@ impl WorkflowTriggers {
                 prefix = Some(p.prefix);
                 participants = p.participants;
                 new_threshold = p.threshold;
+                confirmation_threshold = p.confirmation_threshold;
                 workflow_instance = p.workflow_instance;
             }
             InvitationMeta::Dars(p) => {
@@ -643,6 +645,7 @@ impl WorkflowTriggers {
                 kicked_participant = Some(p.kicked_participant);
                 new_threshold = Some(p.new_threshold);
                 previous_threshold = Some(p.previous_threshold);
+                confirmation_threshold = p.confirmation_threshold;
                 dec_party_id = Some(p.dec_party_id);
                 participants = p.participants;
                 workflow_instance = p.workflow_instance;
@@ -658,6 +661,7 @@ impl WorkflowTriggers {
                 new_participant = Some(p.new_participant);
                 new_threshold = Some(p.new_threshold);
                 previous_threshold = Some(p.previous_threshold);
+                confirmation_threshold = p.confirmation_threshold;
                 dec_party_id = Some(p.dec_party_id);
                 participants = p.participants;
                 workflow_instance = p.workflow_instance;
@@ -665,6 +669,7 @@ impl WorkflowTriggers {
             InvitationMeta::ChangeThreshold(p) => {
                 new_threshold = Some(p.new_threshold);
                 previous_threshold = Some(p.previous_threshold);
+                confirmation_threshold = p.confirmation_threshold;
                 dec_party_id = Some(p.dec_party_id);
                 participants = p.participants;
                 workflow_instance = p.workflow_instance;
@@ -699,6 +704,7 @@ impl WorkflowTriggers {
             new_participant,
             new_threshold,
             previous_threshold,
+            confirmation_threshold,
             dec_party_id,
             package_names,
             contract_intents,

@@ -365,7 +365,8 @@ curl http://localhost:8081/party-config/decparty::1220abc...
    select the peers to invite
 4. Optionally adjust the **Threshold** — how many of the party's owners must sign
    topology changes. It defaults to a majority (`ceil(owners / 2)`, shown and
-   editable in the dialog)
+   editable in the dialog). The **Confirmation threshold** is how many hosting
+   nodes must confirm each transaction. It defaults to the threshold
 5. The coordinator invites peers and orchestrates:
    - Cryptographic key generation (namespace + Daml signing keys)
    - Topology proposal creation (DNS and P2P mappings)
@@ -408,10 +409,11 @@ for the prerequisites and for what to do when a run fails.
 
 ### Changing the Threshold (Change Threshold)
 
-1. From a party card, click **Change Threshold** and enter the new value
+1. From a party card, click **Change Threshold** and enter the new threshold,
+   the new confirmation threshold, or both
 2. The coordinator orchestrates:
    - Export current namespace state
-   - Re-issue the DNS and P2P mappings with the new threshold (same members)
+   - Re-issue the DNS and P2P mappings with the new thresholds (same members)
    - Multi-party signing by a quorum of the current owners
    - Proposal submission
 

@@ -78,6 +78,35 @@ describe("Threshold changes in the feed", () => {
     expect(struckThrough()).toEqual([]);
   });
 
+  it("shows the confirmation threshold a change-threshold invitation asks for", () => {
+    renderFeed({
+      pendingInvitations: [
+        {
+          id: "change-threshold-invite",
+          invitation_type: "ChangeThreshold",
+          coordinator_pubkey: "c0ffee".repeat(8),
+          received_at: 1_700_000_000,
+          participants: [],
+          dar_filenames: [],
+          dar_hashes: [],
+          package_names: [],
+          contract_intents: [],
+          dec_party_id: partyId,
+          previous_threshold: 2,
+          new_threshold: 1,
+          confirmation_threshold: 3,
+        },
+      ],
+    });
+
+    openReview();
+
+    expect(thresholdRow()).toBe("2 → 1");
+    expect(screen.getByText("Confirmation").nextElementSibling?.textContent).toBe(
+      "3",
+    );
+  });
+
   it("shows the old threshold on a Kick run without a strikethrough", () => {
     renderFeed({
       workflowRuns: [

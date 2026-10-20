@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 
 use canton_proto_rs::com::digitalasset::canton::{
-    crypto::v30::{SigningKeyUsage, SigningKeysWithThreshold},
+    crypto::v30::SigningKeyUsage,
     protocol::v30::{
         DecentralizedNamespaceDefinition, PartyToParticipant, TopologyMapping, enums,
         party_to_participant::{HostingParticipant, hosting_participant},
@@ -25,6 +25,7 @@ use crate::{
         proposal_store,
         signing_keys::{adopt_legacy_signing_keys, own_namespace_key},
         storage::{WorkflowStorage, artifact_kinds, identity_kinds},
+        thresholds::{PartyThresholds, ensure_carried_from},
         topology,
     },
 };
@@ -46,8 +47,10 @@ use crate::{
 /// - new `PartyToParticipant`: existing participants + the new member with
 ///   `Confirmation` permission and the **Onboarding marker** set (suspends
 ///   the party on the new member until the ACS import lands and the flag is
-///   cleared), party signing keys merged with the new member's Daml key —
-///   persisted as `ADD_PARTY_P2P_PROPOSAL`
+///   cleared), party signing keys merged with the new member's Daml key, and
+///   the confirmation threshold set by
+///   [`carried_confirmation_threshold`](crate::workflow::thresholds::carried_confirmation_threshold)
+///   — persisted as `ADD_PARTY_P2P_PROPOSAL`
 pub async fn create_proposals(
     config: &NodeConfig,
     storage: &SqlitePool,
@@ -124,7 +127,8 @@ pub async fn create_proposals(
     )
     .await?;
 
-    let new_threshold = add_party_config.new_threshold;
+    let thresholds = add_party_config.thresholds();
+    let new_threshold = thresholds.namespace;
     let new_namespace_def = if rehost {
         if new_threshold != current_namespace_def.threshold {
             anyhow::bail!(
@@ -164,6 +168,14 @@ pub async fn create_proposals(
         // until the ACS import lands and the flag-clearing round removes it.
         onboarding: Some(hosting_participant::Onboarding {}),
     });
+    ensure_carried_from(
+        PartyThresholds::new(
+            current_namespace_def.threshold,
+            Some(i32::try_from(current_p2p.threshold)?),
+        ),
+        new_participants.len(),
+        thresholds,
+    )?;
 
     // A party onboarded before Canton 3.4 carries no inline signing keys: they
     // sit in the deprecated PartyToKeyMapping instead. Merging into that empty
@@ -216,15 +228,8 @@ pub async fn create_proposals(
         );
     }
 
-    let new_p2p = PartyToParticipant {
-        party: party_id.to_string(),
-        threshold: new_threshold.try_into()?,
-        participants: new_participants,
-        party_signing_keys: Some(SigningKeysWithThreshold {
-            keys: signing_keys,
-            threshold: new_threshold.try_into()?,
-        }),
-    };
+    let new_p2p =
+        thresholds.party_to_participant(party_id.to_string(), new_participants, signing_keys)?;
 
     // Publishing the P2P proposal before submit (below) is safe only while it
     // adds the new member as a host, so check that before anything is signed.
@@ -545,6 +550,7 @@ mod tests {
             threshold: 1,
             updated_at: 0,
             my_owner_key: None,
+            confirmation_threshold: None,
         })
         .await?;
         tx.replace_dec_party_participants(

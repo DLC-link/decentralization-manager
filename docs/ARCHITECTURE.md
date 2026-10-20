@@ -42,6 +42,7 @@ The system defaults to a majority threshold for both topology changes and govern
 | Operation | Threshold |
 |-----------|-----------|
 | Topology changes (DNS/P2P) | `ceil(n/2)` of namespace owners must sign by default (bare majority for even `n`); set at creation and adjustable via the change-threshold workflow |
+| Transaction confirmation (P2P) | Hosting participants that must confirm; equal to the namespace threshold unless set apart at creation or by change-threshold. Kick and add-party keep the two equal when they already are |
 | Governance actions | Configurable per `GovernanceRules` contract |
 
 ### Key Types
@@ -205,10 +206,11 @@ everything that follows (`workflow::validation::PeerExpectations`).
   cannot be used to drive a kick.
 - Topology proposals decode to the expected mapping kind, target the accepted
   party, carry exactly the accepted member set, keep this node's namespace
-  among the owners, and use the accepted threshold. For onboarding — where the
-  party does not exist yet — the peer instead checks that the decentralized
-  namespace really is the hash of the proposed owner set, and that the P2P
-  proposal is for the namespace it signed in the DNS step.
+  among the owners, and use the accepted namespace and confirmation
+  thresholds. For onboarding — where the party does not exist yet — the peer
+  instead checks that the decentralized namespace really is the hash of the
+  proposed owner set, and that the P2P proposal is for the namespace it signed
+  in the DNS step.
 - For kick / add-party / change-threshold, the peer reads the party's current
   namespace definition and `PartyToParticipant` from the synchronizer and
   requires each proposal to be exactly the expected change: change-threshold
@@ -293,6 +295,10 @@ and they are load-bearing enough to state rather than imply:
   peer then checks filenames only and logs a warning, so a network mid-upgrade
   keeps working. This is the only leniency left for an absent field, alongside
   the onboarding threshold; every other absent pin fails closed.
+- **An older peer refuses two different thresholds.** A peer built before the
+  confirmation threshold holds both P2P thresholds to the namespace threshold.
+  It refuses to sign any proposal that sets them apart. A proposal that keeps
+  them equal is exactly what it expects.
 
 Governance confirm/execute is not covered here and does not need to be: the peer
 builds those commands locally and the Daml layer re-validates them against the
@@ -541,7 +547,9 @@ external party. It fails at `ExportState` for any other party type.
 
 ### Change Threshold
 
-Changes the signing threshold of an existing decentralized party's namespace.
+Changes the namespace threshold, the confirmation threshold, or both, of an
+existing decentralized party. An omitted confirmation threshold takes the
+namespace one.
 
 **Steps:**
 

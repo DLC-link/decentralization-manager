@@ -521,6 +521,22 @@ const InvitationCard = ({
               </Typography>
             </Box>
           )}
+          {invitation.confirmation_threshold != null && (
+            <Box sx={{ display: "flex", alignItems: "baseline", gap: 1 }}>
+              <Typography
+                variant="caption"
+                color="text.secondary"
+                sx={{ minWidth: 96 }}
+              >
+                Confirmation
+              </Typography>
+              <Typography variant="body2">
+                <Box component="span" sx={{ fontWeight: 600 }}>
+                  {invitation.confirmation_threshold}
+                </Box>
+              </Typography>
+            </Box>
+          )}
           {invitation.participants && invitation.participants.length > 0 && (
             <Box sx={{ display: "flex", alignItems: "baseline", gap: 1 }}>
               <Typography
