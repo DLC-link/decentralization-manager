@@ -48,6 +48,11 @@ export const getActionTypeOptions = (network?: Network): ActionTypeOption[] => [
     hidden: true,
   },
   {
+    value: "governance_set_disclosure_observers",
+    label: "Set Disclosure Observers",
+    hidden: true,
+  },
+  {
     value: "credential_offer_free",
     label: "Credential: Offer Free",
     hidden: true,
@@ -135,6 +140,18 @@ export const formatActionDetails = (
           after: formatMicroseconds(action.new_timeout_microseconds),
         },
       ];
+    case "governance_set_disclosure_observers": {
+      const observers = action.disclosure_observers ?? [];
+      return [
+        {
+          label: "Observers",
+          after:
+            observers.length > 0
+              ? observers.map(truncatePartyId).join(", ")
+              : "None",
+        },
+      ];
+    }
     case "credential_offer_free":
       return [
         { label: "Holder", after: truncatePartyId(action.holder) },

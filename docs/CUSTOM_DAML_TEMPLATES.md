@@ -361,7 +361,7 @@ aliases in DecMan and rebuilding it.
 
 ## Bootstrapping a `GovernanceRules` for your domain
 
-If your decentralized party doesn't yet have a `GovernanceRules` contract, create one through the `/contracts` workflow before any custom proposal can be confirmed. The template lives in `governance-core` and takes **five** fields, in this order (see [`Governance.Rules`](../daml/governance-core/daml/Governance/Rules.daml)):
+If your decentralized party doesn't yet have a `GovernanceRules` contract, create one through the `/contracts` workflow before any custom proposal can be confirmed. The template lives in `governance-core` and takes **six** fields, in this order (see [`Governance.Rules`](../daml/governance-core/daml/Governance/Rules.daml)):
 
 | # | Field | Daml type | Field-type JSON |
 |---|---|---|---|
@@ -370,6 +370,7 @@ If your decentralized party doesn't yet have a `GovernanceRules` contract, creat
 | 3 | `threshold` | `Int` | `{ "type": "int64", "value": N }` (or `{ "type": "governance_threshold" }` for the calculated majority) |
 | 4 | `actionConfirmationTimeout` | `RelTime` | `{ "type": "rel_time", "microseconds": ... }` |
 | 5 | `additionalProposers` | `Optional (Set Party)` | `{ "type": "none" }` (start empty; grow later via the self-action below) |
+| 6 | `disclosureObservers` | `Optional (Set Party)` | `{ "type": "none" }` (only parties that host the governance party see the contract) |
 
 > ⚠️ Do **not** use `{ "type": "attestors_set" }` for `members`. Despite the name, that variant emits a raw `GenMap<Party, Unit>` (used by some CBTC-style templates), not the `DA.Set.Types:Set Party` record wrapper that `members` expects. Always use `party_set` for `Set Party` fields. See the field-type table below.
 
@@ -394,13 +395,14 @@ curl -X POST http://coordinator:8080/contracts \
         { "type": "party_set", "parties": ["member1::1220...", "member2::1220...", "member3::1220..."] },
         { "type": "int64", "value": 2 },
         { "type": "rel_time", "microseconds": 1800000000 },
+        { "type": "none" },
         { "type": "none" }
       ]
     }]
   }'
 ```
 
-The 5th field is **not** optional in the JSON — leaving it off produces a malformed `Optional` value at submission time. Use `{ "type": "none" }` for "no additional proposers".
+The 5th field is **not** optional in the JSON — leaving it off produces a malformed `Optional` value at submission time. Use `{ "type": "none" }` for "no additional proposers". Send the 6th field as `{ "type": "none" }` too when there are no observers. A node with only governance-core 0.1.0 drops a trailing `None`, but refuses a `Some`.
 
 Once this is on the ledger, every member node sees the `GovernanceRules` contract id under `GET /governance/state?party_id=...` and can reuse it for every subsequent custom action — see the callout near the top of this guide.
 

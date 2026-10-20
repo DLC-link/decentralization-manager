@@ -1358,6 +1358,12 @@ pub struct GovernanceState {
     /// predates the field.
     #[serde(default)]
     pub additional_proposers: Vec<CantonId>,
+    /// Parties that observe the rules contract without hosting the governance
+    /// party (`GovernanceRules.disclosureObservers`). Empty when the rules
+    /// contract sets none or predates the field; `default` accepts a response
+    /// from a node that predates it.
+    #[serde(default)]
+    pub disclosure_observers: Vec<CantonId>,
     // Optional on the wire: older governance rules contracts predate this field.
     // `skip_serializing_if` omits it when None and `default` accepts it missing;
     // ts-rs renders it as an optional TS property via the type's `optional_fields`.
@@ -1877,6 +1883,7 @@ mod tests {
             members: vec![party("m1")?],
             threshold: 2,
             additional_proposers: vec![],
+            disclosure_observers: vec![],
             action_confirmation_timeout_microseconds: None,
             package_ref: None,
             out_of_date: false,
@@ -1887,14 +1894,15 @@ mod tests {
         assert_eq!(back.contract_id, state.contract_id);
         assert_eq!(back.package_ref, None);
 
-        // A node that predates `additional_proposers` omits it entirely.
+        // A node that predates `additional_proposers` or
+        // `disclosure_observers` omits it entirely.
         let mut older = serde_json::to_value(&state)?;
-        older
-            .as_object_mut()
-            .expect("an object")
-            .remove("additional_proposers");
+        let fields = older.as_object_mut().expect("an object");
+        fields.remove("additional_proposers");
+        fields.remove("disclosure_observers");
         let back: GovernanceState = serde_json::from_value(older)?;
         assert!(back.additional_proposers.is_empty());
+        assert!(back.disclosure_observers.is_empty());
 
         let json = serde_json::to_string(&GovernanceStateResponse { state: None })?;
         let back: GovernanceStateResponse = serde_json::from_str(&json)?;

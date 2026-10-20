@@ -60,6 +60,9 @@ pub struct RulesState {
     pub timeout_micros: Option<i64>,
     /// Parties that may propose but not confirm or execute.
     pub additional_proposers: Vec<CantonId>,
+    /// Parties that observe the rules contract without hosting the
+    /// governance party.
+    pub disclosure_observers: Vec<CantonId>,
 }
 
 /// Parse a confirmation contract's action, confirming party, and timestamps
@@ -205,6 +208,15 @@ pub fn extract_governance_state(created: &CreatedEvent) -> Option<RulesState> {
         .filter_map(|s| s.parse().ok())
         .collect();
 
+    // disclosureObservers : Optional (Set Party). Rules contracts created
+    // under governance-core 0.1.0 lack the field and read as no observers.
+    let disclosure_observers: Vec<CantonId> = record_value(record, "disclosureObservers")
+        .and_then(extract_optional_party_set)
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|s| s.parse().ok())
+        .collect();
+
     Some(RulesState {
         contract_id: created.contract_id.clone(),
         governance_party,
@@ -212,6 +224,7 @@ pub fn extract_governance_state(created: &CreatedEvent) -> Option<RulesState> {
         threshold,
         timeout_micros,
         additional_proposers,
+        disclosure_observers,
     })
 }
 
@@ -689,7 +702,8 @@ mod tests {
 
     use super::*;
     use crate::framework::encode::{
-        field, make_contract_id, make_int64, make_party, make_record, make_text, make_variant,
+        field, make_contract_id, make_int64, make_optional_party_set, make_party, make_party_set,
+        make_record, make_text, make_variant,
     };
 
     /// A `Governance_SetThreshold` action in the CBTC
@@ -1049,6 +1063,39 @@ mod tests {
         assert!(parsed.additional_proposers.is_empty());
         let parsed = extract_governance_state(&rules(None)).expect("parses");
         assert!(parsed.additional_proposers.is_empty());
+    }
+
+    #[test]
+    fn rules_state_reads_disclosure_observers() {
+        let rules = |observers: Option<Value>| {
+            let mut fields = vec![
+                field("governanceParty", make_party(GOV)),
+                field("members", make_party_set(&[ALICE])),
+                field("threshold", make_int64(1)),
+                field(
+                    "additionalProposers",
+                    make_optional_party_set(Some(&[ALICE])),
+                ),
+            ];
+            if let Some(value) = observers {
+                fields.push(field("disclosureObservers", value));
+            }
+            created_event("rules-do", record_of(fields), 1_700_001_000)
+        };
+
+        let parsed = extract_governance_state(&rules(Some(make_optional_party_set(Some(&[BOB])))))
+            .expect("parses");
+        assert_eq!(parsed.disclosure_observers, vec![cid(BOB)]);
+        assert_eq!(parsed.additional_proposers, vec![cid(ALICE)]);
+
+        // None, and a 0.1.0 rules contract that has no such field.
+        let none: Option<&[&str]> = None;
+        let parsed =
+            extract_governance_state(&rules(Some(make_optional_party_set(none)))).expect("parses");
+        assert!(parsed.disclosure_observers.is_empty());
+        let parsed = extract_governance_state(&rules(None)).expect("parses");
+        assert!(parsed.disclosure_observers.is_empty());
+        assert_eq!(parsed.members, vec![cid(ALICE)]);
     }
 
     #[test]

@@ -1251,6 +1251,7 @@ async fn fetch_governance_state_for_template(
             members: rules.members,
             threshold: rules.threshold,
             additional_proposers: rules.additional_proposers,
+            disclosure_observers: rules.disclosure_observers,
             action_confirmation_timeout_microseconds: rules.timeout_micros,
             // Both callers overwrite these with the package the contract was
             // actually found under, so the parse says nothing about them.
@@ -3539,6 +3540,7 @@ mod tests {
             members: members.iter().map(|p| (*p).clone()).collect(),
             threshold: 1,
             additional_proposers: additional_proposers.iter().map(|p| (*p).clone()).collect(),
+            disclosure_observers: vec![],
             action_confirmation_timeout_microseconds: None,
             package_ref: None,
             out_of_date: false,

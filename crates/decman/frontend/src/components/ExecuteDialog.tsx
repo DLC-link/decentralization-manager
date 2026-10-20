@@ -27,6 +27,7 @@ const ACTION_TYPE_LABELS: Record<string, string> = {
   governance_remove_member: "Remove Governance Member",
   governance_set_threshold: "Set Governance Threshold",
   governance_set_timeout: "Set Governance Timeout",
+  governance_set_disclosure_observers: "Set Disclosure Observers",
   utility_create_provider_request: "Create Provider Request",
   utility_create_user_request: "Create User Request",
   utility_setup: "Utility Setup",

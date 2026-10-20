@@ -59,6 +59,7 @@ createTestGovernance parties =
     threshold = 2
     actionConfirmationTimeout = minutes 30
     additionalProposers = None
+    disclosureObservers = None
 
 -- | Provision a UserService for the governance party via multi-party submit.
 -- Stands in for the full credential-app onboarding chain. The governance party

@@ -90,6 +90,7 @@ createTestGovernance parties =
     threshold = 2
     actionConfirmationTimeout = minutes 30
     additionalProposers = None
+    disclosureObservers = None
 
 -- | Confirm and execute an interface action in one go.
 confirmAndExecute : TestParties -> ContractId GovernanceRules -> ContractId GovernableAction -> [Party] -> Party -> Script ExecuteConfirmedActionResult

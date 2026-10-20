@@ -1251,7 +1251,7 @@ pub async fn propose_action(
 /// ledger work happens.
 ///
 /// The inline confirm/execute choices serialize a `GovernanceSelfAction`, so
-/// only the six self-management variants fit. Everything else in `ActionType`
+/// only the self-management variants fit. Everything else in `ActionType`
 /// exists for the read path and belongs on `POST /governance/propose`. Caught
 /// here it is a clear 400; left to the serializer it would be a 500.
 ///

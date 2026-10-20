@@ -12,6 +12,7 @@ const state = (members: string[]): GovernanceState => ({
   members,
   threshold: 1,
   additional_proposers: [],
+  disclosure_observers: [],
   out_of_date: false,
 });
 

@@ -697,10 +697,13 @@ GovernanceRules {
     threshold                : Int                    -- Minimum confirmations required (1 <= threshold <= |members|)
     actionConfirmationTimeout : RelTime               -- Confirmation validity period (minimum 10 seconds)
     additionalProposers      : Optional (Set Party)   -- Allowlist of non-member proposers; None means "no allowlist"
+    disclosureObservers      : Optional (Set Party)   -- Opt-in observers of this contract; None means "no observers"
 }
 ```
 
 The `additionalProposers` field (added in `v1`) lets a committee grant propose-only rights to parties that are not full voting members — for example, an admin console, a monitoring script, or a regulatory officer. The authoritative on-chain proposer set is `members ∪ fromOptional Set.empty additionalProposers`. `GovernanceRules_ConfirmAction` enforces that every proposal's `proposer` is in this set; outsider proposals are rejected at confirm time even if a member tries to confirm them. The two `SelfAction_*AdditionalProposer` variants below mutate this allowlist under the same threshold consensus as committee changes.
+
+The `disclosureObservers` field (added in governance-core 0.2.0, #165) names parties that observe the rules contract. Members see it because they host the governance party. An observer sees it without hosting that party, for example an additional proposer on another participant. Observing grants no right to confirm or execute. Rules contracts created under 0.1.0 read as `None`. They gain observers only when `SelfAction_SetDisclosureObservers` replaces them.
 
 The contract provides two distinct paths for governance actions:
 
@@ -716,6 +719,7 @@ Self-management actions modify the `GovernanceRules` contract itself. They use a
 | `SelfAction_SetTimeout` | updatedTimeout | Change the confirmation expiry timeout |
 | `SelfAction_AddAdditionalProposer` | additionalProposer | Grant propose-only rights to a non-member party |
 | `SelfAction_RemoveAdditionalProposer` | additionalProposer | Revoke propose-only rights from a party (normalizes the allowlist back to `None` when it becomes empty) |
+| `SelfAction_SetDisclosureObservers` | updatedDisclosureObservers | Replace the disclosure observers (an empty set normalizes to `None`) |
 
 Choices on `GovernanceRules` for self-management:
 - `GovernanceRules_ConfirmGovernanceAction` -- Submit a self-action confirmation

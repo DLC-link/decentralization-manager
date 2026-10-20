@@ -298,6 +298,10 @@ export const GovernanceSection = ({
   // re-seeds from the latest applied values.
   const userEditedThresholdRef = useRef(false);
   const userEditedTimeoutRef = useRef(false);
+  const userEditedObserversRef = useRef(false);
+  // One party id per line. The action replaces the whole set, so it starts
+  // from the current observers.
+  const [disclosureObserversText, setDisclosureObserversText] = useState("");
   // New fields for additional action types
   const [operatorParty, setOperatorParty] = useState(
     defaultOperatorParty || "",
@@ -483,6 +487,14 @@ export const GovernanceSection = ({
       setTimeoutMicroseconds(us);
     }
   }, [governanceState?.action_confirmation_timeout_microseconds]);
+
+  // And for the disclosure observers.
+  const currentObserversText = (governanceState?.disclosure_observers ?? []).join("\n");
+  useEffect(() => {
+    if (!userEditedObserversRef.current) {
+      setDisclosureObserversText(currentObserversText);
+    }
+  }, [currentObserversText]);
 
   // Fetch available services from ACS
   const fetchServices = useCallback(async () => {
@@ -1370,6 +1382,14 @@ export const GovernanceSection = ({
           type: "governance_set_timeout",
           new_timeout_microseconds: timeoutMicroseconds,
         };
+      case "governance_set_disclosure_observers": {
+        const observers = parsePartyLines(disclosureObserversText);
+        return {
+          type: "governance_set_disclosure_observers",
+          // Leaving the field out sends None, which clears the observers.
+          disclosure_observers: observers.length > 0 ? observers : undefined,
+        };
+      }
       case "utility_create_provider_request":
         return {
           type: "utility_create_provider_request",
@@ -1599,6 +1619,8 @@ export const GovernanceSection = ({
     // values that haven't loaded yet at reset time.
     userEditedThresholdRef.current = false;
     userEditedTimeoutRef.current = false;
+    userEditedObserversRef.current = false;
+    setDisclosureObserversText(currentObserversText);
     setNewThreshold(
       governanceState?.threshold != null
         ? Number(governanceState.threshold)
@@ -1623,7 +1645,13 @@ export const GovernanceSection = ({
       return;
     }
 
-    const action = buildActionFromForm();
+    let action: ActionType | null;
+    try {
+      action = buildActionFromForm();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Invalid action");
+      return;
+    }
     if (!action) {
       setError("Invalid action type");
       return;
@@ -2327,6 +2355,31 @@ export const GovernanceSection = ({
             }}
           />
         );
+      case "governance_set_disclosure_observers":
+        return (
+          <TextField
+            label="Disclosure Observers (one party id per line)"
+            value={disclosureObserversText}
+            onChange={(e) => {
+              userEditedObserversRef.current = true;
+              setDisclosureObserversText(e.target.value);
+            }}
+            size="small"
+            fullWidth
+            multiline
+            minRows={2}
+            maxRows={6}
+            helperText="This list replaces the current one. Leave it empty to remove every observer."
+            slotProps={{
+              input: {
+                endAdornment: fieldHelpAdornment(
+                  "Parties that can see the rules contract without hosting the governance party. Observers cannot confirm or execute actions.",
+                  "Help for Disclosure Observers",
+                ),
+              },
+            }}
+          />
+        );
       case "utility_create_provider_request":
       case "utility_create_user_request":
         return (
@@ -2932,7 +2985,7 @@ export const GovernanceSection = ({
                     if (opt.hidden && governanceType !== "core_self") return false;
                     if (governanceType === "core_self") {
                       // For governance-core, only show self-management actions
-                      const selfActions = ["governance_add_member", "governance_remove_member", "governance_set_threshold", "governance_set_timeout"];
+                      const selfActions = ["governance_add_member", "governance_remove_member", "governance_set_threshold", "governance_set_timeout", "governance_set_disclosure_observers"];
                       return selfActions.includes(opt.value);
                     }
                     return !opt.hidden;

@@ -30,6 +30,16 @@ expression: all_action_fixtures()
     "additional_proposer": "p1::1220c4010d6883f367c7f45d55b2449501620130f9b21e96379f17dea455ac7a5892"
   },
   {
+    "type": "governance_set_disclosure_observers",
+    "disclosure_observers": [
+      "o1::1220c4010d6883f367c7f45d55b2449501620130f9b21e96379f17dea455ac7a5892"
+    ]
+  },
+  {
+    "type": "governance_set_disclosure_observers",
+    "disclosure_observers": null
+  },
+  {
     "type": "utility_create_provider_request",
     "operator": "op::1220c4010d6883f367c7f45d55b2449501620130f9b21e96379f17dea455ac7a5892"
   },

@@ -17,11 +17,12 @@ use common::canton_id::CantonId;
 use crate::catalog::types::{deserialize_claim, deserialize_reltime};
 use crate::error::Error;
 use crate::framework::encode::{
-    field, make_int64, make_party, make_record, make_variant, serialize_reltime,
+    field, make_int64, make_optional_party_set, make_party, make_record, make_variant,
+    serialize_reltime,
 };
 use crate::framework::record::{
-    extract_contract_id, extract_int64, extract_list, extract_party_id, extract_record,
-    extract_text, get_field,
+    extract_contract_id, extract_int64, extract_list, extract_party_id, extract_party_set,
+    extract_record, extract_text, get_field,
 };
 use crate::framework::validate::{validate_threshold, validate_timeout};
 
@@ -51,6 +52,12 @@ pub enum ActionType {
     },
     GovernanceRemoveAdditionalProposer {
         additional_proposer: CantonId,
+    },
+    /// Replaces `GovernanceRules.disclosureObservers` with this set. `None`
+    /// clears it, and so does an empty set once the ledger normalizes it.
+    GovernanceSetDisclosureObservers {
+        #[serde(default)]
+        disclosure_observers: Option<Vec<CantonId>>,
     },
 
     // Utility Onboarding (4)
@@ -95,8 +102,8 @@ pub enum ActionType {
 impl ActionType {
     /// Serialize to a `GovernanceSelfAction` Daml variant.
     ///
-    /// Maps the six member-management `ActionType` variants to the
-    /// governance-core `GovernanceSelfAction` enum (different field names).
+    /// Maps the self-management `ActionType` variants to the governance-core
+    /// `GovernanceSelfAction` enum (different field names).
     pub fn to_self_proto(&self) -> Result<Value, Error> {
         match self {
             ActionType::GovernanceAddMember {
@@ -148,6 +155,15 @@ impl ActionType {
                 make_record(vec![field(
                     "additionalProposer",
                     make_party(additional_proposer),
+                )]),
+            )),
+            ActionType::GovernanceSetDisclosureObservers {
+                disclosure_observers,
+            } => Ok(make_variant(
+                "SelfAction_SetDisclosureObservers",
+                make_record(vec![field(
+                    "updatedDisclosureObservers",
+                    make_optional_party_set(disclosure_observers.as_deref()),
                 )]),
             )),
             _ => Err(Error::Encode(format!(
@@ -413,13 +429,20 @@ impl ActionType {
                     additional_proposer,
                 })
             }
+            "SelfAction_SetDisclosureObservers" => {
+                let disclosure_observers =
+                    extract_optional_party_ids(get_field(record, "updatedDisclosureObservers")?)?;
+                Ok(ActionType::GovernanceSetDisclosureObservers {
+                    disclosure_observers,
+                })
+            }
             other => Err(Error::decode(format!(
                 "Unknown GovernanceSelfAction constructor: {other}"
             ))),
         }
     }
 
-    /// True for the six `GovernanceSelfAction` variants — the only actions the
+    /// True for the `GovernanceSelfAction` variants — the only actions the
     /// inline (`core_self`) confirm/execute path can serialize.
     ///
     /// `ActionType` still models the utility / credential / DevNet variants
@@ -436,6 +459,7 @@ impl ActionType {
                 | ActionType::GovernanceSetTimeout { .. }
                 | ActionType::GovernanceAddAdditionalProposer { .. }
                 | ActionType::GovernanceRemoveAdditionalProposer { .. }
+                | ActionType::GovernanceSetDisclosureObservers { .. }
         )
     }
 
@@ -458,6 +482,27 @@ impl ActionType {
             _ => Ok(()),
         }
     }
+}
+
+/// Decode an `Optional (Set Party)`, keeping `None` apart from an empty set.
+/// Execution matches confirmations by value, so the two must not merge.
+fn extract_optional_party_ids(value: &Value) -> Result<Option<Vec<CantonId>>, Error> {
+    let Some(value::Sum::Optional(optional)) = &value.sum else {
+        return Err(Error::decode("Expected Optional value"));
+    };
+    let Some(set) = optional.value.as_deref() else {
+        return Ok(None);
+    };
+    extract_party_set(set)
+        .ok_or_else(|| Error::decode("Expected Set Party value"))?
+        .into_iter()
+        .map(|party| {
+            party
+                .parse()
+                .map_err(|e| Error::decode_from(format!("invalid party id `{party}`"), e))
+        })
+        .collect::<Result<Vec<_>, Error>>()
+        .map(Some)
 }
 
 #[cfg(test)]
@@ -688,9 +733,10 @@ mod tests {
     #[test]
     fn cbtc_form_covers_every_variant_it_can_carry() {
         // Guards against a variant added to `ActionType` without a fixture.
-        // Eleven of the thirteen variants reach this form: four
+        // Eleven of the fourteen variants reach this form: four
         // member-management, four utility, two credential and one DevNet.
-        // The two AdditionalProposer variants exist only in the self form.
+        // The two AdditionalProposer variants and SetDisclosureObservers
+        // exist only in the self form.
         assert_eq!(cbtc_form_fixtures().len(), 11);
     }
 
@@ -730,6 +776,15 @@ mod tests {
         let (ctor, record) = as_variant(&set_threshold);
         assert_eq!(ctor, "SelfAction_SetThreshold");
         assert_eq!(record_labels(record), ["updatedThreshold"]);
+
+        let set_observers = ActionType::GovernanceSetDisclosureObservers {
+            disclosure_observers: None,
+        }
+        .to_self_proto()
+        .expect("action encodes to the self form");
+        let (ctor, record) = as_variant(&set_observers);
+        assert_eq!(ctor, "SelfAction_SetDisclosureObservers");
+        assert_eq!(record_labels(record), ["updatedDisclosureObservers"]);
     }
 
     // ---- `validate` assertions ----
@@ -777,8 +832,8 @@ mod tests {
 
     // ---- `GovernanceSelfAction` codec round trip ----
 
-    /// The six member-management variants — the only ones that also exist in
-    /// the `GovernanceSelfAction` (self-management) form.
+    /// The member-management variants — the only ones that also exist in the
+    /// `GovernanceSelfAction` (self-management) form.
     fn self_encodable_fixtures() -> Vec<ActionType> {
         vec![
             ActionType::GovernanceAddMember {
@@ -798,6 +853,17 @@ mod tests {
             },
             ActionType::GovernanceRemoveAdditionalProposer {
                 additional_proposer: cid("p1"),
+            },
+            ActionType::GovernanceSetDisclosureObservers {
+                disclosure_observers: Some(vec![cid("o1"), cid("o2")]),
+            },
+            // An empty set and `None` are different Daml values, so both
+            // must survive the round trip as they are.
+            ActionType::GovernanceSetDisclosureObservers {
+                disclosure_observers: Some(vec![]),
+            },
+            ActionType::GovernanceSetDisclosureObservers {
+                disclosure_observers: None,
             },
         ]
     }

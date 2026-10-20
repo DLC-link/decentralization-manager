@@ -65,6 +65,7 @@ testAdditionalProposerProposalCanBeExecutedByMembers = script do
     threshold = 2
     actionConfirmationTimeout = minutes 30
     additionalProposers = Some (Set.singleton parties.outsider)
+    disclosureObservers = None
 
   proposalCid <- submit parties.outsider $ createCmd MockProposal with
     governanceParty = parties.governanceParty
@@ -169,6 +170,7 @@ testAdditionalProposerAcceptedAtConfirm = script do
     threshold = 2
     actionConfirmationTimeout = minutes 30
     additionalProposers = Some (Set.singleton parties.outsider)
+    disclosureObservers = None
 
   proposalCid <- submit parties.outsider $ createCmd MockProposal with
     governanceParty = parties.governanceParty

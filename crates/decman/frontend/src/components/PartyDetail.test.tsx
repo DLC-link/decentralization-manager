@@ -158,6 +158,7 @@ describe("PartyDetail governance membership", () => {
         members,
         threshold: 1,
         additional_proposers: [],
+        disclosure_observers: [],
         out_of_date: false,
       },
     });
@@ -202,6 +203,7 @@ describe("PartyDetail governance membership", () => {
         members: [status.member_party_id],
         threshold: 1,
         additional_proposers: [],
+        disclosure_observers: [],
         out_of_date: false,
       },
     };
