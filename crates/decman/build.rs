@@ -1,4 +1,4 @@
-use std::{path::Path, process::Command};
+use std::{path::Path, process::Command, time::SystemTime};
 
 fn main() {
     // The frontend's TypeScript wire types are generated from the Rust DTOs by
@@ -27,8 +27,8 @@ fn main() {
     build_frontend();
 }
 
-/// Install frontend deps (first run only) and build the Vite bundle that
-/// `rust-embed` embeds from `frontend/dist`.
+/// Install frontend deps when they are missing or stale, and build the Vite
+/// bundle that `rust-embed` embeds from `frontend/dist`.
 fn build_frontend() {
     println!("cargo:rerun-if-changed=frontend/src");
     println!("cargo:rerun-if-changed=frontend/index.html");
@@ -41,7 +41,11 @@ fn build_frontend() {
 
     let frontend_dir = Path::new("frontend");
 
-    if !frontend_dir.join("node_modules").exists() {
+    // npm records each install in `node_modules/.package-lock.json`. A lockfile
+    // newer than that record means a dependency changed since the last install,
+    // which otherwise surfaces only as TypeScript errors about missing modules.
+    let installed = frontend_dir.join("node_modules/.package-lock.json");
+    if is_older_than(&installed, &frontend_dir.join("package-lock.json")) {
         println!("cargo:info=Installing frontend dependencies...");
         let status = Command::new("npm")
             .args(["install"])
@@ -50,6 +54,11 @@ fn build_frontend() {
             .expect("Failed to run npm install");
 
         assert!(status.success(), "npm install failed");
+        // npm leaves the record untouched when nothing changed, which would
+        // repeat the install on every build.
+        if let Ok(file) = std::fs::File::options().write(true).open(&installed) {
+            file.set_modified(SystemTime::now()).ok();
+        }
     }
 
     println!("cargo:info=Building frontend...");
@@ -77,4 +86,14 @@ fn build_frontend() {
          Fix: run `just gen-types`, then build again.",
         generated_types.display()
     );
+}
+
+/// True when `path` is missing, or was modified before `reference`.
+fn is_older_than(path: &Path, reference: &Path) -> bool {
+    let modified = |p: &Path| std::fs::metadata(p).and_then(|m| m.modified()).ok();
+    match (modified(path), modified(reference)) {
+        (None, _) => true,
+        (Some(at), Some(reference_at)) => at < reference_at,
+        (Some(_), None) => false,
+    }
 }

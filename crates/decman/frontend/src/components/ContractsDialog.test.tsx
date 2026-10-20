@@ -70,3 +70,52 @@ describe("ContractsDialog party inputs", () => {
     });
   });
 });
+
+describe("ContractsDialog vetted packages", () => {
+  const renderWithVetted = (response: Response) => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) =>
+        String(input) === "/packages/vetted"
+          ? response
+          : new Response(JSON.stringify({}), { status: 200 }),
+      ),
+    );
+    render(
+      <SnackbarProvider>
+        <ContractsDialog
+          open
+          onClose={() => {}}
+          onComplete={() => {}}
+          partyId={partyId}
+          participantIds={[`node::${"d".repeat(68)}`]}
+        />
+      </SnackbarProvider>,
+    );
+  };
+
+  it("says the package list failed to load instead of asking for an upload", async () => {
+    renderWithVetted(new Response("boom", { status: 500 }));
+
+    expect(
+      await screen.findByText(/Could not load the vetted package list: HTTP 500/),
+    ).toBeTruthy();
+    expect(
+      screen.getByLabelText("Could not load the vetted package list"),
+    ).toBeTruthy();
+    expect(
+      screen.queryByLabelText("Upload the governance-core DAR first"),
+    ).toBeNull();
+  });
+
+  it("asks for the DAR when the list loads without it", async () => {
+    renderWithVetted(new Response(JSON.stringify([]), { status: 200 }));
+
+    expect(
+      await screen.findByLabelText("Upload the governance-core DAR first"),
+    ).toBeTruthy();
+    expect(
+      screen.queryByText(/Could not load the vetted package list/),
+    ).toBeNull();
+  });
+});

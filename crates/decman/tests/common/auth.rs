@@ -68,13 +68,12 @@ impl Refresher {
 }
 
 async fn fetch_token(client: &Client, creds: &KeycloakCreds) -> anyhow::Result<TokenState> {
-    // Tolerate base URLs configured both with and without a trailing `/auth`.
-    // Mirrors src/auth/mod.rs::token_url so the test runner and DecMan agree on
-    // the endpoint regardless of how DECPM_KEYCLOAK_URL is set.
+    // Same shape as DecMan's issuer (`oidc_issuer_of` in
+    // src/auth/validators/common.rs): `{url}/realms/{realm}`. A Keycloak that
+    // still serves the legacy `/auth` prefix carries it in DECPM_KEYCLOAK_URL.
     let kc_base = creds.url.trim_end_matches('/');
-    let kc_base = kc_base.strip_suffix("/auth").unwrap_or(kc_base);
     let url = format!(
-        "{kc_base}/auth/realms/{realm}/protocol/openid-connect/token",
+        "{kc_base}/realms/{realm}/protocol/openid-connect/token",
         realm = creds.realm,
     );
     let resp: serde_json::Value = client

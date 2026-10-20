@@ -1119,7 +1119,15 @@ interface ContractTypeSelectionProps {
   isGovernanceCoreDarUploaded: boolean;
   isTokenCustodyDarUploaded: boolean;
   isUtilityCredentialPluginDarUploaded: boolean;
+  /** Why the vetted package list failed to load, or null when it loaded. */
+  vettedPackagesError: string | null;
 }
+
+const VETTED_PACKAGES_UNREADABLE = "Could not load the vetted package list";
+
+/** A failed read must not read as a missing DAR. */
+const missingDarHint = (dar: string, vettedPackagesError: string | null) =>
+  vettedPackagesError ? VETTED_PACKAGES_UNREADABLE : `Upload the ${dar} DAR first`;
 
 const ContractTypeSelection = ({
   onSelect,
@@ -1127,9 +1135,17 @@ const ContractTypeSelection = ({
   isGovernanceCoreDarUploaded,
   isTokenCustodyDarUploaded,
   isUtilityCredentialPluginDarUploaded,
+  vettedPackagesError,
 }: ContractTypeSelectionProps) => {
   return (
     <Box sx={{ display: "flex", flexDirection: "column", gap: 2 }}>
+      {vettedPackagesError && (
+        <Alert severity="warning">
+          {VETTED_PACKAGES_UNREADABLE}: {vettedPackagesError}. The cards below
+          cannot tell whether a DAR is uploaded. Close and reopen this dialog
+          to try again.
+        </Alert>
+      )}
       {/* Deploy Governance Core — shown only when not yet deployed */}
       {!isGovernanceCoreDeployed && (
         <>
@@ -1141,7 +1157,7 @@ const ContractTypeSelection = ({
               title={
                 isGovernanceCoreDarUploaded
                   ? ""
-                  : "Upload the governance-core DAR first"
+                  : missingDarHint("governance-core", vettedPackagesError)
               }
               arrow
             >
@@ -1202,7 +1218,7 @@ const ContractTypeSelection = ({
               tooltip={
                 isTokenCustodyDarUploaded
                   ? undefined
-                  : "Upload the governance-token-custody DAR first"
+                  : missingDarHint("governance-token-custody", vettedPackagesError)
               }
             />
             <PluginCard
@@ -1257,14 +1273,27 @@ export const ContractsDialog = ({
   vettedPackages: initialVettedPackages = [],
 }: ContractsDialogProps) => {
   const [vettedPackages, setVettedPackages] = useState(initialVettedPackages);
+  const [vettedPackagesError, setVettedPackagesError] = useState<string | null>(
+    null,
+  );
 
   // Fetch fresh vetted packages when dialog opens
   useEffect(() => {
     if (open) {
       authenticatedFetch(`${API_BASE}/packages/vetted`)
-        .then((res) => (res.ok ? res.json() : []))
-        .then((data: VettedPackageInfo[]) => setVettedPackages(data))
-        .catch(() => {});
+        .then((res) => {
+          if (!res.ok) throw new Error(`HTTP ${res.status}`);
+          return res.json();
+        })
+        .then((data: VettedPackageInfo[]) => {
+          setVettedPackages(data);
+          setVettedPackagesError(null);
+        })
+        .catch((err: unknown) =>
+          setVettedPackagesError(
+            err instanceof Error ? err.message : "Unknown error",
+          ),
+        );
     }
   }, [open]);
 
@@ -1597,6 +1626,7 @@ export const ContractsDialog = ({
               isUtilityCredentialPluginDarUploaded={
                 isUtilityCredentialPluginDarUploaded
               }
+              vettedPackagesError={vettedPackagesError}
             />
           )}
 

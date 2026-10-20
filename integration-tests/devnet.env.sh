@@ -7,6 +7,13 @@
 # DECPM_CANTON_* / DECPM_KEYCLOAK_* / DECPM_NOISE_PORT from the child env that
 # start_nodes assembles.
 
+# POSIX syntax up to here, so a zsh user gets this message rather than errors
+# from the bash-only lines below.
+if [ -z "${BASH_VERSION:-}" ]; then
+    echo "ERROR: devnet.env.sh needs bash. Run it from bash, not $(basename "${SHELL:-sh}")." >&2
+    return 1 2>/dev/null || exit 1
+fi
+
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -29,6 +36,24 @@ for _penv in "$PARTICIPANT_1_ENV" "$PARTICIPANT_2_ENV" "$PARTICIPANT_3_ENV"; do
     fi
 done
 unset _penv
+
+# Repoint Keycloak without editing the per-participant .env files (they hold
+# secrets). The loop above runs under `set -a`, so it would clobber a plain
+# pre-set value; these overrides apply after the sourcing. Useful for feeding a
+# password straight from a secret manager, e.g.
+#   DECPM_KEYCLOAK_PASSWORD_OVERRIDE=$(op read op://vault/item/password)
+if [ -n "${DECPM_KEYCLOAK_URL_OVERRIDE:-}" ]; then
+    DECPM_KEYCLOAK_URL="$DECPM_KEYCLOAK_URL_OVERRIDE"
+    export DECPM_KEYCLOAK_URL
+fi
+if [ -n "${DECPM_KEYCLOAK_USERNAME_OVERRIDE:-}" ]; then
+    DECPM_KEYCLOAK_USERNAME="$DECPM_KEYCLOAK_USERNAME_OVERRIDE"
+    export DECPM_KEYCLOAK_USERNAME
+fi
+if [ -n "${DECPM_KEYCLOAK_PASSWORD_OVERRIDE:-}" ]; then
+    DECPM_KEYCLOAK_PASSWORD="$DECPM_KEYCLOAK_PASSWORD_OVERRIDE"
+    export DECPM_KEYCLOAK_PASSWORD
+fi
 
 # ---------------------------------------------------------------------------
 # Keycloak config validation.
@@ -97,30 +122,37 @@ unset ADMIN_VARS ADMIN_MISSING _v
 # we spend time on cargo build / DecMan spawn. The fetched token is NOT used by
 # the Rust runner.
 # ---------------------------------------------------------------------------
-# Normalize the base URL: strip a trailing slash, then strip a trailing
-# `/auth` if present. This lets users configure DECPM_KEYCLOAK_URL either as
-# `https://kc.example.com` or `https://kc.example.com/auth` — same shape as
-# src/auth/mod.rs::token_url uses on the DecMan side, so the smoke check
-# composes the same endpoint the DecMan's runtime auth path will reach.
-_KC_BASE="${DECPM_KEYCLOAK_URL%/}"; _KC_BASE="${_KC_BASE%/auth}"
-TOKEN_URL="${_KC_BASE}/auth/realms/${DECPM_KEYCLOAK_REALM}/protocol/openid-connect/token"
-_SMOKE_TOKEN=$(curl -s -f -X POST "$TOKEN_URL" \
+# Same shape as DecMan's issuer (oidc_issuer_of in
+# src/auth/validators/common.rs): `{url}/realms/{realm}`. A Keycloak that
+# still serves the legacy `/auth` prefix carries it in DECPM_KEYCLOAK_URL.
+_KC_BASE="${DECPM_KEYCLOAK_URL%/}"
+TOKEN_URL="${_KC_BASE}/realms/${DECPM_KEYCLOAK_REALM}/protocol/openid-connect/token"
+# Capture curl's status rather than piping into jq. run.sh and bring-up.sh
+# run under `set -o pipefail`, so a failing curl would end the script before
+# the diagnostic below prints. No `-f`: it drops the response body that names
+# the OAuth error, and on HTTP/2 it reports a 401 as a network fault (exit 56).
+_CURL_RC=0
+_SMOKE_RAW=$(curl -s -w '\n%{http_code}' -X POST "$TOKEN_URL" \
     -d "grant_type=password" \
     -d "client_id=${DECPM_KEYCLOAK_CLIENT_ID}" \
     -d "username=${DECPM_KEYCLOAK_USERNAME}" \
-    -d "password=${DECPM_KEYCLOAK_PASSWORD}" \
-    | jq -r .access_token)
-if [ -z "$_SMOKE_TOKEN" ] || [ "$_SMOKE_TOKEN" = "null" ]; then
-    echo "ERROR: Keycloak password grant failed." >&2
+    -d "password=${DECPM_KEYCLOAK_PASSWORD}") || _CURL_RC=$?
+_SMOKE_CODE="${_SMOKE_RAW##*$'\n'}"
+_SMOKE_RESP="${_SMOKE_RAW%$'\n'*}"
+_SMOKE_TOKEN=$(printf '%s' "$_SMOKE_RESP" | jq -r .access_token 2>/dev/null || true)
+if [ "$_CURL_RC" -ne 0 ] || [ -z "$_SMOKE_TOKEN" ] || [ "$_SMOKE_TOKEN" = "null" ]; then
+    echo "ERROR: Keycloak password grant failed (curl exit $_CURL_RC, HTTP ${_SMOKE_CODE:-none})." >&2
     echo "  TOKEN_URL: $TOKEN_URL" >&2
     echo "  CLIENT_ID: $DECPM_KEYCLOAK_CLIENT_ID" >&2
+    echo "  USERNAME:  ${DECPM_KEYCLOAK_USERNAME}" >&2
+    echo "  RESPONSE:  $(printf '%s' "$_SMOKE_RESP" | head -c 300)" >&2
     echo "Check that DECPM_KEYCLOAK_USERNAME and DECPM_KEYCLOAK_PASSWORD are correct and Keycloak is reachable." >&2
     exit 1
 fi
 # Reused by common.sh:wait_for_server for the readiness probes against the
 # real JwtValidator. Fresh token (~5min TTL) easily outlives start_nodes.
 export DECPM_IT_AUTH_TOKEN="$_SMOKE_TOKEN"
-unset _SMOKE_TOKEN
+unset _SMOKE_TOKEN _SMOKE_RESP _CURL_RC
 
 # ---------------------------------------------------------------------------
 # Target + run-id + DEV_DIR.
@@ -159,7 +191,7 @@ export DECPM_EXTERNAL_PARTIES_TTL_SECS=15
 # - Noise: 9000/9001/9002 (per-DecMan Noise listener; matches DECPM_NOISE_PORT
 #   values in the per-participant .env files)
 # - Metrics: 9464/9465/9466 (per-DecMan Prometheus listener)
-# - Canton ledger:  5001/5011/5021 (tunneled to participant-ibtc-devnet-{1,2,3}
+# - Canton ledger:  5001/5011/5021 (tunneled to canton-node-{1,2,3}/svc/participant
 #   service port 5001 via kubectl port-forward)
 # - Canton admin:   5002/5012/5022 (tunneled the same way to service port 5002)
 # These are exported (not just shell vars) so chaos phases that respawn DecMan
@@ -196,18 +228,20 @@ export DECPM_CANTON_NETWORK=devnet
 unset DECPM_ADMIN_ROLE 2>/dev/null || true
 
 # ---------------------------------------------------------------------------
-# Canton tunnel lifecycle (kubectl port-forward against the catalyst-canton
-# namespace in the ieu-devnet EKS cluster).
+# Canton tunnel lifecycle (kubectl port-forward against svc/participant in
+# the canton-node-{1,2,3} namespaces of the devnet EKS cluster). The justfile's
+# port-forward recipe uses the same layout.
 # ---------------------------------------------------------------------------
-KUBE_CONTEXT_DEVNET=${KUBE_CONTEXT_DEVNET:-ieu-devnet}
-KUBE_NS_CANTON=${KUBE_NS_CANTON:-catalyst-canton}
+KUBE_CONTEXT_DEVNET=${KUBE_CONTEXT_DEVNET:-devnet}
+KUBE_NS_CANTON_PREFIX=${KUBE_NS_CANTON_PREFIX:-canton-node-}
+KUBE_CANTON_SVC=${KUBE_CANTON_SVC:-participant}
 CANTON_TUNNEL_PIDS=()
 
 _canton_forward_loop() {
     local idx=$1 local_ledger=$2 local_admin=$3
     while true; do
         kubectl --context="$KUBE_CONTEXT_DEVNET" port-forward \
-            "svc/participant-ibtc-devnet-$idx" -n "$KUBE_NS_CANTON" \
+            "svc/$KUBE_CANTON_SVC" -n "${KUBE_NS_CANTON_PREFIX}${idx}" \
             "${local_ledger}:5001" "${local_admin}:5002" >/dev/null 2>&1
         echo "[P$idx canton-tunnel] port-forward disconnected, restarting in 5s..." >&2
         sleep 5
@@ -235,7 +269,7 @@ start_canton_tunnels() {
     # by Copilot's review on #142 ("comments suppressed due to low confidence
     # #2") — this is the followup landing that fix.
     local auth_probe
-    if ! auth_probe=$(kubectl --context="$KUBE_CONTEXT_DEVNET" -n "$KUBE_NS_CANTON" \
+    if ! auth_probe=$(kubectl --context="$KUBE_CONTEXT_DEVNET" -n "${KUBE_NS_CANTON_PREFIX}1" \
         get svc -o name 2>&1); then
         echo "ERROR: kubectl auth probe failed for context '$KUBE_CONTEXT_DEVNET':" >&2
         echo "$auth_probe" | sed 's/^/  /' >&2
@@ -261,7 +295,7 @@ start_canton_tunnels() {
             sleep 0.5
         done
     done
-    echo "All 6 Canton ports forwarded (5001/5002, 5011/5012, 5021/5022 → svc/participant-ibtc-devnet-{1,2,3})."
+    echo "All 6 Canton ports forwarded (5001/5002, 5011/5012, 5021/5022 → ${KUBE_NS_CANTON_PREFIX}{1,2,3}/svc/$KUBE_CANTON_SVC)."
 }
 
 stop_canton_tunnels() {
@@ -278,12 +312,12 @@ stop_canton_tunnels() {
         # children of $$) AND the kubectl-matching command pattern to
         # match — kubectl isn't a direct child, so nothing ever matched
         # and the forwards leaked between runs (observed 2026-05-19 after
-        # an EXIT_RUNSH=0 run #9 left three svc/participant-ibtc-devnet-*
+        # an EXIT_RUNSH=0 run #9 left three svc/participant-*
         # port-forwards alive). When the loop subshell above dies, kubectl
         # is reparented to init and stays alive until killed explicitly.
-        # The -f pattern is scoped to our devnet context + ibtc-devnet
+        # The -f pattern is scoped to our devnet context + the participant
         # service so it won't affect unrelated kubectl invocations.
-        pkill -f "kubectl --context=$KUBE_CONTEXT_DEVNET port-forward svc/participant-ibtc-devnet" 2>/dev/null || true
+        pkill -f "kubectl --context=$KUBE_CONTEXT_DEVNET port-forward svc/$KUBE_CANTON_SVC" 2>/dev/null || true
         CANTON_TUNNEL_PIDS=()
     fi
 }
