@@ -42,7 +42,7 @@ pub trait Signer: Send + Sync {
     /// The party's Canton namespace fingerprint, derived from the public key
     /// exactly as the node derives it.
     fn fingerprint(&self) -> String {
-        fingerprint_from_public_key(&self.public_key_bytes())
+        fingerprint_from_public_key(&self.public_key_bytes()).into()
     }
 
     /// The party id this key produces for `hint`.

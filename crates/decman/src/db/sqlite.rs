@@ -17,7 +17,7 @@ use super::{
     schema::{Commitable, SchemaRead, SchemaWrite},
 };
 use crate::{
-    canton_id::CantonId,
+    canton_id::{CantonId, Fingerprint},
     config::{PartyCredentials, Peer},
     error::Result,
     server::{
@@ -1036,7 +1036,7 @@ impl Commitable for sqlx::Transaction<'static, sqlx::Sqlite> {
         &mut self,
         party_id: &CantonId,
         participant_uid: &str,
-        signing_key: &str,
+        signing_key: &Fingerprint,
     ) -> Result {
         sqlx::query(
             r"
@@ -1045,7 +1045,7 @@ impl Commitable for sqlx::Transaction<'static, sqlx::Sqlite> {
             WHERE dec_party_id = ? AND participant_uid = ?
             ",
         )
-        .bind(signing_key)
+        .bind(signing_key.as_str())
         .bind(party_id.to_string())
         .bind(participant_uid)
         .execute(&mut **self)
@@ -1447,7 +1447,7 @@ mod tests {
     use sqlx::SqlitePool;
 
     use crate::{
-        canton_id::CantonId,
+        canton_id::{CantonId, Fingerprint},
         config::{Auth0M2MConfig, KeycloakConfig, PackageConfig, PartyCredentials, Peer},
         db::{
             rows::{DecPartyContractRow, DecPartyParticipantRow, DecPartyRow},
@@ -1917,14 +1917,15 @@ mod tests {
         )
         .await?;
         // What `resolve_owner_keys_from_peers` writes once the peer answers.
-        tx.update_participant_signing_key(&party_id, "node1::1220aa", "daml-fingerprint-1")
+        let signing_key: Fingerprint = TEST_NS.parse()?;
+        tx.update_participant_signing_key(&party_id, "node1::1220aa", &signing_key)
             .await?;
         Commitable::commit(tx).await?;
 
         let seeded = pool.get_dec_party_participants(&party_id).await?;
         assert_eq!(
             seeded.first().and_then(|p| p.signing_key.clone()),
-            Some("daml-fingerprint-1".to_string())
+            Some(TEST_NS.to_string())
         );
 
         // A live Canton fetch never carries the fingerprint, so every refresh
@@ -1948,7 +1949,7 @@ mod tests {
         assert_eq!(result[0].permission, "confirmation");
         assert_eq!(
             result[0].signing_key,
-            Some("daml-fingerprint-1".to_string()),
+            Some(TEST_NS.to_string()),
             "signing_key should be preserved across a refresh that brings a NULL value"
         );
 

@@ -30,8 +30,13 @@ use canton_proto_rs::com::{
         version::v1::{UntypedVersionedMessage, untyped_versioned_message},
     },
 };
+use common::fingerprint::fingerprint_from_public_key;
 
-use crate::{canton_id::CantonId, config::NodeConfig, error::Result};
+use crate::{
+    canton_id::{CantonId, Fingerprint},
+    config::NodeConfig,
+    error::Result,
+};
 
 pub use common::fingerprint::MULTIHASH_SHA256_PREFIX;
 
@@ -271,17 +276,13 @@ where
 ///
 /// The fingerprint serves as the namespace identifier and unique key
 /// identifier in Canton.
-pub fn compute_fingerprint(key: &SigningPublicKey) -> String {
+pub fn compute_fingerprint(key: &SigningPublicKey) -> Fingerprint {
     use std::borrow::Cow;
 
     use canton_proto_rs::com::digitalasset::canton::crypto::v30::{
         CryptoKeyFormat, SigningKeySpec,
     };
-    use sha2::{Digest, Sha256};
     use x509_parser::prelude::*;
-
-    // HashPurpose.PublicKeyFingerprint = 12
-    const PURPOSE_PUBLIC_KEY_FINGERPRINT: i32 = 12;
 
     let is_ed25519_spki = key.format == CryptoKeyFormat::DerX509SubjectPublicKeyInfo as i32
         && key.key_spec == SigningKeySpec::EcCurve25519 as i32;
@@ -300,16 +301,7 @@ pub fn compute_fingerprint(key: &SigningPublicKey) -> String {
         Cow::Borrowed(key.public_key.as_slice())
     };
 
-    let mut hasher = Sha256::new();
-    // Purpose ID as 4-byte big-endian integer (domain separation).
-    hasher.update(PURPOSE_PUBLIC_KEY_FINGERPRINT.to_be_bytes());
-    hasher.update(&data);
-    let hash_result = hasher.finalize();
-
-    let fingerprint = format!(
-        "{MULTIHASH_SHA256_PREFIX}{hash}",
-        hash = hex::encode(hash_result)
-    );
+    let fingerprint = fingerprint_from_public_key(&data);
     tracing::debug!("Computed fingerprint: {fingerprint}");
 
     fingerprint

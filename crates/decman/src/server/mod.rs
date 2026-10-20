@@ -69,7 +69,7 @@ use crate::{
     auth::{
         AuthRegistry, JwtValidator, MockAuthRegistry, MockValidator, TokenValidator, WorkflowAuth,
     },
-    canton_id::CantonId,
+    canton_id::{CantonId, Fingerprint},
     config::{Network, NodeConfig, PartyCredentials},
     db::schema::{Commitable, SchemaRead, SchemaWrite},
     error::Result,
@@ -2565,17 +2565,17 @@ async fn list_my_owner_keys(
         .await?
         .into_inner();
 
-    let mut my_fingerprints = Vec::new();
+    let mut my_fingerprints: Vec<String> = Vec::new();
     // Every protocol key this node holds, by fingerprint. The by-name map
     // below only finds a key minted under this tool's naming convention; a
     // party old enough to predate it can hold the key under any name, and
     // then only the fingerprint identifies it.
-    let mut my_protocol_fingerprints: HashSet<String> = HashSet::new();
+    let mut my_protocol_fingerprints: HashSet<Fingerprint> = HashSet::new();
     // Protocol-usage keys, indexed by the vault name onboarding / add-party
     // gave them (`<party prefix>-daml-transactions`). The name is how
     // `get_or_create_signing_key` finds the key again on a retry, so it is
     // also the only local record of which party a protocol key belongs to.
-    let mut my_protocol_keys_by_name: HashMap<String, String> = HashMap::new();
+    let mut my_protocol_keys_by_name: HashMap<String, Fingerprint> = HashMap::new();
     for key_meta in keys_response.private_keys_metadata {
         if let Some(private_key_metadata::PublicKeyWithName::V30(pub_key_with_name)) =
             &key_meta.public_key_with_name
@@ -2586,7 +2586,7 @@ async fn list_my_owner_keys(
                 .usage
                 .contains(&(SigningKeyUsage::Namespace as i32))
             {
-                my_fingerprints.push(compute_fingerprint(signing_key));
+                my_fingerprints.push(compute_fingerprint(signing_key).into());
             }
             if signing_key
                 .usage
@@ -2686,8 +2686,8 @@ async fn list_my_owner_keys(
 async fn party_signing_key_by_fingerprint(
     config: &NodeConfig,
     full_party_id: &str,
-    mine: &HashSet<String>,
-) -> Option<String> {
+    mine: &HashSet<Fingerprint>,
+) -> Option<Fingerprint> {
     let resolve = async {
         let party_id = CantonId::parse(full_party_id)?;
         let synchronizer_id = utils::get_synchronizer_id(config).await?;

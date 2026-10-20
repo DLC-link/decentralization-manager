@@ -23,6 +23,7 @@ use prost::Message;
 use sqlx::SqlitePool;
 
 use crate::{
+    canton_id::Fingerprint,
     config::NodeConfig,
     error::Result,
     utils::{compute_fingerprint, get_participant_id},
@@ -214,7 +215,7 @@ pub(crate) fn encode_keys_payload(
 /// without depending on synchronizer propagation having caught up.
 async fn namespace_delegation_exists(
     config: &NodeConfig,
-    namespace_fingerprint: &str,
+    namespace_fingerprint: &Fingerprint,
 ) -> Result<bool> {
     let mut topology_read_client =
         TopologyManagerReadServiceClient::new(config.admin_channel().await?);
@@ -248,7 +249,7 @@ async fn namespace_delegation_exists(
 pub(crate) async fn propose_namespace_delegation(
     config: &NodeConfig,
     namespace_key: &SigningPublicKey,
-    namespace_fingerprint: &str,
+    namespace_fingerprint: &Fingerprint,
 ) -> Result {
     tracing::debug!("Proposing namespace delegation for {namespace_fingerprint}");
 

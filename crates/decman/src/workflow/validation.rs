@@ -29,7 +29,7 @@ use sha2::{Digest, Sha256};
 use sqlx::SqlitePool;
 
 use crate::{
-    canton_id::CantonId,
+    canton_id::{CantonId, Fingerprint},
     config::NodeConfig,
     db::schema::SchemaRead,
     error::Result,
@@ -228,7 +228,7 @@ impl PeerExpectations {
                      proposal cannot be checked against them"
                 )
             })?;
-        if !owners.contains(&own_namespace) {
+        if !owners.iter().any(|owner| own_namespace == *owner) {
             anyhow::bail!(
                 "DNS proposal does not include this node's namespace {own_namespace} \
                  among its owners"
@@ -385,7 +385,12 @@ impl PeerExpectations {
         // it through would hand a coordinator this peer's signature on a
         // proposal that drops its own namespace.
         match self.own_namespace(config, storage, instance_name).await? {
-            Some(own_namespace) if !namespace_def.owners.contains(&own_namespace) => {
+            Some(own_namespace)
+                if !namespace_def
+                    .owners
+                    .iter()
+                    .any(|owner| own_namespace == *owner) =>
+            {
                 anyhow::bail!(
                     "DNS proposal drops this node's namespace {own_namespace} from the owner set"
                 )
@@ -490,7 +495,7 @@ impl PeerExpectations {
         &self,
         storage: &SqlitePool,
         instance_name: &str,
-    ) -> Result<Option<(String, String)>> {
+    ) -> Result<Option<(Fingerprint, Fingerprint)>> {
         let Some(new_member) = &self.new_participant else {
             return Ok(None);
         };
@@ -952,7 +957,7 @@ impl PeerExpectations {
         config: &NodeConfig,
         storage: &SqlitePool,
         instance_name: &str,
-    ) -> Result<Option<String>> {
+    ) -> Result<Option<Fingerprint>> {
         // An identity row recovered from the chain can only carry the party's
         // Daml key, and older builds wrote a copy of it where the namespace
         // key belongs. Reading that as a namespace fingerprint would compare a
@@ -1048,7 +1053,7 @@ impl PeerExpectations {
 /// holds none — and older builds put a copy of the Daml key there instead.
 /// Taking that at face value compares a Daml fingerprint against the party's
 /// owner set, which refuses every proposal the node is asked to sign.
-fn namespace_fingerprint(keys: &[SigningPublicKey]) -> Option<String> {
+fn namespace_fingerprint(keys: &[SigningPublicKey]) -> Option<Fingerprint> {
     let key = keys.first()?;
     if !key.usage.contains(&(SigningKeyUsage::Namespace as i32)) {
         tracing::warn!(
@@ -1151,7 +1156,8 @@ async fn check_against_head(
             );
         }
         let mut union = legacy_keys.map(|m| m.signing_keys).unwrap_or_default();
-        let mut seen: BTreeSet<String> = union.iter().map(utils::compute_fingerprint).collect();
+        let mut seen: BTreeSet<Fingerprint> =
+            union.iter().map(utils::compute_fingerprint).collect();
         for key in inline {
             if seen.insert(utils::compute_fingerprint(&key)) {
                 union.push(key);
@@ -1170,13 +1176,13 @@ async fn check_against_head(
         kind,
         &current_keys
             .iter()
-            .map(utils::compute_fingerprint)
+            .map(|key| utils::compute_fingerprint(key).into())
             .collect(),
         &proposed_keys
             .keys
             .iter()
-            .map(utils::compute_fingerprint)
-            .collect::<Vec<_>>(),
+            .map(|key| utils::compute_fingerprint(key).into())
+            .collect::<Vec<String>>(),
         new_member.map(|(_, daml)| daml),
         legacy,
     )

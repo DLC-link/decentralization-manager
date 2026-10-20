@@ -267,7 +267,7 @@ mod tests {
     #[test]
     fn secp256k1_key_on_the_mapping_selects_ecdsa_sha256_in_der() {
         let k = key(SigningKeySpec::EcSecp256k1, 7);
-        let fp = compute_fingerprint(&k);
+        let fp = compute_fingerprint(&k).to_string();
         let scheme = PartySignatureScheme::for_party(&mapping(vec![k]), &fp);
 
         let sig = scheme.canton_signature(&[0x80; 64], &fp);
@@ -286,7 +286,7 @@ mod tests {
     #[test]
     fn ed25519_key_keeps_the_concat_format_and_bytes() {
         let k = key(SigningKeySpec::EcCurve25519, 3);
-        let fp = compute_fingerprint(&k);
+        let fp = compute_fingerprint(&k).to_string();
         let scheme = PartySignatureScheme::for_party(&mapping(vec![k]), &fp);
 
         let sig = scheme.canton_signature(&[0x80; 64], &fp);

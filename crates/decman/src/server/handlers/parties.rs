@@ -31,7 +31,7 @@ use super::token_standard::fetch_dso_info;
 
 use crate::{
     auth::WorkflowAuth,
-    canton_id::CantonId,
+    canton_id::{CantonId, Fingerprint},
     config::{NetworkConfig, NodeConfig, PartyCredentials, Peer, default_package_config},
     db::{
         rows::{DecPartyContractRow, DecPartyParticipantRow, DecPartyRow},
@@ -850,8 +850,17 @@ pub async fn resolve_owner_keys_from_peers(
                 let Some(signing_key) = entry["signing_key"].as_str() else {
                     continue;
                 };
+                let signing_key = match signing_key.parse::<Fingerprint>() {
+                    Ok(fingerprint) => fingerprint,
+                    Err(e) => {
+                        tracing::warn!(
+                            "Ignoring signing key from {peer_uid} for {party_id}: {e:#}"
+                        );
+                        continue;
+                    }
+                };
                 if let Err(e) = tx
-                    .update_participant_signing_key(&party_id_canton, &peer_uid, signing_key)
+                    .update_participant_signing_key(&party_id_canton, &peer_uid, &signing_key)
                     .await
                 {
                     tracing::debug!("Failed to update signing key for {peer_uid}: {e}");
@@ -1152,7 +1161,7 @@ async fn supplement_owner_keys_from_topology(
                     if let Some(NsDelegationItem::V30(item)) = result.item
                         && let Some(target_key) = item.target_key
                     {
-                        fingerprints.insert(utils::compute_fingerprint(&target_key));
+                        fingerprints.insert(utils::compute_fingerprint(&target_key).into());
                     }
                 }
                 delegated_fingerprints.insert(namespace.clone(), fingerprints);
@@ -1511,7 +1520,7 @@ async fn my_namespace_fingerprints(
             && signing_key.usage.contains(&1)
         {
             // SigningKeyUsage::Namespace = 1
-            fingerprints.insert(utils::compute_fingerprint(signing_key));
+            fingerprints.insert(utils::compute_fingerprint(signing_key).into());
         }
     }
 

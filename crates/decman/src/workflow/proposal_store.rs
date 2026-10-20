@@ -1461,7 +1461,7 @@ mod tests {
             public_key: vec![9; 32],
             ..Default::default()
         };
-        let owner = utils::compute_fingerprint(&root_key);
+        let owner = utils::compute_fingerprint(&root_key).to_string();
         let root = topology_mapping::Mapping::NamespaceDelegation(NamespaceDelegation {
             namespace: owner.clone(),
             target_key: Some(root_key),

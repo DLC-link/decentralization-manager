@@ -109,7 +109,7 @@ pub async fn create_proposals(
         .collect();
     let own_namespace = own_namespace_key(config, party_id, &synchronizer_id)
         .await?
-        .map(|key| utils::compute_fingerprint(&key));
+        .map(|key| String::from(utils::compute_fingerprint(&key)));
     let rehost = is_former_host(
         storage,
         party_id,
@@ -120,7 +120,7 @@ pub async fn create_proposals(
             own_namespace.as_deref(),
         ),
         &current_namespace_def,
-        &new_namespace_fingerprint,
+        new_namespace_fingerprint.as_str(),
     )
     .await?;
 
@@ -142,7 +142,7 @@ pub async fn create_proposals(
         current_namespace_def.clone()
     } else {
         let mut new_owners = current_namespace_def.owners.clone();
-        new_owners.push(new_namespace_fingerprint.clone());
+        new_owners.push(new_namespace_fingerprint.to_string());
         new_owners.sort();
         DecentralizedNamespaceDefinition {
             decentralized_namespace: current_namespace_def.decentralized_namespace.clone(),
@@ -456,7 +456,7 @@ async fn recorded_namespace_keys(
                     .first()
                     .filter(|key| key.usage.contains(&(SigningKeyUsage::Namespace as i32)))
                 {
-                    recorded.insert(member, utils::compute_fingerprint(key));
+                    recorded.insert(member, utils::compute_fingerprint(key).into());
                 }
             }
             Err(e) => {
@@ -626,7 +626,8 @@ mod tests {
 
     #[sqlx::test(migrator = "MIGRATOR")]
     async fn a_namespace_that_is_not_an_owner_is_a_plain_add(pool: SqlitePool) -> Result {
-        let fingerprint = utils::compute_fingerprint(&key(1, SigningKeyUsage::Namespace));
+        let fingerprint =
+            utils::compute_fingerprint(&key(1, SigningKeyUsage::Namespace)).to_string();
         let def = namespace_def(&["other".to_string()]);
         let rehost = is_former_host(
             &pool,
@@ -645,7 +646,7 @@ mod tests {
     #[sqlx::test(migrator = "MIGRATOR")]
     async fn an_owner_this_node_recorded_for_the_member_is_a_rehost(pool: SqlitePool) -> Result {
         let namespace = key(1, SigningKeyUsage::Namespace);
-        let fingerprint = utils::compute_fingerprint(&namespace);
+        let fingerprint = utils::compute_fingerprint(&namespace).to_string();
         let party = party();
         record_keys(&pool, &party, "p3::1220aa", &namespace).await?;
         let def = namespace_def(&[fingerprint.clone(), "other".to_string()]);
@@ -666,7 +667,7 @@ mod tests {
     #[sqlx::test(migrator = "MIGRATOR")]
     async fn an_owner_recorded_for_another_member_is_refused(pool: SqlitePool) -> Result {
         let namespace = key(1, SigningKeyUsage::Namespace);
-        let fingerprint = utils::compute_fingerprint(&namespace);
+        let fingerprint = utils::compute_fingerprint(&namespace).to_string();
         let party = party();
         record_keys(&pool, &party, "p2::1220bb", &namespace).await?;
         let def = namespace_def(std::slice::from_ref(&fingerprint));
@@ -688,7 +689,8 @@ mod tests {
 
     #[sqlx::test(migrator = "MIGRATOR")]
     async fn an_owner_a_current_member_claims_in_the_cache_is_refused(pool: SqlitePool) -> Result {
-        let fingerprint = utils::compute_fingerprint(&key(1, SigningKeyUsage::Namespace));
+        let fingerprint =
+            utils::compute_fingerprint(&key(1, SigningKeyUsage::Namespace)).to_string();
         let party = party();
         seed_party_with_owner_key(&pool, &party, "p2::1220bb", Some(&fingerprint)).await?;
         let def = namespace_def(std::slice::from_ref(&fingerprint));
@@ -713,7 +715,7 @@ mod tests {
     #[sqlx::test(migrator = "MIGRATOR")]
     async fn a_key_also_claimed_by_a_current_member_is_refused(pool: SqlitePool) -> Result {
         let namespace = key(1, SigningKeyUsage::Namespace);
-        let fingerprint = utils::compute_fingerprint(&namespace);
+        let fingerprint = utils::compute_fingerprint(&namespace).to_string();
         let party = party();
         record_keys(&pool, &party, "p3::1220aa", &namespace).await?;
         seed_party_with_owner_key(&pool, &party, "p2::1220bb", Some(&fingerprint)).await?;
@@ -736,7 +738,8 @@ mod tests {
 
     #[sqlx::test(migrator = "MIGRATOR")]
     async fn a_current_member_with_no_known_key_fails_closed(pool: SqlitePool) -> Result {
-        let fingerprint = utils::compute_fingerprint(&key(1, SigningKeyUsage::Namespace));
+        let fingerprint =
+            utils::compute_fingerprint(&key(1, SigningKeyUsage::Namespace)).to_string();
         let party = party();
         seed_party_with_owner_key(&pool, &party, "p2::1220bb", None).await?;
         let def = namespace_def(std::slice::from_ref(&fingerprint));
@@ -760,7 +763,8 @@ mod tests {
     /// a row says nothing about the member's namespace.
     #[sqlx::test(migrator = "MIGRATOR")]
     async fn a_record_without_a_namespace_key_does_not_attribute(pool: SqlitePool) -> Result {
-        let fingerprint = utils::compute_fingerprint(&key(1, SigningKeyUsage::Namespace));
+        let fingerprint =
+            utils::compute_fingerprint(&key(1, SigningKeyUsage::Namespace)).to_string();
         let party = party();
         record_keys(
             &pool,
@@ -788,7 +792,8 @@ mod tests {
 
     #[sqlx::test(migrator = "MIGRATOR")]
     async fn this_nodes_own_key_comes_from_its_vault(pool: SqlitePool) -> Result {
-        let fingerprint = utils::compute_fingerprint(&key(1, SigningKeyUsage::Namespace));
+        let fingerprint =
+            utils::compute_fingerprint(&key(1, SigningKeyUsage::Namespace)).to_string();
         let party = party();
         let def = namespace_def(std::slice::from_ref(&fingerprint));
         let members = ["p1::1220cc".to_string()];
@@ -813,7 +818,8 @@ mod tests {
     /// added that member.
     #[sqlx::test(migrator = "MIGRATOR")]
     async fn an_owner_no_member_claims_is_a_former_hosts_key(pool: SqlitePool) -> Result {
-        let fingerprint = utils::compute_fingerprint(&key(1, SigningKeyUsage::Namespace));
+        let fingerprint =
+            utils::compute_fingerprint(&key(1, SigningKeyUsage::Namespace)).to_string();
         let party = party();
         seed_party_with_owner_key(&pool, &party, "p2::1220bb", Some("someone-elses-key")).await?;
         let def = namespace_def(&[

@@ -1911,7 +1911,7 @@ mod tests {
             base_serial: 4,
             topology_transactions: vec![serialize(mapping, 5)],
             signatures: vec![der],
-            signed_by: fingerprint,
+            signed_by: fingerprint.into(),
         };
 
         let result = validate_add_hosts_topology(&test_config(3), &current, &bundle);

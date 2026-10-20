@@ -146,7 +146,7 @@ impl TransactionSigner for AwsKmsSigner {
             signatures.push(Signature {
                 format: SignatureFormat::Der as i32,
                 signature: signature_der,
-                signed_by: key.fingerprint.clone(),
+                signed_by: key.fingerprint.to_string(),
                 signing_algorithm_spec: canton_algorithm as i32,
                 signature_delegation: None,
             });
@@ -199,6 +199,8 @@ fn validate_key_id(key_id: &str) -> anyhow::Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use common::fingerprint::fingerprint_from_public_key;
+
     use super::*;
 
     #[test]
@@ -247,7 +249,7 @@ mod tests {
             client: aws_sdk_kms::Client::from_conf(config),
         };
         let key = SigningKeyContext {
-            fingerprint: "test-fingerprint".into(),
+            fingerprint: fingerprint_from_public_key(&[0; 32]),
             public_key: Default::default(),
             kms_key_id: Some("arn:aws:kms:us-east-1:111122223333:key/foreign".into()),
         };

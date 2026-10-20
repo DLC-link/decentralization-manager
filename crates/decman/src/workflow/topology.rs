@@ -32,7 +32,7 @@ use canton_proto_rs::com::digitalasset::canton::{
 use sqlx::SqlitePool;
 
 use crate::{
-    canton_id::CantonId,
+    canton_id::{CantonId, Fingerprint},
     config::NodeConfig,
     consts::{
         topology_propagation_delay_secs, topology_retry_delay_secs, topology_retry_max_attempts,
@@ -558,7 +558,7 @@ pub async fn check_added_signing_keys_signed(
         anyhow::bail!("P2P transaction does not carry a PartyToParticipant mapping");
     };
 
-    let current: HashSet<String> = fetch_p2p_mapping(config, synchronizer_id, party_id)
+    let current: HashSet<Fingerprint> = fetch_p2p_mapping(config, synchronizer_id, party_id)
         .await?
         .party_signing_keys
         .map(|k| k.keys)
@@ -588,6 +588,7 @@ pub async fn check_added_signing_keys_signed(
         .iter()
         .map(utils::compute_fingerprint)
         .filter(|f| !current.contains(f) && !signers.contains(f.as_str()))
+        .map(String::from)
         .collect();
 
     if !missing.is_empty() {

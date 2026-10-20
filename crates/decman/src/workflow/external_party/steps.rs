@@ -42,7 +42,7 @@ use prost::Message as _;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    canton_id::CantonId,
+    canton_id::{CantonId, Fingerprint},
     config::NodeConfig,
     error::Result,
     utils,
@@ -55,7 +55,7 @@ pub struct PreparedTopology {
     /// The party id, `{hint}::{fingerprint-of-the-public-key}`.
     pub party_id: String,
     /// The fingerprint of the supplied public key (used as `signed_by`).
-    pub public_key_fingerprint: String,
+    pub public_key_fingerprint: Fingerprint,
     /// Canton's hash for each transaction, for the party to sign. Canton computes
     /// these, so no Canton hash derivation is reimplemented here.
     pub transaction_hashes: Vec<Vec<u8>>,
@@ -872,7 +872,7 @@ mod tests {
             public_key: PUBLIC_KEY,
             topology_transactions: vec![serialize(mapping, serial)],
             signatures: vec![vec![0u8; 64]],
-            signed_by: keys::fingerprint_from_public_key(&PUBLIC_KEY),
+            signed_by: keys::fingerprint_from_public_key(&PUBLIC_KEY).into(),
         }
     }
 
@@ -986,7 +986,7 @@ mod tests {
             public_key,
             topology_transactions: vec![transaction],
             signatures: vec![vec![0u8; 64]],
-            signed_by: keys::fingerprint_from_public_key(&public_key),
+            signed_by: keys::fingerprint_from_public_key(&public_key).into(),
         };
 
         if let Err(e) = validate_onboarding_topology(&config, &bundle) {
@@ -1141,7 +1141,7 @@ mod tests {
             public_key: PUBLIC_KEY,
             topology_transactions: vec![b"not a protobuf at all".to_vec()],
             signatures: vec![vec![0u8; 64]],
-            signed_by: keys::fingerprint_from_public_key(&PUBLIC_KEY),
+            signed_by: keys::fingerprint_from_public_key(&PUBLIC_KEY).into(),
         };
         if validate_onboarding_topology(&test_config(), &bundle).is_ok() {
             panic!("garbage bytes must be refused");
@@ -1155,7 +1155,7 @@ mod tests {
             public_key: PUBLIC_KEY,
             topology_transactions: Vec::new(),
             signatures: Vec::new(),
-            signed_by: keys::fingerprint_from_public_key(&PUBLIC_KEY),
+            signed_by: keys::fingerprint_from_public_key(&PUBLIC_KEY).into(),
         };
         if validate_onboarding_topology(&test_config(), &bundle).is_ok() {
             panic!("an empty bundle must be refused");

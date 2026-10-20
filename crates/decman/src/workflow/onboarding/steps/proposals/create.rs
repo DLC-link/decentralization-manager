@@ -101,7 +101,7 @@ pub async fn create_proposals(
     let mut namespaces = HashSet::new();
     for key in &namespace_keys {
         let namespace = utils::compute_fingerprint(key);
-        namespaces.insert(namespace);
+        namespaces.insert(namespace.into());
     }
 
     tracing::info!(

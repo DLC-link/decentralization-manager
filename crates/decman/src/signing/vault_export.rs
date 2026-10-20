@@ -57,7 +57,7 @@ impl TransactionSigner for VaultExportSigner {
 
         let mut export_response = vault_client
             .export_key_pair(tonic::Request::new(ExportKeyPairRequest {
-                fingerprint: key_fingerprint.clone(),
+                fingerprint: key_fingerprint.to_string(),
                 protocol_version: CANTON_PROTOCOL_VERSION,
                 password: String::new(), // Empty: the exported key pair is not passphrase-protected.
             }))
@@ -215,7 +215,7 @@ impl TransactionSigner for VaultExportSigner {
                 hash.as_bytes(),
                 &signature_bytes,
                 idx,
-                key_fingerprint,
+                key_fingerprint.as_str(),
             )?;
             tracing::info!("Signature {index} verified locally", index = idx + 1);
 
@@ -224,7 +224,7 @@ impl TransactionSigner for VaultExportSigner {
             signatures.push(Signature {
                 format: SignatureFormat::Concat as i32,
                 signature: signature_bytes.to_vec(),
-                signed_by: key_fingerprint.clone(),
+                signed_by: key_fingerprint.to_string(),
                 signing_algorithm_spec: SigningAlgorithmSpec::Ed25519 as i32,
                 signature_delegation: None,
             });
