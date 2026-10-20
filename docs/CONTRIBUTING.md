@@ -51,7 +51,7 @@ process in [SECURITY.md](SECURITY.md).
   - `crates/decman/migrations/` — SQLx database migrations.
 - `crates/common/` — shared wire DTOs, Canton-ID helpers, and external-party
   fingerprint derivation (used by every other crate).
-- `crates/decman-cli/` — terminal UI client.
+- `crates/decman-cli/` — terminal UI and command-line client.
 - `crates/decman-wallet/` — wallet-side client library for the tenant API.
 - `daml/` — Daml governance packages and tests.
 - `integration-tests/` — end-to-end test harness and scripts.
