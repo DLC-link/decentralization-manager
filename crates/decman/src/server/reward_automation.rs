@@ -28,6 +28,8 @@
 //!   interface views.
 //! * [`run_reassign_once`] — one reassign sweep: assigns every assignable
 //!   unassigned coupon via successive chunked `Delegation_Assign` transactions.
+//! * [`reward_status`] — what the dec party page shows: whether the rewards DAR
+//!   resolves, the active delegation, and whether it names this node.
 //!
 //! The pure record decoders, selection and chunk sizing ([`select_assignable`],
 //! [`chunk_size`]) are unit-tested here; the gRPC reads and command submission
@@ -62,12 +64,13 @@ use super::event_filters::{
 };
 use super::handlers::{get_party_credentials, packages};
 use super::record::{
-    field_decimal, field_list_len, field_optional_is_none, field_party_id, field_party_list,
-    field_time,
+    extract_list, extract_record, field_decimal, field_list_len, field_optional_is_none,
+    field_party_id, field_party_list, field_time, get_field,
 };
 use super::{
     package_inventory::fetch_package_id_to_name,
     queries::{fetch_contract_template_id, read_governance_state},
+    types::{CouponReassignmentDelegationSummary, RewardBeneficiary, RewardStatusResponse},
 };
 
 // ============================================================================
@@ -309,6 +312,17 @@ pub(crate) struct ActiveDelegation {
     pub beneficiary_count: usize,
 }
 
+impl From<ActiveDelegation> for CouponReassignmentDelegationSummary {
+    fn from(d: ActiveDelegation) -> Self {
+        Self {
+            cid: d.cid,
+            dso: d.dso,
+            assigners: d.assigners,
+            beneficiary_count: d.beneficiary_count,
+        }
+    }
+}
+
 /// Decode a `CouponReassignmentDelegation` create-arguments `Record` into an
 /// [`ActiveDelegation`]. Reads only `assigners` — the `split` field is
 /// intentionally **not** parsed here; `Delegation_Assign` enforces it in DAML.
@@ -496,6 +510,92 @@ fn delegations_newest_first(
     // for two creates on one participant, but cheap to pin — keep read order.
     mine.sort_by_key(|(_, offset, _)| std::cmp::Reverse(*offset));
     mine.into_iter().map(|(cid, _, rec)| (cid, rec)).collect()
+}
+
+// ============================================================================
+// Reward status (the dec party page)
+// ============================================================================
+
+/// The decparty's reward status, as the dec party page shows it (#356).
+///
+/// It reads the delegation the sweep acts on. On a participant without the
+/// rewards DAR that read fails with [`package_absent`]. The loop goes quiet on
+/// that error, so this page is where an operator learns of it.
+pub(crate) async fn reward_status(
+    config: &NodeConfig,
+    packages: &PackageConfig,
+    test_mode: bool,
+    decparty: &CantonId,
+    member: &CantonId,
+    token: &str,
+) -> anyhow::Result<RewardStatusResponse> {
+    let package_id = packages
+        .governance_rewards
+        .as_deref()
+        .context("governance_rewards package not configured")?;
+    let read = bounded_created_records(
+        config,
+        decparty,
+        Some(token.to_string()),
+        test_mode,
+        ContractFilter::template(
+            package_id,
+            Module("Governance.Rewards.CouponReassignmentDelegation"),
+            Entity("CouponReassignmentDelegation"),
+        ),
+    )
+    .await;
+    reward_status_from(read, decparty, member)
+}
+
+/// Turn a delegation read into the reward status (pure).
+///
+/// Only an absent package reads as a missing DAR. Every other failure stays an
+/// error, so the page reports a failed read instead of a state it never saw.
+fn reward_status_from(
+    read: anyhow::Result<Vec<(String, i64, Record)>>,
+    decparty: &CantonId,
+    member: &CantonId,
+) -> anyhow::Result<RewardStatusResponse> {
+    let mut status = RewardStatusResponse {
+        rewards_dar_resolvable: true,
+        delegation: None,
+        member_party_id: member.clone(),
+        member_is_assigner: false,
+        beneficiaries: Vec::new(),
+    };
+    let records = match read {
+        Ok(records) => records,
+        Err(e) if package_absent(&e) => {
+            status.rewards_dar_resolvable = false;
+            return Ok(status);
+        }
+        Err(e) => return Err(e),
+    };
+    let Some((cid, rec)) = newest_delegation_for(records, decparty) else {
+        return Ok(status);
+    };
+    let delegation = parse_delegation_record(&cid, &rec)?;
+    status.beneficiaries = parse_split(&rec)?;
+    status.member_is_assigner = role_for(&delegation, member) == Role::Assign;
+    status.delegation = Some(delegation.into());
+    Ok(status)
+}
+
+/// Decode a delegation's `split` for display. Nothing builds a command from
+/// it: `Delegation_Assign` always uses the split stored on the contract.
+fn parse_split(rec: &Record) -> anyhow::Result<Vec<RewardBeneficiary>> {
+    extract_list(get_field(rec, "split")?)?
+        .elements
+        .iter()
+        .map(|entry| {
+            let entry = extract_record(entry)?;
+            Ok(RewardBeneficiary {
+                beneficiary: field_party_id(entry, "beneficiary")?,
+                percentage: field_decimal(entry, "percentage")?,
+            })
+        })
+        .collect()
 }
 
 // ============================================================================
@@ -3312,6 +3412,104 @@ mod tests {
             "a namesake on another participant is not the named assigner"
         );
         Ok(())
+    }
+
+    // ---- the reward status (reward_status_from) ------------------------------
+
+    /// A delegation for GOV that lists `assigners` and holds `split`.
+    fn delegation_listing(assigners: &[&str], split: Vec<Value>) -> Record {
+        let assigners = assigners.iter().map(|a| value(party(a))).collect();
+        record(vec![
+            field("decparty", party(GOV)),
+            field("dso", party(GOV)),
+            field(
+                "assigners",
+                value::Sum::List(List {
+                    elements: assigners,
+                }),
+            ),
+            field("split", value::Sum::List(List { elements: split })),
+        ])
+    }
+
+    fn status_for(
+        read: anyhow::Result<Vec<(String, i64, Record)>>,
+        member: &str,
+    ) -> anyhow::Result<RewardStatusResponse> {
+        reward_status_from(read, &CantonId::parse(GOV)?, &CantonId::parse(member)?)
+    }
+
+    #[test]
+    fn only_an_absent_package_reads_as_a_missing_dar() -> anyhow::Result<()> {
+        let status = status_for(Err(canton_err("PACKAGE_NAMES_NOT_FOUND")), ALICE)?;
+        assert!(!status.rewards_dar_resolvable);
+        assert!(status.delegation.is_none() && status.beneficiaries.is_empty());
+        // Any other failure shows neither a missing DAR nor a missing delegation.
+        assert!(status_for(Err(canton_err("PERMISSION_DENIED")), ALICE).is_err());
+        assert!(status_for(Err(anyhow!("connection refused")), ALICE).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn a_decparty_without_a_delegation_has_the_dar_and_no_delegation() -> anyhow::Result<()> {
+        let theirs = vec![("00theirs".to_string(), 999, delegation_of(BOB))];
+        for read in [vec![], theirs] {
+            let status = status_for(Ok(read), ALICE)?;
+            assert!(status.rewards_dar_resolvable);
+            assert!(status.delegation.is_none() && !status.member_is_assigner);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn the_newest_delegation_says_whether_this_member_assigns() -> anyhow::Result<()> {
+        // The older delegation lists ALICE only, so picking it would deny BOB.
+        let split = vec![
+            beneficiary_record(ALICE, "0.8"),
+            beneficiary_record(BOB, "0.2"),
+        ];
+        let read = || {
+            Ok(vec![
+                ("00old".to_string(), 100, delegation_of(GOV)),
+                (
+                    "00new".to_string(),
+                    900,
+                    delegation_listing(&[ALICE, BOB], split.clone()),
+                ),
+            ])
+        };
+        let bob = status_for(read(), BOB)?;
+        assert!(bob.member_is_assigner);
+        assert_eq!(bob.delegation.context("a delegation")?.cid, "00new");
+        let shares: Vec<(String, String)> = bob
+            .beneficiaries
+            .iter()
+            .map(|b| (b.beneficiary.to_string(), b.percentage.to_string()))
+            .collect();
+        assert_eq!(
+            shares,
+            [(ALICE, "0.8"), (BOB, "0.2")].map(|(p, s)| (p.to_string(), s.to_string()))
+        );
+        // CAROL is not listed. She still sees the delegation and its split.
+        let carol = status_for(read(), CAROL)?;
+        assert!(!carol.member_is_assigner);
+        assert!(carol.delegation.is_some());
+        assert_eq!(carol.beneficiaries.len(), 2);
+        Ok(())
+    }
+
+    #[test]
+    fn a_split_that_does_not_decode_is_an_error_not_an_empty_split() {
+        let no_share = value(value::Sum::Record(record(vec![field(
+            "beneficiary",
+            party(ALICE),
+        )])));
+        let read = vec![(
+            "00del".to_string(),
+            1,
+            delegation_listing(&[ALICE], vec![no_share]),
+        )];
+        assert!(status_for(Ok(read), ALICE).is_err());
     }
 
     #[test]

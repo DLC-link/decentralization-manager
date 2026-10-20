@@ -201,3 +201,28 @@ describe("PartyDetail governance membership", () => {
     ).toBeTruthy();
   });
 });
+
+describe("PartyDetail rewards", () => {
+  it("shows a failed reward status read as a load error, not a missing DAR", async () => {
+    vi.mocked(authenticatedFetch).mockImplementation((url) =>
+      String(url).includes("/reward-status")
+        ? Promise.resolve(
+            new Response(JSON.stringify({ error: "ledger unavailable" }), {
+              status: 503,
+            }),
+          )
+        : new Promise(() => {}),
+    );
+
+    renderDetail(authStatus({ dec_party_read_as: true }));
+
+    await waitFor(() =>
+      expect(
+        screen.getByText(
+          "Could not load the reward status: ledger unavailable",
+        ),
+      ).toBeTruthy(),
+    );
+    expect(screen.queryByText(/rewards DAR/)).toBeNull();
+  });
+});

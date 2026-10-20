@@ -53,8 +53,8 @@ pub use common::types::{
     WorkflowProgress, WorkflowRole, WorkflowRun,
 };
 pub use decman_lib::catalog::types::{
-    AcceptTransferDetails, AppRewardBeneficiary, BillingParams, ServiceRequestDetails,
-    TransferProposalDetails,
+    AcceptTransferDetails, AppRewardBeneficiary, BillingParams, RewardBeneficiary,
+    ServiceRequestDetails, TransferProposalDetails,
 };
 
 use crate::{canton_id::CantonId, noise::server::ActiveWorkflow};
@@ -893,6 +893,28 @@ pub struct HoldingInfo {
 #[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 pub struct HoldingsResponse {
     pub holdings: Vec<HoldingInfo>,
+}
+
+/// A decparty's reward automation as this node sees it.
+///
+/// It separates the three reasons a node assigns no reward coupons. This
+/// participant may lack the rewards DAR, no delegation may be active, or the
+/// delegation may name other assigners.
+#[derive(Serialize, utoipa::ToSchema)]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
+pub struct RewardStatusResponse {
+    /// Whether this participant resolves `governance-rewards-automation-v1`.
+    /// When false, no delegation was read: `delegation` is `None` and
+    /// `beneficiaries` is empty.
+    pub rewards_dar_resolvable: bool,
+    /// The delegation the automation acts on: the newest, if several are active.
+    pub delegation: Option<CouponReassignmentDelegationSummary>,
+    /// This node's member party for the decparty.
+    pub member_party_id: CantonId,
+    /// Whether the delegation lists `member_party_id` as an assigner.
+    pub member_is_assigner: bool,
+    /// The delegation's beneficiary split, as the contract stores it.
+    pub beneficiaries: Vec<RewardBeneficiary>,
 }
 
 // ============================================================================

@@ -41,6 +41,7 @@ import { GovernanceActionsDialog } from "./GovernanceActionsDialog";
 import { GovernanceAuditTrail } from "./GovernanceAuditTrail";
 import { GovernanceRules } from "./GovernanceRules";
 import { HoldingsSection } from "./HoldingsSection";
+import { RewardStatus } from "./RewardStatus";
 import { AuthSection, getAuthStatusIcon } from "./AuthSection";
 import { SURFACE2, cardTableSx, sectionCardSx, zebraRow } from "../styles";
 import { ADMIN_ACCESS, API_BASE } from "../constants";
@@ -53,6 +54,7 @@ import type {
   GovernanceStateResponse,
   Network,
   PartyAuthStatus,
+  RewardStatusResponse,
 } from "../types";
 
 /**
@@ -249,6 +251,16 @@ export const PartyDetail = ({
   const [authExpanded, setAuthExpanded] = useState(false);
   const [governanceExpanded, setGovernanceExpanded] = useState(false);
   const [rulesExpanded, setRulesExpanded] = useState(true);
+  const [rewardsExpanded, setRewardsExpanded] = useState(true);
+  // Keyed by party, like the governance state, so a late response for the
+  // previous party never shows.
+  const [loadedRewards, setLoadedRewards] = useState<{
+    partyId: string;
+    status: RewardStatusResponse | null;
+    error: string | null;
+  } | null>(null);
+  const rewards =
+    loadedRewards?.partyId === party.party_id ? loadedRewards : null;
   const [holdingsCount, setHoldingsCount] = useState(0);
   const [holdingsLoading, setHoldingsLoading] = useState(false);
   const [holdingsRefreshNonce, setHoldingsRefreshNonce] = useState(0);
@@ -361,6 +373,37 @@ export const PartyDetail = ({
       clearInterval(interval);
     };
   }, [party.party_id]);
+
+  // The reward status reads the ledger as the party, so it needs the same
+  // rights as the other read-only sections. A failed read stays an error: it
+  // must never look like a missing DAR or a missing delegation.
+  useEffect(() => {
+    if (!canRead) return;
+    let cancelled = false;
+    const load = async () => {
+      let status: RewardStatusResponse | null = null;
+      let error: string | null = null;
+      try {
+        const res = await authenticatedFetch(
+          `${API_BASE}/reward-status?party_id=${encodeURIComponent(party.party_id)}`,
+        );
+        if (res.ok) {
+          status = await res.json();
+        } else {
+          const body: { error?: string } = await res.json().catch(() => ({}));
+          error = body.error || `the request failed with status ${res.status}`;
+        }
+      } catch (e) {
+        error = e instanceof Error ? e.message : String(e);
+      }
+      if (!cancelled)
+        setLoadedRewards({ partyId: party.party_id, status, error });
+    };
+    void load();
+    return () => {
+      cancelled = true;
+    };
+  }, [party.party_id, canRead]);
 
   const handleKickClick = (participantUid: string) => {
     setSelectedParticipant(participantUid);
@@ -562,6 +605,21 @@ export const PartyDetail = ({
           <GovernanceRules
             state={governanceState}
             memberPartyId={authStatus?.member_party_id}
+          />
+        </CollapsibleSection>
+      )}
+
+      {/* Rewards */}
+      {canRead && (
+        <CollapsibleSection
+          title="Rewards"
+          expanded={rewardsExpanded}
+          onToggle={() => setRewardsExpanded(!rewardsExpanded)}
+          helpText="Reward coupon reassignment for this party: whether this participant has the rewards DAR, the active delegation, and whether this node is an assigner."
+        >
+          <RewardStatus
+            status={rewards?.status ?? null}
+            error={rewards?.error ?? null}
           />
         </CollapsibleSection>
       )}
