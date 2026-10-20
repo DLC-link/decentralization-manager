@@ -533,6 +533,11 @@ pub(crate) async fn reward_status(
         .governance_rewards
         .as_deref()
         .context("governance_rewards package not configured")?;
+    // Under mock auth the read below is a wildcard, so Canton never resolves
+    // the rewards package, and a missing DAR would read as no delegation.
+    if test_mode && !package_listed(&fetch_package_id_to_name(config).await?, package_id) {
+        return Ok(missing_dar_status(member));
+    }
     let read = bounded_created_records(
         config,
         decparty,
@@ -548,6 +553,26 @@ pub(crate) async fn reward_status(
     reward_status_from(read, decparty, member)
 }
 
+/// Whether `package_ref` is among `packages` (id to name). A `#name`
+/// reference matches by name, anything else by package id.
+fn package_listed(packages: &HashMap<String, String>, package_ref: &str) -> bool {
+    match package_ref.strip_prefix('#') {
+        Some(name) => packages.values().any(|listed| listed == name),
+        None => packages.contains_key(package_ref),
+    }
+}
+
+/// The status of a participant without the rewards DAR.
+fn missing_dar_status(member: &CantonId) -> RewardStatusResponse {
+    RewardStatusResponse {
+        rewards_dar_resolvable: false,
+        delegation: None,
+        member_party_id: member.clone(),
+        member_is_assigner: false,
+        beneficiaries: Vec::new(),
+    }
+}
+
 /// Turn a delegation read into the reward status (pure).
 ///
 /// Only an absent package reads as a missing DAR. Every other failure stays an
@@ -557,20 +582,14 @@ fn reward_status_from(
     decparty: &CantonId,
     member: &CantonId,
 ) -> anyhow::Result<RewardStatusResponse> {
-    let mut status = RewardStatusResponse {
-        rewards_dar_resolvable: true,
-        delegation: None,
-        member_party_id: member.clone(),
-        member_is_assigner: false,
-        beneficiaries: Vec::new(),
-    };
     let records = match read {
         Ok(records) => records,
-        Err(e) if package_absent(&e) => {
-            status.rewards_dar_resolvable = false;
-            return Ok(status);
-        }
+        Err(e) if package_absent(&e) => return Ok(missing_dar_status(member)),
         Err(e) => return Err(e),
+    };
+    let mut status = RewardStatusResponse {
+        rewards_dar_resolvable: true,
+        ..missing_dar_status(member)
     };
     let Some((cid, rec)) = newest_delegation_for(records, decparty) else {
         return Ok(status);
@@ -3448,6 +3467,35 @@ mod tests {
         assert!(status_for(Err(canton_err("PERMISSION_DENIED")), ALICE).is_err());
         assert!(status_for(Err(anyhow!("connection refused")), ALICE).is_err());
         Ok(())
+    }
+
+    /// Mock auth reads the delegation with a wildcard, so the DAR check
+    /// looks the package up on the participant instead.
+    #[test]
+    fn a_package_reference_matches_by_name_or_by_id() {
+        let packages: HashMap<String, String> = [
+            (
+                "pkg-rewards".to_string(),
+                "governance-rewards-automation-v1".to_string(),
+            ),
+            ("pkg-core".to_string(), "governance-core-v1".to_string()),
+        ]
+        .into_iter()
+        .collect();
+
+        assert!(package_listed(
+            &packages,
+            "#governance-rewards-automation-v1"
+        ));
+        assert!(package_listed(&packages, "pkg-rewards"));
+        assert!(!package_listed(&packages, "#governance-rewards-v1"));
+        assert!(!package_listed(&packages, "pkg-missing"));
+        // A name is never matched as an id, nor an id as a name.
+        assert!(!package_listed(
+            &packages,
+            "governance-rewards-automation-v1"
+        ));
+        assert!(!package_listed(&packages, "#pkg-rewards"));
     }
 
     #[test]
