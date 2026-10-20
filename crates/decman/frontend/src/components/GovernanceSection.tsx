@@ -1383,7 +1383,9 @@ export const GovernanceSection = ({
           new_timeout_microseconds: timeoutMicroseconds,
         };
       case "governance_set_disclosure_observers": {
-        const observers = parsePartyLines(disclosureObserversText);
+        // Sorted like the backend's party set, so the audit entry and the
+        // ledger action list the parties in the same order.
+        const observers = parsePartyLines(disclosureObserversText).sort();
         return {
           type: "governance_set_disclosure_observers",
           // Leaving the field out sends None, which clears the observers.

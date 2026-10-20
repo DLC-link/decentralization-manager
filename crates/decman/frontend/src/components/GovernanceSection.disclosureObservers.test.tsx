@@ -91,6 +91,20 @@ describe("disclosure observers self-action", { timeout: 20_000 }, () => {
     });
   });
 
+  // The ledger stores the set sorted. A pending vote is matched to its audit
+  // entry by the action, so the posted list must be sorted too.
+  it("posts the observers in sorted order, whatever order they were typed in", async () => {
+    renderForm();
+    await chooseSetObservers();
+    await waitFor(() => expect(observersField()).toHaveProperty("value", alice));
+
+    fireEvent.change(observersField(), { target: { value: `${bob}\n${alice}` } });
+    submit();
+
+    const request = await postedConfirm();
+    expect(request.action.disclosure_observers).toEqual([alice, bob]);
+  });
+
   it("sends no list, which the ledger reads as None, when the field is empty", async () => {
     renderForm();
     await chooseSetObservers();
