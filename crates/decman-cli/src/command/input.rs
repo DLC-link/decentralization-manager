@@ -62,7 +62,7 @@ pub fn dar_files(paths: &[impl AsRef<Path>]) -> Result<Vec<Value>> {
 pub fn query_pair(arg: &str) -> Result<(String, String)> {
     match arg.split_once('=') {
         Some((key, value)) if !key.is_empty() => Ok((key.to_owned(), value.to_owned())),
-        _ => bail!("query argument {arg:?} must look like key=value"),
+        _ => bail!("{arg:?} must look like KEY=VALUE"),
     }
 }
 
