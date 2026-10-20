@@ -15,13 +15,18 @@ use super::{
 };
 
 impl Fixture {
+    /// The URL of `path` on the local service listening on `port`.
+    pub fn url(&self, port: u16, path: &str) -> String {
+        format!("{}{path}", self.target.http_base(port))
+    }
+
     pub async fn post_json<B, R>(&self, port: u16, path: &str, body: &B) -> anyhow::Result<R>
     where
         B: Serialize + ?Sized,
         R: DeserializeOwned,
     {
         let jwt = self.refresher.token().await.context("acquire bearer")?;
-        let url = format!("http://localhost:{port}{path}");
+        let url = self.url(port, path);
         let res = self
             .client
             .post(&url)
@@ -56,7 +61,7 @@ impl Fixture {
         path: &str,
     ) -> anyhow::Result<(String, StatusCode, Vec<u8>)> {
         let jwt = self.refresher.token().await.context("acquire bearer")?;
-        let url = format!("http://localhost:{port}{path}");
+        let url = self.url(port, path);
         let res = self
             .client
             .get(&url)
@@ -132,7 +137,7 @@ impl Fixture {
     }
 
     pub async fn get_text(&self, port: u16, path: &str) -> anyhow::Result<String> {
-        let url = format!("http://localhost:{port}{path}");
+        let url = self.url(port, path);
         let res = self
             .client
             .get(&url)
@@ -156,7 +161,7 @@ impl Fixture {
         R: DeserializeOwned,
     {
         let jwt = self.refresher.token().await.context("acquire bearer")?;
-        let url = format!("http://localhost:{port}{path}");
+        let url = self.url(port, path);
         let res = self
             .client
             .put(&url)
@@ -194,7 +199,7 @@ impl Fixture {
         B: Serialize + ?Sized,
     {
         let jwt = self.refresher.token().await.context("acquire bearer")?;
-        let url = format!("http://localhost:{port}{path}");
+        let url = self.url(port, path);
         let res = self
             .client
             .post(&url)
@@ -264,13 +269,26 @@ mod tests {
     };
 
     use super::Fixture;
-    use crate::common::probe::FATAL_STREAK;
+    use crate::common::{TestTarget, probe::FATAL_STREAK};
 
     async fn fixture_with_jwt(jwt: &str) -> (Fixture, MockServer) {
         let server = MockServer::start().await;
         let mut f = Fixture::for_test_with_jwt(jwt);
         f.p1.http = server.address().port();
         (f, server)
+    }
+
+    /// Devnet runs DecMan as local processes too, so both targets address the
+    /// same local URL.
+    #[test]
+    fn url_is_local_on_both_targets() {
+        let mut f = Fixture::for_test();
+        assert_eq!(
+            f.url(8081, "/node-config"),
+            "http://localhost:8081/node-config"
+        );
+        f.target = TestTarget::Devnet;
+        assert_eq!(f.url(9464, "/metrics"), "http://localhost:9464/metrics");
     }
 
     #[tokio::test]

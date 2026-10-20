@@ -92,7 +92,9 @@ pub(crate) async fn grant_rights(
     Ok(())
 }
 
-async fn update_party_config(
+/// Stores a decparty's credentials on one node, through `PUT /party-config`.
+/// The write stays in that node's own database; nothing reaches the ledger.
+pub(crate) async fn update_party_config(
     f: &Fixture,
     port: u16,
     party_id: &str,

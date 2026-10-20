@@ -807,6 +807,61 @@ human-readable error.
 [i148]: https://github.com/DLC-link/dec-party-manager/issues/148
 [cprev6]: https://github.com/DLC-link/dec-party-manager/pull/142#discussion_r3241693561
 
+#### Reward test against cbtc-network
+
+`devnet_reward_e2e` runs only the CIP-104 reward phase, against the deployed
+`cbtc-network` decparty. It onboards no decparty and votes on nothing. The
+harness nodes assign the decparty's live coupons through its active
+delegation. PQS must then show the new coupons at the delegation's split, by
+value.
+
+```bash
+DECPM_IT_REWARD=1 \
+DECPM_IT_REWARD_DECPARTY='cbtc-network::<namespace-fingerprint-hex>' \
+DECPM_IT_PQS_URL="$(op read 'op://<vault>/<item>/<field>')" \
+DECPM_E2E_TEST=devnet_reward_e2e \
+  ./integration-tests/run.sh --target devnet
+```
+
+- `DECPM_IT_REWARD=1` confirms that the run may act on a shared decparty.
+- `DECPM_IT_REWARD_DECPARTY` is the full party id of the deployed decparty.
+- `DECPM_IT_PQS_URL` is a Postgres URL for devnet's `pqs_cbtc` database. The
+  test opens read-only sessions only.
+
+`run.sh` checks all three before it builds anything. `--target devnet` sets
+`DECPM_IT_TARGET=devnet`, and the test refuses any other target. The
+`.env.example` files document the two new variables too.
+
+The run needs these conditions. The harness cannot create them.
+
+1. Mode-B collection is paused for `cbtc-network`. Otherwise it sweeps the
+   coupons to 0 before the harness can assign them.
+2. Unassigned coupons have re-accumulated since the pause. They reappear
+   within about one round.
+3. The decparty has an active `CouponReassignmentDelegation`. It lists at
+   least one harness member party (`P{N}_MEMBER_PARTY_ID`) as an assigner.
+4. No other DecMan assigns the decparty's coupons during the run. The test
+   checks that its own nodes did the assigning.
+5. The harness nodes sweep on a short interval. `devnet.env.sh` already sets
+   `DECPM_REWARD_AUTOMATION_INTERVAL_SECS=15`.
+6. The member users already hold act-as and read-as rights on the decparty.
+   The test grants no rights.
+7. PQS indexes the `governance-rewards-automation-v1` package, so it holds the
+   delegation.
+
+The test checks these facts, in this order:
+
+- PQS holds the decparty's active delegation, and it names the network's DSO.
+- PQS shows unassigned coupons from that DSO.
+- DecMan's own ledger read names the same delegation as PQS.
+- `decman_reward_coupons_assigned_total` rises on a harness assigner node.
+- Each coupon created with a beneficiary since the start goes to a beneficiary
+  in the split. Every beneficiary holds the same number of coupons. Each
+  beneficiary's total matches its percentage, within Daml's rounding.
+
+The PQS check reads `creates()`, not `archives()`. A coupon therefore counts
+before its beneficiary mints it. The test is `#[ignore]`d and is not a CI check.
+
 ### Frontend Development
 
 ```bash
