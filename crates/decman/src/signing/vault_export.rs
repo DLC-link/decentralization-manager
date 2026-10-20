@@ -1,10 +1,10 @@
 //! Signing backend that exports the private key from the participant's vault
 //! and signs locally with Ed25519.
 //!
-//! This is the historical decman behaviour and works only for the JCE crypto
-//! provider, whose keys are exportable. It is unusable on a KMS-backed node
-//! (the private key cannot leave the KMS) — that case needs a KMS signing
-//! backend instead (see [`crate::signing`]).
+//! This is the supported path for the JCE crypto provider, whose keys are
+//! exportable; `docs/KMS_SIGNING.md` records why it stays. It is unusable on a
+//! KMS-backed node (the private key cannot leave the KMS) — that case needs a
+//! KMS signing backend instead (see [`crate::signing`]).
 
 use async_trait::async_trait;
 use canton_proto_rs::com::digitalasset::canton::crypto::{
