@@ -720,6 +720,7 @@ Self-management actions modify the `GovernanceRules` contract itself. They use a
 | `SelfAction_AddAdditionalProposer` | additionalProposer | Grant propose-only rights to a non-member party |
 | `SelfAction_RemoveAdditionalProposer` | additionalProposer | Revoke propose-only rights from a party (normalizes the allowlist back to `None` when it becomes empty) |
 | `SelfAction_SetDisclosureObservers` | updatedDisclosureObservers | Replace the disclosure observers (an empty set normalizes to `None`) |
+| `SelfAction_CancelAction` | actionProposalCid | Archive a `GovernableAction` proposal of this governance, e.g. one whose proposer the rules no longer authorize (the rules contract is unchanged) |
 
 Choices on `GovernanceRules` for self-management:
 - `GovernanceRules_ConfirmGovernanceAction` -- Submit a self-action confirmation

@@ -17,8 +17,8 @@ use common::canton_id::CantonId;
 use crate::catalog::types::{deserialize_claim, deserialize_reltime};
 use crate::error::Error;
 use crate::framework::encode::{
-    field, make_int64, make_optional_party_set, make_party, make_record, make_variant,
-    serialize_reltime,
+    field, make_contract_id, make_int64, make_optional_party_set, make_party, make_record,
+    make_variant, serialize_reltime,
 };
 use crate::framework::record::{
     extract_contract_id, extract_int64, extract_list, extract_party_id, extract_party_set,
@@ -58,6 +58,10 @@ pub enum ActionType {
     GovernanceSetDisclosureObservers {
         #[serde(default)]
         disclosure_observers: Option<Vec<CantonId>>,
+    },
+    /// Archives the `GovernableAction` proposal with this contract id.
+    GovernanceCancelAction {
+        proposal_cid: String,
     },
 
     // Utility Onboarding (4)
@@ -164,6 +168,13 @@ impl ActionType {
                 make_record(vec![field(
                     "updatedDisclosureObservers",
                     make_optional_party_set(disclosure_observers.as_deref()),
+                )]),
+            )),
+            ActionType::GovernanceCancelAction { proposal_cid } => Ok(make_variant(
+                "SelfAction_CancelAction",
+                make_record(vec![field(
+                    "actionProposalCid",
+                    make_contract_id(proposal_cid),
                 )]),
             )),
             _ => Err(Error::Encode(format!(
@@ -436,6 +447,10 @@ impl ActionType {
                     disclosure_observers,
                 })
             }
+            "SelfAction_CancelAction" => {
+                let proposal_cid = extract_contract_id(get_field(record, "actionProposalCid")?)?;
+                Ok(ActionType::GovernanceCancelAction { proposal_cid })
+            }
             other => Err(Error::decode(format!(
                 "Unknown GovernanceSelfAction constructor: {other}"
             ))),
@@ -460,6 +475,7 @@ impl ActionType {
                 | ActionType::GovernanceAddAdditionalProposer { .. }
                 | ActionType::GovernanceRemoveAdditionalProposer { .. }
                 | ActionType::GovernanceSetDisclosureObservers { .. }
+                | ActionType::GovernanceCancelAction { .. }
         )
     }
 
@@ -479,6 +495,13 @@ impl ActionType {
             ActionType::GovernanceSetTimeout {
                 new_timeout_microseconds,
             } => validate_timeout(*new_timeout_microseconds),
+            ActionType::GovernanceCancelAction { proposal_cid }
+                if proposal_cid.trim().is_empty() =>
+            {
+                Err(Error::Validation(
+                    "proposal_cid must name the proposal to cancel".to_string(),
+                ))
+            }
             _ => Ok(()),
         }
     }
@@ -510,7 +533,7 @@ mod tests {
     use canton_proto_rs::com::daml::ledger::api::v2::RecordField;
 
     use super::*;
-    use crate::framework::encode::{make_contract_id, make_list, make_text, serialize_claim};
+    use crate::framework::encode::{make_list, make_text, serialize_claim};
 
     /// Test-only helper: builds a `CantonId` with a fixed valid namespace so
     /// tests can vary just the prefix.
@@ -733,10 +756,10 @@ mod tests {
     #[test]
     fn cbtc_form_covers_every_variant_it_can_carry() {
         // Guards against a variant added to `ActionType` without a fixture.
-        // Eleven of the fourteen variants reach this form: four
+        // Eleven of the fifteen variants reach this form: four
         // member-management, four utility, two credential and one DevNet.
-        // The two AdditionalProposer variants and SetDisclosureObservers
-        // exist only in the self form.
+        // The two AdditionalProposer variants, SetDisclosureObservers and
+        // CancelAction exist only in the self form.
         assert_eq!(cbtc_form_fixtures().len(), 11);
     }
 
@@ -785,6 +808,15 @@ mod tests {
         let (ctor, record) = as_variant(&set_observers);
         assert_eq!(ctor, "SelfAction_SetDisclosureObservers");
         assert_eq!(record_labels(record), ["updatedDisclosureObservers"]);
+
+        let cancel = ActionType::GovernanceCancelAction {
+            proposal_cid: "00proposal".into(),
+        }
+        .to_self_proto()
+        .expect("action encodes to the self form");
+        let (ctor, record) = as_variant(&cancel);
+        assert_eq!(ctor, "SelfAction_CancelAction");
+        assert_eq!(record_labels(record), ["actionProposalCid"]);
     }
 
     // ---- `validate` assertions ----
@@ -812,6 +844,18 @@ mod tests {
             new_threshold: -1,
         };
         assert!(action.validate().is_err());
+    }
+
+    #[test]
+    fn cancel_action_needs_a_proposal_cid() {
+        let action = ActionType::GovernanceCancelAction {
+            proposal_cid: " ".into(),
+        };
+        assert!(matches!(action.validate(), Err(Error::Validation(_))));
+        let action = ActionType::GovernanceCancelAction {
+            proposal_cid: "00proposal".into(),
+        };
+        assert!(action.validate().is_ok());
     }
 
     #[test]
@@ -864,6 +908,9 @@ mod tests {
             },
             ActionType::GovernanceSetDisclosureObservers {
                 disclosure_observers: None,
+            },
+            ActionType::GovernanceCancelAction {
+                proposal_cid: "00proposal".into(),
             },
         ]
     }

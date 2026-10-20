@@ -40,6 +40,10 @@ expression: all_action_fixtures()
     "disclosure_observers": null
   },
   {
+    "type": "governance_cancel_action",
+    "proposal_cid": "00proposal"
+  },
+  {
     "type": "utility_create_provider_request",
     "operator": "op::1220c4010d6883f367c7f45d55b2449501620130f9b21e96379f17dea455ac7a5892"
   },

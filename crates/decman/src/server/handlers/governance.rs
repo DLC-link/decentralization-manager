@@ -2587,6 +2587,23 @@ mod tests {
         }
     }
 
+    /// A cancellation vote is a self-management action, so `core_self` takes
+    /// it, but only when it names the proposal to cancel.
+    #[test]
+    fn self_management_confirms_take_a_cancellation_with_a_proposal_cid() {
+        let cancel = |proposal_cid: &str| ActionType::GovernanceCancelAction {
+            proposal_cid: proposal_cid.to_owned(),
+        };
+        assert!(validate_inline_action(&cancel("00proposal"), GovernanceType::CoreSelf).is_ok());
+        match validate_inline_action(&cancel(""), GovernanceType::CoreSelf) {
+            Ok(()) => panic!("a cancellation without a proposal cid must not pass"),
+            Err(error) => assert!(
+                error.contains("proposal_cid"),
+                "error should name the field: {error}"
+            ),
+        }
+    }
+
     fn entry_at(offset: i64) -> ChainAuditEntry {
         ChainAuditEntry {
             offset,

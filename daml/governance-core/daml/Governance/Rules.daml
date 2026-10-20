@@ -48,6 +48,9 @@ data GovernanceSelfAction
   | SelfAction_SetDisclosureObservers
       { updatedDisclosureObservers : Optional (Set Party)
       }
+  | SelfAction_CancelAction
+      { actionProposalCid : ContractId GovernableAction
+      }
   deriving (Show, Eq)
 
 -- | A confirmation for a governance self-management action.
@@ -388,6 +391,14 @@ template GovernanceRules
             result <- exercise self GovernanceRules_SetDisclosureObservers with
               newDisclosureObservers = updatedDisclosureObservers
             pure result.governanceRulesCid
+
+          -- See the cancellation note below. The rules contract is unchanged.
+          SelfAction_CancelAction actionProposalCid -> do
+            actionView <- view <$> fetch actionProposalCid
+            require "Cancelled proposal targets this governance"
+              (actionView.governanceParty == governanceParty)
+            exercise actionProposalCid GovernableAction_Cancel
+            pure self
         pure GovernanceRules_ExecuteGovernanceActionResult with ..
 
     -- | Expire a stale self-management confirmation.
@@ -480,8 +491,17 @@ template GovernanceRules
     --   * GovernableAction_ProposerCancel — controlled by the proposer, lets
     --     them retract their own proposal without a governance vote.
     --   * GovernableAction_Cancel — controlled by governanceParty, used when
-    --     governance needs to clean up a stale proposal (typically via the
-    --     standard vote flow as a GovernableAction itself).
+    --     governance needs to clean up a stale proposal. Members reach it by
+    --     voting `SelfAction_CancelAction`, e.g. for a proposal whose proposer
+    --     the rules no longer authorize (#518).
+    -- Cancelling leaves the proposal's confirmations in place. They reference
+    -- an archived contract, so ExecuteConfirmedAction fails on them; each
+    -- confirmer cancels its own, or a member expires them later.
+    -- A cancellation vote has no proposer, so a change in proposer rights
+    -- cannot strand it. Its confirmations name the action, not a rules
+    -- contract, so they survive a membership change, and execution counts
+    -- only current members. If the proposal is archived first, execution
+    -- fails and the cancellation's confirmations expire unused.
 
     -- | Expire a stale action confirmation.
     nonconsuming choice GovernanceRules_ExpireConfirmation : ()

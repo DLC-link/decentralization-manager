@@ -64,7 +64,7 @@ fn requirement(issuer: &str) -> PartyCredentialRequirement {
     }
 }
 
-/// One populated instance per `ActionType` variant (14), plus the `None` form
+/// One populated instance per `ActionType` variant (15), plus the `None` form
 /// of `GovernanceSetDisclosureObservers`, the one variant with an `Option`.
 fn all_action_fixtures() -> Vec<ActionType> {
     vec![
@@ -91,6 +91,9 @@ fn all_action_fixtures() -> Vec<ActionType> {
         },
         ActionType::GovernanceSetDisclosureObservers {
             disclosure_observers: None,
+        },
+        ActionType::GovernanceCancelAction {
+            proposal_cid: "00proposal".into(),
         },
         ActionType::UtilityCreateProviderRequest {
             operator: cid("op"),
