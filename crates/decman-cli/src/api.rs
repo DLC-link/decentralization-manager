@@ -924,9 +924,22 @@ impl DecmanClient {
         }
 
         let status = response.status();
+        // The server answers unknown routes with the web UI's index.html, so an
+        // HTML page means the route does not exist on this server version.
+        let is_html = response
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .is_some_and(|value| value.starts_with("text/html"));
         let text = response
             .text()
             .with_context(|| format!("failed to read the {path} response"))?;
+        if status.is_success() && is_html {
+            bail!(
+                "{method} {path} returned the web UI page, not JSON: this server version \
+                 probably has no such route"
+            );
+        }
         if !status.is_success() {
             return Err(ApiError {
                 method,

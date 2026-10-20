@@ -1,5 +1,7 @@
 //! The governance-core deployment: the `POST /contracts` body that creates a
-//! party's `GovernanceRules` contract, built like the terminal UI builds it.
+//! party's `GovernanceRules` contract, built like the web frontend builds it.
+
+use std::collections::HashMap;
 
 use anyhow::{Context, Result, bail};
 use reqwest::Method;
@@ -19,21 +21,23 @@ pub struct GovernanceCoreInput {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct GovernanceCoreContext {
     pub package_id: String,
-    /// `(participant id, member party id)` for each member with a known party.
+    /// `(participant id, member party id)` for each participant of the party.
     pub members: Vec<(String, String)>,
     pub operator_party: String,
 }
 
-/// Read the package id, the members, and the operator party from the node.
-/// A member without a known member party is left out, as in the terminal UI.
+/// Read the package id, the member parties, and the operator party from the
+/// node, and pair each of the party's participants with its member party.
 ///
 /// # Errors
 ///
-/// Returns an error if a read fails, or if there is no operator party and the
-/// caller gave none.
+/// Returns an error if a read fails, if a participant has no member party, or
+/// if there is no operator party and the caller gave none.
 pub fn fetch_context(
     client: &mut DecmanClient,
     party_id: &str,
+    participants: &[String],
+    member_overrides: &[(String, String)],
     operator_party: Option<String>,
 ) -> Result<GovernanceCoreContext> {
     let query = [("party_id".to_owned(), party_id.to_owned())];
@@ -50,7 +54,37 @@ pub fn fetch_context(
             .context("this node reports no operator party; pass --operator-party")?,
     };
 
-    let members = known
+    Ok(GovernanceCoreContext {
+        package_id: packages
+            .get("governance_core")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_owned(),
+        members: resolve_members(participants, &known, member_overrides)?,
+        operator_party,
+    })
+}
+
+/// Pair each participant of the party with its member party, in the party's
+/// participant order. A `--member` override wins over the member party the
+/// peers report through `/governance/known-members`.
+///
+/// # Errors
+///
+/// Returns an error if an override names a participant outside the party, or
+/// if a participant has no member party.
+pub fn resolve_members(
+    participants: &[String],
+    known: &Value,
+    overrides: &[(String, String)],
+) -> Result<Vec<(String, String)>> {
+    if let Some((stranger, _)) = overrides
+        .iter()
+        .find(|(participant, _)| !participants.contains(participant))
+    {
+        bail!("--member names {stranger}, which is not a participant of this party");
+    }
+    let reported: HashMap<&str, &str> = known
         .get("members")
         .and_then(Value::as_array)
         .into_iter()
@@ -61,19 +95,30 @@ pub fn fetch_context(
                 .get("member_party_id")?
                 .as_str()
                 .filter(|party| !party.is_empty())?;
-            Some((participant.to_owned(), party.to_owned()))
+            Some((participant, party))
         })
         .collect();
 
-    Ok(GovernanceCoreContext {
-        package_id: packages
-            .get("governance_core")
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_owned(),
-        members,
-        operator_party,
-    })
+    let mut members = Vec::new();
+    let mut missing = Vec::new();
+    for participant in participants {
+        let party = overrides
+            .iter()
+            .find(|(id, _)| id == participant)
+            .map(|(_, party)| party.as_str())
+            .or_else(|| reported.get(participant.as_str()).copied());
+        match party {
+            Some(party) => members.push((participant.clone(), party.to_owned())),
+            None => missing.push(participant.as_str()),
+        }
+    }
+    if !missing.is_empty() {
+        bail!(
+            "no member party is known for {}; pass --member PARTICIPANT=PARTY for each",
+            missing.join(", ")
+        );
+    }
+    Ok(members)
 }
 
 /// Build the `POST /contracts` body.
@@ -168,6 +213,52 @@ mod tests {
         assert_eq!(fields[2]["value"], 2);
         assert_eq!(fields[3]["microseconds"], 86_400_000_000_i64);
         assert_eq!(fields[4]["inner"]["parties"], json!(["p::1220"]));
+    }
+
+    fn known() -> Value {
+        json!({ "members": [
+            { "participant_uid": "PAR::1", "member_party_id": "m1::1220" },
+            { "participant_uid": "PAR::2" },
+            { "participant_uid": "PAR::9", "member_party_id": "m9::1220" },
+        ] })
+    }
+
+    #[test]
+    fn members_follow_the_party_and_skip_other_network_participants() {
+        // Act
+        let members = resolve_members(
+            &["PAR::1".to_owned(), "PAR::2".to_owned()],
+            &known(),
+            &[("PAR::2".to_owned(), "m2::1220".to_owned())],
+        )
+        .unwrap();
+
+        // Assert
+        assert_eq!(
+            members,
+            vec![
+                ("PAR::1".to_owned(), "m1::1220".to_owned()),
+                ("PAR::2".to_owned(), "m2::1220".to_owned()),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_participant_without_a_member_party_is_named_in_the_error() {
+        let error = resolve_members(&["PAR::1".to_owned(), "PAR::2".to_owned()], &known(), &[])
+            .unwrap_err();
+        assert!(error.to_string().contains("PAR::2"), "{error}");
+        assert!(!error.to_string().contains("PAR::1,"), "{error}");
+    }
+
+    #[test]
+    fn an_override_outside_the_party_is_refused() {
+        let result = resolve_members(
+            &["PAR::1".to_owned()],
+            &known(),
+            &[("PAR::7".to_owned(), "x::1220".to_owned())],
+        );
+        assert!(result.is_err());
     }
 
     #[test]

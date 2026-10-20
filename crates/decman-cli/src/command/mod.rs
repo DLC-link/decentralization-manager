@@ -354,11 +354,16 @@ pub enum ContractsCommand {
         #[command(flatten)]
         wait: WaitArgs,
     },
-    /// Deploy the governance rules (Governance Core) for a party. The members
-    /// are the party's known members with a member party.
+    /// Deploy the governance rules (Governance Core) for a party. Each
+    /// participant of the party needs a member party: the one its node
+    /// reports, or the one --member gives.
     DeployGovernance {
         #[command(flatten)]
         party: PartyArg,
+        /// The member party of one participant, as PARTICIPANT=PARTY. Repeat
+        /// for more. It replaces the member party the peers report.
+        #[arg(long = "member", value_name = "PARTICIPANT=PARTY")]
+        members: Vec<String>,
         /// Confirmations an action needs before it can execute.
         #[arg(long)]
         threshold: i64,
@@ -760,6 +765,9 @@ fn run_peers(client: &mut DecmanClient, command: PeersCommand) -> Result<Outcome
 struct ResolvedParty {
     id: String,
     threshold: Option<i64>,
+    /// The participant ids that host the party. Empty when the node does not
+    /// list the party.
+    participants: Vec<String>,
 }
 
 /// Resolve a party name or id against `GET /decentralized-parties`. A full id
@@ -784,10 +792,18 @@ fn resolve_party(client: &mut DecmanClient, party: &PartyArg) -> Result<Resolved
         [party] => Ok(ResolvedParty {
             id: party["party_id"].as_str().unwrap_or(arg).to_owned(),
             threshold: party["threshold"].as_i64(),
+            participants: party["participants"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|participant| participant["participant_uid"].as_str())
+                .map(str::to_owned)
+                .collect(),
         }),
         [] if arg.contains("::") => Ok(ResolvedParty {
             id: arg.to_owned(),
             threshold: None,
+            participants: Vec::new(),
         }),
         [] => bail!("this node has no decentralized party named {arg}"),
         several => {
@@ -1080,13 +1096,27 @@ fn run_contracts(client: &mut DecmanClient, command: ContractsCommand) -> Result
             party,
             threshold,
             confirmation_timeout_micros,
+            members,
             extra_proposers,
             operator_party,
             dry_run,
             wait,
         } => {
+            let overrides = members
+                .iter()
+                .map(|member| input::query_pair(member))
+                .collect::<Result<Vec<_>>>()?;
             let party = resolve_party(client, &party)?;
-            let context = contracts::fetch_context(client, &party.id, operator_party)?;
+            if party.participants.is_empty() {
+                bail!("this node does not list {} with its participants", party.id);
+            }
+            let context = contracts::fetch_context(
+                client,
+                &party.id,
+                &party.participants,
+                &overrides,
+                operator_party,
+            )?;
             let input = contracts::GovernanceCoreInput {
                 threshold,
                 confirmation_timeout_micros,

@@ -380,6 +380,31 @@ fn an_api_error_carries_status_and_body() {
 }
 
 #[test]
+fn an_html_page_for_a_missing_route_is_an_error() {
+    // Arrange — the server's SPA fallback answers an unknown route.
+    let fake = Fake::start();
+    fake.token_grant("password", "a-1", 1);
+    fake.mount(
+        Mock::given(method("GET"))
+            .and(path("/invitations/handled"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_raw("<!doctype html><html></html>", "text/html"),
+            )
+            .expect(1),
+    );
+
+    // Act
+    let error = fake
+        .client()
+        .request(Method::GET, "/invitations/handled", &[], None)
+        .unwrap_err();
+
+    // Assert
+    assert!(error.to_string().contains("no such route"), "{error}");
+}
+
+#[test]
 fn distribute_with_wait_follows_the_started_run() {
     // Arrange
     let fake = Fake::start();

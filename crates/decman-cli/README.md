@@ -96,7 +96,7 @@ Run `decman-cli <command> --help` for every option.
 | `dars upload \| distribute \| distribute-package` | Upload DARs to this node, or distribute them to peers |
 | `invitations list \| handled \| accept \| decline` | Handle invitations from other nodes |
 | `workflows list \| get \| wait \| cancel \| dismiss \| retry` | Handle workflow runs |
-| `contracts deploy \| deploy-governance` | Deploy contracts, or the governance rules (Governance Core) from the party's known members |
+| `contracts deploy \| deploy-governance` | Deploy contracts, or the governance rules (Governance Core) |
 | `party-config get \| set \| discover-member-party` | Read and set a party's ledger credentials |
 | `auth status \| test \| grant-rights` | Check and grant the Canton rights of the party credentials |
 | `governance state \| pending \| proposals \| known-members \| audit \| chain-audit` | Read the governance state |
@@ -132,10 +132,11 @@ frontend. `execute` fails until the action has enough confirmations.
 
 ### Governance Core
 
-`contracts deploy-governance` builds the same body as the terminal UI. The
-members are the party's known members that have a member party. You give the
-threshold and the confirmation timeout. Add `--dry-run` to print the body and
-not send it.
+`contracts deploy-governance` builds the same body as the web frontend. Each
+participant of the party needs a member party. The CLI takes the member party
+that the peers report. Give it with `--member PARTICIPANT=PARTY` when a peer
+reports none. You give the threshold and the confirmation timeout. Add
+`--dry-run` to print the body and not send it.
 
 ### JSON input
 
