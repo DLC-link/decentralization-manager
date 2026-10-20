@@ -24,8 +24,8 @@ const stubBackend = () => {
   return submitted;
 };
 
-/** A three-member party whose two thresholds are both 2. */
-const renderDialog = () =>
+/** A three-member party whose thresholds are 2 and `confirmation`. */
+const renderDialog = (confirmation = 2) =>
   render(
     <SnackbarProvider>
       <ChangeThresholdDialog
@@ -35,7 +35,7 @@ const renderDialog = () =>
         partyId={partyId}
         currentThreshold={2}
         currentOwnerCount={3}
-        currentConfirmationThreshold={2}
+        currentConfirmationThreshold={confirmation}
         currentHostCount={3}
       />
     </SnackbarProvider>,
@@ -83,6 +83,25 @@ describe("ChangeThresholdDialog confirmation threshold", () => {
     await waitFor(() => expect(submitted).toHaveLength(1));
 
     expect(submitted[0].new_threshold).toBe(2);
+    expect(submitted[0].confirmation_threshold).toBe(3);
+  });
+
+  it("keeps a differing confirmation threshold when only the threshold changes", async () => {
+    const submitted = stubBackend();
+    renderDialog(3);
+
+    expect(valueOf("Confirmation Threshold")).toBe("3");
+    expect(submitButton().disabled).toBe(true);
+
+    fireEvent.change(screen.getByLabelText("New Threshold"), {
+      target: { value: "1" },
+    });
+    expect(valueOf("Confirmation Threshold")).toBe("3");
+
+    fireEvent.click(submitButton());
+    await waitFor(() => expect(submitted).toHaveLength(1));
+
+    expect(submitted[0].new_threshold).toBe(1);
     expect(submitted[0].confirmation_threshold).toBe(3);
   });
 

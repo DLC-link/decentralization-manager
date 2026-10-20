@@ -40,8 +40,10 @@ export const ChangeThresholdDialog = ({
   currentHostCount,
 }: ChangeThresholdDialogProps) => {
   const [newThreshold, setNewThreshold] = useState(currentThreshold);
-  // Follows the new threshold until the operator edits it; only a different
-  // value is sent.
+  // Follows the new threshold until the operator edits it, unless the party's
+  // two thresholds already differ: then it starts at the current confirmation
+  // threshold, so changing one never resets the other. Only a value that
+  // differs from the new threshold is sent.
   const [confirmationEdit, setConfirmationEdit] = useState<number | null>(
     null,
   );
@@ -57,8 +59,13 @@ export const ChangeThresholdDialog = ({
     // Seed with the current threshold each time the dialog opens with fresh
     // party data; the user edits from there.
     setNewThreshold(currentThreshold);
-    setConfirmationEdit(null);
-  }, [currentThreshold, open]);
+    setConfirmationEdit(
+      currentConfirmationThreshold !== undefined &&
+        currentConfirmationThreshold !== currentThreshold
+        ? currentConfirmationThreshold
+        : null,
+    );
+  }, [currentThreshold, currentConfirmationThreshold, open]);
 
   useEffect(() => {
     if (!open) {
