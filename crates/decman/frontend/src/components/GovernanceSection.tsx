@@ -2318,14 +2318,17 @@ export const GovernanceSection = ({
             instrument_configuration_cid: proposalInstrumentConfigurationCid,
             instrument_id_text: proposalInstrumentIdText,
             additional_identifiers: proposalAdditionalIdentifiers.map((row, idx) => {
+              // The id and scheme go out verbatim, so an unchanged identifier
+              // stays unchanged. The ledger requires only a nonempty id; an
+              // empty scheme is valid.
               const identifier = {
                 source: row.source.trim(),
-                id: row.id.trim(),
-                scheme: row.scheme.trim(),
+                id: row.id,
+                scheme: row.scheme,
               };
-              if (!identifier.source || !identifier.id || !identifier.scheme) {
+              if (!identifier.source || !identifier.id) {
                 throw new Error(
-                  `Additional identifier ${idx + 1}: source, id and scheme are required`,
+                  `Additional identifier ${idx + 1}: source and id are required`,
                 );
               }
               return identifier;

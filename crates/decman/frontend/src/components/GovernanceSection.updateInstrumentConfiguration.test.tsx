@@ -128,10 +128,10 @@ describe("update instrument configuration", { timeout: 20_000 }, () => {
 
   it("refuses an identifier row with an empty field, without posting", async () => {
     await openForm();
-    fireEvent.change(screen.getByLabelText("Identifier 1 Scheme"), { target: { value: " " } });
+    fireEvent.change(screen.getByLabelText("Identifier 1 ID"), { target: { value: "" } });
     submit();
 
-    expect(await screen.findByText(/Additional identifier 1: source, id and scheme are required/))
+    expect(await screen.findByText(/Additional identifier 1: source and id are required/))
       .toBeTruthy();
     expect(proposeCalls()).toHaveLength(0);
   });
@@ -152,6 +152,23 @@ describe("update instrument configuration", { timeout: 20_000 }, () => {
 
     expect(screen.getByText(/could not read this configuration/)).toBeTruthy();
     expect(screen.queryByLabelText("Identifier 1 ID")).toBeNull();
+  });
+
+  // The ledger requires only a nonempty id, so an empty scheme is valid, and
+  // an id with edge spaces must not be trimmed into a different identifier.
+  it("posts identifiers verbatim, including edge spaces and an empty scheme", async () => {
+    const identifiers = [
+      { source: self, id: " TICK ", scheme: "" },
+      { source: issuer, id: "ISIN-1", scheme: " ISIN " },
+    ];
+    mockLedger({
+      ...readable,
+      configuration: { ...readable.configuration, additional_identifiers: identifiers },
+    });
+    await openForm();
+    submit();
+
+    expect((await postedProposal()).additional_identifiers).toEqual(identifiers);
   });
 
   // The editor's "property,value" lines cannot carry these values, so an
