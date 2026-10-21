@@ -113,6 +113,7 @@ when_onboard_against_foreign_configuration fx = do
       issuerRequirements = []
       holderRequirements = []
       providerAppRewardBeneficiaries = None
+      checkBlockList = None
   proposalCid <- submit fx.f.registrarStack.member1 $ createCmd OnboardInstrumentIssuers with
     governanceParty = parties.registrarGov
     proposer = fx.f.registrarStack.member1
@@ -244,6 +245,7 @@ when_onboard_against_claimless_requirement fx = do
         requiredClaims = []]
       holderRequirements = []
       providerAppRewardBeneficiaries = None
+      checkBlockList = None
   proposalCid <- submit fx.f.registrarStack.member1 $ createCmd OnboardInstrumentIssuers with
     governanceParty = parties.registrarGov
     proposer = fx.f.registrarStack.member1
@@ -322,6 +324,7 @@ when_onboard_issuer_to_two_instruments fx = do
     credentialIdNonce = None
     credentialValidFrom = None
     credentialValidUntil = None
+    useBlockList = None
   let provisionInterfaceCid : ContractId GovernableAction = toInterfaceContractId provisionCid
   _ <- confirmAndExecuteAs fx.f.parties fx.f.registrarStack provisionInterfaceCid
   configurations <- query @InstrumentConfiguration parties.registrarGov

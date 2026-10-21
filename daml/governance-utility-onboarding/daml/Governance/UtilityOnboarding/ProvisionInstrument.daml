@@ -19,8 +19,9 @@ import Utility.Registry.Holding.V0.Types (InstrumentIdentifier)
 
 import Governance.Action
 import Governance.UtilityOnboarding.Utils
-  ( mintCredentialsMeetingRequirements, partyList, selfIssuedRequirementsHaveClaims
-  , credentialValidityText, validCredentialIdNonce, validCredentialValidity )
+  ( blockListText, mintCredentialsMeetingRequirements, partyList
+  , selfIssuedRequirementsHaveClaims, credentialValidityText, validCredentialIdNonce
+  , validCredentialValidity )
 
 template ProvisionInstrument
   with
@@ -45,6 +46,10 @@ template ProvisionInstrument
     credentialValidUntil : Optional Time
       -- ^ validUntil of every credential this action mints. None: never
       -- expires, so ending it needs an OffboardInstrumentIssuers vote.
+    useBlockList : Optional Bool
+      -- ^ checkBlockList of the created configuration. Only Some True turns
+      -- the registrar's block list check on. Optional and last so contracts
+      -- created without it upgrade with None, which leaves the check off.
   where
     signatory proposer
     observer governanceParty
@@ -68,6 +73,7 @@ template ProvisionInstrument
                [] -> ", no initial issuers"
                issuers -> ", initial issuers " <> partyList issuers
                  <> credentialValidityText credentialValidFrom credentialValidUntil
+          <> blockListText useBlockList
 
       executeImpl = do
         -- The proposer's authority is in scope during execution. Controller
@@ -81,6 +87,7 @@ template ProvisionInstrument
           additionalIdentifiers
           issuerRequirements
           holderRequirements
+          useBlockList
         forA_ initialInstrumentIssuers $ \instrumentIssuer ->
           mintCredentialsMeetingRequirements
             governanceParty instrumentIssuer

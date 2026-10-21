@@ -269,7 +269,7 @@ daml/
 
 ### `daml.yaml`
 
-Match the SDK version, target, and build options used by the existing packages — for example [`governance-utility-onboarding/daml.yaml`](../daml/governance-utility-onboarding/daml.yaml):
+Match the SDK version, target, and build options used by the existing packages — for example [`governance-token-custody/daml.yaml`](../daml/governance-token-custody/daml.yaml). `governance-utility-onboarding` and its test package build on SDK 3.5.1 with `--target=2.3` instead, because the utility 0.14.4 DARs they depend on need LF 2.3:
 
 ```yaml
 sdk-version: 3.4.11

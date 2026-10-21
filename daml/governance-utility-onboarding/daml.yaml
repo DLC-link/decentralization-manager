@@ -1,26 +1,27 @@
-sdk-version: 3.4.11
+sdk-version: 3.5.1
 name: governance-utility-onboarding-v1
-version: 0.6.0
+version: 0.7.0
 source: daml
 dependencies:
   - daml-prim
   - daml-stdlib
+# A data-dependency DAR exposes only its main package, so every splice
+# package imported here is listed on its own. Each one is the version the
+# 0.14.4 utility DARs embed.
 data-dependencies:
   - ../governance-action-v1/.daml/dist/governance-action-v1-0.1.0.dar
-  - ../dars/splice-amulet-0.1.19.dar
+  - ../dars/splice-amulet-0.1.22.dar
   - ../dars/splice-api-featured-app-v1-1.0.0.dar
-  - ../dars/splice-api-token-burn-mint-v1-1.0.0.dar
   - ../dars/splice-api-token-holding-v1-1.0.0.dar
   - ../dars/splice-api-token-metadata-v1-1.0.0.dar
-  - ../dars/splice-api-token-transfer-instruction-v1-1.0.0.dar
-  - ../dars/splice-util-0.1.4.dar
-  - ../dars/utility-commercials-v0-0.4.1.dar
-  - ../dars/utility-credential-app-v0-0.4.1.dar
-  - ../dars/utility-credential-v0-0.1.0.dar
-  - ../dars/utility-registry-app-v0-0.7.0.dar
-  - ../dars/utility-registry-holding-v0-0.2.1.dar
-  - ../dars/utility-registry-v0-0.6.0.dar
+  - ../dars/splice-util-0.1.7.dar
+  - ../dars/utility-commercials-v0-0.4.2.dar
+  - ../dars/utility-credential-app-v0-0.4.3.dar
+  - ../dars/utility-credential-v0-0.1.2.dar
+  - ../dars/utility-registry-app-v0-0.9.2.dar
+  - ../dars/utility-registry-holding-v0-0.3.2.dar
+  - ../dars/utility-registry-v0-0.8.2.dar
 build-options:
-  - --target=2.2
+  - --target=2.3
   - --ghc-option=-Wunused-binds
   - --ghc-option=-Wunused-matches

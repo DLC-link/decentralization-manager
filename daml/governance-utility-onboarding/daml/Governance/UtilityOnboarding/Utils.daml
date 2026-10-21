@@ -58,6 +58,14 @@ credentialValidityText validFrom validUntil =
     <> optional "" (\t -> " from " <> show t) validFrom
     <> optional "" (\t -> " until " <> show t) validUntil
 
+-- | Describe an instrument configuration's block list flag for a proposal
+-- description, with a leading separator, or nothing when it is unset. The
+-- registry checks the block list only on Some True.
+blockListText : Optional Bool -> Text
+blockListText None = ""
+blockListText (Some True) = "; block list on"
+blockListText (Some False) = "; block list off"
+
 -- | Render a governance-minted credential id:
 --
 -- * with a nonce: {roleTag}/{subject}/{timestamp}-{nonce}-{index}

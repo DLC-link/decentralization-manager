@@ -373,6 +373,8 @@ After the provider service exists, run the onboarding:
 }
 ```
 
+Add `"use_block_list": true` to turn on the registrar's block list check for the new instrument. The registry then checks the block list on every mint, burn and transfer of it. Leave the field out to keep the check off.
+
 ### Dual Governance Onboarding Flow
 
 This flow splits the utility roles across two decentralized parties. The provider decparty owns the `ProviderService` and decides which registrars to accept. The registrar decparty owns the `RegistrarService` and manages its instruments and instrument issuers. Each decparty has its own `GovernanceRules` and members. Step 1 is the same proposal as the Full Onboarding Flow above. Steps 2-7 follow the same propose -> confirm -> execute flow as generic votes, voted on the named decparty.
@@ -462,6 +464,8 @@ Create an `InstrumentConfiguration` and credential the initial issuers:
   }
 }
 ```
+
+`use_block_list` works here as it does on `setup_utility`. Leave it out to keep the block list check off.
 
 **6. Onboard instrument issuers (registrar decparty):**
 

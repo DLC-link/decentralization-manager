@@ -415,6 +415,7 @@ mod tests {
                     additional_identifiers: vec![],
                     create_transfer_rule: true,
                     create_allocation_factory: true,
+                    use_block_list: None,
                 }
                 .template_id(&pkgs)
                 .expect("template id resolves")
@@ -537,6 +538,7 @@ mod tests {
                     initial_instrument_issuers: vec![],
                     credential_valid_from_micros: None,
                     credential_valid_until_micros: None,
+                    use_block_list: None,
                 }
                 .template_id(&pkgs)
                 .expect("template id resolves")

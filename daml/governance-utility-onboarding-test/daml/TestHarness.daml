@@ -1,0 +1,105 @@
+-- Copyright (c) 2026 DLC-Link, Inc. and/or its affiliates. All rights reserved.
+-- SPDX-License-Identifier: Apache-2.0
+
+-- Copied from testlib-0.1.0, minus one unused import. A data-dependency on
+-- that DAR would bring the daml-script of SDK 3.4.11, which this SDK 3.5.1
+-- package cannot use.
+
+-- | Given-When-Then test harness for Daml Script tests.
+-- Domain-agnostic — any Daml project can use this module.
+-- Each Test record is self-contained: `given` allocates fresh state,
+-- so tests are isolated from each other.
+--
+-- Reference: https://github.com/DLC-link/daml-given-when-then-test-example
+module TestHarness where
+
+import Daml.Script
+import DA.Text (isInfixOf)
+
+-- | List of failure messages. Empty means all assertions passed.
+type Failures = [Text]
+
+-- Assertion helpers (Jest-inspired)
+
+-- | Assert two values are equal.
+shouldBe : (Eq a, Show a) => Text -> a -> a -> Failures
+shouldBe label expected actual
+  | expected == actual = []
+  | otherwise =
+    [ label <> "\n  Expected: " <> show expected <> "\n  Received: " <> show actual ]
+
+-- | Assert two values are not equal.
+shouldNotBe : (Eq a, Show a) => Text -> a -> a -> Failures
+shouldNotBe label unexpected actual
+  | unexpected /= actual = []
+  | otherwise =
+    [ label <> "\n  Expected: not " <> show unexpected <> "\n  Received: " <> show actual ]
+
+-- | Assert a text contains a substring.
+shouldContain : Text -> Text -> Text -> Failures
+shouldContain label haystack needle
+  | needle `isInfixOf` haystack = []
+  | otherwise =
+    [ label <> "\n  Expected: containing " <> show needle <> "\n  Received: " <> show haystack ]
+
+-- | Assert a value satisfies a predicate.
+shouldBeTrue : Show a => Text -> Text -> (a -> Bool) -> a -> Failures
+shouldBeTrue label expected predicate actual
+  | predicate actual = []
+  | otherwise =
+    [ label <> "\n  Expected: " <> expected <> "\n  Received: " <> show actual ]
+
+-- | Assert a value is greater than a threshold.
+shouldBeGreaterThan : (Ord a, Show a) => Text -> a -> a -> Failures
+shouldBeGreaterThan label threshold actual
+  | actual > threshold = []
+  | otherwise =
+    [ label <> "\n  Expected: > " <> show threshold <> "\n  Received: " <> show actual ]
+
+-- | Assert a value is less than a threshold.
+shouldBeLessThan : (Ord a, Show a) => Text -> a -> a -> Failures
+shouldBeLessThan label threshold actual
+  | actual < threshold = []
+  | otherwise =
+    [ label <> "\n  Expected: < " <> show threshold <> "\n  Received: " <> show actual ]
+
+-- | Assert a value is greater than or equal to a threshold.
+shouldBeGreaterThanOrEqual : (Ord a, Show a) => Text -> a -> a -> Failures
+shouldBeGreaterThanOrEqual label threshold actual
+  | actual >= threshold = []
+  | otherwise =
+    [ label <> "\n  Expected: >= " <> show threshold <> "\n  Received: " <> show actual ]
+
+-- | Assert a value is less than or equal to a threshold.
+shouldBeLessThanOrEqual : (Ord a, Show a) => Text -> a -> a -> Failures
+shouldBeLessThanOrEqual label threshold actual
+  | actual <= threshold = []
+  | otherwise =
+    [ label <> "\n  Expected: <= " <> show threshold <> "\n  Received: " <> show actual ]
+
+-- | Assert a list is not empty.
+shouldNotBeEmpty : Show a => Text -> [a] -> Failures
+shouldNotBeEmpty label xs
+  | not (null xs) = []
+  | otherwise =
+    [ label <> "\n  Expected: non-empty list\n  Received: []" ]
+
+-- Test harness
+
+-- | Given-When-Then test harness.
+-- `a` is the fixture type (produced by `given`).
+-- `b` is the action result type (produced by `when`).
+-- `then_` returns `Failures` — a list of failure messages. Empty means pass.
+data Test a b = Test with
+  given : Script a
+  when : a -> Script b
+  then_ : a -> b -> Script Failures
+
+-- | Run a Given-When-Then test. Collects all failures and asserts at the end.
+run : Test a b -> Script ()
+run t = do
+  fixture <- t.given
+  result <- t.when fixture
+  failures <- t.then_ fixture result
+  let msg = foldl (\acc f -> if acc == "" then f else acc <> "\n" <> f) "" failures
+  assertMsg msg (null failures)

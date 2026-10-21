@@ -90,6 +90,7 @@ expression: minimal_option_fixtures()
     "holder_requirements": [],
     "initial_instrument_issuers": [],
     "credential_valid_from_micros": null,
-    "credential_valid_until_micros": null
+    "credential_valid_until_micros": null,
+    "use_block_list": null
   }
 ]

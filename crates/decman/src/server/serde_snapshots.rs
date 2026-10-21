@@ -170,6 +170,7 @@ fn all_proposal_fixtures() -> Vec<ProposalType> {
             }],
             create_transfer_rule: true,
             create_allocation_factory: true,
+            use_block_list: Some(true),
         }),
         ProposalType::CreateProviderServiceRequest(CreateProviderServiceRequest {
             operator: cid("op"),
@@ -316,6 +317,7 @@ fn all_proposal_fixtures() -> Vec<ProposalType> {
             initial_instrument_issuers: vec![cid("iss1")],
             credential_valid_from_micros: None,
             credential_valid_until_micros: None,
+            use_block_list: Some(true),
         }),
         ProposalType::OnboardInstrumentIssuers(OnboardInstrumentIssuers {
             instrument_configuration_cid: "00icc".into(),
@@ -406,6 +408,7 @@ fn minimal_option_fixtures() -> Vec<ProposalType> {
             initial_instrument_issuers: vec![],
             credential_valid_from_micros: None,
             credential_valid_until_micros: None,
+            use_block_list: None,
         }),
     ]
 }
@@ -471,6 +474,37 @@ fn proposal_type_minimal_round_trips_through_json() {
             serde_json::from_value(json.clone()).expect("deserialize proposal");
         assert_eq!(back, proposal, "round trip changed the value: {json}");
     }
+}
+
+/// Clients written before `use_block_list` existed send no such key. Both
+/// payloads read its absence as `None`, which leaves the block list check
+/// off.
+#[test]
+fn use_block_list_is_none_when_omitted() {
+    let setup: ProposalType = serde_json::from_value(serde_json::json!({
+        "type": "setup_utility",
+        "provider_service_cid": "00psc",
+        "operator": cid("op"),
+        "instrument_id_text": "uuid-1",
+        "create_transfer_rule": true,
+        "create_allocation_factory": true,
+    }))
+    .expect("deserialize setup_utility");
+    let ProposalType::SetupUtility(setup) = setup else {
+        panic!("expected setup_utility, got {setup:?}");
+    };
+    assert_eq!(setup.use_block_list, None);
+
+    let provision: ProposalType = serde_json::from_value(serde_json::json!({
+        "type": "provision_instrument",
+        "registrar_service_cid": "00rsc",
+        "instrument_id_text": "uuid-2",
+    }))
+    .expect("deserialize provision_instrument");
+    let ProposalType::ProvisionInstrument(provision) = provision else {
+        panic!("expected provision_instrument, got {provision:?}");
+    };
+    assert_eq!(provision.use_block_list, None);
 }
 
 #[test]

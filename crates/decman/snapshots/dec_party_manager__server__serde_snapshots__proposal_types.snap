@@ -57,7 +57,8 @@ expression: all_proposal_fixtures()
       }
     ],
     "create_transfer_rule": true,
-    "create_allocation_factory": true
+    "create_allocation_factory": true,
+    "use_block_list": true
   },
   {
     "type": "create_provider_service_request",
@@ -289,7 +290,8 @@ expression: all_proposal_fixtures()
       "iss1::1220c4010d6883f367c7f45d55b2449501620130f9b21e96379f17dea455ac7a5892"
     ],
     "credential_valid_from_micros": null,
-    "credential_valid_until_micros": null
+    "credential_valid_until_micros": null,
+    "use_block_list": true
   },
   {
     "type": "onboard_instrument_issuers",

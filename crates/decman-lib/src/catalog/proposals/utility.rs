@@ -3,7 +3,7 @@
 use std::collections::HashSet;
 
 use canton_common::decimal::DamlDecimal;
-use canton_proto_rs::com::daml::ledger::api::v2::{Value, value};
+use canton_proto_rs::com::daml::ledger::api::v2::{RecordField, Value, value};
 use common::api::{
     InstrumentId, InstrumentIdentifier, InstrumentIssuerCredentials, PartyCredentialRequirement,
 };
@@ -216,6 +216,10 @@ pub struct SetupUtility {
     pub additional_identifiers: Vec<InstrumentIdentifier>,
     pub create_transfer_rule: bool,
     pub create_allocation_factory: bool,
+    /// `checkBlockList` of the created `InstrumentConfiguration`. Only
+    /// `Some(true)` turns the registrar's block list check on.
+    #[serde(default)]
+    pub use_block_list: Option<bool>,
 }
 
 impl SetupUtility {
@@ -255,6 +259,7 @@ impl DamlProtoEncode for SetupUtility {
                 "createAllocationFactory",
                 make_bool(self.create_allocation_factory),
             ),
+            field("useBlockList", make_optional_bool(&self.use_block_list)),
         ]))
     }
 }
@@ -778,6 +783,10 @@ pub struct ProvisionInstrument {
     /// `OffboardInstrumentIssuers` vote.
     #[serde(default)]
     pub credential_valid_until_micros: Option<i64>,
+    /// `checkBlockList` of the created `InstrumentConfiguration`. Only
+    /// `Some(true)` turns the registrar's block list check on.
+    #[serde(default)]
+    pub use_block_list: Option<bool>,
 }
 
 impl ProvisionInstrument {
@@ -922,13 +931,20 @@ impl Validate for OnboardInstrumentIssuers {
 /// `credentialIdNonce : Optional Text`, which the payload's own encoding
 /// leaves out. The two issuer templates follow it with
 /// `credentialValidFrom : Optional Time` and
-/// `credentialValidUntil : Optional Time`. Submit it through
-/// [`WithCredentialIdNonce`] to set them.
+/// `credentialValidUntil : Optional Time`. `ProvisionInstrument` then
+/// declares `useBlockList : Optional Bool`, which its own encoding also
+/// leaves out. Submit it through [`WithCredentialIdNonce`] to set them.
 pub trait MintsCredentials: GrpcPayload {
     /// The `(validFrom, validUntil)` window, in microseconds since epoch,
     /// copied onto every credential the action mints. `None` for a template
     /// that declares no window fields, so none are sent.
     fn credential_validity_micros(&self) -> Option<(Option<i64>, Option<i64>)>;
+
+    /// The fields the template declares after the validity window, in
+    /// declaration order.
+    fn fields_after_validity(&self) -> Vec<RecordField> {
+        Vec::new()
+    }
 }
 
 /// No window: the SDK checks the registrar credential only inside the
@@ -945,6 +961,13 @@ impl MintsCredentials for ProvisionInstrument {
             self.credential_valid_from_micros,
             self.credential_valid_until_micros,
         ))
+    }
+
+    fn fields_after_validity(&self) -> Vec<RecordField> {
+        vec![field(
+            "useBlockList",
+            make_optional_bool(&self.use_block_list),
+        )]
     }
 }
 
@@ -990,6 +1013,7 @@ impl<P: MintsCredentials + ?Sized> DamlProtoEncode for WithCredentialIdNonce<'_,
                 make_optional_timestamp(valid_until),
             ));
         }
+        record.fields.extend(self.proposal.fields_after_validity());
         Ok(Value {
             sum: Some(value::Sum::Record(record)),
         })
@@ -1181,6 +1205,7 @@ mod tests {
                 }],
                 create_transfer_rule: true,
                 create_allocation_factory: false,
+                use_block_list: Some(true),
             }
             .to_daml_proto()
             .expect("payload encodes")
@@ -1352,6 +1377,7 @@ mod tests {
                 initial_instrument_issuers: vec![cid("issuer")],
                 credential_valid_from_micros: None,
                 credential_valid_until_micros: None,
+                use_block_list: None,
             }
             .to_daml_proto()
             .expect("payload encodes")
@@ -1367,6 +1393,7 @@ mod tests {
                 initial_instrument_issuers: vec![],
                 credential_valid_from_micros: None,
                 credential_valid_until_micros: None,
+                use_block_list: None,
             }
             .to_daml_proto()
             .expect("payload encodes")
@@ -1430,6 +1457,7 @@ mod tests {
                 initial_instrument_issuers: vec![cid("issuer")],
                 credential_valid_from_micros: Some(1_700_000_000_000_000),
                 credential_valid_until_micros: Some(1_800_000_000_000_000),
+                use_block_list: Some(true),
             }),
             Box::new(OnboardInstrumentIssuers {
                 instrument_configuration_cid: "00icc".to_string(),
@@ -1442,8 +1470,9 @@ mod tests {
 
     /// The nonce closes the create arguments, followed by the validity window
     /// on the templates that declare one, in the order they declare them.
-    /// `OnboardRegistrar` declares none, so it gets the nonce alone. Every
-    /// other field is unchanged.
+    /// `ProvisionInstrument` then gets `useBlockList`. `OnboardRegistrar`
+    /// declares none of these, so it gets the nonce alone. Every other field
+    /// is unchanged.
     #[test]
     fn credential_id_nonce_and_validity_are_the_last_create_arguments() {
         let gov = cid("gov");
@@ -1461,25 +1490,59 @@ mod tests {
             )
             .expect("proposal arguments encode");
             let window = proposal.credential_validity_micros();
-            let added = if window.is_some() { 3 } else { 1 };
+            let after_window = proposal.fields_after_validity();
+            let added = if window.is_some() { 3 } else { 1 } + after_window.len();
             let (head, tail) = wrapped.fields.split_at(wrapped.fields.len() - added);
             assert_eq!(head, bare.fields.as_slice(), "other fields unchanged");
             let labels: Vec<&str> = tail.iter().map(|f| f.label.as_str()).collect();
-            let expected: &[&str] = if window.is_some() {
-                &[
-                    "credentialIdNonce",
-                    "credentialValidFrom",
-                    "credentialValidUntil",
-                ]
-            } else {
-                &["credentialIdNonce"]
-            };
+            let mut expected = vec!["credentialIdNonce"];
+            if window.is_some() {
+                expected.extend(["credentialValidFrom", "credentialValidUntil"]);
+            }
+            expected.extend(after_window.iter().map(|f| f.label.as_str()));
             assert_eq!(labels, expected);
             assert_eq!(tail[0].value, Some(make_optional_text(Some(NONCE))));
             if let Some((valid_from, valid_until)) = window {
                 assert_eq!(tail[1].value, Some(make_optional_timestamp(valid_from)));
                 assert_eq!(tail[2].value, Some(make_optional_timestamp(valid_until)));
             }
+            assert_eq!(&tail[added - after_window.len()..], after_window.as_slice());
+        }
+    }
+
+    /// Only `ProvisionInstrument` declares a field after the window, and it
+    /// carries the proposal's block list flag.
+    #[test]
+    fn provision_instrument_sends_use_block_list_after_the_window() {
+        let labels: Vec<Vec<String>> = credential_minting_proposals()
+            .iter()
+            .map(|p| {
+                p.fields_after_validity()
+                    .into_iter()
+                    .map(|f| f.label)
+                    .collect()
+            })
+            .collect();
+        assert_eq!(
+            labels,
+            vec![vec![], vec!["useBlockList".to_string()], vec![]]
+        );
+        for flag in [None, Some(false), Some(true)] {
+            let proposal = ProvisionInstrument {
+                registrar_service_cid: "00rsc".to_string(),
+                instrument_id_text: "uuid-1".to_string(),
+                additional_identifiers: vec![],
+                issuer_requirements: vec![],
+                holder_requirements: vec![],
+                initial_instrument_issuers: vec![],
+                credential_valid_from_micros: None,
+                credential_valid_until_micros: None,
+                use_block_list: flag,
+            };
+            assert_eq!(
+                proposal.fields_after_validity(),
+                vec![field("useBlockList", make_optional_bool(&flag))]
+            );
         }
     }
 
@@ -1515,6 +1578,7 @@ mod tests {
                     initial_instrument_issuers: vec![cid("issuer")],
                     credential_valid_from_micros: from,
                     credential_valid_until_micros: until,
+                    use_block_list: None,
                 }),
                 Box::new(OnboardInstrumentIssuers {
                     instrument_configuration_cid: "00icc".to_string(),
@@ -1670,6 +1734,7 @@ mod tests {
             initial_instrument_issuers: issuers,
             credential_valid_from_micros: None,
             credential_valid_until_micros: None,
+            use_block_list: None,
         };
         assert!(
             mk(vec![issuer_a.clone(), issuer_a.clone()])
@@ -1696,6 +1761,7 @@ mod tests {
             initial_instrument_issuers: vec![],
             credential_valid_from_micros: None,
             credential_valid_until_micros: None,
+            use_block_list: None,
         };
         let claim = RequiredClaim {
             property: "role".to_string(),

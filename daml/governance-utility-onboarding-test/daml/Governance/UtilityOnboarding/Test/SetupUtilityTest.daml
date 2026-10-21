@@ -7,10 +7,12 @@ import Daml.Script
 
 import Utility.Registry.App.V0.Service.AllocationFactory (AllocationFactory)
 import Utility.Registry.App.V0.Service.Registrar (RegistrarService)
-import Utility.Registry.V0.Configuration.Instrument (InstrumentConfiguration)
+import Utility.Registry.V0.Configuration.Instrument (InstrumentConfiguration(..))
 import Utility.Registry.V0.Rule.Transfer (TransferRule)
 
 import Governance.Action (GovernableAction)
+-- Instances only: record-dot access to the execution result's fields.
+import Governance.ExecutionResult ()
 import Governance.Rules
 
 import Governance.UtilityOnboarding.SetupUtility
@@ -42,6 +44,7 @@ when_setup_executed f = do
     additionalIdentifiers = []
     createTransferRule = True
     createAllocationFactory = True
+    useBlockList = None
   let proposalInterfaceCid : ContractId GovernableAction = toInterfaceContractId proposalCid
   _ <- confirmAndExecute f.parties f.rulesCid proposalInterfaceCid
     [f.parties.member1, f.parties.member2] f.parties.member1
@@ -57,7 +60,9 @@ then_setup_artifacts_created f _ = do
     shouldBe "RegistrarService count" 1 (length registrars) <>
     shouldBe "AllocationFactory count" 1 (length factories) <>
     shouldBe "InstrumentConfiguration count" 1 (length configs) <>
-    shouldBe "TransferRule count" 1 (length rules)
+    shouldBe "TransferRule count" 1 (length rules) <>
+    -- None leaves the registrar's block list check off.
+    shouldBe "checkBlockList" [None] (map ((.checkBlockList) . snd) configs)
 
 test_when_setup_proposed_then_artifacts_created = script do
   run Test with
@@ -77,6 +82,7 @@ when_setup_without_optional_steps f = do
     additionalIdentifiers = []
     createTransferRule = False
     createAllocationFactory = False
+    useBlockList = None
   let proposalInterfaceCid : ContractId GovernableAction = toInterfaceContractId proposalCid
   _ <- confirmAndExecute f.parties f.rulesCid proposalInterfaceCid
     [f.parties.member1, f.parties.member2] f.parties.member1
@@ -110,6 +116,7 @@ when_non_member_confirms f = do
     additionalIdentifiers = []
     createTransferRule = True
     createAllocationFactory = True
+    useBlockList = None
   let proposalInterfaceCid : ContractId GovernableAction = toInterfaceContractId proposalCid
   submitMustFail (memberContext f.parties.outsider f.parties.governanceParty) $
     exerciseCmd f.rulesCid GovernanceRules_ConfirmAction with
@@ -124,3 +131,38 @@ test_when_non_member_confirms_then_rejected = script do
     given = given_governance
     when = when_non_member_confirms
     then_ = then_nothing
+
+-- * useBlockList = Some True turns the check on, and the description says so.
+
+when_setup_with_block_list : Fixture -> Script Text
+when_setup_with_block_list f = do
+  providerCid <- initProviderService f.parties
+  proposalCid <- submit f.parties.member1 $ createCmd SetupUtility with
+    governanceParty = f.parties.governanceParty
+    proposer = f.parties.member1
+    providerServiceCid = providerCid
+    operator = f.parties.operator
+    instrumentIdText = "TEST-TOKEN"
+    additionalIdentifiers = []
+    createTransferRule = True
+    createAllocationFactory = True
+    useBlockList = Some True
+  let proposalInterfaceCid : ContractId GovernableAction = toInterfaceContractId proposalCid
+  result <- confirmAndExecute f.parties f.rulesCid proposalInterfaceCid
+    [f.parties.member1, f.parties.member2] f.parties.member1
+  Some executionResult <- queryContractId f.parties.governanceParty result.executionResultCid
+  pure executionResult.description
+
+then_block_list_check_on : Fixture -> Text -> Script Failures
+then_block_list_check_on f description = do
+  configs <- query @InstrumentConfiguration f.parties.governanceParty
+  pure $
+    shouldBe "checkBlockList" [Some True] (map ((.checkBlockList) . snd) configs) <>
+    shouldBe "executed description"
+      "Composite onboarding: register instrument TEST-TOKEN; block list on" description
+
+test_when_setup_with_block_list_then_check_on = script do
+  run Test with
+    given = given_governance
+    when = when_setup_with_block_list
+    then_ = then_block_list_check_on

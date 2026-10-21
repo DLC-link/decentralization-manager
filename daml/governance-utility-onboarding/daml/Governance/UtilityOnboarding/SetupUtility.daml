@@ -15,6 +15,7 @@ import Utility.Registry.App.V0.Service.Registrar
 import Utility.Registry.Holding.V0.Types (InstrumentIdentifier)
 
 import Governance.Action
+import Governance.UtilityOnboarding.Utils (blockListText)
 
 -- | Composite onboarding action: runs the full onboarding chain in one vote.
 -- Flags drive optional steps on the RegistrarServiceRequest.
@@ -28,6 +29,10 @@ template SetupUtility
     additionalIdentifiers : [InstrumentIdentifier]
     createTransferRule : Bool
     createAllocationFactory : Bool
+    useBlockList : Optional Bool
+      -- ^ checkBlockList of the created configuration. Only Some True turns
+      -- the registrar's block list check on. Optional and last so contracts
+      -- created without it upgrade with None, which leaves the check off.
   where
     signatory proposer
     observer governanceParty
@@ -38,6 +43,7 @@ template SetupUtility
         proposer
         actionLabel = "SetupUtility"
         description = "Composite onboarding: register instrument " <> instrumentIdText
+          <> blockListText useBlockList
 
       executeImpl = do
         providerConfigurationCid <- (.providerConfigurationCid) <$>
@@ -60,4 +66,5 @@ template SetupUtility
           additionalIdentifiers = additionalIdentifiers
           issuerRequirements = []
           holderRequirements = []
+          useBlockList
         pure ()

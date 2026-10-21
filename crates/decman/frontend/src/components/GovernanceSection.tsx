@@ -196,6 +196,9 @@ export const GovernanceSection = ({
   const [proposalInstrumentIdText, setProposalInstrumentIdText] = useState("");
   const [proposalCreateTransferRule, setProposalCreateTransferRule] = useState(true);
   const [proposalCreateAllocationFactory, setProposalCreateAllocationFactory] = useState(true);
+  // Unchecked sends no use_block_list, which leaves the registry's block
+  // list check off.
+  const [proposalUseBlockList, setProposalUseBlockList] = useState(false);
   const [proposalUser, setProposalUser] = useState("");
   const [proposalInstrumentConfigurationCid, setProposalInstrumentConfigurationCid] = useState("");
   const [proposalClearBeneficiaries, setProposalClearBeneficiaries] = useState(false);
@@ -1824,6 +1827,7 @@ export const GovernanceSection = ({
     setProposalInstrumentIdText("");
     setProposalCreateTransferRule(true);
     setProposalCreateAllocationFactory(true);
+    setProposalUseBlockList(false);
     setProposalUser(type === "create_user_service_request" ? partyId : "");
     setProposalInstrumentConfigurationCid("");
     setProposalBeneficiaries([]);
@@ -1974,6 +1978,7 @@ export const GovernanceSection = ({
             additional_identifiers: [],
             create_transfer_rule: proposalCreateTransferRule,
             create_allocation_factory: proposalCreateAllocationFactory,
+            ...(proposalUseBlockList && { use_block_list: true }),
           };
           break;
         case "create_provider_service_request":
@@ -2247,6 +2252,7 @@ export const GovernanceSection = ({
               proposalInitialInstrumentIssuersText,
             ),
             ...credentialValidity(),
+            ...(proposalUseBlockList && { use_block_list: true }),
           };
           break;
         case "onboard_instrument_issuers":
@@ -3886,6 +3892,14 @@ export const GovernanceSection = ({
                       </TextHelp>
                     }
                   />
+                  <FormControlLabel
+                    control={<Checkbox size="small" checked={proposalUseBlockList} onChange={(e) => setProposalUseBlockList(e.target.checked)} />}
+                    label={
+                      <TextHelp text="Check the registrar's block list on every mint, burn and transfer of this instrument. Leave it unchecked to skip the check.">
+                        Use block list
+                      </TextHelp>
+                    }
+                  />
                 </>
               )}
 
@@ -5427,6 +5441,14 @@ export const GovernanceSection = ({
                         ),
                       },
                     }}
+                  />
+                  <FormControlLabel
+                    control={<Checkbox size="small" checked={proposalUseBlockList} onChange={(e) => setProposalUseBlockList(e.target.checked)} />}
+                    label={
+                      <TextHelp text="Check the registrar's block list on every mint, burn and transfer of this instrument. Leave it unchecked to skip the check.">
+                        Use block list
+                      </TextHelp>
+                    }
                   />
                 </>
               )}
