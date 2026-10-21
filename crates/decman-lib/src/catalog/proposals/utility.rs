@@ -860,6 +860,89 @@ impl Validate for ProvisionInstrument {
     }
 }
 
+/// Replace a live `InstrumentConfiguration` on the registrar decparty. The
+/// registry's only update path archives the configuration and creates a new
+/// one from a full payload, so every field here is required: a field left
+/// out would be reset on the ledger. The action sets the provider app reward
+/// beneficiaries again after the replace.
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS))]
+pub struct UpdateInstrumentConfiguration {
+    pub registrar_service_cid: String,
+    pub instrument_configuration_cid: String,
+    /// Must equal the configuration's default identifier id. The action
+    /// refuses to change it, because holdings name the instrument by it.
+    pub instrument_id_text: String,
+    pub additional_identifiers: Vec<InstrumentIdentifier>,
+    pub issuer_requirements: Vec<PartyCredentialRequirement>,
+    pub holder_requirements: Vec<PartyCredentialRequirement>,
+    /// `checkBlockList` of the new configuration. The key is required and
+    /// may be `null`, so a request that leaves it out cannot turn a block
+    /// list check off by accident.
+    #[serde(deserialize_with = "serde::Deserialize::deserialize")]
+    pub use_block_list: Option<bool>,
+}
+
+impl UpdateInstrumentConfiguration {
+    pub const MODULE: &'static str = "Governance.UtilityOnboarding.UpdateInstrumentConfiguration";
+    pub const ENTITY: &'static str = "UpdateInstrumentConfiguration";
+}
+
+impl TemplateInfo for UpdateInstrumentConfiguration {
+    fn template_id(&self, pkgs: &dyn PackageResolver) -> Result<TemplateId, Error> {
+        let pkg = pkgs
+            .package_ref("governance_utility_onboarding")
+            .ok_or(Error::PackageNotConfigured("governance_utility_onboarding"))?;
+        Ok(TemplateId::new(pkg, Self::MODULE, Self::ENTITY))
+    }
+}
+
+impl DamlProtoEncode for UpdateInstrumentConfiguration {
+    fn to_daml_proto(&self) -> Result<Value, Error> {
+        Ok(make_record(vec![
+            field(
+                "registrarServiceCid",
+                make_contract_id(&self.registrar_service_cid),
+            ),
+            field(
+                "instrumentConfigurationCid",
+                make_contract_id(&self.instrument_configuration_cid),
+            ),
+            field("instrumentIdText", make_text(&self.instrument_id_text)),
+            field(
+                "additionalIdentifiers",
+                make_list(
+                    self.additional_identifiers
+                        .iter()
+                        .map(serialize_instrument_identifier)
+                        .collect(),
+                ),
+            ),
+            field(
+                "issuerRequirements",
+                serialize_party_credential_requirements(&self.issuer_requirements),
+            ),
+            field(
+                "holderRequirements",
+                serialize_party_credential_requirements(&self.holder_requirements),
+            ),
+            field("useBlockList", make_optional_bool(&self.use_block_list)),
+        ]))
+    }
+}
+
+impl Validate for UpdateInstrumentConfiguration {
+    fn validate(&self, ctx: &ValidationCtx) -> Result<(), Error> {
+        // Mirrors the template's `ensure`.
+        validate_self_issued_requirements_have_claims(
+            &self.issuer_requirements,
+            ctx.governance_party,
+            "issuer_requirements",
+        )
+    }
+}
+
 /// Credential new instrument issuers against an existing
 /// `InstrumentConfiguration`'s issuer requirements.
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -1399,6 +1482,27 @@ mod tests {
             .expect("payload encodes")
         );
         insta::assert_debug_snapshot!(
+            "update_instrument_configuration",
+            UpdateInstrumentConfiguration {
+                registrar_service_cid: "00rsc".to_string(),
+                instrument_configuration_cid: "00icc".to_string(),
+                instrument_id_text: "uuid-1".to_string(),
+                additional_identifiers: vec![InstrumentIdentifier {
+                    source: cid("src"),
+                    id: "TICK".to_string(),
+                    scheme: "Ticker".to_string(),
+                }],
+                issuer_requirements: vec![requirement(
+                    &cid("issuer"),
+                    &[("role", "instrument-issuer")]
+                )],
+                holder_requirements: vec![requirement(&cid("issuer"), &[("role", "holder")])],
+                use_block_list: Some(true),
+            }
+            .to_daml_proto()
+            .expect("payload encodes")
+        );
+        insta::assert_debug_snapshot!(
             "onboard_instrument_issuers",
             OnboardInstrumentIssuers {
                 instrument_configuration_cid: "00icc".to_string(),
@@ -1761,6 +1865,31 @@ mod tests {
             initial_instrument_issuers: vec![],
             credential_valid_from_micros: None,
             credential_valid_until_micros: None,
+            use_block_list: None,
+        };
+        let claim = RequiredClaim {
+            property: "role".to_string(),
+            value: "instrument-issuer".to_string(),
+        };
+        assert!(mk(gov.clone(), vec![]).validate(&ctx(&gov, 0)).is_err());
+        assert!(mk(gov.clone(), vec![claim]).validate(&ctx(&gov, 0)).is_ok());
+        assert!(mk(cid("other"), vec![]).validate(&ctx(&gov, 0)).is_ok());
+    }
+
+    #[test]
+    fn update_instrument_configuration_rejects_claimless_self_issued_requirement() {
+        // Mirrors the template's `ensure`, as on ProvisionInstrument.
+        let gov = cid("gov");
+        let mk = |issuer: CantonId, claims: Vec<RequiredClaim>| UpdateInstrumentConfiguration {
+            registrar_service_cid: "rsc".to_string(),
+            instrument_configuration_cid: "icc".to_string(),
+            instrument_id_text: "uuid-1".to_string(),
+            additional_identifiers: vec![],
+            issuer_requirements: vec![PartyCredentialRequirement {
+                issuer,
+                required_claims: claims,
+            }],
+            holder_requirements: vec![],
             use_block_list: None,
         };
         let claim = RequiredClaim {

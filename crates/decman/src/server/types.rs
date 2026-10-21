@@ -444,6 +444,12 @@ pub enum ProposalType {
     /// credential the initial instrument issuers against its issuer
     /// requirements. Executed once per instrument.
     ProvisionInstrument(decman_lib::catalog::proposals::utility::ProvisionInstrument),
+    /// Replace a live `InstrumentConfiguration` on the registrar decparty
+    /// with a full payload, then set its provider app reward beneficiaries
+    /// again.
+    UpdateInstrumentConfiguration(
+        decman_lib::catalog::proposals::utility::UpdateInstrumentConfiguration,
+    ),
     /// Credential new instrument issuers against an existing
     /// `InstrumentConfiguration`'s issuer requirements.
     OnboardInstrumentIssuers(decman_lib::catalog::proposals::utility::OnboardInstrumentIssuers),
@@ -501,6 +507,7 @@ impl ProposalType {
             Self::CreateRegistrarServiceRequest(p) => p,
             Self::OnboardRegistrar(p) => p,
             Self::ProvisionInstrument(p) => p,
+            Self::UpdateInstrumentConfiguration(p) => p,
             Self::OnboardInstrumentIssuers(p) => p,
             Self::OffboardInstrumentIssuers(p) => p,
         };
@@ -542,6 +549,7 @@ impl ProposalType {
             Self::CreateRegistrarServiceRequest(p) => Some(p),
             Self::OnboardRegistrar(p) => Some(p),
             Self::ProvisionInstrument(p) => Some(p),
+            Self::UpdateInstrumentConfiguration(p) => Some(p),
             Self::OnboardInstrumentIssuers(p) => Some(p),
             Self::OffboardInstrumentIssuers(p) => Some(p),
         }
@@ -1054,7 +1062,7 @@ mod tests {
         CreateUserServiceRequest, Mint, OffboardInstrumentIssuers, OnboardInstrumentIssuers,
         OnboardRegistrar, ProvisionInstrument, ProvisionProviderService,
         RequestDevNetFeaturedAppRight, SetEnableResultContracts, SetProviderAppRewardBeneficiaries,
-        SetupUtility,
+        SetupUtility, UpdateInstrumentConfiguration,
     };
     use decman_lib::catalog::types::AppTransferContextInput;
     use serde_json::Value;
@@ -1651,6 +1659,15 @@ mod tests {
                 initial_instrument_issuers: vec![],
                 credential_valid_from_micros: None,
                 credential_valid_until_micros: None,
+                use_block_list: None,
+            }),
+            ProposalType::UpdateInstrumentConfiguration(UpdateInstrumentConfiguration {
+                registrar_service_cid: "00rsc".into(),
+                instrument_configuration_cid: "00icc".into(),
+                instrument_id_text: "uuid-2".into(),
+                additional_identifiers: vec![],
+                issuer_requirements: vec![],
+                holder_requirements: vec![],
                 use_block_list: None,
             }),
             ProposalType::OnboardInstrumentIssuers(OnboardInstrumentIssuers {

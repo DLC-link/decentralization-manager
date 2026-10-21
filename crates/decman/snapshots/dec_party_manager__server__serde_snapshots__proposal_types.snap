@@ -294,6 +294,42 @@ expression: all_proposal_fixtures()
     "use_block_list": true
   },
   {
+    "type": "update_instrument_configuration",
+    "registrar_service_cid": "00rsc",
+    "instrument_configuration_cid": "00icc",
+    "instrument_id_text": "uuid-2",
+    "additional_identifiers": [
+      {
+        "source": "src::1220c4010d6883f367c7f45d55b2449501620130f9b21e96379f17dea455ac7a5892",
+        "id": "ident",
+        "scheme": "scheme"
+      }
+    ],
+    "issuer_requirements": [
+      {
+        "issuer": "gov::1220c4010d6883f367c7f45d55b2449501620130f9b21e96379f17dea455ac7a5892",
+        "required_claims": [
+          {
+            "property": "role",
+            "value": "issuer"
+          }
+        ]
+      }
+    ],
+    "holder_requirements": [
+      {
+        "issuer": "gov::1220c4010d6883f367c7f45d55b2449501620130f9b21e96379f17dea455ac7a5892",
+        "required_claims": [
+          {
+            "property": "role",
+            "value": "issuer"
+          }
+        ]
+      }
+    ],
+    "use_block_list": true
+  },
+  {
     "type": "onboard_instrument_issuers",
     "instrument_configuration_cid": "00icc",
     "instrument_issuers": [

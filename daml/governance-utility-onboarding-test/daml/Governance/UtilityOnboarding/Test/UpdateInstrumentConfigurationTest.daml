@@ -1,0 +1,402 @@
+-- Copyright (c) 2026 DLC-Link, Inc. and/or its affiliates. All rights reserved.
+-- SPDX-License-Identifier: Apache-2.0
+
+-- | These tests cover UpdateInstrumentConfiguration: the full replace, the
+-- provider app reward beneficiaries kept across it, the registrar and
+-- instrument id checks, and the refusal when another party is the provider.
+module Governance.UtilityOnboarding.Test.UpdateInstrumentConfigurationTest where
+
+import Daml.Script
+
+import Splice.Api.FeaturedAppRightV1 (AppRewardBeneficiary(..))
+import Utility.Credential.V0.Credential (PartyCredentialRequirement(..))
+import Utility.Registry.App.V0.Service.Registrar (RegistrarService(..))
+import Utility.Registry.Holding.V0.Types (InstrumentIdentifier(..))
+import Utility.Registry.V0.Configuration.Instrument
+  (InstrumentConfiguration(..), InstrumentConfiguration_SetProviderAppRewardBeneficiaries(..))
+
+import Governance.Action (GovernableAction)
+-- Instances only: record-dot access to the execution result's fields.
+import Governance.ExecutionResult ()
+import Governance.Rules
+
+import Governance.UtilityOnboarding.DualDecpartyTestUtils
+  ( DualGovFixture, ProvisionedInstrumentArtifacts(..), defaultIssuerRequirement
+  , executeContext, givenDualGovernance, setupProvisionedInstrument )
+import Governance.UtilityOnboarding.DualDecpartyTestUtils qualified as Dual
+import Governance.UtilityOnboarding.SetProviderAppRewardBeneficiaries
+import Governance.UtilityOnboarding.TestUtils
+import Governance.UtilityOnboarding.UpdateInstrumentConfiguration
+
+import TestHarness
+
+-- * Fixtures. SetupUtility makes the governance party provider and
+-- registrar at once, as for cBTC.
+
+data Fixture = Fixture
+  with
+    parties : OnboardingTestParties
+    rulesCid : ContractId GovernanceRules
+    artifacts : SetupArtifacts
+  deriving (Eq, Show)
+
+given_setup_done : Script Fixture
+given_setup_done = do
+  parties <- allocateOnboardingTestParties
+  rulesCid <- createTestGovernance parties
+  artifacts <- setupUtilityForTest parties rulesCid
+  pure Fixture with ..
+
+rewardSplit : OnboardingTestParties -> [AppRewardBeneficiary]
+rewardSplit parties =
+  [ AppRewardBeneficiary with beneficiary = parties.governanceParty; weight = 0.7
+  , AppRewardBeneficiary with beneficiary = parties.outsider; weight = 0.3 ]
+
+-- | Set the beneficiaries through the plugin's own action, the way an
+-- operator does it today.
+given_setup_with_beneficiaries : Script Fixture
+given_setup_with_beneficiaries = do
+  f <- given_setup_done
+  proposalCid <- submit f.parties.member1 $ createCmd SetProviderAppRewardBeneficiaries with
+    governanceParty = f.parties.governanceParty
+    proposer = f.parties.member1
+    instrumentConfigurationCid = f.artifacts.instrumentConfigurationCid
+    providerAppRewardBeneficiaries = Some (rewardSplit f.parties)
+  _ <- confirmAndExecute f.parties f.rulesCid (toInterfaceContractId proposalCid)
+    [f.parties.member1, f.parties.member2] f.parties.member1
+  [(instrumentConfigurationCid, _)] <- query @InstrumentConfiguration f.parties.governanceParty
+  pure f with artifacts = (f.artifacts with instrumentConfigurationCid)
+
+newIdentifier : OnboardingTestParties -> InstrumentIdentifier
+newIdentifier parties = InstrumentIdentifier with
+  source = parties.governanceParty
+  id = "TICK"
+  scheme = "Ticker"
+
+newIssuerRequirement : OnboardingTestParties -> PartyCredentialRequirement
+newIssuerRequirement parties = PartyCredentialRequirement with
+  issuer = parties.governanceParty
+  requiredClaims = [("role", "instrument-issuer")]
+
+updateProposal
+  : Fixture -> ContractId RegistrarService -> ContractId InstrumentConfiguration -> Text
+  -> Optional Bool -> Script (ContractId GovernableAction)
+updateProposal f registrarServiceCid instrumentConfigurationCid instrumentIdText useBlockList = do
+  proposalCid <- submit f.parties.member1 $ createCmd UpdateInstrumentConfiguration with
+    governanceParty = f.parties.governanceParty
+    proposer = f.parties.member1
+    registrarServiceCid
+    instrumentConfigurationCid
+    instrumentIdText
+    additionalIdentifiers = [newIdentifier f.parties]
+    issuerRequirements = [newIssuerRequirement f.parties]
+    holderRequirements = []
+    useBlockList
+  pure (toInterfaceContractId proposalCid)
+
+executeUpdate : Optional Bool -> Fixture -> Script Text
+executeUpdate useBlockList f = do
+  proposalCid <- updateProposal f f.artifacts.registrarServiceCid
+    f.artifacts.instrumentConfigurationCid "TEST-TOKEN" useBlockList
+  result <- confirmAndExecute f.parties f.rulesCid proposalCid
+    [f.parties.member1, f.parties.member2] f.parties.member1
+  Some executionResult <- queryContractId f.parties.governanceParty result.executionResultCid
+  pure executionResult.description
+
+-- | Execution must fail. Returns the failure text, so a test can check that
+-- the intended guard fired. The submit context matches confirmAndExecute.
+executeMustFail : Fixture -> ContractId GovernableAction -> Script Text
+executeMustFail f proposalCid = do
+  confirmationCids <- submitConfirmations f.parties.governanceParty f.rulesCid proposalCid
+    [f.parties.member1, f.parties.member2]
+  failure <- submitWithError (actAs f.parties.member1
+    <> readAs f.parties.governanceParty
+    <> readAs f.parties.outsider
+    <> readAs f.parties.operator) $
+    exerciseCmd f.rulesCid GovernanceRules_ExecuteConfirmedAction with
+      executor = f.parties.member1
+      actionProposalCid = proposalCid
+      confirmations = confirmationCids
+  pure (show failure)
+
+-- * Happy path: every field is replaced, and the beneficiaries survive the
+-- replace. The registry's create clears them, so the action sets them again.
+
+then_replaced_and_beneficiaries_kept : Fixture -> Text -> Script Failures
+then_replaced_and_beneficiaries_kept f description = do
+  let parties = f.parties
+  old <- queryContractId parties.governanceParty f.artifacts.instrumentConfigurationCid
+  configurations <- query @InstrumentConfiguration parties.governanceParty
+  let configurationChecks = case configurations of
+        [(_, configuration)] ->
+          shouldBe "defaultIdentifier.id" "TEST-TOKEN" configuration.defaultIdentifier.id <>
+          shouldBe "additionalIdentifiers" [newIdentifier parties] configuration.additionalIdentifiers <>
+          shouldBe "issuerRequirements" [newIssuerRequirement parties] configuration.issuerRequirements <>
+          shouldBe "holderRequirements" [] configuration.holderRequirements <>
+          shouldBe "checkBlockList" (Some True) configuration.checkBlockList <>
+          shouldBe "providerAppRewardBeneficiaries"
+            (Some (rewardSplit parties)) configuration.providerAppRewardBeneficiaries
+        _ -> shouldBe "InstrumentConfiguration count" 1 (length configurations)
+  pure $
+    shouldBe "old configuration archived" True (old == None) <>
+    configurationChecks <>
+    shouldBe "executed description"
+      "Replace the configuration of instrument TEST-TOKEN; block list on" description
+
+test_when_update_then_configuration_replaced_and_beneficiaries_kept = script do
+  run Test with
+    given = given_setup_with_beneficiaries
+    when = executeUpdate (Some True)
+    then_ = then_replaced_and_beneficiaries_kept
+
+-- * With no beneficiaries set there is nothing to set again.
+
+then_replaced_without_beneficiaries : Fixture -> Text -> Script Failures
+then_replaced_without_beneficiaries f description = do
+  configurations <- query @InstrumentConfiguration f.parties.governanceParty
+  pure $ case configurations of
+    [(_, configuration)] ->
+      shouldBe "issuerRequirements"
+        [newIssuerRequirement f.parties] configuration.issuerRequirements <>
+      shouldBe "checkBlockList" None configuration.checkBlockList <>
+      shouldBe "providerAppRewardBeneficiaries" None configuration.providerAppRewardBeneficiaries <>
+      shouldBe "executed description"
+        "Replace the configuration of instrument TEST-TOKEN" description
+    _ -> shouldBe "InstrumentConfiguration count" 1 (length configurations)
+
+test_when_no_beneficiaries_then_replaced = script do
+  run Test with
+    given = given_setup_done
+    when = executeUpdate None
+    then_ = then_replaced_without_beneficiaries
+
+-- * Refusals leave the configuration as it was.
+
+then_refused_and_unchanged : Text -> Fixture -> Text -> Script Failures
+then_refused_and_unchanged expectedError f failure = do
+  configurations <- query @InstrumentConfiguration f.parties.governanceParty
+  let configurationChecks = case configurations of
+        [(cid, configuration)] ->
+          shouldBe "configuration cid" f.artifacts.instrumentConfigurationCid cid <>
+          shouldBe "additionalIdentifiers" [] configuration.additionalIdentifiers <>
+          shouldBe "providerAppRewardBeneficiaries"
+            (Some (rewardSplit f.parties)) configuration.providerAppRewardBeneficiaries
+        _ -> shouldBe "InstrumentConfiguration count" 1 (length configurations)
+  pure $ shouldContain "execution error" failure expectedError <> configurationChecks
+
+-- A service owned by the proposer is refused. The proposer's authority is
+-- in scope during execution, so controller authorization alone would let it
+-- through.
+when_update_against_proposer_owned_service : Fixture -> Script Text
+when_update_against_proposer_owned_service f = do
+  let proposer = f.parties.member1
+  foreignServiceCid <- submit proposer $ createCmd RegistrarService with
+    operator = f.parties.operator
+    provider = proposer
+    registrar = proposer
+    enableResultContracts = None
+  proposalCid <- updateProposal f foreignServiceCid
+    f.artifacts.instrumentConfigurationCid "TEST-TOKEN" (Some True)
+  executeMustFail f proposalCid
+
+test_when_proposer_owned_service_then_refused = script do
+  run Test with
+    given = given_setup_with_beneficiaries
+    when = when_update_against_proposer_owned_service
+    then_ = then_refused_and_unchanged
+      "registrar service registrar does not match the governance party"
+
+-- Holdings name the instrument by its id, so the action refuses to change it.
+when_update_with_other_instrument_id : Fixture -> Script Text
+when_update_with_other_instrument_id f = do
+  proposalCid <- updateProposal f f.artifacts.registrarServiceCid
+    f.artifacts.instrumentConfigurationCid "OTHER-TOKEN" (Some True)
+  executeMustFail f proposalCid
+
+test_when_instrument_id_differs_then_refused = script do
+  run Test with
+    given = given_setup_with_beneficiaries
+    when = when_update_with_other_instrument_id
+    then_ = then_refused_and_unchanged "instrument id does not match the configuration"
+
+-- A configuration of another registrar is refused by the registry's own
+-- check, even through the governance party's service.
+when_update_foreign_configuration
+  : Fixture -> Script (ContractId InstrumentConfiguration, Text)
+when_update_foreign_configuration f = do
+  let parties = f.parties
+  foreignCid <- submit (actAs parties.outsider <> actAs parties.governanceParty) $
+    createCmd InstrumentConfiguration with
+      operator = parties.operator
+      provider = parties.governanceParty
+      registrar = parties.outsider
+      defaultIdentifier = InstrumentIdentifier with
+        source = parties.outsider
+        id = "FOREIGN-TOKEN"
+        scheme = "RegistrarInternalScheme"
+      additionalIdentifiers = []
+      issuerRequirements = []
+      holderRequirements = []
+      providerAppRewardBeneficiaries = None
+      checkBlockList = None
+  proposalCid <- updateProposal f f.artifacts.registrarServiceCid foreignCid "FOREIGN-TOKEN" None
+  failure <- executeMustFail f proposalCid
+  pure (foreignCid, failure)
+
+then_foreign_configuration_kept
+  : Fixture -> (ContractId InstrumentConfiguration, Text) -> Script Failures
+then_foreign_configuration_kept f (foreignCid, failure) = do
+  foreign <- queryContractId f.parties.governanceParty foreignCid
+  pure $
+    shouldBe "foreign configuration still active" True (foreign /= None) <>
+    shouldContain "execution error" failure "Contract group identifier mismatch"
+
+test_when_foreign_configuration_then_refused = script do
+  run Test with
+    given = given_setup_done
+    when = when_update_foreign_configuration
+    then_ = then_foreign_configuration_kept
+
+-- A claimless self-issued requirement could never be minted, so the
+-- proposal itself is refused.
+when_propose_claimless_requirement : Fixture -> Script ()
+when_propose_claimless_requirement f =
+  submitMustFail f.parties.member1 $ createCmd UpdateInstrumentConfiguration with
+    governanceParty = f.parties.governanceParty
+    proposer = f.parties.member1
+    registrarServiceCid = f.artifacts.registrarServiceCid
+    instrumentConfigurationCid = f.artifacts.instrumentConfigurationCid
+    instrumentIdText = "TEST-TOKEN"
+    additionalIdentifiers = []
+    issuerRequirements = [PartyCredentialRequirement with
+      issuer = f.parties.governanceParty
+      requiredClaims = []]
+    holderRequirements = []
+    useBlockList = None
+
+then_nothing : Fixture -> () -> Script Failures
+then_nothing _ _ = pure []
+
+test_when_claimless_requirement_then_proposal_refused = script do
+  run Test with
+    given = given_setup_done
+    when = when_propose_claimless_requirement
+    then_ = then_nothing
+
+when_outsider_confirms : Fixture -> Script ()
+when_outsider_confirms f = do
+  proposalCid <- updateProposal f f.artifacts.registrarServiceCid
+    f.artifacts.instrumentConfigurationCid "TEST-TOKEN" None
+  submitMustFail (memberContext f.parties.outsider f.parties.governanceParty) $
+    exerciseCmd f.rulesCid GovernanceRules_ConfirmAction with
+      confirmer = f.parties.outsider
+      actionProposalCid = proposalCid
+
+test_when_outsider_confirms_then_rejected = script do
+  run Test with
+    given = given_setup_done
+    when = when_outsider_confirms
+    then_ = then_nothing
+
+-- * Split roles: the provider decparty is not the registrar decparty, so the
+-- registrar cannot set the provider's beneficiaries again.
+
+data DualFixture = DualFixture
+  with
+    f : DualGovFixture
+    provisioned : ProvisionedInstrumentArtifacts
+  deriving (Eq, Show)
+
+given_provisioned_instrument : Script DualFixture
+given_provisioned_instrument = do
+  f <- givenDualGovernance
+  provisioned <- setupProvisionedInstrument f [defaultIssuerRequirement f.parties] []
+  pure DualFixture with ..
+
+providerSplit : DualFixture -> [AppRewardBeneficiary]
+providerSplit fx =
+  [AppRewardBeneficiary with beneficiary = fx.f.parties.providerGov; weight = 1.0]
+
+-- The provider decparty is the only controller of the beneficiaries.
+given_provisioned_with_provider_beneficiaries : Script DualFixture
+given_provisioned_with_provider_beneficiaries = do
+  fx <- given_provisioned_instrument
+  instrumentConfigurationCid <- submit fx.f.parties.providerGov $
+    exerciseCmd fx.provisioned.instrumentConfigurationCid
+      InstrumentConfiguration_SetProviderAppRewardBeneficiaries with
+        providerAppRewardBeneficiaries = Some (providerSplit fx)
+  pure fx with provisioned = (fx.provisioned with instrumentConfigurationCid)
+
+dualUpdateProposal : DualFixture -> Script (ContractId GovernableAction)
+dualUpdateProposal fx = do
+  proposalCid <- submit fx.f.registrarStack.member1 $ createCmd UpdateInstrumentConfiguration with
+    governanceParty = fx.f.parties.registrarGov
+    proposer = fx.f.registrarStack.member1
+    registrarServiceCid = fx.provisioned.onboarded.registrarServiceCid
+    instrumentConfigurationCid = fx.provisioned.instrumentConfigurationCid
+    instrumentIdText = "LAUNCH-TOKEN"
+    additionalIdentifiers = []
+    issuerRequirements = []
+    holderRequirements = []
+    useBlockList = Some True
+  pure (toInterfaceContractId proposalCid)
+
+when_registrar_updates_with_provider_beneficiaries : DualFixture -> Script Text
+when_registrar_updates_with_provider_beneficiaries fx = do
+  proposalCid <- dualUpdateProposal fx
+  let stack = fx.f.registrarStack
+  confirmations <- forA [stack.member1, stack.member2] \confirmer -> do
+    result <- submit (actAs confirmer <> readAs stack.governanceParty) $
+      exerciseCmd stack.rulesCid GovernanceRules_ConfirmAction with
+        confirmer
+        actionProposalCid = proposalCid
+    pure result.confirmationCid
+  failure <- submitWithError (executeContext fx.f.parties stack) $
+    exerciseCmd stack.rulesCid GovernanceRules_ExecuteConfirmedAction with
+      executor = stack.member1
+      actionProposalCid = proposalCid
+      confirmations
+  pure (show failure)
+
+then_provider_beneficiaries_kept : DualFixture -> Text -> Script Failures
+then_provider_beneficiaries_kept fx failure = do
+  configurations <- query @InstrumentConfiguration fx.f.parties.registrarGov
+  let configurationChecks = case configurations of
+        [(cid, configuration)] ->
+          shouldBe "configuration cid" fx.provisioned.instrumentConfigurationCid cid <>
+          shouldBe "providerAppRewardBeneficiaries"
+            (Some (providerSplit fx)) configuration.providerAppRewardBeneficiaries
+        _ -> shouldBe "InstrumentConfiguration count" 1 (length configurations)
+  pure $
+    shouldContain "execution error" failure "only its provider can set them again" <>
+    configurationChecks
+
+test_when_provider_is_another_party_with_beneficiaries_then_refused = script do
+  run Test with
+    given = given_provisioned_with_provider_beneficiaries
+    when = when_registrar_updates_with_provider_beneficiaries
+    then_ = then_provider_beneficiaries_kept
+
+-- Without beneficiaries the registrar decparty can replace its own
+-- configuration even though it is not the provider.
+when_registrar_updates_without_beneficiaries : DualFixture -> Script ()
+when_registrar_updates_without_beneficiaries fx = do
+  proposalCid <- dualUpdateProposal fx
+  _ <- Dual.confirmAndExecuteAs fx.f.parties fx.f.registrarStack proposalCid
+  pure ()
+
+then_registrar_configuration_replaced : DualFixture -> () -> Script Failures
+then_registrar_configuration_replaced fx _ = do
+  configurations <- query @InstrumentConfiguration fx.f.parties.registrarGov
+  pure $ case configurations of
+    [(_, configuration)] ->
+      shouldBe "issuerRequirements" [] configuration.issuerRequirements <>
+      shouldBe "checkBlockList" (Some True) configuration.checkBlockList <>
+      shouldBe "provider" fx.f.parties.providerGov configuration.provider
+    _ -> shouldBe "InstrumentConfiguration count" 1 (length configurations)
+
+test_when_provider_is_another_party_without_beneficiaries_then_replaced = script do
+  run Test with
+    given = given_provisioned_instrument
+    when = when_registrar_updates_without_beneficiaries
+    then_ = then_registrar_configuration_replaced

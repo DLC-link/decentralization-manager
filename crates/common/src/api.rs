@@ -1436,6 +1436,22 @@ pub struct InstrumentInfo {
     pub contract_id: String,
     pub instrument_admin: CantonId,
     pub instrument_id: String,
+    /// The fields an `update_instrument_configuration` proposal replaces, so
+    /// its form can start from the current values. `None` when the contract
+    /// could not be read.
+    #[serde(default)]
+    pub configuration: Option<InstrumentConfigurationFields>,
+}
+
+/// The replaceable fields of an `InstrumentConfiguration`.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
+pub struct InstrumentConfigurationFields {
+    pub additional_identifiers: Vec<InstrumentIdentifier>,
+    pub issuer_requirements: Vec<PartyCredentialRequirement>,
+    pub holder_requirements: Vec<PartyCredentialRequirement>,
+    pub check_block_list: Option<bool>,
 }
 
 /// Response for the instruments endpoint

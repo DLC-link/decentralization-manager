@@ -377,7 +377,7 @@ Add `"use_block_list": true` to turn on the registrar's block list check for the
 
 ### Dual Governance Onboarding Flow
 
-This flow splits the utility roles across two decentralized parties. The provider decparty owns the `ProviderService` and decides which registrars to accept. The registrar decparty owns the `RegistrarService` and manages its instruments and instrument issuers. Each decparty has its own `GovernanceRules` and members. Step 1 is the same proposal as the Full Onboarding Flow above. Steps 2-7 follow the same propose -> confirm -> execute flow as generic votes, voted on the named decparty.
+This flow splits the utility roles across two decentralized parties. The provider decparty owns the `ProviderService` and decides which registrars to accept. The registrar decparty owns the `RegistrarService` and manages its instruments and instrument issuers. Each decparty has its own `GovernanceRules` and members. Step 1 is the same proposal as the Full Onboarding Flow above. Steps 2-8 follow the same propose -> confirm -> execute flow as generic votes, voted on the named decparty.
 
 **1. Create ProviderService (provider decparty):**
 
@@ -517,6 +517,34 @@ Revoke the credentials the registrar decparty self-issued for the offboarded iss
 ```
 
 Each row names one issuer and lists that issuer's credentials. The action checks that every claim on a credential names the declared issuer, so a mistyped row fails instead of revoking the wrong credential. The action revokes only the listed credentials. An issuer keeps minting rights through any live credential the proposal omits, so list every credential the registrar decparty issued for that issuer.
+
+**8. Update an instrument configuration (registrar decparty):**
+
+Replace the fields of a live `InstrumentConfiguration`:
+
+```json
+{
+  "proposal": {
+    "type": "update_instrument_configuration",
+    "registrar_service_cid": "<registrar-service-cid>",
+    "instrument_configuration_cid": "<instrument-configuration-cid>",
+    "instrument_id_text": "LAUNCH-TOKEN",
+    "additional_identifiers": [],
+    "issuer_requirements": [
+      {
+        "issuer": "registrar-gov::1220...",
+        "required_claims": [{ "property": "role", "value": "instrument-issuer" }]
+      }
+    ],
+    "holder_requirements": [],
+    "use_block_list": true
+  }
+}
+```
+
+The registry can only archive a configuration and create a new one, so the proposal replaces every field. DecMan refuses a request that leaves a field out. `use_block_list` must be present, and `null` turns the check off. `instrument_id_text` must match the configuration, because holdings name the instrument by it. The new configuration gets a new contract id.
+
+The create clears the provider app reward beneficiaries. The action sets them again in the same transaction, so the reward split does not change. Only the provider can set them, so the action refuses when they are set and another decparty is the provider. The Setup Utility flow makes the governance party both provider and registrar, so this case does not arise there.
 
 Credentialed issuers request mints and burns through the `AllocationFactory`. The registrar decparty approves each request with the `accept_mint_request` and `accept_burn_request` proposals.
 

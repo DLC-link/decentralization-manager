@@ -116,7 +116,7 @@ mod tests {
         CreateUserServiceRequest, Mint, OffboardInstrumentIssuers, OnboardInstrumentIssuers,
         OnboardRegistrar, ProvisionInstrument, ProvisionProviderService,
         RequestDevNetFeaturedAppRight, SetEnableResultContracts, SetProviderAppRewardBeneficiaries,
-        SetupUtility,
+        SetupUtility, UpdateInstrumentConfiguration,
     };
     use crate::catalog::types::{AppTransferContextInput, BillingParams};
     use crate::framework::TemplateInfo;
@@ -193,7 +193,7 @@ mod tests {
         ));
     }
 
-    /// One assertion per catalog proposal struct — all 29 `TemplateInfo`
+    /// One assertion per catalog proposal struct — all 31 `TemplateInfo`
     /// impls under `catalog::proposals`. `TransferWithContext`,
     /// `AcceptTransferWithContext` and `WithCredentialIdNonce` are excluded:
     /// they delegate `template_id` to the proposal they wrap, so their
@@ -544,6 +544,21 @@ mod tests {
                 .expect("template id resolves")
                 .to_string(),
                 "#governance-utility-onboarding-v1:Governance.UtilityOnboarding.ProvisionInstrument:ProvisionInstrument",
+            ),
+            (
+                UpdateInstrumentConfiguration {
+                    registrar_service_cid: "rsc".to_string(),
+                    instrument_configuration_cid: "icc".to_string(),
+                    instrument_id_text: "iid".to_string(),
+                    additional_identifiers: vec![],
+                    issuer_requirements: vec![],
+                    holder_requirements: vec![],
+                    use_block_list: None,
+                }
+                .template_id(&pkgs)
+                .expect("template id resolves")
+                .to_string(),
+                "#governance-utility-onboarding-v1:Governance.UtilityOnboarding.UpdateInstrumentConfiguration:UpdateInstrumentConfiguration",
             ),
             (
                 OnboardInstrumentIssuers {

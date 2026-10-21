@@ -24,6 +24,7 @@ use decman_lib::catalog::proposals::utility::{
     CreateUserServiceRequest, Mint, OffboardInstrumentIssuers, OnboardInstrumentIssuers,
     OnboardRegistrar, ProvisionInstrument, ProvisionProviderService, RequestDevNetFeaturedAppRight,
     SetEnableResultContracts, SetProviderAppRewardBeneficiaries, SetupUtility,
+    UpdateInstrumentConfiguration,
 };
 use decman_lib::catalog::types::{AppTransferContextInput, RewardBeneficiary};
 
@@ -319,6 +320,19 @@ fn all_proposal_fixtures() -> Vec<ProposalType> {
             credential_valid_until_micros: None,
             use_block_list: Some(true),
         }),
+        ProposalType::UpdateInstrumentConfiguration(UpdateInstrumentConfiguration {
+            registrar_service_cid: "00rsc".into(),
+            instrument_configuration_cid: "00icc".into(),
+            instrument_id_text: "uuid-2".into(),
+            additional_identifiers: vec![InstrumentIdentifier {
+                source: cid("src"),
+                id: "ident".into(),
+                scheme: "scheme".into(),
+            }],
+            issuer_requirements: vec![requirement("gov")],
+            holder_requirements: vec![requirement("gov")],
+            use_block_list: Some(true),
+        }),
         ProposalType::OnboardInstrumentIssuers(OnboardInstrumentIssuers {
             instrument_configuration_cid: "00icc".into(),
             instrument_issuers: vec![cid("iss1"), cid("iss2")],
@@ -408,6 +422,16 @@ fn minimal_option_fixtures() -> Vec<ProposalType> {
             initial_instrument_issuers: vec![],
             credential_valid_from_micros: None,
             credential_valid_until_micros: None,
+            use_block_list: None,
+        }),
+        // Every field is required, and an unset flag goes out as null.
+        ProposalType::UpdateInstrumentConfiguration(UpdateInstrumentConfiguration {
+            registrar_service_cid: "00rsc".into(),
+            instrument_configuration_cid: "00icc".into(),
+            instrument_id_text: "uuid-2".into(),
+            additional_identifiers: vec![],
+            issuer_requirements: vec![],
+            holder_requirements: vec![],
             use_block_list: None,
         }),
     ]
@@ -505,6 +529,37 @@ fn use_block_list_is_none_when_omitted() {
         panic!("expected provision_instrument, got {provision:?}");
     };
     assert_eq!(provision.use_block_list, None);
+}
+
+/// The update replaces the whole configuration, so a request that leaves a
+/// field out is refused instead of resetting that field. `null` still
+/// clears the block list flag.
+#[test]
+fn update_instrument_configuration_requires_every_field() {
+    let full = serde_json::json!({
+        "type": "update_instrument_configuration",
+        "registrar_service_cid": "00rsc",
+        "instrument_configuration_cid": "00icc",
+        "instrument_id_text": "uuid-2",
+        "additional_identifiers": [],
+        "issuer_requirements": [],
+        "holder_requirements": [],
+        "use_block_list": null,
+    });
+    serde_json::from_value::<ProposalType>(full.clone()).expect("a full body deserializes");
+    for key in [
+        "additional_identifiers",
+        "issuer_requirements",
+        "holder_requirements",
+        "use_block_list",
+    ] {
+        let mut body = full.clone();
+        body.as_object_mut().expect("object").remove(key);
+        assert!(
+            serde_json::from_value::<ProposalType>(body).is_err(),
+            "a body without {key} must be refused"
+        );
+    }
 }
 
 #[test]

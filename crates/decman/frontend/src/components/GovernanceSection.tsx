@@ -71,6 +71,7 @@ import type {
   ProposeActionRequest,
   ProposalType,
   InstrumentAllowance,
+  InstrumentIdentifier,
   InstrumentInfo,
   InstrumentsResponse,
   TransferInstructionInfo,
@@ -199,6 +200,10 @@ export const GovernanceSection = ({
   // Unchecked sends no use_block_list, which leaves the registry's block
   // list check off.
   const [proposalUseBlockList, setProposalUseBlockList] = useState(false);
+  // Additional identifier rows of the Update Instrument Configuration form.
+  const [proposalAdditionalIdentifiers, setProposalAdditionalIdentifiers] = useState<
+    InstrumentIdentifier[]
+  >([]);
   const [proposalUser, setProposalUser] = useState("");
   const [proposalInstrumentConfigurationCid, setProposalInstrumentConfigurationCid] = useState("");
   const [proposalClearBeneficiaries, setProposalClearBeneficiaries] = useState(false);
@@ -737,6 +742,30 @@ export const GovernanceSection = ({
     [availableInstruments, partyId],
   );
 
+  // The update replaces every field, so picking a configuration fills the
+  // form with its current values. A field left empty is cleared.
+  const selectConfigurationToUpdate = (cid: string) => {
+    setProposalInstrumentConfigurationCid(cid);
+    const instrument = ownInstruments.find((inst) => inst.contract_id === cid);
+    const current = instrument?.configuration;
+    const toRows = (requirements: PartyCredentialRequirement[]) =>
+      requirements.map((requirement) => ({
+        issuer: requirement.issuer,
+        claimsText: requirement.required_claims
+          .map((claim) => `${claim.property},${claim.value}`)
+          .join("\n"),
+      }));
+    setProposalInstrumentIdText(instrument?.instrument_id ?? "");
+    setProposalAdditionalIdentifiers(current?.additional_identifiers ?? []);
+    setProposalIssuerRequirements(toRows(current?.issuer_requirements ?? []));
+    setProposalHolderRequirements(toRows(current?.holder_requirements ?? []));
+    setProposalUseBlockList(current?.check_block_list === true);
+  };
+  const configurationToUpdateUnreadable =
+    proposalInstrumentConfigurationCid !== "" &&
+    ownInstruments.find((inst) => inst.contract_id === proposalInstrumentConfigurationCid)
+      ?.configuration === undefined;
+
   // Candidate credentials for one offboard row: self-issued by this governance
   // party, carrying claims that all name the row's party, and tagged as an
   // instrument-issuer credential so a dual-role decparty's registrar
@@ -1014,7 +1043,8 @@ export const GovernanceSection = ({
       proposalType === "accept_mint_request" ||
       proposalType === "accept_burn_request" ||
       proposalType === "set_provider_app_reward_beneficiaries" ||
-      proposalType === "onboard_instrument_issuers"
+      proposalType === "onboard_instrument_issuers" ||
+      proposalType === "update_instrument_configuration"
     ) {
       fetchInstruments();
     }
@@ -1225,7 +1255,10 @@ export const GovernanceSection = ({
     }
     // Provision Instrument needs the typed rows to filter on the registrar
     // field, so it uses /services/registrar instead of the blob query.
-    if (proposalType === "provision_instrument") {
+    if (
+      proposalType === "provision_instrument" ||
+      proposalType === "update_instrument_configuration"
+    ) {
       fetchRegistrarServices();
     }
     if (proposalType === "accept_mint_request") {
@@ -1828,6 +1861,7 @@ export const GovernanceSection = ({
     setProposalCreateTransferRule(true);
     setProposalCreateAllocationFactory(true);
     setProposalUseBlockList(false);
+    setProposalAdditionalIdentifiers([]);
     setProposalUser(type === "create_user_service_request" ? partyId : "");
     setProposalInstrumentConfigurationCid("");
     setProposalBeneficiaries([]);
@@ -2253,6 +2287,30 @@ export const GovernanceSection = ({
             ),
             ...credentialValidity(),
             ...(proposalUseBlockList && { use_block_list: true }),
+          };
+          break;
+        case "update_instrument_configuration":
+          proposal = {
+            type: "update_instrument_configuration",
+            registrar_service_cid: proposalRegistrarServiceCid,
+            instrument_configuration_cid: proposalInstrumentConfigurationCid,
+            instrument_id_text: proposalInstrumentIdText,
+            additional_identifiers: proposalAdditionalIdentifiers.map((row, idx) => {
+              const identifier = {
+                source: row.source.trim(),
+                id: row.id.trim(),
+                scheme: row.scheme.trim(),
+              };
+              if (!identifier.source || !identifier.id || !identifier.scheme) {
+                throw new Error(
+                  `Additional identifier ${idx + 1}: source, id and scheme are required`,
+                );
+              }
+              return identifier;
+            }),
+            issuer_requirements: buildRequirements(proposalIssuerRequirements, "Issuer"),
+            holder_requirements: buildRequirements(proposalHolderRequirements, "Holder"),
+            use_block_list: proposalUseBlockList ? true : null,
           };
           break;
         case "onboard_instrument_issuers":
@@ -3266,6 +3324,7 @@ export const GovernanceSection = ({
                   <ListSubheader sx={{ fontStyle: "italic", lineHeight: 1.5, pl: 4 }}>Settings / Configuration</ListSubheader>
                   <MenuItem value="set_provider_app_reward_beneficiaries">Set Provider App Reward Beneficiaries</MenuItem>
                   <MenuItem value="set_enable_result_contracts">Set Enable Result Contracts</MenuItem>
+                  <MenuItem value="update_instrument_configuration">Update Instrument Configuration</MenuItem>
                   <MenuItem value="create_delegated_batched_markers_proxy">Create Delegated Batched Markers Proxy</MenuItem>
                   {/*
                   Hidden per Notion "Clean up Utility Plugin" task — keep the
@@ -3290,6 +3349,7 @@ export const GovernanceSection = ({
                   <MenuItem value="provision_instrument">6. Provision Instrument (as Registrar)</MenuItem>
                   <ListSubheader sx={{ fontStyle: "italic", lineHeight: 1.5, pl: 4 }}>Instrument Management</ListSubheader>
                   <MenuItem value="onboard_instrument_issuers">Onboard Instrument Issuers (as Registrar)</MenuItem>
+                  <MenuItem value="update_instrument_configuration">Update Instrument Configuration (as Registrar)</MenuItem>
                   <MenuItem value="offboard_instrument_issuers">Offboard Instrument Issuers (as Registrar)</MenuItem>
                   <Divider />
                   <ListSubheader sx={{ color: "primary.main", fontWeight: 600 }}>Rewards</ListSubheader>
@@ -5500,6 +5560,159 @@ export const GovernanceSection = ({
                         ),
                       },
                     }}
+                  />
+                </>
+              )}
+
+              {proposalType === "update_instrument_configuration" && (
+                <>
+                  <Alert severity="info">
+                    This replaces every field of the configuration. Picking a
+                    configuration fills the form with its current values. A
+                    field you clear is cleared on the ledger. The reward
+                    beneficiaries stay as they are.
+                  </Alert>
+                  <FormControl size="small" fullWidth required>
+                    <InputLabel>
+                      <TextHelp text="RegistrarService contract of this registrar decparty. The update runs through it.">
+                        RegistrarService
+                      </TextHelp>
+                    </InputLabel>
+                    <Select
+                      label="RegistrarService"
+                      value={proposalRegistrarServiceCid}
+                      onChange={(e) => setProposalRegistrarServiceCid(e.target.value)}
+                      MenuProps={{ disableScrollLock: true }}
+                    >
+                      {registrarServicesLoading ? (
+                        <MenuItem disabled>Loading services…</MenuItem>
+                      ) : ownRegistrarServices.length > 0 ? (
+                        ownRegistrarServices.map((svc) => (
+                          <MenuItem key={svc.contract_id} value={svc.contract_id}>
+                            {svc.contract_id}
+                          </MenuItem>
+                        ))
+                      ) : (
+                        <MenuItem disabled>
+                          No RegistrarService for this party — run "Onboard Registrar" first
+                        </MenuItem>
+                      )}
+                    </Select>
+                  </FormControl>
+                  <FormControl size="small" fullWidth required>
+                    <InputLabel>
+                      <TextHelp text="The InstrumentConfiguration to replace. Execution archives it and creates a new one.">
+                        InstrumentConfiguration
+                      </TextHelp>
+                    </InputLabel>
+                    <Select
+                      label="InstrumentConfiguration"
+                      value={proposalInstrumentConfigurationCid}
+                      onChange={(e) => selectConfigurationToUpdate(e.target.value)}
+                      MenuProps={{ disableScrollLock: true }}
+                    >
+                      {instrumentsLoading ? (
+                        <MenuItem disabled>Loading instruments…</MenuItem>
+                      ) : ownInstruments.length > 0 ? (
+                        ownInstruments.map((inst) => (
+                          <MenuItem key={inst.contract_id} value={inst.contract_id}>
+                            {inst.instrument_id} ({inst.contract_id.slice(0, 8)}…)
+                          </MenuItem>
+                        ))
+                      ) : (
+                        <MenuItem disabled>
+                          No instruments administered by this party — run "Provision Instrument" first
+                        </MenuItem>
+                      )}
+                    </Select>
+                  </FormControl>
+                  {configurationToUpdateUnreadable && (
+                    <Alert severity="warning">
+                      DecMan could not read this configuration&apos;s current
+                      values. Enter every field by hand.
+                    </Alert>
+                  )}
+                  <TextField
+                    size="small"
+                    label="Instrument ID"
+                    value={proposalInstrumentIdText}
+                    fullWidth
+                    disabled
+                    slotProps={{
+                      input: {
+                        endAdornment: fieldHelpAdornment(
+                          "The instrument's id. Holdings name the instrument by it, so the update cannot change it.",
+                          "Help for Instrument ID",
+                        ),
+                      },
+                    }}
+                  />
+                  <Typography variant="caption" color="text.secondary" sx={{ display: "block" }}>
+                    <TextHelp text="Other identifiers of the instrument, each with its source party, id and scheme.">
+                      Additional Identifiers
+                    </TextHelp>
+                  </Typography>
+                  {proposalAdditionalIdentifiers.map((row, idx) => (
+                    <Box key={idx} sx={{ display: "flex", gap: 1, mb: 1, alignItems: "flex-start" }}>
+                      {(["source", "id", "scheme"] as const).map((key) => (
+                        <TextField
+                          key={key}
+                          label={`Identifier ${idx + 1} ${key === "source" ? "Source Party" : key === "id" ? "ID" : "Scheme"}`}
+                          value={row[key]}
+                          onChange={(e) => {
+                            const updated = [...proposalAdditionalIdentifiers];
+                            updated[idx] = { ...row, [key]: e.target.value };
+                            setProposalAdditionalIdentifiers(updated);
+                          }}
+                          size="small"
+                          sx={{ flex: key === "source" ? 2 : 1 }}
+                        />
+                      ))}
+                      <Button
+                        size="small"
+                        color="error"
+                        onClick={() =>
+                          setProposalAdditionalIdentifiers(
+                            proposalAdditionalIdentifiers.filter((_, i) => i !== idx),
+                          )
+                        }
+                      >
+                        Remove
+                      </Button>
+                    </Box>
+                  ))}
+                  <Box>
+                    <Button
+                      size="small"
+                      onClick={() =>
+                        setProposalAdditionalIdentifiers([
+                          ...proposalAdditionalIdentifiers,
+                          { source: partyId, id: "", scheme: "" },
+                        ])
+                      }
+                    >
+                      Add Identifier
+                    </Button>
+                  </Box>
+                  {renderRequirementRows(
+                    "Issuer Requirements",
+                    "Credential requirements an instrument issuer must meet.",
+                    proposalIssuerRequirements,
+                    setProposalIssuerRequirements,
+                  )}
+                  {renderRequirementRows(
+                    "Holder Requirements",
+                    "Credential requirements a holder of this instrument must meet.",
+                    proposalHolderRequirements,
+                    setProposalHolderRequirements,
+                  )}
+                  <FormControlLabel
+                    control={<Checkbox size="small" checked={proposalUseBlockList} onChange={(e) => setProposalUseBlockList(e.target.checked)} />}
+                    label={
+                      <TextHelp text="Check the registrar's block list on every mint, burn and transfer of this instrument. Leave it unchecked to skip the check.">
+                        Use block list
+                      </TextHelp>
+                    }
                   />
                 </>
               )}
