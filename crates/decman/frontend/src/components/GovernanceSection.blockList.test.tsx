@@ -4,9 +4,9 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { SnackbarProvider } from "../contexts";
 import { GovernanceSection } from "./GovernanceSection";
 
-// Setup Utility and Provision Instrument carry an optional block list flag
-// (#396). These tests drive each form to a submit and read the request body
-// the form posts.
+// Setup Utility and Provision Instrument cannot turn the block list on until
+// #566 adds block list support to governance mint and burn. These tests drive
+// each form to a submit and read the request body the form posts.
 const ns = "a".repeat(68);
 const self = `gov::${ns}`;
 
@@ -43,10 +43,6 @@ const chooseType = async (option: string) => {
   fireEvent.click(within(screen.getByRole("listbox")).getByRole("option", { name: option }));
 };
 
-// The page behind a just-closed Select menu stays aria-hidden in jsdom, so
-// find the checkbox through its label rather than its role.
-const blockListBox = () => screen.getByLabelText(/^Use block list/);
-
 const submit = () =>
   fireEvent.click(screen.getAllByRole("button", { name: /Submit Proposal/ })[0]);
 
@@ -69,21 +65,12 @@ const forms = [
 ];
 
 // GovernanceSection is large, so give each render room on a loaded CI runner.
-describe("use block list", { timeout: 20_000 }, () => {
+describe("block list", { timeout: 20_000 }, () => {
   for (const { option, type } of forms) {
-    it(`${type}: sends use_block_list true when checked`, async () => {
+    it(`${type}: has no block list control and sends no use_block_list`, async () => {
       renderForm();
       await chooseType(option);
-      fireEvent.click(blockListBox());
-      submit();
-
-      expect(await postedProposal()).toMatchObject({ type, use_block_list: true });
-    });
-
-    it(`${type}: sends no use_block_list when unchecked`, async () => {
-      renderForm();
-      await chooseType(option);
-      expect(blockListBox()).toHaveProperty("checked", false);
+      expect(screen.queryByLabelText(/block list/i)).toBeNull();
       submit();
 
       const proposal = await postedProposal();
@@ -91,17 +78,4 @@ describe("use block list", { timeout: 20_000 }, () => {
       expect(proposal).not.toHaveProperty("use_block_list");
     });
   }
-
-  it("clears the flag on a type change", async () => {
-    renderForm();
-    await chooseType("3. Setup Utility");
-    fireEvent.click(blockListBox());
-    expect(blockListBox()).toHaveProperty("checked", true);
-
-    await chooseType("Generic Vote");
-    expect(screen.queryByLabelText(/^Use block list/)).toBeNull();
-
-    await chooseType("6. Provision Instrument (as Registrar)");
-    expect(blockListBox()).toHaveProperty("checked", false);
-  });
 });

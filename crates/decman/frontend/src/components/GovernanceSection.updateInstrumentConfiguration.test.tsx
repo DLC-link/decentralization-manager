@@ -21,7 +21,7 @@ const readable = {
       { issuer: self, required_claims: [{ property: "role", value: "instrument-issuer" }] },
     ],
     holder_requirements: [{ issuer, required_claims: [{ property: "kyc", value: "passed" }] }],
-    check_block_list: true,
+    check_block_list: false,
   },
 };
 
@@ -85,6 +85,11 @@ const openForm = async () => {
 const submit = () =>
   fireEvent.click(screen.getAllByRole("button", { name: /Submit Proposal/ })[0]);
 
+const withBlockList = (check_block_list: boolean | null) => ({
+  ...readable,
+  configuration: { ...readable.configuration, check_block_list },
+});
+
 const proposeCalls = () =>
   authenticatedFetch.mock.calls.filter(([url]) => String(url).includes("/governance/propose"));
 
@@ -109,21 +114,42 @@ describe("update instrument configuration", { timeout: 20_000 }, () => {
         { issuer: self, required_claims: [{ property: "role", value: "instrument-issuer" }] },
       ],
       holder_requirements: [{ issuer, required_claims: [{ property: "kyc", value: "passed" }] }],
-      use_block_list: true,
+      use_block_list: false,
     });
   });
 
-  it("sends a cleared field as cleared, and an unchecked flag as null", async () => {
+  it("sends a cleared field as cleared", async () => {
     await openForm();
-    fireEvent.click(screen.getByLabelText(/^Use block list/));
     // The first Remove button belongs to the only identifier row.
     fireEvent.click(screen.getAllByRole("button", { name: "Remove", hidden: true })[0]);
     submit();
 
     const proposal = await postedProposal();
     expect(proposal.additional_identifiers).toEqual([]);
-    expect(proposal.use_block_list).toBeNull();
     expect(proposal.issuer_requirements).toHaveLength(1);
+  });
+
+  // Turning the check on is refused until #566, so the form has no control
+  // for it and sends the current flag.
+  it("has no block list control and sends an unset flag as null", async () => {
+    mockLedger(withBlockList(null));
+    await openForm();
+    expect(screen.queryByLabelText(/block list/i)).toBeNull();
+    submit();
+
+    expect((await postedProposal()).use_block_list).toBeNull();
+  });
+
+  // The update would turn the check off, so the form refuses it.
+  it("refuses a configuration that checks a block list, without posting", async () => {
+    mockLedger(withBlockList(true));
+    await openForm();
+
+    expect(screen.getByText(/DecMan cannot update it until #566/)).toBeTruthy();
+    const button = screen.getAllByRole("button", { name: /Submit Proposal/ })[0];
+    expect(button).toHaveProperty("disabled", true);
+    submit();
+    expect(proposeCalls()).toHaveLength(0);
   });
 
   it("refuses an identifier row with an empty field, without posting", async () => {

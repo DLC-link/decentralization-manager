@@ -373,7 +373,7 @@ After the provider service exists, run the onboarding:
 }
 ```
 
-Add `"use_block_list": true` to turn on the registrar's block list check for the new instrument. The registry then checks the block list on every mint, burn and transfer of it. Leave the field out to keep the check off.
+`use_block_list` sets the registrar's block list check for the new instrument. DecMan refuses `true` until #566, because governance mint and burn cannot pass that check yet. Leave the field out, or send `false`, to keep the check off.
 
 Setup creates a `TransferRule` only when `create_transfer_rule` is true. To add one later, for example after the rule was archived, propose:
 
@@ -478,7 +478,7 @@ Create an `InstrumentConfiguration` and credential the initial issuers:
 }
 ```
 
-`use_block_list` works here as it does on `setup_utility`. Leave it out to keep the block list check off.
+`use_block_list` works here as it does on `setup_utility`. DecMan refuses `true` until #566. Leave it out to keep the block list check off.
 
 **6. Onboard instrument issuers (registrar decparty):**
 
@@ -550,12 +550,12 @@ Replace the fields of a live `InstrumentConfiguration`:
       }
     ],
     "holder_requirements": [],
-    "use_block_list": true
+    "use_block_list": null
   }
 }
 ```
 
-The registry can only archive a configuration and create a new one, so the proposal replaces every field. DecMan refuses a request that leaves a field out. `use_block_list` must be present, and `null` turns the check off. `instrument_id_text` must match the configuration, because holdings name the instrument by it. The new configuration gets a new contract id.
+The registry can only archive a configuration and create a new one, so the proposal replaces every field. DecMan refuses a request that leaves a field out. `use_block_list` must be present, as `null` or `false`. DecMan refuses `true` until #566. The vote also fails at execution when the current configuration checks a block list, because the update would turn that check off. `instrument_id_text` must match the configuration, because holdings name the instrument by it. The new configuration gets a new contract id.
 
 The create clears the provider app reward beneficiaries. The action sets them again in the same transaction, so the reward split does not change. Only the provider can set them, so the action refuses when they are set and another decparty is the provider. The Setup Utility flow makes the governance party both provider and registrar, so this case does not arise there.
 

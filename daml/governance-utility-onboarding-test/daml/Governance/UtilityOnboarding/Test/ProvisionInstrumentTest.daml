@@ -704,7 +704,9 @@ test_when_no_issuers_then_description_has_no_window = script do
 
 -- * useBlockList becomes the configuration's checkBlockList. None is what
 -- earlier package versions passed, and it leaves the check off. Voters see
--- only the description, so it states a set flag.
+-- only the description, so it states a set flag. Some True is refused at
+-- creation, before any vote, until #566 adds block list support to
+-- governance mint and burn.
 
 provisionWithBlockListCapturingDescription : Optional Bool -> Fixture -> Script Text
 provisionWithBlockListCapturingDescription useBlockList fx = do
@@ -740,12 +742,34 @@ test_when_block_list_unset_then_check_off = script do
     then_ = then_block_list_flag_is None
       "Provision instrument LAUNCH-TOKEN, no initial issuers"
 
-test_when_block_list_on_then_check_on = script do
+test_when_block_list_off_then_check_off = script do
   run Test with
     given = given_onboarded_registrar
-    when = provisionWithBlockListCapturingDescription (Some True)
-    then_ = then_block_list_flag_is (Some True)
-      "Provision instrument LAUNCH-TOKEN, no initial issuers; block list on"
+    when = provisionWithBlockListCapturingDescription (Some False)
+    then_ = then_block_list_flag_is (Some False)
+      "Provision instrument LAUNCH-TOKEN, no initial issuers; block list off"
+
+when_propose_with_block_list_on : Fixture -> Script ()
+when_propose_with_block_list_on fx =
+  submitMustFail fx.f.registrarStack.member1 $ createCmd ProvisionInstrument with
+    governanceParty = fx.f.parties.registrarGov
+    proposer = fx.f.registrarStack.member1
+    registrarServiceCid = fx.onboarded.registrarServiceCid
+    instrumentIdText = "LAUNCH-TOKEN"
+    additionalIdentifiers = []
+    issuerRequirements = [defaultIssuerRequirement fx.f.parties]
+    holderRequirements = []
+    initialInstrumentIssuers = []
+    credentialIdNonce = provisionInstrumentNonce
+    credentialValidFrom = None
+    credentialValidUntil = None
+    useBlockList = Some True
+
+test_when_block_list_on_then_proposal_refused = script do
+  run Test with
+    given = given_onboarded_registrar
+    when = when_propose_with_block_list_on
+    then_ = then_nothing_provisioned
 
 test_block_list_text_states_the_flag = script do
   blockListText None === ""

@@ -3,7 +3,8 @@
 
 -- | These tests cover UpdateInstrumentConfiguration: the full replace, the
 -- provider app reward beneficiaries kept across it, the registrar and
--- instrument id checks, and the refusal when another party is the provider.
+-- instrument id checks, the refusal when another party is the provider, and
+-- the block list refusals.
 module Governance.UtilityOnboarding.Test.UpdateInstrumentConfigurationTest where
 
 import Daml.Script
@@ -133,7 +134,7 @@ then_replaced_and_beneficiaries_kept f description = do
           shouldBe "additionalIdentifiers" [newIdentifier parties] configuration.additionalIdentifiers <>
           shouldBe "issuerRequirements" [newIssuerRequirement parties] configuration.issuerRequirements <>
           shouldBe "holderRequirements" [] configuration.holderRequirements <>
-          shouldBe "checkBlockList" (Some True) configuration.checkBlockList <>
+          shouldBe "checkBlockList" (Some False) configuration.checkBlockList <>
           shouldBe "providerAppRewardBeneficiaries"
             (Some (rewardSplit parties)) configuration.providerAppRewardBeneficiaries
         _ -> shouldBe "InstrumentConfiguration count" 1 (length configurations)
@@ -141,12 +142,12 @@ then_replaced_and_beneficiaries_kept f description = do
     shouldBe "old configuration archived" True (old == None) <>
     configurationChecks <>
     shouldBe "executed description"
-      "Replace the configuration of instrument TEST-TOKEN; block list on" description
+      "Replace the configuration of instrument TEST-TOKEN; block list off" description
 
 test_when_update_then_configuration_replaced_and_beneficiaries_kept = script do
   run Test with
     given = given_setup_with_beneficiaries
-    when = executeUpdate (Some True)
+    when = executeUpdate (Some False)
     then_ = then_replaced_and_beneficiaries_kept
 
 -- * With no beneficiaries set there is nothing to set again.
@@ -196,7 +197,7 @@ when_update_against_proposer_owned_service f = do
     registrar = proposer
     enableResultContracts = None
   proposalCid <- updateProposal f foreignServiceCid
-    f.artifacts.instrumentConfigurationCid "TEST-TOKEN" (Some True)
+    f.artifacts.instrumentConfigurationCid "TEST-TOKEN" None
   executeMustFail f proposalCid
 
 test_when_proposer_owned_service_then_refused = script do
@@ -210,7 +211,7 @@ test_when_proposer_owned_service_then_refused = script do
 when_update_with_other_instrument_id : Fixture -> Script Text
 when_update_with_other_instrument_id f = do
   proposalCid <- updateProposal f f.artifacts.registrarServiceCid
-    f.artifacts.instrumentConfigurationCid "OTHER-TOKEN" (Some True)
+    f.artifacts.instrumentConfigurationCid "OTHER-TOKEN" None
   executeMustFail f proposalCid
 
 test_when_instrument_id_differs_then_refused = script do
@@ -257,6 +258,57 @@ test_when_foreign_configuration_then_refused = script do
     when = when_update_foreign_configuration
     then_ = then_foreign_configuration_kept
 
+-- A configuration that checks a block list is refused. The proposal can
+-- carry only None or Some False, so the replace would turn the check off.
+-- Governance cannot create such a configuration until #566, so the fixture
+-- creates it directly.
+given_setup_with_block_list_configuration : Script Fixture
+given_setup_with_block_list_configuration = do
+  f <- given_setup_done
+  let parties = f.parties
+  instrumentConfigurationCid <- submit parties.governanceParty $
+    createCmd InstrumentConfiguration with
+      operator = parties.operator
+      provider = parties.governanceParty
+      registrar = parties.governanceParty
+      defaultIdentifier = InstrumentIdentifier with
+        source = parties.governanceParty
+        id = "CHECKED-TOKEN"
+        scheme = "RegistrarInternalScheme"
+      additionalIdentifiers = []
+      issuerRequirements = []
+      holderRequirements = []
+      providerAppRewardBeneficiaries = None
+      checkBlockList = Some True
+  pure f with artifacts = (f.artifacts with instrumentConfigurationCid)
+
+updateBlockListConfiguration : Optional Bool -> Fixture -> Script Text
+updateBlockListConfiguration useBlockList f = do
+  proposalCid <- updateProposal f f.artifacts.registrarServiceCid
+    f.artifacts.instrumentConfigurationCid "CHECKED-TOKEN" useBlockList
+  executeMustFail f proposalCid
+
+then_block_list_configuration_kept : Fixture -> Text -> Script Failures
+then_block_list_configuration_kept f failure = do
+  configuration <- queryContractId f.parties.governanceParty f.artifacts.instrumentConfigurationCid
+  pure $
+    shouldBe "checkBlockList of the kept configuration"
+      (Some (Some True)) ((.checkBlockList) <$> configuration) <>
+    shouldContain "execution error" failure
+      "the configuration checks a block list, and this update would turn that check off"
+
+test_when_configuration_checks_block_list_and_flag_unset_then_refused = script do
+  run Test with
+    given = given_setup_with_block_list_configuration
+    when = updateBlockListConfiguration None
+    then_ = then_block_list_configuration_kept
+
+test_when_configuration_checks_block_list_and_flag_off_then_refused = script do
+  run Test with
+    given = given_setup_with_block_list_configuration
+    when = updateBlockListConfiguration (Some False)
+    then_ = then_block_list_configuration_kept
+
 -- A claimless self-issued requirement could never be minted, so the
 -- proposal itself is refused.
 when_propose_claimless_requirement : Fixture -> Script ()
@@ -282,6 +334,32 @@ test_when_claimless_requirement_then_proposal_refused = script do
     given = given_setup_done
     when = when_propose_claimless_requirement
     then_ = then_nothing
+
+-- Governance mint and burn cannot pass a block list check until #566, so a
+-- proposal that turns the check on is refused before any vote.
+when_propose_block_list_on : Fixture -> Script ()
+when_propose_block_list_on f =
+  submitMustFail f.parties.member1 $ createCmd UpdateInstrumentConfiguration with
+    governanceParty = f.parties.governanceParty
+    proposer = f.parties.member1
+    registrarServiceCid = f.artifacts.registrarServiceCid
+    instrumentConfigurationCid = f.artifacts.instrumentConfigurationCid
+    instrumentIdText = "TEST-TOKEN"
+    additionalIdentifiers = []
+    issuerRequirements = [newIssuerRequirement f.parties]
+    holderRequirements = []
+    useBlockList = Some True
+
+then_no_update_proposal : Fixture -> () -> Script Failures
+then_no_update_proposal f _ = do
+  proposals <- query @UpdateInstrumentConfiguration f.parties.member1
+  pure $ shouldBe "UpdateInstrumentConfiguration proposal count" 0 (length proposals)
+
+test_when_block_list_on_then_proposal_refused = script do
+  run Test with
+    given = given_setup_done
+    when = when_propose_block_list_on
+    then_ = then_no_update_proposal
 
 when_outsider_confirms : Fixture -> Script ()
 when_outsider_confirms f = do
@@ -338,7 +416,7 @@ dualUpdateProposal fx = do
     additionalIdentifiers = []
     issuerRequirements = []
     holderRequirements = []
-    useBlockList = Some True
+    useBlockList = Some False
   pure (toInterfaceContractId proposalCid)
 
 when_registrar_updates_with_provider_beneficiaries : DualFixture -> Script Text
@@ -391,7 +469,7 @@ then_registrar_configuration_replaced fx _ = do
   pure $ case configurations of
     [(_, configuration)] ->
       shouldBe "issuerRequirements" [] configuration.issuerRequirements <>
-      shouldBe "checkBlockList" (Some True) configuration.checkBlockList <>
+      shouldBe "checkBlockList" (Some False) configuration.checkBlockList <>
       shouldBe "provider" fx.f.parties.providerGov configuration.provider
     _ -> shouldBe "InstrumentConfiguration count" 1 (length configurations)
 

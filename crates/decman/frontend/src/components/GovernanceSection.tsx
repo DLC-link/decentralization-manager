@@ -208,9 +208,6 @@ export const GovernanceSection = ({
   const [proposalInstrumentIdText, setProposalInstrumentIdText] = useState("");
   const [proposalCreateTransferRule, setProposalCreateTransferRule] = useState(true);
   const [proposalCreateAllocationFactory, setProposalCreateAllocationFactory] = useState(true);
-  // Unchecked sends no use_block_list, which leaves the registry's block
-  // list check off.
-  const [proposalUseBlockList, setProposalUseBlockList] = useState(false);
   // Additional identifier rows of the Update Instrument Configuration form.
   const [proposalAdditionalIdentifiers, setProposalAdditionalIdentifiers] = useState<
     InstrumentIdentifier[]
@@ -769,12 +766,12 @@ export const GovernanceSection = ({
     setProposalAdditionalIdentifiers(current?.additional_identifiers ?? []);
     setProposalIssuerRequirements(toRows(current?.issuer_requirements ?? []));
     setProposalHolderRequirements(toRows(current?.holder_requirements ?? []));
-    setProposalUseBlockList(current?.check_block_list === true);
   };
+  const configurationToUpdate = ownInstruments.find(
+    (inst) => inst.contract_id === proposalInstrumentConfigurationCid,
+  )?.configuration;
   const configurationToUpdateUnreadable =
-    proposalInstrumentConfigurationCid !== "" &&
-    ownInstruments.find((inst) => inst.contract_id === proposalInstrumentConfigurationCid)
-      ?.configuration == null;
+    proposalInstrumentConfigurationCid !== "" && configurationToUpdate == null;
 
   // Candidate credentials for one offboard row: self-issued by this governance
   // party, carrying claims that all name the row's party, and tagged as an
@@ -1876,7 +1873,6 @@ export const GovernanceSection = ({
     setProposalInstrumentIdText("");
     setProposalCreateTransferRule(true);
     setProposalCreateAllocationFactory(true);
-    setProposalUseBlockList(false);
     setProposalAdditionalIdentifiers([]);
     setProposalUser(type === "create_user_service_request" ? partyId : "");
     setProposalInstrumentConfigurationCid("");
@@ -1926,6 +1922,14 @@ export const GovernanceSection = ({
   const beneficiaryProblem =
     proposalType === "set_provider_app_reward_beneficiaries"
       ? beneficiariesProblem(proposalBeneficiaries, proposalClearBeneficiaries)
+      : null;
+
+  // The update can send only an unset or false block list flag (#566), so on
+  // a configuration that checks a block list it would turn the check off.
+  const blockListProblem =
+    proposalType === "update_instrument_configuration" &&
+    configurationToUpdate?.check_block_list === true
+      ? "This configuration checks a block list. DecMan cannot update it until #566 adds block list support to governance mint and burn."
       : null;
 
   const handleSubmitProposal = async () => {
@@ -2028,7 +2032,6 @@ export const GovernanceSection = ({
             additional_identifiers: [],
             create_transfer_rule: proposalCreateTransferRule,
             create_allocation_factory: proposalCreateAllocationFactory,
-            ...(proposalUseBlockList && { use_block_list: true }),
           };
           break;
         case "create_provider_service_request":
@@ -2302,7 +2305,6 @@ export const GovernanceSection = ({
               proposalInitialInstrumentIssuersText,
             ),
             ...credentialValidity(),
-            ...(proposalUseBlockList && { use_block_list: true }),
           };
           break;
         case "create_transfer_rule":
@@ -2312,6 +2314,7 @@ export const GovernanceSection = ({
           };
           break;
         case "update_instrument_configuration":
+          if (blockListProblem) throw new Error(blockListProblem);
           proposal = {
             type: "update_instrument_configuration",
             registrar_service_cid: proposalRegistrarServiceCid,
@@ -2335,7 +2338,8 @@ export const GovernanceSection = ({
             }),
             issuer_requirements: buildRequirements(proposalIssuerRequirements, "Issuer"),
             holder_requirements: buildRequirements(proposalHolderRequirements, "Holder"),
-            use_block_list: proposalUseBlockList ? true : null,
+            // The current flag, so the update keeps it.
+            use_block_list: configurationToUpdate?.check_block_list === false ? false : null,
           };
           break;
         case "onboard_instrument_issuers":
@@ -3978,14 +3982,6 @@ export const GovernanceSection = ({
                       </TextHelp>
                     }
                   />
-                  <FormControlLabel
-                    control={<Checkbox size="small" checked={proposalUseBlockList} onChange={(e) => setProposalUseBlockList(e.target.checked)} />}
-                    label={
-                      <TextHelp text="Check the registrar's block list on every mint, burn and transfer of this instrument. Leave it unchecked to skip the check.">
-                        Use block list
-                      </TextHelp>
-                    }
-                  />
                 </>
               )}
 
@@ -5528,14 +5524,6 @@ export const GovernanceSection = ({
                       },
                     }}
                   />
-                  <FormControlLabel
-                    control={<Checkbox size="small" checked={proposalUseBlockList} onChange={(e) => setProposalUseBlockList(e.target.checked)} />}
-                    label={
-                      <TextHelp text="Check the registrar's block list on every mint, burn and transfer of this instrument. Leave it unchecked to skip the check.">
-                        Use block list
-                      </TextHelp>
-                    }
-                  />
                 </>
               )}
 
@@ -5688,6 +5676,7 @@ export const GovernanceSection = ({
                       values. Enter every field by hand.
                     </Alert>
                   )}
+                  {blockListProblem && <Alert severity="warning">{blockListProblem}</Alert>}
                   <TextField
                     size="small"
                     label="Instrument ID"
@@ -5762,14 +5751,6 @@ export const GovernanceSection = ({
                     proposalHolderRequirements,
                     setProposalHolderRequirements,
                   )}
-                  <FormControlLabel
-                    control={<Checkbox size="small" checked={proposalUseBlockList} onChange={(e) => setProposalUseBlockList(e.target.checked)} />}
-                    label={
-                      <TextHelp text="Check the registrar's block list on every mint, burn and transfer of this instrument. Leave it unchecked to skip the check.">
-                        Use block list
-                      </TextHelp>
-                    }
-                  />
                 </>
               )}
 
@@ -5929,7 +5910,8 @@ export const GovernanceSection = ({
                     onClick={handleSubmitProposal}
                     disabled={
                       proposalLoading ||
-                      beneficiaryProblem !== null
+                      beneficiaryProblem !== null ||
+                      blockListProblem !== null
                     }
                     startIcon={
                       proposalLoading ? (
@@ -5947,7 +5929,8 @@ export const GovernanceSection = ({
                     onClick={handleSubmitProposal}
                     disabled={
                       proposalLoading ||
-                      beneficiaryProblem !== null
+                      beneficiaryProblem !== null ||
+                      blockListProblem !== null
                     }
                     startIcon={
                       proposalLoading ? <CircularProgress size={16} /> : undefined

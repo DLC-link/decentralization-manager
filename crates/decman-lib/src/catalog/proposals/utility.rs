@@ -18,8 +18,9 @@ use crate::framework::encode::{
     serialize_party_credential_requirements,
 };
 use crate::framework::validate::{
-    validate_beneficiary_weights, validate_credential_validity, validate_positive_amount,
-    validate_self_issued_requirements_have_claims, validate_unique_issuers,
+    validate_beneficiary_weights, validate_block_list_supported, validate_credential_validity,
+    validate_positive_amount, validate_self_issued_requirements_have_claims,
+    validate_unique_issuers,
 };
 use crate::framework::{
     DamlProtoEncode, GrpcPayload, PackageResolver, TemplateId, TemplateInfo, Validate,
@@ -216,8 +217,9 @@ pub struct SetupUtility {
     pub additional_identifiers: Vec<InstrumentIdentifier>,
     pub create_transfer_rule: bool,
     pub create_allocation_factory: bool,
-    /// `checkBlockList` of the created `InstrumentConfiguration`. Only
-    /// `Some(true)` turns the registrar's block list check on.
+    /// `checkBlockList` of the created `InstrumentConfiguration`.
+    /// `Some(true)` is refused until #566 adds block list support to
+    /// governance mint and burn.
     #[serde(default)]
     pub use_block_list: Option<bool>,
 }
@@ -264,7 +266,12 @@ impl DamlProtoEncode for SetupUtility {
     }
 }
 
-impl Validate for SetupUtility {}
+impl Validate for SetupUtility {
+    fn validate(&self, _ctx: &ValidationCtx) -> Result<(), Error> {
+        // Mirrors the template's `ensure`.
+        validate_block_list_supported(self.use_block_list)
+    }
+}
 
 /// Set the provider-app reward beneficiaries on an `InstrumentConfiguration`.
 /// `providerAppRewardBeneficiaries = None` clears the current setting.
@@ -817,8 +824,9 @@ pub struct ProvisionInstrument {
     /// `OffboardInstrumentIssuers` vote.
     #[serde(default)]
     pub credential_valid_until_micros: Option<i64>,
-    /// `checkBlockList` of the created `InstrumentConfiguration`. Only
-    /// `Some(true)` turns the registrar's block list check on.
+    /// `checkBlockList` of the created `InstrumentConfiguration`.
+    /// `Some(true)` is refused until #566 adds block list support to
+    /// governance mint and burn.
     #[serde(default)]
     pub use_block_list: Option<bool>,
 }
@@ -890,7 +898,8 @@ impl Validate for ProvisionInstrument {
             self.credential_valid_from_micros,
             self.credential_valid_until_micros,
             ctx.now_micros,
-        )
+        )?;
+        validate_block_list_supported(self.use_block_list)
     }
 }
 
@@ -913,7 +922,8 @@ pub struct UpdateInstrumentConfiguration {
     pub holder_requirements: Vec<PartyCredentialRequirement>,
     /// `checkBlockList` of the new configuration. The key is required and
     /// may be `null`, so a request that leaves it out cannot turn a block
-    /// list check off by accident.
+    /// list check off by accident. `Some(true)` is refused until #566 adds
+    /// block list support to governance mint and burn.
     #[serde(deserialize_with = "serde::Deserialize::deserialize")]
     pub use_block_list: Option<bool>,
 }
@@ -973,7 +983,8 @@ impl Validate for UpdateInstrumentConfiguration {
             &self.issuer_requirements,
             ctx.governance_party,
             "issuer_requirements",
-        )
+        )?;
+        validate_block_list_supported(self.use_block_list)
     }
 }
 
@@ -1941,6 +1952,73 @@ mod tests {
         assert!(mk(gov.clone(), vec![]).validate(&ctx(&gov, 0)).is_err());
         assert!(mk(gov.clone(), vec![claim]).validate(&ctx(&gov, 0)).is_ok());
         assert!(mk(cid("other"), vec![]).validate(&ctx(&gov, 0)).is_ok());
+    }
+
+    /// Mirrors the templates' `blockListSupported` guard: governance mint and
+    /// burn cannot pass a block list check until #566, so `Some(true)` is
+    /// refused with a 400 that names the issue.
+    #[test]
+    fn configuration_proposals_refuse_use_block_list_true() {
+        let gov = cid("gov");
+        let with_flag = |use_block_list: Option<bool>| -> Vec<(&str, Box<dyn Validate>)> {
+            vec![
+                (
+                    "setup_utility",
+                    Box::new(SetupUtility {
+                        provider_service_cid: "psc".to_string(),
+                        operator: cid("op"),
+                        instrument_id_text: "uuid-1".to_string(),
+                        additional_identifiers: vec![],
+                        create_transfer_rule: true,
+                        create_allocation_factory: true,
+                        use_block_list,
+                    }),
+                ),
+                (
+                    "provision_instrument",
+                    Box::new(ProvisionInstrument {
+                        registrar_service_cid: "rsc".to_string(),
+                        instrument_id_text: "uuid-1".to_string(),
+                        additional_identifiers: vec![],
+                        issuer_requirements: vec![],
+                        holder_requirements: vec![],
+                        initial_instrument_issuers: vec![],
+                        credential_valid_from_micros: None,
+                        credential_valid_until_micros: None,
+                        use_block_list,
+                    }),
+                ),
+                (
+                    "update_instrument_configuration",
+                    Box::new(UpdateInstrumentConfiguration {
+                        registrar_service_cid: "rsc".to_string(),
+                        instrument_configuration_cid: "icc".to_string(),
+                        instrument_id_text: "uuid-1".to_string(),
+                        additional_identifiers: vec![],
+                        issuer_requirements: vec![],
+                        holder_requirements: vec![],
+                        use_block_list,
+                    }),
+                ),
+            ]
+        };
+        for flag in [None, Some(false)] {
+            for (name, proposal) in with_flag(flag) {
+                assert!(
+                    proposal.validate(&ctx(&gov, 0)).is_ok(),
+                    "{name} should accept use_block_list {flag:?}"
+                );
+            }
+        }
+        for (name, proposal) in with_flag(Some(true)) {
+            match proposal.validate(&ctx(&gov, 0)) {
+                Err(Error::Validation(message)) => assert!(
+                    message.contains("use_block_list") && message.contains("#566"),
+                    "{name}: unexpected message {message:?}"
+                ),
+                other => panic!("{name} should refuse use_block_list true, got {other:?}"),
+            }
+        }
     }
 
     #[test]

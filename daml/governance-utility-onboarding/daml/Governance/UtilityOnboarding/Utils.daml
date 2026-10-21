@@ -58,6 +58,14 @@ credentialValidityText validFrom validUntil =
     <> optional "" (\t -> " from " <> show t) validFrom
     <> optional "" (\t -> " until " <> show t) validUntil
 
+-- | True unless the block list flag is Some True. Governance mint and burn
+-- send no block list shards in their choice context, so the registry would
+-- refuse every one of them on a configuration that checks a block list.
+-- Proposal templates use this in their `ensure` clause, so the flag fails
+-- before any vote. #566 adds the shards and lifts this guard.
+blockListSupported : Optional Bool -> Bool
+blockListSupported = (/= Some True)
+
 -- | Describe an instrument configuration's block list flag for a proposal
 -- description, with a leading separator, or nothing when it is unset. The
 -- registry checks the block list only on Some True.

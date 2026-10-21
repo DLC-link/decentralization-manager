@@ -19,7 +19,7 @@ import Utility.Registry.Holding.V0.Types (InstrumentIdentifier)
 
 import Governance.Action
 import Governance.UtilityOnboarding.Utils
-  ( blockListText, mintCredentialsMeetingRequirements, partyList
+  ( blockListSupported, blockListText, mintCredentialsMeetingRequirements, partyList
   , selfIssuedRequirementsHaveClaims, credentialValidityText, validCredentialIdNonce
   , validCredentialValidity )
 
@@ -47,9 +47,10 @@ template ProvisionInstrument
       -- ^ validUntil of every credential this action mints. None: never
       -- expires, so ending it needs an OffboardInstrumentIssuers vote.
     useBlockList : Optional Bool
-      -- ^ checkBlockList of the created configuration. Only Some True turns
-      -- the registrar's block list check on. Optional and last so contracts
-      -- created without it upgrade with None, which leaves the check off.
+      -- ^ checkBlockList of the created configuration. Some True is refused
+      -- until #566 adds block list support to governance mint and burn.
+      -- Optional and last so contracts created without it upgrade with
+      -- None, which leaves the check off.
   where
     signatory proposer
     observer governanceParty
@@ -59,6 +60,7 @@ template ProvisionInstrument
         && unique initialInstrumentIssuers
         && validCredentialIdNonce credentialIdNonce
         && validCredentialValidity credentialValidFrom credentialValidUntil
+        && blockListSupported useBlockList
 
     interface instance GovernableAction for ProvisionInstrument where
       view = GovernableActionView with
