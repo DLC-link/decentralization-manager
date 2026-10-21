@@ -19,6 +19,8 @@ use serde_json::{Value, json};
 use self::governance::Target;
 use self::wait::{RunSelector, WaitOptions, wait_for_run};
 use crate::api::{ApiError, DecmanClient, mesh_error_hint};
+use crate::auth::run_secret_command;
+use crate::config::{AdminClient, PartyCredentials};
 
 /// The result of a command: the JSON to print, and whether the command
 /// reached its goal. A workflow that ends failed prints its run and still
@@ -27,6 +29,15 @@ use crate::api::{ApiError, DecmanClient, mesh_error_hint};
 pub struct Outcome {
     pub value: Value,
     pub success: bool,
+}
+
+/// Per-node settings a profile configures once, so that `auth grant-rights`
+/// and `party-config` need no credentials on the command line. Secrets are
+/// shell commands; the CLI runs one only when a command needs that secret.
+#[derive(Clone, Debug, Default)]
+pub struct NodeSettings {
+    pub admin_client: Option<AdminClient>,
+    pub party_credentials: Option<PartyCredentials>,
 }
 
 impl Outcome {
@@ -392,18 +403,28 @@ pub enum PartyConfigCommand {
         #[command(flatten)]
         party: PartyArg,
     },
-    /// Save a party's credentials. Give the body as @file or - so secrets
-    /// stay off the command line.
+    /// Save a party's credentials: the profile's [party_credentials] for
+    /// --party, or a --body. A body without a client secret gets the one the
+    /// profile's client_secret_command prints.
     Set {
-        /// JSON body: inline, @file, or -.
+        /// The party to configure with the profile's credentials.
+        #[arg(long, required_unless_present = "body", conflicts_with = "body")]
+        party: Option<String>,
+        /// A JSON body instead of the profile's credentials: inline, @file,
+        /// or -.
         #[arg(long)]
-        body: String,
+        body: Option<String>,
+        /// Send no client secret, so the node keeps the one it stores.
+        #[arg(long)]
+        keep_secret: bool,
     },
-    /// Find the member party and user id the given credentials map to.
+    /// Find the member party and user id that credentials map to: the
+    /// profile's [party_credentials], or a --body.
     DiscoverMemberParty {
-        /// JSON body: inline, @file, or -.
+        /// A JSON body instead of the profile's credentials: inline, @file,
+        /// or -.
         #[arg(long)]
-        body: String,
+        body: Option<String>,
     },
 }
 
@@ -417,11 +438,12 @@ pub enum AuthCommand {
     GrantRights {
         #[command(flatten)]
         party: PartyArg,
-        /// Client id of an IdP client with Canton admin rights. Its secret is
-        /// read from `DECMAN_ADMIN_CLIENT_SECRET` only, so that it stays out
-        /// of the shell history and the process list.
+        /// Client id of an IdP client with Canton admin rights. Default: the
+        /// profile's admin_client_id. Its secret comes from
+        /// `DECMAN_ADMIN_CLIENT_SECRET`, else from the profile's
+        /// admin_client_secret_command, never from the command line.
         #[arg(long)]
-        admin_client_id: String,
+        admin_client_id: Option<String>,
     },
 }
 
@@ -621,7 +643,11 @@ pub enum LedgerCommand {
 ///
 /// Returns an error if an input cannot be read, the API rejects a call, or a
 /// wait fails.
-pub fn run(client: &mut DecmanClient, command: Command) -> Result<Outcome> {
+pub fn run(
+    client: &mut DecmanClient,
+    command: Command,
+    settings: &NodeSettings,
+) -> Result<Outcome> {
     match command {
         Command::Profiles => bail!("profiles needs no login; main lists them before login"),
         Command::Login => {
@@ -644,8 +670,8 @@ pub fn run(client: &mut DecmanClient, command: Command) -> Result<Outcome> {
         Command::Invitations(command) => run_invitations(client, command),
         Command::Workflows(command) => run_workflows(client, command),
         Command::Contracts(command) => run_contracts(client, command),
-        Command::PartyConfig(command) => run_party_config(client, command),
-        Command::Auth(command) => run_auth(client, command),
+        Command::PartyConfig(command) => run_party_config(client, command, settings),
+        Command::Auth(command) => run_auth(client, command, settings),
         Command::Governance(command) => run_governance(client, command),
         Command::Ledger(command) => run_ledger(client, command),
     }
@@ -654,6 +680,82 @@ pub fn run(client: &mut DecmanClient, command: Command) -> Result<Outcome> {
 /// Environment variable that holds the admin client secret for
 /// `auth grant-rights`.
 const ADMIN_SECRET_ENV: &str = "DECMAN_ADMIN_CLIENT_SECRET";
+
+/// The profile's party credentials.
+fn party_credentials(settings: &NodeSettings) -> Result<&PartyCredentials> {
+    settings
+        .party_credentials
+        .as_ref()
+        .context("the profile has no [profiles.party_credentials] section; pass --body instead")
+}
+
+/// The output of the party credentials' client_secret_command, for a body
+/// that needs a secret.
+fn party_client_secret(settings: &NodeSettings) -> Result<String> {
+    let command = settings
+        .party_credentials
+        .as_ref()
+        .and_then(|credentials| credentials.client_secret_command.as_deref())
+        .context(
+            "the body has no client secret, and the profile's [party_credentials] sets no \
+             client_secret_command",
+        )?;
+    run_secret_command("party_credentials.client_secret_command", command)
+}
+
+/// The IdP fields of `credentials` that are set, as a JSON object.
+fn credential_fields(credentials: &PartyCredentials) -> serde_json::Map<String, Value> {
+    let optional = [
+        ("keycloak_url", &credentials.keycloak_url),
+        ("keycloak_realm", &credentials.keycloak_realm),
+        ("keycloak_client_id", &credentials.keycloak_client_id),
+        ("auth0_domain", &credentials.auth0_domain),
+        ("auth0_audience", &credentials.auth0_audience),
+        ("auth0_client_id", &credentials.auth0_client_id),
+    ];
+    optional
+        .into_iter()
+        .filter_map(|(key, value)| {
+            value
+                .clone()
+                .map(|value| (key.to_owned(), Value::String(value)))
+        })
+        .collect()
+}
+
+/// The `PUT /party-config` body for `party_id` from the profile's
+/// credentials, without the client secret.
+fn party_config_body(party_id: &str, credentials: &PartyCredentials) -> Value {
+    let mut body = credential_fields(credentials);
+    body.insert("dec_party_id".to_owned(), json!(party_id));
+    body.insert(
+        "member_party_id".to_owned(),
+        json!(credentials.member_party_id),
+    );
+    body.insert("user_id".to_owned(), json!(credentials.user_id));
+    Value::Object(body)
+}
+
+/// `body` with its client secret filled in by `secret`, when it needs one and
+/// has none. An Auth0 body gets `auth0_client_secret`, any other body
+/// `keycloak_client_secret`. A body with a Keycloak password uses the password
+/// flow and gets no client secret. `secret` runs only when the body needs it.
+fn with_client_secret(mut body: Value, secret: impl FnOnce() -> Result<String>) -> Result<Value> {
+    let present = |value: &Value| !value.is_null() && value != "";
+    let field = if present(&body["auth0_domain"]) {
+        "auth0_client_secret"
+    } else {
+        "keycloak_client_secret"
+    };
+    if present(&body[field]) || present(&body["keycloak_password"]) {
+        return Ok(body);
+    }
+    let object = body
+        .as_object_mut()
+        .context("the party config body must be a JSON object")?;
+    object.insert(field.to_owned(), Value::String(secret()?));
+    Ok(body)
+}
 
 /// `POST /network-config` takes a bare peer array. Accept the
 /// `{"peers": [...]}` object that `GET /network-config` returns too.
@@ -1131,7 +1233,11 @@ fn run_contracts(client: &mut DecmanClient, command: ContractsCommand) -> Result
     }
 }
 
-fn run_party_config(client: &mut DecmanClient, command: PartyConfigCommand) -> Result<Outcome> {
+fn run_party_config(
+    client: &mut DecmanClient,
+    command: PartyConfigCommand,
+    settings: &NodeSettings,
+) -> Result<Outcome> {
     match command {
         PartyConfigCommand::Get { party } => {
             let party = resolve_party(client, &party)?;
@@ -1141,21 +1247,48 @@ fn run_party_config(client: &mut DecmanClient, command: PartyConfigCommand) -> R
                 &[],
             )
         }
-        PartyConfigCommand::Set { body } => Ok(Outcome::ok(client.request(
-            Method::PUT,
-            "/party-config",
-            &[],
-            Some(&input::read_json(&body)?),
-        )?)),
-        PartyConfigCommand::DiscoverMemberParty { body } => post(
-            client,
-            "/party-config/discover-member-party",
-            Some(&input::read_json(&body)?),
-        ),
+        PartyConfigCommand::Set {
+            party,
+            body,
+            keep_secret,
+        } => {
+            let body = match (body, party) {
+                (Some(body), _) => input::read_json(&body)?,
+                (None, Some(party)) => {
+                    let credentials = party_credentials(settings)?;
+                    let party = resolve_party(client, &PartyArg { party })?;
+                    party_config_body(&party.id, credentials)
+                }
+                (None, None) => bail!("pass --party or --body"),
+            };
+            let body = if keep_secret {
+                body
+            } else {
+                with_client_secret(body, || party_client_secret(settings))?
+            };
+            Ok(Outcome::ok(client.request(
+                Method::PUT,
+                "/party-config",
+                &[],
+                Some(&body),
+            )?))
+        }
+        PartyConfigCommand::DiscoverMemberParty { body } => {
+            let body = match body {
+                Some(body) => input::read_json(&body)?,
+                None => Value::Object(credential_fields(party_credentials(settings)?)),
+            };
+            let body = with_client_secret(body, || party_client_secret(settings))?;
+            post(client, "/party-config/discover-member-party", Some(&body))
+        }
     }
 }
 
-fn run_auth(client: &mut DecmanClient, command: AuthCommand) -> Result<Outcome> {
+fn run_auth(
+    client: &mut DecmanClient,
+    command: AuthCommand,
+    settings: &NodeSettings,
+) -> Result<Outcome> {
     match command {
         AuthCommand::Status => get(client, "/auth/status", &[]),
         AuthCommand::Test => post(client, "/auth/test", None),
@@ -1163,10 +1296,27 @@ fn run_auth(client: &mut DecmanClient, command: AuthCommand) -> Result<Outcome> 
             party,
             admin_client_id,
         } => {
-            let admin_client_secret = std::env::var(ADMIN_SECRET_ENV)
+            let admin = settings.admin_client.as_ref();
+            let admin_client_id = admin_client_id
+                .or_else(|| admin.map(|admin| admin.client_id.clone()))
+                .context("pass --admin-client-id, or add [profiles.admin_client] to the profile")?;
+            let admin_client_secret = match std::env::var(ADMIN_SECRET_ENV)
                 .ok()
                 .filter(|secret| !secret.is_empty())
-                .with_context(|| format!("set {ADMIN_SECRET_ENV} to the admin client secret"))?;
+            {
+                Some(secret) => secret,
+                None => {
+                    let admin = admin.with_context(|| {
+                        format!(
+                            "set {ADMIN_SECRET_ENV}, or add [profiles.admin_client] to the profile"
+                        )
+                    })?;
+                    run_secret_command(
+                        "admin_client.client_secret_command",
+                        &admin.client_secret_command,
+                    )?
+                }
+            };
             let party = resolve_party(client, &party)?;
             let body = json!({
                 "dec_party_id": party.id,
@@ -1396,6 +1546,84 @@ mod tests {
             json!([{ "name": "a" }])
         );
         assert_eq!(peer_list(json!([1])), json!([1]));
+    }
+
+    #[test]
+    fn a_keycloak_body_without_a_secret_gets_one() {
+        // Act
+        let body = with_client_secret(json!({ "keycloak_client_id": "c" }), || {
+            Ok("s3cret".to_owned())
+        })
+        .unwrap();
+
+        // Assert
+        assert_eq!(body["keycloak_client_secret"], "s3cret");
+    }
+
+    #[test]
+    fn an_auth0_body_gets_the_auth0_secret_field() {
+        let body = with_client_secret(json!({ "auth0_domain": "x.auth0.com" }), || {
+            Ok("s3cret".to_owned())
+        })
+        .unwrap();
+        assert_eq!(body["auth0_client_secret"], "s3cret");
+        assert!(body.get("keycloak_client_secret").is_none());
+    }
+
+    #[test]
+    fn a_body_with_a_secret_or_a_password_never_runs_the_command() {
+        let never = || -> Result<String> { panic!("the secret command must not run") };
+        let with_secret = json!({ "keycloak_client_secret": "given" });
+        assert_eq!(
+            with_client_secret(with_secret.clone(), never).unwrap(),
+            with_secret
+        );
+        let with_password = json!({ "keycloak_password": "pw" });
+        assert_eq!(
+            with_client_secret(with_password.clone(), never).unwrap(),
+            with_password
+        );
+    }
+
+    #[test]
+    fn a_missing_secret_without_a_profile_command_is_an_error() {
+        let error = party_client_secret(&NodeSettings::default()).unwrap_err();
+        assert!(
+            error.to_string().contains("client_secret_command"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn party_config_body_comes_from_the_profile_credentials() {
+        // Arrange
+        let credentials = PartyCredentials {
+            member_party_id: "attestor-1::1220aa".to_owned(),
+            user_id: "attestor-user".to_owned(),
+            keycloak_url: Some("https://idp".to_owned()),
+            keycloak_realm: Some("nodes".to_owned()),
+            keycloak_client_id: Some("attestor-1".to_owned()),
+            auth0_domain: None,
+            auth0_audience: None,
+            auth0_client_id: None,
+            client_secret_command: Some("never runs here".to_owned()),
+        };
+
+        // Act
+        let body = party_config_body("alpha::1220bb", &credentials);
+
+        // Assert
+        assert_eq!(
+            body,
+            json!({
+                "dec_party_id": "alpha::1220bb",
+                "member_party_id": "attestor-1::1220aa",
+                "user_id": "attestor-user",
+                "keycloak_url": "https://idp",
+                "keycloak_realm": "nodes",
+                "keycloak_client_id": "attestor-1",
+            })
+        );
     }
 
     #[test]

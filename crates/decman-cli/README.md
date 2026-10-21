@@ -64,6 +64,58 @@ API URL and username, and only the current user can read it.
 `decman-cli login` logs in and prints the token expiry. `decman-cli logout`
 deletes the cached tokens. `--no-token-cache` turns the cache off for one call.
 
+### Node settings
+
+Two commands need node credentials besides your login:
+
+- `auth grant-rights` needs the participant admin client.
+- `party-config set` and `party-config discover-member-party` need the ledger
+  credentials that DecMan uses for every party on the node: the node's member
+  party and the IdP client that acts as it.
+
+Configure them once per profile, in two sections under the profile. A section
+belongs to the `[[profiles]]` entry above it, so put it before the next one.
+
+```toml
+[[profiles]]
+name = "devnet"
+api_url = "https://decman.devnet.example"
+username = "alice"
+password_command = "pass show decman/devnet"
+
+[profiles.admin_client]
+client_id = "participant-admin"
+client_secret_command = "pass show decman/devnet/admin"
+
+[profiles.party_credentials]
+member_party_id = "attestor-1::1220..."
+user_id = "attestor-user"
+keycloak_url = "https://keycloak.example"
+keycloak_realm = "nodes"
+keycloak_client_id = "attestor-1"
+client_secret_command = "pass show decman/devnet/attestor"
+```
+
+For Auth0, use `auth0_domain`, `auth0_audience` and `auth0_client_id` in place
+of the Keycloak fields.
+
+With these sections, the commands need only the party:
+
+```bash
+decman-cli -p devnet --yes party-config set --party my-network
+decman-cli -p devnet party-config discover-member-party
+decman-cli -p devnet --yes auth grant-rights --party my-network
+```
+
+The CLI runs a secret command only when a command needs that secret, and it
+never prints a secret. `--admin-client-id` and `DECMAN_ADMIN_CLIENT_SECRET`
+override the admin client. `party-config set --body` and
+`discover-member-party --body` send your own body instead. A body without a
+client secret gets the one from `party_credentials`: an Auth0 body as
+`auth0_client_secret`, any other body as `keycloak_client_secret`, and a body
+with a Keycloak password none. Add `--keep-secret` to send no secret, so the
+node keeps the one it already stores.
+
 ### Protect a node
 
 Set `require_yes = true` on a profile to protect a node from changes by
@@ -142,8 +194,8 @@ reports none. You give the threshold and the confirmation timeout. Add
 
 Options such as `--body`, `--action`, and `--disclosed` take inline JSON,
 `@file` for a file, or `-` for stdin. Give bodies with secrets as a file or on
-stdin, so that the secrets are not in the shell history. `auth grant-rights`
-reads the admin client secret from `DECMAN_ADMIN_CLIENT_SECRET` only.
+stdin, so that the secrets are not in the shell history. Better still, leave
+the secret out of the body and use the node settings above.
 
 ## Examples
 

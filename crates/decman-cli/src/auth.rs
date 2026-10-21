@@ -35,15 +35,21 @@ impl PasswordSource {
     pub fn resolve(&self) -> Result<String> {
         match self {
             Self::Literal(password) => Ok(password.clone()),
-            Self::Command(command) => run_password_command(command),
+            Self::Command(command) => run_secret_command("password_command", command),
         }
     }
 }
 
 /// Run `command` through the platform shell and return its first stdout line.
 /// Stdin and stderr stay attached to the terminal, so a password manager can
-/// prompt the user and report its own errors.
-fn run_password_command(command: &str) -> Result<String> {
+/// prompt the user and report its own errors. `label` names the setting in
+/// errors; the secret itself never appears in one.
+///
+/// # Errors
+///
+/// Returns an error if the command cannot start, exits non-zero, or prints
+/// nothing.
+pub fn run_secret_command(label: &str, command: &str) -> Result<String> {
     let mut shell = if cfg!(windows) {
         let mut shell = Command::new("cmd");
         shell.arg("/C");
@@ -58,17 +64,17 @@ fn run_password_command(command: &str) -> Result<String> {
         .stdin(Stdio::inherit())
         .stderr(Stdio::inherit())
         .output()
-        .context("failed to run password_command")?;
+        .with_context(|| format!("failed to run {label}"))?;
     if !output.status.success() {
-        bail!("password_command exited with {}", output.status);
+        bail!("{label} exited with {}", output.status);
     }
-    let stdout =
-        String::from_utf8(output.stdout).context("password_command printed non-UTF-8 output")?;
-    let password = stdout.lines().next().unwrap_or_default();
-    if password.is_empty() {
-        bail!("password_command printed no password");
+    let stdout = String::from_utf8(output.stdout)
+        .with_context(|| format!("{label} printed non-UTF-8 output"))?;
+    let secret = stdout.lines().next().unwrap_or_default();
+    if secret.is_empty() {
+        bail!("{label} printed nothing");
     }
-    Ok(password.to_owned())
+    Ok(secret.to_owned())
 }
 
 /// The OAuth2 token endpoint and client a login uses.
@@ -443,7 +449,10 @@ mod tests {
         let error = source.resolve().unwrap_err();
 
         // Assert
-        assert!(error.to_string().contains("exited"), "{error}");
+        assert!(
+            error.to_string().contains("password_command exited"),
+            "{error}"
+        );
     }
 
     #[test]

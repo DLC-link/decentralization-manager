@@ -33,6 +33,14 @@ pub struct Profile {
     /// When `true`, commands that change state need `--yes`.
     #[serde(default)]
     pub require_yes: bool,
+    /// The participant admin client, for `auth grant-rights`
+    /// (`[profiles.admin_client]`).
+    #[serde(default)]
+    pub admin_client: Option<AdminClient>,
+    /// The ledger credentials every party on this node uses
+    /// (`[profiles.party_credentials]`).
+    #[serde(default)]
+    pub party_credentials: Option<PartyCredentials>,
     /// Optional OAuth overrides (auto-discovered from `/auth-config` if unset).
     #[serde(default)]
     pub oauth_token_url: Option<String>,
@@ -90,6 +98,40 @@ pub fn password_source(
         (None, Some(command)) => Ok(Some(PasswordSource::Command(command))),
         (None, None) => Ok(None),
     }
+}
+
+/// The participant admin client of a node. `auth grant-rights` uses it to
+/// grant the party user its rights.
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+pub struct AdminClient {
+    pub client_id: String,
+    /// A shell command that prints the client secret.
+    pub client_secret_command: String,
+}
+
+/// The ledger credentials DecMan uses for every party on this node: the
+/// node's member party and the IdP client that acts as it. They are the
+/// `PUT /party-config` fields without the party id and the secret.
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+pub struct PartyCredentials {
+    pub member_party_id: String,
+    /// The Canton user id of the client. DecMan shows it as a label only.
+    pub user_id: String,
+    #[serde(default)]
+    pub keycloak_url: Option<String>,
+    #[serde(default)]
+    pub keycloak_realm: Option<String>,
+    #[serde(default)]
+    pub keycloak_client_id: Option<String>,
+    #[serde(default)]
+    pub auth0_domain: Option<String>,
+    #[serde(default)]
+    pub auth0_audience: Option<String>,
+    #[serde(default)]
+    pub auth0_client_id: Option<String>,
+    /// A shell command that prints the client secret.
+    #[serde(default)]
+    pub client_secret_command: Option<String>,
 }
 
 /// Top-level `config.toml` shape: a list of `[[profiles]]`.
@@ -184,6 +226,23 @@ mod tests {
             username = "carol"
             password_command = "pass show decman"
             require_yes = true
+
+            [profiles.admin_client]
+            client_id = "participant-admin"
+            client_secret_command = "pass show admin"
+
+            [profiles.party_credentials]
+            member_party_id = "attestor-1::1220aa"
+            user_id = "attestor-user"
+            keycloak_url = "https://idp.example"
+            keycloak_realm = "nodes"
+            keycloak_client_id = "attestor-1"
+            client_secret_command = "pass show attestor"
+
+            [[profiles]]
+            name = "Devnet"
+            api_url = "https://decman.devnet"
+            username = "dave"
         "#;
 
         // Act
@@ -193,6 +252,26 @@ mod tests {
 
         // Assert
         assert!(profile.require_yes);
+        assert_eq!(
+            profile.admin_client,
+            Some(AdminClient {
+                client_id: "participant-admin".to_owned(),
+                client_secret_command: "pass show admin".to_owned(),
+            })
+        );
+        let credentials = profile.party_credentials.as_ref().unwrap();
+        assert_eq!(credentials.member_party_id, "attestor-1::1220aa");
+        assert_eq!(
+            credentials.keycloak_client_id.as_deref(),
+            Some("attestor-1")
+        );
+        assert_eq!(
+            credentials.client_secret_command.as_deref(),
+            Some("pass show attestor")
+        );
+        // The sections belong to the profile above them only.
+        assert!(config.profiles[1].admin_client.is_none());
+        assert!(config.profiles[1].party_credentials.is_none());
         assert!(
             matches!(auth.password, Some(PasswordSource::Command(ref c)) if c == "pass show decman")
         );
