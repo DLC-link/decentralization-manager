@@ -79,7 +79,8 @@ expression: minimal_option_fixtures()
     "mint_request_cid": "00mr",
     "instrument_configuration_cid": "00icc",
     "issuer_credential_cids": [],
-    "description": "accept mint"
+    "description": "accept mint",
+    "block_list_shard_cids": []
   },
   {
     "type": "provision_instrument",

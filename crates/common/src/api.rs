@@ -1602,6 +1602,28 @@ pub struct ProviderConfigurationsResponse {
     pub provider_configurations: Vec<ProviderConfigurationInfo>,
 }
 
+/// A `StoredBlockListPartyShas` shard of a registrar's block list, visible
+/// to the party. The accept mint and burn request forms list these, so the
+/// shards for an instrument that checks a block list can be picked.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
+pub struct BlockListShardInfo {
+    pub contract_id: String,
+    pub operator: CantonId,
+    pub registrar: CantonId,
+    /// Hex prefix of the party hashes the shard covers.
+    pub prefix: String,
+}
+
+/// Response for the block list shards endpoint
+#[derive(Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
+pub struct BlockListShardsResponse {
+    pub block_list_shards: Vec<BlockListShardInfo>,
+}
+
 /// A contract ID with its blob
 #[derive(Deserialize, Serialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]

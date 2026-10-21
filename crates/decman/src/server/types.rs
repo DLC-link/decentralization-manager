@@ -17,10 +17,11 @@ use tokio::sync::RwLock;
 pub use common::api::PAGE_SIZE;
 pub use common::api::{
     ActiveCouponReassignmentDelegation, AddPartyInvitePayload, AddPartyRequest, AuditLogResponse,
-    AuthStatus, AuthStatusResponse, AuthTestResponse, AuthTestResult, CancelConfirmationRequest,
-    CancelProposalRequest, ChainAuditEntry, ChainAuditResponse, ChangeThresholdInvitePayload,
-    ChangeThresholdRequest, Claim, ContractQueryResponse, ContractWithBlob, ContractsInvitePayload,
-    ContractsRequest, CouponReassignmentDelegationSummary, CredentialInfo, CredentialOfferInfo,
+    AuthStatus, AuthStatusResponse, AuthTestResponse, AuthTestResult, BlockListShardInfo,
+    BlockListShardsResponse, CancelConfirmationRequest, CancelProposalRequest, ChainAuditEntry,
+    ChainAuditResponse, ChangeThresholdInvitePayload, ChangeThresholdRequest, Claim,
+    ContractQueryResponse, ContractWithBlob, ContractsInvitePayload, ContractsRequest,
+    CouponReassignmentDelegationSummary, CredentialInfo, CredentialOfferInfo,
     CredentialOffersResponse, CredentialsResponse, DarsInvitePayload, DarsRequest,
     DecentralizedPartiesResponse, DeclineInvitationPayload, DisclosedContractInput,
     DiscoverMemberPartyRequest, DiscoverMemberPartyResponse, DistributePackageRequest,
@@ -1634,12 +1635,14 @@ mod tests {
                 instrument_configuration_cid: "00icc".into(),
                 issuer_credential_cids: vec![],
                 description: "accept mint".into(),
+                block_list_shard_cids: vec![],
             }),
             ProposalType::AcceptBurnRequest(AcceptBurnRequest {
                 burn_request_cid: "00br".into(),
                 instrument_configuration_cid: "00icc".into(),
                 issuer_credential_cids: vec![],
                 description: "accept burn".into(),
+                block_list_shard_cids: vec![],
             }),
             ProposalType::CreateProviderConfiguration(CreateProviderConfiguration {
                 provider_service_cid: "00psc".into(),

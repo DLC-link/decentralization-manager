@@ -88,6 +88,8 @@ import type {
   GovernanceStateResponse,
   ActiveCouponReassignmentDelegation,
   CouponReassignmentDelegationSummary,
+  BlockListShardInfo,
+  BlockListShardsResponse,
 } from "../types";
 
 type ActionTypeKey = ActionType["type"];
@@ -270,6 +272,9 @@ export const GovernanceSection = ({
   // Credential cids proving the request's holder meets the instrument's
   // issuer requirements. Passed into the accept's choice context.
   const [proposalIssuerCredentialCids, setProposalIssuerCredentialCids] = useState<string[]>([]);
+  // `StoredBlockListPartyShas` cids for an instrument that checks a block
+  // list. Passed into the accept's choice context.
+  const [proposalBlockListShardCids, setProposalBlockListShardCids] = useState<string[]>([]);
   // Registrar-onboarding proposal state
   const [proposalRegistrarServiceRequestCid, setProposalRegistrarServiceRequestCid] = useState("");
   const [proposalProviderConfigurationCid, setProposalProviderConfigurationCid] = useState("");
@@ -389,6 +394,10 @@ export const GovernanceSection = ({
   // credential picker on the Accept Mint/Burn Request forms.
   const [availableCredentials, setAvailableCredentials] = useState<CredentialInfo[]>([]);
   const [credentialsLoading, setCredentialsLoading] = useState(false);
+  // Block list shards visible to this party. Power the shard picker on the
+  // Accept Mint/Burn Request forms.
+  const [availableBlockListShards, setAvailableBlockListShards] = useState<BlockListShardInfo[]>([]);
+  const [blockListShardsLoading, setBlockListShardsLoading] = useState(false);
   // Pending `RegistrarServiceRequest` and `ProviderConfiguration` contracts.
   // Power the pickers on the Onboard Registrar form.
   const [registrarServiceRequests, setRegistrarServiceRequests] = useState<RegistrarServiceRequestInfo[]>([]);
@@ -640,6 +649,26 @@ export const GovernanceSection = ({
       console.error("Failed to fetch credentials:", e);
     } finally {
       setCredentialsLoading(false);
+    }
+  }, [partyId]);
+
+  // Fetch `StoredBlockListPartyShas` contracts so the Accept Mint/Burn
+  // Request forms can offer a shard picker for instruments that check a
+  // block list.
+  const fetchBlockListShards = useCallback(async () => {
+    setBlockListShardsLoading(true);
+    try {
+      const res = await authenticatedFetch(
+        `${API_BASE}/block-list-shards?party_id=${encodeURIComponent(partyId)}`,
+      );
+      if (res.ok) {
+        const response: BlockListShardsResponse = await res.json();
+        setAvailableBlockListShards(response.block_list_shards);
+      }
+    } catch (e) {
+      console.error("Failed to fetch block list shards:", e);
+    } finally {
+      setBlockListShardsLoading(false);
     }
   }, [partyId]);
 
@@ -1285,6 +1314,9 @@ export const GovernanceSection = ({
     ) {
       fetchCredentials();
     }
+    if (proposalType === "accept_mint_request" || proposalType === "accept_burn_request") {
+      fetchBlockListShards();
+    }
     // The Onboard Registrar pickers list the pending requests and the
     // provider's configurations.
     if (proposalType === "onboard_registrar") {
@@ -1297,6 +1329,7 @@ export const GovernanceSection = ({
     fetchOpenMintRequests,
     fetchOpenBurnRequests,
     fetchCredentials,
+    fetchBlockListShards,
     fetchRegistrarServiceRequests,
     fetchProviderConfigurations,
     fetchRegistrarServices,
@@ -1901,6 +1934,7 @@ export const GovernanceSection = ({
     setProposalOpenMiningRoundCid("");
     setProposalFeaturedAppRightCid("");
     setProposalIssuerCredentialCids([]);
+    setProposalBlockListShardCids([]);
     setProposalDelegate("");
     setProposalDelegationExpiresAt("");
     setProposalAmuletMergeLimit("10");
@@ -1929,8 +1963,20 @@ export const GovernanceSection = ({
   const blockListProblem =
     proposalType === "update_instrument_configuration" &&
     configurationToUpdate?.check_block_list === true
-      ? "This configuration checks a block list. DecMan cannot update it until #566 adds block list support to governance mint and burn."
+      ? "This configuration checks a block list. DecMan cannot update it until #566, because not every mint, burn and transfer sends block list shards yet."
       : null;
+
+  // With the block list check on, the registry refuses an accept that
+  // carries no shards. It fetches them against the instrument's registrar.
+  const acceptInstrument = availableInstruments.find(
+    (inst) => inst.contract_id === proposalInstrumentConfigurationCid,
+  );
+  const acceptNeedsBlockListShards =
+    (proposalType === "accept_mint_request" || proposalType === "accept_burn_request") &&
+    acceptInstrument?.configuration?.check_block_list === true;
+  const registrarBlockListShards = (registrar: string | undefined) =>
+    availableBlockListShards.filter((shard) => shard.registrar === registrar);
+  const acceptBlockListShardCids = acceptNeedsBlockListShards ? proposalBlockListShardCids : [];
 
   const handleSubmitProposal = async () => {
     if (!rulesContractId) return;
@@ -2183,21 +2229,29 @@ export const GovernanceSection = ({
           };
           break;
         case "accept_mint_request":
+          if (acceptNeedsBlockListShards && acceptBlockListShardCids.length === 0) {
+            throw new Error("Pick at least one Block List Shard");
+          }
           proposal = {
             type: "accept_mint_request",
             mint_request_cid: proposalMintRequestCid,
             instrument_configuration_cid: proposalInstrumentConfigurationCid,
             issuer_credential_cids: proposalIssuerCredentialCids,
             description: proposalDescription,
+            block_list_shard_cids: acceptBlockListShardCids,
           };
           break;
         case "accept_burn_request":
+          if (acceptNeedsBlockListShards && acceptBlockListShardCids.length === 0) {
+            throw new Error("Pick at least one Block List Shard");
+          }
           proposal = {
             type: "accept_burn_request",
             burn_request_cid: proposalBurnRequestCid,
             instrument_configuration_cid: proposalInstrumentConfigurationCid,
             issuer_credential_cids: proposalIssuerCredentialCids,
             description: proposalDescription,
+            block_list_shard_cids: acceptBlockListShardCids,
           };
           break;
         case "offer_free_credential": {
@@ -4775,8 +4829,19 @@ export const GovernanceSection = ({
                       i.instrument_admin === req.instrument_admin &&
                       i.instrument_id === req.instrument_id,
                   );
-                  if (inst) setProposalInstrumentConfigurationCid(inst.contract_id);
+                  if (!inst) return;
+                  setProposalInstrumentConfigurationCid(inst.contract_id);
+                  // The registrar's active shards divide all party hashes
+                  // between them, so together they cover every holder.
+                  setProposalBlockListShardCids(
+                    inst.configuration?.check_block_list === true
+                      ? registrarBlockListShards(inst.instrument_admin).map(
+                          (shard) => shard.contract_id,
+                        )
+                      : [],
+                  );
                 };
+                const shardOptions = registrarBlockListShards(acceptInstrument?.instrument_admin);
                 return (
                   <>
                     <Autocomplete
@@ -4978,6 +5043,56 @@ export const GovernanceSection = ({
                         />
                       )}
                     />
+                    {acceptNeedsBlockListShards && (
+                      <Autocomplete
+                        size="small"
+                        multiple
+                        freeSolo
+                        options={shardOptions}
+                        value={proposalBlockListShardCids}
+                        loading={blockListShardsLoading}
+                        onChange={(_event, values) => {
+                          setProposalBlockListShardCids(
+                            values.map((value) =>
+                              typeof value === "string" ? value : value.contract_id,
+                            ),
+                          );
+                        }}
+                        getOptionLabel={(option) => {
+                          // Selected values are stored as bare cids; label them
+                          // with the shard's prefix when the contract is known.
+                          const cid = typeof option === "string" ? option : option.contract_id;
+                          const known =
+                            typeof option === "string"
+                              ? shardOptions.find((s) => s.contract_id === option)
+                              : option;
+                          return known ? `Prefix ${known.prefix} (…${cid.slice(-8)})` : cid;
+                        }}
+                        isOptionEqualToValue={(option, value) =>
+                          typeof value === "string"
+                            ? option.contract_id === value
+                            : option.contract_id === value.contract_id
+                        }
+                        renderInput={(params) => (
+                          <TextField
+                            {...params}
+                            label={
+                              <TextHelp text="The registry checks the holder against these shards of the registrar's block list. Together, all of the registrar's shards cover every holder.">
+                                Block List Shards
+                              </TextHelp>
+                            }
+                            required
+                            helperText={
+                              blockListShardsLoading
+                                ? "Loading block list shards…"
+                                : shardOptions.length === 0
+                                  ? "No block list shards found for this registrar. Paste contract ids."
+                                  : "This instrument checks a block list. Keep all of the registrar's shards, or paste contract ids."
+                            }
+                          />
+                        )}
+                      />
+                    )}
                     <TextField
                       size="small"
                       label="Description"

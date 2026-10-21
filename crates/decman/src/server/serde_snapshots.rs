@@ -285,12 +285,14 @@ fn all_proposal_fixtures() -> Vec<ProposalType> {
             instrument_configuration_cid: "00icc".into(),
             issuer_credential_cids: vec!["00cred".into()],
             description: "accept mint".into(),
+            block_list_shard_cids: vec!["00shard".into()],
         }),
         ProposalType::AcceptBurnRequest(AcceptBurnRequest {
             burn_request_cid: "00br".into(),
             instrument_configuration_cid: "00icc".into(),
             issuer_credential_cids: vec!["00cred".into()],
             description: "accept burn".into(),
+            block_list_shard_cids: vec!["00shard".into()],
         }),
         ProposalType::CreateProviderConfiguration(CreateProviderConfiguration {
             provider_service_cid: "00psc".into(),
@@ -415,6 +417,7 @@ fn minimal_option_fixtures() -> Vec<ProposalType> {
             instrument_configuration_cid: "00icc".into(),
             issuer_credential_cids: vec![],
             description: "accept mint".into(),
+            block_list_shard_cids: vec![],
         }),
         ProposalType::ProvisionInstrument(ProvisionInstrument {
             registrar_service_cid: "00rsc".into(),
@@ -532,6 +535,36 @@ fn use_block_list_is_none_when_omitted() {
         panic!("expected provision_instrument, got {provision:?}");
     };
     assert_eq!(provision.use_block_list, None);
+}
+
+/// Clients written before `block_list_shard_cids` existed send no such key.
+/// Both accept payloads read its absence as an empty list, which sends no
+/// shards.
+#[test]
+fn block_list_shard_cids_are_empty_when_omitted() {
+    let mint: ProposalType = serde_json::from_value(serde_json::json!({
+        "type": "accept_mint_request",
+        "mint_request_cid": "00mr",
+        "instrument_configuration_cid": "00icc",
+        "description": "accept mint",
+    }))
+    .expect("deserialize accept_mint_request");
+    let ProposalType::AcceptMintRequest(mint) = mint else {
+        panic!("expected accept_mint_request, got {mint:?}");
+    };
+    assert!(mint.block_list_shard_cids.is_empty());
+
+    let burn: ProposalType = serde_json::from_value(serde_json::json!({
+        "type": "accept_burn_request",
+        "burn_request_cid": "00br",
+        "instrument_configuration_cid": "00icc",
+        "description": "accept burn",
+    }))
+    .expect("deserialize accept_burn_request");
+    let ProposalType::AcceptBurnRequest(burn) = burn else {
+        panic!("expected accept_burn_request, got {burn:?}");
+    };
+    assert!(burn.block_list_shard_cids.is_empty());
 }
 
 /// The update replaces the whole configuration, so a request that leaves a

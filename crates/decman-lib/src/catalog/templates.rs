@@ -485,6 +485,7 @@ mod tests {
                     instrument_configuration_cid: "icc".to_string(),
                     issuer_credential_cids: vec![],
                     description: "d".to_string(),
+                    block_list_shard_cids: vec![],
                 }
                 .template_id(&pkgs)
                 .expect("template id resolves")
@@ -497,6 +498,7 @@ mod tests {
                     instrument_configuration_cid: "icc".to_string(),
                     issuer_credential_cids: vec![],
                     description: "d".to_string(),
+                    block_list_shard_cids: vec![],
                 }
                 .template_id(&pkgs)
                 .expect("template id resolves")

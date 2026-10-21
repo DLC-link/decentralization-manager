@@ -260,7 +260,7 @@ test_when_foreign_configuration_then_refused = script do
 
 -- A configuration that checks a block list is refused. The proposal can
 -- carry only None or Some False, so the replace would turn the check off.
--- Governance cannot create such a configuration until #566, so the fixture
+-- The votes refuse to create such a configuration (#566), so the fixture
 -- creates it directly.
 given_setup_with_block_list_configuration : Script Fixture
 given_setup_with_block_list_configuration = do
@@ -335,8 +335,8 @@ test_when_claimless_requirement_then_proposal_refused = script do
     when = when_propose_claimless_requirement
     then_ = then_nothing
 
--- Governance mint and burn cannot pass a block list check until #566, so a
--- proposal that turns the check on is refused before any vote.
+-- Not every mint, burn and transfer path sends block list shards yet
+-- (#566), so a proposal that turns the check on is refused before any vote.
 when_propose_block_list_on : Fixture -> Script ()
 when_propose_block_list_on f =
   submitMustFail f.parties.member1 $ createCmd UpdateInstrumentConfiguration with

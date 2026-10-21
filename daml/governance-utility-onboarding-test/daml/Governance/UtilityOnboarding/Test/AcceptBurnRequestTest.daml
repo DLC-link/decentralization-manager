@@ -3,6 +3,7 @@
 
 module Governance.UtilityOnboarding.Test.AcceptBurnRequestTest where
 
+import DA.Optional (isSome)
 import DA.TextMap qualified as TextMap
 import DA.Time (addRelTime, hours)
 import Daml.Script
@@ -17,7 +18,8 @@ import Utility.Registry.App.V0.Service.AllocationFactory
   (AllocationFactory_RequestBurn(..), AllocationFactory_RequestMint(..))
 import Utility.Registry.Holding.V0.Holding (Holding)
 import Utility.Registry.V0.Holding.TokenApiUtils
-  (instrumentConfigurationContextKey, issuerCredentialsContextKey)
+  (blockListContextKey, instrumentConfigurationContextKey, issuerCredentialsContextKey)
+import Utility.Registry.V0.Rule.BlockList (StoredBlockListPartyShas)
 
 import Governance.Action (GovernableAction)
 import Governance.Rules
@@ -43,24 +45,27 @@ mkInstrumentId parties = InstrumentId with
   admin = parties.governanceParty
   id = "TEST-TOKEN"
 
+-- | The factory checks the block list too, so a request on a configuration
+-- that checks it needs the shards.
 choiceContextWithEmptyCredentials
-  : SetupArtifacts -> ChoiceContext
-choiceContextWithEmptyCredentials artifacts = ChoiceContext with
-  values = TextMap.fromList
+  : SetupArtifacts -> Optional [ContractId StoredBlockListPartyShas] -> ChoiceContext
+choiceContextWithEmptyCredentials artifacts shardCids = ChoiceContext with
+  values = TextMap.fromList $
     [ (instrumentConfigurationContextKey,
        AV_ContractId $ coerceContractId artifacts.instrumentConfigurationCid)
     , (issuerCredentialsContextKey, AV_List [])
-    ]
+    ] <> blockListShardEntries shardCids
 
 -- | Seed the requester with a Holding by driving a holder-initiated mint
 -- request through governance — exercises the AcceptMintRequest action under
 -- test only as a setup helper.
 seedHoldingForRequester
   : OnboardingTestParties -> ContractId GovernanceRules -> SetupArtifacts
-  -> Party -> Decimal -> Script (ContractId Holding)
-seedHoldingForRequester parties rulesCid artifacts holder amount = do
+  -> Optional [ContractId StoredBlockListPartyShas] -> Party -> Decimal
+  -> Script (ContractId Holding)
+seedHoldingForRequester parties rulesCid artifacts shardCids holder amount = do
   now <- getTime
-  let context = choiceContextWithEmptyCredentials artifacts
+  let context = choiceContextWithEmptyCredentials artifacts shardCids
   mintResult <- submit (actAs holder <> readAs parties.governanceParty) $
     exerciseCmd artifacts.allocationFactoryCid AllocationFactory_RequestMint with
       expectedAdmin = parties.governanceParty
@@ -83,6 +88,7 @@ seedHoldingForRequester parties rulesCid artifacts holder amount = do
     issuerCredentialCids = None
     description = "Seed mint"
     extraArgsMeta = Metadata with values = TextMap.empty
+    blockListShardCids = shardCids
   let proposalInterfaceCid : ContractId GovernableAction = toInterfaceContractId proposalCid
   _ <- confirmAndExecute parties rulesCid proposalInterfaceCid
     [parties.member1, parties.member2] parties.member1
@@ -92,11 +98,12 @@ seedHoldingForRequester parties rulesCid artifacts holder amount = do
 
 -- | Drive a holder-initiated burn request through the registry factory.
 seedBurnRequest
-  : OnboardingTestParties -> SetupArtifacts -> Party -> Decimal
+  : OnboardingTestParties -> SetupArtifacts
+  -> Optional [ContractId StoredBlockListPartyShas] -> Party -> Decimal
   -> ContractId Holding -> Script (ContractId BurnRequest)
-seedBurnRequest parties artifacts holder amount holdingCid = do
+seedBurnRequest parties artifacts shardCids holder amount holdingCid = do
   now <- getTime
-  let context = choiceContextWithEmptyCredentials artifacts
+  let context = choiceContextWithEmptyCredentials artifacts shardCids
   result <- submit (actAs holder <> readAs parties.governanceParty) $
     exerciseCmd artifacts.allocationFactoryCid AllocationFactory_RequestBurn with
       expectedAdmin = parties.governanceParty
@@ -121,14 +128,14 @@ given_burn_request_exists = do
   artifacts <- setupUtilityForTest parties rulesCid
   let holder = parties.outsider
       burnAmount = 100.0
-  holdingCid <- seedHoldingForRequester parties rulesCid artifacts holder burnAmount
-  burnRequestCid <- seedBurnRequest parties artifacts holder burnAmount holdingCid
+  holdingCid <- seedHoldingForRequester parties rulesCid artifacts None holder burnAmount
+  burnRequestCid <- seedBurnRequest parties artifacts None holder burnAmount holdingCid
   pure Fixture with ..
 
--- * Happy path: propose-confirm-execute burns the holder's holding.
-
-when_accept_burn_request_executed : Fixture -> Script ()
-when_accept_burn_request_executed f = do
+proposeAcceptBurn
+  : Optional [ContractId StoredBlockListPartyShas] -> Fixture
+  -> Script (ContractId GovernableAction)
+proposeAcceptBurn shardCids f = do
   proposalCid <- submit f.parties.member1 $ createCmd AcceptBurnRequest with
     governanceParty = f.parties.governanceParty
     proposer = f.parties.member1
@@ -137,10 +144,37 @@ when_accept_burn_request_executed f = do
     issuerCredentialCids = None
     description = "Accept holder-initiated burn"
     extraArgsMeta = Metadata with values = TextMap.empty
-  let proposalInterfaceCid : ContractId GovernableAction = toInterfaceContractId proposalCid
-  _ <- confirmAndExecute f.parties f.rulesCid proposalInterfaceCid
+    blockListShardCids = shardCids
+  pure (toInterfaceContractId proposalCid)
+
+executeAcceptBurn : Optional [ContractId StoredBlockListPartyShas] -> Fixture -> Script ()
+executeAcceptBurn shardCids f = do
+  proposalCid <- proposeAcceptBurn shardCids f
+  _ <- confirmAndExecute f.parties f.rulesCid proposalCid
     [f.parties.member1, f.parties.member2] f.parties.member1
   pure ()
+
+-- | Confirm the accept, run it, and return the failure.
+executeAcceptBurnMustFail
+  : Optional [ContractId StoredBlockListPartyShas] -> Fixture -> Script Text
+executeAcceptBurnMustFail shardCids f = do
+  proposalCid <- proposeAcceptBurn shardCids f
+  confirmationCids <- submitConfirmations f.parties.governanceParty f.rulesCid proposalCid
+    [f.parties.member1, f.parties.member2]
+  failure <- submitWithError (actAs f.parties.member1
+    <> readAs f.parties.governanceParty
+    <> readAs f.parties.outsider
+    <> readAs f.parties.operator) $
+    exerciseCmd f.rulesCid GovernanceRules_ExecuteConfirmedAction with
+      executor = f.parties.member1
+      actionProposalCid = proposalCid
+      confirmations = confirmationCids
+  pure (show failure)
+
+-- * Happy path: propose-confirm-execute burns the holder's holding.
+
+when_accept_burn_request_executed : Fixture -> Script ()
+when_accept_burn_request_executed = executeAcceptBurn None
 
 -- Registry-app 0.9.0 and later create no ExecutedBurn receipt, so the
 -- consumed request stands in for it.
@@ -162,15 +196,7 @@ test_when_accept_burn_request_then_holding_burned = script do
 
 when_outsider_confirms_accept_burn : Fixture -> Script ()
 when_outsider_confirms_accept_burn f = do
-  proposalCid <- submit f.parties.member1 $ createCmd AcceptBurnRequest with
-    governanceParty = f.parties.governanceParty
-    proposer = f.parties.member1
-    burnRequestCid = f.burnRequestCid
-    instrumentConfigurationCid = f.artifacts.instrumentConfigurationCid
-    issuerCredentialCids = None
-    description = "Accept holder-initiated burn"
-    extraArgsMeta = Metadata with values = TextMap.empty
-  let proposalInterfaceCid : ContractId GovernableAction = toInterfaceContractId proposalCid
+  proposalInterfaceCid <- proposeAcceptBurn None f
   submitMustFail (memberContext f.parties.outsider f.parties.governanceParty) $
     exerciseCmd f.rulesCid GovernanceRules_ConfirmAction with
       confirmer = f.parties.outsider
@@ -184,3 +210,65 @@ test_when_outsider_confirms_accept_burn_then_rejected = script do
     given = given_burn_request_exists
     when = when_outsider_confirms_accept_burn
     then_ = then_nothing_burn
+
+-- * Block list on. Onboarding created one empty shard per hex prefix, and the
+-- request was made before any party was blocked.
+
+given_burn_request_on_block_list : Script Fixture
+given_burn_request_on_block_list = do
+  parties <- allocateOnboardingTestParties
+  rulesCid <- createTestGovernance parties
+  artifacts <- setupUtilityForTest parties rulesCid >>= turnBlockListOn parties
+  shardCids <- queryBlockListShards parties
+  let holder = parties.outsider
+      burnAmount = 100.0
+  holdingCid <-
+    seedHoldingForRequester parties rulesCid artifacts (Some shardCids) holder burnAmount
+  burnRequestCid <-
+    seedBurnRequest parties artifacts (Some shardCids) holder burnAmount holdingCid
+  pure Fixture with ..
+
+-- The holder was blocked after the request, so the factory let it through.
+given_burn_request_from_blocked_holder : Script Fixture
+given_burn_request_from_blocked_holder = do
+  f <- given_burn_request_on_block_list
+  blockParty f.parties f.holder
+  pure f
+
+when_accept_burn_with_all_shards : Fixture -> Script ()
+when_accept_burn_with_all_shards f = do
+  shardCids <- queryBlockListShards f.parties
+  executeAcceptBurn (Some shardCids) f
+
+when_accept_burn_with_all_shards_fails : Fixture -> Script Text
+when_accept_burn_with_all_shards_fails f = do
+  shardCids <- queryBlockListShards f.parties
+  executeAcceptBurnMustFail (Some shardCids) f
+
+-- The failed accept rolls back, so the locked holding and the request stay.
+then_burn_refused : Text -> Fixture -> Text -> Script Failures
+then_burn_refused reason f failure = do
+  holdings <- query @Holding f.holder
+  request <- queryContractId f.parties.governanceParty f.burnRequestCid
+  pure $
+    shouldContain "execution error" failure reason <>
+    shouldBe "holdings for holder" 1 (length holdings) <>
+    shouldBe "burn request still open" True (isSome request)
+
+test_when_block_list_on_and_shards_sent_then_holding_burned = script do
+  run Test with
+    given = given_burn_request_on_block_list
+    when = when_accept_burn_with_all_shards
+    then_ = then_holding_burned
+
+test_when_holder_blocked_then_burn_refused = script do
+  run Test with
+    given = given_burn_request_from_blocked_holder
+    when = when_accept_burn_with_all_shards_fails
+    then_ = then_burn_refused "Holder must not be blocklisted"
+
+test_when_block_list_on_and_no_shards_then_burn_refused = script do
+  run Test with
+    given = given_burn_request_on_block_list
+    when = executeAcceptBurnMustFail None
+    then_ = then_burn_refused ("Missing context entry for: " <> blockListContextKey)

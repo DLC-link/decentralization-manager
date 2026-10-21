@@ -103,6 +103,7 @@ acceptMintViaGovernance fx mintRequestCid issuer = do
     issuerCredentialCids = Some credentialCids
     description = "Accept issuer-initiated mint"
     extraArgsMeta = emptyMeta
+    blockListShardCids = None
   let proposalInterfaceCid : ContractId GovernableAction = toInterfaceContractId proposalCid
   _ <- confirmAndExecuteAs fx.f.parties fx.f.registrarStack proposalInterfaceCid
   pure ()
@@ -140,6 +141,7 @@ acceptBurnViaGovernance fx burnRequestCid issuer = do
     issuerCredentialCids = Some credentialCids
     description = "Accept issuer-initiated burn"
     extraArgsMeta = emptyMeta
+    blockListShardCids = None
   let proposalInterfaceCid : ContractId GovernableAction = toInterfaceContractId proposalCid
   _ <- confirmAndExecuteAs fx.f.parties fx.f.registrarStack proposalInterfaceCid
   pure ()

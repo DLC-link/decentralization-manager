@@ -50,11 +50,11 @@ use super::{
     },
     record::{field_record, record_field},
     types::{
-        ActionType, Claim, ContractInfo, ContractWithBlob, CredentialInfo, CredentialOfferInfo,
-        DomainConfirmation, DomainGovernanceAction, GovernanceAction, GovernanceConfirmation,
-        GovernanceState, HoldingInfo, InstrumentInfo, PartyMetadata, PendingAction,
-        ProposalSummary, ProviderConfigurationInfo, ProviderServiceInfo, RegistrarServiceInfo,
-        RegistrarServiceRequestInfo, TokenRequestInfo, TransferFactoryInfo,
+        ActionType, BlockListShardInfo, Claim, ContractInfo, ContractWithBlob, CredentialInfo,
+        CredentialOfferInfo, DomainConfirmation, DomainGovernanceAction, GovernanceAction,
+        GovernanceConfirmation, GovernanceState, HoldingInfo, InstrumentInfo, PartyMetadata,
+        PendingAction, ProposalSummary, ProviderConfigurationInfo, ProviderServiceInfo,
+        RegistrarServiceInfo, RegistrarServiceRequestInfo, TokenRequestInfo, TransferFactoryInfo,
         TransferInstructionInfo, TransferInstructionStatus, UserServiceInfo,
     },
 };
@@ -1816,6 +1816,61 @@ fn extract_provider_configuration_info(
 }
 
 // ============================================================================
+// Block List Shard Queries
+// ============================================================================
+
+/// StoredBlockListPartyShas template identifier. Hard-coded
+/// `#utility-registry-v0` for the same reason as
+/// [`instrument_configuration_template`].
+fn block_list_shard_template() -> TemplateId {
+    TemplateId {
+        package_id: "#utility-registry-v0".to_string(),
+        module_name: "Utility.Registry.V0.Rule.BlockList",
+        entity_name: "StoredBlockListPartyShas",
+    }
+}
+
+/// Get all StoredBlockListPartyShas contracts visible to a party. The
+/// registrar signs its shards, so a registrar decparty sees its own.
+pub async fn get_block_list_shards(
+    config: &NodeConfig,
+    party_id: &CantonId,
+    token: Option<String>,
+) -> Result<Vec<BlockListShardInfo>> {
+    let template = block_list_shard_template();
+    let event_format = party_event_format(
+        party_id,
+        vec![template_filter(
+            Identifier {
+                package_id: template.package_id.clone(),
+                module_name: template.module_name.to_string(),
+                entity_name: template.entity_name.to_string(),
+            },
+            false,
+        )],
+        true,
+    );
+
+    fetch_active_contracts_filtered(config, token, event_format, |created| {
+        extract_block_list_shard_info(&created)
+    })
+    .await
+}
+
+/// Extract BlockListShardInfo from a StoredBlockListPartyShas created event.
+/// The blocked parties stay behind: the picker labels shards by prefix.
+fn extract_block_list_shard_info(created: &CreatedEvent) -> Option<BlockListShardInfo> {
+    let record = created.create_arguments.as_ref()?;
+
+    Some(BlockListShardInfo {
+        contract_id: created.contract_id.clone(),
+        operator: field_party(record, "operator")?.parse().ok()?,
+        registrar: field_party(record, "registrar")?.parse().ok()?,
+        prefix: field_text(record, "prefix")?,
+    })
+}
+
+// ============================================================================
 // InstrumentConfiguration Queries
 // ============================================================================
 
@@ -3449,6 +3504,73 @@ mod tests {
             record.fields.retain(|f| f.label != "provider");
         }
         assert!(extract_provider_configuration_info(&event).is_none());
+    }
+
+    // ------------------------------------------------------------------------
+    // extract_block_list_shard_info
+    //
+    // `Utility.Registry.V0.Rule.BlockList:StoredBlockListPartyShas` carries
+    // the operator and registrar parties, the hash prefix, the blocked
+    // parties and the shard size. The extractor reads the parties and the
+    // prefix, and must tolerate the fields it ignores. It feeds the shard
+    // picker on the accept mint and burn request forms.
+    // ------------------------------------------------------------------------
+
+    /// A StoredBlockListPartyShas created event with an empty block list.
+    fn block_list_shard_event() -> CreatedEvent {
+        let record = Record {
+            record_id: None,
+            fields: vec![
+                field("operator", party_value(&format!("operator::{SR_FP}"))),
+                field("registrar", party_value(&format!("registrar::{SR_FP}"))),
+                field("prefix", text_value("a")),
+                field("blockList", record_value(vec![])),
+                field(
+                    "maxBlockListShardSize",
+                    Value {
+                        sum: Some(value::Sum::Int64(16)),
+                    },
+                ),
+            ],
+        };
+        CreatedEvent {
+            offset: 0,
+            node_id: 0,
+            contract_id: "shard-cid-1".to_string(),
+            template_id: None,
+            contract_key: None,
+            create_arguments: Some(record),
+            created_event_blob: vec![],
+            interface_views: vec![],
+            witness_parties: vec![],
+            signatories: vec![],
+            observers: vec![],
+            created_at: None,
+            package_name: String::new(),
+            representative_package_id: String::new(),
+            acs_delta: false,
+            contract_key_hash: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn extract_block_list_shard_info_reads_parties_and_prefix() {
+        let Some(info) = extract_block_list_shard_info(&block_list_shard_event()) else {
+            panic!("shard should yield info");
+        };
+        assert_eq!(info.contract_id, "shard-cid-1");
+        assert_eq!(info.operator.to_string(), format!("operator::{SR_FP}"));
+        assert_eq!(info.registrar.to_string(), format!("registrar::{SR_FP}"));
+        assert_eq!(info.prefix, "a");
+    }
+
+    #[test]
+    fn extract_block_list_shard_info_skips_event_without_prefix() {
+        let mut event = block_list_shard_event();
+        if let Some(record) = event.create_arguments.as_mut() {
+            record.fields.retain(|f| f.label != "prefix");
+        }
+        assert!(extract_block_list_shard_info(&event).is_none());
     }
 
     /// An InstrumentConfiguration created event in the shape the ledger

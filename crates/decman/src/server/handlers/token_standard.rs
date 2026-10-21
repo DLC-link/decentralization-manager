@@ -21,19 +21,21 @@ use crate::{
         AppState,
         middleware::require_admin,
         queries::{
-            ContractQueryParams as QueryContractParams, get_credential_offers, get_credentials,
-            get_holdings, get_instruments, get_open_burn_requests, get_open_mint_requests,
-            get_open_transfer_instructions, get_provider_configurations, get_provider_services,
-            get_registrar_service_requests, get_registrar_services, get_transfer_factories,
-            get_user_services, query_contracts_by_template,
+            ContractQueryParams as QueryContractParams, get_block_list_shards,
+            get_credential_offers, get_credentials, get_holdings, get_instruments,
+            get_open_burn_requests, get_open_mint_requests, get_open_transfer_instructions,
+            get_provider_configurations, get_provider_services, get_registrar_service_requests,
+            get_registrar_services, get_transfer_factories, get_user_services,
+            query_contracts_by_template,
         },
         types::{
-            BurnRequestsResponse, ContractQueryResponse, CredentialOffersResponse,
-            CredentialsResponse, ErrorResponse, HoldingsResponse, InstrumentsResponse,
-            MintRequestsResponse, NetworkInfo, OperatorInfo, ProviderConfigurationsResponse,
-            ProviderServicesResponse, RegistrarServiceRequestsResponse, RegistrarServicesResponse,
-            TransferFactoriesResponse, TransferFactoryInfo, TransferInstructionsResponse,
-            TransferPreapprovalsResponse, UserServicesResponse,
+            BlockListShardsResponse, BurnRequestsResponse, ContractQueryResponse,
+            CredentialOffersResponse, CredentialsResponse, ErrorResponse, HoldingsResponse,
+            InstrumentsResponse, MintRequestsResponse, NetworkInfo, OperatorInfo,
+            ProviderConfigurationsResponse, ProviderServicesResponse,
+            RegistrarServiceRequestsResponse, RegistrarServicesResponse, TransferFactoriesResponse,
+            TransferFactoryInfo, TransferInstructionsResponse, TransferPreapprovalsResponse,
+            UserServicesResponse,
         },
     },
 };
@@ -272,6 +274,39 @@ pub async fn get_provider_configurations_handler(
             tracing::error!("Failed to fetch provider configurations: {e}");
             HttpResponse::InternalServerError().json(ErrorResponse {
                 error: format!("Failed to fetch provider configurations: {e}"),
+            })
+        }
+    }
+}
+
+/// Get `StoredBlockListPartyShas` contracts visible to the party. The
+/// accept mint and burn request forms list these, so the shards for an
+/// instrument that checks a block list can be picked instead of pasted in.
+#[utoipa::path(
+    tag = "Services",
+    params(GovernanceQuery),
+    responses(
+        (status = 200, description = "Block list shards", body = BlockListShardsResponse),
+        (status = 500, description = "Internal server error", body = ErrorResponse)
+    )
+)]
+#[get("/block-list-shards")]
+pub async fn get_block_list_shards_handler(
+    data: web::Data<AppState>,
+    query: web::Query<GovernanceQuery>,
+) -> impl Responder {
+    let party_id = &query.party_id;
+
+    let token = get_party_token(&data, party_id).await;
+
+    match get_block_list_shards(&data.config, party_id, token).await {
+        Ok(block_list_shards) => {
+            HttpResponse::Ok().json(BlockListShardsResponse { block_list_shards })
+        }
+        Err(e) => {
+            tracing::error!("Failed to fetch block list shards: {e}");
+            HttpResponse::InternalServerError().json(ErrorResponse {
+                error: format!("Failed to fetch block list shards: {e}"),
             })
         }
     }

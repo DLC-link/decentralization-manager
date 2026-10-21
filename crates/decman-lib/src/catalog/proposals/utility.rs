@@ -218,8 +218,8 @@ pub struct SetupUtility {
     pub create_transfer_rule: bool,
     pub create_allocation_factory: bool,
     /// `checkBlockList` of the created `InstrumentConfiguration`.
-    /// `Some(true)` is refused until #566 adds block list support to
-    /// governance mint and burn.
+    /// `Some(true)` is refused until every mint, burn and transfer path
+    /// sends block list shards (#566).
     #[serde(default)]
     pub use_block_list: Option<bool>,
 }
@@ -553,6 +553,11 @@ pub struct AcceptMintRequest {
     #[serde(default)]
     pub issuer_credential_cids: Vec<String>,
     pub description: String,
+    /// `StoredBlockListPartyShas` contract ids of the registrar's block list.
+    /// The registry reads them when the instrument configuration checks a
+    /// block list, and they must cover the mint holder. Empty sends none.
+    #[serde(default)]
+    pub block_list_shard_cids: Vec<String>,
 }
 
 impl AcceptMintRequest {
@@ -588,6 +593,15 @@ impl DamlProtoEncode for AcceptMintRequest {
                         .collect(),
                 ),
             ),
+            field(
+                "blockListShardCids",
+                make_optional_list(
+                    self.block_list_shard_cids
+                        .iter()
+                        .map(|cid| make_contract_id(cid))
+                        .collect(),
+                ),
+            ),
         ]))
     }
 }
@@ -609,6 +623,11 @@ pub struct AcceptBurnRequest {
     #[serde(default)]
     pub issuer_credential_cids: Vec<String>,
     pub description: String,
+    /// `StoredBlockListPartyShas` contract ids of the registrar's block list.
+    /// The registry reads them when the instrument configuration checks a
+    /// block list, and they must cover the burn holder. Empty sends none.
+    #[serde(default)]
+    pub block_list_shard_cids: Vec<String>,
 }
 
 impl AcceptBurnRequest {
@@ -639,6 +658,15 @@ impl DamlProtoEncode for AcceptBurnRequest {
                 "issuerCredentialCids",
                 make_optional_list(
                     self.issuer_credential_cids
+                        .iter()
+                        .map(|cid| make_contract_id(cid))
+                        .collect(),
+                ),
+            ),
+            field(
+                "blockListShardCids",
+                make_optional_list(
+                    self.block_list_shard_cids
                         .iter()
                         .map(|cid| make_contract_id(cid))
                         .collect(),
@@ -825,8 +853,8 @@ pub struct ProvisionInstrument {
     #[serde(default)]
     pub credential_valid_until_micros: Option<i64>,
     /// `checkBlockList` of the created `InstrumentConfiguration`.
-    /// `Some(true)` is refused until #566 adds block list support to
-    /// governance mint and burn.
+    /// `Some(true)` is refused until every mint, burn and transfer path
+    /// sends block list shards (#566).
     #[serde(default)]
     pub use_block_list: Option<bool>,
 }
@@ -922,8 +950,8 @@ pub struct UpdateInstrumentConfiguration {
     pub holder_requirements: Vec<PartyCredentialRequirement>,
     /// `checkBlockList` of the new configuration. The key is required and
     /// may be `null`, so a request that leaves it out cannot turn a block
-    /// list check off by accident. `Some(true)` is refused until #566 adds
-    /// block list support to governance mint and burn.
+    /// list check off by accident. `Some(true)` is refused until every mint,
+    /// burn and transfer path sends block list shards (#566).
     #[serde(deserialize_with = "serde::Deserialize::deserialize")]
     pub use_block_list: Option<bool>,
 }
@@ -1424,6 +1452,7 @@ mod tests {
                 instrument_configuration_cid: "00icc".to_string(),
                 issuer_credential_cids: vec!["00cred1".to_string(), "00cred2".to_string()],
                 description: "accept mint".to_string(),
+                block_list_shard_cids: vec!["00shard1".to_string(), "00shard2".to_string()],
             }
             .to_daml_proto()
             .expect("payload encodes")
@@ -1435,6 +1464,7 @@ mod tests {
                 instrument_configuration_cid: "00icc".to_string(),
                 issuer_credential_cids: vec![],
                 description: "accept mint".to_string(),
+                block_list_shard_cids: vec![],
             }
             .to_daml_proto()
             .expect("payload encodes")
@@ -1446,6 +1476,7 @@ mod tests {
                 instrument_configuration_cid: "00icc".to_string(),
                 issuer_credential_cids: vec!["00cred1".to_string(), "00cred2".to_string()],
                 description: "accept burn".to_string(),
+                block_list_shard_cids: vec!["00shard1".to_string(), "00shard2".to_string()],
             }
             .to_daml_proto()
             .expect("payload encodes")
@@ -1457,6 +1488,7 @@ mod tests {
                 instrument_configuration_cid: "00icc".to_string(),
                 issuer_credential_cids: vec![],
                 description: "accept burn".to_string(),
+                block_list_shard_cids: vec![],
             }
             .to_daml_proto()
             .expect("payload encodes")
@@ -1700,6 +1732,49 @@ mod tests {
                 proposal.fields_after_validity(),
                 vec![field("useBlockList", make_optional_bool(&flag))]
             );
+        }
+    }
+
+    /// Both accept templates declare `blockListShardCids` last, so Smart
+    /// Contract Upgrade accepts it. An empty list goes out as `None`, which
+    /// leaves the choice context as it was.
+    #[test]
+    fn accept_requests_send_block_list_shards_last() {
+        let gov = cid("gov");
+        let member = cid("member");
+        let accepts = |shards: Vec<String>| -> Vec<Box<dyn DamlProtoEncode>> {
+            vec![
+                Box::new(AcceptMintRequest {
+                    mint_request_cid: "00mrc".to_string(),
+                    instrument_configuration_cid: "00icc".to_string(),
+                    issuer_credential_cids: vec![],
+                    description: "accept mint".to_string(),
+                    block_list_shard_cids: shards.clone(),
+                }),
+                Box::new(AcceptBurnRequest {
+                    burn_request_cid: "00brc".to_string(),
+                    instrument_configuration_cid: "00icc".to_string(),
+                    issuer_credential_cids: vec![],
+                    description: "accept burn".to_string(),
+                    block_list_shard_cids: shards,
+                }),
+            ]
+        };
+        let shards = vec!["00shard1".to_string(), "00shard2".to_string()];
+        for (cids, expected) in [
+            (vec![], make_optional_list(vec![])),
+            (
+                shards.clone(),
+                make_optional_list(shards.iter().map(|c| make_contract_id(c)).collect()),
+            ),
+        ] {
+            for accept in accepts(cids) {
+                let arguments = proposal_create_arguments(accept.as_ref(), &gov, &member)
+                    .expect("proposal arguments encode");
+                let last = arguments.fields.last().expect("arguments have fields");
+                assert_eq!(last.label, "blockListShardCids");
+                assert_eq!(last.value, Some(expected.clone()));
+            }
         }
     }
 
@@ -1954,9 +2029,9 @@ mod tests {
         assert!(mk(cid("other"), vec![]).validate(&ctx(&gov, 0)).is_ok());
     }
 
-    /// Mirrors the templates' `blockListSupported` guard: governance mint and
-    /// burn cannot pass a block list check until #566, so `Some(true)` is
-    /// refused with a 400 that names the issue.
+    /// Mirrors the templates' `blockListSupported` guard: not every mint,
+    /// burn and transfer path sends block list shards yet, so `Some(true)` is
+    /// refused with a 400 that names #566.
     #[test]
     fn configuration_proposals_refuse_use_block_list_true() {
         let gov = cid("gov");

@@ -373,7 +373,7 @@ After the provider service exists, run the onboarding:
 }
 ```
 
-`use_block_list` sets the registrar's block list check for the new instrument. DecMan refuses `true` until #566, because governance mint and burn cannot pass that check yet. Leave the field out, or send `false`, to keep the check off.
+`use_block_list` sets the registrar's block list check for the new instrument. DecMan refuses `true` until #566, because not every mint, burn and transfer path sends block list shards yet. Leave the field out, or send `false`, to keep the check off.
 
 Setup creates a `TransferRule` only when `create_transfer_rule` is true. To add one later, for example after the rule was archived, propose:
 
@@ -560,6 +560,8 @@ The registry can only archive a configuration and create a new one, so the propo
 The create clears the provider app reward beneficiaries. The action sets them again in the same transaction, so the reward split does not change. Only the provider can set them, so the action refuses when they are set and another decparty is the provider. The Setup Utility flow makes the governance party both provider and registrar, so this case does not arise there.
 
 Credentialed issuers request mints and burns through the `AllocationFactory`. The registrar decparty approves each request with the `accept_mint_request` and `accept_burn_request` proposals.
+
+When the instrument checks a block list, each accept must send the registrar's block list shards in `block_list_shard_cids`. List them with `GET /block-list-shards?party_id=...`. Onboarding creates one shard per hex prefix, so the registrar's shards together cover every holder. The accept forms fill in all of them when the instrument checks a block list. Leave the field out for an instrument without the check.
 
 ### Querying Services
 

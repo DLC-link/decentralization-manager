@@ -19,8 +19,10 @@ import Utility.Registry.App.V0.Model.Mint (MintRequest, MintRequest_Accept(..))
 import Utility.Registry.V0.Configuration.Instrument (InstrumentConfiguration)
 import Utility.Registry.V0.Holding.TokenApiUtils
   (instrumentConfigurationContextKey, issuerCredentialsContextKey)
+import Utility.Registry.V0.Rule.BlockList (StoredBlockListPartyShas)
 
 import Governance.Action
+import Governance.UtilityOnboarding.Utils (blockListContextEntries)
 
 template AcceptMintRequest
   with
@@ -31,6 +33,11 @@ template AcceptMintRequest
     description : Text
     extraArgsMeta : Metadata
     issuerCredentialCids : Optional [ContractId Credential]
+    blockListShardCids : Optional [ContractId StoredBlockListPartyShas]
+      -- ^ Shards of the registrar's block list. The registry checks the
+      -- holder against them when the configuration checks a block list.
+      -- Optional and last so proposals created without it upgrade with
+      -- None, which leaves the choice context as it was.
   where
     signatory proposer
     observer governanceParty
@@ -44,13 +51,13 @@ template AcceptMintRequest
 
       executeImpl = do
         let context = ChoiceContext with
-              values = TextMap.fromList
+              values = TextMap.fromList $
                 [ (instrumentConfigurationContextKey,
                    AV_ContractId $ coerceContractId instrumentConfigurationCid)
                 , (issuerCredentialsContextKey,
                    AV_List $ map (AV_ContractId . coerceContractId) $
                      fromOptional [] issuerCredentialCids)
-                ]
+                ] <> blockListContextEntries blockListShardCids
         _ <- exercise mintRequestCid MintRequest_Accept with
           extraArgs = ExtraArgs with
             context

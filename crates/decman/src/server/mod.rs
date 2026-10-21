@@ -1499,6 +1499,7 @@ pub async fn start_server(
             .service(handlers::get_credentials_handler)
             .service(handlers::get_registrar_service_requests_handler)
             .service(handlers::get_provider_configurations_handler)
+            .service(handlers::get_block_list_shards_handler)
             .service(handlers::get_registrar_services_handler)
             .service(handlers::get_instruments_handler)
             .service(handlers::get_transfer_instructions_handler)

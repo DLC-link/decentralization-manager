@@ -73,15 +73,16 @@ pub fn validate_self_issued_requirements_have_claims(
     Ok(())
 }
 
-/// Mirrors the Daml `blockListSupported` guard. Governance mint and burn send
-/// no block list shards, so the registry would refuse every one of them on a
-/// configuration that checks a block list. #566 adds the shards and lifts
-/// this guard.
+/// Mirrors the Daml `blockListSupported` guard. With the flag on, every mint,
+/// burn and transfer must send the registrar's block list shards. The accept
+/// mint and accept burn proposals carry them. The mint and burn offers do
+/// not, and nobody has checked what wallet and cbtc-lib transfers send
+/// (#566).
 pub fn validate_block_list_supported(use_block_list: Option<bool>) -> Result<(), Error> {
     if use_block_list == Some(true) {
         return Err(Error::Validation(
-            "use_block_list cannot be true until #566 adds block list support to governance \
-             mint and burn"
+            "use_block_list cannot be true until every mint, burn and transfer path sends \
+             block list shards (#566)"
                 .to_string(),
         ));
     }

@@ -705,8 +705,8 @@ test_when_no_issuers_then_description_has_no_window = script do
 -- * useBlockList becomes the configuration's checkBlockList. None is what
 -- earlier package versions passed, and it leaves the check off. Voters see
 -- only the description, so it states a set flag. Some True is refused at
--- creation, before any vote, until #566 adds block list support to
--- governance mint and burn.
+-- creation, before any vote, until every mint, burn and transfer path sends
+-- block list shards (#566).
 
 provisionWithBlockListCapturingDescription : Optional Bool -> Fixture -> Script Text
 provisionWithBlockListCapturingDescription useBlockList fx = do

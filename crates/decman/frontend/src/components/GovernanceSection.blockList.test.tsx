@@ -5,8 +5,8 @@ import { SnackbarProvider } from "../contexts";
 import { GovernanceSection } from "./GovernanceSection";
 
 // Setup Utility and Provision Instrument cannot turn the block list on until
-// #566 adds block list support to governance mint and burn. These tests drive
-// each form to a submit and read the request body the form posts.
+// every mint, burn and transfer path sends block list shards (#566). These
+// tests drive each form to a submit and read the request body the form posts.
 const ns = "a".repeat(68);
 const self = `gov::${ns}`;
 

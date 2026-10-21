@@ -217,7 +217,10 @@ expression: all_proposal_fixtures()
     "issuer_credential_cids": [
       "00cred"
     ],
-    "description": "accept mint"
+    "description": "accept mint",
+    "block_list_shard_cids": [
+      "00shard"
+    ]
   },
   {
     "type": "accept_burn_request",
@@ -226,7 +229,10 @@ expression: all_proposal_fixtures()
     "issuer_credential_cids": [
       "00cred"
     ],
-    "description": "accept burn"
+    "description": "accept burn",
+    "block_list_shard_cids": [
+      "00shard"
+    ]
   },
   {
     "type": "create_provider_configuration",
