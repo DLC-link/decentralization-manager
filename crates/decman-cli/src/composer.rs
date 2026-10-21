@@ -160,7 +160,8 @@ pub fn action_types(governance_type: &str) -> Vec<TypeOption> {
 }
 
 /// The proposal types offered on a `core_self` party, grouped as in the web
-/// frontend (`offer_paid_credential` is omitted — the API form is unimplemented).
+/// frontend. The two paid-credential proposals are offered only in the web
+/// frontend.
 pub fn proposal_types() -> Vec<TypeOption> {
     vec![
         opt("generic_vote", "Generic vote"),
@@ -855,12 +856,10 @@ mod tests {
                 .any(|option| option.key.starts_with("governance_"))
         );
 
-        // The unimplemented paid-credential proposal is not offered.
-        assert!(
-            !proposal_types()
-                .iter()
-                .any(|option| option.key == "offer_paid_credential")
-        );
+        // The paid-credential proposals are web-only.
+        assert!(!proposal_types().iter().any(|option| {
+            option.key == "offer_paid_credential" || option.key == "accept_paid_credential"
+        }));
     }
 
     #[test]

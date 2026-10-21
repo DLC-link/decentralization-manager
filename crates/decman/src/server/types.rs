@@ -407,6 +407,10 @@ pub enum ProposalType {
     /// Accept a free credential offered to the governance party. Wraps
     /// `UserService_AcceptFreeCredentialOffer`.
     AcceptFreeCredential(decman_lib::catalog::proposals::credential::AcceptFreeCredential),
+    /// Accept a paid credential offered to the governance party. Wraps
+    /// `UserService_AcceptPaidCredentialOffer`, which locks the governance
+    /// party's deposit Amulets.
+    AcceptPaidCredential(decman_lib::catalog::proposals::credential::AcceptPaidCredential),
     /// Offer a burn of `amount` tokens held by `holder` via
     /// `AllocationFactory_OfferBurn`. Holdings are supplied by the holder at
     /// `BurnOffer_Accept` time, not here.
@@ -489,6 +493,7 @@ impl ProposalType {
             Self::OfferFreeCredential(p) => p,
             Self::OfferPaidCredential(p) => p,
             Self::AcceptFreeCredential(p) => p,
+            Self::AcceptPaidCredential(p) => p,
             Self::Burn(p) => p,
             Self::AcceptMintRequest(p) => p,
             Self::AcceptBurnRequest(p) => p,
@@ -529,6 +534,7 @@ impl ProposalType {
             Self::OfferFreeCredential(p) => Some(p),
             Self::OfferPaidCredential(p) => Some(p),
             Self::AcceptFreeCredential(p) => Some(p),
+            Self::AcceptPaidCredential(p) => Some(p),
             Self::Burn(p) => Some(p),
             Self::AcceptMintRequest(p) => Some(p),
             Self::AcceptBurnRequest(p) => Some(p),
@@ -1033,7 +1039,7 @@ mod tests {
     use common::types::AcsTransferDirection;
     use decman_lib::catalog::proposals::core::GenericVote;
     use decman_lib::catalog::proposals::credential::{
-        AcceptFreeCredential, OfferFreeCredential, OfferPaidCredential,
+        AcceptFreeCredential, AcceptPaidCredential, OfferFreeCredential, OfferPaidCredential,
     };
     use decman_lib::catalog::proposals::custody::{
         AcceptTransfer, SetupCcPreapproval, SetupTokenPreapproval, Transfer,
@@ -1050,6 +1056,7 @@ mod tests {
         RequestDevNetFeaturedAppRight, SetEnableResultContracts, SetProviderAppRewardBeneficiaries,
         SetupUtility,
     };
+    use decman_lib::catalog::types::AppTransferContextInput;
     use serde_json::Value;
     use sqlx::SqlitePool;
 
@@ -1587,6 +1594,16 @@ mod tests {
             ProposalType::AcceptFreeCredential(AcceptFreeCredential {
                 user_service_cid: "00usc".into(),
                 credential_offer_cid: "00offer".into(),
+            }),
+            ProposalType::AcceptPaidCredential(AcceptPaidCredential {
+                user_service_cid: "00usc".into(),
+                credential_offer_cid: "00offer".into(),
+                deposit_amulet_cids: vec!["00amulet".into()],
+                app_transfer_context: AppTransferContextInput {
+                    amulet_rules_cid: "00rules".into(),
+                    open_mining_round_cid: "00round".into(),
+                    featured_app_right_cid: None,
+                },
             }),
             ProposalType::Burn(Burn {
                 allocation_factory_cid: "00alloc".into(),

@@ -1,5 +1,6 @@
 //! Payload support types shared across several `ActionType` / `ProposalType`
-//! variants — reward beneficiaries and paid-credential billing parameters —
+//! variants — reward beneficiaries, paid-credential billing parameters and
+//! the Amulet transfer context —
 //! plus the encoders and decoders that move them to and from the Daml Ledger
 //! API `Value` wire format. Also holds
 //! the `GovernableAction` proposal detail DTOs (`ServiceRequestDetails`,
@@ -17,7 +18,8 @@ use common::canton_id::CantonId;
 
 use crate::error::Error;
 use crate::framework::encode::{
-    field, make_int64, make_list, make_numeric, make_optional_numeric, make_party, make_record,
+    field, make_contract_id, make_int64, make_list, make_numeric, make_optional_contract_id,
+    make_optional_numeric, make_party, make_record,
 };
 use crate::framework::record::{extract_int64, extract_record, extract_text, get_field};
 
@@ -62,8 +64,24 @@ pub struct BillingParams {
     /// Holder's weight on the activity marker (0.0 - 1.0). None means 0.
     #[serde(default)]
     #[cfg_attr(feature = "openapi", schema(value_type = Option<String>))]
-    #[cfg_attr(feature = "typegen", ts(type = "string"))]
+    #[cfg_attr(feature = "typegen", ts(as = "Option<String>"))]
     pub holder_activity_weight: Option<DamlDecimal>,
+}
+
+/// Contract ids of a splice-amulet `AppTransferContext`, which a paid
+/// credential accept uses to lock its deposit.
+/// Mirrors `Splice.AmuletRules.AppTransferContext`.
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
+pub struct AppTransferContextInput {
+    /// The DSO's `AmuletRules` contract.
+    pub amulet_rules_cid: String,
+    /// An `OpenMiningRound` that is open when the proposal executes.
+    pub open_mining_round_cid: String,
+    /// A `FeaturedAppRight` whose provider is the credential issuer.
+    #[serde(default)]
+    pub featured_app_right_cid: Option<String>,
 }
 
 /// Operator + counterparty parties extracted from a service-request proposal
@@ -157,6 +175,20 @@ pub fn serialize_billing_params(params: &BillingParams) -> Value {
         field(
             "holderActivityWeight",
             make_optional_numeric(&params.holder_activity_weight),
+        ),
+    ])
+}
+
+pub fn serialize_app_transfer_context(ctx: &AppTransferContextInput) -> Value {
+    make_record(vec![
+        field("amuletRules", make_contract_id(&ctx.amulet_rules_cid)),
+        field(
+            "openMiningRound",
+            make_contract_id(&ctx.open_mining_round_cid),
+        ),
+        field(
+            "featuredAppRight",
+            make_optional_contract_id(&ctx.featured_app_right_cid),
         ),
     ])
 }

@@ -101,7 +101,7 @@ mod tests {
     use super::*;
     use crate::catalog::proposals::core::GenericVote;
     use crate::catalog::proposals::credential::{
-        AcceptFreeCredential, OfferFreeCredential, OfferPaidCredential,
+        AcceptFreeCredential, AcceptPaidCredential, OfferFreeCredential, OfferPaidCredential,
     };
     use crate::catalog::proposals::custody::{
         AcceptTransfer, SetupCcPreapproval, SetupTokenPreapproval, Transfer,
@@ -118,7 +118,7 @@ mod tests {
         RequestDevNetFeaturedAppRight, SetEnableResultContracts, SetProviderAppRewardBeneficiaries,
         SetupUtility,
     };
-    use crate::catalog::types::BillingParams;
+    use crate::catalog::types::{AppTransferContextInput, BillingParams};
     use crate::framework::TemplateInfo;
 
     /// Any valid `CantonId` — the exact value is irrelevant to a
@@ -257,6 +257,22 @@ mod tests {
                 .expect("template id resolves")
                 .to_string(),
                 "#governance-utility-credential-v1:Governance.UtilityCredential.AcceptFreeCredential:AcceptFreeCredential",
+            ),
+            (
+                AcceptPaidCredential {
+                    user_service_cid: "usc".to_string(),
+                    credential_offer_cid: "offer".to_string(),
+                    deposit_amulet_cids: vec!["amulet".to_string()],
+                    app_transfer_context: AppTransferContextInput {
+                        amulet_rules_cid: "rules".to_string(),
+                        open_mining_round_cid: "round".to_string(),
+                        featured_app_right_cid: None,
+                    },
+                }
+                .template_id(&pkgs)
+                .expect("template id resolves")
+                .to_string(),
+                "#governance-utility-credential-v1:Governance.UtilityCredential.AcceptPaidCredential:AcceptPaidCredential",
             ),
             (
                 SetupCcPreapproval {
@@ -549,7 +565,7 @@ mod tests {
                 "#governance-utility-onboarding-v1:Governance.UtilityOnboarding.OffboardInstrumentIssuers:OffboardInstrumentIssuers",
             ),
         ];
-        assert_eq!(cases.len(), 30, "one case per catalog proposal struct");
+        assert_eq!(cases.len(), 31, "one case per catalog proposal struct");
         for (actual, expected) in cases {
             assert_eq!(actual, expected);
         }

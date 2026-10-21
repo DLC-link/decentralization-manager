@@ -9,7 +9,7 @@ use common::api::{
 };
 use decman_lib::catalog::proposals::core::GenericVote;
 use decman_lib::catalog::proposals::credential::{
-    AcceptFreeCredential, OfferFreeCredential, OfferPaidCredential,
+    AcceptFreeCredential, AcceptPaidCredential, OfferFreeCredential, OfferPaidCredential,
 };
 use decman_lib::catalog::proposals::custody::{
     AcceptTransfer, SetupCcPreapproval, SetupTokenPreapproval, Transfer,
@@ -25,7 +25,7 @@ use decman_lib::catalog::proposals::utility::{
     OnboardRegistrar, ProvisionInstrument, ProvisionProviderService, RequestDevNetFeaturedAppRight,
     SetEnableResultContracts, SetProviderAppRewardBeneficiaries, SetupUtility,
 };
-use decman_lib::catalog::types::RewardBeneficiary;
+use decman_lib::catalog::types::{AppTransferContextInput, RewardBeneficiary};
 
 use crate::canton_id::CantonId;
 use crate::server::types::{ActionType, AppRewardBeneficiary, BillingParams, ProposalType};
@@ -257,6 +257,16 @@ fn all_proposal_fixtures() -> Vec<ProposalType> {
             user_service_cid: "00usc".into(),
             credential_offer_cid: "00offer".into(),
         }),
+        ProposalType::AcceptPaidCredential(AcceptPaidCredential {
+            user_service_cid: "00usc".into(),
+            credential_offer_cid: "00offer".into(),
+            deposit_amulet_cids: vec!["00amulet1".into(), "00amulet2".into()],
+            app_transfer_context: AppTransferContextInput {
+                amulet_rules_cid: "00rules".into(),
+                open_mining_round_cid: "00round".into(),
+                featured_app_right_cid: Some("00far".into()),
+            },
+        }),
         ProposalType::Burn(Burn {
             allocation_factory_cid: "00alloc".into(),
             instrument_id: instrument(),
@@ -370,6 +380,16 @@ fn minimal_option_fixtures() -> Vec<ProposalType> {
                 holder_activity_weight: None,
             },
             deposit_initial_amount_usd: None,
+        }),
+        ProposalType::AcceptPaidCredential(AcceptPaidCredential {
+            user_service_cid: "00usc".into(),
+            credential_offer_cid: "00offer".into(),
+            deposit_amulet_cids: vec!["00amulet1".into()],
+            app_transfer_context: AppTransferContextInput {
+                amulet_rules_cid: "00rules".into(),
+                open_mining_round_cid: "00round".into(),
+                featured_app_right_cid: None,
+            },
         }),
         ProposalType::AcceptMintRequest(AcceptMintRequest {
             mint_request_cid: "00mr".into(),

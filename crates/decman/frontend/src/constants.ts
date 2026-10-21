@@ -23,6 +23,11 @@ export const TEMPLATE_ALLOCATION_FACTORY = {
   module: "Utility.Registry.App.V0.Service.AllocationFactory",
   entity: "AllocationFactory",
 };
+export const TEMPLATE_AMULET = {
+  package_ref: "#splice-amulet",
+  module: "Splice.Amulet",
+  entity: "Amulet",
+};
 export const TEMPLATE_REGISTRAR_SERVICE = {
   package_ref: "#utility-registry-app-v0",
   module: "Utility.Registry.App.V0.Service.Registrar",

@@ -62,6 +62,19 @@ expression: minimal_option_fixtures()
     "deposit_initial_amount_usd": null
   },
   {
+    "type": "accept_paid_credential",
+    "user_service_cid": "00usc",
+    "credential_offer_cid": "00offer",
+    "deposit_amulet_cids": [
+      "00amulet1"
+    ],
+    "app_transfer_context": {
+      "amulet_rules_cid": "00rules",
+      "open_mining_round_cid": "00round",
+      "featured_app_right_cid": null
+    }
+  },
+  {
     "type": "accept_mint_request",
     "mint_request_cid": "00mr",
     "instrument_configuration_cid": "00icc",

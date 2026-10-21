@@ -180,6 +180,20 @@ expression: all_proposal_fixtures()
     "credential_offer_cid": "00offer"
   },
   {
+    "type": "accept_paid_credential",
+    "user_service_cid": "00usc",
+    "credential_offer_cid": "00offer",
+    "deposit_amulet_cids": [
+      "00amulet1",
+      "00amulet2"
+    ],
+    "app_transfer_context": {
+      "amulet_rules_cid": "00rules",
+      "open_mining_round_cid": "00round",
+      "featured_app_right_cid": "00far"
+    }
+  },
+  {
     "type": "burn",
     "allocation_factory_cid": "00alloc",
     "instrument_id": {

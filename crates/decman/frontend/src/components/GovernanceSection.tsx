@@ -30,11 +30,18 @@ import {
   API_BASE,
   ADMIN_ACCESS,
   TEMPLATE_ALLOCATION_FACTORY,
+  TEMPLATE_AMULET,
   TEMPLATE_REGISTRAR_SERVICE,
 } from "../constants";
 import { authenticatedFetch } from "../api";
 import { getActionTypeOptions } from "../governanceFormat";
 import { beneficiariesProblem, beneficiaryWeightSum } from "../rewardBeneficiaries";
+import {
+  buildBillingParams,
+  buildInitialDeposit,
+  ownedAmulets,
+  type AmuletOption,
+} from "../paidCredential";
 import { fieldHelpAdornment, TextHelp } from "./FieldHelp";
 import type {
   GovernanceResponse,
@@ -226,11 +233,21 @@ export const GovernanceSection = ({
   const [proposalAllocationFactoryCid, setProposalAllocationFactoryCid] = useState("");
   const [proposalRecipient, setProposalRecipient] = useState("");
   const [proposalHolder, setProposalHolder] = useState("");
-  // Credential proposal state (offer_free / accept_free)
+  // Credential proposal state (offer / accept, free and paid)
   const [proposalUserServiceCid, setProposalUserServiceCid] = useState("");
   const [proposalCredentialId, setProposalCredentialId] = useState("");
   const [proposalCredentialClaimsText, setProposalCredentialClaimsText] = useState("");
   const [proposalCredentialOfferCid, setProposalCredentialOfferCid] = useState("");
+  // Offer Paid Credential billing fields, as typed
+  const [proposalFeePerDayUsd, setProposalFeePerDayUsd] = useState("");
+  const [proposalBillingPeriodMinutes, setProposalBillingPeriodMinutes] = useState("");
+  const [proposalDepositTargetAmountUsd, setProposalDepositTargetAmountUsd] = useState("");
+  const [proposalHolderActivityWeight, setProposalHolderActivityWeight] = useState("");
+  const [proposalDepositInitialAmountUsd, setProposalDepositInitialAmountUsd] = useState("");
+  // Accept Paid Credential deposit and transfer context
+  const [proposalDepositAmuletCids, setProposalDepositAmuletCids] = useState<string[]>([]);
+  const [proposalOpenMiningRoundCid, setProposalOpenMiningRoundCid] = useState("");
+  const [proposalFeaturedAppRightCid, setProposalFeaturedAppRightCid] = useState("");
   // Accept holder-initiated mint/burn request state
   const [proposalMintRequestCid, setProposalMintRequestCid] = useState("");
   const [proposalBurnRequestCid, setProposalBurnRequestCid] = useState("");
@@ -340,6 +357,10 @@ export const GovernanceSection = ({
   // CredentialOffer dropdowns on the Accept Free Credential forms.
   const [credentialOffers, setCredentialOffers] = useState<CredentialOfferInfo[]>([]);
   const [credentialOffersLoading, setCredentialOffersLoading] = useState(false);
+  // Amulets this party owns. Powers the deposit picker on the Accept Paid
+  // Credential form.
+  const [ownAmulets, setOwnAmulets] = useState<AmuletOption[]>([]);
+  const [ownAmuletsLoading, setOwnAmuletsLoading] = useState(false);
   const [registrarServiceContracts, setRegistrarServiceContracts] = useState<ContractWithBlob[]>([]);
   // Typed `MintRequest`/`BurnRequest` rows so the Accept dropdowns can show
   // holder → amount instrument (…cid) — mirroring the Accept Transfer UX —
@@ -559,6 +580,8 @@ export const GovernanceSection = ({
       proposalType === "setup_utility" ||
       proposalType === "offer_free_credential" ||
       proposalType === "accept_free_credential" ||
+      proposalType === "offer_paid_credential" ||
+      proposalType === "accept_paid_credential" ||
       proposalType === "create_provider_configuration" ||
       proposalType === "onboard_registrar"
     ) {
@@ -664,7 +687,8 @@ export const GovernanceSection = ({
   useEffect(() => {
     if (
       selectedActionType === "credential_accept_free" ||
-      proposalType === "accept_free_credential"
+      proposalType === "accept_free_credential" ||
+      proposalType === "accept_paid_credential"
     ) {
       fetchCredentialOffers();
     }
@@ -675,6 +699,13 @@ export const GovernanceSection = ({
   // billed offers).
   const acceptableCredentialOffers = useMemo(
     () => credentialOffers.filter((o) => o.is_free && o.holder === partyId),
+    [credentialOffers, partyId],
+  );
+
+  // Offers this party can take via the Paid direction: it is the holder and
+  // the offer carries billing params.
+  const acceptablePaidCredentialOffers = useMemo(
+    () => credentialOffers.filter((o) => !o.is_free && o.holder === partyId),
     [credentialOffers, partyId],
   );
 
@@ -725,7 +756,9 @@ export const GovernanceSection = ({
   useEffect(() => {
     if (
       (proposalType === "offer_free_credential" ||
-        proposalType === "accept_free_credential") &&
+        proposalType === "accept_free_credential" ||
+        proposalType === "offer_paid_credential" ||
+        proposalType === "accept_paid_credential") &&
       !proposalUserServiceCid &&
       userServices.length > 0
     ) {
@@ -754,17 +787,58 @@ export const GovernanceSection = ({
     credentialOfferCid,
   ]);
 
+  // The same prefill for the Accept Paid Credential form.
+  useEffect(() => {
+    if (
+      proposalType === "accept_paid_credential" &&
+      acceptablePaidCredentialOffers.length === 1 &&
+      !proposalCredentialOfferCid
+    ) {
+      setProposalCredentialOfferCid(acceptablePaidCredentialOffers[0].contract_id);
+    }
+  }, [proposalType, acceptablePaidCredentialOffers, proposalCredentialOfferCid]);
+
+  // UserService select shared by the credential proposal forms.
+  const renderUserServiceSelect = (help: string) => (
+    <FormControl size="small" fullWidth required>
+      <InputLabel>
+        <TextHelp text={help}>UserService Contract ID</TextHelp>
+      </InputLabel>
+      <Select
+        label="UserService Contract ID"
+        value={proposalUserServiceCid}
+        onChange={(e) => setProposalUserServiceCid(e.target.value)}
+        MenuProps={{ disableScrollLock: true }}
+      >
+        {servicesLoading ? (
+          <MenuItem disabled>Loading services…</MenuItem>
+        ) : userServices.length > 0 ? (
+          userServices.map((svc) => (
+            <MenuItem key={svc.contract_id} value={svc.contract_id}>
+              {svc.contract_id}
+            </MenuItem>
+          ))
+        ) : (
+          <MenuItem disabled>No user services found</MenuItem>
+        )}
+      </Select>
+    </FormControl>
+  );
+
   // CredentialOffer picker shared by the direct Accept Free Credential action
-  // and the Accept Free Credential proposal form. freeSolo keeps hand-pasting
-  // a cid possible when the offer isn't visible to this participant.
+  // and the Accept Free and Accept Paid Credential proposal forms. freeSolo
+  // keeps hand-pasting a cid possible when the offer isn't visible to this
+  // participant.
   const renderCredentialOfferAutocomplete = (
     value: string,
     setValue: (v: string) => void,
+    offers: CredentialOfferInfo[] = acceptableCredentialOffers,
+    kind: "free" | "paid" = "free",
   ) => (
     <Autocomplete
       size="small"
       freeSolo
-      options={acceptableCredentialOffers}
+      options={offers}
       value={value}
       loading={credentialOffersLoading}
       onChange={(_event, newValue) => {
@@ -823,8 +897,8 @@ export const GovernanceSection = ({
           helperText={
             credentialOffersLoading
               ? "Loading pending offers…"
-              : acceptableCredentialOffers.length === 0
-                ? "No pending free offers visible — paste a contract id directly if you have one"
+              : offers.length === 0
+                ? `No pending ${kind} offers visible — paste a contract id directly if you have one`
                 : "Pick a pending offer, or paste a contract id"
           }
         />
@@ -1097,7 +1171,7 @@ export const GovernanceSection = ({
         entity: string;
         interface?: boolean;
       },
-      options?: { activeOnly?: boolean },
+      options?: { activeOnly?: boolean; includePayload?: boolean },
     ) => {
       const params = new URLSearchParams({
         party_id: partyId,
@@ -1107,6 +1181,7 @@ export const GovernanceSection = ({
       });
       if (template.interface) params.set("interface", "true");
       if (options?.activeOnly) params.set("active_only", "true");
+      if (options?.includePayload) params.set("include_payload", "true");
       const res = await authenticatedFetch(`${API_BASE}/contracts/query?${params}`);
       if (res.ok) {
         const data: ContractQueryResponse = await res.json();
@@ -1116,6 +1191,25 @@ export const GovernanceSection = ({
     },
     [partyId],
   );
+
+  // Accept Paid Credential locks Amulets this party owns as the deposit.
+  const fetchOwnAmulets = useCallback(async () => {
+    setOwnAmuletsLoading(true);
+    try {
+      const contracts = await fetchContractsByTemplate(TEMPLATE_AMULET, { includePayload: true });
+      setOwnAmulets(ownedAmulets(contracts, partyId));
+    } catch (e) {
+      console.error("Failed to fetch Amulets:", e);
+    } finally {
+      setOwnAmuletsLoading(false);
+    }
+  }, [fetchContractsByTemplate, partyId]);
+
+  useEffect(() => {
+    if (proposalType === "accept_paid_credential") {
+      fetchOwnAmulets();
+    }
+  }, [proposalType, fetchOwnAmulets]);
 
   // Fetch AllocationFactory contracts when Mint/Burn proposal is selected.
   // (set_enable_result_contracts needs RegistrarService instead.)
@@ -1206,11 +1300,16 @@ export const GovernanceSection = ({
     }
   }, [proposalType, dsoPartyId, fetchNetworkInfo]);
 
-  // Request DevNet Featured App Right pins the DSO's current AmuletRules, so
-  // prefill its cid from network-info too. The field keeps a refresh button
-  // for when the DSO replaces the contract while the form is open.
+  // Request DevNet Featured App Right and Accept Paid Credential pin the
+  // DSO's current AmuletRules, so prefill its cid from network-info too. The
+  // field keeps a refresh button for when the DSO replaces the contract while
+  // the form is open.
   useEffect(() => {
-    if (proposalType === "request_dev_net_featured_app_right" && !amuletRulesCid) {
+    if (
+      (proposalType === "request_dev_net_featured_app_right" ||
+        proposalType === "accept_paid_credential") &&
+      !amuletRulesCid
+    ) {
       fetchNetworkInfo();
     }
   }, [proposalType, amuletRulesCid, fetchNetworkInfo]);
@@ -1743,6 +1842,14 @@ export const GovernanceSection = ({
     setProposalCredentialId("");
     setProposalCredentialClaimsText("");
     setProposalCredentialOfferCid("");
+    setProposalFeePerDayUsd("");
+    setProposalBillingPeriodMinutes("");
+    setProposalDepositTargetAmountUsd("");
+    setProposalHolderActivityWeight("");
+    setProposalDepositInitialAmountUsd("");
+    setProposalDepositAmuletCids([]);
+    setProposalOpenMiningRoundCid("");
+    setProposalFeaturedAppRightCid("");
     setProposalIssuerCredentialCids([]);
     setProposalDelegate("");
     setProposalDelegationExpiresAt("");
@@ -2055,9 +2162,40 @@ export const GovernanceSection = ({
           };
           break;
         case "offer_paid_credential":
-          throw new Error(
-            "Paid credential proposal forms are not implemented yet — use the Free direction or call the API directly.",
-          );
+          proposal = {
+            type: "offer_paid_credential",
+            user_service_cid: proposalUserServiceCid,
+            holder: proposalHolder,
+            id: proposalCredentialId,
+            description: proposalDescription,
+            claims: parseClaimsText(proposalCredentialClaimsText),
+            billing_params: buildBillingParams({
+              feePerDayUsd: proposalFeePerDayUsd,
+              billingPeriodMinutes: proposalBillingPeriodMinutes,
+              depositTargetAmountUsd: proposalDepositTargetAmountUsd,
+              holderActivityWeight: proposalHolderActivityWeight,
+            }),
+            ...buildInitialDeposit(proposalDepositInitialAmountUsd),
+          };
+          break;
+        case "accept_paid_credential": {
+          if (proposalDepositAmuletCids.length === 0) {
+            throw new Error("Pick at least one Deposit Amulet");
+          }
+          const featuredAppRightCid = proposalFeaturedAppRightCid.trim();
+          proposal = {
+            type: "accept_paid_credential",
+            user_service_cid: proposalUserServiceCid,
+            credential_offer_cid: proposalCredentialOfferCid,
+            deposit_amulet_cids: proposalDepositAmuletCids,
+            app_transfer_context: {
+              amulet_rules_cid: amuletRulesCid.trim(),
+              open_mining_round_cid: proposalOpenMiningRoundCid.trim(),
+              ...(featuredAppRightCid ? { featured_app_right_cid: featuredAppRightCid } : {}),
+            },
+          };
+          break;
+        }
         case "create_provider_configuration":
           proposal = {
             type: "create_provider_configuration",
@@ -2163,7 +2301,8 @@ export const GovernanceSection = ({
 
   // Render form fields based on selected action type
   // Shared by the legacy DevNet Feature App action form and the Request DevNet
-  // Featured App Right proposal form: both pin the DSO's current AmuletRules.
+  // Featured App Right and Accept Paid Credential proposal forms: all pin the
+  // DSO's current AmuletRules.
   const renderAmuletRulesCidField = () => (
     <Box sx={{ display: "flex", gap: 1, alignItems: "center" }}>
       <TextField
@@ -2176,7 +2315,7 @@ export const GovernanceSection = ({
         slotProps={{
           input: {
             endAdornment: fieldHelpAdornment(
-              "Contract id of the DSO's current AmuletRules contract on DevNet, prefilled from the DSO scan API. Refresh it if the DSO has replaced the contract since this form opened.",
+              "Contract id of the DSO's current AmuletRules contract, prefilled from the DSO scan API. Refresh it if the DSO has replaced the contract since this form opened.",
               "Help for Amulet Rules CID",
             ),
           },
@@ -3156,9 +3295,8 @@ export const GovernanceSection = ({
                   <ListSubheader sx={{ color: "primary.main", fontWeight: 600 }}>Utility Credential</ListSubheader>
                   <MenuItem value="offer_free_credential">Offer Free Credential</MenuItem>
                   <MenuItem value="accept_free_credential">Accept Free Credential</MenuItem>
-                  <MenuItem value="offer_paid_credential" disabled>
-                    Offer Paid Credential (form coming soon)
-                  </MenuItem>
+                  <MenuItem value="offer_paid_credential">Offer Paid Credential</MenuItem>
+                  <MenuItem value="accept_paid_credential">Accept Paid Credential</MenuItem>
                 </Select>
               </FormControl>
 
@@ -4764,33 +4902,12 @@ export const GovernanceSection = ({
                 );
               })()}
 
-              {proposalType === "offer_free_credential" && (
+              {(proposalType === "offer_free_credential" ||
+                proposalType === "offer_paid_credential") && (
                 <>
-                  <FormControl size="small" fullWidth required>
-                    <InputLabel>
-                      <TextHelp text="Contract id of this governance party's UserService, used to issue the credential offer.">
-                        UserService Contract ID
-                      </TextHelp>
-                    </InputLabel>
-                    <Select
-                      label="UserService Contract ID"
-                      value={proposalUserServiceCid}
-                      onChange={(e) => setProposalUserServiceCid(e.target.value)}
-                      MenuProps={{ disableScrollLock: true }}
-                    >
-                      {servicesLoading ? (
-                        <MenuItem disabled>Loading services…</MenuItem>
-                      ) : userServices.length > 0 ? (
-                        userServices.map((svc) => (
-                          <MenuItem key={svc.contract_id} value={svc.contract_id}>
-                            {svc.contract_id}
-                          </MenuItem>
-                        ))
-                      ) : (
-                        <MenuItem disabled>No user services found</MenuItem>
-                      )}
-                    </Select>
-                  </FormControl>
+                  {renderUserServiceSelect(
+                    "Contract id of this governance party's UserService, used to issue the credential offer.",
+                  )}
                   <TextField
                     size="small"
                     label="Holder Party"
@@ -4801,7 +4918,7 @@ export const GovernanceSection = ({
                     slotProps={{
                       input: {
                         endAdornment: fieldHelpAdornment(
-                          "Party id that will receive the free credential offer.",
+                          "Party id that will receive the credential offer.",
                           "Help for Holder Party",
                         ),
                       },
@@ -4858,40 +4975,198 @@ export const GovernanceSection = ({
                       },
                     }}
                   />
+                  {proposalType === "offer_paid_credential" && (
+                    <>
+                      <TextField
+                        size="small"
+                        label="Fee per Day (USD)"
+                        value={proposalFeePerDayUsd}
+                        onChange={(e) => setProposalFeePerDayUsd(e.target.value)}
+                        fullWidth
+                        required
+                        slotProps={{
+                          input: {
+                            endAdornment: fieldHelpAdornment(
+                              "The credential's daily fee in USD. Billing takes it from the holder's deposit.",
+                              "Help for Fee per Day (USD)",
+                            ),
+                          },
+                        }}
+                      />
+                      <TextField
+                        size="small"
+                        label="Billing Period (minutes)"
+                        value={proposalBillingPeriodMinutes}
+                        onChange={(e) => setProposalBillingPeriodMinutes(e.target.value)}
+                        fullWidth
+                        required
+                        slotProps={{
+                          input: {
+                            endAdornment: fieldHelpAdornment(
+                              "Minutes between fee charges. Each charge covers the time since the last one.",
+                              "Help for Billing Period (minutes)",
+                            ),
+                          },
+                        }}
+                      />
+                      <TextField
+                        size="small"
+                        label="Deposit Target (USD)"
+                        value={proposalDepositTargetAmountUsd}
+                        onChange={(e) => setProposalDepositTargetAmountUsd(e.target.value)}
+                        fullWidth
+                        required
+                        slotProps={{
+                          input: {
+                            endAdornment: fieldHelpAdornment(
+                              "The deposit in USD that the holder keeps locked to cover fees. Top-ups refill the deposit to this amount.",
+                              "Help for Deposit Target (USD)",
+                            ),
+                          },
+                        }}
+                      />
+                      <TextField
+                        size="small"
+                        label="Holder Activity Weight"
+                        value={proposalHolderActivityWeight}
+                        onChange={(e) => setProposalHolderActivityWeight(e.target.value)}
+                        fullWidth
+                        slotProps={{
+                          input: {
+                            endAdornment: fieldHelpAdornment(
+                              "The holder's share of the activity reward, from 0 to 1. The issuer gets the rest. Leave empty for 0.",
+                              "Help for Holder Activity Weight",
+                            ),
+                          },
+                        }}
+                      />
+                      <TextField
+                        size="small"
+                        label="Initial Deposit (USD)"
+                        value={proposalDepositInitialAmountUsd}
+                        onChange={(e) => setProposalDepositInitialAmountUsd(e.target.value)}
+                        fullWidth
+                        slotProps={{
+                          input: {
+                            endAdornment: fieldHelpAdornment(
+                              "The USD amount the holder locks on accept. Leave empty to lock the Deposit Target.",
+                              "Help for Initial Deposit (USD)",
+                            ),
+                          },
+                        }}
+                      />
+                    </>
+                  )}
                 </>
               )}
 
               {proposalType === "accept_free_credential" && (
                 <>
-                  <FormControl size="small" fullWidth required>
-                    <InputLabel>
-                      <TextHelp text="Contract id of this governance party's UserService, used to accept the credential offer.">
-                        UserService Contract ID
-                      </TextHelp>
-                    </InputLabel>
-                    <Select
-                      label="UserService Contract ID"
-                      value={proposalUserServiceCid}
-                      onChange={(e) => setProposalUserServiceCid(e.target.value)}
-                      MenuProps={{ disableScrollLock: true }}
-                    >
-                      {servicesLoading ? (
-                        <MenuItem disabled>Loading services…</MenuItem>
-                      ) : userServices.length > 0 ? (
-                        userServices.map((svc) => (
-                          <MenuItem key={svc.contract_id} value={svc.contract_id}>
-                            {svc.contract_id}
-                          </MenuItem>
-                        ))
-                      ) : (
-                        <MenuItem disabled>No user services found</MenuItem>
-                      )}
-                    </Select>
-                  </FormControl>
+                  {renderUserServiceSelect(
+                    "Contract id of this governance party's UserService, used to accept the credential offer.",
+                  )}
                   {renderCredentialOfferAutocomplete(
                     proposalCredentialOfferCid,
                     setProposalCredentialOfferCid,
                   )}
+                </>
+              )}
+
+              {proposalType === "accept_paid_credential" && (
+                <>
+                  {renderUserServiceSelect(
+                    "Contract id of this governance party's UserService, used to accept the credential offer.",
+                  )}
+                  {renderCredentialOfferAutocomplete(
+                    proposalCredentialOfferCid,
+                    setProposalCredentialOfferCid,
+                    acceptablePaidCredentialOffers,
+                    "paid",
+                  )}
+                  <Autocomplete
+                    size="small"
+                    multiple
+                    freeSolo
+                    options={ownAmulets}
+                    value={proposalDepositAmuletCids}
+                    loading={ownAmuletsLoading}
+                    onChange={(_event, values) => {
+                      setProposalDepositAmuletCids(
+                        values.map((value) =>
+                          typeof value === "string" ? value : value.contract_id,
+                        ),
+                      );
+                    }}
+                    getOptionLabel={(option) => {
+                      // Selected values are stored as bare cids; label them
+                      // with the amount when the Amulet is known.
+                      const cid = typeof option === "string" ? option : option.contract_id;
+                      const known =
+                        typeof option === "string"
+                          ? ownAmulets.find((a) => a.contract_id === option)
+                          : option;
+                      return known ? `${known.amount} CC (…${cid.slice(-8)})` : cid;
+                    }}
+                    isOptionEqualToValue={(option, value) =>
+                      typeof value === "string"
+                        ? option.contract_id === value
+                        : option.contract_id === value.contract_id
+                    }
+                    renderInput={(params) => (
+                      <TextField
+                        {...params}
+                        label={
+                          <TextHelp text="Unlocked Amulets of this governance party. Together they must cover the offer's deposit.">
+                            Deposit Amulets
+                          </TextHelp>
+                        }
+                        helperText={
+                          ownAmuletsLoading
+                            ? "Loading Amulets…"
+                            : ownAmulets.length === 0
+                              ? "No Amulets visible — paste a contract id directly if you have one"
+                              : "Pick one or more Amulets"
+                        }
+                      />
+                    )}
+                  />
+                  {renderAmuletRulesCidField()}
+                  <TextField
+                    size="small"
+                    label="Open Mining Round CID"
+                    value={proposalOpenMiningRoundCid}
+                    onChange={(e) => setProposalOpenMiningRoundCid(e.target.value)}
+                    fullWidth
+                    required
+                    slotProps={{
+                      input: {
+                        endAdornment: fieldHelpAdornment(
+                          "Contract id of an OpenMiningRound that is open now. The DSO scan API lists the open rounds.",
+                          "Help for Open Mining Round CID",
+                        ),
+                      },
+                    }}
+                  />
+                  <TextField
+                    size="small"
+                    label="Featured App Right CID"
+                    value={proposalFeaturedAppRightCid}
+                    onChange={(e) => setProposalFeaturedAppRightCid(e.target.value)}
+                    fullWidth
+                    slotProps={{
+                      input: {
+                        endAdornment: fieldHelpAdornment(
+                          "Optional FeaturedAppRight of the credential issuer. The deposit transfer is unfeatured, so you can leave this empty.",
+                          "Help for Featured App Right CID",
+                        ),
+                      },
+                    }}
+                  />
+                  <Alert severity="info">
+                    The proposal pins these Amulets and this open mining round.
+                    The round closes about 20 minutes after it opens. Confirm
+                    and execute before then, or propose again.
+                  </Alert>
                 </>
               )}
 
@@ -5356,12 +5631,6 @@ export const GovernanceSection = ({
                 </>
               )}
 
-              {proposalType === "offer_paid_credential" && (
-                <Typography variant="caption" color="text.secondary">
-                  Paid credential proposal form is not implemented yet. Use the Free direction or call <code>POST /governance/propose</code> directly with a <code>type: "offer_paid_credential"</code> payload.
-                </Typography>
-              )}
-
               {(() => {
                 const inlineSubmitBtn = (
                   <Button
@@ -5369,7 +5638,6 @@ export const GovernanceSection = ({
                     onClick={handleSubmitProposal}
                     disabled={
                       proposalLoading ||
-                      proposalType === "offer_paid_credential" ||
                       beneficiaryProblem !== null
                     }
                     startIcon={
@@ -5388,7 +5656,6 @@ export const GovernanceSection = ({
                     onClick={handleSubmitProposal}
                     disabled={
                       proposalLoading ||
-                      proposalType === "offer_paid_credential" ||
                       beneficiaryProblem !== null
                     }
                     startIcon={
