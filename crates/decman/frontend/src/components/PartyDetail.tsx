@@ -48,6 +48,8 @@ import { ADMIN_ACCESS, API_BASE } from "../constants";
 import { authenticatedFetch } from "../api";
 import { formatMicroseconds } from "../governanceFormat";
 import { getGovernanceMembership } from "../governanceMembership";
+import { usePeers, useSharedPartyCounts } from "../usePeerLinks";
+import { HostingParticipant } from "./HostingParticipant";
 import type {
   DecentralizedParty,
   GovernanceState,
@@ -227,6 +229,10 @@ interface PartyDetailProps {
   network?: Network;
   /// Open the packages tab, comparing this party's hosting participants.
   onCheckDars?: () => void;
+  /// Open the configuration tab at a peer's row.
+  onOpenPeerConfig?: (participantId: string) => void;
+  /// Open the party list filtered to the parties a participant also hosts.
+  onShowSharedParties?: (participantId: string) => void;
 }
 
 export const PartyDetail = ({
@@ -240,7 +246,11 @@ export const PartyDetail = ({
   operatorParty,
   network,
   onCheckDars,
+  onOpenPeerConfig,
+  onShowSharedParties,
 }: PartyDetailProps) => {
+  const peers = usePeers();
+  const sharedCounts = useSharedPartyCounts();
   const [kickDialogOpen, setKickDialogOpen] = useState(false);
   const [addDialogOpen, setAddDialogOpen] = useState(false);
   const [changeThresholdDialogOpen, setChangeThresholdDialogOpen] =
@@ -684,12 +694,20 @@ export const PartyDetail = ({
             </TableHead>
             <TableBody>
               {party.participants.map((p, idx) => (
-                <TableRow key={p.participant_uid} sx={zebraRow(idx)} data-testid="participant-row">
+                <TableRow
+                  key={p.participant_uid}
+                  sx={zebraRow(idx)}
+                  data-testid="participant-row"
+                  data-participant-uid={p.participant_uid}
+                >
                   <TableCell sx={{ py: 1 }}>
-                    <CopyableText
-                      text={p.participant_uid}
-                      truncate={{ start: 32, end: 16 }}
-                      variant="body2"
+                    <HostingParticipant
+                      participantId={p.participant_uid}
+                      isSelf={p.participant_uid === selfParticipantId}
+                      peers={peers}
+                      sharedCount={sharedCounts?.get(p.participant_uid) ?? null}
+                      onOpenPeerConfig={onOpenPeerConfig}
+                      onShowSharedParties={onShowSharedParties}
                     />
                   </TableCell>
                   <TableCell sx={{ py: 1 }}>

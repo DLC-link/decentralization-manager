@@ -344,8 +344,8 @@ test.describe.serial("governance happy path", () => {
       .filter({ has: parts.p1.getByRole("button", { name: "Kick participant" }) })
       .last();
     await expect(kickableRow).toBeVisible({ timeout: 30_000 });
-    const kickedUid = (await kickableRow.locator("td").first().innerText()).trim();
-    expect(kickedUid).not.toEqual("");
+    const kickedUid = await kickableRow.getAttribute("data-participant-uid");
+    expect(kickedUid).toBeTruthy();
     const kickBtn = kickableRow.getByRole("button", { name: "Kick participant" });
     await expect(kickBtn).toBeVisible({ timeout: 30_000 });
     await kickBtn.click();
@@ -368,11 +368,12 @@ test.describe.serial("governance happy path", () => {
       await openParty(parts.p1, partyPrefix!);
       await expect(parts.p1.getByTestId("participant-row")).toHaveCount(2);
       await expect(parts.p1.getByTestId("party-threshold")).toHaveText("2");
-      // The participant that was kicked is the one that is gone. Matched on the
-      // uid text as rendered (CopyableText truncates it), captured from this
-      // same table above, so the comparison is like for like.
+      // The participant that was kicked is the one that is gone, matched on
+      // the full uid the row carries.
       await expect(
-        parts.p1.getByTestId("participant-row").filter({ hasText: kickedUid }),
+        parts.p1.locator(
+          `[data-testid="participant-row"][data-participant-uid="${kickedUid}"]`,
+        ),
       ).toHaveCount(0);
     }).toPass({ timeout: 120_000, intervals: [5000, 5000, 10_000] });
     await test.info().attach("After kick: party has 2 participants", {

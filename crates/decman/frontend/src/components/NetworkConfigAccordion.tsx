@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useCallback, useState } from "react";
 import {
   Typography,
   Box,
@@ -32,6 +32,8 @@ import { zebraRow } from "../styles";
 import { copyToClipboard } from "../clipboard";
 import { fieldHelpAdornment } from "./FieldHelp";
 import { StatusDot } from "./StatusDot";
+import { SharedPartiesChip } from "./SharedPartiesChip";
+import { useSharedPartyCounts } from "../usePeerLinks";
 import { currentStepLabel, workflowKindLabel } from "../workflowSteps";
 import { PeersCsvDialog, type PeersCsvMode } from "./PeersCsvDialog";
 import { parsePeersCsv, peerToCsvRow } from "../peerCsv";
@@ -52,6 +54,10 @@ interface NetworkConfigAccordionProps {
   /** Our own round-trip latency to the backend (ms), shown on the "you" row. */
   selfLatencyMs?: number;
   onSave?: (peers: Peer[]) => Promise<void>;
+  /** The peer the URL points at. Its row scrolls into view, highlighted. */
+  focusParticipantId?: string | null;
+  /** Open the party list filtered to the parties a peer also hosts. */
+  onShowSharedParties?: (participantId: string) => void;
 }
 
 const emptyPeer: Peer = {
@@ -69,6 +75,8 @@ export const NetworkConfigAccordion = ({
   participantStatuses,
   selfLatencyMs,
   onSave,
+  focusParticipantId,
+  onShowSharedParties,
 }: NetworkConfigAccordionProps) => {
   const [editing, setEditing] = useState(false);
   const [editedPeers, setEditedPeers] = useState<Peer[]>([]);
@@ -78,6 +86,22 @@ export const NetworkConfigAccordion = ({
   const theme = useTheme();
   const isSmall = useMediaQuery(theme.breakpoints.down("sm"));
   const isMedium = useMediaQuery(theme.breakpoints.down("md"));
+  const sharedCounts = useSharedPartyCounts();
+
+  // A callback ref runs when the focused row mounts, which is after the peers
+  // load.
+  const focusedRowRef = useCallback((row: HTMLTableRowElement | null) => {
+    row?.scrollIntoView({ block: "center" });
+  }, []);
+
+  const peerRowProps = (participantId: string) => {
+    const focused = participantId === focusParticipantId;
+    return {
+      ref: focused ? focusedRowRef : undefined,
+      "aria-current": focused || undefined,
+      "data-participant-uid": participantId,
+    };
+  };
 
   const selfNodeId = nodeConfig?.node.participant_id;
   const selfPublicKey = keyStatus?.public_key || "";
@@ -429,7 +453,18 @@ export const NetworkConfigAccordion = ({
             onSave={ADMIN_ACCESS ? onSave : undefined}
           />
           <Box sx={{ overflowX: "auto" }}>
-            <Table size="small" sx={{ minWidth: 650 }}>
+            <Table
+              size="small"
+              sx={{
+                minWidth: 650,
+                // The row the URL points at.
+                "& tr[aria-current='true']": {
+                  outline: "2px solid",
+                  outlineColor: "primary.main",
+                  outlineOffset: "-2px",
+                },
+              }}
+            >
               <TableHead>
                 <TableRow>
                   <TableCell sx={{ py: 1, width: 50 }}>Status</TableCell>
@@ -437,11 +472,15 @@ export const NetworkConfigAccordion = ({
                   <TableCell sx={{ py: 1, whiteSpace: "nowrap" }}>Address</TableCell>
                   <TableCell sx={{ py: 1, whiteSpace: "nowrap" }}>Public Key</TableCell>
                   <TableCell sx={{ py: 1, whiteSpace: "nowrap" }}>Version</TableCell>
+                  <TableCell sx={{ py: 1, whiteSpace: "nowrap" }}>Shared parties</TableCell>
                 </TableRow>
               </TableHead>
             <TableBody>
               {selfEntry && (
-                <TableRow sx={{ bgcolor: "action.selected" }}>
+                <TableRow
+                  {...peerRowProps(selfEntry.participant_id)}
+                  sx={{ bgcolor: "action.selected" }}
+                >
                   <TableCell sx={{ py: 1 }}>
                     <Tooltip title="This is your node" arrow>
                       <PersonIcon sx={{ fontSize: 14, color: "primary.main" }} />
@@ -489,12 +528,18 @@ export const NetworkConfigAccordion = ({
                       nodeConfig?.version ??
                       "—"}
                   </TableCell>
+                  {/* This node hosts every listed party. */}
+                  <TableCell sx={{ py: 1 }}>—</TableCell>
                 </TableRow>
               )}
               {otherPeers.map((p, idx) => {
                 const st = getStat(p.participant_id);
                 return (
-                  <TableRow key={p.participant_id} sx={zebraRow(idx)}>
+                  <TableRow
+                    key={p.participant_id}
+                    {...peerRowProps(p.participant_id)}
+                    sx={zebraRow(idx)}
+                  >
                     <TableCell sx={{ py: 1 }}>
                       <StatusDot status={st?.status} title={statusTooltip(st)} />
                     </TableCell>
@@ -535,6 +580,17 @@ export const NetworkConfigAccordion = ({
                       {/* Falls back to the compatibility semver: a peer that
                         * predates `build_version` still reports `version`. */}
                       {st?.build_version ?? st?.version ?? "—"}
+                    </TableCell>
+                    <TableCell sx={{ py: 1 }}>
+                      {sharedCounts && onShowSharedParties ? (
+                        <SharedPartiesChip
+                          count={sharedCounts.get(p.participant_id) ?? 0}
+                          name={p.name || truncateParticipantId(p.participant_id)}
+                          onClick={() => onShowSharedParties(p.participant_id)}
+                        />
+                      ) : (
+                        "—"
+                      )}
                     </TableCell>
                   </TableRow>
                 );
