@@ -21,9 +21,8 @@ pub use common::api::{
     BlockListShardsResponse, CancelConfirmationRequest, CancelProposalRequest, ChainAuditEntry,
     ChainAuditResponse, ChangeThresholdInvitePayload, ChangeThresholdRequest, Claim,
     ContractQueryResponse, ContractWithBlob, ContractsInvitePayload, ContractsRequest,
-    CouponReassignmentDelegationSummary, CredentialInfo, CredentialOfferInfo,
-    CredentialOffersResponse, CredentialsResponse, DarsInvitePayload, DarsRequest,
-    DecentralizedPartiesResponse, DeclineInvitationPayload, DisclosedContractInput,
+    CouponReassignmentDelegationSummary, CredentialInfo, CredentialsResponse, DarsInvitePayload,
+    DarsRequest, DecentralizedPartiesResponse, DeclineInvitationPayload, DisclosedContractInput,
     DiscoverMemberPartyRequest, DiscoverMemberPartyResponse, DistributePackageRequest,
     ErrorResponse, ExpireConfirmationRequest, ExternalPartiesResponse, ExternalPartyHost,
     ExternalPartyInfo, GovernanceState, GovernanceStateResponse, GovernanceType,
@@ -880,6 +879,41 @@ pub struct BurnRequestsResponse {
     pub burn_requests: Vec<TokenRequestInfo>,
 }
 
+/// A pending `Utility.Credential.App.V0.Model.Offer:CredentialOffer` visible
+/// to the party. The accept credential forms list offers where the party is
+/// the `holder`, so the CredentialOffer cid no longer has to be pasted in by
+/// hand.
+#[derive(Clone, Debug, Serialize, utoipa::ToSchema)]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
+pub struct CredentialOfferInfo {
+    pub contract_id: String,
+    pub operator: CantonId,
+    pub issuer: CantonId,
+    pub holder: CantonId,
+    /// The template's `id` field — the credential's identifier.
+    pub credential_id: String,
+    pub description: String,
+    /// True when the offer carries no `billingParams`, i.e. it can be taken
+    /// with `CredentialOffer_AcceptFree` (the only direction the
+    /// AcceptFreeCredential governance action supports).
+    pub is_free: bool,
+    /// The offer's billing params. A free offer has none.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub billing_params: Option<BillingParams>,
+    /// The USD amount the offer locks at accept instead of its deposit target.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(value_type = Option<String>)]
+    #[cfg_attr(feature = "typegen", ts(as = "Option<String>"))]
+    pub deposit_initial_amount_usd: Option<DamlDecimal>,
+}
+
+/// Response for the credential offers endpoint
+#[derive(Serialize, utoipa::ToSchema)]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
+pub struct CredentialOffersResponse {
+    pub credential_offers: Vec<CredentialOfferInfo>,
+}
+
 /// A token-standard Holding owned by a decentralized party, aggregated across
 /// every active `Splice.Api.Token.HoldingV1:Holding` contract that shares the
 /// same `(instrument_admin, instrument_id)` pair.
@@ -1621,6 +1655,7 @@ mod tests {
                     open_mining_round_cid: "00round".into(),
                     featured_app_right_cid: None,
                 },
+                deposit_amount_usd: None,
             }),
             ProposalType::Burn(Burn {
                 allocation_factory_cid: "00alloc".into(),

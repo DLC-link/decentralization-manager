@@ -1,7 +1,7 @@
 // Input handling for the Offer Paid Credential and Accept Paid Credential
 // proposal forms.
 
-import type { BillingParams, ContractWithBlob } from "./types";
+import type { BillingParams, ContractWithBlob, CredentialOfferInfo } from "./types";
 
 /// The billing fields of the Offer Paid Credential form, as typed.
 export interface BillingInputs {
@@ -68,3 +68,23 @@ export const ownedAmulets = (contracts: ContractWithBlob[], owner: string): Amul
     if (payload?.owner !== owner || typeof amount !== "string") return [];
     return [{ contract_id: c.contract_id, amount }];
   });
+
+/// A ledger decimal without its trailing zeros, for display: the ledger sends
+/// "30.0000000000" for 30.
+export const formatDecimal = (value: string): string =>
+  value.includes(".") ? value.replace(/0+$/, "").replace(/\.$/, "") : value;
+
+/// The deposit an accept of `offer` locks, in USD: the initial deposit, or the
+/// deposit target when the offer sets none. `CredentialOffer_AcceptPaid` takes
+/// the same amount. `undefined` when the offer carries no billing params.
+export const offerDepositUsd = (offer: CredentialOfferInfo): string | undefined =>
+  offer.billing_params
+    ? (offer.deposit_initial_amount_usd ?? offer.billing_params.deposit_target_amount_usd)
+    : undefined;
+
+/// One line on a paid offer's billing, for the offer list.
+export const offerBillingSummary = (offer: CredentialOfferInfo): string | undefined => {
+  const deposit = offerDepositUsd(offer);
+  if (!offer.billing_params || deposit === undefined) return undefined;
+  return `Deposit ${formatDecimal(deposit)} USD, fee ${formatDecimal(offer.billing_params.fee_per_day_usd)} USD a day`;
+};

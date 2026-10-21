@@ -28,7 +28,7 @@ use decman_lib::{
     catalog::interpret::{
         self, DomainAction, ParsedConfirmation, ParsedDomainConfirmation, ProposalInfo,
     },
-    framework::record::{field_numeric, field_party, field_text, field_timestamp},
+    framework::record::{field_int64, field_numeric, field_party, field_text, field_timestamp},
 };
 
 use crate::{
@@ -50,12 +50,12 @@ use super::{
     },
     record::{field_record, record_field},
     types::{
-        ActionType, BlockListShardInfo, Claim, ContractInfo, ContractWithBlob, CredentialInfo,
-        CredentialOfferInfo, DomainConfirmation, DomainGovernanceAction, GovernanceAction,
-        GovernanceConfirmation, GovernanceState, HoldingInfo, InstrumentInfo, PartyMetadata,
-        PendingAction, ProposalSummary, ProviderConfigurationInfo, ProviderServiceInfo,
-        RegistrarServiceInfo, RegistrarServiceRequestInfo, TokenRequestInfo, TransferFactoryInfo,
-        TransferInstructionInfo, TransferInstructionStatus, UserServiceInfo,
+        ActionType, BillingParams, BlockListShardInfo, Claim, ContractInfo, ContractWithBlob,
+        CredentialInfo, CredentialOfferInfo, DomainConfirmation, DomainGovernanceAction,
+        GovernanceAction, GovernanceConfirmation, GovernanceState, HoldingInfo, InstrumentInfo,
+        PartyMetadata, PendingAction, ProposalSummary, ProviderConfigurationInfo,
+        ProviderServiceInfo, RegistrarServiceInfo, RegistrarServiceRequestInfo, TokenRequestInfo,
+        TransferFactoryInfo, TransferInstructionInfo, TransferInstructionStatus, UserServiceInfo,
     },
 };
 
@@ -1528,7 +1528,43 @@ fn extract_credential_offer_info(created: &CreatedEvent) -> Option<CredentialOff
         credential_id,
         description,
         is_free: !has_billing_params,
+        billing_params: offer_billing_params(record),
+        deposit_initial_amount_usd: field_optional_decimal(record, "depositInitialAmountUsd"),
     })
+}
+
+/// The offer's `billingParams`. `None` for a free offer, or for params in a
+/// shape decman cannot read.
+fn offer_billing_params(record: &Record) -> Option<BillingParams> {
+    let Some(value::Sum::Optional(opt)) = record_field(record, "billingParams") else {
+        return None;
+    };
+    let Some(value::Sum::Record(params)) = opt.value.as_deref()?.sum.as_ref() else {
+        return None;
+    };
+    Some(BillingParams {
+        fee_per_day_usd: field_record(params, "feePerDayUsd")
+            .and_then(|fee| field_numeric(fee, "rate"))?
+            .parse()
+            .ok()?,
+        billing_period_minutes: field_int64(params, "billingPeriodMinutes")?,
+        deposit_target_amount_usd: field_numeric(params, "depositTargetAmountUsd")?
+            .parse()
+            .ok()?,
+        holder_activity_weight: field_optional_decimal(params, "holderActivityWeight"),
+    })
+}
+
+/// An `Optional Decimal` field. `None` when the field is `None`, absent, or
+/// not a decimal.
+fn field_optional_decimal(record: &Record, label: &str) -> Option<DamlDecimal> {
+    let Some(value::Sum::Optional(opt)) = record_field(record, label) else {
+        return None;
+    };
+    match opt.value.as_deref()?.sum.as_ref()? {
+        value::Sum::Numeric(n) => n.parse().ok(),
+        _ => None,
+    }
 }
 
 /// Get all Credential contracts visible to a party
@@ -3220,6 +3256,55 @@ mod tests {
         assert_eq!(info.credential_id, "provider-service-credential");
         assert_eq!(info.description, "Provider service access");
         assert!(info.is_free);
+        assert_eq!(info.billing_params, None);
+        assert_eq!(info.deposit_initial_amount_usd, None);
+    }
+
+    /// The ledger answers each `Numeric 10` with ten decimal places.
+    #[test]
+    fn extract_credential_offer_info_reads_the_billing_params_and_initial_deposit() {
+        let billing = optional_value(Some(record_value(vec![
+            field(
+                "feePerDayUsd",
+                record_value(vec![field("rate", numeric_value("1.5000000000"))]),
+            ),
+            field(
+                "billingPeriodMinutes",
+                Value {
+                    sum: Some(value::Sum::Int64(60)),
+                },
+            ),
+            field("depositTargetAmountUsd", numeric_value("30.0000000000")),
+            field(
+                "holderActivityWeight",
+                optional_value(Some(numeric_value("0.2000000000"))),
+            ),
+        ])));
+        let mut event = credential_offer_event(billing);
+        if let Some(record) = event.create_arguments.as_mut() {
+            for f in &mut record.fields {
+                if f.label == "depositInitialAmountUsd" {
+                    f.value = Some(optional_value(Some(numeric_value("20.0000000000"))));
+                }
+            }
+        }
+        let dec = |s: &str| -> DamlDecimal { s.parse().expect("valid decimal") };
+
+        let Some(info) = extract_credential_offer_info(&event) else {
+            panic!("paid offer should yield info");
+        };
+
+        assert!(!info.is_free);
+        assert_eq!(
+            info.billing_params,
+            Some(BillingParams {
+                fee_per_day_usd: dec("1.5"),
+                billing_period_minutes: 60,
+                deposit_target_amount_usd: dec("30"),
+                holder_activity_weight: Some(dec("0.2")),
+            })
+        );
+        assert_eq!(info.deposit_initial_amount_usd, Some(dec("20")));
     }
 
     #[test]
@@ -3232,6 +3317,8 @@ mod tests {
             panic!("paid offer should still yield info");
         };
         assert!(!info.is_free);
+        // Params decman cannot read are left out, not guessed.
+        assert_eq!(info.billing_params, None);
     }
 
     #[test]

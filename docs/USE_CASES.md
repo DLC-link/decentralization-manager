@@ -646,10 +646,13 @@ Issue and accept credentials through governance. Both are domain proposals on
     "app_transfer_context": {
       "amulet_rules_cid": "<amulet-rules-contract-id>",
       "open_mining_round_cid": "<open-mining-round-contract-id>"
-    }
+    },
+    "deposit_amount_usd": "30.0"
   }
 }
 ```
+
+`deposit_amount_usd` is the deposit the accept locks: the offer's initial deposit, or its deposit target when it sets none. The vote's description shows it, so members see what the governance party pays. Execution refuses an amount the offer does not lock. `GET /credential-offers` returns each offer's `billing_params` and `deposit_initial_amount_usd`, and the form fills the amount from the chosen offer. A proposal without the field still works, but its vote shows no amount.
 
 The accept locks the deposit Amulets with the DSO's `AmuletRules` and an open mining round. The governance party sees neither contract. DecMan reads the round from the scan API that `DECPM_SCAN_URL` names. `GET /open-mining-round` returns the newest open round, and the form fills it in. At execution, DecMan discloses `AmuletRules`, the round and any `featured_app_right_cid`. A node without `DECPM_SCAN_URL` refuses the execute with a 422, unless the request carries all three in `disclosed_contracts`.
 

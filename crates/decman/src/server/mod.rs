@@ -99,10 +99,11 @@ pub use node_health::{
 };
 pub use types::{
     AcceptTransferDetails, ActionType, AppRewardBeneficiary, BillingParams, BurnRequestsResponse,
-    ConfirmActionRequest, DomainConfirmation, DomainGovernanceAction, ExecuteActionRequest,
-    GovernanceAction, GovernanceConfirmation, GovernanceResponse, HoldingInfo, HoldingsResponse,
-    MintRequestsResponse, PendingAction, ProposalType, ProposeActionRequest, RewardStatusResponse,
-    ServiceRequestDetails, TokenRequestInfo, TransferInstructionInfo, TransferInstructionStatus,
+    ConfirmActionRequest, CredentialOfferInfo, CredentialOffersResponse, DomainConfirmation,
+    DomainGovernanceAction, ExecuteActionRequest, GovernanceAction, GovernanceConfirmation,
+    GovernanceResponse, HoldingInfo, HoldingsResponse, MintRequestsResponse, PendingAction,
+    ProposalType, ProposeActionRequest, RewardStatusResponse, ServiceRequestDetails,
+    TokenRequestInfo, TransferInstructionInfo, TransferInstructionStatus,
     TransferInstructionsResponse, TransferProposalDetails,
 };
 

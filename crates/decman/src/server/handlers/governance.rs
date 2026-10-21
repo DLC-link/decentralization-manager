@@ -3486,6 +3486,7 @@ mod paid_accept_disclosure_tests {
                 open_mining_round_cid: open_mining_round.to_string(),
                 featured_app_right_cid: featured_app_right.map(str::to_string),
             },
+            deposit_amount_usd: None,
         }
         .to_daml_proto()
         .expect("the proposal encodes");

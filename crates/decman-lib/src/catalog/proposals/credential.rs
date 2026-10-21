@@ -205,6 +205,13 @@ pub struct AcceptPaidCredential {
     /// The governance party's unlocked `Amulet` contracts that fund the deposit.
     pub deposit_amulet_cids: Vec<String>,
     pub app_transfer_context: AppTransferContextInput,
+    /// The deposit the accept locks, in USD: the offer's initial deposit, or
+    /// its deposit target when it sets none. The vote's description shows it,
+    /// and execution refuses an amount the offer does not lock.
+    #[serde(default)]
+    #[cfg_attr(feature = "openapi", schema(value_type = Option<String>))]
+    #[cfg_attr(feature = "typegen", ts(as = "Option<String>"))]
+    pub deposit_amount_usd: Option<DamlDecimal>,
 }
 
 impl AcceptPaidCredential {
@@ -242,14 +249,22 @@ impl DamlProtoEncode for AcceptPaidCredential {
                 "appTransferContext",
                 serialize_app_transfer_context(&self.app_transfer_context),
             ),
+            field(
+                "depositAmountUsd",
+                make_optional_numeric(&self.deposit_amount_usd),
+            ),
         ]))
     }
 }
 
 impl Validate for AcceptPaidCredential {
     /// The template refuses an empty list. A repeated Amulet would fail the
-    /// deposit transfer only at execution, after the vote.
+    /// deposit transfer only at execution, after the vote. So would a stated
+    /// deposit at or below zero, which no offer locks.
     fn validate(&self, _ctx: &ValidationCtx) -> Result<(), Error> {
+        if let Some(amount) = &self.deposit_amount_usd {
+            validate_positive_amount(amount, "deposit_amount_usd")?;
+        }
         if self.deposit_amulet_cids.is_empty() {
             return Err(Error::Validation(
                 "deposit_amulet_cids must name at least one Amulet".to_string(),
@@ -426,6 +441,7 @@ mod tests {
                 open_mining_round_cid: "00round".to_string(),
                 featured_app_right_cid: None,
             },
+            deposit_amount_usd: None,
         }
     }
 
@@ -451,6 +467,21 @@ mod tests {
                 .to_string(),
             "deposit_amulet_cids must not list 00a1 more than once"
         );
+
+        let stated = |amount: &str| AcceptPaidCredential {
+            deposit_amount_usd: Some(amount.parse().expect("valid decimal")),
+            ..paid_accept(vec!["00a1"])
+        };
+        assert!(stated("30.0").validate(&ctx(&gov, 0)).is_ok());
+        for amount in ["0", "-1"] {
+            let err = stated(amount)
+                .validate(&ctx(&gov, 0))
+                .expect_err("a deposit at or below zero is refused");
+            assert!(
+                err.to_string().starts_with("deposit_amount_usd"),
+                "{amount}: {err}"
+            );
+        }
     }
 
     #[test]
@@ -523,6 +554,15 @@ mod tests {
             paid_accept(vec!["00a1", "00a2"])
                 .to_daml_proto()
                 .expect("payload encodes")
+        );
+        insta::assert_debug_snapshot!(
+            "accept_paid_credential_deposit_amount_some",
+            AcceptPaidCredential {
+                deposit_amount_usd: Some("30".parse().expect("valid decimal")),
+                ..paid_accept(vec!["00a1"])
+            }
+            .to_daml_proto()
+            .expect("payload encodes")
         );
         insta::assert_debug_snapshot!(
             "accept_paid_credential_featured_app_right_some",

@@ -72,7 +72,8 @@ expression: minimal_option_fixtures()
       "amulet_rules_cid": "00rules",
       "open_mining_round_cid": "00round",
       "featured_app_right_cid": null
-    }
+    },
+    "deposit_amount_usd": null
   },
   {
     "type": "accept_mint_request",

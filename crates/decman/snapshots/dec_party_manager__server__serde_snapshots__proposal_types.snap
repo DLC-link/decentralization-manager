@@ -196,7 +196,8 @@ expression: all_proposal_fixtures()
       "amulet_rules_cid": "00rules",
       "open_mining_round_cid": "00round",
       "featured_app_right_cid": "00far"
-    }
+    },
+    "deposit_amount_usd": "30"
   },
   {
     "type": "burn",

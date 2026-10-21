@@ -268,6 +268,7 @@ mod tests {
                         open_mining_round_cid: "round".to_string(),
                         featured_app_right_cid: None,
                     },
+                    deposit_amount_usd: None,
                 }
                 .template_id(&pkgs)
                 .expect("template id resolves")

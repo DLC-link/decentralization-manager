@@ -25,13 +25,13 @@ use dec_party_manager::{
     server::{
         AcceptTransferDetails, ActionType, AppRewardBeneficiary, BillingParams,
         BurnRequestsResponse, ComponentHealth, ComponentState, ConfirmActionRequest,
-        DomainConfirmation, DomainGovernanceAction, ExecuteActionRequest, GovernanceAction,
-        GovernanceConfirmation, GovernanceResponse, HoldingInfo, HoldingsResponse, LinkHealth,
-        MintRequestsResponse, NodeConfigResponse, NodeHealthResponse, NodeHealthStatus,
-        ParticipantHealth, PendingAction, ProposalType, ProposeActionRequest, RewardStatusResponse,
-        ServiceRequestDetails, SynchronizerHealth, TokenRequestInfo, TopologyQueues,
-        TransferInstructionInfo, TransferInstructionStatus, TransferInstructionsResponse,
-        TransferProposalDetails,
+        CredentialOfferInfo, CredentialOffersResponse, DomainConfirmation, DomainGovernanceAction,
+        ExecuteActionRequest, GovernanceAction, GovernanceConfirmation, GovernanceResponse,
+        HoldingInfo, HoldingsResponse, LinkHealth, MintRequestsResponse, NodeConfigResponse,
+        NodeHealthResponse, NodeHealthStatus, ParticipantHealth, PendingAction, ProposalType,
+        ProposeActionRequest, RewardStatusResponse, ServiceRequestDetails, SynchronizerHealth,
+        TokenRequestInfo, TopologyQueues, TransferInstructionInfo, TransferInstructionStatus,
+        TransferInstructionsResponse, TransferProposalDetails,
     },
 };
 

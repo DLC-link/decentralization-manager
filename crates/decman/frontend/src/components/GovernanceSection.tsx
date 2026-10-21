@@ -39,6 +39,9 @@ import { beneficiariesProblem, beneficiaryWeightSum } from "../rewardBeneficiari
 import {
   buildBillingParams,
   buildInitialDeposit,
+  formatDecimal,
+  offerBillingSummary,
+  offerDepositUsd,
   ownedAmulets,
   type AmuletOption,
 } from "../paidCredential";
@@ -759,6 +762,15 @@ export const GovernanceSection = ({
     [credentialOffers, partyId],
   );
 
+  // The listed paid offer the Accept Paid Credential form names. A pasted cid
+  // of an unlisted offer leaves it undefined.
+  const chosenPaidOffer = useMemo(
+    () =>
+      acceptablePaidCredentialOffers.find((o) => o.contract_id === proposalCredentialOfferCid),
+    [acceptablePaidCredentialOffers, proposalCredentialOfferCid],
+  );
+  const chosenDepositUsd = chosenPaidOffer && offerDepositUsd(chosenPaidOffer);
+
   // Requests this provider decparty can accept via Onboard Registrar: only
   // those that name it as the provider. With the provider fixed, each row
   // needs only the registrar and the cid tail.
@@ -943,6 +955,7 @@ export const GovernanceSection = ({
         }
         const issuerName = option.issuer.split("::")[0];
         const cidTail = option.contract_id.slice(-8);
+        const billing = offerBillingSummary(option);
         return (
           <li {...props} key={option.contract_id}>
             <Box sx={{ display: "flex", flexDirection: "column", gap: 0.25 }}>
@@ -952,6 +965,11 @@ export const GovernanceSection = ({
               {option.description && (
                 <Typography variant="caption" color="text.secondary">
                   {option.description}
+                </Typography>
+              )}
+              {billing && (
+                <Typography variant="caption" color="text.secondary">
+                  {billing}
                 </Typography>
               )}
             </Box>
@@ -2341,6 +2359,9 @@ export const GovernanceSection = ({
               open_mining_round_cid: proposalOpenMiningRoundCid.trim(),
               ...(featuredAppRightCid ? { featured_app_right_cid: featuredAppRightCid } : {}),
             },
+            // The vote's description shows this amount, and execution checks
+            // it against the offer.
+            ...(chosenDepositUsd ? { deposit_amount_usd: chosenDepositUsd } : {}),
           };
           break;
         }
@@ -5329,6 +5350,22 @@ export const GovernanceSection = ({
                     setProposalCredentialOfferCid,
                     acceptablePaidCredentialOffers,
                     "paid",
+                  )}
+                  {chosenPaidOffer?.billing_params && chosenDepositUsd ? (
+                    <Alert severity="info">
+                      This accept locks a deposit of {formatDecimal(chosenDepositUsd)} USD, and
+                      the vote shows that amount. The offer's deposit target is{" "}
+                      {formatDecimal(chosenPaidOffer.billing_params.deposit_target_amount_usd)} USD.
+                      Its fee is {formatDecimal(chosenPaidOffer.billing_params.fee_per_day_usd)} USD
+                      a day, billed every {chosenPaidOffer.billing_params.billing_period_minutes}{" "}
+                      minutes.
+                    </Alert>
+                  ) : (
+                    proposalCredentialOfferCid && (
+                      <Alert severity="warning">
+                        This offer is not in the list, so the vote will not show its deposit.
+                      </Alert>
+                    )
                   )}
                   <Autocomplete
                     size="small"

@@ -271,6 +271,7 @@ fn all_proposal_fixtures() -> Vec<ProposalType> {
                 open_mining_round_cid: "00round".into(),
                 featured_app_right_cid: Some("00far".into()),
             },
+            deposit_amount_usd: Some(dec("30")),
         }),
         ProposalType::Burn(Burn {
             allocation_factory_cid: "00alloc".into(),
@@ -411,6 +412,7 @@ fn minimal_option_fixtures() -> Vec<ProposalType> {
                 open_mining_round_cid: "00round".into(),
                 featured_app_right_cid: None,
             },
+            deposit_amount_usd: None,
         }),
         ProposalType::AcceptMintRequest(AcceptMintRequest {
             mint_request_cid: "00mr".into(),
