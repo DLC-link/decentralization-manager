@@ -634,6 +634,27 @@ Issue and accept credentials through governance. Both are domain proposals on
 }
 ```
 
+**Accept a paid credential:**
+
+```json
+{
+  "proposal": {
+    "type": "accept_paid_credential",
+    "user_service_cid": "<user-service-contract-id>",
+    "credential_offer_cid": "<credential-offer-contract-id>",
+    "deposit_amulet_cids": ["<amulet-contract-id>"],
+    "app_transfer_context": {
+      "amulet_rules_cid": "<amulet-rules-contract-id>",
+      "open_mining_round_cid": "<open-mining-round-contract-id>"
+    }
+  }
+}
+```
+
+The accept locks the deposit Amulets with the DSO's `AmuletRules` and an open mining round. The governance party sees neither contract. DecMan reads the round from the scan API that `DECPM_SCAN_URL` names. `GET /open-mining-round` returns the newest open round, and the form fills it in. At execution, DecMan discloses `AmuletRules`, the round and any `featured_app_right_cid`. A node without `DECPM_SCAN_URL` refuses the execute with a 422, unless the request carries all three in `disclosed_contracts`.
+
+The round closes about 20 minutes after it opens. Confirm and execute before then, or propose again.
+
 All credential operations go through the same governance confirmation flow, requiring threshold approval from the decentralized party members.
 
 ## Generic Voting

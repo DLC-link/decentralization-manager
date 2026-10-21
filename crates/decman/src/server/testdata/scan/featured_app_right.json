@@ -1,0 +1,12 @@
+{
+  "featured_app_right": {
+    "template_id": "17b6f7c18efec9022dde39a19039783c68490a722e8a5088b22ee034678171a2:Splice.Amulet:FeaturedAppRight",
+    "contract_id": "00far",
+    "payload": {
+      "dso": "DSO::1220be58c29e65de40bf273be1dc2b266d43a9a002ea5b18955aeef7aac881bb471a",
+      "provider": "issuer::1220be58c29e65de40bf273be1dc2b266d43a9a002ea5b18955aeef7aac881bb471a"
+    },
+    "created_event_blob": "ZmFy",
+    "created_at": "2026-10-21T13:44:17.279730Z"
+  }
+}

@@ -68,6 +68,7 @@ import type {
   ContractQueryResponse,
   Network,
   NetworkInfo,
+  OpenMiningRoundInfo,
   ProposeActionRequest,
   ProposalType,
   InstrumentAllowance,
@@ -266,6 +267,10 @@ export const GovernanceSection = ({
   const [proposalDepositAmuletCids, setProposalDepositAmuletCids] = useState<string[]>([]);
   const [proposalOpenMiningRoundCid, setProposalOpenMiningRoundCid] = useState("");
   const [proposalFeaturedAppRightCid, setProposalFeaturedAppRightCid] = useState("");
+  // The newest open round as scan lists it, or why the node could not read it
+  const [openMiningRound, setOpenMiningRound] = useState<OpenMiningRoundInfo | null>(null);
+  const [openMiningRoundError, setOpenMiningRoundError] = useState("");
+  const [openMiningRoundLoading, setOpenMiningRoundLoading] = useState(false);
   // Accept holder-initiated mint/burn request state
   const [proposalMintRequestCid, setProposalMintRequestCid] = useState("");
   const [proposalBurnRequestCid, setProposalBurnRequestCid] = useState("");
@@ -1362,6 +1367,37 @@ export const GovernanceSection = ({
       fetchNetworkInfo();
     }
   }, [selectedActionType, fetchNetworkInfo]);
+
+  // Read the newest open mining round from scan for the Accept Paid
+  // Credential form. Without DECPM_SCAN_URL the node answers 422, and the
+  // form shows its message.
+  const fetchOpenMiningRound = useCallback(async () => {
+    setOpenMiningRoundLoading(true);
+    try {
+      const res = await authenticatedFetch(`${API_BASE}/open-mining-round`);
+      const data = await res.json();
+      if (res.ok) {
+        const round = data as OpenMiningRoundInfo;
+        setOpenMiningRound(round);
+        setOpenMiningRoundError("");
+        setProposalOpenMiningRoundCid(round.contract_id);
+      } else {
+        setOpenMiningRound(null);
+        setOpenMiningRoundError(data.error || "Failed to read the open mining round");
+      }
+    } catch (e) {
+      setOpenMiningRound(null);
+      setOpenMiningRoundError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setOpenMiningRoundLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (proposalType === "accept_paid_credential") {
+      fetchOpenMiningRound();
+    }
+  }, [proposalType, fetchOpenMiningRound]);
 
   // Setup CC Preapproval and Setup Minting Delegation need the DSO party id
   // from the network-info endpoint to prefill their DSO field. Mirror the
@@ -5342,22 +5378,46 @@ export const GovernanceSection = ({
                     )}
                   />
                   {renderAmuletRulesCidField()}
-                  <TextField
-                    size="small"
-                    label="Open Mining Round CID"
-                    value={proposalOpenMiningRoundCid}
-                    onChange={(e) => setProposalOpenMiningRoundCid(e.target.value)}
-                    fullWidth
-                    required
-                    slotProps={{
-                      input: {
-                        endAdornment: fieldHelpAdornment(
-                          "Contract id of an OpenMiningRound that is open now. The DSO scan API lists the open rounds.",
-                          "Help for Open Mining Round CID",
-                        ),
-                      },
-                    }}
-                  />
+                  <Box sx={{ display: "flex", gap: 1, alignItems: "center" }}>
+                    <TextField
+                      size="small"
+                      label="Open Mining Round CID"
+                      value={proposalOpenMiningRoundCid}
+                      onChange={(e) => setProposalOpenMiningRoundCid(e.target.value)}
+                      fullWidth
+                      required
+                      helperText={
+                        openMiningRoundLoading
+                          ? "Reading the open round from scan…"
+                          : openMiningRound && openMiningRound.contract_id === proposalOpenMiningRoundCid
+                            ? `Round ${openMiningRound.round}, open until ${new Date(openMiningRound.target_closes_at).toLocaleTimeString()}`
+                            : undefined
+                      }
+                      slotProps={{
+                        input: {
+                          endAdornment: fieldHelpAdornment(
+                            "Contract id of an OpenMiningRound that is open now. DecMan fills in the newest one from scan. You can paste another one.",
+                            "Help for Open Mining Round CID",
+                          ),
+                        },
+                      }}
+                    />
+                    <Tooltip title="Refresh">
+                      <span>
+                        <IconButton
+                          size="small"
+                          onClick={fetchOpenMiningRound}
+                          disabled={openMiningRoundLoading}
+                          aria-label="Refresh the open mining round"
+                        >
+                          {openMiningRoundLoading ? <CircularProgress size={20} /> : <RefreshIcon />}
+                        </IconButton>
+                      </span>
+                    </Tooltip>
+                  </Box>
+                  {openMiningRoundError && (
+                    <Alert severity="warning">{openMiningRoundError}</Alert>
+                  )}
                   <TextField
                     size="small"
                     label="Featured App Right CID"

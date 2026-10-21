@@ -124,6 +124,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         OnboardingInvitePayload,
         OnboardingMeshErrorResponse,
         OnboardingRequest,
+        OpenMiningRoundInfo,
         OperatorInfo,
         PackageConfig,
         PackageInfo,

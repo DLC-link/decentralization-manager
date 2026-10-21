@@ -502,6 +502,14 @@ pub struct CantonConfig {
     /// TLS for the Ledger API channel.
     #[serde(default)]
     pub ledger_api_tls: CantonTlsConfig,
+    /// Base URL of a Splice scan API, up to and including `/api/scan`. A paid
+    /// credential accept reads its open mining round and featured app right
+    /// from it. Unset or empty turns that accept off.
+    ///
+    /// `skip_serializing`: only the server reads it, so it stays off
+    /// `GET /node-config`.
+    #[serde(default, skip_serializing)]
+    pub scan_url: Option<String>,
 }
 
 impl Default for CantonConfig {
@@ -515,6 +523,7 @@ impl Default for CantonConfig {
             network: Network::Devnet,
             admin_api_tls: CantonTlsConfig::default(),
             ledger_api_tls: CantonTlsConfig::default(),
+            scan_url: None,
         }
     }
 }
@@ -576,6 +585,16 @@ impl NodeConfig {
             "ledger",
         )
         .await
+    }
+
+    /// The scan API base URL without a trailing slash, or `None` when it is
+    /// unset or empty.
+    pub fn scan_url(&self) -> Option<&str> {
+        self.canton
+            .scan_url
+            .as_deref()
+            .map(|url| url.trim_end_matches('/'))
+            .filter(|url| !url.is_empty())
     }
 
     /// Get the synchronizer name
@@ -996,6 +1015,18 @@ mod tests {
             Network::Mainnet.registry_url(),
             "https://api.utilities.digitalasset.com",
         );
+    }
+
+    #[test]
+    fn scan_url_drops_a_trailing_slash_and_treats_empty_as_unset() {
+        let mut config = NodeConfig::default();
+        assert_eq!(config.scan_url(), None);
+
+        config.canton.scan_url = Some(String::new());
+        assert_eq!(config.scan_url(), None);
+
+        config.canton.scan_url = Some("https://scan.example/api/scan/".to_string());
+        assert_eq!(config.scan_url(), Some("https://scan.example/api/scan"));
     }
 
     #[test]

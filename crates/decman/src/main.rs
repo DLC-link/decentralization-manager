@@ -156,6 +156,7 @@ async fn run() -> Result {
             canton_ledger_tls_domain,
             canton_synchronizer,
             canton_network,
+            scan_url,
             keycloak_url,
             keycloak_realm,
             keycloak_client_id,
@@ -237,6 +238,7 @@ async fn run() -> Result {
             if let Some(net) = canton_network {
                 config.canton.network = *net;
             }
+            config.canton.scan_url = scan_url.clone();
             // `internal_url` is deliberately not in this guard: it only
             // supplements a real Keycloak config and is meaningless on its
             // own, so it must not by itself materialize a config with empty

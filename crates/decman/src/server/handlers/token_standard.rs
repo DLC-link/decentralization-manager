@@ -28,11 +28,12 @@ use crate::{
             get_registrar_services, get_transfer_factories, get_user_services,
             query_contracts_by_template,
         },
+        scan::{ScanNotConfigured, fetch_open_mining_rounds, newest_open_round},
         types::{
             BlockListShardsResponse, BurnRequestsResponse, ContractQueryResponse,
             CredentialOffersResponse, CredentialsResponse, ErrorResponse, HoldingsResponse,
-            InstrumentsResponse, MintRequestsResponse, NetworkInfo, OperatorInfo,
-            ProviderConfigurationsResponse, ProviderServicesResponse,
+            InstrumentsResponse, MintRequestsResponse, NetworkInfo, OpenMiningRoundInfo,
+            OperatorInfo, ProviderConfigurationsResponse, ProviderServicesResponse,
             RegistrarServiceRequestsResponse, RegistrarServicesResponse, TransferFactoriesResponse,
             TransferFactoryInfo, TransferInstructionsResponse, TransferPreapprovalsResponse,
             UserServicesResponse,
@@ -842,6 +843,48 @@ pub async fn get_network_info(data: web::Data<AppState>) -> impl Responder {
     }
 }
 
+/// Get the newest open mining round from the scan API (`DECPM_SCAN_URL`).
+/// The Accept Paid Credential form pins this round.
+#[utoipa::path(
+    tag = "Proxy",
+    responses(
+        (status = 200, description = "The newest open mining round", body = OpenMiningRoundInfo),
+        (status = 422, description = "DECPM_SCAN_URL is not set", body = ErrorResponse),
+        (status = 502, description = "Scan API error", body = ErrorResponse),
+        (status = 503, description = "Scan lists no open mining round right now", body = ErrorResponse)
+    )
+)]
+#[get("/open-mining-round")]
+pub async fn get_open_mining_round(data: web::Data<AppState>) -> impl Responder {
+    let Some(scan_url) = data.config.scan_url() else {
+        return HttpResponse::UnprocessableEntity().json(ErrorResponse {
+            error: ScanNotConfigured.to_string(),
+        });
+    };
+    let rounds = match fetch_open_mining_rounds(&data.http_client, scan_url).await {
+        Ok(rounds) => rounds,
+        Err(e) => {
+            tracing::warn!("Failed to fetch open mining rounds from scan: {e:#}");
+            return HttpResponse::BadGateway().json(ErrorResponse {
+                error: format!("{e:#}"),
+            });
+        }
+    };
+    let time =
+        |t: &chrono::DateTime<chrono::Utc>| t.to_rfc3339_opts(chrono::SecondsFormat::AutoSi, true);
+    match newest_open_round(&rounds, chrono::Utc::now()) {
+        Some(round) => HttpResponse::Ok().json(OpenMiningRoundInfo {
+            contract_id: round.contract.contract_id.clone(),
+            round: round.round,
+            opens_at: time(&round.opens_at),
+            target_closes_at: time(&round.target_closes_at),
+        }),
+        None => HttpResponse::ServiceUnavailable().json(ErrorResponse {
+            error: "Scan lists no open mining round right now. Try again in a minute.".to_string(),
+        }),
+    }
+}
+
 /// Get DA Utility operator party ID
 #[utoipa::path(
     tag = "Proxy",
@@ -926,5 +969,138 @@ pub async fn get_token_standard_contracts(
         Err(e) => HttpResponse::BadGateway().json(ErrorResponse {
             error: format!("Failed to fetch token standard contracts: {e}"),
         }),
+    }
+}
+
+#[cfg(test)]
+mod open_mining_round_tests {
+    use actix_web::{App, http::StatusCode, test as actix_test};
+    use chrono::{Duration, Utc};
+    use wiremock::{
+        Mock, MockServer, ResponseTemplate,
+        matchers::{method, path},
+    };
+
+    use super::*;
+
+    const ROUNDS: &str = include_str!("../testdata/scan/open_and_issuing_mining_rounds.json");
+
+    /// The scan fixture with each round's opensAt and targetClosesAt moved to
+    /// the given minutes from now, for rounds 66343, 66344 and 66345.
+    fn rounds_at(minutes: [(i64, i64); 3]) -> String {
+        let mut body: serde_json::Value = serde_json::from_str(ROUNDS).expect("the fixture parses");
+        let now = Utc::now();
+        let open_rounds = body["open_mining_rounds"]
+            .as_object_mut()
+            .expect("the fixture lists open rounds");
+        for entry in open_rounds.values_mut() {
+            let payload = &mut entry["contract"]["payload"];
+            let (opens, closes) = match payload["round"]["number"].as_str() {
+                Some("66343") => minutes[0],
+                Some("66344") => minutes[1],
+                _ => minutes[2],
+            };
+            payload["opensAt"] = (now + Duration::minutes(opens)).to_rfc3339().into();
+            payload["targetClosesAt"] = (now + Duration::minutes(closes)).to_rfc3339().into();
+        }
+        body.to_string()
+    }
+
+    /// 66343 closes in five minutes, 66344 opened five minutes ago, and 66345
+    /// has not opened.
+    fn rounds_open_now() -> String {
+        rounds_at([(-15, 5), (-5, 15), (5, 25)])
+    }
+
+    async fn get(scan_url: Option<String>) -> (StatusCode, serde_json::Value) {
+        let mut state = AppState::for_test(None)
+            .await
+            .expect("a test state")
+            .into_inner();
+        std::sync::Arc::get_mut(&mut state)
+            .expect("a fresh test state has one owner")
+            .config
+            .canton
+            .scan_url = scan_url;
+        let app = actix_test::init_service(
+            App::new()
+                .app_data(web::Data::from(state))
+                .service(get_open_mining_round),
+        )
+        .await;
+        let res = actix_test::call_service(
+            &app,
+            actix_test::TestRequest::get()
+                .uri("/open-mining-round")
+                .to_request(),
+        )
+        .await;
+        let status = res.status();
+        (status, actix_test::read_body_json(res).await)
+    }
+
+    async fn scan_answering(body: String) -> MockServer {
+        let scan = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/scan/v0/open-and-issuing-mining-rounds"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(body))
+            .mount(&scan)
+            .await;
+        scan
+    }
+
+    #[actix_web::test]
+    async fn answers_with_the_newest_round_that_is_open_now() {
+        let scan = scan_answering(rounds_open_now()).await;
+
+        let (status, body) = get(Some(format!("{}/api/scan/", scan.uri()))).await;
+
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["round"], 66344);
+        assert!(
+            body["contract_id"]
+                .as_str()
+                .is_some_and(|cid| cid.starts_with("00196e70b89f")),
+            "{body}"
+        );
+    }
+
+    #[actix_web::test]
+    async fn says_so_when_the_scan_url_is_not_set() {
+        let (status, body) = get(None).await;
+
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert!(
+            body["error"]
+                .as_str()
+                .is_some_and(|e| e.starts_with("DECPM_SCAN_URL is not set")),
+            "{body}"
+        );
+    }
+
+    #[actix_web::test]
+    async fn is_unavailable_when_no_listed_round_is_open() {
+        let scan = scan_answering(rounds_at([(-40, -20), (-30, -10), (5, 25)])).await;
+
+        let (status, body) = get(Some(format!("{}/api/scan", scan.uri()))).await;
+
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+    }
+
+    #[actix_web::test]
+    async fn a_scan_failure_is_a_bad_gateway() {
+        let scan = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(500).set_body_string("boom"))
+            .mount(&scan)
+            .await;
+
+        let (status, body) = get(Some(format!("{}/api/scan", scan.uri()))).await;
+
+        assert_eq!(status, StatusCode::BAD_GATEWAY);
+        assert!(
+            body["error"].as_str().is_some_and(|e| e.contains("boom")),
+            "{body}"
+        );
     }
 }

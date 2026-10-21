@@ -533,6 +533,7 @@ Most variables have a default that's only useful for local development (loopback
 | `DECPM_CANTON_LEDGER_TLS_CLIENT_KEY` | unset | optional | |
 | `DECPM_CANTON_LEDGER_TLS_DOMAIN` | unset | optional | |
 | `DECPM_CANTON_NETWORK` | `devnet` | **yes** | `mainnet`, `testnet`, or `devnet` |
+| `DECPM_SCAN_URL` | unset | optional | Base URL of a Splice scan API of the same network, up to and including `/api/scan`. A paid credential accept reads its open mining round and featured app right from it. Unset turns the paid accept off |
 | `DECPM_KEYCLOAK_URL` | unset | **yes**¹ | Keycloak server URL for frontend auth |
 | `DECPM_KEYCLOAK_REALM` | unset | **yes**¹ | Keycloak realm |
 | `DECPM_KEYCLOAK_CLIENT_ID` | unset | **yes**¹ | Keycloak client used by the SPA |

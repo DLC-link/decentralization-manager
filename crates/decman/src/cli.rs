@@ -135,6 +135,12 @@ pub enum Commands {
         #[arg(long, env = "DECPM_CANTON_NETWORK")]
         canton_network: Option<Network>,
 
+        /// Base URL of a Splice scan API, up to and including `/api/scan`.
+        /// A paid credential accept reads its open mining round from it.
+        /// Unset turns that accept off.
+        #[arg(long, env = "DECPM_SCAN_URL")]
+        scan_url: Option<String>,
+
         // Keycloak (top-level, for frontend gating)
         /// Keycloak server URL for frontend auth
         #[arg(long, env = "DECPM_KEYCLOAK_URL")]

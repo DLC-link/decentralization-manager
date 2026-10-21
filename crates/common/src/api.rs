@@ -1650,6 +1650,21 @@ pub struct NetworkInfo {
     pub amulet_rules_blob: String,
 }
 
+/// The newest open `OpenMiningRound`, as the scan API lists it. A paid
+/// credential accept pins this round.
+#[derive(Debug, Deserialize, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
+pub struct OpenMiningRoundInfo {
+    pub contract_id: String,
+    /// The round number.
+    pub round: u64,
+    /// When the round opened, as RFC 3339.
+    pub opens_at: String,
+    /// When the round is due to close, as RFC 3339.
+    pub target_closes_at: String,
+}
+
 /// DA Utility operator info (operator party id)
 #[derive(Deserialize, Serialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]

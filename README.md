@@ -180,6 +180,7 @@ The database file path can be overridden with the `--db` CLI flag.
 | `DECPM_CANTON_LEDGER_PORT` | Canton Ledger API port | `5001` |
 | `DECPM_CANTON_SYNCHRONIZER` | Canton synchronizer name | `global` |
 | `DECPM_CANTON_NETWORK` | Canton network environment (`devnet`, `testnet`, `mainnet`) | `devnet` |
+| `DECPM_SCAN_URL` | Base URL of a Splice scan API of that network, up to and including `/api/scan`. A paid credential accept reads its open mining round from it. Unset turns the paid accept off | _(none)_ |
 | `DECPM_CANTON_ADMIN_TLS` | Speak TLS to the Canton Admin API (see [TLS to the participant](#tls-to-the-participant)) | `false` |
 | `DECPM_CANTON_ADMIN_TLS_CA_CERT` | PEM of the CA that issued the Admin API certificate. Needed when that CA is private | _(platform trust store)_ |
 | `DECPM_CANTON_ADMIN_TLS_CLIENT_CERT` | PEM client certificate, for an Admin API that requires mTLS | _(none)_ |
@@ -427,6 +428,7 @@ The table below is a curated subset. A complete, interactive API reference is av
 | `/auth-config` | GET | Returns frontend auth configuration (Keycloak or Auth0) |
 | `/node-config` | GET | Returns node configuration |
 | `/network-info` | GET | Returns network info (DSO party, AmuletRules contract) |
+| `/open-mining-round` | GET | Returns the newest open mining round from scan (needs `DECPM_SCAN_URL`) |
 | `/operator-info` | GET | Returns DA Utility operator info |
 | `/network-config` | GET | Returns network peer list (from SQLite) |
 | `/network-config` | POST | Updates network peer list (saved to SQLite) |

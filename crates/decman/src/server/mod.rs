@@ -21,6 +21,7 @@ mod package_inventory;
 mod queries;
 mod record;
 mod reward_automation;
+mod scan;
 mod transfer_context;
 mod types;
 
@@ -1522,6 +1523,7 @@ pub async fn start_server(
             .service(handlers::get_coupon_reassignment_delegation)
             .service(handlers::get_reward_status)
             .service(handlers::get_network_info)
+            .service(handlers::get_open_mining_round)
             .service(handlers::get_operator_info)
             .service(handlers::get_party_config)
             .service(handlers::save_party_config)
