@@ -6,9 +6,9 @@
 #
 # The local dev / docker-compose full-source build lives in development/Dockerfile.
 #
-# distroless/cc-debian12 already ships glibc, libgcc, libssl/libcrypto and
-# ca-certificates on Debian 12 (bookworm) — the same libs the binary is built
-# against in the rust:slim-bookworm CI job — so nothing needs to be copied in.
+# distroless/cc-debian13 already ships glibc, libgcc, libssl/libcrypto and
+# ca-certificates on Debian 13 (trixie) — the same libs the binary is built
+# against in the rust:slim-trixie CI job — so nothing needs to be copied in.
 #
 # Two variants are built from this one file. The defaults below produce the
 # root image published as `:<tag>`; CI overrides the three build args to
@@ -18,7 +18,7 @@
 #   --build-arg RUNTIME_UID=65532 \
 #   --build-arg DECPM_DIR_DEFAULT=/home/nonroot
 ARG BASE_TAG=latest
-FROM gcr.io/distroless/cc-debian12:${BASE_TAG}
+FROM gcr.io/distroless/cc-debian13:${BASE_TAG}
 
 COPY --chmod=0755 dec-party-manager /usr/local/bin/dec-party-manager
 
