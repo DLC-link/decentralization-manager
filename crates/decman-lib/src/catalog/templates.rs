@@ -591,7 +591,7 @@ mod tests {
                 "#governance-utility-onboarding-v1:Governance.UtilityOnboarding.OffboardInstrumentIssuers:OffboardInstrumentIssuers",
             ),
         ];
-        assert_eq!(cases.len(), 32, "one case per catalog proposal struct");
+        assert_eq!(cases.len(), 33, "one case per catalog proposal struct");
         for (actual, expected) in cases {
             assert_eq!(actual, expected);
         }
