@@ -9,7 +9,7 @@ use common::api::{
 };
 use decman_lib::catalog::proposals::core::GenericVote;
 use decman_lib::catalog::proposals::credential::{
-    AcceptFreeCredential, OfferFreeCredential, OfferPaidCredential,
+    AcceptFreeCredential, AcceptPaidCredential, OfferFreeCredential, OfferPaidCredential,
 };
 use decman_lib::catalog::proposals::custody::{
     AcceptTransfer, SetupCcPreapproval, SetupTokenPreapproval, Transfer,
@@ -21,11 +21,12 @@ use decman_lib::catalog::proposals::rewards::{
 use decman_lib::catalog::proposals::utility::{
     AcceptBurnRequest, AcceptMintRequest, Burn, CreateDelegatedBatchedMarkersProxy,
     CreateProviderConfiguration, CreateProviderServiceRequest, CreateRegistrarServiceRequest,
-    CreateUserServiceRequest, Mint, OffboardInstrumentIssuers, OnboardInstrumentIssuers,
-    OnboardRegistrar, ProvisionInstrument, ProvisionProviderService, RequestDevNetFeaturedAppRight,
-    SetEnableResultContracts, SetProviderAppRewardBeneficiaries, SetupUtility,
+    CreateTransferRule, CreateUserServiceRequest, Mint, OffboardInstrumentIssuers,
+    OnboardInstrumentIssuers, OnboardRegistrar, ProvisionInstrument, ProvisionProviderService,
+    RequestDevNetFeaturedAppRight, SetEnableResultContracts, SetProviderAppRewardBeneficiaries,
+    SetupUtility, UpdateInstrumentConfiguration,
 };
-use decman_lib::catalog::types::RewardBeneficiary;
+use decman_lib::catalog::types::{AppTransferContextInput, RewardBeneficiary};
 
 use crate::canton_id::CantonId;
 use crate::server::types::{ActionType, AppRewardBeneficiary, BillingParams, ProposalType};
@@ -170,6 +171,7 @@ fn all_proposal_fixtures() -> Vec<ProposalType> {
             }],
             create_transfer_rule: true,
             create_allocation_factory: true,
+            use_block_list: Some(true),
         }),
         ProposalType::CreateProviderServiceRequest(CreateProviderServiceRequest {
             operator: cid("op"),
@@ -207,6 +209,9 @@ fn all_proposal_fixtures() -> Vec<ProposalType> {
         ProposalType::SetEnableResultContracts(SetEnableResultContracts {
             registrar_service_cid: "00rsc".into(),
             enable_result_contracts: Some(true),
+        }),
+        ProposalType::CreateTransferRule(CreateTransferRule {
+            registrar_service_cid: "00rsc".into(),
         }),
         ProposalType::CreateDelegatedBatchedMarkersProxy(CreateDelegatedBatchedMarkersProxy {
             operator: cid("op"),
@@ -257,6 +262,16 @@ fn all_proposal_fixtures() -> Vec<ProposalType> {
             user_service_cid: "00usc".into(),
             credential_offer_cid: "00offer".into(),
         }),
+        ProposalType::AcceptPaidCredential(AcceptPaidCredential {
+            user_service_cid: "00usc".into(),
+            credential_offer_cid: "00offer".into(),
+            deposit_amulet_cids: vec!["00amulet1".into(), "00amulet2".into()],
+            app_transfer_context: AppTransferContextInput {
+                amulet_rules_cid: "00rules".into(),
+                open_mining_round_cid: "00round".into(),
+                featured_app_right_cid: Some("00far".into()),
+            },
+        }),
         ProposalType::Burn(Burn {
             allocation_factory_cid: "00alloc".into(),
             instrument_id: instrument(),
@@ -306,6 +321,20 @@ fn all_proposal_fixtures() -> Vec<ProposalType> {
             initial_instrument_issuers: vec![cid("iss1")],
             credential_valid_from_micros: None,
             credential_valid_until_micros: None,
+            use_block_list: Some(true),
+        }),
+        ProposalType::UpdateInstrumentConfiguration(UpdateInstrumentConfiguration {
+            registrar_service_cid: "00rsc".into(),
+            instrument_configuration_cid: "00icc".into(),
+            instrument_id_text: "uuid-2".into(),
+            additional_identifiers: vec![InstrumentIdentifier {
+                source: cid("src"),
+                id: "ident".into(),
+                scheme: "scheme".into(),
+            }],
+            issuer_requirements: vec![requirement("gov")],
+            holder_requirements: vec![requirement("gov")],
+            use_block_list: Some(true),
         }),
         ProposalType::OnboardInstrumentIssuers(OnboardInstrumentIssuers {
             instrument_configuration_cid: "00icc".into(),
@@ -371,6 +400,16 @@ fn minimal_option_fixtures() -> Vec<ProposalType> {
             },
             deposit_initial_amount_usd: None,
         }),
+        ProposalType::AcceptPaidCredential(AcceptPaidCredential {
+            user_service_cid: "00usc".into(),
+            credential_offer_cid: "00offer".into(),
+            deposit_amulet_cids: vec!["00amulet1".into()],
+            app_transfer_context: AppTransferContextInput {
+                amulet_rules_cid: "00rules".into(),
+                open_mining_round_cid: "00round".into(),
+                featured_app_right_cid: None,
+            },
+        }),
         ProposalType::AcceptMintRequest(AcceptMintRequest {
             mint_request_cid: "00mr".into(),
             instrument_configuration_cid: "00icc".into(),
@@ -386,6 +425,17 @@ fn minimal_option_fixtures() -> Vec<ProposalType> {
             initial_instrument_issuers: vec![],
             credential_valid_from_micros: None,
             credential_valid_until_micros: None,
+            use_block_list: None,
+        }),
+        // Every field is required, and an unset flag goes out as null.
+        ProposalType::UpdateInstrumentConfiguration(UpdateInstrumentConfiguration {
+            registrar_service_cid: "00rsc".into(),
+            instrument_configuration_cid: "00icc".into(),
+            instrument_id_text: "uuid-2".into(),
+            additional_identifiers: vec![],
+            issuer_requirements: vec![],
+            holder_requirements: vec![],
+            use_block_list: None,
         }),
     ]
 }
@@ -450,6 +500,68 @@ fn proposal_type_minimal_round_trips_through_json() {
         let back: ProposalType =
             serde_json::from_value(json.clone()).expect("deserialize proposal");
         assert_eq!(back, proposal, "round trip changed the value: {json}");
+    }
+}
+
+/// Clients written before `use_block_list` existed send no such key. Both
+/// payloads read its absence as `None`, which leaves the block list check
+/// off.
+#[test]
+fn use_block_list_is_none_when_omitted() {
+    let setup: ProposalType = serde_json::from_value(serde_json::json!({
+        "type": "setup_utility",
+        "provider_service_cid": "00psc",
+        "operator": cid("op"),
+        "instrument_id_text": "uuid-1",
+        "create_transfer_rule": true,
+        "create_allocation_factory": true,
+    }))
+    .expect("deserialize setup_utility");
+    let ProposalType::SetupUtility(setup) = setup else {
+        panic!("expected setup_utility, got {setup:?}");
+    };
+    assert_eq!(setup.use_block_list, None);
+
+    let provision: ProposalType = serde_json::from_value(serde_json::json!({
+        "type": "provision_instrument",
+        "registrar_service_cid": "00rsc",
+        "instrument_id_text": "uuid-2",
+    }))
+    .expect("deserialize provision_instrument");
+    let ProposalType::ProvisionInstrument(provision) = provision else {
+        panic!("expected provision_instrument, got {provision:?}");
+    };
+    assert_eq!(provision.use_block_list, None);
+}
+
+/// The update replaces the whole configuration, so a request that leaves a
+/// field out is refused instead of resetting that field. `null` still
+/// clears the block list flag.
+#[test]
+fn update_instrument_configuration_requires_every_field() {
+    let full = serde_json::json!({
+        "type": "update_instrument_configuration",
+        "registrar_service_cid": "00rsc",
+        "instrument_configuration_cid": "00icc",
+        "instrument_id_text": "uuid-2",
+        "additional_identifiers": [],
+        "issuer_requirements": [],
+        "holder_requirements": [],
+        "use_block_list": null,
+    });
+    serde_json::from_value::<ProposalType>(full.clone()).expect("a full body deserializes");
+    for key in [
+        "additional_identifiers",
+        "issuer_requirements",
+        "holder_requirements",
+        "use_block_list",
+    ] {
+        let mut body = full.clone();
+        body.as_object_mut().expect("object").remove(key);
+        assert!(
+            serde_json::from_value::<ProposalType>(body).is_err(),
+            "a body without {key} must be refused"
+        );
     }
 }
 

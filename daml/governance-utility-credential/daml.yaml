@@ -1,16 +1,20 @@
-sdk-version: 3.4.11
+sdk-version: 3.5.1
 name: governance-utility-credential-v1
-version: 0.1.0
+version: 0.2.0
 source: daml
 dependencies:
   - daml-prim
   - daml-stdlib
 data-dependencies:
   - ../governance-action-v1/.daml/dist/governance-action-v1-0.1.0.dar
-  - ../dars/splice-util-0.1.4.dar
-  - ../dars/utility-credential-app-v0-0.4.1.dar
-  - ../dars/utility-credential-v0-0.1.0.dar
+  - ../dars/utility-credential-app-v0-0.4.3.dar
+  - ../dars/utility-credential-v0-0.1.2.dar
+# AcceptPaidCredential must pass the credential app the Amulet and
+# AppTransferContext types it was compiled against. This exposes the
+# splice-amulet that utility-credential-app-v0 embeds.
+module-prefixes:
+  splice-amulet-0.1.22: CredentialApp
 build-options:
-  - --target=2.2
+  - --target=2.3
   - --ghc-option=-Wunused-binds
   - --ghc-option=-Wunused-matches

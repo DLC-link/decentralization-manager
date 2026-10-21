@@ -132,6 +132,7 @@ setupUtilityForTest parties rulesCid = do
     additionalIdentifiers = []
     createTransferRule = True
     createAllocationFactory = True
+    useBlockList = None
   let proposalInterfaceCid : ContractId GovernableAction = toInterfaceContractId proposalCid
   _ <- confirmAndExecute parties rulesCid proposalInterfaceCid
     [parties.member1, parties.member2] parties.member1
@@ -164,6 +165,7 @@ testAmuletConfig = AmuletConfig with
     maxNumInputs = 100
     maxNumOutputs = 100
     maxNumLockHolders = 50
+    tokenStandardMaxTTL = None
   issuanceCurve = Schedule with
     initialValue = IssuanceConfig with
       amuletToIssuePerYear = 40000000000.0
@@ -198,3 +200,4 @@ testAmuletConfig = AmuletConfig with
   optDevelopmentFundManager = None
   externalPartyConfigStateTickDuration = None
   rewardConfig = None
+  transferPreapprovalBaseDuration = None

@@ -210,20 +210,24 @@ jobs:
       - uses: actions/checkout@v7
       # ~/.dpm holds the dpm CLI and the installed SDK toolchain. Cache
       # both so the install steps below short-circuit on a hit. Key on the
-      # SDK version so a bump invalidates the cache automatically; keep
+      # SDK versions so a bump invalidates the cache automatically; keep
       # the install-script-driven steps so a cache miss still self-heals.
+      # The utility plugins build on 3.5.1 (the 0.14.x utility DARs need
+      # LF 2.3); every other package stays on 3.4.11.
       - name: Cache dpm + Daml SDK
         id: cache-dpm
         uses: actions/cache@v6
         with:
           path: ~/.dpm
-          key: dpm-3.4.11
+          key: dpm-3.4.11-3.5.1
       - name: Install dpm
         if: steps.cache-dpm.outputs.cache-hit != 'true'
         run: curl -sSL https://get.digitalasset.com/install/install.sh | sh
       - name: Install Daml SDK
         if: steps.cache-dpm.outputs.cache-hit != 'true'
-        run: ~/.dpm/bin/dpm install 3.4.11
+        run: |
+          ~/.dpm/bin/dpm install 3.4.11
+          ~/.dpm/bin/dpm install 3.5.1
       - name: Build
         run: ~/.dpm/bin/dpm build --all
       # No reviewer can read a DAR by eye, so a stale or hand-edited binary in
@@ -301,3 +305,5 @@ jobs:
         run: cd governance-token-custody-test && ~/.dpm/bin/dpm test
       - name: Test governance-utility-onboarding
         run: cd governance-utility-onboarding-test && ~/.dpm/bin/dpm test
+      - name: Test governance-utility-credential
+        run: cd governance-utility-credential-test && ~/.dpm/bin/dpm test

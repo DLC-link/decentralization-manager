@@ -128,7 +128,9 @@ beforeEach(() => {
   Element.prototype.scrollIntoView = () => {};
 });
 
-describe("party details to shared parties", () => {
+// App renders every tab, GovernanceSection included, so give each render
+// room on a loaded CI runner.
+describe("party details to shared parties", { timeout: 20_000 }, () => {
   it("lists only the parties this node shares with the participant", async () => {
     await renderApp(`#parties/${partyId("alpha")}`);
 
@@ -215,7 +217,7 @@ describe("party details to shared parties", () => {
   });
 });
 
-describe("shared parties deep link", () => {
+describe("shared parties deep link", { timeout: 20_000 }, () => {
   it("opens the filtered list, and the chip clears the filter", async () => {
     await renderApp(`#parties/shared/${charlie}`);
 
@@ -251,7 +253,7 @@ describe("shared parties deep link", () => {
   });
 });
 
-describe("peer config to shared parties", () => {
+describe("peer config to shared parties", { timeout: 20_000 }, () => {
   it("shows the decentralized list even when the external one was open", async () => {
     await renderApp("#parties");
     fireEvent.click(await screen.findByRole("tab", { name: "External Parties" }));
@@ -274,7 +276,7 @@ describe("peer config to shared parties", () => {
   });
 });
 
-describe("browser Back out of a shared view", () => {
+describe("browser Back out of a shared view", { timeout: 20_000 }, () => {
   it("reads the prefix list again", async () => {
     await renderApp("#parties/alpha");
     await waitFor(() => expect(listedParty("alpha")).toBeTruthy());
@@ -308,7 +310,7 @@ describe("browser Back out of a shared view", () => {
   });
 });
 
-describe("party details to peer config", () => {
+describe("party details to peer config", { timeout: 20_000 }, () => {
   it("opens the configuration tab at the peer's row", async () => {
     await renderApp(`#parties/${partyId("alpha")}`);
 

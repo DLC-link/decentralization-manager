@@ -101,7 +101,7 @@ mod tests {
     use super::*;
     use crate::catalog::proposals::core::GenericVote;
     use crate::catalog::proposals::credential::{
-        AcceptFreeCredential, OfferFreeCredential, OfferPaidCredential,
+        AcceptFreeCredential, AcceptPaidCredential, OfferFreeCredential, OfferPaidCredential,
     };
     use crate::catalog::proposals::custody::{
         AcceptTransfer, SetupCcPreapproval, SetupTokenPreapproval, Transfer,
@@ -113,12 +113,12 @@ mod tests {
     use crate::catalog::proposals::utility::{
         AcceptBurnRequest, AcceptMintRequest, Burn, CreateDelegatedBatchedMarkersProxy,
         CreateProviderConfiguration, CreateProviderServiceRequest, CreateRegistrarServiceRequest,
-        CreateUserServiceRequest, Mint, OffboardInstrumentIssuers, OnboardInstrumentIssuers,
-        OnboardRegistrar, ProvisionInstrument, ProvisionProviderService,
+        CreateTransferRule, CreateUserServiceRequest, Mint, OffboardInstrumentIssuers,
+        OnboardInstrumentIssuers, OnboardRegistrar, ProvisionInstrument, ProvisionProviderService,
         RequestDevNetFeaturedAppRight, SetEnableResultContracts, SetProviderAppRewardBeneficiaries,
-        SetupUtility,
+        SetupUtility, UpdateInstrumentConfiguration,
     };
-    use crate::catalog::types::BillingParams;
+    use crate::catalog::types::{AppTransferContextInput, BillingParams};
     use crate::framework::TemplateInfo;
 
     /// Any valid `CantonId` — the exact value is irrelevant to a
@@ -193,7 +193,7 @@ mod tests {
         ));
     }
 
-    /// One assertion per catalog proposal struct — all 29 `TemplateInfo`
+    /// One assertion per catalog proposal struct — all 32 `TemplateInfo`
     /// impls under `catalog::proposals`. `TransferWithContext`,
     /// `AcceptTransferWithContext` and `WithCredentialIdNonce` are excluded:
     /// they delegate `template_id` to the proposal they wrap, so their
@@ -257,6 +257,22 @@ mod tests {
                 .expect("template id resolves")
                 .to_string(),
                 "#governance-utility-credential-v1:Governance.UtilityCredential.AcceptFreeCredential:AcceptFreeCredential",
+            ),
+            (
+                AcceptPaidCredential {
+                    user_service_cid: "usc".to_string(),
+                    credential_offer_cid: "offer".to_string(),
+                    deposit_amulet_cids: vec!["amulet".to_string()],
+                    app_transfer_context: AppTransferContextInput {
+                        amulet_rules_cid: "rules".to_string(),
+                        open_mining_round_cid: "round".to_string(),
+                        featured_app_right_cid: None,
+                    },
+                }
+                .template_id(&pkgs)
+                .expect("template id resolves")
+                .to_string(),
+                "#governance-utility-credential-v1:Governance.UtilityCredential.AcceptPaidCredential:AcceptPaidCredential",
             ),
             (
                 SetupCcPreapproval {
@@ -399,6 +415,7 @@ mod tests {
                     additional_identifiers: vec![],
                     create_transfer_rule: true,
                     create_allocation_factory: true,
+                    use_block_list: None,
                 }
                 .template_id(&pkgs)
                 .expect("template id resolves")
@@ -424,6 +441,15 @@ mod tests {
                 .expect("template id resolves")
                 .to_string(),
                 "#governance-utility-onboarding-v1:Governance.UtilityOnboarding.SetEnableResultContracts:SetEnableResultContracts",
+            ),
+            (
+                CreateTransferRule {
+                    registrar_service_cid: "rsc".to_string(),
+                }
+                .template_id(&pkgs)
+                .expect("template id resolves")
+                .to_string(),
+                "#governance-utility-onboarding-v1:Governance.UtilityOnboarding.CreateTransferRule:CreateTransferRule",
             ),
             (
                 Mint {
@@ -521,11 +547,27 @@ mod tests {
                     initial_instrument_issuers: vec![],
                     credential_valid_from_micros: None,
                     credential_valid_until_micros: None,
+                    use_block_list: None,
                 }
                 .template_id(&pkgs)
                 .expect("template id resolves")
                 .to_string(),
                 "#governance-utility-onboarding-v1:Governance.UtilityOnboarding.ProvisionInstrument:ProvisionInstrument",
+            ),
+            (
+                UpdateInstrumentConfiguration {
+                    registrar_service_cid: "rsc".to_string(),
+                    instrument_configuration_cid: "icc".to_string(),
+                    instrument_id_text: "iid".to_string(),
+                    additional_identifiers: vec![],
+                    issuer_requirements: vec![],
+                    holder_requirements: vec![],
+                    use_block_list: None,
+                }
+                .template_id(&pkgs)
+                .expect("template id resolves")
+                .to_string(),
+                "#governance-utility-onboarding-v1:Governance.UtilityOnboarding.UpdateInstrumentConfiguration:UpdateInstrumentConfiguration",
             ),
             (
                 OnboardInstrumentIssuers {
@@ -549,7 +591,7 @@ mod tests {
                 "#governance-utility-onboarding-v1:Governance.UtilityOnboarding.OffboardInstrumentIssuers:OffboardInstrumentIssuers",
             ),
         ];
-        assert_eq!(cases.len(), 30, "one case per catalog proposal struct");
+        assert_eq!(cases.len(), 33, "one case per catalog proposal struct");
         for (actual, expected) in cases {
             assert_eq!(actual, expected);
         }

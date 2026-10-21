@@ -73,6 +73,21 @@ pub fn validate_self_issued_requirements_have_claims(
     Ok(())
 }
 
+/// Mirrors the Daml `blockListSupported` guard. Governance mint and burn send
+/// no block list shards, so the registry would refuse every one of them on a
+/// configuration that checks a block list. #566 adds the shards and lifts
+/// this guard.
+pub fn validate_block_list_supported(use_block_list: Option<bool>) -> Result<(), Error> {
+    if use_block_list == Some(true) {
+        return Err(Error::Validation(
+            "use_block_list cannot be true until #566 adds block list support to governance \
+             mint and burn"
+                .to_string(),
+        ));
+    }
+    Ok(())
+}
+
 /// Reject an epoch-microsecond instant that is not in the future.
 ///
 /// The on-ledger `executeImpl` asserts the same thing, but only at execute

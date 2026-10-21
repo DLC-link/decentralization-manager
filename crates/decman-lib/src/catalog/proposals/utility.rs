@@ -3,7 +3,7 @@
 use std::collections::HashSet;
 
 use canton_common::decimal::DamlDecimal;
-use canton_proto_rs::com::daml::ledger::api::v2::{Value, value};
+use canton_proto_rs::com::daml::ledger::api::v2::{RecordField, Value, value};
 use common::api::{
     InstrumentId, InstrumentIdentifier, InstrumentIssuerCredentials, PartyCredentialRequirement,
 };
@@ -18,8 +18,9 @@ use crate::framework::encode::{
     serialize_party_credential_requirements,
 };
 use crate::framework::validate::{
-    validate_beneficiary_weights, validate_credential_validity, validate_positive_amount,
-    validate_self_issued_requirements_have_claims, validate_unique_issuers,
+    validate_beneficiary_weights, validate_block_list_supported, validate_credential_validity,
+    validate_positive_amount, validate_self_issued_requirements_have_claims,
+    validate_unique_issuers,
 };
 use crate::framework::{
     DamlProtoEncode, GrpcPayload, PackageResolver, TemplateId, TemplateInfo, Validate,
@@ -216,6 +217,11 @@ pub struct SetupUtility {
     pub additional_identifiers: Vec<InstrumentIdentifier>,
     pub create_transfer_rule: bool,
     pub create_allocation_factory: bool,
+    /// `checkBlockList` of the created `InstrumentConfiguration`.
+    /// `Some(true)` is refused until #566 adds block list support to
+    /// governance mint and burn.
+    #[serde(default)]
+    pub use_block_list: Option<bool>,
 }
 
 impl SetupUtility {
@@ -255,11 +261,17 @@ impl DamlProtoEncode for SetupUtility {
                 "createAllocationFactory",
                 make_bool(self.create_allocation_factory),
             ),
+            field("useBlockList", make_optional_bool(&self.use_block_list)),
         ]))
     }
 }
 
-impl Validate for SetupUtility {}
+impl Validate for SetupUtility {
+    fn validate(&self, _ctx: &ValidationCtx) -> Result<(), Error> {
+        // Mirrors the template's `ensure`.
+        validate_block_list_supported(self.use_block_list)
+    }
+}
 
 /// Set the provider-app reward beneficiaries on an `InstrumentConfiguration`.
 /// `providerAppRewardBeneficiaries = None` clears the current setting.
@@ -351,6 +363,40 @@ impl DamlProtoEncode for SetEnableResultContracts {
 }
 
 impl Validate for SetEnableResultContracts {}
+
+/// Create a `TransferRule` on the governance party's `RegistrarService`.
+/// Setup creates the first one when asked to. This adds one later.
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
+pub struct CreateTransferRule {
+    pub registrar_service_cid: String,
+}
+
+impl CreateTransferRule {
+    pub const MODULE: &'static str = "Governance.UtilityOnboarding.CreateTransferRule";
+    pub const ENTITY: &'static str = "CreateTransferRule";
+}
+
+impl TemplateInfo for CreateTransferRule {
+    fn template_id(&self, pkgs: &dyn PackageResolver) -> Result<TemplateId, Error> {
+        let pkg = pkgs
+            .package_ref("governance_utility_onboarding")
+            .ok_or(Error::PackageNotConfigured("governance_utility_onboarding"))?;
+        Ok(TemplateId::new(pkg, Self::MODULE, Self::ENTITY))
+    }
+}
+
+impl DamlProtoEncode for CreateTransferRule {
+    fn to_daml_proto(&self) -> Result<Value, Error> {
+        Ok(make_record(vec![field(
+            "registrarServiceCid",
+            make_contract_id(&self.registrar_service_cid),
+        )]))
+    }
+}
+
+impl Validate for CreateTransferRule {}
 
 /// Offer a mint of `amount` tokens to `recipient` via
 /// `AllocationFactory_OfferMint`. The resulting `MintOffer` is accepted
@@ -778,6 +824,11 @@ pub struct ProvisionInstrument {
     /// `OffboardInstrumentIssuers` vote.
     #[serde(default)]
     pub credential_valid_until_micros: Option<i64>,
+    /// `checkBlockList` of the created `InstrumentConfiguration`.
+    /// `Some(true)` is refused until #566 adds block list support to
+    /// governance mint and burn.
+    #[serde(default)]
+    pub use_block_list: Option<bool>,
 }
 
 impl ProvisionInstrument {
@@ -847,7 +898,93 @@ impl Validate for ProvisionInstrument {
             self.credential_valid_from_micros,
             self.credential_valid_until_micros,
             ctx.now_micros,
-        )
+        )?;
+        validate_block_list_supported(self.use_block_list)
+    }
+}
+
+/// Replace a live `InstrumentConfiguration` on the registrar decparty. The
+/// registry's only update path archives the configuration and creates a new
+/// one from a full payload, so every field here is required: a field left
+/// out would be reset on the ledger. The action sets the provider app reward
+/// beneficiaries again after the replace.
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS))]
+pub struct UpdateInstrumentConfiguration {
+    pub registrar_service_cid: String,
+    pub instrument_configuration_cid: String,
+    /// Must equal the configuration's default identifier id. The action
+    /// refuses to change it, because holdings name the instrument by it.
+    pub instrument_id_text: String,
+    pub additional_identifiers: Vec<InstrumentIdentifier>,
+    pub issuer_requirements: Vec<PartyCredentialRequirement>,
+    pub holder_requirements: Vec<PartyCredentialRequirement>,
+    /// `checkBlockList` of the new configuration. The key is required and
+    /// may be `null`, so a request that leaves it out cannot turn a block
+    /// list check off by accident. `Some(true)` is refused until #566 adds
+    /// block list support to governance mint and burn.
+    #[serde(deserialize_with = "serde::Deserialize::deserialize")]
+    pub use_block_list: Option<bool>,
+}
+
+impl UpdateInstrumentConfiguration {
+    pub const MODULE: &'static str = "Governance.UtilityOnboarding.UpdateInstrumentConfiguration";
+    pub const ENTITY: &'static str = "UpdateInstrumentConfiguration";
+}
+
+impl TemplateInfo for UpdateInstrumentConfiguration {
+    fn template_id(&self, pkgs: &dyn PackageResolver) -> Result<TemplateId, Error> {
+        let pkg = pkgs
+            .package_ref("governance_utility_onboarding")
+            .ok_or(Error::PackageNotConfigured("governance_utility_onboarding"))?;
+        Ok(TemplateId::new(pkg, Self::MODULE, Self::ENTITY))
+    }
+}
+
+impl DamlProtoEncode for UpdateInstrumentConfiguration {
+    fn to_daml_proto(&self) -> Result<Value, Error> {
+        Ok(make_record(vec![
+            field(
+                "registrarServiceCid",
+                make_contract_id(&self.registrar_service_cid),
+            ),
+            field(
+                "instrumentConfigurationCid",
+                make_contract_id(&self.instrument_configuration_cid),
+            ),
+            field("instrumentIdText", make_text(&self.instrument_id_text)),
+            field(
+                "additionalIdentifiers",
+                make_list(
+                    self.additional_identifiers
+                        .iter()
+                        .map(serialize_instrument_identifier)
+                        .collect(),
+                ),
+            ),
+            field(
+                "issuerRequirements",
+                serialize_party_credential_requirements(&self.issuer_requirements),
+            ),
+            field(
+                "holderRequirements",
+                serialize_party_credential_requirements(&self.holder_requirements),
+            ),
+            field("useBlockList", make_optional_bool(&self.use_block_list)),
+        ]))
+    }
+}
+
+impl Validate for UpdateInstrumentConfiguration {
+    fn validate(&self, ctx: &ValidationCtx) -> Result<(), Error> {
+        // Mirrors the template's `ensure`.
+        validate_self_issued_requirements_have_claims(
+            &self.issuer_requirements,
+            ctx.governance_party,
+            "issuer_requirements",
+        )?;
+        validate_block_list_supported(self.use_block_list)
     }
 }
 
@@ -922,13 +1059,20 @@ impl Validate for OnboardInstrumentIssuers {
 /// `credentialIdNonce : Optional Text`, which the payload's own encoding
 /// leaves out. The two issuer templates follow it with
 /// `credentialValidFrom : Optional Time` and
-/// `credentialValidUntil : Optional Time`. Submit it through
-/// [`WithCredentialIdNonce`] to set them.
+/// `credentialValidUntil : Optional Time`. `ProvisionInstrument` then
+/// declares `useBlockList : Optional Bool`, which its own encoding also
+/// leaves out. Submit it through [`WithCredentialIdNonce`] to set them.
 pub trait MintsCredentials: GrpcPayload {
     /// The `(validFrom, validUntil)` window, in microseconds since epoch,
     /// copied onto every credential the action mints. `None` for a template
     /// that declares no window fields, so none are sent.
     fn credential_validity_micros(&self) -> Option<(Option<i64>, Option<i64>)>;
+
+    /// The fields the template declares after the validity window, in
+    /// declaration order.
+    fn fields_after_validity(&self) -> Vec<RecordField> {
+        Vec::new()
+    }
 }
 
 /// No window: the SDK checks the registrar credential only inside the
@@ -945,6 +1089,13 @@ impl MintsCredentials for ProvisionInstrument {
             self.credential_valid_from_micros,
             self.credential_valid_until_micros,
         ))
+    }
+
+    fn fields_after_validity(&self) -> Vec<RecordField> {
+        vec![field(
+            "useBlockList",
+            make_optional_bool(&self.use_block_list),
+        )]
     }
 }
 
@@ -990,6 +1141,7 @@ impl<P: MintsCredentials + ?Sized> DamlProtoEncode for WithCredentialIdNonce<'_,
                 make_optional_timestamp(valid_until),
             ));
         }
+        record.fields.extend(self.proposal.fields_after_validity());
         Ok(Value {
             sum: Some(value::Sum::Record(record)),
         })
@@ -1181,6 +1333,7 @@ mod tests {
                 }],
                 create_transfer_rule: true,
                 create_allocation_factory: false,
+                use_block_list: Some(true),
             }
             .to_daml_proto()
             .expect("payload encodes")
@@ -1220,6 +1373,14 @@ mod tests {
             SetEnableResultContracts {
                 registrar_service_cid: "00rsc".to_string(),
                 enable_result_contracts: None,
+            }
+            .to_daml_proto()
+            .expect("payload encodes")
+        );
+        insta::assert_debug_snapshot!(
+            "create_transfer_rule",
+            CreateTransferRule {
+                registrar_service_cid: "00rsc".to_string(),
             }
             .to_daml_proto()
             .expect("payload encodes")
@@ -1352,6 +1513,7 @@ mod tests {
                 initial_instrument_issuers: vec![cid("issuer")],
                 credential_valid_from_micros: None,
                 credential_valid_until_micros: None,
+                use_block_list: None,
             }
             .to_daml_proto()
             .expect("payload encodes")
@@ -1367,6 +1529,28 @@ mod tests {
                 initial_instrument_issuers: vec![],
                 credential_valid_from_micros: None,
                 credential_valid_until_micros: None,
+                use_block_list: None,
+            }
+            .to_daml_proto()
+            .expect("payload encodes")
+        );
+        insta::assert_debug_snapshot!(
+            "update_instrument_configuration",
+            UpdateInstrumentConfiguration {
+                registrar_service_cid: "00rsc".to_string(),
+                instrument_configuration_cid: "00icc".to_string(),
+                instrument_id_text: "uuid-1".to_string(),
+                additional_identifiers: vec![InstrumentIdentifier {
+                    source: cid("src"),
+                    id: "TICK".to_string(),
+                    scheme: "Ticker".to_string(),
+                }],
+                issuer_requirements: vec![requirement(
+                    &cid("issuer"),
+                    &[("role", "instrument-issuer")]
+                )],
+                holder_requirements: vec![requirement(&cid("issuer"), &[("role", "holder")])],
+                use_block_list: Some(true),
             }
             .to_daml_proto()
             .expect("payload encodes")
@@ -1430,6 +1614,7 @@ mod tests {
                 initial_instrument_issuers: vec![cid("issuer")],
                 credential_valid_from_micros: Some(1_700_000_000_000_000),
                 credential_valid_until_micros: Some(1_800_000_000_000_000),
+                use_block_list: Some(true),
             }),
             Box::new(OnboardInstrumentIssuers {
                 instrument_configuration_cid: "00icc".to_string(),
@@ -1442,8 +1627,9 @@ mod tests {
 
     /// The nonce closes the create arguments, followed by the validity window
     /// on the templates that declare one, in the order they declare them.
-    /// `OnboardRegistrar` declares none, so it gets the nonce alone. Every
-    /// other field is unchanged.
+    /// `ProvisionInstrument` then gets `useBlockList`. `OnboardRegistrar`
+    /// declares none of these, so it gets the nonce alone. Every other field
+    /// is unchanged.
     #[test]
     fn credential_id_nonce_and_validity_are_the_last_create_arguments() {
         let gov = cid("gov");
@@ -1461,25 +1647,59 @@ mod tests {
             )
             .expect("proposal arguments encode");
             let window = proposal.credential_validity_micros();
-            let added = if window.is_some() { 3 } else { 1 };
+            let after_window = proposal.fields_after_validity();
+            let added = if window.is_some() { 3 } else { 1 } + after_window.len();
             let (head, tail) = wrapped.fields.split_at(wrapped.fields.len() - added);
             assert_eq!(head, bare.fields.as_slice(), "other fields unchanged");
             let labels: Vec<&str> = tail.iter().map(|f| f.label.as_str()).collect();
-            let expected: &[&str] = if window.is_some() {
-                &[
-                    "credentialIdNonce",
-                    "credentialValidFrom",
-                    "credentialValidUntil",
-                ]
-            } else {
-                &["credentialIdNonce"]
-            };
+            let mut expected = vec!["credentialIdNonce"];
+            if window.is_some() {
+                expected.extend(["credentialValidFrom", "credentialValidUntil"]);
+            }
+            expected.extend(after_window.iter().map(|f| f.label.as_str()));
             assert_eq!(labels, expected);
             assert_eq!(tail[0].value, Some(make_optional_text(Some(NONCE))));
             if let Some((valid_from, valid_until)) = window {
                 assert_eq!(tail[1].value, Some(make_optional_timestamp(valid_from)));
                 assert_eq!(tail[2].value, Some(make_optional_timestamp(valid_until)));
             }
+            assert_eq!(&tail[added - after_window.len()..], after_window.as_slice());
+        }
+    }
+
+    /// Only `ProvisionInstrument` declares a field after the window, and it
+    /// carries the proposal's block list flag.
+    #[test]
+    fn provision_instrument_sends_use_block_list_after_the_window() {
+        let labels: Vec<Vec<String>> = credential_minting_proposals()
+            .iter()
+            .map(|p| {
+                p.fields_after_validity()
+                    .into_iter()
+                    .map(|f| f.label)
+                    .collect()
+            })
+            .collect();
+        assert_eq!(
+            labels,
+            vec![vec![], vec!["useBlockList".to_string()], vec![]]
+        );
+        for flag in [None, Some(false), Some(true)] {
+            let proposal = ProvisionInstrument {
+                registrar_service_cid: "00rsc".to_string(),
+                instrument_id_text: "uuid-1".to_string(),
+                additional_identifiers: vec![],
+                issuer_requirements: vec![],
+                holder_requirements: vec![],
+                initial_instrument_issuers: vec![],
+                credential_valid_from_micros: None,
+                credential_valid_until_micros: None,
+                use_block_list: flag,
+            };
+            assert_eq!(
+                proposal.fields_after_validity(),
+                vec![field("useBlockList", make_optional_bool(&flag))]
+            );
         }
     }
 
@@ -1515,6 +1735,7 @@ mod tests {
                     initial_instrument_issuers: vec![cid("issuer")],
                     credential_valid_from_micros: from,
                     credential_valid_until_micros: until,
+                    use_block_list: None,
                 }),
                 Box::new(OnboardInstrumentIssuers {
                     instrument_configuration_cid: "00icc".to_string(),
@@ -1670,6 +1891,7 @@ mod tests {
             initial_instrument_issuers: issuers,
             credential_valid_from_micros: None,
             credential_valid_until_micros: None,
+            use_block_list: None,
         };
         assert!(
             mk(vec![issuer_a.clone(), issuer_a.clone()])
@@ -1696,6 +1918,7 @@ mod tests {
             initial_instrument_issuers: vec![],
             credential_valid_from_micros: None,
             credential_valid_until_micros: None,
+            use_block_list: None,
         };
         let claim = RequiredClaim {
             property: "role".to_string(),
@@ -1704,6 +1927,98 @@ mod tests {
         assert!(mk(gov.clone(), vec![]).validate(&ctx(&gov, 0)).is_err());
         assert!(mk(gov.clone(), vec![claim]).validate(&ctx(&gov, 0)).is_ok());
         assert!(mk(cid("other"), vec![]).validate(&ctx(&gov, 0)).is_ok());
+    }
+
+    #[test]
+    fn update_instrument_configuration_rejects_claimless_self_issued_requirement() {
+        // Mirrors the template's `ensure`, as on ProvisionInstrument.
+        let gov = cid("gov");
+        let mk = |issuer: CantonId, claims: Vec<RequiredClaim>| UpdateInstrumentConfiguration {
+            registrar_service_cid: "rsc".to_string(),
+            instrument_configuration_cid: "icc".to_string(),
+            instrument_id_text: "uuid-1".to_string(),
+            additional_identifiers: vec![],
+            issuer_requirements: vec![PartyCredentialRequirement {
+                issuer,
+                required_claims: claims,
+            }],
+            holder_requirements: vec![],
+            use_block_list: None,
+        };
+        let claim = RequiredClaim {
+            property: "role".to_string(),
+            value: "instrument-issuer".to_string(),
+        };
+        assert!(mk(gov.clone(), vec![]).validate(&ctx(&gov, 0)).is_err());
+        assert!(mk(gov.clone(), vec![claim]).validate(&ctx(&gov, 0)).is_ok());
+        assert!(mk(cid("other"), vec![]).validate(&ctx(&gov, 0)).is_ok());
+    }
+
+    /// Mirrors the templates' `blockListSupported` guard: governance mint and
+    /// burn cannot pass a block list check until #566, so `Some(true)` is
+    /// refused with a 400 that names the issue.
+    #[test]
+    fn configuration_proposals_refuse_use_block_list_true() {
+        let gov = cid("gov");
+        let with_flag = |use_block_list: Option<bool>| -> Vec<(&str, Box<dyn Validate>)> {
+            vec![
+                (
+                    "setup_utility",
+                    Box::new(SetupUtility {
+                        provider_service_cid: "psc".to_string(),
+                        operator: cid("op"),
+                        instrument_id_text: "uuid-1".to_string(),
+                        additional_identifiers: vec![],
+                        create_transfer_rule: true,
+                        create_allocation_factory: true,
+                        use_block_list,
+                    }),
+                ),
+                (
+                    "provision_instrument",
+                    Box::new(ProvisionInstrument {
+                        registrar_service_cid: "rsc".to_string(),
+                        instrument_id_text: "uuid-1".to_string(),
+                        additional_identifiers: vec![],
+                        issuer_requirements: vec![],
+                        holder_requirements: vec![],
+                        initial_instrument_issuers: vec![],
+                        credential_valid_from_micros: None,
+                        credential_valid_until_micros: None,
+                        use_block_list,
+                    }),
+                ),
+                (
+                    "update_instrument_configuration",
+                    Box::new(UpdateInstrumentConfiguration {
+                        registrar_service_cid: "rsc".to_string(),
+                        instrument_configuration_cid: "icc".to_string(),
+                        instrument_id_text: "uuid-1".to_string(),
+                        additional_identifiers: vec![],
+                        issuer_requirements: vec![],
+                        holder_requirements: vec![],
+                        use_block_list,
+                    }),
+                ),
+            ]
+        };
+        for flag in [None, Some(false)] {
+            for (name, proposal) in with_flag(flag) {
+                assert!(
+                    proposal.validate(&ctx(&gov, 0)).is_ok(),
+                    "{name} should accept use_block_list {flag:?}"
+                );
+            }
+        }
+        for (name, proposal) in with_flag(Some(true)) {
+            match proposal.validate(&ctx(&gov, 0)) {
+                Err(Error::Validation(message)) => assert!(
+                    message.contains("use_block_list") && message.contains("#566"),
+                    "{name}: unexpected message {message:?}"
+                ),
+                other => panic!("{name} should refuse use_block_list true, got {other:?}"),
+            }
+        }
     }
 
     #[test]

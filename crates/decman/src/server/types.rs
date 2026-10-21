@@ -372,6 +372,8 @@ pub enum ProposalType {
     ),
     /// Toggle result-contract emission on a `RegistrarService`.
     SetEnableResultContracts(decman_lib::catalog::proposals::utility::SetEnableResultContracts),
+    /// Create a `TransferRule` on the governance party's `RegistrarService`.
+    CreateTransferRule(decman_lib::catalog::proposals::utility::CreateTransferRule),
     /// Authorize the `operator` to create batched activity markers on behalf
     /// of the governance party via a `DelegatedBatchedMarkersProxy`.
     CreateDelegatedBatchedMarkersProxy(
@@ -407,6 +409,10 @@ pub enum ProposalType {
     /// Accept a free credential offered to the governance party. Wraps
     /// `UserService_AcceptFreeCredentialOffer`.
     AcceptFreeCredential(decman_lib::catalog::proposals::credential::AcceptFreeCredential),
+    /// Accept a paid credential offered to the governance party. Wraps
+    /// `UserService_AcceptPaidCredentialOffer`, which locks the governance
+    /// party's deposit Amulets.
+    AcceptPaidCredential(decman_lib::catalog::proposals::credential::AcceptPaidCredential),
     /// Offer a burn of `amount` tokens held by `holder` via
     /// `AllocationFactory_OfferBurn`. Holdings are supplied by the holder at
     /// `BurnOffer_Accept` time, not here.
@@ -440,6 +446,12 @@ pub enum ProposalType {
     /// credential the initial instrument issuers against its issuer
     /// requirements. Executed once per instrument.
     ProvisionInstrument(decman_lib::catalog::proposals::utility::ProvisionInstrument),
+    /// Replace a live `InstrumentConfiguration` on the registrar decparty
+    /// with a full payload, then set its provider app reward beneficiaries
+    /// again.
+    UpdateInstrumentConfiguration(
+        decman_lib::catalog::proposals::utility::UpdateInstrumentConfiguration,
+    ),
     /// Credential new instrument issuers against an existing
     /// `InstrumentConfiguration`'s issuer requirements.
     OnboardInstrumentIssuers(decman_lib::catalog::proposals::utility::OnboardInstrumentIssuers),
@@ -481,6 +493,7 @@ impl ProposalType {
             Self::SetupCouponReassignmentDelegation(p) => p,
             Self::RevokeCouponReassignmentDelegation(p) => p,
             Self::SetEnableResultContracts(p) => p,
+            Self::CreateTransferRule(p) => p,
             Self::CreateDelegatedBatchedMarkersProxy(p) => p,
             Self::RequestDevNetFeaturedAppRight(p) => p,
             Self::SetupMintingDelegation(p) => p,
@@ -489,6 +502,7 @@ impl ProposalType {
             Self::OfferFreeCredential(p) => p,
             Self::OfferPaidCredential(p) => p,
             Self::AcceptFreeCredential(p) => p,
+            Self::AcceptPaidCredential(p) => p,
             Self::Burn(p) => p,
             Self::AcceptMintRequest(p) => p,
             Self::AcceptBurnRequest(p) => p,
@@ -496,6 +510,7 @@ impl ProposalType {
             Self::CreateRegistrarServiceRequest(p) => p,
             Self::OnboardRegistrar(p) => p,
             Self::ProvisionInstrument(p) => p,
+            Self::UpdateInstrumentConfiguration(p) => p,
             Self::OnboardInstrumentIssuers(p) => p,
             Self::OffboardInstrumentIssuers(p) => p,
         };
@@ -521,6 +536,7 @@ impl ProposalType {
             Self::SetupCouponReassignmentDelegation(p) => Some(p),
             Self::RevokeCouponReassignmentDelegation(p) => Some(p),
             Self::SetEnableResultContracts(p) => Some(p),
+            Self::CreateTransferRule(p) => Some(p),
             Self::CreateDelegatedBatchedMarkersProxy(p) => Some(p),
             Self::RequestDevNetFeaturedAppRight(p) => Some(p),
             Self::SetupMintingDelegation(p) => Some(p),
@@ -529,6 +545,7 @@ impl ProposalType {
             Self::OfferFreeCredential(p) => Some(p),
             Self::OfferPaidCredential(p) => Some(p),
             Self::AcceptFreeCredential(p) => Some(p),
+            Self::AcceptPaidCredential(p) => Some(p),
             Self::Burn(p) => Some(p),
             Self::AcceptMintRequest(p) => Some(p),
             Self::AcceptBurnRequest(p) => Some(p),
@@ -536,6 +553,7 @@ impl ProposalType {
             Self::CreateRegistrarServiceRequest(p) => Some(p),
             Self::OnboardRegistrar(p) => Some(p),
             Self::ProvisionInstrument(p) => Some(p),
+            Self::UpdateInstrumentConfiguration(p) => Some(p),
             Self::OnboardInstrumentIssuers(p) => Some(p),
             Self::OffboardInstrumentIssuers(p) => Some(p),
         }
@@ -1033,7 +1051,7 @@ mod tests {
     use common::types::AcsTransferDirection;
     use decman_lib::catalog::proposals::core::GenericVote;
     use decman_lib::catalog::proposals::credential::{
-        AcceptFreeCredential, OfferFreeCredential, OfferPaidCredential,
+        AcceptFreeCredential, AcceptPaidCredential, OfferFreeCredential, OfferPaidCredential,
     };
     use decman_lib::catalog::proposals::custody::{
         AcceptTransfer, SetupCcPreapproval, SetupTokenPreapproval, Transfer,
@@ -1045,11 +1063,12 @@ mod tests {
     use decman_lib::catalog::proposals::utility::{
         AcceptBurnRequest, AcceptMintRequest, Burn, CreateDelegatedBatchedMarkersProxy,
         CreateProviderConfiguration, CreateProviderServiceRequest, CreateRegistrarServiceRequest,
-        CreateUserServiceRequest, Mint, OffboardInstrumentIssuers, OnboardInstrumentIssuers,
-        OnboardRegistrar, ProvisionInstrument, ProvisionProviderService,
+        CreateTransferRule, CreateUserServiceRequest, Mint, OffboardInstrumentIssuers,
+        OnboardInstrumentIssuers, OnboardRegistrar, ProvisionInstrument, ProvisionProviderService,
         RequestDevNetFeaturedAppRight, SetEnableResultContracts, SetProviderAppRewardBeneficiaries,
-        SetupUtility,
+        SetupUtility, UpdateInstrumentConfiguration,
     };
+    use decman_lib::catalog::types::AppTransferContextInput;
     use serde_json::Value;
     use sqlx::SqlitePool;
 
@@ -1513,6 +1532,7 @@ mod tests {
                 additional_identifiers: vec![],
                 create_transfer_rule: true,
                 create_allocation_factory: true,
+                use_block_list: None,
             }),
             ProposalType::CreateProviderServiceRequest(CreateProviderServiceRequest {
                 operator: test_party("op").unwrap(),
@@ -1538,6 +1558,9 @@ mod tests {
             ProposalType::SetEnableResultContracts(SetEnableResultContracts {
                 registrar_service_cid: "00rsc".into(),
                 enable_result_contracts: None,
+            }),
+            ProposalType::CreateTransferRule(CreateTransferRule {
+                registrar_service_cid: "00rsc".into(),
             }),
             ProposalType::CreateDelegatedBatchedMarkersProxy(CreateDelegatedBatchedMarkersProxy {
                 operator: test_party("op").unwrap(),
@@ -1588,6 +1611,16 @@ mod tests {
                 user_service_cid: "00usc".into(),
                 credential_offer_cid: "00offer".into(),
             }),
+            ProposalType::AcceptPaidCredential(AcceptPaidCredential {
+                user_service_cid: "00usc".into(),
+                credential_offer_cid: "00offer".into(),
+                deposit_amulet_cids: vec!["00amulet".into()],
+                app_transfer_context: AppTransferContextInput {
+                    amulet_rules_cid: "00rules".into(),
+                    open_mining_round_cid: "00round".into(),
+                    featured_app_right_cid: None,
+                },
+            }),
             ProposalType::Burn(Burn {
                 allocation_factory_cid: "00alloc".into(),
                 instrument_id: instrument_id(),
@@ -1633,6 +1666,16 @@ mod tests {
                 initial_instrument_issuers: vec![],
                 credential_valid_from_micros: None,
                 credential_valid_until_micros: None,
+                use_block_list: None,
+            }),
+            ProposalType::UpdateInstrumentConfiguration(UpdateInstrumentConfiguration {
+                registrar_service_cid: "00rsc".into(),
+                instrument_configuration_cid: "00icc".into(),
+                instrument_id_text: "uuid-2".into(),
+                additional_identifiers: vec![],
+                issuer_requirements: vec![],
+                holder_requirements: vec![],
+                use_block_list: None,
             }),
             ProposalType::OnboardInstrumentIssuers(OnboardInstrumentIssuers {
                 instrument_configuration_cid: "00icc".into(),

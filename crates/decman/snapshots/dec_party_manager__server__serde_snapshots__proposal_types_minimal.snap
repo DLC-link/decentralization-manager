@@ -62,6 +62,19 @@ expression: minimal_option_fixtures()
     "deposit_initial_amount_usd": null
   },
   {
+    "type": "accept_paid_credential",
+    "user_service_cid": "00usc",
+    "credential_offer_cid": "00offer",
+    "deposit_amulet_cids": [
+      "00amulet1"
+    ],
+    "app_transfer_context": {
+      "amulet_rules_cid": "00rules",
+      "open_mining_round_cid": "00round",
+      "featured_app_right_cid": null
+    }
+  },
+  {
     "type": "accept_mint_request",
     "mint_request_cid": "00mr",
     "instrument_configuration_cid": "00icc",
@@ -77,6 +90,17 @@ expression: minimal_option_fixtures()
     "holder_requirements": [],
     "initial_instrument_issuers": [],
     "credential_valid_from_micros": null,
-    "credential_valid_until_micros": null
+    "credential_valid_until_micros": null,
+    "use_block_list": null
+  },
+  {
+    "type": "update_instrument_configuration",
+    "registrar_service_cid": "00rsc",
+    "instrument_configuration_cid": "00icc",
+    "instrument_id_text": "uuid-2",
+    "additional_identifiers": [],
+    "issuer_requirements": [],
+    "holder_requirements": [],
+    "use_block_list": null
   }
 ]

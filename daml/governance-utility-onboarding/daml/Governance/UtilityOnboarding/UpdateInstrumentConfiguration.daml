@@ -1,0 +1,95 @@
+-- Copyright (c) 2026 DLC-Link, Inc. and/or its affiliates. All rights reserved.
+-- SPDX-License-Identifier: Apache-2.0
+
+-- | The registrar decparty replaces a live InstrumentConfiguration.
+--
+-- The registry has no setter for these fields. Its only update path archives
+-- the configuration and creates a new one from a full payload, so this
+-- proposal carries every field. That create always clears the provider app
+-- reward beneficiaries, so the action sets them again in the same
+-- transaction.
+module Governance.UtilityOnboarding.UpdateInstrumentConfiguration where
+
+import DA.Foldable (forA_)
+
+import Splice.Util (require)
+import Utility.Credential.V0.Credential (PartyCredentialRequirement)
+import Utility.Registry.App.V0.Service.Registrar
+  ( RegistrarService
+  , RegistrarService_ArchiveAndCreateInstrumentConfiguration(..)
+  , RegistrarService_CreateInstrumentConfiguration(..) )
+import Utility.Registry.Holding.V0.Types (InstrumentIdentifier)
+import Utility.Registry.V0.Configuration.Instrument
+  ( InstrumentConfiguration
+  , InstrumentConfiguration_SetProviderAppRewardBeneficiaries(..) )
+
+import Governance.Action
+import Governance.UtilityOnboarding.Utils
+  (blockListSupported, blockListText, selfIssuedRequirementsHaveClaims)
+
+template UpdateInstrumentConfiguration
+  with
+    governanceParty : Party
+      -- ^ The registrar decparty. Must equal the RegistrarService's registrar.
+    proposer : Party
+    registrarServiceCid : ContractId RegistrarService
+    instrumentConfigurationCid : ContractId InstrumentConfiguration
+      -- ^ The configuration to replace. Execution archives it.
+    instrumentIdText : Text
+      -- ^ Must equal the configuration's default identifier id. Holdings
+      -- name the instrument by this id, so the action refuses to change it.
+    additionalIdentifiers : [InstrumentIdentifier]
+    issuerRequirements : [PartyCredentialRequirement]
+    holderRequirements : [PartyCredentialRequirement]
+    useBlockList : Optional Bool
+      -- ^ checkBlockList of the new configuration. Some True is refused
+      -- until #566 adds block list support to governance mint and burn.
+  where
+    signatory proposer
+    observer governanceParty
+    -- Same guards as ProvisionInstrument. A claimless self-issued requirement
+    -- can never be minted, so later onboard actions would fail against it.
+    ensure selfIssuedRequirementsHaveClaims governanceParty issuerRequirements
+        && blockListSupported useBlockList
+
+    interface instance GovernableAction for UpdateInstrumentConfiguration where
+      view = GovernableActionView with
+        governanceParty
+        proposer
+        actionLabel = "UpdateInstrumentConfiguration"
+        -- Voters see only this text, so it says that every field is replaced.
+        description = "Replace the configuration of instrument " <> instrumentIdText
+          <> blockListText useBlockList
+
+      executeImpl = do
+        -- The proposer's authority is in scope during execution, as in
+        -- ProvisionInstrument. Pin the service to the governance party.
+        registrarService <- fetch registrarServiceCid
+        require "UpdateInstrumentConfiguration: registrar service registrar does not match the governance party"
+          (registrarService.registrar == governanceParty)
+        current <- fetch instrumentConfigurationCid
+        require "UpdateInstrumentConfiguration: instrument id does not match the configuration"
+          (current.defaultIdentifier.id == instrumentIdText)
+        -- The ensure clause refuses Some True, so the replace would turn a
+        -- block list check off. Refuse until #566 lifts that guard.
+        require "UpdateInstrumentConfiguration: the configuration checks a block list, and this update would turn that check off"
+          (current.checkBlockList /= Some True)
+        -- Only the provider can set the beneficiaries again. Refuse rather
+        -- than clear them when the provider is another party.
+        forA_ current.providerAppRewardBeneficiaries \_ ->
+          require "UpdateInstrumentConfiguration: the configuration has provider app reward beneficiaries, and only its provider can set them again"
+            (current.provider == governanceParty)
+        result <- exercise registrarServiceCid RegistrarService_ArchiveAndCreateInstrumentConfiguration with
+          cid = instrumentConfigurationCid
+          payload = RegistrarService_CreateInstrumentConfiguration with
+            instrumentId = instrumentIdText
+            additionalIdentifiers
+            issuerRequirements
+            holderRequirements
+            useBlockList
+        -- The create sets providerAppRewardBeneficiaries to None, which gives
+        -- the provider's share of app rewards to the provider alone.
+        forA_ current.providerAppRewardBeneficiaries \_ ->
+          exercise result.createResult.instrumentConfigurationCid
+            InstrumentConfiguration_SetProviderAppRewardBeneficiaries with
+              providerAppRewardBeneficiaries = current.providerAppRewardBeneficiaries

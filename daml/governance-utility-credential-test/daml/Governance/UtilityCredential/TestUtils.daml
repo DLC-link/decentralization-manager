@@ -5,10 +5,21 @@
 module Governance.UtilityCredential.TestUtils where
 
 import DA.Set as Set hiding (filter)
-import DA.Time (minutes)
+import DA.Time (addRelTime, days, minutes)
 import Daml.Script
 
+import CredentialApp.Splice.Amulet (Amulet(..))
+import CredentialApp.Splice.AmuletConfig (AmuletConfig(..), PackageConfig(..), TransferConfig(..), USD)
+import CredentialApp.Splice.AmuletRules (AmuletRules(..), AppTransferContext(..))
+import CredentialApp.Splice.DecentralizedSynchronizer
+  (AmuletDecentralizedSynchronizerConfig(..), BaseRateTrafficLimits(..), SynchronizerFeesConfig(..))
+import CredentialApp.Splice.Fees (ExpiringAmount(..), FixedFee(..), RatePerRound(..), SteppedRate(..))
+import CredentialApp.Splice.Issuance (IssuanceConfig(..))
+import CredentialApp.Splice.Round (OpenMiningRound(..))
+import CredentialApp.Splice.Schedule (Schedule(..))
+import CredentialApp.Splice.Types (Round(..))
 import Utility.Credential.App.V0.Service.User (UserService(..))
+import Utility.Credential.App.V0.Types (BillingParams(..), RatePerDay(..))
 import Utility.Credential.V0.Credential (Claim(..))
 
 import Governance.Action (GovernableAction)
@@ -78,6 +89,120 @@ testClaim subject = Claim with
   subject = partyToText subject
   property = "hasTestRole"
   value = "Member"
+
+-- | Billing parameters used by the paid-credential tests. With these the
+-- holder locks 30 USD worth of Amulet as its deposit.
+testBillingParams : BillingParams
+testBillingParams = BillingParams with
+  feePerDayUsd = RatePerDay with rate = 1.0
+  billingPeriodMinutes = 60
+  depositTargetAmountUsd = 30.0
+  holderActivityWeight = None
+
+-- | Amulet price of the test open mining round, in USD per Amulet.
+testAmuletPrice : Decimal
+testAmuletPrice = 0.5
+
+-- | Create the DSO's AmuletRules and an open mining round, and return them
+-- as the context a paid credential accept locks its deposit with.
+createTestAppTransferContext : CredentialTestParties -> Script AppTransferContext
+createTestAppTransferContext parties = do
+  now <- getTime
+  amuletRules <- submit parties.dso $ createCmd AmuletRules with
+    dso = parties.dso
+    configSchedule = Schedule with
+      initialValue = testAmuletConfig
+      futureValues = []
+    isDevNet = False
+    contractStateSchemaVersion = None
+  openMiningRound <- submit parties.dso $ createCmd OpenMiningRound with
+    dso = parties.dso
+    round = testRound
+    amuletPrice = testAmuletPrice
+    opensAt = addRelTime now (minutes (-1))
+    targetClosesAt = addRelTime now (minutes 20)
+    issuingFor = days 0
+    transferConfigUsd = testTransferConfig
+    issuanceConfig = testIssuanceConfig
+    tickDuration = minutes 10
+    trafficPrice = None
+    rewardConfig = None
+  pure AppTransferContext with
+    amuletRules
+    openMiningRound
+    featuredAppRight = None
+
+-- | Create an unlocked Amulet owned by `owner`. It carries no holding fee,
+-- so a transfer moves its exact amount.
+createTestAmulet : CredentialTestParties -> Party -> Decimal -> Script (ContractId Amulet)
+createTestAmulet parties owner initialAmount =
+  submit (actAs parties.dso <> actAs owner) $ createCmd Amulet with
+    dso = parties.dso
+    owner
+    amount = ExpiringAmount with
+      initialAmount
+      createdAt = testRound
+      ratePerRound = RatePerRound with rate = 0.0
+
+testRound : Round
+testRound = Round with number = 1
+
+-- | Minimal AmuletConfig accepted by `validAmuletConfig`. Values follow the
+-- Splice defaults; `featuredAppActivityMarkerAmount` must equal
+-- `extraFeaturedAppRewardAmount`.
+testAmuletConfig : AmuletConfig USD
+testAmuletConfig = AmuletConfig with
+  transferConfig = testTransferConfig
+  issuanceCurve = Schedule with
+    initialValue = testIssuanceConfig
+    futureValues = []
+  decentralizedSynchronizer = AmuletDecentralizedSynchronizerConfig with
+    requiredSynchronizers = Set.fromList ["global-synchronizer"]
+    activeSynchronizer = "global-synchronizer"
+    fees = SynchronizerFeesConfig with
+      baseRateTrafficLimits = BaseRateTrafficLimits with
+        burstAmount = 400000
+        burstWindow = minutes 20
+      extraTrafficPrice = 1.0
+      readVsWriteScalingFactor = 4
+      minTopupAmount = 200000
+  tickDuration = minutes 10
+  packageConfig = PackageConfig with
+    amulet = "0.1.22"
+    amuletNameService = "0.1.22"
+    dsoGovernance = "0.1.22"
+    validatorLifecycle = "0.1.22"
+    wallet = "0.1.22"
+    walletPayments = "0.1.22"
+  transferPreapprovalFee = None
+  featuredAppActivityMarkerAmount = Some 1.0
+  optDevelopmentFundManager = None
+  externalPartyConfigStateTickDuration = None
+  rewardConfig = None
+  transferPreapprovalBaseDuration = None
+
+testTransferConfig : TransferConfig USD
+testTransferConfig = TransferConfig with
+  createFee = FixedFee with fee = 0.0
+  holdingFee = RatePerRound with rate = 0.0000190259
+  transferFee = SteppedRate with initialRate = 0.0; steps = []
+  lockHolderFee = FixedFee with fee = 0.0
+  extraFeaturedAppRewardAmount = 1.0
+  maxNumInputs = 100
+  maxNumOutputs = 100
+  maxNumLockHolders = 50
+  tokenStandardMaxTTL = None
+
+testIssuanceConfig : IssuanceConfig
+testIssuanceConfig = IssuanceConfig with
+  amuletToIssuePerYear = 40000000000.0
+  validatorRewardPercentage = 0.05
+  appRewardPercentage = 0.15
+  validatorRewardCap = 0.2
+  featuredAppRewardCap = 100.0
+  unfeaturedAppRewardCap = 0.6
+  optValidatorFaucetCap = Some 2.85
+  optDevelopmentFundPercentage = None
 
 -- | Collect confirmations from a list of members for an interface action.
 submitConfirmations

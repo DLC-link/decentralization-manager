@@ -37,4 +37,6 @@ template RequestDevNetFeaturedAppRight
       executeImpl = do
         _ <- exercise amuletRulesCid AmuletRules_DevNet_FeatureApp with
           provider = governanceParty
+          -- None grants the default activity weight.
+          activityWeight = None
         pure ()

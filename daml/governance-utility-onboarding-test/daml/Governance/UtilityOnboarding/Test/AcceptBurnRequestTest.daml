@@ -11,7 +11,7 @@ import Splice.Api.Token.HoldingV1 (InstrumentId(..))
 import Splice.Api.Token.MetadataV1
   (AnyValue(..), ChoiceContext(..), ExtraArgs(..), Metadata(..))
 
-import Utility.Registry.App.V0.Model.Burn (Burn(..), BurnRequest, ExecutedBurn)
+import Utility.Registry.App.V0.Model.Burn (Burn(..), BurnRequest)
 import Utility.Registry.App.V0.Model.Mint (Mint(..))
 import Utility.Registry.App.V0.Service.AllocationFactory
   (AllocationFactory_RequestBurn(..), AllocationFactory_RequestMint(..))
@@ -142,13 +142,15 @@ when_accept_burn_request_executed f = do
     [f.parties.member1, f.parties.member2] f.parties.member1
   pure ()
 
+-- Registry-app 0.9.0 and later create no ExecutedBurn receipt, so the
+-- consumed request stands in for it.
 then_holding_burned : Fixture -> () -> Script Failures
 then_holding_burned f _ = do
   holdings <- query @Holding f.holder
-  executed <- query @ExecutedBurn f.parties.governanceParty
+  requests <- query @BurnRequest f.parties.governanceParty
   pure $
     shouldBe "remaining holdings for holder" 0 (length holdings) <>
-    shouldBe "ExecutedBurn count" 1 (length executed)
+    shouldBe "open BurnRequest count" 0 (length requests)
 
 test_when_accept_burn_request_then_holding_burned = script do
   run Test with

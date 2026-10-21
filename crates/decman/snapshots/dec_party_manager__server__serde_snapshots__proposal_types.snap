@@ -57,7 +57,8 @@ expression: all_proposal_fixtures()
       }
     ],
     "create_transfer_rule": true,
-    "create_allocation_factory": true
+    "create_allocation_factory": true,
+    "use_block_list": true
   },
   {
     "type": "create_provider_service_request",
@@ -106,6 +107,10 @@ expression: all_proposal_fixtures()
     "type": "set_enable_result_contracts",
     "registrar_service_cid": "00rsc",
     "enable_result_contracts": true
+  },
+  {
+    "type": "create_transfer_rule",
+    "registrar_service_cid": "00rsc"
   },
   {
     "type": "create_delegated_batched_markers_proxy",
@@ -178,6 +183,20 @@ expression: all_proposal_fixtures()
     "type": "accept_free_credential",
     "user_service_cid": "00usc",
     "credential_offer_cid": "00offer"
+  },
+  {
+    "type": "accept_paid_credential",
+    "user_service_cid": "00usc",
+    "credential_offer_cid": "00offer",
+    "deposit_amulet_cids": [
+      "00amulet1",
+      "00amulet2"
+    ],
+    "app_transfer_context": {
+      "amulet_rules_cid": "00rules",
+      "open_mining_round_cid": "00round",
+      "featured_app_right_cid": "00far"
+    }
   },
   {
     "type": "burn",
@@ -275,7 +294,44 @@ expression: all_proposal_fixtures()
       "iss1::1220c4010d6883f367c7f45d55b2449501620130f9b21e96379f17dea455ac7a5892"
     ],
     "credential_valid_from_micros": null,
-    "credential_valid_until_micros": null
+    "credential_valid_until_micros": null,
+    "use_block_list": true
+  },
+  {
+    "type": "update_instrument_configuration",
+    "registrar_service_cid": "00rsc",
+    "instrument_configuration_cid": "00icc",
+    "instrument_id_text": "uuid-2",
+    "additional_identifiers": [
+      {
+        "source": "src::1220c4010d6883f367c7f45d55b2449501620130f9b21e96379f17dea455ac7a5892",
+        "id": "ident",
+        "scheme": "scheme"
+      }
+    ],
+    "issuer_requirements": [
+      {
+        "issuer": "gov::1220c4010d6883f367c7f45d55b2449501620130f9b21e96379f17dea455ac7a5892",
+        "required_claims": [
+          {
+            "property": "role",
+            "value": "issuer"
+          }
+        ]
+      }
+    ],
+    "holder_requirements": [
+      {
+        "issuer": "gov::1220c4010d6883f367c7f45d55b2449501620130f9b21e96379f17dea455ac7a5892",
+        "required_claims": [
+          {
+            "property": "role",
+            "value": "issuer"
+          }
+        ]
+      }
+    ],
+    "use_block_list": true
   },
   {
     "type": "onboard_instrument_issuers",

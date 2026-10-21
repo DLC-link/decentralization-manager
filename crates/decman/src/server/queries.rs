@@ -21,6 +21,9 @@ use canton_proto_rs::com::{
         ListPackagesRequest, package_service_client::PackageServiceClient,
     },
 };
+use common::api::{
+    InstrumentConfigurationFields, InstrumentIdentifier, PartyCredentialRequirement, RequiredClaim,
+};
 use decman_lib::{
     catalog::interpret::{
         self, DomainAction, ParsedConfirmation, ParsedDomainConfirmation, ProposalInfo,
@@ -1887,7 +1890,82 @@ fn extract_instrument_info(created: &CreatedEvent) -> Option<InstrumentInfo> {
         contract_id: created.contract_id.clone(),
         instrument_admin,
         instrument_id,
+        configuration: extract_instrument_configuration_fields(record),
     })
+}
+
+/// Read the fields an update replaces. `None` if any of them has an
+/// unexpected shape, so the form never starts from a partial read. A
+/// configuration created before checkBlockList existed has no such field,
+/// which reads as unset.
+fn extract_instrument_configuration_fields(
+    record: &Record,
+) -> Option<InstrumentConfigurationFields> {
+    Some(InstrumentConfigurationFields {
+        additional_identifiers: list_field_records(record, "additionalIdentifiers")?
+            .into_iter()
+            .map(|identifier| {
+                Some(InstrumentIdentifier {
+                    source: field_party(identifier, "source")?.parse().ok()?,
+                    id: field_text(identifier, "id")?,
+                    scheme: field_text(identifier, "scheme")?,
+                })
+            })
+            .collect::<Option<_>>()?,
+        issuer_requirements: credential_requirements(record, "issuerRequirements")?,
+        holder_requirements: credential_requirements(record, "holderRequirements")?,
+        check_block_list: match record_field(record, "checkBlockList") {
+            Some(value::Sum::Optional(opt)) => match opt.value.as_deref() {
+                None => None,
+                Some(inner) => match inner.sum {
+                    Some(value::Sum::Bool(b)) => Some(b),
+                    _ => return None,
+                },
+            },
+            None => None,
+            _ => return None,
+        },
+    })
+}
+
+/// The record elements of a list field. `None` if the field is not a list
+/// of records.
+fn list_field_records<'a>(record: &'a Record, label: &str) -> Option<Vec<&'a Record>> {
+    let Some(value::Sum::List(list)) = record_field(record, label) else {
+        return None;
+    };
+    list.elements
+        .iter()
+        .map(|element| match &element.sum {
+            Some(value::Sum::Record(r)) => Some(r),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Read a `[PartyCredentialRequirement]` field. Each required claim is a
+/// Daml `(Text, Text)` tuple, whose fields are `_1` and `_2`.
+fn credential_requirements(
+    record: &Record,
+    label: &str,
+) -> Option<Vec<PartyCredentialRequirement>> {
+    list_field_records(record, label)?
+        .into_iter()
+        .map(|requirement| {
+            Some(PartyCredentialRequirement {
+                issuer: field_party(requirement, "issuer")?.parse().ok()?,
+                required_claims: list_field_records(requirement, "requiredClaims")?
+                    .into_iter()
+                    .map(|claim| {
+                        Some(RequiredClaim {
+                            property: field_text(claim, "_1")?,
+                            value: field_text(claim, "_2")?,
+                        })
+                    })
+                    .collect::<Option<_>>()?,
+            })
+        })
+        .collect()
 }
 
 // ============================================================================
@@ -3371,6 +3449,141 @@ mod tests {
             record.fields.retain(|f| f.label != "provider");
         }
         assert!(extract_provider_configuration_info(&event).is_none());
+    }
+
+    /// An InstrumentConfiguration created event in the shape the ledger
+    /// sends: one additional identifier, one issuer requirement with one
+    /// claim, no holder requirements, and the given block list flag.
+    fn instrument_configuration_event(check_block_list: Value) -> CreatedEvent {
+        let registrar = format!("registrar::{SR_FP}");
+        let identifier = |id: &str, scheme: &str| {
+            record_value(vec![
+                field("source", party_value(&registrar)),
+                field("id", text_value(id)),
+                field("scheme", text_value(scheme)),
+            ])
+        };
+        let record = Record {
+            record_id: None,
+            fields: vec![
+                field("operator", party_value(&format!("operator::{SR_FP}"))),
+                field("provider", party_value(&format!("provider::{SR_FP}"))),
+                field("registrar", party_value(&registrar)),
+                field(
+                    "defaultIdentifier",
+                    identifier("TOKEN", "RegistrarInternalScheme"),
+                ),
+                field(
+                    "additionalIdentifiers",
+                    list_value(vec![identifier("TICK", "Ticker")]),
+                ),
+                field(
+                    "issuerRequirements",
+                    list_value(vec![record_value(vec![
+                        field("issuer", party_value(&registrar)),
+                        field(
+                            "requiredClaims",
+                            list_value(vec![record_value(vec![
+                                field("_1", text_value("role")),
+                                field("_2", text_value("instrument-issuer")),
+                            ])]),
+                        ),
+                    ])]),
+                ),
+                field("holderRequirements", list_value(vec![])),
+                field("providerAppRewardBeneficiaries", optional_value(None)),
+                field("checkBlockList", check_block_list),
+            ],
+        };
+        CreatedEvent {
+            offset: 0,
+            node_id: 0,
+            contract_id: "icc-cid-1".to_string(),
+            template_id: None,
+            contract_key: None,
+            create_arguments: Some(record),
+            created_event_blob: vec![],
+            interface_views: vec![],
+            witness_parties: vec![],
+            signatories: vec![],
+            observers: vec![],
+            created_at: None,
+            package_name: String::new(),
+            representative_package_id: String::new(),
+            acs_delta: false,
+            contract_key_hash: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn extract_instrument_info_reads_the_replaceable_fields() {
+        let registrar: CantonId = format!("registrar::{SR_FP}").parse().expect("party id");
+        for (flag, expected) in [
+            (optional_value(None), None),
+            (optional_value(Some(bool_value(true))), Some(true)),
+            (optional_value(Some(bool_value(false))), Some(false)),
+        ] {
+            let info = extract_instrument_info(&instrument_configuration_event(flag))
+                .expect("configuration should yield info");
+            assert_eq!(info.instrument_id, "TOKEN");
+            assert_eq!(
+                info.configuration,
+                Some(InstrumentConfigurationFields {
+                    additional_identifiers: vec![InstrumentIdentifier {
+                        source: registrar.clone(),
+                        id: "TICK".to_string(),
+                        scheme: "Ticker".to_string(),
+                    }],
+                    issuer_requirements: vec![PartyCredentialRequirement {
+                        issuer: registrar.clone(),
+                        required_claims: vec![RequiredClaim {
+                            property: "role".to_string(),
+                            value: "instrument-issuer".to_string(),
+                        }],
+                    }],
+                    holder_requirements: vec![],
+                    check_block_list: expected,
+                })
+            );
+        }
+    }
+
+    /// A configuration from before registry-v0 0.7.0 has no checkBlockList,
+    /// which reads as unset.
+    #[test]
+    fn extract_instrument_info_reads_a_missing_block_list_flag_as_unset() {
+        let mut without_flag = instrument_configuration_event(optional_value(None));
+        if let Some(record) = without_flag.create_arguments.as_mut() {
+            record.fields.retain(|f| f.label != "checkBlockList");
+        }
+        let info = extract_instrument_info(&without_flag).expect("instrument lists");
+        let fields = info.configuration.expect("fields read");
+        assert_eq!(fields.check_block_list, None);
+        assert_eq!(fields.issuer_requirements.len(), 1);
+    }
+
+    /// A claim of the wrong shape cannot be read, and neither can a flag that
+    /// is not an Optional Bool. The form then gets no partial values, and the
+    /// instrument still lists for mint and burn.
+    #[test]
+    fn extract_instrument_info_leaves_out_fields_it_cannot_read() {
+        let bad_flag = instrument_configuration_event(bool_value(true));
+        let info = extract_instrument_info(&bad_flag).expect("instrument still lists");
+        assert_eq!(info.configuration, None);
+
+        let mut bad_claim = instrument_configuration_event(optional_value(None));
+        if let Some(record) = bad_claim.create_arguments.as_mut() {
+            for f in record.fields.iter_mut() {
+                if f.label == "issuerRequirements" {
+                    f.value = Some(list_value(vec![record_value(vec![
+                        field("issuer", party_value(&format!("registrar::{SR_FP}"))),
+                        field("requiredClaims", list_value(vec![text_value("role")])),
+                    ])]));
+                }
+            }
+        }
+        let info = extract_instrument_info(&bad_claim).expect("instrument still lists");
+        assert_eq!(info.configuration, None);
     }
 
     // ====================================================================

@@ -3,8 +3,8 @@
 
 -- | These tests cover ProvisionInstrument: the happy path, the claimless,
 -- duplicate-issuer and nonce ensure guards, the proposer-owned-service
--- check, the credential id layout with and without a nonce, and the
--- credential validity window.
+-- check, the credential id layout with and without a nonce, the
+-- credential validity window and the block list flag.
 module Governance.UtilityOnboarding.Test.ProvisionInstrumentTest where
 
 import DA.Assert ((===))
@@ -23,7 +23,7 @@ import Governance.ExecutionResult ()
 
 import Governance.UtilityOnboarding.DualDecpartyTestUtils
 import Governance.UtilityOnboarding.ProvisionInstrument
-import Governance.UtilityOnboarding.Utils (credentialValidityText, mkCredentialId)
+import Governance.UtilityOnboarding.Utils (blockListText, credentialValidityText, mkCredentialId)
 
 import TestHarness
 
@@ -59,6 +59,7 @@ provisionProposalWithNonce fx credentialIdNonce issuerRequirements initialInstru
     credentialIdNonce
     credentialValidFrom = None
     credentialValidUntil = None
+    useBlockList = None
   pure (toInterfaceContractId proposalCid)
 
 -- * Happy path: configuration created, initial issuer credentialed.
@@ -178,6 +179,7 @@ when_provision_claimless_requirement fx =
     credentialIdNonce = None
     credentialValidFrom = None
     credentialValidUntil = None
+    useBlockList = None
 
 then_nothing_provisioned : Fixture -> () -> Script Failures
 then_nothing_provisioned fx _ = do
@@ -236,6 +238,7 @@ when_provision_claimless_holder_requirement fx = do
     credentialIdNonce = None
     credentialValidFrom = None
     credentialValidUntil = None
+    useBlockList = None
   let proposalInterfaceCid : ContractId GovernableAction = toInterfaceContractId proposalCid
   _ <- confirmAndExecuteAs fx.f.parties fx.f.registrarStack proposalInterfaceCid
   pure ()
@@ -278,6 +281,7 @@ when_provision_against_proposer_owned_service fx = do
     credentialIdNonce = None
     credentialValidFrom = None
     credentialValidUntil = None
+    useBlockList = None
   confirmThenExecuteMustFail fx.f.parties fx.f.registrarStack (toInterfaceContractId proposalCid)
 
 then_no_credentials_minted : Fixture -> () -> Script Failures
@@ -353,6 +357,7 @@ when_provision_duplicate_initial_issuers fx =
     credentialIdNonce = None
     credentialValidFrom = None
     credentialValidUntil = None
+    useBlockList = None
 
 test_when_duplicate_initial_issuers_then_create_fails = script do
   run Test with
@@ -456,6 +461,7 @@ proposeWithNonceMustFail fx credentialIdNonce =
     credentialIdNonce
     credentialValidFrom = None
     credentialValidUntil = None
+    useBlockList = None
 
 when_propose_with_empty_nonce : Fixture -> Script ()
 when_propose_with_empty_nonce fx = proposeWithNonceMustFail fx (Some "")
@@ -494,6 +500,7 @@ provisionProposalWithValidity fx credentialValidFrom credentialValidUntil = do
     credentialIdNonce = provisionInstrumentNonce
     credentialValidFrom
     credentialValidUntil
+    useBlockList = None
   pure (toInterfaceContractId proposalCid)
 
 -- | Assert issuer1 holds one credential with the given window.
@@ -572,6 +579,7 @@ proposeWithValidityMustFail fx credentialValidFrom credentialValidUntil =
     credentialIdNonce = provisionInstrumentNonce
     credentialValidFrom
     credentialValidUntil
+    useBlockList = None
 
 when_propose_with_empty_window : Fixture -> Script ()
 when_propose_with_empty_window fx = do
@@ -651,6 +659,7 @@ provisionWithExpiryCapturingDescription fx initialInstrumentIssuers = do
     credentialIdNonce = provisionInstrumentNonce
     credentialValidFrom = None
     credentialValidUntil = Some (addRelTime now (days 30))
+    useBlockList = None
   result <- confirmAndExecuteAs fx.f.parties fx.f.registrarStack (toInterfaceContractId proposalCid)
   Some executionResult <-
     queryContractId fx.f.parties.registrarGov result.executionResultCid
@@ -692,3 +701,77 @@ test_when_no_issuers_then_description_has_no_window = script do
     given = given_onboarded_registrar
     when = when_provision_no_issuers_with_expiry_capturing_description
     then_ = then_description_has_no_window
+
+-- * useBlockList becomes the configuration's checkBlockList. None is what
+-- earlier package versions passed, and it leaves the check off. Voters see
+-- only the description, so it states a set flag. Some True is refused at
+-- creation, before any vote, until #566 adds block list support to
+-- governance mint and burn.
+
+provisionWithBlockListCapturingDescription : Optional Bool -> Fixture -> Script Text
+provisionWithBlockListCapturingDescription useBlockList fx = do
+  proposalCid <- submit fx.f.registrarStack.member1 $ createCmd ProvisionInstrument with
+    governanceParty = fx.f.parties.registrarGov
+    proposer = fx.f.registrarStack.member1
+    registrarServiceCid = fx.onboarded.registrarServiceCid
+    instrumentIdText = "LAUNCH-TOKEN"
+    additionalIdentifiers = []
+    issuerRequirements = [defaultIssuerRequirement fx.f.parties]
+    holderRequirements = []
+    initialInstrumentIssuers = []
+    credentialIdNonce = provisionInstrumentNonce
+    credentialValidFrom = None
+    credentialValidUntil = None
+    useBlockList
+  result <- confirmAndExecuteAs fx.f.parties fx.f.registrarStack (toInterfaceContractId proposalCid)
+  Some executionResult <-
+    queryContractId fx.f.parties.registrarGov result.executionResultCid
+  pure executionResult.description
+
+then_block_list_flag_is : Optional Bool -> Text -> Fixture -> Text -> Script Failures
+then_block_list_flag_is expectedFlag expectedDescription fx description = do
+  configurations <- query @InstrumentConfiguration fx.f.parties.registrarGov
+  pure $
+    shouldBe "checkBlockList" [expectedFlag] (map ((.checkBlockList) . snd) configurations) <>
+    shouldBe "executed description" expectedDescription description
+
+test_when_block_list_unset_then_check_off = script do
+  run Test with
+    given = given_onboarded_registrar
+    when = provisionWithBlockListCapturingDescription None
+    then_ = then_block_list_flag_is None
+      "Provision instrument LAUNCH-TOKEN, no initial issuers"
+
+test_when_block_list_off_then_check_off = script do
+  run Test with
+    given = given_onboarded_registrar
+    when = provisionWithBlockListCapturingDescription (Some False)
+    then_ = then_block_list_flag_is (Some False)
+      "Provision instrument LAUNCH-TOKEN, no initial issuers; block list off"
+
+when_propose_with_block_list_on : Fixture -> Script ()
+when_propose_with_block_list_on fx =
+  submitMustFail fx.f.registrarStack.member1 $ createCmd ProvisionInstrument with
+    governanceParty = fx.f.parties.registrarGov
+    proposer = fx.f.registrarStack.member1
+    registrarServiceCid = fx.onboarded.registrarServiceCid
+    instrumentIdText = "LAUNCH-TOKEN"
+    additionalIdentifiers = []
+    issuerRequirements = [defaultIssuerRequirement fx.f.parties]
+    holderRequirements = []
+    initialInstrumentIssuers = []
+    credentialIdNonce = provisionInstrumentNonce
+    credentialValidFrom = None
+    credentialValidUntil = None
+    useBlockList = Some True
+
+test_when_block_list_on_then_proposal_refused = script do
+  run Test with
+    given = given_onboarded_registrar
+    when = when_propose_with_block_list_on
+    then_ = then_nothing_provisioned
+
+test_block_list_text_states_the_flag = script do
+  blockListText None === ""
+  blockListText (Some True) === "; block list on"
+  blockListText (Some False) === "; block list off"

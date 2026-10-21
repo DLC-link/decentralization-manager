@@ -35,7 +35,7 @@ process in [SECURITY.md](SECURITY.md).
 - **Rust** — recent stable toolchain (the crate uses edition 2024, Rust ≥ 1.85).
 - **Node.js** — `^20.19.0 || >=22.12.0` (the React frontend is built automatically by `build.rs`).
 - **Docker** — required to run the full integration test (boots a Splice localnet).
-- **Daml** — the `dpm` CLI (Daml SDK `3.4.11`); **Java 17+** is required for Daml tests.
+- **Daml** — the `dpm` CLI with Daml SDKs `3.4.11` and `3.5.1` (the utility onboarding and credential plugins and their test packages build on `3.5.1`); **Java 17+** is required for Daml tests.
 - Access to the Canton ledger/admin APIs of a participant node for running the app against a live network (optional for most code changes).
 
 > **Note:** some Rust dependencies (`canton-common`, `canton-proto-rs`,
