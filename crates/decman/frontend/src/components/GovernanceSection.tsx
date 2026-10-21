@@ -129,6 +129,17 @@ const holdingAvailable = (h: Holding): number =>
 /// Mirrors the backend default; overridable per-transfer in the form.
 const DEFAULT_TRANSFER_EXPIRY_HOURS = 24;
 
+/** One requirement-editor row. `claims` holds a prefilled row's exact claims. */
+type RequirementRow = {
+  issuer: string;
+  claimsText: string;
+  claims?: { property: string; value: string }[];
+};
+
+/** The editor's "property,value" text for a list of required claims. */
+const requiredClaimsText = (claims: { property: string; value: string }[]) =>
+  claims.map((claim) => `${claim.property},${claim.value}`).join("\n");
+
 export const GovernanceSection = ({
   partyId,
   rulesContractId: initialRulesContractId,
@@ -268,13 +279,13 @@ export const GovernanceSection = ({
   // Requirement-editor rows: an issuer party id plus its required claims as
   // "property,value" lines. Parsed into PartyCredentialRequirement on submit.
   const [proposalRegistrarRequirements, setProposalRegistrarRequirements] = useState<
-    { issuer: string; claimsText: string }[]
+    RequirementRow[]
   >([]);
   const [proposalHolderRequirements, setProposalHolderRequirements] = useState<
-    { issuer: string; claimsText: string }[]
+    RequirementRow[]
   >([]);
   const [proposalIssuerRequirements, setProposalIssuerRequirements] = useState<
-    { issuer: string; claimsText: string }[]
+    RequirementRow[]
   >([]);
   // Party-list textareas, one party id per line.
   const [proposalInitialInstrumentIssuersText, setProposalInitialInstrumentIssuersText] = useState("");
@@ -748,12 +759,11 @@ export const GovernanceSection = ({
     setProposalInstrumentConfigurationCid(cid);
     const instrument = ownInstruments.find((inst) => inst.contract_id === cid);
     const current = instrument?.configuration;
-    const toRows = (requirements: PartyCredentialRequirement[]) =>
+    const toRows = (requirements: PartyCredentialRequirement[]): RequirementRow[] =>
       requirements.map((requirement) => ({
         issuer: requirement.issuer,
-        claimsText: requirement.required_claims
-          .map((claim) => `${claim.property},${claim.value}`)
-          .join("\n"),
+        claimsText: requiredClaimsText(requirement.required_claims),
+        claims: requirement.required_claims,
       }));
     setProposalInstrumentIdText(instrument?.instrument_id ?? "");
     setProposalAdditionalIdentifiers(current?.additional_identifiers ?? []);
@@ -764,7 +774,7 @@ export const GovernanceSection = ({
   const configurationToUpdateUnreadable =
     proposalInstrumentConfigurationCid !== "" &&
     ownInstruments.find((inst) => inst.contract_id === proposalInstrumentConfigurationCid)
-      ?.configuration === undefined;
+      ?.configuration == null;
 
   // Candidate credentials for one offboard row: self-issued by this governance
   // party, carrying claims that all name the row's party, and tagged as an
@@ -945,8 +955,8 @@ export const GovernanceSection = ({
   const renderRequirementRows = (
     label: string,
     help: string,
-    rows: { issuer: string; claimsText: string }[],
-    setRows: (rows: { issuer: string; claimsText: string }[]) => void,
+    rows: RequirementRow[],
+    setRows: (rows: RequirementRow[]) => void,
   ) => (
     <>
       <Typography variant="caption" color="text.secondary" sx={{ display: "block" }}>
@@ -1618,9 +1628,11 @@ export const GovernanceSection = ({
   };
 
   // Turn requirement-editor rows into PartyCredentialRequirement payloads.
-  // `label` names the list in error messages.
+  // `label` names the list in error messages. A prefilled row whose text is
+  // unchanged sends its original claims, because the text form cannot carry
+  // a comma, a newline or edge whitespace inside a value.
   const buildRequirements = (
-    rows: { issuer: string; claimsText: string }[],
+    rows: RequirementRow[],
     label: string,
   ): PartyCredentialRequirement[] =>
     rows.map((row, idx) => {
@@ -1630,7 +1642,10 @@ export const GovernanceSection = ({
       }
       return {
         issuer,
-        required_claims: parseRequiredClaimsText(row.claimsText),
+        required_claims:
+          row.claims && row.claimsText === requiredClaimsText(row.claims)
+            ? row.claims
+            : parseRequiredClaimsText(row.claimsText),
       };
     });
 

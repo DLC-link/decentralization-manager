@@ -144,4 +144,36 @@ describe("update instrument configuration", { timeout: 20_000 }, () => {
     expect(screen.getByLabelText(/^Instrument ID/)).toHaveProperty("value", "TOKEN");
     expect(screen.queryByLabelText("Identifier 1 ID")).toBeNull();
   });
+
+  // The backend sends a failed configuration read as JSON null.
+  it("warns when the configuration read failed and came back null", async () => {
+    mockLedger({ ...readable, configuration: null });
+    await openForm();
+
+    expect(screen.getByText(/could not read this configuration/)).toBeTruthy();
+    expect(screen.queryByLabelText("Identifier 1 ID")).toBeNull();
+  });
+
+  // The editor's "property,value" lines cannot carry these values, so an
+  // unchanged row must send its original claims rather than the parsed text.
+  it("posts claims with commas, newlines and edge spaces unchanged", async () => {
+    const awkward = [
+      { property: "region", value: "EU,US" },
+      { property: "status", value: " approved " },
+      { property: "note", value: "line one\nline two" },
+    ];
+    mockLedger({
+      ...readable,
+      configuration: {
+        ...readable.configuration,
+        holder_requirements: [{ issuer, required_claims: awkward }],
+      },
+    });
+    await openForm();
+    submit();
+
+    const proposal = await postedProposal();
+    expect(proposal.holder_requirements).toEqual([{ issuer, required_claims: awkward }]);
+    expect(proposal.issuer_requirements).toEqual(readable.configuration.issuer_requirements);
+  });
 });
