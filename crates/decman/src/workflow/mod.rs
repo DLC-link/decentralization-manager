@@ -219,6 +219,7 @@ pub async fn run_workflow_with_handler(
         outcome = &mut workflow_handle => outcome,
         reason = active.wait_until_stranded() => {
             workflow_handle.abort();
+            utils::forget_synchronizer_id_on_unknown_store(&reason.to_string());
             tracing::error!("Workflow failed: {reason}");
             anyhow::bail!("{reason}");
         }
@@ -229,6 +230,8 @@ pub async fn run_workflow_with_handler(
             Ok(())
         }
         Ok(Err(e)) => {
+            // A retried run then resolves the successor synchronizer.
+            utils::forget_synchronizer_id_on_unknown_store(&format!("{e:#}"));
             tracing::error!("Workflow failed: {e:#}");
             anyhow::bail!("Coordinator workflow failed: {e:#}");
         }
@@ -1257,6 +1260,8 @@ async fn retry_peer_step(
     reason: String,
 ) -> Result {
     *consecutive_failures += 1;
+    // The retry below then resolves the successor synchronizer after an LSU.
+    utils::forget_synchronizer_id_on_unknown_store(&reason);
     tracing::warn!(
         ?command,
         attempt = *consecutive_failures,

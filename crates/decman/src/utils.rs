@@ -1,9 +1,13 @@
-use std::path::Path;
+use std::{
+    path::Path,
+    sync::Mutex,
+    time::{Duration, Instant},
+};
 
 use bytes::{Buf, BufMut, BytesMut};
 use futures::StreamExt;
 use prost::Message;
-use tokio::{fs, sync::OnceCell};
+use tokio::fs;
 
 use anyhow::Context;
 use canton_proto_rs::com::{
@@ -307,28 +311,85 @@ pub fn compute_fingerprint(key: &SigningPublicKey) -> Fingerprint {
     fingerprint
 }
 
-/// Process-wide cache for the resolved physical synchronizer ID.
+/// How long a resolved physical synchronizer ID is trusted.
 ///
-/// The ID is stable for the lifetime of a DecMan process (it only changes if the
-/// node is reprovisioned against a different synchronizer, which requires a
-/// restart). Resolving it costs a fresh gRPC channel + a one-shot
-/// `get_synchronizer_id` call against the Canton admin API — observed at
-/// ~4.3s median over a kubectl-tunneled devnet (see #149). Caching it
-/// eliminates that cost from every call site that previously resolved it
-/// per request.
-static SYNCHRONIZER_ID_CACHE: OnceCell<String> = OnceCell::const_new();
+/// A logical synchronizer upgrade (LSU) moves the participant to a successor
+/// physical synchronizer while DecMan keeps running, so the ID can change at
+/// any time (#567). Resolving it costs a fresh gRPC channel and a call to the
+/// Canton admin API, about 4.3s median over a kubectl-tunneled devnet (#149).
+/// Five minutes keeps that cost off most requests and bounds how long a stale
+/// ID survives when no error clears it first.
+const SYNCHRONIZER_ID_TTL: Duration = Duration::from_secs(300);
 
-/// Get synchronizer ID from config (cached after first successful resolution).
+/// Canton's error id for a topology store it does not know. A cached
+/// synchronizer ID names such a store once an LSU has moved the participant on.
+const TOPOLOGY_STORE_NOT_FOUND: &str = "TOPOLOGY_STORE_NOT_FOUND";
+
+/// A resolved physical synchronizer ID and when it was resolved.
+#[derive(Debug, Clone)]
+struct CachedSynchronizerId {
+    id: String,
+    resolved_at: Instant,
+}
+
+/// Process-wide cache for the resolved physical synchronizer ID.
+static SYNCHRONIZER_ID_CACHE: Mutex<Option<CachedSynchronizerId>> = Mutex::new(None);
+
+/// The cached ID, if it is younger than [`SYNCHRONIZER_ID_TTL`] at `now`.
+fn fresh_synchronizer_id(
+    cache: &Mutex<Option<CachedSynchronizerId>>,
+    now: Instant,
+) -> Option<String> {
+    cache
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .as_ref()
+        .filter(|cached| now.duration_since(cached.resolved_at) < SYNCHRONIZER_ID_TTL)
+        .map(|cached| cached.id.clone())
+}
+
+/// Clears `cache` when `error` reports an unknown topology store. Returns
+/// whether it cleared anything.
+fn forget_synchronizer_id_in(cache: &Mutex<Option<CachedSynchronizerId>>, error: &str) -> bool {
+    if !error.contains(TOPOLOGY_STORE_NOT_FOUND) {
+        return false;
+    }
+    cache
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .take()
+        .is_some()
+}
+
+/// Drops the cached synchronizer ID when `error` reports an unknown topology
+/// store, so the next call resolves the successor after an LSU. Workflow step
+/// failures pass their error text here before they retry or fail the run.
+pub fn forget_synchronizer_id_on_unknown_store(error: &str) {
+    if forget_synchronizer_id_in(&SYNCHRONIZER_ID_CACHE, error) {
+        tracing::info!(
+            "Dropped the cached synchronizer ID: Canton no longer knows its topology store, \
+             most likely after a logical synchronizer upgrade"
+        );
+    }
+}
+
+/// Get synchronizer ID from config, cached for [`SYNCHRONIZER_ID_TTL`].
 ///
 /// Queries the participant's synchronizer connectivity service to get the
-/// physical synchronizer ID for the configured synchronizer alias. The result
-/// is memoised in a process-wide [`SYNCHRONIZER_ID_CACHE`]; subsequent calls
-/// return the cached value without any network round trip.
+/// physical synchronizer ID for the configured synchronizer alias. A cached
+/// value younger than the TTL is returned without a network round trip.
 pub async fn get_synchronizer_id(config: &NodeConfig) -> Result<String> {
-    SYNCHRONIZER_ID_CACHE
-        .get_or_try_init(|| async { fetch_synchronizer_id(config, config.synchronizer()).await })
-        .await
-        .cloned()
+    if let Some(id) = fresh_synchronizer_id(&SYNCHRONIZER_ID_CACHE, Instant::now()) {
+        return Ok(id);
+    }
+    let id = fetch_synchronizer_id(config, config.synchronizer()).await?;
+    *SYNCHRONIZER_ID_CACHE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner()) = Some(CachedSynchronizerId {
+        id: id.clone(),
+        resolved_at: Instant::now(),
+    });
+    Ok(id)
 }
 
 /// Get the physical synchronizer ID for an alias, over the configured Admin
@@ -652,7 +713,54 @@ mod tests {
         atomic::{AtomicUsize, Ordering},
     };
 
-    use super::bounded_ordered;
+    use super::{
+        CachedSynchronizerId, Duration, Instant, Mutex, SYNCHRONIZER_ID_TTL, bounded_ordered,
+        forget_synchronizer_id_in, fresh_synchronizer_id,
+    };
+
+    fn cache_holding(id: &str, resolved_at: Instant) -> Mutex<Option<CachedSynchronizerId>> {
+        Mutex::new(Some(CachedSynchronizerId {
+            id: id.to_string(),
+            resolved_at,
+        }))
+    }
+
+    /// The error a peer hit on devnet after the 2026-10-21 LSU (#567).
+    const STALE_STORE: &str = "Aborting peer: 6 consecutive step failures: code: 'Some requested \
+        entity was not found', message: \"TOPOLOGY_STORE_NOT_FOUND(11,0): Topology store \
+        'global-domain::1220be58::35-5' is not known.\"";
+
+    #[test]
+    fn a_cached_id_expires_after_the_ttl() {
+        let start = Instant::now();
+        let cache = cache_holding("global-domain::1220be58::35-5", start);
+
+        assert_eq!(
+            fresh_synchronizer_id(&cache, start + SYNCHRONIZER_ID_TTL - Duration::from_secs(1)),
+            Some("global-domain::1220be58::35-5".to_string())
+        );
+        assert_eq!(
+            fresh_synchronizer_id(&cache, start + SYNCHRONIZER_ID_TTL),
+            None
+        );
+        assert_eq!(fresh_synchronizer_id(&Mutex::new(None), start), None);
+    }
+
+    #[test]
+    fn an_unknown_topology_store_drops_the_cached_id() {
+        let cache = cache_holding("global-domain::1220be58::35-5", Instant::now());
+
+        assert!(!forget_synchronizer_id_in(
+            &cache,
+            "TOPOLOGY_NO_APPROPRIATE_SIGNING_KEY_IN_STORE"
+        ));
+        assert!(fresh_synchronizer_id(&cache, Instant::now()).is_some());
+
+        assert!(forget_synchronizer_id_in(&cache, STALE_STORE));
+        assert_eq!(fresh_synchronizer_id(&cache, Instant::now()), None);
+        // Nothing left to drop, so a second failure reports no change.
+        assert!(!forget_synchronizer_id_in(&cache, STALE_STORE));
+    }
 
     /// A future that records how many of its peers run at the same time.
     async fn tracked(
