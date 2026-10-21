@@ -1,0 +1,17 @@
+-- Copyright (c) 2026 DLC-Link, Inc. and/or its affiliates. All rights reserved.
+-- SPDX-License-Identifier: Apache-2.0
+
+-- | The check every credential action makes before it uses a UserService.
+module Governance.UtilityCredential.Service (requireGovernanceUserService) where
+
+import Utility.Credential.App.V0.Service.User (UserService(..))
+
+-- | Fetches the UserService and requires that the governance party is its
+-- user. The proposer signs the proposal, so its authority also reaches
+-- executeImpl. Without this check, a proposer could pass a UserService of its
+-- own, and the vote would act for the proposer instead of the governance party.
+requireGovernanceUserService : Text -> Party -> ContractId UserService -> Update ()
+requireGovernanceUserService action governanceParty userServiceCid = do
+  service <- fetch userServiceCid
+  assertMsg (action <> ": the user service does not belong to the governance party")
+    (service.user == governanceParty)
