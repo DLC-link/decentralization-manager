@@ -357,6 +357,40 @@ impl DamlProtoEncode for SetEnableResultContracts {
 
 impl Validate for SetEnableResultContracts {}
 
+/// Create a `TransferRule` on the governance party's `RegistrarService`.
+/// Setup creates the first one when asked to. This adds one later.
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
+pub struct CreateTransferRule {
+    pub registrar_service_cid: String,
+}
+
+impl CreateTransferRule {
+    pub const MODULE: &'static str = "Governance.UtilityOnboarding.CreateTransferRule";
+    pub const ENTITY: &'static str = "CreateTransferRule";
+}
+
+impl TemplateInfo for CreateTransferRule {
+    fn template_id(&self, pkgs: &dyn PackageResolver) -> Result<TemplateId, Error> {
+        let pkg = pkgs
+            .package_ref("governance_utility_onboarding")
+            .ok_or(Error::PackageNotConfigured("governance_utility_onboarding"))?;
+        Ok(TemplateId::new(pkg, Self::MODULE, Self::ENTITY))
+    }
+}
+
+impl DamlProtoEncode for CreateTransferRule {
+    fn to_daml_proto(&self) -> Result<Value, Error> {
+        Ok(make_record(vec![field(
+            "registrarServiceCid",
+            make_contract_id(&self.registrar_service_cid),
+        )]))
+    }
+}
+
+impl Validate for CreateTransferRule {}
+
 /// Offer a mint of `amount` tokens to `recipient` via
 /// `AllocationFactory_OfferMint`. The resulting `MintOffer` is accepted
 /// later by the recipient, outside this plugin.
@@ -1328,6 +1362,14 @@ mod tests {
             SetEnableResultContracts {
                 registrar_service_cid: "00rsc".to_string(),
                 enable_result_contracts: None,
+            }
+            .to_daml_proto()
+            .expect("payload encodes")
+        );
+        insta::assert_debug_snapshot!(
+            "create_transfer_rule",
+            CreateTransferRule {
+                registrar_service_cid: "00rsc".to_string(),
             }
             .to_daml_proto()
             .expect("payload encodes")

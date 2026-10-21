@@ -21,10 +21,10 @@ use decman_lib::catalog::proposals::rewards::{
 use decman_lib::catalog::proposals::utility::{
     AcceptBurnRequest, AcceptMintRequest, Burn, CreateDelegatedBatchedMarkersProxy,
     CreateProviderConfiguration, CreateProviderServiceRequest, CreateRegistrarServiceRequest,
-    CreateUserServiceRequest, Mint, OffboardInstrumentIssuers, OnboardInstrumentIssuers,
-    OnboardRegistrar, ProvisionInstrument, ProvisionProviderService, RequestDevNetFeaturedAppRight,
-    SetEnableResultContracts, SetProviderAppRewardBeneficiaries, SetupUtility,
-    UpdateInstrumentConfiguration,
+    CreateTransferRule, CreateUserServiceRequest, Mint, OffboardInstrumentIssuers,
+    OnboardInstrumentIssuers, OnboardRegistrar, ProvisionInstrument, ProvisionProviderService,
+    RequestDevNetFeaturedAppRight, SetEnableResultContracts, SetProviderAppRewardBeneficiaries,
+    SetupUtility, UpdateInstrumentConfiguration,
 };
 use decman_lib::catalog::types::{AppTransferContextInput, RewardBeneficiary};
 
@@ -209,6 +209,9 @@ fn all_proposal_fixtures() -> Vec<ProposalType> {
         ProposalType::SetEnableResultContracts(SetEnableResultContracts {
             registrar_service_cid: "00rsc".into(),
             enable_result_contracts: Some(true),
+        }),
+        ProposalType::CreateTransferRule(CreateTransferRule {
+            registrar_service_cid: "00rsc".into(),
         }),
         ProposalType::CreateDelegatedBatchedMarkersProxy(CreateDelegatedBatchedMarkersProxy {
             operator: cid("op"),

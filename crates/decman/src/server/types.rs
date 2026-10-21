@@ -372,6 +372,8 @@ pub enum ProposalType {
     ),
     /// Toggle result-contract emission on a `RegistrarService`.
     SetEnableResultContracts(decman_lib::catalog::proposals::utility::SetEnableResultContracts),
+    /// Create a `TransferRule` on the governance party's `RegistrarService`.
+    CreateTransferRule(decman_lib::catalog::proposals::utility::CreateTransferRule),
     /// Authorize the `operator` to create batched activity markers on behalf
     /// of the governance party via a `DelegatedBatchedMarkersProxy`.
     CreateDelegatedBatchedMarkersProxy(
@@ -491,6 +493,7 @@ impl ProposalType {
             Self::SetupCouponReassignmentDelegation(p) => p,
             Self::RevokeCouponReassignmentDelegation(p) => p,
             Self::SetEnableResultContracts(p) => p,
+            Self::CreateTransferRule(p) => p,
             Self::CreateDelegatedBatchedMarkersProxy(p) => p,
             Self::RequestDevNetFeaturedAppRight(p) => p,
             Self::SetupMintingDelegation(p) => p,
@@ -533,6 +536,7 @@ impl ProposalType {
             Self::SetupCouponReassignmentDelegation(p) => Some(p),
             Self::RevokeCouponReassignmentDelegation(p) => Some(p),
             Self::SetEnableResultContracts(p) => Some(p),
+            Self::CreateTransferRule(p) => Some(p),
             Self::CreateDelegatedBatchedMarkersProxy(p) => Some(p),
             Self::RequestDevNetFeaturedAppRight(p) => Some(p),
             Self::SetupMintingDelegation(p) => Some(p),
@@ -1059,8 +1063,8 @@ mod tests {
     use decman_lib::catalog::proposals::utility::{
         AcceptBurnRequest, AcceptMintRequest, Burn, CreateDelegatedBatchedMarkersProxy,
         CreateProviderConfiguration, CreateProviderServiceRequest, CreateRegistrarServiceRequest,
-        CreateUserServiceRequest, Mint, OffboardInstrumentIssuers, OnboardInstrumentIssuers,
-        OnboardRegistrar, ProvisionInstrument, ProvisionProviderService,
+        CreateTransferRule, CreateUserServiceRequest, Mint, OffboardInstrumentIssuers,
+        OnboardInstrumentIssuers, OnboardRegistrar, ProvisionInstrument, ProvisionProviderService,
         RequestDevNetFeaturedAppRight, SetEnableResultContracts, SetProviderAppRewardBeneficiaries,
         SetupUtility, UpdateInstrumentConfiguration,
     };
@@ -1554,6 +1558,9 @@ mod tests {
             ProposalType::SetEnableResultContracts(SetEnableResultContracts {
                 registrar_service_cid: "00rsc".into(),
                 enable_result_contracts: None,
+            }),
+            ProposalType::CreateTransferRule(CreateTransferRule {
+                registrar_service_cid: "00rsc".into(),
             }),
             ProposalType::CreateDelegatedBatchedMarkersProxy(CreateDelegatedBatchedMarkersProxy {
                 operator: test_party("op").unwrap(),

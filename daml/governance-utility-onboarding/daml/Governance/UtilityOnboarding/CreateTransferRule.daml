@@ -1,0 +1,42 @@
+-- Copyright (c) 2026 DLC-Link, Inc. and/or its affiliates. All rights reserved.
+-- SPDX-License-Identifier: Apache-2.0
+
+-- | Granular onboarding action: CreateTransferRule
+--
+-- SetupUtility and OnboardRegistrar can create a TransferRule when the
+-- RegistrarService is set up. This action creates one later, for example
+-- when the service was set up without one, or after the rule was archived.
+module Governance.UtilityOnboarding.CreateTransferRule where
+
+import Splice.Util (require)
+import Utility.Registry.App.V0.Service.Registrar
+  (RegistrarService, RegistrarService_CreateTransferRule(..))
+
+import Governance.Action
+
+template CreateTransferRule
+  with
+    governanceParty : Party
+      -- ^ The registrar decparty. Must equal the RegistrarService's registrar.
+    proposer : Party
+    registrarServiceCid : ContractId RegistrarService
+  where
+    signatory proposer
+    observer governanceParty
+
+    interface instance GovernableAction for CreateTransferRule where
+      view = GovernableActionView with
+        governanceParty
+        proposer
+        actionLabel = "CreateTransferRule"
+        description = "Create a TransferRule on the governance party's RegistrarService"
+
+      executeImpl = do
+        -- The proposer's authority is in scope during execution, so a
+        -- service the proposer owns would pass controller authorization.
+        -- Pin the service to the governance party.
+        registrarService <- fetch registrarServiceCid
+        require "CreateTransferRule: registrar service registrar does not match the governance party"
+          (registrarService.registrar == governanceParty)
+        _ <- exercise registrarServiceCid RegistrarService_CreateTransferRule
+        pure ()

@@ -1257,7 +1257,8 @@ export const GovernanceSection = ({
     // field, so it uses /services/registrar instead of the blob query.
     if (
       proposalType === "provision_instrument" ||
-      proposalType === "update_instrument_configuration"
+      proposalType === "update_instrument_configuration" ||
+      proposalType === "create_transfer_rule"
     ) {
       fetchRegistrarServices();
     }
@@ -2287,6 +2288,12 @@ export const GovernanceSection = ({
             ),
             ...credentialValidity(),
             ...(proposalUseBlockList && { use_block_list: true }),
+          };
+          break;
+        case "create_transfer_rule":
+          proposal = {
+            type: "create_transfer_rule",
+            registrar_service_cid: proposalRegistrarServiceCid,
           };
           break;
         case "update_instrument_configuration":
@@ -3325,6 +3332,7 @@ export const GovernanceSection = ({
                   <MenuItem value="set_provider_app_reward_beneficiaries">Set Provider App Reward Beneficiaries</MenuItem>
                   <MenuItem value="set_enable_result_contracts">Set Enable Result Contracts</MenuItem>
                   <MenuItem value="update_instrument_configuration">Update Instrument Configuration</MenuItem>
+                  <MenuItem value="create_transfer_rule">Create Transfer Rule</MenuItem>
                   <MenuItem value="create_delegated_batched_markers_proxy">Create Delegated Batched Markers Proxy</MenuItem>
                   {/*
                   Hidden per Notion "Clean up Utility Plugin" task — keep the
@@ -5562,6 +5570,36 @@ export const GovernanceSection = ({
                     }}
                   />
                 </>
+              )}
+
+              {proposalType === "create_transfer_rule" && (
+                <FormControl size="small" fullWidth required>
+                  <InputLabel>
+                    <TextHelp text="RegistrarService contract of this registrar decparty. The new TransferRule belongs to it. Setup creates the first rule when asked to, so use this to add one later.">
+                      RegistrarService
+                    </TextHelp>
+                  </InputLabel>
+                  <Select
+                    label="RegistrarService"
+                    value={proposalRegistrarServiceCid}
+                    onChange={(e) => setProposalRegistrarServiceCid(e.target.value)}
+                    MenuProps={{ disableScrollLock: true }}
+                  >
+                    {registrarServicesLoading ? (
+                      <MenuItem disabled>Loading services…</MenuItem>
+                    ) : ownRegistrarServices.length > 0 ? (
+                      ownRegistrarServices.map((svc) => (
+                        <MenuItem key={svc.contract_id} value={svc.contract_id}>
+                          {svc.contract_id}
+                        </MenuItem>
+                      ))
+                    ) : (
+                      <MenuItem disabled>
+                        No RegistrarService for this party — run "Setup Utility" or "Onboard Registrar" first
+                      </MenuItem>
+                    )}
+                  </Select>
+                </FormControl>
               )}
 
               {proposalType === "update_instrument_configuration" && (

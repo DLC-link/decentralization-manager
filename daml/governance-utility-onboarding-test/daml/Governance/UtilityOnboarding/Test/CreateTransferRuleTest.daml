@@ -1,0 +1,187 @@
+-- Copyright (c) 2026 DLC-Link, Inc. and/or its affiliates. All rights reserved.
+-- SPDX-License-Identifier: Apache-2.0
+
+-- | These tests cover CreateTransferRule: the happy path on a single and a
+-- split provider and registrar, the registrar check, and the member check.
+module Governance.UtilityOnboarding.Test.CreateTransferRuleTest where
+
+import Daml.Script
+
+import Utility.Registry.App.V0.Service.Registrar (RegistrarService(..))
+import Utility.Registry.V0.Rule.Transfer (TransferRule(..))
+
+import Governance.Action (GovernableAction)
+-- Instances only: record-dot access to the execution result's fields.
+import Governance.ExecutionResult ()
+import Governance.Rules
+
+import Governance.UtilityOnboarding.CreateTransferRule
+import Governance.UtilityOnboarding.DualDecpartyTestUtils qualified as Dual
+import Governance.UtilityOnboarding.SetupUtility
+import Governance.UtilityOnboarding.TestUtils
+
+import TestHarness
+
+data Fixture = Fixture
+  with
+    parties : OnboardingTestParties
+    rulesCid : ContractId GovernanceRules
+    registrarServiceCid : ContractId RegistrarService
+  deriving (Eq, Show)
+
+-- | SetupUtility without a TransferRule, so the action creates the first one.
+given_setup_without_transfer_rule : Script Fixture
+given_setup_without_transfer_rule = do
+  parties <- allocateOnboardingTestParties
+  rulesCid <- createTestGovernance parties
+  providerServiceCid <- initProviderService parties
+  proposalCid <- submit parties.member1 $ createCmd SetupUtility with
+    governanceParty = parties.governanceParty
+    proposer = parties.member1
+    providerServiceCid
+    operator = parties.operator
+    instrumentIdText = "TEST-TOKEN"
+    additionalIdentifiers = []
+    createTransferRule = False
+    createAllocationFactory = True
+    useBlockList = None
+  _ <- confirmAndExecute parties rulesCid (toInterfaceContractId proposalCid)
+    [parties.member1, parties.member2] parties.member1
+  [(registrarServiceCid, _)] <- query @RegistrarService parties.governanceParty
+  pure Fixture with ..
+
+createTransferRuleProposal
+  : Fixture -> ContractId RegistrarService -> Script (ContractId GovernableAction)
+createTransferRuleProposal f registrarServiceCid = do
+  proposalCid <- submit f.parties.member1 $ createCmd CreateTransferRule with
+    governanceParty = f.parties.governanceParty
+    proposer = f.parties.member1
+    registrarServiceCid
+  pure (toInterfaceContractId proposalCid)
+
+-- * Happy path: one TransferRule on the governance party's service.
+
+when_create_transfer_rule : Fixture -> Script Text
+when_create_transfer_rule f = do
+  proposalCid <- createTransferRuleProposal f f.registrarServiceCid
+  result <- confirmAndExecute f.parties f.rulesCid proposalCid
+    [f.parties.member1, f.parties.member2] f.parties.member1
+  Some executionResult <- queryContractId f.parties.governanceParty result.executionResultCid
+  pure executionResult.description
+
+then_transfer_rule_created : Fixture -> Text -> Script Failures
+then_transfer_rule_created f description = do
+  rules <- query @TransferRule f.parties.governanceParty
+  pure $
+    shouldBe "TransferRules"
+      [TransferRule with
+        operator = f.parties.operator
+        provider = f.parties.governanceParty
+        registrar = f.parties.governanceParty]
+      (map snd rules) <>
+    shouldBe "executed description"
+      "Create a TransferRule on the governance party's RegistrarService" description
+
+test_when_create_transfer_rule_then_rule_created = script do
+  run Test with
+    given = given_setup_without_transfer_rule
+    when = when_create_transfer_rule
+    then_ = then_transfer_rule_created
+
+-- * A service owned by the proposer is refused. The proposer's authority
+-- is in scope during execution, so controller authorization alone would
+-- let the proposer create a rule on its own service.
+
+when_create_on_proposer_owned_service : Fixture -> Script Text
+when_create_on_proposer_owned_service f = do
+  let proposer = f.parties.member1
+  foreignServiceCid <- submit proposer $ createCmd RegistrarService with
+    operator = f.parties.operator
+    provider = proposer
+    registrar = proposer
+    enableResultContracts = None
+  proposalCid <- createTransferRuleProposal f foreignServiceCid
+  confirmationCids <- submitConfirmations f.parties.governanceParty f.rulesCid proposalCid
+    [f.parties.member1, f.parties.member2]
+  failure <- submitWithError (actAs proposer <> readAs f.parties.governanceParty) $
+    exerciseCmd f.rulesCid GovernanceRules_ExecuteConfirmedAction with
+      executor = proposer
+      actionProposalCid = proposalCid
+      confirmations = confirmationCids
+  pure (show failure)
+
+then_refused_without_rule : Fixture -> Text -> Script Failures
+then_refused_without_rule f failure = do
+  governanceRules <- query @TransferRule f.parties.governanceParty
+  proposerRules <- query @TransferRule f.parties.member1
+  pure $
+    shouldContain "execution error" failure
+      "registrar service registrar does not match the governance party" <>
+    shouldBe "TransferRules of the governance party" 0 (length governanceRules) <>
+    shouldBe "TransferRules of the proposer" 0 (length proposerRules)
+
+test_when_proposer_owned_service_then_refused = script do
+  run Test with
+    given = given_setup_without_transfer_rule
+    when = when_create_on_proposer_owned_service
+    then_ = then_refused_without_rule
+
+-- * Non-member confirm is rejected.
+
+when_outsider_confirms : Fixture -> Script ()
+when_outsider_confirms f = do
+  proposalCid <- createTransferRuleProposal f f.registrarServiceCid
+  submitMustFail (memberContext f.parties.outsider f.parties.governanceParty) $
+    exerciseCmd f.rulesCid GovernanceRules_ConfirmAction with
+      confirmer = f.parties.outsider
+      actionProposalCid = proposalCid
+
+then_nothing : Fixture -> () -> Script Failures
+then_nothing _ _ = pure []
+
+test_when_outsider_confirms_then_rejected = script do
+  run Test with
+    given = given_setup_without_transfer_rule
+    when = when_outsider_confirms
+    then_ = then_nothing
+
+-- * Split roles: the registrar decparty creates the rule on a service
+-- whose provider is another decparty. The service's signatures carry the
+-- provider's authority, so no provider vote is needed.
+
+data DualFixture = DualFixture
+  with
+    f : Dual.DualGovFixture
+    onboarded : Dual.OnboardedRegistrarArtifacts
+  deriving (Eq, Show)
+
+given_onboarded_registrar : Script DualFixture
+given_onboarded_registrar = do
+  f <- Dual.givenDualGovernance
+  onboarded <- Dual.setupOnboardedRegistrar f [Dual.defaultRegistrarRequirement f.parties]
+  pure DualFixture with ..
+
+when_registrar_creates_transfer_rule : DualFixture -> Script ()
+when_registrar_creates_transfer_rule fx = do
+  proposalCid <- submit fx.f.registrarStack.member1 $ createCmd CreateTransferRule with
+    governanceParty = fx.f.parties.registrarGov
+    proposer = fx.f.registrarStack.member1
+    registrarServiceCid = fx.onboarded.registrarServiceCid
+  _ <- Dual.confirmAndExecuteAs fx.f.parties fx.f.registrarStack (toInterfaceContractId proposalCid)
+  pure ()
+
+-- The onboarding request already asked for one rule, so there are two.
+then_second_rule_created : DualFixture -> () -> Script Failures
+then_second_rule_created fx _ = do
+  rules <- query @TransferRule fx.f.parties.registrarGov
+  let expected = TransferRule with
+        operator = fx.f.parties.operator
+        provider = fx.f.parties.providerGov
+        registrar = fx.f.parties.registrarGov
+  pure $ shouldBe "TransferRules" [expected, expected] (map snd rules)
+
+test_when_registrar_decparty_creates_transfer_rule_then_created = script do
+  run Test with
+    given = given_onboarded_registrar
+    when = when_registrar_creates_transfer_rule
+    then_ = then_second_rule_created

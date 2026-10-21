@@ -109,6 +109,10 @@ expression: all_proposal_fixtures()
     "enable_result_contracts": true
   },
   {
+    "type": "create_transfer_rule",
+    "registrar_service_cid": "00rsc"
+  },
+  {
     "type": "create_delegated_batched_markers_proxy",
     "operator": "op::1220c4010d6883f367c7f45d55b2449501620130f9b21e96379f17dea455ac7a5892"
   },

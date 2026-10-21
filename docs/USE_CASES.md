@@ -375,6 +375,19 @@ After the provider service exists, run the onboarding:
 
 Add `"use_block_list": true` to turn on the registrar's block list check for the new instrument. The registry then checks the block list on every mint, burn and transfer of it. Leave the field out to keep the check off.
 
+Setup creates a `TransferRule` only when `create_transfer_rule` is true. To add one later, for example after the rule was archived, propose:
+
+```json
+{
+  "proposal": {
+    "type": "create_transfer_rule",
+    "registrar_service_cid": "<registrar-service-cid>"
+  }
+}
+```
+
+The service must be one whose registrar is the governance party. This works in the dual governance flow too, voted on the registrar decparty.
+
 ### Dual Governance Onboarding Flow
 
 This flow splits the utility roles across two decentralized parties. The provider decparty owns the `ProviderService` and decides which registrars to accept. The registrar decparty owns the `RegistrarService` and manages its instruments and instrument issuers. Each decparty has its own `GovernanceRules` and members. Step 1 is the same proposal as the Full Onboarding Flow above. Steps 2-8 follow the same propose -> confirm -> execute flow as generic votes, voted on the named decparty.
