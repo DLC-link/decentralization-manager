@@ -27,7 +27,7 @@ use crate::api::{AuthSettings, DecmanClient};
 use crate::app::{App, Outcome, run_login, spawn_workers};
 use crate::auth::{PasswordSource, TokenCache};
 use crate::cli::{Cli, CommandOptions, Connection};
-use crate::command::Command;
+use crate::command::{Command, NodeSettings};
 use crate::config::Profile;
 
 /// Entry point for decman-cli.
@@ -115,7 +115,7 @@ fn command_outcome(
             login.name
         ));
     }
-    command::run(&mut client, command)
+    command::run(&mut client, command, &login.settings)
 }
 
 /// The login a command runs with.
@@ -124,6 +124,7 @@ struct Login {
     api_url: String,
     auth: AuthSettings,
     require_yes: bool,
+    settings: NodeSettings,
 }
 
 impl Login {
@@ -133,6 +134,10 @@ impl Login {
             api_url: profile.api_url.clone(),
             auth: profile.auth()?,
             require_yes: profile.require_yes,
+            settings: NodeSettings {
+                admin_client: profile.admin_client.clone(),
+                party_credentials: profile.party_credentials.clone(),
+            },
         })
     }
 }
@@ -177,6 +182,7 @@ fn select_login(
             api_url,
             auth: connection.auth_settings()?,
             require_yes,
+            settings: NodeSettings::default(),
         });
     }
     match profiles.as_slice() {
@@ -186,6 +192,7 @@ fn select_login(
             api_url: connection.require_api_url()?,
             auth: connection.auth_settings()?,
             require_yes: false,
+            settings: NodeSettings::default(),
         }),
         _ => bail!(
             "{path} has several profiles; pick one with --profile ({names})",

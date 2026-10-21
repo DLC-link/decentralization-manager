@@ -23,9 +23,24 @@ username = "bob"
 password_command = "pass show decman/devnet"
 # Commands that change state need --yes on this profile.
 require_yes = true
+
 # Optional OAuth overrides (auto-discovered from /auth-config if omitted):
 # oauth_token_url = "https://keycloak.example/realms/r/protocol/openid-connect/token"
 # oauth_client_id = "decman-cli"
 # oauth_client_secret = ""
 # oauth_audience = ""
 # oauth_scope = ""
+
+# Optional node settings (see README "Node settings"). Each section belongs to
+# the [[profiles]] entry above it.
+# [profiles.admin_client]
+# client_id = "participant-admin"
+# client_secret_command = "pass show decman/devnet/admin"
+#
+# [profiles.party_credentials]
+# member_party_id = "attestor-1::1220..."
+# user_id = "attestor-user"
+# keycloak_url = "https://keycloak.example"
+# keycloak_realm = "nodes"
+# keycloak_client_id = "attestor-1"
+# client_secret_command = "pass show decman/devnet/attestor"

@@ -9,7 +9,8 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 use crate::api::{AuthSettings, DecmanClient};
 use crate::auth::{AuthTarget, PasswordSource, TokenCache, TokenSet};
 use crate::cli::Cli;
-use crate::command::{self, Command};
+use crate::command::{self, Command, NodeSettings};
+use crate::config::{AdminClient, PartyCredentials};
 
 /// A fake server on its own runtime. The blocking client must not run inside
 /// a runtime, so the tests call it from the test thread.
@@ -94,6 +95,10 @@ fn tokens(access: &str, access_expires_at: i64, refresh: &str) -> TokenSet {
         refresh_token: Some(refresh.to_owned()),
         refresh_expires_at: None,
     }
+}
+
+fn run_command(fake: &Fake, command: Command) -> anyhow::Result<command::Outcome> {
+    command::run(&mut fake.client(), command, &NodeSettings::default())
 }
 
 fn parse(args: &[&str]) -> Command {
@@ -443,7 +448,7 @@ fn distribute_with_wait_follows_the_started_run() {
     ]);
 
     // Act
-    let outcome = command::run(&mut fake.client(), command).unwrap();
+    let outcome = run_command(&fake, command).unwrap();
 
     // Assert
     assert!(outcome.success);
@@ -464,8 +469,7 @@ fn waiting_on_a_failed_run_is_unsuccessful() {
     );
 
     // Act
-    let outcome =
-        command::run(&mut fake.client(), parse(&["workflows", "wait", "dars-7"])).unwrap();
+    let outcome = run_command(&fake, parse(&["workflows", "wait", "dars-7"])).unwrap();
 
     // Assert
     assert!(!outcome.success);
@@ -510,11 +514,7 @@ fn accepting_with_wait_follows_this_nodes_peer_run() {
     fake.get_with_token("/workflows", "a-1", json!({ "runs": [peer_run] }), 1);
 
     // Act
-    let outcome = command::run(
-        &mut fake.client(),
-        parse(&["invitations", "accept", "inv-1", "--wait"]),
-    )
-    .unwrap();
+    let outcome = run_command(&fake, parse(&["invitations", "accept", "inv-1", "--wait"])).unwrap();
 
     // Assert
     assert!(outcome.success);
@@ -571,8 +571,8 @@ fn governance_confirm_resolves_the_party_and_sends_the_frontend_body() {
     );
 
     // Act
-    let outcome = command::run(
-        &mut fake.client(),
+    let outcome = run_command(
+        &fake,
         parse(&[
             "governance",
             "confirm",
@@ -586,4 +586,105 @@ fn governance_confirm_resolves_the_party_and_sends_the_frontend_body() {
 
     // Assert
     assert_eq!(outcome.value, json!({ "message": "confirmed" }));
+}
+
+#[cfg(unix)]
+#[test]
+fn grant_rights_takes_the_admin_client_from_the_profile() {
+    // Arrange
+    let fake = Fake::start();
+    fake.token_grant("password", "a-1", 1);
+    fake.mount(
+        Mock::given(method("GET"))
+            .and(path("/decentralized-parties"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "parties": [{ "party_id": "alpha::1220aa", "threshold": 2 }],
+            })))
+            .expect(1),
+    );
+    fake.mount(
+        Mock::given(method("POST"))
+            .and(path("/auth/grant-rights"))
+            .and(body_json(json!({
+                "dec_party_id": "alpha::1220aa",
+                "admin_client_id": "participant-admin",
+                "admin_client_secret": "admin-s3cret",
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "ok": true })))
+            .expect(1),
+    );
+    let settings = NodeSettings {
+        admin_client: Some(AdminClient {
+            client_id: "participant-admin".to_owned(),
+            client_secret_command: "printf 'admin-s3cret\\n'".to_owned(),
+        }),
+        party_credentials: None,
+    };
+
+    // Act
+    let outcome = command::run(
+        &mut fake.client(),
+        parse(&["auth", "grant-rights", "--party", "alpha"]),
+        &settings,
+    )
+    .unwrap();
+
+    // Assert
+    assert_eq!(outcome.value, json!({ "ok": true }));
+}
+
+#[cfg(unix)]
+#[test]
+fn party_config_set_builds_the_body_from_the_profile_credentials() {
+    // Arrange
+    let fake = Fake::start();
+    fake.token_grant("password", "a-1", 1);
+    fake.mount(
+        Mock::given(method("GET"))
+            .and(path("/decentralized-parties"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "parties": [{ "party_id": "alpha::1220aa", "threshold": 2 }],
+            })))
+            .expect(1),
+    );
+    fake.mount(
+        Mock::given(method("PUT"))
+            .and(path("/party-config"))
+            .and(body_json(json!({
+                "dec_party_id": "alpha::1220aa",
+                "member_party_id": "attestor-1::1220bb",
+                "user_id": "attestor-user",
+                "keycloak_url": "https://idp",
+                "keycloak_realm": "nodes",
+                "keycloak_client_id": "attestor-1",
+                "keycloak_client_secret": "party-s3cret",
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "ok": true })))
+            .expect(1),
+    );
+    let settings = NodeSettings {
+        admin_client: None,
+        party_credentials: Some(PartyCredentials {
+            member_party_id: "attestor-1::1220bb".to_owned(),
+            user_id: "attestor-user".to_owned(),
+            keycloak_url: Some("https://idp".to_owned()),
+            keycloak_realm: Some("nodes".to_owned()),
+            keycloak_client_id: Some("attestor-1".to_owned()),
+            auth0_domain: None,
+            auth0_audience: None,
+            auth0_client_id: None,
+            client_secret_command: Some("printf 'party-s3cret\\n'".to_owned()),
+        }),
+    };
+
+    // Act
+    let outcome = command::run(
+        &mut fake.client(),
+        parse(&["party-config", "set", "--party", "alpha"]),
+        &settings,
+    )
+    .unwrap();
+
+    // Assert
+    assert_eq!(outcome.value, json!({ "ok": true }));
 }
