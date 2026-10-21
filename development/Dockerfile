@@ -1,4 +1,4 @@
-FROM rust:slim-bookworm AS builder
+FROM rust:slim-trixie AS builder
 
 RUN apt-get update && apt-get install -y curl ca-certificates
 RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash -
@@ -55,6 +55,9 @@ WORKDIR /app
 COPY --from=builder /lib/x86_64-linux-gnu/libgcc_s.so.1 /lib64/libgcc_s.so.1
 COPY --from=builder /lib/x86_64-linux-gnu/libssl.so.3 /lib64/libssl.so.3
 COPY --from=builder /lib/x86_64-linux-gnu/libcrypto.so.3 /lib64/libcrypto.so.3
+# Trixie's libcrypto links zlib and zstd, which busybox does not ship.
+COPY --from=builder /lib/x86_64-linux-gnu/libz.so.1 /lib64/libz.so.1
+COPY --from=builder /lib/x86_64-linux-gnu/libzstd.so.1 /lib64/libzstd.so.1
 COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
 COPY --from=builder /app/target/release/dec-party-manager /usr/local/bin/
 

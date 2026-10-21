@@ -28,7 +28,7 @@ jobs:
   cargo:
     name: Format, Clippy & Unit Tests
     runs-on: ubuntu-latest # TEMP stopgap: ubuntu-8-core larger runners unavailable — revert once restored
-    container: rust:slim-bookworm
+    container: rust:slim-trixie
     # Pin coverage instrumentation AND incremental at the job level so the
     # build, clippy, and coverage steps share one fingerprint and reuse
     # target/. Without RUSTFLAGS unified, the coverage step had

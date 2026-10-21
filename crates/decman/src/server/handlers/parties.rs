@@ -4,7 +4,7 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use actix_web::{HttpResponse, Responder, delete, get, web};
+use actix_web::{HttpRequest, HttpResponse, Responder, delete, get, web};
 use canton_proto_rs::com::digitalasset::canton::{
     admin::participant::v30::{ListPackagesRequest, package_service_client::PackageServiceClient},
     crypto::{
@@ -45,6 +45,7 @@ use crate::{
     server::{
         AppState,
         health::classify_health_reply,
+        middleware::require_admin,
         package_inventory::{TopologyReader, expected_splice_versions, fetch_vetted_packages},
         queries::{
             contract_templates_all, fetch_package_versions, get_contracts, get_party_metadata,
@@ -2044,14 +2045,20 @@ pub struct QuarantineQuery {
     responses(
         (status = 200, description = "Quarantine lifted, or none was set"),
         (status = 400, description = "Malformed party or participant id", body = ErrorResponse),
+        (status = 401, description = "Unauthorized", body = ErrorResponse),
+        (status = 403, description = "Forbidden: admin role required", body = ErrorResponse),
         (status = 500, description = "Internal server error", body = ErrorResponse)
     )
 )]
 #[delete("/acs-import-quarantine")]
 pub async fn clear_acs_import_quarantine(
+    http_req: HttpRequest,
     data: web::Data<AppState>,
     query: web::Query<QuarantineQuery>,
 ) -> impl Responder {
+    if let Err(resp) = require_admin(&http_req, data.admin_role.as_deref()) {
+        return resp;
+    }
     let (Ok(party_id), Ok(participant_id)) = (
         CantonId::parse(&query.party_id),
         CantonId::parse(&query.participant_id),
@@ -3270,5 +3277,64 @@ mod tests {
             rendered.contains("unknown sender"),
             "reason missing from Display: {rendered}"
         );
+    }
+}
+
+#[cfg(test)]
+mod clear_acs_import_quarantine_gate_tests {
+    use actix_web::{
+        App,
+        http::StatusCode,
+        test::{self, TestRequest},
+    };
+
+    use super::*;
+    use crate::server::middleware::AuthMiddleware;
+
+    fn clear_request() -> TestRequest {
+        let namespace = "0".repeat(68);
+        TestRequest::delete().uri(&format!(
+            "/acs-import-quarantine?party_id=dec-party::{namespace}\
+             &participant_id=participant::{namespace}"
+        ))
+    }
+
+    /// The gate fires before the handler touches the quarantine table.
+    #[actix_web::test]
+    async fn a_request_without_a_principal_is_unauthorized() -> anyhow::Result<()> {
+        let data = AppState::for_test(None).await?;
+        let app = test::init_service(
+            App::new()
+                .app_data(data)
+                .service(clear_acs_import_quarantine),
+        )
+        .await;
+
+        let resp = test::call_service(&app, clear_request().to_request()).await;
+
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        Ok(())
+    }
+
+    /// A valid token without the admin role must not lift the interlock that
+    /// keeps replication off a participant holding a partial ACS.
+    #[actix_web::test]
+    async fn a_non_admin_cannot_lift_the_quarantine() -> anyhow::Result<()> {
+        let data = AppState::for_test_as_non_admin().await?;
+        let app = test::init_service(
+            App::new()
+                .app_data(data)
+                .wrap(AuthMiddleware)
+                .service(clear_acs_import_quarantine),
+        )
+        .await;
+
+        let req = clear_request()
+            .insert_header(("Authorization", "Bearer spa.user.token"))
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+        Ok(())
     }
 }
