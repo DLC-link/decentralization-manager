@@ -507,7 +507,9 @@ This repository is a Cargo workspace with four crates under `crates/`:
 - **`common`** — shared wire DTOs, the Canton-ID helpers, and the external-party
   fingerprint derivation, consumed by the other crates. Kept dependency-light;
   OpenAPI (`utoipa`) schema derives are behind its `openapi` feature.
-- **`decman-cli`** — a terminal UI client for the server.
+- **`decman-cli`** — a client for the server: a terminal UI, and commands that
+  print JSON for scripts and agents. See
+  [crates/decman-cli/README.md](crates/decman-cli/README.md).
 - **`decman-wallet`** — the client side of the tenant API (`/v0/tenant/*`): the
   library a wallet provider embeds to run a co-validated party from a key it holds
   itself, and to transact as it. See
