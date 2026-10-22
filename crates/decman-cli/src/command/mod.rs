@@ -31,6 +31,21 @@ pub struct Outcome {
     pub success: bool,
 }
 
+/// `text` with control characters replaced by `?`, for stderr. Error and
+/// progress text can come from the server or a peer, and a raw escape
+/// sequence could rewrite the terminal.
+pub fn for_terminal(text: &str) -> String {
+    text.chars()
+        .map(|c| {
+            if c.is_control() && c != '\n' && c != '\t' {
+                '?'
+            } else {
+                c
+            }
+        })
+        .collect()
+}
+
 /// Per-node settings a profile configures once, so that `auth grant-rights`
 /// and `party-config` need no credentials on the command line. Secrets are
 /// shell commands; the CLI runs one only when a command needs that secret.
@@ -312,6 +327,16 @@ pub enum InvitationsCommand {
         /// Invitation id.
         id: String,
     },
+    /// Download one DAR of a DAR invitation, to compare it before you accept.
+    Dar {
+        /// Invitation id.
+        id: String,
+        /// Position of the DAR in the invitation, from 0.
+        index: usize,
+        /// File to write the DAR to.
+        #[arg(long)]
+        out: PathBuf,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -439,9 +464,9 @@ pub enum AuthCommand {
         #[command(flatten)]
         party: PartyArg,
         /// Client id of an IdP client with Canton admin rights. Default: the
-        /// profile's admin_client_id. Its secret comes from
-        /// `DECMAN_ADMIN_CLIENT_SECRET`, else from the profile's
-        /// admin_client_secret_command, never from the command line.
+        /// profile's [admin_client] client_id. Its secret comes from
+        /// `DECMAN_ADMIN_CLIENT_SECRET`, else from that section's
+        /// client_secret_command, never from the command line.
         #[arg(long)]
         admin_client_id: Option<String>,
     },
@@ -480,10 +505,17 @@ pub enum GovernanceCommand {
         #[command(flatten)]
         party: PartyArg,
     },
-    /// Pending actions and proposals with their confirmations.
+    /// Pending actions and proposals with their confirmations, one page of
+    /// proposals at a time.
     Pending {
         #[command(flatten)]
         party: PartyArg,
+        /// Proposals per page. The server default is 25, its maximum 200.
+        #[arg(long)]
+        limit: Option<usize>,
+        /// The next_cursor of the previous page.
+        #[arg(long)]
+        cursor: Option<String>,
     },
     /// Proposals, one page at a time.
     Proposals {
@@ -723,6 +755,68 @@ fn credential_fields(credentials: &PartyCredentials) -> serde_json::Map<String, 
         .collect()
 }
 
+/// Fail before any secret command runs when the profile blocks writes, so a
+/// refused command never prompts the password manager.
+fn ensure_writes_allowed(client: &DecmanClient) -> Result<()> {
+    match client.writes_blocked() {
+        Some(reason) => bail!("{reason}"),
+        None => Ok(()),
+    }
+}
+
+/// The admin client id and secret for `auth grant-rights`. The id comes from
+/// `--admin-client-id`, else from the profile. The secret comes from the
+/// environment, else from the profile's command. The profile's command is used
+/// only for the profile's own client, so a different `--admin-client-id`
+/// never gets that client's secret.
+fn admin_credentials(
+    override_id: Option<String>,
+    profile: Option<&AdminClient>,
+    env_secret: Option<String>,
+) -> Result<(String, String)> {
+    let id = override_id
+        .or_else(|| profile.map(|admin| admin.client_id.clone()))
+        .context("pass --admin-client-id, or add [profiles.admin_client] to the profile")?;
+    if let Some(secret) = env_secret.filter(|secret| !secret.is_empty()) {
+        return Ok((id, secret));
+    }
+    let admin = profile
+        .filter(|admin| admin.client_id == id)
+        .with_context(|| {
+            format!(
+                "set {ADMIN_SECRET_ENV} to the secret of {id}; the profile holds no command for it"
+            )
+        })?;
+    let secret = run_secret_command(
+        "admin_client.client_secret_command",
+        &admin.client_secret_command,
+    )?;
+    Ok((id, secret))
+}
+
+/// `body` with the profile's client secret filled in, when it needs one. A
+/// `--body` gets the secret only if it names the same IdP and client as the
+/// profile; otherwise the server would send the secret to another IdP.
+fn with_profile_secret(body: Value, settings: &NodeSettings) -> Result<Value> {
+    with_client_secret(body, |body| {
+        let credentials = party_credentials(settings)?;
+        if !names_profile_client(body, credentials) {
+            bail!(
+                "the body names another IdP or client than the profile's [party_credentials]; \
+                 put the secret in the body yourself, or pass --keep-secret"
+            );
+        }
+        party_client_secret(settings)
+    })
+}
+
+/// Whether every IdP field the profile sets has the same value in `body`.
+fn names_profile_client(body: &Value, credentials: &PartyCredentials) -> bool {
+    credential_fields(credentials)
+        .iter()
+        .all(|(key, value)| body.get(key) == Some(value))
+}
+
 /// The `PUT /party-config` body for `party_id` from the profile's
 /// credentials, without the client secret.
 fn party_config_body(party_id: &str, credentials: &PartyCredentials) -> Value {
@@ -740,7 +834,10 @@ fn party_config_body(party_id: &str, credentials: &PartyCredentials) -> Value {
 /// has none. An Auth0 body gets `auth0_client_secret`, any other body
 /// `keycloak_client_secret`. A body with a Keycloak password uses the password
 /// flow and gets no client secret. `secret` runs only when the body needs it.
-fn with_client_secret(mut body: Value, secret: impl FnOnce() -> Result<String>) -> Result<Value> {
+fn with_client_secret(
+    mut body: Value,
+    secret: impl FnOnce(&Value) -> Result<String>,
+) -> Result<Value> {
     let present = |value: &Value| !value.is_null() && value != "";
     let field = if present(&body["auth0_domain"]) {
         "auth0_client_secret"
@@ -750,10 +847,14 @@ fn with_client_secret(mut body: Value, secret: impl FnOnce() -> Result<String>) 
     if present(&body[field]) || present(&body["keycloak_password"]) {
         return Ok(body);
     }
+    if !body.is_object() {
+        bail!("the party config body must be a JSON object");
+    }
+    let secret = secret(&body)?;
     let object = body
         .as_object_mut()
         .context("the party config body must be a JSON object")?;
-    object.insert(field.to_owned(), Value::String(secret()?));
+    object.insert(field.to_owned(), Value::String(secret));
     Ok(body)
 }
 
@@ -921,6 +1022,17 @@ fn resolve_party(client: &mut DecmanClient, party: &PartyArg) -> Result<Resolved
     }
 }
 
+/// The current threshold of `party`. The server shows it to the peers as the
+/// "before" value, so an unknown threshold is an error, not 0.
+fn known_threshold(party: &ResolvedParty) -> Result<i64> {
+    party.threshold.with_context(|| {
+        format!(
+            "this node does not list {} with its threshold; run the command on a node that does",
+            party.id
+        )
+    })
+}
+
 /// The parties `arg` names: the one with that full id, or every party whose
 /// name (the part before `::`) equals `arg`.
 fn matching_parties<'a>(parties: &'a [Value], arg: &str) -> Vec<&'a Value> {
@@ -948,12 +1060,21 @@ fn start_workflow(
     if !wait.wait {
         return Ok(Outcome::ok(response));
     }
-    let name = response
+    let Some(name) = response
         .get("instance_name")
         .and_then(Value::as_str)
         .filter(|name| !name.is_empty())
-        .context("the response names no workflow run to wait for")?
-        .to_owned();
+        .map(str::to_owned)
+    else {
+        // The workflow started, so print what the server said before failing.
+        return Ok(Outcome {
+            value: json!({
+                "response": response,
+                "error": "the workflow started, but the response names no run to wait for",
+            }),
+            success: false,
+        });
+    };
     eprintln!("started workflow run {name}");
     wait_for_run(client, &RunSelector::Instance(name), wait.options())
 }
@@ -997,7 +1118,7 @@ fn run_parties(client: &mut DecmanClient, command: PartiesCommand) -> Result<Out
                 "decentralized_party_id": party.id,
                 "new_participant_id": participant,
                 "new_threshold": threshold,
-                "previous_threshold": party.threshold.unwrap_or(0),
+                "previous_threshold": known_threshold(&party)?,
             });
             start_workflow(client, "/add-party", &body, &wait)
         }
@@ -1012,7 +1133,7 @@ fn run_parties(client: &mut DecmanClient, command: PartiesCommand) -> Result<Out
                 "decentralized_party_id": party.id,
                 "participant_id": participant,
                 "new_threshold": threshold,
-                "previous_threshold": party.threshold.unwrap_or(0),
+                "previous_threshold": known_threshold(&party)?,
             });
             start_workflow(client, "/kick", &body, &wait)
         }
@@ -1025,7 +1146,7 @@ fn run_parties(client: &mut DecmanClient, command: PartiesCommand) -> Result<Out
             let body = json!({
                 "decentralized_party_id": party.id,
                 "new_threshold": threshold,
-                "previous_threshold": party.threshold.unwrap_or(0),
+                "previous_threshold": known_threshold(&party)?,
             });
             start_workflow(client, "/change-threshold", &body, &wait)
         }
@@ -1112,6 +1233,13 @@ fn run_invitations(client: &mut DecmanClient, command: InvitationsCommand) -> Re
         }
         InvitationsCommand::Decline { id } => {
             post(client, "/invitations/decline", Some(&json!({ "id": id })))
+        }
+        InvitationsCommand::Dar { id, index, out } => {
+            let bytes =
+                client.request_bytes(&format!("/invitations/{}/dars/{index}", segment(&id)?))?;
+            std::fs::write(&out, &bytes)
+                .with_context(|| format!("failed to write {}", out.display()))?;
+            Ok(Outcome::ok(json!({ "file": out, "bytes": bytes.len() })))
         }
     }
 }
@@ -1252,6 +1380,7 @@ fn run_party_config(
             body,
             keep_secret,
         } => {
+            ensure_writes_allowed(client)?;
             let body = match (body, party) {
                 (Some(body), _) => input::read_json(&body)?,
                 (None, Some(party)) => {
@@ -1264,7 +1393,7 @@ fn run_party_config(
             let body = if keep_secret {
                 body
             } else {
-                with_client_secret(body, || party_client_secret(settings))?
+                with_profile_secret(body, settings)?
             };
             Ok(Outcome::ok(client.request(
                 Method::PUT,
@@ -1274,11 +1403,12 @@ fn run_party_config(
             )?))
         }
         PartyConfigCommand::DiscoverMemberParty { body } => {
+            ensure_writes_allowed(client)?;
             let body = match body {
                 Some(body) => input::read_json(&body)?,
                 None => Value::Object(credential_fields(party_credentials(settings)?)),
             };
-            let body = with_client_secret(body, || party_client_secret(settings))?;
+            let body = with_profile_secret(body, settings)?;
             post(client, "/party-config/discover-member-party", Some(&body))
         }
     }
@@ -1296,27 +1426,12 @@ fn run_auth(
             party,
             admin_client_id,
         } => {
-            let admin = settings.admin_client.as_ref();
-            let admin_client_id = admin_client_id
-                .or_else(|| admin.map(|admin| admin.client_id.clone()))
-                .context("pass --admin-client-id, or add [profiles.admin_client] to the profile")?;
-            let admin_client_secret = match std::env::var(ADMIN_SECRET_ENV)
-                .ok()
-                .filter(|secret| !secret.is_empty())
-            {
-                Some(secret) => secret,
-                None => {
-                    let admin = admin.with_context(|| {
-                        format!(
-                            "set {ADMIN_SECRET_ENV}, or add [profiles.admin_client] to the profile"
-                        )
-                    })?;
-                    run_secret_command(
-                        "admin_client.client_secret_command",
-                        &admin.client_secret_command,
-                    )?
-                }
-            };
+            ensure_writes_allowed(client)?;
+            let (admin_client_id, admin_client_secret) = admin_credentials(
+                admin_client_id,
+                settings.admin_client.as_ref(),
+                std::env::var(ADMIN_SECRET_ENV).ok(),
+            )?;
             let party = resolve_party(client, &party)?;
             let body = json!({
                 "dec_party_id": party.id,
@@ -1334,13 +1449,16 @@ fn run_governance(client: &mut DecmanClient, command: GovernanceCommand) -> Resu
             let party = resolve_party(client, &party)?;
             get(client, "/governance/state", &[("party_id", party.id)])
         }
-        GovernanceCommand::Pending { party } => {
+        GovernanceCommand::Pending {
+            party,
+            limit,
+            cursor,
+        } => {
             let party = resolve_party(client, &party)?;
-            get(
-                client,
-                "/governance/confirmations",
-                &[("party_id", party.id)],
-            )
+            let mut query = vec![("party_id", party.id)];
+            optional(&mut query, "limit", limit.map(|limit| limit.to_string()));
+            optional(&mut query, "cursor", cursor);
+            get(client, "/governance/confirmations", &query)
         }
         GovernanceCommand::Proposals {
             party,
@@ -1383,7 +1501,8 @@ fn run_governance(client: &mut DecmanClient, command: GovernanceCommand) -> Resu
         GovernanceCommand::Propose { party, body } => {
             let proposal = input::read_json(&body)?;
             let party = resolve_party(client, &party)?;
-            let (_, rules_contract_id) = governance::fetch(client, &party.id)?;
+            let rules_contract_id =
+                governance::rules_contract_id(&governance::fetch(client, &party.id)?)?;
             let body = json!({
                 "party_id": party.id,
                 "rules_contract_id": rules_contract_id,
@@ -1394,7 +1513,8 @@ fn run_governance(client: &mut DecmanClient, command: GovernanceCommand) -> Resu
         GovernanceCommand::Confirm { party, target } => {
             let target = target.target()?;
             let party = resolve_party(client, &party)?;
-            let (pending, rules) = governance::fetch(client, &party.id)?;
+            let pending = governance::fetch(client, &party.id)?;
+            let rules = governance::rules_contract_id(&pending)?;
             let body = governance::confirm_body(&pending, &party.id, &rules, &target)?;
             post(client, "/governance/confirm", Some(&body))
         }
@@ -1409,14 +1529,15 @@ fn run_governance(client: &mut DecmanClient, command: GovernanceCommand) -> Resu
                 None => json!([]),
             };
             let party = resolve_party(client, &party)?;
-            let (pending, rules) = governance::fetch(client, &party.id)?;
+            let pending = governance::fetch(client, &party.id)?;
+            let rules = governance::rules_contract_id(&pending)?;
             let body = governance::execute_body(&pending, &party.id, &rules, &target, disclosed)?;
             post(client, "/governance/execute", Some(&body))
         }
         GovernanceCommand::Revoke { party, target } => {
             let target = target.target()?;
             let party = resolve_party(client, &party)?;
-            let (pending, _) = governance::fetch(client, &party.id)?;
+            let pending = governance::fetch(client, &party.id)?;
             let body = governance::revoke_body(&pending, &party.id, &target)?;
             post(client, "/governance/cancel", Some(&body))
         }
@@ -1425,13 +1546,14 @@ fn run_governance(client: &mut DecmanClient, command: GovernanceCommand) -> Resu
             confirmation,
         } => {
             let party = resolve_party(client, &party)?;
-            let (pending, rules) = governance::fetch(client, &party.id)?;
+            let pending = governance::fetch(client, &party.id)?;
+            let rules = governance::rules_contract_id(&pending)?;
             let body = governance::expire_body(&pending, &party.id, &rules, &confirmation)?;
             post(client, "/governance/expire", Some(&body))
         }
         GovernanceCommand::CancelProposal { party, proposal } => {
             let party = resolve_party(client, &party)?;
-            let (pending, _) = governance::fetch(client, &party.id)?;
+            let pending = governance::fetch(client, &party.id)?;
             let body = governance::cancel_proposal_body(&pending, &party.id, &proposal)?;
             post(client, "/governance/cancel-proposal", Some(&body))
         }
@@ -1536,6 +1658,7 @@ mod tests {
         assert_eq!(segment("../kick").unwrap(), "..%2Fkick");
         assert_eq!(segment("a b?c#d").unwrap(), "a%20b%3Fc%23d");
         assert!(segment("..").is_err());
+        assert!(segment(".").is_err());
         assert!(segment("").is_err());
     }
 
@@ -1551,7 +1674,7 @@ mod tests {
     #[test]
     fn a_keycloak_body_without_a_secret_gets_one() {
         // Act
-        let body = with_client_secret(json!({ "keycloak_client_id": "c" }), || {
+        let body = with_client_secret(json!({ "keycloak_client_id": "c" }), |_| {
             Ok("s3cret".to_owned())
         })
         .unwrap();
@@ -1562,7 +1685,7 @@ mod tests {
 
     #[test]
     fn an_auth0_body_gets_the_auth0_secret_field() {
-        let body = with_client_secret(json!({ "auth0_domain": "x.auth0.com" }), || {
+        let body = with_client_secret(json!({ "auth0_domain": "x.auth0.com" }), |_| {
             Ok("s3cret".to_owned())
         })
         .unwrap();
@@ -1572,7 +1695,7 @@ mod tests {
 
     #[test]
     fn a_body_with_a_secret_or_a_password_never_runs_the_command() {
-        let never = || -> Result<String> { panic!("the secret command must not run") };
+        let never = |_: &Value| -> Result<String> { panic!("the secret command must not run") };
         let with_secret = json!({ "keycloak_client_secret": "given" });
         assert_eq!(
             with_client_secret(with_secret.clone(), never).unwrap(),
@@ -1624,6 +1747,97 @@ mod tests {
                 "keycloak_client_id": "attestor-1",
             })
         );
+    }
+
+    fn profile_admin() -> AdminClient {
+        AdminClient {
+            client_id: "participant-admin".to_owned(),
+            client_secret_command: "never runs in these tests".to_owned(),
+        }
+    }
+
+    fn profile_credentials() -> PartyCredentials {
+        PartyCredentials {
+            member_party_id: "m::1220".to_owned(),
+            user_id: "u".to_owned(),
+            keycloak_url: Some("https://idp".to_owned()),
+            keycloak_realm: Some("nodes".to_owned()),
+            keycloak_client_id: Some("attestor-1".to_owned()),
+            auth0_domain: None,
+            auth0_audience: None,
+            auth0_client_id: None,
+            client_secret_command: Some("never runs in these tests".to_owned()),
+        }
+    }
+
+    #[test]
+    fn the_admin_secret_from_the_environment_wins() {
+        // Act
+        let (id, secret) =
+            admin_credentials(None, Some(&profile_admin()), Some("env-s3cret".to_owned())).unwrap();
+
+        // Assert
+        assert_eq!(id, "participant-admin");
+        assert_eq!(secret, "env-s3cret");
+    }
+
+    #[test]
+    fn another_admin_client_never_gets_the_profile_secret() {
+        // Act
+        let error = admin_credentials(
+            Some("other-client".to_owned()),
+            Some(&profile_admin()),
+            None,
+        )
+        .unwrap_err();
+
+        // Assert
+        assert!(
+            error.to_string().contains("secret of other-client"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn no_admin_client_anywhere_is_an_error() {
+        let error = admin_credentials(None, None, None).unwrap_err();
+        assert!(error.to_string().contains("--admin-client-id"), "{error}");
+    }
+
+    #[test]
+    fn a_body_for_the_profile_client_matches() {
+        let body = json!({
+            "dec_party_id": "p::1220",
+            "keycloak_url": "https://idp",
+            "keycloak_realm": "nodes",
+            "keycloak_client_id": "attestor-1",
+        });
+        assert!(names_profile_client(&body, &profile_credentials()));
+    }
+
+    #[test]
+    fn a_body_for_another_idp_gets_no_profile_secret() {
+        // Arrange — the secret would go to the IdP that the body names.
+        let settings = NodeSettings {
+            admin_client: None,
+            party_credentials: Some(profile_credentials()),
+        };
+        let body = json!({
+            "keycloak_url": "https://evil.example",
+            "keycloak_realm": "nodes",
+            "keycloak_client_id": "attestor-1",
+        });
+
+        // Act
+        let error = with_profile_secret(body, &settings).unwrap_err();
+
+        // Assert
+        assert!(error.to_string().contains("another IdP"), "{error}");
+    }
+
+    #[test]
+    fn terminal_text_loses_control_characters() {
+        assert_eq!(for_terminal("a\u{1b}[31mb\nc\td"), "a?[31mb\nc\td");
     }
 
     #[test]

@@ -244,6 +244,20 @@ mod tests {
     }
 
     #[test]
+    fn an_override_wins_over_a_reported_member_party() {
+        // Act
+        let members = resolve_members(
+            &["PAR::1".to_owned()],
+            &known(),
+            &[("PAR::1".to_owned(), "x::1220".to_owned())],
+        )
+        .unwrap();
+
+        // Assert
+        assert_eq!(members, vec![("PAR::1".to_owned(), "x::1220".to_owned())]);
+    }
+
+    #[test]
     fn a_participant_without_a_member_party_is_named_in_the_error() {
         let error = resolve_members(&["PAR::1".to_owned(), "PAR::2".to_owned()], &known(), &[])
             .unwrap_err();
@@ -273,8 +287,14 @@ mod tests {
         let mut context = context();
         context.package_id.clear();
 
-        // Act / Assert
-        assert!(body("dec::1220", &context, &input(1)).is_err());
+        // Act
+        let error = body("dec::1220", &context, &input(1)).unwrap_err();
+
+        // Assert
+        assert!(
+            error.to_string().contains("governance-core package"),
+            "{error}"
+        );
     }
 
     #[test]
@@ -283,7 +303,13 @@ mod tests {
         let mut context = context();
         context.members.clear();
 
-        // Act / Assert
-        assert!(body("dec::1220", &context, &input(1)).is_err());
+        // Act
+        let error = body("dec::1220", &context, &input(1)).unwrap_err();
+
+        // Assert
+        assert!(
+            error.to_string().contains("no governance members"),
+            "{error}"
+        );
     }
 }

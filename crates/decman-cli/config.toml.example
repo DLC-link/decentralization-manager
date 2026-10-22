@@ -21,7 +21,7 @@ network = "devnet"
 api_url = "https://decman.devnet.example"
 username = "bob"
 password_command = "pass show decman/devnet"
-# Commands that change state need --yes on this profile.
+# Every request that is not a read (GET) needs --yes on this profile.
 require_yes = true
 
 # Optional OAuth overrides (auto-discovered from /auth-config if omitted):
@@ -38,9 +38,9 @@ require_yes = true
 # client_secret_command = "pass show decman/devnet/admin"
 #
 # [profiles.party_credentials]
-# member_party_id = "attestor-1::1220..."
-# user_id = "attestor-user"
+# member_party_id = "member-1::1220..."
+# user_id = "member-user"
 # keycloak_url = "https://keycloak.example"
 # keycloak_realm = "nodes"
-# keycloak_client_id = "attestor-1"
-# client_secret_command = "pass show decman/devnet/attestor"
+# keycloak_client_id = "member-1"
+# client_secret_command = "pass show decman/devnet/member"

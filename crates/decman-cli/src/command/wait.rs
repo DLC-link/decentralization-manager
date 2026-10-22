@@ -14,8 +14,12 @@ use reqwest::Method;
 use super::Outcome;
 use crate::api::DecmanClient;
 
-/// Polls in a row that may miss the run before the wait gives up.
+/// Polls in a row that may miss the run before the wait stops.
 const MAX_MISSES: u32 = 5;
+
+/// Polls in a row that may fail, for example on a network error, before the
+/// wait stops. The run goes on at the node while the CLI retries.
+const MAX_POLL_ERRORS: u32 = 3;
 
 /// How to find the run to wait for.
 #[derive(Clone, Debug)]
@@ -52,9 +56,30 @@ pub fn wait_for_run(
 ) -> Result<Outcome> {
     let started = Instant::now();
     let mut misses = 0;
+    let mut errors = 0;
     let mut last_progress = String::new();
     loop {
-        let response = client.request(Method::GET, "/workflows", &[], None)?;
+        let response = match client.request(Method::GET, "/workflows", &[], None) {
+            Ok(response) => {
+                errors = 0;
+                response
+            }
+            Err(error) => {
+                errors += 1;
+                if errors >= MAX_POLL_ERRORS {
+                    return Err(error.context(format!(
+                        "polling failed {MAX_POLL_ERRORS} times in a row; the run goes on at \
+                         the node, so check it with workflows get"
+                    )));
+                }
+                eprintln!(
+                    "poll failed, retrying: {}",
+                    super::for_terminal(&format!("{error:#}"))
+                );
+                std::thread::sleep(options.interval);
+                continue;
+            }
+        };
         let runs: WorkflowRunsResponse =
             serde_json::from_value(response).context("failed to parse the /workflows response")?;
 
@@ -63,7 +88,7 @@ pub fn wait_for_run(
                 misses = 0;
                 let progress = describe(run);
                 if progress != last_progress {
-                    eprintln!("{progress}");
+                    eprintln!("{}", super::for_terminal(&progress));
                     last_progress = progress;
                 }
                 if is_terminal(run.status) {
@@ -97,8 +122,9 @@ pub fn wait_for_run(
     }
 }
 
-/// The run `selector` names. For a peer run, the newest match wins, because
-/// a coordinator can retry and invite this node again.
+/// The run `selector` names. The server keeps one peer row per coordinator
+/// run, so a peer selector matches at most one run; the newest one wins in
+/// case an older server kept more.
 fn find_run<'a>(runs: &'a [WorkflowRun], selector: &RunSelector) -> Option<&'a WorkflowRun> {
     match selector {
         RunSelector::Instance(name) => runs.iter().find(|run| &run.instance_name == name),

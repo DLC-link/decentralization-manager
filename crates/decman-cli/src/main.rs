@@ -86,7 +86,7 @@ fn run_command(
             }
         }
         Err(error) => {
-            eprintln!("error: {error:#}");
+            eprintln!("error: {}", command::for_terminal(&format!("{error:#}")));
             ExitCode::FAILURE
         }
     }
@@ -103,7 +103,8 @@ fn command_outcome(
     }
     let login = select_login(connection, options, config_path)?;
     let mut client = DecmanClient::new(login.api_url.clone(), login.auth.clone())?
-        .with_request_timeout(Duration::from_secs(options.http_timeout));
+        .with_request_timeout(Duration::from_secs(options.http_timeout))
+        .with_warnings();
     if !options.no_token_cache
         && let Some(cache) = TokenCache::for_login(&login.api_url, &login.auth.username)
     {
@@ -111,7 +112,7 @@ fn command_outcome(
     }
     if login.require_yes && !options.yes {
         client = client.with_writes_blocked(format!(
-            "profile {} needs --yes for commands that change state",
+            "profile {} needs --yes for every request that is not a read (GET)",
             login.name
         ));
     }
@@ -173,10 +174,9 @@ fn select_login(
     if connection.api_url.is_some() {
         let api_url = connection.require_api_url()?;
         // A protected node stays protected when it is reached by URL.
-        let same_node = |url: &str| url.trim_end_matches('/') == api_url.trim_end_matches('/');
         let require_yes = profiles
             .iter()
-            .any(|profile| profile.require_yes && same_node(&profile.api_url));
+            .any(|profile| profile.require_yes && same_node(&profile.api_url, &api_url));
         return Ok(Login {
             name: api_url.clone(),
             api_url,
@@ -187,18 +187,34 @@ fn select_login(
     }
     match profiles.as_slice() {
         [profile] => Login::from_profile(profile),
-        [] => Ok(Login {
-            name: String::new(),
-            api_url: connection.require_api_url()?,
-            auth: connection.auth_settings()?,
-            require_yes: false,
-            settings: NodeSettings::default(),
-        }),
+        [] => bail!(
+            "no login selected: pass --profile, or set --api-url / DECMAN_API_URL ({} has no profiles)",
+            config_path.display()
+        ),
         _ => bail!(
             "{path} has several profiles; pick one with --profile ({names})",
             path = config_path.display(),
             names = names(),
         ),
+    }
+}
+
+/// Whether two API URLs name the same node: same scheme, host and port
+/// (`https://a` and `https://A:443/` match), ignoring a trailing `/`.
+fn same_node(left: &str, right: &str) -> bool {
+    let key = |url: &str| {
+        reqwest::Url::parse(url).ok().map(|url| {
+            (
+                url.scheme().to_owned(),
+                url.host_str().map(str::to_ascii_lowercase),
+                url.port_or_known_default(),
+                url.path().trim_end_matches('/').to_owned(),
+            )
+        })
+    };
+    match (key(left), key(right)) {
+        (Some(left), Some(right)) => left == right,
+        _ => left.trim_end_matches('/') == right.trim_end_matches('/'),
     }
 }
 
@@ -366,4 +382,156 @@ fn init_tracing() {
         )
         .with_writer(std::io::stderr)
         .init();
+}
+
+#[cfg(test)]
+mod tests {
+    use clap::CommandFactory;
+
+    use super::*;
+
+    fn parse(args: &[&str]) -> Cli {
+        let mut argv = vec!["decman-cli"];
+        argv.extend_from_slice(args);
+        Cli::try_parse_from(argv).unwrap()
+    }
+
+    fn config(dir: &tempfile::TempDir, toml: &str) -> PathBuf {
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, toml).unwrap();
+        path
+    }
+
+    const PROTECTED: &str = r#"
+        [[profiles]]
+        name = "guarded"
+        api_url = "https://decman.example"
+        username = "alice"
+        password = "hunter2"
+        require_yes = true
+
+        [[profiles]]
+        name = "open"
+        api_url = "https://other.example"
+        username = "bob"
+        password_command = "pass show bob"
+    "#;
+
+    #[test]
+    fn the_cli_definition_is_consistent() {
+        Cli::command().debug_assert();
+    }
+
+    #[test]
+    fn same_node_ignores_case_default_port_and_trailing_slash() {
+        assert!(same_node(
+            "https://decman.example",
+            "https://DECMAN.example:443/"
+        ));
+        assert!(!same_node(
+            "https://decman.example",
+            "https://decman.example:8443"
+        ));
+        assert!(!same_node(
+            "https://decman.example",
+            "http://decman.example"
+        ));
+    }
+
+    #[test]
+    fn a_url_login_to_a_protected_node_keeps_the_guard() {
+        // Arrange
+        let dir = tempfile::tempdir().unwrap();
+        let path = config(&dir, PROTECTED);
+        let cli = parse(&[
+            "--api-url",
+            "https://DECMAN.example/",
+            "--username",
+            "x",
+            "profiles",
+        ]);
+
+        // Act
+        let login = select_login(&cli.connection, &cli.options, &path).unwrap();
+
+        // Assert
+        assert!(login.require_yes);
+    }
+
+    #[test]
+    fn a_profile_wins_over_a_url() {
+        // Arrange
+        let dir = tempfile::tempdir().unwrap();
+        let path = config(&dir, PROTECTED);
+        let cli = parse(&[
+            "-p",
+            "open",
+            "--api-url",
+            "https://decman.example",
+            "profiles",
+        ]);
+
+        // Act
+        let login = select_login(&cli.connection, &cli.options, &path).unwrap();
+
+        // Assert
+        assert_eq!(login.name, "open");
+        assert!(!login.require_yes);
+    }
+
+    #[test]
+    fn several_profiles_without_a_choice_is_an_error() {
+        // Arrange
+        let dir = tempfile::tempdir().unwrap();
+        let path = config(&dir, PROTECTED);
+        let cli = parse(&["profiles"]);
+
+        // Act
+        let error = select_login(&cli.connection, &cli.options, &path)
+            .err()
+            .unwrap();
+
+        // Assert
+        assert!(
+            error.to_string().contains("pick one with --profile"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn listing_profiles_never_shows_a_password() {
+        // Arrange
+        let dir = tempfile::tempdir().unwrap();
+        let path = config(&dir, PROTECTED);
+
+        // Act
+        let outcome = list_profiles(&path).unwrap();
+
+        // Assert
+        let text = outcome.value.to_string();
+        assert!(!text.contains("hunter2"), "{text}");
+        assert!(!text.contains("pass show bob"), "{text}");
+        assert!(text.contains("password_command"), "{text}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_tui_resolves_a_password_command_before_it_starts() {
+        // Arrange
+        let auth = AuthSettings {
+            username: "alice".to_owned(),
+            password: Some(PasswordSource::Command("printf 's3cret\\n'".to_owned())),
+            token_url: None,
+            client_id: None,
+            client_secret: None,
+            audience: None,
+            scope: None,
+        };
+
+        // Act
+        let resolved = resolve_password_now(auth).unwrap();
+
+        // Assert
+        assert!(matches!(resolved.password, Some(PasswordSource::Literal(ref p)) if p == "s3cret"));
+    }
 }

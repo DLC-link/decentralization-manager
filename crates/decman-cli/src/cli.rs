@@ -120,7 +120,7 @@ impl Connection {
     }
 }
 
-/// Options for the command mode. The terminal UI ignores them.
+/// Options for the command mode. The terminal UI reads only `--config`.
 #[derive(Debug, Args)]
 pub struct CommandOptions {
     /// Login profile from the config file.
@@ -132,7 +132,7 @@ pub struct CommandOptions {
     #[arg(long, env = "DECMAN_CONFIG", global = true)]
     pub config: Option<PathBuf>,
 
-    /// Allow commands that change state on a profile with `require_yes`.
+    /// Allow requests that are not reads (GET) on a profile with `require_yes`.
     #[arg(long, global = true)]
     pub yes: bool,
 

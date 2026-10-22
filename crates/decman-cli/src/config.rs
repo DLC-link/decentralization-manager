@@ -15,6 +15,7 @@ const SESSION_FILE: &str = ".decman-cli-session";
 
 /// One login profile from `config.toml`.
 #[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Profile {
     /// Custom display name for this profile.
     pub name: String,
@@ -103,6 +104,7 @@ pub fn password_source(
 /// The participant admin client of a node. `auth grant-rights` uses it to
 /// grant the party user its rights.
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct AdminClient {
     pub client_id: String,
     /// A shell command that prints the client secret.
@@ -113,6 +115,7 @@ pub struct AdminClient {
 /// node's member party and the IdP client that acts as it. They are the
 /// `PUT /party-config` fields without the party id and the secret.
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct PartyCredentials {
     pub member_party_id: String,
     /// The Canton user id of the client. DecMan shows it as a label only.
@@ -275,6 +278,24 @@ mod tests {
         assert!(
             matches!(auth.password, Some(PasswordSource::Command(ref c)) if c == "pass show decman")
         );
+    }
+
+    #[test]
+    fn a_misspelled_key_is_an_error() {
+        // Arrange — a typo must not turn the write guard off without a word.
+        let toml = r#"
+            [[profiles]]
+            name = "Devnet"
+            api_url = "https://decman.devnet"
+            username = "bob"
+            require-yes = true
+        "#;
+
+        // Act
+        let error = toml::from_str::<ConfigFile>(toml).unwrap_err();
+
+        // Assert
+        assert!(error.to_string().contains("require-yes"), "{error}");
     }
 
     #[test]

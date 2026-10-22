@@ -135,7 +135,7 @@ fn a_cached_login_serves_the_next_invocation() {
     fake.token_grant("password", "a-1", 1);
     fake.get_with_token("/node-config", "a-1", json!({ "ok": true }), 2);
     let dir = tempfile::tempdir().unwrap();
-    let cache = TokenCache::in_dir(dir.path(), &fake.uri(), "alice");
+    let cache = TokenCache::in_dir(&dir.path().join("cache"), &fake.uri(), "alice");
 
     // Act — two clients, as two separate CLI invocations.
     let first = fake.client().with_token_cache(cache.clone()).request(
@@ -159,7 +159,7 @@ fn an_expired_access_token_is_refreshed_without_the_password() {
     // Arrange
     let fake = Fake::start();
     let dir = tempfile::tempdir().unwrap();
-    let cache = TokenCache::in_dir(dir.path(), &fake.uri(), "alice");
+    let cache = TokenCache::in_dir(&dir.path().join("cache"), &fake.uri(), "alice");
     cache
         .save(&fake.target(), &tokens("a-old", 1, "r-old"))
         .unwrap();
@@ -196,7 +196,7 @@ fn a_401_refreshes_once_and_retries() {
     // Arrange
     let fake = Fake::start();
     let dir = tempfile::tempdir().unwrap();
-    let cache = TokenCache::in_dir(dir.path(), &fake.uri(), "alice");
+    let cache = TokenCache::in_dir(&dir.path().join("cache"), &fake.uri(), "alice");
     cache
         .save(&fake.target(), &tokens("a-revoked", i64::MAX / 2, "r-old"))
         .unwrap();
@@ -225,7 +225,7 @@ fn a_failed_refresh_falls_back_to_the_password() {
     // Arrange
     let fake = Fake::start();
     let dir = tempfile::tempdir().unwrap();
-    let cache = TokenCache::in_dir(dir.path(), &fake.uri(), "alice");
+    let cache = TokenCache::in_dir(&dir.path().join("cache"), &fake.uri(), "alice");
     cache
         .save(&fake.target(), &tokens("a-old", 1, "r-expired"))
         .unwrap();
@@ -255,7 +255,7 @@ fn a_login_another_invocation_refreshed_is_used_without_refreshing_again() {
     // invocation writes a fresh one to the same cache file.
     let fake = Fake::start();
     let dir = tempfile::tempdir().unwrap();
-    let cache = TokenCache::in_dir(dir.path(), &fake.uri(), "alice");
+    let cache = TokenCache::in_dir(&dir.path().join("cache"), &fake.uri(), "alice");
     cache
         .save(&fake.target(), &tokens("a-old", 1, "r-old"))
         .unwrap();
@@ -283,7 +283,7 @@ fn a_stale_cached_token_endpoint_falls_back_to_discovery() {
     // Arrange — the cached login names a token endpoint the IdP no longer has.
     let fake = Fake::start();
     let dir = tempfile::tempdir().unwrap();
-    let cache = TokenCache::in_dir(dir.path(), &fake.uri(), "alice");
+    let cache = TokenCache::in_dir(&dir.path().join("cache"), &fake.uri(), "alice");
     let stale = AuthTarget {
         token_url: format!("{}/old-token", fake.uri()),
         client_id: "cli".to_owned(),
@@ -291,9 +291,10 @@ fn a_stale_cached_token_endpoint_falls_back_to_discovery() {
     };
     cache.save(&stale, &tokens("a-old", 1, "r-old")).unwrap();
     fake.mount(
+        // Only the refresh goes to the old endpoint. The password must not.
         Mock::given(path("/old-token"))
             .respond_with(ResponseTemplate::new(404))
-            .expect(2),
+            .expect(1),
     );
     fake.mount(
         Mock::given(method("GET"))
@@ -687,4 +688,421 @@ fn party_config_set_builds_the_body_from_the_profile_credentials() {
 
     // Assert
     assert_eq!(outcome.value, json!({ "ok": true }));
+}
+
+fn party_list(id: &str, threshold: i64, participants: &[&str]) -> ResponseTemplate {
+    let participants: Vec<Value> = participants
+        .iter()
+        .map(|participant| json!({ "participant_uid": participant, "permission": "confirmation" }))
+        .collect();
+    ResponseTemplate::new(200).set_body_json(json!({
+        "parties": [{ "party_id": id, "threshold": threshold, "participants": participants }],
+    }))
+}
+
+#[test]
+fn wait_polls_until_the_run_ends() {
+    // Arrange — the first poll sees the run in progress, the second completed.
+    let fake = Fake::start();
+    fake.token_grant("password", "a-1", 1);
+    fake.mount(
+        Mock::given(method("GET"))
+            .and(path("/workflows"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(json!({ "runs": [run_json("inprogress", json!({}))] })),
+            )
+            .up_to_n_times(1)
+            .expect(1),
+    );
+    fake.get_with_token(
+        "/workflows",
+        "a-1",
+        json!({ "runs": [run_json("completed", json!({}))] }),
+        1,
+    );
+
+    // Act
+    let outcome = run_command(
+        &fake,
+        parse(&["workflows", "wait", "dars-7", "--poll-interval", "1"]),
+    )
+    .unwrap();
+
+    // Assert
+    assert!(outcome.success);
+    assert_eq!(outcome.value["status"], "completed");
+}
+
+#[test]
+fn wait_stops_when_the_run_stays_missing() {
+    // Arrange
+    let fake = Fake::start();
+    fake.token_grant("password", "a-1", 1);
+    fake.get_with_token("/workflows", "a-1", json!({ "runs": [] }), 5);
+
+    // Act
+    let error = run_command(
+        &fake,
+        parse(&["workflows", "wait", "dars-7", "--poll-interval", "1"]),
+    )
+    .unwrap_err();
+
+    // Assert
+    assert!(error.to_string().contains("dismissed"), "{error}");
+}
+
+#[test]
+fn wait_stops_at_its_timeout() {
+    // Arrange
+    let fake = Fake::start();
+    fake.token_grant("password", "a-1", 1);
+    fake.get_with_token(
+        "/workflows",
+        "a-1",
+        json!({ "runs": [run_json("inprogress", json!({}))] }),
+        1,
+    );
+
+    // Act
+    let error = run_command(
+        &fake,
+        parse(&["workflows", "wait", "dars-7", "--timeout", "0"]),
+    )
+    .unwrap_err();
+
+    // Assert
+    assert!(error.to_string().contains("timed out"), "{error}");
+}
+
+#[test]
+fn the_tui_calls_refresh_after_a_401_too() {
+    // Arrange
+    let fake = Fake::start();
+    fake.token_grant("password", "a-1", 1);
+    fake.mount(
+        Mock::given(method("GET"))
+            .and(path("/decentralized-parties"))
+            .and(header("authorization", "Bearer a-1"))
+            .respond_with(ResponseTemplate::new(401))
+            .expect(1),
+    );
+    fake.token_grant("refresh_token", "a-2", 1);
+    fake.get_with_token("/decentralized-parties", "a-2", json!({ "parties": [] }), 1);
+
+    // Act
+    let parties = fake.client().fetch_parties().unwrap();
+
+    // Assert
+    assert!(parties.is_empty());
+}
+
+#[test]
+fn a_node_without_auth_gets_no_token_and_no_cache() {
+    // Arrange
+    let fake = Fake::start();
+    fake.mount(
+        Mock::given(method("GET"))
+            .and(path("/auth-config"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(json!({ "auth_required": false })),
+            )
+            .expect(1),
+    );
+    fake.mount(
+        Mock::given(method("POST"))
+            .and(path("/token"))
+            .respond_with(ResponseTemplate::new(500))
+            .expect(0),
+    );
+    fake.mount(
+        Mock::given(method("GET"))
+            .and(path("/node-config"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "ok": true })))
+            .expect(1),
+    );
+    let dir = tempfile::tempdir().unwrap();
+    let cache = TokenCache::in_dir(&dir.path().join("cache"), &fake.uri(), "alice");
+    let mut auth = fake.auth();
+    auth.token_url = None;
+    auth.client_id = None;
+
+    // Act
+    let result = DecmanClient::new(fake.uri(), auth)
+        .unwrap()
+        .with_token_cache(cache.clone())
+        .request(Method::GET, "/node-config", &[], None);
+
+    // Assert
+    assert_eq!(result.unwrap(), json!({ "ok": true }));
+    assert!(cache.load().is_none());
+}
+
+#[test]
+fn plain_http_to_another_host_is_refused() {
+    let error = DecmanClient::new("http://decman.example".to_owned(), Fake::start().auth())
+        .err()
+        .unwrap();
+    assert!(error.to_string().contains("use https"), "{error}");
+}
+
+#[test]
+fn add_member_sends_the_current_threshold_as_previous() {
+    // Arrange
+    let fake = Fake::start();
+    fake.token_grant("password", "a-1", 1);
+    fake.mount(
+        Mock::given(method("GET"))
+            .and(path("/decentralized-parties"))
+            .respond_with(party_list("alpha::1220aa", 2, &["PAR::1", "PAR::2"]))
+            .expect(1),
+    );
+    fake.mount(
+        Mock::given(method("POST"))
+            .and(path("/add-party"))
+            .and(body_json(json!({
+                "decentralized_party_id": "alpha::1220aa",
+                "new_participant_id": "PAR::3",
+                "new_threshold": 2,
+                "previous_threshold": 2,
+            })))
+            .respond_with(
+                ResponseTemplate::new(202).set_body_json(json!({ "instance_name": "add-1" })),
+            )
+            .expect(1),
+    );
+
+    // Act
+    let outcome = run_command(
+        &fake,
+        parse(&[
+            "parties",
+            "add-member",
+            "--party",
+            "alpha",
+            "--participant",
+            "PAR::3",
+            "--threshold",
+            "2",
+        ]),
+    )
+    .unwrap();
+
+    // Assert
+    assert_eq!(outcome.value["instance_name"], "add-1");
+}
+
+#[test]
+fn a_party_the_node_does_not_list_has_no_previous_threshold() {
+    // Arrange
+    let fake = Fake::start();
+    fake.token_grant("password", "a-1", 1);
+    fake.get_with_token("/decentralized-parties", "a-1", json!({ "parties": [] }), 1);
+    fake.mount(
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(202))
+            .expect(0),
+    );
+
+    // Act
+    let error = run_command(
+        &fake,
+        parse(&[
+            "parties",
+            "set-threshold",
+            "--party",
+            "alpha::1220aa",
+            "--threshold",
+            "1",
+        ]),
+    )
+    .unwrap_err();
+
+    // Assert
+    assert!(error.to_string().contains("threshold"), "{error}");
+}
+
+#[test]
+fn keep_secret_sends_the_body_without_a_secret() {
+    // Arrange
+    let fake = Fake::start();
+    fake.token_grant("password", "a-1", 1);
+    let body = json!({ "dec_party_id": "alpha::1220aa", "keycloak_client_id": "attestor-1" });
+    fake.mount(
+        Mock::given(method("PUT"))
+            .and(path("/party-config"))
+            .and(body_json(body.clone()))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "ok": true })))
+            .expect(1),
+    );
+    let body = body.to_string();
+
+    // Act — no profile settings, so a secret lookup would fail.
+    let outcome = run_command(
+        &fake,
+        parse(&["party-config", "set", "--body", &body, "--keep-secret"]),
+    )
+    .unwrap();
+
+    // Assert
+    assert_eq!(outcome.value, json!({ "ok": true }));
+}
+
+#[test]
+fn deploy_governance_dry_run_reads_but_never_deploys() {
+    // Arrange
+    let fake = Fake::start();
+    fake.token_grant("password", "a-1", 1);
+    fake.mount(
+        Mock::given(method("GET"))
+            .and(path("/decentralized-parties"))
+            .respond_with(party_list("alpha::1220aa", 2, &["PAR::1", "PAR::2"]))
+            .expect(1),
+    );
+    fake.get_with_token(
+        "/packages",
+        "a-1",
+        json!({ "governance_core": "#governance-core-v1" }),
+        1,
+    );
+    fake.get_with_token(
+        "/governance/known-members",
+        "a-1",
+        json!({ "members": [
+            { "participant_uid": "PAR::1", "member_party_id": "m1::1220" },
+            { "participant_uid": "PAR::2", "member_party_id": "m2::1220" },
+        ] }),
+        1,
+    );
+    fake.get_with_token(
+        "/operator-info",
+        "a-1",
+        json!({ "party_id": "op::1220" }),
+        1,
+    );
+    fake.mount(
+        Mock::given(method("POST"))
+            .and(path("/contracts"))
+            .respond_with(ResponseTemplate::new(202))
+            .expect(0),
+    );
+
+    // Act
+    let outcome = run_command(
+        &fake,
+        parse(&[
+            "contracts",
+            "deploy-governance",
+            "--party",
+            "alpha",
+            "--threshold",
+            "2",
+            "--confirmation-timeout-micros",
+            "86400000000",
+            "--dry-run",
+        ]),
+    )
+    .unwrap();
+
+    // Assert
+    assert_eq!(
+        outcome.value["participant_parties"],
+        json!(["m1::1220", "m2::1220"])
+    );
+    assert_eq!(outcome.value["operator_party"], "op::1220");
+    assert_eq!(
+        outcome.value["contracts"][0]["package_id"],
+        "#governance-core-v1"
+    );
+}
+
+#[test]
+fn confirm_finds_a_proposal_on_a_later_page() {
+    // Arrange
+    let fake = Fake::start();
+    fake.token_grant("password", "a-1", 1);
+    fake.mount(
+        Mock::given(method("GET"))
+            .and(path("/decentralized-parties"))
+            .respond_with(party_list("alpha::1220aa", 2, &["PAR::1"]))
+            .expect(1),
+    );
+    let page = |cid: &str, next: Option<&str>| {
+        json!({
+            "threshold": 2,
+            "rules_contract_id": "rules-1",
+            "member_party_id": "me::1220",
+            "actions": [],
+            "next_cursor": next,
+            "domain_actions": [{
+                "proposal_cid": cid, "action_label": "SetupUtility",
+                "confirmations": [], "confirmation_count": 0, "can_execute": false,
+            }],
+        })
+    };
+    fake.mount(
+        Mock::given(method("GET"))
+            .and(path("/governance/confirmations"))
+            .and(query_param("cursor", "page-2"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(page("p-old", None)))
+            .expect(1),
+    );
+    fake.mount(
+        Mock::given(method("GET"))
+            .and(path("/governance/confirmations"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(page("p-new", Some("page-2"))))
+            .expect(1),
+    );
+    fake.mount(
+        Mock::given(method("POST"))
+            .and(path("/governance/confirm"))
+            .and(body_string_contains("p-old"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "message": "ok" })))
+            .expect(1),
+    );
+
+    // Act
+    let outcome = run_command(
+        &fake,
+        parse(&[
+            "governance",
+            "confirm",
+            "--party",
+            "alpha",
+            "--proposal",
+            "p-old",
+        ]),
+    )
+    .unwrap();
+
+    // Assert
+    assert_eq!(outcome.value, json!({ "message": "ok" }));
+}
+
+#[test]
+fn an_invitation_dar_is_written_as_raw_bytes() {
+    // Arrange
+    let fake = Fake::start();
+    fake.token_grant("password", "a-1", 1);
+    let dar = vec![0x50, 0x4b, 0x03, 0x04, 0xff, 0x00];
+    fake.mount(
+        Mock::given(method("GET"))
+            .and(path("/invitations/inv-1/dars/0"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(dar.clone()))
+            .expect(1),
+    );
+    let dir = tempfile::tempdir().unwrap();
+    let out = dir.path().join("pkg.dar");
+    let out_arg = out.display().to_string();
+
+    // Act
+    let outcome = run_command(
+        &fake,
+        parse(&["invitations", "dar", "inv-1", "0", "--out", &out_arg]),
+    )
+    .unwrap();
+
+    // Assert
+    assert_eq!(std::fs::read(&out).unwrap(), dar);
+    assert_eq!(outcome.value["bytes"], 6);
 }
