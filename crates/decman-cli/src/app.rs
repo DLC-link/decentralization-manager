@@ -987,6 +987,7 @@ fn build_gov_view(
         threshold,
         rules_contract_id,
         member_party_id,
+        ..
     } = client.fetch_governance(party_id)?;
     // Confirm/execute/propose all need a real rules contract id; bail early with
     // a clear message rather than sending empty ids that fail obscurely later.

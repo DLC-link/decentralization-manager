@@ -90,30 +90,57 @@ impl Pending<'_> {
     }
 }
 
-/// The confirmations list for `party_id`, with the rules contract id checked.
+/// Proposals per page when the CLI reads every page.
+const PAGE_SIZE: usize = 200;
+
+/// Pages the CLI reads at most, so a server that always returns a cursor
+/// cannot keep it busy.
+const MAX_PAGES: usize = 50;
+
+/// The full confirmations list for `party_id`, with every page of proposals.
+/// The server sends 25 proposals per page by default, so an older proposal
+/// is only found on a later page.
 ///
 /// # Errors
 ///
-/// Returns an error if the request fails or the party has no governance rules
-/// contract.
-pub fn fetch(
-    client: &mut DecmanClient,
-    party_id: &str,
-) -> Result<(GovernanceConfirmations, String)> {
-    let response = client.request(
-        Method::GET,
-        "/governance/confirmations",
-        &[("party_id".to_owned(), party_id.to_owned())],
-        None,
-    )?;
-    let confirmations: GovernanceConfirmations = serde_json::from_value(response)
-        .context("failed to parse the /governance/confirmations response")?;
-    let rules_contract_id = confirmations
+/// Returns an error if a request fails or a response does not parse.
+pub fn fetch(client: &mut DecmanClient, party_id: &str) -> Result<GovernanceConfirmations> {
+    let mut cursor: Option<String> = None;
+    let mut all: Option<GovernanceConfirmations> = None;
+    for _ in 0..MAX_PAGES {
+        let mut query = vec![
+            ("party_id".to_owned(), party_id.to_owned()),
+            ("limit".to_owned(), PAGE_SIZE.to_string()),
+        ];
+        if let Some(cursor) = &cursor {
+            query.push(("cursor".to_owned(), cursor.clone()));
+        }
+        let response = client.request(Method::GET, "/governance/confirmations", &query, None)?;
+        let page: GovernanceConfirmations = serde_json::from_value(response)
+            .context("failed to parse the /governance/confirmations response")?;
+        cursor = page.next_cursor.clone();
+        match &mut all {
+            None => all = Some(page),
+            Some(all) => all.domain_actions.extend(page.domain_actions),
+        }
+        if cursor.is_none() {
+            break;
+        }
+    }
+    all.context("the /governance/confirmations response was empty")
+}
+
+/// The rules contract id that confirm, execute, expire and propose need.
+///
+/// # Errors
+///
+/// Returns an error if the party has no governance rules contract.
+pub fn rules_contract_id(confirmations: &GovernanceConfirmations) -> Result<String> {
+    confirmations
         .rules_contract_id
         .clone()
         .filter(|id| !id.is_empty())
-        .context("no governance rules contract found for this party")?;
-    Ok((confirmations, rules_contract_id))
+        .context("no governance rules contract found for this party")
 }
 
 /// Find the pending action `target` names, or `None` if it is not pending.
@@ -308,7 +335,7 @@ mod tests {
                     { "contract_id": "c-self-me", "confirming_party": "me::1220", "expires_at": 0 },
                     { "contract_id": "c-self-you", "confirming_party": "you::1220", "expires_at": 0 }
                 ],
-                "executable_confirmation_cids": ["c-self-me", "c-self-you"],
+                "executable_confirmation_cids": ["c-self-you"],
                 "confirmation_count": 2,
                 "can_execute": true
             }],
@@ -393,10 +420,8 @@ mod tests {
 
         // Assert
         assert_eq!(body["governance_type"], "core_self");
-        assert_eq!(
-            body["confirmation_cids"],
-            json!(["c-self-me", "c-self-you"])
-        );
+        // Only the server's live subset, not every confirmation.
+        assert_eq!(body["confirmation_cids"], json!(["c-self-you"]));
         assert_eq!(body["action"]["new_threshold"], 2);
         assert_eq!(body["disclosed_contracts"], json!([]));
     }

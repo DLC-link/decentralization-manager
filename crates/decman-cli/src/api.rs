@@ -351,6 +351,9 @@ pub struct GovernanceConfirmations {
     pub rules_contract_id: Option<String>,
     #[serde(default)]
     pub member_party_id: Option<String>,
+    /// Cursor of the next page of proposals, when there is one.
+    #[serde(default)]
+    pub next_cursor: Option<String>,
 }
 
 /// `/operator-info` response: this node's operator party id.
@@ -769,7 +772,9 @@ pub struct DecmanClient {
     request_timeout: Option<Duration>,
     /// When set, [`Self::request`] refuses every non-`GET` with this message.
     writes_blocked: Option<String>,
-    authenticated: bool,
+    /// Print login problems that are not fatal on stderr. The TUI leaves this
+    /// off, because stderr output would draw over its screen.
+    warn: bool,
 }
 
 impl DecmanClient {
@@ -779,8 +784,12 @@ impl DecmanClient {
     ///
     /// Returns an error if the underlying HTTP client cannot be constructed.
     pub fn new(base_url: String, auth: AuthSettings) -> Result<Self> {
+        ensure_secure_url(&base_url)?;
+        // No redirects: a redirect to another host would carry a request body
+        // with secrets (grant-rights, party-config) to that host.
         let http = Client::builder()
             .timeout(Duration::from_secs(15))
+            .redirect(reqwest::redirect::Policy::none())
             .build()
             .context("failed to build HTTP client")?;
 
@@ -795,7 +804,7 @@ impl DecmanClient {
             target_from_cache: false,
             request_timeout: None,
             writes_blocked: None,
-            authenticated: false,
+            warn: false,
         })
     }
 
@@ -823,6 +832,11 @@ impl DecmanClient {
         };
         agrees(&self.auth.token_url, &target.token_url)
             && agrees(&self.auth.client_id, &target.client_id)
+            && self
+                .auth
+                .audience
+                .as_ref()
+                .is_none_or(|audience| target.audience.as_ref() == Some(audience))
     }
 
     /// Take a newer, valid login from the cache file. A parallel invocation
@@ -859,6 +873,19 @@ impl DecmanClient {
         self
     }
 
+    /// Print login problems that are not fatal, such as a failed refresh or a
+    /// cache that cannot be written, on stderr.
+    #[must_use]
+    pub fn with_warnings(mut self) -> Self {
+        self.warn = true;
+        self
+    }
+
+    /// The message of a write block, if writes are blocked.
+    pub fn writes_blocked(&self) -> Option<&str> {
+        self.writes_blocked.as_deref()
+    }
+
     /// The base URL this client talks to, without a trailing slash.
     pub fn base_url(&self) -> &str {
         &self.base_url
@@ -886,7 +913,6 @@ impl DecmanClient {
     /// Returns an error if the cache file exists but cannot be deleted.
     pub fn logout(&mut self) -> Result<bool> {
         self.tokens = None;
-        self.authenticated = false;
         match &self.cache {
             Some(cache) => cache.clear(),
             None => Ok(false),
@@ -913,15 +939,7 @@ impl DecmanClient {
         {
             bail!("{reason}");
         }
-        if !self.authenticated {
-            self.authenticate()?;
-        }
-        let mut response = self.send_request(&method, path, query, body)?;
-        if response.status() == StatusCode::UNAUTHORIZED {
-            self.drop_access_token();
-            self.authenticate()?;
-            response = self.send_request(&method, path, query, body)?;
-        }
+        let response = self.send_authed(&method, path, query, body)?;
 
         let status = response.status();
         // The server answers unknown routes with the web UI's index.html, so an
@@ -953,6 +971,49 @@ impl DecmanClient {
             return Ok(Value::Null);
         }
         Ok(serde_json::from_str(&text).unwrap_or(Value::String(text)))
+    }
+
+    /// `GET` a route that answers with raw bytes, such as a DAR download.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if login or the request fails, or as an [`ApiError`]
+    /// if the API returns a non-success status.
+    pub fn request_bytes(&mut self, path: &str) -> Result<Vec<u8>> {
+        let response = self.send_authed(&Method::GET, path, &[], None)?;
+        let status = response.status();
+        if !status.is_success() {
+            return Err(ApiError {
+                method: Method::GET,
+                path: path.to_owned(),
+                status,
+                body: response.text().unwrap_or_default(),
+            }
+            .into());
+        }
+        Ok(response
+            .bytes()
+            .with_context(|| format!("failed to read the {path} response"))?
+            .to_vec())
+    }
+
+    /// Send a request with a valid login, and once more after a fresh login
+    /// when the server answers `401`.
+    fn send_authed(
+        &mut self,
+        method: &Method,
+        path: &str,
+        query: &[(String, String)],
+        body: Option<&Value>,
+    ) -> Result<Response> {
+        self.authenticate()?;
+        let response = self.send_request(method, path, query, body)?;
+        if response.status() != StatusCode::UNAUTHORIZED {
+            return Ok(response);
+        }
+        self.drop_access_token();
+        self.authenticate()?;
+        self.send_request(method, path, query, body)
     }
 
     fn send_request(
@@ -1136,9 +1197,9 @@ impl DecmanClient {
         }
         let text = response.text().unwrap_or_default();
         if status == StatusCode::UNPROCESSABLE_ENTITY
-            && let Ok(mesh) = serde_json::from_str::<MeshErrorResponse>(&text)
+            && let Some(hint) = mesh_error_hint(&text)
         {
-            bail!("{}", format_mesh_error(&mesh));
+            bail!("{hint}");
         }
         bail!("onboarding failed ({status}): {text}");
     }
@@ -1621,30 +1682,18 @@ impl DecmanClient {
         self.get_json_query(path, &[])
     }
 
-    /// GET `path` with query params as JSON, authenticating on first use and
-    /// re-authenticating once on `401 Unauthorized` (i.e. an expired token).
+    /// GET `path` with query params as JSON.
     fn get_json_query<T: DeserializeOwned>(
         &mut self,
         path: &str,
         query: &[(&str, &str)],
     ) -> Result<T> {
-        if !self.authenticated {
-            self.authenticate()?;
-        }
-
-        let mut response = self.get(path, query)?;
-        if response.status() == StatusCode::UNAUTHORIZED {
-            self.drop_access_token();
-            self.authenticate()?;
-            response = self.get(path, query)?;
-        }
-
-        let status = response.status();
-        if !status.is_success() {
-            let body = response.text().unwrap_or_default();
-            bail!("decman API {path} returned {status}: {body}");
-        }
-
+        let query: Vec<(String, String)> = query
+            .iter()
+            .map(|(key, value)| ((*key).to_owned(), (*value).to_owned()))
+            .collect();
+        let response = self.send_authed(&Method::GET, path, &query, None)?;
+        let response = success_or_api_error(Method::GET, path, response)?;
         response
             .json()
             .with_context(|| format!("failed to parse {path} response"))
@@ -1669,7 +1718,6 @@ impl DecmanClient {
             .as_ref()
             .is_some_and(|tokens| tokens.access_valid(now))
         {
-            self.authenticated = true;
             return Ok(());
         }
         let target = match self.target.clone() {
@@ -1682,7 +1730,6 @@ impl DecmanClient {
         };
         let Some(target) = target else {
             self.tokens = None;
-            self.authenticated = true;
             return Ok(());
         };
 
@@ -1690,42 +1737,48 @@ impl DecmanClient {
         let refreshed = previous
             .as_ref()
             .and_then(|tokens| tokens.usable_refresh_token(now))
-            .and_then(|refresh| self.refresh_grant(&target, refresh, previous.as_ref()).ok());
+            .and_then(|refresh| {
+                self.refresh_grant(&target, refresh, previous.as_ref())
+                    .map_err(|error| self.warning(&format!("token refresh failed: {error:#}")))
+                    .ok()
+            });
         let (target, tokens) = match refreshed {
             Some(tokens) => (target, tokens),
             None => self.password_login(target)?,
         };
-        if let Some(cache) = &self.cache {
+        if let Some(cache) = &self.cache
+            && let Err(error) = cache.save(&target, &tokens)
+        {
             // A cache write failure only costs a login on the next call.
-            let _ = cache.save(&target, &tokens);
+            self.warning(&format!("the login was not cached: {error:#}"));
         }
         self.tokens = Some(tokens);
-        self.authenticated = true;
         Ok(())
     }
 
-    /// Log in with the password. A cached token endpoint can be out of date,
-    /// for example after the node moved to another IdP, so a failed login on
-    /// a cached target runs discovery once and tries the new target.
+    /// Print `message` on stderr when warnings are on.
+    fn warning(&self, message: &str) {
+        if self.warn {
+            eprintln!("warning: {message}");
+        }
+    }
+
+    /// Log in with the password. A token endpoint from the cache can be out
+    /// of date, for example after the node moved to another IdP. The password
+    /// must never go to an old host, so a cached target is discovered again
+    /// before the password is sent.
     fn password_login(&mut self, target: AuthTarget) -> Result<(AuthTarget, TokenSet)> {
-        let password = self.resolve_password()?;
-        let error = match self.password_grant(&target, &password) {
-            Ok(tokens) => return Ok((target, tokens)),
-            Err(error) => error,
+        let target = if self.target_from_cache {
+            self.target_from_cache = false;
+            let fresh = self.resolve_auth_target()?;
+            self.target = Some(fresh.clone());
+            fresh.context("this node no longer requires a login; run logout")?
+        } else {
+            target
         };
-        if !self.target_from_cache {
-            return Err(error);
-        }
-        self.target_from_cache = false;
-        let fresh = self.resolve_auth_target()?;
-        self.target = Some(fresh.clone());
-        match fresh {
-            Some(fresh) if fresh != target => {
-                let tokens = self.password_grant(&fresh, &password)?;
-                Ok((fresh, tokens))
-            }
-            _ => Err(error),
-        }
+        let password = self.resolve_password()?;
+        let tokens = self.password_grant(&target, &password)?;
+        Ok((target, tokens))
     }
 
     /// The configured password, running the password command on first use.
@@ -1756,7 +1809,6 @@ impl DecmanClient {
         if let Some(tokens) = &mut self.tokens {
             tokens.expire_access();
         }
-        self.authenticated = false;
     }
 
     /// Resolve the token endpoint, client id, and audience.
@@ -1845,6 +1897,7 @@ impl DecmanClient {
 
     /// Mint an access token via the OAuth2 password grant.
     fn password_grant(&self, target: &AuthTarget, password: &str) -> Result<TokenSet> {
+        ensure_secure_url(&target.token_url)?;
         let mut form = vec![
             ("grant_type", "password"),
             ("client_id", target.client_id.as_str()),
@@ -1894,6 +1947,7 @@ impl DecmanClient {
         refresh_token: &str,
         previous: Option<&TokenSet>,
     ) -> Result<TokenSet> {
+        ensure_secure_url(&target.token_url)?;
         let mut form = vec![
             ("grant_type", "refresh_token"),
             ("client_id", target.client_id.as_str()),
@@ -1917,97 +1971,56 @@ impl DecmanClient {
         Ok(TokenSet::from_response(token, now_secs(), previous))
     }
 
-    /// Send a `GET {base_url}{path}` with query params, attaching the bearer
-    /// token if present.
-    fn get(&self, path: &str, query: &[(&str, &str)]) -> Result<Response> {
-        let url = format!("{base}{path}", base = self.base_url);
-        let mut request = self.http.get(&url);
-        if let Some(token) = self.access_token() {
-            request = request.bearer_auth(token);
-        }
-        if !query.is_empty() {
-            request = request.query(query);
-        }
-        request
-            .send()
-            .with_context(|| format!("request to {url} failed"))
-    }
-
-    /// POST `path` with an optional JSON body, returning the raw response.
-    /// Authenticates on first use and re-authenticates once on `401`, so the
-    /// caller can inspect non-success statuses (e.g. a 422 with a typed body).
+    /// POST `path` with an optional JSON body, returning the raw response,
+    /// so the caller can inspect non-success statuses (e.g. a 422 with a typed
+    /// body).
     fn post_raw(&mut self, path: &str, body: Option<&Value>) -> Result<Response> {
-        if !self.authenticated {
-            self.authenticate()?;
-        }
-
-        let mut response = self.send_post(path, body)?;
-        if response.status() == StatusCode::UNAUTHORIZED {
-            self.drop_access_token();
-            self.authenticate()?;
-            response = self.send_post(path, body)?;
-        }
-        Ok(response)
+        self.send_authed(&Method::POST, path, &[], body)
     }
 
     /// POST `path` with an optional JSON body, discarding the success body and
     /// failing on any non-success status.
     fn post(&mut self, path: &str, body: Option<Value>) -> Result<()> {
         let response = self.post_raw(path, body.as_ref())?;
-        let status = response.status();
-        if !status.is_success() {
-            let body = response.text().unwrap_or_default();
-            bail!("decman API {path} returned {status}: {body}");
-        }
-        Ok(())
+        success_or_api_error(Method::POST, path, response).map(drop)
     }
 
-    /// Send a `POST {base_url}{path}`, attaching the bearer token and JSON body
-    /// if present.
-    fn send_post(&self, path: &str, body: Option<&Value>) -> Result<Response> {
-        let url = format!("{base}{path}", base = self.base_url);
-        let mut request = self.http.post(&url);
-        if let Some(token) = self.access_token() {
-            request = request.bearer_auth(token);
-        }
-        if let Some(body) = body {
-            request = request.json(body);
-        }
-        request
-            .send()
-            .with_context(|| format!("request to {url} failed"))
-    }
-
-    /// PUT `path` with a JSON body, authenticating on first use and retrying
-    /// once on `401`, then failing on any non-success status.
+    /// PUT `path` with a JSON body, failing on any non-success status.
     fn put(&mut self, path: &str, body: Value) -> Result<()> {
-        if !self.authenticated {
-            self.authenticate()?;
-        }
-        let mut response = self.send_put(path, &body)?;
-        if response.status() == StatusCode::UNAUTHORIZED {
-            self.drop_access_token();
-            self.authenticate()?;
-            response = self.send_put(path, &body)?;
-        }
-        let status = response.status();
-        if !status.is_success() {
-            let text = response.text().unwrap_or_default();
-            bail!("decman API {path} returned {status}: {text}");
-        }
-        Ok(())
+        let response = self.send_authed(&Method::PUT, path, &[], Some(&body))?;
+        success_or_api_error(Method::PUT, path, response).map(drop)
     }
+}
 
-    /// Send a `PUT {base_url}{path}` with a JSON body and the bearer token.
-    fn send_put(&self, path: &str, body: &Value) -> Result<Response> {
-        let url = format!("{base}{path}", base = self.base_url);
-        let mut request = self.http.put(&url).json(body);
-        if let Some(token) = self.access_token() {
-            request = request.bearer_auth(token);
-        }
-        request
-            .send()
-            .with_context(|| format!("request to {url} failed"))
+/// `response` if it succeeded, else an [`ApiError`] with its body.
+fn success_or_api_error(method: Method, path: &str, response: Response) -> Result<Response> {
+    let status = response.status();
+    if status.is_success() {
+        return Ok(response);
+    }
+    Err(ApiError {
+        method,
+        path: path.to_owned(),
+        status,
+        body: response.text().unwrap_or_default(),
+    }
+    .into())
+}
+
+/// Refuse a plain `http://` URL to anything but this machine. Tokens,
+/// passwords and client secrets must not cross the network in clear text.
+///
+/// # Errors
+///
+/// Returns an error for a URL that does not parse, or for `http://` to a
+/// host other than `localhost`, `127.0.0.1` or `::1`.
+pub fn ensure_secure_url(url: &str) -> Result<()> {
+    let parsed = reqwest::Url::parse(url).with_context(|| format!("{url} is not a valid URL"))?;
+    let loopback = matches!(parsed.host_str(), Some("localhost" | "127.0.0.1" | "[::1]"));
+    match parsed.scheme() {
+        "https" => Ok(()),
+        "http" if loopback => Ok(()),
+        scheme => bail!("{url}: use https; {scheme} is allowed for localhost only"),
     }
 }
 
@@ -2109,7 +2122,7 @@ mod tests {
             client_id: Some("decman-web".to_owned()),
             ..auth_settings()
         };
-        let client = DecmanClient::new("http://api.invalid".to_owned(), auth).unwrap();
+        let client = DecmanClient::new("https://api.invalid".to_owned(), auth).unwrap();
 
         // Act
         let target = client.resolve_auth_target().unwrap().unwrap();

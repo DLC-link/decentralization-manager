@@ -208,8 +208,13 @@ impl TokenCache {
     }
 
     /// The cached login, if the file exists, parses, and belongs to this API
-    /// URL and username. A broken file counts as no cache.
+    /// URL and username. A broken file counts as no cache, and so does a file
+    /// or directory that another user could have written.
     pub fn load(&self) -> Option<CachedLogin> {
+        let dir = self.path.parent()?;
+        if !is_private(dir) || !is_private(&self.path) {
+            return None;
+        }
         let text = std::fs::read_to_string(&self.path).ok()?;
         let login: CachedLogin = serde_json::from_str(&text).ok()?;
         (login.api_url == self.api_url && login.username == self.username).then_some(login)
@@ -234,6 +239,13 @@ impl TokenCache {
             .parent()
             .context("token cache path has no directory")?;
         create_private_dir(dir)?;
+        if !is_private(dir) {
+            bail!(
+                "the token cache directory {} is a link or open to other users; \
+                 run chmod 700 on it, or pass --no-token-cache",
+                dir.display()
+            );
+        }
         let temp = self
             .path
             .with_extension(format!("tmp.{}", std::process::id()));
@@ -271,17 +283,42 @@ fn create_private_dir(dir: &Path) -> Result<()> {
     std::fs::create_dir_all(dir).context("failed to create the token cache directory")
 }
 
+/// Whether `path` is a real file or directory that only its owner can read or
+/// write. A symlink never counts as private.
+#[cfg(unix)]
+fn is_private(path: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::symlink_metadata(path)
+        .is_ok_and(|meta| !meta.file_type().is_symlink() && meta.permissions().mode() & 0o077 == 0)
+}
+
+#[cfg(not(unix))]
+fn is_private(_path: &Path) -> bool {
+    true
+}
+
+/// Write `bytes` to a new file at `path`, readable by the owner only. The file
+/// must not exist, so a planted file or symlink makes the write fail instead
+/// of being followed. A leftover from an earlier crashed run is removed first.
 #[cfg(unix)]
 fn write_private_file(path: &Path, bytes: &[u8]) -> Result<()> {
     use std::io::Write;
     use std::os::unix::fs::OpenOptionsExt;
-    let mut file = std::fs::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .mode(0o600)
-        .open(path)
-        .context("failed to open the token cache file")?;
+    let open = || {
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(path)
+    };
+    let mut file = match open() {
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            std::fs::remove_file(path).context("failed to remove a stale token cache file")?;
+            open()
+        }
+        other => other,
+    }
+    .context("failed to open the token cache file")?;
     file.write_all(bytes)
         .context("failed to write the token cache file")
 }
@@ -406,12 +443,65 @@ mod tests {
         assert!(cache.load().is_none());
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn cache_in_a_directory_open_to_others_is_refused() {
+        // Arrange
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let cache_dir = dir.path().join("decman-cli");
+        let cache = TokenCache::in_dir(&cache_dir, "https://a", "alice");
+        let tokens = TokenSet {
+            access_token: "a".to_owned(),
+            access_expires_at: None,
+            refresh_token: None,
+            refresh_expires_at: None,
+        };
+        cache.save(&target(), &tokens).unwrap();
+        std::fs::set_permissions(&cache_dir, std::fs::Permissions::from_mode(0o777)).unwrap();
+
+        // Act
+        let loaded = cache.load();
+        let saved = cache.save(&target(), &tokens);
+
+        // Assert
+        assert!(loaded.is_none());
+        assert!(
+            saved
+                .unwrap_err()
+                .to_string()
+                .contains("open to other users")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlinked_cache_file_is_not_read() {
+        // Arrange
+        let dir = tempfile::tempdir().unwrap();
+        let cache_dir = dir.path().join("decman-cli");
+        let cache = TokenCache::in_dir(&cache_dir, "https://a", "alice");
+        let tokens = TokenSet {
+            access_token: "a".to_owned(),
+            access_expires_at: None,
+            refresh_token: None,
+            refresh_expires_at: None,
+        };
+        cache.save(&target(), &tokens).unwrap();
+        let real = dir.path().join("elsewhere.json");
+        std::fs::rename(&cache.path, &real).unwrap();
+        std::os::unix::fs::symlink(&real, &cache.path).unwrap();
+
+        // Act / Assert
+        assert!(cache.load().is_none());
+    }
+
     #[test]
     fn cache_ignores_a_record_for_another_server() {
         // Arrange — two logins whose file names collide after sanitizing.
         let dir = tempfile::tempdir().unwrap();
-        let first = TokenCache::in_dir(dir.path(), "https://a.b", "alice");
-        let second = TokenCache::in_dir(dir.path(), "https://a_b", "alice");
+        let first = TokenCache::in_dir(&dir.path().join("cache"), "https://a.b", "alice");
+        let second = TokenCache::in_dir(&dir.path().join("cache"), "https://a_b", "alice");
         assert_eq!(first.path, second.path);
         let tokens = TokenSet {
             access_token: "a".to_owned(),
@@ -428,6 +518,7 @@ mod tests {
         assert!(second.load().is_none());
     }
 
+    #[cfg(unix)]
     #[test]
     fn password_command_returns_the_first_stdout_line() {
         // Arrange
@@ -440,6 +531,7 @@ mod tests {
         assert_eq!(password, "hunter2");
     }
 
+    #[cfg(unix)]
     #[test]
     fn failing_password_command_is_an_error() {
         // Arrange
@@ -455,12 +547,16 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn empty_password_command_output_is_an_error() {
         // Arrange
         let source = PasswordSource::Command("true".to_owned());
 
-        // Act / Assert
-        assert!(source.resolve().is_err());
+        // Act
+        let error = source.resolve().unwrap_err();
+
+        // Assert
+        assert!(error.to_string().contains("printed nothing"), "{error}");
     }
 }
