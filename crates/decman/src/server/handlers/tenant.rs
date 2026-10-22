@@ -578,7 +578,7 @@ pub async fn tenant_add_hosts_execute(
         (status = 200, description = "One block of the ACS", body = TenantAcsBlockResponse),
         (status = 400, description = "Bad target participant id or seq", body = ErrorResponse),
         (status = 401, description = "Invalid tenant API key", body = ErrorResponse),
-        (status = 409, description = "Out of sync with this host's export; restart from block 1", body = ErrorResponse),
+        (status = 409, description = "Out of sync with this host's export; restart from block 1. Or this host is leaving the party", body = ErrorResponse),
         (status = 500, description = "Export failed on this host", body = ErrorResponse)
     )
 )]
@@ -637,6 +637,7 @@ pub async fn tenant_acs_snapshot(
                 ),
             });
         }
+        Ok(ServedBlock::Held) => return relay_held_response(&party_id),
         Err(e) => {
             tracing::error!("tenant acs snapshot: export failed: {e:#}");
             return HttpResponse::InternalServerError().json(ErrorResponse {
@@ -725,7 +726,7 @@ pub async fn tenant_acs_snapshot(
         (status = 400, description = "Bad base64, bad party id, or missing packages", body = ErrorResponse),
         (status = 401, description = "Invalid tenant API key", body = ErrorResponse),
         (status = 404, description = "No authorized mapping for this party on this host", body = ErrorResponse),
-        (status = 409, description = "Out of sync with this host's import; restart from block 1", body = ErrorResponse),
+        (status = 409, description = "Out of sync with this host's import; restart from block 1. Or this host is leaving the party", body = ErrorResponse),
         (status = 500, description = "Import failed on this participant", body = ErrorResponse)
     )
 )]
@@ -844,6 +845,7 @@ pub async fn tenant_acs_import(
             imported: false,
             marker_cleared: false,
         }),
+        Ok(AcceptedBlock::Held) => relay_held_response(&body.party_id),
         Ok(AcceptedBlock::OutOfSync { expected, asked }) => {
             HttpResponse::Conflict().json(ErrorResponse {
                 error: match expected {
@@ -1361,6 +1363,17 @@ pub struct AcsBlockQuery {
     pub base_serial: u32,
     /// Which block to serve, 1-based.
     pub seq: u64,
+}
+
+/// The 409 for a relay that would start while this host changes the party's
+/// hosting.
+fn relay_held_response(party_id: &str) -> HttpResponse {
+    HttpResponse::Conflict().json(ErrorResponse {
+        error: format!(
+            "this host is leaving {party_id}, so no ACS relay for it may start; retry once the \
+             unhost has finished"
+        ),
+    })
 }
 
 /// Base64-decode a raw Ed25519 public key into its fixed 32-byte array, or the

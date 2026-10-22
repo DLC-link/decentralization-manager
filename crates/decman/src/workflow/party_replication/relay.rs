@@ -31,7 +31,11 @@
 //!   as the add-party path accepts. Asking for block 1 again is therefore the
 //!   signal to throw the old session away and start over, not an error.
 
-use std::{collections::HashMap, sync::Arc, time::Duration};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::{Arc, PoisonError},
+    time::Duration,
+};
 
 use sqlx::SqlitePool;
 use tokio::{
@@ -91,6 +95,33 @@ struct ImportEntry {
 pub struct RelaySessions {
     exports: Mutex<HashMap<String, Arc<Mutex<ExportEntry>>>>,
     imports: Mutex<HashMap<String, ImportEntry>>,
+    /// Parties whose hosting this node is changing. No relay starts for them.
+    ///
+    /// A hold is taken while both maps are locked, and a new session checks it
+    /// while its own map is locked. That shared lock is what keeps a relay and
+    /// a hold from each missing the other.
+    held: std::sync::Mutex<HashSet<String>>,
+}
+
+/// Why [`RelaySessions::hold`] refused.
+#[derive(Debug, PartialEq, Eq)]
+pub enum HoldRefused {
+    /// Another hold on the party is in place.
+    AlreadyHeld,
+    /// A relay for the party is open.
+    RelayOpen,
+}
+
+/// Keeps new relays for one party from starting until it is dropped.
+pub struct PartyHold {
+    sessions: Arc<RelaySessions>,
+    party_id: String,
+}
+
+impl Drop for PartyHold {
+    fn drop(&mut self) {
+        self.sessions.held().remove(&self.party_id);
+    }
 }
 
 /// What a source did with a block request.
@@ -100,6 +131,8 @@ pub enum ServedBlock {
     /// `seq` is neither a replay of the last block nor the next one, and the
     /// Canton stream cannot rewind. The wallet must restart from block 1.
     OutOfSync { expected: u64, asked: u64 },
+    /// The party is held, so no new export may start.
+    Held,
 }
 
 /// What a joiner did with a delivered block.
@@ -111,11 +144,52 @@ pub enum AcceptedBlock {
     /// No session, or `seq` is not the one expected. The wallet must restart
     /// from block 1.
     OutOfSync { expected: Option<u64>, asked: u64 },
+    /// The party is held, so no new import may start.
+    Held,
 }
 
 impl RelaySessions {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    fn held(&self) -> std::sync::MutexGuard<'_, HashSet<String>> {
+        // Nothing panics while holding the lock, so a poisoned set is intact.
+        self.held.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Whether `party_id` is held.
+    pub fn is_held(&self, party_id: &str) -> bool {
+        self.held().contains(party_id)
+    }
+
+    /// Stop new relays for `party_id` from starting until the returned hold is
+    /// dropped.
+    ///
+    /// `belongs` picks out the party's sessions by instance name. A hold is
+    /// refused while one of them is open, and while another hold is in place.
+    ///
+    /// # Errors
+    /// [`HoldRefused`] says which of the two blocked it.
+    pub async fn hold(
+        self: &Arc<Self>,
+        party_id: &str,
+        belongs: impl Fn(&str) -> bool,
+    ) -> std::result::Result<PartyHold, HoldRefused> {
+        let exports = self.exports.lock().await;
+        let imports = self.imports.lock().await;
+        if exports.keys().any(|name| belongs(name)) || imports.keys().any(|name| belongs(name)) {
+            return Err(HoldRefused::RelayOpen);
+        }
+        if !self.held().insert(party_id.to_string()) {
+            return Err(HoldRefused::AlreadyHeld);
+        }
+        drop(imports);
+        drop(exports);
+        Ok(PartyHold {
+            sessions: Arc::clone(self),
+            party_id: party_id.to_string(),
+        })
     }
 
     // ----------------------------------------------------------------
@@ -163,15 +237,23 @@ impl RelaySessions {
                         asked: seq,
                     });
                 }
+                let party = target.party_id.to_string();
+                // Checked first so a held party opens no Canton stream.
+                if self.is_held(&party) {
+                    return Ok(ServedBlock::Held);
+                }
                 let _ = (config, db);
                 let entry = Arc::new(Mutex::new(ExportEntry {
                     session: open().await?,
                     last_touched: Instant::now(),
                 }));
-                self.exports
-                    .lock()
-                    .await
-                    .insert(target.instance_name.clone(), entry.clone());
+                let mut exports = self.exports.lock().await;
+                // Checked again under the lock a hold takes. The export just
+                // opened is dropped with the entry.
+                if self.is_held(&party) {
+                    return Ok(ServedBlock::Held);
+                }
+                exports.insert(target.instance_name.clone(), entry.clone());
                 entry
             }
         };
@@ -225,6 +307,9 @@ impl RelaySessions {
 
         let sender = {
             let mut imports = self.imports.lock().await;
+            if seq == 1 && self.is_held(&target.party_id.to_string()) {
+                return Ok(AcceptedBlock::Held);
+            }
             if seq == 1 {
                 // A restart. The previous import must be fully retired before
                 // the next one starts, not merely told to stop.
@@ -518,9 +603,90 @@ mod tests {
             Ok(ServedBlock::OutOfSync { expected, asked }) => {
                 assert_eq!((expected, asked), (1, 7));
             }
-            Ok(ServedBlock::Block(_)) => panic!("block 7 cannot be served from nothing"),
+            Ok(ServedBlock::Block(_) | ServedBlock::Held) => {
+                panic!("block 7 cannot be served from nothing")
+            }
             Err(e) => panic!("this is a protocol answer, not a failure: {e}"),
         }
+    }
+
+    fn party_of(target: &ReplicationTarget) -> String {
+        target.party_id.to_string()
+    }
+
+    /// One hold per party: a second unhost of the same party must wait for the
+    /// first, and the hold frees the party when it is dropped.
+    #[tokio::test]
+    async fn a_party_takes_one_hold_at_a_time() {
+        let sessions = Arc::new(RelaySessions::new());
+        let party = party_of(&target("run-1"));
+
+        let Ok(first) = sessions.hold(&party, |_| false).await else {
+            panic!("a free party must be held");
+        };
+        assert!(sessions.is_held(&party));
+        assert_eq!(
+            sessions.hold(&party, |_| false).await.err(),
+            Some(HoldRefused::AlreadyHeld)
+        );
+        assert!(sessions.hold("bob::1220bb", |_| false).await.is_ok());
+
+        drop(first);
+        assert!(!sessions.is_held(&party));
+        assert!(sessions.hold(&party, |_| false).await.is_ok());
+    }
+
+    /// A held party starts no relay. The export side must refuse before it opens
+    /// a Canton stream, and the import side before it disconnects anything.
+    #[tokio::test]
+    async fn a_held_party_starts_no_relay() {
+        let sessions = Arc::new(RelaySessions::new());
+        let db = pool().await;
+        let target = target("run-1");
+        let Ok(_hold) = sessions.hold(&party_of(&target), |_| false).await else {
+            panic!("a free party must be held");
+        };
+
+        let served = sessions
+            .serve_block(&NodeConfig::default(), &db, &target, 1, 1024, async || {
+                panic!("a held party must open no export")
+            })
+            .await;
+        assert!(matches!(served, Ok(ServedBlock::Held)));
+
+        let block = PipeBlock::Data {
+            seq: 1,
+            bytes: b"some bytes".to_vec(),
+        };
+        let accepted = sessions
+            .accept_block(&NodeConfig::default(), &db, &target, &[], block)
+            .await;
+        assert!(matches!(accepted, Ok(AcceptedBlock::Held)));
+        assert!(sessions.imports.lock().await.is_empty());
+    }
+
+    /// The other direction: a relay already open keeps the party from being
+    /// held, so its hosting cannot change under the transfer.
+    #[tokio::test]
+    async fn an_open_relay_blocks_a_hold() {
+        let sessions = Arc::new(RelaySessions::new());
+        let (blocks, _rx) = mpsc::channel(BLOCK_CHANNEL_CAPACITY);
+        sessions.imports.lock().await.insert(
+            "run-1".to_string(),
+            ImportEntry {
+                blocks,
+                task: tokio::spawn(async { Ok(()) }),
+                expected_seq: 2,
+                last_touched: Instant::now(),
+            },
+        );
+        let party = party_of(&target("run-1"));
+
+        assert_eq!(
+            sessions.hold(&party, |name| name == "run-1").await.err(),
+            Some(HoldRefused::RelayOpen)
+        );
+        assert!(!sessions.is_held(&party));
     }
 
     /// The mirror on the joiner. Without a session there is no open import to

@@ -22,11 +22,7 @@
 //!    written first and updated at every step, so a crash leaves it open at the
 //!    step it reached, and the next attempt resumes from there.
 
-use std::{
-    collections::HashSet,
-    sync::{LazyLock, Mutex, PoisonError},
-    time::Duration,
-};
+use std::{sync::Arc, time::Duration};
 
 use anyhow::Context;
 use canton_proto_rs::com::{
@@ -65,7 +61,7 @@ use crate::{
                 self, AuditStatus, NewAttempt, RequestedVia, UnhostAuditRow, UnhostStep,
             },
         },
-        party_replication::relay::RelaySessions,
+        party_replication::relay::{HoldRefused, RelaySessions},
         topology,
     },
 };
@@ -78,34 +74,6 @@ const SPLICE_AMULET: &str = "#splice-amulet";
 /// apart, before it reports the write as accepted but not yet effective. Kept
 /// short so the whole call returns inside a wallet client's 60 s timeout.
 const EFFECTIVE_POLLS: u32 = 10;
-
-/// Unhosts running on this node, by party.
-///
-/// Two concurrent attempts for one party would both archive and both submit
-/// the same serial. The second is refused instead. A process-wide set is
-/// enough, because the audit rows and the topology both belong to this node.
-static IN_FLIGHT: LazyLock<Mutex<HashSet<String>>> = LazyLock::new(Default::default);
-
-/// Holds a party in [`IN_FLIGHT`] until dropped.
-struct InFlight(String);
-
-impl InFlight {
-    fn claim(party_id: &str) -> Option<Self> {
-        let mut running = IN_FLIGHT.lock().unwrap_or_else(PoisonError::into_inner);
-        running
-            .insert(party_id.to_string())
-            .then(|| Self(party_id.to_string()))
-    }
-}
-
-impl Drop for InFlight {
-    fn drop(&mut self) {
-        IN_FLIGHT
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .remove(&self.0);
-    }
-}
 
 /// Why an unhost was refused. Each variant maps to the status code that tells
 /// the caller what to do next.
@@ -152,7 +120,7 @@ pub struct UnhostRequest {
 pub struct UnhostEnv<'a> {
     pub config: &'a NodeConfig,
     pub db: &'a SqlitePool,
-    pub relay_sessions: &'a RelaySessions,
+    pub relay_sessions: &'a Arc<RelaySessions>,
     pub auth: Option<&'a WorkflowAuth>,
 }
 
@@ -182,11 +150,6 @@ pub async fn unhost(
     request: &UnhostRequest,
 ) -> Result<UnhostOutcome, UnhostError> {
     let party_id = request.party_id.as_str();
-    let Some(_guard) = InFlight::claim(party_id) else {
-        return Err(UnhostError::Busy(format!(
-            "an unhost of {party_id} is already running on this host; wait for it to finish"
-        )));
-    };
     let me = env.config.participant_id().to_string();
 
     let audit_id = unhost_audit::insert_attempt(
@@ -201,6 +164,36 @@ pub async fn unhost(
     )
     .await
     .map_err(UnhostError::Internal)?;
+
+    // Held until the attempt ends. A second unhost of the party is refused,
+    // and so is any ACS relay for it, because a relay running while the node
+    // leaves would stream or import against a mapping that no longer holds.
+    // Taking the hold and starting a relay share a lock, so neither can miss
+    // the other.
+    let _hold = match env
+        .relay_sessions
+        .hold(party_id, |instance| {
+            instance_is_for_party(instance, party_id)
+        })
+        .await
+    {
+        Ok(hold) => hold,
+        Err(refused) => {
+            let error = match refused {
+                HoldRefused::AlreadyHeld => already_running(party_id),
+                HoldRefused::RelayOpen => relay_busy(party_id),
+            };
+            tracing::info!(%party_id, audit_id, "external-party unhost refused: {error}");
+            let message = error.to_string();
+            if let Err(e) =
+                unhost_audit::finish(env.db, audit_id, AuditStatus::Failed, None, Some(&message))
+                    .await
+            {
+                tracing::error!(%party_id, audit_id, "failed to close the unhost audit row: {e:#}");
+            }
+            return Err(error);
+        }
+    };
 
     let mut progress = Progress {
         audit_id,
@@ -346,9 +339,6 @@ async fn run(
         .into());
     }
     leave_mapping(&current.mapping, me)?;
-    if relay_open(env.relay_sessions, party_id).await {
-        return Err(relay_busy(party_id).into());
-    }
 
     let earlier = unhost_audit::latest_with_work(env.db, party_id, me)
         .await
@@ -469,6 +459,12 @@ async fn relay_open(sessions: &RelaySessions, party_id: &str) -> bool {
     sessions
         .any_session(|instance| instance_is_for_party(instance, party_id))
         .await
+}
+
+fn already_running(party_id: &str) -> UnhostError {
+    UnhostError::Busy(format!(
+        "an unhost of {party_id} is already running on this host; wait for it to finish"
+    ))
 }
 
 fn relay_busy(party_id: &str) -> UnhostError {
@@ -896,6 +892,9 @@ pub async fn preview(
     }
 
     let mut blocker = leave_mapping(&current.mapping, &me).err();
+    if blocker.is_none() && env.relay_sessions.is_held(party_id) {
+        blocker = Some(already_running(party_id));
+    }
     if blocker.is_none() && relay_open(env.relay_sessions, party_id).await {
         blocker = Some(relay_busy(party_id));
     }
@@ -1244,17 +1243,5 @@ mod tests {
             UnhostError::from(anyhow::anyhow!("rpc failed")),
             UnhostError::Internal(_)
         ));
-    }
-
-    /// One unhost per party at a time; the claim frees itself when dropped.
-    #[test]
-    fn a_second_unhost_of_the_same_party_is_refused_while_one_runs() {
-        let party = "in-flight-test::1220aa";
-        let first = InFlight::claim(party);
-        assert!(first.is_some());
-        assert!(InFlight::claim(party).is_none());
-        assert!(InFlight::claim("another-party::1220aa").is_some());
-        drop(first);
-        assert!(InFlight::claim(party).is_some());
     }
 }
