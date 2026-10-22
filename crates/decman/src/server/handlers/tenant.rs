@@ -1174,17 +1174,6 @@ pub async fn tenant_unhost(
         Ok(index) => index,
         Err(resp) => return resp,
     };
-    let me = data.config.participant_id();
-    if body.participant_id != *me {
-        return HttpResponse::BadRequest().json(ErrorResponse {
-            error: format!(
-                "this host is {me}, not {named}; a host removes only itself, so send the request \
-                 to {named}'s own host",
-                named = body.participant_id
-            ),
-        });
-    }
-
     let body = body.into_inner();
     run_unhost(
         &data,
@@ -1194,6 +1183,7 @@ pub async fn tenant_unhost(
             splice_cleanup: body.splice_cleanup.unwrap_or(true),
             requested_via: RequestedVia::Tenant,
             requested_by: tenant_requester(key_index),
+            named_participant: Some(body.participant_id),
         },
     )
     .await

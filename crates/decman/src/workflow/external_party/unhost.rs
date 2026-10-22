@@ -114,6 +114,10 @@ pub struct UnhostRequest {
     pub requested_via: RequestedVia,
     /// The admin user, or `tenant-key-N`. Never a key.
     pub requested_by: String,
+    /// The participant the caller means to remove. The tenant API names it, so
+    /// a caller cannot mistake which host it is talking to. `None` means this
+    /// node.
+    pub named_participant: Option<CantonId>,
 }
 
 /// What the workflow reads and writes through.
@@ -164,6 +168,25 @@ pub async fn unhost(
     )
     .await
     .map_err(UnhostError::Internal)?;
+
+    if let Some(named) = request
+        .named_participant
+        .as_ref()
+        .filter(|named| named.to_string() != me)
+    {
+        let error = UnhostError::Refused(format!(
+            "this host is {me}, not {named}; a host removes only itself, so send the request \
+             to {named}'s own host"
+        ));
+        tracing::info!(%party_id, audit_id, "external-party unhost refused: {error}");
+        let message = error.to_string();
+        if let Err(e) =
+            unhost_audit::finish(env.db, audit_id, AuditStatus::Failed, None, Some(&message)).await
+        {
+            tracing::error!(%party_id, audit_id, "failed to close the unhost audit row: {e:#}");
+        }
+        return Err(error);
+    }
 
     // Held until the node is gone or the attempt ends. A second unhost of the
     // party is refused, and so is any ACS relay for it, because a relay running
@@ -1368,6 +1391,49 @@ mod tests {
         assert!(!outcome_unknown(&anyhow::anyhow!(
             "no channel to the admin API"
         )));
+    }
+
+    /// A request naming another participant is refused before anything else,
+    /// and the refusal lands in the audit like every other. The audit is the
+    /// record of what was asked of this node.
+    #[sqlx::test(migrator = "crate::db::MIGRATOR")]
+    async fn naming_another_participant_is_refused_and_audited(
+        db: SqlitePool,
+    ) -> anyhow::Result<()> {
+        let mut config = NodeConfig::default();
+        config.node.participant_id = Some(CantonId::parse(&format!(
+            "participant-3::1220{}",
+            "cc".repeat(32)
+        ))?);
+        let other = CantonId::parse(&format!("participant-1::1220{}", "aa".repeat(32)))?;
+        let relay_sessions = Arc::new(RelaySessions::new());
+        let env = UnhostEnv {
+            config: &config,
+            db: &db,
+            relay_sessions: &relay_sessions,
+            auth: None,
+        };
+        let request = UnhostRequest {
+            party_id: PARTY.to_string(),
+            base_serial: 4,
+            splice_cleanup: false,
+            requested_via: RequestedVia::Tenant,
+            requested_by: "tenant-key-0".to_string(),
+            named_participant: Some(other),
+        };
+
+        let Err(UnhostError::Refused(message)) = unhost(&env, &request).await else {
+            panic!("a request naming another participant must be refused");
+        };
+        assert!(message.contains("removes only itself"), "{message}");
+
+        let rows = unhost_audit::list_for_party(&db, PARTY, 10).await?;
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].status, "failed");
+        assert_eq!(rows[0].requested_by, "tenant-key-0");
+        assert_eq!(rows[0].error.as_deref(), Some(message.as_str()));
+        assert!(!relay_sessions.is_held(PARTY), "a refusal takes no hold");
+        Ok(())
     }
 
     /// A 404 that travelled through `anyhow` must still be a 404.

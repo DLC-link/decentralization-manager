@@ -63,6 +63,7 @@ pub async fn unhost_external_party(
         splice_cleanup: body.splice_cleanup.unwrap_or(true),
         requested_via: RequestedVia::Operator,
         requested_by: principal.email.unwrap_or(principal.sub),
+        named_participant: None,
     };
     run_unhost(&data, request).await
 }
