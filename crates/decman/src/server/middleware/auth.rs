@@ -170,12 +170,19 @@ pub fn require_admin(
 /// insecure/test mode the key set isn't required, matching how the Keycloak path
 /// relaxes under `--insecure` (so dev + the e2e harness run without keys).
 ///
+/// Returns the index of the matching key in the configured list, so a caller
+/// can record which key acted without recording the key. `None` in
+/// insecure/test mode, where no key is checked.
+///
 /// # Errors
 /// Returns a 401 `HttpResponse` when the bearer is missing or not a configured key.
 #[allow(clippy::result_large_err)]
-pub fn require_tenant_api_key(req: &HttpRequest, state: &AppState) -> Result<(), HttpResponse> {
+pub fn require_tenant_api_key(
+    req: &HttpRequest,
+    state: &AppState,
+) -> Result<Option<usize>, HttpResponse> {
     if state.test_mode {
-        return Ok(());
+        return Ok(None);
     }
     let presented = req
         .headers()
@@ -183,16 +190,18 @@ pub fn require_tenant_api_key(req: &HttpRequest, state: &AppState) -> Result<(),
         .and_then(|h| h.to_str().ok())
         .and_then(parse_bearer)
         .unwrap_or_default();
-    let ok = !presented.is_empty()
-        && state
+    let matched = if presented.is_empty() {
+        None
+    } else {
+        state
             .config
             .tenant_api_keys
             .iter()
-            .any(|k| constant_time_eq(k.as_bytes(), presented.as_bytes()));
-    if ok {
-        Ok(())
-    } else {
-        Err(HttpResponse::Unauthorized().json(json!({"error": "invalid tenant API key"})))
+            .position(|k| constant_time_eq(k.as_bytes(), presented.as_bytes()))
+    };
+    match matched {
+        Some(index) => Ok(Some(index)),
+        None => Err(HttpResponse::Unauthorized().json(json!({"error": "invalid tenant API key"}))),
     }
 }
 
@@ -512,5 +521,29 @@ mod tests {
         let req = TestRequest::put().uri("/party-config").to_request();
         let resp = test::call_service(&app, req).await;
         assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    /// The unhost audit records a tenant key by its index, so the check must
+    /// report which configured key matched, and refuse one that matches none.
+    #[actix_web::test]
+    async fn tenant_key_check_reports_which_key_matched() {
+        let Ok(mut state) = Arc::try_unwrap(build_app_state(Vec::new()).await.into_inner()) else {
+            panic!("the freshly built state has no other owner");
+        };
+        state.test_mode = false;
+        state.config.tenant_api_keys = vec!["first".to_string(), "second".to_string()];
+
+        let second = TestRequest::default()
+            .insert_header(("Authorization", "Bearer second"))
+            .to_http_request();
+        assert_eq!(require_tenant_api_key(&second, &state).ok(), Some(Some(1)));
+
+        let unknown = TestRequest::default()
+            .insert_header(("Authorization", "Bearer third"))
+            .to_http_request();
+        let Err(refused) = require_tenant_api_key(&unknown, &state) else {
+            panic!("a key that is not configured must be refused");
+        };
+        assert_eq!(refused.status(), StatusCode::UNAUTHORIZED);
     }
 }

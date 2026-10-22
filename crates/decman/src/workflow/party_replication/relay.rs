@@ -31,7 +31,11 @@
 //!   as the add-party path accepts. Asking for block 1 again is therefore the
 //!   signal to throw the old session away and start over, not an error.
 
-use std::{collections::HashMap, sync::Arc, time::Duration};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::{Arc, PoisonError},
+    time::Duration,
+};
 
 use sqlx::SqlitePool;
 use tokio::{
@@ -91,6 +95,83 @@ struct ImportEntry {
 pub struct RelaySessions {
     exports: Mutex<HashMap<String, Arc<Mutex<ExportEntry>>>>,
     imports: Mutex<HashMap<String, ImportEntry>>,
+    /// Parties whose hosting this node is changing. No relay starts for them.
+    ///
+    /// A hold is taken while both maps are locked, and a new session checks it
+    /// while its own map is locked. That shared lock is what keeps a relay and
+    /// a hold from each missing the other.
+    held: std::sync::Mutex<HashSet<String>>,
+    /// Imports out of the map but still tearing down: the task is finishing,
+    /// or reconnecting the participant. A hold must wait for them as well.
+    /// Counted per instance, so two teardowns of one transfer each keep their
+    /// own mark. Shared with the teardown task that owns each mark.
+    retiring: Arc<std::sync::Mutex<HashMap<String, usize>>>,
+    /// Exports between admission and registration, while their Canton stream
+    /// opens. Reserved under the exports lock, so a hold sees them too.
+    opening: std::sync::Mutex<HashMap<String, usize>>,
+}
+
+/// Reserves an opening export until it is dropped: after registration, on a
+/// failed open, or when the caller is cancelled.
+struct Opening<'a> {
+    sessions: &'a RelaySessions,
+    instance_name: String,
+}
+
+impl Drop for Opening<'_> {
+    fn drop(&mut self) {
+        let mut opening = self.sessions.opening();
+        if let Some(count) = opening.get_mut(&self.instance_name) {
+            *count -= 1;
+            if *count == 0 {
+                opening.remove(&self.instance_name);
+            }
+        }
+    }
+}
+
+/// Marks an import as retiring until it is dropped. The teardown task owns it,
+/// so the mark lasts exactly as long as the import does, whatever happens to
+/// the caller that started the teardown, and a panic still clears it.
+struct Retiring {
+    marks: Arc<std::sync::Mutex<HashMap<String, usize>>>,
+    instance_name: String,
+}
+
+impl Drop for Retiring {
+    fn drop(&mut self) {
+        let mut marks = self.marks.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(count) = marks.get_mut(&self.instance_name) {
+            *count -= 1;
+            if *count == 0 {
+                marks.remove(&self.instance_name);
+            }
+        }
+    }
+}
+
+/// How long a restarted import waits for the teardown of the one before it.
+const RETIREMENT_WAIT: Duration = Duration::from_secs(120);
+
+/// Why [`RelaySessions::hold`] refused.
+#[derive(Debug, PartialEq, Eq)]
+pub enum HoldRefused {
+    /// Another hold on the party is in place.
+    AlreadyHeld,
+    /// A relay for the party is open.
+    RelayOpen,
+}
+
+/// Keeps new relays for one party from starting until it is dropped.
+pub struct PartyHold {
+    sessions: Arc<RelaySessions>,
+    party_id: String,
+}
+
+impl Drop for PartyHold {
+    fn drop(&mut self) {
+        self.sessions.held().remove(&self.party_id);
+    }
 }
 
 /// What a source did with a block request.
@@ -100,6 +181,8 @@ pub enum ServedBlock {
     /// `seq` is neither a replay of the last block nor the next one, and the
     /// Canton stream cannot rewind. The wallet must restart from block 1.
     OutOfSync { expected: u64, asked: u64 },
+    /// The party is held, so no new export may start.
+    Held,
 }
 
 /// What a joiner did with a delivered block.
@@ -111,11 +194,119 @@ pub enum AcceptedBlock {
     /// No session, or `seq` is not the one expected. The wallet must restart
     /// from block 1.
     OutOfSync { expected: Option<u64>, asked: u64 },
+    /// The party is held, so no new import may start.
+    Held,
 }
 
 impl RelaySessions {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    fn held(&self) -> std::sync::MutexGuard<'_, HashSet<String>> {
+        // Nothing panics while holding the lock, so a poisoned set is intact.
+        self.held.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn retiring(&self) -> std::sync::MutexGuard<'_, HashMap<String, usize>> {
+        self.retiring.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn opening(&self) -> std::sync::MutexGuard<'_, HashMap<String, usize>> {
+        self.opening.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Retire an import the caller has just taken out of the map, in a task of
+    /// its own. The caller holds the imports lock, which is the lock a hold
+    /// checks the mark under. The task owns the mark, so a caller that stops
+    /// waiting cannot clear it while the import still runs.
+    fn spawn_retirement(
+        &self,
+        instance_name: &str,
+        entry: ImportEntry,
+    ) -> tokio::task::JoinHandle<Result<()>> {
+        *self
+            .retiring()
+            .entry(instance_name.to_string())
+            .or_default() += 1;
+        let mark = Retiring {
+            marks: Arc::clone(&self.retiring),
+            instance_name: instance_name.to_string(),
+        };
+        tokio::spawn(async move {
+            let _mark = mark;
+            retire(entry).await
+        })
+    }
+
+    /// Take an import out of the map and retire it in a task of its own.
+    ///
+    /// The import is marked as retiring under the map's lock, which is the lock
+    /// a hold checks the mark under. The task owns the mark, so a caller that
+    /// stops waiting cannot clear it while the import still runs.
+    async fn retire_import(
+        &self,
+        instance_name: &str,
+    ) -> Option<tokio::task::JoinHandle<Result<()>>> {
+        let mut imports = self.imports.lock().await;
+        let entry = imports.remove(instance_name)?;
+        Some(self.spawn_retirement(instance_name, entry))
+    }
+
+    /// Wait, for a bounded time, until no teardown of `instance_name` runs.
+    /// Called with the imports lock held; a teardown never takes that lock, so
+    /// it cannot wait on the caller.
+    async fn await_retirement(&self, instance_name: &str) -> Result<()> {
+        let deadline = Instant::now() + RETIREMENT_WAIT;
+        while self.retiring().contains_key(instance_name) {
+            if Instant::now() >= deadline {
+                anyhow::bail!(
+                    "the previous ACS import of this transfer is still tearing down; restart \
+                     the transfer from block 1 later"
+                );
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        Ok(())
+    }
+
+    /// Whether `party_id` is held.
+    pub fn is_held(&self, party_id: &str) -> bool {
+        self.held().contains(party_id)
+    }
+
+    /// Stop new relays for `party_id` from starting until the returned hold is
+    /// dropped.
+    ///
+    /// `belongs` picks out the party's sessions by instance name. A hold is
+    /// refused while one of them is open or still tearing down, and while
+    /// another hold is in place.
+    ///
+    /// # Errors
+    /// [`HoldRefused`] says which of the two blocked it.
+    pub async fn hold(
+        self: &Arc<Self>,
+        party_id: &str,
+        belongs: impl Fn(&str) -> bool,
+    ) -> std::result::Result<PartyHold, HoldRefused> {
+        let exports = self.exports.lock().await;
+        let imports = self.imports.lock().await;
+        if exports.keys().any(|name| belongs(name))
+            || self.opening().keys().any(|name| belongs(name))
+            || imports.keys().any(|name| belongs(name))
+            || self.retiring().keys().any(|name| belongs(name))
+        {
+            return Err(HoldRefused::RelayOpen);
+        }
+        if !self.held().insert(party_id.to_string()) {
+            return Err(HoldRefused::AlreadyHeld);
+        }
+        drop(imports);
+        drop(exports);
+        Ok(PartyHold {
+            sessions: Arc::clone(self),
+            party_id: party_id.to_string(),
+        })
     }
 
     // ----------------------------------------------------------------
@@ -163,15 +354,32 @@ impl RelaySessions {
                         asked: seq,
                     });
                 }
+                // Admitted under the lock a hold takes, and reserved before the
+                // Canton stream opens. Opening is not one step, so without the
+                // reservation a hold could start and end while it runs, and
+                // the export would register after the party had moved.
+                let reservation = {
+                    let _exports = self.exports.lock().await;
+                    if self.is_held(&target.party_id.to_string()) {
+                        return Ok(ServedBlock::Held);
+                    }
+                    *self
+                        .opening()
+                        .entry(target.instance_name.clone())
+                        .or_default() += 1;
+                    Opening {
+                        sessions: self,
+                        instance_name: target.instance_name.clone(),
+                    }
+                };
                 let _ = (config, db);
                 let entry = Arc::new(Mutex::new(ExportEntry {
                     session: open().await?,
                     last_touched: Instant::now(),
                 }));
-                self.exports
-                    .lock()
-                    .await
-                    .insert(target.instance_name.clone(), entry.clone());
+                let mut exports = self.exports.lock().await;
+                exports.insert(target.instance_name.clone(), entry.clone());
+                drop(reservation);
                 entry
             }
         };
@@ -225,6 +433,16 @@ impl RelaySessions {
 
         let sender = {
             let mut imports = self.imports.lock().await;
+            if seq == 1 && self.is_held(&target.party_id.to_string()) {
+                return Ok(AcceptedBlock::Held);
+            }
+            if seq == 1 {
+                // An earlier import of this transfer may have left the map and
+                // still be reconnecting the participant. Like the restart
+                // below, the new one waits for it under the lock: it must not
+                // disconnect the participant under that reconnect.
+                self.await_retirement(&target.instance_name).await?;
+            }
             if seq == 1 {
                 // A restart. The previous import must be fully retired before
                 // the next one starts, not merely told to stop.
@@ -243,10 +461,18 @@ impl RelaySessions {
                 // new is spawned. Holding it cannot deadlock: a spawned import
                 // never touches this registry.
                 if let Some(old) = imports.remove(&target.instance_name) {
+                    // Through the marked teardown, so a cancelled restart
+                    // leaves the old import blocking holds until it has ended.
                     // Its failure is expected — it is being cancelled — so it is
                     // logged rather than returned over this fresh transfer.
-                    if let Err(e) = retire(old).await {
-                        tracing::info!("the previous ACS import ended: {e}");
+                    match self.spawn_retirement(&target.instance_name, old).await {
+                        Ok(Ok(())) => {}
+                        Ok(Err(e)) => tracing::info!("the previous ACS import ended: {e}"),
+                        Err(e) => {
+                            tracing::info!(
+                                "the previous ACS import's teardown did not complete: {e}"
+                            )
+                        }
                     }
                 }
                 let (tx, rx) = mpsc::channel(BLOCK_CHANNEL_CAPACITY);
@@ -303,14 +529,37 @@ impl RelaySessions {
 
     /// Wait for this replication's import to finish and take its result.
     async fn finish(&self, target: &ReplicationTarget) -> Result<()> {
-        let Some(entry) = self.imports.lock().await.remove(&target.instance_name) else {
+        let Some(teardown) = self.retire_import(&target.instance_name).await else {
             anyhow::bail!(
                 "no ACS import is open for {party} on this host; restart the transfer from \
                  block 1",
                 party = target.party_id
             );
         };
-        retire(entry).await
+        match teardown.await {
+            Ok(result) => result,
+            Err(e) => anyhow::bail!("the ACS import teardown did not complete: {e}"),
+        }
+    }
+
+    /// Whether any open or opening export, any open import, or any import
+    /// still tearing down has an instance name that `belongs` accepts. These are the sessions
+    /// that make [`Self::hold`] refuse.
+    ///
+    /// A caller about to change the party's hosting asks this first: a relay
+    /// still running would stream or import against a mapping that no longer
+    /// holds.
+    pub async fn any_session(&self, belongs: impl Fn(&str) -> bool) -> bool {
+        {
+            let exports = self.exports.lock().await;
+            if exports.keys().any(|name| belongs(name))
+                || self.opening().keys().any(|name| belongs(name))
+            {
+                return true;
+            }
+        }
+        let imports = self.imports.lock().await;
+        imports.keys().any(|name| belongs(name)) || self.retiring().keys().any(|name| belongs(name))
     }
 
     /// Drop this replication's sessions, if any.
@@ -319,11 +568,14 @@ impl RelaySessions {
     /// aborted — see the module docs.
     pub async fn discard(&self, instance_name: &str) {
         self.exports.lock().await.remove(instance_name);
-        let entry = self.imports.lock().await.remove(instance_name);
-        if let Some(entry) = entry
-            && let Err(e) = retire(entry).await
-        {
-            tracing::info!("the discarded ACS import ended: {e}");
+        if let Some(teardown) = self.retire_import(instance_name).await {
+            match teardown.await {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => tracing::info!("the discarded ACS import ended: {e}"),
+                Err(e) => {
+                    tracing::info!("the discarded ACS import's teardown did not complete: {e}")
+                }
+            }
         }
     }
 
@@ -505,9 +757,370 @@ mod tests {
             Ok(ServedBlock::OutOfSync { expected, asked }) => {
                 assert_eq!((expected, asked), (1, 7));
             }
-            Ok(ServedBlock::Block(_)) => panic!("block 7 cannot be served from nothing"),
+            Ok(ServedBlock::Block(_) | ServedBlock::Held) => {
+                panic!("block 7 cannot be served from nothing")
+            }
             Err(e) => panic!("this is a protocol answer, not a failure: {e}"),
         }
+    }
+
+    fn party_of(target: &ReplicationTarget) -> String {
+        target.party_id.to_string()
+    }
+
+    /// One hold per party: a second unhost of the same party must wait for the
+    /// first, and the hold frees the party when it is dropped.
+    #[tokio::test]
+    async fn a_party_takes_one_hold_at_a_time() {
+        let sessions = Arc::new(RelaySessions::new());
+        let party = party_of(&target("run-1"));
+
+        let Ok(first) = sessions.hold(&party, |_| false).await else {
+            panic!("a free party must be held");
+        };
+        assert!(sessions.is_held(&party));
+        assert_eq!(
+            sessions.hold(&party, |_| false).await.err(),
+            Some(HoldRefused::AlreadyHeld)
+        );
+        assert!(sessions.hold("bob::1220bb", |_| false).await.is_ok());
+
+        drop(first);
+        assert!(!sessions.is_held(&party));
+        assert!(sessions.hold(&party, |_| false).await.is_ok());
+    }
+
+    /// A held party starts no relay. The export side must refuse before it opens
+    /// a Canton stream, and the import side before it disconnects anything.
+    #[tokio::test]
+    async fn a_held_party_starts_no_relay() {
+        let sessions = Arc::new(RelaySessions::new());
+        let db = pool().await;
+        let target = target("run-1");
+        let Ok(_hold) = sessions.hold(&party_of(&target), |_| false).await else {
+            panic!("a free party must be held");
+        };
+
+        let served = sessions
+            .serve_block(&NodeConfig::default(), &db, &target, 1, 1024, async || {
+                panic!("a held party must open no export")
+            })
+            .await;
+        assert!(matches!(served, Ok(ServedBlock::Held)));
+
+        let block = PipeBlock::Data {
+            seq: 1,
+            bytes: b"some bytes".to_vec(),
+        };
+        let accepted = sessions
+            .accept_block(&NodeConfig::default(), &db, &target, &[], block)
+            .await;
+        assert!(matches!(accepted, Ok(AcceptedBlock::Held)));
+        assert!(sessions.imports.lock().await.is_empty());
+    }
+
+    /// The other direction: a relay already open keeps the party from being
+    /// held, so its hosting cannot change under the transfer.
+    #[tokio::test]
+    async fn an_open_relay_blocks_a_hold() {
+        let sessions = Arc::new(RelaySessions::new());
+        let (blocks, _rx) = mpsc::channel(BLOCK_CHANNEL_CAPACITY);
+        sessions.imports.lock().await.insert(
+            "run-1".to_string(),
+            ImportEntry {
+                blocks,
+                task: tokio::spawn(async { Ok(()) }),
+                expected_seq: 2,
+                last_touched: Instant::now(),
+            },
+        );
+        let party = party_of(&target("run-1"));
+
+        assert_eq!(
+            sessions.hold(&party, |name| name == "run-1").await.err(),
+            Some(HoldRefused::RelayOpen)
+        );
+        assert!(!sessions.is_held(&party));
+    }
+
+    /// An import that has left the map can still be finishing, or reconnecting
+    /// the participant. A hold must wait until that teardown is over.
+    #[tokio::test]
+    async fn an_import_still_retiring_blocks_a_hold() -> anyhow::Result<()> {
+        let sessions = Arc::new(RelaySessions::new());
+        let (release, released) = tokio::sync::oneshot::channel::<()>();
+        let (blocks, _rx) = mpsc::channel(BLOCK_CHANNEL_CAPACITY);
+        sessions.imports.lock().await.insert(
+            "run-1".to_string(),
+            ImportEntry {
+                blocks,
+                task: tokio::spawn(async move {
+                    let _ = released.await;
+                    Ok(())
+                }),
+                expected_seq: 2,
+                last_touched: Instant::now(),
+            },
+        );
+        let finishing = {
+            let sessions = Arc::clone(&sessions);
+            tokio::spawn(async move { sessions.finish(&target("run-1")).await })
+        };
+        while !sessions.imports.lock().await.is_empty() {
+            tokio::task::yield_now().await;
+        }
+        let party = party_of(&target("run-1"));
+
+        assert_eq!(
+            sessions.hold(&party, |name| name == "run-1").await.err(),
+            Some(HoldRefused::RelayOpen)
+        );
+
+        assert!(
+            sessions.any_session(|name| name == "run-1").await,
+            "the unhost preview must see what the hold sees"
+        );
+
+        let _ = release.send(());
+        finishing.await??;
+        assert!(!sessions.any_session(|name| name == "run-1").await);
+        assert!(sessions.hold(&party, |name| name == "run-1").await.is_ok());
+        Ok(())
+    }
+
+    /// The caller that started a teardown may be dropped, for example when the
+    /// wallet disconnects on the final block. The import still runs, so the
+    /// party must stay blocked until it ends, and be free once it has.
+    #[tokio::test]
+    async fn a_cancelled_teardown_still_blocks_a_hold_until_the_import_ends() -> anyhow::Result<()>
+    {
+        let sessions = Arc::new(RelaySessions::new());
+        let (release, released) = tokio::sync::oneshot::channel::<()>();
+        let (blocks, _rx) = mpsc::channel(BLOCK_CHANNEL_CAPACITY);
+        sessions.imports.lock().await.insert(
+            "run-1".to_string(),
+            ImportEntry {
+                blocks,
+                task: tokio::spawn(async move {
+                    let _ = released.await;
+                    Ok(())
+                }),
+                expected_seq: 2,
+                last_touched: Instant::now(),
+            },
+        );
+        let finishing = {
+            let sessions = Arc::clone(&sessions);
+            tokio::spawn(async move { sessions.finish(&target("run-1")).await })
+        };
+        while !sessions.imports.lock().await.is_empty() {
+            tokio::task::yield_now().await;
+        }
+        finishing.abort();
+        let _ = finishing.await;
+        let party = party_of(&target("run-1"));
+
+        assert_eq!(
+            sessions.hold(&party, |name| name == "run-1").await.err(),
+            Some(HoldRefused::RelayOpen),
+            "the import is still running"
+        );
+
+        let _ = release.send(());
+        for _ in 0..1000 {
+            if !sessions.retiring().contains_key("run-1") {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert!(sessions.hold(&party, |name| name == "run-1").await.is_ok());
+        Ok(())
+    }
+
+    /// An import entry for `run-1` whose task ends when the returned sender
+    /// fires.
+    async fn blocked_import(sessions: &RelaySessions) -> tokio::sync::oneshot::Sender<()> {
+        let (release, released) = tokio::sync::oneshot::channel::<()>();
+        let (blocks, _rx) = mpsc::channel(BLOCK_CHANNEL_CAPACITY);
+        sessions.imports.lock().await.insert(
+            "run-1".to_string(),
+            ImportEntry {
+                blocks,
+                task: tokio::spawn(async move {
+                    let _ = released.await;
+                    Ok(())
+                }),
+                expected_seq: 2,
+                last_touched: Instant::now(),
+            },
+        );
+        release
+    }
+
+    /// Wait up to five seconds for `done`.
+    async fn until(mut done: impl FnMut() -> bool) {
+        for _ in 0..500 {
+            if done() {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!("the condition never held");
+    }
+
+    /// Two teardowns of one transfer each keep their own mark. The first to
+    /// end must not free the party while the second import still runs.
+    #[tokio::test]
+    async fn overlapping_teardowns_of_one_transfer_each_block_a_hold() {
+        let sessions = Arc::new(RelaySessions::new());
+        let party = party_of(&target("run-1"));
+        let release_first = blocked_import(&sessions).await;
+        let Some(first) = sessions.retire_import("run-1").await else {
+            panic!("the first import must be in the map");
+        };
+        let release_second = blocked_import(&sessions).await;
+        let Some(second) = sessions.retire_import("run-1").await else {
+            panic!("the second import must be in the map");
+        };
+
+        let _ = release_first.send(());
+        let _ = first.await;
+        assert_eq!(
+            sessions.hold(&party, |name| name == "run-1").await.err(),
+            Some(HoldRefused::RelayOpen),
+            "the second import is still running"
+        );
+
+        let _ = release_second.send(());
+        let _ = second.await;
+        assert!(sessions.hold(&party, |name| name == "run-1").await.is_ok());
+    }
+
+    /// A block-1 retry must not start a new import while the previous import of
+    /// the same transfer is still tearing down.
+    #[tokio::test]
+    async fn a_restart_waits_for_the_previous_teardown() {
+        let sessions = Arc::new(RelaySessions::new());
+        let release = blocked_import(&sessions).await;
+        let Some(teardown) = sessions.retire_import("run-1").await else {
+            panic!("the import must be in the map");
+        };
+        let restart = {
+            let sessions = Arc::clone(&sessions);
+            tokio::spawn(async move {
+                let db = pool().await;
+                let block = PipeBlock::Data {
+                    seq: 1,
+                    bytes: b"some bytes".to_vec(),
+                };
+                sessions
+                    .accept_block(&NodeConfig::default(), &db, &target("run-1"), &[], block)
+                    .await
+            })
+        };
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        // The restart waits holding the imports lock, so the map is read only
+        // when that lock is free.
+        assert!(!restart.is_finished(), "the restart must wait");
+        assert!(
+            sessions.imports.try_lock().map_or(true, |m| m.is_empty()),
+            "no new import may start yet"
+        );
+
+        let _ = release.send(());
+        let _ = teardown.await;
+        // Once the old import is gone, the new one starts: it registers in the
+        // map, or the call returns on its own. Either way, well before the
+        // two-minute bound.
+        until(|| restart.is_finished() || sessions.imports.try_lock().is_ok_and(|m| !m.is_empty()))
+            .await;
+        if restart.is_finished() {
+            if let Ok(Err(e)) = restart.await {
+                assert!(
+                    !e.to_string().contains("still tearing down"),
+                    "the restart gave up waiting: {e}"
+                );
+            }
+        } else {
+            restart.abort();
+        }
+    }
+
+    /// Opening an export takes time. A hold that starts while it opens must be
+    /// refused, and the reservation must go once the open fails.
+    #[tokio::test]
+    async fn an_opening_export_blocks_a_hold() -> anyhow::Result<()> {
+        let sessions = Arc::new(RelaySessions::new());
+        let (release, released) = tokio::sync::oneshot::channel::<()>();
+        let serving = {
+            let sessions = Arc::clone(&sessions);
+            tokio::spawn(async move {
+                let db = pool().await;
+                sessions
+                    .serve_block(
+                        &NodeConfig::default(),
+                        &db,
+                        &target("run-1"),
+                        1,
+                        1024,
+                        async || {
+                            let _ = released.await;
+                            anyhow::bail!("Canton refused the export")
+                        },
+                    )
+                    .await
+            })
+        };
+        until(|| sessions.opening().contains_key("run-1")).await;
+        let party = party_of(&target("run-1"));
+
+        assert_eq!(
+            sessions.hold(&party, |name| name == "run-1").await.err(),
+            Some(HoldRefused::RelayOpen)
+        );
+        assert!(sessions.any_session(|name| name == "run-1").await);
+
+        let _ = release.send(());
+        assert!(serving.await?.is_err(), "the failed open must surface");
+        assert!(!sessions.opening().contains_key("run-1"));
+        assert!(sessions.hold(&party, |name| name == "run-1").await.is_ok());
+        Ok(())
+    }
+
+    /// A block-1 restart retires the import before it. If the restart is
+    /// cancelled during that teardown, the old import still runs, so the party
+    /// must stay blocked until it ends.
+    #[tokio::test]
+    async fn a_cancelled_restart_still_blocks_a_hold_until_the_old_import_ends() {
+        let sessions = Arc::new(RelaySessions::new());
+        let release = blocked_import(&sessions).await;
+        let restart = {
+            let sessions = Arc::clone(&sessions);
+            tokio::spawn(async move {
+                let db = pool().await;
+                let block = PipeBlock::Data {
+                    seq: 1,
+                    bytes: b"some bytes".to_vec(),
+                };
+                sessions
+                    .accept_block(&NodeConfig::default(), &db, &target("run-1"), &[], block)
+                    .await
+            })
+        };
+        until(|| sessions.retiring().contains_key("run-1")).await;
+        restart.abort();
+        let _ = restart.await;
+        let party = party_of(&target("run-1"));
+
+        assert_eq!(
+            sessions.hold(&party, |name| name == "run-1").await.err(),
+            Some(HoldRefused::RelayOpen),
+            "the old import is still running"
+        );
+
+        let _ = release.send(());
+        until(|| !sessions.retiring().contains_key("run-1")).await;
+        assert!(sessions.hold(&party, |name| name == "run-1").await.is_ok());
     }
 
     /// The mirror on the joiner. Without a session there is no open import to

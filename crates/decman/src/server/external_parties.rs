@@ -131,6 +131,15 @@ impl ExternalPartiesCache {
         (inner.view(), start)
     }
 
+    /// Drop a party this node no longer hosts, so the list stops showing it
+    /// before the next scan. A scan already running may still return it; the
+    /// scan after that corrects it.
+    pub fn forget(&self, party_id: &str) {
+        if let Some(snapshot) = self.lock().snapshot.as_mut() {
+            snapshot.parties.retain(|p| p.party_id != party_id);
+        }
+    }
+
     fn finish(&self, result: Result<Vec<HostedExternalParty>, String>, now: Instant) {
         let mut inner = self.lock();
         inner.scanning = false;
@@ -210,6 +219,21 @@ mod tests {
         let (view, start) = cache.observe(now + SECOND, TTL);
         assert!(!start, "a running scan must not start a second one");
         assert!(matches!(view, View::Pending));
+    }
+
+    /// After this node leaves a party, the list must stop showing it at once,
+    /// not after the next scan up to a TTL later.
+    #[test]
+    fn a_forgotten_party_leaves_the_snapshot() {
+        let cache = ExternalPartiesCache::default();
+        let t0 = Instant::now();
+        cache.observe(t0, TTL);
+        cache.finish(Ok(vec![party("a::key"), party("b::key")]), t0);
+
+        cache.forget("a::key");
+
+        let (parties, _, _, _) = ready(cache.observe(t0, TTL).0);
+        assert_eq!(parties, ["b::key"]);
     }
 
     #[test]

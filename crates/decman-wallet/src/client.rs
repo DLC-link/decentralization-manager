@@ -8,11 +8,12 @@
 use base64::{Engine, engine::general_purpose::STANDARD};
 use common::{
     api::{
-        TenantAcsBlockResponse, TenantAcsImportRequest, TenantAcsImportResponse,
-        TenantAddHostsExecuteRequest, TenantAddHostsExecuteResponse, TenantAddHostsPrepareResponse,
-        TenantAddHostsRequest, TenantExecuteRequest, TenantExecuteResponse,
-        TenantPartyStateResponse, TenantPrepareRequest, TenantPrepareResponse,
-        TenantThresholdExecuteRequest, TenantThresholdRequest,
+        ExternalPartyUnhostResponse, TenantAcsBlockResponse, TenantAcsImportRequest,
+        TenantAcsImportResponse, TenantAddHostsExecuteRequest, TenantAddHostsExecuteResponse,
+        TenantAddHostsPrepareResponse, TenantAddHostsRequest, TenantExecuteRequest,
+        TenantExecuteResponse, TenantPartyStateResponse, TenantPrepareRequest,
+        TenantPrepareResponse, TenantThresholdExecuteRequest, TenantThresholdRequest,
+        TenantUnhostRequest,
     },
     canton_id::CantonId,
     types::WorkflowProgress,
@@ -182,6 +183,21 @@ impl TenantClient {
         req: &TenantThresholdExecuteRequest,
     ) -> Result<TenantAddHostsExecuteResponse> {
         self.post("/v0/tenant/threshold/execute", req).await
+    }
+
+    /// `POST /v0/tenant/unhost` — ask THIS host to stop hosting the party.
+    ///
+    /// The host removes only itself, with its own key, so the wallet signs
+    /// nothing. `req.participant_id` must be this host's own id, and
+    /// `req.base_serial` the serial [`Self::party_state`] reports. The host
+    /// first archives the Splice contracts its validator holds for the party.
+    ///
+    /// A 202 means the write was accepted but is not effective yet: repeat the
+    /// call, which answers 200 once the host is gone. A host that would leave
+    /// the party unable to meet its threshold refuses with a 400; lower the
+    /// threshold first.
+    pub async fn unhost(&self, req: &TenantUnhostRequest) -> Result<ExternalPartyUnhostResponse> {
+        self.post("/v0/tenant/unhost", req).await
     }
 
     /// Base64-decode a field the host sent us, tagging which field it was.

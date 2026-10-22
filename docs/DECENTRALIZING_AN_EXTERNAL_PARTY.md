@@ -339,6 +339,14 @@ a signature over the prepared hash, then `ExecuteSubmission`.
 The wallet needs a Ledger API user on that participant that may read as the
 party and execute submissions for it. The host operator grants those rights.
 
+## Remove a host
+
+A host can leave the party with its own key. The wallet signs nothing. Call
+`/v0/tenant/unhost` on that host, or click **Stop hosting** in its UI. The host
+first archives the Splice contracts its validator holds for the party.
+[Leaving a party](DECENTRALIZING_AN_EXISTING_PARTY.md#leaving-a-party) lists
+the checks, the steps and the errors.
+
 ## If something goes wrong
 
 | Symptom | Cause | Do this |

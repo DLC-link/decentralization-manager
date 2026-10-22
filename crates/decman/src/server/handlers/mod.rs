@@ -7,6 +7,7 @@ mod parties;
 mod party_config;
 mod tenant;
 mod token_standard;
+mod unhost;
 mod workflows;
 
 pub(crate) use auth::{get_auth_config, get_auth_status, grant_rights, test_auth};
@@ -44,7 +45,7 @@ pub(crate) use tenant::{
     tenant_acs_import, tenant_acs_snapshot, tenant_add_hosts_authorize, tenant_add_hosts_execute,
     tenant_add_hosts_prepare, tenant_execute, tenant_local_party_adopt_execute,
     tenant_local_party_adopt_prepare, tenant_party_state, tenant_prepare, tenant_status,
-    tenant_threshold_authorize, tenant_threshold_execute, tenant_threshold_prepare,
+    tenant_threshold_authorize, tenant_threshold_execute, tenant_threshold_prepare, tenant_unhost,
 };
 pub(crate) use token_standard::{
     get_block_list_shards_handler, get_burn_requests_handler, get_credential_offers_handler,
@@ -56,6 +57,7 @@ pub(crate) use token_standard::{
     get_transfer_instructions_handler, get_transfer_preapprovals_handler,
     get_user_services_handler, query_contracts_handler,
 };
+pub(crate) use unhost::{get_unhost_audit, preview_unhost_external_party, unhost_external_party};
 pub(crate) use workflows::{
     cancel_add_party, cancel_change_threshold, cancel_contracts, cancel_dars, cancel_kick,
     cancel_onboarding, cancel_workflow_instance, dismiss_workflow, get_add_party_status,

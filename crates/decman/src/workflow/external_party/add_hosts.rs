@@ -107,6 +107,20 @@ pub fn replication_instance(party_id: &str, target: &CantonId, base_serial: u32)
     format!("tenant-add-hosts:{party_id}:{target}:{base_serial}")
 }
 
+/// Whether `instance` names a tenant add-hosts replication of `party_id`, as
+/// built by [`replication_instance`].
+///
+/// The party id is followed by `:` and then the target's id, which never starts
+/// with `:`. Checking that character keeps `alice::12` from matching an instance
+/// of `alice::123`, and a party id cut short at its `::` from matching at all.
+pub fn instance_is_for_party(instance: &str, party_id: &str) -> bool {
+    instance
+        .strip_prefix("tenant-add-hosts:")
+        .and_then(|rest| rest.strip_prefix(party_id))
+        .and_then(|rest| rest.strip_prefix(':'))
+        .is_some_and(|target| !target.is_empty() && !target.starts_with(':'))
+}
+
 /// A [`ReplicationTarget`] for artefact access only, rebuilt from an instance
 /// name.
 ///
@@ -1787,6 +1801,20 @@ mod tests {
             &[participant(3), participant(4)],
             HostPermission::Confirmation
         ));
+    }
+
+    /// An unhost refuses while a relay for the party is open, and finds that
+    /// relay by its instance name. A match on a longer party id would block a
+    /// party for another party's transfer.
+    #[test]
+    fn an_instance_name_matches_only_its_own_party() {
+        let instance = replication_instance("alice::12", &participant(3), 4);
+        assert!(instance_is_for_party(&instance, "alice::12"));
+        assert!(!instance_is_for_party(&instance, "alice::1"));
+        assert!(!instance_is_for_party(&instance, "alice"));
+        assert!(!instance_is_for_party(&instance, "bob::12"));
+        let longer = replication_instance("alice::123", &participant(3), 4);
+        assert!(!instance_is_for_party(&longer, "alice::12"));
     }
 
     /// The node whose root key IS the party's namespace signs the "party

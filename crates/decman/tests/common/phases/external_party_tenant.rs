@@ -38,7 +38,6 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
     let seed = *wallet.seed();
     let hint = fresh_prefix("tenant-ext");
     let party_id = wallet.party_id(&hint);
-    let public_key = wallet.public_key_b64();
     info!("Wallet-driven external party: {party_id}");
 
     Scenario::with_ctx(
@@ -49,67 +48,9 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
         "wallet prepares once, signs, and onboards on every host itself",
         {
             let hint = hint.clone();
-            let public_key = public_key.clone();
             move |f, _| {
                 let hint = hint.clone();
-                let public_key = public_key.clone();
-                Box::pin(async move {
-                    // 1) One host builds the multi-host topology from the wallet's
-                    // pubkey (2-of-3 across P1+P2+P3). Threshold is capped at N-1.
-                    let prepare_req = json!({
-                        "party_hint": hint,
-                        "public_key": public_key,
-                        "hosting_peers": [&f.p2.participant_id, &f.p3.participant_id],
-                        "confirmation_threshold": 2,
-                    });
-                    let prep: Value = f
-                        .post_json(f.p1.http, "/v0/tenant/prepare", &prepare_req)
-                        .await?;
-                    let hashes = prep
-                        .get("transaction_hashes")
-                        .and_then(Value::as_array)
-                        .context("prepare response missing transaction_hashes")?
-                        .iter()
-                        .map(|h| {
-                            let encoded = h
-                                .as_str()
-                                .context("transaction_hashes entry is not a string")?;
-                            STANDARD
-                                .decode(encoded)
-                                .context("transaction hash is not valid base64")
-                        })
-                        .collect::<anyhow::Result<Vec<_>>>()?;
-                    let topology_transactions = prep
-                        .get("topology_transactions")
-                        .cloned()
-                        .context("prepare response missing topology_transactions")?;
-
-                    // 2) The wallet signs each transaction hash locally with its own key.
-                    let wallet = ExternalKeyPair::from_seed(seed);
-                    // One signature per transaction, over the hash Canton returned
-                    // for it.
-                    let signatures: Vec<String> = hashes
-                        .iter()
-                        .map(|h| STANDARD.encode(wallet.sign(h)))
-                        .collect();
-
-                    // 3) The wallet submits the SAME signed bundle to every host
-                    // itself — no host relays to another. `onboard` carries no host
-                    // set / threshold: those live in the signed topology txs.
-                    let onboard_req = json!({
-                        "party_hint": hint,
-                        "public_key": public_key,
-                        "topology_transactions": topology_transactions,
-                        "signatures": signatures,
-                        "signed_by": wallet.fingerprint(),
-                    });
-                    for host in [f.p1.http, f.p2.http, f.p3.http] {
-                        let _: Value = f
-                            .post_json(host, "/v0/tenant/execute", &onboard_req)
-                            .await?;
-                    }
-                    Ok(())
-                })
+                Box::pin(async move { onboard_on_three_hosts(&*f, &hint, seed).await })
             }
         },
     )
@@ -164,4 +105,91 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
     })
     .run(f)
     .await
+}
+
+/// Onboard `hint`'s party on P1+P2+P3 at 2 of 3, the way a wallet does it: one
+/// host prepares, the wallet signs each hash locally, and every host gets the
+/// same signed bundle.
+pub(super) async fn onboard_on_three_hosts(
+    f: &Fixture,
+    hint: &str,
+    seed: [u8; 32],
+) -> anyhow::Result<()> {
+    let hosts = [
+        (f.p1.http, f.p1.participant_id.as_str()),
+        (f.p2.http, f.p2.participant_id.as_str()),
+        (f.p3.http, f.p3.participant_id.as_str()),
+    ];
+    onboard_on_hosts(f, hint, seed, &hosts, 2).await
+}
+
+/// Onboard `hint`'s party on `hosts` (HTTP port, participant id) at
+/// `threshold`. The first host prepares.
+pub(super) async fn onboard_on_hosts(
+    f: &Fixture,
+    hint: &str,
+    seed: [u8; 32],
+    hosts: &[(u16, &str)],
+    threshold: u32,
+) -> anyhow::Result<()> {
+    let wallet = ExternalKeyPair::from_seed(seed);
+    let public_key = wallet.public_key_b64();
+    let Some(((preparer, _), peers)) = hosts.split_first() else {
+        anyhow::bail!("onboarding needs at least one host");
+    };
+    let peers: Vec<&str> = peers.iter().map(|(_, id)| *id).collect();
+
+    // 1) One host builds the multi-host topology from the wallet's pubkey.
+    // The threshold is capped at N-1.
+    let prepare_req = json!({
+        "party_hint": hint,
+        "public_key": public_key,
+        "hosting_peers": peers,
+        "confirmation_threshold": threshold,
+    });
+    let prep: Value = f
+        .post_json(*preparer, "/v0/tenant/prepare", &prepare_req)
+        .await?;
+    let hashes = prep
+        .get("transaction_hashes")
+        .and_then(Value::as_array)
+        .context("prepare response missing transaction_hashes")?
+        .iter()
+        .map(|h| {
+            let encoded = h
+                .as_str()
+                .context("transaction_hashes entry is not a string")?;
+            STANDARD
+                .decode(encoded)
+                .context("transaction hash is not valid base64")
+        })
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    let topology_transactions = prep
+        .get("topology_transactions")
+        .cloned()
+        .context("prepare response missing topology_transactions")?;
+
+    // 2) The wallet signs each transaction hash locally with its own key.
+    // One signature per transaction, over the hash Canton returned for it.
+    let signatures: Vec<String> = hashes
+        .iter()
+        .map(|h| STANDARD.encode(wallet.sign(h)))
+        .collect();
+
+    // 3) The wallet submits the SAME signed bundle to every host
+    // itself — no host relays to another. `onboard` carries no host
+    // set / threshold: those live in the signed topology txs.
+    let onboard_req = json!({
+        "party_hint": hint,
+        "public_key": public_key,
+        "topology_transactions": topology_transactions,
+        "signatures": signatures,
+        "signed_by": wallet.fingerprint(),
+    });
+    for (host, _) in hosts {
+        let _: Value = f
+            .post_json(*host, "/v0/tenant/execute", &onboard_req)
+            .await?;
+    }
+    Ok(())
 }

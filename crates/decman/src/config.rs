@@ -303,8 +303,17 @@ pub struct NodeConfig {
     /// Bearer API keys a wallet provider presents to the `/v0/tenant/*`
     /// endpoints, authenticated separately from the Keycloak UI token. Empty
     /// disables the tenant API (except in insecure/test mode). Not serialized.
+    ///
+    /// Ordered as configured, so an audit row can name the key a request used
+    /// by its index without recording the key.
     #[serde(skip)]
-    pub tenant_api_keys: std::collections::HashSet<String>,
+    pub tenant_api_keys: Vec<String>,
+    /// This node's Splice validator operator party, which must also have an
+    /// entry in the party credentials. Unhosting an external party archives the
+    /// Splice contracts this party holds for it. `None` means the node runs no
+    /// Splice cleanup. Not serialized.
+    #[serde(skip)]
+    pub validator_operator_party: Option<CantonId>,
     /// Root directory containing data/ subdirectory
     #[serde(skip)]
     root_dir: PathBuf,
@@ -327,7 +336,8 @@ impl Default for NodeConfig {
             auth0: None,
             insecure: false,
             insecure_auth: InsecureAuthConfig::default(),
-            tenant_api_keys: std::collections::HashSet::new(),
+            tenant_api_keys: Vec::new(),
+            validator_operator_party: None,
             root_dir: PathBuf::new(),
         }
     }

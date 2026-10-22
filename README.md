@@ -201,6 +201,7 @@ The database file path can be overridden with the `--db` CLI flag.
 | `DECPM_AUTH0_SCOPE` | Extra space-separated scopes the SPA requests. Needed only when the admin role arrives as an Auth0 RBAC scope | _(none)_ |
 | `DECPM_JWT_ROLE_CLAIM` | JWT claim that holds an array of role names. Needed only when the IdP puts roles in a namespaced custom claim | _(none)_ |
 | `DECPM_TENANT_API_KEYS` | Comma-separated bearer keys for the tenant API (`/v0/tenant/*`). Unset turns the tenant API off, except in insecure mode | _(none)_ |
+| `DECPM_VALIDATOR_OPERATOR_PARTY` | This node's Splice validator operator party. An unhost archives the Splice contracts this party holds for the external party that the node leaves. The party also needs a [party credential](#party-credentials-for-the-validator-operator). Unset means an unhost must send `"splice_cleanup": false` | _(none)_ |
 | `DECPM_INSECURE` | Run without an IdP: accept any inbound token and present an unsafe HS256 token to Canton (CLI flag `--insecure`). **Never use in production.** See [Insecure mode](#insecure-mode-local-development-without-an-idp) | `false` |
 | `DECPM_CANTON_HMAC_SECRET` | HS256 secret decman signs the unsafe Canton token with, in insecure mode. Must match Canton's unsafe auth-service secret | `unsafe` |
 | `DECPM_CANTON_HMAC_AUDIENCE` | `aud` claim for the unsafe Canton token, in insecure mode. Must match Canton's `target-audience` | `https://canton.network.global` |
@@ -356,6 +357,31 @@ curl -X PUT http://localhost:8081/party-config \
 curl http://localhost:8081/party-config/decparty::1220abc...
 ```
 
+#### Party credentials for the validator operator
+
+An unhost archives the Splice contracts that this node's validator holds for an
+external party. It acts as the party that `DECPM_VALIDATOR_OPERATOR_PARTY`
+names, so that party needs a credential entry too. Store it like any other
+entry, with the operator party in both party fields. The user must have
+`actAs` for the operator party. The validator app's own ledger user has it.
+
+```bash
+curl -X PUT http://localhost:8081/party-config \
+  -H "Content-Type: application/json" \
+  -d '{
+    "dec_party_id": "validator-operator::1220abc...",
+    "member_party_id": "validator-operator::1220abc...",
+    "user_id": "validator-app-user",
+    "keycloak_url": "https://keycloak.example.com",
+    "keycloak_realm": "my-realm",
+    "keycloak_client_id": "validator-client",
+    "keycloak_client_secret": "secret-value"
+  }'
+```
+
+Party discovery skips this entry, because the operator party is not a
+decentralized party.
+
 ## Workflows
 
 ### Creating a Decentralized Party (Onboarding)
@@ -478,6 +504,9 @@ The table below is a curated subset. A complete, interactive API reference is av
 | `/dars/distribute/status` | GET | Returns DARs distribution workflow progress |
 | `/packages/vetted` | GET | Returns packages uploaded on this node |
 | `/external-parties` | GET | Lists the external (co-validated) parties this node hosts |
+| `/external-parties/{party_id}/unhost/preview` | GET | Admin: what an unhost would do now. Reports the serial to pin, the hosts that remain, the Splice contracts to archive, and any blocker. Writes nothing |
+| `/external-parties/{party_id}/unhost` | POST | Admin: this node leaves the party. It archives its validator's Splice contracts for the party, then removes itself from the hosting mapping with its own key |
+| `/external-parties/{party_id}/unhost-audit` | GET | One row per unhost attempt on this node, newest first |
 | `/v0/tenant/prepare` | POST | Wallet-facing: builds an external party's onboarding topology and returns the hash to sign |
 | `/v0/tenant/execute` | POST | Wallet-facing: validates the wallet's signed topology, co-signs, and submits it |
 | `/v0/tenant/{party}/status` | GET | Wallet-facing: reports whether this host has the party hosted yet |
@@ -492,6 +521,7 @@ The table below is a curated subset. A complete, interactive API reference is av
 | `/v0/tenant/threshold/authorize` | POST | Changes the threshold of a party whose namespace is a participant's key. Only the owning node can authorize it |
 | `/v0/tenant/local-party/adopt-key/prepare` | POST | Wallet-facing: builds the conversion that gives a local party an owner-held signing key |
 | `/v0/tenant/local-party/adopt-key/execute` | POST | Wallet-facing: co-signs and submits the owner-signed conversion |
+| `/v0/tenant/unhost` | POST | Wallet-facing: asks this host to leave the party. The body names this host's own `participant_id`. The host removes only itself, with its own key |
 
 The `/v0/tenant/*` endpoints are the tenant API. They authenticate with a
 separate tenant API key rather than the operator JWT, and are driven by
