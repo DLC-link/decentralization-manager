@@ -30,7 +30,7 @@ use tracing::info;
 use decman_wallet::ExternalKeyPair;
 
 use crate::common::{
-    Fixture,
+    Fixture, TestTarget,
     chaos::fresh_prefix,
     http::probe_workflow_status,
     ledger_api::P1_JSON_API,
@@ -134,18 +134,21 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
                     );
 
                     // The localnet has no validator operator party, so the
-                    // cleanup can only be skipped on purpose.
-                    let mut with_cleanup =
-                        unhost_request(&party_id, &f.p3.participant_id, base_serial);
-                    with_cleanup["splice_cleanup"] = Value::Null;
-                    let (status, body) = f
-                        .post_expect_status(f.p3.http, "/v0/tenant/unhost", &with_cleanup)
-                        .await?;
-                    anyhow::ensure!(
-                        status == StatusCode::UNPROCESSABLE_ENTITY,
-                        "an unhost with the Splice cleanup on a node without an operator party \
-                         answered {status}: {body}"
-                    );
+                    // cleanup can only be skipped on purpose. A DevNet node
+                    // may have one, and this request would then unhost.
+                    if matches!(f.target, TestTarget::Localnet) {
+                        let mut with_cleanup =
+                            unhost_request(&party_id, &f.p3.participant_id, base_serial);
+                        with_cleanup["splice_cleanup"] = Value::Null;
+                        let (status, body) = f
+                            .post_expect_status(f.p3.http, "/v0/tenant/unhost", &with_cleanup)
+                            .await?;
+                        anyhow::ensure!(
+                            status == StatusCode::UNPROCESSABLE_ENTITY,
+                            "an unhost with the Splice cleanup on a node without an operator \
+                             party answered {status}: {body}"
+                        );
+                    }
 
                     let request = unhost_request(&party_id, &f.p3.participant_id, base_serial);
                     for attempt in 1..=UNHOST_ATTEMPTS {
