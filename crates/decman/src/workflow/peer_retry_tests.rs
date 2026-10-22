@@ -19,14 +19,15 @@ struct PeerRun {
 }
 
 /// Drive the real peer loop through `commands` from a scripted coordinator.
-async fn run_commands(
-    db: SqlitePool,
-    kind: WorkflowKind,
-    commands: Vec<Message>,
-) -> Result<PeerRun> {
+///
+/// Each run opens its own database, so concurrent runs never wait on one
+/// SQLite write lock.
+async fn run_commands(kind: WorkflowKind, commands: Vec<Message>) -> Result<PeerRun> {
     let root = tempfile::tempdir()?;
     let mut node = NodeConfig::default().with_root_dir(root.path());
     node.node.participant_id = Some(CantonId::parse(&format!("peer::1220{}", "a".repeat(64)))?);
+    let db = crate::db::connect(&node.db_path()).await?;
+    crate::db::MIGRATOR.run(&db).await?;
     let keys = NoiseKeypair::generate();
     tokio::fs::create_dir_all(node.data_dir()).await?;
     keys.save_to_file(node.key_file_path()).await?;
@@ -114,7 +115,7 @@ async fn run_commands(
         start_peer(
             node,
             coordinator,
-            db,
+            db.clone(),
             instance,
             "coordinator-run".into(),
             None,
@@ -135,6 +136,7 @@ async fn run_commands(
         Err(error) if error.is_cancelled() => {}
         result => result??,
     }
+    db.close().await;
     let polls = polls
         .lock()
         .map_err(|_| anyhow::anyhow!("poll lock poisoned"))?
@@ -166,8 +168,8 @@ fn assert_reported(run: &PeerRun, kind: WorkflowKind) {
     );
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn malformed_commands_back_off_and_exhaust_the_budget(db: SqlitePool) -> Result {
+#[tokio::test]
+async fn malformed_commands_back_off_and_exhaust_the_budget() -> Result {
     let mut cases = Vec::new();
     for (kind, command, item_count) in [
         (WorkflowKind::Contracts, MessageType::SignSubmissions, 2),
@@ -206,44 +208,39 @@ async fn malformed_commands_back_off_and_exhaust_the_budget(db: SqlitePool) -> R
         Message::new_empty(MessageType::GenerateKeys),
     ));
 
-    futures::future::try_join_all(cases.into_iter().map(|(kind, message)| {
-        let db = db.clone();
-        async move {
-            let command = message.msg_type;
-            let run = run_commands(db, kind, vec![message; MAX_CONSECUTIVE_STEP_FAILURES]).await?;
-            let error = run
-                .result
-                .as_ref()
-                .err()
-                .ok_or_else(|| anyhow::anyhow!("{command:?} did not abort"))?;
+    futures::future::try_join_all(cases.into_iter().map(|(kind, message)| async move {
+        let command = message.msg_type;
+        let run = run_commands(kind, vec![message; MAX_CONSECUTIVE_STEP_FAILURES]).await?;
+        let error = run
+            .result
+            .as_ref()
+            .err()
+            .ok_or_else(|| anyhow::anyhow!("{command:?} did not abort"))?;
+        assert!(
+            error.to_string().contains(&format!("({command:?})")),
+            "{error}"
+        );
+        assert_reported(&run, kind);
+        assert_eq!(
+            run.polls.len(),
+            MAX_CONSECUTIVE_STEP_FAILURES,
+            "{command:?}"
+        );
+        assert_eq!(run.completions, 0, "malformed {command:?} was completed");
+        for pair in run.polls.windows(2) {
             assert!(
-                error.to_string().contains(&format!("({command:?})")),
-                "{error}"
+                pair[1].duration_since(pair[0]) >= Duration::from_secs(2),
+                "{command:?} polled without backoff"
             );
-            assert_reported(&run, kind);
-            assert_eq!(
-                run.polls.len(),
-                MAX_CONSECUTIVE_STEP_FAILURES,
-                "{command:?}"
-            );
-            assert_eq!(run.completions, 0, "malformed {command:?} was completed");
-            for pair in run.polls.windows(2) {
-                assert!(
-                    pair[1].duration_since(pair[0]) >= Duration::from_secs(2),
-                    "{command:?} polled without backoff"
-                );
-            }
-            Ok::<(), anyhow::Error>(())
         }
+        Ok::<(), anyhow::Error>(())
     }))
     .await?;
     Ok(())
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn control_messages_preserve_failures_but_completed_steps_reset_them(
-    db: SqlitePool,
-) -> Result {
+#[tokio::test]
+async fn control_messages_preserve_failures_but_completed_steps_reset_them() -> Result {
     let bad = Message::new_empty(MessageType::SignClearOnboarding);
     let mut controls = Vec::new();
     for _ in 0..MAX_CONSECUTIVE_STEP_FAILURES {
@@ -259,8 +256,8 @@ async fn control_messages_preserve_failures_but_completed_steps_reset_them(
     ));
     recovered.push(bad);
     let (control, recovered) = tokio::try_join!(
-        run_commands(db.clone(), WorkflowKind::AddParty, controls),
-        run_commands(db, WorkflowKind::AddParty, recovered),
+        run_commands(WorkflowKind::AddParty, controls),
+        run_commands(WorkflowKind::AddParty, recovered),
     )?;
     assert!(control.result.is_err(), "Wait/Ping reset the failure count");
     assert_reported(&control, WorkflowKind::AddParty);
