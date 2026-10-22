@@ -234,6 +234,73 @@ A script cannot replace DecMan here. Each write is a versioned protobuf
 transaction that Canton generates, then signs, then accepts. There is also no
 `decman-cli` command for it.
 
+## Leaving a party
+
+A host can stop hosting a party on its own. It removes itself from the party's
+hosting mapping and signs that change with its own key. The party's key is not
+needed. Canton accepts the change when the threshold stays the same, no host
+joins, and exactly one host leaves.
+
+You start it in one of two ways:
+
+- **From the UI.** An admin clicks **Stop hosting** on the party's row in the
+  external-parties list. The dialog reads
+  `GET /external-parties/{party_id}/unhost/preview` first. It shows the
+  serial, the hosts that remain, and the Splice contracts that the node will
+  archive. The confirm button calls `POST /external-parties/{party_id}/unhost`.
+- **From the tenant API.** The wallet provider calls `/v0/tenant/unhost` on the
+  host that leaves. `TenantClient::unhost` in `decman-wallet` makes this call.
+
+```bash
+curl -X POST "$HOST/v0/tenant/unhost" \
+  -H "Authorization: Bearer $KEY" -H 'Content-Type: application/json' \
+  -d '{"party_id": "...", "participant_id": "<this host>", "base_serial": 7}'
+```
+
+### What the host checks first
+
+The host checks its own head state before it writes anything. A failed check
+changes nothing on the ledger or in the topology.
+
+| Check | Answer when the check fails |
+|---|---|
+| The party's mapping lists this host | `404`. A repeat after a success answers `200` instead |
+| `participant_id` is this host. Only the tenant call carries it | `400` |
+| `base_serial` is the serial in head state | `409` |
+| Another host remains | `400`. Canton refuses a mapping with no hosts |
+| The hosts that remain can meet the threshold | `400`. The party's key must lower the threshold first |
+| No ACS copy of the party is open on this host | `409` |
+| No other unhost of the party runs on this host | `409` |
+| The host can run the Splice cleanup, or the request sends `"splice_cleanup": false` | `422` |
+
+A remaining host counts toward the threshold only when it has no onboarding
+marker. It must also have Confirmation or Submission permission. On a 2-of-3
+party one host may leave. On a 2-of-2 or 3-of-3 party no host may leave.
+
+### What the host does
+
+1. **Splice cleanup.** The host acts as its validator operator party, which
+   `DECPM_VALIDATOR_OPERATOR_PARTY` names. It archives each `ValidatorRight`
+   whose `user` is the party and whose `validator` is the operator. It cancels
+   each `TransferPreapproval` whose `receiver` is the party and whose
+   `provider` is the operator. It leaves an expired preapproval alone, because
+   the DSO expires it. This step runs first, so a failure leaves the party
+   fully hosted.
+2. **Topology.** The host writes the mapping without itself at serial
+   `base_serial + 1`, signed with its own key. It reads head state until the
+   mapping no longer lists it. After about 20 seconds it answers `202`. Repeat
+   the call to see it finish.
+3. **Audit.** The host writes one row per attempt to its own database.
+   `GET /external-parties/{party_id}/unhost-audit` lists the rows, newest
+   first. The **History** button on the party's row shows them too.
+
+You can repeat every step safely. Suppose an attempt finished the cleanup and
+then failed at the topology step. The next attempt skips the cleanup, as long as
+the serial has not moved.
+
+The host keeps the party's contracts in its store. DecMan has no call that
+removes them yet.
+
 ## If something goes wrong
 
 | Symptom | Cause | Do this |
@@ -247,6 +314,13 @@ transaction that Canton generates, then signs, then accepts. There is also no
 | `500` "Imported the ACS, but could not request the marker clear" on the last block | Canton already has its own marker clear pending | Nothing. Poll `/state` until `onboarding_hosts` is 0 |
 | `"package_preflight": false` in block 1 | The owner node cannot list the party's packages before the copy | Normal for a local party. Check the DARs yourself first |
 | A normal submission for the party fails after the conversion | The party now signs for itself | Switch the application to interactive submission |
+| `400` "the hosts that would remain" from unhost | The hosts that remain cannot meet the threshold | Lower the threshold with the party's key, then repeat the unhost |
+| `400` "the last host" from unhost | This host is the party's only host | Add another host first |
+| `409` "an ACS relay … is open" from unhost | A copy of the party's contracts runs on this host | Let the copy finish. An idle copy times out after 5 minutes |
+| `409` "an unhost of … is already running" | An earlier unhost call for the party still runs | Wait for it to answer, then read `/state` |
+| `422` from unhost | The host has no validator operator party | Set `DECPM_VALIDATOR_OPERATOR_PARTY`. If the host never acted as the party's Splice validator, send `"splice_cleanup": false` |
+| `202` from unhost | Canton accepted the topology write, but it is not effective yet | Repeat the call. It answers `200` once the host is gone |
+| `500` from unhost | A Splice archive or the topology write failed | Read the reason in the unhost history, fix it, and repeat the call |
 
 The copy fails the same way for every kind of party. See
 [If something goes wrong](DECENTRALIZING_AN_EXTERNAL_PARTY.md#if-something-goes-wrong)

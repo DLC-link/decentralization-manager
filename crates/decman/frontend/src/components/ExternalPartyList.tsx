@@ -1,5 +1,18 @@
-import { Alert, Box, Chip, LinearProgress, Tooltip, Typography } from "@mui/material";
+import { useState } from "react";
+import {
+  Alert,
+  Box,
+  Chip,
+  IconButton,
+  LinearProgress,
+  Tooltip,
+  Typography,
+} from "@mui/material";
+import HistoryIcon from "@mui/icons-material/History";
+import LinkOffIcon from "@mui/icons-material/LinkOff";
+import { ADMIN_ACCESS } from "../constants";
 import { CopyableText } from "./CopyableText";
+import { StopHostingDialog, UnhostHistoryDialog } from "./ExternalPartyUnhost";
 import { PartyIdText } from "./PartyIdText";
 import { RowCard } from "./RowCard";
 import { PaginationControls } from "./Pagination";
@@ -22,6 +35,8 @@ const HOSTS_SLOT = 72;
 const CONFIRMATIONS_SLOT = 108;
 // Wide enough for "YYYY-MM-DD HH:MM UTC" on one line at the mono fact size.
 const CREATED_SLOT = 160;
+// Two 30px icon buttons and the gap between them.
+const ACTIONS_SLOT = 68;
 
 const factSx = {
   fontFamily: "var(--font-mono)",
@@ -132,6 +147,8 @@ export const ExternalPartyList = ({
   refreshError,
 }: ExternalPartyListProps) => {
   const { page, setPage, pageCount, pageItems, total } = usePagination(parties);
+  const [stopping, setStopping] = useState<string | null>(null);
+  const [history, setHistory] = useState<string | null>(null);
 
   if (error) {
     return <Alert severity="error" sx={{ mt: 2 }}>{error}</Alert>;
@@ -248,6 +265,7 @@ export const ExternalPartyList = ({
               Created
             </Typography>
           </Tooltip>
+          <Box sx={{ width: ACTIONS_SLOT, flexShrink: 0 }} aria-hidden />
         </Box>
 
         <Box sx={{ display: "flex", flexDirection: "column", gap: 1 }}>
@@ -306,6 +324,43 @@ export const ExternalPartyList = ({
               >
                 {formatCreated(party.created_at)}
               </Typography>
+              <Box
+                sx={{
+                  width: ACTIONS_SLOT,
+                  flexShrink: 0,
+                  display: "flex",
+                  justifyContent: "flex-end",
+                  gap: 0.5,
+                }}
+              >
+                <Tooltip title="Unhost history">
+                  <IconButton
+                    size="small"
+                    aria-label={`Unhost history of ${party.party_id}`}
+                    onClick={(e) => {
+                      // The row is an expander; this button must not toggle it.
+                      e.stopPropagation();
+                      setHistory(party.party_id);
+                    }}
+                  >
+                    <HistoryIcon sx={{ fontSize: 18 }} />
+                  </IconButton>
+                </Tooltip>
+                {ADMIN_ACCESS && (
+                  <Tooltip title="Stop hosting">
+                    <IconButton
+                      size="small"
+                      aria-label={`Stop hosting ${party.party_id}`}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setStopping(party.party_id);
+                      }}
+                    >
+                      <LinkOffIcon sx={{ fontSize: 18 }} />
+                    </IconButton>
+                  </Tooltip>
+                )}
+              </Box>
             </RowCard>
           ))}
         </Box>
@@ -318,6 +373,8 @@ export const ExternalPartyList = ({
         total={total}
         onChange={setPage}
       />
+      <StopHostingDialog partyId={stopping} onClose={() => setStopping(null)} />
+      <UnhostHistoryDialog partyId={history} onClose={() => setHistory(null)} />
     </Box>
   );
 };

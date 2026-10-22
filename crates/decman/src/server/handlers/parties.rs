@@ -1706,14 +1706,20 @@ fn build_decentralized_namespace_request(
 /// discovery after the originating workflow has been dismissed. Keeping all
 /// three sources prevents exact-filter discovery from hiding a newly added
 /// party on a node that already has credentials for another party.
+///
+/// The validator operator party's credential is skipped. It exists for the
+/// Splice cleanup of an unhost, the party is not decentralized, and as the only
+/// exact filter it would stop the discovery of the parties this node hosts.
 fn known_party_filters(
     party_credentials: &[PartyCredentials],
+    validator_operator_party: Option<&CantonId>,
     workflow_party_ids: impl IntoIterator<Item = String>,
     cached_party_ids: impl IntoIterator<Item = String>,
     prefix_filter: Option<&str>,
 ) -> Vec<String> {
     let mut parties: Vec<_> = party_credentials
         .iter()
+        .filter(|credentials| Some(&credentials.dec_party_id) != validator_operator_party)
         .map(|credentials| credentials.dec_party_id.to_string())
         .chain(workflow_party_ids)
         .chain(cached_party_ids)
@@ -1740,6 +1746,7 @@ async fn fetch_decentralized_parties(
     let cached_parties = db.get_dec_parties_by_prefix("").await?;
     let known_party_ids = known_party_filters(
         party_credentials,
+        config.validator_operator_party.as_ref(),
         workflow_runs
             .into_iter()
             .filter_map(|run| run.dec_party_id.map(|party_id| party_id.to_string())),
@@ -3142,6 +3149,7 @@ mod tests {
         assert_eq!(
             known_party_filters(
                 &parties,
+                None,
                 workflow_ids.clone(),
                 cached_ids.clone(),
                 Some("cbtc-")
@@ -3153,8 +3161,34 @@ mod tests {
             ]
         );
         assert_eq!(
-            known_party_filters(&parties, workflow_ids, cached_ids, Some("missing")),
+            known_party_filters(&parties, None, workflow_ids, cached_ids, Some("missing")),
             Vec::<String>::new()
+        );
+        Ok(())
+    }
+
+    /// A node whose only credential is its validator operator's must still
+    /// discover the parties it hosts. As an exact filter, that party would make
+    /// discovery look for it alone and find nothing decentralized.
+    #[test]
+    fn the_validator_operator_party_is_not_a_discovery_filter() -> anyhow::Result<()> {
+        let namespace = "1220c4010d6883f367c7f45d55b2449501620130f9b21e96379f17dea455ac7a5892";
+        let operator = CantonId::parse(&format!("validator::{namespace}"))?;
+        let parties = vec![PartyCredentials {
+            dec_party_id: operator.clone(),
+            member_party_id: operator.clone(),
+            user_id: "validator-user".to_string(),
+            keycloak: Default::default(),
+            auth0: None,
+            packages: Default::default(),
+        }];
+
+        assert!(
+            known_party_filters(&parties, Some(&operator), Vec::new(), Vec::new(), None).is_empty()
+        );
+        assert_eq!(
+            known_party_filters(&parties, None, Vec::new(), Vec::new(), None),
+            vec![operator.to_string()]
         );
         Ok(())
     }

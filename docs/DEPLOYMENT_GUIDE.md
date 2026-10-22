@@ -545,6 +545,7 @@ Most variables have a default that's only useful for local development (loopback
 | `DECPM_ALLOWED_ORIGIN` | same-origin | optional | CORS origin if UI host ≠ API host |
 | `DECPM_DB_ENCRYPTION_KEY` | unset | recommended | Random passphrase (hashed via SHA-256) protecting party secrets at rest. If unset, secrets are stored in plaintext in the SQLite DB. |
 | `DECPM_TENANT_API_KEYS` | unset | optional | Comma-separated bearer keys for the tenant API (`/v0/tenant/*`). Set it only on a node that hosts external parties, or that adds hosts to a local party. Unset turns the tenant API off. Keep the keys in the Secret |
+| `DECPM_VALIDATOR_OPERATOR_PARTY` | unset | optional | This node's Splice validator operator party. Set it on a node whose validator serves external parties. An unhost then archives the `ValidatorRight` and `TransferPreapproval` contracts this party holds for the party that the node leaves. The operator party also needs a party credential: see the README's [Party credentials for the validator operator](../README.md#party-credentials-for-the-validator-operator) |
 | `DECPM_TIMEOUT_HANDSHAKE` | `30` | optional | Noise handshake timeout (seconds) |
 | `DECPM_TIMEOUT_MESSAGE` | `120` | optional | Noise message timeout (seconds) |
 | `DECPM_TIMEOUT_RETRY_ATTEMPTS` | `3` | optional | Connection retry attempts |

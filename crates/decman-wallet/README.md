@@ -146,6 +146,36 @@ participant's key, so no wallet signature can authorize its topology. Its hosts
 are added with `/v0/tenant/add-hosts/authorize` instead. See
 [Decentralizing an existing party](../../docs/DECENTRALIZING_AN_EXISTING_PARTY.md).
 
+## Asking a host to leave a party
+
+`TenantClient::unhost` asks one host to stop hosting the party. The host
+removes itself with its own key, so the wallet signs nothing. It first archives
+the Splice contracts its validator holds for the party.
+
+```rust
+use common::api::TenantUnhostRequest;
+
+let host = &all_hosts[2];
+let base_serial = host.client.party_state(&party_id).await?.serial;
+let left = host
+    .client
+    .unhost(&TenantUnhostRequest {
+        party_id: party_id.clone(),
+        // A host removes only itself, so this must be its own id.
+        participant_id: host.participant_id.clone(),
+        base_serial,
+        // `None` runs the Splice cleanup. `Some(false)` only for a host that
+        // never acted as the party's Splice validator.
+        splice_cleanup: None,
+    })
+    .await?;
+```
+
+A `202` means the host's write is not effective yet. Repeat the call: it
+answers `200` once the host is gone. A `400` means the hosts that remain could
+not meet the threshold. Lower it with `raise_threshold` first, which moves the
+threshold either way.
+
 ## Keys the wallet does not hold
 
 `ExternalKeyPair` keeps the seed in this process. A provider whose keys live in

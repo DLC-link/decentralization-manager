@@ -224,6 +224,13 @@ pub enum Commands {
         #[arg(long, env = "DECPM_TENANT_API_KEYS")]
         tenant_api_keys: Option<String>,
 
+        /// This node's Splice validator operator party. Unhosting an external
+        /// party archives the `ValidatorRight` and `TransferPreapproval` this
+        /// party holds for it, so the party needs an entry in the party
+        /// credentials too. Unset means no Splice cleanup runs.
+        #[arg(long, env = "DECPM_VALIDATOR_OPERATOR_PARTY")]
+        validator_operator_party: Option<String>,
+
         // Timeouts
         /// Noise handshake timeout in seconds
         #[arg(long, env = "DECPM_TIMEOUT_HANDSHAKE")]

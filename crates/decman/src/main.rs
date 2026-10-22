@@ -2,7 +2,9 @@ mod cli;
 
 use std::{path::PathBuf, process::ExitCode};
 
+use anyhow::Context;
 use dec_party_manager::{
+    canton_id::CantonId,
     config::{Auth0Config, CantonTlsConfig, KeycloakConfig, NodeConfig},
     db,
     error::Result,
@@ -39,6 +41,19 @@ fn apply_tls_overrides(tls: &mut CantonTlsConfig, overrides: TlsOverrides<'_>) {
     if let Some(domain) = overrides.domain {
         tls.domain = Some(domain.clone());
     }
+}
+
+/// Split `DECPM_TENANT_API_KEYS` into keys, in the order configured. A repeat
+/// keeps its first position, so the index an audit row records for a key
+/// always names the same key.
+fn parse_tenant_api_keys(raw: &str) -> Vec<String> {
+    let mut keys: Vec<String> = Vec::new();
+    for key in raw.split(',').map(str::trim).filter(|k| !k.is_empty()) {
+        if !keys.iter().any(|k| k == key) {
+            keys.push(key.to_string());
+        }
+    }
+    keys
 }
 
 /// Extract the --dir / -d value from raw args before clap parses,
@@ -184,6 +199,7 @@ async fn run() -> Result {
             canton_hmac_audience,
             canton_hmac_subject,
             tenant_api_keys,
+            validator_operator_party,
             ..
         } => {
             if let Some(key) = db_encryption_key {
@@ -326,14 +342,15 @@ async fn run() -> Result {
 
             config.tenant_api_keys = tenant_api_keys
                 .as_deref()
-                .map(|s| {
-                    s.split(',')
-                        .map(str::trim)
-                        .filter(|k| !k.is_empty())
-                        .map(String::from)
-                        .collect()
-                })
+                .map(parse_tenant_api_keys)
                 .unwrap_or_default();
+            config.validator_operator_party = validator_operator_party
+                .as_deref()
+                .map(str::trim)
+                .filter(|party| !party.is_empty())
+                .map(CantonId::parse)
+                .transpose()
+                .context("DECPM_VALIDATOR_OPERATOR_PARTY is not a valid party id")?;
 
             config.insecure = *insecure;
             // Only ingest the unsafe HMAC settings when insecure mode is on;
@@ -401,7 +418,17 @@ mod tests {
     use anyhow::anyhow;
     use tracing_subscriber::{fmt::MakeWriter, prelude::*};
 
-    use super::{json_layer, json_logs_enabled};
+    use super::{json_layer, json_logs_enabled, parse_tenant_api_keys};
+
+    /// The audit row names a tenant key by its index, so the index must follow
+    /// the configured order and must not shift when a key is repeated.
+    #[test]
+    fn tenant_keys_keep_their_configured_order() {
+        assert_eq!(
+            parse_tenant_api_keys(" b , a,,b ,c"),
+            vec!["b".to_string(), "a".to_string(), "c".to_string()]
+        );
+    }
 
     /// A writer the test reads back once the layer has written to it.
     #[derive(Clone, Default)]

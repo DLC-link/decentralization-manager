@@ -6,12 +6,14 @@
 //! bundle to its own participant. Every binary field on the wire is base64
 //! (STANDARD engine).
 //!
-//! Onboarding is all this API does. Transacting as the party — reading its
+//! Hosting the party is all this API manages. Transacting as the party — reading its
 //! contracts, preparing and executing submissions, moving token-standard assets —
 //! is the wallet's own job against Canton, because it needs a Ledger-API
 //! credential the node has no business holding on the party's behalf. Onboarding,
 //! by contrast, writes topology over the tokenless Admin API and needs no ledger
-//! token at all.
+//! token at all. `unhost` is the one call that uses a ledger token, and it is the
+//! node's own: its Splice cleanup acts as the node's validator operator party,
+//! never as the external party.
 //!
 //! Unlike the admin endpoints (Keycloak JWT + `require_admin`), tenant callers
 //! authenticate with a provider-issued API key, so every handler here calls
@@ -27,13 +29,13 @@ use crate::{
         AppState,
         middleware::require_tenant_api_key,
         types::{
-            ErrorResponse, LocalPartyAdoptExecuteRequest, LocalPartyAdoptRequest,
-            TenantAcsBlockResponse, TenantAcsImportRequest, TenantAcsImportResponse,
-            TenantAddHostsExecuteRequest, TenantAddHostsExecuteResponse,
+            ErrorResponse, ExternalPartyUnhostResponse, LocalPartyAdoptExecuteRequest,
+            LocalPartyAdoptRequest, TenantAcsBlockResponse, TenantAcsImportRequest,
+            TenantAcsImportResponse, TenantAddHostsExecuteRequest, TenantAddHostsExecuteResponse,
             TenantAddHostsPrepareResponse, TenantAddHostsRequest, TenantExecuteRequest,
             TenantExecuteResponse, TenantPartyStateResponse, TenantPrepareRequest,
             TenantPrepareResponse, TenantThresholdExecuteRequest, TenantThresholdRequest,
-            WorkflowProgress, WorkflowStatusResponse,
+            TenantUnhostRequest, WorkflowProgress, WorkflowStatusResponse,
         },
     },
     workflow::external_party::{
@@ -50,6 +52,8 @@ use crate::{
         threshold::{
             ExternalPartyThresholdPayload, authorize_threshold, prepare_threshold, submit_threshold,
         },
+        unhost::UnhostRequest,
+        unhost_audit::RequestedVia,
     },
     workflow::party_replication::{
         ClearOutcome, collect_party_package_ids, open_export_session,
@@ -59,7 +63,7 @@ use crate::{
     },
 };
 
-use super::workflows::validate_confirmation_threshold;
+use super::{unhost::run_unhost, workflows::validate_confirmation_threshold};
 
 // ============================================================================
 // Onboarding (wallet-driven)
@@ -1138,6 +1142,71 @@ pub async fn tenant_party_state(
     }
 }
 
+/// Make THIS host leave an external party, at the wallet provider's request.
+///
+/// The host removes only itself, with its own key, so no party signature is
+/// involved. It archives the Splice contracts its validator holds for the party
+/// first, then leaves the party's hosting mapping. A repeat after success
+/// answers 200 with the current serial.
+#[utoipa::path(
+    tag = "Tenant",
+    request_body = TenantUnhostRequest,
+    responses(
+        (status = 200, description = "This host no longer hosts the party", body = ExternalPartyUnhostResponse),
+        (status = 202, description = "The topology write was accepted but is not effective yet; repeat the call", body = ExternalPartyUnhostResponse),
+        (status = 400, description = "participant_id is not this host, this host is the last host, or the hosts left could not meet the threshold", body = ErrorResponse),
+        (status = 401, description = "Invalid tenant API key", body = ErrorResponse),
+        (status = 404, description = "This host does not host the party", body = ErrorResponse),
+        (status = 409, description = "The pinned serial moved, or an unhost or ACS relay for the party is running", body = ErrorResponse),
+        (status = 422, description = "This host has no validator operator party, and splice_cleanup was not false", body = ErrorResponse),
+        (status = 500, description = "A step failed on this host", body = ExternalPartyUnhostResponse)
+    )
+)]
+#[post("/v0/tenant/unhost")]
+pub async fn tenant_unhost(
+    http_req: HttpRequest,
+    data: web::Data<AppState>,
+    body: web::Json<TenantUnhostRequest>,
+) -> impl Responder {
+    let key_index = match require_tenant_api_key(&http_req, &data) {
+        Ok(index) => index,
+        Err(resp) => return resp,
+    };
+    let me = data.config.participant_id();
+    if body.participant_id != *me {
+        return HttpResponse::BadRequest().json(ErrorResponse {
+            error: format!(
+                "this host is {me}, not {named}; a host removes only itself, so send the request \
+                 to {named}'s own host",
+                named = body.participant_id
+            ),
+        });
+    }
+
+    let body = body.into_inner();
+    run_unhost(
+        &data,
+        UnhostRequest {
+            party_id: body.party_id,
+            base_serial: body.base_serial,
+            splice_cleanup: body.splice_cleanup.unwrap_or(true),
+            requested_via: RequestedVia::Tenant,
+            requested_by: tenant_requester(key_index),
+        },
+    )
+    .await
+}
+
+/// How the audit names a tenant caller: by the index of its key in
+/// `DECPM_TENANT_API_KEYS`, never by the key.
+fn tenant_requester(key_index: Option<usize>) -> String {
+    match key_index {
+        Some(index) => format!("tenant-key-{index}"),
+        // Insecure/test mode checks no key.
+        None => "tenant-key-unchecked".to_string(),
+    }
+}
+
 /// Block size for draining and re-serving a snapshot.
 const EXPORT_BLOCK_SIZE: usize = 1024 * 1024;
 
@@ -1475,6 +1544,30 @@ mod tests {
                 "wrong status for {label}"
             );
         }
+    }
+
+    /// The audit names the key by its position, and must never carry the key.
+    #[test]
+    fn a_tenant_caller_is_recorded_by_key_index() {
+        assert_eq!(tenant_requester(Some(2)), "tenant-key-2");
+        assert_eq!(tenant_requester(None), "tenant-key-unchecked");
+    }
+
+    #[test]
+    fn unhost_request_keeps_its_wire_shape() {
+        let json = serde_json::json!({
+            "party_id": "alice::1220aa",
+            "participant_id": test_participant(),
+            "base_serial": 4,
+        });
+        let Ok(request) = serde_json::from_value::<TenantUnhostRequest>(json) else {
+            panic!("the documented unhost request shape must deserialize");
+        };
+        assert_eq!(request.base_serial, 4);
+        assert_eq!(
+            request.splice_cleanup, None,
+            "omitted means the cleanup runs"
+        );
     }
 
     /// A stale-pin error must name both serials, or the wallet cannot tell what

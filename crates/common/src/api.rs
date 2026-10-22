@@ -808,6 +808,128 @@ pub struct TenantPartyStateResponse {
     pub has_signing_key: bool,
 }
 
+/// A wallet provider's request that THIS host stop hosting an external party.
+///
+/// The host removes only itself, with its own key, so no party signature is
+/// involved. Canton accepts that when the threshold is unchanged and exactly one
+/// host leaves.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
+pub struct TenantUnhostRequest {
+    /// Full party id of the party this host leaves.
+    pub party_id: String,
+    /// This host's own participant id. A request naming another participant is
+    /// refused, so a caller cannot mistake which host it is talking to.
+    pub participant_id: CantonId,
+    /// The serial the caller read from the party's current mapping.
+    pub base_serial: u32,
+    /// Whether to archive the Splice contracts this host's validator holds for
+    /// the party first. Omitted means yes. Send `false` only for a host that
+    /// never acted as the party's Splice validator.
+    pub splice_cleanup: Option<bool>,
+}
+
+/// An operator's request that this node stop hosting an external party. The
+/// party is named in the path.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
+pub struct ExternalPartyUnhostRequest {
+    /// The serial the preview reported.
+    pub base_serial: u32,
+    /// As on [`TenantUnhostRequest`]: omitted means yes.
+    pub splice_cleanup: Option<bool>,
+}
+
+/// What an unhost attempt did, from either entry point.
+///
+/// `Completed` means this host's head state no longer lists it. `InProgress`
+/// means the topology write was accepted but is not effective yet; repeat the
+/// call to see it finish. `Failed` means a step failed after work started; the
+/// audit row holds the reason.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
+pub struct ExternalPartyUnhostResponse {
+    pub status: WorkflowProgress,
+    pub party_id: String,
+    /// The serial this host reads for the party now.
+    pub serial: u32,
+    /// `ValidatorRight` contracts this attempt archived.
+    pub validator_rights_archived: Vec<String>,
+    /// `TransferPreapproval` contracts this attempt cancelled.
+    pub preapprovals_cancelled: Vec<String>,
+    /// The audit row that records this attempt.
+    pub audit_id: i64,
+}
+
+/// What an unhost would do on this node right now. Nothing is written.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
+pub struct ExternalPartyUnhostPreview {
+    pub party_id: String,
+    /// The serial to pin as `base_serial` on the unhost.
+    pub serial: u32,
+    /// How many hosts must confirm. The unhost leaves it unchanged.
+    pub threshold: u32,
+    /// The hosts that remain once this node leaves.
+    pub remaining_hosts: Vec<String>,
+    /// This node's validator operator party, or `None` when
+    /// `DECPM_VALIDATOR_OPERATOR_PARTY` is unset and no Splice cleanup can run.
+    pub validator_operator_party: Option<String>,
+    /// `ValidatorRight` contracts the unhost archives.
+    pub validator_rights: Vec<String>,
+    /// `TransferPreapproval` contracts the unhost cancels.
+    pub preapprovals_to_cancel: Vec<String>,
+    /// `TransferPreapproval` contracts past their expiry. The DSO expires
+    /// these, so the unhost leaves them alone.
+    pub preapprovals_expired: Vec<String>,
+    /// Why the unhost would be refused, or `None` when it can go ahead.
+    pub blocker: Option<String>,
+}
+
+/// One attempt to make this node leave an external party.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
+pub struct UnhostAuditEntry {
+    pub id: i64,
+    pub party_id: String,
+    pub participant_id: String,
+    /// `operator` or `tenant`.
+    pub requested_via: String,
+    /// The admin user, or `tenant-key-N` for the Nth configured tenant key.
+    pub requested_by: String,
+    pub serial_before: Option<u32>,
+    pub serial_after: Option<u32>,
+    pub validator_rights_archived: Vec<String>,
+    pub preapprovals_cancelled: Vec<String>,
+    pub splice_cleanup: bool,
+    /// The step the attempt reached: `preconditions`, `splice_cleanup`,
+    /// `topology` or `done`.
+    pub step: String,
+    /// The earlier attempt this one resumed, if any.
+    pub resumed_from: Option<i64>,
+    /// Unix seconds.
+    pub started_at: i64,
+    /// Unix seconds. `None` while the attempt runs, or after a crash.
+    pub finished_at: Option<i64>,
+    /// `in_progress`, `completed` or `failed`.
+    pub status: String,
+    pub error: Option<String>,
+}
+
+/// Response wrapper for `GET /external-parties/{party_id}/unhost-audit`,
+/// newest first.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
+pub struct UnhostAuditResponse {
+    pub entries: Vec<UnhostAuditEntry>,
+}
+
 /// Response for key status check
 #[derive(Serialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]

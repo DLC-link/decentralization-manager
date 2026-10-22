@@ -12,8 +12,9 @@
 
 use base64::{Engine, engine::general_purpose::STANDARD};
 use common::{
-    api::{HostPermission, TenantExecuteRequest, TenantPrepareRequest},
+    api::{HostPermission, TenantExecuteRequest, TenantPrepareRequest, TenantUnhostRequest},
     canton_id::CantonId,
+    types::WorkflowProgress,
 };
 use decman_wallet::{
     ExternalKeyPair, HostStatus, TenantClient, WalletHost, execute_co_validated, statuses,
@@ -885,4 +886,89 @@ async fn threshold_prepare_calls(server: &MockServer) -> usize {
                 .count()
         })
         .unwrap_or(0)
+}
+
+// ============================================================================
+// A host leaving a party
+// ============================================================================
+
+fn client_for(server: &MockServer) -> TenantClient {
+    match TenantClient::new(server.uri(), "key") {
+        Ok(c) => c,
+        Err(e) => panic!("client must build: {e}"),
+    }
+}
+
+/// The host learns which participant the wallet means, at which serial, and
+/// whether to run the Splice cleanup; the wallet reads back what was archived.
+#[tokio::test]
+async fn unhost_sends_the_pinned_request_and_reads_what_was_archived() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v0/tenant/unhost"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "status": "completed",
+            "party_id": "alice::1220ab",
+            "serial": 5,
+            "validator_rights_archived": ["vr-1"],
+            "preapprovals_cancelled": ["tp-1"],
+            "audit_id": 9,
+        })))
+        .mount(&server)
+        .await;
+
+    let request = TenantUnhostRequest {
+        party_id: "alice::1220ab".to_string(),
+        participant_id: participant_id(3),
+        base_serial: 4,
+        splice_cleanup: Some(false),
+    };
+    let response = match client_for(&server).unhost(&request).await {
+        Ok(r) => r,
+        Err(e) => panic!("a 200 must read as success: {e}"),
+    };
+    assert_eq!(response.status, WorkflowProgress::Completed);
+    assert_eq!(response.serial, 5);
+    assert_eq!(response.validator_rights_archived, vec!["vr-1".to_string()]);
+    assert_eq!(response.preapprovals_cancelled, vec!["tp-1".to_string()]);
+    assert_eq!(response.audit_id, 9);
+
+    let requests = server.received_requests().await.unwrap_or_default();
+    let Some(sent) = requests.first() else {
+        panic!("the unhost must reach the host");
+    };
+    let body: serde_json::Value = match serde_json::from_slice(&sent.body) {
+        Ok(v) => v,
+        Err(e) => panic!("the request body must be JSON: {e}"),
+    };
+    assert_eq!(body["participant_id"], json!(participant_id(3).to_string()));
+    assert_eq!(body["base_serial"], json!(4));
+    assert_eq!(body["splice_cleanup"], json!(false));
+}
+
+/// A refusal keeps its status and the host's reason, so the wallet can tell a
+/// threshold it must lower from a host that is down.
+#[tokio::test]
+async fn an_unhost_refusal_carries_the_hosts_reason() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v0/tenant/unhost"))
+        .respond_with(ResponseTemplate::new(400).set_body_json(json!({
+            "error": "the party's key must lower the threshold first",
+        })))
+        .mount(&server)
+        .await;
+
+    let request = TenantUnhostRequest {
+        party_id: "alice::1220ab".to_string(),
+        participant_id: participant_id(2),
+        base_serial: 4,
+        splice_cleanup: None,
+    };
+    let error = match client_for(&server).unhost(&request).await {
+        Ok(_) => panic!("a 400 must not read as success"),
+        Err(e) => e,
+    };
+    assert!(error.is_status(400));
+    assert!(error.to_string().contains("lower the threshold"), "{error}");
 }

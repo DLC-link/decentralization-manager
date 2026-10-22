@@ -25,7 +25,8 @@ pub use common::api::{
     DecentralizedPartiesResponse, DeclineInvitationPayload, DisclosedContractInput,
     DiscoverMemberPartyRequest, DiscoverMemberPartyResponse, DistributePackageRequest,
     ErrorResponse, ExpireConfirmationRequest, ExternalPartiesResponse, ExternalPartyHost,
-    ExternalPartyInfo, GovernanceState, GovernanceStateResponse, GovernanceType,
+    ExternalPartyInfo, ExternalPartyUnhostPreview, ExternalPartyUnhostRequest,
+    ExternalPartyUnhostResponse, GovernanceState, GovernanceStateResponse, GovernanceType,
     GrantRightsRequest, GrantRightsResponse, HandledInvitationsResponse, InstrumentInfo,
     InstrumentsResponse, InvitationActionRequest, KeyStatusResponse, KickInvitePayload,
     KickRequest, KnownMember, KnownMembersResponse, LocalPartyAdoptExecuteRequest,
@@ -40,9 +41,9 @@ pub use common::api::{
     TenantAddHostsExecuteRequest, TenantAddHostsExecuteResponse, TenantAddHostsPrepareResponse,
     TenantAddHostsRequest, TenantExecuteRequest, TenantExecuteResponse, TenantPartyStateResponse,
     TenantPrepareRequest, TenantPrepareResponse, TenantThresholdExecuteRequest,
-    TenantThresholdRequest, TransferFactoriesResponse, TransferFactoryInfo,
-    TransferPreapprovalsResponse, UserServiceInfo, UserServicesResponse, WorkflowResponse,
-    WorkflowRunsResponse, WorkflowStatusResponse,
+    TenantThresholdRequest, TenantUnhostRequest, TransferFactoriesResponse, TransferFactoryInfo,
+    TransferPreapprovalsResponse, UnhostAuditResponse, UserServiceInfo, UserServicesResponse,
+    WorkflowResponse, WorkflowRunsResponse, WorkflowStatusResponse,
 };
 pub use common::types::{
     AcsTransferProgress, AuditLogEntry, AuthConfigResponse, ConnectionStatus, ContractInfo,

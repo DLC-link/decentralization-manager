@@ -12,6 +12,7 @@ use canton_proto_rs::com::{
             party_management_service_client::PartyManagementServiceClient,
             user_management_service_client::UserManagementServiceClient,
         },
+        command_service_client::CommandServiceClient,
         event_query_service_client::EventQueryServiceClient,
         interactive::interactive_submission_service_client::InteractiveSubmissionServiceClient,
         state_service_client::StateServiceClient,
@@ -496,6 +497,7 @@ define_client_creator!(create_submission_client, InteractiveSubmissionServiceCli
 define_client_creator!(create_state_client, StateServiceClient);
 define_client_creator!(create_update_client, UpdateServiceClient);
 define_client_creator!(create_event_query_client, EventQueryServiceClient);
+define_client_creator!(create_command_client, CommandServiceClient);
 
 /// Create a directory with context for error messages
 pub async fn create_directory(path: &Path) -> Result {

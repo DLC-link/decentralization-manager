@@ -474,6 +474,15 @@ pub struct PartyAuthCredentials {
 }
 
 impl WorkflowAuth {
+    /// Whether this node holds credentials for `party_id`. Mock auth serves
+    /// every party.
+    pub fn has_credentials(&self, party_id: &CantonId) -> bool {
+        match self {
+            WorkflowAuth::Keycloak(registry) => registry.has_credentials(party_id),
+            WorkflowAuth::Mock(_) => true,
+        }
+    }
+
     /// Get credentials for a decentralized party
     ///
     /// Returns token, user_id, and member_party_id.

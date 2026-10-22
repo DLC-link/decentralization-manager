@@ -313,6 +313,19 @@ impl RelaySessions {
         retire(entry).await
     }
 
+    /// Whether any open export or import has an instance name that `belongs`
+    /// accepts.
+    ///
+    /// A caller about to change the party's hosting asks this first: a relay
+    /// still running would stream or import against a mapping that no longer
+    /// holds.
+    pub async fn any_session(&self, belongs: impl Fn(&str) -> bool) -> bool {
+        if self.exports.lock().await.keys().any(|name| belongs(name)) {
+            return true;
+        }
+        self.imports.lock().await.keys().any(|name| belongs(name))
+    }
+
     /// Drop this replication's sessions, if any.
     ///
     /// Used when a transfer is abandoned deliberately. The import is not
