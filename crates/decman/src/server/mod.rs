@@ -12,6 +12,7 @@ mod audit;
 mod chain_audit;
 mod event_filters;
 mod external_parties;
+mod former_parties;
 mod governance_poller;
 mod handlers;
 mod ledger_paging;
@@ -1178,6 +1179,38 @@ pub async fn start_server(
         Err(_) => tracing::warn!("Timed out sweeping leftover temporary topology stores"),
     }
 
+    // A purge runs inside this process, so one still marked running was cut
+    // off by the restart and will never record its own outcome. Its row would
+    // block every later purge and workflow start, so decman does not start
+    // until the row is repaired.
+    let interrupted = db
+        .fail_interrupted_purges(former_parties::INTERRUPTED_PURGE_ERROR)
+        .await
+        .context("Could not mark the purges a restart interrupted as failed")?;
+    if !interrupted.is_empty() {
+        tracing::error!(
+            "{} purge(s) of former-party contracts were interrupted by a restart; \
+             the participant may still be disconnected from its synchronizer",
+            interrupted.len()
+        );
+    }
+    for party_id in &interrupted {
+        match CantonId::parse(party_id) {
+            Ok(party) => {
+                audit::log_purge_audit(
+                    &db,
+                    audit::PurgeAuditEvent::End(Err(
+                        former_parties::INTERRUPTED_PURGE_ERROR.to_string()
+                    )),
+                    &party,
+                    None,
+                )
+                .await;
+            }
+            Err(e) => tracing::warn!("Skipping the audit row of an interrupted purge: {e}"),
+        }
+    }
+
     // Boot-time workflow recovery. For any `workflow_runs` row that was
     // InProgress when we shut down, re-spawn the coordinator task (which
     // resumes at the persisted `current_step` via `WorkflowState::from_persisted`)
@@ -1440,6 +1473,11 @@ pub async fn start_server(
             .service(handlers::get_vetted_packages)
             .service(handlers::get_expected_versions)
             .service(handlers::clear_acs_import_quarantine)
+            .service(handlers::list_former_parties)
+            .service(handlers::preview_former_party_purge)
+            .service(handlers::purge_former_party)
+            .service(handlers::reconnect_after_purge)
+            .service(handlers::dismiss_former_party)
             .service(handlers::start_kick)
             .service(handlers::get_kick_status)
             .service(handlers::cancel_kick)

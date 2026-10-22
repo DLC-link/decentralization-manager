@@ -216,6 +216,41 @@ impl Fixture {
             .with_context(|| format!("read body POST {url}"))?;
         Ok((status, String::from_utf8_lossy(&bytes).into_owned()))
     }
+
+    /// GET that returns the HTTP status code (and body) without erroring on
+    /// non-2xx, for asserting refusals.
+    pub async fn get_expect_status(
+        &self,
+        port: u16,
+        path: &str,
+    ) -> anyhow::Result<(reqwest::StatusCode, String)> {
+        let (_, status, bytes) = self.get_raw(port, path).await?;
+        Ok((status, String::from_utf8_lossy(&bytes).into_owned()))
+    }
+
+    /// DELETE that returns the HTTP status code (and body) without erroring on
+    /// non-2xx.
+    pub async fn delete_expect_status(
+        &self,
+        port: u16,
+        path: &str,
+    ) -> anyhow::Result<(reqwest::StatusCode, String)> {
+        let jwt = self.refresher.token().await.context("acquire bearer")?;
+        let url = format!("http://localhost:{port}{path}");
+        let res = self
+            .client
+            .delete(&url)
+            .header(AUTHORIZATION, format!("Bearer {jwt}"))
+            .send()
+            .await
+            .with_context(|| format!("DELETE {url}"))?;
+        let status = res.status();
+        let bytes = res
+            .bytes()
+            .await
+            .with_context(|| format!("read body DELETE {url}"))?;
+        Ok((status, String::from_utf8_lossy(&bytes).into_owned()))
+    }
 }
 
 #[derive(Debug, Deserialize)]

@@ -14,8 +14,8 @@ use canton_proto_rs::com::{
             ContractImportMode, DisconnectSynchronizerRequest, ExportPartyAcsRequest,
             ImportPartyAcsRequest, ListConnectedSynchronizersRequest, ListPackagesRequest,
             ListRegisteredSynchronizersRequest, ModifySynchronizerRequest,
-            ReconnectSynchronizersRequest, list_connected_synchronizers_response,
-            package_service_client::PackageServiceClient,
+            ReconnectSynchronizersRequest, SynchronizerConnectionConfig,
+            list_connected_synchronizers_response, package_service_client::PackageServiceClient,
             party_management_service_client::PartyManagementServiceClient,
             synchronizer_connectivity_service_client::SynchronizerConnectivityServiceClient,
         },
@@ -600,19 +600,7 @@ async fn set_manual_connect(config: &NodeConfig, manual: bool) -> Result {
     let alias = config.synchronizer();
     let mut connectivity =
         SynchronizerConnectivityServiceClient::new(config.admin_channel().await?);
-    let mut connection = connectivity
-        .list_registered_synchronizers(tonic::Request::new(ListRegisteredSynchronizersRequest {
-            all_statuses: false,
-        }))
-        .await?
-        .into_inner()
-        .results
-        .into_iter()
-        .filter_map(|r| r.config)
-        .find(|c| c.synchronizer_alias == alias)
-        .ok_or_else(|| {
-            anyhow::anyhow!("synchronizer '{alias}' is not registered on this participant")
-        })?;
+    let mut connection = registered_connection(&mut connectivity, alias).await?;
     if connection.manual_connect == manual {
         return Ok(());
     }
@@ -626,6 +614,37 @@ async fn set_manual_connect(config: &NodeConfig, manual: bool) -> Result {
         .await?;
     tracing::info!("synchronizer '{alias}' manual connection set to {manual}");
     Ok(())
+}
+
+/// Whether this node's synchronizer is set to manual connection. DecMan sets
+/// that when it keeps the participant off the synchronizer on purpose.
+pub(crate) async fn manual_connect_enabled(config: &NodeConfig) -> Result<bool> {
+    let mut connectivity =
+        SynchronizerConnectivityServiceClient::new(config.admin_channel().await?);
+    Ok(
+        registered_connection(&mut connectivity, config.synchronizer())
+            .await?
+            .manual_connect,
+    )
+}
+
+async fn registered_connection(
+    connectivity: &mut SynchronizerConnectivityServiceClient<tonic::transport::Channel>,
+    alias: &str,
+) -> Result<SynchronizerConnectionConfig> {
+    connectivity
+        .list_registered_synchronizers(tonic::Request::new(ListRegisteredSynchronizersRequest {
+            all_statuses: false,
+        }))
+        .await?
+        .into_inner()
+        .results
+        .into_iter()
+        .filter_map(|r| r.config)
+        .find(|c| c.synchronizer_alias == alias)
+        .ok_or_else(|| {
+            anyhow::anyhow!("synchronizer '{alias}' is not registered on this participant")
+        })
 }
 
 /// Reconnect the participant to all registered synchronizers and confirm the
@@ -648,7 +667,7 @@ async fn reconnect_and_verify_healthy(config: &NodeConfig) -> Result {
 
 /// Poll `ListConnectedSynchronizers` until the configured synchronizer reports
 /// healthy, or give up after the topology retry budget. Never reconnects.
-async fn verify_healthy(config: &NodeConfig) -> Result {
+pub(crate) async fn verify_healthy(config: &NodeConfig) -> Result {
     let alias = config.synchronizer();
     let max_attempts = topology_retry_max_attempts();
     let retry_delay = Duration::from_secs(topology_retry_delay_secs());
@@ -711,7 +730,7 @@ async fn verify_healthy(config: &NodeConfig) -> Result {
 /// or an accepted `ReconnectSynchronizers` request. Reporting a half-reconnected
 /// (or crash-looping) participant as success is exactly the failure this fix
 /// exists to prevent.
-fn synchronizer_healthy(
+pub(crate) fn synchronizer_healthy(
     connected: &[list_connected_synchronizers_response::Result],
     alias: &str,
 ) -> bool {

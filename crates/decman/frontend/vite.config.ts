@@ -42,6 +42,7 @@ function mockApi(): Plugin {
     'onboarding', 'kick', 'credential-offers', 'token-standard-contracts',
     'transfer-factories', 'transfer-preapprovals', 'coupon-reassignment-delegation',
     'reward-status',
+    'former-parties',
   ])
   const load = (name: string): string | null => {
     const file = join(mocksDir, `${name}.json`)
