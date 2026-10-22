@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   Alert,
   Box,
@@ -37,6 +37,52 @@ const errorOf = async (response: Response, fallback: string) => {
   return body?.error || `${fallback} (HTTP ${response.status})`;
 };
 
+/** How long the dialog waits before it repeats a pending unhost. */
+export const UNHOST_RETRY_MS = 5_000;
+/** How many repeats it makes: two minutes in all. */
+const UNHOST_RETRIES = 24;
+
+type Attempt = { kind: "done" } | { kind: "wait" } | { kind: "error"; message: string };
+
+/**
+ * Send the pinned unhost once, and read the answer as finished, still going, or
+ * failed. The node keeps working when a request is cut short, so a dropped
+ * request and a gateway timeout read as still going.
+ */
+const attemptUnhost = async (
+  partyId: string,
+  body: ExternalPartyUnhostRequest,
+): Promise<Attempt> => {
+  let response: Response;
+  try {
+    response = await authenticatedFetch(`${partyPath(partyId)}/unhost`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+  } catch {
+    return { kind: "wait" };
+  }
+  // 202: Canton accepted the write, but it is not effective yet.
+  if (response.status === 200) return { kind: "done" };
+  if ([202, 502, 503, 504].includes(response.status)) return { kind: "wait" };
+  if (response.status === 409) {
+    const message = await errorOf(response, "Failed to stop hosting");
+    // An earlier request, perhaps this dialog's own, still runs on the node.
+    return message.includes("already running") ? { kind: "wait" } : { kind: "error", message };
+  }
+  if (response.status === 500) {
+    const result: Partial<ExternalPartyUnhostResponse> = await response.json().catch(() => ({}));
+    const archived =
+      (result.validator_rights_archived?.length ?? 0) + (result.preapprovals_cancelled?.length ?? 0);
+    return {
+      kind: "error",
+      message: `A step failed after ${archived} Splice contract(s) were archived. The party is still hosted here. The unhost history holds the reason.`,
+    };
+  }
+  return { kind: "error", message: await errorOf(response, "Failed to stop hosting") };
+};
+
 /** A labelled list of contract or participant ids, or nothing when empty. */
 const IdList = ({ label, ids }: { label: string; ids: string[] }) =>
   ids.length === 0 ? null : (
@@ -72,6 +118,15 @@ const StopHosting = ({ partyId, onClose }: { partyId: string; onClose: () => voi
   const [error, setError] = useState<string | null>(null);
   const [skipCleanup, setSkipCleanup] = useState(false);
   const [submitting, setSubmitting] = useState(false);
+  const [waiting, setWaiting] = useState(false);
+  // Set when the dialog closes, so a pending wait stops asking.
+  const stopped = useRef(false);
+  useEffect(
+    () => () => {
+      stopped.current = true;
+    },
+    [],
+  );
 
   useEffect(() => {
     let cancelled = false;
@@ -98,42 +153,39 @@ const StopHosting = ({ partyId, onClose }: { partyId: string; onClose: () => voi
     if (!preview) return;
     setSubmitting(true);
     setError(null);
-    try {
-      const body: ExternalPartyUnhostRequest = {
-        base_serial: preview.serial,
-        // Omitted runs the cleanup. Without an operator party the node can only
-        // skip it, and only because the operator said so above.
-        ...(noOperator ? { splice_cleanup: false } : {}),
-      };
-      const response = await authenticatedFetch(`${partyPath(partyId)}/unhost`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(body),
-      });
-      if (response.status === 200) {
+    const body: ExternalPartyUnhostRequest = {
+      base_serial: preview.serial,
+      // Omitted runs the cleanup. Without an operator party the node can only
+      // skip it, and only because the operator said so above.
+      ...(noOperator ? { splice_cleanup: false } : {}),
+    };
+    // The same pinned request every time. Once the node is gone the node
+    // answers 200 to it, whatever the preview would now say.
+    for (let attempt = 0; attempt <= UNHOST_RETRIES; attempt++) {
+      if (attempt > 0) {
+        setWaiting(true);
+        await new Promise((resolve) => setTimeout(resolve, UNHOST_RETRY_MS));
+      }
+      if (stopped.current) return;
+      const outcome = await attemptUnhost(partyId, body);
+      if (stopped.current) return;
+      if (outcome.kind === "done") {
         showSnackbar(`This node no longer hosts ${partyId}`);
         onClose();
-      } else if (response.status === 202) {
-        showSnackbar(
-          "The topology change is accepted but not effective yet. Stop hosting again in a moment to finish.",
-        );
-        onClose();
-      } else if (response.status === 500) {
-        const result: Partial<ExternalPartyUnhostResponse> = await response.json().catch(() => ({}));
-        const archived =
-          (result.validator_rights_archived?.length ?? 0) +
-          (result.preapprovals_cancelled?.length ?? 0);
-        setError(
-          `A step failed after ${archived} Splice contract(s) were archived. The party is still hosted here. The unhost history holds the reason.`,
-        );
-      } else {
-        setError(await errorOf(response, "Failed to stop hosting"));
+        return;
       }
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to stop hosting");
-    } finally {
-      setSubmitting(false);
+      if (outcome.kind === "error") {
+        setError(outcome.message);
+        setWaiting(false);
+        setSubmitting(false);
+        return;
+      }
     }
+    setError(
+      "The change has not taken effect after two minutes. The node keeps working on it, and the unhost history records the result.",
+    );
+    setWaiting(false);
+    setSubmitting(false);
   };
 
   const nothingToArchive =
@@ -142,7 +194,7 @@ const StopHosting = ({ partyId, onClose }: { partyId: string; onClose: () => voi
     preview.preapprovals_to_cancel.length === 0;
 
   return (
-    <Dialog open onClose={() => !submitting && onClose()} maxWidth="sm" fullWidth>
+    <Dialog open onClose={() => (!submitting || waiting) && onClose()} maxWidth="sm" fullWidth>
       <DialogTitle>Stop hosting this party</DialogTitle>
       <DialogContent sx={{ display: "flex", flexDirection: "column", gap: 2 }}>
         <CopyableText text={partyId} truncate={{ start: 32, end: 16 }} variant="body2" />
@@ -192,10 +244,19 @@ const StopHosting = ({ partyId, onClose }: { partyId: string; onClose: () => voi
             </Typography>
           </>
         )}
+        {waiting && (
+          <>
+            <Alert severity="info">
+              The node is still leaving the party. This dialog asks again every few seconds until it
+              is gone.
+            </Alert>
+            <LinearProgress aria-label="Waiting for the node to leave" />
+          </>
+        )}
         {error && <Alert severity="error">{error}</Alert>}
       </DialogContent>
       <DialogActions>
-        <Button onClick={onClose} disabled={submitting}>
+        <Button onClick={onClose} disabled={submitting && !waiting}>
           Cancel
         </Button>
         <Button

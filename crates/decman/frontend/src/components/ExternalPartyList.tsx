@@ -150,8 +150,22 @@ export const ExternalPartyList = ({
   const [stopping, setStopping] = useState<string | null>(null);
   const [history, setHistory] = useState<string | null>(null);
 
+  // Rendered whatever the list shows, so a dialog survives its party leaving
+  // the list while it still waits for the node to go.
+  const dialogs = (
+    <>
+      <StopHostingDialog partyId={stopping} onClose={() => setStopping(null)} />
+      <UnhostHistoryDialog partyId={history} onClose={() => setHistory(null)} />
+    </>
+  );
+
   if (error) {
-    return <Alert severity="error" sx={{ mt: 2 }}>{error}</Alert>;
+    return (
+      <>
+        <Alert severity="error" sx={{ mt: 2 }}>{error}</Alert>
+        {dialogs}
+      </>
+    );
   }
   if (loading) {
     return (
@@ -168,6 +182,7 @@ export const ExternalPartyList = ({
             This node is reading its topology. The first scan after a restart can take a few minutes.
           </Typography>
         )}
+        {dialogs}
       </Box>
     );
   }
@@ -191,6 +206,7 @@ export const ExternalPartyList = ({
         >
           No external parties hosted on this node
         </Typography>
+        {dialogs}
       </Box>
     );
   }
@@ -373,8 +389,7 @@ export const ExternalPartyList = ({
         total={total}
         onChange={setPage}
       />
-      <StopHostingDialog partyId={stopping} onClose={() => setStopping(null)} />
-      <UnhostHistoryDialog partyId={history} onClose={() => setHistory(null)} />
+      {dialogs}
     </Box>
   );
 };

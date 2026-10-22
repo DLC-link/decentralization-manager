@@ -1,9 +1,10 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { authenticatedFetch } from "../api";
 import { SnackbarProvider } from "../contexts";
 import { ExternalPartyList } from "./ExternalPartyList";
+import { UNHOST_RETRY_MS } from "./ExternalPartyUnhost";
 import type {
   ExternalPartyInfo,
   ExternalPartyUnhostPreview,
@@ -50,22 +51,30 @@ const preview = (extra: Partial<ExternalPartyUnhostPreview> = {}): ExternalParty
 const json = (body: unknown, status = 200) =>
   Promise.resolve(new Response(JSON.stringify(body), { status }));
 
-const serve = (previewBody: ExternalPartyUnhostPreview, unhostStatus = 200) => {
+const outcome = (status: string) => ({
+  status,
+  party_id: PARTY,
+  serial: 5,
+  validator_rights_archived: [id("vr")],
+  preapprovals_cancelled: [],
+  audit_id: 1,
+});
+
+/** What the node answers to each unhost request, in order. */
+type Answer = number | { status: number; error: string };
+
+const serve = (previewBody: ExternalPartyUnhostPreview, ...answers: Answer[]) => {
+  const queue = answers.length > 0 ? [...answers] : [200];
   fetchMock.mockImplementation((input) => {
     const url = String(input);
     if (url === `${BASE}/unhost/preview`) return json(previewBody);
     if (url === `${BASE}/unhost`) {
-      return json(
-        {
-          status: unhostStatus === 200 ? "completed" : "failed",
-          party_id: PARTY,
-          serial: 5,
-          validator_rights_archived: [id("vr")],
-          preapprovals_cancelled: [],
-          audit_id: 1,
-        },
-        unhostStatus,
-      );
+      const answer = queue.length > 1 ? queue.shift()! : queue[0];
+      if (typeof answer !== "number") return json({ error: answer.error }, answer.status);
+      if (answer === 200) return json(outcome("completed"));
+      if (answer === 202) return json(outcome("inprogress"), 202);
+      if (answer === 500) return json(outcome("failed"), 500);
+      return json({ error: "gateway timeout" }, answer);
     }
     return json({ error: `unexpected ${url}` }, 404);
   });
@@ -83,6 +92,7 @@ const openStopHosting = async () => {
 const confirmButton = () => screen.getByRole("button", { name: "Stop hosting" });
 
 beforeEach(() => fetchMock.mockReset());
+afterEach(() => vi.useRealTimers());
 
 describe("Stop hosting an external party", () => {
   it("lists what it archives and sends nothing until the operator confirms", async () => {
@@ -128,6 +138,71 @@ describe("Stop hosting an external party", () => {
     await waitFor(() => expect(unhostCalls()).toHaveLength(1));
     const [, init] = unhostCalls()[0];
     expect(JSON.parse(String(init?.body))).toEqual({ base_serial: 4, splice_cleanup: false });
+  });
+
+  it("waits through a 202 and finishes once the node is gone", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    serve(preview(), 202, 200);
+    await openStopHosting();
+
+    fireEvent.click(confirmButton());
+    await waitFor(() => expect(unhostCalls()).toHaveLength(1));
+    expect(await screen.findByText(/still leaving the party/)).toBeTruthy();
+
+    await act(() => vi.advanceTimersByTimeAsync(UNHOST_RETRY_MS));
+
+    await waitFor(() => expect(unhostCalls()).toHaveLength(2));
+    // The repeat is the request the operator confirmed, not a new preview.
+    expect(JSON.parse(String(unhostCalls()[1][1]?.body))).toEqual({ base_serial: 4 });
+    expect(await screen.findByText(`This node no longer hosts ${PARTY}`)).toBeTruthy();
+  });
+
+  it("keeps waiting through a gateway timeout and its own earlier call", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    serve(
+      preview(),
+      504,
+      { status: 409, error: `an unhost of ${PARTY} is already running on this host` },
+      200,
+    );
+    await openStopHosting();
+
+    fireEvent.click(confirmButton());
+    await waitFor(() => expect(unhostCalls()).toHaveLength(1));
+    await act(() => vi.advanceTimersByTimeAsync(UNHOST_RETRY_MS));
+    await waitFor(() => expect(unhostCalls()).toHaveLength(2));
+    await act(() => vi.advanceTimersByTimeAsync(UNHOST_RETRY_MS));
+
+    await waitFor(() => expect(unhostCalls()).toHaveLength(3));
+    expect(await screen.findByText(`This node no longer hosts ${PARTY}`)).toBeTruthy();
+  });
+
+  it("stops with the reason when the serial moved", async () => {
+    serve(preview(), { status: 409, error: "this host reads serial 5 for wallet::key, not the 4 the request pinned" });
+    await openStopHosting();
+
+    fireEvent.click(confirmButton());
+
+    expect(await screen.findByText(/not the 4 the request pinned/)).toBeTruthy();
+    expect(unhostCalls()).toHaveLength(1);
+  });
+
+  it("keeps waiting after the party leaves the list", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    serve(preview(), 202, 200);
+    const { rerender } = render(<ExternalPartyList parties={[PARTY_ROW]} />, {
+      wrapper: SnackbarProvider,
+    });
+    fireEvent.click(screen.getByRole("button", { name: `Stop hosting ${PARTY}` }));
+    await screen.findByText(/removes itself from the party's hosts/);
+    fireEvent.click(confirmButton());
+    await screen.findByText(/still leaving the party/);
+
+    // The next list poll no longer has the party.
+    rerender(<ExternalPartyList parties={[]} />);
+    await act(() => vi.advanceTimersByTimeAsync(UNHOST_RETRY_MS));
+
+    expect(await screen.findByText(`This node no longer hosts ${PARTY}`)).toBeTruthy();
   });
 
   it("says the party is still hosted when a step fails", async () => {
