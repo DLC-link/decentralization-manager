@@ -136,22 +136,39 @@ pub async fn get_unhost_audit(
 }
 
 /// Run the workflow for either entry point and answer with its outcome.
+///
+/// The workflow runs in its own task. With a Splice cleanup on a busy network it
+/// can outlast the caller: a wallet client gives up after 60 seconds, and actix
+/// drops a handler whose client went away. Inside the handler that would stop
+/// it between two steps; in its own task it finishes and closes its audit row.
 pub(super) async fn run_unhost(data: &web::Data<AppState>, request: UnhostRequest) -> HttpResponse {
-    let auth = data.auth.read().await.clone();
-    let env = UnhostEnv {
-        config: &data.config,
-        db: &data.db,
-        relay_sessions: &data.relay_sessions,
-        auth: auth.as_ref(),
-    };
-    match unhost(&env, &request).await {
-        Ok(outcome) => {
-            if outcome.status == WorkflowProgress::Completed {
+    let party_id = request.party_id.clone();
+    let task = {
+        let data = data.clone();
+        tokio::spawn(async move {
+            let auth = data.auth.read().await.clone();
+            let env = UnhostEnv {
+                config: &data.config,
+                db: &data.db,
+                relay_sessions: &data.relay_sessions,
+                auth: auth.as_ref(),
+            };
+            let result = unhost(&env, &request).await;
+            if matches!(&result, Ok(outcome) if outcome.status == WorkflowProgress::Completed) {
                 data.external_parties.forget(&request.party_id);
             }
-            unhost_outcome_response(&request.party_id, outcome)
+            result
+        })
+    };
+    match task.await {
+        Ok(Ok(outcome)) => unhost_outcome_response(&party_id, outcome),
+        Ok(Err(error)) => unhost_error_response(error),
+        Err(join) => {
+            tracing::error!(%party_id, "the external-party unhost task did not finish: {join}");
+            HttpResponse::InternalServerError().json(ErrorResponse {
+                error: "The unhost stopped unexpectedly; see the host's logs".to_string(),
+            })
         }
-        Err(error) => unhost_error_response(error),
     }
 }
 

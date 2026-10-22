@@ -176,6 +176,10 @@ answers `200` once the host is gone. A `400` means the hosts that remain could
 not meet the threshold. Lower it with `raise_threshold` first, which moves the
 threshold either way.
 
+The Splice cleanup can take longer than the client's 60-second timeout. The
+host keeps working after the client gives up, so repeat the call. A repeat
+answers `409` while the first call still runs, and `200` once the host is gone.
+
 ## Keys the wallet does not hold
 
 `ExternalKeyPair` keeps the seed in this process. A provider whose keys live in

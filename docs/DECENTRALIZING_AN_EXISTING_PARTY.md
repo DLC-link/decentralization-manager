@@ -298,6 +298,12 @@ You can repeat every step safely. Suppose an attempt finished the cleanup and
 then failed at the topology step. The next attempt skips the cleanup, as long as
 the serial has not moved.
 
+The host keeps working when the caller gives up. On a busy network the Splice
+cleanup can take more than a minute, which is longer than the wallet client
+waits. Repeat the call: it answers `409` while the first one still runs, and
+`200` once the host is gone. A repeat after a `202` also closes that earlier
+attempt's audit row as `completed`.
+
 The host keeps the party's contracts in its store. DecMan has no call that
 removes them yet.
 
@@ -317,7 +323,8 @@ removes them yet.
 | `400` "the hosts that would remain" from unhost | The hosts that remain cannot meet the threshold | Lower the threshold with the party's key, then repeat the unhost |
 | `400` "the last host" from unhost | This host is the party's only host | Add another host first |
 | `409` "an ACS relay … is open" from unhost | A copy of the party's contracts runs on this host | Let the copy finish. An idle copy times out after 5 minutes |
-| `409` "an unhost of … is already running" | An earlier unhost call for the party still runs | Wait for it to answer, then read `/state` |
+| `409` "an unhost of … is already running" | An earlier unhost call for the party still runs, perhaps for a caller that gave up | Wait, then repeat the call |
+| `409` "this host is leaving …" from an ACS block call | An unhost of the party runs on this host | Wait for the unhost to finish. The relay cannot start while the host leaves |
 | `422` from unhost | The host has no validator operator party | Set `DECPM_VALIDATOR_OPERATOR_PARTY`. If the host never acted as the party's Splice validator, send `"splice_cleanup": false` |
 | `202` from unhost | Canton accepted the topology write, but it is not effective yet | Repeat the call. It answers `200` once the host is gone |
 | `500` from unhost | A Splice archive or the topology write failed | Read the reason in the unhost history, fix it, and repeat the call |
