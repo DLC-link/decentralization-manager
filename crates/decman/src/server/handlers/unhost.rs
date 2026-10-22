@@ -4,6 +4,8 @@
 //! Both entry points run the same [`unhost`] workflow, so they answer with the
 //! same status codes and the same body.
 
+use std::sync::Arc;
+
 use actix_web::{HttpRequest, HttpResponse, Responder, get, post, web};
 
 use crate::{
@@ -96,6 +98,7 @@ pub async fn preview_unhost_external_party(
         db: &data.db,
         relay_sessions: &data.relay_sessions,
         auth: auth.as_ref(),
+        on_departed: None,
     };
     match preview(&env, &party_id).await {
         Ok(preview) => HttpResponse::Ok().json(preview),
@@ -148,17 +151,21 @@ pub(super) async fn run_unhost(data: &web::Data<AppState>, request: UnhostReques
         let data = data.clone();
         tokio::spawn(async move {
             let auth = data.auth.read().await.clone();
+            // Drops the party from the external-party list as soon as the node
+            // is gone, also when the watcher after a 202 sees it.
+            let on_departed: Arc<dyn Fn() + Send + Sync> = {
+                let data = data.clone();
+                let party_id = request.party_id.clone();
+                Arc::new(move || data.external_parties.forget(&party_id))
+            };
             let env = UnhostEnv {
                 config: &data.config,
                 db: &data.db,
                 relay_sessions: &data.relay_sessions,
                 auth: auth.as_ref(),
+                on_departed: Some(on_departed),
             };
-            let result = unhost(&env, &request).await;
-            if matches!(&result, Ok(outcome) if outcome.status == WorkflowProgress::Completed) {
-                data.external_parties.forget(&request.party_id);
-            }
-            result
+            unhost(&env, &request).await
         })
     };
     match task.await {

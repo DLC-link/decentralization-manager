@@ -130,6 +130,9 @@ pub struct UnhostEnv<'a> {
     pub db: &'a SqlitePool,
     pub relay_sessions: &'a Arc<RelaySessions>,
     pub auth: Option<&'a WorkflowAuth>,
+    /// Called once this node is seen gone from the party, whether the call
+    /// itself saw it or the watcher after a 202 did.
+    pub on_departed: Option<Arc<dyn Fn() + Send + Sync>>,
 }
 
 /// What an attempt did, once it got past its preconditions.
@@ -267,6 +270,9 @@ pub async fn unhost(
     match result {
         Ok(Finished::Completed { serial }) => {
             tracing::info!(%party_id, serial, audit_id, "external-party unhost completed");
+            if let Some(on_departed) = &env.on_departed {
+                on_departed();
+            }
             Ok(outcome(WorkflowProgress::Completed, serial))
         }
         Ok(Finished::Pending { .. }) => {
@@ -285,6 +291,7 @@ pub async fn unhost(
                 party_id.to_string(),
                 me,
                 audit_id,
+                env.on_departed.clone(),
             ));
             Ok(outcome(
                 WorkflowProgress::InProgress,
@@ -313,6 +320,7 @@ async fn watch_departure(
     party_id: String,
     me: String,
     audit_id: i64,
+    on_departed: Option<Arc<dyn Fn() + Send + Sync>>,
 ) {
     let delay = Duration::from_secs(topology_retry_delay_secs());
     for _ in 0..WATCH_POLLS {
@@ -340,6 +348,9 @@ async fn watch_departure(
                     audit_id,
                     "external-party unhost completed after it was accepted"
                 );
+                if let Some(on_departed) = on_departed {
+                    on_departed();
+                }
                 drop(hold);
                 return;
             }
@@ -1472,6 +1483,7 @@ mod tests {
             db: &db,
             relay_sessions: &relay_sessions,
             auth: None,
+            on_departed: None,
         };
         let request = UnhostRequest {
             party_id: PARTY.to_string(),
