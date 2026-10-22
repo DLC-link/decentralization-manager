@@ -101,6 +101,23 @@ pub struct RelaySessions {
     /// while its own map is locked. That shared lock is what keeps a relay and
     /// a hold from each missing the other.
     held: std::sync::Mutex<HashSet<String>>,
+    /// Imports out of the map but still tearing down: the task is finishing,
+    /// or reconnecting the participant. A hold must wait for them as well.
+    retiring: std::sync::Mutex<HashSet<String>>,
+}
+
+/// Marks an import as retiring until it is dropped. A drop guard rather than a
+/// removal after the await, so a caller dropped mid-teardown cannot leave the
+/// party blocked for good.
+struct Retiring<'a> {
+    sessions: &'a RelaySessions,
+    instance_name: String,
+}
+
+impl Drop for Retiring<'_> {
+    fn drop(&mut self) {
+        self.sessions.retiring().remove(&self.instance_name);
+    }
 }
 
 /// Why [`RelaySessions::hold`] refused.
@@ -158,6 +175,26 @@ impl RelaySessions {
         self.held.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
+    fn retiring(&self) -> std::sync::MutexGuard<'_, HashSet<String>> {
+        self.retiring.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Take an import out of the map, marked as retiring until the returned
+    /// guard drops. The mark is set under the map's lock, which is the lock a
+    /// hold checks it under.
+    async fn take_import(&self, instance_name: &str) -> Option<(ImportEntry, Retiring<'_>)> {
+        let mut imports = self.imports.lock().await;
+        let entry = imports.remove(instance_name)?;
+        self.retiring().insert(instance_name.to_string());
+        Some((
+            entry,
+            Retiring {
+                sessions: self,
+                instance_name: instance_name.to_string(),
+            },
+        ))
+    }
+
     /// Whether `party_id` is held.
     pub fn is_held(&self, party_id: &str) -> bool {
         self.held().contains(party_id)
@@ -167,7 +204,8 @@ impl RelaySessions {
     /// dropped.
     ///
     /// `belongs` picks out the party's sessions by instance name. A hold is
-    /// refused while one of them is open, and while another hold is in place.
+    /// refused while one of them is open or still tearing down, and while
+    /// another hold is in place.
     ///
     /// # Errors
     /// [`HoldRefused`] says which of the two blocked it.
@@ -178,7 +216,10 @@ impl RelaySessions {
     ) -> std::result::Result<PartyHold, HoldRefused> {
         let exports = self.exports.lock().await;
         let imports = self.imports.lock().await;
-        if exports.keys().any(|name| belongs(name)) || imports.keys().any(|name| belongs(name)) {
+        if exports.keys().any(|name| belongs(name))
+            || imports.keys().any(|name| belongs(name))
+            || self.retiring().iter().any(|name| belongs(name))
+        {
             return Err(HoldRefused::RelayOpen);
         }
         if !self.held().insert(party_id.to_string()) {
@@ -388,7 +429,7 @@ impl RelaySessions {
 
     /// Wait for this replication's import to finish and take its result.
     async fn finish(&self, target: &ReplicationTarget) -> Result<()> {
-        let Some(entry) = self.imports.lock().await.remove(&target.instance_name) else {
+        let Some((entry, _retiring)) = self.take_import(&target.instance_name).await else {
             anyhow::bail!(
                 "no ACS import is open for {party} on this host; restart the transfer from \
                  block 1",
@@ -417,8 +458,7 @@ impl RelaySessions {
     /// aborted — see the module docs.
     pub async fn discard(&self, instance_name: &str) {
         self.exports.lock().await.remove(instance_name);
-        let entry = self.imports.lock().await.remove(instance_name);
-        if let Some(entry) = entry
+        if let Some((entry, _retiring)) = self.take_import(instance_name).await
             && let Err(e) = retire(entry).await
         {
             tracing::info!("the discarded ACS import ended: {e}");
@@ -687,6 +727,45 @@ mod tests {
             Some(HoldRefused::RelayOpen)
         );
         assert!(!sessions.is_held(&party));
+    }
+
+    /// An import that has left the map can still be finishing, or reconnecting
+    /// the participant. A hold must wait until that teardown is over.
+    #[tokio::test]
+    async fn an_import_still_retiring_blocks_a_hold() -> anyhow::Result<()> {
+        let sessions = Arc::new(RelaySessions::new());
+        let (release, released) = tokio::sync::oneshot::channel::<()>();
+        let (blocks, _rx) = mpsc::channel(BLOCK_CHANNEL_CAPACITY);
+        sessions.imports.lock().await.insert(
+            "run-1".to_string(),
+            ImportEntry {
+                blocks,
+                task: tokio::spawn(async move {
+                    let _ = released.await;
+                    Ok(())
+                }),
+                expected_seq: 2,
+                last_touched: Instant::now(),
+            },
+        );
+        let finishing = {
+            let sessions = Arc::clone(&sessions);
+            tokio::spawn(async move { sessions.finish(&target("run-1")).await })
+        };
+        while !sessions.imports.lock().await.is_empty() {
+            tokio::task::yield_now().await;
+        }
+        let party = party_of(&target("run-1"));
+
+        assert_eq!(
+            sessions.hold(&party, |name| name == "run-1").await.err(),
+            Some(HoldRefused::RelayOpen)
+        );
+
+        let _ = release.send(());
+        finishing.await??;
+        assert!(sessions.hold(&party, |name| name == "run-1").await.is_ok());
+        Ok(())
     }
 
     /// The mirror on the joiner. Without a session there is no open import to
