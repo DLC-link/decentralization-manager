@@ -13,6 +13,10 @@
 //! * P3's audit row reads `completed`, with the Splice cleanup off.
 //! * P2 cannot leave as well, because one host cannot meet a threshold of 2.
 //!
+//! A second party, hosted by P1 and P2 at 1 of 2, covers a host that still
+//! holds the party's contracts. Canton refuses that departure unless the write
+//! carries the active-contracts force flag.
+//!
 //! The localnet carries no Splice packages, so every request sends
 //! `splice_cleanup: false`. The Splice half is verified on DevNet.
 //!
@@ -36,7 +40,7 @@ use crate::common::{
     ledger_api::P1_JSON_API,
     phases::{
         deploy_gov_core::grant_rights,
-        external_party_tenant::onboard_on_three_hosts,
+        external_party_tenant::{onboard_on_hosts, onboard_on_three_hosts},
         local_party_decentralization::{ORPHAN_DAR, create_marker_as_converted, node_config},
     },
     scenario::Scenario,
@@ -64,6 +68,39 @@ fn unhost_request(party_id: &str, participant_id: &str, base_serial: u64) -> Val
         "base_serial": base_serial,
         "splice_cleanup": false,
     })
+}
+
+/// Ask the host on `port` to leave the party, and repeat while the departure is
+/// still in flight. Answers 200 once the host is gone.
+async fn leave(
+    f: &Fixture,
+    port: u16,
+    name: &str,
+    party_id: &str,
+    participant_id: &str,
+) -> anyhow::Result<()> {
+    let base_serial = serial_on(f, port, party_id).await?;
+    let request = unhost_request(party_id, participant_id, base_serial);
+    for attempt in 1..=UNHOST_ATTEMPTS {
+        let (status, body) = f
+            .post_expect_status(port, "/v0/tenant/unhost", &request)
+            .await?;
+        match status {
+            StatusCode::OK => {
+                info!("{name} left {party_id} after {attempt} call(s): {body}");
+                return Ok(());
+            }
+            // Accepted but not effective yet. The host keeps the party held
+            // until it is, so a repeat answers 409 "already running" until
+            // then, and 200 after.
+            StatusCode::ACCEPTED => tokio::time::sleep(Duration::from_secs(2)).await,
+            StatusCode::CONFLICT if body.contains("already running") => {
+                tokio::time::sleep(Duration::from_secs(2)).await;
+            }
+            _ => anyhow::bail!("{name}'s unhost answered {status}: {body}"),
+        }
+    }
+    anyhow::bail!("{name}'s unhost never took effect in {UNHOST_ATTEMPTS} calls")
 }
 
 pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
@@ -150,29 +187,7 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
                         );
                     }
 
-                    let request = unhost_request(&party_id, &f.p3.participant_id, base_serial);
-                    for attempt in 1..=UNHOST_ATTEMPTS {
-                        let (status, body) = f
-                            .post_expect_status(f.p3.http, "/v0/tenant/unhost", &request)
-                            .await?;
-                        match status {
-                            StatusCode::OK => {
-                                info!("P3 left {party_id} after {attempt} call(s): {body}");
-                                return Ok(());
-                            }
-                            // Accepted but not effective yet. The host keeps
-                            // the party held until it is, so a repeat answers
-                            // 409 "already running" until then, and 200 after.
-                            StatusCode::ACCEPTED => {
-                                tokio::time::sleep(Duration::from_secs(2)).await;
-                            }
-                            StatusCode::CONFLICT if body.contains("already running") => {
-                                tokio::time::sleep(Duration::from_secs(2)).await;
-                            }
-                            _ => anyhow::bail!("P3's unhost answered {status}: {body}"),
-                        }
-                    }
-                    anyhow::bail!("P3's unhost never took effect in {UNHOST_ATTEMPTS} calls")
+                    leave(&*f, f.p3.http, "P3", &party_id, &f.p3.participant_id).await
                 })
             }
         })
@@ -251,6 +266,7 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
     // 3 — the party still transacts through the hosts that remain.
     // ------------------------------------------------------------------
     let p1_config = node_config(&f.p1.participant_id, "P1_CANTON_ADMIN", "P1_CANTON_LEDGER")?;
+    let p1_config_held = p1_config.clone();
     let dar_path = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../releases/v1")
         .join(ORPHAN_DAR);
@@ -333,6 +349,109 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
                 }
             },
         )
+        .run(f)
+        .await?;
+
+    // ------------------------------------------------------------------
+    // 5 — a host that holds the party's contracts can still leave.
+    // ------------------------------------------------------------------
+    // orphan-marker is on P1 and P2 since step 3, so both can store the
+    // party's contract. P3 stays out of this party.
+    let held = ExternalKeyPair::generate();
+    let held_seed = *held.seed();
+    let held_hint = fresh_prefix("tenant-unhost-held");
+    let held_party = held.party_id(&held_hint);
+    info!("External party P2 will leave while holding its contracts: {held_party}");
+
+    let mut scenario = Scenario::with_ctx(
+        format!("P2 leaves {held_hint} while it holds the party's contracts"),
+        (),
+    )
+    .when("the wallet onboards it on P1 and P2 at 1 of 2", {
+        let hint = held_hint.clone();
+        move |f, _| {
+            let hint = hint.clone();
+            Box::pin(async move {
+                let hosts = [
+                    (f.p1.http, f.p1.participant_id.as_str()),
+                    (f.p2.http, f.p2.participant_id.as_str()),
+                ];
+                onboard_on_hosts(&*f, &hint, held_seed, &hosts, 1).await
+            })
+        }
+    });
+    for (name, port) in [("P1", f.p1.http), ("P2", f.p2.http)] {
+        let party_id = held_party.clone();
+        scenario = scenario.then(
+            format!("{name} hosts the party"),
+            Duration::from_secs(180),
+            move |f, _| {
+                let party_id = party_id.clone();
+                Box::pin(async move {
+                    probe_workflow_status(
+                        &*f,
+                        port,
+                        &format!("/v0/tenant/{party_id}/status"),
+                        "tenant-onboarding",
+                    )
+                    .await
+                })
+            },
+        );
+    }
+    scenario
+        .when("the party creates a contract that P2 stores too", {
+            let party_id = held_party.clone();
+            move |f, _| {
+                let party_id = party_id.clone();
+                let config = p1_config_held.clone();
+                let wallet = ExternalKeyPair::from_seed(held_seed);
+                Box::pin(async move {
+                    grant_rights(&*f, P1_JSON_API, &party_id, "P1").await?;
+                    let token = f.refresher.token().await?;
+                    let created =
+                        create_marker_as_converted(&config, &token, &party_id, &wallet, 0)
+                            .await
+                            .context("the party submitting through P1 before P2 leaves")?;
+                    anyhow::ensure!(created == 1, "created {created} contract(s), not 1");
+                    Ok(())
+                })
+            }
+        })
+        .when("P2 leaves through /v0/tenant/unhost", {
+            let party_id = held_party.clone();
+            move |f, _| {
+                let party_id = party_id.clone();
+                Box::pin(async move {
+                    leave(&*f, f.p2.http, "P2", &party_id, &f.p2.participant_id).await
+                })
+            }
+        })
+        .then("P1 is the party's only host", Duration::from_secs(120), {
+            let party_id = held_party.clone();
+            move |f, _| {
+                let party_id = party_id.clone();
+                Box::pin(async move {
+                    let state: Value = f
+                        .probe_get_json(f.p1.http, &format!("/v0/tenant/{party_id}/state"))
+                        .await?;
+                    (state.get("host_count").and_then(Value::as_u64)? == 1).then_some(Ok(()))
+                })
+            }
+        })
+        .then("P2 no longer hosts the party", Duration::from_secs(60), {
+            let party_id = held_party.clone();
+            move |f, _| {
+                let party_id = party_id.clone();
+                Box::pin(async move {
+                    let status = f
+                        .get_status(f.p2.http, &format!("/v0/tenant/{party_id}/status"))
+                        .await
+                        .ok()?;
+                    (status == StatusCode::NOT_FOUND).then_some(Ok(()))
+                })
+            }
+        })
         .run(f)
         .await
 }

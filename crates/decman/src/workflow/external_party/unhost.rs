@@ -37,7 +37,7 @@ use canton_proto_rs::com::{
             party_to_participant::HostingParticipant,
             topology_mapping,
         },
-        topology::admin::v30::{AuthorizeRequest, authorize_request},
+        topology::admin::v30::{AuthorizeRequest, ForceFlag, authorize_request},
     },
 };
 use common::{api::ExternalPartyUnhostPreview, types::WorkflowProgress};
@@ -896,7 +896,11 @@ async fn leave_topology(
             // This node's namespace alone authorizes its own departure, so the
             // write must be complete when this returns.
             must_fully_authorize: true,
-            force_changes: vec![],
+            // Canton refuses to drop a party this node still holds active
+            // contracts for unless told the operator means it. Keeping those
+            // contracts in the store is deliberate: purging them is separate
+            // work, because other local parties may still see them.
+            force_changes: vec![ForceFlag::DisablePartyWithActiveContracts as i32],
             signed_by: vec![],
             store: Some(topology::synchronizer_store_id(&synchronizer_id)),
             wait_to_become_effective: None,

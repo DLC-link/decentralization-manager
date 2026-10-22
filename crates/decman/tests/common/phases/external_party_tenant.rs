@@ -115,19 +115,40 @@ pub(super) async fn onboard_on_three_hosts(
     hint: &str,
     seed: [u8; 32],
 ) -> anyhow::Result<()> {
+    let hosts = [
+        (f.p1.http, f.p1.participant_id.as_str()),
+        (f.p2.http, f.p2.participant_id.as_str()),
+        (f.p3.http, f.p3.participant_id.as_str()),
+    ];
+    onboard_on_hosts(f, hint, seed, &hosts, 2).await
+}
+
+/// Onboard `hint`'s party on `hosts` (HTTP port, participant id) at
+/// `threshold`. The first host prepares.
+pub(super) async fn onboard_on_hosts(
+    f: &Fixture,
+    hint: &str,
+    seed: [u8; 32],
+    hosts: &[(u16, &str)],
+    threshold: u32,
+) -> anyhow::Result<()> {
     let wallet = ExternalKeyPair::from_seed(seed);
     let public_key = wallet.public_key_b64();
+    let Some(((preparer, _), peers)) = hosts.split_first() else {
+        anyhow::bail!("onboarding needs at least one host");
+    };
+    let peers: Vec<&str> = peers.iter().map(|(_, id)| *id).collect();
 
-    // 1) One host builds the multi-host topology from the wallet's
-    // pubkey (2-of-3 across P1+P2+P3). Threshold is capped at N-1.
+    // 1) One host builds the multi-host topology from the wallet's pubkey.
+    // The threshold is capped at N-1.
     let prepare_req = json!({
         "party_hint": hint,
         "public_key": public_key,
-        "hosting_peers": [&f.p2.participant_id, &f.p3.participant_id],
-        "confirmation_threshold": 2,
+        "hosting_peers": peers,
+        "confirmation_threshold": threshold,
     });
     let prep: Value = f
-        .post_json(f.p1.http, "/v0/tenant/prepare", &prepare_req)
+        .post_json(*preparer, "/v0/tenant/prepare", &prepare_req)
         .await?;
     let hashes = prep
         .get("transaction_hashes")
@@ -165,9 +186,9 @@ pub(super) async fn onboard_on_three_hosts(
         "signatures": signatures,
         "signed_by": wallet.fingerprint(),
     });
-    for host in [f.p1.http, f.p2.http, f.p3.http] {
+    for (host, _) in hosts {
         let _: Value = f
-            .post_json(host, "/v0/tenant/execute", &onboard_req)
+            .post_json(*host, "/v0/tenant/execute", &onboard_req)
             .await?;
     }
     Ok(())
