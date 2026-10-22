@@ -170,6 +170,34 @@ describe("accept request block list shards", { timeout: 20_000 }, () => {
       expect(proposal.block_list_shard_cids).toEqual([]);
     });
 
+    // The request can be picked before /block-list-shards answers. The
+    // registrar's shards must still be filled in once they arrive.
+    it(`${form.type}: fills in shards that arrive after the request is picked`, async () => {
+      let releaseShards: () => void = () => {};
+      const shardsReady = new Promise<void>((resolve) => {
+        releaseShards = resolve;
+      });
+      const answer = authenticatedFetch.getMockImplementation();
+      authenticatedFetch.mockImplementation((url: string, init?: RequestInit) =>
+        url.includes("/block-list-shards")
+          ? shardsReady.then(() => ({
+              ok: true,
+              json: async () => ({ block_list_shards: [...ownShards, foreignShard] }),
+            }))
+          : answer?.(url, init),
+      );
+
+      await openWithRequest(form, "CHECKED");
+      releaseShards();
+      // Each selected shard shows as a chip labelled with its prefix.
+      expect(await screen.findByText("Prefix 0 (…ard-zero)")).toBeTruthy();
+      expect(screen.getByText("Prefix 1 (…hard-one)")).toBeTruthy();
+      submit();
+
+      const proposal = await postedProposal();
+      expect(proposal.block_list_shard_cids).toEqual(["00shard-zero", "00shard-one"]);
+    });
+
     it(`${form.type}: refuses to post without a shard when the instrument checks a block list`, async () => {
       mockLedger([foreignShard]);
       await openWithRequest(form, "CHECKED");

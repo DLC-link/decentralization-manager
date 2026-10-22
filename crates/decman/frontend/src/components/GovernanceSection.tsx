@@ -283,6 +283,9 @@ export const GovernanceSection = ({
   // `StoredBlockListPartyShas` cids for an instrument that checks a block
   // list. Passed into the accept's choice context.
   const [proposalBlockListShardCids, setProposalBlockListShardCids] = useState<string[]>([]);
+  // Set once the operator edits the shard picker, so a late shard list never
+  // replaces a hand-made choice.
+  const [blockListShardsEdited, setBlockListShardsEdited] = useState(false);
   // Registrar-onboarding proposal state
   const [proposalRegistrarServiceRequestCid, setProposalRegistrarServiceRequestCid] = useState("");
   const [proposalProviderConfigurationCid, setProposalProviderConfigurationCid] = useState("");
@@ -1989,6 +1992,7 @@ export const GovernanceSection = ({
     setProposalFeaturedAppRightCid("");
     setProposalIssuerCredentialCids([]);
     setProposalBlockListShardCids([]);
+    setBlockListShardsEdited(false);
     setProposalDelegate("");
     setProposalDelegationExpiresAt("");
     setProposalAmuletMergeLimit("10");
@@ -2031,6 +2035,24 @@ export const GovernanceSection = ({
   const registrarBlockListShards = (registrar: string | undefined) =>
     availableBlockListShards.filter((shard) => shard.registrar === registrar);
   const acceptBlockListShardCids = acceptNeedsBlockListShards ? proposalBlockListShardCids : [];
+  // The shard list can arrive after the request is picked, when the prefill
+  // found none. Fill in the registrar's shards once they arrive, unless the
+  // operator has already chosen shards by hand.
+  const acceptRegistrar = acceptInstrument?.instrument_admin;
+  useEffect(() => {
+    if (!acceptNeedsBlockListShards || blockListShardsEdited) return;
+    if (proposalBlockListShardCids.length > 0) return;
+    const shards = availableBlockListShards.filter((shard) => shard.registrar === acceptRegistrar);
+    if (shards.length > 0) {
+      setProposalBlockListShardCids(shards.map((shard) => shard.contract_id));
+    }
+  }, [
+    acceptNeedsBlockListShards,
+    acceptRegistrar,
+    availableBlockListShards,
+    blockListShardsEdited,
+    proposalBlockListShardCids.length,
+  ]);
 
   const handleSubmitProposal = async () => {
     if (!rulesContractId) return;
@@ -4897,6 +4919,7 @@ export const GovernanceSection = ({
                         )
                       : [],
                   );
+                  setBlockListShardsEdited(false);
                 };
                 const shardOptions = registrarBlockListShards(acceptInstrument?.instrument_admin);
                 return (
@@ -5109,6 +5132,7 @@ export const GovernanceSection = ({
                         value={proposalBlockListShardCids}
                         loading={blockListShardsLoading}
                         onChange={(_event, values) => {
+                          setBlockListShardsEdited(true);
                           setProposalBlockListShardCids(
                             values.map((value) =>
                               typeof value === "string" ? value : value.contract_id,
