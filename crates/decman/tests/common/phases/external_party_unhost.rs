@@ -70,6 +70,47 @@ fn unhost_request(party_id: &str, participant_id: &str, base_serial: u64) -> Val
     })
 }
 
+/// A decentralized party's hosts change only through its governance. A tenant
+/// key must not make a host leave one, even though Canton would accept the
+/// host's own signature. Runs after `create_dec_party`, which leaves the
+/// fixture's party hosted by P1, P2 and P3.
+pub async fn refuses_a_decentralized_party(f: &mut Fixture) -> anyhow::Result<()> {
+    info!("Phase: external_party_unhost (decentralized party)");
+    let party_id = f.party_id()?.to_string();
+
+    Scenario::with_ctx(
+        format!("P3 refuses to leave decentralized party {party_id}"),
+        (),
+    )
+    .when("a tenant asks P3 to leave it", {
+        move |f, _| {
+            let party_id = party_id.clone();
+            Box::pin(async move {
+                let base_serial = serial_on(&*f, f.p3.http, &party_id).await?;
+                let (status, body) = f
+                    .post_expect_status(
+                        f.p3.http,
+                        "/v0/tenant/unhost",
+                        &unhost_request(&party_id, &f.p3.participant_id, base_serial),
+                    )
+                    .await?;
+                anyhow::ensure!(
+                    status == StatusCode::BAD_REQUEST && body.contains("decentralized party"),
+                    "a tenant unhost of a decentralized party answered {status}: {body}"
+                );
+                let after = serial_on(&*f, f.p3.http, &party_id).await?;
+                anyhow::ensure!(
+                    after == base_serial,
+                    "the refused unhost moved the serial from {base_serial} to {after}"
+                );
+                Ok(())
+            })
+        }
+    })
+    .run(f)
+    .await
+}
+
 /// Ask the host on `port` to leave the party, and repeat while the departure is
 /// still in flight. Answers 200 once the host is gone.
 async fn leave(

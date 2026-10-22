@@ -37,7 +37,11 @@ use canton_proto_rs::com::{
             party_to_participant::HostingParticipant,
             topology_mapping,
         },
-        topology::admin::v30::{AuthorizeRequest, ForceFlag, authorize_request},
+        topology::admin::v30::{
+            AuthorizeRequest, ForceFlag, ListDecentralizedNamespaceDefinitionRequest,
+            authorize_request,
+            topology_manager_read_service_client::TopologyManagerReadServiceClient,
+        },
     },
 };
 use common::{api::ExternalPartyUnhostPreview, types::WorkflowProgress};
@@ -408,6 +412,7 @@ async fn run(
     let current = read_hosted(env.config, party_id)
         .await
         .map_err(UnhostError::from)?;
+    refuse_a_decentralized_party(env.config, party_id).await?;
     progress.serial_before = current.serial;
     unhost_audit::set_serial_before(env.db, progress.audit_id, current.serial)
         .await
@@ -491,6 +496,60 @@ impl From<anyhow::Error> for UnhostError {
             Err(other) => Self::Internal(other),
         }
     }
+}
+
+/// The namespace half of a party id, if it has one.
+fn namespace_of(party_id: &str) -> Option<&str> {
+    party_id.rsplit_once("::").map(|(_, namespace)| namespace)
+}
+
+/// Refuse a decentralized party.
+///
+/// Its hosts change only through its governance: a host leaves it by a kick
+/// its members vote for. Without this check, anyone holding a tenant key could
+/// make this node leave a governance party on this node's key alone, because
+/// Canton accepts a single host's departure from any party.
+///
+/// # Errors
+/// [`UnhostError::Refused`] for a decentralized party, and
+/// [`UnhostError::Internal`] when the topology read fails.
+async fn refuse_a_decentralized_party(
+    config: &NodeConfig,
+    party_id: &str,
+) -> Result<(), UnhostError> {
+    let Some(namespace) = namespace_of(party_id) else {
+        return Ok(());
+    };
+    let decentralized = async {
+        let synchronizer_id = utils::get_synchronizer_id(config).await?;
+        let mut client = TopologyManagerReadServiceClient::new(config.admin_channel().await?)
+            .max_decoding_message_size(utils::MAX_GRPC_MESSAGE_SIZE);
+        let response = client
+            .list_decentralized_namespace_definition(tonic::Request::new(
+                ListDecentralizedNamespaceDefinitionRequest {
+                    base_query: Some(topology::head_state_query(&synchronizer_id)),
+                    filter_namespace: namespace.to_string(),
+                },
+            ))
+            .await
+            .context("ListDecentralizedNamespaceDefinition RPC failed")?
+            .into_inner();
+        anyhow::Ok(response.results.iter().any(|result| {
+            result
+                .item
+                .as_ref()
+                .is_some_and(|definition| definition.decentralized_namespace == namespace)
+        }))
+    }
+    .await
+    .map_err(UnhostError::Internal)?;
+    if decentralized {
+        return Err(UnhostError::Refused(format!(
+            "{party_id} is a decentralized party; its hosts change only through its governance, \
+             so remove a member with a kick instead"
+        )));
+    }
+    Ok(())
 }
 
 /// Does the mapping list `me`, at any permission?
@@ -1017,6 +1076,7 @@ pub async fn preview(
 ) -> Result<ExternalPartyUnhostPreview, UnhostError> {
     let me = env.config.participant_id().to_string();
     let current = read_hosted(env.config, party_id).await?;
+    refuse_a_decentralized_party(env.config, party_id).await?;
     if !hosts(&current.mapping, &me) {
         return Err(UnhostError::NotHosted {
             party: party_id.to_string(),
@@ -1434,6 +1494,12 @@ mod tests {
         assert_eq!(rows[0].error.as_deref(), Some(message.as_str()));
         assert!(!relay_sessions.is_held(PARTY), "a refusal takes no hold");
         Ok(())
+    }
+
+    #[test]
+    fn a_party_namespace_is_the_part_after_the_separator() {
+        assert_eq!(namespace_of("alice::1220aa"), Some("1220aa"));
+        assert_eq!(namespace_of("alice"), None);
     }
 
     /// A 404 that travelled through `anyhow` must still be a 404.

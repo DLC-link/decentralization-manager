@@ -126,6 +126,8 @@ async fn governance_workflows_e2e() -> anyhow::Result<()> {
     // add_party_missing_dar needs P3 to stay without orphan-marker.
     phases::local_party_decentralization::run(&mut f).await?;
     phases::create_dec_party::run(&mut f).await?;
+    // The tenant unhost must refuse a decentralized party, so it needs one.
+    phases::external_party_unhost::refuses_a_decentralized_party(&mut f).await?;
     phases::distribute_dars::run(&mut f).await?;
     phases::check_peer_dars::run(&mut f).await?;
     phases::deploy_gov_core::run(&mut f).await?;
