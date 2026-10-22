@@ -1468,7 +1468,7 @@ pub async fn execute_action(
             })
         }
         Err(e) => {
-            tracing::error!("Failed to execute action: {e}");
+            tracing::error!("Failed to execute action: {e:#}");
             spawn_audit_log(
                 audit_pool,
                 AuditParams {
@@ -1479,7 +1479,7 @@ pub async fn execute_action(
                     action_summary: audit_summary,
                     details: audit_details,
                     status: "failed",
-                    error_message: Some(format!("{e}")),
+                    error_message: Some(format!("{e:#}")),
                 },
             );
             execute_failure_response(&e)
@@ -1489,7 +1489,9 @@ pub async fn execute_action(
 
 /// The execute handler's answer to a failed execute. A node without
 /// `DECPM_SCAN_URL` cannot disclose what a paid credential accept reads. That
-/// is a setting the caller can fix, so it is a 422, not a server fault.
+/// is a setting the caller can fix, so it is a 422, not a server fault. The
+/// message carries the whole error chain, so a scan 403 reads differently from
+/// a malformed reply or a dropped connection.
 fn execute_failure_response(e: &anyhow::Error) -> HttpResponse {
     let mut response = if e.downcast_ref::<ScanNotConfigured>().is_some() {
         HttpResponse::UnprocessableEntity()
@@ -1497,7 +1499,7 @@ fn execute_failure_response(e: &anyhow::Error) -> HttpResponse {
         HttpResponse::InternalServerError()
     };
     response.json(ErrorResponse {
-        error: format!("Failed to execute action: {e}"),
+        error: format!("Failed to execute action: {e:#}"),
     })
 }
 
@@ -3647,6 +3649,24 @@ mod paid_accept_disclosure_tests {
             .map_err(|e| anyhow::anyhow!("{e}"))?;
         let body: serde_json::Value = serde_json::from_slice(&body)?;
         assert_eq!(body["error"], "Failed to execute action: ledger said no");
+        Ok(())
+    }
+
+    #[actix_web::test]
+    async fn an_execute_failure_names_its_underlying_cause() -> Result<()> {
+        let error = anyhow::anyhow!("scan answered 403 Forbidden: access denied")
+            .context("Failed to fetch the open mining rounds from scan");
+        let response = execute_failure_response(&error);
+
+        let body = to_bytes(response.into_body())
+            .await
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+        let body: serde_json::Value = serde_json::from_slice(&body)?;
+        assert_eq!(
+            body["error"],
+            "Failed to execute action: Failed to fetch the open mining rounds from scan: \
+             scan answered 403 Forbidden: access denied"
+        );
         Ok(())
     }
 }
