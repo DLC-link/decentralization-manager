@@ -478,13 +478,16 @@ fn relay_busy(party_id: &str) -> UnhostError {
 
 /// The earlier attempt this one resumes, if any.
 ///
-/// Only an attempt that finished its Splice cleanup and did not complete, read
-/// at the serial head state still reports. A different serial means the party
-/// moved since, so the cleanup runs again: it is cheap, and archived contracts
-/// are simply not found.
+/// Only an attempt that ran its Splice cleanup, reached the topology step and
+/// did not complete, read at the serial head state still reports. An attempt
+/// sent with `splice_cleanup: false` reaches the topology step too, so the flag
+/// is what proves the cleanup ran. A different serial means the party moved
+/// since, so the cleanup runs again: it is cheap, and archived contracts are
+/// simply not found.
 fn resumes(earlier: Option<&UnhostAuditRow>, head_serial: u32) -> Option<i64> {
     let row = earlier?;
-    (row.status != AuditStatus::Completed.as_str()
+    (row.splice_cleanup
+        && row.status != AuditStatus::Completed.as_str()
         && row.step == UnhostStep::Topology.as_str()
         && row.serial_before == Some(i64::from(head_serial)))
     .then_some(row.id)
@@ -1128,6 +1131,16 @@ mod tests {
             None,
             "a finished unhost starts over"
         );
+    }
+
+    /// An attempt sent with `splice_cleanup: false` also reaches the topology
+    /// step. A later attempt that asks for the cleanup must run it, or the node
+    /// leaves with its Splice contracts still live.
+    #[test]
+    fn an_attempt_that_skipped_the_cleanup_is_not_resumed() {
+        let mut skipped = row(AuditStatus::Failed, UnhostStep::Topology, Some(4));
+        skipped.splice_cleanup = false;
+        assert_eq!(resumes(Some(&skipped), 4), None);
     }
 
     fn party_field(label: &str, party: &str) -> RecordField {
