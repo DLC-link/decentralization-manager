@@ -918,6 +918,16 @@ async fn leave_topology(
                 found: after.serial,
             }
             .into()),
+            // Unchanged head state does not prove a rejection when the answer
+            // was lost: Canton may have scheduled the removal anyway. The
+            // watcher keeps the party held until it knows.
+            _ if outcome_unknown(&error) => {
+                tracing::warn!(
+                    %party_id,
+                    "external-party unhost: the topology write's outcome is unknown: {error:#}"
+                );
+                Ok(Finished::Pending { submitted })
+            }
             _ => Err(Stop::Failed(error)),
         };
     }
@@ -938,6 +948,28 @@ async fn leave_topology(
         tokio::time::sleep(delay).await;
     }
     Ok(Finished::Pending { submitted })
+}
+
+/// Whether a failed topology write may still have been scheduled.
+///
+/// A gRPC error that says the call never finished cannot tell a rejection from
+/// a lost answer. An error that is not a gRPC status failed before anything
+/// was sent, and a status such as `INVALID_ARGUMENT` is Canton's refusal.
+fn outcome_unknown(error: &anyhow::Error) -> bool {
+    error
+        .chain()
+        .find_map(|cause| cause.downcast_ref::<tonic::Status>())
+        .is_some_and(|status| {
+            matches!(
+                status.code(),
+                tonic::Code::Unavailable
+                    | tonic::Code::DeadlineExceeded
+                    | tonic::Code::Cancelled
+                    | tonic::Code::Unknown
+                    | tonic::Code::Internal
+                    | tonic::Code::Aborted
+            )
+        })
 }
 
 // ============================================================================
@@ -1300,6 +1332,38 @@ mod tests {
             ],
         );
         assert!(classify(&event, PARTY, OPERATOR).is_none());
+    }
+
+    /// A lost answer must not read as a rejection: the removal may be scheduled,
+    /// and releasing the hold would let a relay start under it. Canton's own
+    /// refusals, and failures before anything was sent, are definite.
+    #[test]
+    fn only_an_unfinished_call_leaves_the_outcome_unknown() {
+        let status = |code| anyhow::Error::new(tonic::Status::new(code, "x"));
+        for code in [
+            tonic::Code::Unavailable,
+            tonic::Code::DeadlineExceeded,
+            tonic::Code::Cancelled,
+            tonic::Code::Unknown,
+        ] {
+            assert!(outcome_unknown(&status(code)), "{code:?}");
+        }
+        for code in [
+            tonic::Code::InvalidArgument,
+            tonic::Code::FailedPrecondition,
+            tonic::Code::PermissionDenied,
+            tonic::Code::AlreadyExists,
+        ] {
+            assert!(!outcome_unknown(&status(code)), "{code:?}");
+        }
+        let wrapped = status(tonic::Code::Unavailable).context("authorize");
+        assert!(
+            outcome_unknown(&wrapped),
+            "context must not hide the status"
+        );
+        assert!(!outcome_unknown(&anyhow::anyhow!(
+            "no channel to the admin API"
+        )));
     }
 
     /// A 404 that travelled through `anyhow` must still be a 404.
