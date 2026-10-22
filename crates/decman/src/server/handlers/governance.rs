@@ -23,6 +23,7 @@ use decman_lib::catalog::commands::{
     build_confirm_proposal, build_confirm_self_action, build_execute_proposal,
     build_execute_self_action, build_expire_domain_confirmation, build_expire_self_confirmation,
 };
+use decman_lib::catalog::proposals::credential::AcceptPaidCredential;
 use decman_lib::catalog::proposals::custody::{
     AcceptTransfer, AcceptTransferWithContext, Transfer, TransferWithContext,
 };
@@ -36,7 +37,9 @@ use decman_lib::catalog::templates::{
 };
 use decman_lib::framework::commands::{build_propose, first_created_contract_id};
 use decman_lib::framework::encode::TransferValidity;
-use decman_lib::framework::record::record_field;
+use decman_lib::framework::record::{
+    extract_contract_id, field_contract_id, field_record, record_field,
+};
 
 use super::token_standard::{AmuletRulesContract, GovernanceQuery, fetch_amulet_rules};
 use crate::{
@@ -56,6 +59,7 @@ use crate::{
             get_governance_state as query_governance_state, resolve_contract_package_ref,
             select_input_holdings,
         },
+        scan::{self, OpenMiningRound, ScanNotConfigured},
         transfer_context::{
             AcceptTransferContext, ProposeTransferArgs, fetch as fetch_accept_transfer_context,
             fetch_factory_for_propose, fetch_proposal_created_event, has_template,
@@ -1386,6 +1390,7 @@ pub async fn confirm_action(
         (status = 401, description = "Unauthorized", body = ErrorResponse),
         (status = 403, description = "Forbidden: admin role required", body = ErrorResponse),
         (status = 404, description = "No credentials configured for party", body = ErrorResponse),
+        (status = 422, description = "A paid credential accept needs DECPM_SCAN_URL, which is not set", body = ErrorResponse),
         (status = 500, description = "Internal server error", body = ErrorResponse)
     )
 )]
@@ -1463,7 +1468,7 @@ pub async fn execute_action(
             })
         }
         Err(e) => {
-            tracing::error!("Failed to execute action: {e}");
+            tracing::error!("Failed to execute action: {e:#}");
             spawn_audit_log(
                 audit_pool,
                 AuditParams {
@@ -1474,14 +1479,28 @@ pub async fn execute_action(
                     action_summary: audit_summary,
                     details: audit_details,
                     status: "failed",
-                    error_message: Some(format!("{e}")),
+                    error_message: Some(format!("{e:#}")),
                 },
             );
-            HttpResponse::InternalServerError().json(ErrorResponse {
-                error: format!("Failed to execute action: {e}"),
-            })
+            execute_failure_response(&e)
         }
     }
+}
+
+/// The execute handler's answer to a failed execute. A node without
+/// `DECPM_SCAN_URL` cannot disclose what a paid credential accept reads. That
+/// is a setting the caller can fix, so it is a 422, not a server fault. The
+/// message carries the whole error chain, so a scan 403 reads differently from
+/// a malformed reply or a dropped connection.
+fn execute_failure_response(e: &anyhow::Error) -> HttpResponse {
+    let mut response = if e.downcast_ref::<ScanNotConfigured>().is_some() {
+        HttpResponse::UnprocessableEntity()
+    } else {
+        HttpResponse::InternalServerError()
+    };
+    response.json(ErrorResponse {
+        error: format!("Failed to execute action: {e:#}"),
+    })
 }
 
 /// Expire a stale governance confirmation
@@ -2068,9 +2087,11 @@ async fn execute_confirmed_action(
     // The executor's submission must carry the contracts the proposal's
     // execute step reads but no member can see. `AcceptTransferProposal` needs
     // the registry-supplied transfer rule and its dependencies;
-    // `RequestDevNetFeaturedAppRight` needs the DSO's `AmuletRules`. Both key
-    // on the on-chain proposal's template, not on `governance_type`, so a
-    // non-CoreDomain path carrying such a proposal still gets its contracts.
+    // `RequestDevNetFeaturedAppRight` needs the DSO's `AmuletRules`;
+    // `AcceptPaidCredential` needs `AmuletRules`, its open mining round and any
+    // featured app right it names. All key on the on-chain proposal's
+    // template, not on `governance_type`, so a non-CoreDomain path carrying
+    // such a proposal still gets its contracts.
     let mut registry_disclosed: Vec<DisclosedContract> = Vec::new();
     let mut proposal_event: Option<CreatedEvent> = None;
     if let Some(proposal_cid) = request.proposal_cid.as_deref() {
@@ -2137,6 +2158,21 @@ async fn execute_confirmed_action(
                 .await
                 .context("Failed to fetch AmuletRules from the DSO API")?;
             registry_disclosed.push(amulet_rules_disclosure(proposed_cid, &current)?);
+        }
+
+        if has_template(
+            created,
+            AcceptPaidCredential::MODULE,
+            AcceptPaidCredential::ENTITY,
+        ) {
+            let pins = PaidAcceptPins::of(created)?;
+            let requested: HashSet<&str> = request
+                .disclosed_contracts
+                .iter()
+                .map(|dc| dc.contract_id.as_str())
+                .collect();
+            registry_disclosed
+                .extend(paid_accept_disclosures(http_client, config, &pins, &requested).await?);
         }
     }
 
@@ -2235,7 +2271,8 @@ async fn execute_confirmed_action(
     Ok(())
 }
 
-/// The `AmuletRules` disclosure for a `RequestDevNetFeaturedAppRight` execute.
+/// The `AmuletRules` disclosure for a `RequestDevNetFeaturedAppRight` or
+/// `AcceptPaidCredential` execute.
 ///
 /// Only the DSO can see `AmuletRules`, so the executor discloses the current
 /// contract from the DSO scan API. The proposal pins a contract id. When the
@@ -2246,22 +2283,143 @@ fn amulet_rules_disclosure(
     proposed_cid: Option<&str>,
     current: &AmuletRulesContract,
 ) -> Result<DisclosedContract> {
-    let proposed_cid =
-        proposed_cid.context("RequestDevNetFeaturedAppRight proposal has no amuletRulesCid")?;
+    let proposed_cid = proposed_cid.context("The proposal has no amuletRulesCid")?;
     if proposed_cid != current.contract_id {
         anyhow::bail!(
             "The proposal names AmuletRules {proposed_cid}, but the DSO's current AmuletRules is {}. Cancel this proposal and propose again.",
             current.contract_id
         );
     }
+    disclosure(
+        &current.contract_id,
+        &current.created_event_blob,
+        "the DSO's AmuletRules",
+    )
+}
+
+/// A disclosed contract from a base64 created-event blob. `what` names the
+/// contract in the error.
+fn disclosure(contract_id: &str, blob: &str, what: &str) -> Result<DisclosedContract> {
     Ok(DisclosedContract {
         template_id: None,
-        contract_id: current.contract_id.clone(),
+        contract_id: contract_id.to_owned(),
         created_event_blob: base64::engine::general_purpose::STANDARD
-            .decode(&current.created_event_blob)
-            .context("Invalid base64 in the DSO's AmuletRules created_event_blob")?,
+            .decode(blob)
+            .with_context(|| format!("Invalid base64 in the created_event_blob of {what}"))?,
         synchronizer_id: String::new(),
     })
+}
+
+/// The DSO contracts an `AcceptPaidCredential` proposal pins in its
+/// `appTransferContext`.
+#[derive(Debug)]
+struct PaidAcceptPins {
+    amulet_rules: String,
+    open_mining_round: String,
+    featured_app_right: Option<String>,
+}
+
+impl PaidAcceptPins {
+    fn of(created: &CreatedEvent) -> Result<Self> {
+        let context = created
+            .create_arguments
+            .as_ref()
+            .and_then(|args| field_record(args, "appTransferContext"))
+            .context("The AcceptPaidCredential proposal has no appTransferContext")?;
+        let featured_app_right = match record_field(context, "featuredAppRight") {
+            Some(value::Sum::Optional(optional)) => optional
+                .value
+                .as_deref()
+                .map(extract_contract_id)
+                .transpose()
+                .context("The AcceptPaidCredential featuredAppRight is not a contract id")?,
+            _ => None,
+        };
+        Ok(Self {
+            amulet_rules: field_contract_id(context, "amuletRules")
+                .context("The AcceptPaidCredential proposal has no amuletRules")?,
+            open_mining_round: field_contract_id(context, "openMiningRound")
+                .context("The AcceptPaidCredential proposal has no openMiningRound")?,
+            featured_app_right,
+        })
+    }
+}
+
+/// The disclosures an `AcceptPaidCredential` execute needs, minus those the
+/// request already carries. The governance party sees none of the three
+/// contracts. `AmuletRules` comes from the DSO API, the rest from scan.
+///
+/// # Errors
+/// Returns [`ScanNotConfigured`] when scan must be read and `DECPM_SCAN_URL`
+/// is not set. Returns an error when a pinned contract is no longer active.
+async fn paid_accept_disclosures(
+    http_client: &reqwest::Client,
+    config: &NodeConfig,
+    pins: &PaidAcceptPins,
+    requested: &HashSet<&str>,
+) -> Result<Vec<DisclosedContract>> {
+    let needs_round = !requested.contains(pins.open_mining_round.as_str());
+    let featured_app_right = pins
+        .featured_app_right
+        .as_deref()
+        .filter(|cid| !requested.contains(cid));
+    let scan_url = if needs_round || featured_app_right.is_some() {
+        Some(config.scan_url().ok_or(ScanNotConfigured)?)
+    } else {
+        None
+    };
+
+    let mut disclosed = Vec::new();
+    if !requested.contains(pins.amulet_rules.as_str()) {
+        let current = fetch_amulet_rules(http_client, config)
+            .await
+            .context("Failed to fetch AmuletRules from the DSO API")?;
+        disclosed.push(amulet_rules_disclosure(Some(&pins.amulet_rules), &current)?);
+    }
+    let Some(scan_url) = scan_url else {
+        return Ok(disclosed);
+    };
+    if needs_round {
+        let rounds = scan::fetch_open_mining_rounds(http_client, scan_url)
+            .await
+            .context("Failed to fetch the open mining rounds from scan")?;
+        disclosed.push(open_round_disclosure(&pins.open_mining_round, &rounds)?);
+    }
+    if let Some(cid) = featured_app_right {
+        let right = scan::fetch_featured_app_right(http_client, scan_url, cid)
+            .await
+            .context("Failed to fetch the FeaturedAppRight from scan")?
+            .with_context(|| {
+                format!(
+                    "The proposal names FeaturedAppRight {cid}, which scan does not list as active. Cancel this proposal and propose again."
+                )
+            })?;
+        disclosed.push(disclosure(
+            &right.contract_id,
+            &right.created_event_blob,
+            "the FeaturedAppRight",
+        )?);
+    }
+    Ok(disclosed)
+}
+
+/// The disclosure of the open round a paid accept pins. Scan lists a round
+/// until the DSO archives it. A pinned round missing from the list has
+/// closed, and the accept can never execute.
+fn open_round_disclosure(pinned: &str, rounds: &[OpenMiningRound]) -> Result<DisclosedContract> {
+    let round = rounds
+        .iter()
+        .find(|r| r.contract.contract_id == pinned)
+        .with_context(|| {
+            format!(
+                "The proposal pins open mining round {pinned}, which has closed. Cancel this proposal and propose again."
+            )
+        })?;
+    disclosure(
+        &round.contract.contract_id,
+        &round.contract.created_event_blob,
+        "the open mining round",
+    )
 }
 
 /// Execute ExpireConfirmation choice on governance rules contract
@@ -3289,6 +3447,226 @@ mod cancel_confirmation_gate_tests {
         let resp = test::call_service(&app, req).await;
 
         assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod paid_accept_disclosure_tests {
+    use actix_web::{body::to_bytes, http::StatusCode};
+    use decman_lib::catalog::types::AppTransferContextInput;
+    use decman_lib::framework::DamlProtoEncode;
+    use wiremock::{
+        Mock, MockServer, ResponseTemplate,
+        matchers::{method, path},
+    };
+
+    use super::*;
+
+    const ROUNDS: &str = include_str!("../testdata/scan/open_and_issuing_mining_rounds.json");
+    const FEATURED_APP_RIGHT: &str = include_str!("../testdata/scan/featured_app_right.json");
+
+    /// Round 66344 of the scan fixture.
+    fn round_66344() -> scan::ScanContract {
+        scan::parse_open_mining_rounds(ROUNDS)
+            .expect("the fixture parses")
+            .into_iter()
+            .find(|r| r.round == 66344)
+            .expect("the fixture lists round 66344")
+            .contract
+    }
+
+    /// The create event of an `AcceptPaidCredential` proposal, encoded the
+    /// way decman proposes it.
+    fn proposal(open_mining_round: &str, featured_app_right: Option<&str>) -> CreatedEvent {
+        let payload = AcceptPaidCredential {
+            user_service_cid: "00usc".to_string(),
+            credential_offer_cid: "00offer".to_string(),
+            deposit_amulet_cids: vec!["00amulet".to_string()],
+            app_transfer_context: AppTransferContextInput {
+                amulet_rules_cid: "00rules".to_string(),
+                open_mining_round_cid: open_mining_round.to_string(),
+                featured_app_right_cid: featured_app_right.map(str::to_string),
+            },
+            deposit_amount_usd: None,
+        }
+        .to_daml_proto()
+        .expect("the proposal encodes");
+        let Some(value::Sum::Record(record)) = payload.sum else {
+            panic!("a proposal encodes as a record");
+        };
+        CreatedEvent {
+            create_arguments: Some(record),
+            ..CreatedEvent::default()
+        }
+    }
+
+    fn config(scan_url: Option<String>) -> NodeConfig {
+        let mut config = NodeConfig::default();
+        config.canton.scan_url = scan_url;
+        config
+    }
+
+    async fn scan() -> MockServer {
+        let scan = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/scan/v0/open-and-issuing-mining-rounds"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(ROUNDS))
+            .mount(&scan)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/scan/v0/featured-apps/by-contract-id/00far"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(FEATURED_APP_RIGHT))
+            .mount(&scan)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/scan/v0/featured-apps/by-contract-id/00gone"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("{}"))
+            .mount(&scan)
+            .await;
+        scan
+    }
+
+    /// Disclosures for `created` when the request already carries the
+    /// AmuletRules, so no test reaches the public DSO API.
+    async fn disclosures(
+        created: &CreatedEvent,
+        scan_url: Option<String>,
+    ) -> Result<Vec<DisclosedContract>> {
+        let pins = PaidAcceptPins::of(created)?;
+        let requested = HashSet::from(["00rules"]);
+        paid_accept_disclosures(
+            &reqwest::Client::new(),
+            &config(scan_url),
+            &pins,
+            &requested,
+        )
+        .await
+    }
+
+    #[test]
+    fn pins_are_read_from_the_app_transfer_context() -> Result<()> {
+        let pins = PaidAcceptPins::of(&proposal("00round", Some("00far")))?;
+        assert_eq!(pins.amulet_rules, "00rules");
+        assert_eq!(pins.open_mining_round, "00round");
+        assert_eq!(pins.featured_app_right.as_deref(), Some("00far"));
+
+        let pins = PaidAcceptPins::of(&proposal("00round", None))?;
+        assert_eq!(pins.featured_app_right, None);
+        Ok(())
+    }
+
+    #[test]
+    fn a_proposal_without_a_transfer_context_is_an_error() {
+        let err = PaidAcceptPins::of(&CreatedEvent::default()).expect_err("nothing to read");
+        assert!(format!("{err:#}").contains("appTransferContext"));
+    }
+
+    #[tokio::test]
+    async fn the_pinned_round_and_featured_app_right_come_from_scan() -> Result<()> {
+        let scan = scan().await;
+        let round = round_66344();
+
+        let disclosed = disclosures(
+            &proposal(&round.contract_id, Some("00far")),
+            Some(format!("{}/api/scan", scan.uri())),
+        )
+        .await?;
+
+        let cids: Vec<&str> = disclosed.iter().map(|d| d.contract_id.as_str()).collect();
+        assert_eq!(cids, [round.contract_id.as_str(), "00far"]);
+        // The blobs are the decoded `created_event_blob`s scan served.
+        assert_eq!(
+            disclosed[0].created_event_blob,
+            base64::engine::general_purpose::STANDARD.decode(&round.created_event_blob)?
+        );
+        assert_eq!(disclosed[1].created_event_blob, b"far");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn without_a_scan_url_the_accept_is_refused_as_not_configured() {
+        let err = disclosures(&proposal(&round_66344().contract_id, None), None)
+            .await
+            .expect_err("the round must come from scan");
+
+        assert!(err.downcast_ref::<ScanNotConfigured>().is_some(), "{err:#}");
+        let response = execute_failure_response(&err);
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    }
+
+    #[tokio::test]
+    async fn without_a_scan_url_a_request_that_discloses_everything_still_executes() -> Result<()> {
+        let pins = PaidAcceptPins::of(&proposal("00round", Some("00far")))?;
+        let requested = HashSet::from(["00rules", "00round", "00far"]);
+
+        let disclosed =
+            paid_accept_disclosures(&reqwest::Client::new(), &config(None), &pins, &requested)
+                .await?;
+
+        assert!(disclosed.is_empty());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_pinned_round_scan_no_longer_lists_has_closed() {
+        let scan = scan().await;
+
+        let err = disclosures(
+            &proposal("00closed", None),
+            Some(format!("{}/api/scan", scan.uri())),
+        )
+        .await
+        .expect_err("a closed round cannot be disclosed");
+
+        let message = format!("{err:#}");
+        assert!(message.contains("00closed"), "{message}");
+        assert!(message.contains("propose again"), "{message}");
+    }
+
+    #[tokio::test]
+    async fn a_featured_app_right_scan_does_not_list_is_refused() {
+        let scan = scan().await;
+
+        let err = disclosures(
+            &proposal(&round_66344().contract_id, Some("00gone")),
+            Some(format!("{}/api/scan", scan.uri())),
+        )
+        .await
+        .expect_err("an inactive right cannot be disclosed");
+
+        let message = format!("{err:#}");
+        assert!(message.contains("00gone"), "{message}");
+    }
+
+    #[actix_web::test]
+    async fn any_other_execute_failure_stays_a_500() -> Result<()> {
+        let response = execute_failure_response(&anyhow::anyhow!("ledger said no"));
+
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let body = to_bytes(response.into_body())
+            .await
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+        let body: serde_json::Value = serde_json::from_slice(&body)?;
+        assert_eq!(body["error"], "Failed to execute action: ledger said no");
+        Ok(())
+    }
+
+    #[actix_web::test]
+    async fn an_execute_failure_names_its_underlying_cause() -> Result<()> {
+        let error = anyhow::anyhow!("scan answered 403 Forbidden: access denied")
+            .context("Failed to fetch the open mining rounds from scan");
+        let response = execute_failure_response(&error);
+
+        let body = to_bytes(response.into_body())
+            .await
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+        let body: serde_json::Value = serde_json::from_slice(&body)?;
+        assert_eq!(
+            body["error"],
+            "Failed to execute action: Failed to fetch the open mining rounds from scan: \
+             scan answered 403 Forbidden: access denied"
+        );
         Ok(())
     }
 }

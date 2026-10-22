@@ -39,6 +39,9 @@ import { beneficiariesProblem, beneficiaryWeightSum } from "../rewardBeneficiari
 import {
   buildBillingParams,
   buildInitialDeposit,
+  formatDecimal,
+  offerBillingSummary,
+  offerDepositUsd,
   ownedAmulets,
   type AmuletOption,
 } from "../paidCredential";
@@ -68,6 +71,7 @@ import type {
   ContractQueryResponse,
   Network,
   NetworkInfo,
+  OpenMiningRoundInfo,
   ProposeActionRequest,
   ProposalType,
   InstrumentAllowance,
@@ -88,6 +92,8 @@ import type {
   GovernanceStateResponse,
   ActiveCouponReassignmentDelegation,
   CouponReassignmentDelegationSummary,
+  BlockListShardInfo,
+  BlockListShardsResponse,
 } from "../types";
 
 type ActionTypeKey = ActionType["type"];
@@ -264,12 +270,22 @@ export const GovernanceSection = ({
   const [proposalDepositAmuletCids, setProposalDepositAmuletCids] = useState<string[]>([]);
   const [proposalOpenMiningRoundCid, setProposalOpenMiningRoundCid] = useState("");
   const [proposalFeaturedAppRightCid, setProposalFeaturedAppRightCid] = useState("");
+  // The newest open round as scan lists it, or why the node could not read it
+  const [openMiningRound, setOpenMiningRound] = useState<OpenMiningRoundInfo | null>(null);
+  const [openMiningRoundError, setOpenMiningRoundError] = useState("");
+  const [openMiningRoundLoading, setOpenMiningRoundLoading] = useState(false);
   // Accept holder-initiated mint/burn request state
   const [proposalMintRequestCid, setProposalMintRequestCid] = useState("");
   const [proposalBurnRequestCid, setProposalBurnRequestCid] = useState("");
   // Credential cids proving the request's holder meets the instrument's
   // issuer requirements. Passed into the accept's choice context.
   const [proposalIssuerCredentialCids, setProposalIssuerCredentialCids] = useState<string[]>([]);
+  // `StoredBlockListPartyShas` cids for an instrument that checks a block
+  // list. Passed into the accept's choice context.
+  const [proposalBlockListShardCids, setProposalBlockListShardCids] = useState<string[]>([]);
+  // Set once the operator edits the shard picker, so a late shard list never
+  // replaces a hand-made choice.
+  const [blockListShardsEdited, setBlockListShardsEdited] = useState(false);
   // Registrar-onboarding proposal state
   const [proposalRegistrarServiceRequestCid, setProposalRegistrarServiceRequestCid] = useState("");
   const [proposalProviderConfigurationCid, setProposalProviderConfigurationCid] = useState("");
@@ -389,6 +405,10 @@ export const GovernanceSection = ({
   // credential picker on the Accept Mint/Burn Request forms.
   const [availableCredentials, setAvailableCredentials] = useState<CredentialInfo[]>([]);
   const [credentialsLoading, setCredentialsLoading] = useState(false);
+  // Block list shards visible to this party. Power the shard picker on the
+  // Accept Mint/Burn Request forms.
+  const [availableBlockListShards, setAvailableBlockListShards] = useState<BlockListShardInfo[]>([]);
+  const [blockListShardsLoading, setBlockListShardsLoading] = useState(false);
   // Pending `RegistrarServiceRequest` and `ProviderConfiguration` contracts.
   // Power the pickers on the Onboard Registrar form.
   const [registrarServiceRequests, setRegistrarServiceRequests] = useState<RegistrarServiceRequestInfo[]>([]);
@@ -643,6 +663,26 @@ export const GovernanceSection = ({
     }
   }, [partyId]);
 
+  // Fetch `StoredBlockListPartyShas` contracts so the Accept Mint/Burn
+  // Request forms can offer a shard picker for instruments that check a
+  // block list.
+  const fetchBlockListShards = useCallback(async () => {
+    setBlockListShardsLoading(true);
+    try {
+      const res = await authenticatedFetch(
+        `${API_BASE}/block-list-shards?party_id=${encodeURIComponent(partyId)}`,
+      );
+      if (res.ok) {
+        const response: BlockListShardsResponse = await res.json();
+        setAvailableBlockListShards(response.block_list_shards);
+      }
+    } catch (e) {
+      console.error("Failed to fetch block list shards:", e);
+    } finally {
+      setBlockListShardsLoading(false);
+    }
+  }, [partyId]);
+
   // Fetch pending `RegistrarServiceRequest` contracts so the Onboard
   // Registrar form can offer a picker instead of a hand-pasted contract id.
   const fetchRegistrarServiceRequests = useCallback(async () => {
@@ -724,6 +764,15 @@ export const GovernanceSection = ({
     () => credentialOffers.filter((o) => !o.is_free && o.holder === partyId),
     [credentialOffers, partyId],
   );
+
+  // The listed paid offer the Accept Paid Credential form names. A pasted cid
+  // of an unlisted offer leaves it undefined.
+  const chosenPaidOffer = useMemo(
+    () =>
+      acceptablePaidCredentialOffers.find((o) => o.contract_id === proposalCredentialOfferCid),
+    [acceptablePaidCredentialOffers, proposalCredentialOfferCid],
+  );
+  const chosenDepositUsd = chosenPaidOffer && offerDepositUsd(chosenPaidOffer);
 
   // Requests this provider decparty can accept via Onboard Registrar: only
   // those that name it as the provider. With the provider fixed, each row
@@ -909,6 +958,7 @@ export const GovernanceSection = ({
         }
         const issuerName = option.issuer.split("::")[0];
         const cidTail = option.contract_id.slice(-8);
+        const billing = offerBillingSummary(option);
         return (
           <li {...props} key={option.contract_id}>
             <Box sx={{ display: "flex", flexDirection: "column", gap: 0.25 }}>
@@ -918,6 +968,11 @@ export const GovernanceSection = ({
               {option.description && (
                 <Typography variant="caption" color="text.secondary">
                   {option.description}
+                </Typography>
+              )}
+              {billing && (
+                <Typography variant="caption" color="text.secondary">
+                  {billing}
                 </Typography>
               )}
             </Box>
@@ -1285,6 +1340,9 @@ export const GovernanceSection = ({
     ) {
       fetchCredentials();
     }
+    if (proposalType === "accept_mint_request" || proposalType === "accept_burn_request") {
+      fetchBlockListShards();
+    }
     // The Onboard Registrar pickers list the pending requests and the
     // provider's configurations.
     if (proposalType === "onboard_registrar") {
@@ -1297,6 +1355,7 @@ export const GovernanceSection = ({
     fetchOpenMintRequests,
     fetchOpenBurnRequests,
     fetchCredentials,
+    fetchBlockListShards,
     fetchRegistrarServiceRequests,
     fetchProviderConfigurations,
     fetchRegistrarServices,
@@ -1329,6 +1388,37 @@ export const GovernanceSection = ({
       fetchNetworkInfo();
     }
   }, [selectedActionType, fetchNetworkInfo]);
+
+  // Read the newest open mining round from scan for the Accept Paid
+  // Credential form. Without DECPM_SCAN_URL the node answers 422, and the
+  // form shows its message.
+  const fetchOpenMiningRound = useCallback(async () => {
+    setOpenMiningRoundLoading(true);
+    try {
+      const res = await authenticatedFetch(`${API_BASE}/open-mining-round`);
+      const data = await res.json();
+      if (res.ok) {
+        const round = data as OpenMiningRoundInfo;
+        setOpenMiningRound(round);
+        setOpenMiningRoundError("");
+        setProposalOpenMiningRoundCid(round.contract_id);
+      } else {
+        setOpenMiningRound(null);
+        setOpenMiningRoundError(data.error || "Failed to read the open mining round");
+      }
+    } catch (e) {
+      setOpenMiningRound(null);
+      setOpenMiningRoundError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setOpenMiningRoundLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (proposalType === "accept_paid_credential") {
+      fetchOpenMiningRound();
+    }
+  }, [proposalType, fetchOpenMiningRound]);
 
   // Setup CC Preapproval and Setup Minting Delegation need the DSO party id
   // from the network-info endpoint to prefill their DSO field. Mirror the
@@ -1901,6 +1991,8 @@ export const GovernanceSection = ({
     setProposalOpenMiningRoundCid("");
     setProposalFeaturedAppRightCid("");
     setProposalIssuerCredentialCids([]);
+    setProposalBlockListShardCids([]);
+    setBlockListShardsEdited(false);
     setProposalDelegate("");
     setProposalDelegationExpiresAt("");
     setProposalAmuletMergeLimit("10");
@@ -1929,8 +2021,38 @@ export const GovernanceSection = ({
   const blockListProblem =
     proposalType === "update_instrument_configuration" &&
     configurationToUpdate?.check_block_list === true
-      ? "This configuration checks a block list. DecMan cannot update it until #566 adds block list support to governance mint and burn."
+      ? "This configuration checks a block list. DecMan cannot update it until #566, because not every mint, burn and transfer sends block list shards yet."
       : null;
+
+  // With the block list check on, the registry refuses an accept that
+  // carries no shards. It fetches them against the instrument's registrar.
+  const acceptInstrument = availableInstruments.find(
+    (inst) => inst.contract_id === proposalInstrumentConfigurationCid,
+  );
+  const acceptNeedsBlockListShards =
+    (proposalType === "accept_mint_request" || proposalType === "accept_burn_request") &&
+    acceptInstrument?.configuration?.check_block_list === true;
+  const registrarBlockListShards = (registrar: string | undefined) =>
+    availableBlockListShards.filter((shard) => shard.registrar === registrar);
+  const acceptBlockListShardCids = acceptNeedsBlockListShards ? proposalBlockListShardCids : [];
+  // The shard list can arrive after the request is picked, when the prefill
+  // found none. Fill in the registrar's shards once they arrive, unless the
+  // operator has already chosen shards by hand.
+  const acceptRegistrar = acceptInstrument?.instrument_admin;
+  useEffect(() => {
+    if (!acceptNeedsBlockListShards || blockListShardsEdited) return;
+    if (proposalBlockListShardCids.length > 0) return;
+    const shards = availableBlockListShards.filter((shard) => shard.registrar === acceptRegistrar);
+    if (shards.length > 0) {
+      setProposalBlockListShardCids(shards.map((shard) => shard.contract_id));
+    }
+  }, [
+    acceptNeedsBlockListShards,
+    acceptRegistrar,
+    availableBlockListShards,
+    blockListShardsEdited,
+    proposalBlockListShardCids.length,
+  ]);
 
   const handleSubmitProposal = async () => {
     if (!rulesContractId) return;
@@ -2183,21 +2305,29 @@ export const GovernanceSection = ({
           };
           break;
         case "accept_mint_request":
+          if (acceptNeedsBlockListShards && acceptBlockListShardCids.length === 0) {
+            throw new Error("Pick at least one Block List Shard");
+          }
           proposal = {
             type: "accept_mint_request",
             mint_request_cid: proposalMintRequestCid,
             instrument_configuration_cid: proposalInstrumentConfigurationCid,
             issuer_credential_cids: proposalIssuerCredentialCids,
             description: proposalDescription,
+            block_list_shard_cids: acceptBlockListShardCids,
           };
           break;
         case "accept_burn_request":
+          if (acceptNeedsBlockListShards && acceptBlockListShardCids.length === 0) {
+            throw new Error("Pick at least one Block List Shard");
+          }
           proposal = {
             type: "accept_burn_request",
             burn_request_cid: proposalBurnRequestCid,
             instrument_configuration_cid: proposalInstrumentConfigurationCid,
             issuer_credential_cids: proposalIssuerCredentialCids,
             description: proposalDescription,
+            block_list_shard_cids: acceptBlockListShardCids,
           };
           break;
         case "offer_free_credential": {
@@ -2251,6 +2381,9 @@ export const GovernanceSection = ({
               open_mining_round_cid: proposalOpenMiningRoundCid.trim(),
               ...(featuredAppRightCid ? { featured_app_right_cid: featuredAppRightCid } : {}),
             },
+            // The vote's description shows this amount, and execution checks
+            // it against the offer.
+            ...(chosenDepositUsd ? { deposit_amount_usd: chosenDepositUsd } : {}),
           };
           break;
         }
@@ -4775,8 +4908,20 @@ export const GovernanceSection = ({
                       i.instrument_admin === req.instrument_admin &&
                       i.instrument_id === req.instrument_id,
                   );
-                  if (inst) setProposalInstrumentConfigurationCid(inst.contract_id);
+                  if (!inst) return;
+                  setProposalInstrumentConfigurationCid(inst.contract_id);
+                  // The registrar's active shards divide all party hashes
+                  // between them, so together they cover every holder.
+                  setProposalBlockListShardCids(
+                    inst.configuration?.check_block_list === true
+                      ? registrarBlockListShards(inst.instrument_admin).map(
+                          (shard) => shard.contract_id,
+                        )
+                      : [],
+                  );
+                  setBlockListShardsEdited(false);
                 };
+                const shardOptions = registrarBlockListShards(acceptInstrument?.instrument_admin);
                 return (
                   <>
                     <Autocomplete
@@ -4978,6 +5123,57 @@ export const GovernanceSection = ({
                         />
                       )}
                     />
+                    {acceptNeedsBlockListShards && (
+                      <Autocomplete
+                        size="small"
+                        multiple
+                        freeSolo
+                        options={shardOptions}
+                        value={proposalBlockListShardCids}
+                        loading={blockListShardsLoading}
+                        onChange={(_event, values) => {
+                          setBlockListShardsEdited(true);
+                          setProposalBlockListShardCids(
+                            values.map((value) =>
+                              typeof value === "string" ? value : value.contract_id,
+                            ),
+                          );
+                        }}
+                        getOptionLabel={(option) => {
+                          // Selected values are stored as bare cids; label them
+                          // with the shard's prefix when the contract is known.
+                          const cid = typeof option === "string" ? option : option.contract_id;
+                          const known =
+                            typeof option === "string"
+                              ? shardOptions.find((s) => s.contract_id === option)
+                              : option;
+                          return known ? `Prefix ${known.prefix} (…${cid.slice(-8)})` : cid;
+                        }}
+                        isOptionEqualToValue={(option, value) =>
+                          typeof value === "string"
+                            ? option.contract_id === value
+                            : option.contract_id === value.contract_id
+                        }
+                        renderInput={(params) => (
+                          <TextField
+                            {...params}
+                            label={
+                              <TextHelp text="The registry checks the holder against these shards of the registrar's block list. Together, all of the registrar's shards cover every holder.">
+                                Block List Shards
+                              </TextHelp>
+                            }
+                            required
+                            helperText={
+                              blockListShardsLoading
+                                ? "Loading block list shards…"
+                                : shardOptions.length === 0
+                                  ? "No block list shards found for this registrar. Paste contract ids."
+                                  : "This instrument checks a block list. Keep all of the registrar's shards, or paste contract ids."
+                            }
+                          />
+                        )}
+                      />
+                    )}
                     <TextField
                       size="small"
                       label="Description"
@@ -5179,6 +5375,22 @@ export const GovernanceSection = ({
                     acceptablePaidCredentialOffers,
                     "paid",
                   )}
+                  {chosenPaidOffer?.billing_params && chosenDepositUsd ? (
+                    <Alert severity="info">
+                      This accept locks a deposit of {formatDecimal(chosenDepositUsd)} USD, and
+                      the vote shows that amount. The offer's deposit target is{" "}
+                      {formatDecimal(chosenPaidOffer.billing_params.deposit_target_amount_usd)} USD.
+                      Its fee is {formatDecimal(chosenPaidOffer.billing_params.fee_per_day_usd)} USD
+                      a day, billed every {chosenPaidOffer.billing_params.billing_period_minutes}{" "}
+                      minutes.
+                    </Alert>
+                  ) : (
+                    proposalCredentialOfferCid && (
+                      <Alert severity="warning">
+                        This offer is not in the list, so the vote will not show its deposit.
+                      </Alert>
+                    )
+                  )}
                   <Autocomplete
                     size="small"
                     multiple
@@ -5227,22 +5439,46 @@ export const GovernanceSection = ({
                     )}
                   />
                   {renderAmuletRulesCidField()}
-                  <TextField
-                    size="small"
-                    label="Open Mining Round CID"
-                    value={proposalOpenMiningRoundCid}
-                    onChange={(e) => setProposalOpenMiningRoundCid(e.target.value)}
-                    fullWidth
-                    required
-                    slotProps={{
-                      input: {
-                        endAdornment: fieldHelpAdornment(
-                          "Contract id of an OpenMiningRound that is open now. The DSO scan API lists the open rounds.",
-                          "Help for Open Mining Round CID",
-                        ),
-                      },
-                    }}
-                  />
+                  <Box sx={{ display: "flex", gap: 1, alignItems: "center" }}>
+                    <TextField
+                      size="small"
+                      label="Open Mining Round CID"
+                      value={proposalOpenMiningRoundCid}
+                      onChange={(e) => setProposalOpenMiningRoundCid(e.target.value)}
+                      fullWidth
+                      required
+                      helperText={
+                        openMiningRoundLoading
+                          ? "Reading the open round from scan…"
+                          : openMiningRound && openMiningRound.contract_id === proposalOpenMiningRoundCid
+                            ? `Round ${openMiningRound.round}, open until ${new Date(openMiningRound.target_closes_at).toLocaleTimeString()}`
+                            : undefined
+                      }
+                      slotProps={{
+                        input: {
+                          endAdornment: fieldHelpAdornment(
+                            "Contract id of an OpenMiningRound that is open now. DecMan fills in the newest one from scan. You can paste another one.",
+                            "Help for Open Mining Round CID",
+                          ),
+                        },
+                      }}
+                    />
+                    <Tooltip title="Refresh">
+                      <span>
+                        <IconButton
+                          size="small"
+                          onClick={fetchOpenMiningRound}
+                          disabled={openMiningRoundLoading}
+                          aria-label="Refresh the open mining round"
+                        >
+                          {openMiningRoundLoading ? <CircularProgress size={20} /> : <RefreshIcon />}
+                        </IconButton>
+                      </span>
+                    </Tooltip>
+                  </Box>
+                  {openMiningRoundError && (
+                    <Alert severity="warning">{openMiningRoundError}</Alert>
+                  )}
                   <TextField
                     size="small"
                     label="Featured App Right CID"

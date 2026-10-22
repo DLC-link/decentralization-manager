@@ -47,11 +47,12 @@ pub(crate) use tenant::{
     tenant_threshold_authorize, tenant_threshold_execute, tenant_threshold_prepare,
 };
 pub(crate) use token_standard::{
-    get_burn_requests_handler, get_credential_offers_handler, get_credentials_handler,
-    get_holdings_handler, get_instruments_handler, get_mint_requests_handler, get_network_info,
-    get_operator_info, get_packages, get_provider_configurations_handler,
-    get_provider_services_handler, get_registrar_service_requests_handler,
-    get_registrar_services_handler, get_token_standard_contracts, get_transfer_factories_handler,
+    get_block_list_shards_handler, get_burn_requests_handler, get_credential_offers_handler,
+    get_credentials_handler, get_holdings_handler, get_instruments_handler,
+    get_mint_requests_handler, get_network_info, get_open_mining_round, get_operator_info,
+    get_packages, get_provider_configurations_handler, get_provider_services_handler,
+    get_registrar_service_requests_handler, get_registrar_services_handler,
+    get_token_standard_contracts, get_transfer_factories_handler,
     get_transfer_instructions_handler, get_transfer_preapprovals_handler,
     get_user_services_handler, query_contracts_handler,
 };

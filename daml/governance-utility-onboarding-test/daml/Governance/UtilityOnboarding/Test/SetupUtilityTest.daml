@@ -168,7 +168,7 @@ test_when_setup_with_block_list_off_then_check_off = script do
     then_ = then_block_list_check_off
 
 -- * useBlockList = Some True is refused at creation, before any vote.
--- Governance mint and burn cannot pass a block list check until #566.
+-- Not every mint, burn and transfer path sends block list shards yet (#566).
 
 when_setup_proposed_with_block_list_on : Fixture -> Script ()
 when_setup_proposed_with_block_list_on f = do

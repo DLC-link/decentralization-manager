@@ -3,6 +3,7 @@
 
 module Governance.UtilityOnboarding.Test.AcceptMintRequestTest where
 
+import DA.Optional (isSome)
 import DA.TextMap qualified as TextMap
 import DA.Time (addRelTime, hours)
 import Daml.Script
@@ -16,7 +17,8 @@ import Utility.Registry.App.V0.Service.AllocationFactory
   (AllocationFactory_RequestMint(..))
 import Utility.Registry.Holding.V0.Holding (Holding)
 import Utility.Registry.V0.Holding.TokenApiUtils
-  (instrumentConfigurationContextKey, issuerCredentialsContextKey)
+  (blockListContextKey, instrumentConfigurationContextKey, issuerCredentialsContextKey)
+import Utility.Registry.V0.Rule.BlockList (StoredBlockListPartyShas)
 
 import Governance.Action (GovernableAction)
 import Governance.Rules
@@ -43,18 +45,20 @@ mkInstrumentId parties = InstrumentId with
 
 -- | Drive a holder-initiated mint request through the registry factory.
 -- The MintRequest is the prerequisite that the AcceptMintRequest action
--- under test consumes.
+-- under test consumes. The factory checks the block list too, so a request
+-- on a configuration that checks it needs the shards.
 seedMintRequest
-  : OnboardingTestParties -> SetupArtifacts -> Party -> Decimal
+  : OnboardingTestParties -> SetupArtifacts
+  -> Optional [ContractId StoredBlockListPartyShas] -> Party -> Decimal
   -> Script (ContractId MintRequest)
-seedMintRequest parties artifacts holder amount = do
+seedMintRequest parties artifacts shardCids holder amount = do
   now <- getTime
   let context = ChoiceContext with
-        values = TextMap.fromList
+        values = TextMap.fromList $
           [ (instrumentConfigurationContextKey,
              AV_ContractId $ coerceContractId artifacts.instrumentConfigurationCid)
           , (issuerCredentialsContextKey, AV_List [])
-          ]
+          ] <> blockListShardEntries shardCids
   result <- submit (actAs holder <> readAs parties.governanceParty) $
     exerciseCmd artifacts.allocationFactoryCid AllocationFactory_RequestMint with
       expectedAdmin = parties.governanceParty
@@ -78,13 +82,13 @@ given_mint_request_exists = do
   artifacts <- setupUtilityForTest parties rulesCid
   let requestedHolder = parties.outsider
       requestedAmount = 150.0
-  mintRequestCid <- seedMintRequest parties artifacts requestedHolder requestedAmount
+  mintRequestCid <- seedMintRequest parties artifacts None requestedHolder requestedAmount
   pure Fixture with ..
 
--- * Happy path: propose-confirm-execute mints a Holding for the requester.
-
-when_accept_mint_request_executed : Fixture -> Script ()
-when_accept_mint_request_executed f = do
+proposeAcceptMint
+  : Optional [ContractId StoredBlockListPartyShas] -> Fixture
+  -> Script (ContractId GovernableAction)
+proposeAcceptMint shardCids f = do
   proposalCid <- submit f.parties.member1 $ createCmd AcceptMintRequest with
     governanceParty = f.parties.governanceParty
     proposer = f.parties.member1
@@ -93,10 +97,37 @@ when_accept_mint_request_executed f = do
     issuerCredentialCids = None
     description = "Accept holder-initiated mint"
     extraArgsMeta = Metadata with values = TextMap.empty
-  let proposalInterfaceCid : ContractId GovernableAction = toInterfaceContractId proposalCid
-  _ <- confirmAndExecute f.parties f.rulesCid proposalInterfaceCid
+    blockListShardCids = shardCids
+  pure (toInterfaceContractId proposalCid)
+
+executeAcceptMint : Optional [ContractId StoredBlockListPartyShas] -> Fixture -> Script ()
+executeAcceptMint shardCids f = do
+  proposalCid <- proposeAcceptMint shardCids f
+  _ <- confirmAndExecute f.parties f.rulesCid proposalCid
     [f.parties.member1, f.parties.member2] f.parties.member1
   pure ()
+
+-- | Confirm the accept, run it, and return the failure.
+executeAcceptMintMustFail
+  : Optional [ContractId StoredBlockListPartyShas] -> Fixture -> Script Text
+executeAcceptMintMustFail shardCids f = do
+  proposalCid <- proposeAcceptMint shardCids f
+  confirmationCids <- submitConfirmations f.parties.governanceParty f.rulesCid proposalCid
+    [f.parties.member1, f.parties.member2]
+  failure <- submitWithError (actAs f.parties.member1
+    <> readAs f.parties.governanceParty
+    <> readAs f.parties.outsider
+    <> readAs f.parties.operator) $
+    exerciseCmd f.rulesCid GovernanceRules_ExecuteConfirmedAction with
+      executor = f.parties.member1
+      actionProposalCid = proposalCid
+      confirmations = confirmationCids
+  pure (show failure)
+
+-- * Happy path: propose-confirm-execute mints a Holding for the requester.
+
+when_accept_mint_request_executed : Fixture -> Script ()
+when_accept_mint_request_executed = executeAcceptMint None
 
 then_holding_minted_for_requester : Fixture -> () -> Script Failures
 then_holding_minted_for_requester f _ = do
@@ -118,15 +149,7 @@ test_when_accept_mint_request_then_holding_minted = script do
 
 when_outsider_confirms_accept_mint : Fixture -> Script ()
 when_outsider_confirms_accept_mint f = do
-  proposalCid <- submit f.parties.member1 $ createCmd AcceptMintRequest with
-    governanceParty = f.parties.governanceParty
-    proposer = f.parties.member1
-    mintRequestCid = f.mintRequestCid
-    instrumentConfigurationCid = f.artifacts.instrumentConfigurationCid
-    issuerCredentialCids = None
-    description = "Accept holder-initiated mint"
-    extraArgsMeta = Metadata with values = TextMap.empty
-  let proposalInterfaceCid : ContractId GovernableAction = toInterfaceContractId proposalCid
+  proposalInterfaceCid <- proposeAcceptMint None f
   submitMustFail (memberContext f.parties.outsider f.parties.governanceParty) $
     exerciseCmd f.rulesCid GovernanceRules_ConfirmAction with
       confirmer = f.parties.outsider
@@ -140,3 +163,73 @@ test_when_outsider_confirms_accept_mint_then_rejected = script do
     given = given_mint_request_exists
     when = when_outsider_confirms_accept_mint
     then_ = then_nothing_mint
+
+-- * Block list on. Onboarding created one empty shard per hex prefix, and the
+-- request was made before any party was blocked.
+
+given_mint_request_on_block_list : Script Fixture
+given_mint_request_on_block_list = do
+  parties <- allocateOnboardingTestParties
+  rulesCid <- createTestGovernance parties
+  artifacts <- setupUtilityForTest parties rulesCid >>= turnBlockListOn parties
+  shardCids <- queryBlockListShards parties
+  let requestedHolder = parties.outsider
+      requestedAmount = 150.0
+  mintRequestCid <-
+    seedMintRequest parties artifacts (Some shardCids) requestedHolder requestedAmount
+  pure Fixture with ..
+
+-- The holder was blocked after the request, so the factory let it through.
+given_mint_request_from_blocked_holder : Script Fixture
+given_mint_request_from_blocked_holder = do
+  f <- given_mint_request_on_block_list
+  blockParty f.parties f.requestedHolder
+  pure f
+
+when_accept_mint_with_all_shards : Fixture -> Script ()
+when_accept_mint_with_all_shards f = do
+  shardCids <- queryBlockListShards f.parties
+  executeAcceptMint (Some shardCids) f
+
+when_accept_mint_with_all_shards_fails : Fixture -> Script Text
+when_accept_mint_with_all_shards_fails f = do
+  shardCids <- queryBlockListShards f.parties
+  executeAcceptMintMustFail (Some shardCids) f
+
+when_accept_mint_without_holder_shard : Fixture -> Script Text
+when_accept_mint_without_holder_shard f = do
+  shardCids <- queryShardsMissing f.parties f.requestedHolder
+  executeAcceptMintMustFail (Some shardCids) f
+
+then_mint_refused : Text -> Fixture -> Text -> Script Failures
+then_mint_refused reason f failure = do
+  holdings <- query @Holding f.requestedHolder
+  request <- queryContractId f.parties.governanceParty f.mintRequestCid
+  pure $
+    shouldContain "execution error" failure reason <>
+    shouldBe "holdings for requester" 0 (length holdings) <>
+    shouldBe "mint request still open" True (isSome request)
+
+test_when_block_list_on_and_shards_sent_then_holding_minted = script do
+  run Test with
+    given = given_mint_request_on_block_list
+    when = when_accept_mint_with_all_shards
+    then_ = then_holding_minted_for_requester
+
+test_when_holder_blocked_then_mint_refused = script do
+  run Test with
+    given = given_mint_request_from_blocked_holder
+    when = when_accept_mint_with_all_shards_fails
+    then_ = then_mint_refused "Holder must not be blocklisted"
+
+test_when_block_list_on_and_no_shards_then_mint_refused = script do
+  run Test with
+    given = given_mint_request_on_block_list
+    when = executeAcceptMintMustFail None
+    then_ = then_mint_refused ("Missing context entry for: " <> blockListContextKey)
+
+test_when_holder_shard_missing_then_mint_refused = script do
+  run Test with
+    given = given_mint_request_on_block_list
+    when = when_accept_mint_without_holder_shard
+    then_ = then_mint_refused "Holder prefix must be provided"

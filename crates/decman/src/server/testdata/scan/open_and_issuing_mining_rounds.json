@@ -1,0 +1,198 @@
+{
+  "time_to_live_in_microseconds": 291436570,
+  "open_mining_rounds": {
+    "00daa21cd6810308cb0d541a0f7efba0332eaac91bb1845b98bb918b454c51e89bca12122018a77e59114857735d29eca844e521e734a76d3e5e7e463274d9272602f7f6f8": {
+      "contract": {
+        "template_id": "17b6f7c18efec9022dde39a19039783c68490a722e8a5088b22ee034678171a2:Splice.Round:OpenMiningRound",
+        "contract_id": "00daa21cd6810308cb0d541a0f7efba0332eaac91bb1845b98bb918b454c51e89bca12122018a77e59114857735d29eca844e521e734a76d3e5e7e463274d9272602f7f6f8",
+        "payload": {
+          "dso": "DSO::1220be58c29e65de40bf273be1dc2b266d43a9a002ea5b18955aeef7aac881bb471a",
+          "tickDuration": {
+            "microseconds": "600000000"
+          },
+          "issuingFor": {
+            "microseconds": "39805800000000"
+          },
+          "amuletPrice": "0.10738",
+          "issuanceConfig": {
+            "validatorRewardPercentage": "0.12",
+            "optDevelopmentFundPercentage": null,
+            "unfeaturedAppRewardCap": "0.6",
+            "appRewardPercentage": "0.4",
+            "featuredAppRewardCap": "20000.0",
+            "amuletToIssuePerYear": "20000000000.0",
+            "validatorRewardCap": "0.2",
+            "optValidatorFaucetCap": "0.0"
+          },
+          "opensAt": "2026-10-21T13:54:17.279730Z",
+          "rewardConfig": {
+            "batchSize": "100",
+            "mintingVersion": "RewardVersion_TrafficBasedAppRewards",
+            "dryRunVersion": null,
+            "rewardCouponTimeToLive": {
+              "microseconds": "129600000000"
+            },
+            "appRewardCouponThreshold": "0.5"
+          },
+          "transferConfigUsd": {
+            "holdingFee": {
+              "rate": "0.0000190259"
+            },
+            "extraFeaturedAppRewardAmount": "1.0",
+            "maxNumInputs": "100",
+            "tokenStandardMaxTTL": null,
+            "lockHolderFee": {
+              "fee": "0.0"
+            },
+            "createFee": {
+              "fee": "0.0"
+            },
+            "maxNumLockHolders": "50",
+            "transferFee": {
+              "initialRate": "0.0",
+              "steps": []
+            },
+            "maxNumOutputs": "100"
+          },
+          "trafficPrice": "60.0",
+          "targetClosesAt": "2026-10-21T14:14:17.279730Z",
+          "round": {
+            "number": "66343"
+          }
+        },
+        "created_event_blob": "CgMyLjESlgcKRQDaohzWgQMIyw1UGg9++6AzLqrJG7GEW5i7kYtFTFHom8oSEiAYp35ZEUhXc10p7KhE5SHnNKdtPl5+RjJ02ScmAvf2+BINc3BsaWNlLWFtdWxldBpiCkAxN2I2ZjdjMThlZmVjOTAyMmRkZTM5YTE5MDM5NzgzYzY4NDkwYTcyMmU4YTUwODhiMjJlZTAzNDY3ODE3MWEyEgZTcGxpY2USBVJvdW5kGg9PcGVuTWluaW5nUm91bmQi2QRq1gQKTQpLOklEU086OjEyMjBiZTU4YzI5ZTY1ZGU0MGJmMjczYmUxZGMyYjI2NmQ0M2E5YTAwMmVhNWIxODk1NWFlZWY3YWFjODgxYmI0NzFhCgwKCmoICgYKBBjOjAgKEAoOMgwwLjEwNzM4MDAwMDAKCwoJKfKYRhVaXgYACgsKCSnyJM1cWl4GAAoQCg5qDAoKCggYgKiNqYCNEgqSAQqPAWqMAQoWChRqEgoQCg4yDDAuMDAwMDAwMDAwMAoWChRqEgoQCg4yDDAuMDAwMDE5MDI1OQocChpqGAoQCg4yDDAuMDAwMDAwMDAwMAoECgJaAAoWChRqEgoQCg4yDDAuMDAwMDAwMDAwMAoQCg4yDDEuMDAwMDAwMDAwMAoFCgMYyAEKBQoDGMgBCgQKAhhkCpYBCpMBapABChoKGDIWMjAwMDAwMDAwMDAuMDAwMDAwMDAwMAoQCg4yDDAuMTIwMDAwMDAwMAoQCg4yDDAuNDAwMDAwMDAwMAoQCg4yDDAuMjAwMDAwMDAwMAoUChIyEDIwMDAwLjAwMDAwMDAwMDAKEAoOMgwwLjYwMDAwMDAwMDAKFAoSUhAKDjIMMC4wMDAwMDAwMDAwCg4KDGoKCggKBhiAmJq8BAoVChNSEQoPMg02MC4wMDAwMDAwMDAwCmQKYlJgCl5qXAoqCih6JgokUmV3YXJkVmVyc2lvbl9UcmFmZmljQmFzZWRBcHBSZXdhcmRzCgQKAlIACgUKAxjIAQoPCg1qCwoJCgcYgMCYzMUHChAKDjIMMC41MDAwMDAwMDAwKklEU086OjEyMjBiZTU4YzI5ZTY1ZGU0MGJmMjczYmUxZGMyYjI2NmQ0M2E5YTAwMmVhNWIxODk1NWFlZWY3YWFjODgxYmI0NzFhOfJSg/FZXgYAQioKJgokCAESIIxK+mdKIRktAFzvT4sEkvEvskE6m4mj8ECISsZNFldaEB4=",
+        "created_at": "2026-10-21T13:44:17.279730Z"
+      },
+      "domain_id": "global-domain::1220be58c29e65de40bf273be1dc2b266d43a9a002ea5b18955aeef7aac881bb471a"
+    },
+    "00196e70b89f40bcc3e872d7a37200d448569ef75dd716d9b965532e5613b78630ca121220e5c1222582920a188ba6855afb21acc456e39623c68e1228da40aacfd35ce3ab": {
+      "contract": {
+        "template_id": "17b6f7c18efec9022dde39a19039783c68490a722e8a5088b22ee034678171a2:Splice.Round:OpenMiningRound",
+        "contract_id": "00196e70b89f40bcc3e872d7a37200d448569ef75dd716d9b965532e5613b78630ca121220e5c1222582920a188ba6855afb21acc456e39623c68e1228da40aacfd35ce3ab",
+        "payload": {
+          "dso": "DSO::1220be58c29e65de40bf273be1dc2b266d43a9a002ea5b18955aeef7aac881bb471a",
+          "tickDuration": {
+            "microseconds": "600000000"
+          },
+          "issuingFor": {
+            "microseconds": "39806400000000"
+          },
+          "amuletPrice": "0.107481",
+          "issuanceConfig": {
+            "validatorRewardPercentage": "0.12",
+            "optDevelopmentFundPercentage": null,
+            "unfeaturedAppRewardCap": "0.6",
+            "appRewardPercentage": "0.4",
+            "featuredAppRewardCap": "20000.0",
+            "amuletToIssuePerYear": "20000000000.0",
+            "validatorRewardCap": "0.2",
+            "optValidatorFaucetCap": "0.0"
+          },
+          "opensAt": "2026-10-21T14:04:37.754976Z",
+          "rewardConfig": {
+            "batchSize": "100",
+            "mintingVersion": "RewardVersion_TrafficBasedAppRewards",
+            "dryRunVersion": null,
+            "rewardCouponTimeToLive": {
+              "microseconds": "129600000000"
+            },
+            "appRewardCouponThreshold": "0.5"
+          },
+          "transferConfigUsd": {
+            "holdingFee": {
+              "rate": "0.0000190259"
+            },
+            "extraFeaturedAppRewardAmount": "1.0",
+            "maxNumInputs": "100",
+            "tokenStandardMaxTTL": null,
+            "lockHolderFee": {
+              "fee": "0.0"
+            },
+            "createFee": {
+              "fee": "0.0"
+            },
+            "maxNumLockHolders": "50",
+            "transferFee": {
+              "initialRate": "0.0",
+              "steps": []
+            },
+            "maxNumOutputs": "100"
+          },
+          "trafficPrice": "60.0",
+          "targetClosesAt": "2026-10-21T14:24:37.754976Z",
+          "round": {
+            "number": "66344"
+          }
+        },
+        "created_event_blob": "CgMyLjESlgcKRQAZbnC4n0C8w+hy16NyANRIVp73XdcW2bllUy5WE7eGMMoSEiDlwSIlgpIKGIumhVr7IazEVuOWI8aOEijaQKrP01zjqxINc3BsaWNlLWFtdWxldBpiCkAxN2I2ZjdjMThlZmVjOTAyMmRkZTM5YTE5MDM5NzgzYzY4NDkwYTcyMmU4YTUwODhiMjJlZTAzNDY3ODE3MWEyEgZTcGxpY2USBVJvdW5kGg9PcGVuTWluaW5nUm91bmQi2QRq1gQKTQpLOklEU086OjEyMjBiZTU4YzI5ZTY1ZGU0MGJmMjczYmUxZGMyYjI2NmQ0M2E5YTAwMmVhNWIxODk1NWFlZWY3YWFjODgxYmI0NzFhCgwKCmoICgYKBBjQjAgKEAoOMgwwLjEwNzQ4MTAwMDAKCwoJKWBMQjpaXgYACgsKCSlg2MiBWl4GAAoQCg5qDAoKCggYgMCn5YSNEgqSAQqPAWqMAQoWChRqEgoQCg4yDDAuMDAwMDAwMDAwMAoWChRqEgoQCg4yDDAuMDAwMDE5MDI1OQocChpqGAoQCg4yDDAuMDAwMDAwMDAwMAoECgJaAAoWChRqEgoQCg4yDDAuMDAwMDAwMDAwMAoQCg4yDDEuMDAwMDAwMDAwMAoFCgMYyAEKBQoDGMgBCgQKAhhkCpYBCpMBapABChoKGDIWMjAwMDAwMDAwMDAuMDAwMDAwMDAwMAoQCg4yDDAuMTIwMDAwMDAwMAoQCg4yDDAuNDAwMDAwMDAwMAoQCg4yDDAuMjAwMDAwMDAwMAoUChIyEDIwMDAwLjAwMDAwMDAwMDAKEAoOMgwwLjYwMDAwMDAwMDAKFAoSUhAKDjIMMC4wMDAwMDAwMDAwCg4KDGoKCggKBhiAmJq8BAoVChNSEQoPMg02MC4wMDAwMDAwMDAwCmQKYlJgCl5qXAoqCih6JgokUmV3YXJkVmVyc2lvbl9UcmFmZmljQmFzZWRBcHBSZXdhcmRzCgQKAlIACgUKAxjIAQoPCg1qCwoJCgcYgMCYzMUHChAKDjIMMC41MDAwMDAwMDAwKklEU086OjEyMjBiZTU4YzI5ZTY1ZGU0MGJmMjczYmUxZGMyYjI2NmQ0M2E5YTAwMmVhNWIxODk1NWFlZWY3YWFjODgxYmI0NzFhOWAGfxZaXgYAQioKJgokCAESIAIJZT91UU4uu+d0YEpGbI6rdca0b62I0/g0N4955cNLEB4=",
+        "created_at": "2026-10-21T13:54:37.754976Z"
+      },
+      "domain_id": "global-domain::1220be58c29e65de40bf273be1dc2b266d43a9a002ea5b18955aeef7aac881bb471a"
+    },
+    "00a7311a1a0579ebc3b1c4ddd86338646b5618e1c33e350860792ade71ca1423d3ca121220ad5e0e7838f939e65e3c1f2154d6ea9a65a3b1c0cd0342f3886d7365d074c07b": {
+      "contract": {
+        "template_id": "17b6f7c18efec9022dde39a19039783c68490a722e8a5088b22ee034678171a2:Splice.Round:OpenMiningRound",
+        "contract_id": "00a7311a1a0579ebc3b1c4ddd86338646b5618e1c33e350860792ade71ca1423d3ca121220ad5e0e7838f939e65e3c1f2154d6ea9a65a3b1c0cd0342f3886d7365d074c07b",
+        "payload": {
+          "dso": "DSO::1220be58c29e65de40bf273be1dc2b266d43a9a002ea5b18955aeef7aac881bb471a",
+          "tickDuration": {
+            "microseconds": "600000000"
+          },
+          "issuingFor": {
+            "microseconds": "39807000000000"
+          },
+          "amuletPrice": "0.107004",
+          "issuanceConfig": {
+            "validatorRewardPercentage": "0.12",
+            "optDevelopmentFundPercentage": null,
+            "unfeaturedAppRewardCap": "0.6",
+            "appRewardPercentage": "0.4",
+            "featuredAppRewardCap": "20000.0",
+            "amuletToIssuePerYear": "20000000000.0",
+            "validatorRewardCap": "0.2",
+            "optValidatorFaucetCap": "0.0"
+          },
+          "opensAt": "2026-10-21T14:14:51.436570Z",
+          "rewardConfig": {
+            "batchSize": "100",
+            "mintingVersion": "RewardVersion_TrafficBasedAppRewards",
+            "dryRunVersion": null,
+            "rewardCouponTimeToLive": {
+              "microseconds": "129600000000"
+            },
+            "appRewardCouponThreshold": "0.5"
+          },
+          "transferConfigUsd": {
+            "holdingFee": {
+              "rate": "0.0000190259"
+            },
+            "extraFeaturedAppRewardAmount": "1.0",
+            "maxNumInputs": "100",
+            "tokenStandardMaxTTL": null,
+            "lockHolderFee": {
+              "fee": "0.0"
+            },
+            "createFee": {
+              "fee": "0.0"
+            },
+            "maxNumLockHolders": "50",
+            "transferFee": {
+              "initialRate": "0.0",
+              "steps": []
+            },
+            "maxNumOutputs": "100"
+          },
+          "trafficPrice": "60.0",
+          "targetClosesAt": "2026-10-21T14:34:51.436570Z",
+          "round": {
+            "number": "66345"
+          }
+        },
+        "created_event_blob": "CgMyLjESlgcKRQCnMRoaBXnrw7HE3dhjOGRrVhjhwz41CGB5Kt5xyhQj08oSEiCtXg54OPk55l48HyFU1uqaZaOxwM0DQvOIbXNl0HTAexINc3BsaWNlLWFtdWxldBpiCkAxN2I2ZjdjMThlZmVjOTAyMmRkZTM5YTE5MDM5NzgzYzY4NDkwYTcyMmU4YTUwODhiMjJlZTAzNDY3ODE3MWEyEgZTcGxpY2USBVJvdW5kGg9PcGVuTWluaW5nUm91bmQi2QRq1gQKTQpLOklEU086OjEyMjBiZTU4YzI5ZTY1ZGU0MGJmMjczYmUxZGMyYjI2NmQ0M2E5YTAwMmVhNWIxODk1NWFlZWY3YWFjODgxYmI0NzFhCgwKCmoICgYKBBjSjAgKEAoOMgwwLjEwNzAwNDAwMDAKCwoJKRpW1l5aXgYACgsKCSka4lymWl4GAAoQCg5qDAoKCggYgNjBoYmNEgqSAQqPAWqMAQoWChRqEgoQCg4yDDAuMDAwMDAwMDAwMAoWChRqEgoQCg4yDDAuMDAwMDE5MDI1OQocChpqGAoQCg4yDDAuMDAwMDAwMDAwMAoECgJaAAoWChRqEgoQCg4yDDAuMDAwMDAwMDAwMAoQCg4yDDEuMDAwMDAwMDAwMAoFCgMYyAEKBQoDGMgBCgQKAhhkCpYBCpMBapABChoKGDIWMjAwMDAwMDAwMDAuMDAwMDAwMDAwMAoQCg4yDDAuMTIwMDAwMDAwMAoQCg4yDDAuNDAwMDAwMDAwMAoQCg4yDDAuMjAwMDAwMDAwMAoUChIyEDIwMDAwLjAwMDAwMDAwMDAKEAoOMgwwLjYwMDAwMDAwMDAKFAoSUhAKDjIMMC4wMDAwMDAwMDAwCg4KDGoKCggKBhiAmJq8BAoVChNSEQoPMg02MC4wMDAwMDAwMDAwCmQKYlJgCl5qXAoqCih6JgokUmV3YXJkVmVyc2lvbl9UcmFmZmljQmFzZWRBcHBSZXdhcmRzCgQKAlIACgUKAxjIAQoPCg1qCwoJCgcYgMCYzMUHChAKDjIMMC41MDAwMDAwMDAwKklEU086OjEyMjBiZTU4YzI5ZTY1ZGU0MGJmMjczYmUxZGMyYjI2NmQ0M2E5YTAwMmVhNWIxODk1NWFlZWY3YWFjODgxYmI0NzFhORoQEztaXgYAQioKJgokCAESIAzHyX6nmsZRqL3dhXDsrRUqwRO4QT/UzSpdVYziKExTEB4=",
+        "created_at": "2026-10-21T14:04:51.436570Z"
+      },
+      "domain_id": "global-domain::1220be58c29e65de40bf273be1dc2b266d43a9a002ea5b18955aeef7aac881bb471a"
+    }
+  },
+  "issuing_mining_rounds": {}
+}

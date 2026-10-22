@@ -10,9 +10,12 @@ import DA.Set qualified as Set
 import DA.Text (intercalate, isInfixOf)
 import DA.Time (convertRelTimeToMicroseconds, subTime, time)
 
+import Splice.Api.Token.MetadataV1 (AnyValue(..))
 import Splice.Util (require)
 import Utility.Credential.V0.Credential
   (Claim(..), Credential(..), PartyCredentialRequirement(..))
+import Utility.Registry.V0.Holding.TokenApiUtils (blockListContextKey)
+import Utility.Registry.V0.Rule.BlockList (StoredBlockListPartyShas)
 
 -- | Render a party list for a proposal description: full ids via `show`,
 -- joined by ", ". The executed description is copied into the on-chain
@@ -58,13 +61,22 @@ credentialValidityText validFrom validUntil =
     <> optional "" (\t -> " from " <> show t) validFrom
     <> optional "" (\t -> " until " <> show t) validUntil
 
--- | True unless the block list flag is Some True. Governance mint and burn
--- send no block list shards in their choice context, so the registry would
--- refuse every one of them on a configuration that checks a block list.
--- Proposal templates use this in their `ensure` clause, so the flag fails
--- before any vote. #566 adds the shards and lifts this guard.
+-- | True unless the block list flag is Some True. With the flag on, the
+-- registry refuses every mint, burn and transfer whose choice context lacks
+-- the registrar's block list shards. AcceptMintRequest and AcceptBurnRequest
+-- carry them. MintProposal and BurnProposal do not, and nobody has checked
+-- what wallet and cbtc-lib transfers send (#566). Proposal templates use
+-- this in their `ensure` clause, so the flag fails before any vote.
 blockListSupported : Optional Bool -> Bool
 blockListSupported = (/= Some True)
+
+-- | The choice context entry for block list shards, or none when unset. The
+-- registry reads the shards back with `getFromContextU`, which takes a list
+-- of contract ids.
+blockListContextEntries
+  : Optional [ContractId StoredBlockListPartyShas] -> [(Text, AnyValue)]
+blockListContextEntries = optional [] \cids ->
+  [(blockListContextKey, AV_List $ map (AV_ContractId . coerceContractId) cids)]
 
 -- | Describe an instrument configuration's block list flag for a proposal
 -- description, with a leading separator, or nothing when it is unset. The

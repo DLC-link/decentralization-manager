@@ -82,6 +82,7 @@ All configuration is supplied via `DECPM_*` environment variables. The key ones:
 | `DECPM_CANTON_LEDGER_PORT` | Canton Ledger API port | `5001` |
 | `DECPM_CANTON_SYNCHRONIZER` | Canton synchronizer name | `global` |
 | `DECPM_CANTON_NETWORK` | Canton network (`devnet`, `testnet`, `mainnet`) | `devnet` |
+| `DECPM_SCAN_URL` | Splice scan API of that network, up to and including `/api/scan`. Needed only to accept a paid credential | _(none)_ |
 | `DECPM_CANTON_ADMIN_TLS` | Speak TLS to the Canton Admin API | `false` |
 | `DECPM_CANTON_ADMIN_TLS_CA_CERT` | PEM of the CA that issued the Admin API certificate, when it is a private one | _(platform trust store)_ |
 | `DECPM_CANTON_LEDGER_TLS` | Speak TLS to the Canton Ledger API | `false` |

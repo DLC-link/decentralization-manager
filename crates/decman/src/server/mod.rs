@@ -21,6 +21,7 @@ mod package_inventory;
 mod queries;
 mod record;
 mod reward_automation;
+mod scan;
 mod transfer_context;
 mod types;
 
@@ -98,10 +99,11 @@ pub use node_health::{
 };
 pub use types::{
     AcceptTransferDetails, ActionType, AppRewardBeneficiary, BillingParams, BurnRequestsResponse,
-    ConfirmActionRequest, DomainConfirmation, DomainGovernanceAction, ExecuteActionRequest,
-    GovernanceAction, GovernanceConfirmation, GovernanceResponse, HoldingInfo, HoldingsResponse,
-    MintRequestsResponse, PendingAction, ProposalType, ProposeActionRequest, RewardStatusResponse,
-    ServiceRequestDetails, TokenRequestInfo, TransferInstructionInfo, TransferInstructionStatus,
+    ConfirmActionRequest, CredentialOfferInfo, CredentialOffersResponse, DomainConfirmation,
+    DomainGovernanceAction, ExecuteActionRequest, GovernanceAction, GovernanceConfirmation,
+    GovernanceResponse, HoldingInfo, HoldingsResponse, MintRequestsResponse, PendingAction,
+    ProposalType, ProposeActionRequest, RewardStatusResponse, ServiceRequestDetails,
+    TokenRequestInfo, TransferInstructionInfo, TransferInstructionStatus,
     TransferInstructionsResponse, TransferProposalDetails,
 };
 
@@ -1499,6 +1501,7 @@ pub async fn start_server(
             .service(handlers::get_credentials_handler)
             .service(handlers::get_registrar_service_requests_handler)
             .service(handlers::get_provider_configurations_handler)
+            .service(handlers::get_block_list_shards_handler)
             .service(handlers::get_registrar_services_handler)
             .service(handlers::get_instruments_handler)
             .service(handlers::get_transfer_instructions_handler)
@@ -1521,6 +1524,7 @@ pub async fn start_server(
             .service(handlers::get_coupon_reassignment_delegation)
             .service(handlers::get_reward_status)
             .service(handlers::get_network_info)
+            .service(handlers::get_open_mining_round)
             .service(handlers::get_operator_info)
             .service(handlers::get_party_config)
             .service(handlers::save_party_config)

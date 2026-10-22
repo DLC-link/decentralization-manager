@@ -5,9 +5,11 @@
 module Governance.UtilityOnboarding.TestUtils where
 
 import DA.Set as Set hiding (filter)
+import DA.Text (isPrefixOf)
 import DA.Time (minutes)
 import Daml.Script
 
+import Splice.Api.Token.MetadataV1 (AnyValue(..))
 import Splice.AmuletConfig (AmuletConfig(..), PackageConfig(..), TransferConfig(..), USD)
 import Splice.AmuletRules (AmuletRules(..))
 import Splice.DecentralizedSynchronizer
@@ -18,7 +20,11 @@ import Splice.Schedule (Schedule(..))
 import Utility.Registry.App.V0.Service.AllocationFactory (AllocationFactory)
 import Utility.Registry.App.V0.Service.Provider (ProviderService(..))
 import Utility.Registry.App.V0.Service.Registrar (RegistrarService)
-import Utility.Registry.V0.Configuration.Instrument (InstrumentConfiguration)
+import Utility.Registry.V0.Configuration.Instrument (InstrumentConfiguration(..))
+import Utility.Registry.V0.Holding.TokenApiUtils (blockListContextKey)
+import Utility.Registry.V0.Rule.BlockList
+  (StoredBlockListPartyShas(..), StoredBlockListPartyShas_AddSha(..))
+import Utility.Registry.V0.Util (partyToSha)
 
 import Governance.Action (GovernableAction)
 import Governance.Confirmation (GovernanceConfirmation)
@@ -137,6 +143,49 @@ setupUtilityForTest parties rulesCid = do
   _ <- confirmAndExecute parties rulesCid proposalInterfaceCid
     [parties.member1, parties.member2] parties.member1
   resolveSetupArtifacts parties
+
+-- | Replace the instrument configuration with one that checks the block
+-- list. The votes refuse useBlockList = Some True (#566), so the registrar
+-- replaces it directly.
+turnBlockListOn : OnboardingTestParties -> SetupArtifacts -> Script SetupArtifacts
+turnBlockListOn parties artifacts = do
+  Some configuration <-
+    queryContractId parties.governanceParty artifacts.instrumentConfigurationCid
+  instrumentConfigurationCid <- submit parties.governanceParty $
+    archiveCmd artifacts.instrumentConfigurationCid *>
+    createCmd configuration with checkBlockList = Some True
+  pure artifacts with instrumentConfigurationCid
+
+-- | The registrar's block list shards. Onboarding creates one empty shard per
+-- hex prefix, so together they cover every party.
+queryBlockListShards : OnboardingTestParties -> Script [ContractId StoredBlockListPartyShas]
+queryBlockListShards parties = do
+  shards <- query @StoredBlockListPartyShas parties.governanceParty
+  pure [cid | (cid, _) <- shards]
+
+-- | The shards whose prefix does not start the party's hash.
+queryShardsMissing : OnboardingTestParties -> Party -> Script [ContractId StoredBlockListPartyShas]
+queryShardsMissing parties p = do
+  shards <- query @StoredBlockListPartyShas parties.governanceParty
+  pure [cid | (cid, shard) <- shards, not (shard.prefix `isPrefixOf` partyToSha p)]
+
+-- | Add a party to the registrar's block list, as the registrar.
+blockParty : OnboardingTestParties -> Party -> Script ()
+blockParty parties p = do
+  shards <- query @StoredBlockListPartyShas parties.governanceParty
+  [(shardCid, _)] <- pure
+    [s | s@(_, shard) <- shards, shard.prefix `isPrefixOf` partyToSha p]
+  _ <- submit parties.governanceParty $
+    exerciseCmd shardCid StoredBlockListPartyShas_AddSha with p
+  pure ()
+
+-- | The choice context entry that carries block list shards, in the shape
+-- the registry reads, or none. Written out here so the fixtures do not
+-- depend on the plugin's own encoding.
+blockListShardEntries
+  : Optional [ContractId StoredBlockListPartyShas] -> [(Text, AnyValue)]
+blockListShardEntries = optional [] \cids ->
+  [(blockListContextKey, AV_List [AV_ContractId (coerceContractId cid) | cid <- cids])]
 
 -- | Create an AmuletRules contract signed by the test DSO. `isDevNet` is the
 -- only field the onboarding actions read; the config just has to pass the

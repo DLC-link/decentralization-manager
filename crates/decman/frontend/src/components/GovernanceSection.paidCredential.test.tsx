@@ -18,8 +18,20 @@ const { authenticatedFetch } = vi.hoisted(() => ({ authenticatedFetch: vi.fn() }
 vi.mock("../api", () => ({ authenticatedFetch }));
 
 const ok = (body: unknown) => Promise.resolve({ ok: true, json: async () => body });
+const fail = (status: number, body: unknown) =>
+  Promise.resolve({ ok: false, status, json: async () => body });
 
-const offer = (contract_id: string, is_free: boolean) => ({
+// The round /open-mining-round answers with, as scan lists it.
+const openRound = {
+  contract_id: "00round-66344",
+  round: 66344,
+  opens_at: "2026-10-21T14:04:37.754976Z",
+  target_closes_at: "2026-10-21T14:24:37.754976Z",
+};
+let openRoundResponse: () => Promise<unknown>;
+
+// A paid offer carries billing params, with the ledger's ten decimal places.
+const offer = (contract_id: string, is_free: boolean, deposit_initial_amount_usd?: string) => ({
   contract_id,
   operator,
   issuer,
@@ -27,7 +39,18 @@ const offer = (contract_id: string, is_free: boolean) => ({
   credential_id: contract_id,
   description: "",
   is_free,
+  ...(is_free
+    ? {}
+    : {
+        billing_params: {
+          fee_per_day_usd: "1.5000000000",
+          billing_period_minutes: 60,
+          deposit_target_amount_usd: "30.0000000000",
+        },
+      }),
+  ...(deposit_initial_amount_usd ? { deposit_initial_amount_usd } : {}),
 });
+let paidOffer: ReturnType<typeof offer>;
 
 const amulet = (contract_id: string, owner: string, initialAmount: string) => ({
   contract_id,
@@ -36,6 +59,8 @@ const amulet = (contract_id: string, owner: string, initialAmount: string) => ({
 });
 
 beforeEach(() => {
+  openRoundResponse = () => ok(openRound);
+  paidOffer = offer("00paid-offer", false);
   authenticatedFetch.mockReset();
   authenticatedFetch.mockImplementation((url: string, init?: RequestInit) => {
     if (url.includes("/governance/confirmations")) {
@@ -49,7 +74,7 @@ beforeEach(() => {
     }
     if (url.includes("/credential-offers")) {
       return ok({
-        credential_offers: [offer("00free-offer", true), offer("00paid-offer", false)],
+        credential_offers: [offer("00free-offer", true), paidOffer],
       });
     }
     if (url.includes("/contracts/query") && url.includes("Splice.Amulet")) {
@@ -62,6 +87,9 @@ beforeEach(() => {
     }
     if (url.includes("/network-info")) {
       return ok({ dso_party_id: `DSO::${ns}`, amulet_rules_cid: "00rules", amulet_rules_blob: "" });
+    }
+    if (url.includes("/open-mining-round")) {
+      return openRoundResponse();
     }
     if (url.includes("/governance/propose") && init?.method === "POST") {
       return ok({});
@@ -198,12 +226,55 @@ describe("Accept Paid Credential form", { timeout: 20_000 }, () => {
     await waitFor(() => expect(field("Amulet Rules CID")).toHaveProperty("value", "00rules"));
   };
 
-  // TextHelp names the picker after its help text.
+  const openAcceptWithRound = async () => {
+    await openAccept();
+    await waitFor(() =>
+      expect(field("Open Mining Round CID")).toHaveProperty("value", openRound.contract_id),
+    );
+  };
+
+  const pickTheOwnAmulet = async () => {
+    fireEvent.mouseDown(amuletPicker());
+    fireEvent.click(
+      within(await screen.findByRole("listbox")).getByRole("option", { name: /100\.0000000000 CC/ }),
+    );
+  };
+
+  // TextHelp names each picker after its help text.
   const amuletPicker = () =>
     screen.getByRole("combobox", { name: /^Unlocked Amulets of this governance party/ });
+  const offerPicker = () =>
+    screen.getByRole("combobox", { name: /^Contract id of the pending CredentialOffer/ });
+
+  it("prefills the newest open round from scan and posts it", async () => {
+    await openAcceptWithRound();
+    expect(screen.getByText(/^Round 66344, open until /)).toBeTruthy();
+    await pickTheOwnAmulet();
+    submit();
+
+    expect((await postedProposal()).app_transfer_context).toEqual({
+      amulet_rules_cid: "00rules",
+      open_mining_round_cid: openRound.contract_id,
+    });
+  });
+
+  it("says so when the node has no scan URL, and takes a pasted round", async () => {
+    const message =
+      "DECPM_SCAN_URL is not set, so this node cannot read the open mining round. Set it to a Splice scan API to accept a paid credential.";
+    openRoundResponse = () => fail(422, { error: message });
+    await openAccept();
+
+    expect(await screen.findByText(message)).toBeTruthy();
+    expect(field("Open Mining Round CID")).toHaveProperty("value", "");
+    await pickTheOwnAmulet();
+    type("Open Mining Round CID", "00round");
+    submit();
+
+    expect((await postedProposal()).app_transfer_context.open_mining_round_cid).toBe("00round");
+  });
 
   it("posts the picked Amulets and the transfer context", async () => {
-    await openAccept();
+    await openAcceptWithRound();
     fireEvent.mouseDown(amuletPicker());
     const listbox = await screen.findByRole("listbox");
     // Only this party's own Amulets are offered.
@@ -221,11 +292,59 @@ describe("Accept Paid Credential form", { timeout: 20_000 }, () => {
         amulet_rules_cid: "00rules",
         open_mining_round_cid: "00round",
       },
+      deposit_amount_usd: "30.0000000000",
     });
   });
 
+  it("shows the deposit the offer locks and states it on the vote", async () => {
+    await openAcceptWithRound();
+    expect(
+      screen.getByText(/^This accept locks a deposit of 30 USD, and the vote shows that amount\./),
+    ).toBeTruthy();
+    expect(screen.getByText(/Its fee is 1\.5 USD a day, billed every 60 minutes\./)).toBeTruthy();
+    await pickTheOwnAmulet();
+    submit();
+
+    expect((await postedProposal()).deposit_amount_usd).toBe("30.0000000000");
+  });
+
+  it("states the initial deposit when the offer sets one", async () => {
+    paidOffer = offer("00paid-offer", false, "20.0000000000");
+    await openAcceptWithRound();
+    expect(screen.getByText(/^This accept locks a deposit of 20 USD/)).toBeTruthy();
+    expect(screen.getByText(/The offer's deposit target is 30 USD\./)).toBeTruthy();
+    await pickTheOwnAmulet();
+    submit();
+
+    expect((await postedProposal()).deposit_amount_usd).toBe("20.0000000000");
+  });
+
+  it("lists each paid offer with its deposit and fee", async () => {
+    await openAcceptWithRound();
+    fireEvent.mouseDown(offerPicker());
+
+    const listbox = await screen.findByRole("listbox");
+    expect(within(listbox).getByText("Deposit 30 USD, fee 1.5 USD a day")).toBeTruthy();
+  });
+
+  it("states no deposit for an offer it cannot see", async () => {
+    await openAcceptWithRound();
+    fireEvent.change(offerPicker(), {
+      target: { value: "00unlisted-offer" },
+    });
+    expect(
+      await screen.findByText("This offer is not in the list, so the vote will not show its deposit."),
+    ).toBeTruthy();
+    await pickTheOwnAmulet();
+    submit();
+
+    const proposal = await postedProposal();
+    expect(proposal.credential_offer_cid).toBe("00unlisted-offer");
+    expect(proposal).not.toHaveProperty("deposit_amount_usd");
+  });
+
   it("sends the featured app right when one is given", async () => {
-    await openAccept();
+    await openAcceptWithRound();
     fireEvent.mouseDown(amuletPicker());
     fireEvent.click(
       within(await screen.findByRole("listbox")).getByRole("option", { name: /100\.0000000000 CC/ }),
@@ -242,7 +361,7 @@ describe("Accept Paid Credential form", { timeout: 20_000 }, () => {
   });
 
   it("refuses to post without a deposit Amulet", async () => {
-    await openAccept();
+    await openAcceptWithRound();
     type("Open Mining Round CID", "00round");
     submit();
 

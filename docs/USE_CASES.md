@@ -373,7 +373,7 @@ After the provider service exists, run the onboarding:
 }
 ```
 
-`use_block_list` sets the registrar's block list check for the new instrument. DecMan refuses `true` until #566, because governance mint and burn cannot pass that check yet. Leave the field out, or send `false`, to keep the check off.
+`use_block_list` sets the registrar's block list check for the new instrument. DecMan refuses `true` until #566, because not every mint, burn and transfer path sends block list shards yet. Leave the field out, or send `false`, to keep the check off.
 
 Setup creates a `TransferRule` only when `create_transfer_rule` is true. To add one later, for example after the rule was archived, propose:
 
@@ -561,6 +561,8 @@ The create clears the provider app reward beneficiaries. The action sets them ag
 
 Credentialed issuers request mints and burns through the `AllocationFactory`. The registrar decparty approves each request with the `accept_mint_request` and `accept_burn_request` proposals.
 
+When the instrument checks a block list, each accept must send the registrar's block list shards in `block_list_shard_cids`. List them with `GET /block-list-shards?party_id=...`. Onboarding creates one shard per hex prefix, so the registrar's shards together cover every holder. The accept forms fill in all of them when the instrument checks a block list. Leave the field out for an instrument without the check.
+
 ### Querying Services
 
 **List ProviderServices:**
@@ -631,6 +633,30 @@ Issue and accept credentials through governance. Both are domain proposals on
   }
 }
 ```
+
+**Accept a paid credential:**
+
+```json
+{
+  "proposal": {
+    "type": "accept_paid_credential",
+    "user_service_cid": "<user-service-contract-id>",
+    "credential_offer_cid": "<credential-offer-contract-id>",
+    "deposit_amulet_cids": ["<amulet-contract-id>"],
+    "app_transfer_context": {
+      "amulet_rules_cid": "<amulet-rules-contract-id>",
+      "open_mining_round_cid": "<open-mining-round-contract-id>"
+    },
+    "deposit_amount_usd": "30.0"
+  }
+}
+```
+
+`deposit_amount_usd` is the deposit the accept locks: the offer's initial deposit, or its deposit target when it sets none. The vote's description shows it, so members see what the governance party pays. Execution refuses an amount the offer does not lock. `GET /credential-offers` returns each offer's `billing_params` and `deposit_initial_amount_usd`, and the form fills the amount from the chosen offer. A proposal without the field still works, but its vote shows no amount.
+
+The accept locks the deposit Amulets with the DSO's `AmuletRules` and an open mining round. The governance party sees neither contract. DecMan reads the round from the scan API that `DECPM_SCAN_URL` names. `GET /open-mining-round` returns the newest open round, and the form fills it in. At execution, DecMan discloses `AmuletRules`, the round and any `featured_app_right_cid`. A node without `DECPM_SCAN_URL` refuses the execute with a 422, unless the request carries all three in `disclosed_contracts`.
+
+The round closes about 20 minutes after it opens. Confirm and execute before then, or propose again.
 
 All credential operations go through the same governance confirmation flow, requiring threshold approval from the decentralized party members.
 

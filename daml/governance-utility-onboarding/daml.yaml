@@ -1,6 +1,6 @@
 sdk-version: 3.5.1
 name: governance-utility-onboarding-v1
-version: 0.7.0
+version: 0.8.0
 source: daml
 dependencies:
   - daml-prim

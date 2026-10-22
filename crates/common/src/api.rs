@@ -1482,35 +1482,6 @@ pub struct TransferFactoriesResponse {
     pub transfer_factories: Vec<TransferFactoryInfo>,
 }
 
-/// A pending `Utility.Credential.App.V0.Model.Offer:CredentialOffer` visible
-/// to the party. The accept-free-credential forms list offers where the party
-/// is the `holder`, so the CredentialOffer cid no longer has to be pasted in
-/// by hand.
-#[derive(Clone, Debug, Serialize)]
-#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
-pub struct CredentialOfferInfo {
-    pub contract_id: String,
-    pub operator: CantonId,
-    pub issuer: CantonId,
-    pub holder: CantonId,
-    /// The template's `id` field — the credential's identifier.
-    pub credential_id: String,
-    pub description: String,
-    /// True when the offer carries no `billingParams`, i.e. it can be taken
-    /// with `CredentialOffer_AcceptFree` (the only direction the
-    /// AcceptFreeCredential governance action supports).
-    pub is_free: bool,
-}
-
-/// Response for the credential offers endpoint
-#[derive(Serialize)]
-#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
-#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
-pub struct CredentialOffersResponse {
-    pub credential_offers: Vec<CredentialOfferInfo>,
-}
-
 /// A `Utility.Credential.V0.Credential:Credential` contract visible to the
 /// party. The accept mint/burn request forms list these so the issuer
 /// credentials backing the accept no longer have to be pasted in by hand.
@@ -1602,6 +1573,28 @@ pub struct ProviderConfigurationsResponse {
     pub provider_configurations: Vec<ProviderConfigurationInfo>,
 }
 
+/// A `StoredBlockListPartyShas` shard of a registrar's block list, visible
+/// to the party. The accept mint and burn request forms list these, so the
+/// shards for an instrument that checks a block list can be picked.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
+pub struct BlockListShardInfo {
+    pub contract_id: String,
+    pub operator: CantonId,
+    pub registrar: CantonId,
+    /// Hex prefix of the party hashes the shard covers.
+    pub prefix: String,
+}
+
+/// Response for the block list shards endpoint
+#[derive(Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
+pub struct BlockListShardsResponse {
+    pub block_list_shards: Vec<BlockListShardInfo>,
+}
+
 /// A contract ID with its blob
 #[derive(Deserialize, Serialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
@@ -1626,6 +1619,21 @@ pub struct NetworkInfo {
     pub dso_party_id: CantonId,
     pub amulet_rules_cid: String,
     pub amulet_rules_blob: String,
+}
+
+/// The newest open `OpenMiningRound`, as the scan API lists it. A paid
+/// credential accept pins this round.
+#[derive(Debug, Deserialize, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
+pub struct OpenMiningRoundInfo {
+    pub contract_id: String,
+    /// The round number.
+    pub round: u64,
+    /// When the round opened, as RFC 3339.
+    pub opens_at: String,
+    /// When the round is due to close, as RFC 3339.
+    pub target_closes_at: String,
 }
 
 /// DA Utility operator info (operator party id)
