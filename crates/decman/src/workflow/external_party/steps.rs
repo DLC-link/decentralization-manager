@@ -30,9 +30,9 @@ use canton_proto_rs::com::digitalasset::canton::{
     },
     topology::admin::v30::{
         AddTransactionsRequest, BaseQuery, GenerateTransactionsRequest,
-        ListDecentralizedNamespaceDefinitionRequest, ListPartyToParticipantRequest,
-        SignTransactionsRequest, StoreId, Synchronizer, base_query, generate_transactions_request,
-        list_party_to_participant_response::result::Item as P2pItem, store_id, synchronizer,
+        ListPartyToParticipantRequest, SignTransactionsRequest, StoreId, Synchronizer, base_query,
+        generate_transactions_request, list_party_to_participant_response::result::Item as P2pItem,
+        store_id, synchronizer,
         topology_manager_read_service_client::TopologyManagerReadServiceClient,
         topology_manager_write_service_client::TopologyManagerWriteServiceClient,
     },
@@ -677,7 +677,7 @@ pub struct HostedExternalPartyHost {
 }
 
 /// Render a protobuf timestamp as RFC 3339 (UTC), for display.
-fn timestamp_to_rfc3339(ts: &prost_types::Timestamp) -> String {
+pub(super) fn timestamp_to_rfc3339(ts: &prost_types::Timestamp) -> String {
     chrono::DateTime::from_timestamp(ts.seconds, ts.nanos.max(0) as u32)
         .map(|dt| dt.to_rfc3339())
         .unwrap_or_default()
@@ -692,85 +692,7 @@ fn timestamp_to_rfc3339(ts: &prost_types::Timestamp) -> String {
 /// Returns an error if the synchronizer id cannot be resolved or a topology RPC
 /// fails.
 pub async fn list_hosted_external_parties(config: &NodeConfig) -> Result<Vec<HostedExternalParty>> {
-    let synchronizer_id = utils::get_synchronizer_id(config).await?;
-    let self_uid = config.participant_id().to_string();
-    let own_namespace = self_uid
-        .rsplit_once("::")
-        .map(|(_, ns)| ns.to_string())
-        .unwrap_or_default();
-    let mut client = TopologyManagerReadServiceClient::new(config.admin_channel().await?)
-        .max_decoding_message_size(utils::MAX_GRPC_MESSAGE_SIZE);
-
-    let decentralized: std::collections::HashSet<String> = client
-        .list_decentralized_namespace_definition(tonic::Request::new(
-            ListDecentralizedNamespaceDefinitionRequest {
-                base_query: Some(party_query(&synchronizer_id, false)),
-                filter_namespace: String::new(),
-            },
-        ))
-        .await?
-        .into_inner()
-        .results
-        .into_iter()
-        .filter_map(|r| r.item.map(|i| i.decentralized_namespace))
-        .collect();
-
-    let p2p = client
-        .list_party_to_participant(tonic::Request::new(ListPartyToParticipantRequest {
-            base_query: Some(party_query(&synchronizer_id, false)),
-            filter_party: String::new(),
-            filter_participant: self_uid.clone(),
-        }))
-        .await?
-        .into_inner();
-
-    let mut parties = Vec::new();
-    for result in p2p.results {
-        // `valid_from` is when this mapping became effective — the party's creation
-        // time for a serial-1 mapping. Read before `item` is moved out.
-        let created_at = result
-            .context
-            .as_ref()
-            .and_then(|c| c.valid_from.as_ref())
-            .map(timestamp_to_rfc3339);
-        let Some(P2pItem::V30(mapping)) = result.item else {
-            continue;
-        };
-        let Some(entry) = mapping.participants.iter().find(|h| {
-            h.participant_uid == self_uid
-                && h.permission == ParticipantPermission::Confirmation as i32
-        }) else {
-            continue;
-        };
-        let onboarding = entry.onboarding.is_some();
-        let Some((_, fingerprint)) = mapping.party.rsplit_once("::") else {
-            continue;
-        };
-        let fingerprint = fingerprint.to_string();
-        // Skip this node's own local namespace and any decentralized party — what
-        // remains is an external party with a self-owned single-key namespace.
-        if fingerprint == own_namespace || decentralized.contains(&fingerprint) {
-            continue;
-        }
-        let hosts = mapping
-            .participants
-            .iter()
-            .map(|h| HostedExternalPartyHost {
-                participant_uid: h.participant_uid.clone(),
-                permission: h.permission,
-            })
-            .collect();
-        parties.push(HostedExternalParty {
-            party_id: mapping.party.clone(),
-            fingerprint,
-            threshold: mapping.threshold,
-            host_count: mapping.participants.len() as u32,
-            created_at,
-            onboarding,
-            hosts,
-        });
-    }
-    Ok(parties)
+    super::discovery::list_hosted_external_parties(config).await
 }
 
 #[cfg(test)]

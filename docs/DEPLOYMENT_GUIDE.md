@@ -515,7 +515,7 @@ Most variables have a default that's only useful for local development (loopback
 | `DECPM_REWARD_EXPIRY_READ_INTERVAL_SECS` | `3600` | optional | How often the automation re-reads the backlog purely to refresh `decman_reward_oldest_unassigned_expires_in_seconds`. Both expiry alert rules read that gauge, so this bounds how stale their input can get. A sweep reads the ledger too, so the gauge refreshes at whichever interval is shorter |
 | `DECPM_REWARD_MAX_CREATES` | `100` | optional | Output contracts one `Delegation_Assign` may create, bounding the coupons per transaction. Lower it if assigns start failing |
 | `DECPM_REWARD_MIN_EXPIRY_MARGIN_SECS` | `120` | optional | Time a coupon must have left before expiry to be assigned |
-| `DECPM_EXTERNAL_PARTIES_TTL_SECS` | `300` | optional | How long the External Parties list serves requests before a request starts the next topology scan. A scan reads the whole topology store, so keep this in minutes |
+| `DECPM_EXTERNAL_PARTIES_TTL_SECS` | `300` | optional | How long the External Parties list serves requests before a request starts the next topology scan. Discovery uses batched hosted-party enumeration and individual topology reads; keep this in minutes |
 | `DECPM_PUBLIC_ADDRESS` | falls back to `DECPM_LISTEN_ADDRESS` | **yes** | Hostname peers use to reach this node from the public internet |
 | `DECPM_CANTON_ADMIN_HOST` | `127.0.0.1` | **yes** | Canton Admin API host |
 | `DECPM_CANTON_ADMIN_PORT` | `5002` | optional | Canton Admin API port |
@@ -553,6 +553,17 @@ Most variables have a default that's only useful for local development (loopback
 | `DECPM_LOG_FORMAT` | `json` | optional | Leave it unset in a cluster, because the log pipeline parses JSON only. `text` gives the console format for local work |
 
 ¹ Required only for the chosen provider. Set the `DECPM_KEYCLOAK_*` trio **or** the `DECPM_AUTH0_*` trio, not both.
+
+External-party discovery is scoped to the configured synchronizer and local
+participant. It enumerates at most 5,000 hosted party IDs, then reads individual
+party mappings and namespace definitions sequentially. Hosted-party enumeration
+has a five-minute deadline; each individual topology read has a 60-second
+deadline. Both client timeouts and gRPC deadlines are set, and the complete scan
+is bounded to ten minutes. Enumeration still scans
+Canton's store in batches; this bounds retained topology data, not total database
+work. A full 5,000-party result or a failed read fails the refresh rather than
+publishing an incomplete list. The last successful snapshot stays visible with
+`refresh_error`; without a previous snapshot, the endpoint returns HTTP 503.
 
 ## Note: keeping the existing Noise keypair
 

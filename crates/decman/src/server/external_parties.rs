@@ -1,4 +1,4 @@
-//! Topology discovery is expensive: Canton's participant filter scans the store.
+//! Topology discovery is expensive even with batched, scoped reads.
 //! Requests read a shared snapshot. A missing or stale snapshot starts a single
 //! background scan, so a node scans only while someone asks for the list.
 use std::{
