@@ -489,8 +489,9 @@ impl RelaySessions {
         }
     }
 
-    /// Whether any open export or import has an instance name that `belongs`
-    /// accepts.
+    /// Whether any open export or import, or any import still tearing down,
+    /// has an instance name that `belongs` accepts. These are the sessions
+    /// that make [`Self::hold`] refuse.
     ///
     /// A caller about to change the party's hosting asks this first: a relay
     /// still running would stream or import against a mapping that no longer
@@ -499,7 +500,8 @@ impl RelaySessions {
         if self.exports.lock().await.keys().any(|name| belongs(name)) {
             return true;
         }
-        self.imports.lock().await.keys().any(|name| belongs(name))
+        let imports = self.imports.lock().await;
+        imports.keys().any(|name| belongs(name)) || self.retiring().keys().any(|name| belongs(name))
     }
 
     /// Drop this replication's sessions, if any.
@@ -816,8 +818,14 @@ mod tests {
             Some(HoldRefused::RelayOpen)
         );
 
+        assert!(
+            sessions.any_session(|name| name == "run-1").await,
+            "the unhost preview must see what the hold sees"
+        );
+
         let _ = release.send(());
         finishing.await??;
+        assert!(!sessions.any_session(|name| name == "run-1").await);
         assert!(sessions.hold(&party, |name| name == "run-1").await.is_ok());
         Ok(())
     }
