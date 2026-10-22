@@ -1,3 +1,4 @@
+import { StrictMode } from "react";
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -138,6 +139,25 @@ describe("Stop hosting an external party", () => {
     await waitFor(() => expect(unhostCalls()).toHaveLength(1));
     const [, init] = unhostCalls()[0];
     expect(JSON.parse(String(init?.body))).toEqual({ base_serial: 4, splice_cleanup: false });
+  });
+
+  // The app renders under StrictMode, which runs every effect's setup, cleanup
+  // and setup again in development. The dialog must still send its request.
+  it("sends the unhost under StrictMode", async () => {
+    serve(preview());
+    render(
+      <StrictMode>
+        <ExternalPartyList parties={[PARTY_ROW]} />
+      </StrictMode>,
+      { wrapper: SnackbarProvider },
+    );
+    fireEvent.click(screen.getByRole("button", { name: `Stop hosting ${PARTY}` }));
+    await screen.findByText(/removes itself from the party's hosts/);
+
+    fireEvent.click(confirmButton());
+
+    await waitFor(() => expect(unhostCalls()).toHaveLength(1));
+    expect(await screen.findByText(`This node no longer hosts ${PARTY}`)).toBeTruthy();
   });
 
   it("waits through a 202 and finishes once the node is gone", async () => {

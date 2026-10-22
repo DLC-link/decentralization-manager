@@ -119,14 +119,15 @@ const StopHosting = ({ partyId, onClose }: { partyId: string; onClose: () => voi
   const [skipCleanup, setSkipCleanup] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [waiting, setWaiting] = useState(false);
-  // Set when the dialog closes, so a pending wait stops asking.
+  // Set when the dialog closes, so a pending wait stops asking. Cleared on
+  // setup too, because StrictMode runs setup, cleanup and setup again.
   const stopped = useRef(false);
-  useEffect(
-    () => () => {
+  useEffect(() => {
+    stopped.current = false;
+    return () => {
       stopped.current = true;
-    },
-    [],
-  );
+    };
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
