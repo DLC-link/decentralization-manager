@@ -315,18 +315,19 @@ async fn run(
 ) -> Result<Finished, Stop> {
     let party_id = request.party_id.as_str();
 
-    // The in-flight guard is held, so any other open row for the party is one
-    // a crash left behind.
-    unhost_audit::close_interrupted(env.db, party_id, me, progress.audit_id)
-        .await
-        .map_err(UnhostError::Internal)?;
-
     // ---- Preconditions, against this node's own head-state read ----------
     let current = read_hosted(env.config, party_id)
         .await
         .map_err(UnhostError::from)?;
     progress.serial_before = current.serial;
     unhost_audit::set_serial_before(env.db, progress.audit_id, current.serial)
+        .await
+        .map_err(UnhostError::Internal)?;
+
+    // Settled against head state, so an earlier attempt that answered 202 and
+    // has since landed is recorded as the departure it was.
+    let departed_at = (!hosts(&current.mapping, me)).then_some(current.serial);
+    unhost_audit::close_open_attempts(env.db, party_id, me, progress.audit_id, departed_at)
         .await
         .map_err(UnhostError::Internal)?;
 

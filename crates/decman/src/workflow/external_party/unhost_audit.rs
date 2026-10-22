@@ -270,20 +270,50 @@ pub async fn latest_with_work(
     .await?)
 }
 
-/// Close every other attempt still marked `in_progress` for this party.
+/// Close every other attempt still marked `in_progress` for this party, against
+/// what head state says now.
 ///
-/// The caller holds the in-process guard for the party, so no other attempt can
-/// be running: an open row is one a crash or a restart left behind.
+/// The caller holds the guard that admits one unhost of the party at a time,
+/// so no other attempt is running. An open row is either one a crash left
+/// behind, or one that answered 202 because its topology write was not
+/// effective yet.
+///
+/// `departed_at` is the head serial when head state no longer lists this node.
+/// A 202 row whose write is at or before that serial then closes as
+/// `completed`: the departure it recorded did happen. Every other open row
+/// closes as interrupted.
 ///
 /// # Errors
-/// Returns an error if the update fails.
-pub async fn close_interrupted(
+/// Returns an error if an update fails.
+pub async fn close_open_attempts(
     db: &SqlitePool,
     party_id: &str,
     participant_id: &str,
     current: i64,
+    departed_at: Option<u32>,
 ) -> Result<u64> {
-    let closed = sqlx::query(
+    let mut closed = 0;
+    if let Some(serial) = departed_at {
+        closed += sqlx::query(
+            "UPDATE external_party_unhost_audit \
+             SET status = ?, step = ?, finished_at = ? \
+             WHERE party_id = ? AND participant_id = ? AND status = ? AND id != ? \
+               AND step = ? AND serial_after IS NOT NULL AND serial_after <= ?",
+        )
+        .bind(AuditStatus::Completed.as_str())
+        .bind(UnhostStep::Done.as_str())
+        .bind(now_secs())
+        .bind(party_id)
+        .bind(participant_id)
+        .bind(AuditStatus::InProgress.as_str())
+        .bind(current)
+        .bind(UnhostStep::Topology.as_str())
+        .bind(i64::from(serial))
+        .execute(db)
+        .await?
+        .rows_affected();
+    }
+    closed += sqlx::query(
         "UPDATE external_party_unhost_audit \
          SET status = ?, finished_at = ?, \
              error = COALESCE(error, 'interrupted before it finished; attempt ' || ? || ' took over') \
@@ -430,7 +460,7 @@ mod tests {
         let crashed = insert_attempt(&db, &attempt(RequestedVia::Tenant)).await?;
         let current = insert_attempt(&db, &attempt(RequestedVia::Tenant)).await?;
 
-        assert_eq!(close_interrupted(&db, PARTY, ME, current).await?, 1);
+        assert_eq!(close_open_attempts(&db, PARTY, ME, current, None).await?, 1);
 
         let rows = list_for_party(&db, PARTY, 10).await?;
         let by_id = |id| rows.iter().find(|row| row.id == id).cloned();
@@ -451,6 +481,67 @@ mod tests {
             by_id(current).map(|row| row.status),
             Some("in_progress".into())
         );
+        Ok(())
+    }
+
+    /// An attempt that answered 202 left its row open with the serial it wrote.
+    /// Once head state shows the node gone, the retry must close that row as
+    /// completed: it holds the archived contract ids of a departure that did
+    /// happen.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_retry_completes_a_pending_attempt_that_landed(db: SqlitePool) -> Result {
+        let pending = insert_attempt(&db, &attempt(RequestedVia::Tenant)).await?;
+        set_step(&db, pending, UnhostStep::Topology).await?;
+        set_cleanup(&db, pending, &["vr-1".to_string()], &[]).await?;
+        finish(&db, pending, AuditStatus::InProgress, Some(5), None).await?;
+        let crashed = insert_attempt(&db, &attempt(RequestedVia::Tenant)).await?;
+        let retry = insert_attempt(&db, &attempt(RequestedVia::Tenant)).await?;
+
+        assert_eq!(
+            close_open_attempts(&db, PARTY, ME, retry, Some(5)).await?,
+            2
+        );
+
+        let rows = list_for_party(&db, PARTY, 10).await?;
+        let by_id = |id| {
+            rows.iter()
+                .find(|row| row.id == id)
+                .cloned()
+                .map(UnhostAuditRow::into_entry)
+        };
+        let Some(pending) = by_id(pending) else {
+            panic!("the pending row must still be there");
+        };
+        assert_eq!(pending.status, "completed");
+        assert_eq!(pending.step, "done");
+        assert_eq!(pending.error, None);
+        assert_eq!(pending.validator_rights_archived, vec!["vr-1".to_string()]);
+        assert!(pending.finished_at.is_some());
+        assert_eq!(by_id(crashed).map(|row| row.status), Some("failed".into()));
+        assert_eq!(
+            by_id(retry).map(|row| row.status),
+            Some("in_progress".into())
+        );
+        Ok(())
+    }
+
+    /// While head state still lists the node, nothing proves the pending write
+    /// landed, so its row closes as interrupted like any other.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_pending_attempt_that_did_not_land_is_interrupted(db: SqlitePool) -> Result {
+        let pending = insert_attempt(&db, &attempt(RequestedVia::Tenant)).await?;
+        set_step(&db, pending, UnhostStep::Topology).await?;
+        finish(&db, pending, AuditStatus::InProgress, Some(5), None).await?;
+        let retry = insert_attempt(&db, &attempt(RequestedVia::Tenant)).await?;
+
+        close_open_attempts(&db, PARTY, ME, retry, None).await?;
+
+        let rows = list_for_party(&db, PARTY, 10).await?;
+        let status = rows
+            .iter()
+            .find(|row| row.id == pending)
+            .map(|row| row.status.clone());
+        assert_eq!(status, Some("failed".into()));
         Ok(())
     }
 
