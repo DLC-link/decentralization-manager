@@ -42,9 +42,9 @@ use crate::common::{
     scenario::Scenario,
 };
 
-/// How many times the phase repeats an unhost that answered 202. A repeat after
-/// the write takes effect answers 200.
-const UNHOST_ATTEMPTS: usize = 10;
+/// How many times the phase repeats an unhost that is still in flight. A repeat
+/// after the write takes effect answers 200.
+const UNHOST_ATTEMPTS: usize = 30;
 
 /// This host's serial for the party, from the endpoint a wallet reads it from.
 async fn serial_on(f: &Fixture, port: u16, party_id: &str) -> anyhow::Result<u64> {
@@ -160,9 +160,13 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
                                 info!("P3 left {party_id} after {attempt} call(s): {body}");
                                 return Ok(());
                             }
-                            // Accepted but not effective yet. A repeat reads
-                            // head state first and answers 200 once it lands.
+                            // Accepted but not effective yet. The host keeps
+                            // the party held until it is, so a repeat answers
+                            // 409 "already running" until then, and 200 after.
                             StatusCode::ACCEPTED => {
+                                tokio::time::sleep(Duration::from_secs(2)).await;
+                            }
+                            StatusCode::CONFLICT if body.contains("already running") => {
                                 tokio::time::sleep(Duration::from_secs(2)).await;
                             }
                             _ => anyhow::bail!("P3's unhost answered {status}: {body}"),
