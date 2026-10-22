@@ -288,8 +288,10 @@ party one host may leave. On a 2-of-2 or 3-of-3 party no host may leave.
    fully hosted.
 2. **Topology.** The host writes the mapping without itself at serial
    `base_serial + 1`, signed with its own key. It reads head state until the
-   mapping no longer lists it. After about 20 seconds it answers `202`. Repeat
-   the call to see it finish.
+   mapping no longer lists it. After about 20 seconds it answers `202` and
+   keeps watching. Until the change takes effect, no ACS copy of the party may
+   start on this host, and a repeat answers `409`. Once the host is gone, it
+   closes the attempt's audit row as `completed`, and a repeat answers `200`.
 3. **Audit.** The host writes one row per attempt to its own database.
    `GET /external-parties/{party_id}/unhost-audit` lists the rows, newest
    first. The **History** button on the party's row shows them too.
@@ -301,8 +303,7 @@ the serial has not moved.
 The host keeps working when the caller gives up. On a busy network the Splice
 cleanup can take more than a minute, which is longer than the wallet client
 waits. Repeat the call: it answers `409` while the first one still runs, and
-`200` once the host is gone. A repeat after a `202` also closes that earlier
-attempt's audit row as `completed`.
+`200` once the host is gone.
 
 The host keeps the party's contracts in its store. DecMan has no call that
 removes them yet.
@@ -326,7 +327,7 @@ removes them yet.
 | `409` "an unhost of … is already running" | An earlier unhost call for the party still runs, perhaps for a caller that gave up | Wait, then repeat the call |
 | `409` "this host is leaving …" from an ACS block call | An unhost of the party runs on this host | Wait for the unhost to finish. The relay cannot start while the host leaves |
 | `422` from unhost | The host has no validator operator party | Set `DECPM_VALIDATOR_OPERATOR_PARTY`. If the host never acted as the party's Splice validator, send `"splice_cleanup": false` |
-| `202` from unhost | Canton accepted the topology write, but it is not effective yet | Repeat the call. It answers `200` once the host is gone |
+| `202` from unhost | Canton accepted the topology write, but it is not effective yet | Repeat the call later. It answers `409` while the host waits for the change, and `200` once the host is gone |
 | `500` from unhost | A Splice archive or the topology write failed | Read the reason in the unhost history, fix it, and repeat the call |
 
 The copy fails the same way for every kind of party. See

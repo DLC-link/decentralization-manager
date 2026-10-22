@@ -171,8 +171,9 @@ let left = host
     .await?;
 ```
 
-A `202` means the host's write is not effective yet. Repeat the call: it
-answers `200` once the host is gone. A `400` means the hosts that remain could
+A `202` means the host's write is not effective yet. Repeat the call later: it
+answers `409` while the host waits for the change, and `200` once the host is
+gone. A `400` means the hosts that remain could
 not meet the threshold. Lower it with `raise_threshold` first, which moves the
 threshold either way.
 

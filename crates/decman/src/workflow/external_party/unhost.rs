@@ -61,7 +61,7 @@ use crate::{
                 self, AuditStatus, NewAttempt, RequestedVia, UnhostAuditRow, UnhostStep,
             },
         },
-        party_replication::relay::{HoldRefused, RelaySessions},
+        party_replication::relay::{HoldRefused, PartyHold, RelaySessions},
         topology,
     },
 };
@@ -165,12 +165,12 @@ pub async fn unhost(
     .await
     .map_err(UnhostError::Internal)?;
 
-    // Held until the attempt ends. A second unhost of the party is refused,
-    // and so is any ACS relay for it, because a relay running while the node
-    // leaves would stream or import against a mapping that no longer holds.
-    // Taking the hold and starting a relay share a lock, so neither can miss
-    // the other.
-    let _hold = match env
+    // Held until the node is gone or the attempt ends. A second unhost of the
+    // party is refused, and so is any ACS relay for it, because a relay running
+    // while the node leaves would stream or import against a mapping that no
+    // longer holds. Taking the hold and starting a relay share a lock, so
+    // neither can miss the other.
+    let hold = match env
         .relay_sessions
         .hold(party_id, |instance| {
             instance_is_for_party(instance, party_id)
@@ -248,6 +248,17 @@ pub async fn unhost(
                 audit_id,
                 "external-party unhost accepted; the write is not effective yet"
             );
+            // The removal is scheduled but not effective, so this node still
+            // appears in the mapping and a relay could otherwise start. The
+            // hold moves to a watcher that releases it once the node is gone.
+            tokio::spawn(watch_departure(
+                env.config.clone(),
+                env.db.clone(),
+                hold,
+                party_id.to_string(),
+                me,
+                audit_id,
+            ));
             Ok(outcome(
                 WorkflowProgress::InProgress,
                 progress.serial_before,
@@ -256,6 +267,68 @@ pub async fn unhost(
         Err(Stop::Refused(error)) => Err(error),
         Err(Stop::Failed(_)) => Ok(outcome(WorkflowProgress::Failed, progress.serial_before)),
     }
+}
+
+/// How many head-state reads [`watch_departure`] makes, one topology retry delay
+/// apart: ten minutes with the default delay.
+const WATCH_POLLS: u32 = 300;
+
+/// Wait for an accepted removal to take effect, keeping the party held until it
+/// does. Then close the attempt's audit row as completed.
+///
+/// A repeat of the unhost meanwhile is refused as already running, and answers
+/// 200 once the hold is gone. If the removal never shows, the hold is released
+/// and the row stays open for the next attempt to settle.
+async fn watch_departure(
+    config: NodeConfig,
+    db: SqlitePool,
+    hold: PartyHold,
+    party_id: String,
+    me: String,
+    audit_id: i64,
+) {
+    let delay = Duration::from_secs(topology_retry_delay_secs());
+    for _ in 0..WATCH_POLLS {
+        tokio::time::sleep(delay).await;
+        match read_hosted(&config, &party_id).await {
+            Ok(current) if !hosts(&current.mapping, &me) => {
+                let closed = async {
+                    unhost_audit::set_step(&db, audit_id, UnhostStep::Done).await?;
+                    unhost_audit::finish(
+                        &db,
+                        audit_id,
+                        AuditStatus::Completed,
+                        Some(current.serial),
+                        None,
+                    )
+                    .await
+                }
+                .await;
+                if let Err(e) = closed {
+                    tracing::error!(%party_id, audit_id, "failed to close the unhost audit row: {e:#}");
+                }
+                tracing::info!(
+                    %party_id,
+                    serial = current.serial,
+                    audit_id,
+                    "external-party unhost completed after it was accepted"
+                );
+                drop(hold);
+                return;
+            }
+            Ok(_) => {}
+            Err(e) => {
+                tracing::warn!(%party_id, "external-party unhost: head-state read failed: {e:#}");
+            }
+        }
+    }
+    tracing::warn!(
+        %party_id,
+        audit_id,
+        "external-party unhost: the accepted removal did not take effect in time; releasing the \
+         party for the next attempt"
+    );
+    drop(hold);
 }
 
 /// What one attempt has done so far, for the audit row and the response.
