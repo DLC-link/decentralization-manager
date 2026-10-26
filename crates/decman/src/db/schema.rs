@@ -1,6 +1,6 @@
 use super::rows::{
     ChainAuditCacheRow, DecPartyContractRow, DecPartyParticipantRow, DecPartyRow,
-    GovernanceAuditRow,
+    FormerDecPartyRow, GovernanceAuditRow,
 };
 use crate::{
     canton_id::{CantonId, Fingerprint},
@@ -50,6 +50,12 @@ pub trait SchemaRead {
         party_id: &CantonId,
         participant_id: &CantonId,
     ) -> Result<Option<String>>;
+
+    /// Former parties an operator has not dismissed, oldest removal first.
+    async fn get_former_dec_parties(&self) -> Result<Vec<FormerDecPartyRow>>;
+
+    /// One former party, dismissed or not.
+    async fn get_former_dec_party(&self, party_id: &CantonId) -> Result<Option<FormerDecPartyRow>>;
 
     /// Get owner keys for a decentralized party
     async fn get_dec_party_owners(&self, party_id: &CantonId) -> Result<Vec<String>>;
@@ -204,6 +210,45 @@ pub trait SchemaWrite {
         party_id: &CantonId,
         participant_id: &CantonId,
     ) -> Result<bool>;
+
+    /// Record that this participant no longer hosts `party_id`, as of
+    /// `removed_at`. The same removal seen again changes nothing. A newer
+    /// removal resets the row, because a rehost and a second removal leave new
+    /// leftovers: the old purge and dismissal no longer cover them. A row with
+    /// a running purge is left alone. Returns whether a row was added or reset.
+    async fn record_former_dec_party(&self, party_id: &CantonId, removed_at: i64) -> Result<bool>;
+
+    /// Forget former parties this participant hosts again. A row whose purge
+    /// is running is kept, so the purge can record its outcome.
+    async fn forget_former_dec_parties(&self, party_ids: &[String]) -> Result<u64>;
+
+    /// Mark a purge of `party_id` as running. Returns `false`, and changes
+    /// nothing, when the party is not a visible former party, or when any
+    /// purge or workflow run is in progress on this node. A purge takes the
+    /// participant off the synchronizer, so it must overlap with neither.
+    /// While it runs, no workflow run can become in progress either.
+    async fn claim_former_party_purge(&self, party_id: &CantonId) -> Result<bool>;
+
+    /// Record a purge that finished and left only shared contracts behind.
+    async fn complete_former_party_purge(
+        &self,
+        party_id: &CantonId,
+        purged: i64,
+        kept: i64,
+    ) -> Result<()>;
+
+    /// Record a purge that failed.
+    async fn fail_former_party_purge(&self, party_id: &CantonId, error: &str) -> Result<()>;
+
+    /// Mark every running purge as failed with `error`. Run at startup: a
+    /// purge runs inside this process, so one still marked running there was
+    /// cut off by the restart. Returns the ids of the parties whose purge
+    /// it marked as failed.
+    async fn fail_interrupted_purges(&self, error: &str) -> Result<Vec<String>>;
+
+    /// Hide a former party whose purge succeeded. Returns whether a row
+    /// changed.
+    async fn dismiss_former_dec_party(&self, party_id: &CantonId) -> Result<bool>;
 }
 
 /// A transaction that can be committed
@@ -323,7 +368,8 @@ pub trait Commitable {
     async fn prune_handled_invitations(&mut self, keep: i64) -> Result<u64>;
 
     /// Insert or replace a workflow run. Used on initial start, on every
-    /// state-machine advance, and on resume.
+    /// state-machine advance, and on resume. Fails for an in-progress run
+    /// while a purge of former-party contracts runs.
     async fn upsert_workflow_run(&mut self, run: &WorkflowRun) -> Result;
 
     /// Update the per-step progress fields without touching status.
@@ -336,7 +382,8 @@ pub trait Commitable {
         updated_at: i64,
     ) -> Result;
 
-    /// Flip the status (and optional error) of a workflow run.
+    /// Flip the status (and optional error) of a workflow run. Fails on a
+    /// flip to in progress while a purge of former-party contracts runs.
     async fn set_workflow_run_status(
         &mut self,
         instance_name: &str,
