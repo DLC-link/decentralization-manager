@@ -10,12 +10,11 @@
 use std::time::{Duration, Instant, SystemTime};
 
 use anyhow::Context;
-use common::{api::PendingInvitationsResponse, types::InvitationType};
 use serde_json::{Value, json};
 use tokio::time::sleep;
 use tracing::info;
 
-use super::{Fixture, invitations::probe_pending_invitation};
+use super::{Fixture, invitations::probe_run_invitation};
 
 /// Generate a stable, monotonically increasing prefix for a chaos phase. The
 /// suffix is epoch-millis so two phases never collide even when they run
@@ -113,22 +112,21 @@ pub async fn start_workflow_on(
 }
 
 /// Wait until the invitation belonging to coordinator run `instance` is
-/// visible on `port`, then return its id.
+/// visible on `port`, then return its id. A failed probe counts as "not
+/// yet", so a peer that is still starting up does not end the wait.
+///
+/// There is no wait by invitation kind. The cancel cascade can leave an
+/// earlier run's invitation pending, and a wait by kind may return it.
 pub async fn wait_for_invite_for_instance(
     f: &Fixture,
     port: u16,
     instance: &str,
     deadline: Duration,
 ) -> anyhow::Result<String> {
-    let start = std::time::Instant::now();
+    let start = Instant::now();
     loop {
-        let r: PendingInvitationsResponse = f.get_json(port, "/invitations").await?;
-        if let Some(inv) = r
-            .invitations
-            .into_iter()
-            .find(|i| i.workflow_instance.as_deref() == Some(instance))
-        {
-            return Ok(inv.id);
+        if let Some(id) = probe_run_invitation(f, port, instance).await {
+            return Ok(id);
         }
         if start.elapsed() >= deadline {
             anyhow::bail!(
@@ -136,7 +134,7 @@ pub async fn wait_for_invite_for_instance(
                  within {deadline:?}"
             );
         }
-        tokio::time::sleep(Duration::from_millis(500)).await;
+        sleep(Duration::from_millis(500)).await;
     }
 }
 
@@ -183,28 +181,6 @@ pub async fn ensure_nodes_healthy(f: &mut Fixture) -> anyhow::Result<()> {
         crate::common::processes::restart_node(f, idx).await?;
     }
     Ok(())
-}
-
-/// Wait for a pending invitation of the given type to appear on `port`,
-/// returning its id. Bails after the deadline.
-pub async fn wait_for_invite(
-    f: &Fixture,
-    port: u16,
-    invitation_type: InvitationType,
-    deadline: Duration,
-) -> anyhow::Result<String> {
-    let start = Instant::now();
-    loop {
-        if let Some(id) = probe_pending_invitation(f, port, invitation_type).await {
-            return Ok(id);
-        }
-        if start.elapsed() >= deadline {
-            anyhow::bail!(
-                "{invitation_type} invitation not visible on port {port} within {deadline:?}"
-            );
-        }
-        sleep(Duration::from_millis(500)).await;
-    }
 }
 
 /// Poll `probe` every second until it returns `true` or the deadline passes.
