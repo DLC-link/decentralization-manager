@@ -19,8 +19,10 @@ import Utility.Registry.App.V0.Service.AllocationFactory
 import Utility.Registry.V0.Configuration.Instrument (InstrumentConfiguration)
 import Utility.Registry.V0.Holding.TokenApiUtils
   (instrumentConfigurationContextKey, issuerCredentialsContextKey)
+import Utility.Registry.V0.Rule.BlockList (StoredBlockListPartyShas)
 
 import Governance.Action
+import Governance.UtilityOnboarding.Utils (blockListContextEntries)
 
 template BurnProposal
   with
@@ -36,6 +38,12 @@ template BurnProposal
     executeBefore : Time
     meta : Metadata
     extraArgsMeta : Metadata
+    blockListShardCids : Optional [ContractId StoredBlockListPartyShas]
+      -- ^ Shards of the registrar's block list. The registry checks the
+      -- holder against them when the configuration checks a block list.
+      -- BurnOffer_Accept checks again, with shards the holder sends.
+      -- Optional and last so proposals created without it upgrade with
+      -- None, which leaves the choice context as it was.
   where
     signatory proposer
     observer governanceParty
@@ -51,12 +59,12 @@ template BurnProposal
 
       executeImpl = do
         let context = ChoiceContext with
-              values = TextMap.fromList
+              values = TextMap.fromList $
                 [ (instrumentConfigurationContextKey,
                    AV_ContractId $ coerceContractId instrumentConfigurationCid)
                 , (issuerCredentialsContextKey,
                    AV_List [])
-                ]
+                ] <> blockListContextEntries blockListShardCids
         _ <- exercise allocationFactoryCid AllocationFactory_OfferBurn with
           expectedAdmin = governanceParty
           burn = Burn with

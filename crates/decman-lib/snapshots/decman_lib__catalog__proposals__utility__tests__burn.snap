@@ -1,6 +1,6 @@
 ---
 source: crates/decman-lib/src/catalog/proposals/utility.rs
-expression: "Burn\n{\n    allocation_factory_cid: \"00alloc\".to_string(), instrument_id: InstrumentId\n    { admin: \"admin::ns\".to_string(), id: \"instr-1\".to_string(), },\n    instrument_configuration_cid: \"00icc\".to_string(), holder: cid(\"holder\"),\n    amount: \"1.5\".parse().expect(\"valid decimal\"), description:\n    \"burn it\".to_string(),\n}.to_daml_proto().unwrap()"
+expression: "Burn\n{\n    allocation_factory_cid: \"00alloc\".to_string(), instrument_id: InstrumentId\n    { admin: \"admin::ns\".to_string(), id: \"instr-1\".to_string(), },\n    instrument_configuration_cid: \"00icc\".to_string(), holder: cid(\"holder\"),\n    amount: \"1.5\".parse().expect(\"valid decimal\"), description:\n    \"burn it\".to_string(), block_list_shard_cids:\n    vec![\"00shard1\".to_string(), \"00shard2\".to_string()],\n}.to_daml_proto().expect(\"payload encodes\")"
 ---
 Value {
     sum: Some(
@@ -186,6 +186,45 @@ Value {
                                                     ),
                                                 },
                                             ],
+                                        },
+                                    ),
+                                ),
+                            },
+                        ),
+                    },
+                    RecordField {
+                        label: "blockListShardCids",
+                        value: Some(
+                            Value {
+                                sum: Some(
+                                    Optional(
+                                        Optional {
+                                            value: Some(
+                                                Value {
+                                                    sum: Some(
+                                                        List(
+                                                            List {
+                                                                elements: [
+                                                                    Value {
+                                                                        sum: Some(
+                                                                            ContractId(
+                                                                                "00shard1",
+                                                                            ),
+                                                                        ),
+                                                                    },
+                                                                    Value {
+                                                                        sum: Some(
+                                                                            ContractId(
+                                                                                "00shard2",
+                                                                            ),
+                                                                        ),
+                                                                    },
+                                                                ],
+                                                            },
+                                                        ),
+                                                    ),
+                                                },
+                                            ),
                                         },
                                     ),
                                 ),

@@ -236,6 +236,7 @@ fn all_proposal_fixtures() -> Vec<ProposalType> {
             recipient: cid("recv"),
             amount: dec("5"),
             description: "mint".into(),
+            block_list_shard_cids: vec!["00shard".into()],
         }),
         ProposalType::OfferFreeCredential(OfferFreeCredential {
             user_service_cid: "00usc".into(),
@@ -280,6 +281,7 @@ fn all_proposal_fixtures() -> Vec<ProposalType> {
             holder: cid("holder"),
             amount: dec("3"),
             description: "burn".into(),
+            block_list_shard_cids: vec!["00shard".into()],
         }),
         ProposalType::AcceptMintRequest(AcceptMintRequest {
             mint_request_cid: "00mr".into(),
@@ -414,6 +416,24 @@ fn minimal_option_fixtures() -> Vec<ProposalType> {
             },
             deposit_amount_usd: None,
         }),
+        ProposalType::Mint(Mint {
+            allocation_factory_cid: "00alloc".into(),
+            instrument_id: instrument(),
+            instrument_configuration_cid: "00icc".into(),
+            recipient: cid("recv"),
+            amount: dec("5"),
+            description: "mint".into(),
+            block_list_shard_cids: vec![],
+        }),
+        ProposalType::Burn(Burn {
+            allocation_factory_cid: "00alloc".into(),
+            instrument_id: instrument(),
+            instrument_configuration_cid: "00icc".into(),
+            holder: cid("holder"),
+            amount: dec("3"),
+            description: "burn".into(),
+            block_list_shard_cids: vec![],
+        }),
         ProposalType::AcceptMintRequest(AcceptMintRequest {
             mint_request_cid: "00mr".into(),
             instrument_configuration_cid: "00icc".into(),
@@ -540,8 +560,8 @@ fn use_block_list_is_none_when_omitted() {
 }
 
 /// Clients written before `block_list_shard_cids` existed send no such key.
-/// Both accept payloads read its absence as an empty list, which sends no
-/// shards.
+/// The accept and offer payloads read its absence as an empty list, which
+/// sends no shards.
 #[test]
 fn block_list_shard_cids_are_empty_when_omitted() {
     let mint: ProposalType = serde_json::from_value(serde_json::json!({
@@ -567,6 +587,36 @@ fn block_list_shard_cids_are_empty_when_omitted() {
         panic!("expected accept_burn_request, got {burn:?}");
     };
     assert!(burn.block_list_shard_cids.is_empty());
+
+    let mint_offer: ProposalType = serde_json::from_value(serde_json::json!({
+        "type": "mint",
+        "allocation_factory_cid": "00alloc",
+        "instrument_id": instrument(),
+        "instrument_configuration_cid": "00icc",
+        "recipient": cid("recv"),
+        "amount": "5",
+        "description": "mint",
+    }))
+    .expect("deserialize mint");
+    let ProposalType::Mint(mint_offer) = mint_offer else {
+        panic!("expected mint, got {mint_offer:?}");
+    };
+    assert!(mint_offer.block_list_shard_cids.is_empty());
+
+    let burn_offer: ProposalType = serde_json::from_value(serde_json::json!({
+        "type": "burn",
+        "allocation_factory_cid": "00alloc",
+        "instrument_id": instrument(),
+        "instrument_configuration_cid": "00icc",
+        "holder": cid("holder"),
+        "amount": "3",
+        "description": "burn",
+    }))
+    .expect("deserialize burn");
+    let ProposalType::Burn(burn_offer) = burn_offer else {
+        panic!("expected burn, got {burn_offer:?}");
+    };
+    assert!(burn_offer.block_list_shard_cids.is_empty());
 }
 
 /// The update replaces the whole configuration, so a request that leaves a

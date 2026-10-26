@@ -1621,6 +1621,7 @@ mod tests {
                 recipient: test_party("recv").unwrap(),
                 amount: "5".parse().unwrap(),
                 description: "mint".into(),
+                block_list_shard_cids: vec![],
             }),
             ProposalType::OfferFreeCredential(OfferFreeCredential {
                 user_service_cid: "00usc".into(),
@@ -1665,6 +1666,7 @@ mod tests {
                 holder: test_party("holder").unwrap(),
                 amount: "3".parse().unwrap(),
                 description: "burn".into(),
+                block_list_shard_cids: vec![],
             }),
             ProposalType::AcceptMintRequest(AcceptMintRequest {
                 mint_request_cid: "00mr".into(),

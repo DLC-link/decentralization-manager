@@ -8,13 +8,18 @@ import DA.Time (addRelTime, hours)
 import Daml.Script
 
 import Splice.Api.Token.HoldingV1 (InstrumentId(..))
-import Splice.Api.Token.MetadataV1 (Metadata(..))
-import Utility.Registry.App.V0.Model.Mint (MintOffer)
+import Splice.Api.Token.MetadataV1 (ExtraArgs(..), Metadata(..))
+import Utility.Registry.App.V0.Model.Mint
+  (MintOffer, MintOffer_Accept(..), MintOffer_Accept_Result)
+import Utility.Registry.Holding.V0.Holding (Holding)
+import Utility.Registry.V0.Holding.TokenApiUtils (blockListContextKey)
+import Utility.Registry.V0.Rule.BlockList (StoredBlockListPartyShas)
 
 import Governance.Action (GovernableAction)
-import Governance.Rules (GovernanceRules)
+import Governance.Rules
 
 import Governance.TokenIssuance.MintProposal
+import Governance.UtilityOnboarding.Test.AcceptBurnRequestTest (choiceContextWithEmptyCredentials)
 import Governance.UtilityOnboarding.TestUtils
 
 import TestHarness
@@ -51,16 +56,21 @@ mkInstrumentId parties = InstrumentId with
   admin = parties.governanceParty
   id = "TEST-TOKEN"
 
-when_mint_offered : Fixture -> Script MintInputs
-when_mint_offered f = do
+mkMintInputs : Fixture -> Script MintInputs
+mkMintInputs f = do
   now <- getTime
-  let inputs = MintInputs with
-        recipient = f.parties.outsider
-        amount = 100.0
-        description = "Bridge tx abcd1234"
-        requestedAt = now
-        executeBefore = now `addRelTime` hours 24
-        meta = Metadata with values = TextMap.fromList [("bridge-id", "xyz-789")]
+  pure MintInputs with
+    recipient = f.parties.outsider
+    amount = 100.0
+    description = "Bridge tx abcd1234"
+    requestedAt = now
+    executeBefore = now `addRelTime` hours 24
+    meta = Metadata with values = TextMap.fromList [("bridge-id", "xyz-789")]
+
+proposeMint
+  : Optional [ContractId StoredBlockListPartyShas] -> Fixture -> MintInputs
+  -> Script (ContractId GovernableAction)
+proposeMint shardCids f inputs = do
   proposalCid <- submit f.parties.member1 $ createCmd MintProposal with
     governanceParty = f.parties.governanceParty
     proposer = f.parties.member1
@@ -74,10 +84,35 @@ when_mint_offered f = do
     executeBefore = inputs.executeBefore
     meta = inputs.meta
     extraArgsMeta = Metadata with values = TextMap.empty
-  let proposalInterfaceCid : ContractId GovernableAction = toInterfaceContractId proposalCid
-  _ <- confirmAndExecute f.parties f.rulesCid proposalInterfaceCid
+    blockListShardCids = shardCids
+  pure (toInterfaceContractId proposalCid)
+
+offerMint : Optional [ContractId StoredBlockListPartyShas] -> Fixture -> Script MintInputs
+offerMint shardCids f = do
+  inputs <- mkMintInputs f
+  proposalCid <- proposeMint shardCids f inputs
+  _ <- confirmAndExecute f.parties f.rulesCid proposalCid
     [f.parties.member1, f.parties.member2] f.parties.member1
   pure inputs
+
+-- | Confirm the offer, run it, and return the failure.
+offerMintMustFail : Optional [ContractId StoredBlockListPartyShas] -> Fixture -> Script Text
+offerMintMustFail shardCids f = do
+  proposalCid <- mkMintInputs f >>= proposeMint shardCids f
+  confirmationCids <- submitConfirmations f.parties.governanceParty f.rulesCid proposalCid
+    [f.parties.member1, f.parties.member2]
+  failure <- submitWithError (actAs f.parties.member1
+    <> readAs f.parties.governanceParty
+    <> readAs f.parties.outsider
+    <> readAs f.parties.operator) $
+    exerciseCmd f.rulesCid GovernanceRules_ExecuteConfirmedAction with
+      executor = f.parties.member1
+      actionProposalCid = proposalCid
+      confirmations = confirmationCids
+  pure (show failure)
+
+when_mint_offered : Fixture -> Script MintInputs
+when_mint_offered = offerMint None
 
 then_mint_offer_fields_match : Fixture -> MintInputs -> Script Failures
 then_mint_offer_fields_match f inputs = do
@@ -114,6 +149,7 @@ when_zero_amount f = do
     executeBefore = now `addRelTime` hours 24
     meta = Metadata with values = TextMap.empty
     extraArgsMeta = Metadata with values = TextMap.empty
+    blockListShardCids = None
 
 then_nothing_mint : Fixture -> () -> Script Failures
 then_nothing_mint _ _ = pure []
@@ -123,3 +159,126 @@ test_when_zero_amount_then_create_rejected = script do
     given = given_setup_done
     when = when_zero_amount
     then_ = then_nothing_mint
+
+-- * Block list on. Onboarding created one empty shard per hex prefix.
+
+given_setup_on_block_list : Script Fixture
+given_setup_on_block_list = do
+  parties <- allocateOnboardingTestParties
+  rulesCid <- createTestGovernance parties
+  artifacts <- setupUtilityForTest parties rulesCid >>= turnBlockListOn parties
+  pure Fixture with ..
+
+given_recipient_blocked : Script Fixture
+given_recipient_blocked = do
+  f <- given_setup_on_block_list
+  blockParty f.parties f.parties.outsider
+  pure f
+
+when_mint_offered_with_all_shards : Fixture -> Script MintInputs
+when_mint_offered_with_all_shards f = do
+  shardCids <- queryBlockListShards f.parties
+  offerMint (Some shardCids) f
+
+when_mint_offered_with_all_shards_fails : Fixture -> Script Text
+when_mint_offered_with_all_shards_fails f = do
+  shardCids <- queryBlockListShards f.parties
+  offerMintMustFail (Some shardCids) f
+
+when_mint_offered_without_recipient_shard : Fixture -> Script Text
+when_mint_offered_without_recipient_shard f = do
+  shardCids <- queryShardsMissing f.parties f.parties.outsider
+  offerMintMustFail (Some shardCids) f
+
+-- The failed offer rolls back, so no MintOffer exists.
+then_mint_offer_refused : Text -> Fixture -> Text -> Script Failures
+then_mint_offer_refused reason f failure = do
+  offers <- query @MintOffer f.parties.governanceParty
+  pure $
+    shouldContain "execution error" failure reason <>
+    shouldBe "MintOffer count" 0 (length offers)
+
+test_when_block_list_on_and_shards_sent_then_mint_offer_created = script do
+  run Test with
+    given = given_setup_on_block_list
+    when = when_mint_offered_with_all_shards
+    then_ = then_mint_offer_fields_match
+
+test_when_recipient_blocked_then_mint_offer_refused = script do
+  run Test with
+    given = given_recipient_blocked
+    when = when_mint_offered_with_all_shards_fails
+    then_ = then_mint_offer_refused "Holder must not be blocklisted"
+
+test_when_block_list_on_and_no_shards_then_mint_offer_refused = script do
+  run Test with
+    given = given_setup_on_block_list
+    when = offerMintMustFail None
+    then_ = then_mint_offer_refused ("Missing context entry for: " <> blockListContextKey)
+
+test_when_recipient_shard_missing_then_mint_offer_refused = script do
+  run Test with
+    given = given_setup_on_block_list
+    when = when_mint_offered_without_recipient_shard
+    then_ = then_mint_offer_refused "Holder prefix must be provided"
+
+-- * The recipient's MintOffer_Accept checks the block list again, with the
+-- shards the recipient sends. The recipient sees neither the configuration
+-- nor the shards, so it reads them as the registrar. A wallet would send
+-- them as disclosed contracts.
+
+given_mint_offer_on_block_list : Script Fixture
+given_mint_offer_on_block_list = do
+  f <- given_setup_on_block_list
+  _ <- when_mint_offered_with_all_shards f
+  pure f
+
+acceptMintOfferCommand
+  : Optional [ContractId StoredBlockListPartyShas] -> Fixture
+  -> Script (Commands MintOffer_Accept_Result)
+acceptMintOfferCommand shardCids f = do
+  [(offerCid, _)] <- query @MintOffer f.parties.outsider
+  pure $ exerciseCmd offerCid MintOffer_Accept with
+    extraArgs = ExtraArgs with
+      context = choiceContextWithEmptyCredentials f.artifacts shardCids
+      meta = Metadata with values = TextMap.empty
+
+when_recipient_accepts_with_shards : Fixture -> Script ()
+when_recipient_accepts_with_shards f = do
+  shardCids <- queryBlockListShards f.parties
+  command <- acceptMintOfferCommand (Some shardCids) f
+  _ <- submit (actAs f.parties.outsider <> readAs f.parties.governanceParty) command
+  pure ()
+
+when_recipient_accepts_without_shards : Fixture -> Script Text
+when_recipient_accepts_without_shards f = do
+  command <- acceptMintOfferCommand None f
+  failure <- submitWithError (actAs f.parties.outsider <> readAs f.parties.governanceParty) command
+  pure (show failure)
+
+then_recipient_holds_minted_amount : Fixture -> () -> Script Failures
+then_recipient_holds_minted_amount f _ = do
+  holdings <- query @Holding f.parties.outsider
+  pure $ shouldBe "holding amounts" [100.0] [h.amount | (_, h) <- holdings]
+
+then_mint_offer_still_open : Fixture -> Text -> Script Failures
+then_mint_offer_still_open f failure = do
+  offers <- query @MintOffer f.parties.outsider
+  holdings <- query @Holding f.parties.outsider
+  pure $
+    shouldContain "execution error" failure
+      ("Missing context entry for: " <> blockListContextKey) <>
+    shouldBe "MintOffer count" 1 (length offers) <>
+    shouldBe "holdings for recipient" 0 (length holdings)
+
+test_when_recipient_accepts_with_shards_then_holding_minted = script do
+  run Test with
+    given = given_mint_offer_on_block_list
+    when = when_recipient_accepts_with_shards
+    then_ = then_recipient_holds_minted_amount
+
+test_when_recipient_accepts_without_shards_then_mint_refused = script do
+  run Test with
+    given = given_mint_offer_on_block_list
+    when = when_recipient_accepts_without_shards
+    then_ = then_mint_offer_still_open

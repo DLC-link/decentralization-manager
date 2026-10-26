@@ -8,13 +8,19 @@ import DA.Time (addRelTime, hours)
 import Daml.Script
 
 import Splice.Api.Token.HoldingV1 (InstrumentId(..))
-import Splice.Api.Token.MetadataV1 (Metadata(..))
-import Utility.Registry.App.V0.Model.Burn (BurnOffer)
+import Splice.Api.Token.MetadataV1 (ExtraArgs(..), Metadata(..))
+import Utility.Registry.App.V0.Model.Burn
+  (BurnOffer, BurnOffer_Accept(..), BurnOffer_Accept_Result)
+import Utility.Registry.Holding.V0.Holding (Holding)
+import Utility.Registry.V0.Holding.TokenApiUtils (blockListContextKey)
+import Utility.Registry.V0.Rule.BlockList (StoredBlockListPartyShas)
 
 import Governance.Action (GovernableAction)
-import Governance.Rules (GovernanceRules)
+import Governance.Rules
 
 import Governance.TokenIssuance.BurnProposal
+import Governance.UtilityOnboarding.Test.AcceptBurnRequestTest
+  (choiceContextWithEmptyCredentials, seedHoldingForRequester)
 import Governance.UtilityOnboarding.TestUtils
 
 import TestHarness
@@ -51,16 +57,21 @@ mkInstrumentId parties = InstrumentId with
   admin = parties.governanceParty
   id = "TEST-TOKEN"
 
-when_burn_offered : Fixture -> Script BurnInputs
-when_burn_offered f = do
+mkBurnInputs : Fixture -> Script BurnInputs
+mkBurnInputs f = do
   now <- getTime
-  let inputs = BurnInputs with
-        holder = f.parties.outsider
-        amount = 100.0
-        description = "Bridge unwind tx abcd1234"
-        requestedAt = now
-        executeBefore = now `addRelTime` hours 24
-        meta = Metadata with values = TextMap.fromList [("bridge-id", "xyz-789")]
+  pure BurnInputs with
+    holder = f.parties.outsider
+    amount = 100.0
+    description = "Bridge unwind tx abcd1234"
+    requestedAt = now
+    executeBefore = now `addRelTime` hours 24
+    meta = Metadata with values = TextMap.fromList [("bridge-id", "xyz-789")]
+
+proposeBurn
+  : Optional [ContractId StoredBlockListPartyShas] -> Fixture -> BurnInputs
+  -> Script (ContractId GovernableAction)
+proposeBurn shardCids f inputs = do
   proposalCid <- submit f.parties.member1 $ createCmd BurnProposal with
     governanceParty = f.parties.governanceParty
     proposer = f.parties.member1
@@ -74,10 +85,35 @@ when_burn_offered f = do
     executeBefore = inputs.executeBefore
     meta = inputs.meta
     extraArgsMeta = Metadata with values = TextMap.empty
-  let proposalInterfaceCid : ContractId GovernableAction = toInterfaceContractId proposalCid
-  _ <- confirmAndExecute f.parties f.rulesCid proposalInterfaceCid
+    blockListShardCids = shardCids
+  pure (toInterfaceContractId proposalCid)
+
+offerBurn : Optional [ContractId StoredBlockListPartyShas] -> Fixture -> Script BurnInputs
+offerBurn shardCids f = do
+  inputs <- mkBurnInputs f
+  proposalCid <- proposeBurn shardCids f inputs
+  _ <- confirmAndExecute f.parties f.rulesCid proposalCid
     [f.parties.member1, f.parties.member2] f.parties.member1
   pure inputs
+
+-- | Confirm the offer, run it, and return the failure.
+offerBurnMustFail : Optional [ContractId StoredBlockListPartyShas] -> Fixture -> Script Text
+offerBurnMustFail shardCids f = do
+  proposalCid <- mkBurnInputs f >>= proposeBurn shardCids f
+  confirmationCids <- submitConfirmations f.parties.governanceParty f.rulesCid proposalCid
+    [f.parties.member1, f.parties.member2]
+  failure <- submitWithError (actAs f.parties.member1
+    <> readAs f.parties.governanceParty
+    <> readAs f.parties.outsider
+    <> readAs f.parties.operator) $
+    exerciseCmd f.rulesCid GovernanceRules_ExecuteConfirmedAction with
+      executor = f.parties.member1
+      actionProposalCid = proposalCid
+      confirmations = confirmationCids
+  pure (show failure)
+
+when_burn_offered : Fixture -> Script BurnInputs
+when_burn_offered = offerBurn None
 
 then_burn_offer_fields_match : Fixture -> BurnInputs -> Script Failures
 then_burn_offer_fields_match f inputs = do
@@ -114,6 +150,7 @@ when_zero_amount_burn f = do
     executeBefore = now `addRelTime` hours 24
     meta = Metadata with values = TextMap.empty
     extraArgsMeta = Metadata with values = TextMap.empty
+    blockListShardCids = None
 
 then_nothing_burn : Fixture -> () -> Script Failures
 then_nothing_burn _ _ = pure []
@@ -123,3 +160,123 @@ test_when_zero_amount_burn_then_create_rejected = script do
     given = given_setup_done
     when = when_zero_amount_burn
     then_ = then_nothing_burn
+
+-- * Block list on. Onboarding created one empty shard per hex prefix.
+
+given_setup_on_block_list : Script Fixture
+given_setup_on_block_list = do
+  parties <- allocateOnboardingTestParties
+  rulesCid <- createTestGovernance parties
+  artifacts <- setupUtilityForTest parties rulesCid >>= turnBlockListOn parties
+  pure Fixture with ..
+
+given_holder_blocked : Script Fixture
+given_holder_blocked = do
+  f <- given_setup_on_block_list
+  blockParty f.parties f.parties.outsider
+  pure f
+
+when_burn_offered_with_all_shards : Fixture -> Script BurnInputs
+when_burn_offered_with_all_shards f = do
+  shardCids <- queryBlockListShards f.parties
+  offerBurn (Some shardCids) f
+
+when_burn_offered_with_all_shards_fails : Fixture -> Script Text
+when_burn_offered_with_all_shards_fails f = do
+  shardCids <- queryBlockListShards f.parties
+  offerBurnMustFail (Some shardCids) f
+
+-- The failed offer rolls back, so no BurnOffer exists.
+then_burn_offer_refused : Text -> Fixture -> Text -> Script Failures
+then_burn_offer_refused reason f failure = do
+  offers <- query @BurnOffer f.parties.governanceParty
+  pure $
+    shouldContain "execution error" failure reason <>
+    shouldBe "BurnOffer count" 0 (length offers)
+
+test_when_block_list_on_and_shards_sent_then_burn_offer_created = script do
+  run Test with
+    given = given_setup_on_block_list
+    when = when_burn_offered_with_all_shards
+    then_ = then_burn_offer_fields_match
+
+test_when_holder_blocked_then_burn_offer_refused = script do
+  run Test with
+    given = given_holder_blocked
+    when = when_burn_offered_with_all_shards_fails
+    then_ = then_burn_offer_refused "Holder must not be blocklisted"
+
+test_when_block_list_on_and_no_shards_then_burn_offer_refused = script do
+  run Test with
+    given = given_setup_on_block_list
+    when = offerBurnMustFail None
+    then_ = then_burn_offer_refused ("Missing context entry for: " <> blockListContextKey)
+
+-- * The holder's BurnOffer_Accept checks the block list again, with the
+-- shards the holder sends. The holder sees neither the configuration nor
+-- the shards, so it reads them as the registrar. A wallet would send them
+-- as disclosed contracts.
+
+given_burn_offer_on_block_list : Script Fixture
+given_burn_offer_on_block_list = do
+  f <- given_setup_on_block_list
+  shardCids <- queryBlockListShards f.parties
+  _ <- seedHoldingForRequester f.parties f.rulesCid f.artifacts (Some shardCids)
+    f.parties.outsider 100.0
+  _ <- offerBurn (Some shardCids) f
+  pure f
+
+acceptBurnOfferCommand
+  : Optional [ContractId StoredBlockListPartyShas] -> Fixture
+  -> Script (Commands BurnOffer_Accept_Result)
+acceptBurnOfferCommand shardCids f = do
+  [(offerCid, _)] <- query @BurnOffer f.parties.outsider
+  holdings <- query @Holding f.parties.outsider
+  pure $ exerciseCmd offerCid BurnOffer_Accept with
+    holdingCids = map fst holdings
+    extraArgs = ExtraArgs with
+      context = choiceContextWithEmptyCredentials f.artifacts shardCids
+      meta = Metadata with values = TextMap.empty
+
+when_holder_accepts_with_shards : Fixture -> Script ()
+when_holder_accepts_with_shards f = do
+  shardCids <- queryBlockListShards f.parties
+  command <- acceptBurnOfferCommand (Some shardCids) f
+  _ <- submit (actAs f.parties.outsider <> readAs f.parties.governanceParty) command
+  pure ()
+
+when_holder_accepts_without_shards : Fixture -> Script Text
+when_holder_accepts_without_shards f = do
+  command <- acceptBurnOfferCommand None f
+  failure <- submitWithError (actAs f.parties.outsider <> readAs f.parties.governanceParty) command
+  pure (show failure)
+
+then_holding_burned : Fixture -> () -> Script Failures
+then_holding_burned f _ = do
+  offers <- query @BurnOffer f.parties.outsider
+  holdings <- query @Holding f.parties.outsider
+  pure $
+    shouldBe "BurnOffer count" 0 (length offers) <>
+    shouldBe "holdings for holder" 0 (length holdings)
+
+then_burn_offer_still_open : Fixture -> Text -> Script Failures
+then_burn_offer_still_open f failure = do
+  offers <- query @BurnOffer f.parties.outsider
+  holdings <- query @Holding f.parties.outsider
+  pure $
+    shouldContain "execution error" failure
+      ("Missing context entry for: " <> blockListContextKey) <>
+    shouldBe "BurnOffer count" 1 (length offers) <>
+    shouldBe "holdings for holder" 1 (length holdings)
+
+test_when_holder_accepts_with_shards_then_holding_burned = script do
+  run Test with
+    given = given_burn_offer_on_block_list
+    when = when_holder_accepts_with_shards
+    then_ = then_holding_burned
+
+test_when_holder_accepts_without_shards_then_burn_refused = script do
+  run Test with
+    given = given_burn_offer_on_block_list
+    when = when_holder_accepts_without_shards
+    then_ = then_burn_offer_still_open
