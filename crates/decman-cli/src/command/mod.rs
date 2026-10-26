@@ -31,20 +31,7 @@ pub struct Outcome {
     pub success: bool,
 }
 
-/// `text` with control characters replaced by `?`, for stderr. Error and
-/// progress text can come from the server or a peer, and a raw escape
-/// sequence could rewrite the terminal.
-pub fn for_terminal(text: &str) -> String {
-    text.chars()
-        .map(|c| {
-            if c.is_control() && c != '\n' && c != '\t' {
-                '?'
-            } else {
-                c
-            }
-        })
-        .collect()
-}
+pub use crate::api::for_terminal;
 
 /// Per-node settings a profile configures once, so that `auth grant-rights`
 /// and `party-config` need no credentials on the command line. Secrets are
@@ -810,11 +797,29 @@ fn with_profile_secret(body: Value, settings: &NodeSettings) -> Result<Value> {
     })
 }
 
-/// Whether every IdP field the profile sets has the same value in `body`.
+/// The IdP fields that decide where the server sends a client secret.
+const IDP_FIELDS: [&str; 6] = [
+    "keycloak_url",
+    "keycloak_realm",
+    "keycloak_client_id",
+    "auth0_domain",
+    "auth0_audience",
+    "auth0_client_id",
+];
+
+/// `value` when it is set: not missing, not `null` and not an empty string.
+fn set_value(value: Option<&Value>) -> Option<&Value> {
+    value.filter(|value| !value.is_null() && *value != "")
+}
+
+/// Whether `body` names exactly the profile's IdP and client. Every IdP field
+/// must match, including the fields the profile leaves unset: a body that adds
+/// Auth0 fields to the profile's Keycloak fields would send the secret to Auth0.
 fn names_profile_client(body: &Value, credentials: &PartyCredentials) -> bool {
-    credential_fields(credentials)
+    let profile = credential_fields(credentials);
+    IDP_FIELDS
         .iter()
-        .all(|(key, value)| body.get(key) == Some(value))
+        .all(|key| set_value(body.get(*key)) == set_value(profile.get(*key)))
 }
 
 /// The `PUT /party-config` body for `party_id` from the profile's
@@ -1833,6 +1838,21 @@ mod tests {
 
         // Assert
         assert!(error.to_string().contains("another IdP"), "{error}");
+    }
+
+    #[test]
+    fn a_body_that_adds_auth0_fields_gets_no_profile_secret() {
+        // Arrange — the profile's Keycloak fields, plus another provider.
+        let body = json!({
+            "keycloak_url": "https://idp",
+            "keycloak_realm": "nodes",
+            "keycloak_client_id": "attestor-1",
+            "auth0_domain": "evil.auth0.com",
+            "auth0_client_id": "x",
+        });
+
+        // Act / Assert
+        assert!(!names_profile_client(&body, &profile_credentials()));
     }
 
     #[test]

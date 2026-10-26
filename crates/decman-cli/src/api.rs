@@ -942,13 +942,7 @@ impl DecmanClient {
         let response = self.send_authed(&method, path, query, body)?;
 
         let status = response.status();
-        // The server answers unknown routes with the web UI's index.html, so an
-        // HTML page means the route does not exist on this server version.
-        let is_html = response
-            .headers()
-            .get(reqwest::header::CONTENT_TYPE)
-            .and_then(|value| value.to_str().ok())
-            .is_some_and(|value| value.starts_with("text/html"));
+        let is_html = is_html(&response);
         let text = response
             .text()
             .with_context(|| format!("failed to read the {path} response"))?;
@@ -981,15 +975,12 @@ impl DecmanClient {
     /// if the API returns a non-success status.
     pub fn request_bytes(&mut self, path: &str) -> Result<Vec<u8>> {
         let response = self.send_authed(&Method::GET, path, &[], None)?;
-        let status = response.status();
-        if !status.is_success() {
-            return Err(ApiError {
-                method: Method::GET,
-                path: path.to_owned(),
-                status,
-                body: response.text().unwrap_or_default(),
-            }
-            .into());
+        let response = success_or_api_error(Method::GET, path, response)?;
+        if is_html(&response) {
+            bail!(
+                "GET {path} returned the web UI page, not a file: this server version \
+                 probably has no such route"
+            );
         }
         Ok(response
             .bytes()
@@ -1706,13 +1697,26 @@ impl DecmanClient {
     /// falls through to the password login. A new token goes to the cache.
     fn authenticate(&mut self) -> Result<()> {
         let now = now_secs();
-        if !self
+        if self
             .tokens
             .as_ref()
             .is_some_and(|tokens| tokens.access_valid(now))
         {
-            self.adopt_newer_cached_login(now);
+            return Ok(());
         }
+        // Hold the cache lock until the new login is saved, so a parallel
+        // invocation waits and then takes the saved login. Two refreshes with
+        // the same single-use refresh token would make one of them fail.
+        let _lock = match &self.cache {
+            Some(cache) => cache
+                .lock()
+                .map_err(|error| {
+                    self.warning(&format!("the token cache is not locked: {error:#}"));
+                })
+                .ok(),
+            None => None,
+        };
+        self.adopt_newer_cached_login(now);
         if self
             .tokens
             .as_ref()
@@ -1759,7 +1763,7 @@ impl DecmanClient {
     /// Print `message` on stderr when warnings are on.
     fn warning(&self, message: &str) {
         if self.warn {
-            eprintln!("warning: {message}");
+            eprintln!("warning: {}", for_terminal(message));
         }
     }
 
@@ -1990,6 +1994,32 @@ impl DecmanClient {
         let response = self.send_authed(&Method::PUT, path, &[], Some(&body))?;
         success_or_api_error(Method::PUT, path, response).map(drop)
     }
+}
+
+/// Whether `response` is an HTML page. The server answers unknown routes with
+/// the web UI's index.html, so a page means the route does not exist on this
+/// server version.
+fn is_html(response: &Response) -> bool {
+    response
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value.starts_with("text/html"))
+}
+
+/// `text` with control characters replaced by `?`, for stderr. Error and
+/// progress text can come from a server, an IdP or a peer, and a raw escape
+/// sequence could rewrite the terminal.
+pub fn for_terminal(text: &str) -> String {
+    text.chars()
+        .map(|c| {
+            if c.is_control() && c != '\n' && c != '\t' {
+                '?'
+            } else {
+                c
+            }
+        })
+        .collect()
 }
 
 /// `response` if it succeeded, else an [`ApiError`] with its body.

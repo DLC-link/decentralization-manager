@@ -254,6 +254,30 @@ impl TokenCache {
         Ok(())
     }
 
+    /// Lock this login's cache for the current process. The lock is released
+    /// when the returned file is dropped.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the cache directory is not private, or the lock
+    /// file cannot be opened or locked.
+    pub fn lock(&self) -> Result<std::fs::File> {
+        let dir = self
+            .path
+            .parent()
+            .context("token cache path has no directory")?;
+        create_private_dir(dir)?;
+        if !is_private(dir) {
+            bail!(
+                "the token cache directory {} is a link or open to other users",
+                dir.display()
+            );
+        }
+        let file = open_lock_file(&self.path.with_extension("lock"))?;
+        file.lock().context("failed to lock the token cache")?;
+        Ok(file)
+    }
+
     /// Delete the cache file. Returns whether a file was there.
     ///
     /// # Errors
@@ -321,6 +345,28 @@ fn write_private_file(path: &Path, bytes: &[u8]) -> Result<()> {
     .context("failed to open the token cache file")?;
     file.write_all(bytes)
         .context("failed to write the token cache file")
+}
+
+#[cfg(unix)]
+fn open_lock_file(path: &Path) -> Result<std::fs::File> {
+    use std::os::unix::fs::OpenOptionsExt;
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .mode(0o600)
+        .open(path)
+        .context("failed to open the token cache lock file")
+}
+
+#[cfg(not(unix))]
+fn open_lock_file(path: &Path) -> Result<std::fs::File> {
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(path)
+        .context("failed to open the token cache lock file")
 }
 
 #[cfg(not(unix))]
@@ -494,6 +540,31 @@ mod tests {
 
         // Act / Assert
         assert!(cache.load().is_none());
+    }
+
+    #[test]
+    fn a_held_cache_lock_blocks_a_second_lock() {
+        // Arrange
+        let dir = tempfile::tempdir().unwrap();
+        let cache = TokenCache::in_dir(&dir.path().join("cache"), "https://a", "alice");
+        let held = cache.lock().unwrap();
+        let other = open_lock_file(&cache.path.with_extension("lock")).unwrap();
+
+        // Act
+        let blocked = other.try_lock();
+        drop(held);
+        // A shell child that another test forks can hold a copy of the lock
+        // for a moment, until its exec closes it. So retry for a short time.
+        let free = (0..50).any(|_| {
+            other.try_lock().is_ok() || {
+                std::thread::sleep(std::time::Duration::from_millis(20));
+                false
+            }
+        });
+
+        // Assert
+        assert!(blocked.is_err());
+        assert!(free);
     }
 
     #[test]

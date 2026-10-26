@@ -54,7 +54,30 @@ pub fn wait_for_run(
     selector: &RunSelector,
     options: WaitOptions,
 ) -> Result<Outcome> {
-    let started = Instant::now();
+    let deadline = options.timeout.map(|timeout| Instant::now() + timeout);
+    let timed_out = || {
+        anyhow::anyhow!(
+            "timed out after {}s waiting for {}",
+            options.timeout.unwrap_or_default().as_secs(),
+            describe_selector(selector)
+        )
+    };
+    // Sleep for one interval, but never past the deadline. Fails once the
+    // deadline has passed.
+    let pause = || -> Result<()> {
+        let nap = match deadline {
+            Some(deadline) => {
+                let left = deadline.saturating_duration_since(Instant::now());
+                if left.is_zero() {
+                    return Err(timed_out());
+                }
+                left.min(options.interval)
+            }
+            None => options.interval,
+        };
+        std::thread::sleep(nap);
+        Ok(())
+    };
     let mut misses = 0;
     let mut errors = 0;
     let mut last_progress = String::new();
@@ -76,7 +99,7 @@ pub fn wait_for_run(
                     "poll failed, retrying: {}",
                     super::for_terminal(&format!("{error:#}"))
                 );
-                std::thread::sleep(options.interval);
+                pause()?;
                 continue;
             }
         };
@@ -109,16 +132,7 @@ pub fn wait_for_run(
             }
         }
 
-        if let Some(timeout) = options.timeout
-            && started.elapsed() >= timeout
-        {
-            bail!(
-                "timed out after {}s waiting for {}",
-                timeout.as_secs(),
-                describe_selector(selector)
-            );
-        }
-        std::thread::sleep(options.interval);
+        pause()?;
     }
 }
 

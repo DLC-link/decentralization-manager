@@ -1106,3 +1106,67 @@ fn an_invitation_dar_is_written_as_raw_bytes() {
     assert_eq!(std::fs::read(&out).unwrap(), dar);
     assert_eq!(outcome.value["bytes"], 6);
 }
+
+#[test]
+fn an_html_page_is_not_written_as_a_dar() {
+    // Arrange — an older server answers the unknown route with its web page.
+    let fake = Fake::start();
+    fake.token_grant("password", "a-1", 1);
+    fake.mount(
+        Mock::given(method("GET"))
+            .and(path("/invitations/inv-1/dars/0"))
+            .respond_with(ResponseTemplate::new(200).set_body_raw("<html></html>", "text/html"))
+            .expect(1),
+    );
+    let dir = tempfile::tempdir().unwrap();
+    let out = dir.path().join("pkg.dar");
+    let out_arg = out.display().to_string();
+
+    // Act
+    let error = run_command(
+        &fake,
+        parse(&["invitations", "dar", "inv-1", "0", "--out", &out_arg]),
+    )
+    .unwrap_err();
+
+    // Assert
+    assert!(error.to_string().contains("web UI page"), "{error}");
+    assert!(!out.exists());
+}
+
+#[test]
+fn wait_never_sleeps_past_its_timeout() {
+    // Arrange
+    let fake = Fake::start();
+    fake.token_grant("password", "a-1", 1);
+    // One poll at the start, and at most one more at the deadline.
+    fake.mount(
+        Mock::given(method("GET"))
+            .and(path("/workflows"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(json!({ "runs": [run_json("inprogress", json!({}))] })),
+            )
+            .expect(1..=2),
+    );
+    let started = std::time::Instant::now();
+
+    // Act
+    let error = run_command(
+        &fake,
+        parse(&[
+            "workflows",
+            "wait",
+            "dars-7",
+            "--timeout",
+            "1",
+            "--poll-interval",
+            "60",
+        ]),
+    )
+    .unwrap_err();
+
+    // Assert
+    assert!(error.to_string().contains("timed out"), "{error}");
+    assert!(started.elapsed() < std::time::Duration::from_secs(10));
+}
