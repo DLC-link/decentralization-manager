@@ -14,7 +14,7 @@ mod event_filters;
 mod external_parties;
 mod governance_poller;
 mod handlers;
-mod ledger_paging;
+pub(crate) mod ledger_paging;
 mod middleware;
 mod node_health;
 mod package_inventory;
@@ -1452,6 +1452,9 @@ pub async fn start_server(
             .service(handlers::get_change_threshold_status)
             .service(handlers::cancel_change_threshold)
             .service(handlers::list_external_parties)
+            .service(handlers::unhost_external_party)
+            .service(handlers::preview_unhost_external_party)
+            .service(handlers::get_unhost_audit)
             .service(handlers::tenant_prepare)
             .service(handlers::tenant_execute)
             .service(handlers::tenant_add_hosts_prepare)
@@ -1465,6 +1468,7 @@ pub async fn start_server(
             .service(handlers::tenant_local_party_adopt_prepare)
             .service(handlers::tenant_local_party_adopt_execute)
             .service(handlers::tenant_party_state)
+            .service(handlers::tenant_unhost)
             .service(handlers::tenant_status)
             .service(handlers::start_onboarding)
             .service(handlers::get_onboarding_status)

@@ -89,7 +89,7 @@ use crate::common::{
 };
 
 /// The leaf DAR whose one template a single party signs alone.
-const ORPHAN_DAR: &str = "orphan-marker-0.1.0.dar";
+pub(super) const ORPHAN_DAR: &str = "orphan-marker-0.1.0.dar";
 
 /// Addressed by package NAME so Canton resolves the vetted version.
 const ORPHAN_PACKAGE: &str = "#orphan-marker";
@@ -107,7 +107,7 @@ const SEEDED_MARKERS: i64 = 5;
 /// The phase drives Canton directly for the two things no DecMan endpoint
 /// exposes: allocating the local party the partner already has, and submitting
 /// as the party once it holds a key.
-fn node_config(
+pub(super) fn node_config(
     participant_id: &str,
     admin_env: &str,
     ledger_env: &str,
@@ -215,7 +215,7 @@ async fn create_marker_as_local(f: &Fixture, party_id: &str, marker: i64) -> any
 /// This is the path the partner's application moves to at the cutover: the node
 /// prepares, the key holder signs the hash the node returns, and the node
 /// executes. Nothing here holds the party's key but the caller.
-async fn create_marker_as_converted(
+pub(super) async fn create_marker_as_converted(
     config: &NodeConfig,
     token: &str,
     party_id: &str,

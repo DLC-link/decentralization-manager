@@ -92,6 +92,13 @@ impl Fixture {
             .with_context(|| format!("deserialize GET {url}: {}", String::from_utf8_lossy(&bytes)))
     }
 
+    /// The status code of a GET, for probes that wait on a refusal such as a
+    /// 404 rather than on a body.
+    pub async fn get_status(&self, port: u16, path: &str) -> anyhow::Result<StatusCode> {
+        let (_, status, _) = self.get_raw(port, path).await?;
+        Ok(status)
+    }
+
     /// `get_json` for polled `Then` probes: `None` means "keep polling", and
     /// the reason is recorded in [`Fixture::probe_diag`] instead of being
     /// dropped by `.ok()?`. The runner logs that reason on timeout, and ends

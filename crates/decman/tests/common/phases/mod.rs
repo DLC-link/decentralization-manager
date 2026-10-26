@@ -22,6 +22,7 @@ pub mod distribute_dars;
 pub mod dual_governance_onboarding;
 pub mod external_party_add_hosts;
 pub mod external_party_tenant;
+pub mod external_party_unhost;
 pub mod generate_keys_idempotent;
 pub mod generic_vote;
 pub mod identity_survives_dismiss;
