@@ -127,20 +127,20 @@ impl TransactionSigner for AwsKmsSigner {
             // Verify locally before submission. A signature that fails here is
             // guaranteed to be rejected at ExecuteSubmission, so fail loudly
             // with context instead of producing an opaque ledger error.
-            let der_sig = DerSignature::from_bytes(&signature_der).map_err(|e| {
-                anyhow::anyhow!("AWS KMS returned a signature that is not valid DER: {e}")
-            })?;
-            verifying_key
-                .verify(hash.as_bytes(), &der_sig)
-                .map_err(|e| {
-                    anyhow::anyhow!(
+            check_kms_signature(&verifying_key, hash.as_bytes(), &signature_der).map_err(
+                |failure| match failure {
+                    LocalCheck::NotDer(e) => {
+                        anyhow::anyhow!("AWS KMS returned a signature that is not valid DER: {e}")
+                    }
+                    LocalCheck::Mismatch(e) => anyhow::anyhow!(
                         "Signature {index} from KMS key {kms_key_id} failed local \
                          verification against the registered public key \
                          {fingerprint}: {e}",
                         index = idx + 1,
                         fingerprint = key.fingerprint
-                    )
-                })?;
+                    ),
+                },
+            )?;
             tracing::info!("Signature {index} verified locally", index = idx + 1);
 
             signatures.push(Signature {
@@ -155,6 +155,30 @@ impl TransactionSigner for AwsKmsSigner {
         tracing::debug!("Generated {count} signatures", count = signatures.len());
         Ok(signatures)
     }
+}
+
+/// Why a KMS signature failed the local check.
+#[derive(Debug)]
+enum LocalCheck {
+    /// The bytes are not a DER-encoded ECDSA signature.
+    NotDer(String),
+    /// The signature does not verify against the registered key.
+    Mismatch(String),
+}
+
+/// Checks a DER signature over `message` with the party's P-256 key. Canton
+/// checks the same signature at ExecuteSubmission, with SHA-256 over the raw
+/// message, which is also what KMS signs with `MessageType::Raw`.
+fn check_kms_signature(
+    verifying_key: &VerifyingKey,
+    message: &[u8],
+    signature_der: &[u8],
+) -> Result<(), LocalCheck> {
+    let signature =
+        DerSignature::from_bytes(signature_der).map_err(|e| LocalCheck::NotDer(e.to_string()))?;
+    verifying_key
+        .verify(message, &signature)
+        .map_err(|e| LocalCheck::Mismatch(e.to_string()))
 }
 
 /// Map a Canton signing key spec to the AWS KMS signing algorithm and the
@@ -200,8 +224,49 @@ fn validate_key_id(key_id: &str) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use common::fingerprint::fingerprint_from_public_key;
+    use p256::{
+        ecdsa::{Signature as P256Signature, SigningKey, signature::Signer},
+        pkcs8::EncodePublicKey,
+    };
 
     use super::*;
+
+    /// A P-256 key that verifies as the registered key would: parsed back from
+    /// its X.509 SPKI encoding, the form Canton stores.
+    fn key_pair(seed: u8) -> anyhow::Result<(SigningKey, VerifyingKey)> {
+        let signing_key = SigningKey::from_slice(&[seed; 32])?;
+        let spki = signing_key.verifying_key().to_public_key_der()?;
+        Ok((
+            signing_key,
+            VerifyingKey::from_public_key_der(spki.as_bytes())?,
+        ))
+    }
+
+    /// Guards the p256 upgrade: a DER signature over a raw hash, as KMS returns
+    /// it, must verify, and anything else must be refused.
+    #[test]
+    fn a_der_signature_over_the_raw_hash_verifies_and_nothing_else_does() -> anyhow::Result<()> {
+        let (signing_key, verifying_key) = key_pair(7)?;
+        let hash = [42u8; 32];
+        let signature: P256Signature = signing_key.sign(&hash);
+        let der = signature.to_der();
+
+        assert!(check_kms_signature(&verifying_key, &hash, der.as_bytes()).is_ok());
+        assert!(matches!(
+            check_kms_signature(&verifying_key, &[43u8; 32], der.as_bytes()),
+            Err(LocalCheck::Mismatch(_))
+        ));
+        let (_, other_key) = key_pair(9)?;
+        assert!(matches!(
+            check_kms_signature(&other_key, &hash, der.as_bytes()),
+            Err(LocalCheck::Mismatch(_))
+        ));
+        assert!(matches!(
+            check_kms_signature(&verifying_key, &hash, b"not der"),
+            Err(LocalCheck::NotDer(_))
+        ));
+        Ok(())
+    }
 
     #[test]
     fn accepts_account_local_key_ids() -> anyhow::Result<()> {
