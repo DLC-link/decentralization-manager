@@ -447,7 +447,9 @@ pub async fn get_chain_audit(
     let party_id = party_id_str.as_str();
     let mut state_client = utils::create_state_client(config, token.clone()).await?;
     let ledger_end = state_client
-        .get_ledger_end(tonic::Request::new(GetLedgerEndRequest {}))
+        .get_ledger_end(tonic::Request::new(GetLedgerEndRequest {
+            synchronizer_id: vec![],
+        }))
         .await
         .context("Failed to query ledger end")?
         .into_inner()

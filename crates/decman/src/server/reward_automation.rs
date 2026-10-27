@@ -183,7 +183,9 @@ where
     let mut state_client = utils::create_state_client(config, token).await?;
 
     let ledger_end = state_client
-        .get_ledger_end(tonic::Request::new(GetLedgerEndRequest {}))
+        .get_ledger_end(tonic::Request::new(GetLedgerEndRequest {
+            synchronizer_id: vec![],
+        }))
         .await?
         .into_inner()
         .offset;

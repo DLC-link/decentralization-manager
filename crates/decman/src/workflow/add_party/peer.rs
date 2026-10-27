@@ -1,7 +1,7 @@
 use canton_proto_rs::com::digitalasset::canton::{
     protocol::v30::party_to_participant::HostingParticipant,
     topology::admin::v30::{
-        ListPartyToParticipantRequest, list_party_to_participant_response::result::Item as P2pItem,
+        ListPartyToParticipantRequest,
         topology_manager_read_service_client::TopologyManagerReadServiceClient,
     },
 };
@@ -54,12 +54,12 @@ pub async fn wait_for_hosting_proposal(config: &NodeConfig, party_id: &CantonId)
                 }))
                 .await?
                 .into_inner();
-            let found = response.results.into_iter().any(|r| {
-                let Some(P2pItem::V30(mapping)) = r.item else {
-                    return false;
-                };
-                mapping.party == party_id.to_string() && mapping.participants.iter().any(hosts_self)
-            });
+            let found = topology::p2p_rows(response.results)?
+                .into_iter()
+                .any(|(_, mapping)| {
+                    mapping.party == party_id.to_string()
+                        && mapping.participants.iter().any(hosts_self)
+                });
             if found {
                 tracing::info!(
                     "This node's store holds the mapping hosting it with the onboarding marker \

@@ -1212,9 +1212,9 @@ dependencies = [
 
 [[package]]
 name = "canton-api-client"
-version = "3.6.0-0.1.0"
+version = "3.6.1-0.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1702122d98d165e2c77a1c6532e8be8a80d5bf7f25eac71beed5587a61fcaf01"
+checksum = "47e17b77ce38ae760c1b8f82f8ae8dc0d2766f16a7092d540dfcf3bf26e21f6c"
 dependencies = [
  "chrono",
  "reqwest 0.13.3",
@@ -1230,7 +1230,7 @@ dependencies = [
 [[package]]
 name = "canton-proto-rs"
 version = "3.4.0"
-source = "git+https://github.com/DLC-link/canton-lib?rev=651ea5221b4794f55bd152e9f3e762a92af69afd#651ea5221b4794f55bd152e9f3e762a92af69afd"
+source = "git+https://github.com/DLC-link/canton-lib?rev=c24ed57bd3b3b24b668dffc7084849681c04e4fc#c24ed57bd3b3b24b668dffc7084849681c04e4fc"
 dependencies = [
  "prost",
  "prost-types",
@@ -1431,8 +1431,8 @@ dependencies = [
 
 [[package]]
 name = "common"
-version = "0.6.1"
-source = "git+https://github.com/DLC-link/canton-lib?rev=651ea5221b4794f55bd152e9f3e762a92af69afd#651ea5221b4794f55bd152e9f3e762a92af69afd"
+version = "0.12.0"
+source = "git+https://github.com/DLC-link/canton-lib?rev=c24ed57bd3b3b24b668dffc7084849681c04e4fc#c24ed57bd3b3b24b668dffc7084849681c04e4fc"
 dependencies = [
  "canton-api-client",
  "rust_decimal",
@@ -1821,7 +1821,7 @@ dependencies = [
  "chrono",
  "clap",
  "common 0.1.0",
- "common 0.6.1",
+ "common 0.12.0",
  "decman-lib",
  "decman-wallet",
  "dotenvy",
@@ -1895,7 +1895,7 @@ dependencies = [
  "canton-proto-rs",
  "chrono",
  "common 0.1.0",
- "common 0.6.1",
+ "common 0.12.0",
  "insta",
  "prost-types",
  "serde",
@@ -3233,8 +3233,8 @@ dependencies = [
 
 [[package]]
 name = "keycloak"
-version = "0.6.1"
-source = "git+https://github.com/DLC-link/canton-lib?rev=651ea5221b4794f55bd152e9f3e762a92af69afd#651ea5221b4794f55bd152e9f3e762a92af69afd"
+version = "0.12.0"
+source = "git+https://github.com/DLC-link/canton-lib?rev=c24ed57bd3b3b24b668dffc7084849681c04e4fc#c24ed57bd3b3b24b668dffc7084849681c04e4fc"
 dependencies = [
  "base64 0.22.1",
  "reqwest 0.12.28",
@@ -4619,10 +4619,10 @@ checksum = "dc897dd8d9e8bd1ed8cdad82b5966c3e0ecae09fb1907d58efaa013543185d0a"
 
 [[package]]
 name = "registry"
-version = "0.6.1"
-source = "git+https://github.com/DLC-link/canton-lib?rev=651ea5221b4794f55bd152e9f3e762a92af69afd#651ea5221b4794f55bd152e9f3e762a92af69afd"
+version = "0.12.0"
+source = "git+https://github.com/DLC-link/canton-lib?rev=c24ed57bd3b3b24b668dffc7084849681c04e4fc#c24ed57bd3b3b24b668dffc7084849681c04e4fc"
 dependencies = [
- "common 0.6.1",
+ "common 0.12.0",
  "reqwest 0.12.28",
  "serde",
  "serde_json",

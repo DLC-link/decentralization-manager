@@ -414,7 +414,12 @@ async fn admin_status(
     // show up as a one-off spike.
     let started = Instant::now();
 
-    match client.participant_status(ParticipantStatusRequest {}).await {
+    match client
+        .participant_status(ParticipantStatusRequest {
+            synchronizer_id: None,
+        })
+        .await
+    {
         Ok(response) => {
             *slot = Some(channel);
             (
@@ -749,6 +754,7 @@ mod tests {
                                 description: Some("catching up".to_string()),
                             },
                         )),
+                        labels: std::collections::HashMap::new(),
                     }],
                     version: "3.5.8".to_string(),
                 }),

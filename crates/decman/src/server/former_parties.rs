@@ -27,7 +27,7 @@ use canton_proto_rs::com::digitalasset::canton::{
     },
     protocol::v30::enums::TopologyChangeOp,
     topology::admin::v30::{
-        ListPartyToParticipantRequest, list_party_to_participant_response::result::Item as P2pItem,
+        ListPartyToParticipantRequest,
         topology_manager_read_service_client::TopologyManagerReadServiceClient,
     },
 };
@@ -52,7 +52,7 @@ use crate::{
     utils,
     workflow::{
         party_replication::acs::{manual_connect_enabled, synchronizer_healthy, verify_healthy},
-        topology::{head_state_query, history_query},
+        topology::{head_state_query, history_query, p2p_rows},
     },
 };
 
@@ -127,12 +127,10 @@ async fn hosting_history(
         .into_inner();
 
     // `filter_party` matches on a prefix, so a longer party id can come back.
-    Ok(response
-        .results
+    Ok(p2p_rows(response.results)?
         .into_iter()
-        .filter_map(|result| {
-            let context = result.context?;
-            let P2pItem::V30(mapping) = result.item?;
+        .filter_map(|(context, mapping)| {
+            let context = context?;
             (mapping.party == party_id).then(|| HostingEntry {
                 serial: context.serial,
                 valid_from: context.valid_from.map(|t| t.seconds).unwrap_or_default(),
@@ -304,12 +302,12 @@ async fn hosts(
         }))
         .await?
         .into_inner();
-    let hosted = response.results.into_iter().any(|result| {
-        let operation = result.context.map(|c| c.operation);
-        matches!(result.item, Some(P2pItem::V30(ref m))
-            if m.party == party
-                && operation == Some(TopologyChangeOp::AddReplace as i32)
-                && m.participants.iter().any(|p| p.participant_uid == participant_uid))
+    let hosted = p2p_rows(response.results)?.into_iter().any(|(context, m)| {
+        m.party == party
+            && context.is_some_and(|c| c.operation == TopologyChangeOp::AddReplace as i32)
+            && m.participants
+                .iter()
+                .any(|p| p.participant_uid == participant_uid)
     });
     Ok(hosted.then_some(party))
 }
@@ -642,6 +640,7 @@ async fn purge_in_batches(config: &NodeConfig, alias: &str, contract_ids: &[Stri
                 synchronizer_alias: alias.to_string(),
                 contract_ids: batch.to_vec(),
                 ignore_already_purged: true,
+                force_repair_when_topology_transaction_at_ledger_end: false,
             };
             match repair.purge_contracts(tonic::Request::new(request)).await {
                 Ok(_) => break,

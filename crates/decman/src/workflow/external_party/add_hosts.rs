@@ -52,7 +52,7 @@ use canton_proto_rs::com::digitalasset::canton::{
     topology::admin::v30::{
         AddTransactionsRequest, AuthorizeRequest, GenerateTransactionsRequest,
         ListPartyToParticipantRequest, SignTransactionsRequest, authorize_request,
-        generate_transactions_request, list_party_to_participant_response::result::Item as P2pItem,
+        generate_transactions_request,
         topology_manager_read_service_client::TopologyManagerReadServiceClient,
         topology_manager_write_service_client::TopologyManagerWriteServiceClient,
     },
@@ -244,15 +244,8 @@ pub async fn read_party_to_participant(
         .context("ListPartyToParticipant RPC failed")?
         .into_inner();
 
-    for result in response.results {
-        let serial = result
-            .context
-            .as_ref()
-            .map(|c| c.serial)
-            .unwrap_or_default();
-        let Some(P2pItem::V30(mapping)) = result.item else {
-            continue;
-        };
+    for (context, mapping) in topology::p2p_rows(response.results)? {
+        let serial = context.as_ref().map(|c| c.serial).unwrap_or_default();
         // `filter_party` is a prefix filter on some Canton versions, so confirm the
         // exact party rather than trusting the server-side filter.
         if mapping.party != party_id {

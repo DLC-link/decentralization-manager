@@ -146,7 +146,9 @@ pub async fn current_ledger_offset(config: &NodeConfig, ledger_token: Option<&st
 async fn ledger_end_offset(config: &NodeConfig, token: Option<&str>) -> Result<i64> {
     let mut client = utils::create_state_client(config, token.map(str::to_owned)).await?;
     let response = client
-        .get_ledger_end(tonic::Request::new(GetLedgerEndRequest {}))
+        .get_ledger_end(tonic::Request::new(GetLedgerEndRequest {
+            synchronizer_id: vec![],
+        }))
         .await?
         .into_inner();
     Ok(response.offset)
