@@ -771,8 +771,9 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
                 };
                 let (matched, mismatched) = match received_commitments(&p3, settled_at).await {
                     Ok(v) => v,
-                    // Transport interruptions can recover; invalid requests and
-                    // server errors should retain their original diagnostics.
+                    // Transport interruptions and a participant with no
+                    // commitment yet can recover. Invalid requests and other
+                    // server errors keep their original diagnostics.
                     Err(e) if !retryable_commitment_error(&e) => return Some(Err(e)),
                     Err(e) => {
                         f.probe_diag.record(
@@ -1148,12 +1149,19 @@ async fn received_commitments(
     )
 }
 
+/// Canton's answer while the participant has not yet computed and sent a
+/// commitment for the synchronizer. Canton 3.6 reaches this state after the
+/// re-host, and the next reconciliation tick clears it.
+const NO_COMMITMENT_COMPUTED_YET: &str = "No computations done for";
+
 fn retryable_commitment_error(error: &anyhow::Error) -> bool {
     match error.downcast_ref::<tonic::Status>() {
-        Some(status) => matches!(
-            status.code(),
-            tonic::Code::Unavailable | tonic::Code::DeadlineExceeded
-        ),
+        Some(status) => {
+            matches!(
+                status.code(),
+                tonic::Code::Unavailable | tonic::Code::DeadlineExceeded
+            ) || status.message().contains(NO_COMMITMENT_COMPUTED_YET)
+        }
         // Channel establishment failures do not carry an RPC status.
         None => true,
     }
@@ -1307,6 +1315,15 @@ mod commitment_tests {
                 tonic::Status::new(code, "retry")
             )));
         }
+    }
+
+    #[test]
+    fn no_commitment_computed_yet_is_retried() {
+        let error = anyhow::Error::new(tonic::Status::internal(
+            "No computations done for global-domain::1220abcd",
+        ))
+        .context("lookup received commitments");
+        assert!(retryable_commitment_error(&error));
     }
 }
 
