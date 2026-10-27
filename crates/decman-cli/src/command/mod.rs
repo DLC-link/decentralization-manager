@@ -13,11 +13,17 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use clap::{ArgGroup, Args, Subcommand, ValueEnum};
+use common::api::{
+    AddPartyRequest, ChangeThresholdRequest, GrantRightsRequest, KickRequest, OnboardingRequest,
+};
+use common::canton_id::CantonId;
 use reqwest::{Method, StatusCode};
+use serde::Serialize;
 use serde_json::{Value, json};
 
 use self::governance::Target;
 use self::wait::{RunSelector, WaitOptions, wait_for_run};
+pub use crate::api::for_terminal;
 use crate::api::{ApiError, DecmanClient, mesh_error_hint};
 use crate::auth::run_secret_command;
 use crate::config::{AdminClient, PartyCredentials};
@@ -31,7 +37,14 @@ pub struct Outcome {
     pub success: bool,
 }
 
-pub use crate::api::for_terminal;
+impl Outcome {
+    fn ok(value: Value) -> Self {
+        Self {
+            value,
+            success: true,
+        }
+    }
+}
 
 /// Per-node settings a profile configures once, so that `auth grant-rights`
 /// and `party-config` need no credentials on the command line. Secrets are
@@ -40,15 +53,6 @@ pub use crate::api::for_terminal;
 pub struct NodeSettings {
     pub admin_client: Option<AdminClient>,
     pub party_credentials: Option<PartyCredentials>,
-}
-
-impl Outcome {
-    fn ok(value: Value) -> Self {
-        Self {
-            value,
-            success: true,
-        }
-    }
 }
 
 #[derive(Debug, Subcommand)]
@@ -201,6 +205,10 @@ pub enum PartiesCommand {
         /// Signing threshold. The server default is a majority.
         #[arg(long)]
         threshold: Option<i32>,
+        /// How many hosting participants must confirm a transaction. The
+        /// server default is the signing threshold.
+        #[arg(long)]
+        confirmation_threshold: Option<i32>,
         #[command(flatten)]
         wait: WaitArgs,
     },
@@ -237,6 +245,11 @@ pub enum PartiesCommand {
         /// New threshold.
         #[arg(long)]
         threshold: i32,
+        /// New confirmation threshold. By default a party keeps a confirmation
+        /// threshold that differs from its signing threshold; otherwise the
+        /// two stay equal.
+        #[arg(long)]
+        confirmation_threshold: Option<i32>,
         #[command(flatten)]
         wait: WaitArgs,
     },
@@ -397,6 +410,10 @@ pub enum ContractsCommand {
         /// A party that may propose besides the members. Repeat for more.
         #[arg(long = "extra-proposer")]
         extra_proposers: Vec<String>,
+        /// A party that sees the governance contracts without being a member.
+        /// Repeat for more.
+        #[arg(long = "disclosure-observer")]
+        disclosure_observers: Vec<String>,
         /// Operator party. Default: this node's operator party.
         #[arg(long)]
         operator_party: Option<String>,
@@ -972,7 +989,10 @@ fn run_peers(client: &mut DecmanClient, command: PeersCommand) -> Result<Outcome
 /// node lists it.
 struct ResolvedParty {
     id: String,
-    threshold: Option<i64>,
+    threshold: Option<i32>,
+    /// `None` when the node does not list the party, or when its party list
+    /// predates the field.
+    confirmation_threshold: Option<i32>,
     /// The participant ids that host the party. Empty when the node does not
     /// list the party.
     participants: Vec<String>,
@@ -999,7 +1019,8 @@ fn resolve_party(client: &mut DecmanClient, party: &PartyArg) -> Result<Resolved
     match matches.as_slice() {
         [party] => Ok(ResolvedParty {
             id: party["party_id"].as_str().unwrap_or(arg).to_owned(),
-            threshold: party["threshold"].as_i64(),
+            threshold: as_i32(&party["threshold"]),
+            confirmation_threshold: as_i32(&party["confirmation_threshold"]),
             participants: party["participants"]
                 .as_array()
                 .into_iter()
@@ -1011,6 +1032,7 @@ fn resolve_party(client: &mut DecmanClient, party: &PartyArg) -> Result<Resolved
         [] if arg.contains("::") => Ok(ResolvedParty {
             id: arg.to_owned(),
             threshold: None,
+            confirmation_threshold: None,
             participants: Vec::new(),
         }),
         [] => bail!("this node has no decentralized party named {arg}"),
@@ -1027,9 +1049,27 @@ fn resolve_party(client: &mut DecmanClient, party: &PartyArg) -> Result<Resolved
     }
 }
 
+/// A request body from one of the server's request types, so that a changed
+/// server type breaks the CLI build.
+fn to_body(request: &impl Serialize) -> Result<Value> {
+    serde_json::to_value(request).context("failed to encode the request body")
+}
+
+fn canton_id(id: &str) -> Result<CantonId> {
+    CantonId::parse(id).with_context(|| format!("{id} is not a valid Canton id"))
+}
+
+fn canton_ids(ids: &[String]) -> Result<Vec<CantonId>> {
+    ids.iter().map(|id| canton_id(id)).collect()
+}
+
+fn as_i32(value: &Value) -> Option<i32> {
+    value.as_i64().and_then(|value| i32::try_from(value).ok())
+}
+
 /// The current threshold of `party`. The server shows it to the peers as the
 /// "before" value, so an unknown threshold is an error, not 0.
-fn known_threshold(party: &ResolvedParty) -> Result<i64> {
+fn known_threshold(party: &ResolvedParty) -> Result<i32> {
     party.threshold.with_context(|| {
         format!(
             "this node does not list {} with its threshold; run the command on a node that does",
@@ -1106,10 +1146,15 @@ fn run_parties(client: &mut DecmanClient, command: PartiesCommand) -> Result<Out
             prefix,
             peers,
             threshold,
+            confirmation_threshold,
             wait,
         } => {
-            let body =
-                json!({ "party_id_prefix": prefix, "peer_ids": peers, "threshold": threshold });
+            let body = to_body(&OnboardingRequest {
+                party_id_prefix: prefix,
+                peer_ids: canton_ids(&peers)?,
+                threshold,
+                confirmation_threshold,
+            })?;
             start_workflow(client, "/onboarding", &body, &wait).map_err(with_mesh_hint)
         }
         PartiesCommand::AddMember {
@@ -1119,12 +1164,12 @@ fn run_parties(client: &mut DecmanClient, command: PartiesCommand) -> Result<Out
             wait,
         } => {
             let party = resolve_party(client, &party)?;
-            let body = json!({
-                "decentralized_party_id": party.id,
-                "new_participant_id": participant,
-                "new_threshold": threshold,
-                "previous_threshold": known_threshold(&party)?,
-            });
+            let body = to_body(&AddPartyRequest {
+                decentralized_party_id: canton_id(&party.id)?,
+                new_participant_id: canton_id(&participant)?,
+                new_threshold: threshold,
+                previous_threshold: known_threshold(&party)?,
+            })?;
             start_workflow(client, "/add-party", &body, &wait)
         }
         PartiesCommand::RemoveMember {
@@ -1134,28 +1179,51 @@ fn run_parties(client: &mut DecmanClient, command: PartiesCommand) -> Result<Out
             wait,
         } => {
             let party = resolve_party(client, &party)?;
-            let body = json!({
-                "decentralized_party_id": party.id,
-                "participant_id": participant,
-                "new_threshold": threshold,
-                "previous_threshold": known_threshold(&party)?,
-            });
+            let body = to_body(&KickRequest {
+                decentralized_party_id: canton_id(&party.id)?,
+                participant_id: canton_id(&participant)?,
+                new_threshold: threshold,
+                previous_threshold: known_threshold(&party)?,
+            })?;
             start_workflow(client, "/kick", &body, &wait)
         }
         PartiesCommand::SetThreshold {
             party,
             threshold,
+            confirmation_threshold,
             wait,
         } => {
             let party = resolve_party(client, &party)?;
-            let body = json!({
-                "decentralized_party_id": party.id,
-                "new_threshold": threshold,
-                "previous_threshold": known_threshold(&party)?,
-            });
+            let body = to_body(&ChangeThresholdRequest {
+                decentralized_party_id: canton_id(&party.id)?,
+                new_threshold: threshold,
+                confirmation_threshold: new_confirmation_threshold(
+                    &party,
+                    threshold,
+                    confirmation_threshold,
+                ),
+                previous_threshold: known_threshold(&party)?,
+            })?;
             start_workflow(client, "/change-threshold", &body, &wait)
         }
     }
+}
+
+/// The confirmation threshold for `set-threshold`, as the web UI picks it: the
+/// `--confirmation-threshold` value, else the party's current one when it
+/// differs from its signing threshold, else the new signing threshold. `None`
+/// means "the same as the new signing threshold", which the server applies.
+fn new_confirmation_threshold(
+    party: &ResolvedParty,
+    new_threshold: i32,
+    requested: Option<i32>,
+) -> Option<i32> {
+    let kept = party
+        .confirmation_threshold
+        .filter(|current| Some(*current) != party.threshold);
+    requested
+        .or(kept)
+        .filter(|confirmation| *confirmation != new_threshold)
 }
 
 /// Replace a `422` onboarding error with its mesh remediation hints.
@@ -1333,6 +1401,7 @@ fn run_contracts(client: &mut DecmanClient, command: ContractsCommand) -> Result
             confirmation_timeout_micros,
             members,
             extra_proposers,
+            disclosure_observers,
             operator_party,
             dry_run,
             wait,
@@ -1356,6 +1425,7 @@ fn run_contracts(client: &mut DecmanClient, command: ContractsCommand) -> Result
                 threshold,
                 confirmation_timeout_micros,
                 extra_proposers,
+                disclosure_observers,
             };
             let body = contracts::body(&party.id, &context, &input)?;
             if dry_run {
@@ -1438,11 +1508,11 @@ fn run_auth(
                 std::env::var(ADMIN_SECRET_ENV).ok(),
             )?;
             let party = resolve_party(client, &party)?;
-            let body = json!({
-                "dec_party_id": party.id,
-                "admin_client_id": admin_client_id,
-                "admin_client_secret": admin_client_secret,
-            });
+            let body = to_body(&GrantRightsRequest {
+                dec_party_id: canton_id(&party.id)?,
+                admin_client_id,
+                admin_client_secret,
+            })?;
             post(client, "/auth/grant-rights", Some(&body))
         }
     }
@@ -1623,6 +1693,48 @@ mod tests {
         // Assert
         assert_eq!(matches.len(), 1);
         assert_eq!(matches[0]["party_id"], "alpha::1220aa");
+    }
+
+    fn party(threshold: i32, confirmation_threshold: Option<i32>) -> ResolvedParty {
+        ResolvedParty {
+            id: "alpha::1220aa".to_owned(),
+            threshold: Some(threshold),
+            confirmation_threshold,
+            participants: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn equal_thresholds_stay_equal() {
+        assert_eq!(
+            new_confirmation_threshold(&party(2, Some(2)), 3, None),
+            None
+        );
+        assert_eq!(new_confirmation_threshold(&party(2, None), 3, None), None);
+    }
+
+    #[test]
+    fn a_differing_confirmation_threshold_is_kept() {
+        assert_eq!(
+            new_confirmation_threshold(&party(2, Some(1)), 3, None),
+            Some(1)
+        );
+        assert_eq!(
+            new_confirmation_threshold(&party(2, Some(1)), 1, None),
+            None
+        );
+    }
+
+    #[test]
+    fn the_option_overrides_the_confirmation_threshold() {
+        assert_eq!(
+            new_confirmation_threshold(&party(2, Some(1)), 3, Some(2)),
+            Some(2)
+        );
+        assert_eq!(
+            new_confirmation_threshold(&party(2, Some(1)), 3, Some(3)),
+            None
+        );
     }
 
     #[test]

@@ -22,6 +22,7 @@ api_url = "https://decman.devnet.example"
 username = "bob"
 password_command = "pass show decman/devnet"
 # Every request that is not a read (GET) needs --yes on this profile.
+# The terminal UI ignores this setting; it protects commands only.
 require_yes = true
 
 # Optional OAuth overrides (auto-discovered from /auth-config if omitted):

@@ -12,6 +12,11 @@ use crate::cli::Cli;
 use crate::command::{self, Command, NodeSettings};
 use crate::config::{AdminClient, PartyCredentials};
 
+/// Canton ids with a full 34-byte namespace, because request bodies parse them.
+const ALPHA: &str = "alpha::1220aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+const NEW_PEER: &str =
+    "participant3::1220cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
+
 /// A fake server on its own runtime. The blocking client must not run inside
 /// a runtime, so the tests call it from the test thread.
 struct Fake {
@@ -573,14 +578,14 @@ fn governance_confirm_resolves_the_party_and_sends_the_frontend_body() {
             .and(path("/decentralized-parties"))
             .and(query_param("prefix", "alpha"))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-                "parties": [{ "party_id": "alpha::1220aa", "threshold": 2 }],
+                "parties": [{ "party_id": ALPHA, "threshold": 2 }],
             })))
             .expect(1),
     );
     fake.mount(
         Mock::given(method("GET"))
             .and(path("/governance/confirmations"))
-            .and(query_param("party_id", "alpha::1220aa"))
+            .and(query_param("party_id", ALPHA))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({
                 "threshold": 2,
                 "rules_contract_id": "rules-1",
@@ -600,7 +605,7 @@ fn governance_confirm_resolves_the_party_and_sends_the_frontend_body() {
         Mock::given(method("POST"))
             .and(path("/governance/confirm"))
             .and(body_json(json!({
-                "party_id": "alpha::1220aa",
+                "party_id": ALPHA,
                 "rules_contract_id": "rules-1",
                 "action": { "type": "governance_set_threshold", "new_threshold": 0 },
                 "governance_type": "core_domain",
@@ -640,7 +645,7 @@ fn grant_rights_takes_the_admin_client_from_the_profile() {
         Mock::given(method("GET"))
             .and(path("/decentralized-parties"))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-                "parties": [{ "party_id": "alpha::1220aa", "threshold": 2 }],
+                "parties": [{ "party_id": ALPHA, "threshold": 2 }],
             })))
             .expect(1),
     );
@@ -648,7 +653,7 @@ fn grant_rights_takes_the_admin_client_from_the_profile() {
         Mock::given(method("POST"))
             .and(path("/auth/grant-rights"))
             .and(body_json(json!({
-                "dec_party_id": "alpha::1220aa",
+                "dec_party_id": ALPHA,
                 "admin_client_id": "participant-admin",
                 "admin_client_secret": "admin-s3cret",
             })))
@@ -685,7 +690,7 @@ fn party_config_set_builds_the_body_from_the_profile_credentials() {
         Mock::given(method("GET"))
             .and(path("/decentralized-parties"))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-                "parties": [{ "party_id": "alpha::1220aa", "threshold": 2 }],
+                "parties": [{ "party_id": ALPHA, "threshold": 2 }],
             })))
             .expect(1),
     );
@@ -693,7 +698,7 @@ fn party_config_set_builds_the_body_from_the_profile_credentials() {
         Mock::given(method("PUT"))
             .and(path("/party-config"))
             .and(body_json(json!({
-                "dec_party_id": "alpha::1220aa",
+                "dec_party_id": ALPHA,
                 "member_party_id": "attestor-1::1220bb",
                 "user_id": "attestor-user",
                 "keycloak_url": "https://idp",
@@ -895,15 +900,15 @@ fn add_member_sends_the_current_threshold_as_previous() {
     fake.mount(
         Mock::given(method("GET"))
             .and(path("/decentralized-parties"))
-            .respond_with(party_list("alpha::1220aa", 2, &["PAR::1", "PAR::2"]))
+            .respond_with(party_list(ALPHA, 2, &["PAR::1", "PAR::2"]))
             .expect(1),
     );
     fake.mount(
         Mock::given(method("POST"))
             .and(path("/add-party"))
             .and(body_json(json!({
-                "decentralized_party_id": "alpha::1220aa",
-                "new_participant_id": "PAR::3",
+                "decentralized_party_id": ALPHA,
+                "new_participant_id": NEW_PEER,
                 "new_threshold": 2,
                 "previous_threshold": 2,
             })))
@@ -922,7 +927,7 @@ fn add_member_sends_the_current_threshold_as_previous() {
             "--party",
             "alpha",
             "--participant",
-            "PAR::3",
+            NEW_PEER,
             "--threshold",
             "2",
         ]),
@@ -952,7 +957,7 @@ fn a_party_the_node_does_not_list_has_no_previous_threshold() {
             "parties",
             "set-threshold",
             "--party",
-            "alpha::1220aa",
+            ALPHA,
             "--threshold",
             "1",
         ]),
@@ -964,11 +969,99 @@ fn a_party_the_node_does_not_list_has_no_previous_threshold() {
 }
 
 #[test]
+fn set_threshold_keeps_a_confirmation_threshold_that_differs() {
+    // Arrange — the party signs with 2 of 3 and confirms with 1.
+    let fake = Fake::start();
+    fake.token_grant("password", "a-1", 1);
+    fake.mount(
+        Mock::given(method("GET"))
+            .and(path("/decentralized-parties"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "parties": [{ "party_id": ALPHA, "threshold": 2, "confirmation_threshold": 1 }],
+            })))
+            .expect(1),
+    );
+    fake.mount(
+        Mock::given(method("POST"))
+            .and(path("/change-threshold"))
+            .and(body_json(json!({
+                "decentralized_party_id": ALPHA,
+                "new_threshold": 3,
+                "confirmation_threshold": 1,
+                "previous_threshold": 2,
+            })))
+            .respond_with(
+                ResponseTemplate::new(202).set_body_json(json!({ "instance_name": "ct-1" })),
+            )
+            .expect(1),
+    );
+
+    // Act
+    let outcome = run_command(
+        &fake,
+        parse(&[
+            "parties",
+            "set-threshold",
+            "--party",
+            "alpha",
+            "--threshold",
+            "3",
+        ]),
+    )
+    .unwrap();
+
+    // Assert
+    assert_eq!(outcome.value["instance_name"], "ct-1");
+}
+
+#[test]
+fn create_sends_the_confirmation_threshold() {
+    // Arrange
+    let fake = Fake::start();
+    fake.token_grant("password", "a-1", 1);
+    fake.mount(
+        Mock::given(method("POST"))
+            .and(path("/onboarding"))
+            .and(body_json(json!({
+                "party_id_prefix": "beta",
+                "peer_ids": [NEW_PEER],
+                "threshold": 2,
+                "confirmation_threshold": 1,
+            })))
+            .respond_with(
+                ResponseTemplate::new(202).set_body_json(json!({ "instance_name": "onb-1" })),
+            )
+            .expect(1),
+    );
+
+    // Act
+    let outcome = run_command(
+        &fake,
+        parse(&[
+            "parties",
+            "create",
+            "--prefix",
+            "beta",
+            "--peer",
+            NEW_PEER,
+            "--threshold",
+            "2",
+            "--confirmation-threshold",
+            "1",
+        ]),
+    )
+    .unwrap();
+
+    // Assert
+    assert_eq!(outcome.value["instance_name"], "onb-1");
+}
+
+#[test]
 fn keep_secret_sends_the_body_without_a_secret() {
     // Arrange
     let fake = Fake::start();
     fake.token_grant("password", "a-1", 1);
-    let body = json!({ "dec_party_id": "alpha::1220aa", "keycloak_client_id": "attestor-1" });
+    let body = json!({ "dec_party_id": ALPHA, "keycloak_client_id": "attestor-1" });
     fake.mount(
         Mock::given(method("PUT"))
             .and(path("/party-config"))
@@ -997,7 +1090,7 @@ fn deploy_governance_dry_run_reads_but_never_deploys() {
     fake.mount(
         Mock::given(method("GET"))
             .and(path("/decentralized-parties"))
-            .respond_with(party_list("alpha::1220aa", 2, &["PAR::1", "PAR::2"]))
+            .respond_with(party_list(ALPHA, 2, &["PAR::1", "PAR::2"]))
             .expect(1),
     );
     fake.get_with_token(
@@ -1065,7 +1158,7 @@ fn confirm_finds_a_proposal_on_a_later_page() {
     fake.mount(
         Mock::given(method("GET"))
             .and(path("/decentralized-parties"))
-            .respond_with(party_list("alpha::1220aa", 2, &["PAR::1"]))
+            .respond_with(party_list(ALPHA, 2, &["PAR::1"]))
             .expect(1),
     );
     let page = |cid: &str, next: Option<&str>| {
@@ -1118,6 +1211,53 @@ fn confirm_finds_a_proposal_on_a_later_page() {
 
     // Assert
     assert_eq!(outcome.value, json!({ "message": "ok" }));
+}
+
+#[test]
+fn proposals_past_the_page_limit_are_an_error() {
+    // Arrange — every page names a next page.
+    let fake = Fake::start();
+    fake.token_grant("password", "a-1", 1);
+    fake.mount(
+        Mock::given(method("GET"))
+            .and(path("/decentralized-parties"))
+            .respond_with(party_list(ALPHA, 2, &["PAR::1"]))
+            .expect(1),
+    );
+    fake.mount(
+        Mock::given(method("GET"))
+            .and(path("/governance/confirmations"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "threshold": 2,
+                "rules_contract_id": "rules-1",
+                "actions": [],
+                "domain_actions": [],
+                "next_cursor": "more",
+            })))
+            .expect(50),
+    );
+    fake.mount(
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(0),
+    );
+
+    // Act
+    let error = run_command(
+        &fake,
+        parse(&[
+            "governance",
+            "confirm",
+            "--party",
+            "alpha",
+            "--proposal",
+            "p-old",
+        ]),
+    )
+    .unwrap_err();
+
+    // Assert
+    assert!(error.to_string().contains("50 pages"), "{error}");
 }
 
 #[test]

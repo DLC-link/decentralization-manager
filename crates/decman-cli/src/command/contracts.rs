@@ -15,6 +15,7 @@ pub struct GovernanceCoreInput {
     pub threshold: i64,
     pub confirmation_timeout_micros: i64,
     pub extra_proposers: Vec<String>,
+    pub disclosure_observers: Vec<String>,
 }
 
 /// The facts the node supplies: the governance-core package and the members.
@@ -171,9 +172,20 @@ pub fn body(
                     "type": "optional",
                     "inner": { "type": "party_set", "parties": input.extra_proposers },
                 },
+                disclosure_observers_field(&input.disclosure_observers),
             ],
         }],
     }))
+}
+
+/// The `disclosureObservers` field. governance-core 0.1.0 refuses an empty
+/// `Some`, so no observers is sent as `None`, as the web frontend does.
+fn disclosure_observers_field(observers: &[String]) -> Value {
+    if observers.is_empty() {
+        json!({ "type": "none" })
+    } else {
+        json!({ "type": "optional", "inner": { "type": "party_set", "parties": observers } })
+    }
 }
 
 #[cfg(test)]
@@ -196,6 +208,7 @@ mod tests {
             threshold,
             confirmation_timeout_micros: 86_400_000_000,
             extra_proposers: vec!["p::1220".to_owned()],
+            disclosure_observers: Vec::new(),
         }
     }
 
@@ -213,6 +226,23 @@ mod tests {
         assert_eq!(fields[2]["value"], 2);
         assert_eq!(fields[3]["microseconds"], 86_400_000_000_i64);
         assert_eq!(fields[4]["inner"]["parties"], json!(["p::1220"]));
+        assert_eq!(fields[5], json!({ "type": "none" }));
+    }
+
+    #[test]
+    fn disclosure_observers_are_sent_as_some() {
+        // Arrange
+        let mut input = input(2);
+        input.disclosure_observers = vec!["obs::1220".to_owned()];
+
+        // Act
+        let body = body("dec::1220", &context(), &input).unwrap();
+
+        // Assert
+        assert_eq!(
+            body["contracts"][0]["fields"][5],
+            json!({ "type": "optional", "inner": { "type": "party_set", "parties": ["obs::1220"] } })
+        );
     }
 
     fn known() -> Value {

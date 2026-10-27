@@ -5,9 +5,13 @@
 //! request bodies the web frontend sends.
 
 use anyhow::{Context, Result, bail};
+use common::api::{
+    CancelConfirmationRequest, CancelProposalRequest, ExpireConfirmationRequest, GovernanceType,
+};
 use reqwest::Method;
 use serde_json::{Value, json};
 
+use super::{canton_id, to_body};
 use crate::api::{
     DecmanClient, DomainGovAction, GovAction, GovConfirmation, GovernanceConfirmations,
 };
@@ -44,10 +48,10 @@ impl Pending<'_> {
         }
     }
 
-    fn governance_type(&self) -> &'static str {
+    fn governance_type(&self) -> GovernanceType {
         match self {
-            Self::SelfAction(_) => "core_self",
-            Self::Domain(_) => "core_domain",
+            Self::SelfAction(_) => GovernanceType::CoreSelf,
+            Self::Domain(_) => GovernanceType::CoreDomain,
         }
     }
 
@@ -107,7 +111,7 @@ const MAX_PAGES: usize = 50;
 pub fn fetch(client: &mut DecmanClient, party_id: &str) -> Result<GovernanceConfirmations> {
     let mut cursor: Option<String> = None;
     let mut all: Option<GovernanceConfirmations> = None;
-    for _ in 0..MAX_PAGES {
+    for page_number in 1..=MAX_PAGES {
         let mut query = vec![
             ("party_id".to_owned(), party_id.to_owned()),
             ("limit".to_owned(), PAGE_SIZE.to_string()),
@@ -125,6 +129,12 @@ pub fn fetch(client: &mut DecmanClient, party_id: &str) -> Result<GovernanceConf
         }
         if cursor.is_none() {
             break;
+        }
+        if page_number == MAX_PAGES {
+            bail!(
+                "the party has more than {} pending proposals; the CLI reads at most {MAX_PAGES} pages",
+                MAX_PAGES * PAGE_SIZE
+            );
         }
     }
     all.context("the /governance/confirmations response was empty")
@@ -270,11 +280,11 @@ pub fn revoke_body(
     let pending = require(confirmations, target)?;
     let mine = own_confirmation(confirmations, &pending)
         .context("this node has no confirmation on that action")?;
-    Ok(json!({
-        "party_id": party_id,
-        "confirmation_cid": mine.contract_id,
-        "governance_type": pending.governance_type(),
-    }))
+    to_body(&CancelConfirmationRequest {
+        party_id: canton_id(party_id)?,
+        confirmation_cid: mine.contract_id.clone(),
+        governance_type: pending.governance_type(),
+    })
 }
 
 /// Body for `POST /governance/expire`.
@@ -292,12 +302,12 @@ pub fn expire_body(
         confirmations,
         &Target::Confirmation(confirmation_cid.to_owned()),
     )?;
-    Ok(json!({
-        "party_id": party_id,
-        "rules_contract_id": rules_contract_id,
-        "confirmation_cid": confirmation_cid,
-        "governance_type": pending.governance_type(),
-    }))
+    to_body(&ExpireConfirmationRequest {
+        party_id: canton_id(party_id)?,
+        rules_contract_id: rules_contract_id.to_owned(),
+        confirmation_cid: confirmation_cid.to_owned(),
+        governance_type: pending.governance_type(),
+    })
 }
 
 /// Body for `POST /governance/cancel-proposal`. It carries this node's own
@@ -313,16 +323,18 @@ pub fn cancel_proposal_body(
 ) -> Result<Value> {
     let pending = require(confirmations, &Target::Proposal(proposal_cid.to_owned()))?;
     let mine = own_confirmation(confirmations, &pending).map(|c| c.contract_id.clone());
-    Ok(json!({
-        "party_id": party_id,
-        "proposal_cid": proposal_cid,
-        "confirmation_cid": mine,
-    }))
+    to_body(&CancelProposalRequest {
+        party_id: canton_id(party_id)?,
+        proposal_cid: proposal_cid.to_owned(),
+        confirmation_cid: mine,
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const DEC: &str = "dec::1220dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd";
 
     fn confirmations() -> GovernanceConfirmations {
         serde_json::from_value(json!({
@@ -357,7 +369,7 @@ mod tests {
         // Act
         let body = confirm_body(
             &confirmations(),
-            "dec::1220",
+            DEC,
             "rules",
             &Target::Proposal("p-1".to_owned()),
         )
@@ -367,7 +379,7 @@ mod tests {
         assert_eq!(
             body,
             json!({
-                "party_id": "dec::1220",
+                "party_id": DEC,
                 "rules_contract_id": "rules",
                 "action": placeholder_action(),
                 "governance_type": "core_domain",
@@ -384,7 +396,7 @@ mod tests {
         // Act
         let body = confirm_body(
             &confirmations(),
-            "dec::1220",
+            DEC,
             "rules",
             &Target::Action(action.clone()),
         )
@@ -399,7 +411,7 @@ mod tests {
     fn confirm_on_an_unknown_proposal_is_an_error() {
         let result = confirm_body(
             &confirmations(),
-            "dec::1220",
+            DEC,
             "rules",
             &Target::Proposal("missing".to_owned()),
         );
@@ -411,7 +423,7 @@ mod tests {
         // Act
         let body = execute_body(
             &confirmations(),
-            "dec::1220",
+            DEC,
             "rules",
             &Target::Confirmation("c-self-you".to_owned()),
             json!([]),
@@ -430,7 +442,7 @@ mod tests {
     fn execute_below_threshold_is_refused() {
         let error = execute_body(
             &confirmations(),
-            "dec::1220",
+            DEC,
             "rules",
             &Target::Proposal("p-1".to_owned()),
             json!([]),
@@ -451,7 +463,7 @@ mod tests {
         // Act
         let body = execute_body(
             &confirmations,
-            "dec::1220",
+            DEC,
             "rules",
             &Target::Proposal("p-1".to_owned()),
             json!([]),
@@ -468,7 +480,7 @@ mod tests {
         // Act
         let body = revoke_body(
             &confirmations(),
-            "dec::1220",
+            DEC,
             &Target::Confirmation("c-self-you".to_owned()),
         )
         .unwrap();
@@ -480,18 +492,14 @@ mod tests {
 
     #[test]
     fn revoke_without_own_confirmation_is_an_error() {
-        let result = revoke_body(
-            &confirmations(),
-            "dec::1220",
-            &Target::Proposal("p-1".to_owned()),
-        );
+        let result = revoke_body(&confirmations(), DEC, &Target::Proposal("p-1".to_owned()));
         assert!(result.is_err());
     }
 
     #[test]
     fn expire_takes_the_type_of_the_action_holding_the_confirmation() {
         // Act
-        let body = expire_body(&confirmations(), "dec::1220", "rules", "c-dom-you").unwrap();
+        let body = expire_body(&confirmations(), DEC, "rules", "c-dom-you").unwrap();
 
         // Assert
         assert_eq!(body["governance_type"], "core_domain");
@@ -500,7 +508,7 @@ mod tests {
     #[test]
     fn cancel_proposal_without_own_confirmation_sends_null() {
         // Act
-        let body = cancel_proposal_body(&confirmations(), "dec::1220", "p-1").unwrap();
+        let body = cancel_proposal_body(&confirmations(), DEC, "p-1").unwrap();
 
         // Assert
         assert_eq!(body["confirmation_cid"], Value::Null);

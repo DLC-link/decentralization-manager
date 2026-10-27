@@ -281,7 +281,7 @@ pub struct ReconnectFormerPartyRequest {
 /// `deny_unknown_fields` rejects pre-fix requests carrying
 /// `namespace_fingerprint` instead of silently ignoring it (the server now
 /// derives it from cache; see `start_kick`).
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(deny_unknown_fields)]
 #[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
@@ -298,7 +298,7 @@ pub struct KickRequest {
 }
 
 /// Request to add a new member to an existing decentralized party.
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(deny_unknown_fields)]
 #[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
@@ -315,7 +315,7 @@ pub struct AddPartyRequest {
 
 /// Request to change the thresholds of an existing decentralized party.
 /// Re-issues the namespace + party mappings; membership is unchanged.
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(deny_unknown_fields)]
 #[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
@@ -336,7 +336,7 @@ pub struct ChangeThresholdRequest {
 }
 
 /// Request to create a new decentralized party
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 pub struct OnboardingRequest {
@@ -1388,7 +1388,7 @@ pub struct DiscoverMemberPartyResponse {
 }
 
 /// Request to grant the configured user the rights they need to act on a dec party
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 pub struct GrantRightsRequest {

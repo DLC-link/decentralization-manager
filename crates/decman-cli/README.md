@@ -134,6 +134,9 @@ unless you add `--yes`. That includes reads that use `POST`, such as
 through `--api-url` or `DECMAN_API_URL`. A blocked command fails before it runs
 any secret command.
 
+The protection applies to commands only. The terminal UI reads the same
+profiles, but it ignores `require_yes`.
+
 ## Output
 
 - **stdout** holds the result as JSON. Add `--compact` for one line.
@@ -206,7 +209,9 @@ page, and `--cursor` with the `next_cursor` of the previous page.
 with one difference. The web frontend puts every known member party into the
 member set. The CLI takes only the party's own participants, and pairs each one
 with its member party. The CLI takes the member party that the peers report.
-Give it with `--member PARTICIPANT=PARTY` when a peer reports none. You give the threshold and the confirmation timeout. Add
+Give it with `--member PARTICIPANT=PARTY` when a peer reports none. You give
+the threshold and the confirmation timeout. Add `--disclosure-observer` for
+each party that sees the governance contracts without being a member. Add
 `--dry-run` to print the body and not send it.
 
 ### JSON input

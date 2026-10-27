@@ -4,6 +4,10 @@
 //! invocations if its tokens are kept on disk. The cache holds the access and
 //! refresh tokens per API URL and username, readable by the current user only.
 
+#[cfg(unix)]
+use std::io::Write;
+#[cfg(unix)]
+use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -294,7 +298,6 @@ impl TokenCache {
 
 #[cfg(unix)]
 fn create_private_dir(dir: &Path) -> Result<()> {
-    use std::os::unix::fs::DirBuilderExt;
     std::fs::DirBuilder::new()
         .recursive(true)
         .mode(0o700)
@@ -311,7 +314,6 @@ fn create_private_dir(dir: &Path) -> Result<()> {
 /// write. A symlink never counts as private.
 #[cfg(unix)]
 fn is_private(path: &Path) -> bool {
-    use std::os::unix::fs::PermissionsExt;
     std::fs::symlink_metadata(path)
         .is_ok_and(|meta| !meta.file_type().is_symlink() && meta.permissions().mode() & 0o077 == 0)
 }
@@ -326,8 +328,6 @@ fn is_private(_path: &Path) -> bool {
 /// of being followed. A leftover from an earlier crashed run is removed first.
 #[cfg(unix)]
 fn write_private_file(path: &Path, bytes: &[u8]) -> Result<()> {
-    use std::io::Write;
-    use std::os::unix::fs::OpenOptionsExt;
     let open = || {
         std::fs::OpenOptions::new()
             .write(true)
@@ -349,7 +349,6 @@ fn write_private_file(path: &Path, bytes: &[u8]) -> Result<()> {
 
 #[cfg(unix)]
 fn open_lock_file(path: &Path) -> Result<std::fs::File> {
-    use std::os::unix::fs::OpenOptionsExt;
     std::fs::OpenOptions::new()
         .write(true)
         .create(true)
@@ -480,7 +479,6 @@ mod tests {
         assert_eq!(loaded.target, target());
         #[cfg(unix)]
         {
-            use std::os::unix::fs::PermissionsExt;
             let mode = std::fs::metadata(&cache.path).unwrap().permissions().mode();
             assert_eq!(mode & 0o777, 0o600);
         }
@@ -493,7 +491,6 @@ mod tests {
     #[test]
     fn cache_in_a_directory_open_to_others_is_refused() {
         // Arrange
-        use std::os::unix::fs::PermissionsExt;
         let dir = tempfile::tempdir().unwrap();
         let cache_dir = dir.path().join("decman-cli");
         let cache = TokenCache::in_dir(&cache_dir, "https://a", "alice");
