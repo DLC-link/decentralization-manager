@@ -20,15 +20,15 @@
 use std::time::{Duration, Instant};
 
 use anyhow::Context;
-use common::{api::DecentralizedPartiesResponse, types::InvitationType};
+use common::api::DecentralizedPartiesResponse;
 use serde_json::{Value, json};
 use tokio::time::sleep;
 use tracing::info;
 
 use crate::common::{
-    Fixture, TestTarget, chaos,
+    Fixture, TestTarget, chaos, db,
     http::probe_workflow_status,
-    invitations::{post_accept_invitation, probe_pending_invitation},
+    invitations::{post_accept_invitation, probe_run_invitation},
 };
 
 pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
@@ -102,15 +102,16 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
         .post_json(f.p1.http, "/contracts", &req)
         .await
         .context("POST /contracts")?;
+    // The response carries the kind's status, not the run's name. The handler
+    // persists the run row before it answers, so the newest row is this run.
+    let instance = db::latest_coordinator_instance(&f.db_path(1), "Contracts")
+        .await?
+        .context("POST /contracts left no Contracts run on P1")?;
 
     // Only P2 accepts. P3 stays up but never accepts — the absent owner.
-    let p2_inv = chaos::wait_for_invite(
-        f,
-        f.p2.http,
-        InvitationType::Contracts,
-        Duration::from_secs(60),
-    )
-    .await?;
+    let p2_inv =
+        chaos::wait_for_invite_for_instance(f, f.p2.http, &instance, Duration::from_secs(60))
+            .await?;
     post_accept_invitation(f, f.p2.http, &p2_inv)
         .await
         .context("accept Contracts on P2")?;
@@ -137,7 +138,7 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
     info!("contracts workflow completed at quorum with P3 absent");
 
     // Best-effort: clear P3's stale, never-accepted invite so it doesn't linger.
-    if let Some(id) = probe_pending_invitation(f, f.p3.http, InvitationType::Contracts).await {
+    if let Some(id) = probe_run_invitation(f, f.p3.http, &instance).await {
         let _ = f
             .post_expect_status(f.p3.http, "/invitations/decline", &json!({ "id": id }))
             .await;

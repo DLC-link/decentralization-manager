@@ -14,11 +14,14 @@ use canton_proto_rs::com::digitalasset::canton::topology::admin::v30::{
     topology_manager_read_service_client::TopologyManagerReadServiceClient,
     topology_manager_write_service_client::TopologyManagerWriteServiceClient,
 };
-use common::{api::PendingInvitationsResponse, types::InvitationType};
 use dec_party_manager::{config::NodeConfig, utils, workflow::proposal_store};
 
 use super::legacy_key_retirement::configs;
-use crate::common::{Fixture, chaos, db, invitations::post_accept_invitation, processes};
+use crate::common::{
+    Fixture, chaos, db,
+    invitations::{post_accept_invitation, probe_run_invitation},
+    processes,
+};
 
 pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
     chaos::ensure_nodes_healthy(f).await?;
@@ -38,18 +41,14 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
         if n < 1 {
             return Ok(false);
         }
-        let inv_p2: PendingInvitationsResponse =
-            f_imm.get_json(f_imm.p2.http, "/invitations").await?;
-        let inv_p3: PendingInvitationsResponse =
-            f_imm.get_json(f_imm.p3.http, "/invitations").await?;
-        let p2_has = inv_p2
-            .invitations
-            .iter()
-            .any(|i| i.invitation_type == InvitationType::Onboarding);
-        let p3_has = inv_p3
-            .invitations
-            .iter()
-            .any(|i| i.invitation_type == InvitationType::Onboarding);
+        // An earlier phase's cancelled run can leave its invitation pending,
+        // so only this run's invitation proves the invites went out.
+        let p2_has = probe_run_invitation(f_imm, f_imm.p2.http, &instance)
+            .await
+            .is_some();
+        let p3_has = probe_run_invitation(f_imm, f_imm.p3.http, &instance)
+            .await
+            .is_some();
         Ok(p2_has && p3_has)
     })
     .await?;
@@ -71,20 +70,12 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
     .with_context(|| format!("P1 restarted but {leftover} is still on its participant"))?;
 
     // Now accept on both peers.
-    let p2_inv = chaos::wait_for_invite(
-        f,
-        f.p2.http,
-        InvitationType::Onboarding,
-        Duration::from_secs(60),
-    )
-    .await?;
-    let p3_inv = chaos::wait_for_invite(
-        f,
-        f.p3.http,
-        InvitationType::Onboarding,
-        Duration::from_secs(60),
-    )
-    .await?;
+    let p2_inv =
+        chaos::wait_for_invite_for_instance(f, f.p2.http, &instance, Duration::from_secs(60))
+            .await?;
+    let p3_inv =
+        chaos::wait_for_invite_for_instance(f, f.p3.http, &instance, Duration::from_secs(60))
+            .await?;
     post_accept_invitation(f, f.p2.http, &p2_inv).await?;
     post_accept_invitation(f, f.p3.http, &p3_inv).await?;
 

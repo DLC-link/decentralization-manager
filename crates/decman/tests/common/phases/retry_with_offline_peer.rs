@@ -15,7 +15,7 @@
 
 use std::time::Duration;
 
-use common::{api::WorkflowRunsResponse, types::InvitationType};
+use common::api::WorkflowRunsResponse;
 use serde_json::json;
 use tokio::time::sleep;
 
@@ -28,20 +28,12 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
     chaos::say("P2", &format!("starting onboarding with prefix {prefix}"));
     chaos::post_onboarding(f, &prefix).await?;
 
-    let p2_inv = chaos::wait_for_invite(
-        f,
-        f.p2.http,
-        InvitationType::Onboarding,
-        Duration::from_secs(60),
-    )
-    .await?;
-    let p3_inv = chaos::wait_for_invite(
-        f,
-        f.p3.http,
-        InvitationType::Onboarding,
-        Duration::from_secs(60),
-    )
-    .await?;
+    let p2_inv =
+        chaos::wait_for_invite_for_instance(f, f.p2.http, &instance, Duration::from_secs(60))
+            .await?;
+    let p3_inv =
+        chaos::wait_for_invite_for_instance(f, f.p3.http, &instance, Duration::from_secs(60))
+            .await?;
     post_accept_invitation(f, f.p2.http, &p2_inv).await?;
     post_accept_invitation(f, f.p3.http, &p3_inv).await?;
 
