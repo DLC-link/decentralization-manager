@@ -54,7 +54,9 @@ pub fn wait_for_run(
     selector: &RunSelector,
     options: WaitOptions,
 ) -> Result<Outcome> {
-    let deadline = options.timeout.map(|timeout| Instant::now() + timeout);
+    let deadline = options
+        .timeout
+        .and_then(|timeout| Instant::now().checked_add(timeout));
     let timed_out = || {
         anyhow::anyhow!(
             "timed out after {}s waiting for {}",

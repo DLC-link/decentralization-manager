@@ -279,6 +279,47 @@ fn a_login_another_invocation_refreshed_is_used_without_refreshing_again() {
 }
 
 #[test]
+fn a_refresh_token_another_invocation_rotated_is_used_after_its_access_expired() {
+    // Arrange — this client loads r-old; a parallel invocation rotates it to
+    // r-rotated, and that access token has expired too.
+    let fake = Fake::start();
+    let dir = tempfile::tempdir().unwrap();
+    let cache = TokenCache::in_dir(&dir.path().join("cache"), &fake.uri(), "alice");
+    cache
+        .save(&fake.target(), &tokens("a-old", 1, "r-old"))
+        .unwrap();
+    let mut client = fake.client().with_token_cache(cache.clone());
+    cache
+        .save(&fake.target(), &tokens("a-rotated", 1, "r-rotated"))
+        .unwrap();
+    fake.mount(
+        Mock::given(method("POST"))
+            .and(path("/token"))
+            .and(body_string_contains("refresh_token=r-rotated"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "access_token": "a-2",
+                "expires_in": 300,
+            })))
+            .expect(1),
+    );
+    fake.mount(
+        Mock::given(method("POST"))
+            .and(path("/token"))
+            .and(body_string_contains("refresh_token=r-old"))
+            .respond_with(ResponseTemplate::new(400))
+            .expect(0),
+    );
+    fake.token_grant("password", "unused", 0);
+    fake.get_with_token("/node-config", "a-2", json!({}), 1);
+
+    // Act
+    let result = client.request(Method::GET, "/node-config", &[], None);
+
+    // Assert
+    result.unwrap();
+}
+
+#[test]
 fn a_stale_cached_token_endpoint_falls_back_to_discovery() {
     // Arrange — the cached login names a token endpoint the IdP no longer has.
     let fake = Fake::start();

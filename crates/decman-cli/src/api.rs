@@ -839,20 +839,30 @@ impl DecmanClient {
                 .is_none_or(|audience| target.audience.as_ref() == Some(audience))
     }
 
-    /// Take a newer, valid login from the cache file. A parallel invocation
-    /// can have refreshed it since this client loaded it, and a second refresh
-    /// with the same refresh token can fail. The token this client already
-    /// holds, for example one the server just rejected, is never taken again.
+    /// Take a newer login from the cache file. A parallel invocation can have
+    /// refreshed it since this client loaded it, and a second refresh with
+    /// the same refresh token can fail. So a new refresh token is taken even
+    /// when its access token has expired. The access token this client
+    /// already holds, for example one the server just rejected, is never
+    /// used again.
     fn adopt_newer_cached_login(&mut self, now: i64) {
-        let Some(login) = self.cache.as_ref().and_then(TokenCache::load) else {
+        let Some(mut login) = self.cache.as_ref().and_then(TokenCache::load) else {
             return;
         };
-        let held = self.access_token();
-        if held == Some(login.tokens.access_token.as_str())
-            || !login.tokens.access_valid(now)
-            || !self.matches_overrides(&login.target)
-        {
+        if !self.matches_overrides(&login.target) {
             return;
+        }
+        let held = self.tokens.as_ref();
+        let same_access =
+            held.is_some_and(|tokens| tokens.access_token == login.tokens.access_token);
+        let newer_access = !same_access && login.tokens.access_valid(now);
+        let newer_refresh = login.tokens.usable_refresh_token(now).is_some()
+            && held.is_none_or(|tokens| tokens.refresh_token != login.tokens.refresh_token);
+        if !newer_access && !newer_refresh {
+            return;
+        }
+        if same_access {
+            login.tokens.expire_access();
         }
         self.target = Some(Some(login.target));
         self.target_from_cache = true;
