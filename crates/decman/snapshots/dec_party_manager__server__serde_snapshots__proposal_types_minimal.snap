@@ -76,6 +76,32 @@ expression: minimal_option_fixtures()
     "deposit_amount_usd": null
   },
   {
+    "type": "mint",
+    "allocation_factory_cid": "00alloc",
+    "instrument_id": {
+      "admin": "admin-party",
+      "id": "TOK"
+    },
+    "instrument_configuration_cid": "00icc",
+    "recipient": "recv::1220c4010d6883f367c7f45d55b2449501620130f9b21e96379f17dea455ac7a5892",
+    "amount": "5",
+    "description": "mint",
+    "block_list_shard_cids": []
+  },
+  {
+    "type": "burn",
+    "allocation_factory_cid": "00alloc",
+    "instrument_id": {
+      "admin": "admin-party",
+      "id": "TOK"
+    },
+    "instrument_configuration_cid": "00icc",
+    "holder": "holder::1220c4010d6883f367c7f45d55b2449501620130f9b21e96379f17dea455ac7a5892",
+    "amount": "3",
+    "description": "burn",
+    "block_list_shard_cids": []
+  },
+  {
     "type": "accept_mint_request",
     "mint_request_cid": "00mr",
     "instrument_configuration_cid": "00icc",

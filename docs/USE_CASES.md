@@ -571,6 +571,8 @@ Credentialed issuers request mints and burns through the `AllocationFactory`. Th
 
 When the instrument checks a block list, each accept must send the registrar's block list shards in `block_list_shard_cids`. List them with `GET /block-list-shards?party_id=...`. Onboarding creates one shard per hex prefix, so the registrar's shards together cover every holder. The accept forms fill in all of them when the instrument checks a block list. Leave the field out for an instrument without the check.
 
+The `mint` and `burn` offer proposals take the same `block_list_shard_cids` field. The registry checks the holder when the vote makes the offer. It checks the holder again when the holder accepts the `MintOffer` or `BurnOffer`. The holder must send the shards with that accept, as disclosed contracts, because only the registrar and the operator see them. DecMan takes no part in that accept. The UI hides the Mint and Burn forms, so send these proposals through the API.
+
 ### Querying Services
 
 **List ProviderServices:**

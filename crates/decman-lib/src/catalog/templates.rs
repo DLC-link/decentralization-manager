@@ -460,6 +460,7 @@ mod tests {
                     recipient: cid("recipient"),
                     amount: decimal("1.0"),
                     description: "d".to_string(),
+                    block_list_shard_cids: vec![],
                 }
                 .template_id(&pkgs)
                 .expect("template id resolves")
@@ -474,6 +475,7 @@ mod tests {
                     holder: cid("holder"),
                     amount: decimal("1.0"),
                     description: "d".to_string(),
+                    block_list_shard_cids: vec![],
                 }
                 .template_id(&pkgs)
                 .expect("template id resolves")

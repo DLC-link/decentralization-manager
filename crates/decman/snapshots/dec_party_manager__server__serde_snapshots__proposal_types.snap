@@ -142,7 +142,10 @@ expression: all_proposal_fixtures()
     "instrument_configuration_cid": "00icc",
     "recipient": "recv::1220c4010d6883f367c7f45d55b2449501620130f9b21e96379f17dea455ac7a5892",
     "amount": "5",
-    "description": "mint"
+    "description": "mint",
+    "block_list_shard_cids": [
+      "00shard"
+    ]
   },
   {
     "type": "offer_free_credential",
@@ -209,7 +212,10 @@ expression: all_proposal_fixtures()
     "instrument_configuration_cid": "00icc",
     "holder": "holder::1220c4010d6883f367c7f45d55b2449501620130f9b21e96379f17dea455ac7a5892",
     "amount": "3",
-    "description": "burn"
+    "description": "burn",
+    "block_list_shard_cids": [
+      "00shard"
+    ]
   },
   {
     "type": "accept_mint_request",

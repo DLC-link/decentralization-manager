@@ -413,6 +413,11 @@ pub struct Mint {
     #[cfg_attr(feature = "typegen", ts(type = "string"))]
     pub amount: DamlDecimal,
     pub description: String,
+    /// `StoredBlockListPartyShas` contract ids of the registrar's block list.
+    /// The registry reads them when the instrument configuration checks a
+    /// block list, and they must cover the recipient. Empty sends none.
+    #[serde(default)]
+    pub block_list_shard_cids: Vec<String>,
 }
 
 impl Mint {
@@ -458,6 +463,15 @@ impl DamlProtoEncode for Mint {
             ),
             field("meta", make_empty_metadata()),
             field("extraArgsMeta", make_empty_metadata()),
+            field(
+                "blockListShardCids",
+                make_optional_list(
+                    self.block_list_shard_cids
+                        .iter()
+                        .map(|cid| make_contract_id(cid))
+                        .collect(),
+                ),
+            ),
         ]))
     }
 }
@@ -483,6 +497,11 @@ pub struct Burn {
     #[cfg_attr(feature = "typegen", ts(type = "string"))]
     pub amount: DamlDecimal,
     pub description: String,
+    /// `StoredBlockListPartyShas` contract ids of the registrar's block list.
+    /// The registry reads them when the instrument configuration checks a
+    /// block list, and they must cover the burn holder. Empty sends none.
+    #[serde(default)]
+    pub block_list_shard_cids: Vec<String>,
 }
 
 impl Burn {
@@ -528,6 +547,15 @@ impl DamlProtoEncode for Burn {
             ),
             field("meta", make_empty_metadata()),
             field("extraArgsMeta", make_empty_metadata()),
+            field(
+                "blockListShardCids",
+                make_optional_list(
+                    self.block_list_shard_cids
+                        .iter()
+                        .map(|cid| make_contract_id(cid))
+                        .collect(),
+                ),
+            ),
         ]))
     }
 }
@@ -1425,6 +1453,7 @@ mod tests {
                 recipient: cid("recv"),
                 amount: "1.5".parse().expect("valid decimal"),
                 description: "mint it".to_string(),
+                block_list_shard_cids: vec!["00shard1".to_string(), "00shard2".to_string()],
             }
             .to_daml_proto()
             .expect("payload encodes")
@@ -1441,6 +1470,7 @@ mod tests {
                 holder: cid("holder"),
                 amount: "1.5".parse().expect("valid decimal"),
                 description: "burn it".to_string(),
+                block_list_shard_cids: vec!["00shard1".to_string(), "00shard2".to_string()],
             }
             .to_daml_proto()
             .expect("payload encodes")
@@ -1735,15 +1765,38 @@ mod tests {
         }
     }
 
-    /// Both accept templates declare `blockListShardCids` last, so Smart
-    /// Contract Upgrade accepts it. An empty list goes out as `None`, which
-    /// leaves the choice context as it was.
+    /// The accept and offer templates for mint and burn declare
+    /// `blockListShardCids` last, so Smart Contract Upgrade accepts it. An
+    /// empty list goes out as `None`, which leaves the choice context as it
+    /// was.
     #[test]
-    fn accept_requests_send_block_list_shards_last() {
+    fn mint_and_burn_proposals_send_block_list_shards_last() {
         let gov = cid("gov");
         let member = cid("member");
-        let accepts = |shards: Vec<String>| -> Vec<Box<dyn DamlProtoEncode>> {
+        let instrument_id = || InstrumentId {
+            admin: "admin::ns".to_string(),
+            id: "instr-1".to_string(),
+        };
+        let proposals = |shards: Vec<String>| -> Vec<Box<dyn DamlProtoEncode>> {
             vec![
+                Box::new(Mint {
+                    allocation_factory_cid: "00alloc".to_string(),
+                    instrument_id: instrument_id(),
+                    instrument_configuration_cid: "00icc".to_string(),
+                    recipient: cid("recv"),
+                    amount: "1.5".parse().expect("valid decimal"),
+                    description: "mint it".to_string(),
+                    block_list_shard_cids: shards.clone(),
+                }),
+                Box::new(Burn {
+                    allocation_factory_cid: "00alloc".to_string(),
+                    instrument_id: instrument_id(),
+                    instrument_configuration_cid: "00icc".to_string(),
+                    holder: cid("holder"),
+                    amount: "1.5".parse().expect("valid decimal"),
+                    description: "burn it".to_string(),
+                    block_list_shard_cids: shards.clone(),
+                }),
                 Box::new(AcceptMintRequest {
                     mint_request_cid: "00mrc".to_string(),
                     instrument_configuration_cid: "00icc".to_string(),
@@ -1768,8 +1821,8 @@ mod tests {
                 make_optional_list(shards.iter().map(|c| make_contract_id(c)).collect()),
             ),
         ] {
-            for accept in accepts(cids) {
-                let arguments = proposal_create_arguments(accept.as_ref(), &gov, &member)
+            for proposal in proposals(cids) {
+                let arguments = proposal_create_arguments(proposal.as_ref(), &gov, &member)
                     .expect("proposal arguments encode");
                 let last = arguments.fields.last().expect("arguments have fields");
                 assert_eq!(last.label, "blockListShardCids");
@@ -2135,6 +2188,7 @@ mod tests {
             recipient: cid("recv"),
             amount: amount.parse().expect("valid decimal"),
             description: "mint it".to_string(),
+            block_list_shard_cids: vec![],
         };
         assert!(mint("1.5").validate(&ctx(&gov, 0)).is_ok());
         assert!(mint("0").validate(&ctx(&gov, 0)).is_err());
@@ -2150,6 +2204,7 @@ mod tests {
             holder: cid("holder"),
             amount: amount.parse().expect("valid decimal"),
             description: "burn it".to_string(),
+            block_list_shard_cids: vec![],
         };
         assert!(burn("1.5").validate(&ctx(&gov, 0)).is_ok());
         assert!(burn("0").validate(&ctx(&gov, 0)).is_err());

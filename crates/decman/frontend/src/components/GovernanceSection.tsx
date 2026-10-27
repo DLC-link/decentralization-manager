@@ -2282,6 +2282,8 @@ export const GovernanceSection = ({
           };
           break;
         }
+        // The type menu hides Mint and Burn, so their forms have no shard
+        // picker and send no block list shards.
         case "mint":
           proposal = {
             type: "mint",
@@ -2291,6 +2293,7 @@ export const GovernanceSection = ({
             recipient: proposalRecipient,
             amount: proposalAmount,
             description: proposalDescription,
+            block_list_shard_cids: [],
           };
           break;
         case "burn":
@@ -2302,6 +2305,7 @@ export const GovernanceSection = ({
             holder: proposalHolder,
             amount: proposalAmount,
             description: proposalDescription,
+            block_list_shard_cids: [],
           };
           break;
         case "accept_mint_request":

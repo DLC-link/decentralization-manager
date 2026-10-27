@@ -75,9 +75,10 @@ pub fn validate_self_issued_requirements_have_claims(
 
 /// Mirrors the Daml `blockListSupported` guard. With the flag on, every mint,
 /// burn and transfer must send the registrar's block list shards. The accept
-/// mint and accept burn proposals carry them. The mint and burn offers do
-/// not, and nobody has checked what wallet and cbtc-lib transfers send
-/// (#566).
+/// and offer proposals for mint and burn carry them. The holder's accept of a
+/// mint or burn offer checks the block list again, and the holder must send
+/// the shards there. Nobody has checked what wallet and cbtc-lib transfers
+/// send (#566).
 pub fn validate_block_list_supported(use_block_list: Option<bool>) -> Result<(), Error> {
     if use_block_list == Some(true) {
         return Err(Error::Validation(

@@ -63,10 +63,12 @@ credentialValidityText validFrom validUntil =
 
 -- | True unless the block list flag is Some True. With the flag on, the
 -- registry refuses every mint, burn and transfer whose choice context lacks
--- the registrar's block list shards. AcceptMintRequest and AcceptBurnRequest
--- carry them. MintProposal and BurnProposal do not, and nobody has checked
--- what wallet and cbtc-lib transfers send (#566). Proposal templates use
--- this in their `ensure` clause, so the flag fails before any vote.
+-- the registrar's block list shards. AcceptMintRequest, AcceptBurnRequest,
+-- MintProposal and BurnProposal carry them. The holder's MintOffer_Accept
+-- and BurnOffer_Accept check the block list again, and the holder must send
+-- the shards there. Nobody has checked what wallet and cbtc-lib transfers
+-- send (#566). Proposal templates use this in their `ensure` clause, so the
+-- flag fails before any vote.
 blockListSupported : Optional Bool -> Bool
 blockListSupported = (/= Some True)
 
