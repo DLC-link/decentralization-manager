@@ -32,7 +32,7 @@ use canton_proto_rs::com::digitalasset::canton::{
         AddTransactionsRequest, BaseQuery, GenerateTransactionsRequest,
         ListDecentralizedNamespaceDefinitionRequest, ListPartyToParticipantRequest,
         SignTransactionsRequest, StoreId, Synchronizer, base_query, generate_transactions_request,
-        list_party_to_participant_response::result::Item as P2pItem, store_id, synchronizer,
+        store_id, synchronizer,
         topology_manager_read_service_client::TopologyManagerReadServiceClient,
         topology_manager_write_service_client::TopologyManagerWriteServiceClient,
     },
@@ -618,10 +618,7 @@ pub async fn host_onboarding_status(
         // only the uid and the permission reports such a host as live, which is
         // how a caller ends up trusting a host that cannot yet confirm anything.
         let mut named = None;
-        for result in &response.results {
-            let Some(P2pItem::V30(p)) = &result.item else {
-                continue;
-            };
+        for (_, p) in topology::p2p_rows(response.results)? {
             if let Some(entry) = p.participants.iter().find(|h| {
                 h.participant_uid == self_uid
                     && h.permission == ParticipantPermission::Confirmation as i32
@@ -725,17 +722,13 @@ pub async fn list_hosted_external_parties(config: &NodeConfig) -> Result<Vec<Hos
         .into_inner();
 
     let mut parties = Vec::new();
-    for result in p2p.results {
+    for (context, mapping) in topology::p2p_rows(p2p.results)? {
         // `valid_from` is when this mapping became effective — the party's creation
-        // time for a serial-1 mapping. Read before `item` is moved out.
-        let created_at = result
-            .context
+        // time for a serial-1 mapping.
+        let created_at = context
             .as_ref()
             .and_then(|c| c.valid_from.as_ref())
             .map(timestamp_to_rfc3339);
-        let Some(P2pItem::V30(mapping)) = result.item else {
-            continue;
-        };
         let Some(entry) = mapping.participants.iter().find(|h| {
             h.participant_uid == self_uid
                 && h.permission == ParticipantPermission::Confirmation as i32

@@ -133,7 +133,9 @@ where
         Some(c) => (c.offset, Some(c.page_token)),
         None => (
             client
-                .get_ledger_end(tonic::Request::new(GetLedgerEndRequest {}))
+                .get_ledger_end(tonic::Request::new(GetLedgerEndRequest {
+                    synchronizer_id: vec![],
+                }))
                 .await?
                 .into_inner()
                 .offset,
@@ -209,7 +211,9 @@ where
     let mut client = utils::create_state_client(config, token.clone()).await?;
 
     let ledger_end = client
-        .get_ledger_end(tonic::Request::new(GetLedgerEndRequest {}))
+        .get_ledger_end(tonic::Request::new(GetLedgerEndRequest {
+            synchronizer_id: vec![],
+        }))
         .await?
         .into_inner()
         .offset;

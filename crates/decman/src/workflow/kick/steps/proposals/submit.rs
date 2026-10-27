@@ -7,7 +7,6 @@ use canton_proto_rs::com::digitalasset::canton::{
     },
     topology::admin::v30::{
         ListDecentralizedNamespaceDefinitionRequest, ListPartyToParticipantRequest,
-        list_party_to_participant_response::result::Item as P2pItem,
         topology_manager_read_service_client::TopologyManagerReadServiceClient,
     },
 };
@@ -184,15 +183,15 @@ async fn wait_for_p2p_in_topology(
             .await?
             .into_inner();
 
-        if response.results.iter().any(|row| {
-            row.context.as_ref().is_some_and(|context| {
-                context.operation == TopologyChangeOp::AddReplace as i32
-                    && i64::from(context.serial) >= i64::from(expected_serial)
-            }) && row
-                .item
-                .as_ref()
-                .is_some_and(|P2pItem::V30(actual)| p2p_matches(actual, expected))
-        }) {
+        if topology::p2p_rows(response.results)?
+            .iter()
+            .any(|(context, actual)| {
+                context.as_ref().is_some_and(|context| {
+                    context.operation == TopologyChangeOp::AddReplace as i32
+                        && i64::from(context.serial) >= i64::from(expected_serial)
+                }) && p2p_matches(actual, expected)
+            })
+        {
             tracing::info!("P2P found in topology after {attempt} attempt(s)");
             return Ok(());
         }

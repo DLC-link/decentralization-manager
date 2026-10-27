@@ -58,7 +58,6 @@ use canton_proto_rs::com::digitalasset::canton::{
     topology::admin::v30::{
         AuthorizeRequest, ForceFlag, ListDecentralizedNamespaceDefinitionRequest,
         ListPartyToParticipantRequest, ListSynchronizerParametersStateRequest, authorize_request,
-        list_party_to_participant_response::result::Item as P2pItem,
         topology_manager_read_service_client::TopologyManagerReadServiceClient,
     },
 };
@@ -70,7 +69,9 @@ use common::{
 };
 use dec_party_manager::{
     config::NodeConfig,
-    workflow::topology::{authorize_with_topology_retry, head_state_query, synchronizer_store_id},
+    workflow::topology::{
+        authorize_with_topology_retry, head_state_query, p2p_rows, synchronizer_store_id,
+    },
 };
 use reqwest::header::{AUTHORIZATION, CONTENT_TYPE};
 use serde_json::{Value, json};
@@ -298,6 +299,7 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
                                 synchronizer_alias: alias.clone(),
                                 contract_ids: held.clone(),
                                 ignore_already_purged: true,
+                                force_repair_when_topology_transaction_at_ledger_end: false,
                             }))
                             .await
                         {
@@ -897,15 +899,15 @@ async fn read_hosting(
         }))
         .await?
         .into_inner();
-    Ok(response.results.into_iter().find_map(|r| {
-        let valid_from = r
-            .context
-            .as_ref()
-            .and_then(|c| c.valid_from)
-            .map(to_system_time);
-        let P2pItem::V30(mapping) = r.item?;
-        (mapping.party == party_id).then_some((mapping, valid_from))
-    }))
+    Ok(p2p_rows(response.results)?
+        .into_iter()
+        .find_map(|(context, mapping)| {
+            let valid_from = context
+                .as_ref()
+                .and_then(|c| c.valid_from)
+                .map(to_system_time);
+            (mapping.party == party_id).then_some((mapping, valid_from))
+        }))
 }
 
 /// Parties the head state has `participant_uid` hosting.
@@ -923,11 +925,9 @@ pub(super) async fn hosted_parties(
         }))
         .await?
         .into_inner();
-    Ok(response
-        .results
+    Ok(p2p_rows(response.results)?
         .into_iter()
-        .filter_map(|r| {
-            let P2pItem::V30(mapping) = r.item?;
+        .filter_map(|(_, mapping)| {
             mapping
                 .participants
                 .iter()

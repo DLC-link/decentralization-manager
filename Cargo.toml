@@ -101,13 +101,13 @@ wiremock = { version = "0.6" }
 x509-parser = { version = "0.18" }
 zeroize = { version = "1.8", features = ["derive"] }
 
-canton-common = { package = "common", git = "https://github.com/DLC-link/canton-lib", rev = "651ea5221b4794f55bd152e9f3e762a92af69afd" }
-canton-proto-rs = { git = "https://github.com/DLC-link/canton-lib", rev = "651ea5221b4794f55bd152e9f3e762a92af69afd" }
-canton-registry = { package = "registry", git = "https://github.com/DLC-link/canton-lib", rev = "651ea5221b4794f55bd152e9f3e762a92af69afd" }
+canton-common = { package = "common", git = "https://github.com/DLC-link/canton-lib", rev = "ca3548140910ee10f6d0095d39e4c6cd0ba6adfd" }
+canton-proto-rs = { git = "https://github.com/DLC-link/canton-lib", rev = "ca3548140910ee10f6d0095d39e4c6cd0ba6adfd" }
+canton-registry = { package = "registry", git = "https://github.com/DLC-link/canton-lib", rev = "ca3548140910ee10f6d0095d39e4c6cd0ba6adfd" }
 common = { path = "crates/common" }
 decman-lib = { path = "crates/decman-lib" }
 decman-wallet = { path = "crates/decman-wallet" }
-keycloak = { git = "https://github.com/DLC-link/canton-lib", rev = "651ea5221b4794f55bd152e9f3e762a92af69afd" }
+keycloak = { git = "https://github.com/DLC-link/canton-lib", rev = "ca3548140910ee10f6d0095d39e4c6cd0ba6adfd" }
 penelope = { git = "https://github.com/DLC-link/penelope", rev = "8f36b2dfda5932c8310ec6891ff3b72d416118dc" }
 
 [patch.crates-io]

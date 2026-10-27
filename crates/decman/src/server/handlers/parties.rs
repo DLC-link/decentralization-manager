@@ -17,9 +17,8 @@ use canton_proto_rs::com::digitalasset::canton::{
     topology::admin::v30::{
         BaseQuery, ListDecentralizedNamespaceDefinitionRequest, ListNamespaceDelegationRequest,
         ListPartiesRequest, ListPartyToParticipantRequest, StoreId, Synchronizer, base_query,
-        list_namespace_delegation_response::result::Item as NsDelegationItem,
-        list_party_to_participant_response::result::Item as P2pItem, store_id, synchronizer,
-        topology_aggregation_service_client::TopologyAggregationServiceClient,
+        list_namespace_delegation_response::result::Item as NsDelegationItem, store_id,
+        synchronizer, topology_aggregation_service_client::TopologyAggregationServiceClient,
         topology_manager_read_service_client::TopologyManagerReadServiceClient,
     },
 };
@@ -60,6 +59,7 @@ use crate::{
         },
     },
     utils,
+    workflow::topology,
 };
 
 /// How many parties [`fetch_decentralized_parties`] reads at once.
@@ -1886,10 +1886,7 @@ async fn fetch_decentralized_parties(
         .await?
         .into_inner();
 
-        for result in response.results {
-            let Some(P2pItem::V30(party_mapping)) = result.item else {
-                continue;
-            };
+        for (_, party_mapping) in topology::p2p_rows(response.results)? {
             let Some((_, namespace)) = party_mapping.party.rsplit_once("::") else {
                 continue;
             };

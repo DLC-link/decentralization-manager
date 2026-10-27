@@ -11,7 +11,6 @@ use canton_proto_rs::com::{
         },
         topology::admin::v30::{
             ListPartyToParticipantRequest,
-            list_party_to_participant_response::result::Item as P2pItem,
             topology_manager_read_service_client::TopologyManagerReadServiceClient,
         },
     },
@@ -431,11 +430,10 @@ async fn backfill_peer_keys_from_chain(
         .await?
         .into_inner();
 
-    let mut signing_keys: Vec<SigningPublicKey> = p2p_response
-        .results
+    let mut signing_keys: Vec<SigningPublicKey> = topology::p2p_rows(p2p_response.results)?
         .into_iter()
-        .find_map(|r| r.item.map(|P2pItem::V30(mapping)| mapping))
-        .and_then(|item| item.party_signing_keys)
+        .next()
+        .and_then(|(_, item)| item.party_signing_keys)
         .map(|k| k.keys)
         .unwrap_or_default();
 

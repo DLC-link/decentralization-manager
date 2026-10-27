@@ -19,12 +19,13 @@ use canton_proto_rs::com::digitalasset::canton::{
         SignedTopologyTransaction, TopologyTransaction, enums, topology_mapping,
     },
     topology::admin::v30::{
-        AddTransactionsRequest, AuthorizeRequest, AuthorizeResponse, BaseQuery, ForceFlag,
-        ListAllRequest, ListDecentralizedNamespaceDefinitionRequest, ListPartyToKeyMappingRequest,
-        ListPartyToParticipantRequest, SignTransactionsRequest, SignTransactionsResponse, StoreId,
-        Synchronizer, base_query,
+        AddTransactionsRequest, AuthorizeRequest, AuthorizeResponse, BaseQuery, BaseResult,
+        ForceFlag, ListAllRequest, ListDecentralizedNamespaceDefinitionRequest,
+        ListPartyToKeyMappingRequest, ListPartyToParticipantRequest, SignTransactionsRequest,
+        SignTransactionsResponse, StoreId, Synchronizer, base_query,
         list_party_to_key_mapping_response::result::Item as PartyToKeyItem,
-        list_party_to_participant_response::result::Item as P2pItem, store_id, synchronizer,
+        list_party_to_participant_response::{self, result::Item as P2pItem},
+        store_id, synchronizer,
         topology_manager_read_service_client::TopologyManagerReadServiceClient,
         topology_manager_write_service_client::TopologyManagerWriteServiceClient,
     },
@@ -229,6 +230,41 @@ pub fn history_query(synchronizer_id: &str) -> BaseQuery {
     }
 }
 
+/// The `v30` mapping of a `ListPartyToParticipant` row.
+///
+/// Canton 3.6 can also return a `v31` mapping, but only on an alpha protocol
+/// version. DecMan reads `v30` alone. Skipping a `v31` row would report a
+/// mapping as missing, so it is an error instead.
+///
+/// # Errors
+///
+/// Errors when the row holds a `v31` mapping.
+pub fn p2p_v30(item: P2pItem) -> Result<PartyToParticipant> {
+    match item {
+        P2pItem::V30(mapping) => Ok(mapping),
+        P2pItem::V31(_) => anyhow::bail!(
+            "Canton returned a v31 PartyToParticipant mapping, which only an alpha protocol \
+             version uses. DecMan supports v30 mappings only"
+        ),
+    }
+}
+
+/// The rows of a `ListPartyToParticipant` response that carry a mapping, each
+/// with its context. See [`p2p_v30`].
+///
+/// # Errors
+///
+/// Errors when a row holds a `v31` mapping.
+pub fn p2p_rows(
+    results: Vec<list_party_to_participant_response::Result>,
+) -> Result<Vec<(Option<BaseResult>, PartyToParticipant)>> {
+    results
+        .into_iter()
+        .filter_map(|row| Some((row.context, row.item?)))
+        .map(|(context, item)| Ok((context, p2p_v30(item)?)))
+        .collect()
+}
+
 /// Every `PartyToParticipant` serial ever in force for `party_id`, paired with
 /// the time each became effective.
 ///
@@ -257,16 +293,14 @@ pub async fn fetch_p2p_history(
         .await?
         .into_inner();
 
-    let mut history: Vec<(i32, prost_types::Timestamp, PartyToParticipant)> = response
-        .results
-        .into_iter()
-        .filter_map(|r| {
-            let context = r.context?;
-            let valid_from = context.valid_from?;
-            let P2pItem::V30(mapping) = r.item?;
-            Some((context.serial, valid_from, mapping))
-        })
-        .collect();
+    let mut history: Vec<(i32, prost_types::Timestamp, PartyToParticipant)> =
+        p2p_rows(response.results)?
+            .into_iter()
+            .filter_map(|(context, mapping)| {
+                let context = context?;
+                Some((context.serial, context.valid_from?, mapping))
+            })
+            .collect();
 
     // Canton does not promise an order, and the caller wants the EARLIEST
     // serial that matches, so sort rather than trusting the response.
@@ -354,17 +388,24 @@ pub async fn fetch_p2p_mapping_at_head_in(
     // Same pinning as `fetch_party_to_key_mapping`: `filter_party` matches on
     // a prefix, and the head state can hold a `Remove`.
     let mut without_context = 0usize;
-    let mapping = response.results.into_iter().find_map(|r| {
+    let mut mapping = None;
+    for r in response.results {
         let Some(context) = r.context else {
             without_context += 1;
-            return None;
+            continue;
         };
         if context.operation != enums::TopologyChangeOp::AddReplace as i32 {
-            return None;
+            continue;
         }
-        let P2pItem::V30(mapping) = r.item?;
-        (mapping.party == party_id.to_string()).then_some((context.serial, mapping))
-    });
+        let Some(item) = r.item else {
+            continue;
+        };
+        let candidate = p2p_v30(item)?;
+        if candidate.party == party_id.to_string() {
+            mapping = Some((context.serial, candidate));
+            break;
+        }
+    }
 
     match mapping {
         Some((serial, mapping)) => Ok((u32::try_from(serial)?, mapping)),
@@ -1317,6 +1358,47 @@ mod tests {
             ),
             other => panic!("expected synchronizer store, got {other:?}"),
         }
+    }
+
+    fn p2p_row(serial: i32, item: Option<P2pItem>) -> list_party_to_participant_response::Result {
+        list_party_to_participant_response::Result {
+            context: Some(BaseResult {
+                serial,
+                ..Default::default()
+            }),
+            item,
+        }
+    }
+
+    #[test]
+    fn p2p_rows_keeps_v30_rows_with_their_context() {
+        let mapping = PartyToParticipant {
+            party: "alice::1220aa".to_string(),
+            ..Default::default()
+        };
+        let rows = p2p_rows(vec![
+            p2p_row(1, None),
+            p2p_row(2, Some(P2pItem::V30(mapping.clone()))),
+        ])
+        .expect("v30 rows convert");
+        assert_eq!(rows.len(), 1, "a row without a mapping is dropped");
+        assert_eq!(rows[0].0.as_ref().map(|c| c.serial), Some(2));
+        assert_eq!(rows[0].1, mapping);
+    }
+
+    #[test]
+    fn p2p_rows_rejects_a_v31_row() {
+        let v31 = canton_proto_rs::com::digitalasset::canton::protocol::v31::PartyToParticipant {
+            party: "alice::1220aa".to_string(),
+            ..Default::default()
+        };
+        let error = p2p_rows(vec![
+            p2p_row(1, Some(P2pItem::V30(PartyToParticipant::default()))),
+            p2p_row(2, Some(P2pItem::V31(v31))),
+        ])
+        .expect_err("a v31 row must not be skipped")
+        .to_string();
+        assert!(error.contains("v31"), "{error}");
     }
 
     #[test]

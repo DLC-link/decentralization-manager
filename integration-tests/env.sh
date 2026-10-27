@@ -45,7 +45,7 @@ export DECPM_EXTERNAL_PARTIES_TTL_SECS=3
 export DECPM_PEER_WAIT_POLL_DELAY_MS=500
 
 # Localnet
-LOCALNET_VERSION="0.6.12"
+LOCALNET_VERSION="0.9.4"
 LOCALNET_BUNDLE_URL="https://github.com/digital-asset/decentralized-canton-sync/releases/download/v${LOCALNET_VERSION}/${LOCALNET_VERSION}_splice-node.tar.gz"
 LOCALNET_CACHE_DIR="$SCRIPT_DIR/.localnet"
 LOCALNET_COMPOSE_DIR="$LOCALNET_CACHE_DIR/splice-node/docker-compose/localnet"
@@ -231,6 +231,24 @@ configure_localnet_reconciliation() {
     }
 }
 
+# Canton 3.6 turns the old ACS commitment processor off from protocol version
+# 36, and Splice 0.9.4 founds the synchronizer on 36. The re-host phase reads
+# P3's commitments with LookupReceivedAcsCommitments, and only the old
+# processor feeds that RPC. Every participant inherits `_participant`, and
+# HOCON resolves `${_participant}` after the whole file merges, so one line at
+# the end reaches all three. Idempotent: the bundle stays cached between runs.
+configure_localnet_commitments() {
+    local conf="$LOCALNET_COMPOSE_DIR/conf/canton/app.conf"
+    if grep -q "disable-old-acs-commitment-processor" "$conf"; then
+        return 0
+    fi
+    printf '\n_participant.parameters.acs-commitments.disable-old-acs-commitment-processor = never\n' >> "$conf"
+    grep -q "disable-old-acs-commitment-processor" "$conf" || {
+        echo "Failed to keep the old ACS commitment processor on in $conf" >&2
+        return 1
+    }
+}
+
 localnet_compose() {
     export IMAGE_TAG="$LOCALNET_VERSION"
     docker compose \
@@ -250,6 +268,7 @@ start_localnet() {
     localnet_compose down -v 2>/dev/null || true
 
     configure_localnet_reconciliation
+    configure_localnet_commitments
 
     echo "Starting localnet..."
     # Only start the services our tests actually use. The 3 active profiles

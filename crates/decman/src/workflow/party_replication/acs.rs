@@ -749,7 +749,9 @@ pub async fn collect_party_package_ids(
 ) -> Result<Vec<String>> {
     let mut state = utils::create_state_client(config, ledger_token.map(str::to_string)).await?;
     let ledger_end = state
-        .get_ledger_end(tonic::Request::new(GetLedgerEndRequest {}))
+        .get_ledger_end(tonic::Request::new(GetLedgerEndRequest {
+            synchronizer_id: vec![],
+        }))
         .await?
         .into_inner()
         .offset;

@@ -16,7 +16,8 @@ use anyhow::Context as _;
 use base64::Engine as _;
 use canton_common::{
     decimal::DamlDecimal,
-    transfer::{DisclosedContract as RegistryDisclosedContract, InstrumentId, Meta, Transfer},
+    instrument::InstrumentId,
+    transfer::{DisclosedContract as RegistryDisclosedContract, Meta, Transfer},
     transfer_factory::{
         ChoiceArguments, Context, ContextValue, ExtraArgs, Meta as FactoryMeta,
         MetaValue as FactoryMetaValue,
