@@ -149,7 +149,7 @@ jobs:
         uses: actions/cache@v6
         with:
           path: .localnet/
-          key: localnet-0.6.12
+          key: localnet-0.9.4
       # Generate the frontend TS bindings before the integration build (which
       # builds the decman binary → build.rs → frontend, needing this file).
       - name: Generate frontend TypeScript bindings

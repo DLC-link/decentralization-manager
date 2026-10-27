@@ -45,7 +45,7 @@ export DECPM_EXTERNAL_PARTIES_TTL_SECS=3
 export DECPM_PEER_WAIT_POLL_DELAY_MS=500
 
 # Localnet
-LOCALNET_VERSION="0.6.12"
+LOCALNET_VERSION="0.9.4"
 LOCALNET_BUNDLE_URL="https://github.com/digital-asset/decentralized-canton-sync/releases/download/v${LOCALNET_VERSION}/${LOCALNET_VERSION}_splice-node.tar.gz"
 LOCALNET_CACHE_DIR="$SCRIPT_DIR/.localnet"
 LOCALNET_COMPOSE_DIR="$LOCALNET_CACHE_DIR/splice-node/docker-compose/localnet"
