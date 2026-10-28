@@ -250,7 +250,7 @@ retry needs.
 
 | Error says | Cause | Do this |
 |---|---|---|
-| "the new member … is missing N package(s)" | A DAR is missing on the new member | Distribute the DAR, then click **Retry** |
+| "the new member … has not vetted N package(s)" | The new member has not uploaded or not vetted a DAR | Distribute the DAR, then click **Retry** |
 | "Re-hosting … leaves the namespace as it is" | A former member was re-added with a new threshold | Start a new run with the current threshold |
 | "… is quarantined for …" | An earlier copy failed after part of the contracts reached Canton | See [Quarantine](#quarantine) |
 | A timeout in `RetireLegacyKeys` | Too few upgraded owners are online | Bring the owners online, then click **Retry** |
