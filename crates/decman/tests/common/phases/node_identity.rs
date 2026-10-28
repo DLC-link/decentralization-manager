@@ -29,8 +29,8 @@ use tracing::info;
 use crate::common::{
     Fixture, TestTarget,
     ledger_api::{
-        P1_JSON_API, REWARD_COUPON_V2_TEMPLATE, SeedCoupon, archive_command,
-        reward_coupon_create_command,
+        P1_JSON_API, P2_JSON_API, P3_JSON_API, REWARD_COUPON_V2_TEMPLATE, SeedCoupon,
+        archive_command, reward_coupon_create_command,
     },
     phases::deploy_gov_core::grant_rights,
     scenario::Scenario,
@@ -45,6 +45,8 @@ struct NetworkPeers {
 struct Ctx {
     /// The first `POST /node-identity` response of P1, P2 and P3, in order.
     first: Vec<NodeIdentityResponse>,
+    /// Each responding user's rights, read from the Ledger API after the POST.
+    first_rights: Vec<Value>,
     repeat: Option<NodeIdentityResponse>,
     decoy: Option<String>,
 }
@@ -83,13 +85,29 @@ fn check_first_allocations(f: &Fixture, ctx: &Ctx) -> anyhow::Result<()> {
             response.allocated,
             "{name}: the node party was not allocated"
         );
+    }
+    for ((name, _, participant_id), rights) in nodes(f).iter().zip(&ctx.first_rights) {
+        let expected = expected_node_party(participant_id)?;
         ensure!(
-            response.act_as,
-            "{name}: {} cannot act as {expected} after AllocateParty",
-            response.user_id
+            has_party_act_as(rights, &expected),
+            "{name}: no CanActAs on {expected} after AllocateParty: {rights}"
         );
     }
     Ok(())
+}
+
+/// Whether a Ledger API rights listing holds `CanActAs` on exactly `party`.
+/// An any-party right does not count: fact 1b is that `AllocateParty` granted
+/// this one.
+fn has_party_act_as(rights: &Value, party: &str) -> bool {
+    rights["rights"].as_array().is_some_and(|rights| {
+        rights.iter().any(|right| {
+            right
+                .pointer("/kind/CanActAs/value/party")
+                .and_then(Value::as_str)
+                == Some(party)
+        })
+    })
 }
 
 fn check_repeat(ctx: &Ctx) -> anyhow::Result<()> {
@@ -261,13 +279,20 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
         })
         .when("each node posts /node-identity", |f, ctx| {
             Box::pin(async move {
-                for (name, port, _) in nodes(f) {
+                let json_apis = [P1_JSON_API, P2_JSON_API, P3_JSON_API];
+                for ((name, port, _), json_api) in nodes(f).into_iter().zip(json_apis) {
                     let response: NodeIdentityResponse = f
                         .post_json(port, "/node-identity", &json!({}))
                         .await
                         .with_context(|| format!("POST /node-identity on {name}"))?;
                     info!("{name} POST /node-identity: {response:?}");
+                    let rights: Value = f
+                        .get_json(json_api, &format!("/v2/users/{}/rights", response.user_id))
+                        .await
+                        .with_context(|| format!("read {}'s rights on {name}", response.user_id))?;
+                    info!("Fact 1b: {name} {} rights: {rights}", response.user_id);
                     ctx.first.push(response);
+                    ctx.first_rights.push(rights);
                 }
                 Ok(())
             })

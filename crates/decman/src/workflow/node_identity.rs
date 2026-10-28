@@ -286,7 +286,9 @@ pub fn rights_flags(rights: &[Right], party: &str) -> (bool, bool) {
     for right in rights {
         match &right.kind {
             Some(Kind::CanActAs(CanActAs { party: p })) if p == party => act_as = true,
+            Some(Kind::CanActAsAnyParty(_)) => act_as = true,
             Some(Kind::CanReadAs(CanReadAs { party: p })) if p == party => read_as = true,
+            Some(Kind::CanReadAsAnyParty(_)) => read_as = true,
             _ => {}
         }
     }
@@ -314,7 +316,9 @@ pub fn right_names(rights: &[Right]) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use canton_proto_rs::com::{
-        daml::ledger::api::v2::admin::right::ParticipantAdmin,
+        daml::ledger::api::v2::admin::right::{
+            CanActAsAnyParty, CanReadAsAnyParty, ParticipantAdmin,
+        },
         digitalasset::canton::protocol::v30::{
             enums::ParticipantPermission, party_to_participant::HostingParticipant,
         },
@@ -440,6 +444,15 @@ mod tests {
         ];
         assert_eq!(rights_flags(&rights, party), (true, false));
         assert_eq!(rights_flags(&rights, "other::ns"), (false, true));
+    }
+
+    #[test]
+    fn rights_flags_count_any_party_rights() {
+        let rights = [
+            right(Kind::CanActAsAnyParty(CanActAsAnyParty {})),
+            right(Kind::CanReadAsAnyParty(CanReadAsAnyParty {})),
+        ];
+        assert_eq!(rights_flags(&rights, "decman-node-p::ns"), (true, true));
     }
 
     #[test]
