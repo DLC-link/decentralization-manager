@@ -120,7 +120,8 @@ pub async fn export_state(
 /// The new member's vetting comes from this node's own topology store, so no
 /// peer is contacted. That store records vetting, not uploads, so this check is
 /// stricter than the import's: a package the new member holds but has not
-/// vetted is refused here too.
+/// vetted is refused here too. A package it has vetted but no longer holds is
+/// the new member's own check, `check_vetted_packages_held`, before it signs.
 async fn check_new_member_packages(
     config: &NodeConfig,
     add_party_config: &AddPartyConfig,

@@ -251,6 +251,7 @@ retry needs.
 | Error says | Cause | Do this |
 |---|---|---|
 | "the new member … has not vetted N package(s)" | The new member has not uploaded or not vetted a DAR | Distribute the DAR, then click **Retry** |
+| "this participant has vetted N package(s) it does not hold" | The new member lost a DAR, for example in a restore from backup, but kept its vetting | Upload the DAR on the new member again, then click **Retry** |
 | "Re-hosting … leaves the namespace as it is" | A former member was re-added with a new threshold | Start a new run with the current threshold |
 | "… is quarantined for …" | An earlier copy failed after part of the contracts reached Canton | See [Quarantine](#quarantine) |
 | A timeout in `RetireLegacyKeys` | Too few upgraded owners are online | Bring the owners online, then click **Retry** |
