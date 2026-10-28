@@ -1883,9 +1883,12 @@ dependencies = [
  "rfd",
  "serde",
  "serde_json",
+ "tempfile",
+ "tokio",
  "toml",
  "tracing",
  "tracing-subscriber",
+ "wiremock",
 ]
 
 [[package]]

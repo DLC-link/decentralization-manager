@@ -7,12 +7,13 @@ use common::types::{
     ParticipantsStatusResponse, PeerPackageComparison, PendingInvitation, VettedPackageInfo,
     WorkflowInfo, WorkflowKind, WorkflowRun,
 };
-use reqwest::StatusCode;
 use reqwest::blocking::{Client, Response};
+use reqwest::{Method, StatusCode};
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 
+use crate::auth::{AuthTarget, PasswordSource, TokenCache, TokenResponse, TokenSet, now_secs};
 use crate::composer::{PickerOption, PickerSource};
 
 /// User credentials and optional IdP overrides for the OAuth2 password grant.
@@ -23,7 +24,8 @@ use crate::composer::{PickerOption, PickerSource};
 #[derive(Clone, Debug)]
 pub struct AuthSettings {
     pub username: String,
-    pub password: String,
+    /// `None` works only against a node with auth disabled.
+    pub password: Option<PasswordSource>,
     /// Token endpoint override; discovered from `/auth-config` when `None`.
     pub token_url: Option<String>,
     /// Client id override; discovered from `/auth-config` when `None`.
@@ -349,6 +351,9 @@ pub struct GovernanceConfirmations {
     pub rules_contract_id: Option<String>,
     #[serde(default)]
     pub member_party_id: Option<String>,
+    /// Cursor of the next page of proposals, when there is one.
+    #[serde(default)]
+    pub next_cursor: Option<String>,
 }
 
 /// `/operator-info` response: this node's operator party id.
@@ -539,6 +544,14 @@ struct MeshErrorResponse {
     missing_edges: Vec<MeshEdge>,
 }
 
+/// The remediation hints for a `422` onboarding body, or `None` if the body is
+/// not a mesh error.
+pub fn mesh_error_hint(body: &str) -> Option<String> {
+    serde_json::from_str::<MeshErrorResponse>(body)
+        .ok()
+        .map(|mesh| format_mesh_error(&mesh))
+}
+
 /// Render a mesh pre-flight failure as actionable, multi-line remediation
 /// guidance, mirroring the web frontend's onboarding error panel.
 fn format_mesh_error(mesh: &MeshErrorResponse) -> String {
@@ -697,19 +710,6 @@ struct AuthStatusResponse {
     parties: Vec<PartyAuthStatus>,
 }
 
-/// Resolved OAuth2 target after discovery / overrides are applied.
-struct AuthTarget {
-    token_url: String,
-    client_id: String,
-    audience: Option<String>,
-}
-
-/// Token endpoint response; only `access_token` is consumed.
-#[derive(Debug, Deserialize)]
-struct TokenResponse {
-    access_token: String,
-}
-
 /// `GET /decentralized-parties` response envelope.
 #[derive(Debug, Deserialize)]
 struct PartiesResponse {
@@ -725,14 +725,56 @@ fn keycloak_token_url(host: &str, realm: &str) -> String {
     )
 }
 
+/// A non-success HTTP response from the decman API. It stays typed so a caller
+/// can read the status, for example to format a `422` mesh error.
+#[derive(Debug)]
+pub struct ApiError {
+    pub method: Method,
+    pub path: String,
+    pub status: StatusCode,
+    pub body: String,
+}
+
+impl std::fmt::Display for ApiError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "decman API {method} {path} returned {status}: {body}",
+            method = self.method,
+            path = self.path,
+            status = self.status,
+            body = self.body,
+        )
+    }
+}
+
+impl std::error::Error for ApiError {}
+
 /// Blocking client for the decman HTTP API, authenticating via the OAuth2
 /// password grant (the same username/password login the web frontend uses).
+///
+/// The client refreshes an expired access token with the refresh token, and
+/// falls back to a new password login only when the refresh fails.
 pub struct DecmanClient {
     base_url: String,
     http: Client,
     auth: AuthSettings,
-    token: Option<String>,
-    authenticated: bool,
+    /// The resolved token endpoint, or `Some(None)` when the node has auth
+    /// disabled. `None` until first resolved.
+    target: Option<Option<AuthTarget>>,
+    tokens: Option<TokenSet>,
+    /// The resolved password, kept so a password command runs at most once.
+    password: Option<String>,
+    cache: Option<TokenCache>,
+    /// Whether `target` came from the cache rather than from discovery.
+    target_from_cache: bool,
+    /// Timeout for [`Self::request`]; the TUI calls keep the client default.
+    request_timeout: Option<Duration>,
+    /// When set, [`Self::request`] refuses every non-`GET` with this message.
+    writes_blocked: Option<String>,
+    /// Print login problems that are not fatal on stderr. The TUI leaves this
+    /// off, because stderr output would draw over its screen.
+    warn: bool,
 }
 
 impl DecmanClient {
@@ -742,8 +784,12 @@ impl DecmanClient {
     ///
     /// Returns an error if the underlying HTTP client cannot be constructed.
     pub fn new(base_url: String, auth: AuthSettings) -> Result<Self> {
+        ensure_secure_url(&base_url)?;
+        // No redirects: a redirect to another host would carry a request body
+        // with secrets (grant-rights, party-config) to that host.
         let http = Client::builder()
             .timeout(Duration::from_secs(15))
+            .redirect(reqwest::redirect::Policy::none())
             .build()
             .context("failed to build HTTP client")?;
 
@@ -751,9 +797,250 @@ impl DecmanClient {
             base_url: base_url.trim_end_matches('/').to_owned(),
             http,
             auth,
-            token: None,
-            authenticated: false,
+            target: None,
+            tokens: None,
+            password: None,
+            cache: None,
+            target_from_cache: false,
+            request_timeout: None,
+            writes_blocked: None,
+            warn: false,
         })
+    }
+
+    /// Keep tokens in `cache` across invocations, starting from any login it
+    /// already holds. A cached login whose token endpoint or client differs
+    /// from an explicit override is ignored.
+    #[must_use]
+    pub fn with_token_cache(mut self, cache: TokenCache) -> Self {
+        if let Some(login) = cache
+            .load()
+            .filter(|login| self.matches_overrides(&login.target))
+        {
+            self.target = Some(Some(login.target));
+            self.target_from_cache = true;
+            self.tokens = Some(login.tokens);
+        }
+        self.cache = Some(cache);
+        self
+    }
+
+    /// Whether `target` agrees with the explicit token URL and client id.
+    fn matches_overrides(&self, target: &AuthTarget) -> bool {
+        let agrees = |explicit: &Option<String>, cached: &str| {
+            explicit.as_deref().is_none_or(|value| value == cached)
+        };
+        agrees(&self.auth.token_url, &target.token_url)
+            && agrees(&self.auth.client_id, &target.client_id)
+            && self
+                .auth
+                .audience
+                .as_ref()
+                .is_none_or(|audience| target.audience.as_ref() == Some(audience))
+    }
+
+    /// Take a newer login from the cache file. A parallel invocation can have
+    /// refreshed it since this client loaded it, and a second refresh with
+    /// the same refresh token can fail. So a new refresh token is taken even
+    /// when its access token has expired. The access token this client
+    /// already holds, for example one the server just rejected, is never
+    /// used again.
+    fn adopt_newer_cached_login(&mut self, now: i64) {
+        let Some(mut login) = self.cache.as_ref().and_then(TokenCache::load) else {
+            return;
+        };
+        if !self.matches_overrides(&login.target) {
+            return;
+        }
+        let held = self.tokens.as_ref();
+        let same_access =
+            held.is_some_and(|tokens| tokens.access_token == login.tokens.access_token);
+        let newer_access = !same_access && login.tokens.access_valid(now);
+        let newer_refresh = login.tokens.usable_refresh_token(now).is_some()
+            && held.is_none_or(|tokens| tokens.refresh_token != login.tokens.refresh_token);
+        if !newer_access && !newer_refresh {
+            return;
+        }
+        if same_access {
+            login.tokens.expire_access();
+        }
+        self.target = Some(Some(login.target));
+        self.target_from_cache = true;
+        self.tokens = Some(login.tokens);
+    }
+
+    /// Use `timeout` for each [`Self::request`] call.
+    #[must_use]
+    pub fn with_request_timeout(mut self, timeout: Duration) -> Self {
+        self.request_timeout = Some(timeout);
+        self
+    }
+
+    /// Make [`Self::request`] refuse every non-`GET` call with `reason`.
+    #[must_use]
+    pub fn with_writes_blocked(mut self, reason: String) -> Self {
+        self.writes_blocked = Some(reason);
+        self
+    }
+
+    /// Print login problems that are not fatal, such as a failed refresh or a
+    /// cache that cannot be written, on stderr.
+    #[must_use]
+    pub fn with_warnings(mut self) -> Self {
+        self.warn = true;
+        self
+    }
+
+    /// The message of a write block, if writes are blocked.
+    pub fn writes_blocked(&self) -> Option<&str> {
+        self.writes_blocked.as_deref()
+    }
+
+    /// The base URL this client talks to, without a trailing slash.
+    pub fn base_url(&self) -> &str {
+        &self.base_url
+    }
+
+    /// Log in now, or reuse a valid or refreshable cached login, and return
+    /// the access token's expiry time (`None` when it has none, or when the
+    /// node has auth disabled).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if discovery or every login attempt fails.
+    pub fn login(&mut self) -> Result<Option<i64>> {
+        self.authenticate()?;
+        Ok(self
+            .tokens
+            .as_ref()
+            .and_then(|tokens| tokens.access_expires_at))
+    }
+
+    /// Delete the cached login. Returns whether there was one.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the cache file exists but cannot be deleted.
+    pub fn logout(&mut self) -> Result<bool> {
+        self.tokens = None;
+        match &self.cache {
+            Some(cache) => cache.clear(),
+            None => Ok(false),
+        }
+    }
+
+    /// Send any request to the API and return the response body as JSON
+    /// (`null` for an empty body, a JSON string for a non-JSON body).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if writes are blocked and `method` is not `GET`, if
+    /// login or the request fails, or as an [`ApiError`] if the API returns a
+    /// non-success status.
+    pub fn request(
+        &mut self,
+        method: Method,
+        path: &str,
+        query: &[(String, String)],
+        body: Option<&Value>,
+    ) -> Result<Value> {
+        if method != Method::GET
+            && let Some(reason) = &self.writes_blocked
+        {
+            bail!("{reason}");
+        }
+        let response = self.send_authed(&method, path, query, body)?;
+
+        let status = response.status();
+        let is_html = is_html(&response);
+        let text = response
+            .text()
+            .with_context(|| format!("failed to read the {path} response"))?;
+        if status.is_success() && is_html {
+            bail!(
+                "{method} {path} returned the web UI page, not JSON: this server version \
+                 probably has no such route"
+            );
+        }
+        if !status.is_success() {
+            return Err(ApiError {
+                method,
+                path: path.to_owned(),
+                status,
+                body: text,
+            }
+            .into());
+        }
+        if text.trim().is_empty() {
+            return Ok(Value::Null);
+        }
+        Ok(serde_json::from_str(&text).unwrap_or(Value::String(text)))
+    }
+
+    /// `GET` a route that answers with raw bytes, such as a DAR download.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if login or the request fails, or as an [`ApiError`]
+    /// if the API returns a non-success status.
+    pub fn request_bytes(&mut self, path: &str) -> Result<Vec<u8>> {
+        let response = self.send_authed(&Method::GET, path, &[], None)?;
+        let response = success_or_api_error(Method::GET, path, response)?;
+        if is_html(&response) {
+            bail!(
+                "GET {path} returned the web UI page, not a file: this server version \
+                 probably has no such route"
+            );
+        }
+        Ok(response
+            .bytes()
+            .with_context(|| format!("failed to read the {path} response"))?
+            .to_vec())
+    }
+
+    /// Send a request with a valid login, and once more after a fresh login
+    /// when the server answers `401`.
+    fn send_authed(
+        &mut self,
+        method: &Method,
+        path: &str,
+        query: &[(String, String)],
+        body: Option<&Value>,
+    ) -> Result<Response> {
+        self.authenticate()?;
+        let response = self.send_request(method, path, query, body)?;
+        if response.status() != StatusCode::UNAUTHORIZED {
+            return Ok(response);
+        }
+        self.drop_access_token();
+        self.authenticate()?;
+        self.send_request(method, path, query, body)
+    }
+
+    fn send_request(
+        &self,
+        method: &Method,
+        path: &str,
+        query: &[(String, String)],
+        body: Option<&Value>,
+    ) -> Result<Response> {
+        let url = format!("{base}{path}", base = self.base_url);
+        let mut request = self.http.request(method.clone(), &url);
+        if let Some(token) = self.access_token() {
+            request = request.bearer_auth(token);
+        }
+        if !query.is_empty() {
+            request = request.query(query);
+        }
+        if let Some(body) = body {
+            request = request.json(body);
+        }
+        if let Some(timeout) = self.request_timeout {
+            request = request.timeout(timeout);
+        }
+        request
+            .send()
+            .with_context(|| format!("request to {url} failed"))
     }
 
     /// Fetch the decentralized parties this node is a member of.
@@ -911,9 +1198,9 @@ impl DecmanClient {
         }
         let text = response.text().unwrap_or_default();
         if status == StatusCode::UNPROCESSABLE_ENTITY
-            && let Ok(mesh) = serde_json::from_str::<MeshErrorResponse>(&text)
+            && let Some(hint) = mesh_error_hint(&text)
         {
-            bail!("{}", format_mesh_error(&mesh));
+            bail!("{hint}");
         }
         bail!("onboarding failed ({status}): {text}");
     }
@@ -1396,44 +1683,146 @@ impl DecmanClient {
         self.get_json_query(path, &[])
     }
 
-    /// GET `path` with query params as JSON, authenticating on first use and
-    /// re-authenticating once on `401 Unauthorized` (i.e. an expired token).
+    /// GET `path` with query params as JSON.
     fn get_json_query<T: DeserializeOwned>(
         &mut self,
         path: &str,
         query: &[(&str, &str)],
     ) -> Result<T> {
-        if !self.authenticated {
-            self.authenticate()?;
-        }
-
-        let mut response = self.get(path, query)?;
-        if response.status() == StatusCode::UNAUTHORIZED {
-            self.authenticated = false;
-            self.token = None;
-            self.authenticate()?;
-            response = self.get(path, query)?;
-        }
-
-        let status = response.status();
-        if !status.is_success() {
-            let body = response.text().unwrap_or_default();
-            bail!("decman API {path} returned {status}: {body}");
-        }
-
+        let query: Vec<(String, String)> = query
+            .iter()
+            .map(|(key, value)| ((*key).to_owned(), (*value).to_owned()))
+            .collect();
+        let response = self.send_authed(&Method::GET, path, &query, None)?;
+        let response = success_or_api_error(Method::GET, path, response)?;
         response
             .json()
             .with_context(|| format!("failed to parse {path} response"))
     }
 
-    /// Resolve the IdP target and, when authentication is required, mint a token.
+    /// Make sure a usable access token is held, when the node requires one.
+    ///
+    /// The order is: a still-valid access token, then the refresh grant, then
+    /// a password login. A failed refresh (for example an expired session)
+    /// falls through to the password login. A new token goes to the cache.
     fn authenticate(&mut self) -> Result<()> {
-        self.token = match self.resolve_auth_target()? {
-            Some(target) => Some(self.password_grant(&target)?),
+        let now = now_secs();
+        if self
+            .tokens
+            .as_ref()
+            .is_some_and(|tokens| tokens.access_valid(now))
+        {
+            return Ok(());
+        }
+        // Hold the cache lock until the new login is saved, so a parallel
+        // invocation waits and then takes the saved login. Two refreshes with
+        // the same single-use refresh token would make one of them fail.
+        let _lock = match &self.cache {
+            Some(cache) => cache
+                .lock()
+                .map_err(|error| {
+                    self.warning(&format!("the token cache is not locked: {error:#}"));
+                })
+                .ok(),
             None => None,
         };
-        self.authenticated = true;
+        self.adopt_newer_cached_login(now);
+        if self
+            .tokens
+            .as_ref()
+            .is_some_and(|tokens| tokens.access_valid(now))
+        {
+            return Ok(());
+        }
+        let target = match self.target.clone() {
+            Some(target) => target,
+            None => {
+                let target = self.resolve_auth_target()?;
+                self.target = Some(target.clone());
+                target
+            }
+        };
+        let Some(target) = target else {
+            self.tokens = None;
+            return Ok(());
+        };
+
+        let previous = self.tokens.take();
+        let refreshed = previous
+            .as_ref()
+            .and_then(|tokens| tokens.usable_refresh_token(now))
+            .and_then(|refresh| {
+                self.refresh_grant(&target, refresh, previous.as_ref())
+                    .map_err(|error| self.warning(&format!("token refresh failed: {error:#}")))
+                    .ok()
+            });
+        let (target, tokens) = match refreshed {
+            Some(tokens) => (target, tokens),
+            None => self.password_login(target)?,
+        };
+        if let Some(cache) = &self.cache
+            && let Err(error) = cache.save(&target, &tokens)
+        {
+            // A cache write failure only costs a login on the next call.
+            self.warning(&format!("the login was not cached: {error:#}"));
+        }
+        self.tokens = Some(tokens);
         Ok(())
+    }
+
+    /// Print `message` on stderr when warnings are on.
+    fn warning(&self, message: &str) {
+        if self.warn {
+            eprintln!("warning: {}", for_terminal(message));
+        }
+    }
+
+    /// Log in with the password. A token endpoint from the cache can be out
+    /// of date, for example after the node moved to another IdP. The password
+    /// must never go to an old host, so a cached target is discovered again
+    /// before the password is sent.
+    fn password_login(&mut self, target: AuthTarget) -> Result<(AuthTarget, TokenSet)> {
+        let target = if self.target_from_cache {
+            self.target_from_cache = false;
+            let fresh = self.resolve_auth_target()?;
+            self.target = Some(fresh.clone());
+            fresh.context("this node no longer requires a login; run logout")?
+        } else {
+            target
+        };
+        let password = self.resolve_password()?;
+        let tokens = self.password_grant(&target, &password)?;
+        Ok((target, tokens))
+    }
+
+    /// The configured password, running the password command on first use.
+    fn resolve_password(&mut self) -> Result<String> {
+        if let Some(password) = &self.password {
+            return Ok(password.clone());
+        }
+        let password = self
+            .auth
+            .password
+            .as_ref()
+            .context("this node requires a login, but no password or password_command is set")?
+            .resolve()?;
+        self.password = Some(password.clone());
+        Ok(password)
+    }
+
+    /// The current access token, if any.
+    fn access_token(&self) -> Option<&str> {
+        self.tokens
+            .as_ref()
+            .map(|tokens| tokens.access_token.as_str())
+    }
+
+    /// Forget the access token after a `401`, keeping the refresh token, so the
+    /// next [`Self::authenticate`] refreshes before it logs in again.
+    fn drop_access_token(&mut self) {
+        if let Some(tokens) = &mut self.tokens {
+            tokens.expire_access();
+        }
     }
 
     /// Resolve the token endpoint, client id, and audience.
@@ -1521,12 +1910,13 @@ impl DecmanClient {
     }
 
     /// Mint an access token via the OAuth2 password grant.
-    fn password_grant(&self, target: &AuthTarget) -> Result<String> {
+    fn password_grant(&self, target: &AuthTarget, password: &str) -> Result<TokenSet> {
+        ensure_secure_url(&target.token_url)?;
         let mut form = vec![
             ("grant_type", "password"),
             ("client_id", target.client_id.as_str()),
             ("username", self.auth.username.as_str()),
-            ("password", self.auth.password.as_str()),
+            ("password", password),
         ];
         if let Some(secret) = &self.auth.client_secret {
             form.push(("client_secret", secret.as_str()));
@@ -1561,102 +1951,116 @@ impl DecmanClient {
         }
 
         let token: TokenResponse = response.json().context("failed to parse token response")?;
-        Ok(token.access_token)
+        Ok(TokenSet::from_response(token, now_secs(), None))
     }
 
-    /// Send a `GET {base_url}{path}` with query params, attaching the bearer
-    /// token if present.
-    fn get(&self, path: &str, query: &[(&str, &str)]) -> Result<Response> {
-        let url = format!("{base}{path}", base = self.base_url);
-        let mut request = self.http.get(&url);
-        if let Some(token) = &self.token {
-            request = request.bearer_auth(token);
+    /// Exchange a refresh token for a new access token.
+    fn refresh_grant(
+        &self,
+        target: &AuthTarget,
+        refresh_token: &str,
+        previous: Option<&TokenSet>,
+    ) -> Result<TokenSet> {
+        ensure_secure_url(&target.token_url)?;
+        let mut form = vec![
+            ("grant_type", "refresh_token"),
+            ("client_id", target.client_id.as_str()),
+            ("refresh_token", refresh_token),
+        ];
+        if let Some(secret) = &self.auth.client_secret {
+            form.push(("client_secret", secret.as_str()));
         }
-        if !query.is_empty() {
-            request = request.query(query);
-        }
-        request
+        let response = self
+            .http
+            .post(&target.token_url)
+            .form(&form)
             .send()
-            .with_context(|| format!("request to {url} failed"))
+            .with_context(|| format!("token request to {url} failed", url = target.token_url))?;
+        let status = response.status();
+        if !status.is_success() {
+            let body = response.text().unwrap_or_default();
+            bail!("refresh grant returned {status}: {body}");
+        }
+        let token: TokenResponse = response.json().context("failed to parse token response")?;
+        Ok(TokenSet::from_response(token, now_secs(), previous))
     }
 
-    /// POST `path` with an optional JSON body, returning the raw response.
-    /// Authenticates on first use and re-authenticates once on `401`, so the
-    /// caller can inspect non-success statuses (e.g. a 422 with a typed body).
+    /// POST `path` with an optional JSON body, returning the raw response,
+    /// so the caller can inspect non-success statuses (e.g. a 422 with a typed
+    /// body).
     fn post_raw(&mut self, path: &str, body: Option<&Value>) -> Result<Response> {
-        if !self.authenticated {
-            self.authenticate()?;
-        }
-
-        let mut response = self.send_post(path, body)?;
-        if response.status() == StatusCode::UNAUTHORIZED {
-            self.authenticated = false;
-            self.token = None;
-            self.authenticate()?;
-            response = self.send_post(path, body)?;
-        }
-        Ok(response)
+        self.send_authed(&Method::POST, path, &[], body)
     }
 
     /// POST `path` with an optional JSON body, discarding the success body and
     /// failing on any non-success status.
     fn post(&mut self, path: &str, body: Option<Value>) -> Result<()> {
         let response = self.post_raw(path, body.as_ref())?;
-        let status = response.status();
-        if !status.is_success() {
-            let body = response.text().unwrap_or_default();
-            bail!("decman API {path} returned {status}: {body}");
-        }
-        Ok(())
+        success_or_api_error(Method::POST, path, response).map(drop)
     }
 
-    /// Send a `POST {base_url}{path}`, attaching the bearer token and JSON body
-    /// if present.
-    fn send_post(&self, path: &str, body: Option<&Value>) -> Result<Response> {
-        let url = format!("{base}{path}", base = self.base_url);
-        let mut request = self.http.post(&url);
-        if let Some(token) = &self.token {
-            request = request.bearer_auth(token);
-        }
-        if let Some(body) = body {
-            request = request.json(body);
-        }
-        request
-            .send()
-            .with_context(|| format!("request to {url} failed"))
-    }
-
-    /// PUT `path` with a JSON body, authenticating on first use and retrying
-    /// once on `401`, then failing on any non-success status.
+    /// PUT `path` with a JSON body, failing on any non-success status.
     fn put(&mut self, path: &str, body: Value) -> Result<()> {
-        if !self.authenticated {
-            self.authenticate()?;
-        }
-        let mut response = self.send_put(path, &body)?;
-        if response.status() == StatusCode::UNAUTHORIZED {
-            self.authenticated = false;
-            self.token = None;
-            self.authenticate()?;
-            response = self.send_put(path, &body)?;
-        }
-        let status = response.status();
-        if !status.is_success() {
-            let text = response.text().unwrap_or_default();
-            bail!("decman API {path} returned {status}: {text}");
-        }
-        Ok(())
+        let response = self.send_authed(&Method::PUT, path, &[], Some(&body))?;
+        success_or_api_error(Method::PUT, path, response).map(drop)
     }
+}
 
-    /// Send a `PUT {base_url}{path}` with a JSON body and the bearer token.
-    fn send_put(&self, path: &str, body: &Value) -> Result<Response> {
-        let url = format!("{base}{path}", base = self.base_url);
-        let mut request = self.http.put(&url).json(body);
-        if let Some(token) = &self.token {
-            request = request.bearer_auth(token);
-        }
-        request
-            .send()
-            .with_context(|| format!("request to {url} failed"))
+/// Whether `response` is an HTML page. The server answers unknown routes with
+/// the web UI's index.html, so a page means the route does not exist on this
+/// server version.
+fn is_html(response: &Response) -> bool {
+    response
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value.starts_with("text/html"))
+}
+
+/// `text` with control characters replaced by `?`, for stderr. Error and
+/// progress text can come from a server, an IdP or a peer, and a raw escape
+/// sequence could rewrite the terminal.
+pub fn for_terminal(text: &str) -> String {
+    text.chars()
+        .map(|c| {
+            if c.is_control() && c != '\n' && c != '\t' {
+                '?'
+            } else {
+                c
+            }
+        })
+        .collect()
+}
+
+/// `response` if it succeeded, else an [`ApiError`] with its body.
+fn success_or_api_error(method: Method, path: &str, response: Response) -> Result<Response> {
+    let status = response.status();
+    if status.is_success() {
+        return Ok(response);
+    }
+    Err(ApiError {
+        method,
+        path: path.to_owned(),
+        status,
+        body: response.text().unwrap_or_default(),
+    }
+    .into())
+}
+
+/// Refuse a plain `http://` URL to anything but this machine. Tokens,
+/// passwords and client secrets must not cross the network in clear text.
+///
+/// # Errors
+///
+/// Returns an error for a URL that does not parse, or for `http://` to a
+/// host other than `localhost`, `127.0.0.1` or `::1`.
+pub fn ensure_secure_url(url: &str) -> Result<()> {
+    let parsed = reqwest::Url::parse(url).with_context(|| format!("{url} is not a valid URL"))?;
+    let loopback = matches!(parsed.host_str(), Some("localhost" | "127.0.0.1" | "[::1]"));
+    match parsed.scheme() {
+        "https" => Ok(()),
+        "http" if loopback => Ok(()),
+        scheme => bail!("{url}: use https; {scheme} is allowed for localhost only"),
     }
 }
 
@@ -1685,7 +2089,7 @@ mod tests {
     fn auth_settings() -> AuthSettings {
         AuthSettings {
             username: "alice".to_owned(),
-            password: "secret".to_owned(),
+            password: Some(PasswordSource::Literal("secret".to_owned())),
             token_url: None,
             client_id: None,
             client_secret: None,
@@ -1758,7 +2162,7 @@ mod tests {
             client_id: Some("decman-web".to_owned()),
             ..auth_settings()
         };
-        let client = DecmanClient::new("http://api.invalid".to_owned(), auth).unwrap();
+        let client = DecmanClient::new("https://api.invalid".to_owned(), auth).unwrap();
 
         // Act
         let target = client.resolve_auth_target().unwrap().unwrap();
