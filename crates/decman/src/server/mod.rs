@@ -34,6 +34,7 @@ mod serde_snapshots;
 pub(crate) mod health;
 pub(crate) mod peer_status;
 
+pub(crate) use package_inventory::fetch_vetted_package_ids;
 pub(crate) use queries::compare_versions;
 
 use std::{
@@ -1874,6 +1875,8 @@ async fn handle_incoming_connection(
                             // so there is no builder error to unwrap.
                             return Ok(Response::new(Body::from(msg.to_bytes())));
                         }
+                        // This build never sends ListPackages; it reads a peer's
+                        // vetting from the topology store. Older peers still ask.
                         MessageType::ListPackages => {
                             tracing::debug!("Received ListPackages request");
                             let payload = match list_local_packages(&triggers.config).await {
