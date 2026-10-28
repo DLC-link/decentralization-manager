@@ -224,17 +224,9 @@ pub(super) fn extract_user_id_from_jwt(token: &str) -> Option<String> {
         return None;
     }
 
-    // Decode the payload (second part) - URL-safe base64 without padding
-    let payload = parts[1];
-    let padding_needed = (4 - (payload.len() % 4)) % 4;
-    let padded = if padding_needed > 0 {
-        format!("{}{}", payload, "=".repeat(padding_needed))
-    } else {
-        payload.to_string()
-    };
-
-    let decoded = base64::engine::general_purpose::STANDARD
-        .decode(&padded)
+    // The payload is URL-safe base64. Some issuers pad it anyway.
+    let decoded = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(parts[1].trim_end_matches('='))
         .ok()?;
     let json: serde_json::Value = serde_json::from_slice(&decoded).ok()?;
     json.get("sub").and_then(|v| v.as_str()).map(String::from)
@@ -811,6 +803,23 @@ mod tests {
         collections::{HashMap, HashSet},
         sync::Arc,
     };
+
+    /// A payload whose URL-safe encoding holds `-`, which the standard
+    /// alphabet rejects.
+    #[test]
+    fn extract_user_id_reads_url_safe_payloads() {
+        let payload = "eyJzdWIiOiJvcHMtYWRtaW4iLCJub3RlIjoiPz8-Pn5-In0";
+        assert!(payload.contains('-'));
+        for token in [
+            format!("header.{payload}.signature"),
+            format!("header.{payload}=.signature"),
+        ] {
+            assert_eq!(
+                super::extract_user_id_from_jwt(&token).as_deref(),
+                Some("ops-admin")
+            );
+        }
+    }
 
     use actix_web::{
         App,
