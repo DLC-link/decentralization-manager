@@ -1412,6 +1412,77 @@ pub struct GrantRightsResponse {
     pub rights: RightsStatus,
 }
 
+/// Request to allocate this node's identity party
+#[derive(Clone, Debug, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
+pub struct NodeIdentityRequest {
+    /// Client id of a participant-admin client. Required unless the node runs
+    /// in insecure mode. Never stored.
+    pub admin_client_id: Option<String>,
+    /// Client secret matching `admin_client_id`. Never stored.
+    pub admin_client_secret: Option<String>,
+    /// Ledger API user that receives act-as on the node party. Defaults to the
+    /// first configured party's user.
+    pub user_id: Option<String>,
+}
+
+/// This node's identity party after an allocate call
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
+pub struct NodeIdentityResponse {
+    pub node_party_id: CantonId,
+    pub participant_id: CantonId,
+    /// False when this participant already hosted the party.
+    pub allocated: bool,
+    /// Whether the party lives in this participant's namespace.
+    pub namespace_matches: bool,
+    /// This participant's hosting permission, if it hosts the party.
+    pub hosting_permission: Option<Permission>,
+    pub user_id: String,
+    /// Whether `user_id` can act as the node party.
+    pub act_as: bool,
+    /// Whether `user_id` can read as the node party.
+    pub read_as: bool,
+    /// The user behind the admin token.
+    pub admin_user_id: String,
+    pub admin_rights: Vec<String>,
+}
+
+/// How this node sees one node's identity party in its own topology
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
+pub struct NodeIdentityPeer {
+    pub participant_id: CantonId,
+    pub name: String,
+    /// The party id derived from `participant_id`.
+    pub node_party_id: CantonId,
+    /// Whether a PartyToParticipant mapping exists for exactly this party.
+    pub found: bool,
+    pub namespace_matches: bool,
+    /// The permission `participant_id` holds on the party, if it hosts it.
+    pub hosting_permission: Option<Permission>,
+    /// Found, in the participant's namespace, and hosted there with Submission.
+    pub verified: bool,
+}
+
+/// Node identity check for this node and every configured peer
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
+pub struct NodeIdentityStatusResponse {
+    #[serde(rename = "self")]
+    pub self_: NodeIdentityPeer,
+    /// Every other configured peer.
+    pub peers: Vec<NodeIdentityPeer>,
+    /// The `filter_party` the scan used.
+    pub scan_filter: String,
+    /// Every party the scan returned, without an exact-match filter.
+    pub scan: Vec<String>,
+}
+
 // ============================================================================
 // Governance building-block DTOs (no on-chain decimals)
 // ============================================================================
