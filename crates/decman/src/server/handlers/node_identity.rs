@@ -55,6 +55,7 @@ fn participant_unresolved() -> HttpResponse {
 /// The admin token and users for an allocate call. Insecure mode uses its
 /// unsafe token for both. Otherwise the operator's admin client mints a token
 /// from the first configured party's IdP.
+#[allow(clippy::result_large_err)]
 async fn resolve_tokens(
     data: &AppState,
     body: NodeIdentityRequest,
@@ -122,6 +123,7 @@ async fn resolve_tokens(
 
 /// Allocate the node party unless this participant already hosts it, then
 /// report what the ledger shows. Never grants rights.
+#[allow(clippy::result_large_err)]
 async fn allocate(
     config: &NodeConfig,
     tokens: &Tokens,
