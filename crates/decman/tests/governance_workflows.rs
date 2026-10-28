@@ -87,6 +87,10 @@ async fn governance_workflows_e2e() -> anyhow::Result<()> {
 
     let mut f = Fixture::from_env()?;
     f.discover_network_parties().await?;
+    // Canton-native node identity, localnet only. It leaves a node party per
+    // participant, a decoy party on P1, and act-as on P1's admin party for
+    // ledger-api-user. No later phase reads them.
+    phases::node_identity::run(&mut f).await?;
     // Regression guard for the subset-party hang: onboard a party with a
     // single invited peer (1 coordinator + 1 regular peer) before the
     // full-mesh happy path, which can't catch it because it invites everyone.

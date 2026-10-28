@@ -34,6 +34,7 @@ pub mod local_party_adopt_endpoints;
 pub mod local_party_adopt_key;
 pub mod local_party_decentralization;
 pub mod no_early_publish;
+pub mod node_identity;
 pub mod notification_feed;
 pub mod owner_key_resilience;
 pub mod peer_3_strikes_abort;
