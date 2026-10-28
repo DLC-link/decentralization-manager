@@ -24,8 +24,10 @@ use canton_proto_rs::com::{
 };
 use common::types::Permission;
 
+use sha2::{Digest, Sha256};
+
 use crate::{
-    canton_id::CantonId,
+    canton_id::{CantonId, MAX_PARTY_ID_PREFIX_LEN},
     config::NodeConfig,
     error::Result,
     server::permission_from_proto,
@@ -36,11 +38,31 @@ use crate::{
 /// The identifier prefix every node party starts with.
 pub const NODE_PARTY_PREFIX: &str = "decman-node-";
 
-/// The node party of `participant`.
+/// Hex characters of the hash that keep a shortened node party id unique.
+const HASH_SUFFIX_LEN: usize = 16;
+
+/// The node party of `participant`, in the participant's namespace.
 pub fn node_party_id(participant: &CantonId) -> CantonId {
     CantonId::new(
-        format!("{NODE_PARTY_PREFIX}{prefix}", prefix = participant.prefix),
+        node_party_prefix(&participant.prefix),
         participant.namespace,
+    )
+}
+
+/// `decman-node-` and the participant's prefix. A participant prefix too long
+/// for that is cut and suffixed with a hash of the whole prefix, so the id
+/// stays within [`MAX_PARTY_ID_PREFIX_LEN`] and every peer derives the same id.
+fn node_party_prefix(participant_prefix: &str) -> String {
+    let full = format!("{NODE_PARTY_PREFIX}{participant_prefix}");
+    if full.chars().count() <= MAX_PARTY_ID_PREFIX_LEN {
+        return full;
+    }
+    let hash = hex::encode(Sha256::digest(participant_prefix.as_bytes()));
+    let keep = MAX_PARTY_ID_PREFIX_LEN - NODE_PARTY_PREFIX.len() - 1 - HASH_SUFFIX_LEN;
+    let head: String = participant_prefix.chars().take(keep).collect();
+    format!(
+        "{NODE_PARTY_PREFIX}{head}-{suffix}",
+        suffix = &hash[..HASH_SUFFIX_LEN]
     )
 }
 
@@ -299,6 +321,7 @@ mod tests {
     };
 
     use super::*;
+    use crate::canton_id::validate_party_id_prefix;
 
     const NS: &str = "1220c4010d6883f367c7f45d55b2449501620130f9b21e96379f17dea455ac7a5892";
     const OTHER_NS: &str = "1220aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa01";
@@ -417,6 +440,26 @@ mod tests {
         ];
         assert_eq!(rights_flags(&rights, party), (true, false));
         assert_eq!(rights_flags(&rights, "other::ns"), (false, true));
+    }
+
+    #[test]
+    fn node_party_prefix_stays_whole_up_to_the_limit() {
+        let participant = "p".repeat(MAX_PARTY_ID_PREFIX_LEN - NODE_PARTY_PREFIX.len());
+        let prefix = node_party_prefix(&participant);
+        assert_eq!(prefix, format!("{NODE_PARTY_PREFIX}{participant}"));
+        assert_eq!(prefix.len(), MAX_PARTY_ID_PREFIX_LEN);
+    }
+
+    #[test]
+    fn long_participant_prefix_is_cut_and_hashed() {
+        let long = "p".repeat(MAX_PARTY_ID_PREFIX_LEN);
+        let other = format!("{}q", "p".repeat(MAX_PARTY_ID_PREFIX_LEN - 1));
+        let prefix = node_party_prefix(&long);
+        assert_eq!(prefix.len(), MAX_PARTY_ID_PREFIX_LEN);
+        assert!(prefix.starts_with(NODE_PARTY_PREFIX));
+        assert!(validate_party_id_prefix(&prefix).is_ok(), "{prefix}");
+        assert_eq!(prefix, node_party_prefix(&long));
+        assert_ne!(prefix, node_party_prefix(&other));
     }
 
     #[test]
