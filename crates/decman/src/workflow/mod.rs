@@ -4,6 +4,7 @@ pub mod contracts;
 pub mod dars;
 pub mod external_party;
 pub mod kick;
+pub mod node_identity;
 pub mod onboarding;
 pub mod party_replication;
 pub mod proposal_store;
