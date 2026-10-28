@@ -16,7 +16,8 @@ use canton_proto_rs::com::{
     digitalasset::canton::{
         protocol::v30::{PartyToParticipant, enums::TopologyChangeOp},
         topology::admin::v30::{
-            ListPartyToParticipantRequest,
+            ListPartiesRequest, ListPartyToParticipantRequest,
+            topology_aggregation_service_client::TopologyAggregationServiceClient,
             topology_manager_read_service_client::TopologyManagerReadServiceClient,
         },
     },
@@ -163,17 +164,38 @@ pub async fn wait_for_submission(
     }
 }
 
+/// Most parties one scan returns. `ListParties` has no cursor.
+const SCAN_LIMIT: i32 = 1_000;
+
 /// Every party whose identifier starts with [`NODE_PARTY_PREFIX`], with no
 /// exact-match filter.
+///
+/// This asks `ListParties`, which narrows a bare prefix by party identifier.
+/// On Canton 3.6, `ListPartyToParticipant` returns nothing for a filter
+/// without `::`.
 ///
 /// # Errors
 ///
 /// Returns an error when the topology read fails.
 pub async fn scan_node_parties(config: &NodeConfig) -> Result<Vec<String>> {
-    let mut parties: Vec<String> = list_party_to_participant(config, NODE_PARTY_PREFIX)
-        .await?
+    let mut client = TopologyAggregationServiceClient::new(config.admin_channel().await?)
+        .max_decoding_message_size(utils::MAX_GRPC_MESSAGE_SIZE);
+    let response = client
+        .list_parties(tonic::Request::new(ListPartiesRequest {
+            as_of: None,
+            limit: SCAN_LIMIT,
+            // Empty asks across every synchronizer this participant is on.
+            synchronizer_ids: Vec::new(),
+            filter_party: NODE_PARTY_PREFIX.to_string(),
+            filter_participant: String::new(),
+        }))
+        .await
+        .context("ListParties RPC failed")?
+        .into_inner();
+    let mut parties: Vec<String> = response
+        .results
         .into_iter()
-        .map(|m| m.party)
+        .map(|result| result.party)
         .collect();
     parties.sort();
     parties.dedup();
