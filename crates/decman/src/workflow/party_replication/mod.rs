@@ -29,8 +29,8 @@ use sqlx::SqlitePool;
 use crate::{canton_id::CantonId, error::Result, workflow::storage::WorkflowStorage};
 
 pub use acs::{
-    TransferSource, collect_party_package_ids, import_party_acs, open_export_session,
-    open_import_window,
+    TransferSource, check_vetted_packages_held, collect_party_package_ids, import_party_acs,
+    open_export_session, open_import_window,
 };
 
 /// Unix milliseconds, saturating at 0 if the clock is before the epoch.

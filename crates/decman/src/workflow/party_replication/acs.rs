@@ -35,6 +35,7 @@ use crate::{
     },
     db::schema::{SchemaRead, SchemaWrite},
     error::Result,
+    server::fetch_vetted_package_ids,
     utils,
     workflow::{
         party_replication::{
@@ -813,6 +814,34 @@ async fn local_package_ids(config: &NodeConfig) -> Result<HashSet<String>> {
         .into_inner()
         .package_descriptions;
     Ok(descriptions.into_iter().map(|p| p.package_id).collect())
+}
+
+/// New-member side: refuse to join while this participant has vetted a
+/// package it does not hold.
+///
+/// The coordinator checks the party's packages against this participant's
+/// vetting. A restore from backup keeps the vetting but loses the DAR, and the
+/// import's own package preflight runs only at `SyncAcs`, after this member has
+/// left the synchronizer. Holding every vetted package, together with the
+/// coordinator's check, puts every package the party needs on this participant
+/// before it disconnects.
+pub async fn check_vetted_packages_held(config: &NodeConfig) -> Result {
+    let vetted = fetch_vetted_package_ids(config, config.participant_id()).await?;
+    let held = local_package_ids(config).await?;
+    let missing: Vec<&str> = vetted
+        .iter()
+        .map(String::as_str)
+        .filter(|id| !held.contains(*id))
+        .collect();
+    if !missing.is_empty() {
+        anyhow::bail!(
+            "this participant has vetted {n} package(s) it does not hold, as after a restore \
+             from backup — re-upload the corresponding DAR(s), then retry the add. Missing \
+             package ids: {missing:?}",
+            n = missing.len()
+        );
+    }
+    Ok(())
 }
 
 /// Why one `ImportPartyAcs` attempt did not complete. Both carry how many
