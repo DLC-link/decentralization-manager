@@ -1063,15 +1063,6 @@ fn truncate(value: &str, max: usize) -> String {
 /// the string the package-checker popup previously rendered verbatim.
 fn peer_error_label(kind: PeerErrorKind) -> &'static str {
     match kind {
-        PeerErrorKind::TcpConnectTimeout => "tcp_connect_timeout",
-        PeerErrorKind::TcpConnectFailed => "tcp_connect_failed",
-        PeerErrorKind::RequestTimeout => "request_timeout",
-        PeerErrorKind::Transport => "transport",
-        PeerErrorKind::HandshakeFailed => "handshake_failed",
-        PeerErrorKind::BadStatus => "bad_status",
-        PeerErrorKind::DecodeFailed => "decode_failed",
-        PeerErrorKind::InvalidPublicKey => "invalid_public_key",
-        PeerErrorKind::Other => "other",
         PeerErrorKind::TopologyReadFailed => "topology_read_failed",
         PeerErrorKind::NoVettedPackages => "no_vetted_packages",
     }

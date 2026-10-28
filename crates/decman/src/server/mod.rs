@@ -48,7 +48,6 @@ use actix_web::{App, HttpServer, web};
 use anyhow::{Context, bail};
 use base64::{Engine, engine::general_purpose::STANDARD};
 use canton_proto_rs::com::digitalasset::canton::{
-    admin::participant::v30::{ListPackagesRequest, package_service_client::PackageServiceClient},
     crypto::{
         admin::v30::{
             ListMyKeysRequest, private_key_metadata, vault_service_client::VaultServiceClient,
@@ -109,8 +108,8 @@ pub use types::{
     TransferInstructionsResponse, TransferProposalDetails,
 };
 
-/// TTL for a cached chunked response (per peer): a ListPackages listing or a
-/// DAR a peer asked to read before accepting its invite.
+/// TTL for a cached chunked response (per peer): a DAR a peer asked to read
+/// before accepting its invite.
 const PEER_CHUNK_CACHE_TTL: Duration = Duration::from_secs(30);
 
 /// Per-peer entry in the chunk cache: `(payload bytes, last-access time)`.
@@ -118,7 +117,7 @@ const PEER_CHUNK_CACHE_TTL: Duration = Duration::from_secs(30);
 /// handler), so a slow peer mid-reassembly extends its own TTL window.
 type ChunkCacheEntry = (Vec<u8>, Instant);
 
-/// Shared cache of large ListPackages payloads awaiting chunk retrieval by peers.
+/// Shared cache of large peer responses awaiting chunk retrieval by peers.
 type PeerChunkCache = Arc<Mutex<HashMap<String, ChunkCacheEntry>>>;
 
 /// Application state shared across all handlers
@@ -299,11 +298,11 @@ struct WorkflowTriggers {
     /// identity, admin URL, or synchronizer alias as a bundle (e.g.
     /// `list_my_owner_keys`'s P2P filter, see #149).
     config: NodeConfig,
-    /// Cache for chunked ListPackages responses, keyed by the requesting
-    /// peer's pubkey (hex). Populated when a ListPackages response exceeds
+    /// Cache for chunked `RequestDar` responses, keyed by the requesting
+    /// peer's pubkey (hex). Populated when a requested DAR exceeds
     /// `MAX_PAYLOAD_SIZE`; consumed by subsequent GetChunk requests from the
-    /// same peer. TTL: 30 seconds. One entry per peer; replaced on new
-    /// ListPackages call from the same peer.
+    /// same peer. TTL: 30 seconds. One entry per peer; replaced on the next
+    /// `RequestDar` from the same peer.
     peer_chunk_cache: PeerChunkCache,
     db: SqlitePool,
     /// Read by the `RequestMemberParty` listener arm.
@@ -1875,25 +1874,6 @@ async fn handle_incoming_connection(
                             // so there is no builder error to unwrap.
                             return Ok(Response::new(Body::from(msg.to_bytes())));
                         }
-                        // This build never sends ListPackages; it reads a peer's
-                        // vetting from the topology store. Older peers still ask.
-                        MessageType::ListPackages => {
-                            tracing::debug!("Received ListPackages request");
-                            let payload = match list_local_packages(&triggers.config).await {
-                                Ok(data) => data,
-                                Err(e) => {
-                                    tracing::error!("Failed to list packages: {e}");
-                                    b"[]".to_vec()
-                                }
-                            };
-                            return Ok(peer_payload_response(
-                                payload,
-                                peer_pubkey_hex.as_deref(),
-                                &triggers.peer_chunk_cache,
-                                "ListPackages response",
-                            )
-                            .await);
-                        }
                         MessageType::RequestDar => {
                             tracing::debug!("Received RequestDar request");
                             let sender = peer_id_str.as_deref();
@@ -1931,16 +1911,16 @@ async fn handle_incoming_connection(
                             .await);
                         }
                         MessageType::GetChunk => {
-                            // GetChunk serves BOTH the chunked ListPackages transfer and a
+                            // GetChunk serves BOTH the chunked RequestDar transfer and a
                             // workflow's chunked command. The routing key disambiguates:
                             // workflow chunk requests are ALWAYS stamped with their
                             // coordinator run's instance (NoiseClient stamps every command),
                             // so a keyed GetChunk routes to exactly that run — and an
-                            // EMPTY key means a ListPackages transfer and goes straight to
+                            // EMPTY key means a RequestDar transfer and goes straight to
                             // the chunk cache below. No sole-active fallback here: with
                             // concurrent workflows a node is routinely mid-run while a peer
-                            // fetches packages, and falling back would feed the
-                            // ListPackages transfer INTO a live workflow's chunk server.
+                            // reads a DAR, and falling back would feed the RequestDar
+                            // transfer INTO a live workflow's chunk server.
                             if !msg.instance.is_empty() {
                                 let active = triggers.workflows.route(&msg.instance);
                                 let peer =
@@ -2020,7 +2000,7 @@ async fn handle_incoming_connection(
                                     }
                                     Some(true) => {
                                         // Expired — drop the stale entry now so it doesn't
-                                        // linger until the next ListPackages-driven `retain`.
+                                        // linger until the next RequestDar-driven `retain`.
                                         cache.remove(pk);
                                         tracing::warn!(
                                             "GetChunk for {pk} chunk {chunk_index}: cache entry \
@@ -2917,31 +2897,6 @@ async fn peer_payload_response(
     Response::new(Body::from(
         Message::new(MessageType::ChunkedCommand, meta).to_bytes(),
     ))
-}
-
-async fn list_local_packages(config: &NodeConfig) -> Result<Vec<u8>> {
-    let mut client = PackageServiceClient::new(config.admin_channel().await?);
-    let response = client
-        .list_packages(tonic::Request::new(ListPackagesRequest {
-            limit: 0,
-            filter_name: String::new(),
-        }))
-        .await?
-        .into_inner();
-
-    let packages: Vec<serde_json::Value> = response
-        .package_descriptions
-        .into_iter()
-        .map(|p| {
-            serde_json::json!({
-                "package_id": p.package_id,
-                "name": p.name,
-                "version": p.version,
-            })
-        })
-        .collect();
-
-    Ok(serde_json::to_vec(&packages)?)
 }
 
 #[cfg(test)]

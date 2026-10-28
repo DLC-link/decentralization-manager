@@ -153,13 +153,8 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
     );
 
     // P1 now has EXACTLY ONE live run (sibling A). The comparison must still
-    // report P1's packages while that run holds the node.
-    //
-    // This began as a regression guard for a Noise chunk-routing bug: a
-    // chunked ListPackages with an empty routing key was misrouted into the
-    // live workflow's chunk server. The comparison reads the synchronizer's
-    // topology store now and sends P1 nothing, so that path is gone. The
-    // assertion stays because a live run must not hide a peer's packages.
+    // report P1's packages while that run holds the node: a live run must
+    // not hide a peer's packages.
     let v: serde_json::Value = f
         .get_json(f.p2.http, "/packages/compare-peers")
         .await
@@ -177,10 +172,10 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
         .unwrap_or(false);
     anyhow::ensure!(
         p1_has_packages,
-        "cross-node package listing failed while a workflow was live — chunked \
-         ListPackages was likely misrouted into the workflow's chunk server: {v}"
+        "P2's package comparison showed no peer with packages while P1 had a \
+         live run: {v}"
     );
-    chaos::say("G12", "chunked ListPackages unaffected by the live run");
+    chaos::say("G12", "package comparison unaffected by the live run");
 
     // Sibling A must still complete end to end: P2 accepts its surviving
     // invite, and A drives through on all three nodes.

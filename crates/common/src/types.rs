@@ -123,25 +123,13 @@ pub struct PackageInfo {
 /// stable on the wire — so the UI can distinguish failure modes without
 /// having to scan logs.
 ///
-/// `TopologyReadFailed` and `NoVettedPackages` are the only two anything
-/// emits: the package comparison reads the synchronizer's topology store and
-/// contacts no peer. The variants above them describe a failed Noise request
-/// and now have no producer — they stay only so an existing client keeps
-/// deserializing this enum. Remove them when the transport goes.
+/// The package comparison reads the synchronizer's topology store and contacts
+/// no peer, so both kinds describe that read.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 #[serde(rename_all = "snake_case")]
 pub enum PeerErrorKind {
-    TcpConnectTimeout,
-    TcpConnectFailed,
-    RequestTimeout,
-    Transport,
-    HandshakeFailed,
-    BadStatus,
-    DecodeFailed,
-    InvalidPublicKey,
-    Other,
     /// This node's topology read for the peer failed.
     TopologyReadFailed,
     /// The read succeeded and the peer has vetted no package.
