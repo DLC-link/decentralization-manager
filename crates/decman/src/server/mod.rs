@@ -1533,6 +1533,8 @@ pub async fn start_server(
             .service(handlers::get_auth_status)
             .service(handlers::test_auth)
             .service(handlers::grant_rights)
+            .service(handlers::allocate_node_identity)
+            .service(handlers::get_node_identity)
             .service(handlers::get_governance)
             .service(handlers::get_governance_state)
             .service(handlers::get_proposals_page)
