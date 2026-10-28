@@ -241,7 +241,10 @@ mod tests {
         // Assert
         assert_eq!(
             body["contracts"][0]["fields"][5],
-            json!({ "type": "optional", "inner": { "type": "party_set", "parties": ["obs::1220"] } })
+            json!({
+                "type": "optional",
+                "inner": { "type": "party_set", "parties": ["obs::1220"] },
+            })
         );
     }
 

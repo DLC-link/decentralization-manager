@@ -132,7 +132,8 @@ pub fn fetch(client: &mut DecmanClient, party_id: &str) -> Result<GovernanceConf
         }
         if page_number == MAX_PAGES {
             bail!(
-                "the party has more than {} pending proposals; the CLI reads at most {MAX_PAGES} pages",
+                "the party has more than {} pending proposals; \
+                 the CLI reads at most {MAX_PAGES} pages",
                 MAX_PAGES * PAGE_SIZE
             );
         }
@@ -345,7 +346,11 @@ mod tests {
                 "action": { "type": "governance_set_threshold", "new_threshold": 2 },
                 "confirmations": [
                     { "contract_id": "c-self-me", "confirming_party": "me::1220", "expires_at": 0 },
-                    { "contract_id": "c-self-you", "confirming_party": "you::1220", "expires_at": 0 }
+                    {
+                        "contract_id": "c-self-you",
+                        "confirming_party": "you::1220",
+                        "expires_at": 0
+                    }
                 ],
                 "executable_confirmation_cids": ["c-self-you"],
                 "confirmation_count": 2,
