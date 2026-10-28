@@ -32,7 +32,7 @@ use crate::common::{
         P1_JSON_API, REWARD_COUPON_V2_TEMPLATE, SeedCoupon, archive_command,
         reward_coupon_create_command,
     },
-    phases::deploy_gov_core::{allocate_party, grant_rights},
+    phases::deploy_gov_core::grant_rights,
     scenario::Scenario,
 };
 
@@ -300,8 +300,24 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
                         .split_once("::")
                         .context("P1 participant id has no '::'")?;
                 let hint = format!("decman-node-{prefix}-decoy");
-                let decoy = allocate_party(&*f, P1_JSON_API, &hint, "participant-1").await?;
+                // The JSON Ledger API reads `partyIdHint`. The shared
+                // `allocate_party` helper sends `party_id_hint`, which it
+                // ignores, so its parties come back as `party-<uuid>`.
+                let req = json!({ "partyIdHint": hint, "identityProviderId": "" });
+                let response: Value = f
+                    .post_json(P1_JSON_API, "/v2/parties", &req)
+                    .await
+                    .context("allocate the decoy party on P1")?;
+                let decoy = response
+                    .pointer("/partyDetails/party")
+                    .and_then(Value::as_str)
+                    .context("no partyDetails.party in the allocation response")?
+                    .to_string();
                 info!("Decoy party on P1: {decoy}");
+                ensure!(
+                    decoy.starts_with(&format!("{hint}::")),
+                    "the decoy came back as {decoy}, not under the hint {hint}"
+                );
                 ctx.decoy = Some(decoy);
                 Ok(())
             })
