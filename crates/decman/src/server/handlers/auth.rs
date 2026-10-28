@@ -22,6 +22,7 @@ use crate::{
         },
     },
     utils,
+    workflow::node_identity::{right_names, rights_flags},
 };
 
 /// Get frontend auth configuration (provider details + whether auth is required).
@@ -216,7 +217,7 @@ pub async fn get_auth_status(data: web::Data<AppState>) -> impl Responder {
 }
 
 /// Extract user_id (sub claim) from JWT token
-fn extract_user_id_from_jwt(token: &str) -> Option<String> {
+pub(super) fn extract_user_id_from_jwt(token: &str) -> Option<String> {
     // JWT format: header.payload.signature
     let parts: Vec<&str> = token.split('.').collect();
     if parts.len() != 3 {
@@ -268,38 +269,13 @@ async fn check_user_rights(
         .into_inner();
 
     tracing::debug!(
-        "ListUserRights for {effective_user_id} returned {} rights",
-        response.rights.len()
+        "ListUserRights for {effective_user_id} returned {rights:?}",
+        rights = right_names(&response.rights)
     );
 
-    let mut member_party_act_as = false;
-    let mut member_party_read_as = false;
-    let mut dec_party_act_as = false;
-    let mut dec_party_read_as = false;
-
-    for right in response.rights {
-        match right.kind {
-            Some(Kind::CanActAs(CanActAs { ref party })) => {
-                tracing::debug!("  CanActAs: {party}");
-                if party == &member_party_id_str {
-                    member_party_act_as = true;
-                }
-                if party == &dec_party_id_str {
-                    dec_party_act_as = true;
-                }
-            }
-            Some(Kind::CanReadAs(CanReadAs { ref party })) => {
-                tracing::debug!("  CanReadAs: {party}");
-                if party == &member_party_id_str {
-                    member_party_read_as = true;
-                }
-                if party == &dec_party_id_str {
-                    dec_party_read_as = true;
-                }
-            }
-            _ => {}
-        }
-    }
+    let (member_party_act_as, member_party_read_as) =
+        rights_flags(&response.rights, &member_party_id_str);
+    let (dec_party_act_as, dec_party_read_as) = rights_flags(&response.rights, &dec_party_id_str);
 
     Ok(RightsStatus {
         member_party_act_as,
@@ -366,7 +342,7 @@ pub async fn test_auth(data: web::Data<AppState>) -> impl Responder {
 /// grant-rights mint was the one path that assumed Keycloak, and an Auth0 party
 /// leaves `PartyCredentials.keycloak` empty (#259).
 #[derive(Debug)]
-enum AdminTokenSource {
+pub(super) enum AdminTokenSource {
     /// Auth0 `client_credentials`. Auth0 requires an explicit `audience`, and
     /// the admin token is presented to the same ledger API as the party's own
     /// token — Canton validates `aud` against its configured target audience —
@@ -386,7 +362,7 @@ impl AdminTokenSource {
     /// a usable Auth0 tenant nor a Keycloak realm. Previously such a party
     /// produced a relative token URL that failed inside reqwest as an opaque
     /// "builder error".
-    fn from_party(creds: &PartyCredentials) -> std::result::Result<Self, String> {
+    pub(super) fn from_party(creds: &PartyCredentials) -> std::result::Result<Self, String> {
         if let Some(auth0) = &creds.auth0 {
             let domain = auth0.domain.trim();
             let audience = auth0.audience.trim();
@@ -430,7 +406,7 @@ impl AdminTokenSource {
     }
 
     /// The absolute `client_credentials` token endpoint for this source.
-    fn token_endpoint(&self) -> String {
+    pub(super) fn token_endpoint(&self) -> String {
         match self {
             Self::Auth0 { domain, .. } => auth0_token_url(domain),
             Self::Keycloak { url, realm } => token_url(url, realm),
@@ -439,7 +415,7 @@ impl AdminTokenSource {
 
     /// IdP name for operator-facing messages, so a failed mint says which
     /// system rejected the credentials.
-    fn idp(&self) -> &'static str {
+    pub(super) fn idp(&self) -> &'static str {
         match self {
             Self::Auth0 { .. } => "Auth0",
             Self::Keycloak { .. } => "Keycloak",
@@ -449,7 +425,7 @@ impl AdminTokenSource {
 
 /// Why an admin token mint failed.
 #[derive(Debug, thiserror::Error)]
-enum AdminMintError {
+pub(super) enum AdminMintError {
     /// The IdP answered 400, 401 or 403: the supplied client id or secret is wrong.
     #[error("{message}")]
     Rejected { status: u16, message: String },
@@ -468,14 +444,14 @@ enum AdminMintError {
 }
 
 impl AdminMintError {
-    fn kind(&self) -> &'static str {
+    pub(super) fn kind(&self) -> &'static str {
         match self {
             Self::Rejected { .. } => "rejected",
             Self::RateLimited { .. } | Self::Upstream { .. } => "upstream",
         }
     }
 
-    fn status(&self) -> Option<u16> {
+    pub(super) fn status(&self) -> Option<u16> {
         match self {
             Self::Rejected { status, .. } => Some(*status),
             Self::RateLimited { .. } => Some(StatusCode::TOO_MANY_REQUESTS.as_u16()),
@@ -497,7 +473,7 @@ struct AdminTokenResponse {
 /// Returns [`AdminMintError::Rejected`] when the IdP refuses the credentials and
 /// [`AdminMintError::Upstream`] for transport failures, other error statuses and
 /// unparseable responses.
-async fn mint_admin_token(
+pub(super) async fn mint_admin_token(
     http: &reqwest::Client,
     token_url: &str,
     source: &AdminTokenSource,
@@ -680,25 +656,7 @@ pub async fn grant_rights(
                 party = %dec_party_id,
                 "Failed to mint admin token for grant-rights: {e}"
             );
-            return match e {
-                AdminMintError::Rejected { .. } => {
-                    HttpResponse::UnprocessableEntity().json(ErrorResponse {
-                        error: format!("Admin {idp} auth failed"),
-                    })
-                }
-                AdminMintError::RateLimited { retry_after, .. } => {
-                    let mut response = HttpResponse::ServiceUnavailable();
-                    if let Some(retry_after) = retry_after {
-                        response.insert_header((RETRY_AFTER, retry_after));
-                    }
-                    response.json(ErrorResponse {
-                        error: format!("Admin {idp} token endpoint is rate-limiting requests"),
-                    })
-                }
-                AdminMintError::Upstream { .. } => HttpResponse::BadGateway().json(ErrorResponse {
-                    error: format!("Admin {idp} token endpoint failed"),
-                }),
-            };
+            return mint_error_response(e, idp);
         }
     };
 
@@ -719,6 +677,30 @@ pub async fn grant_rights(
                 error: "Failed to grant rights".into(),
             })
         }
+    }
+}
+
+/// The response for a failed admin token mint. The message names only the
+/// IdP, because the error itself carries the IdP response body.
+pub(super) fn mint_error_response(e: AdminMintError, idp: &str) -> HttpResponse {
+    match e {
+        AdminMintError::Rejected { .. } => {
+            HttpResponse::UnprocessableEntity().json(ErrorResponse {
+                error: format!("Admin {idp} auth failed"),
+            })
+        }
+        AdminMintError::RateLimited { retry_after, .. } => {
+            let mut response = HttpResponse::ServiceUnavailable();
+            if let Some(retry_after) = retry_after {
+                response.insert_header((RETRY_AFTER, retry_after));
+            }
+            response.json(ErrorResponse {
+                error: format!("Admin {idp} token endpoint is rate-limiting requests"),
+            })
+        }
+        AdminMintError::Upstream { .. } => HttpResponse::BadGateway().json(ErrorResponse {
+            error: format!("Admin {idp} token endpoint failed"),
+        }),
     }
 }
 
