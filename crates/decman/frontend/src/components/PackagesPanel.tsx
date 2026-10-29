@@ -85,9 +85,6 @@ export function peerErrorTooltip(peer: PeerPackageResult): string {
     case undefined:
     case null:
       return "No package list for this peer";
-    default:
-      // The Noise variants, kept on the wire. Nothing emits them now.
-      return `No package list for this peer (${peer.error_kind})`;
   }
 }
 

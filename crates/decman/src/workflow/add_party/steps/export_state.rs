@@ -1,16 +1,11 @@
 use std::collections::HashSet;
 
-use common::types::PackageInfo;
 use sqlx::SqlitePool;
 
 use crate::{
-    config::{NodeConfig, Peer},
-    db::schema::SchemaRead,
+    config::NodeConfig,
     error::Result,
-    noise::{
-        Message, MessageType, NoiseKeypair, parse_public_key,
-        send_noise_message_with_chunked_response,
-    },
+    server::fetch_vetted_package_ids,
     utils,
     workflow::{
         add_party::AddPartyConfig,
@@ -84,7 +79,7 @@ pub async fn export_state(
         );
     }
 
-    check_new_member_packages(config, storage, add_party_config, ledger_token).await?;
+    check_new_member_packages(config, add_party_config, ledger_token).await?;
 
     let namespace_bytes = utils::encode_length_prefixed_message(&namespace_def);
     storage
@@ -112,8 +107,8 @@ pub async fn export_state(
     Ok(())
 }
 
-/// Refuse the add before any topology is written if the new member is missing a
-/// package the party's contracts need.
+/// Refuse the add before any topology is written if the new member has not
+/// vetted a package the party's contracts need.
 ///
 /// `import_party_acs` checks this too, but only at `SyncAcs` — by then
 /// `SubmitProposals` has hosted the party on the new participant with the
@@ -121,9 +116,14 @@ pub async fn export_state(
 /// with no ACS behind it. Every archive of a contract created before that lands
 /// in its ACS journal with no activation to derive a reassignment counter from,
 /// and those orphans make the participant fail its next reconnect.
+///
+/// The new member's vetting comes from this node's own topology store, so no
+/// peer is contacted. That store records vetting, not uploads, so this check is
+/// stricter than the import's: a package the new member holds but has not
+/// vetted is refused here too. A package it has vetted but no longer holds is
+/// the new member's own check, `check_vetted_packages_held`, before it signs.
 async fn check_new_member_packages(
     config: &NodeConfig,
-    storage: &SqlitePool,
     add_party_config: &AddPartyConfig,
     ledger_token: Option<&str>,
 ) -> Result {
@@ -134,57 +134,28 @@ async fn check_new_member_packages(
     }
 
     let new_participant = &add_party_config.new_participant_id;
-    let peer = storage
-        .get_peer(&new_participant.to_string())
+    let vetted: HashSet<String> = fetch_vetted_package_ids(config, new_participant)
         .await?
-        .ok_or_else(|| anyhow::anyhow!("No peer record for the new member {new_participant}"))?;
-    let held = fetch_peer_package_ids(config, &peer).await?;
+        .into_iter()
+        .collect();
 
     let missing: Vec<&str> = required
         .iter()
         .map(String::as_str)
-        .filter(|id| !held.contains(*id))
+        .filter(|id| !vetted.contains(*id))
         .collect();
     if !missing.is_empty() {
         anyhow::bail!(
-            "the new member {new_participant} is missing {n} package(s) required by the \
+            "the new member {new_participant} has not vetted {n} package(s) required by the \
              party's contracts — upload and vet the corresponding DAR(s) on it before adding \
-             it, or its ACS import cannot be validated. Missing package ids: {missing:?}",
+             it. Missing package ids: {missing:?}",
             n = missing.len()
         );
     }
 
     tracing::info!(
-        "New member holds all {n} package(s) the party's contracts reference",
+        "New member has vetted all {n} package(s) the party's contracts reference",
         n = required.len()
     );
     Ok(())
-}
-
-/// The package ids a peer reports over `ListPackages`.
-async fn fetch_peer_package_ids(config: &NodeConfig, peer: &Peer) -> Result<HashSet<String>> {
-    let keypair = NoiseKeypair::from_file(&config.key_file_path()).await?;
-    let psk = keypair.derive_psk(&parse_public_key(&peer.public_key)?);
-    let identity = config.participant_id().to_string();
-
-    let response = send_noise_message_with_chunked_response(
-        &peer.address,
-        peer.port,
-        &psk,
-        identity.as_bytes(),
-        &Message::new_empty(MessageType::ListPackages),
-        &config.noise_retry,
-    )
-    .await?;
-
-    let message = Message::from_bytes(&response)?;
-    if message.msg_type != MessageType::Data {
-        anyhow::bail!(
-            "the new member answered ListPackages with {msg_type:?}",
-            msg_type = message.msg_type
-        );
-    }
-
-    let packages: Vec<PackageInfo> = serde_json::from_slice(&message.payload)?;
-    Ok(packages.into_iter().map(|p| p.package_id).collect())
 }

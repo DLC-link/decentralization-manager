@@ -939,6 +939,14 @@ async fn run_peer(
                     continue;
                 }
 
+                if is_new_member(&node_config, &add_party_config)
+                    && let Err(e) =
+                        party_replication::check_vetted_packages_held(&node_config).await
+                {
+                    fail_step!("Refusing to sign as the new member: {e:#}");
+                    continue;
+                }
+
                 let proposal_data = utils::encode_length_prefixed(&[&items[1], &items[2]]);
                 if let Err(e) =
                     add_party::sign_proposals(&node_config, &db, &instance_name, &proposal_data)
