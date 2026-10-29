@@ -819,12 +819,17 @@ async fn local_package_ids(config: &NodeConfig) -> Result<HashSet<String>> {
 /// New-member side: refuse to join while this participant has vetted a
 /// package it does not hold.
 ///
+/// Vetting is synchronizer topology, but the package store is local, so the
+/// two can disagree. An operator can vet a package that was never uploaded,
+/// with `FORCE_FLAG_ALLOW_UNKNOWN_PACKAGE`. A restore from a backup taken
+/// before a DAR upload brings back the old package store, while the vetting
+/// stays on the synchronizer.
+///
 /// The coordinator checks the party's packages against this participant's
-/// vetting. A restore from backup keeps the vetting but loses the DAR, and the
-/// import's own package preflight runs only at `SyncAcs`, after this member has
-/// left the synchronizer. Holding every vetted package, together with the
-/// coordinator's check, puts every package the party needs on this participant
-/// before it disconnects.
+/// vetting only, and the import's own package preflight runs at `SyncAcs`,
+/// after this member has left the synchronizer. Holding every vetted package,
+/// together with the coordinator's check, puts every package the party needs
+/// on this participant before it disconnects.
 pub async fn check_vetted_packages_held(config: &NodeConfig) -> Result {
     let vetted = fetch_vetted_package_ids(config, config.participant_id()).await?;
     let held = local_package_ids(config).await?;
