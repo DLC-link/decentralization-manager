@@ -28,8 +28,10 @@ import { PartyList } from "./components/PartyList";
 import { PartyDetail } from "./components/PartyDetail";
 import { FormerPartyDetail } from "./components/FormerPartyDetail";
 import { NodeHealthCard } from "./components/NodeHealthCard";
+import { NodeIdentityCard } from "./components/NodeIdentityCard";
 import { NetworkConfigAccordion } from "./components/NetworkConfigAccordion";
 import { useNodeHealth } from "./useNodeHealth";
+import { useNodeIdentity } from "./useNodeIdentity";
 import { PackagesPanel } from "./components/PackagesPanel";
 import { LoadingSkeleton, ConfigTabSkeleton } from "./components/LoadingSkeleton";
 import { DarsDialog } from "./components/DarsDialog";
@@ -249,6 +251,7 @@ const App = () => {
   // Only the Configuration tab shows node health, and only it pays for the
   // poll: the probe stops the moment the operator moves to another tab.
   const nodeHealth = useNodeHealth(activeTab === 2);
+  const nodeIdentity = useNodeIdentity(activeTab === 2);
   const listedParties = useMemo(
     () => (sharedWith ? partiesSharedWith(parties, sharedWith) : parties),
     [parties, sharedWith],
@@ -1528,6 +1531,15 @@ const App = () => {
                   config={nodeConfig}
                   health={nodeHealth}
                   selfLatency={selfLatency}
+                />
+              </Box>
+              <Divider />
+              <Box sx={{ px: "var(--content-pad)", py: 2 }}>
+                <NodeIdentityCard
+                  status={nodeIdentity.status}
+                  error={nodeIdentity.error}
+                  loading={nodeIdentity.loading}
+                  onRefresh={nodeIdentity.refresh}
                 />
               </Box>
               <Divider />
