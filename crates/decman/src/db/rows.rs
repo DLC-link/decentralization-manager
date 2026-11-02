@@ -4,7 +4,10 @@ use anyhow::Context;
 
 use crate::{
     canton_id::CantonId,
-    config::{Auth0M2MConfig, KeycloakConfig, PackageConfig, PartyCredentials, Peer},
+    config::{
+        Auth0M2MConfig, IdpClient, KeycloakConfig, NodeIdentityRecord, PackageConfig,
+        PartyCredentials, Peer,
+    },
     db::crypto,
     error::Result,
     server::{
@@ -128,6 +131,110 @@ impl PartyCredentialsRow {
             },
             auth0,
             packages: PackageConfig::default(),
+        })
+    }
+}
+
+#[derive(Debug, sqlx::FromRow)]
+pub struct NodeIdentityRow {
+    pub node_party_id: String,
+    pub participant_id: String,
+    pub user_id: String,
+    pub keycloak_url: Option<String>,
+    pub keycloak_realm: Option<String>,
+    pub keycloak_client_id: Option<String>,
+    pub keycloak_client_secret: Option<String>,
+    pub auth0_domain: Option<String>,
+    pub auth0_audience: Option<String>,
+    pub auth0_client_id: Option<String>,
+    pub auth0_client_secret: Option<String>,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
+impl NodeIdentityRow {
+    pub fn from_domain(record: &NodeIdentityRecord) -> Result<Self> {
+        let mut row = Self {
+            node_party_id: record.node_party_id.to_string(),
+            participant_id: record.participant_id.to_string(),
+            user_id: record.user_id.clone(),
+            keycloak_url: None,
+            keycloak_realm: None,
+            keycloak_client_id: None,
+            keycloak_client_secret: None,
+            auth0_domain: None,
+            auth0_audience: None,
+            auth0_client_id: None,
+            auth0_client_secret: None,
+            created_at: record.created_at,
+            updated_at: record.updated_at,
+        };
+        match &record.login {
+            Some(IdpClient::Keycloak(k)) => {
+                row.keycloak_url = Some(k.url.clone());
+                row.keycloak_realm = Some(k.realm.clone());
+                row.keycloak_client_id = Some(crypto::encrypt(&k.client_id)?);
+                row.keycloak_client_secret = crypto::encrypt_opt(&k.client_secret)?;
+            }
+            Some(IdpClient::Auth0(a)) => {
+                row.auth0_domain = Some(a.domain.clone());
+                row.auth0_audience = Some(a.audience.clone());
+                row.auth0_client_id = Some(crypto::encrypt(&a.client_id)?);
+                row.auth0_client_secret = Some(crypto::encrypt(&a.client_secret)?);
+            }
+            None => {}
+        }
+        Ok(row)
+    }
+
+    /// # Errors
+    ///
+    /// Returns an error for a row whose login columns are only partly set,
+    /// because reading it as "no login" would put the node on the unsafe
+    /// token.
+    pub fn into_domain(self) -> Result<NodeIdentityRecord> {
+        let keycloak = (
+            self.keycloak_url,
+            self.keycloak_realm,
+            self.keycloak_client_id,
+            self.keycloak_client_secret,
+        );
+        let auth0 = (
+            self.auth0_domain,
+            self.auth0_audience,
+            self.auth0_client_id,
+            self.auth0_client_secret,
+        );
+        let login = match (keycloak, auth0) {
+            ((None, None, None, None), (None, None, None, None)) => None,
+            ((None, None, None, None), (Some(domain), Some(audience), Some(id), Some(secret))) => {
+                Some(IdpClient::Auth0(Auth0M2MConfig {
+                    domain,
+                    audience,
+                    client_id: crypto::decrypt(&id)?,
+                    client_secret: crypto::decrypt(&secret)?,
+                }))
+            }
+            ((Some(url), Some(realm), Some(id), Some(secret)), (None, None, None, None)) => {
+                Some(IdpClient::Keycloak(KeycloakConfig {
+                    url,
+                    internal_url: None,
+                    realm,
+                    client_id: crypto::decrypt(&id)?,
+                    client_secret: Some(crypto::decrypt(&secret)?),
+                    username: None,
+                    password: None,
+                }))
+            }
+            _ => anyhow::bail!("The stored node identity holds an incomplete login"),
+        };
+        Ok(NodeIdentityRecord {
+            node_party_id: CantonId::parse(&self.node_party_id)?,
+            participant_id: CantonId::parse(&self.participant_id)?,
+            user_id: self.user_id,
+            login,
+            created_at: self.created_at,
+            updated_at: self.updated_at,
         })
     }
 }
@@ -720,6 +827,108 @@ mod tests {
 
         assert!(creds.auth0.is_none());
 
+        Ok(())
+    }
+
+    fn node_identity_record(login: Option<IdpClient>) -> Result<NodeIdentityRecord> {
+        let ns = "1220c4010d6883f367c7f45d55b2449501620130f9b21e96379f17dea455ac7a5892";
+        Ok(NodeIdentityRecord {
+            node_party_id: CantonId::parse(&format!("decman-node-participant1::{ns}"))?,
+            participant_id: CantonId::parse(&format!("participant1::{ns}"))?,
+            user_id: "node-login".to_string(),
+            login,
+            created_at: 100,
+            updated_at: 200,
+        })
+    }
+
+    #[test]
+    fn node_identity_keycloak_login_round_trips() -> Result {
+        let record = node_identity_record(Some(IdpClient::Keycloak(KeycloakConfig {
+            url: "https://kc.example".to_string(),
+            realm: "canton".to_string(),
+            client_id: "node-client".to_string(),
+            client_secret: Some("node-secret".to_string()),
+            ..KeycloakConfig::default()
+        })))?;
+
+        let row = NodeIdentityRow::from_domain(&record)?;
+        assert!(row.auth0_domain.is_none());
+        let back = row.into_domain()?;
+
+        assert_eq!(back.node_party_id, record.node_party_id);
+        assert_eq!(back.participant_id, record.participant_id);
+        assert_eq!(back.user_id, "node-login");
+        assert_eq!((back.created_at, back.updated_at), (100, 200));
+        let Some(IdpClient::Keycloak(k)) = back.login else {
+            panic!("expected a Keycloak login, got {:?}", back.login);
+        };
+        assert_eq!(k.url, "https://kc.example");
+        assert_eq!(k.realm, "canton");
+        assert_eq!(k.client_id, "node-client");
+        assert_eq!(k.client_secret.as_deref(), Some("node-secret"));
+        Ok(())
+    }
+
+    #[test]
+    fn node_identity_auth0_login_round_trips() -> Result {
+        let record = node_identity_record(Some(IdpClient::Auth0(Auth0M2MConfig {
+            domain: "tenant.us.auth0.com".to_string(),
+            audience: "https://canton.network.global".to_string(),
+            client_id: "node-m2m".to_string(),
+            client_secret: "node-secret".to_string(),
+        })))?;
+
+        let row = NodeIdentityRow::from_domain(&record)?;
+        assert!(row.keycloak_url.is_none());
+        let back = row.into_domain()?;
+
+        let Some(IdpClient::Auth0(a)) = back.login else {
+            panic!("expected an Auth0 login, got {:?}", back.login);
+        };
+        assert_eq!(a.domain, "tenant.us.auth0.com");
+        assert_eq!(a.audience, "https://canton.network.global");
+        assert_eq!(a.client_id, "node-m2m");
+        assert_eq!(a.client_secret, "node-secret");
+        Ok(())
+    }
+
+    #[test]
+    fn node_identity_without_login_round_trips() -> Result {
+        let row = NodeIdentityRow::from_domain(&node_identity_record(None)?)?;
+
+        assert!(row.into_domain()?.login.is_none());
+        Ok(())
+    }
+
+    /// Reading a half-written login as "no login" would move the node onto
+    /// the unsafe token, so the row must fail instead.
+    #[test]
+    fn node_identity_partial_auth0_login_errs() -> Result {
+        let mut row = NodeIdentityRow::from_domain(&node_identity_record(None)?)?;
+        row.auth0_domain = Some("tenant.us.auth0.com".to_string());
+        row.auth0_audience = Some("https://canton.network.global".to_string());
+        row.auth0_client_secret = Some("node-secret".to_string());
+
+        assert_is_err(row.into_domain());
+        Ok(())
+    }
+
+    #[test]
+    fn node_identity_with_both_logins_errs() -> Result {
+        let record = node_identity_record(Some(IdpClient::Auth0(Auth0M2MConfig {
+            domain: "tenant.us.auth0.com".to_string(),
+            audience: "https://canton.network.global".to_string(),
+            client_id: "node-m2m".to_string(),
+            client_secret: "node-secret".to_string(),
+        })))?;
+        let mut row = NodeIdentityRow::from_domain(&record)?;
+        row.keycloak_url = Some("https://kc.example".to_string());
+        row.keycloak_realm = Some("canton".to_string());
+        row.keycloak_client_id = Some("node-client".to_string());
+        row.keycloak_client_secret = Some("node-secret".to_string());
+
+        assert_is_err(row.into_domain());
         Ok(())
     }
 }

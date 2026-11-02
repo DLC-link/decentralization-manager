@@ -4,7 +4,7 @@ use super::rows::{
 };
 use crate::{
     canton_id::{CantonId, Fingerprint},
-    config::{PartyCredentials, Peer},
+    config::{NodeIdentityRecord, PartyCredentials, Peer},
     error::Result,
     server::{
         HandledInvitation, InvitationOutcome, InvitationType, PendingInvitation, WorkflowKind,
@@ -35,6 +35,9 @@ pub trait SchemaRead {
         &self,
         dec_party_id: &CantonId,
     ) -> Result<Option<PartyCredentials>>;
+
+    /// Get this node's identity, if one was saved
+    async fn get_node_identity(&self) -> Result<Option<NodeIdentityRecord>>;
 
     /// Get cached decentralized parties by prefix
     async fn get_dec_parties_by_prefix(&self, prefix: &str) -> Result<Vec<DecPartyRow>>;
@@ -265,6 +268,10 @@ pub trait Commitable {
 
     /// Insert or replace party credentials
     async fn upsert_party_credentials(&mut self, creds: &PartyCredentials) -> Result;
+
+    /// Insert or replace this node's identity. A replace keeps the stored
+    /// `created_at`.
+    async fn upsert_node_identity(&mut self, record: &NodeIdentityRecord) -> Result;
 
     /// Upsert a decentralized party
     async fn upsert_dec_party(&mut self, row: &DecPartyRow) -> Result;

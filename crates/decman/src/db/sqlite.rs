@@ -11,14 +11,14 @@ use super::{
     crypto,
     rows::{
         ChainAuditCacheRow, DecPartyContractRow, DecPartyIdentityRow, DecPartyParticipantRow,
-        DecPartyRow, FormerDecPartyRow, GovernanceAuditRow, HandledInvitationRow,
+        DecPartyRow, FormerDecPartyRow, GovernanceAuditRow, HandledInvitationRow, NodeIdentityRow,
         PartyCredentialsRow, PeerRow, PendingInvitationRow, WorkflowArtifactRow, WorkflowRunRow,
     },
     schema::{Commitable, SchemaRead, SchemaWrite},
 };
 use crate::{
     canton_id::{CantonId, Fingerprint},
-    config::{PartyCredentials, Peer},
+    config::{NodeIdentityRecord, PartyCredentials, Peer},
     error::Result,
     server::{
         HandledInvitation, InvitationOutcome, InvitationType, PendingInvitation, WorkflowKind,
@@ -183,6 +183,14 @@ impl SchemaRead for SqlitePool {
         .bind(dec_party_id.to_string())
         .fetch_optional(self)
         .await?;
+
+        row.map(|r| r.into_domain()).transpose()
+    }
+
+    async fn get_node_identity(&self) -> Result<Option<NodeIdentityRecord>> {
+        let row = sqlx::query_as::<_, NodeIdentityRow>("SELECT * FROM node_identity WHERE id = 1")
+            .fetch_optional(self)
+            .await?;
 
         row.map(|r| r.into_domain()).transpose()
     }
@@ -929,6 +937,61 @@ impl Commitable for sqlx::Transaction<'static, sqlx::Sqlite> {
         Ok(())
     }
 
+    async fn upsert_node_identity(&mut self, record: &NodeIdentityRecord) -> Result {
+        let row = NodeIdentityRow::from_domain(record)?;
+
+        sqlx::query(
+            r"
+            INSERT INTO node_identity (
+                id,
+                node_party_id,
+                participant_id,
+                user_id,
+                keycloak_url,
+                keycloak_realm,
+                keycloak_client_id,
+                keycloak_client_secret,
+                auth0_domain,
+                auth0_audience,
+                auth0_client_id,
+                auth0_client_secret,
+                created_at,
+                updated_at
+            ) VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET
+                node_party_id = excluded.node_party_id,
+                participant_id = excluded.participant_id,
+                user_id = excluded.user_id,
+                keycloak_url = excluded.keycloak_url,
+                keycloak_realm = excluded.keycloak_realm,
+                keycloak_client_id = excluded.keycloak_client_id,
+                keycloak_client_secret = excluded.keycloak_client_secret,
+                auth0_domain = excluded.auth0_domain,
+                auth0_audience = excluded.auth0_audience,
+                auth0_client_id = excluded.auth0_client_id,
+                auth0_client_secret = excluded.auth0_client_secret,
+                updated_at = excluded.updated_at
+            ",
+        )
+        .bind(&row.node_party_id)
+        .bind(&row.participant_id)
+        .bind(&row.user_id)
+        .bind(&row.keycloak_url)
+        .bind(&row.keycloak_realm)
+        .bind(&row.keycloak_client_id)
+        .bind(&row.keycloak_client_secret)
+        .bind(&row.auth0_domain)
+        .bind(&row.auth0_audience)
+        .bind(&row.auth0_client_id)
+        .bind(&row.auth0_client_secret)
+        .bind(row.created_at)
+        .bind(row.updated_at)
+        .execute(&mut **self)
+        .await?;
+
+        Ok(())
+    }
+
     async fn upsert_dec_party(&mut self, row: &DecPartyRow) -> Result {
         // ON CONFLICT DO UPDATE preserves the dec_party row's identity, so the
         // ON DELETE CASCADE on dec_party_participant.dec_party_id does NOT fire.
@@ -1610,7 +1673,10 @@ mod tests {
 
     use crate::{
         canton_id::{CantonId, Fingerprint},
-        config::{Auth0M2MConfig, KeycloakConfig, PackageConfig, PartyCredentials, Peer},
+        config::{
+            Auth0M2MConfig, IdpClient, KeycloakConfig, NodeIdentityRecord, PackageConfig,
+            PartyCredentials, Peer,
+        },
         db::{
             rows::{DecPartyContractRow, DecPartyParticipantRow, DecPartyRow},
             schema::{Commitable, SchemaRead, SchemaWrite},
@@ -3867,6 +3933,114 @@ mod tests {
         };
         assert_auth0(&by_id);
 
+        Ok(())
+    }
+
+    // ====================================================================
+    // Node identity
+    // ====================================================================
+
+    fn node_identity(user_id: &str, login: IdpClient, now: i64) -> NodeIdentityRecord {
+        NodeIdentityRecord {
+            node_party_id: CantonId::parse(&format!("decman-node-node1::{TEST_NS}")).unwrap(),
+            participant_id: CantonId::parse(&format!("node1::{TEST_NS}")).unwrap(),
+            user_id: user_id.to_string(),
+            login: Some(login),
+            created_at: now,
+            updated_at: now,
+        }
+    }
+
+    fn keycloak_login(secret: &str) -> IdpClient {
+        IdpClient::Keycloak(KeycloakConfig {
+            url: "https://kc.example.com".to_string(),
+            realm: "canton".to_string(),
+            client_id: "node-client".to_string(),
+            client_secret: Some(secret.to_string()),
+            ..KeycloakConfig::default()
+        })
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn test_node_identity_starts_empty(pool: SqlitePool) -> Result {
+        assert!(pool.get_node_identity().await?.is_none());
+        Ok(())
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn test_upsert_and_get_node_identity(pool: SqlitePool) -> Result {
+        let mut tx = pool.begin_transaction().await?;
+        tx.upsert_node_identity(&node_identity("node-login", keycloak_login("s1"), 100))
+            .await?;
+        Commitable::commit(tx).await?;
+
+        let Some(stored) = pool.get_node_identity().await? else {
+            panic!("no node identity stored");
+        };
+        assert_eq!(stored.user_id, "node-login");
+        assert_eq!(
+            stored.node_party_id.to_string(),
+            format!("decman-node-node1::{TEST_NS}")
+        );
+        let Some(IdpClient::Keycloak(k)) = stored.login else {
+            panic!("expected a Keycloak login, got {:?}", stored.login);
+        };
+        assert_eq!(k.client_id, "node-client");
+        assert_eq!(k.client_secret.as_deref(), Some("s1"));
+        Ok(())
+    }
+
+    /// The table holds one row. A second save replaces the login and the
+    /// user, and keeps the time of the first save.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn test_upsert_node_identity_replaces_the_single_row(pool: SqlitePool) -> Result {
+        let mut tx = pool.begin_transaction().await?;
+        tx.upsert_node_identity(&node_identity("old-login", keycloak_login("s1"), 100))
+            .await?;
+        Commitable::commit(tx).await?;
+
+        let auth0 = IdpClient::Auth0(Auth0M2MConfig {
+            domain: "tenant.us.auth0.com".to_string(),
+            audience: "https://canton.network.global".to_string(),
+            client_id: "node-m2m".to_string(),
+            client_secret: "s2".to_string(),
+        });
+        let mut tx = pool.begin_transaction().await?;
+        tx.upsert_node_identity(&node_identity("new-login", auth0, 200))
+            .await?;
+        Commitable::commit(tx).await?;
+
+        let (rows,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM node_identity")
+            .fetch_one(&pool)
+            .await?;
+        assert_eq!(rows, 1);
+        let Some(stored) = pool.get_node_identity().await? else {
+            panic!("no node identity stored");
+        };
+        assert_eq!(stored.user_id, "new-login");
+        assert_eq!((stored.created_at, stored.updated_at), (100, 200));
+        let Some(IdpClient::Auth0(a)) = stored.login else {
+            panic!("expected an Auth0 login, got {:?}", stored.login);
+        };
+        assert_eq!(a.client_id, "node-m2m");
+        assert_eq!(a.client_secret, "s2");
+        Ok(())
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn test_node_identity_table_refuses_a_second_row(pool: SqlitePool) -> Result {
+        let mut tx = pool.begin_transaction().await?;
+        tx.upsert_node_identity(&node_identity("node-login", keycloak_login("s1"), 100))
+            .await?;
+        Commitable::commit(tx).await?;
+
+        let second = sqlx::query(
+            "INSERT INTO node_identity (id, node_party_id, participant_id, user_id, \
+             created_at, updated_at) VALUES (2, 'p', 'q', 'u', 0, 0)",
+        )
+        .execute(&pool)
+        .await;
+        assert!(second.is_err(), "a second row was accepted");
         Ok(())
     }
 
