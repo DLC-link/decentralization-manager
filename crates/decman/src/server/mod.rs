@@ -1367,17 +1367,9 @@ pub async fn start_server(
             "metrics_port collides with another listener; this node reports no metrics"
         );
     } else {
-        let metrics_host = host.to_string();
-        match HttpServer::new(|| App::new().route("/metrics", web::get().to(handlers::metrics)))
-            // One worker: the default is one per logical CPU.
-            .workers(1)
-            .bind((metrics_host.clone(), metrics_port))
-        {
-            Ok(server) => {
-                tracing::info!("Serving metrics on {metrics_host}:{metrics_port}/metrics");
-                // `run()` before the async block: `HttpServer` holds an `Rc` and is
-                // not `Send`, while the `Server` it returns is.
-                let running = server.run();
+        match metrics_server(host, metrics_port) {
+            Ok(running) => {
+                tracing::info!("Serving metrics on {host}:{metrics_port}/metrics");
                 spawn_supervised(
                     "metrics server",
                     "every alert rule reads an empty series while this node looks healthy",
@@ -1585,6 +1577,22 @@ pub async fn start_server(
     .await?;
 
     Ok(())
+}
+
+/// Binds and starts the server that answers `/metrics`.
+///
+/// It ignores SIGTERM and SIGINT, so it ends only with the process. The API server
+/// handles shutdown. A stop on the signal would end the supervised task, which then
+/// logs a normal shutdown at `error`.
+pub fn metrics_server(host: &str, port: u16) -> std::io::Result<actix_web::dev::Server> {
+    Ok(
+        HttpServer::new(|| App::new().route("/metrics", web::get().to(handlers::metrics)))
+            // One worker: the default is one per logical CPU.
+            .workers(1)
+            .disable_signals()
+            .bind((host, port))?
+            .run(),
+    )
 }
 
 /// Spawns a task that must live as long as the process, and reports its death at
