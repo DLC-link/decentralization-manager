@@ -12,13 +12,17 @@
 //!   per-peer check matches the exact id.
 //! - 4: whether a user with act-as on the participant admin party can sign a
 //!   create as it (logged only, never fails the suite).
+//! - 5: `GET /node-identity` shows the stored identity: the POST's user and,
+//!   in insecure mode, the unsafe token. P2 keeps it across a restart.
+//! - 6: whether AllocateParty accepts a `userId` that was never created
+//!   (logged only). It decides whether decman must call CreateUser first.
 
 use std::{collections::BTreeSet, time::Duration};
 
 use anyhow::{Context, ensure};
 use chrono::Utc;
 use common::{
-    api::{NodeIdentityResponse, NodeIdentityStatusResponse},
+    api::{NodeIdentityRequest, NodeIdentityResponse, NodeIdentityStatusResponse, NodeLoginStatus},
     types::Permission,
 };
 use dec_party_manager::config::Peer;
@@ -33,12 +37,24 @@ use crate::common::{
         archive_command, reward_coupon_create_command,
     },
     phases::deploy_gov_core::grant_rights,
+    processes,
     scenario::Scenario,
 };
 
 #[derive(Deserialize)]
 struct NetworkPeers {
     peers: Vec<Peer>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ParticipantsStatus {
+    statuses: Vec<PeerStatus>,
+}
+
+#[derive(Debug, Deserialize)]
+struct PeerStatus {
+    id: String,
+    status: String,
 }
 
 #[derive(Default)]
@@ -171,6 +187,42 @@ fn check_status(
     Ok(())
 }
 
+/// Fact 5: the identity `response` set up is stored, with the unsafe token
+/// of insecure mode.
+fn check_stored(
+    status: &NodeIdentityStatusResponse,
+    response: &NodeIdentityResponse,
+) -> anyhow::Result<()> {
+    let stored = status
+        .identity
+        .as_ref()
+        .context("no stored node identity")?;
+    ensure!(
+        stored.node_party_id == response.node_party_id,
+        "stored party {}, the POST returned {}",
+        stored.node_party_id,
+        response.node_party_id
+    );
+    ensure!(
+        stored.user_id == response.user_id,
+        "stored user {}, the POST returned {}",
+        stored.user_id,
+        response.user_id
+    );
+    ensure!(
+        stored.participant_matches,
+        "stored for participant {}",
+        stored.participant_id
+    );
+    ensure!(
+        stored.login.is_none() && stored.token == NodeLoginStatus::Mock,
+        "expected the unsafe token, got login {:?} and token {:?}",
+        stored.login,
+        stored.token
+    );
+    Ok(())
+}
+
 async fn probe_status(f: &Fixture, ctx: &Ctx, index: usize) -> Option<anyhow::Result<()>> {
     let all = nodes(f);
     let (name, port, own_id) = all[index].clone();
@@ -189,11 +241,17 @@ async fn probe_status(f: &Fixture, ctx: &Ctx, index: usize) -> Option<anyhow::Re
         return Some(Err(anyhow::anyhow!("no decoy party recorded")));
     };
 
+    let Some(response) = ctx.first.get(index) else {
+        return Some(Err(anyhow::anyhow!("no first {name} response recorded")));
+    };
+
     let status: NodeIdentityStatusResponse = f.probe_get_json(port, "/node-identity").await?;
     f.probe_diag.ok(
         &format!("{name} GET /node-identity"),
-        check_status(&status, &own_id, &peer_ids, &node_parties, decoy),
+        check_status(&status, &own_id, &peer_ids, &node_parties, decoy)
+            .and_then(|()| check_stored(&status, response)),
     )?;
+    info!("{name} stored identity: {:?}", status.identity);
     info!(
         "{name} scan with filter {:?}: {:?}",
         status.scan_filter, status.scan
@@ -242,6 +300,55 @@ async fn create_as_admin_party(f: &Fixture) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Fact 5 after a restart: P2 reloads the identity it stored.
+async fn probe_restarted(f: &Fixture, ctx: &Ctx) -> Option<anyhow::Result<()>> {
+    let Some(response) = ctx.first.get(1) else {
+        return Some(Err(anyhow::anyhow!("no first P2 response recorded")));
+    };
+    let status: NodeIdentityStatusResponse = f.probe_get_json(f.p2.http, "/node-identity").await?;
+    info!(
+        "P2 stored identity after the restart: {:?}",
+        status.identity
+    );
+    Some(check_stored(&status, response))
+}
+
+/// P1's view of P2 on the peer mesh, which the next phase needs.
+async fn p1_sees_p2_connected(f: &Fixture) -> Option<anyhow::Result<()>> {
+    let statuses: ParticipantsStatus = f.probe_get_json(f.p1.http, "/participants-status").await?;
+    statuses
+        .statuses
+        .iter()
+        .any(|s| s.id == f.p2.participant_id && s.status == "Connected")
+        .then_some(Ok(()))
+}
+
+/// Fact 6: allocate a party through the JSON Ledger API for a `userId` that
+/// was never created, and log what Canton answers.
+async fn allocate_for_unknown_user(f: &Fixture) -> anyhow::Result<()> {
+    let user_id = format!("never-created-{}", f.run_id);
+    let req = json!({
+        "partyIdHint": format!("node-identity-fact6-{}", f.run_id),
+        "identityProviderId": "",
+        "userId": user_id,
+    });
+    match f
+        .post_json::<_, Value>(P1_JSON_API, "/v2/parties", &req)
+        .await
+    {
+        Ok(response) => info!("Fact 6: AllocateParty for {user_id} returned {response}"),
+        Err(e) => info!("Fact 6: AllocateParty for {user_id} failed: {e:#}"),
+    }
+    match f
+        .get_json::<Value>(P1_JSON_API, &format!("/v2/users/{user_id}/rights"))
+        .await
+    {
+        Ok(rights) => info!("Fact 6: {user_id} rights afterwards: {rights}"),
+        Err(e) => info!("Fact 6: reading {user_id}'s rights failed: {e:#}"),
+    }
+    Ok(())
+}
+
 pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
     if f.target != TestTarget::Localnet {
         info!("node_identity: skipped (localnet-only)");
@@ -282,7 +389,7 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
                 let json_apis = [P1_JSON_API, P2_JSON_API, P3_JSON_API];
                 for ((name, port, _), json_api) in nodes(f).into_iter().zip(json_apis) {
                     let response: NodeIdentityResponse = f
-                        .post_json(port, "/node-identity", &json!({}))
+                        .post_json(port, "/node-identity", &NodeIdentityRequest::default())
                         .await
                         .with_context(|| format!("POST /node-identity on {name}"))?;
                     info!("{name} POST /node-identity: {response:?}");
@@ -305,7 +412,7 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
         .when("P1 posts /node-identity again", |f, ctx| {
             Box::pin(async move {
                 let response: NodeIdentityResponse = f
-                    .post_json(f.p1.http, "/node-identity", &json!({}))
+                    .post_json(f.p1.http, "/node-identity", &NodeIdentityRequest::default())
                     .await
                     .context("second POST /node-identity on P1")?;
                 info!("P1 second POST /node-identity: {response:?}");
@@ -348,7 +455,8 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
             })
         })
         .then(
-            "P1 scans every node party and the decoy, and verifies P2 and P3 (fact 3)",
+            "P1 scans every node party and the decoy, verifies P2 and P3, and shows its \
+             stored identity (facts 3, 5)",
             Duration::from_secs(60),
             |f, ctx| Box::pin(async move { probe_status(f, ctx, 0).await }),
         )
@@ -358,6 +466,27 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
         .then("P3 sees the same", Duration::from_secs(60), |f, ctx| {
             Box::pin(async move { probe_status(f, ctx, 2).await })
         })
+        .when("P2 restarts", |f, _| {
+            Box::pin(async move {
+                let pid = processes::restart_node(f, 2).await?;
+                info!("P2 restarted as pid {pid}");
+                Ok(())
+            })
+        })
+        .then(
+            "P2 keeps its stored identity (fact 5)",
+            Duration::from_secs(60),
+            |f, ctx| Box::pin(async move { probe_restarted(f, ctx).await }),
+        )
+        .then(
+            "P1 sees P2 connected again",
+            Duration::from_secs(120),
+            |f, _| Box::pin(async move { p1_sees_p2_connected(f).await }),
+        )
+        .when(
+            "P1 allocates a party for a user that was never created (fact 6)",
+            |f, _| Box::pin(async move { allocate_for_unknown_user(f).await }),
+        )
         .when(
             "P1's user creates a contract as the participant admin party (fact 4)",
             |f, _| {
