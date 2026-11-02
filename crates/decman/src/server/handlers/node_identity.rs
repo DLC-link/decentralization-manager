@@ -404,26 +404,17 @@ async fn allocate(
     })
 }
 
-/// Give a new login's user act-as and read-as on the node party, which
-/// AllocateParty granted only to the first login's user. The previous user
-/// keeps its rights.
+/// Give the login's user act-as and read-as on the node party. AllocateParty
+/// grants act-as only to the user of the call that creates the party, so a
+/// later login needs this: after a login change, a reset database, or a
+/// retried setup.
 #[allow(clippy::result_large_err)]
-async fn grant_to_new_user(
+async fn grant_missing_rights(
     config: &NodeConfig,
     tokens: &Tokens,
-    previous_user: &str,
     response: &mut NodeIdentityResponse,
 ) -> std::result::Result<(), HttpResponse> {
     let node_party = response.node_party_id.to_string();
-    tracing::info!(
-        previous_user,
-        user_id = %tokens.user_id,
-        node_party = %node_party,
-        "The node login moved to another user. The previous user keeps its rights"
-    );
-    if response.act_as {
-        return Ok(());
-    }
     let granted = grant_user_rights(
         config,
         &tokens.admin_token,
@@ -511,7 +502,15 @@ async fn set_up(
     }
     let mut response = allocate(&data.config, &tokens, &participant_id).await?;
     if let Some(previous) = stored.as_ref().filter(|r| r.user_id != tokens.user_id) {
-        grant_to_new_user(&data.config, &tokens, &previous.user_id, &mut response).await?;
+        tracing::info!(
+            previous_user = %previous.user_id,
+            user_id = %tokens.user_id,
+            node_party = %response.node_party_id,
+            "The node login moved to another user. The previous user keeps its rights"
+        );
+    }
+    if !response.act_as {
+        grant_missing_rights(&data.config, &tokens, &mut response).await?;
     }
 
     let now = chrono::Utc::now().timestamp();
@@ -550,7 +549,8 @@ async fn set_up(
 /// Set up this node's identity party and the login that acts as it.
 ///
 /// The node login is one IdP client. Its token's `sub` names the Ledger API
-/// user, which is created if missing and gets act-as through AllocateParty.
+/// user, which is created if missing. It gets act-as through AllocateParty, or
+/// through a grant when the node party already exists.
 /// The admin token comes from the same IdP. The login is stored; the admin
 /// credentials are not.
 #[utoipa::path(

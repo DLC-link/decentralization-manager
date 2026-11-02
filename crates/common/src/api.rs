@@ -1498,8 +1498,8 @@ pub struct NodeIdentityResponse {
     pub act_as: bool,
     /// Whether `user_id` can read as the node party.
     pub read_as: bool,
-    /// Whether this call granted `user_id` act-as and read-as. Only a new
-    /// login on an existing node party needs the grant.
+    /// Whether this call granted `user_id` act-as and read-as. A login whose
+    /// user did not create the node party needs the grant.
     pub rights_granted: bool,
     /// `None` in insecure mode.
     pub login: Option<NodeLoginSummary>,
