@@ -10,7 +10,8 @@ use std::time::Duration;
 use anyhow::Context;
 use canton_proto_rs::com::{
     daml::ledger::api::v2::admin::{
-        AllocatePartyRequest, ListUserRightsRequest, Right,
+        AllocatePartyRequest, CreateUserRequest, GrantUserRightsRequest, ListUserRightsRequest,
+        Right, User,
         right::{CanActAs, CanExecuteAs, CanReadAs, Kind},
     },
     digitalasset::canton::{
@@ -255,6 +256,57 @@ pub async fn allocate_node_party(
         Err(status) if status.code() == tonic::Code::AlreadyExists => Ok(None),
         Err(status) => Err(status).context("AllocateParty RPC failed"),
     }
+}
+
+/// Create the Ledger API user `user_id` with no rights. Returns whether it
+/// was created. `false` means it already existed.
+///
+/// # Errors
+///
+/// Returns an error when the CreateUser call fails for another reason.
+pub async fn create_user_if_missing(
+    config: &NodeConfig,
+    admin_token: &str,
+    user_id: &str,
+) -> Result<bool> {
+    let mut client = utils::create_user_client(config, Some(admin_token.to_string())).await?;
+    let request = CreateUserRequest {
+        user: Some(User {
+            id: user_id.to_string(),
+            ..User::default()
+        }),
+        rights: Vec::new(),
+    };
+    match client.create_user(tonic::Request::new(request)).await {
+        Ok(_) => Ok(true),
+        Err(status) if status.code() == tonic::Code::AlreadyExists => Ok(false),
+        Err(status) => Err(status).context("CreateUser RPC failed"),
+    }
+}
+
+/// Grant `rights` to `user_id`. Returns how many of them are new.
+///
+/// # Errors
+///
+/// Returns an error when the GrantUserRights call fails.
+pub async fn grant_user_rights(
+    config: &NodeConfig,
+    admin_token: &str,
+    user_id: &str,
+    rights: Vec<Right>,
+) -> Result<usize> {
+    let mut client = utils::create_user_client(config, Some(admin_token.to_string())).await?;
+    Ok(client
+        .grant_user_rights(tonic::Request::new(GrantUserRightsRequest {
+            user_id: user_id.to_string(),
+            rights,
+            identity_provider_id: String::new(),
+        }))
+        .await
+        .context("GrantUserRights RPC failed")?
+        .into_inner()
+        .newly_granted_rights
+        .len())
 }
 
 /// The rights `user_id` holds, read with `token`.

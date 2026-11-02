@@ -1412,22 +1412,74 @@ pub struct GrantRightsResponse {
     pub rights: RightsStatus,
 }
 
-/// Request to allocate this node's identity party
-#[derive(Clone, Debug, Deserialize)]
+/// Request to set up this node's identity party and the login that acts as
+/// it. The login is one IdP client: set the Keycloak or the Auth0 fields. An
+/// omitted login field keeps the stored value.
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 pub struct NodeIdentityRequest {
-    /// Client id of a participant-admin client. Required unless the node runs
-    /// in insecure mode. Never stored.
+    /// Client id of a participant-admin client at the node login's IdP.
+    /// Required unless the node runs in insecure mode. Never stored.
     pub admin_client_id: Option<String>,
     /// Client secret matching `admin_client_id`. Never stored.
     pub admin_client_secret: Option<String>,
-    /// Ledger API user that receives act-as on the node party. Defaults to the
-    /// first configured party's user.
-    pub user_id: Option<String>,
+    pub keycloak_url: Option<String>,
+    pub keycloak_realm: Option<String>,
+    pub keycloak_client_id: Option<String>,
+    /// Omitted keeps the stored secret. A new `keycloak_url` needs a new
+    /// secret.
+    pub keycloak_client_secret: Option<String>,
+    pub auth0_domain: Option<String>,
+    pub auth0_audience: Option<String>,
+    pub auth0_client_id: Option<String>,
+    /// Omitted keeps the stored secret. A new `auth0_domain` needs a new
+    /// secret.
+    pub auth0_client_secret: Option<String>,
 }
 
-/// This node's identity party after an allocate call
+/// The IdP of a node login
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
+#[serde(rename_all = "lowercase")]
+pub enum NodeLoginIdp {
+    Keycloak,
+    Auth0,
+}
+
+/// A node login without its secret
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
+pub struct NodeLoginSummary {
+    pub idp: NodeLoginIdp,
+    pub client_id: String,
+    /// Set for a Keycloak login.
+    pub keycloak_url: Option<String>,
+    /// Set for a Keycloak login.
+    pub keycloak_realm: Option<String>,
+    /// Set for an Auth0 login.
+    pub auth0_domain: Option<String>,
+    /// Set for an Auth0 login.
+    pub auth0_audience: Option<String>,
+}
+
+/// Whether the node login yields a token
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
+#[serde(tag = "status", rename_all = "lowercase")]
+pub enum NodeLoginStatus {
+    Ok,
+    /// Insecure mode: the node presents the unsafe token.
+    Mock,
+    Failed {
+        error: String,
+    },
+}
+
+/// This node's identity after a setup call
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
@@ -1440,14 +1492,35 @@ pub struct NodeIdentityResponse {
     pub namespace_matches: bool,
     /// This participant's hosting permission, if it hosts the party.
     pub hosting_permission: Option<Permission>,
+    /// The Ledger API user the node login authenticates as.
     pub user_id: String,
     /// Whether `user_id` can act as the node party.
     pub act_as: bool,
     /// Whether `user_id` can read as the node party.
     pub read_as: bool,
-    /// The user behind the admin token.
-    pub admin_user_id: String,
-    pub admin_rights: Vec<String>,
+    /// Whether this call granted `user_id` act-as and read-as. Only a new
+    /// login on an existing node party needs the grant.
+    pub rights_granted: bool,
+    /// `None` in insecure mode.
+    pub login: Option<NodeLoginSummary>,
+}
+
+/// The node identity this node has stored
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
+pub struct StoredNodeIdentity {
+    pub node_party_id: CantonId,
+    /// The participant the node party was set up on.
+    pub participant_id: CantonId,
+    /// Whether `participant_id` is this node's participant.
+    pub participant_matches: bool,
+    pub user_id: String,
+    /// `None` in insecure mode.
+    pub login: Option<NodeLoginSummary>,
+    pub token: NodeLoginStatus,
+    /// Seconds since the epoch.
+    pub updated_at: i64,
 }
 
 /// How this node sees one node's identity party in its own topology
@@ -1481,6 +1554,8 @@ pub struct NodeIdentityStatusResponse {
     pub scan_filter: String,
     /// Every party the scan returned, without an exact-match filter.
     pub scan: Vec<String>,
+    /// `None` until an admin sets up the node identity.
+    pub identity: Option<StoredNodeIdentity>,
 }
 
 // ============================================================================

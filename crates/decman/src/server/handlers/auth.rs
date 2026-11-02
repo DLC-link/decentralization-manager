@@ -11,7 +11,7 @@ use serde::Deserialize;
 use crate::{
     auth::{WorkflowAuth, auth0_token_body, auth0_token_url, truncate_for_log},
     canton_id::CantonId,
-    config::{NodeConfig, PartyCredentials},
+    config::{IdpClient, NodeConfig, PartyCredentials},
     error::Result,
     server::{
         AppState,
@@ -344,6 +344,18 @@ pub(super) enum AdminTokenSource {
     Keycloak { url: String, realm: String },
 }
 
+/// What an IdP client lacks to name a token endpoint.
+#[derive(Debug)]
+pub(super) enum IdpGap {
+    /// The Auth0 domain or audience is empty.
+    Auth0 {
+        domain_missing: bool,
+        audience_missing: bool,
+    },
+    /// The Keycloak URL or realm is empty.
+    Keycloak,
+}
+
 impl AdminTokenSource {
     /// Mirrors the precedence the rest of the file uses: Auth0 when the party
     /// has a tenant, Keycloak otherwise.
@@ -355,46 +367,63 @@ impl AdminTokenSource {
     /// produced a relative token URL that failed inside reqwest as an opaque
     /// "builder error".
     pub(super) fn from_party(creds: &PartyCredentials) -> std::result::Result<Self, String> {
-        if let Some(auth0) = &creds.auth0 {
-            let domain = auth0.domain.trim();
-            let audience = auth0.audience.trim();
-            if domain.is_empty() || audience.is_empty() {
-                return Err(format!(
-                    "Party {party} has an incomplete Auth0 configuration \
-                     (domain{domain_state}, audience{audience_state}); \
-                     re-enter the party credentials before granting rights",
-                    party = creds.dec_party_id,
-                    domain_state = if domain.is_empty() {
-                        " missing"
-                    } else {
-                        " set"
-                    },
-                    audience_state = if audience.is_empty() {
-                        " missing"
-                    } else {
-                        " set"
-                    },
-                ));
-            }
-            return Ok(Self::Auth0 {
-                domain: domain.to_string(),
-                audience: audience.to_string(),
-            });
-        }
-
-        let url = creds.keycloak.url.trim();
-        let realm = creds.keycloak.realm.trim();
-        if url.is_empty() || realm.is_empty() {
-            return Err(format!(
+        let client = match &creds.auth0 {
+            Some(auth0) => IdpClient::Auth0(auth0.clone()),
+            None => IdpClient::Keycloak(creds.keycloak.clone()),
+        };
+        let party = &creds.dec_party_id;
+        Self::from_idp(&client).map_err(|gap| match gap {
+            IdpGap::Auth0 {
+                domain_missing,
+                audience_missing,
+            } => format!(
+                "Party {party} has an incomplete Auth0 configuration \
+                 (domain{domain_state}, audience{audience_state}); \
+                 re-enter the party credentials before granting rights",
+                domain_state = if domain_missing { " missing" } else { " set" },
+                audience_state = if audience_missing { " missing" } else { " set" },
+            ),
+            IdpGap::Keycloak => format!(
                 "Party {party} has neither an Auth0 tenant nor a Keycloak realm configured, \
-                 so there is no token endpoint to mint an admin token from",
-                party = creds.dec_party_id,
-            ));
-        }
-        Ok(Self::Keycloak {
-            url: url.to_string(),
-            realm: realm.to_string(),
+                 so there is no token endpoint to mint an admin token from"
+            ),
         })
+    }
+
+    /// The token endpoint of `client`'s IdP: its Auth0 tenant or its
+    /// Keycloak realm.
+    ///
+    /// # Errors
+    ///
+    /// Returns what `client` lacks when it names no usable endpoint.
+    pub(super) fn from_idp(client: &IdpClient) -> std::result::Result<Self, IdpGap> {
+        match client {
+            IdpClient::Auth0(auth0) => {
+                let domain = auth0.domain.trim();
+                let audience = auth0.audience.trim();
+                if domain.is_empty() || audience.is_empty() {
+                    return Err(IdpGap::Auth0 {
+                        domain_missing: domain.is_empty(),
+                        audience_missing: audience.is_empty(),
+                    });
+                }
+                Ok(Self::Auth0 {
+                    domain: domain.to_string(),
+                    audience: audience.to_string(),
+                })
+            }
+            IdpClient::Keycloak(keycloak) => {
+                let url = keycloak.url.trim();
+                let realm = keycloak.realm.trim();
+                if url.is_empty() || realm.is_empty() {
+                    return Err(IdpGap::Keycloak);
+                }
+                Ok(Self::Keycloak {
+                    url: url.to_string(),
+                    realm: realm.to_string(),
+                })
+            }
+        }
     }
 
     /// The absolute `client_credentials` token endpoint for this source.
@@ -648,7 +677,7 @@ pub async fn grant_rights(
                 party = %dec_party_id,
                 "Failed to mint admin token for grant-rights: {e}"
             );
-            return mint_error_response(e, idp);
+            return mint_error_response(e, "Admin", idp);
         }
     };
 
@@ -672,13 +701,14 @@ pub async fn grant_rights(
     }
 }
 
-/// The response for a failed admin token mint. The message names only the
-/// IdP, because the error itself carries the IdP response body.
-pub(super) fn mint_error_response(e: AdminMintError, idp: &str) -> HttpResponse {
+/// The response for a failed token mint. `who` names the client, such as
+/// "Admin". The message names only the client and the IdP, because the error
+/// itself carries the IdP response body.
+pub(super) fn mint_error_response(e: AdminMintError, who: &str, idp: &str) -> HttpResponse {
     match e {
         AdminMintError::Rejected { .. } => {
             HttpResponse::UnprocessableEntity().json(ErrorResponse {
-                error: format!("Admin {idp} auth failed"),
+                error: format!("{who} {idp} auth failed"),
             })
         }
         AdminMintError::RateLimited { retry_after, .. } => {
@@ -687,11 +717,11 @@ pub(super) fn mint_error_response(e: AdminMintError, idp: &str) -> HttpResponse 
                 response.insert_header((RETRY_AFTER, retry_after));
             }
             response.json(ErrorResponse {
-                error: format!("Admin {idp} token endpoint is rate-limiting requests"),
+                error: format!("{who} {idp} token endpoint is rate-limiting requests"),
             })
         }
         AdminMintError::Upstream { .. } => HttpResponse::BadGateway().json(ErrorResponse {
-            error: format!("Admin {idp} token endpoint failed"),
+            error: format!("{who} {idp} token endpoint failed"),
         }),
     }
 }
@@ -744,7 +774,7 @@ async fn grant_user_rights(
     check_user_rights(config, party_token, user_id, member_party_id, dec_party_id).await
 }
 
-fn right_act_as(party: &str) -> Right {
+pub(super) fn right_act_as(party: &str) -> Right {
     Right {
         kind: Some(Kind::CanActAs(CanActAs {
             party: party.to_string(),
@@ -752,7 +782,7 @@ fn right_act_as(party: &str) -> Right {
     }
 }
 
-fn right_read_as(party: &str) -> Right {
+pub(super) fn right_read_as(party: &str) -> Right {
     Right {
         kind: Some(Kind::CanReadAs(CanReadAs {
             party: party.to_string(),
