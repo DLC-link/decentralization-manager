@@ -411,6 +411,7 @@ mod tests {
             http_client: reqwest::Client::new(),
             health_cache: crate::server::HealthCache::new(),
             external_parties: Default::default(),
+            node_identity: Default::default(),
         })
     }
 

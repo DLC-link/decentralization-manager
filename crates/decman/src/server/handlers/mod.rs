@@ -41,7 +41,7 @@ pub(crate) use invitations::{
     list_handled_invitations,
 };
 pub(crate) use keys::get_key_status;
-pub(crate) use node_identity::{allocate_node_identity, get_node_identity};
+pub(crate) use node_identity::{allocate_node_identity, get_node_identity, load_node_identity};
 pub(crate) use parties::{
     Discovery, DiscoveryGate, MAX_CONCURRENT_DISCOVERIES, clear_acs_import_quarantine,
     compare_peer_packages, discover_and_cache, get_decentralized_parties, get_expected_versions,

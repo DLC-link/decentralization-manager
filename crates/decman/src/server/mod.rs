@@ -69,7 +69,8 @@ use utoipa_swagger_ui::SwaggerUi;
 
 use crate::{
     auth::{
-        AuthRegistry, JwtValidator, MockAuthRegistry, MockValidator, TokenValidator, WorkflowAuth,
+        AuthRegistry, JwtValidator, MockAuthRegistry, MockValidator, NodeIdentity, TokenValidator,
+        WorkflowAuth,
     },
     canton_id::{CantonId, Fingerprint},
     config::{Network, NodeConfig, PartyCredentials},
@@ -198,6 +199,9 @@ pub struct AppState {
     /// Topology snapshot of the external parties this node hosts. A request
     /// for a stale one starts a single background scan.
     pub external_parties: external_parties::ExternalPartiesCache,
+    /// This node's identity with its login started. `None` until an admin
+    /// saves one, or while the IdP refuses the stored login.
+    pub node_identity: Arc<RwLock<Option<NodeIdentity>>>,
 }
 
 #[cfg(test)]
@@ -281,6 +285,7 @@ impl AppState {
             http_client: reqwest::Client::new(),
             health_cache: HealthCache::new(),
             external_parties: Default::default(),
+            node_identity: Default::default(),
         };
         (state, peer_jobs)
     }
@@ -1065,6 +1070,9 @@ pub async fn start_server(
         )))
     };
 
+    let node_identity = Arc::new(RwLock::new(
+        handlers::load_node_identity(&db, auth.as_ref()).await,
+    ));
     let auth = Arc::new(RwLock::new(auth));
 
     // Inbound token validator. Production verifies JWT signatures locally
@@ -1156,6 +1164,7 @@ pub async fn start_server(
         http_client,
         health_cache: HealthCache::new(),
         external_parties: Default::default(),
+        node_identity,
     });
 
     // A coordinator killed while it signed a party proposal leaves that

@@ -5,8 +5,10 @@ use actix_web::{HttpRequest, HttpResponse, Responder, get, post, web};
 use super::auth::{
     AdminTokenSource, extract_user_id_from_jwt, mint_admin_token, mint_error_response,
 };
+use sqlx::SqlitePool;
+
 use crate::{
-    auth::WorkflowAuth,
+    auth::{NodeIdentity, WorkflowAuth},
     canton_id::CantonId,
     config::{NodeConfig, Peer},
     consts::topology_propagation_delay_secs,
@@ -25,6 +27,46 @@ use crate::{
         right_names, rights_flags, scan_node_parties, verify_hosting, wait_for_submission,
     },
 };
+
+/// This node's saved identity with its login started, for startup.
+///
+/// A login the IdP refuses is logged and left unloaded, as
+/// `AuthRegistry::new` does for a party. Insecure mode uses the unsafe token.
+pub(crate) async fn load_node_identity(
+    db: &SqlitePool,
+    auth: Option<&WorkflowAuth>,
+) -> Option<NodeIdentity> {
+    let record = match db.get_node_identity().await {
+        Ok(Some(record)) => record,
+        Ok(None) => return None,
+        Err(e) => {
+            tracing::warn!("Failed to load the node identity: {e:#}");
+            return None;
+        }
+    };
+    if let Some(WorkflowAuth::Mock(registry)) = auth {
+        let token = registry.get_by_str("").await.get_token();
+        return Some(NodeIdentity::mock(&record, token));
+    }
+    match NodeIdentity::connect(&record).await {
+        Ok(identity) => {
+            tracing::info!(
+                node_party = %record.node_party_id,
+                user_id = %record.user_id,
+                "Node login started"
+            );
+            Some(identity)
+        }
+        Err(e) => {
+            tracing::warn!(
+                node_party = %record.node_party_id,
+                user_id = %record.user_id,
+                "Node login failed: {e}. The node identity stays unloaded until the login works"
+            );
+            None
+        }
+    }
+}
 
 /// The Ledger API token and users an allocate call works with.
 struct Tokens {
@@ -311,10 +353,68 @@ mod tests {
         http::{StatusCode, header::AUTHORIZATION},
         test::{self, TestRequest},
     };
+    use std::sync::Arc;
+
+    use anyhow::Context;
     use serde_json::json;
+    use tokio::sync::RwLock;
+    use wiremock::{
+        Mock, MockServer, ResponseTemplate,
+        matchers::{method, path_regex},
+    };
 
     use super::*;
-    use crate::server::middleware::AuthMiddleware;
+    use crate::{
+        auth::MockAuthRegistry,
+        config::{IdpClient, KeycloakConfig, NodeIdentityRecord},
+        db::schema::{Commitable, SchemaWrite},
+        server::middleware::AuthMiddleware,
+    };
+
+    const NS: &str = "1220c4010d6883f367c7f45d55b2449501620130f9b21e96379f17dea455ac7a5892";
+
+    fn keycloak_login(url: &str) -> IdpClient {
+        IdpClient::Keycloak(KeycloakConfig {
+            url: url.to_string(),
+            realm: "canton".to_string(),
+            client_id: "node-client".to_string(),
+            client_secret: Some("node-secret".to_string()),
+            ..KeycloakConfig::default()
+        })
+    }
+
+    fn stored_identity(login: Option<IdpClient>) -> anyhow::Result<NodeIdentityRecord> {
+        Ok(NodeIdentityRecord {
+            node_party_id: CantonId::parse(&format!("decman-node-participant1::{NS}"))?,
+            participant_id: CantonId::parse(&format!("participant1::{NS}"))?,
+            user_id: "node-login".to_string(),
+            login,
+            created_at: 100,
+            updated_at: 100,
+        })
+    }
+
+    async fn save(db: &SqlitePool, record: &NodeIdentityRecord) -> anyhow::Result<()> {
+        let mut tx = db.begin_transaction().await?;
+        tx.upsert_node_identity(record).await?;
+        Commitable::commit(tx).await?;
+        Ok(())
+    }
+
+    /// A Keycloak stand-in that answers every token request with `response`.
+    async fn keycloak_answering(response: ResponseTemplate) -> MockServer {
+        let idp = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path_regex(r".*/token$"))
+            .respond_with(response)
+            .mount(&idp)
+            .await;
+        idp
+    }
+
+    fn token_response(token: &str) -> ResponseTemplate {
+        ResponseTemplate::new(200).set_body_json(json!({"access_token": token, "expires_in": 300}))
+    }
 
     /// Without the auth middleware no principal reaches the handlers, so the
     /// admin gate must refuse before any Canton or IdP call.
@@ -371,6 +471,56 @@ mod tests {
             let resp = test::call_service(&app, req).await;
             assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "body {body}");
         }
+        Ok(())
+    }
+
+    #[sqlx::test(migrator = "crate::db::MIGRATOR")]
+    async fn startup_loads_nothing_before_an_identity_is_saved(
+        pool: SqlitePool,
+    ) -> anyhow::Result<()> {
+        assert!(load_node_identity(&pool, None).await.is_none());
+        Ok(())
+    }
+
+    #[sqlx::test(migrator = "crate::db::MIGRATOR")]
+    async fn startup_logs_in_with_the_stored_client(pool: SqlitePool) -> anyhow::Result<()> {
+        let idp = keycloak_answering(token_response("node-token")).await;
+        save(&pool, &stored_identity(Some(keycloak_login(&idp.uri())))?).await?;
+
+        let identity = load_node_identity(&pool, None)
+            .await
+            .context("no identity loaded")?;
+
+        assert_eq!(identity.user_id, "node-login");
+        assert_eq!(identity.token().await?, "node-token");
+        Ok(())
+    }
+
+    /// One refused login must not stop the node from starting.
+    #[sqlx::test(migrator = "crate::db::MIGRATOR")]
+    async fn startup_leaves_a_refused_login_unloaded(pool: SqlitePool) -> anyhow::Result<()> {
+        let idp = keycloak_answering(ResponseTemplate::new(401)).await;
+        save(&pool, &stored_identity(Some(keycloak_login(&idp.uri())))?).await?;
+
+        assert!(load_node_identity(&pool, None).await.is_none());
+        Ok(())
+    }
+
+    #[sqlx::test(migrator = "crate::db::MIGRATOR")]
+    async fn startup_in_insecure_mode_uses_the_unsafe_token(
+        pool: SqlitePool,
+    ) -> anyhow::Result<()> {
+        save(&pool, &stored_identity(None)?).await?;
+        let registry = MockAuthRegistry::new(Arc::new(RwLock::new(Vec::new())));
+        let unsafe_token = registry.get_by_str("").await.get_token();
+        let auth = WorkflowAuth::Mock(Arc::new(registry));
+
+        let identity = load_node_identity(&pool, Some(&auth))
+            .await
+            .context("no identity loaded")?;
+
+        assert_eq!(identity.user_id, "node-login");
+        assert_eq!(identity.token().await?, unsafe_token);
         Ok(())
     }
 }
