@@ -202,6 +202,7 @@ The database file path can be overridden with the `--db` CLI flag.
 | `DECPM_AUTH0_SCOPE` | Extra space-separated scopes the SPA requests. Needed only when the admin role arrives as an Auth0 RBAC scope | _(none)_ |
 | `DECPM_JWT_ROLE_CLAIM` | JWT claim that holds an array of role names. Needed only when the IdP puts roles in a namespaced custom claim | _(none)_ |
 | `DECPM_TENANT_API_KEYS` | Comma-separated bearer keys for the tenant API (`/v0/tenant/*`). Unset turns the tenant API off, except in insecure mode | _(none)_ |
+| `DECPM_TENANT_RATE_LIMIT_PER_MINUTE` | Calls per minute that one tenant API key may make. A call past the limit gets a 429. The two ACS relay calls are exempt. `0` turns the limit off. Insecure mode has no limit | `120` |
 | `DECPM_VALIDATOR_OPERATOR_PARTY` | This node's Splice validator operator party. An unhost archives the Splice contracts this party holds for the external party that the node leaves. The party also needs a [party credential](#party-credentials-for-the-validator-operator). Unset means an unhost must send `"splice_cleanup": false` | _(none)_ |
 | `DECPM_INSECURE` | Run without an IdP: accept any inbound token and present an unsafe HS256 token to Canton (CLI flag `--insecure`). **Never use in production.** See [Insecure mode](#insecure-mode-local-development-without-an-idp) | `false` |
 | `DECPM_CANTON_HMAC_SECRET` | HS256 secret decman signs the unsafe Canton token with, in insecure mode. Must match Canton's unsafe auth-service secret | `unsafe` |
@@ -529,7 +530,12 @@ separate tenant API key rather than the operator JWT, and are driven by
 [`decman-wallet`](crates/decman-wallet/README.md). A caller sends the key as
 `Authorization: Bearer <key>`. The node reads its keys from
 `DECPM_TENANT_API_KEYS`. With no keys set, it refuses every tenant call
-outside insecure mode.
+outside insecure mode. Each key may make `DECPM_TENANT_RATE_LIMIT_PER_MINUTE`
+calls per minute. A call past the limit gets a 429 with a `Retry-After`
+header that gives the seconds to wait. The ACS block read
+(`/v0/tenant/{party}/acs/{target}`) and the ACS block import
+(`/v0/tenant/add-hosts/import`) are exempt, because one ACS copy sends many
+blocks.
 
 ## Development
 

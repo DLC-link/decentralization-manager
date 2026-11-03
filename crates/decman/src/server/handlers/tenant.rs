@@ -19,6 +19,11 @@
 //! authenticate with a provider-issued API key, so every handler here calls
 //! [`require_tenant_api_key`] first (the `/v0/tenant/` prefix bypasses the JWT
 //! middleware).
+//!
+//! Each key may make `DECPM_TENANT_RATE_LIMIT_PER_MINUTE` calls per minute, and
+//! a call past that gets a 429 with `Retry-After`. The two ACS relay calls, the
+//! block read and the block import, are exempt, because one copy sends many
+//! blocks.
 
 use actix_web::{HttpRequest, HttpResponse, Responder, get, post, web};
 use base64::{Engine, engine::general_purpose::STANDARD};
@@ -27,7 +32,7 @@ use crate::{
     canton_id::validate_party_id_prefix,
     server::{
         AppState,
-        middleware::require_tenant_api_key,
+        middleware::{require_tenant_api_key, require_tenant_api_key_unmetered},
         types::{
             ErrorResponse, ExternalPartyUnhostResponse, LocalPartyAdoptExecuteRequest,
             LocalPartyAdoptRequest, TenantAcsBlockResponse, TenantAcsImportRequest,
@@ -79,6 +84,7 @@ use super::{unhost::run_unhost, workflows::validate_confirmation_threshold};
         (status = 200, description = "Unsigned onboarding topology", body = TenantPrepareResponse),
         (status = 400, description = "Bad request", body = ErrorResponse),
         (status = 401, description = "Invalid tenant API key", body = ErrorResponse),
+        (status = 429, description = "Rate limit for this tenant API key exceeded; Retry-After gives the seconds to wait", body = ErrorResponse),
         (status = 500, description = "Internal server error", body = ErrorResponse)
     )
 )]
@@ -154,6 +160,7 @@ pub async fn tenant_prepare(
         (status = 202, description = "Allocated on this host (status reflects this host's view)", body = TenantExecuteResponse),
         (status = 400, description = "Bad request (bad base64, or signed_by != public_key fingerprint)", body = ErrorResponse),
         (status = 401, description = "Invalid tenant API key", body = ErrorResponse),
+        (status = 429, description = "Rate limit for this tenant API key exceeded; Retry-After gives the seconds to wait", body = ErrorResponse),
         (status = 500, description = "Allocation failed on this participant", body = ErrorResponse)
     )
 )]
@@ -267,7 +274,8 @@ pub async fn tenant_execute(
     responses(
         (status = 200, description = "Onboarding status on this host", body = WorkflowStatusResponse),
         (status = 401, description = "Invalid tenant API key", body = ErrorResponse),
-        (status = 404, description = "No authorized PartyToParticipant for this party", body = ErrorResponse)
+        (status = 404, description = "No authorized PartyToParticipant for this party", body = ErrorResponse),
+        (status = 429, description = "Rate limit for this tenant API key exceeded; Retry-After gives the seconds to wait", body = ErrorResponse)
     )
 )]
 #[get("/v0/tenant/{party}/status")]
@@ -332,6 +340,7 @@ pub async fn tenant_status(
         (status = 401, description = "Invalid tenant API key", body = ErrorResponse),
         (status = 404, description = "No authorized PartyToParticipant for this party", body = ErrorResponse),
         (status = 409, description = "This host reads a different serial for the party", body = ErrorResponse),
+        (status = 429, description = "Rate limit for this tenant API key exceeded; Retry-After gives the seconds to wait", body = ErrorResponse),
         (status = 500, description = "A Canton call failed on this host", body = ErrorResponse)
     )
 )]
@@ -406,6 +415,7 @@ pub async fn tenant_add_hosts_prepare(
         (status = 401, description = "Invalid tenant API key", body = ErrorResponse),
         (status = 404, description = "No authorized PartyToParticipant for this party", body = ErrorResponse),
         (status = 409, description = "The pinned base serial has moved on this node", body = ErrorResponse),
+        (status = 429, description = "Rate limit for this tenant API key exceeded; Retry-After gives the seconds to wait", body = ErrorResponse),
         (status = 500, description = "A Canton call failed on this node", body = ErrorResponse)
     )
 )]
@@ -479,6 +489,7 @@ pub async fn tenant_add_hosts_authorize(
         (status = 401, description = "Invalid tenant API key", body = ErrorResponse),
         (status = 404, description = "No authorized PartyToParticipant for this party", body = ErrorResponse),
         (status = 409, description = "The pinned base serial has moved on this host", body = ErrorResponse),
+        (status = 429, description = "Rate limit for this tenant API key exceeded; Retry-After gives the seconds to wait", body = ErrorResponse),
         (status = 500, description = "A Canton call failed on this host", body = ErrorResponse)
     )
 )]
@@ -589,7 +600,8 @@ pub async fn tenant_acs_snapshot(
     path: web::Path<(String, String)>,
     query: web::Query<AcsBlockQuery>,
 ) -> impl Responder {
-    if let Err(resp) = require_tenant_api_key(&http_req, &data) {
+    // Unmetered: one ACS copy asks for many blocks in a row.
+    if let Err(resp) = require_tenant_api_key_unmetered(&http_req, &data) {
         return resp;
     }
     let (party_id, target) = path.into_inner();
@@ -736,7 +748,8 @@ pub async fn tenant_acs_import(
     data: web::Data<AppState>,
     body: web::Json<TenantAcsImportRequest>,
 ) -> impl Responder {
-    if let Err(resp) = require_tenant_api_key(&http_req, &data) {
+    // Unmetered: one ACS copy sends many blocks in a row.
+    if let Err(resp) = require_tenant_api_key_unmetered(&http_req, &data) {
         return resp;
     }
     if body.seq == 0 {
@@ -918,6 +931,7 @@ pub async fn tenant_acs_import(
         (status = 401, description = "Invalid tenant API key", body = ErrorResponse),
         (status = 404, description = "This host does not host this party", body = ErrorResponse),
         (status = 409, description = "The pinned base serial has moved on this host", body = ErrorResponse),
+        (status = 429, description = "Rate limit for this tenant API key exceeded; Retry-After gives the seconds to wait", body = ErrorResponse),
         (status = 500, description = "A Canton call failed on this host", body = ErrorResponse)
     )
 )]
@@ -975,6 +989,7 @@ pub async fn tenant_threshold_prepare(
         (status = 401, description = "Invalid tenant API key", body = ErrorResponse),
         (status = 404, description = "No authorized PartyToParticipant for this party", body = ErrorResponse),
         (status = 409, description = "The pinned base serial has moved on this node", body = ErrorResponse),
+        (status = 429, description = "Rate limit for this tenant API key exceeded; Retry-After gives the seconds to wait", body = ErrorResponse),
         (status = 500, description = "A Canton call failed on this node", body = ErrorResponse)
     )
 )]
@@ -1034,6 +1049,7 @@ pub async fn tenant_threshold_authorize(
         (status = 401, description = "Invalid tenant API key", body = ErrorResponse),
         (status = 404, description = "This host does not host this party", body = ErrorResponse),
         (status = 409, description = "The pinned base serial has moved on this host", body = ErrorResponse),
+        (status = 429, description = "Rate limit for this tenant API key exceeded; Retry-After gives the seconds to wait", body = ErrorResponse),
         (status = 500, description = "A Canton call failed on this host", body = ErrorResponse)
     )
 )]
@@ -1101,6 +1117,7 @@ pub async fn tenant_threshold_execute(
         (status = 200, description = "The party's current topology on this host", body = TenantPartyStateResponse),
         (status = 401, description = "Invalid tenant API key", body = ErrorResponse),
         (status = 404, description = "This host holds no authorized mapping for this party", body = ErrorResponse),
+        (status = 429, description = "Rate limit for this tenant API key exceeded; Retry-After gives the seconds to wait", body = ErrorResponse),
         (status = 500, description = "A Canton call failed on this host", body = ErrorResponse)
     )
 )]
@@ -1161,6 +1178,7 @@ pub async fn tenant_party_state(
         (status = 404, description = "This host does not host the party", body = ErrorResponse),
         (status = 409, description = "The pinned serial moved, or an unhost or ACS relay for the party is running", body = ErrorResponse),
         (status = 422, description = "This host has no validator operator party, and splice_cleanup was not false", body = ErrorResponse),
+        (status = 429, description = "Rate limit for this tenant API key exceeded; Retry-After gives the seconds to wait", body = ErrorResponse),
         (status = 500, description = "A step failed on this host", body = ExternalPartyUnhostResponse)
     )
 )]
@@ -1222,6 +1240,7 @@ const EXPORT_BLOCK_SIZE: usize = 1024 * 1024;
         (status = 401, description = "Invalid tenant API key", body = ErrorResponse),
         (status = 404, description = "No authorized mapping for this party on this host", body = ErrorResponse),
         (status = 409, description = "The pinned base serial has moved on this host", body = ErrorResponse),
+        (status = 429, description = "Rate limit for this tenant API key exceeded; Retry-After gives the seconds to wait", body = ErrorResponse),
         (status = 500, description = "A Canton call failed on this host", body = ErrorResponse)
     )
 )]
@@ -1269,6 +1288,7 @@ pub async fn tenant_local_party_adopt_prepare(
         (status = 401, description = "Invalid tenant API key", body = ErrorResponse),
         (status = 404, description = "No authorized mapping for this party on this host", body = ErrorResponse),
         (status = 409, description = "The pinned base serial has moved on this host", body = ErrorResponse),
+        (status = 429, description = "Rate limit for this tenant API key exceeded; Retry-After gives the seconds to wait", body = ErrorResponse),
         (status = 500, description = "A Canton call failed on this host", body = ErrorResponse)
     )
 )]
@@ -1585,5 +1605,105 @@ mod tests {
         .to_string();
         assert!(message.contains('4'), "{message}");
         assert!(message.contains('7'), "{message}");
+    }
+
+    /// A state that checks the tenant key `"key"` against a budget of `limit`
+    /// calls per minute, as a production node does.
+    async fn metered_state(limit: u32) -> web::Data<AppState> {
+        let Ok(state) = AppState::for_test(None).await else {
+            panic!("the test state must build");
+        };
+        let Ok(mut state) = std::sync::Arc::try_unwrap(state.into_inner()) else {
+            panic!("the freshly built state has no other owner");
+        };
+        state.test_mode = false;
+        state.config.tenant_api_keys = vec!["key".to_string()];
+        state.config.tenant_rate_limit_per_minute = limit;
+        web::Data::new(state)
+    }
+
+    /// Refused at validation, so it reaches no Canton.
+    fn prepare_without_peers() -> actix_web::test::TestRequest {
+        actix_web::test::TestRequest::post()
+            .uri("/v0/tenant/prepare")
+            .insert_header(("Authorization", "Bearer key"))
+            .set_json(serde_json::json!({
+                "party_hint": "alice",
+                "public_key": STANDARD.encode([7u8; 32]),
+                "hosting_peers": [],
+            }))
+    }
+
+    /// Refused at validation, so it reaches no Canton.
+    fn import_block_zero() -> actix_web::test::TestRequest {
+        actix_web::test::TestRequest::post()
+            .uri("/v0/tenant/add-hosts/import")
+            .insert_header(("Authorization", "Bearer key"))
+            .set_json(serde_json::json!({
+                "party_id": "alice::1220aa",
+                "base_serial": 1,
+                "seq": 0,
+                "chunk": "",
+                "end": false,
+            }))
+    }
+
+    #[actix_web::test]
+    async fn a_metered_call_past_the_limit_answers_429() {
+        let app = actix_web::test::init_service(
+            actix_web::App::new()
+                .app_data(metered_state(1).await)
+                .service(tenant_prepare),
+        )
+        .await;
+
+        let first = actix_web::test::call_service(&app, prepare_without_peers().to_request()).await;
+        assert_eq!(first.status(), actix_web::http::StatusCode::BAD_REQUEST);
+
+        let second =
+            actix_web::test::call_service(&app, prepare_without_peers().to_request()).await;
+        assert_eq!(
+            second.status(),
+            actix_web::http::StatusCode::TOO_MANY_REQUESTS
+        );
+        assert!(
+            second
+                .headers()
+                .get(actix_web::http::header::RETRY_AFTER)
+                .is_some(),
+            "a 429 must say how long to wait"
+        );
+        let body: serde_json::Value = actix_web::test::read_body_json(second).await;
+        assert!(body["error"].is_string(), "{body}");
+    }
+
+    /// One ACS copy sends a block per call, so the import must not spend the
+    /// budget the other calls share.
+    #[actix_web::test]
+    async fn the_acs_import_is_not_metered() {
+        let app = actix_web::test::init_service(
+            actix_web::App::new()
+                .app_data(metered_state(1).await)
+                .service(tenant_prepare)
+                .service(tenant_acs_import),
+        )
+        .await;
+
+        for i in 0..3 {
+            let response =
+                actix_web::test::call_service(&app, import_block_zero().to_request()).await;
+            assert_eq!(
+                response.status(),
+                actix_web::http::StatusCode::BAD_REQUEST,
+                "import {i}"
+            );
+        }
+        let prepare =
+            actix_web::test::call_service(&app, prepare_without_peers().to_request()).await;
+        assert_eq!(
+            prepare.status(),
+            actix_web::http::StatusCode::BAD_REQUEST,
+            "the imports must have left the whole budget"
+        );
     }
 }

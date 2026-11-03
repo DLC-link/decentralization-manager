@@ -49,7 +49,9 @@ The operator of each host does this once.
 
 1. **Turn on the tenant API.** Set `DECPM_TENANT_API_KEYS` to one or more
    random keys, separated by commas, and restart DecMan. With no keys, the
-   node refuses every tenant call.
+   node refuses every tenant call. Each key may make 120 calls per minute.
+   `DECPM_TENANT_RATE_LIMIT_PER_MINUTE` changes this number, and `0` turns
+   the limit off. The ACS copy calls do not count toward the limit.
 2. **Let the wallet reach DecMan.** Route DecMan's HTTP port to the wallet over
    TLS. The tenant API checks the tenant key, not the operator login.
 3. **Test the key.** A party that does not exist gives `404` with the right key
@@ -352,6 +354,7 @@ the checks, the steps and the errors.
 | Symptom | Cause | Do this |
 |---|---|---|
 | `401` | The key is not one of that host's keys, or the host has no keys set | Send that host its own key. Check `DECPM_TENANT_API_KEYS` on the host |
+| `429` | More calls per minute than the host allows for that key | Wait the seconds in `Retry-After`, then retry. The operator can raise `DECPM_TENANT_RATE_LIMIT_PER_MINUTE` |
 | `409` from a prepare or execute call | The party's serial changed after you read it | Read `/state` again and restart from prepare |
 | `404` from a prepare or execute call | No host mapping exists for the party | Check the party ID. A joining host still answers `200`, because it reads the shared topology |
 | `400` that names a field | The bundle does not match what the host built itself | Do not retry it as it is. Restart from prepare |

@@ -230,6 +230,11 @@ pub enum Commands {
         #[arg(long, env = "DECPM_TENANT_API_KEYS")]
         tenant_api_keys: Option<String>,
 
+        /// Requests per minute that one tenant API key may make to the
+        /// metered `/v0/tenant/*` endpoints. 0 disables the limit. Default 120.
+        #[arg(long, env = "DECPM_TENANT_RATE_LIMIT_PER_MINUTE")]
+        tenant_rate_limit_per_minute: Option<u32>,
+
         /// This node's Splice validator operator party. Unhosting an external
         /// party archives the `ValidatorRight` and `TransferPreapproval` this
         /// party holds for it, so the party needs an entry in the party

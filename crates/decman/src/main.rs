@@ -200,6 +200,7 @@ async fn run() -> Result {
             canton_hmac_audience,
             canton_hmac_subject,
             tenant_api_keys,
+            tenant_rate_limit_per_minute,
             validator_operator_party,
             ..
         } => {
@@ -346,6 +347,9 @@ async fn run() -> Result {
                 .as_deref()
                 .map(parse_tenant_api_keys)
                 .unwrap_or_default();
+            if let Some(v) = tenant_rate_limit_per_minute {
+                config.tenant_rate_limit_per_minute = *v;
+            }
             config.validator_operator_party = validator_operator_party
                 .as_deref()
                 .map(str::trim)

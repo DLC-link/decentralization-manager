@@ -308,6 +308,11 @@ pub struct NodeConfig {
     /// by its index without recording the key.
     #[serde(skip)]
     pub tenant_api_keys: Vec<String>,
+    /// Requests per minute that one tenant API key may make to the metered
+    /// `/v0/tenant/*` endpoints. 0 disables the limit. Default 120. Not
+    /// serialized.
+    #[serde(skip)]
+    pub tenant_rate_limit_per_minute: u32,
     /// This node's Splice validator operator party, which must also have an
     /// entry in the party credentials. Unhosting an external party archives the
     /// Splice contracts this party holds for it. `None` means the node runs no
@@ -337,6 +342,7 @@ impl Default for NodeConfig {
             insecure: false,
             insecure_auth: InsecureAuthConfig::default(),
             tenant_api_keys: Vec::new(),
+            tenant_rate_limit_per_minute: 120,
             validator_operator_party: None,
             root_dir: PathBuf::new(),
         }

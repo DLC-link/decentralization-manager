@@ -13,19 +13,27 @@
 use std::{
     future::{Ready, ready},
     rc::Rc,
+    time::Instant,
 };
 
 use actix_web::{
     Error, HttpMessage, HttpRequest, HttpResponse,
     body::{EitherBody, MessageBody},
     dev::{Service, ServiceRequest, ServiceResponse, Transform, forward_ready},
-    http::header::AUTHORIZATION,
+    http::header::{AUTHORIZATION, RETRY_AFTER},
     web,
 };
 use futures::future::LocalBoxFuture;
 use serde_json::json;
 
-use crate::{auth::Principal, server::AppState};
+use crate::{
+    auth::Principal,
+    server::{
+        AppState,
+        tenant_rate_limit::{Verdict, retry_after_secs},
+        types::ErrorResponse,
+    },
+};
 
 /// Actix `Transform` that enforces inbound token auth. Wrap the app with
 /// `.wrap(AuthMiddleware)` to engage it.
@@ -163,21 +171,74 @@ pub fn require_admin(
     Ok(principal)
 }
 
-/// Authorize a `/v0/tenant/*` request by its bearer API key. Tenant callers
-/// (wallet providers) present a provider-issued API key, not a Keycloak JWT, so
-/// this compares the presented bearer against the configured tenant keys rather
-/// than reading the `Principal` the middleware attaches for admin routes. In
-/// insecure/test mode the key set isn't required, matching how the Keycloak path
-/// relaxes under `--insecure` (so dev + the e2e harness run without keys).
+/// Authorize a `/v0/tenant/*` request by its bearer API key, and spend one
+/// request from that key's per-minute budget. Tenant callers (wallet providers)
+/// present a provider-issued API key, not a Keycloak JWT, so this compares the
+/// presented bearer against the configured tenant keys rather than reading the
+/// `Principal` the middleware attaches for admin routes. In insecure/test mode
+/// the key set isn't required, matching how the Keycloak path relaxes under
+/// `--insecure` (so dev + the e2e harness run without keys), and no budget
+/// applies.
 ///
 /// Returns the index of the matching key in the configured list, so a caller
 /// can record which key acted without recording the key. `None` in
 /// insecure/test mode, where no key is checked.
 ///
 /// # Errors
-/// Returns a 401 `HttpResponse` when the bearer is missing or not a configured key.
+/// Returns a 401 `HttpResponse` when the bearer is missing or not a configured
+/// key, and a 429 with `Retry-After` when the key has spent its budget.
 #[allow(clippy::result_large_err)]
 pub fn require_tenant_api_key(
+    req: &HttpRequest,
+    state: &AppState,
+) -> Result<Option<usize>, HttpResponse> {
+    let Some(index) = match_tenant_api_key(req, state)? else {
+        return Ok(None);
+    };
+    let limit = state.config.tenant_rate_limit_per_minute;
+    if limit == 0 {
+        return Ok(Some(index));
+    }
+    match state
+        .tenant_rate_limiter
+        .check(index, limit, Instant::now())
+    {
+        Verdict::Allowed => Ok(Some(index)),
+        Verdict::Limited { retry_after } => {
+            let secs = retry_after_secs(retry_after);
+            tracing::warn!(
+                key_index = index,
+                path = req.path(),
+                retry_after_secs = secs,
+                "tenant API key over its rate limit of {limit} requests per minute"
+            );
+            Err(HttpResponse::TooManyRequests()
+                .insert_header((RETRY_AFTER, secs.to_string()))
+                .json(ErrorResponse {
+                    error: format!(
+                        "rate limit of {limit} requests per minute for this tenant API key \
+                         exceeded; retry after {secs} seconds"
+                    ),
+                }))
+        }
+    }
+}
+
+/// As [`require_tenant_api_key`], but spends no budget. For the ACS relay
+/// calls, where one copy sends many blocks in a row.
+///
+/// # Errors
+/// Returns a 401 `HttpResponse` when the bearer is missing or not a configured key.
+#[allow(clippy::result_large_err)]
+pub fn require_tenant_api_key_unmetered(
+    req: &HttpRequest,
+    state: &AppState,
+) -> Result<Option<usize>, HttpResponse> {
+    match_tenant_api_key(req, state)
+}
+
+#[allow(clippy::result_large_err)]
+fn match_tenant_api_key(
     req: &HttpRequest,
     state: &AppState,
 ) -> Result<Option<usize>, HttpResponse> {
@@ -411,6 +472,7 @@ mod tests {
             http_client: reqwest::Client::new(),
             health_cache: crate::server::HealthCache::new(),
             external_parties: Default::default(),
+            tenant_rate_limiter: Default::default(),
         })
     }
 
@@ -543,6 +605,136 @@ mod tests {
             .to_http_request();
         let Err(refused) = require_tenant_api_key(&unknown, &state) else {
             panic!("a key that is not configured must be refused");
+        };
+        assert_eq!(refused.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    /// A state that checks tenant keys, as a production node does.
+    async fn tenant_state(keys: &[&str], limit: u32) -> AppState {
+        let Ok(mut state) = Arc::try_unwrap(build_app_state(Vec::new()).await.into_inner()) else {
+            panic!("the freshly built state has no other owner");
+        };
+        state.test_mode = false;
+        state.config.tenant_api_keys = keys.iter().map(ToString::to_string).collect();
+        state.config.tenant_rate_limit_per_minute = limit;
+        state
+    }
+
+    fn tenant_request(key: &str) -> HttpRequest {
+        TestRequest::default()
+            .insert_header(("Authorization", format!("Bearer {key}")))
+            .to_http_request()
+    }
+
+    #[actix_web::test]
+    async fn a_key_over_its_limit_gets_429_with_retry_after() {
+        let state = tenant_state(&["first"], 2).await;
+        for _ in 0..2 {
+            assert_eq!(
+                require_tenant_api_key(&tenant_request("first"), &state).ok(),
+                Some(Some(0))
+            );
+        }
+
+        let Err(limited) = require_tenant_api_key(&tenant_request("first"), &state) else {
+            panic!("the third call in a minute must be refused at a limit of 2");
+        };
+        assert_eq!(limited.status(), StatusCode::TOO_MANY_REQUESTS);
+        let retry_after = limited
+            .headers()
+            .get(RETRY_AFTER)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.parse::<u64>().ok());
+        assert!(
+            retry_after.is_some_and(|secs| (1..=60).contains(&secs)),
+            "Retry-After must be whole seconds within the window, got {retry_after:?}"
+        );
+        let Ok(body) = actix_web::body::to_bytes(limited.into_body()).await else {
+            panic!("the 429 body must be readable");
+        };
+        let Ok(body) = serde_json::from_slice::<serde_json::Value>(&body) else {
+            panic!("the 429 body must be JSON");
+        };
+        assert!(
+            body["error"]
+                .as_str()
+                .is_some_and(|e| e.contains("rate limit")),
+            "{body}"
+        );
+    }
+
+    /// A caller without a valid key must not spend a real key's budget, nor
+    /// learn from a 429 that the budget is spent.
+    #[actix_web::test]
+    async fn an_unknown_key_spends_no_budget() {
+        let state = tenant_state(&["first"], 1).await;
+        for _ in 0..5 {
+            let Err(refused) = require_tenant_api_key(&tenant_request("guess"), &state) else {
+                panic!("a key that is not configured must be refused");
+            };
+            assert_eq!(refused.status(), StatusCode::UNAUTHORIZED);
+        }
+        assert_eq!(
+            require_tenant_api_key(&tenant_request("first"), &state).ok(),
+            Some(Some(0))
+        );
+
+        let Err(refused) = require_tenant_api_key(&tenant_request("guess"), &state) else {
+            panic!("a key that is not configured must be refused");
+        };
+        assert_eq!(refused.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[actix_web::test]
+    async fn a_limit_of_zero_disables_the_check() {
+        let state = tenant_state(&["first"], 0).await;
+        for _ in 0..500 {
+            assert_eq!(
+                require_tenant_api_key(&tenant_request("first"), &state).ok(),
+                Some(Some(0))
+            );
+        }
+    }
+
+    #[actix_web::test]
+    async fn test_mode_is_never_limited() {
+        let mut state = tenant_state(&[], 1).await;
+        state.test_mode = true;
+        for _ in 0..5 {
+            assert_eq!(
+                require_tenant_api_key(&TestRequest::default().to_http_request(), &state).ok(),
+                Some(None)
+            );
+        }
+    }
+
+    /// The ACS relay calls use the unmetered check. They must neither spend
+    /// the budget the other calls share nor be refused once it is spent.
+    #[actix_web::test]
+    async fn the_unmetered_check_shares_no_budget() {
+        let state = tenant_state(&["first"], 1).await;
+        for _ in 0..5 {
+            assert_eq!(
+                require_tenant_api_key_unmetered(&tenant_request("first"), &state).ok(),
+                Some(Some(0))
+            );
+        }
+        assert_eq!(
+            require_tenant_api_key(&tenant_request("first"), &state).ok(),
+            Some(Some(0))
+        );
+        let Err(limited) = require_tenant_api_key(&tenant_request("first"), &state) else {
+            panic!("the second metered call must be refused at a limit of 1");
+        };
+        assert_eq!(limited.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(
+            require_tenant_api_key_unmetered(&tenant_request("first"), &state).ok(),
+            Some(Some(0))
+        );
+
+        let Err(refused) = require_tenant_api_key_unmetered(&tenant_request("guess"), &state)
+        else {
+            panic!("the unmetered check must still refuse an unknown key");
         };
         assert_eq!(refused.status(), StatusCode::UNAUTHORIZED);
     }
