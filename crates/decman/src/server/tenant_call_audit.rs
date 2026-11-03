@@ -1,6 +1,5 @@
 //! The `tenant_call_audit` table: one row per tenant API call that writes
-//! topology or state on this node, and one per ACS import that ended before
-//! its final block.
+//! topology or state on this node, and one when an ACS import ends.
 //!
 //! The tenant handlers insert a call's row after the call has its answer, so
 //! the row holds the status the caller saw. A row names the key by its index
@@ -22,16 +21,22 @@ pub const ERROR_CAP: usize = 1024;
 const TRUNCATED: &str = "…[truncated]";
 
 /// What a row records: a tenant call that writes, or a step in the life of an
-/// ACS import. An import counts at its first block, which opens the import and
-/// disconnects the participant, and at its final block, which finishes it. An
-/// import that ends before its final block counts as abandoned.
+/// ACS import.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TenantEndpoint {
     Execute,
     AddHostsAuthorize,
     AddHostsExecute,
+    /// Block 1, which opens an import and disconnects the participant, or
+    /// block 0, which does not exist.
     AcsImportStart,
+    /// A final block that no open import took, so it was refused.
     AcsImportEnd,
+    /// The import took its final block and finished. Its teardown writes the
+    /// row, so the row has no HTTP status.
+    AcsImportCompleted,
+    /// The import ended without finishing. Its teardown writes the row, with
+    /// the reason and no HTTP status.
     AcsImportAbandoned,
     ThresholdAuthorize,
     ThresholdExecute,
@@ -47,6 +52,7 @@ impl TenantEndpoint {
             Self::AddHostsExecute => "/v0/tenant/add-hosts/execute",
             Self::AcsImportStart => "/v0/tenant/add-hosts/import (start)",
             Self::AcsImportEnd => "/v0/tenant/add-hosts/import (end)",
+            Self::AcsImportCompleted => "/v0/tenant/add-hosts/import (completed)",
             Self::AcsImportAbandoned => "/v0/tenant/add-hosts/import (abandoned)",
             Self::ThresholdAuthorize => "/v0/tenant/threshold/authorize",
             Self::ThresholdExecute => "/v0/tenant/threshold/execute",
@@ -65,7 +71,7 @@ pub struct NewTenantCall<'a> {
     pub key_id: Option<&'a str>,
     pub endpoint: TenantEndpoint,
     pub party_id: Option<&'a str>,
-    /// `None` for an import the node ended without a call.
+    /// `None` for an import's end, which no call answers.
     pub http_status: Option<u16>,
     pub error: Option<&'a str>,
 }

@@ -219,7 +219,8 @@ pub fn tenant_key_id(key: &str) -> String {
 /// Check the key of a `/v0/tenant/*` request and spend one call of its budget,
 /// before any handler reads the body. The two ACS relay calls are checked but
 /// not metered here, because one copy sends a call per block. The import
-/// handler spends the budget itself for the blocks that start or end a copy.
+/// handler spends the budget itself for a block that opens a copy or that no
+/// open copy takes.
 ///
 /// Insecure/test mode checks no key and spends no budget, matching how the
 /// JWT path relaxes under `--insecure`.

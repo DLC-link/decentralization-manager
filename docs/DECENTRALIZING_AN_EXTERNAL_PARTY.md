@@ -51,8 +51,8 @@ The operator of each host does this once.
    random keys, separated by commas, and restart DecMan. With no keys, the
    node refuses every tenant call. Each key may make 120 calls per minute.
    `DECPM_TENANT_RATE_LIMIT_PER_MINUTE` changes this number, and `0` turns
-   the limit off. In an ACS copy, only the first and the final import block
-   count toward the limit.
+   the limit off. In an ACS copy, only the import of block 1 counts toward
+   the limit, so a copy that started is never refused partway.
 2. **Let the wallet reach DecMan.** Route DecMan's HTTP port to the wallet over
    TLS. The tenant API checks the tenant key, not the operator login.
 3. **Test the key.** A party that does not exist gives `404` with the right key
@@ -353,8 +353,8 @@ the checks, the steps and the errors.
 ## If something goes wrong
 
 The host operator can read each tenant call that wrote on the host, with its
-status and error, at `GET /tenant-call-audit`. An ACS copy that stopped before
-its final block also has a row there, with the reason.
+status and error, at `GET /tenant-call-audit`. Each ACS copy also gets a row
+when it completes or stops, with the reason it stopped.
 
 | Symptom | Cause | Do this |
 |---|---|---|

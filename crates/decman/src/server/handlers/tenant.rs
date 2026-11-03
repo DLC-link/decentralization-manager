@@ -22,8 +22,10 @@
 //!
 //! Each key may make `DECPM_TENANT_RATE_LIMIT_PER_MINUTE` calls per minute, and
 //! a call past that gets a 429 with `Retry-After`. The ACS block read does not
-//! count, because one copy sends a call per block. Of the ACS block imports,
-//! only the blocks that start or end a copy count.
+//! count, because one copy sends a call per block. An ACS block import counts
+//! when it opens a copy, or when no open copy takes it. The other blocks of an
+//! open copy, the final one included, never count, so a copy is never refused
+//! partway.
 
 use actix_web::{HttpRequest, HttpResponse, Responder, body::MessageBody, get, post, web};
 use base64::{Engine, engine::general_purpose::STANDARD};
@@ -64,7 +66,7 @@ use crate::{
     workflow::party_replication::{
         ClearOutcome, collect_party_package_ids, open_export_session,
         pipe::{PipeBlock, PipeTrailer},
-        relay::{AcceptedBlock, OnAbandoned, ServedBlock},
+        relay::{AcceptedBlock, ImportEnd, OnImportEnd, ServedBlock},
         request_onboarding_flag_clear,
     },
 };
@@ -785,7 +787,7 @@ pub async fn tenant_acs_snapshot(
         (status = 401, description = "Invalid tenant API key", body = ErrorResponse),
         (status = 404, description = "No authorized mapping for this party on this host", body = ErrorResponse),
         (status = 409, description = "Out of sync with this host's import; restart from block 1. Or this host is leaving the party", body = ErrorResponse),
-        (status = 429, description = "Rate limit for this tenant API key exceeded; only the first and the final block of a copy count. Retry-After gives the seconds to wait", body = ErrorResponse),
+        (status = 429, description = "Rate limit for this tenant API key exceeded; only a block that opens a copy, or that no open copy takes, counts. Retry-After gives the seconds to wait", body = ErrorResponse),
         (status = 500, description = "Import failed on this participant", body = ErrorResponse)
     )
 )]
@@ -800,32 +802,50 @@ pub async fn tenant_acs_import(
         Ok(key) => key,
         Err(resp) => return resp,
     };
-    // Block 1 opens the import and disconnects the participant, and the final
-    // block finishes it. Those two count toward the budget and are recorded.
-    // The blocks between them only carry data. Block 0 does not exist, but it
-    // counts too, so a refused call cannot write rows for free.
-    let lifecycle = body.seq <= 1 || body.end;
-    if !lifecycle {
+    // A copy this host admitted must never be refused partway, or the
+    // participant stays off the synchronizer until the reaper ends the copy.
+    // So the blocks of an admitted copy, the final one included, spend no
+    // budget and write no row here: the copy's teardown records how it ended.
+    // Every other block spends budget: block 1, which opens a copy, block 0,
+    // which does not exist, and a block that no admitted copy takes.
+    if body.seq > 1 && import_is_admitted(&data, &body).await {
         return tenant_acs_import_on_this_host(&data, &body, None).await;
     }
     if let Err(resp) = charge_tenant_key(&data, key.as_ref(), http_req.path()) {
         return resp;
     }
-    let on_abandoned =
-        (body.seq == 1).then(|| record_abandoned(&data, key.clone(), &body.party_id));
-    let response = tenant_acs_import_on_this_host(&data, &body, on_abandoned).await;
-    let endpoint = if body.end {
+    let on_end = (body.seq == 1).then(|| record_import_end(&data, key.clone(), &body.party_id));
+    let response = tenant_acs_import_on_this_host(&data, &body, on_end).await;
+    let endpoint = if body.seq <= 1 {
+        TenantEndpoint::AcsImportStart
+    } else if body.end {
         TenantEndpoint::AcsImportEnd
     } else {
-        TenantEndpoint::AcsImportStart
+        return response;
     };
     audited(&data, key.as_ref(), endpoint, &body.party_id, response).await
+}
+
+/// Whether the block belongs to an import that this host has open.
+async fn import_is_admitted(data: &AppState, body: &TenantAcsImportRequest) -> bool {
+    match replication_target(
+        &body.party_id,
+        data.config.participant_id(),
+        body.base_serial,
+    ) {
+        Ok(target) => {
+            data.relay_sessions
+                .is_importing(&target.instance_name)
+                .await
+        }
+        Err(_) => false,
+    }
 }
 
 async fn tenant_acs_import_on_this_host(
     data: &AppState,
     body: &TenantAcsImportRequest,
-    on_abandoned: Option<OnAbandoned>,
+    on_end: Option<OnImportEnd>,
 ) -> HttpResponse {
     if body.seq == 0 {
         return HttpResponse::BadRequest().json(ErrorResponse {
@@ -921,7 +941,7 @@ async fn tenant_acs_import_on_this_host(
             &replication,
             &body.package_ids,
             block,
-            on_abandoned,
+            on_end,
         )
         .await;
 
@@ -1363,20 +1383,27 @@ async fn audited(
     response
 }
 
-/// What an import that block 1 opens calls if it ends before its final block:
-/// it records the abandonment against the key that opened it.
-fn record_abandoned(data: &AppState, key: Option<TenantKey>, party_id: &str) -> OnAbandoned {
+/// What an import that block 1 opens calls when it is retired: it records how
+/// the copy ended against the key that opened it. No call answers at that
+/// point, so the row has no HTTP status.
+fn record_import_end(data: &AppState, key: Option<TenantKey>, party_id: &str) -> OnImportEnd {
     let db = data.db.clone();
     let party_id = party_id.to_string();
-    Box::new(move |reason| {
+    Box::new(move |end| {
         Box::pin(async move {
+            let (endpoint, error) = match &end {
+                ImportEnd::Completed => (TenantEndpoint::AcsImportCompleted, None),
+                ImportEnd::Abandoned(why) => {
+                    (TenantEndpoint::AcsImportAbandoned, Some(why.as_str()))
+                }
+            };
             let call = NewTenantCall {
                 key_index: key.as_ref().map(|k| k.index),
                 key_id: key.as_ref().map(|k| k.id.as_str()),
-                endpoint: TenantEndpoint::AcsImportAbandoned,
+                endpoint,
                 party_id: Some(&party_id),
                 http_status: None,
-                error: Some(&reason),
+                error,
             };
             record(&db, &call).await;
         })
@@ -1812,19 +1839,41 @@ mod tests {
         assert!(message.contains('7'), "{message}");
     }
 
-    /// A state that checks the tenant key `"key"` against a budget of `limit`
-    /// calls per minute, as a production node does.
+    /// A party id that `replication_target` accepts.
+    fn valid_party() -> String {
+        format!("alice::1220{}", "aa".repeat(32))
+    }
+
+    /// The tenant key `"key"` against a budget of `limit` calls per minute, as
+    /// a production node checks it, on a node with a participant id.
+    fn meter(mut state: AppState, limit: u32) -> web::Data<AppState> {
+        state.test_mode = false;
+        state.config.tenant_api_keys = vec!["key".to_string()];
+        state.config.tenant_rate_limit_per_minute = limit;
+        state.config.node.participant_id =
+            crate::canton_id::CantonId::parse(&test_participant()).ok();
+        // Nothing listens here, so a Canton call fails at once.
+        state.config.canton.admin_api_host = "127.0.0.1".to_string();
+        state.config.canton.admin_api_port = 1;
+        web::Data::new(state)
+    }
+
     async fn metered_state(limit: u32) -> web::Data<AppState> {
         let Ok(state) = AppState::for_test(None).await else {
             panic!("the test state must build");
         };
-        let Ok(mut state) = std::sync::Arc::try_unwrap(state.into_inner()) else {
+        let Ok(state) = std::sync::Arc::try_unwrap(state.into_inner()) else {
             panic!("the freshly built state has no other owner");
         };
-        state.test_mode = false;
-        state.config.tenant_api_keys = vec!["key".to_string()];
-        state.config.tenant_rate_limit_per_minute = limit;
-        web::Data::new(state)
+        meter(state, limit)
+    }
+
+    /// The instance name of the copy of `party` onto this node at serial 1.
+    fn instance_of(state: &AppState, party: &str) -> String {
+        match replication_target(party, state.config.participant_id(), 1) {
+            Ok(target) => target.instance_name,
+            Err(e) => panic!("the test party must name a replication: {e}"),
+        }
     }
 
     /// Refused at validation, so it reaches no Canton.
@@ -1839,18 +1888,16 @@ mod tests {
             }))
     }
 
-    /// A block between the first and the last. Refused at validation, so it
-    /// reaches no Canton.
-    fn import_data_block() -> actix_web::test::TestRequest {
+    fn import_block(party: &str, seq: u64, end: bool) -> actix_web::test::TestRequest {
         actix_web::test::TestRequest::post()
             .uri("/v0/tenant/add-hosts/import")
             .insert_header(("Authorization", "Bearer key"))
             .set_json(serde_json::json!({
-                "party_id": "alice::1220aa",
+                "party_id": party,
                 "base_serial": 1,
-                "seq": 2,
-                "chunk": "not base64!",
-                "end": false,
+                "seq": seq,
+                "chunk": STANDARD.encode(b"block"),
+                "end": end,
             }))
     }
 
@@ -1892,26 +1939,34 @@ mod tests {
         assert!(body["error"].is_string(), "{body}");
     }
 
-    /// One ACS copy sends a block per call, so the blocks between the first
-    /// and the last must not spend the budget the other calls share.
+    /// One ACS copy sends a block per call. The blocks of an open copy must
+    /// not spend the budget the other calls share, and must pass when it is
+    /// spent.
     #[actix_web::test]
-    async fn import_data_blocks_are_not_metered() {
+    async fn the_blocks_of_an_open_copy_are_not_metered() {
+        let state = metered_state(1).await;
+        let party = valid_party();
+        state
+            .relay_sessions
+            .open_test_import(&instance_of(&state, &party), None, Ok(()))
+            .await;
         let app = actix_web::test::init_service(
             actix_web::App::new()
-                .app_data(metered_state(1).await)
+                .app_data(state)
                 .wrap(crate::server::middleware::AuthMiddleware)
                 .service(tenant_prepare)
                 .service(tenant_acs_import),
         )
         .await;
 
-        for i in 0..3 {
+        for seq in 2..=4 {
             let response =
-                actix_web::test::call_service(&app, import_data_block().to_request()).await;
+                actix_web::test::call_service(&app, import_block(&party, seq, false).to_request())
+                    .await;
             assert_eq!(
                 response.status(),
-                actix_web::http::StatusCode::BAD_REQUEST,
-                "block {i}"
+                actix_web::http::StatusCode::OK,
+                "block {seq}"
             );
         }
         let prepare =
@@ -1919,13 +1974,21 @@ mod tests {
         assert_eq!(
             prepare.status(),
             actix_web::http::StatusCode::BAD_REQUEST,
-            "the data blocks must have left the whole budget"
+            "the blocks must have left the whole budget"
+        );
+
+        let response =
+            actix_web::test::call_service(&app, import_block(&party, 5, false).to_request()).await;
+        assert_eq!(
+            response.status(),
+            actix_web::http::StatusCode::OK,
+            "a block of an open copy must pass with the budget spent"
         );
     }
 }
 
-/// Every request here is refused at validation, before any Canton call, so
-/// the tests need no participant.
+/// Every request here is refused at validation, or reaches an import the test
+/// opened without Canton, so the tests need no participant.
 #[cfg(test)]
 mod audit_tests {
     use actix_web::{App, http::StatusCode, test as actix_test};
@@ -1934,6 +1997,7 @@ mod audit_tests {
 
     use super::*;
     use crate::{
+        canton_id::CantonId,
         db::MIGRATOR,
         server::{
             middleware::AuthMiddleware,
@@ -1942,6 +2006,11 @@ mod audit_tests {
     };
 
     const PARTY: &str = "alice::1220aa";
+
+    /// A party id that `replication_target` accepts.
+    fn valid_party() -> String {
+        format!("alice::1220{}", "aa".repeat(32))
+    }
 
     /// A state on `db` that checks the tenant keys `keys` against a budget of
     /// `limit` calls per minute, as a production node does.
@@ -1954,6 +2023,11 @@ mod audit_tests {
         state.test_mode = false;
         state.config.tenant_api_keys = keys.iter().map(ToString::to_string).collect();
         state.config.tenant_rate_limit_per_minute = limit;
+        state.config.node.participant_id =
+            CantonId::parse(&format!("participant-3::1220{}", "bb".repeat(32))).ok();
+        // Nothing listens here, so a Canton call fails at once.
+        state.config.canton.admin_api_host = "127.0.0.1".to_string();
+        state.config.canton.admin_api_port = 1;
         web::Data::new(state)
     }
 
@@ -1994,6 +2068,13 @@ mod audit_tests {
                 "chunk": chunk,
                 "end": end,
             }))
+    }
+
+    fn the_key() -> TenantKey {
+        TenantKey {
+            index: 0,
+            id: crate::server::middleware::tenant_key_id("key"),
+        }
     }
 
     #[sqlx::test(migrator = "MIGRATOR")]
@@ -2090,10 +2171,11 @@ mod audit_tests {
         Ok(())
     }
 
-    /// Block 1 opens the import and the final block finishes it, so both are
-    /// recorded. The blocks between them only carry data.
+    /// Block 1 opens an import, so it is recorded. A final block that no open
+    /// import takes is refused, and is recorded too. The blocks between only
+    /// carry data.
     #[sqlx::test(migrator = "MIGRATOR")]
-    async fn the_import_records_its_start_and_its_end(db: SqlitePool) -> anyhow::Result<()> {
+    async fn the_import_records_its_start_and_a_refused_end(db: SqlitePool) -> anyhow::Result<()> {
         let app = actix_test::init_service(
             App::new()
                 .app_data(keyed_state(db.clone(), &["key"], 0))
@@ -2101,41 +2183,44 @@ mod audit_tests {
                 .service(tenant_acs_import),
         )
         .await;
+        let party = valid_party();
 
         let data_block =
-            actix_test::call_service(&app, import(PARTY, 2, "not base64!", false).to_request())
-                .await;
-        assert_eq!(data_block.status(), StatusCode::BAD_REQUEST);
+            actix_test::call_service(&app, import(&party, 2, "", false).to_request()).await;
+        assert_eq!(data_block.status(), StatusCode::CONFLICT);
         assert!(audit_rows(&db).await?.is_empty());
 
         // A chunk that is not base64 stops block 1 before any Canton call.
         let start =
-            actix_test::call_service(&app, import(PARTY, 1, "not base64!", false).to_request())
+            actix_test::call_service(&app, import(&party, 1, "not base64!", false).to_request())
                 .await;
         assert_eq!(start.status(), StatusCode::BAD_REQUEST);
-        let end = actix_test::call_service(&app, import(PARTY, 0, "", true).to_request()).await;
-        assert_eq!(end.status(), StatusCode::BAD_REQUEST);
+        let end = actix_test::call_service(&app, import(&party, 3, "", true).to_request()).await;
+        assert_eq!(end.status(), StatusCode::CONFLICT);
 
         let rows = audit_rows(&db).await?;
-        let endpoints: Vec<&str> = rows.iter().map(|r| r.endpoint.as_str()).collect();
+        let seen: Vec<(&str, Option<u16>)> = rows
+            .iter()
+            .map(|r| (r.endpoint.as_str(), r.http_status))
+            .collect();
         assert_eq!(
-            endpoints,
+            seen,
             [
-                "/v0/tenant/add-hosts/import (end)",
-                "/v0/tenant/add-hosts/import (start)"
+                ("/v0/tenant/add-hosts/import (end)", Some(409)),
+                ("/v0/tenant/add-hosts/import (start)", Some(400)),
             ]
         );
-        assert!(rows.iter().all(|r| r.party_id.as_deref() == Some(PARTY)));
-        assert!(rows.iter().all(|r| r.http_status == Some(400)));
+        assert!(
+            rows.iter()
+                .all(|r| r.party_id.as_deref() == Some(party.as_str()))
+        );
         Ok(())
     }
 
-    /// The blocks that start or end a copy are the ones that write a row, so
-    /// they spend the budget. Past it, the call gets a 429 and writes nothing.
+    /// A block that no open copy takes spends the budget. Past it, the call
+    /// gets a 429 and writes nothing.
     #[sqlx::test(migrator = "MIGRATOR")]
-    async fn an_import_block_that_writes_a_row_spends_the_budget(
-        db: SqlitePool,
-    ) -> anyhow::Result<()> {
+    async fn a_block_no_open_copy_takes_spends_the_budget(db: SqlitePool) -> anyhow::Result<()> {
         let app = actix_test::init_service(
             App::new()
                 .app_data(keyed_state(db.clone(), &["key"], 1))
@@ -2148,13 +2233,77 @@ mod audit_tests {
         assert_eq!(first.status(), StatusCode::BAD_REQUEST);
         let second = actix_test::call_service(&app, import(PARTY, 0, "", true).to_request()).await;
         assert_eq!(second.status(), StatusCode::TOO_MANY_REQUESTS);
+        let stray =
+            actix_test::call_service(&app, import(&valid_party(), 3, "", true).to_request()).await;
+        assert_eq!(stray.status(), StatusCode::TOO_MANY_REQUESTS);
         assert_eq!(audit_rows(&db).await?.len(), 1);
+        Ok(())
+    }
 
-        // The blocks between still pass.
-        let data_block =
-            actix_test::call_service(&app, import(PARTY, 2, "not base64!", false).to_request())
+    /// A copy refused partway leaves the participant disconnected until the
+    /// reaper ends it. So once block 1 is admitted, the final block must pass
+    /// even when block 1 spent the last of the budget. The copy's teardown
+    /// records how it ended.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn the_final_block_of_an_open_copy_spends_no_budget(
+        db: SqlitePool,
+    ) -> anyhow::Result<()> {
+        let state = keyed_state(db.clone(), &["key"], 1);
+        let party = valid_party();
+        let app = actix_test::init_service(
+            App::new()
+                .app_data(state.clone())
+                .wrap(AuthMiddleware)
+                .service(tenant_acs_import),
+        )
+        .await;
+
+        // A real block 1 needs Canton to open the copy. A refused one spends
+        // the budget the same way, and the test then opens the copy itself.
+        let start =
+            actix_test::call_service(&app, import(&party, 1, "not base64!", false).to_request())
                 .await;
-        assert_eq!(data_block.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(start.status(), StatusCode::BAD_REQUEST);
+        let spent =
+            actix_test::call_service(&app, import(&party, 1, "not base64!", false).to_request())
+                .await;
+        assert_eq!(spent.status(), StatusCode::TOO_MANY_REQUESTS);
+        let instance = match replication_target(&party, state.config.participant_id(), 1) {
+            Ok(target) => target.instance_name,
+            Err(e) => panic!("the test party must name a replication: {e}"),
+        };
+        state
+            .relay_sessions
+            .open_test_import(
+                &instance,
+                Some(record_import_end(&state, Some(the_key()), &party)),
+                Ok(()),
+            )
+            .await;
+
+        let end = actix_test::call_service(&app, import(&party, 2, "", true).to_request()).await;
+
+        assert_ne!(end.status(), StatusCode::TOO_MANY_REQUESTS);
+        // The import finished. Without Canton the marker clear after it fails.
+        let body: serde_json::Value = actix_test::read_body_json(end).await;
+        assert!(
+            body["error"]
+                .as_str()
+                .is_some_and(|e| e.starts_with("Imported the ACS")),
+            "{body}"
+        );
+        let rows = audit_rows(&db).await?;
+        let seen: Vec<(&str, Option<u16>)> = rows
+            .iter()
+            .map(|r| (r.endpoint.as_str(), r.http_status))
+            .collect();
+        assert_eq!(
+            seen,
+            [
+                ("/v0/tenant/add-hosts/import (completed)", None),
+                ("/v0/tenant/add-hosts/import (start)", Some(400)),
+            ]
+        );
         Ok(())
     }
 
@@ -2185,34 +2334,46 @@ mod audit_tests {
         Ok(())
     }
 
-    /// An import that block 1 opened and that ended before its final block is
-    /// recorded against the key that opened it.
+    /// The end of an import that block 1 opened is recorded against the key
+    /// that opened it.
     #[sqlx::test(migrator = "MIGRATOR")]
-    async fn an_abandoned_import_is_recorded_against_its_key(db: SqlitePool) -> anyhow::Result<()> {
+    async fn the_end_of_an_import_is_recorded_against_its_key(
+        db: SqlitePool,
+    ) -> anyhow::Result<()> {
         let state = keyed_state(db.clone(), &["key"], 0);
-        let key = TenantKey {
-            index: 0,
-            id: crate::server::middleware::tenant_key_id("key"),
-        };
 
-        record_abandoned(&state, Some(key.clone()), PARTY)(
+        record_import_end(&state, Some(the_key()), PARTY)(ImportEnd::Completed).await;
+        record_import_end(&state, Some(the_key()), PARTY)(ImportEnd::Abandoned(
             "the reaper ended the idle copy: the wallet stopped relaying".to_string(),
-        )
+        ))
         .await;
 
         let rows = audit_rows(&db).await?;
-        assert_eq!(rows.len(), 1, "{rows:?}");
-        let row = &rows[0];
-        assert_eq!(row.endpoint, "/v0/tenant/add-hosts/import (abandoned)");
-        assert_eq!(row.party_id.as_deref(), Some(PARTY));
-        assert_eq!(row.http_status, None, "no call answered");
-        assert_eq!(row.key_index, Some(0));
-        assert_eq!(row.key_id.as_deref(), Some(key.id.as_str()));
-        assert!(
-            row.error.as_deref().is_some_and(|e| e.contains("reaper")),
-            "{:?}",
-            row.error
+        assert_eq!(rows.len(), 2, "{rows:?}");
+        let (abandoned, completed) = (&rows[0], &rows[1]);
+        assert_eq!(
+            abandoned.endpoint,
+            "/v0/tenant/add-hosts/import (abandoned)"
         );
+        assert!(
+            abandoned
+                .error
+                .as_deref()
+                .is_some_and(|e| e.contains("reaper")),
+            "{:?}",
+            abandoned.error
+        );
+        assert_eq!(
+            completed.endpoint,
+            "/v0/tenant/add-hosts/import (completed)"
+        );
+        assert_eq!(completed.error, None);
+        for row in &rows {
+            assert_eq!(row.party_id.as_deref(), Some(PARTY));
+            assert_eq!(row.http_status, None, "no call answers an import's end");
+            assert_eq!(row.key_index, Some(0));
+            assert_eq!(row.key_id, Some(the_key().id));
+        }
         Ok(())
     }
 
