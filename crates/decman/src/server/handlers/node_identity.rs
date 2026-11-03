@@ -436,6 +436,39 @@ async fn grant_missing_rights(
     Ok(())
 }
 
+/// Read the node user's rights with the node login's own token. The IdP can
+/// mint a token that Canton still rejects, such as one for another audience.
+#[allow(clippy::result_large_err)]
+async fn check_login_reaches_canton(
+    config: &NodeConfig,
+    identity: &NodeIdentity,
+) -> std::result::Result<(), HttpResponse> {
+    let token = identity.token().await.map_err(|e| {
+        tracing::warn!("The node login failed before its Canton check: {e}");
+        error_response(
+            HttpResponse::BadGateway(),
+            "Node login token endpoint failed".to_string(),
+        )
+    })?;
+    let Err(e) = list_user_rights(config, &token, &identity.user_id).await else {
+        return Ok(());
+    };
+    let refused = e.downcast_ref::<tonic::Status>().is_some_and(|status| {
+        matches!(
+            status.code(),
+            tonic::Code::Unauthenticated | tonic::Code::PermissionDenied
+        )
+    });
+    if !refused {
+        return Err(canton_failed(e));
+    }
+    tracing::warn!(user_id = %identity.user_id, "Canton refused the node login's token: {e:#}");
+    Err(error_response(
+        HttpResponse::UnprocessableEntity(),
+        format!("Canton refused the node login's token: {e:#}"),
+    ))
+}
+
 #[allow(clippy::result_large_err)]
 async fn save(
     data: &AppState,
@@ -538,6 +571,7 @@ async fn set_up(
             )
         })?,
     };
+    check_login_reaches_canton(&data.config, &identity).await?;
     // Holding the slot across the save keeps the active login in step with
     // the stored one when two setups race.
     let mut slot = data.node_identity.write().await;
@@ -565,7 +599,7 @@ async fn set_up(
         (status = 400, description = "Admin credentials or login fields missing, or a stored secret would move to a new URL", body = ErrorResponse),
         (status = 401, description = "Missing or invalid session token", body = ErrorResponse),
         (status = 403, description = "Caller is not an admin", body = ErrorResponse),
-        (status = 422, description = "The IdP rejected the node login or the admin credentials", body = ErrorResponse),
+        (status = 422, description = "The IdP rejected the node login or the admin credentials, or Canton refused the node login's token", body = ErrorResponse),
         (status = 500, description = "Participant id unresolved, or a Canton call or the save failed", body = ErrorResponse),
         (status = 502, description = "IdP failed, or Canton allocated another party id", body = ErrorResponse),
         (status = 503, description = "IdP rate-limited a token mint", body = ErrorResponse)
