@@ -339,6 +339,54 @@ a signature over the prepared hash, then `ExecuteSubmission`.
 The wallet needs a Ledger API user on that participant that may read as the
 party and execute submissions for it. The host operator grants those rights.
 
+## Set up a transfer preapproval
+
+A `TransferPreapproval` lets the party receive Canton Coin from any sender
+without accepting each transfer. Its provider party pays the fee and renews it
+before it expires. The provider also earns the app rewards on the transfers
+that use it.
+
+DecMan does not create or renew preapprovals. Splice's validator does both when
+the provider is the validator operator party:
+
+1. The validator operator creates an `ExternalPartySetupProposal` for the
+   party, with `POST /v0/admin/external-party/setup-proposal` on the Splice
+   validator.
+2. The wallet signs the acceptance with the party's key. It uses
+   `/v0/admin/external-party/setup-proposal/prepare-accept`, then
+   `/v0/admin/external-party/setup-proposal/submit-accept`.
+3. The acceptance creates a `ValidatorRight` and a `TransferPreapproval`. The
+   validator operator party is the provider of both.
+
+Any host's validator can be the provider. In the usual setup, the wallet
+provider's own validator is the provider. The wallet provider then pays the fee
+and earns the rewards.
+
+The acceptance runs as the validator's ledger user, so that user needs rights
+over the party. Grant it `CanReadAs` and `CanExecuteAs` for the party. Without
+them, the acceptance fails with `PERMISSION_DENIED`.
+
+### Renewal
+
+Splice's `RenewTransferPreapprovalTrigger` renews each preapproval whose
+provider is the validator operator party. It pays the fee from the validator's
+wallet. Two validator settings, under `transfer-preapproval`, control it:
+
+| Setting | Default | Meaning |
+|---|---|---|
+| `preapproval-lifetime` | 90 days | How long a new preapproval lasts, and how much each renewal adds |
+| `renewal-duration` | 30 days | How long before the expiry the validator renews |
+
+The validator's wallet must hold enough Canton Coin for the fee. Otherwise the
+trigger logs `Insufficient funds for the transfer pre-approval renewal` and
+tries again later.
+
+A preapproval whose provider is another party does not renew by itself. That
+provider needs its own automation that exercises `TransferPreapproval_Renew`.
+
+When a host leaves the party, DecMan cancels the preapprovals that its
+validator provides. See [Remove a host](#remove-a-host).
+
 ## Remove a host
 
 A host can leave the party with its own key. The wallet signs nothing. Call
