@@ -1,6 +1,7 @@
 mod validators;
 
 pub(crate) mod mock;
+pub mod node;
 
 pub mod validator;
 
@@ -16,12 +17,13 @@ use thiserror::Error;
 use tokio::sync::RwLock;
 
 pub use mock::{MockAuthRegistry, MockTokenManager};
+pub use node::{NodeIdentity, NodeTokenSource};
 pub use validator::{Principal, TokenValidator, ValidationError};
 pub use validators::{JwtValidator, MockValidator, OidcIntrospectionValidator};
 
 use crate::{
     canton_id::CantonId,
-    config::{Auth0M2MConfig, KeycloakConfig, PartyCredentials},
+    config::{Auth0M2MConfig, IdpClient, KeycloakConfig, PartyCredentials},
 };
 
 /// Authentication errors
@@ -74,7 +76,10 @@ struct TokenState {
 #[derive(Clone, Debug)]
 enum TokenSource {
     Keycloak(KeycloakConfig),
-    Auth0(Auth0M2MConfig),
+    Auth0 {
+        config: Auth0M2MConfig,
+        token_url: String,
+    },
 }
 
 /// Manages OAuth2 token lifecycle with automatic refresh for a single party.
@@ -101,17 +106,7 @@ impl TokenManager {
         user_id: String,
         member_party_id: CantonId,
     ) -> Result<Self> {
-        let source = TokenSource::Keycloak(config);
-        let http = reqwest::Client::new();
-        let state = Self::authenticate(&source, &http, TOKEN_REQUEST_TIMEOUT).await?;
-        Ok(Self {
-            source,
-            user_id,
-            member_party_id,
-            state: RwLock::new(state),
-            http,
-            request_timeout: TOKEN_REQUEST_TIMEOUT,
-        })
+        Self::start(TokenSource::Keycloak(config), user_id, member_party_id).await
     }
 
     /// Create a TokenManager from an Auth0 M2M config and perform initial auth.
@@ -124,7 +119,36 @@ impl TokenManager {
         user_id: String,
         member_party_id: CantonId,
     ) -> Result<Self> {
-        let source = TokenSource::Auth0(config);
+        let token_url = auth0_token_url(&config.domain);
+        Self::start(
+            TokenSource::Auth0 { config, token_url },
+            user_id,
+            member_party_id,
+        )
+        .await
+    }
+
+    /// Create a TokenManager for an IdP client and perform initial auth.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the IdP refuses the client
+    pub async fn for_client(
+        client: IdpClient,
+        user_id: String,
+        member_party_id: CantonId,
+    ) -> Result<Self> {
+        match client {
+            IdpClient::Keycloak(config) => Self::new(config, user_id, member_party_id).await,
+            IdpClient::Auth0(config) => Self::new_auth0(config, user_id, member_party_id).await,
+        }
+    }
+
+    async fn start(
+        source: TokenSource,
+        user_id: String,
+        member_party_id: CantonId,
+    ) -> Result<Self> {
         let http = reqwest::Client::new();
         let state = Self::authenticate(&source, &http, TOKEN_REQUEST_TIMEOUT).await?;
         Ok(Self {
@@ -174,7 +198,9 @@ impl TokenManager {
         let call = async {
             match source {
                 TokenSource::Keycloak(config) => Self::authenticate_keycloak(config).await,
-                TokenSource::Auth0(config) => Self::authenticate_auth0(config, http).await,
+                TokenSource::Auth0 { config, token_url } => {
+                    Self::authenticate_auth0(config, token_url, http).await
+                }
             }
         };
         tokio::time::timeout(timeout, call)
@@ -228,9 +254,10 @@ impl TokenManager {
 
     async fn authenticate_auth0(
         config: &Auth0M2MConfig,
+        token_url: &str,
         http: &reqwest::Client,
     ) -> Result<TokenState> {
-        let response = auth0_client_credentials(http, config).await?;
+        let response = auth0_client_credentials_at(http, token_url, config).await?;
         let expires_in_secs = response.expires_in.saturating_sub(60);
         let expires_at = SystemTime::now()
             .checked_add(Duration::from_secs(expires_in_secs))
@@ -340,8 +367,17 @@ pub(crate) async fn auth0_client_credentials(
     http: &reqwest::Client,
     config: &Auth0M2MConfig,
 ) -> Result<Auth0TokenResponse> {
+    auth0_client_credentials_at(http, &auth0_token_url(&config.domain), config).await
+}
+
+/// [`auth0_client_credentials`] against `token_url`.
+async fn auth0_client_credentials_at(
+    http: &reqwest::Client,
+    token_url: &str,
+    config: &Auth0M2MConfig,
+) -> Result<Auth0TokenResponse> {
     let response = http
-        .post(auth0_token_url(&config.domain))
+        .post(token_url)
         .json(&auth0_token_body(
             &config.client_id,
             &config.client_secret,

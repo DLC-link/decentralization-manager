@@ -11,7 +11,7 @@ use serde::Deserialize;
 use crate::{
     auth::{WorkflowAuth, auth0_token_body, auth0_token_url, truncate_for_log},
     canton_id::CantonId,
-    config::{NodeConfig, PartyCredentials},
+    config::{IdpClient, NodeConfig, PartyCredentials},
     error::Result,
     server::{
         AppState,
@@ -22,6 +22,7 @@ use crate::{
         },
     },
     utils,
+    workflow::node_identity::{right_names, rights_flags},
 };
 
 /// Get frontend auth configuration (provider details + whether auth is required).
@@ -216,24 +217,16 @@ pub async fn get_auth_status(data: web::Data<AppState>) -> impl Responder {
 }
 
 /// Extract user_id (sub claim) from JWT token
-fn extract_user_id_from_jwt(token: &str) -> Option<String> {
+pub(super) fn extract_user_id_from_jwt(token: &str) -> Option<String> {
     // JWT format: header.payload.signature
     let parts: Vec<&str> = token.split('.').collect();
     if parts.len() != 3 {
         return None;
     }
 
-    // Decode the payload (second part) - URL-safe base64 without padding
-    let payload = parts[1];
-    let padding_needed = (4 - (payload.len() % 4)) % 4;
-    let padded = if padding_needed > 0 {
-        format!("{}{}", payload, "=".repeat(padding_needed))
-    } else {
-        payload.to_string()
-    };
-
-    let decoded = base64::engine::general_purpose::STANDARD
-        .decode(&padded)
+    // The payload is URL-safe base64. Some issuers pad it anyway.
+    let decoded = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(parts[1].trim_end_matches('='))
         .ok()?;
     let json: serde_json::Value = serde_json::from_slice(&decoded).ok()?;
     json.get("sub").and_then(|v| v.as_str()).map(String::from)
@@ -268,38 +261,13 @@ async fn check_user_rights(
         .into_inner();
 
     tracing::debug!(
-        "ListUserRights for {effective_user_id} returned {} rights",
-        response.rights.len()
+        "ListUserRights for {effective_user_id} returned {rights:?}",
+        rights = right_names(&response.rights)
     );
 
-    let mut member_party_act_as = false;
-    let mut member_party_read_as = false;
-    let mut dec_party_act_as = false;
-    let mut dec_party_read_as = false;
-
-    for right in response.rights {
-        match right.kind {
-            Some(Kind::CanActAs(CanActAs { ref party })) => {
-                tracing::debug!("  CanActAs: {party}");
-                if party == &member_party_id_str {
-                    member_party_act_as = true;
-                }
-                if party == &dec_party_id_str {
-                    dec_party_act_as = true;
-                }
-            }
-            Some(Kind::CanReadAs(CanReadAs { ref party })) => {
-                tracing::debug!("  CanReadAs: {party}");
-                if party == &member_party_id_str {
-                    member_party_read_as = true;
-                }
-                if party == &dec_party_id_str {
-                    dec_party_read_as = true;
-                }
-            }
-            _ => {}
-        }
-    }
+    let (member_party_act_as, member_party_read_as) =
+        rights_flags(&response.rights, &member_party_id_str);
+    let (dec_party_act_as, dec_party_read_as) = rights_flags(&response.rights, &dec_party_id_str);
 
     Ok(RightsStatus {
         member_party_act_as,
@@ -366,7 +334,7 @@ pub async fn test_auth(data: web::Data<AppState>) -> impl Responder {
 /// grant-rights mint was the one path that assumed Keycloak, and an Auth0 party
 /// leaves `PartyCredentials.keycloak` empty (#259).
 #[derive(Debug)]
-enum AdminTokenSource {
+pub(super) enum AdminTokenSource {
     /// Auth0 `client_credentials`. Auth0 requires an explicit `audience`, and
     /// the admin token is presented to the same ledger API as the party's own
     /// token — Canton validates `aud` against its configured target audience —
@@ -374,6 +342,18 @@ enum AdminTokenSource {
     Auth0 { domain: String, audience: String },
     /// Keycloak `client_credentials` against the realm's token endpoint.
     Keycloak { url: String, realm: String },
+}
+
+/// What an IdP client lacks to name a token endpoint.
+#[derive(Debug)]
+pub(super) enum IdpGap {
+    /// The Auth0 domain or audience is empty.
+    Auth0 {
+        domain_missing: bool,
+        audience_missing: bool,
+    },
+    /// The Keycloak URL or realm is empty.
+    Keycloak,
 }
 
 impl AdminTokenSource {
@@ -386,51 +366,68 @@ impl AdminTokenSource {
     /// a usable Auth0 tenant nor a Keycloak realm. Previously such a party
     /// produced a relative token URL that failed inside reqwest as an opaque
     /// "builder error".
-    fn from_party(creds: &PartyCredentials) -> std::result::Result<Self, String> {
-        if let Some(auth0) = &creds.auth0 {
-            let domain = auth0.domain.trim();
-            let audience = auth0.audience.trim();
-            if domain.is_empty() || audience.is_empty() {
-                return Err(format!(
-                    "Party {party} has an incomplete Auth0 configuration \
-                     (domain{domain_state}, audience{audience_state}); \
-                     re-enter the party credentials before granting rights",
-                    party = creds.dec_party_id,
-                    domain_state = if domain.is_empty() {
-                        " missing"
-                    } else {
-                        " set"
-                    },
-                    audience_state = if audience.is_empty() {
-                        " missing"
-                    } else {
-                        " set"
-                    },
-                ));
-            }
-            return Ok(Self::Auth0 {
-                domain: domain.to_string(),
-                audience: audience.to_string(),
-            });
-        }
-
-        let url = creds.keycloak.url.trim();
-        let realm = creds.keycloak.realm.trim();
-        if url.is_empty() || realm.is_empty() {
-            return Err(format!(
+    pub(super) fn from_party(creds: &PartyCredentials) -> std::result::Result<Self, String> {
+        let client = match &creds.auth0 {
+            Some(auth0) => IdpClient::Auth0(auth0.clone()),
+            None => IdpClient::Keycloak(creds.keycloak.clone()),
+        };
+        let party = &creds.dec_party_id;
+        Self::from_idp(&client).map_err(|gap| match gap {
+            IdpGap::Auth0 {
+                domain_missing,
+                audience_missing,
+            } => format!(
+                "Party {party} has an incomplete Auth0 configuration \
+                 (domain{domain_state}, audience{audience_state}); \
+                 re-enter the party credentials before granting rights",
+                domain_state = if domain_missing { " missing" } else { " set" },
+                audience_state = if audience_missing { " missing" } else { " set" },
+            ),
+            IdpGap::Keycloak => format!(
                 "Party {party} has neither an Auth0 tenant nor a Keycloak realm configured, \
-                 so there is no token endpoint to mint an admin token from",
-                party = creds.dec_party_id,
-            ));
-        }
-        Ok(Self::Keycloak {
-            url: url.to_string(),
-            realm: realm.to_string(),
+                 so there is no token endpoint to mint an admin token from"
+            ),
         })
     }
 
+    /// The token endpoint of `client`'s IdP: its Auth0 tenant or its
+    /// Keycloak realm.
+    ///
+    /// # Errors
+    ///
+    /// Returns what `client` lacks when it names no usable endpoint.
+    pub(super) fn from_idp(client: &IdpClient) -> std::result::Result<Self, IdpGap> {
+        match client {
+            IdpClient::Auth0(auth0) => {
+                let domain = auth0.domain.trim();
+                let audience = auth0.audience.trim();
+                if domain.is_empty() || audience.is_empty() {
+                    return Err(IdpGap::Auth0 {
+                        domain_missing: domain.is_empty(),
+                        audience_missing: audience.is_empty(),
+                    });
+                }
+                Ok(Self::Auth0 {
+                    domain: domain.to_string(),
+                    audience: audience.to_string(),
+                })
+            }
+            IdpClient::Keycloak(keycloak) => {
+                let url = keycloak.url.trim();
+                let realm = keycloak.realm.trim();
+                if url.is_empty() || realm.is_empty() {
+                    return Err(IdpGap::Keycloak);
+                }
+                Ok(Self::Keycloak {
+                    url: url.to_string(),
+                    realm: realm.to_string(),
+                })
+            }
+        }
+    }
+
     /// The absolute `client_credentials` token endpoint for this source.
-    fn token_endpoint(&self) -> String {
+    pub(super) fn token_endpoint(&self) -> String {
         match self {
             Self::Auth0 { domain, .. } => auth0_token_url(domain),
             Self::Keycloak { url, realm } => token_url(url, realm),
@@ -439,7 +436,7 @@ impl AdminTokenSource {
 
     /// IdP name for operator-facing messages, so a failed mint says which
     /// system rejected the credentials.
-    fn idp(&self) -> &'static str {
+    pub(super) fn idp(&self) -> &'static str {
         match self {
             Self::Auth0 { .. } => "Auth0",
             Self::Keycloak { .. } => "Keycloak",
@@ -449,7 +446,7 @@ impl AdminTokenSource {
 
 /// Why an admin token mint failed.
 #[derive(Debug, thiserror::Error)]
-enum AdminMintError {
+pub(super) enum AdminMintError {
     /// The IdP answered 400, 401 or 403: the supplied client id or secret is wrong.
     #[error("{message}")]
     Rejected { status: u16, message: String },
@@ -468,14 +465,14 @@ enum AdminMintError {
 }
 
 impl AdminMintError {
-    fn kind(&self) -> &'static str {
+    pub(super) fn kind(&self) -> &'static str {
         match self {
             Self::Rejected { .. } => "rejected",
             Self::RateLimited { .. } | Self::Upstream { .. } => "upstream",
         }
     }
 
-    fn status(&self) -> Option<u16> {
+    pub(super) fn status(&self) -> Option<u16> {
         match self {
             Self::Rejected { status, .. } => Some(*status),
             Self::RateLimited { .. } => Some(StatusCode::TOO_MANY_REQUESTS.as_u16()),
@@ -497,7 +494,7 @@ struct AdminTokenResponse {
 /// Returns [`AdminMintError::Rejected`] when the IdP refuses the credentials and
 /// [`AdminMintError::Upstream`] for transport failures, other error statuses and
 /// unparseable responses.
-async fn mint_admin_token(
+pub(super) async fn mint_admin_token(
     http: &reqwest::Client,
     token_url: &str,
     source: &AdminTokenSource,
@@ -680,25 +677,7 @@ pub async fn grant_rights(
                 party = %dec_party_id,
                 "Failed to mint admin token for grant-rights: {e}"
             );
-            return match e {
-                AdminMintError::Rejected { .. } => {
-                    HttpResponse::UnprocessableEntity().json(ErrorResponse {
-                        error: format!("Admin {idp} auth failed"),
-                    })
-                }
-                AdminMintError::RateLimited { retry_after, .. } => {
-                    let mut response = HttpResponse::ServiceUnavailable();
-                    if let Some(retry_after) = retry_after {
-                        response.insert_header((RETRY_AFTER, retry_after));
-                    }
-                    response.json(ErrorResponse {
-                        error: format!("Admin {idp} token endpoint is rate-limiting requests"),
-                    })
-                }
-                AdminMintError::Upstream { .. } => HttpResponse::BadGateway().json(ErrorResponse {
-                    error: format!("Admin {idp} token endpoint failed"),
-                }),
-            };
+            return mint_error_response(e, "Admin", idp);
         }
     };
 
@@ -719,6 +698,31 @@ pub async fn grant_rights(
                 error: "Failed to grant rights".into(),
             })
         }
+    }
+}
+
+/// The response for a failed token mint. `who` names the client, such as
+/// "Admin". The message names only the client and the IdP, because the error
+/// itself carries the IdP response body.
+pub(super) fn mint_error_response(e: AdminMintError, who: &str, idp: &str) -> HttpResponse {
+    match e {
+        AdminMintError::Rejected { .. } => {
+            HttpResponse::UnprocessableEntity().json(ErrorResponse {
+                error: format!("{who} {idp} auth failed"),
+            })
+        }
+        AdminMintError::RateLimited { retry_after, .. } => {
+            let mut response = HttpResponse::ServiceUnavailable();
+            if let Some(retry_after) = retry_after {
+                response.insert_header((RETRY_AFTER, retry_after));
+            }
+            response.json(ErrorResponse {
+                error: format!("{who} {idp} token endpoint is rate-limiting requests"),
+            })
+        }
+        AdminMintError::Upstream { .. } => HttpResponse::BadGateway().json(ErrorResponse {
+            error: format!("{who} {idp} token endpoint failed"),
+        }),
     }
 }
 
@@ -770,7 +774,7 @@ async fn grant_user_rights(
     check_user_rights(config, party_token, user_id, member_party_id, dec_party_id).await
 }
 
-fn right_act_as(party: &str) -> Right {
+pub(super) fn right_act_as(party: &str) -> Right {
     Right {
         kind: Some(Kind::CanActAs(CanActAs {
             party: party.to_string(),
@@ -778,7 +782,7 @@ fn right_act_as(party: &str) -> Right {
     }
 }
 
-fn right_read_as(party: &str) -> Right {
+pub(super) fn right_read_as(party: &str) -> Right {
     Right {
         kind: Some(Kind::CanReadAs(CanReadAs {
             party: party.to_string(),
@@ -829,6 +833,23 @@ mod tests {
         collections::{HashMap, HashSet},
         sync::Arc,
     };
+
+    /// A payload whose URL-safe encoding holds `-`, which the standard
+    /// alphabet rejects.
+    #[test]
+    fn extract_user_id_reads_url_safe_payloads() {
+        let payload = "eyJzdWIiOiJvcHMtYWRtaW4iLCJub3RlIjoiPz8-Pn5-In0";
+        assert!(payload.contains('-'));
+        for token in [
+            format!("header.{payload}.signature"),
+            format!("header.{payload}=.signature"),
+        ] {
+            assert_eq!(
+                super::extract_user_id_from_jwt(&token).as_deref(),
+                Some("ops-admin")
+            );
+        }
+    }
 
     use actix_web::{
         App,
@@ -906,6 +927,7 @@ mod tests {
             http_client: reqwest::Client::new(),
             health_cache: crate::server::HealthCache::new(),
             external_parties: Default::default(),
+            node_identity: Default::default(),
         })
     }
 

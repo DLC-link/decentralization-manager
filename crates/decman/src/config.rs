@@ -167,6 +167,48 @@ pub struct PartyCredentials {
     pub packages: PackageConfig,
 }
 
+/// An IdP client that logs in with client credentials.
+#[derive(Clone, Debug)]
+pub enum IdpClient {
+    /// A confidential Keycloak client. Only `client_secret` authenticates it.
+    Keycloak(KeycloakConfig),
+    /// An Auth0 machine-to-machine application.
+    Auth0(Auth0M2MConfig),
+}
+
+impl IdpClient {
+    pub fn client_id(&self) -> &str {
+        match self {
+            Self::Keycloak(config) => &config.client_id,
+            Self::Auth0(config) => &config.client_id,
+        }
+    }
+
+    pub fn client_secret(&self) -> &str {
+        match self {
+            Self::Keycloak(config) => config.client_secret.as_deref().unwrap_or_default(),
+            Self::Auth0(config) => &config.client_secret,
+        }
+    }
+}
+
+/// This node's identity: the node party and the Ledger API login that acts
+/// as it.
+#[derive(Clone, Debug)]
+pub struct NodeIdentityRecord {
+    pub node_party_id: CantonId,
+    /// The participant the node party was set up on.
+    pub participant_id: CantonId,
+    /// The Ledger API user the login authenticates as.
+    pub user_id: String,
+    /// `None` in insecure mode, where the node presents the unsafe token.
+    pub login: Option<IdpClient>,
+    /// Seconds since the epoch.
+    pub created_at: i64,
+    /// Seconds since the epoch.
+    pub updated_at: i64,
+}
+
 /// Timeout configuration
 #[derive(Clone, Debug, Serialize, utoipa::ToSchema)]
 #[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
