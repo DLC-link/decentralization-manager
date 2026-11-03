@@ -538,8 +538,12 @@ async fn set_up(
             )
         })?,
     };
+    // Holding the slot across the save keeps the active login in step with
+    // the stored one when two setups race.
+    let mut slot = data.node_identity.write().await;
     save(data, &record).await?;
-    *data.node_identity.write().await = Some(identity);
+    *slot = Some(identity);
+    drop(slot);
 
     response.login = record.login.as_ref().map(login_summary);
     tracing::info!(?response, "Node identity set up");
