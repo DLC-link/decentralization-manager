@@ -1016,6 +1016,34 @@ pub struct UnhostAuditResponse {
     pub entries: Vec<UnhostAuditEntry>,
 }
 
+/// One tenant API call that wrote topology or state on this node.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
+pub struct TenantCallAuditEntry {
+    pub id: i64,
+    /// Unix seconds.
+    pub called_at: i64,
+    /// The index of the caller's key in `DECPM_TENANT_API_KEYS`. `None` in
+    /// insecure mode, where no key is checked.
+    pub key_index: Option<u32>,
+    /// The route that was called, such as `/v0/tenant/add-hosts/execute`.
+    pub endpoint: String,
+    pub party_id: Option<String>,
+    /// The HTTP status the call answered with.
+    pub http_status: u16,
+    /// The error the call answered with. `None` on success.
+    pub error: Option<String>,
+}
+
+/// Response wrapper for `GET /tenant-call-audit`, newest first.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
+pub struct TenantCallAuditResponse {
+    pub entries: Vec<TenantCallAuditEntry>,
+}
+
 /// Response for key status check
 #[derive(Serialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]

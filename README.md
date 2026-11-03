@@ -509,6 +509,7 @@ The table below is a curated subset. A complete, interactive API reference is av
 | `/external-parties/{party_id}/unhost/preview` | GET | Admin: what an unhost would do now. Reports the serial to pin, the hosts that remain, the Splice contracts to archive, and any blocker. Writes nothing |
 | `/external-parties/{party_id}/unhost` | POST | Admin: this node leaves the party. It archives its validator's Splice contracts for the party, then removes itself from the hosting mapping with its own key |
 | `/external-parties/{party_id}/unhost-audit` | GET | One row per unhost attempt on this node, newest first |
+| `/tenant-call-audit` | GET | Admin: one row per tenant call that wrote topology or state on this node, newest first. Each row has the time, the key index, the endpoint, the party, the HTTP status and the error. `?party_id=` filters by party. `?limit=` sets the row count (default 100, at most 500) |
 | `/v0/tenant/prepare` | POST | Wallet-facing: builds an external party's onboarding topology and returns the hash to sign |
 | `/v0/tenant/execute` | POST | Wallet-facing: validates the wallet's signed topology, co-signs, and submits it |
 | `/v0/tenant/{party}/status` | GET | Wallet-facing: reports whether this host has the party hosted yet |

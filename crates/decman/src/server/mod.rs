@@ -23,6 +23,7 @@ mod queries;
 mod record;
 mod reward_automation;
 mod scan;
+pub(crate) mod tenant_call_audit;
 mod tenant_rate_limit;
 mod transfer_context;
 mod types;
@@ -1491,6 +1492,7 @@ pub async fn start_server(
             .service(handlers::unhost_external_party)
             .service(handlers::preview_unhost_external_party)
             .service(handlers::get_unhost_audit)
+            .service(handlers::get_tenant_call_audit)
             .service(handlers::tenant_prepare)
             .service(handlers::tenant_execute)
             .service(handlers::tenant_add_hosts_prepare)
