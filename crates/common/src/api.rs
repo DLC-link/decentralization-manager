@@ -1016,7 +1016,8 @@ pub struct UnhostAuditResponse {
     pub entries: Vec<UnhostAuditEntry>,
 }
 
-/// One tenant API call that wrote topology or state on this node.
+/// One tenant API call that wrote topology or state on this node, or one ACS
+/// import that ended before its final block.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
@@ -1027,12 +1028,20 @@ pub struct TenantCallAuditEntry {
     /// The index of the caller's key in `DECPM_TENANT_API_KEYS`. `None` in
     /// insecure mode, where no key is checked.
     pub key_index: Option<u32>,
-    /// The route that was called, such as `/v0/tenant/add-hosts/execute`.
+    /// The first 16 hex characters of the SHA-256 of the caller's key. It
+    /// still names the key after `DECPM_TENANT_API_KEYS` is reordered. `None`
+    /// in insecure mode.
+    pub key_id: Option<String>,
+    /// The route that was called, such as `/v0/tenant/add-hosts/execute`. An
+    /// ACS import row adds `(start)`, `(end)` or `(abandoned)` to its route.
     pub endpoint: String,
+    /// At most 256 characters. A longer value ends in `…[truncated]`.
     pub party_id: Option<String>,
-    /// The HTTP status the call answered with.
-    pub http_status: u16,
-    /// The error the call answered with. `None` on success.
+    /// The HTTP status the call answered with. `None` for an import that the
+    /// node ended without a call, such as one the reaper removed.
+    pub http_status: Option<u16>,
+    /// The error the call answered with, or why an import was abandoned.
+    /// `None` on success. At most 1024 characters, like `party_id`.
     pub error: Option<String>,
 }
 

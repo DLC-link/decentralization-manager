@@ -77,9 +77,10 @@ mod tests {
     fn call(party_id: &'static str) -> NewTenantCall<'static> {
         NewTenantCall {
             key_index: Some(0),
+            key_id: Some("0123456789abcdef"),
             endpoint: TenantEndpoint::AddHostsExecute,
             party_id: Some(party_id),
-            http_status: 202,
+            http_status: Some(202),
             error: None,
         }
     }
@@ -193,11 +194,21 @@ mod tests {
             "entries": [{
                 "id": 7,
                 "called_at": 1_700_000_000,
-                "key_index": null,
+                "key_index": 1,
+                "key_id": "0123456789abcdef",
                 "endpoint": "/v0/tenant/threshold/execute",
                 "party_id": "alice::1220aa",
                 "http_status": 409,
                 "error": "stale serial",
+            }, {
+                "id": 6,
+                "called_at": 1_700_000_000,
+                "key_index": null,
+                "key_id": null,
+                "endpoint": "/v0/tenant/add-hosts/import (abandoned)",
+                "party_id": "alice::1220aa",
+                "http_status": null,
+                "error": "the reaper ended the idle copy",
             }],
         });
         let Ok(response) = serde_json::from_value::<TenantCallAuditResponse>(json) else {
@@ -205,8 +216,12 @@ mod tests {
         };
         let entry = &response.entries[0];
         assert_eq!(entry.id, 7);
-        assert_eq!(entry.key_index, None);
-        assert_eq!(entry.http_status, 409);
+        assert_eq!(entry.key_index, Some(1));
+        assert_eq!(entry.key_id.as_deref(), Some("0123456789abcdef"));
+        assert_eq!(entry.http_status, Some(409));
         assert_eq!(entry.error.as_deref(), Some("stale serial"));
+        let abandoned = &response.entries[1];
+        assert_eq!(abandoned.key_id, None);
+        assert_eq!(abandoned.http_status, None);
     }
 }

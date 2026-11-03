@@ -1,5 +1,5 @@
 mod auth;
 
-pub use auth::{
-    AuthMiddleware, require_admin, require_tenant_api_key, require_tenant_api_key_unmetered,
-};
+#[cfg(test)]
+pub(crate) use auth::tenant_key_id;
+pub use auth::{AuthMiddleware, TenantKey, charge_tenant_key, require_admin, tenant_caller};

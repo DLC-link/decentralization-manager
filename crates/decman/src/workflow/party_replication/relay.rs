@@ -37,6 +37,7 @@ use std::{
     time::Duration,
 };
 
+use futures::future::BoxFuture;
 use sqlx::SqlitePool;
 use tokio::{
     sync::{Mutex, mpsc},
@@ -75,6 +76,15 @@ struct ExportEntry {
     last_touched: Instant,
 }
 
+/// Called once, with the reason, when an import ends before its final block
+/// was delivered: a restart, a discard, the reaper, or a failed import. The
+/// tenant API records it in its audit.
+pub type OnAbandoned = Box<dyn FnOnce(String) -> BoxFuture<'static, ()> + Send>;
+
+const RESTARTED: &str = "a new copy started from block 1";
+const FAILED: &str = "the import failed before its final block";
+const DISCARDED: &str = "the copy was discarded";
+
 /// One import held open on a joining host between block requests.
 struct ImportEntry {
     /// Feeds the import task's `next_block`. Dropping it is how a session is
@@ -87,6 +97,10 @@ struct ImportEntry {
     /// The next sequence number this session will accept.
     expected_seq: u64,
     last_touched: Instant,
+    /// Whether the final block was handed to the import. An import retired
+    /// without it was abandoned.
+    end_delivered: bool,
+    on_abandoned: Option<OnAbandoned>,
 }
 
 /// Every wallet-relayed transfer this node is part of, keyed by the
@@ -224,6 +238,7 @@ impl RelaySessions {
         &self,
         instance_name: &str,
         entry: ImportEntry,
+        why: &'static str,
     ) -> tokio::task::JoinHandle<Result<()>> {
         *self
             .retiring()
@@ -235,7 +250,7 @@ impl RelaySessions {
         };
         tokio::spawn(async move {
             let _mark = mark;
-            retire(entry).await
+            retire(entry, why).await
         })
     }
 
@@ -247,10 +262,11 @@ impl RelaySessions {
     async fn retire_import(
         &self,
         instance_name: &str,
+        why: &'static str,
     ) -> Option<tokio::task::JoinHandle<Result<()>>> {
         let mut imports = self.imports.lock().await;
         let entry = imports.remove(instance_name)?;
-        Some(self.spawn_retirement(instance_name, entry))
+        Some(self.spawn_retirement(instance_name, entry, why))
     }
 
     /// Wait, for a bounded time, until no teardown of `instance_name` runs.
@@ -415,6 +431,9 @@ impl RelaySessions {
     /// wallet. On the final block it waits for the import to finish, so the
     /// caller can report the outcome rather than guessing it.
     ///
+    /// `on_abandoned` is kept by the import that block 1 opens, and called if
+    /// that import ends before its final block.
+    ///
     /// # Errors
     /// Propagates an import failure, which by then has already put the
     /// participant back on the synchronizer.
@@ -425,6 +444,7 @@ impl RelaySessions {
         target: &ReplicationTarget,
         required_package_ids: &[String],
         block: PipeBlock,
+        on_abandoned: Option<OnAbandoned>,
     ) -> Result<AcceptedBlock> {
         let seq = match &block {
             PipeBlock::Data { seq, .. } | PipeBlock::End { seq, .. } => *seq,
@@ -465,7 +485,10 @@ impl RelaySessions {
                     // leaves the old import blocking holds until it has ended.
                     // Its failure is expected — it is being cancelled — so it is
                     // logged rather than returned over this fresh transfer.
-                    match self.spawn_retirement(&target.instance_name, old).await {
+                    match self
+                        .spawn_retirement(&target.instance_name, old, RESTARTED)
+                        .await
+                    {
                         Ok(Ok(())) => {}
                         Ok(Err(e)) => tracing::info!("the previous ACS import ended: {e}"),
                         Err(e) => {
@@ -490,6 +513,8 @@ impl RelaySessions {
                         task,
                         expected_seq: 2,
                         last_touched: Instant::now(),
+                        end_delivered: is_end,
+                        on_abandoned,
                     },
                 );
                 tx
@@ -509,6 +534,7 @@ impl RelaySessions {
                 }
                 entry.expected_seq = seq + 1;
                 entry.last_touched = Instant::now();
+                entry.end_delivered |= is_end;
                 entry.blocks.clone()
             }
         };
@@ -529,7 +555,7 @@ impl RelaySessions {
 
     /// Wait for this replication's import to finish and take its result.
     async fn finish(&self, target: &ReplicationTarget) -> Result<()> {
-        let Some(teardown) = self.retire_import(&target.instance_name).await else {
+        let Some(teardown) = self.retire_import(&target.instance_name, FAILED).await else {
             anyhow::bail!(
                 "no ACS import is open for {party} on this host; restart the transfer from \
                  block 1",
@@ -568,7 +594,7 @@ impl RelaySessions {
     /// aborted — see the module docs.
     pub async fn discard(&self, instance_name: &str) {
         self.exports.lock().await.remove(instance_name);
-        if let Some(teardown) = self.retire_import(instance_name).await {
+        if let Some(teardown) = self.retire_import(instance_name, DISCARDED).await {
             match teardown.await {
                 Ok(Ok(())) => {}
                 Ok(Err(e)) => tracing::info!("the discarded ACS import ended: {e}"),
@@ -620,7 +646,7 @@ impl RelaySessions {
                 secs = idle_timeout.as_secs()
             );
             if let Some(entry) = imports.remove(name)
-                && let Err(e) = retire(entry).await
+                && let Err(e) = retire(entry, "the reaper ended the idle copy").await
             {
                 tracing::info!("the reaped ACS import ended: {e}");
             }
@@ -638,14 +664,32 @@ impl RelaySessions {
 /// the participant again. Removing the entry without this await lets the old
 /// task's reconnect land underneath a new import that has already begun feeding
 /// Canton, which is the orphan-ACS state the quarantine exists to catch.
-async fn retire(entry: ImportEntry) -> Result<()> {
+///
+/// An import retired before its final block was delivered reports `why` to its
+/// `on_abandoned`, with the error the import ended on.
+async fn retire(entry: ImportEntry, why: &str) -> Result<()> {
+    let ImportEntry {
+        blocks,
+        task,
+        end_delivered,
+        on_abandoned,
+        ..
+    } = entry;
     // Dropping the sender is what the callback sees as "the wallet stopped
     // relaying"; the await is what makes the ordering observable.
-    drop(entry.blocks);
-    match entry.task.await {
+    drop(blocks);
+    let result = match task.await {
         Ok(result) => result,
-        Err(e) => anyhow::bail!("the ACS import task did not complete: {e}"),
+        Err(e) => Err(anyhow::anyhow!("the ACS import task did not complete: {e}")),
+    };
+    if !end_delivered && let Some(on_abandoned) = on_abandoned {
+        let reason = match &result {
+            Ok(()) => why.to_string(),
+            Err(e) => format!("{why}: {e}"),
+        };
+        on_abandoned(reason).await;
     }
+    result
 }
 
 /// Run the whole import, pulling each block from `rx`.
@@ -813,7 +857,7 @@ mod tests {
             bytes: b"some bytes".to_vec(),
         };
         let accepted = sessions
-            .accept_block(&NodeConfig::default(), &db, &target, &[], block)
+            .accept_block(&NodeConfig::default(), &db, &target, &[], block, None)
             .await;
         assert!(matches!(accepted, Ok(AcceptedBlock::Held)));
         assert!(sessions.imports.lock().await.is_empty());
@@ -832,6 +876,8 @@ mod tests {
                 task: tokio::spawn(async { Ok(()) }),
                 expected_seq: 2,
                 last_touched: Instant::now(),
+                end_delivered: false,
+                on_abandoned: None,
             },
         );
         let party = party_of(&target("run-1"));
@@ -860,6 +906,8 @@ mod tests {
                 }),
                 expected_seq: 2,
                 last_touched: Instant::now(),
+                end_delivered: false,
+                on_abandoned: None,
             },
         );
         let finishing = {
@@ -907,6 +955,8 @@ mod tests {
                 }),
                 expected_seq: 2,
                 last_touched: Instant::now(),
+                end_delivered: false,
+                on_abandoned: None,
             },
         );
         let finishing = {
@@ -952,6 +1002,8 @@ mod tests {
                 }),
                 expected_seq: 2,
                 last_touched: Instant::now(),
+                end_delivered: false,
+                on_abandoned: None,
             },
         );
         release
@@ -975,11 +1027,11 @@ mod tests {
         let sessions = Arc::new(RelaySessions::new());
         let party = party_of(&target("run-1"));
         let release_first = blocked_import(&sessions).await;
-        let Some(first) = sessions.retire_import("run-1").await else {
+        let Some(first) = sessions.retire_import("run-1", DISCARDED).await else {
             panic!("the first import must be in the map");
         };
         let release_second = blocked_import(&sessions).await;
-        let Some(second) = sessions.retire_import("run-1").await else {
+        let Some(second) = sessions.retire_import("run-1", DISCARDED).await else {
             panic!("the second import must be in the map");
         };
 
@@ -1002,7 +1054,7 @@ mod tests {
     async fn a_restart_waits_for_the_previous_teardown() {
         let sessions = Arc::new(RelaySessions::new());
         let release = blocked_import(&sessions).await;
-        let Some(teardown) = sessions.retire_import("run-1").await else {
+        let Some(teardown) = sessions.retire_import("run-1", DISCARDED).await else {
             panic!("the import must be in the map");
         };
         let restart = {
@@ -1014,7 +1066,14 @@ mod tests {
                     bytes: b"some bytes".to_vec(),
                 };
                 sessions
-                    .accept_block(&NodeConfig::default(), &db, &target("run-1"), &[], block)
+                    .accept_block(
+                        &NodeConfig::default(),
+                        &db,
+                        &target("run-1"),
+                        &[],
+                        block,
+                        None,
+                    )
                     .await
             })
         };
@@ -1103,7 +1162,14 @@ mod tests {
                     bytes: b"some bytes".to_vec(),
                 };
                 sessions
-                    .accept_block(&NodeConfig::default(), &db, &target("run-1"), &[], block)
+                    .accept_block(
+                        &NodeConfig::default(),
+                        &db,
+                        &target("run-1"),
+                        &[],
+                        block,
+                        None,
+                    )
                     .await
             })
         };
@@ -1134,7 +1200,14 @@ mod tests {
             bytes: b"some bytes".to_vec(),
         };
         let result = sessions
-            .accept_block(&NodeConfig::default(), &db, &target("run-1"), &[], block)
+            .accept_block(
+                &NodeConfig::default(),
+                &db,
+                &target("run-1"),
+                &[],
+                block,
+                None,
+            )
             .await;
         match result {
             Ok(AcceptedBlock::OutOfSync { expected, asked }) => {
@@ -1174,6 +1247,8 @@ mod tests {
             task,
             expected_seq: 2,
             last_touched: Instant::now(),
+            end_delivered: false,
+            on_abandoned: None,
         }
     }
 
@@ -1201,7 +1276,7 @@ mod tests {
             panic!("the import must take the first block");
         }
 
-        if let Err(e) = retire(entry_for(tx, task)).await {
+        if let Err(e) = retire(entry_for(tx, task), DISCARDED).await {
             panic!("retiring a healthy import must not fail: {e}");
         }
         assert!(
@@ -1275,5 +1350,100 @@ mod tests {
         let sessions = RelaySessions::new();
         sessions.discard("never-started").await;
         assert_eq!(sessions.reap(Duration::ZERO).await, (0, 0));
+    }
+
+    /// The reasons an import's `on_abandoned` was called with.
+    type Reasons = Arc<std::sync::Mutex<Vec<String>>>;
+
+    /// An open import that records why it was abandoned. Its task ends with
+    /// `outcome` once its channel closes.
+    async fn watched_import(
+        sessions: &RelaySessions,
+        end_delivered: bool,
+        outcome: Result<()>,
+    ) -> Reasons {
+        let reasons = Reasons::default();
+        let on_abandoned: OnAbandoned = {
+            let reasons = Arc::clone(&reasons);
+            Box::new(move |reason| {
+                Box::pin(async move {
+                    reasons
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .push(reason);
+                })
+            })
+        };
+        let (blocks, mut rx) = mpsc::channel::<PipeBlock>(BLOCK_CHANNEL_CAPACITY);
+        let task = tokio::spawn(async move {
+            while rx.recv().await.is_some() {}
+            outcome
+        });
+        sessions.imports.lock().await.insert(
+            "run-1".to_string(),
+            ImportEntry {
+                blocks,
+                task,
+                expected_seq: 2,
+                last_touched: Instant::now(),
+                end_delivered,
+                on_abandoned: Some(on_abandoned),
+            },
+        );
+        reasons
+    }
+
+    fn reasons_of(reasons: &Reasons) -> Vec<String> {
+        reasons
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+
+    #[tokio::test]
+    async fn a_discarded_import_reports_that_it_was_abandoned() {
+        let sessions = RelaySessions::new();
+        let reasons = watched_import(&sessions, false, Ok(())).await;
+
+        sessions.discard("run-1").await;
+
+        assert_eq!(reasons_of(&reasons), vec![DISCARDED.to_string()]);
+    }
+
+    /// The import's own error says what went wrong, so it goes with the
+    /// reason.
+    #[tokio::test]
+    async fn a_reaped_import_reports_why_with_its_error() {
+        let sessions = RelaySessions::new();
+        let reasons = watched_import(
+            &sessions,
+            false,
+            Err(anyhow::anyhow!(
+                "the wallet stopped relaying before block 2"
+            )),
+        )
+        .await;
+
+        assert_eq!(sessions.reap(Duration::ZERO).await, (0, 1));
+
+        let reasons = reasons_of(&reasons);
+        assert_eq!(reasons.len(), 1, "{reasons:?}");
+        assert!(reasons[0].contains("reaper"), "{reasons:?}");
+        assert!(reasons[0].contains("before block 2"), "{reasons:?}");
+    }
+
+    /// The call that delivered the final block records the outcome, so the
+    /// import must not also count as abandoned.
+    #[tokio::test]
+    async fn an_import_given_its_final_block_is_not_abandoned() {
+        let sessions = RelaySessions::new();
+        let reasons = watched_import(&sessions, true, Ok(())).await;
+
+        if let Err(e) = sessions.finish(&target("run-1")).await {
+            panic!("the import ended well: {e}");
+        }
+
+        assert!(reasons_of(&reasons).is_empty());
+        assert!(sessions.imports.lock().await.is_empty());
     }
 }

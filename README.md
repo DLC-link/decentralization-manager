@@ -202,7 +202,7 @@ The database file path can be overridden with the `--db` CLI flag.
 | `DECPM_AUTH0_SCOPE` | Extra space-separated scopes the SPA requests. Needed only when the admin role arrives as an Auth0 RBAC scope | _(none)_ |
 | `DECPM_JWT_ROLE_CLAIM` | JWT claim that holds an array of role names. Needed only when the IdP puts roles in a namespaced custom claim | _(none)_ |
 | `DECPM_TENANT_API_KEYS` | Comma-separated bearer keys for the tenant API (`/v0/tenant/*`). Unset turns the tenant API off, except in insecure mode | _(none)_ |
-| `DECPM_TENANT_RATE_LIMIT_PER_MINUTE` | Calls per minute that one tenant API key may make. A call past the limit gets a 429. The two ACS relay calls are exempt. `0` turns the limit off. Insecure mode has no limit | `120` |
+| `DECPM_TENANT_RATE_LIMIT_PER_MINUTE` | Calls per minute that one tenant API key may make. A call past the limit gets a 429. The ACS block read does not count. Of the ACS block imports, only the first and the final block of a copy count. `0` turns the limit off. Insecure mode has no limit | `120` |
 | `DECPM_VALIDATOR_OPERATOR_PARTY` | This node's Splice validator operator party. An unhost archives the Splice contracts this party holds for the external party that the node leaves. The party also needs a [party credential](#party-credentials-for-the-validator-operator). Unset means an unhost must send `"splice_cleanup": false` | _(none)_ |
 | `DECPM_INSECURE` | Run without an IdP: accept any inbound token and present an unsafe HS256 token to Canton (CLI flag `--insecure`). **Never use in production.** See [Insecure mode](#insecure-mode-local-development-without-an-idp) | `false` |
 | `DECPM_CANTON_HMAC_SECRET` | HS256 secret decman signs the unsafe Canton token with, in insecure mode. Must match Canton's unsafe auth-service secret | `unsafe` |
@@ -509,7 +509,7 @@ The table below is a curated subset. A complete, interactive API reference is av
 | `/external-parties/{party_id}/unhost/preview` | GET | Admin: what an unhost would do now. Reports the serial to pin, the hosts that remain, the Splice contracts to archive, and any blocker. Writes nothing |
 | `/external-parties/{party_id}/unhost` | POST | Admin: this node leaves the party. It archives its validator's Splice contracts for the party, then removes itself from the hosting mapping with its own key |
 | `/external-parties/{party_id}/unhost-audit` | GET | One row per unhost attempt on this node, newest first |
-| `/tenant-call-audit` | GET | Admin: one row per tenant call that wrote topology or state on this node, newest first. Each row has the time, the key index, the endpoint, the party, the HTTP status and the error. `?party_id=` filters by party. `?limit=` sets the row count (default 100, at most 500) |
+| `/tenant-call-audit` | GET | Admin: one row per tenant call that wrote topology or state on this node, newest first. An ACS import gets a row at its first block, at its final block, and when it ends before its final block. Each row has the time, the key index, the key id, the endpoint, the party, the HTTP status and the error. The key id is the first 16 hex characters of the key's SHA-256. The party id and the error are capped at 256 and 1024 characters. `?party_id=` filters by party. `?limit=` sets the row count (default 100, at most 500) |
 | `/v0/tenant/prepare` | POST | Wallet-facing: builds an external party's onboarding topology and returns the hash to sign |
 | `/v0/tenant/execute` | POST | Wallet-facing: validates the wallet's signed topology, co-signs, and submits it |
 | `/v0/tenant/{party}/status` | GET | Wallet-facing: reports whether this host has the party hosted yet |
@@ -531,12 +531,13 @@ separate tenant API key rather than the operator JWT, and are driven by
 [`decman-wallet`](crates/decman-wallet/README.md). A caller sends the key as
 `Authorization: Bearer <key>`. The node reads its keys from
 `DECPM_TENANT_API_KEYS`. With no keys set, it refuses every tenant call
-outside insecure mode. Each key may make `DECPM_TENANT_RATE_LIMIT_PER_MINUTE`
-calls per minute. A call past the limit gets a 429 with a `Retry-After`
-header that gives the seconds to wait. The ACS block read
-(`/v0/tenant/{party}/acs/{target}`) and the ACS block import
-(`/v0/tenant/add-hosts/import`) are exempt, because one ACS copy sends many
-blocks.
+outside insecure mode. The node checks the key before it reads the body.
+Each key may make `DECPM_TENANT_RATE_LIMIT_PER_MINUTE` calls per minute. A
+call past the limit gets a 429 with a `Retry-After` header that gives the
+seconds to wait. One ACS copy sends a call for each block, so the ACS block
+read (`/v0/tenant/{party}/acs/{target}`) does not count. Of the ACS block
+imports (`/v0/tenant/add-hosts/import`), only the first and the final block of
+a copy count.
 
 ## Development
 

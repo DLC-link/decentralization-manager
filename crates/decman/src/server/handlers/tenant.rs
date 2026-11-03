@@ -16,14 +16,14 @@
 //! never as the external party.
 //!
 //! Unlike the admin endpoints (Keycloak JWT + `require_admin`), tenant callers
-//! authenticate with a provider-issued API key, so every handler here calls
-//! [`require_tenant_api_key`] first (the `/v0/tenant/` prefix bypasses the JWT
-//! middleware).
+//! authenticate with a provider-issued API key. The auth middleware checks the
+//! key before the body is read, and every handler here takes the matched key
+//! from [`tenant_caller`].
 //!
 //! Each key may make `DECPM_TENANT_RATE_LIMIT_PER_MINUTE` calls per minute, and
-//! a call past that gets a 429 with `Retry-After`. The two ACS relay calls, the
-//! block read and the block import, are exempt, because one copy sends many
-//! blocks.
+//! a call past that gets a 429 with `Retry-After`. The ACS block read does not
+//! count, because one copy sends a call per block. Of the ACS block imports,
+//! only the blocks that start or end a copy count.
 
 use actix_web::{HttpRequest, HttpResponse, Responder, body::MessageBody, get, post, web};
 use base64::{Engine, engine::general_purpose::STANDARD};
@@ -32,7 +32,7 @@ use crate::{
     canton_id::validate_party_id_prefix,
     server::{
         AppState,
-        middleware::{require_tenant_api_key, require_tenant_api_key_unmetered},
+        middleware::{TenantKey, charge_tenant_key, tenant_caller},
         tenant_call_audit::{self, NewTenantCall, TenantEndpoint},
         types::{
             ErrorResponse, ExternalPartyUnhostResponse, LocalPartyAdoptExecuteRequest,
@@ -64,7 +64,7 @@ use crate::{
     workflow::party_replication::{
         ClearOutcome, collect_party_package_ids, open_export_session,
         pipe::{PipeBlock, PipeTrailer},
-        relay::{AcceptedBlock, ServedBlock},
+        relay::{AcceptedBlock, OnAbandoned, ServedBlock},
         request_onboarding_flag_clear,
     },
 };
@@ -95,7 +95,7 @@ pub async fn tenant_prepare(
     data: web::Data<AppState>,
     body: web::Json<TenantPrepareRequest>,
 ) -> impl Responder {
-    if let Err(resp) = require_tenant_api_key(&http_req, &data) {
+    if let Err(resp) = tenant_caller(&http_req) {
         return resp;
     }
     if let Err(msg) = validate_party_id_prefix(&body.party_hint) {
@@ -171,15 +171,15 @@ pub async fn tenant_execute(
     data: web::Data<AppState>,
     body: web::Json<TenantExecuteRequest>,
 ) -> impl Responder {
-    let key_index = match require_tenant_api_key(&http_req, &data) {
-        Ok(index) => index,
+    let key = match tenant_caller(&http_req) {
+        Ok(key) => key,
         Err(resp) => return resp,
     };
     let response = tenant_execute_on_this_host(&data, &body).await;
     let party_id = format!("{}::{}", body.party_hint, body.signed_by);
     audited(
         &data,
-        key_index,
+        key.as_ref(),
         TenantEndpoint::Execute,
         &party_id,
         response,
@@ -299,7 +299,7 @@ pub async fn tenant_status(
     data: web::Data<AppState>,
     path: web::Path<String>,
 ) -> impl Responder {
-    if let Err(resp) = require_tenant_api_key(&http_req, &data) {
+    if let Err(resp) = tenant_caller(&http_req) {
         return resp;
     }
     let party = path.into_inner();
@@ -365,7 +365,7 @@ pub async fn tenant_add_hosts_prepare(
     data: web::Data<AppState>,
     body: web::Json<TenantAddHostsRequest>,
 ) -> impl Responder {
-    if let Err(resp) = require_tenant_api_key(&http_req, &data) {
+    if let Err(resp) = tenant_caller(&http_req) {
         return resp;
     }
     if body.new_hosts.is_empty() {
@@ -440,14 +440,14 @@ pub async fn tenant_add_hosts_authorize(
     data: web::Data<AppState>,
     body: web::Json<TenantAddHostsRequest>,
 ) -> impl Responder {
-    let key_index = match require_tenant_api_key(&http_req, &data) {
-        Ok(index) => index,
+    let key = match tenant_caller(&http_req) {
+        Ok(key) => key,
         Err(resp) => return resp,
     };
     let response = tenant_add_hosts_authorize_on_this_host(&data, &body).await;
     audited(
         &data,
-        key_index,
+        key.as_ref(),
         TenantEndpoint::AddHostsAuthorize,
         &body.party_id,
         response,
@@ -530,14 +530,14 @@ pub async fn tenant_add_hosts_execute(
     data: web::Data<AppState>,
     body: web::Json<TenantAddHostsExecuteRequest>,
 ) -> impl Responder {
-    let key_index = match require_tenant_api_key(&http_req, &data) {
-        Ok(index) => index,
+    let key = match tenant_caller(&http_req) {
+        Ok(key) => key,
         Err(resp) => return resp,
     };
     let response = tenant_add_hosts_execute_on_this_host(&data, &body).await;
     audited(
         &data,
-        key_index,
+        key.as_ref(),
         TenantEndpoint::AddHostsExecute,
         &body.party_id,
         response,
@@ -646,8 +646,8 @@ pub async fn tenant_acs_snapshot(
     path: web::Path<(String, String)>,
     query: web::Query<AcsBlockQuery>,
 ) -> impl Responder {
-    // Unmetered: one ACS copy asks for many blocks in a row.
-    if let Err(resp) = require_tenant_api_key_unmetered(&http_req, &data) {
+    // The middleware spends no budget here: one ACS copy asks for many blocks.
+    if let Err(resp) = tenant_caller(&http_req) {
         return resp;
     }
     let (party_id, target) = path.into_inner();
@@ -785,6 +785,7 @@ pub async fn tenant_acs_snapshot(
         (status = 401, description = "Invalid tenant API key", body = ErrorResponse),
         (status = 404, description = "No authorized mapping for this party on this host", body = ErrorResponse),
         (status = 409, description = "Out of sync with this host's import; restart from block 1. Or this host is leaving the party", body = ErrorResponse),
+        (status = 429, description = "Rate limit for this tenant API key exceeded; only the first and the final block of a copy count. Retry-After gives the seconds to wait", body = ErrorResponse),
         (status = 500, description = "Import failed on this participant", body = ErrorResponse)
     )
 )]
@@ -794,30 +795,37 @@ pub async fn tenant_acs_import(
     data: web::Data<AppState>,
     body: web::Json<TenantAcsImportRequest>,
 ) -> impl Responder {
-    // Unmetered: one ACS copy sends many blocks in a row.
-    let key_index = match require_tenant_api_key_unmetered(&http_req, &data) {
-        Ok(index) => index,
+    // The middleware spends no budget here: one ACS copy sends many blocks.
+    let key = match tenant_caller(&http_req) {
+        Ok(key) => key,
         Err(resp) => return resp,
     };
-    let response = tenant_acs_import_on_this_host(&data, &body).await;
-    // The final block finishes the import and clears the marker. The blocks
-    // before it only carry data, so they are not recorded.
-    if !body.end {
-        return response;
+    // Block 1 opens the import and disconnects the participant, and the final
+    // block finishes it. Those two count toward the budget and are recorded.
+    // The blocks between them only carry data. Block 0 does not exist, but it
+    // counts too, so a refused call cannot write rows for free.
+    let lifecycle = body.seq <= 1 || body.end;
+    if !lifecycle {
+        return tenant_acs_import_on_this_host(&data, &body, None).await;
     }
-    audited(
-        &data,
-        key_index,
-        TenantEndpoint::AcsImportComplete,
-        &body.party_id,
-        response,
-    )
-    .await
+    if let Err(resp) = charge_tenant_key(&data, key.as_ref(), http_req.path()) {
+        return resp;
+    }
+    let on_abandoned =
+        (body.seq == 1).then(|| record_abandoned(&data, key.clone(), &body.party_id));
+    let response = tenant_acs_import_on_this_host(&data, &body, on_abandoned).await;
+    let endpoint = if body.end {
+        TenantEndpoint::AcsImportEnd
+    } else {
+        TenantEndpoint::AcsImportStart
+    };
+    audited(&data, key.as_ref(), endpoint, &body.party_id, response).await
 }
 
 async fn tenant_acs_import_on_this_host(
     data: &AppState,
     body: &TenantAcsImportRequest,
+    on_abandoned: Option<OnAbandoned>,
 ) -> HttpResponse {
     if body.seq == 0 {
         return HttpResponse::BadRequest().json(ErrorResponse {
@@ -913,6 +921,7 @@ async fn tenant_acs_import_on_this_host(
             &replication,
             &body.package_ids,
             block,
+            on_abandoned,
         )
         .await;
 
@@ -1008,7 +1017,7 @@ pub async fn tenant_threshold_prepare(
     data: web::Data<AppState>,
     body: web::Json<TenantThresholdRequest>,
 ) -> impl Responder {
-    if let Err(resp) = require_tenant_api_key(&http_req, &data) {
+    if let Err(resp) = tenant_caller(&http_req) {
         return resp;
     }
     match prepare_threshold(
@@ -1066,14 +1075,14 @@ pub async fn tenant_threshold_authorize(
     data: web::Data<AppState>,
     body: web::Json<TenantThresholdRequest>,
 ) -> impl Responder {
-    let key_index = match require_tenant_api_key(&http_req, &data) {
-        Ok(index) => index,
+    let key = match tenant_caller(&http_req) {
+        Ok(key) => key,
         Err(resp) => return resp,
     };
     let response = tenant_threshold_authorize_on_this_host(&data, &body).await;
     audited(
         &data,
-        key_index,
+        key.as_ref(),
         TenantEndpoint::ThresholdAuthorize,
         &body.party_id,
         response,
@@ -1141,14 +1150,14 @@ pub async fn tenant_threshold_execute(
     data: web::Data<AppState>,
     body: web::Json<TenantThresholdExecuteRequest>,
 ) -> impl Responder {
-    let key_index = match require_tenant_api_key(&http_req, &data) {
-        Ok(index) => index,
+    let key = match tenant_caller(&http_req) {
+        Ok(key) => key,
         Err(resp) => return resp,
     };
     let response = tenant_threshold_execute_on_this_host(&data, &body).await;
     audited(
         &data,
-        key_index,
+        key.as_ref(),
         TenantEndpoint::ThresholdExecute,
         &body.party_id,
         response,
@@ -1225,7 +1234,7 @@ pub async fn tenant_party_state(
     data: web::Data<AppState>,
     path: web::Path<String>,
 ) -> impl Responder {
-    if let Err(resp) = require_tenant_api_key(&http_req, &data) {
+    if let Err(resp) = tenant_caller(&http_req) {
         return resp;
     }
     let party_id = path.into_inner();
@@ -1286,8 +1295,8 @@ pub async fn tenant_unhost(
     data: web::Data<AppState>,
     body: web::Json<TenantUnhostRequest>,
 ) -> impl Responder {
-    let key_index = match require_tenant_api_key(&http_req, &data) {
-        Ok(index) => index,
+    let key = match tenant_caller(&http_req) {
+        Ok(key) => key,
         Err(resp) => return resp,
     };
     let body = body.into_inner();
@@ -1298,7 +1307,7 @@ pub async fn tenant_unhost(
             base_serial: body.base_serial,
             splice_cleanup: body.splice_cleanup.unwrap_or(true),
             requested_via: RequestedVia::Tenant,
-            requested_by: tenant_requester(key_index),
+            requested_by: tenant_requester(key.map(|k| k.index)),
             named_participant: Some(body.participant_id),
         },
     )
@@ -1322,7 +1331,7 @@ fn tenant_requester(key_index: Option<usize>) -> String {
 /// write may already have happened and the caller must still see its outcome.
 async fn audited(
     data: &AppState,
-    key_index: Option<usize>,
+    key: Option<&TenantKey>,
     endpoint: TenantEndpoint,
     party_id: &str,
     response: HttpResponse,
@@ -1343,21 +1352,48 @@ async fn audited(
         (response, None)
     };
     let call = NewTenantCall {
-        key_index,
+        key_index: key.map(|k| k.index),
+        key_id: key.map(|k| k.id.as_str()),
         endpoint,
         party_id: Some(party_id),
-        http_status: status.as_u16(),
+        http_status: Some(status.as_u16()),
         error: error.as_deref(),
     };
-    if let Err(e) = tenant_call_audit::insert_call(&data.db, &call).await {
+    record(&data.db, &call).await;
+    response
+}
+
+/// What an import that block 1 opens calls if it ends before its final block:
+/// it records the abandonment against the key that opened it.
+fn record_abandoned(data: &AppState, key: Option<TenantKey>, party_id: &str) -> OnAbandoned {
+    let db = data.db.clone();
+    let party_id = party_id.to_string();
+    Box::new(move |reason| {
+        Box::pin(async move {
+            let call = NewTenantCall {
+                key_index: key.as_ref().map(|k| k.index),
+                key_id: key.as_ref().map(|k| k.id.as_str()),
+                endpoint: TenantEndpoint::AcsImportAbandoned,
+                party_id: Some(&party_id),
+                http_status: None,
+                error: Some(&reason),
+            };
+            record(&db, &call).await;
+        })
+    })
+}
+
+/// Insert an audit row. A failure is logged and goes no further, because the
+/// Canton write may already have happened and the caller must still see its
+/// outcome.
+async fn record(db: &sqlx::SqlitePool, call: &NewTenantCall<'_>) {
+    if let Err(e) = tenant_call_audit::insert_call(db, call).await {
         tracing::error!(
-            endpoint = endpoint.as_str(),
-            %party_id,
-            http_status = status.as_u16(),
+            endpoint = call.endpoint.as_str(),
+            http_status = call.http_status,
             "failed to record a tenant call in the audit: {e:#}"
         );
     }
-    response
 }
 
 /// The text of a refusal: the `error` field of an `ErrorResponse`, or the raw
@@ -1403,7 +1439,7 @@ pub async fn tenant_local_party_adopt_prepare(
     data: web::Data<AppState>,
     body: web::Json<LocalPartyAdoptRequest>,
 ) -> impl Responder {
-    if let Err(resp) = require_tenant_api_key(&http_req, &data) {
+    if let Err(resp) = tenant_caller(&http_req) {
         return resp;
     }
     let public_key = match decode_public_key(&body.public_key) {
@@ -1451,14 +1487,14 @@ pub async fn tenant_local_party_adopt_execute(
     data: web::Data<AppState>,
     body: web::Json<LocalPartyAdoptExecuteRequest>,
 ) -> impl Responder {
-    let key_index = match require_tenant_api_key(&http_req, &data) {
-        Ok(index) => index,
+    let key = match tenant_caller(&http_req) {
+        Ok(key) => key,
         Err(resp) => return resp,
     };
     let response = tenant_local_party_adopt_execute_on_this_host(&data, &body).await;
     audited(
         &data,
-        key_index,
+        key.as_ref(),
         TenantEndpoint::LocalPartyAdoptExecute,
         &body.party_id,
         response,
@@ -1803,56 +1839,67 @@ mod tests {
             }))
     }
 
-    /// Refused at validation, so it reaches no Canton.
-    fn import_block_zero() -> actix_web::test::TestRequest {
+    /// A block between the first and the last. Refused at validation, so it
+    /// reaches no Canton.
+    fn import_data_block() -> actix_web::test::TestRequest {
         actix_web::test::TestRequest::post()
             .uri("/v0/tenant/add-hosts/import")
             .insert_header(("Authorization", "Bearer key"))
             .set_json(serde_json::json!({
                 "party_id": "alice::1220aa",
                 "base_serial": 1,
-                "seq": 0,
-                "chunk": "",
+                "seq": 2,
+                "chunk": "not base64!",
                 "end": false,
             }))
     }
 
+    /// The middleware spends the budget, and the handler must not spend it a
+    /// second time.
     #[actix_web::test]
-    async fn a_metered_call_past_the_limit_answers_429() {
+    async fn a_call_is_charged_once() {
         let app = actix_web::test::init_service(
             actix_web::App::new()
-                .app_data(metered_state(1).await)
+                .app_data(metered_state(2).await)
+                .wrap(crate::server::middleware::AuthMiddleware)
                 .service(tenant_prepare),
         )
         .await;
 
-        let first = actix_web::test::call_service(&app, prepare_without_peers().to_request()).await;
-        assert_eq!(first.status(), actix_web::http::StatusCode::BAD_REQUEST);
+        for i in 0..2 {
+            let response =
+                actix_web::test::call_service(&app, prepare_without_peers().to_request()).await;
+            assert_eq!(
+                response.status(),
+                actix_web::http::StatusCode::BAD_REQUEST,
+                "call {i} is within a limit of 2"
+            );
+        }
 
-        let second =
-            actix_web::test::call_service(&app, prepare_without_peers().to_request()).await;
+        let third = actix_web::test::call_service(&app, prepare_without_peers().to_request()).await;
         assert_eq!(
-            second.status(),
+            third.status(),
             actix_web::http::StatusCode::TOO_MANY_REQUESTS
         );
         assert!(
-            second
+            third
                 .headers()
                 .get(actix_web::http::header::RETRY_AFTER)
                 .is_some(),
             "a 429 must say how long to wait"
         );
-        let body: serde_json::Value = actix_web::test::read_body_json(second).await;
+        let body: serde_json::Value = actix_web::test::read_body_json(third).await;
         assert!(body["error"].is_string(), "{body}");
     }
 
-    /// One ACS copy sends a block per call, so the import must not spend the
-    /// budget the other calls share.
+    /// One ACS copy sends a block per call, so the blocks between the first
+    /// and the last must not spend the budget the other calls share.
     #[actix_web::test]
-    async fn the_acs_import_is_not_metered() {
+    async fn import_data_blocks_are_not_metered() {
         let app = actix_web::test::init_service(
             actix_web::App::new()
                 .app_data(metered_state(1).await)
+                .wrap(crate::server::middleware::AuthMiddleware)
                 .service(tenant_prepare)
                 .service(tenant_acs_import),
         )
@@ -1860,11 +1907,11 @@ mod tests {
 
         for i in 0..3 {
             let response =
-                actix_web::test::call_service(&app, import_block_zero().to_request()).await;
+                actix_web::test::call_service(&app, import_data_block().to_request()).await;
             assert_eq!(
                 response.status(),
                 actix_web::http::StatusCode::BAD_REQUEST,
-                "import {i}"
+                "block {i}"
             );
         }
         let prepare =
@@ -1872,7 +1919,7 @@ mod tests {
         assert_eq!(
             prepare.status(),
             actix_web::http::StatusCode::BAD_REQUEST,
-            "the imports must have left the whole budget"
+            "the data blocks must have left the whole budget"
         );
     }
 }
@@ -1886,13 +1933,19 @@ mod audit_tests {
     use sqlx::SqlitePool;
 
     use super::*;
-    use crate::db::MIGRATOR;
+    use crate::{
+        db::MIGRATOR,
+        server::{
+            middleware::AuthMiddleware,
+            tenant_call_audit::{PARTY_ID_CAP, TenantCallAuditRow},
+        },
+    };
 
     const PARTY: &str = "alice::1220aa";
 
-    /// A state on `db` that checks the tenant keys `keys`, as a production
-    /// node does.
-    fn keyed_state(db: SqlitePool, keys: &[&str]) -> web::Data<AppState> {
+    /// A state on `db` that checks the tenant keys `keys` against a budget of
+    /// `limit` calls per minute, as a production node does.
+    fn keyed_state(db: SqlitePool, keys: &[&str], limit: u32) -> web::Data<AppState> {
         let Ok(mut state) =
             std::sync::Arc::try_unwrap(AppState::for_test_on(None, db).into_inner())
         else {
@@ -1900,6 +1953,7 @@ mod audit_tests {
         };
         state.test_mode = false;
         state.config.tenant_api_keys = keys.iter().map(ToString::to_string).collect();
+        state.config.tenant_rate_limit_per_minute = limit;
         web::Data::new(state)
     }
 
@@ -1907,7 +1961,7 @@ mod audit_tests {
         Ok(tenant_call_audit::list(db, None, 100)
             .await?
             .into_iter()
-            .map(|row| row.into_entry())
+            .map(TenantCallAuditRow::into_entry)
             .collect())
     }
 
@@ -1929,15 +1983,15 @@ mod audit_tests {
             .set_json(mismatched_add_hosts())
     }
 
-    fn import(end: bool) -> actix_test::TestRequest {
+    fn import(party_id: &str, seq: u64, chunk: &str, end: bool) -> actix_test::TestRequest {
         actix_test::TestRequest::post()
             .uri("/v0/tenant/add-hosts/import")
             .insert_header(("Authorization", "Bearer key"))
             .set_json(json!({
-                "party_id": PARTY,
+                "party_id": party_id,
                 "base_serial": 1,
-                "seq": 0,
-                "chunk": "",
+                "seq": seq,
+                "chunk": chunk,
                 "end": end,
             }))
     }
@@ -1946,10 +2000,11 @@ mod audit_tests {
     async fn a_refused_add_hosts_execute_is_recorded_with_its_error(
         db: SqlitePool,
     ) -> anyhow::Result<()> {
-        let state = keyed_state(db.clone(), &["key"]);
+        let state = keyed_state(db.clone(), &["key"], 0);
         let app = actix_test::init_service(
             App::new()
                 .app_data(state.clone())
+                .wrap(AuthMiddleware)
                 .service(tenant_add_hosts_execute),
         )
         .await;
@@ -1972,7 +2027,7 @@ mod audit_tests {
         let row = &rows[0];
         assert_eq!(row.endpoint, "/v0/tenant/add-hosts/execute");
         assert_eq!(row.party_id.as_deref(), Some(PARTY));
-        assert_eq!(row.http_status, 400);
+        assert_eq!(row.http_status, Some(400));
         assert_eq!(row.key_index, Some(0));
         let body: serde_json::Value = serde_json::from_slice(&body)?;
         assert_eq!(row.error.as_deref(), body["error"].as_str());
@@ -1991,7 +2046,8 @@ mod audit_tests {
     async fn an_unauthenticated_call_leaves_no_row(db: SqlitePool) -> anyhow::Result<()> {
         let app = actix_test::init_service(
             App::new()
-                .app_data(keyed_state(db.clone(), &["key"]))
+                .app_data(keyed_state(db.clone(), &["key"], 0))
+                .wrap(AuthMiddleware)
                 .service(tenant_add_hosts_execute),
         )
         .await;
@@ -2004,47 +2060,159 @@ mod audit_tests {
         Ok(())
     }
 
+    /// The index changes when the key list is reordered, so the row also keeps
+    /// the key's id, which does not. Neither is the key.
     #[sqlx::test(migrator = "MIGRATOR")]
-    async fn the_key_index_is_recorded_and_the_key_is_not(db: SqlitePool) -> anyhow::Result<()> {
-        let app = actix_test::init_service(
-            App::new()
-                .app_data(keyed_state(db.clone(), &["first", "second"]))
-                .service(tenant_add_hosts_execute),
-        )
-        .await;
-
-        actix_test::call_service(&app, add_hosts_execute("second").to_request()).await;
+    async fn the_key_is_named_by_index_and_id_and_not_stored(db: SqlitePool) -> anyhow::Result<()> {
+        for keys in [["first", "second"], ["second", "first"]] {
+            let app = actix_test::init_service(
+                App::new()
+                    .app_data(keyed_state(db.clone(), &keys, 0))
+                    .wrap(AuthMiddleware)
+                    .service(tenant_add_hosts_execute),
+            )
+            .await;
+            actix_test::call_service(&app, add_hosts_execute("second").to_request()).await;
+        }
 
         let rows = audit_rows(&db).await?;
-        assert_eq!(rows.len(), 1, "{rows:?}");
-        assert_eq!(rows[0].key_index, Some(1));
-        let stored = serde_json::to_string(&rows[0])?;
-        assert!(!stored.contains("second"), "{stored}");
+        assert_eq!(rows.len(), 2, "{rows:?}");
+        // Newest first: the reordered list put the key at index 0.
+        assert_eq!(rows[0].key_index, Some(0));
+        assert_eq!(rows[1].key_index, Some(1));
+        let id = crate::server::middleware::tenant_key_id("second");
+        assert_eq!(rows[0].key_id.as_deref(), Some(id.as_str()));
+        assert_eq!(rows[1].key_id, rows[0].key_id);
+        for row in &rows {
+            let stored = serde_json::to_string(row)?;
+            assert!(!stored.contains("second"), "{stored}");
+        }
         Ok(())
     }
 
-    /// The blocks before the last only carry data. The last one finishes the
-    /// import, so only it is recorded.
+    /// Block 1 opens the import and the final block finishes it, so both are
+    /// recorded. The blocks between them only carry data.
     #[sqlx::test(migrator = "MIGRATOR")]
-    async fn only_the_final_import_block_is_recorded(db: SqlitePool) -> anyhow::Result<()> {
+    async fn the_import_records_its_start_and_its_end(db: SqlitePool) -> anyhow::Result<()> {
         let app = actix_test::init_service(
             App::new()
-                .app_data(keyed_state(db.clone(), &["key"]))
+                .app_data(keyed_state(db.clone(), &["key"], 0))
+                .wrap(AuthMiddleware)
                 .service(tenant_acs_import),
         )
         .await;
 
-        let data_block = actix_test::call_service(&app, import(false).to_request()).await;
+        let data_block =
+            actix_test::call_service(&app, import(PARTY, 2, "not base64!", false).to_request())
+                .await;
         assert_eq!(data_block.status(), StatusCode::BAD_REQUEST);
         assert!(audit_rows(&db).await?.is_empty());
 
-        let final_block = actix_test::call_service(&app, import(true).to_request()).await;
-        assert_eq!(final_block.status(), StatusCode::BAD_REQUEST);
+        // A chunk that is not base64 stops block 1 before any Canton call.
+        let start =
+            actix_test::call_service(&app, import(PARTY, 1, "not base64!", false).to_request())
+                .await;
+        assert_eq!(start.status(), StatusCode::BAD_REQUEST);
+        let end = actix_test::call_service(&app, import(PARTY, 0, "", true).to_request()).await;
+        assert_eq!(end.status(), StatusCode::BAD_REQUEST);
+
+        let rows = audit_rows(&db).await?;
+        let endpoints: Vec<&str> = rows.iter().map(|r| r.endpoint.as_str()).collect();
+        assert_eq!(
+            endpoints,
+            [
+                "/v0/tenant/add-hosts/import (end)",
+                "/v0/tenant/add-hosts/import (start)"
+            ]
+        );
+        assert!(rows.iter().all(|r| r.party_id.as_deref() == Some(PARTY)));
+        assert!(rows.iter().all(|r| r.http_status == Some(400)));
+        Ok(())
+    }
+
+    /// The blocks that start or end a copy are the ones that write a row, so
+    /// they spend the budget. Past it, the call gets a 429 and writes nothing.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn an_import_block_that_writes_a_row_spends_the_budget(
+        db: SqlitePool,
+    ) -> anyhow::Result<()> {
+        let app = actix_test::init_service(
+            App::new()
+                .app_data(keyed_state(db.clone(), &["key"], 1))
+                .wrap(AuthMiddleware)
+                .service(tenant_acs_import),
+        )
+        .await;
+
+        let first = actix_test::call_service(&app, import(PARTY, 0, "", true).to_request()).await;
+        assert_eq!(first.status(), StatusCode::BAD_REQUEST);
+        let second = actix_test::call_service(&app, import(PARTY, 0, "", true).to_request()).await;
+        assert_eq!(second.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(audit_rows(&db).await?.len(), 1);
+
+        // The blocks between still pass.
+        let data_block =
+            actix_test::call_service(&app, import(PARTY, 2, "not base64!", false).to_request())
+                .await;
+        assert_eq!(data_block.status(), StatusCode::BAD_REQUEST);
+        Ok(())
+    }
+
+    /// The JSON limit is 100 MiB, and the caller chooses the party id.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn an_over_long_party_id_is_stored_capped(db: SqlitePool) -> anyhow::Result<()> {
+        let app = actix_test::init_service(
+            App::new()
+                .app_data(keyed_state(db.clone(), &["key"], 0))
+                .wrap(AuthMiddleware)
+                .service(tenant_acs_import),
+        )
+        .await;
+        let party = "p".repeat(100_000);
+
+        let response =
+            actix_test::call_service(&app, import(&party, 0, "", true).to_request()).await;
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
         let rows = audit_rows(&db).await?;
         assert_eq!(rows.len(), 1, "{rows:?}");
-        assert_eq!(rows[0].endpoint, "/v0/tenant/add-hosts/import");
-        assert_eq!(rows[0].party_id.as_deref(), Some(PARTY));
-        assert_eq!(rows[0].http_status, 400);
+        let Some(stored) = rows[0].party_id.as_deref() else {
+            panic!("the row must keep the capped party id");
+        };
+        assert!(stored.starts_with(&"p".repeat(PARTY_ID_CAP)), "{stored}");
+        assert!(stored.ends_with("[truncated]"), "{stored}");
+        assert!(stored.chars().count() < PARTY_ID_CAP + 20, "{stored}");
+        Ok(())
+    }
+
+    /// An import that block 1 opened and that ended before its final block is
+    /// recorded against the key that opened it.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn an_abandoned_import_is_recorded_against_its_key(db: SqlitePool) -> anyhow::Result<()> {
+        let state = keyed_state(db.clone(), &["key"], 0);
+        let key = TenantKey {
+            index: 0,
+            id: crate::server::middleware::tenant_key_id("key"),
+        };
+
+        record_abandoned(&state, Some(key.clone()), PARTY)(
+            "the reaper ended the idle copy: the wallet stopped relaying".to_string(),
+        )
+        .await;
+
+        let rows = audit_rows(&db).await?;
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        let row = &rows[0];
+        assert_eq!(row.endpoint, "/v0/tenant/add-hosts/import (abandoned)");
+        assert_eq!(row.party_id.as_deref(), Some(PARTY));
+        assert_eq!(row.http_status, None, "no call answered");
+        assert_eq!(row.key_index, Some(0));
+        assert_eq!(row.key_id.as_deref(), Some(key.id.as_str()));
+        assert!(
+            row.error.as_deref().is_some_and(|e| e.contains("reaper")),
+            "{:?}",
+            row.error
+        );
         Ok(())
     }
 
@@ -2054,7 +2222,8 @@ mod audit_tests {
     async fn execute_records_the_party_the_call_named(db: SqlitePool) -> anyhow::Result<()> {
         let app = actix_test::init_service(
             App::new()
-                .app_data(keyed_state(db.clone(), &["key"]))
+                .app_data(keyed_state(db.clone(), &["key"], 0))
+                .wrap(AuthMiddleware)
                 .service(tenant_execute),
         )
         .await;
@@ -2086,7 +2255,8 @@ mod audit_tests {
     async fn a_failed_audit_write_does_not_fail_the_call(db: SqlitePool) -> anyhow::Result<()> {
         let app = actix_test::init_service(
             App::new()
-                .app_data(keyed_state(db.clone(), &["key"]))
+                .app_data(keyed_state(db.clone(), &["key"], 0))
+                .wrap(AuthMiddleware)
                 .service(tenant_add_hosts_execute),
         )
         .await;

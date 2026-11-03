@@ -185,8 +185,9 @@ answers `409` while the first call still runs, and `200` once the host is gone.
 
 Each host limits the calls per minute that one tenant key may make. The
 default is 120. A call past the limit returns `Error::Api` with `status: 429`.
-The client does not retry it. The message gives the seconds to wait. The ACS
-copy calls in `add_hosts` do not count toward the limit.
+The client does not retry it. The message gives the seconds to wait. In the
+ACS copy that `add_hosts` runs, only the first and the final import block count
+toward the limit.
 
 ## Keys the wallet does not hold
 
