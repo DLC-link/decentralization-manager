@@ -833,11 +833,7 @@ async fn local_package_ids(config: &NodeConfig) -> Result<HashSet<String>> {
 pub async fn check_vetted_packages_held(config: &NodeConfig) -> Result {
     let vetted = fetch_vetted_package_ids(config, config.participant_id()).await?;
     let held = local_package_ids(config).await?;
-    let missing: Vec<&str> = vetted
-        .iter()
-        .map(String::as_str)
-        .filter(|id| !held.contains(*id))
-        .collect();
+    let missing = vetted_not_held(&vetted, &held);
     if !missing.is_empty() {
         anyhow::bail!(
             "this participant has vetted {n} package(s) it does not hold, as after a restore \
@@ -847,6 +843,15 @@ pub async fn check_vetted_packages_held(config: &NodeConfig) -> Result {
         );
     }
     Ok(())
+}
+
+/// The vetted package ids missing from `held`, in vetting order.
+fn vetted_not_held<'a>(vetted: &'a [String], held: &HashSet<String>) -> Vec<&'a str> {
+    vetted
+        .iter()
+        .map(String::as_str)
+        .filter(|id| !held.contains(*id))
+        .collect()
 }
 
 /// Why one `ImportPartyAcs` attempt did not complete. Both carry how many
@@ -1212,5 +1217,40 @@ mod tests {
             &[connected("other", false), connected(alias, true)],
             alias,
         ));
+    }
+
+    fn ids(ids: &[&str]) -> Vec<String> {
+        ids.iter().map(|id| id.to_string()).collect()
+    }
+
+    #[test]
+    fn vetted_not_held_names_each_missing_package() {
+        let vetted = ids(&["a", "b", "c"]);
+        let held: HashSet<String> = ids(&["b"]).into_iter().collect();
+
+        assert_eq!(vetted_not_held(&vetted, &held), vec!["a", "c"]);
+    }
+
+    #[test]
+    fn vetted_not_held_is_empty_when_every_vetted_package_is_held() {
+        let vetted = ids(&["a", "b"]);
+        let held: HashSet<String> = ids(&["a", "b"]).into_iter().collect();
+
+        assert!(vetted_not_held(&vetted, &held).is_empty());
+    }
+
+    #[test]
+    fn vetted_not_held_ignores_packages_held_but_not_vetted() {
+        let vetted = ids(&["a"]);
+        let held: HashSet<String> = ids(&["a", "unvetted"]).into_iter().collect();
+
+        assert!(vetted_not_held(&vetted, &held).is_empty());
+    }
+
+    #[test]
+    fn vetted_not_held_is_empty_when_nothing_is_vetted() {
+        let held: HashSet<String> = ids(&["a"]).into_iter().collect();
+
+        assert!(vetted_not_held(&[], &held).is_empty());
     }
 }
