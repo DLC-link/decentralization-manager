@@ -277,7 +277,7 @@ fn admin_credentials(
 ) -> std::result::Result<(&str, &str), HttpResponse> {
     match (
         given(&body.admin_client_id),
-        given(&body.admin_client_secret),
+        given_secret(&body.admin_client_secret),
     ) {
         (Some(id), Some(secret)) => Ok((id, secret)),
         _ => Err(bad_request(
@@ -1140,6 +1140,19 @@ mod tests {
             result.as_ref().is_err_and(|e| e.ends_with("are required")),
             "{result:?}"
         );
+    }
+
+    #[test]
+    fn admin_credentials_keep_the_secret_as_sent() {
+        let body = NodeIdentityRequest {
+            admin_client_id: Some(" validator-admin ".to_string()),
+            admin_client_secret: Some(" s3cret ".to_string()),
+            ..NodeIdentityRequest::default()
+        };
+
+        let credentials = admin_credentials(&body).ok();
+
+        assert_eq!(credentials, Some(("validator-admin", " s3cret ")));
     }
 
     #[sqlx::test(migrator = "crate::db::MIGRATOR")]
