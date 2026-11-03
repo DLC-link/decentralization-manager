@@ -30,6 +30,8 @@ interface NodeIdentityCardProps {
   error: string | null;
   loading: boolean;
   onRefresh: () => void;
+  /** Insecure mode: setup takes no login. */
+  testMode?: boolean;
 }
 
 const LABEL_SX = { fontSize: "0.78rem", color: "text.secondary" } as const;
@@ -74,7 +76,13 @@ const describePeer = (peer: NodeIdentityPeer): string => {
  * The Config tab's Node identity block: the party this node acts as, the
  * login that acts as it, and whether each peer's node party checks out.
  */
-export const NodeIdentityCard = ({ status, error, loading, onRefresh }: NodeIdentityCardProps) => {
+export const NodeIdentityCard = ({
+  status,
+  error,
+  loading,
+  onRefresh,
+  testMode = false,
+}: NodeIdentityCardProps) => {
   const { showSnackbar } = useSnackbar();
   const [dialogOpen, setDialogOpen] = useState(false);
   const identity = status?.identity;
@@ -134,7 +142,7 @@ export const NodeIdentityCard = ({ status, error, loading, onRefresh }: NodeIden
             </span>
           </Tooltip>
           <Button size="small" variant="outlined" onClick={() => setDialogOpen(true)}>
-            {identity ? "Change login" : "Set up"}
+            {!identity ? "Set up" : testMode ? "Set up again" : "Change login"}
           </Button>
         </Box>
       </Box>
@@ -206,6 +214,7 @@ export const NodeIdentityCard = ({ status, error, loading, onRefresh }: NodeIden
         onClose={() => setDialogOpen(false)}
         onSaved={handleSaved}
         login={identity?.login}
+        testMode={testMode}
       />
     </Box>
   );

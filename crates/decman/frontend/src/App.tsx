@@ -1540,6 +1540,7 @@ const App = () => {
                   error={nodeIdentity.error}
                   loading={nodeIdentity.loading}
                   onRefresh={nodeIdentity.refresh}
+                  testMode={nodeConfig.test_mode}
                 />
               </Box>
               <Divider />

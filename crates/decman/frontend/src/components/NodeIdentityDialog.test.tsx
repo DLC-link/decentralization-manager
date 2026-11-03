@@ -147,6 +147,19 @@ describe("NodeIdentityDialog", () => {
     expect(valueOf("Node Client ID")).toBe("node-m2m");
   });
 
+  it("posts an empty request in insecure mode", async () => {
+    const submitted = stubBackend();
+    const onSaved = vi.fn();
+    render(<NodeIdentityDialog open onClose={() => {}} onSaved={onSaved} testMode />);
+
+    expect(screen.queryByLabelText("Node Client ID")).toBeNull();
+    expect(screen.queryByLabelText("Admin Client Secret")).toBeNull();
+    fireEvent.click(saveButton());
+    await waitFor(() => expect(onSaved).toHaveBeenCalledWith(RESPONSE));
+
+    expect(submitted).toEqual([{}]);
+  });
+
   it("shows the backend's error and keeps the dialog open", async () => {
     stubBackend(() => Response.json({ error: "Node login Auth0 auth failed" }, { status: 422 }));
     const onClose = vi.fn();

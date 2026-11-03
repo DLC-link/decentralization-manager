@@ -47,10 +47,20 @@ const IDENTITY: StoredNodeIdentity = {
   updated_at: 1_790_000_000,
 };
 
-const renderCard = (status: NodeIdentityStatusResponse | null, error: string | null = null) =>
+const renderCard = (
+  status: NodeIdentityStatusResponse | null,
+  error: string | null = null,
+  testMode = false,
+) =>
   render(
     <SnackbarProvider>
-      <NodeIdentityCard status={status} error={error} loading={false} onRefresh={() => {}} />
+      <NodeIdentityCard
+        status={status}
+        error={error}
+        loading={false}
+        onRefresh={() => {}}
+        testMode={testMode}
+      />
     </SnackbarProvider>,
   );
 
@@ -79,6 +89,17 @@ describe("NodeIdentityCard", () => {
 
     expect(screen.getByText("unsafe token")).toBeTruthy();
     expect(screen.getByText("Unsafe token (insecure mode)")).toBeTruthy();
+  });
+
+  it("offers to set up again in insecure mode, not to change the login", () => {
+    renderCard(
+      { ...STATUS, identity: { ...IDENTITY, login: undefined, token: { status: "mock" } } },
+      null,
+      true,
+    );
+
+    expect(screen.getByRole("button", { name: "Set up again" })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Change login" })).toBeNull();
   });
 
   it("shows why the login failed", () => {
