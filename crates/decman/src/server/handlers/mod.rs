@@ -7,6 +7,7 @@ mod keys;
 mod parties;
 mod party_config;
 mod tenant;
+mod tenant_call_audit;
 mod token_standard;
 mod unhost;
 mod workflows;
@@ -52,6 +53,7 @@ pub(crate) use tenant::{
     tenant_local_party_adopt_prepare, tenant_party_state, tenant_prepare, tenant_status,
     tenant_threshold_authorize, tenant_threshold_execute, tenant_threshold_prepare, tenant_unhost,
 };
+pub(crate) use tenant_call_audit::get_tenant_call_audit;
 pub(crate) use token_standard::{
     get_block_list_shards_handler, get_burn_requests_handler, get_credential_offers_handler,
     get_credentials_handler, get_holdings_handler, get_instruments_handler,

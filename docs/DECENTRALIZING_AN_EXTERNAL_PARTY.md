@@ -351,6 +351,9 @@ the checks, the steps and the errors.
 
 ## If something goes wrong
 
+The host operator can read each tenant call that wrote on the host, with its
+status and error, at `GET /tenant-call-audit`.
+
 | Symptom | Cause | Do this |
 |---|---|---|
 | `401` | The key is not one of that host's keys, or the host has no keys set | Send that host its own key. Check `DECPM_TENANT_API_KEYS` on the host |

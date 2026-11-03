@@ -25,7 +25,7 @@
 //! block read and the block import, are exempt, because one copy sends many
 //! blocks.
 
-use actix_web::{HttpRequest, HttpResponse, Responder, get, post, web};
+use actix_web::{HttpRequest, HttpResponse, Responder, body::MessageBody, get, post, web};
 use base64::{Engine, engine::general_purpose::STANDARD};
 
 use crate::{
@@ -33,6 +33,7 @@ use crate::{
     server::{
         AppState,
         middleware::{require_tenant_api_key, require_tenant_api_key_unmetered},
+        tenant_call_audit::{self, NewTenantCall, TenantEndpoint},
         types::{
             ErrorResponse, ExternalPartyUnhostResponse, LocalPartyAdoptExecuteRequest,
             LocalPartyAdoptRequest, TenantAcsBlockResponse, TenantAcsImportRequest,
@@ -170,9 +171,23 @@ pub async fn tenant_execute(
     data: web::Data<AppState>,
     body: web::Json<TenantExecuteRequest>,
 ) -> impl Responder {
-    if let Err(resp) = require_tenant_api_key(&http_req, &data) {
-        return resp;
-    }
+    let key_index = match require_tenant_api_key(&http_req, &data) {
+        Ok(index) => index,
+        Err(resp) => return resp,
+    };
+    let response = tenant_execute_on_this_host(&data, &body).await;
+    let party_id = format!("{}::{}", body.party_hint, body.signed_by);
+    audited(
+        &data,
+        key_index,
+        TenantEndpoint::Execute,
+        &party_id,
+        response,
+    )
+    .await
+}
+
+async fn tenant_execute_on_this_host(data: &AppState, body: &TenantExecuteRequest) -> HttpResponse {
     if let Err(msg) = validate_party_id_prefix(&body.party_hint) {
         return HttpResponse::BadRequest().json(ErrorResponse { error: msg });
     }
@@ -425,9 +440,25 @@ pub async fn tenant_add_hosts_authorize(
     data: web::Data<AppState>,
     body: web::Json<TenantAddHostsRequest>,
 ) -> impl Responder {
-    if let Err(resp) = require_tenant_api_key(&http_req, &data) {
-        return resp;
-    }
+    let key_index = match require_tenant_api_key(&http_req, &data) {
+        Ok(index) => index,
+        Err(resp) => return resp,
+    };
+    let response = tenant_add_hosts_authorize_on_this_host(&data, &body).await;
+    audited(
+        &data,
+        key_index,
+        TenantEndpoint::AddHostsAuthorize,
+        &body.party_id,
+        response,
+    )
+    .await
+}
+
+async fn tenant_add_hosts_authorize_on_this_host(
+    data: &AppState,
+    body: &TenantAddHostsRequest,
+) -> HttpResponse {
     if body.new_hosts.is_empty() {
         return HttpResponse::BadRequest().json(ErrorResponse {
             error: "new_hosts must name at least one participant to add".to_string(),
@@ -499,10 +530,25 @@ pub async fn tenant_add_hosts_execute(
     data: web::Data<AppState>,
     body: web::Json<TenantAddHostsExecuteRequest>,
 ) -> impl Responder {
-    if let Err(resp) = require_tenant_api_key(&http_req, &data) {
-        return resp;
-    }
+    let key_index = match require_tenant_api_key(&http_req, &data) {
+        Ok(index) => index,
+        Err(resp) => return resp,
+    };
+    let response = tenant_add_hosts_execute_on_this_host(&data, &body).await;
+    audited(
+        &data,
+        key_index,
+        TenantEndpoint::AddHostsExecute,
+        &body.party_id,
+        response,
+    )
+    .await
+}
 
+async fn tenant_add_hosts_execute_on_this_host(
+    data: &AppState,
+    body: &TenantAddHostsExecuteRequest,
+) -> HttpResponse {
     let topology_transactions =
         match decode_all(&body.topology_transactions, "topology transaction") {
             Ok(v) => v,
@@ -749,9 +795,30 @@ pub async fn tenant_acs_import(
     body: web::Json<TenantAcsImportRequest>,
 ) -> impl Responder {
     // Unmetered: one ACS copy sends many blocks in a row.
-    if let Err(resp) = require_tenant_api_key_unmetered(&http_req, &data) {
-        return resp;
+    let key_index = match require_tenant_api_key_unmetered(&http_req, &data) {
+        Ok(index) => index,
+        Err(resp) => return resp,
+    };
+    let response = tenant_acs_import_on_this_host(&data, &body).await;
+    // The final block finishes the import and clears the marker. The blocks
+    // before it only carry data, so they are not recorded.
+    if !body.end {
+        return response;
     }
+    audited(
+        &data,
+        key_index,
+        TenantEndpoint::AcsImportComplete,
+        &body.party_id,
+        response,
+    )
+    .await
+}
+
+async fn tenant_acs_import_on_this_host(
+    data: &AppState,
+    body: &TenantAcsImportRequest,
+) -> HttpResponse {
     if body.seq == 0 {
         return HttpResponse::BadRequest().json(ErrorResponse {
             error: "seq is 1-based; block 0 does not exist".to_string(),
@@ -999,10 +1066,25 @@ pub async fn tenant_threshold_authorize(
     data: web::Data<AppState>,
     body: web::Json<TenantThresholdRequest>,
 ) -> impl Responder {
-    if let Err(resp) = require_tenant_api_key(&http_req, &data) {
-        return resp;
-    }
+    let key_index = match require_tenant_api_key(&http_req, &data) {
+        Ok(index) => index,
+        Err(resp) => return resp,
+    };
+    let response = tenant_threshold_authorize_on_this_host(&data, &body).await;
+    audited(
+        &data,
+        key_index,
+        TenantEndpoint::ThresholdAuthorize,
+        &body.party_id,
+        response,
+    )
+    .await
+}
 
+async fn tenant_threshold_authorize_on_this_host(
+    data: &AppState,
+    body: &TenantThresholdRequest,
+) -> HttpResponse {
     let base_serial = match authorize_threshold(
         &data.config,
         &body.party_id,
@@ -1059,9 +1141,25 @@ pub async fn tenant_threshold_execute(
     data: web::Data<AppState>,
     body: web::Json<TenantThresholdExecuteRequest>,
 ) -> impl Responder {
-    if let Err(resp) = require_tenant_api_key(&http_req, &data) {
-        return resp;
-    }
+    let key_index = match require_tenant_api_key(&http_req, &data) {
+        Ok(index) => index,
+        Err(resp) => return resp,
+    };
+    let response = tenant_threshold_execute_on_this_host(&data, &body).await;
+    audited(
+        &data,
+        key_index,
+        TenantEndpoint::ThresholdExecute,
+        &body.party_id,
+        response,
+    )
+    .await
+}
+
+async fn tenant_threshold_execute_on_this_host(
+    data: &AppState,
+    body: &TenantThresholdExecuteRequest,
+) -> HttpResponse {
     let topology_transactions =
         match decode_all(&body.topology_transactions, "topology transaction") {
             Ok(v) => v,
@@ -1217,6 +1315,61 @@ fn tenant_requester(key_index: Option<usize>) -> String {
     }
 }
 
+/// Record a write call in the tenant call audit, and return its response
+/// unchanged.
+///
+/// A failed insert is logged and does not fail the call, because the Canton
+/// write may already have happened and the caller must still see its outcome.
+async fn audited(
+    data: &AppState,
+    key_index: Option<usize>,
+    endpoint: TenantEndpoint,
+    party_id: &str,
+    response: HttpResponse,
+) -> HttpResponse {
+    let status = response.status();
+    let (response, error) = if status.is_client_error() || status.is_server_error() {
+        let (head, body) = response.into_parts();
+        match body.try_into_bytes() {
+            Ok(bytes) => {
+                let error = error_text(&bytes);
+                (head.set_body(bytes).map_into_boxed_body(), error)
+            }
+            // A streamed body cannot be read without consuming it. The
+            // handlers here answer with JSON, which is never streamed.
+            Err(body) => (head.set_body(body), None),
+        }
+    } else {
+        (response, None)
+    };
+    let call = NewTenantCall {
+        key_index,
+        endpoint,
+        party_id: Some(party_id),
+        http_status: status.as_u16(),
+        error: error.as_deref(),
+    };
+    if let Err(e) = tenant_call_audit::insert_call(&data.db, &call).await {
+        tracing::error!(
+            endpoint = endpoint.as_str(),
+            %party_id,
+            http_status = status.as_u16(),
+            "failed to record a tenant call in the audit: {e:#}"
+        );
+    }
+    response
+}
+
+/// The text of a refusal: the `error` field of an `ErrorResponse`, or the raw
+/// body when it is not one.
+fn error_text(body: &[u8]) -> Option<String> {
+    let text = serde_json::from_slice::<serde_json::Value>(body)
+        .ok()
+        .and_then(|json| json.get("error")?.as_str().map(str::to_owned))
+        .unwrap_or_else(|| String::from_utf8_lossy(body).into_owned());
+    (!text.is_empty()).then_some(text)
+}
+
 /// Block size for draining and re-serving a snapshot.
 const EXPORT_BLOCK_SIZE: usize = 1024 * 1024;
 
@@ -1298,9 +1451,25 @@ pub async fn tenant_local_party_adopt_execute(
     data: web::Data<AppState>,
     body: web::Json<LocalPartyAdoptExecuteRequest>,
 ) -> impl Responder {
-    if let Err(resp) = require_tenant_api_key(&http_req, &data) {
-        return resp;
-    }
+    let key_index = match require_tenant_api_key(&http_req, &data) {
+        Ok(index) => index,
+        Err(resp) => return resp,
+    };
+    let response = tenant_local_party_adopt_execute_on_this_host(&data, &body).await;
+    audited(
+        &data,
+        key_index,
+        TenantEndpoint::LocalPartyAdoptExecute,
+        &body.party_id,
+        response,
+    )
+    .await
+}
+
+async fn tenant_local_party_adopt_execute_on_this_host(
+    data: &AppState,
+    body: &LocalPartyAdoptExecuteRequest,
+) -> HttpResponse {
     let public_key = match decode_public_key(&body.public_key) {
         Ok(key) => key,
         Err(resp) => return resp,
@@ -1705,5 +1874,234 @@ mod tests {
             actix_web::http::StatusCode::BAD_REQUEST,
             "the imports must have left the whole budget"
         );
+    }
+}
+
+/// Every request here is refused at validation, before any Canton call, so
+/// the tests need no participant.
+#[cfg(test)]
+mod audit_tests {
+    use actix_web::{App, http::StatusCode, test as actix_test};
+    use serde_json::json;
+    use sqlx::SqlitePool;
+
+    use super::*;
+    use crate::db::MIGRATOR;
+
+    const PARTY: &str = "alice::1220aa";
+
+    /// A state on `db` that checks the tenant keys `keys`, as a production
+    /// node does.
+    fn keyed_state(db: SqlitePool, keys: &[&str]) -> web::Data<AppState> {
+        let Ok(mut state) =
+            std::sync::Arc::try_unwrap(AppState::for_test_on(None, db).into_inner())
+        else {
+            panic!("the freshly built state has no other owner");
+        };
+        state.test_mode = false;
+        state.config.tenant_api_keys = keys.iter().map(ToString::to_string).collect();
+        web::Data::new(state)
+    }
+
+    async fn audit_rows(db: &SqlitePool) -> anyhow::Result<Vec<common::api::TenantCallAuditEntry>> {
+        Ok(tenant_call_audit::list(db, None, 100)
+            .await?
+            .into_iter()
+            .map(|row| row.into_entry())
+            .collect())
+    }
+
+    /// One signature for two transactions, so the host refuses it with a 400.
+    fn mismatched_add_hosts() -> TenantAddHostsExecuteRequest {
+        TenantAddHostsExecuteRequest {
+            party_id: PARTY.to_string(),
+            base_serial: 4,
+            topology_transactions: vec!["AQID".to_string(), "BAU=".to_string()],
+            signatures: vec!["BAU=".to_string()],
+            signed_by: "1220aa".to_string(),
+        }
+    }
+
+    fn add_hosts_execute(key: &str) -> actix_test::TestRequest {
+        actix_test::TestRequest::post()
+            .uri("/v0/tenant/add-hosts/execute")
+            .insert_header(("Authorization", format!("Bearer {key}")))
+            .set_json(mismatched_add_hosts())
+    }
+
+    fn import(end: bool) -> actix_test::TestRequest {
+        actix_test::TestRequest::post()
+            .uri("/v0/tenant/add-hosts/import")
+            .insert_header(("Authorization", "Bearer key"))
+            .set_json(json!({
+                "party_id": PARTY,
+                "base_serial": 1,
+                "seq": 0,
+                "chunk": "",
+                "end": end,
+            }))
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_refused_add_hosts_execute_is_recorded_with_its_error(
+        db: SqlitePool,
+    ) -> anyhow::Result<()> {
+        let state = keyed_state(db.clone(), &["key"]);
+        let app = actix_test::init_service(
+            App::new()
+                .app_data(state.clone())
+                .service(tenant_add_hosts_execute),
+        )
+        .await;
+
+        let response = actix_test::call_service(&app, add_hosts_execute("key").to_request()).await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let content_type = response.headers().get("content-type").cloned();
+        let body = actix_test::read_body(response).await;
+
+        // The audit must hand the caller the handler's answer untouched.
+        let direct = tenant_add_hosts_execute_on_this_host(&state, &mismatched_add_hosts()).await;
+        assert_eq!(direct.headers().get("content-type").cloned(), content_type);
+        let Ok(direct_body) = actix_web::body::to_bytes(direct.into_body()).await else {
+            panic!("the handler's body must be readable");
+        };
+        assert_eq!(body, direct_body);
+
+        let rows = audit_rows(&db).await?;
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        let row = &rows[0];
+        assert_eq!(row.endpoint, "/v0/tenant/add-hosts/execute");
+        assert_eq!(row.party_id.as_deref(), Some(PARTY));
+        assert_eq!(row.http_status, 400);
+        assert_eq!(row.key_index, Some(0));
+        let body: serde_json::Value = serde_json::from_slice(&body)?;
+        assert_eq!(row.error.as_deref(), body["error"].as_str());
+        assert!(
+            row.error
+                .as_deref()
+                .is_some_and(|e| e.contains("one signature per topology transaction")),
+            "{:?}",
+            row.error
+        );
+        Ok(())
+    }
+
+    /// A 401 returns before the handler body runs, so it leaves no row.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn an_unauthenticated_call_leaves_no_row(db: SqlitePool) -> anyhow::Result<()> {
+        let app = actix_test::init_service(
+            App::new()
+                .app_data(keyed_state(db.clone(), &["key"]))
+                .service(tenant_add_hosts_execute),
+        )
+        .await;
+
+        let response =
+            actix_test::call_service(&app, add_hosts_execute("not-a-key").to_request()).await;
+
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        assert!(audit_rows(&db).await?.is_empty());
+        Ok(())
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn the_key_index_is_recorded_and_the_key_is_not(db: SqlitePool) -> anyhow::Result<()> {
+        let app = actix_test::init_service(
+            App::new()
+                .app_data(keyed_state(db.clone(), &["first", "second"]))
+                .service(tenant_add_hosts_execute),
+        )
+        .await;
+
+        actix_test::call_service(&app, add_hosts_execute("second").to_request()).await;
+
+        let rows = audit_rows(&db).await?;
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert_eq!(rows[0].key_index, Some(1));
+        let stored = serde_json::to_string(&rows[0])?;
+        assert!(!stored.contains("second"), "{stored}");
+        Ok(())
+    }
+
+    /// The blocks before the last only carry data. The last one finishes the
+    /// import, so only it is recorded.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn only_the_final_import_block_is_recorded(db: SqlitePool) -> anyhow::Result<()> {
+        let app = actix_test::init_service(
+            App::new()
+                .app_data(keyed_state(db.clone(), &["key"]))
+                .service(tenant_acs_import),
+        )
+        .await;
+
+        let data_block = actix_test::call_service(&app, import(false).to_request()).await;
+        assert_eq!(data_block.status(), StatusCode::BAD_REQUEST);
+        assert!(audit_rows(&db).await?.is_empty());
+
+        let final_block = actix_test::call_service(&app, import(true).to_request()).await;
+        assert_eq!(final_block.status(), StatusCode::BAD_REQUEST);
+        let rows = audit_rows(&db).await?;
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert_eq!(rows[0].endpoint, "/v0/tenant/add-hosts/import");
+        assert_eq!(rows[0].party_id.as_deref(), Some(PARTY));
+        assert_eq!(rows[0].http_status, 400);
+        Ok(())
+    }
+
+    /// An execute names no party id. The row holds the one the call would
+    /// create, so the audit can be read by party.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn execute_records_the_party_the_call_named(db: SqlitePool) -> anyhow::Result<()> {
+        let app = actix_test::init_service(
+            App::new()
+                .app_data(keyed_state(db.clone(), &["key"]))
+                .service(tenant_execute),
+        )
+        .await;
+        // `signed_by` is not the fingerprint of the key, so the host refuses it.
+        let request = actix_test::TestRequest::post()
+            .uri("/v0/tenant/execute")
+            .insert_header(("Authorization", "Bearer key"))
+            .set_json(json!({
+                "party_hint": "alice",
+                "public_key": STANDARD.encode([7u8; 32]),
+                "topology_transactions": [],
+                "signatures": [],
+                "signed_by": "1220ff",
+            }));
+
+        let response = actix_test::call_service(&app, request.to_request()).await;
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let rows = audit_rows(&db).await?;
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert_eq!(rows[0].endpoint, "/v0/tenant/execute");
+        assert_eq!(rows[0].party_id.as_deref(), Some("alice::1220ff"));
+        Ok(())
+    }
+
+    /// The Canton write may already have happened, so a broken audit must not
+    /// change what the caller sees.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_failed_audit_write_does_not_fail_the_call(db: SqlitePool) -> anyhow::Result<()> {
+        let app = actix_test::init_service(
+            App::new()
+                .app_data(keyed_state(db.clone(), &["key"]))
+                .service(tenant_add_hosts_execute),
+        )
+        .await;
+        let recorded = actix_test::call_service(&app, add_hosts_execute("key").to_request()).await;
+        assert_eq!(recorded.status(), StatusCode::BAD_REQUEST);
+        let recorded = actix_test::read_body(recorded).await;
+
+        sqlx::query("DROP TABLE tenant_call_audit")
+            .execute(&db)
+            .await?;
+        let unrecorded =
+            actix_test::call_service(&app, add_hosts_execute("key").to_request()).await;
+
+        assert_eq!(unrecorded.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(actix_test::read_body(unrecorded).await, recorded);
+        Ok(())
     }
 }
