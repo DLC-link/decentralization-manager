@@ -101,6 +101,12 @@ fn check_first_allocations(f: &Fixture, ctx: &Ctx) -> anyhow::Result<()> {
             response.allocated,
             "{name}: the node party was not allocated"
         );
+        // Setup grants act-as itself when the user lacks it, which would
+        // hide an AllocateParty that granted nothing.
+        ensure!(
+            !response.rights_granted,
+            "{name}: AllocateParty gave no act-as, so setup granted it"
+        );
     }
     for ((name, _, participant_id), rights) in nodes(f).iter().zip(&ctx.first_rights) {
         let expected = expected_node_party(participant_id)?;
