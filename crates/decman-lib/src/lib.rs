@@ -5,7 +5,9 @@
 //! `framework` is template-agnostic: traits, encode/record toolkits, event
 //! filters, the command envelope. `catalog` is decman's protocol content:
 //! the by-value `ActionType` enum, one struct per proposal, template
-//! accessors, flow builders, and state interpretation.
+//! accessors, flow builders, and state interpretation. `canton_hash`
+//! recomputes the hash of an interactive-submission transaction, so a signer
+//! can check what it signs.
 //!
 //! # Purity contract
 //!
@@ -26,9 +28,9 @@
 //! transport.
 //!
 //! The `Cargo.toml` dependency list is the check a reader can run. It holds
-//! `serde`, `thiserror`, `tracing`, `chrono`, the two canton crates, and this
-//! workspace's `common`. A new dependency that does I/O, keeps state, or
-//! reads a clock breaks the contract.
+//! `serde`, `thiserror`, `tracing`, `chrono`, `hex`, `sha2`, the two canton
+//! crates, and this workspace's `common`. A new dependency that does I/O,
+//! keeps state, or reads a clock breaks the contract.
 //!
 //! # Quick start: a custom proposal
 //!
@@ -93,6 +95,7 @@
 //! let _ = build_confirm_proposal(&rules, "rules-cid", &member, &governance, "proposal-cid", "cmd-2".into());
 //! ```
 
+pub mod canton_hash;
 pub mod catalog;
 pub mod error;
 pub mod framework;

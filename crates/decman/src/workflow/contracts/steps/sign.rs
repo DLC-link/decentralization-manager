@@ -15,10 +15,10 @@ use canton_proto_rs::com::{
         },
     },
 };
+use decman_lib::canton_hash;
 use sqlx::SqlitePool;
 
 use crate::{
-    canton_hash,
     canton_id::CantonId,
     config::NodeConfig,
     error::Result,
