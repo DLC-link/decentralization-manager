@@ -12,6 +12,7 @@ path = "src/lib.rs"
 [dependencies]
 async-trait = { workspace = true }
 base64 = { workspace = true }
+chrono = { workspace = true }
 ed25519-dalek = { workspace = true }
 rand = { workspace = true }
 reqwest = { version = "0.13", features = ["json"] }
