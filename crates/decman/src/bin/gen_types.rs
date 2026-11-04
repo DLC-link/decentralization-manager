@@ -164,6 +164,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ResponseSource,
         RightsStatus,
         SuccessResponse,
+        TenantCallAuditEntry,
+        TenantCallAuditResponse,
         TransferFactoriesResponse,
         TransferFactoryInfo,
         TransferPreapprovalsResponse,

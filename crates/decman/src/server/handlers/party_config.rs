@@ -665,6 +665,7 @@ mod tests {
             http_client: reqwest::Client::new(),
             health_cache: crate::server::HealthCache::new(),
             external_parties: Default::default(),
+            tenant_rate_limiter: Default::default(),
         });
         let app =
             test::init_service(App::new().app_data(state).service(discover_member_party)).await;
@@ -744,6 +745,7 @@ mod tests {
             http_client: reqwest::Client::new(),
             health_cache: crate::server::HealthCache::new(),
             external_parties: Default::default(),
+            tenant_rate_limiter: Default::default(),
         });
         let app = test::init_service(
             App::new()
@@ -821,6 +823,7 @@ mod tests {
             http_client: reqwest::Client::new(),
             health_cache: crate::server::HealthCache::new(),
             external_parties: Default::default(),
+            tenant_rate_limiter: Default::default(),
         });
         let app = test::init_service(App::new().app_data(state).service(get_party_config)).await;
 

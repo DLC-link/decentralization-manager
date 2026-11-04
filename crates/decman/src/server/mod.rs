@@ -23,6 +23,8 @@ mod queries;
 mod record;
 mod reward_automation;
 mod scan;
+pub(crate) mod tenant_call_audit;
+mod tenant_rate_limit;
 mod transfer_context;
 mod types;
 
@@ -198,6 +200,9 @@ pub struct AppState {
     /// Topology snapshot of the external parties this node hosts. A request
     /// for a stale one starts a single background scan.
     pub external_parties: external_parties::ExternalPartiesCache,
+    /// Request counts per tenant API key, for the per-minute limit on the
+    /// `/v0/tenant/*` endpoints.
+    pub tenant_rate_limiter: tenant_rate_limit::TenantRateLimiter,
 }
 
 #[cfg(test)]
@@ -281,6 +286,7 @@ impl AppState {
             http_client: reqwest::Client::new(),
             health_cache: HealthCache::new(),
             external_parties: Default::default(),
+            tenant_rate_limiter: Default::default(),
         };
         (state, peer_jobs)
     }
@@ -1156,6 +1162,7 @@ pub async fn start_server(
         http_client,
         health_cache: HealthCache::new(),
         external_parties: Default::default(),
+        tenant_rate_limiter: Default::default(),
     });
 
     // A coordinator killed while it signed a party proposal leaves that
@@ -1485,6 +1492,7 @@ pub async fn start_server(
             .service(handlers::unhost_external_party)
             .service(handlers::preview_unhost_external_party)
             .service(handlers::get_unhost_audit)
+            .service(handlers::get_tenant_call_audit)
             .service(handlers::tenant_prepare)
             .service(handlers::tenant_execute)
             .service(handlers::tenant_add_hosts_prepare)

@@ -6,6 +6,11 @@
 //! through unauthenticated so a fresh node can be configured; after the first
 //! row lands, normal auth applies and the handler enforces admin role.
 //!
+//! The tenant API (`/v0/tenant/*`) authenticates with a provider-issued API key
+//! instead of a JWT. The middleware checks that key and spends the key's
+//! per-minute budget before the handler reads the body, so a refused call
+//! costs no body parsing. It attaches the matched key as a [`TenantCaller`].
+//!
 //! Everything else requires a valid `Authorization: Bearer <token>` that the
 //! configured `TokenValidator` accepts. The resolved `Principal` is attached
 //! to the request extensions for handlers to consume.
@@ -13,19 +18,31 @@
 use std::{
     future::{Ready, ready},
     rc::Rc,
+    time::Instant,
 };
 
 use actix_web::{
     Error, HttpMessage, HttpRequest, HttpResponse,
     body::{EitherBody, MessageBody},
     dev::{Service, ServiceRequest, ServiceResponse, Transform, forward_ready},
-    http::header::AUTHORIZATION,
+    http::{
+        Method,
+        header::{AUTHORIZATION, HeaderMap, RETRY_AFTER},
+    },
     web,
 };
 use futures::future::LocalBoxFuture;
 use serde_json::json;
+use sha2::{Digest, Sha256};
 
-use crate::{auth::Principal, server::AppState};
+use crate::{
+    auth::Principal,
+    server::{
+        AppState,
+        tenant_rate_limit::{Verdict, retry_after_secs},
+        types::ErrorResponse,
+    },
+};
 
 /// Actix `Transform` that enforces inbound token auth. Wrap the app with
 /// `.wrap(AuthMiddleware)` to engage it.
@@ -80,6 +97,17 @@ where
                     .json(json!({"error": "application state missing"}));
                 return Ok(req.into_response(response).map_into_right_body());
             };
+
+            if path.starts_with(TENANT_PREFIX) {
+                return match admit_tenant_call(req.method(), &path, req.headers(), &app_state) {
+                    Ok(caller) => {
+                        req.extensions_mut().insert(caller);
+                        let res = service.call(req).await?;
+                        Ok(res.map_into_left_body())
+                    }
+                    Err(response) => Ok(req.into_response(response).map_into_right_body()),
+                };
+            }
 
             // Bootstrap: first `PUT /party-config` on a fresh node is allowed
             // without a token. The operator typically has not provisioned an
@@ -163,29 +191,133 @@ pub fn require_admin(
     Ok(principal)
 }
 
-/// Authorize a `/v0/tenant/*` request by its bearer API key. Tenant callers
-/// (wallet providers) present a provider-issued API key, not a Keycloak JWT, so
-/// this compares the presented bearer against the configured tenant keys rather
-/// than reading the `Principal` the middleware attaches for admin routes. In
-/// insecure/test mode the key set isn't required, matching how the Keycloak path
-/// relaxes under `--insecure` (so dev + the e2e harness run without keys).
+const TENANT_PREFIX: &str = "/v0/tenant/";
+
+/// A tenant API key that matched, named without the key itself.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TenantKey {
+    /// The key's position in `DECPM_TENANT_API_KEYS`.
+    pub index: usize,
+    /// See [`tenant_key_id`].
+    pub id: String,
+}
+
+/// The tenant key that the middleware accepted for a `/v0/tenant/*` request.
+/// `None` in insecure/test mode, where no key is checked.
+#[derive(Clone, Debug)]
+pub struct TenantCaller(pub Option<TenantKey>);
+
+/// The first 16 hex characters of the SHA-256 of a tenant key. It names the
+/// key across a reordered or shortened `DECPM_TENANT_API_KEYS`, which the
+/// index does not, and it cannot be turned back into the key.
+pub fn tenant_key_id(key: &str) -> String {
+    let mut id = hex::encode(Sha256::digest(key.as_bytes()));
+    id.truncate(16);
+    id
+}
+
+/// Check the key of a `/v0/tenant/*` request and spend one call of its budget,
+/// before any handler reads the body. The two ACS relay calls are checked but
+/// not metered here, because one copy sends a call per block. The import
+/// handler spends the budget itself for a block that opens a copy or that no
+/// open copy takes.
 ///
-/// Returns the index of the matching key in the configured list, so a caller
-/// can record which key acted without recording the key. `None` in
-/// insecure/test mode, where no key is checked.
+/// Insecure/test mode checks no key and spends no budget, matching how the
+/// JWT path relaxes under `--insecure`.
 ///
 /// # Errors
-/// Returns a 401 `HttpResponse` when the bearer is missing or not a configured key.
+/// A 401 when the bearer is missing or is not a configured key, and a 429
+/// with `Retry-After` when the key has spent its budget.
 #[allow(clippy::result_large_err)]
-pub fn require_tenant_api_key(
-    req: &HttpRequest,
+fn admit_tenant_call(
+    method: &Method,
+    path: &str,
+    headers: &HeaderMap,
     state: &AppState,
-) -> Result<Option<usize>, HttpResponse> {
+) -> Result<TenantCaller, HttpResponse> {
+    let key = match_tenant_api_key(headers, state)?;
+    if !is_acs_relay_call(method, path) {
+        charge_tenant_key(state, key.as_ref(), path)?;
+    }
+    Ok(TenantCaller(key))
+}
+
+/// `GET /v0/tenant/{party}/acs/{target}` and `POST /v0/tenant/add-hosts/import`.
+fn is_acs_relay_call(method: &Method, path: &str) -> bool {
+    let Some(route) = path.strip_prefix(TENANT_PREFIX) else {
+        return false;
+    };
+    if *method == Method::POST {
+        return route == "add-hosts/import";
+    }
+    *method == Method::GET && matches!(route.split('/').collect::<Vec<_>>()[..], [_, "acs", _])
+}
+
+/// Spend one call of `key`'s per-minute budget. `None` (insecure/test mode)
+/// and a limit of 0 spend nothing.
+///
+/// # Errors
+/// A 429 with `Retry-After` when the key has spent its budget.
+#[allow(clippy::result_large_err)]
+pub fn charge_tenant_key(
+    state: &AppState,
+    key: Option<&TenantKey>,
+    path: &str,
+) -> Result<(), HttpResponse> {
+    let limit = state.config.tenant_rate_limit_per_minute;
+    let Some(key) = key.filter(|_| limit > 0) else {
+        return Ok(());
+    };
+    match state
+        .tenant_rate_limiter
+        .check(key.index, limit, Instant::now())
+    {
+        Verdict::Allowed => Ok(()),
+        Verdict::Limited { retry_after } => {
+            let secs = retry_after_secs(retry_after);
+            tracing::warn!(
+                key_index = key.index,
+                key_id = %key.id,
+                path,
+                retry_after_secs = secs,
+                "tenant API key over its rate limit of {limit} requests per minute"
+            );
+            Err(HttpResponse::TooManyRequests()
+                .insert_header((RETRY_AFTER, secs.to_string()))
+                .json(ErrorResponse {
+                    error: format!(
+                        "rate limit of {limit} requests per minute for this tenant API key \
+                         exceeded; retry after {secs} seconds"
+                    ),
+                }))
+        }
+    }
+}
+
+/// The tenant key that the middleware accepted for this request.
+///
+/// # Errors
+/// A 401 when the request did not pass through the middleware, so no key was
+/// checked.
+#[allow(clippy::result_large_err)]
+pub fn tenant_caller(req: &HttpRequest) -> Result<Option<TenantKey>, HttpResponse> {
+    req.extensions()
+        .get::<TenantCaller>()
+        .map(|caller| caller.0.clone())
+        .ok_or_else(|| {
+            HttpResponse::Unauthorized().json(json!({"error": "invalid tenant API key"}))
+        })
+}
+
+#[allow(clippy::result_large_err)]
+fn match_tenant_api_key(
+    headers: &HeaderMap,
+    state: &AppState,
+) -> Result<Option<TenantKey>, HttpResponse> {
     if state.test_mode {
         return Ok(None);
     }
-    let presented = req
-        .headers()
+    let presented = headers
         .get(AUTHORIZATION)
         .and_then(|h| h.to_str().ok())
         .and_then(parse_bearer)
@@ -200,7 +332,10 @@ pub fn require_tenant_api_key(
             .position(|k| constant_time_eq(k.as_bytes(), presented.as_bytes()))
     };
     match matched {
-        Some(index) => Ok(Some(index)),
+        Some(index) => Ok(Some(TenantKey {
+            index,
+            id: tenant_key_id(presented),
+        })),
         None => Err(HttpResponse::Unauthorized().json(json!({"error": "invalid tenant API key"}))),
     }
 }
@@ -259,10 +394,6 @@ fn is_always_public(path: &str) -> bool {
         || path.starts_with("/swagger-ui/")
         || path.starts_with("/api-docs/")
         || path.starts_with("/.well-known/")
-        // Tenant API: wallet providers authenticate with a provider-issued API
-        // key (not a Keycloak JWT), so bypass the JWT middleware here — each
-        // /v0/tenant/* handler enforces `require_tenant_api_key` itself.
-        || path.starts_with("/v0/tenant/")
 }
 
 #[cfg(test)]
@@ -411,6 +542,7 @@ mod tests {
             http_client: reqwest::Client::new(),
             health_cache: crate::server::HealthCache::new(),
             external_parties: Default::default(),
+            tenant_rate_limiter: Default::default(),
         })
     }
 
@@ -523,26 +655,285 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
     }
 
-    /// The unhost audit records a tenant key by its index, so the check must
-    /// report which configured key matched, and refuse one that matches none.
-    #[actix_web::test]
-    async fn tenant_key_check_reports_which_key_matched() {
+    /// A state that checks the tenant keys `keys` against a budget of `limit`
+    /// calls per minute, as a production node does.
+    async fn tenant_state(keys: &[&str], limit: u32) -> Data<AppState> {
         let Ok(mut state) = Arc::try_unwrap(build_app_state(Vec::new()).await.into_inner()) else {
             panic!("the freshly built state has no other owner");
         };
         state.test_mode = false;
-        state.config.tenant_api_keys = vec!["first".to_string(), "second".to_string()];
+        state.config.tenant_api_keys = keys.iter().map(ToString::to_string).collect();
+        state.config.tenant_rate_limit_per_minute = limit;
+        Data::new(state)
+    }
 
-        let second = TestRequest::default()
-            .insert_header(("Authorization", "Bearer second"))
-            .to_http_request();
-        assert_eq!(require_tenant_api_key(&second, &state).ok(), Some(Some(1)));
+    /// How often the stub write handler ran.
+    #[derive(Default)]
+    struct Calls(std::sync::atomic::AtomicUsize);
 
-        let unknown = TestRequest::default()
-            .insert_header(("Authorization", "Bearer third"))
-            .to_http_request();
-        let Err(refused) = require_tenant_api_key(&unknown, &state) else {
-            panic!("a key that is not configured must be refused");
+    /// Stands for a tenant write handler. It reads a JSON body, so a malformed
+    /// body is a 400 once the request gets this far. It answers with the key
+    /// the middleware attached.
+    #[actix_web::post("/v0/tenant/prepare")]
+    async fn stub_tenant_write(
+        req: HttpRequest,
+        calls: Data<Calls>,
+        _body: web::Json<serde_json::Value>,
+    ) -> impl Responder {
+        calls.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let key = tenant_caller(&req).ok().flatten();
+        HttpResponse::Ok().json(json!({
+            "index": key.as_ref().map(|k| k.index),
+            "id": key.map(|k| k.id),
+        }))
+    }
+
+    #[actix_web::post("/v0/tenant/add-hosts/import")]
+    async fn stub_tenant_import() -> impl Responder {
+        HttpResponse::Ok().finish()
+    }
+
+    #[get("/v0/tenant/{party}/acs/{target}")]
+    async fn stub_tenant_acs() -> impl Responder {
+        HttpResponse::Ok().finish()
+    }
+
+    fn tenant_post(uri: &str, key: &str, body: &'static str) -> TestRequest {
+        TestRequest::post()
+            .uri(uri)
+            .insert_header(("Authorization", format!("Bearer {key}")))
+            .insert_header(("Content-Type", "application/json"))
+            .set_payload(body)
+    }
+
+    #[actix_web::test]
+    async fn the_middleware_names_the_key_that_matched() {
+        for keys in [["first", "second"], ["second", "first"]] {
+            let app = test::init_service(
+                App::new()
+                    .app_data(tenant_state(&keys, 0).await)
+                    .app_data(Data::new(Calls::default()))
+                    .wrap(AuthMiddleware)
+                    .service(stub_tenant_write),
+            )
+            .await;
+
+            let resp = test::call_service(
+                &app,
+                tenant_post("/v0/tenant/prepare", "second", "{}").to_request(),
+            )
+            .await;
+            assert_eq!(resp.status(), StatusCode::OK);
+            let body: serde_json::Value = test::read_body_json(resp).await;
+            let index = keys.iter().position(|k| *k == "second");
+            assert_eq!(body["index"], json!(index), "{keys:?}");
+            // The id is the same whatever the key's position.
+            assert_eq!(body["id"], json!(tenant_key_id("second")), "{keys:?}");
+
+            let resp = test::call_service(
+                &app,
+                tenant_post("/v0/tenant/prepare", "third", "{}").to_request(),
+            )
+            .await;
+            assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        }
+    }
+
+    #[test]
+    fn a_key_id_is_short_hex_that_does_not_contain_the_key() {
+        let key = "tenant-key-0123456789abcdef";
+        let id = tenant_key_id(key);
+        assert_eq!(id.len(), 16);
+        assert!(id.chars().all(|c| c.is_ascii_hexdigit()), "{id}");
+        assert!(!key.contains(&id) && !id.contains(key), "{id}");
+        assert_eq!(id, tenant_key_id(key), "the id must be stable");
+        assert_ne!(id, tenant_key_id("another-key"));
+    }
+
+    /// A caller without a valid key must not make the node parse its body,
+    /// must not spend a real key's budget, and must not learn from a 429 that
+    /// the budget is spent.
+    #[actix_web::test]
+    async fn an_unknown_key_gets_401_before_the_body_is_read() {
+        let calls = Data::new(Calls::default());
+        let app = test::init_service(
+            App::new()
+                .app_data(tenant_state(&["first"], 1).await)
+                .app_data(calls.clone())
+                .wrap(AuthMiddleware)
+                .service(stub_tenant_write),
+        )
+        .await;
+
+        for _ in 0..5 {
+            let resp = test::call_service(
+                &app,
+                tenant_post("/v0/tenant/prepare", "guess", "not json").to_request(),
+            )
+            .await;
+            // A 400 would mean the body was parsed.
+            assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        }
+        assert_eq!(calls.0.load(std::sync::atomic::Ordering::SeqCst), 0);
+
+        let resp = test::call_service(
+            &app,
+            tenant_post("/v0/tenant/prepare", "first", "{}").to_request(),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK, "the budget must be unspent");
+
+        let resp = test::call_service(
+            &app,
+            tenant_post("/v0/tenant/prepare", "guess", "{}").to_request(),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    /// The budget is spent before the body is parsed, so a malformed body
+    /// cannot get past it.
+    #[actix_web::test]
+    async fn an_exhausted_key_gets_429_even_for_a_malformed_body() {
+        let app = test::init_service(
+            App::new()
+                .app_data(tenant_state(&["first"], 1).await)
+                .app_data(Data::new(Calls::default()))
+                .wrap(AuthMiddleware)
+                .service(stub_tenant_write),
+        )
+        .await;
+
+        let resp = test::call_service(
+            &app,
+            tenant_post("/v0/tenant/prepare", "first", "not json").to_request(),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+        let limited = test::call_service(
+            &app,
+            tenant_post("/v0/tenant/prepare", "first", "not json").to_request(),
+        )
+        .await;
+        assert_eq!(limited.status(), StatusCode::TOO_MANY_REQUESTS);
+        let retry_after = limited
+            .headers()
+            .get(RETRY_AFTER)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.parse::<u64>().ok());
+        assert!(
+            retry_after.is_some_and(|secs| (1..=60).contains(&secs)),
+            "Retry-After must be whole seconds within the window, got {retry_after:?}"
+        );
+        let body: serde_json::Value = test::read_body_json(limited).await;
+        assert!(
+            body["error"]
+                .as_str()
+                .is_some_and(|e| e.contains("rate limit")),
+            "{body}"
+        );
+    }
+
+    /// One ACS copy sends a call per block, so the middleware checks the key
+    /// of the two relay calls but spends no budget on them.
+    #[actix_web::test]
+    async fn the_acs_relay_calls_are_checked_but_not_metered() {
+        let app = test::init_service(
+            App::new()
+                .app_data(tenant_state(&["first"], 1).await)
+                .app_data(Data::new(Calls::default()))
+                .wrap(AuthMiddleware)
+                .service(stub_tenant_write)
+                .service(stub_tenant_import)
+                .service(stub_tenant_acs),
+        )
+        .await;
+
+        for i in 0..3 {
+            let resp = test::call_service(
+                &app,
+                tenant_post("/v0/tenant/add-hosts/import", "first", "{}").to_request(),
+            )
+            .await;
+            assert_eq!(resp.status(), StatusCode::OK, "import {i}");
+            let read = TestRequest::get()
+                .uri("/v0/tenant/alice::1220aa/acs/participant-3::1220bb?base_serial=1&seq=1")
+                .insert_header(("Authorization", "Bearer first"))
+                .to_request();
+            assert_eq!(
+                test::call_service(&app, read).await.status(),
+                StatusCode::OK,
+                "read {i}"
+            );
+        }
+        let resp = test::call_service(
+            &app,
+            tenant_post("/v0/tenant/prepare", "first", "{}").to_request(),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK, "the budget must be unspent");
+
+        let resp = test::call_service(
+            &app,
+            tenant_post("/v0/tenant/add-hosts/import", "guess", "{}").to_request(),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[actix_web::test]
+    async fn a_limit_of_zero_turns_the_budget_off() {
+        let app = test::init_service(
+            App::new()
+                .app_data(tenant_state(&["first"], 0).await)
+                .app_data(Data::new(Calls::default()))
+                .wrap(AuthMiddleware)
+                .service(stub_tenant_write),
+        )
+        .await;
+        for _ in 0..200 {
+            let resp = test::call_service(
+                &app,
+                tenant_post("/v0/tenant/prepare", "first", "{}").to_request(),
+            )
+            .await;
+            assert_eq!(resp.status(), StatusCode::OK);
+        }
+    }
+
+    #[actix_web::test]
+    async fn test_mode_checks_no_key_and_spends_no_budget() {
+        let Ok(mut state) = Arc::try_unwrap(tenant_state(&[], 1).await.into_inner()) else {
+            panic!("the freshly built state has no other owner");
+        };
+        state.test_mode = true;
+        let app = test::init_service(
+            App::new()
+                .app_data(Data::new(state))
+                .app_data(Data::new(Calls::default()))
+                .wrap(AuthMiddleware)
+                .service(stub_tenant_write),
+        )
+        .await;
+        for _ in 0..5 {
+            let req = TestRequest::post()
+                .uri("/v0/tenant/prepare")
+                .set_json(json!({}))
+                .to_request();
+            let resp = test::call_service(&app, req).await;
+            assert_eq!(resp.status(), StatusCode::OK);
+            let body: serde_json::Value = test::read_body_json(resp).await;
+            assert_eq!(body["index"], serde_json::Value::Null);
+        }
+    }
+
+    /// A handler reached without the middleware has no checked key, so it must
+    /// refuse the call rather than treat it as insecure mode.
+    #[test]
+    fn a_request_the_middleware_did_not_see_is_refused() {
+        let Err(refused) = tenant_caller(&TestRequest::default().to_http_request()) else {
+            panic!("a request without a checked key must be refused");
         };
         assert_eq!(refused.status(), StatusCode::UNAUTHORIZED);
     }
