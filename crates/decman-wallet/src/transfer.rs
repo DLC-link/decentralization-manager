@@ -189,7 +189,9 @@ pub struct AcceptReceipt {
 /// `key` must be the sender's key. The wallet signs only after the prepared
 /// transaction passes its check: the hash is recomputed, and the root must be
 /// `TransferFactory_Transfer` on the registry's factory, acting as the sender
-/// alone, with this sender, receiver, amount and instrument.
+/// alone. Its argument must carry these arguments: the instrument admin,
+/// sender, receiver, amount, instrument, both times, and the input holdings
+/// in order.
 ///
 /// # Errors
 /// [`Error::NoHoldings`] before any registry or prepare call when there is

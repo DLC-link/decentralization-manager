@@ -9,6 +9,7 @@
 //! sub-transaction the factory or the instruction produces.
 
 use base64::{Engine, engine::general_purpose::STANDARD};
+use chrono::{DateTime, SecondsFormat, Utc};
 use decman_lib::{
     canton_hash::{HashingScheme, compute_prepared_transaction_hash},
     canton_proto_rs::com::daml::ledger::api::v2::{
@@ -171,6 +172,7 @@ fn check_transfer(exercise: &Exercise, args: &TransferArgs) -> std::result::Resu
         .as_ref()
         .ok_or_else(|| Refusal::Shape("its exercise has no choice argument".to_string()))?;
     for (path, wanted) in [
+        ("expectedAdmin", &args.instrument_admin),
         ("transfer.sender", &args.sender),
         ("transfer.receiver", &args.receiver),
         ("transfer.instrumentId.admin", &args.instrument_admin),
@@ -187,6 +189,40 @@ fn check_transfer(exercise: &Exercise, args: &TransferArgs) -> std::result::Resu
             found: amount.to_string(),
         });
     }
+
+    // A later `executeBefore` would keep the offer open longer than asked.
+    for (path, wanted) in [
+        ("transfer.requestedAt", &args.requested_at),
+        ("transfer.executeBefore", &args.execute_before),
+    ] {
+        let found = timestamp_at(argument, path)?;
+        let requested = DateTime::parse_from_rfc3339(wanted)
+            .ok()
+            .map(|time| time.timestamp_micros());
+        if requested != Some(found) {
+            return Err(Refusal::Mismatch {
+                field: path,
+                expected: wanted.clone(),
+                found: DateTime::<Utc>::from_timestamp_micros(found).map_or_else(
+                    || found.to_string(),
+                    |time| time.to_rfc3339_opts(SecondsFormat::Micros, true),
+                ),
+            });
+        }
+    }
+
+    let inputs = contract_ids_at(argument, "transfer.inputHoldingCids")?;
+    if !inputs
+        .iter()
+        .copied()
+        .eq(args.input_holding_cids.iter().map(String::as_str))
+    {
+        return Err(Refusal::Mismatch {
+            field: "transfer.inputHoldingCids",
+            expected: args.input_holding_cids.join(", "),
+            found: inputs.join(", "),
+        });
+    }
     Ok(())
 }
 
@@ -201,9 +237,9 @@ fn same(field: &'static str, expected: &str, found: &str) -> std::result::Result
     })
 }
 
-/// The party, text or numeric found by following the record labels in
-/// `path`, for example `transfer.sender`.
-fn text_at<'v>(value: &'v Value, path: &'static str) -> std::result::Result<&'v str, Refusal> {
+/// The value found by following the record labels in `path`, for example
+/// `transfer.sender`.
+fn value_at<'v>(value: &'v Value, path: &'static str) -> std::result::Result<&'v Sum, Refusal> {
     let mut current = value;
     for label in path.split('.') {
         current = match current.sum.as_ref() {
@@ -216,12 +252,48 @@ fn text_at<'v>(value: &'v Value, path: &'static str) -> std::result::Result<&'v 
         }
         .ok_or_else(|| Refusal::Shape(format!("its choice argument has no {path}")))?;
     }
-    match current.sum.as_ref() {
-        Some(Sum::Party(text) | Sum::Text(text) | Sum::Numeric(text)) => Ok(text),
+    current
+        .sum
+        .as_ref()
+        .ok_or_else(|| Refusal::Shape(format!("its choice argument's {path} is empty")))
+}
+
+/// The party, text or numeric at `path`.
+fn text_at<'v>(value: &'v Value, path: &'static str) -> std::result::Result<&'v str, Refusal> {
+    match value_at(value, path)? {
+        Sum::Party(text) | Sum::Text(text) | Sum::Numeric(text) => Ok(text),
         _ => Err(Refusal::Shape(format!(
             "its choice argument's {path} is not text"
         ))),
     }
+}
+
+/// The time at `path`, in microseconds since the epoch.
+fn timestamp_at(value: &Value, path: &'static str) -> std::result::Result<i64, Refusal> {
+    match value_at(value, path)? {
+        Sum::Timestamp(micros) => Ok(*micros),
+        _ => Err(Refusal::Shape(format!(
+            "its choice argument's {path} is not a time"
+        ))),
+    }
+}
+
+/// The list of contract ids at `path`, in order.
+fn contract_ids_at<'v>(
+    value: &'v Value,
+    path: &'static str,
+) -> std::result::Result<Vec<&'v str>, Refusal> {
+    let not_ids = || Refusal::Shape(format!("its choice argument's {path} is not contract ids"));
+    let Sum::List(list) = value_at(value, path)? else {
+        return Err(not_ids());
+    };
+    list.elements
+        .iter()
+        .map(|element| match element.sum.as_ref() {
+            Some(Sum::ContractId(id)) => Ok(id.as_str()),
+            _ => Err(not_ids()),
+        })
+        .collect()
 }
 
 /// A decimal without the trailing fractional zeros that do not change its

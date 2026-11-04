@@ -5,6 +5,7 @@
 //! and `CanExecuteAs` for the party, and never `CanActAs`: the participant
 //! relays what the key holder signed and must not be able to submit on its own.
 
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
 
@@ -13,6 +14,11 @@ use crate::{
     http::JsonHost,
     transfer::{HOLDING_INTERFACE_ID, TRANSFER_INSTRUCTION_INTERFACE_ID},
 };
+
+/// The `TransferInstructionStatus` constructor of an instruction that waits
+/// for its receiver. The other one, `TransferPendingInternalWorkflow`, waits
+/// for the registry.
+const PENDING_RECEIVER_ACCEPTANCE: &str = "TransferPendingReceiverAcceptance";
 
 /// A JSON Ledger API client for one participant.
 #[derive(Clone)]
@@ -83,8 +89,13 @@ impl LedgerClient {
             .collect())
     }
 
-    /// The transfer instructions that name `party_id` as the receiver: the
-    /// transfers waiting for this party to accept them.
+    /// The transfers `party_id` can accept now. Each names the party as its
+    /// receiver, waits for the receiver's acceptance, and has not reached its
+    /// `executeBefore`.
+    ///
+    /// An instruction that waits for the registry's internal workflow is left
+    /// out, and so is an expired one. A deadline the client cannot read
+    /// counts as expired.
     ///
     /// # Errors
     /// Fails if either the ledger-end or the ACS call fails.
@@ -92,9 +103,15 @@ impl LedgerClient {
         let views: Vec<(String, TransferInstructionView)> = self
             .interface_views(party_id, TRANSFER_INSTRUCTION_INTERFACE_ID)
             .await?;
+        let now = Utc::now();
         Ok(views
             .into_iter()
-            .filter(|(_, view)| view.transfer.receiver == party_id)
+            .filter(|(_, view)| {
+                view.transfer.receiver == party_id
+                    && view.status.tag == PENDING_RECEIVER_ACCEPTANCE
+                    && DateTime::parse_from_rfc3339(&view.transfer.execute_before)
+                        .is_ok_and(|deadline| deadline > now)
+            })
             .map(|(contract_id, view)| TransferInstruction {
                 contract_id,
                 sender: view.transfer.sender,
@@ -102,6 +119,8 @@ impl LedgerClient {
                 amount: view.transfer.amount,
                 instrument_admin: view.transfer.instrument_id.admin,
                 instrument_id: view.transfer.instrument_id.id,
+                status: view.status.tag,
+                execute_before: view.transfer.execute_before,
             })
             .collect())
     }
@@ -160,7 +179,7 @@ impl LedgerClient {
         });
         let entries: Vec<AcsEntry<V>> = self
             .host
-            .post("/v2/state/active-contracts", &request)
+            .post_stream("/v2/state/active-contracts", &request)
             .await?;
         Ok(entries
             .into_iter()
@@ -200,6 +219,11 @@ pub struct TransferInstruction {
     pub amount: String,
     pub instrument_admin: String,
     pub instrument_id: String,
+    /// The status constructor, `TransferPendingReceiverAcceptance` for every
+    /// instruction [`LedgerClient::transfer_instructions`] returns.
+    pub status: String,
+    /// The deadline for accepting, RFC 3339, as the ledger wrote it.
+    pub execute_before: String,
 }
 
 /// A contract the submission reads but the submitting party cannot see. The
@@ -328,6 +352,13 @@ struct HoldingView {
 #[derive(Deserialize)]
 struct TransferInstructionView {
     transfer: TransferView,
+    status: StatusView,
+}
+
+/// A Daml variant in the JSON Ledger API: `{"tag": ..., "value": ...}`.
+#[derive(Deserialize)]
+struct StatusView {
+    tag: String,
 }
 
 #[derive(Deserialize)]
@@ -337,4 +368,5 @@ struct TransferView {
     receiver: String,
     amount: String,
     instrument_id: InstrumentIdView,
+    execute_before: String,
 }

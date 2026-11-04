@@ -42,6 +42,16 @@ pub enum Error {
         source: reqwest::Error,
     },
 
+    /// The body arrived as text, but it is not the JSON this client expects.
+    #[error("{host}: {method} {path} returned JSON this client cannot read: {source}")]
+    Json {
+        host: String,
+        method: &'static str,
+        path: String,
+        #[source]
+        source: serde_json::Error,
+    },
+
     #[error("{host} returned a {field} that is not valid base64: {source}")]
     Base64 {
         host: String,
@@ -163,6 +173,7 @@ impl Error {
             | Self::Transport { host, .. }
             | Self::Api { host, .. }
             | Self::Decode { host, .. }
+            | Self::Json { host, .. }
             | Self::Base64 { host, .. }
             | Self::PartyIdMismatch { host, .. }
             | Self::MalformedPreparation { host, .. }

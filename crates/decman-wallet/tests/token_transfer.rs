@@ -119,7 +119,23 @@ fn holding_view(owner: &str, id: &str, amount: &str, lock: Value) -> Value {
     })
 }
 
-fn instruction_view(sender: &str, receiver: &str, amount: &str) -> Value {
+/// A deadline that has not passed, and one that has.
+const OPEN_UNTIL: &str = "2999-01-01T00:00:00Z";
+const EXPIRED_AT: &str = "2000-01-01T00:00:00Z";
+
+/// The status of an instruction that waits for its receiver, as the JSON
+/// Ledger API encodes a Daml variant.
+fn awaiting_receiver() -> Value {
+    json!({ "tag": "TransferPendingReceiverAcceptance", "value": {} })
+}
+
+fn instruction_view(
+    sender: &str,
+    receiver: &str,
+    amount: &str,
+    status: Value,
+    execute_before: &str,
+) -> Value {
     json!({
         "originalInstructionCid": null,
         "transfer": {
@@ -127,12 +143,12 @@ fn instruction_view(sender: &str, receiver: &str, amount: &str) -> Value {
             "receiver": receiver,
             "amount": amount,
             "instrumentId": { "admin": DSO, "id": "Amulet" },
-            "requestedAt": "2026-11-04T10:00:00Z",
-            "executeBefore": "2026-11-05T10:00:00Z",
+            "requestedAt": "2000-01-01T00:00:00Z",
+            "executeBefore": execute_before,
             "inputHoldingCids": [],
             "meta": { "values": {} },
         },
-        "status": { "tag": "TransferPendingReceiverAcceptance", "value": {} },
+        "status": status,
         "meta": { "values": {} },
     })
 }
@@ -257,13 +273,25 @@ async fn transfer_instructions_are_the_ones_naming_the_party_as_receiver() {
             acs_entry(
                 "00b1",
                 interface,
-                instruction_view(SENDER, RECEIVER, "1.2500000000"),
+                instruction_view(
+                    SENDER,
+                    RECEIVER,
+                    "1.2500000000",
+                    awaiting_receiver(),
+                    OPEN_UNTIL,
+                ),
             ),
             // The receiver's own outgoing offer: not one it can accept.
             acs_entry(
                 "00b2",
                 interface,
-                instruction_view(RECEIVER, SENDER, "3.0000000000"),
+                instruction_view(
+                    RECEIVER,
+                    SENDER,
+                    "3.0000000000",
+                    awaiting_receiver(),
+                    OPEN_UNTIL,
+                ),
             ),
         ],
     )
@@ -281,6 +309,8 @@ async fn transfer_instructions_are_the_ones_naming_the_party_as_receiver() {
     assert_eq!(pending[0].amount, "1.2500000000");
     assert_eq!(pending[0].instrument_admin, DSO);
     assert_eq!(pending[0].instrument_id, "Amulet");
+    assert_eq!(pending[0].status, "TransferPendingReceiverAcceptance");
+    assert_eq!(pending[0].execute_before, OPEN_UNTIL);
 
     let acs = bodies(
         &server,
@@ -290,6 +320,114 @@ async fn transfer_instructions_are_the_ones_naming_the_party_as_receiver() {
     let filter = &acs[0]["eventFormat"]["filtersByParty"][RECEIVER]["cumulative"][0]["identifierFilter"]
         ["InterfaceFilter"]["value"];
     assert_eq!(filter["interfaceId"], TRANSFER_INSTRUCTION_INTERFACE_ID);
+}
+
+/// Only an offer that waits for the receiver and has not expired can be
+/// accepted, so only that one is listed.
+#[tokio::test]
+async fn transfer_instructions_are_only_the_offers_the_party_can_accept_now() {
+    let server = MockServer::start().await;
+    stub_ledger_end(&server, 7).await;
+    let interface = "pkg:Splice.Api.Token.TransferInstructionV1:TransferInstruction";
+    let internal_workflow = json!({
+        "tag": "TransferPendingInternalWorkflow",
+        "value": { "pendingActions": [[DSO, "approve the transfer"]] },
+    });
+    stub_acs(
+        &server,
+        vec![
+            acs_entry(
+                "00b1",
+                interface,
+                instruction_view(
+                    SENDER,
+                    RECEIVER,
+                    "1.2500000000",
+                    awaiting_receiver(),
+                    OPEN_UNTIL,
+                ),
+            ),
+            acs_entry(
+                "00b2",
+                interface,
+                instruction_view(
+                    SENDER,
+                    RECEIVER,
+                    "2.0000000000",
+                    internal_workflow,
+                    OPEN_UNTIL,
+                ),
+            ),
+            acs_entry(
+                "00b3",
+                interface,
+                instruction_view(
+                    SENDER,
+                    RECEIVER,
+                    "3.0000000000",
+                    awaiting_receiver(),
+                    EXPIRED_AT,
+                ),
+            ),
+        ],
+    )
+    .await;
+
+    let pending = match ledger_for(&server).transfer_instructions(RECEIVER).await {
+        Ok(pending) => pending,
+        Err(e) => panic!("transfer instructions must read: {e}"),
+    };
+
+    let listed: Vec<&str> = pending.iter().map(|i| i.contract_id.as_str()).collect();
+    assert_eq!(listed, vec!["00b1"]);
+}
+
+/// The active-contracts endpoint answers with a JSON array, with one JSON
+/// object per line, or with an empty body. Each must read the same.
+#[tokio::test]
+async fn holdings_read_every_body_shape_the_active_contracts_endpoint_sends() {
+    let holding = "pkg:Splice.Api.Token.HoldingV1:Holding";
+    let entries = [
+        acs_entry(
+            "00a1",
+            holding,
+            holding_view(SENDER, "Amulet", "10.0000000000", Value::Null),
+        ),
+        acs_entry(
+            "00a2",
+            holding,
+            holding_view(SENDER, "Amulet", "2.5000000000", Value::Null),
+        ),
+    ];
+    let array = Value::Array(entries.to_vec()).to_string();
+    let ndjson = entries
+        .iter()
+        .map(Value::to_string)
+        .collect::<Vec<_>>()
+        .join("\n")
+        + "\n";
+
+    for (shape, body, expected) in [
+        ("a JSON array", array, vec!["00a1", "00a2"]),
+        ("newline-delimited JSON", ndjson, vec!["00a1", "00a2"]),
+        ("an empty body", String::new(), Vec::new()),
+    ] {
+        let server = MockServer::start().await;
+        stub_ledger_end(&server, 42).await;
+        Mock::given(method("POST"))
+            .and(path(format!("{LEDGER_PREFIX}/v2/state/active-contracts")))
+            .respond_with(ResponseTemplate::new(200).set_body_string(body))
+            .mount(&server)
+            .await;
+
+        let holdings = match ledger_for(&server).holdings(SENDER).await {
+            Ok(holdings) => holdings,
+            Err(e) => panic!("{shape} must read: {e}"),
+        };
+
+        let read: Vec<&str> = holdings.iter().map(|h| h.contract_id.as_str()).collect();
+        assert_eq!(read, expected, "{shape}");
+    }
 }
 
 #[tokio::test]
@@ -475,19 +613,42 @@ fn extra_args() -> DamlValue {
     ])
 }
 
+/// `args()`'s `requestedAt` and `executeBefore`, in microseconds since the
+/// epoch, as the ledger writes them.
+const REQUESTED_AT_MICROS: i64 = 1_793_786_400_000_000;
+const EXECUTE_BEFORE_MICROS: i64 = 1_793_872_800_000_000;
+
 /// What the ledger puts in the transaction for a transfer. The amount is in
 /// the ledger's own form, with ten decimals.
+#[derive(Clone, Copy)]
 struct OnLedger<'a> {
+    expected_admin: &'a str,
     sender: &'a str,
     receiver: &'a str,
     amount: &'a str,
     instrument_id: &'a str,
+    execute_before: i64,
+    inputs: &'a [&'a str],
+}
+
+/// The transfer `send_args(sender)` asks for, as the ledger writes it. The
+/// one input is the unlocked holding `stub_send` gives the sender.
+fn faithful(sender: &str) -> OnLedger<'_> {
+    OnLedger {
+        expected_admin: DSO,
+        sender,
+        receiver: RECEIVER,
+        amount: "1.2500000000",
+        instrument_id: "Amulet",
+        execute_before: EXECUTE_BEFORE_MICROS,
+        inputs: &["00a1"],
+    }
 }
 
 /// The `TransferFactory_Transfer` choice argument as a Daml value.
 fn transfer_value(transfer: &OnLedger<'_>) -> DamlValue {
     record(vec![
-        ("expectedAdmin", party(DSO)),
+        ("expectedAdmin", party(transfer.expected_admin)),
         (
             "transfer",
             record(vec![
@@ -501,12 +662,19 @@ fn transfer_value(transfer: &OnLedger<'_>) -> DamlValue {
                         ("id", daml(Sum::Text(transfer.instrument_id.to_string()))),
                     ]),
                 ),
-                ("requestedAt", daml(Sum::Timestamp(1_793_786_400_000_000))),
-                ("executeBefore", daml(Sum::Timestamp(1_793_872_800_000_000))),
+                ("requestedAt", daml(Sum::Timestamp(REQUESTED_AT_MICROS))),
+                (
+                    "executeBefore",
+                    daml(Sum::Timestamp(transfer.execute_before)),
+                ),
                 (
                     "inputHoldingCids",
                     daml(Sum::List(List {
-                        elements: vec![daml(Sum::ContractId("00a1".to_string()))],
+                        elements: transfer
+                            .inputs
+                            .iter()
+                            .map(|cid| daml(Sum::ContractId((*cid).to_string())))
+                            .collect(),
                     })),
                 ),
                 ("meta", empty_metadata()),
@@ -608,12 +776,7 @@ fn faithful_send(sender: &str) -> (PreparedTransaction, Value) {
             "TransferFactory",
             TRANSFER_CHOICE,
             &[sender],
-            transfer_value(&OnLedger {
-                sender,
-                receiver: RECEIVER,
-                amount: "1.2500000000",
-                instrument_id: "Amulet",
-            }),
+            transfer_value(&faithful(sender)),
         ),
         sender,
     );
@@ -941,10 +1104,8 @@ async fn a_hash_that_does_not_match_the_transaction_is_not_signed() {
             TRANSFER_CHOICE,
             &[&sender],
             transfer_value(&OnLedger {
-                sender: &sender,
                 receiver: MALLORY,
-                amount: "1.2500000000",
-                instrument_id: "Amulet",
+                ..faithful(&sender)
             }),
         ),
         &sender,
@@ -994,10 +1155,8 @@ async fn a_transaction_for_a_different_receiver_is_not_signed() {
             TRANSFER_CHOICE,
             &[&sender],
             transfer_value(&OnLedger {
-                sender: &sender,
                 receiver: MALLORY,
-                amount: "1.2500000000",
-                instrument_id: "Amulet",
+                ..faithful(&sender)
             }),
         ),
         &sender,
@@ -1047,12 +1206,7 @@ async fn a_transaction_for_a_different_receiver_is_not_signed() {
 async fn each_field_the_check_reads_refuses_a_tampered_transaction() {
     let key = ExternalKeyPair::from_seed([25u8; 32]);
     let sender = key.party_id("alice");
-    let faithful = OnLedger {
-        sender: &sender,
-        receiver: RECEIVER,
-        amount: "1.2500000000",
-        instrument_id: "Amulet",
-    };
+    let honest = faithful(&sender);
     let tampered = [
         (
             "transfer.amount",
@@ -1063,7 +1217,7 @@ async fn each_field_the_check_reads_refuses_a_tampered_transaction() {
                 &[&sender],
                 transfer_value(&OnLedger {
                     amount: "12.5000000000",
-                    ..faithful
+                    ..honest
                 }),
             ),
         ),
@@ -1076,7 +1230,7 @@ async fn each_field_the_check_reads_refuses_a_tampered_transaction() {
                 &[&sender],
                 transfer_value(&OnLedger {
                     instrument_id: "CBTC",
-                    ..faithful
+                    ..honest
                 }),
             ),
         ),
@@ -1089,7 +1243,48 @@ async fn each_field_the_check_reads_refuses_a_tampered_transaction() {
                 &[&sender],
                 transfer_value(&OnLedger {
                     sender: MALLORY,
-                    ..faithful
+                    ..honest
+                }),
+            ),
+        ),
+        (
+            "expectedAdmin",
+            exercise(
+                FACTORY_ID,
+                "TransferFactory",
+                TRANSFER_CHOICE,
+                &[&sender],
+                transfer_value(&OnLedger {
+                    expected_admin: MALLORY,
+                    ..honest
+                }),
+            ),
+        ),
+        (
+            // Keeps the offer open a day longer than the wallet asked.
+            "transfer.executeBefore",
+            exercise(
+                FACTORY_ID,
+                "TransferFactory",
+                TRANSFER_CHOICE,
+                &[&sender],
+                transfer_value(&OnLedger {
+                    execute_before: EXECUTE_BEFORE_MICROS + 86_400_000_000,
+                    ..honest
+                }),
+            ),
+        ),
+        (
+            // Spends a holding the wallet did not choose.
+            "transfer.inputHoldingCids",
+            exercise(
+                FACTORY_ID,
+                "TransferFactory",
+                TRANSFER_CHOICE,
+                &[&sender],
+                transfer_value(&OnLedger {
+                    inputs: &["00a1", "00a2"],
+                    ..honest
                 }),
             ),
         ),
@@ -1100,7 +1295,7 @@ async fn each_field_the_check_reads_refuses_a_tampered_transaction() {
                 "TransferFactory",
                 TRANSFER_CHOICE,
                 &[&sender, MALLORY],
-                transfer_value(&faithful),
+                transfer_value(&honest),
             ),
         ),
         (
@@ -1110,7 +1305,7 @@ async fn each_field_the_check_reads_refuses_a_tampered_transaction() {
                 "TransferFactory",
                 TRANSFER_CHOICE,
                 &[&sender],
-                transfer_value(&faithful),
+                transfer_value(&honest),
             ),
         ),
         (
@@ -1120,7 +1315,7 @@ async fn each_field_the_check_reads_refuses_a_tampered_transaction() {
                 "TransferFactory",
                 "TransferFactory_PublicFetch",
                 &[&sender],
-                transfer_value(&faithful),
+                transfer_value(&honest),
             ),
         ),
         (
@@ -1130,7 +1325,7 @@ async fn each_field_the_check_reads_refuses_a_tampered_transaction() {
                 "AllocationFactory",
                 TRANSFER_CHOICE,
                 &[&sender],
-                transfer_value(&faithful),
+                transfer_value(&honest),
             ),
         ),
     ];

@@ -102,7 +102,7 @@ let args = TransferArgs::new(
 let sent = send_transfer(&ledger, &registry, &key, &args).await?;
 tracing::info!(kind = %sent.transfer_kind, update_id = %sent.update_id, "sent");
 
-// Accept every transfer offered to the party.
+// Accept every offer the party can accept now.
 for offer in ledger.transfer_instructions(&party_id).await? {
     accept_transfer(&ledger, &registry, &key, &party_id, &offer.contract_id).await?;
 }
@@ -125,11 +125,12 @@ The flows follow the splice-wallet-kernel SDK step for step.
 | List offers | `LedgerClient::transfer_instructions` | `token.transfer.pending` | `POST /v2/state/active-contracts` |
 | Accept | `accept_transfer` | `token.transfer.accept` | `POST {registry}/registry/transfer-instruction/v1/{cid}/choice-contexts/accept`, then prepare to execute |
 
-The crate differs from the SDK in three ways:
+The crate differs from the SDK in four ways:
 
 - It sends the hashing scheme version that the prepare returned. The SDK always sends V2.
 - It spends every unlocked holding of the instrument, up to 100. The SDK picks holdings by amount.
 - It skips every holding with a lock. The SDK also spends a holding whose lock has expired.
+- It lists only offers that wait for the receiver and have not expired. The SDK's `pending` lists every instruction.
 
 ### The check before signing
 
@@ -146,8 +147,9 @@ So the wallet checks each prepared transaction before the key signs:
    must be an exercise.
 4. The exercise must use the expected interface, choice and contract. Its only
    acting party must be the wallet's party.
-5. For a send, the choice argument must name the requested sender, receiver,
-   amount and instrument.
+5. For a send, the choice argument must match the request. The check compares
+   the instrument admin, sender, receiver, amount and instrument. It also
+   compares both times, and the input holdings in order.
 
 A transaction that fails returns `Error::TransactionRefused`. The `Refusal` in
 it names what did not match. The wallet signs nothing and executes nothing.

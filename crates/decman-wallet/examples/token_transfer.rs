@@ -156,6 +156,7 @@ async fn log_pending(ledger: &LedgerClient, party: &str) -> Result {
             sender = %instruction.sender,
             instrument_id = %instruction.instrument_id,
             amount = %instruction.amount,
+            execute_before = %instruction.execute_before,
             "pending transfer"
         );
     }

@@ -63,6 +63,33 @@ impl JsonHost {
         self.read_json("POST", path, response).await
     }
 
+    /// POST to an endpoint that streams its answer. The body is a JSON array,
+    /// newline-delimited JSON objects, or empty when there is nothing to send.
+    pub(crate) async fn post_stream<B: Serialize, T: DeserializeOwned>(
+        &self,
+        path: &str,
+        body: &B,
+    ) -> Result<Vec<T>> {
+        let request = self
+            .http
+            .post(format!("{base}{path}", base = self.base_url))
+            .json(body);
+        let response = self.send("POST", path, request).await?;
+        let response = self.check_status("POST", path, response).await?;
+        let text = response.text().await.map_err(|source| Error::Decode {
+            host: self.base_url.clone(),
+            method: "POST",
+            path: path.to_string(),
+            source,
+        })?;
+        parse_stream(&text).map_err(|source| Error::Json {
+            host: self.base_url.clone(),
+            method: "POST",
+            path: path.to_string(),
+            source,
+        })
+    }
+
     async fn send(
         &self,
         method: &'static str,
@@ -87,17 +114,7 @@ impl JsonHost {
         path: &str,
         response: Response,
     ) -> Result<T> {
-        let status = response.status();
-        if !status.is_success() {
-            let body = response.text().await.unwrap_or_default();
-            return Err(Error::Api {
-                host: self.base_url.clone(),
-                method,
-                path: path.to_string(),
-                status: status.as_u16(),
-                message: error_message(body),
-            });
-        }
+        let response = self.check_status(method, path, response).await?;
         response.json().await.map_err(|source| Error::Decode {
             host: self.base_url.clone(),
             method,
@@ -105,6 +122,43 @@ impl JsonHost {
             source,
         })
     }
+
+    /// Turn a non-2xx response into [`Error::Api`] with the server's message.
+    async fn check_status(
+        &self,
+        method: &'static str,
+        path: &str,
+        response: Response,
+    ) -> Result<Response> {
+        let status = response.status();
+        if status.is_success() {
+            return Ok(response);
+        }
+        let body = response.text().await.unwrap_or_default();
+        Err(Error::Api {
+            host: self.base_url.clone(),
+            method,
+            path: path.to_string(),
+            status: status.as_u16(),
+            message: error_message(body),
+        })
+    }
+}
+
+/// Read a streamed answer: a JSON array, one JSON object per line, or nothing.
+fn parse_stream<T: DeserializeOwned>(text: &str) -> serde_json::Result<Vec<T>> {
+    let text = text.trim();
+    if text.is_empty() {
+        return Ok(Vec::new());
+    }
+    if text.starts_with('[') {
+        return serde_json::from_str(text);
+    }
+    text.lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(serde_json::from_str)
+        .collect()
 }
 
 /// The readable part of an error body: a registry's `{"error": ...}`, or a
