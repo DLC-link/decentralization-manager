@@ -27,8 +27,11 @@
 //! open copy, the final one included, never count, so a copy is never refused
 //! partway.
 
+use std::panic::AssertUnwindSafe;
+
 use actix_web::{HttpRequest, HttpResponse, Responder, body::MessageBody, get, post, web};
 use base64::{Engine, engine::general_purpose::STANDARD};
+use futures::FutureExt;
 
 use crate::{
     canton_id::validate_party_id_prefix,
@@ -809,9 +812,21 @@ pub async fn tenant_acs_import(
     // So the next block of an open copy, the final one included, spends no
     // budget and writes no row here: the copy's teardown records how it ended.
     // Every other block spends budget: block 1, which opens a copy, block 0,
-    // which does not exist, and a block that no open copy takes next.
-    if body.seq > 1 && is_next_import_block(&data, &body).await {
-        return tenant_acs_import_on_this_host(&data, &body, None).await;
+    // which does not exist, a block that fails the checks below, and a block
+    // that no open copy takes next. Two requests that carry the same next
+    // block both pass, and the import takes one: a wallet that retries a block
+    // it saw time out must not get a 429.
+    let checked = check_import_block(&data, &body);
+    let next = match &checked {
+        Ok(checked) if body.seq > 1 => {
+            data.relay_sessions
+                .is_next_block(&checked.replication.instance_name, body.seq)
+                .await
+        }
+        _ => false,
+    };
+    if next {
+        return tenant_acs_import_on_this_host(&data, &body, checked, None).await;
     }
     if let Err(resp) = charge_tenant_key(&data, key.as_ref(), http_req.path()) {
         return resp;
@@ -821,66 +836,67 @@ pub async fn tenant_acs_import(
     } else if body.end {
         TenantEndpoint::AcsImportEnd
     } else {
-        return tenant_acs_import_on_this_host(&data, &body, None).await;
+        return tenant_acs_import_on_this_host(&data, &body, checked, None).await;
     };
     let on_end = (body.seq == 1).then(|| record_import_end(&data, key.clone(), &body.party_id));
     let body = body.into_inner();
     let party_id = body.party_id.clone();
     audited_write(&data, key, endpoint, party_id, move |data| async move {
-        tenant_acs_import_on_this_host(&data, &body, on_end).await
+        tenant_acs_import_on_this_host(&data, &body, checked, on_end).await
     })
     .await
 }
 
-/// Whether the block is the next one that an import open on this host will
-/// take. A block of an open copy with another sequence number is refused with
-/// a 409, so it spends budget like any block that no copy takes. Two requests
-/// that carry the same next block both pass here, and the import takes one:
-/// a wallet that retries a block it saw time out must not get a 429.
-async fn is_next_import_block(data: &AppState, body: &TenantAcsImportRequest) -> bool {
-    match replication_target(
+/// A relayed block that passed the checks that need no Canton call.
+struct CheckedBlock {
+    replication: crate::workflow::party_replication::ReplicationTarget,
+    block: PipeBlock,
+}
+
+/// Check a relayed block without a Canton call, and decode its chunk once.
+/// The error is the message of the 400 that refuses the block.
+fn check_import_block(
+    data: &AppState,
+    body: &TenantAcsImportRequest,
+) -> std::result::Result<CheckedBlock, String> {
+    if body.seq == 0 {
+        return Err("seq is 1-based; block 0 does not exist".to_string());
+    }
+    let chunk = STANDARD
+        .decode(&body.chunk)
+        .map_err(|e| format!("chunk is not valid base64: {e}"))?;
+    let replication = replication_target(
         &body.party_id,
         data.config.participant_id(),
         body.base_serial,
-    ) {
-        Ok(target) => {
-            data.relay_sessions
-                .is_next_block(&target.instance_name, body.seq)
-                .await
+    )
+    .map_err(|e| format!("party_id is not a valid party id: {e}"))?;
+    let block = if body.end {
+        PipeBlock::End {
+            seq: body.seq,
+            trailer: PipeTrailer {
+                total_len: body.total_len,
+                sha256: body.sha256.clone(),
+            },
         }
-        Err(_) => false,
-    }
+    } else {
+        PipeBlock::Data {
+            seq: body.seq,
+            bytes: chunk,
+        }
+    };
+    Ok(CheckedBlock { replication, block })
 }
 
 async fn tenant_acs_import_on_this_host(
     data: &AppState,
     body: &TenantAcsImportRequest,
+    checked: std::result::Result<CheckedBlock, String>,
     on_end: Option<OnImportEnd>,
 ) -> HttpResponse {
-    if body.seq == 0 {
-        return HttpResponse::BadRequest().json(ErrorResponse {
-            error: "seq is 1-based; block 0 does not exist".to_string(),
-        });
-    }
-    let chunk = match STANDARD.decode(&body.chunk) {
-        Ok(bytes) => bytes,
-        Err(e) => {
-            return HttpResponse::BadRequest().json(ErrorResponse {
-                error: format!("chunk is not valid base64: {e}"),
-            });
-        }
-    };
-    let replication = match replication_target(
-        &body.party_id,
-        data.config.participant_id(),
-        body.base_serial,
-    ) {
-        Ok(t) => t,
-        Err(e) => {
-            return HttpResponse::BadRequest().json(ErrorResponse {
-                error: format!("party_id is not a valid party id: {e}"),
-            });
-        }
+    let CheckedBlock { replication, block } = match checked {
+        Ok(checked) => checked,
+        Err(error) => return HttpResponse::BadRequest().json(ErrorResponse { error }),
     };
 
     // Before anything disconnects this participant. `import_party_acs` checks
@@ -927,21 +943,6 @@ async fn tenant_acs_import_on_this_host(
             }
         }
     }
-
-    let block = if body.end {
-        PipeBlock::End {
-            seq: body.seq,
-            trailer: PipeTrailer {
-                total_len: body.total_len,
-                sha256: body.sha256.clone(),
-            },
-        }
-    } else {
-        PipeBlock::Data {
-            seq: body.seq,
-            bytes: chunk,
-        }
-    };
 
     let accepted = data
         .relay_sessions
@@ -1361,8 +1362,8 @@ fn tenant_requester(key_index: Option<usize>) -> String {
 ///
 /// A client that goes away drops its request, and actix drops the handler with
 /// it. The task does not depend on the handler, so the write still finishes
-/// and its row is still written. A write that panics answers 500, and the row
-/// says so if the handler is still there to write it.
+/// and its row is still written. The task also catches a write that panics:
+/// it answers 500 and writes the row itself.
 async fn audited_write<W, F>(
     data: &web::Data<AppState>,
     key: Option<TenantKey>,
@@ -1376,30 +1377,47 @@ where
 {
     let task = tokio::spawn({
         let data = data.clone();
-        let key = key.clone();
         let party_id = party_id.clone();
         async move {
-            let answer = Answer::of(write(data.clone()).await);
+            let written = {
+                let data = data.clone();
+                AssertUnwindSafe(async move { write(data).await })
+                    .catch_unwind()
+                    .await
+            };
+            let response = written.unwrap_or_else(|_| {
+                tracing::error!(
+                    endpoint = endpoint.as_str(),
+                    %party_id,
+                    "a tenant write panicked"
+                );
+                write_failed()
+            });
+            let answer = Answer::of(response);
             record_answer(&data.db, key.as_ref(), endpoint, &party_id, &answer).await;
             answer
         }
     });
-    let answer = match task.await {
-        Ok(answer) => answer,
+    match task.await {
+        Ok(answer) => answer.into_response(),
+        // The task caught the write's own panic and wrote its row, so this is a
+        // failure of the audit insert itself. Another row could repeat that one.
         Err(e) => {
             tracing::error!(
                 endpoint = endpoint.as_str(),
                 %party_id,
-                "a tenant write did not complete: {e}"
+                "a tenant write task did not complete: {e}"
             );
-            let answer = Answer::of(HttpResponse::InternalServerError().json(ErrorResponse {
-                error: "The call failed on this host; see the host's logs".to_string(),
-            }));
-            record_answer(&data.db, key.as_ref(), endpoint, &party_id, &answer).await;
-            answer
+            write_failed()
         }
-    };
-    answer.into_response()
+    }
+}
+
+/// The answer to a write that did not complete.
+fn write_failed() -> HttpResponse {
+    HttpResponse::InternalServerError().json(ErrorResponse {
+        error: "The call failed on this host; see the host's logs".to_string(),
+    })
 }
 
 /// A write's answer as plain data, so it can leave the task the write ran in.
@@ -2454,6 +2472,97 @@ mod audit_tests {
                     .await;
             assert_eq!(next.status(), StatusCode::OK, "block {seq}");
         }
+        Ok(())
+    }
+
+    /// A next block that fails the checks cannot be imported, so it is not
+    /// part of the copy: it spends budget, and a failed final block gets its
+    /// own row. A valid next block still passes with the budget spent.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_next_block_that_fails_its_checks_spends_budget(
+        db: SqlitePool,
+    ) -> anyhow::Result<()> {
+        let state = keyed_state(db.clone(), &["key"], 1);
+        let party = valid_party();
+        state
+            .relay_sessions
+            .open_test_import(&instance_of(&state, &party), None, Ok(()))
+            .await;
+        let app = actix_test::init_service(
+            App::new()
+                .app_data(state)
+                .wrap(AuthMiddleware)
+                .service(tenant_acs_import),
+        )
+        .await;
+
+        let bad_end =
+            actix_test::call_service(&app, import(&party, 2, "not base64!", true).to_request())
+                .await;
+        assert_eq!(bad_end.status(), StatusCode::BAD_REQUEST);
+        let bad_data =
+            actix_test::call_service(&app, import(&party, 2, "not base64!", false).to_request())
+                .await;
+        assert_eq!(bad_data.status(), StatusCode::TOO_MANY_REQUESTS);
+        let good = actix_test::call_service(
+            &app,
+            import(&party, 2, &STANDARD.encode(b"block"), false).to_request(),
+        )
+        .await;
+        assert_eq!(good.status(), StatusCode::OK);
+
+        let rows = audit_rows(&db).await?;
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert_eq!(rows[0].endpoint, "/v0/tenant/add-hosts/import (end)");
+        assert_eq!(rows[0].http_status, Some(400));
+        assert!(
+            rows[0]
+                .error
+                .as_deref()
+                .is_some_and(|e| e.contains("not valid base64")),
+            "{:?}",
+            rows[0].error
+        );
+        Ok(())
+    }
+
+    /// The write runs in its own task. When it panics after its caller went
+    /// away, the task still writes its row, once.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_write_that_panics_after_its_caller_went_away_is_recorded_once(
+        db: SqlitePool,
+    ) -> anyhow::Result<()> {
+        let state = keyed_state(db.clone(), &["key"], 0);
+        let (finish, finished) = tokio::sync::oneshot::channel::<()>();
+        let call = audited_write(
+            &state,
+            Some(the_key()),
+            TenantEndpoint::ThresholdExecute,
+            PARTY.to_string(),
+            move |_| async move {
+                let _ = finished.await;
+                a_broken_write()
+            },
+        );
+
+        let gone = tokio::time::timeout(std::time::Duration::from_millis(50), call).await;
+        assert!(
+            gone.is_err(),
+            "the write must still run when the caller goes"
+        );
+        let _ = finish.send(());
+
+        for _ in 0..200 {
+            if !audit_rows(&db).await?.is_empty() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        // A second row would come at once, from the same task.
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        let rows = audit_rows(&db).await?;
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert_eq!(rows[0].http_status, Some(500));
         Ok(())
     }
 
