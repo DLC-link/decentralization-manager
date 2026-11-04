@@ -816,22 +816,32 @@ pub async fn tenant_acs_import(
     // that no open copy takes next. Two requests that carry the same next
     // block both pass, and the import takes one: a wallet that retries a block
     // it saw time out must not get a 429.
-    let checked = check_import_block(&data, &body);
-    let next = match &checked {
-        Ok(checked) if body.seq > 1 => {
-            data.relay_sessions
-                .is_next_block(&checked.replication.instance_name, body.seq)
-                .await
-        }
-        _ => false,
-    };
-    if next {
-        return tenant_acs_import_on_this_host(&data, &body, checked, None).await;
-    }
-    if let Err(resp) = charge_tenant_key(&data, key.as_ref(), http_req.path()) {
+    //
+    // Block 0 and block 1 can never skip the budget, so they spend it before
+    // the checks: a key with no budget left gets its 429 before the node
+    // decodes the chunk.
+    let opens = body.seq <= 1;
+    if opens && let Err(resp) = charge_tenant_key(&data, key.as_ref(), http_req.path()) {
         return resp;
     }
-    let endpoint = if body.seq <= 1 {
+    let checked = check_import_block(&data, &body);
+    if !opens {
+        let next = match &checked {
+            Ok(checked) => {
+                data.relay_sessions
+                    .is_next_block(&checked.replication.instance_name, body.seq)
+                    .await
+            }
+            Err(_) => false,
+        };
+        if next {
+            return tenant_acs_import_on_this_host(&data, &body, checked, None).await;
+        }
+        if let Err(resp) = charge_tenant_key(&data, key.as_ref(), http_req.path()) {
+            return resp;
+        }
+    }
+    let endpoint = if opens {
         TenantEndpoint::AcsImportStart
     } else if body.end {
         TenantEndpoint::AcsImportEnd
@@ -2472,6 +2482,41 @@ mod audit_tests {
                     .await;
             assert_eq!(next.status(), StatusCode::OK, "block {seq}");
         }
+        Ok(())
+    }
+
+    /// Block 1 spends budget before its chunk is checked. With the budget
+    /// spent, a block 1 with a bad chunk gets a 429 and writes no row. Whether
+    /// the chunk was decoded is not visible from outside, so this test does not
+    /// check it.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_spent_key_gets_429_for_block_1_and_no_row(db: SqlitePool) -> anyhow::Result<()> {
+        let app = actix_test::init_service(
+            App::new()
+                .app_data(keyed_state(db.clone(), &["key"], 1))
+                .wrap(AuthMiddleware)
+                .service(tenant_acs_import),
+        )
+        .await;
+        let party = valid_party();
+
+        let first =
+            actix_test::call_service(&app, import(&party, 1, "not base64!", false).to_request())
+                .await;
+        assert_eq!(first.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            audit_rows(&db).await?.len(),
+            1,
+            "block 1 gets its (start) row"
+        );
+
+        let spent =
+            actix_test::call_service(&app, import(&party, 1, "not base64!", false).to_request())
+                .await;
+        assert_eq!(spent.status(), StatusCode::TOO_MANY_REQUESTS);
+        let rows = audit_rows(&db).await?;
+        assert_eq!(rows.len(), 1, "a 429 writes no row: {rows:?}");
+        assert_eq!(rows[0].endpoint, "/v0/tenant/add-hosts/import (start)");
         Ok(())
     }
 
