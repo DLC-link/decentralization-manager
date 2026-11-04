@@ -1,5 +1,9 @@
-//! Token Standard transfers: the arguments, and the choice arguments built
-//! from them.
+//! Token Standard transfers: send an asset, and accept one sent to the party.
+//!
+//! Both flows run the same steps as the splice-wallet-kernel SDK. The
+//! registry supplies the choice context, the participant prepares the
+//! transaction, the wallet checks it and signs its hash, and the participant
+//! executes it. The key never leaves the [`Signer`].
 //!
 //! Canton Coin and utility instruments such as CBTC use the same interfaces
 //! and the same choice arguments. Only the registry root differs.
@@ -7,9 +11,17 @@
 use std::time::Duration;
 
 use chrono::{DateTime, SecondsFormat, TimeDelta, Utc};
+use serde::Serialize;
 use serde_json::{Value, json};
+use uuid::Uuid;
 
-use crate::ledger::Holding;
+use crate::{
+    check::{Expected, check_prepared},
+    error::{Error, Result},
+    ledger::{DisclosedContract, ExecuteRequest, Executed, Holding, LedgerClient, PrepareRequest},
+    registry::RegistryClient,
+    signer::Signer,
+};
 
 /// The `Holding` interface, by package name.
 pub const HOLDING_INTERFACE_ID: &str =
@@ -143,6 +155,256 @@ pub fn unlocked_holdings<'a>(
         })
         .take(MAX_INPUT_HOLDINGS)
         .collect()
+}
+
+/// What a committed send produced.
+#[derive(Clone, Debug, Serialize)]
+pub struct TransferReceipt {
+    pub update_id: String,
+    pub completion_offset: i64,
+    pub factory_id: String,
+    /// `offer` means the receiver must accept before the asset moves.
+    pub transfer_kind: String,
+    pub input_holding_cids: Vec<String>,
+    /// The hash the wallet signed, base64.
+    pub prepared_transaction_hash: String,
+}
+
+/// What a committed accept produced.
+#[derive(Clone, Debug, Serialize)]
+pub struct AcceptReceipt {
+    pub update_id: String,
+    pub completion_offset: i64,
+    pub instruction_cid: String,
+    /// The hash the wallet signed, base64.
+    pub prepared_transaction_hash: String,
+}
+
+/// Send `args.amount` of an instrument from `args.sender` to `args.receiver`.
+///
+/// When `args.input_holding_cids` is empty, the send spends every unlocked
+/// holding of the instrument the sender owns, up to [`MAX_INPUT_HOLDINGS`].
+/// The factory consumes what it needs and returns the change.
+///
+/// `key` must be the sender's key. The wallet signs only after the prepared
+/// transaction passes its check: the hash is recomputed, and the root must be
+/// `TransferFactory_Transfer` on the registry's factory, acting as the sender
+/// alone, with this sender, receiver, amount and instrument.
+///
+/// # Errors
+/// [`Error::NoHoldings`] before any registry or prepare call when there is
+/// nothing to spend. [`Error::TransactionRefused`] when the prepared
+/// transaction fails the check; nothing is signed or executed then. Any
+/// ledger, registry or signer error otherwise.
+pub async fn send_transfer(
+    ledger: &LedgerClient,
+    registry: &RegistryClient,
+    key: &dyn Signer,
+    args: &TransferArgs,
+) -> Result<TransferReceipt> {
+    let mut args = args.clone();
+    if args.input_holding_cids.is_empty() {
+        let holdings = ledger.holdings(&args.sender).await?;
+        args.input_holding_cids = unlocked_holdings(
+            &holdings,
+            &args.sender,
+            &args.instrument_admin,
+            &args.instrument_id,
+        )
+        .into_iter()
+        .map(|holding| holding.contract_id.clone())
+        .collect();
+    }
+    if args.input_holding_cids.is_empty() {
+        return Err(Error::NoHoldings {
+            party: args.sender,
+            instrument_admin: args.instrument_admin,
+            instrument_id: args.instrument_id,
+        });
+    }
+    tracing::info!(
+        sender = %args.sender,
+        inputs = args.input_holding_cids.len(),
+        "selected the input holdings"
+    );
+
+    let factory = registry.transfer_factory(&args).await?;
+    tracing::info!(
+        registry = registry.root(),
+        factory_id = %factory.factory_id,
+        transfer_kind = %factory.transfer_kind,
+        "fetched the transfer factory"
+    );
+
+    let command = exercise(
+        TRANSFER_FACTORY_INTERFACE_ID,
+        &factory.factory_id,
+        TRANSFER_CHOICE,
+        transfer_choice_argument(&args, &factory.choice_context.choice_context_data),
+    );
+    let expected = Expected {
+        interface_id: TRANSFER_FACTORY_INTERFACE_ID,
+        choice: TRANSFER_CHOICE,
+        contract_id: &factory.factory_id,
+        party: &args.sender,
+        transfer: Some(&args),
+    };
+    let submitted = submit(
+        ledger,
+        key,
+        &args.sender,
+        command,
+        factory.choice_context.disclosed_contracts.clone(),
+        &expected,
+    )
+    .await?;
+
+    Ok(TransferReceipt {
+        update_id: submitted.executed.update_id,
+        completion_offset: submitted.executed.completion_offset,
+        factory_id: factory.factory_id,
+        transfer_kind: factory.transfer_kind,
+        input_holding_cids: args.input_holding_cids,
+        prepared_transaction_hash: submitted.prepared_transaction_hash,
+    })
+}
+
+/// Accept the transfer instruction `instruction_cid` as `party`, its
+/// receiver.
+///
+/// `key` must be the party's key. The wallet signs only after the prepared
+/// transaction passes its check: the hash is recomputed, and the root must be
+/// `TransferInstruction_Accept` on this instruction, acting as `party` alone.
+///
+/// # Errors
+/// [`Error::TransactionRefused`] when the prepared transaction fails the
+/// check; nothing is signed or executed then. Any ledger, registry or signer
+/// error otherwise.
+pub async fn accept_transfer(
+    ledger: &LedgerClient,
+    registry: &RegistryClient,
+    key: &dyn Signer,
+    party: &str,
+    instruction_cid: &str,
+) -> Result<AcceptReceipt> {
+    let context = registry.accept_context(instruction_cid).await?;
+    tracing::info!(
+        registry = registry.root(),
+        instruction_cid,
+        "fetched the accept context"
+    );
+
+    let command = exercise(
+        TRANSFER_INSTRUCTION_INTERFACE_ID,
+        instruction_cid,
+        ACCEPT_CHOICE,
+        accept_choice_argument(&context.choice_context_data),
+    );
+    let expected = Expected {
+        interface_id: TRANSFER_INSTRUCTION_INTERFACE_ID,
+        choice: ACCEPT_CHOICE,
+        contract_id: instruction_cid,
+        party,
+        transfer: None,
+    };
+    let submitted = submit(
+        ledger,
+        key,
+        party,
+        command,
+        context.disclosed_contracts,
+        &expected,
+    )
+    .await?;
+
+    Ok(AcceptReceipt {
+        update_id: submitted.executed.update_id,
+        completion_offset: submitted.executed.completion_offset,
+        instruction_cid: instruction_cid.to_string(),
+        prepared_transaction_hash: submitted.prepared_transaction_hash,
+    })
+}
+
+/// A JSON Ledger API exercise through an interface.
+fn exercise(interface_id: &str, contract_id: &str, choice: &str, argument: Value) -> Value {
+    json!({
+        "ExerciseCommand": {
+            "templateId": interface_id,
+            "contractId": contract_id,
+            "choice": choice,
+            "choiceArgument": argument,
+        }
+    })
+}
+
+struct Submitted {
+    executed: Executed,
+    prepared_transaction_hash: String,
+}
+
+/// Prepare `command` as `party`, check the result, sign its hash with `key`,
+/// and execute it.
+async fn submit(
+    ledger: &LedgerClient,
+    key: &dyn Signer,
+    party: &str,
+    command: Value,
+    disclosed_contracts: Vec<DisclosedContract>,
+    expected: &Expected<'_>,
+) -> Result<Submitted> {
+    let prepared = ledger
+        .prepare(&PrepareRequest {
+            user_id: ledger.user_id().to_string(),
+            command_id: Uuid::new_v4().to_string(),
+            act_as: vec![party.to_string()],
+            read_as: Vec::new(),
+            commands: vec![command],
+            disclosed_contracts,
+            synchronizer_id: None,
+            verbose_hashing: false,
+        })
+        .await?;
+
+    let hash = check_prepared(ledger.base_url(), &prepared, expected)?;
+    tracing::info!(
+        party,
+        hash = %prepared.prepared_transaction_hash,
+        scheme = %prepared.hashing_scheme_version,
+        "the prepared transaction passed the check; signing its hash"
+    );
+    let signature = key.sign_b64_async(&hash).await?;
+
+    let executed = ledger
+        .execute(&ExecuteRequest {
+            user_id: ledger.user_id().to_string(),
+            submission_id: Uuid::new_v4().to_string(),
+            prepared_transaction: prepared.prepared_transaction,
+            hashing_scheme_version: prepared.hashing_scheme_version,
+            deduplication_period: json!({ "Empty": {} }),
+            party_signatures: json!({
+                "signatures": [{
+                    "party": party,
+                    "signatures": [{
+                        "format": "SIGNATURE_FORMAT_CONCAT",
+                        "signature": signature,
+                        "signedBy": key.fingerprint(),
+                        "signingAlgorithmSpec": "SIGNING_ALGORITHM_SPEC_ED25519",
+                    }],
+                }],
+            }),
+        })
+        .await?;
+    tracing::info!(
+        party,
+        update_id = %executed.update_id,
+        completion_offset = executed.completion_offset,
+        "the transaction committed"
+    );
+
+    Ok(Submitted {
+        executed,
+        prepared_transaction_hash: prepared.prepared_transaction_hash,
+    })
 }
 
 #[cfg(test)]

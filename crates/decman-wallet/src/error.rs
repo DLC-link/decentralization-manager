@@ -1,4 +1,4 @@
-//! Errors surfaced by the tenant client.
+//! Errors surfaced by the tenant, ledger and registry clients.
 
 use thiserror::Error;
 
@@ -110,6 +110,49 @@ pub enum Error {
         operation: &'static str,
         role: &'static str,
     },
+
+    /// The sender owns no unlocked holding of the instrument, so a send has
+    /// nothing to spend. Nothing was asked of the registry or the ledger.
+    #[error("{party} holds no unlocked {instrument_id} from {instrument_admin}")]
+    NoHoldings {
+        party: String,
+        instrument_admin: String,
+        instrument_id: String,
+    },
+
+    /// The prepared transaction failed the check the wallet runs before it
+    /// signs. Nothing was signed and nothing was executed.
+    #[error("{host} prepared a transaction this wallet will not sign: {reason}")]
+    TransactionRefused { host: String, reason: Refusal },
+}
+
+/// Why the wallet refused to sign a prepared transaction.
+#[derive(Debug, Error)]
+pub enum Refusal {
+    /// The wallet could not recompute the hash, so it cannot know what the
+    /// hash commits to. An unknown hashing scheme lands here.
+    #[error("its hash cannot be recomputed: {0}")]
+    Unverifiable(String),
+
+    /// The hash that came with the transaction is not the transaction's hash.
+    #[error("it came with hash {supplied}, but it hashes to {recomputed}")]
+    HashMismatch {
+        supplied: String,
+        recomputed: String,
+    },
+
+    /// The transaction is not one exercise at its root, or the exercise's
+    /// argument lacks a field the check reads.
+    #[error("{0}")]
+    Shape(String),
+
+    /// The root exercise differs from what the wallet asked for.
+    #[error("its {field} is {found}, not {expected}")]
+    Mismatch {
+        field: &'static str,
+        expected: String,
+        found: String,
+    },
 }
 
 impl Error {
@@ -123,10 +166,15 @@ impl Error {
             | Self::Base64 { host, .. }
             | Self::PartyIdMismatch { host, .. }
             | Self::MalformedPreparation { host, .. }
-            | Self::HostDisagreement { host, .. } => host,
-            // Not about any one host: a signing failure is local, and a missing
-            // host set has nobody to name.
-            Self::NotEnoughHosts(_) | Self::Signing { .. } | Self::NoHosts { .. } => "",
+            | Self::HostDisagreement { host, .. }
+            | Self::TransactionRefused { host, .. } => host,
+            // Not about any one host: a signing failure is local, a missing
+            // host set has nobody to name, and an empty wallet is the
+            // wallet's own state.
+            Self::NotEnoughHosts(_)
+            | Self::Signing { .. }
+            | Self::NoHosts { .. }
+            | Self::NoHoldings { .. } => "",
         }
     }
 
