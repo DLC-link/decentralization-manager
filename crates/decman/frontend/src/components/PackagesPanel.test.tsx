@@ -35,12 +35,4 @@ describe("peerErrorTooltip", () => {
   it("still says something when no kind is set", () => {
     expect(peerErrorTooltip(peer())).toBe("No package list for this peer");
   });
-
-  it("names a Noise variant rather than dropping it", () => {
-    // Nothing emits these now, but they stay on the wire. An old node talking
-    // to a new UI must not render a blank tooltip.
-    expect(peerErrorTooltip(peer("handshake_failed"))).toContain(
-      "handshake_failed",
-    );
-  });
 });

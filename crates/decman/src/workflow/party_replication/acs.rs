@@ -35,6 +35,7 @@ use crate::{
     },
     db::schema::{SchemaRead, SchemaWrite},
     error::Result,
+    server::fetch_vetted_package_ids,
     utils,
     workflow::{
         party_replication::{
@@ -815,6 +816,44 @@ async fn local_package_ids(config: &NodeConfig) -> Result<HashSet<String>> {
     Ok(descriptions.into_iter().map(|p| p.package_id).collect())
 }
 
+/// New-member side: refuse to join while this participant has vetted a
+/// package it does not hold.
+///
+/// Vetting is synchronizer topology, but the package store is local, so the
+/// two can disagree. An operator can vet a package that was never uploaded,
+/// with `FORCE_FLAG_ALLOW_UNKNOWN_PACKAGE`. A restore from a backup taken
+/// before a DAR upload brings back the old package store, while the vetting
+/// stays on the synchronizer.
+///
+/// The coordinator checks the party's packages against this participant's
+/// vetting only, and the import's own package preflight runs at `SyncAcs`,
+/// after this member has left the synchronizer. Holding every vetted package,
+/// together with the coordinator's check, puts every package the party needs
+/// on this participant before it disconnects.
+pub async fn check_vetted_packages_held(config: &NodeConfig) -> Result {
+    let vetted = fetch_vetted_package_ids(config, config.participant_id()).await?;
+    let held = local_package_ids(config).await?;
+    let missing = vetted_not_held(&vetted, &held);
+    if !missing.is_empty() {
+        anyhow::bail!(
+            "this participant has vetted {n} package(s) it does not hold, as after a restore \
+             from backup — re-upload the corresponding DAR(s), then retry the add. Missing \
+             package ids: {missing:?}",
+            n = missing.len()
+        );
+    }
+    Ok(())
+}
+
+/// The vetted package ids missing from `held`, in vetting order.
+fn vetted_not_held<'a>(vetted: &'a [String], held: &HashSet<String>) -> Vec<&'a str> {
+    vetted
+        .iter()
+        .map(String::as_str)
+        .filter(|id| !held.contains(*id))
+        .collect()
+}
+
 /// Why one `ImportPartyAcs` attempt did not complete. Both carry how many
 /// bytes reached Canton, because that is what decides the quarantine.
 enum ImportError {
@@ -1178,5 +1217,40 @@ mod tests {
             &[connected("other", false), connected(alias, true)],
             alias,
         ));
+    }
+
+    fn ids(ids: &[&str]) -> Vec<String> {
+        ids.iter().map(|id| id.to_string()).collect()
+    }
+
+    #[test]
+    fn vetted_not_held_names_each_missing_package() {
+        let vetted = ids(&["a", "b", "c"]);
+        let held: HashSet<String> = ids(&["b"]).into_iter().collect();
+
+        assert_eq!(vetted_not_held(&vetted, &held), vec!["a", "c"]);
+    }
+
+    #[test]
+    fn vetted_not_held_is_empty_when_every_vetted_package_is_held() {
+        let vetted = ids(&["a", "b"]);
+        let held: HashSet<String> = ids(&["a", "b"]).into_iter().collect();
+
+        assert!(vetted_not_held(&vetted, &held).is_empty());
+    }
+
+    #[test]
+    fn vetted_not_held_ignores_packages_held_but_not_vetted() {
+        let vetted = ids(&["a"]);
+        let held: HashSet<String> = ids(&["a", "unvetted"]).into_iter().collect();
+
+        assert!(vetted_not_held(&vetted, &held).is_empty());
+    }
+
+    #[test]
+    fn vetted_not_held_is_empty_when_nothing_is_vetted() {
+        let held: HashSet<String> = ids(&["a"]).into_iter().collect();
+
+        assert!(vetted_not_held(&[], &held).is_empty());
     }
 }

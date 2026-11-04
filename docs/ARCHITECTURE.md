@@ -335,7 +335,6 @@ Minimum message size: 6 bytes (type + length with zero payload).
 | 0x0008 | GetNextCommand | (empty) | Peer polls for next command |
 | 0x0009 | SignKick | Config + kick proposals | Sign kick topology proposals |
 | 0x000A | Ping | (empty) | Heartbeat ping |
-| 0x000B | ListPackages | (empty) | Request peer's uploaded package list |
 | 0x000C | RequestOwnerKeys | (empty) | Request a peer's namespace owner keys |
 | 0x000D | ListPeers | (empty) | Request a peer's known-peer list |
 | 0x000E | RequestMemberParty | (empty) | Request a peer's member party |

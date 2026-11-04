@@ -67,7 +67,6 @@ pub enum MessageType {
     GetNextCommand = 0x0008,
     SignKick = 0x0009,
     Ping = 0x000A,
-    ListPackages = 0x000B,
     RequestOwnerKeys = 0x000C,
     ListPeers = 0x000D,
     RequestMemberParty = 0x000E,
@@ -187,8 +186,8 @@ pub const CHUNK_SIZE: usize = 1024 * 1024;
 
 /// Hard ceiling on the assembled size of a chunked response. Bounds peer-supplied
 /// `total_size` so a malicious or buggy peer can't ask the client to allocate
-/// arbitrary memory. 16 MiB is well above any plausible `ListPackages` payload
-/// (SV nodes observed at ~8 KiB) while keeping worst-case allocation bounded.
+/// arbitrary memory. A DAR that a peer reads before it accepts is the largest
+/// payload served this way; the server refuses one above this cap.
 pub const MAX_CHUNKED_TOTAL_SIZE: usize = 16 * 1024 * 1024;
 
 /// Hard ceiling on the chunk count for a chunked response. Equal to
@@ -241,7 +240,6 @@ impl TryFrom<u16> for MessageType {
             0x0008 => Ok(Self::GetNextCommand),
             0x0009 => Ok(Self::SignKick),
             0x000A => Ok(Self::Ping),
-            0x000B => Ok(Self::ListPackages),
             0x000C => Ok(Self::RequestOwnerKeys),
             0x000D => Ok(Self::ListPeers),
             0x000E => Ok(Self::RequestMemberParty),
