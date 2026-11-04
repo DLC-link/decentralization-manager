@@ -575,10 +575,15 @@ impl RelaySessions {
         }
     }
 
-    /// Whether this host has an open import for the replication
-    /// `instance_name`.
-    pub async fn is_importing(&self, instance_name: &str) -> bool {
-        self.imports.lock().await.contains_key(instance_name)
+    /// Whether block `seq` is the next block that the open import
+    /// `instance_name` will take. Checked under the registry lock, which is the
+    /// lock [`Self::accept_block`] checks the sequence under.
+    pub async fn is_next_block(&self, instance_name: &str, seq: u64) -> bool {
+        self.imports
+            .lock()
+            .await
+            .get(instance_name)
+            .is_some_and(|entry| entry.expected_seq == seq)
     }
 
     /// Whether any open or opening export, any open import, or any import
@@ -1507,7 +1512,7 @@ mod tests {
 
         assert!(matches!(result, Ok(AcceptedBlock::Complete)));
         assert_eq!(ends_of(&ends), vec![ImportEnd::Completed]);
-        assert!(!sessions.is_importing("run-1").await);
+        assert!(!sessions.imports.lock().await.contains_key("run-1"));
     }
 
     /// The request that delivered the final block can be cancelled while it
@@ -1538,7 +1543,7 @@ mod tests {
             let sessions = Arc::clone(&sessions);
             tokio::spawn(async move { sessions.finish(&target("run-1")).await })
         };
-        while sessions.is_importing("run-1").await {
+        while sessions.imports.lock().await.contains_key("run-1") {
             tokio::task::yield_now().await;
         }
 
@@ -1605,5 +1610,16 @@ mod tests {
         let ends = ends_of(&ends);
         assert_eq!(ends.len(), 1, "{ends:?}");
         assert!(matches!(&ends[0], ImportEnd::Abandoned(_)), "{ends:?}");
+    }
+
+    #[tokio::test]
+    async fn only_the_expected_block_is_next() {
+        let sessions = RelaySessions::new();
+        assert!(!sessions.is_next_block("run-1", 2).await, "no copy is open");
+        sessions.open_test_import("run-1", None, Ok(())).await;
+
+        assert!(sessions.is_next_block("run-1", 2).await);
+        assert!(!sessions.is_next_block("run-1", 3).await);
+        assert!(!sessions.is_next_block("run-2", 2).await);
     }
 }

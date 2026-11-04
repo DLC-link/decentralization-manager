@@ -177,14 +177,14 @@ pub async fn tenant_execute(
         Ok(key) => key,
         Err(resp) => return resp,
     };
-    let response = tenant_execute_on_this_host(&data, &body).await;
+    let body = body.into_inner();
     let party_id = format!("{}::{}", body.party_hint, body.signed_by);
-    audited(
+    audited_write(
         &data,
-        key.as_ref(),
+        key,
         TenantEndpoint::Execute,
-        &party_id,
-        response,
+        party_id,
+        move |data| async move { tenant_execute_on_this_host(&data, &body).await },
     )
     .await
 }
@@ -446,13 +446,14 @@ pub async fn tenant_add_hosts_authorize(
         Ok(key) => key,
         Err(resp) => return resp,
     };
-    let response = tenant_add_hosts_authorize_on_this_host(&data, &body).await;
-    audited(
+    let body = body.into_inner();
+    let party_id = body.party_id.clone();
+    audited_write(
         &data,
-        key.as_ref(),
+        key,
         TenantEndpoint::AddHostsAuthorize,
-        &body.party_id,
-        response,
+        party_id,
+        move |data| async move { tenant_add_hosts_authorize_on_this_host(&data, &body).await },
     )
     .await
 }
@@ -536,13 +537,14 @@ pub async fn tenant_add_hosts_execute(
         Ok(key) => key,
         Err(resp) => return resp,
     };
-    let response = tenant_add_hosts_execute_on_this_host(&data, &body).await;
-    audited(
+    let body = body.into_inner();
+    let party_id = body.party_id.clone();
+    audited_write(
         &data,
-        key.as_ref(),
+        key,
         TenantEndpoint::AddHostsExecute,
-        &body.party_id,
-        response,
+        party_id,
+        move |data| async move { tenant_add_hosts_execute_on_this_host(&data, &body).await },
     )
     .await
 }
@@ -804,30 +806,38 @@ pub async fn tenant_acs_import(
     };
     // A copy this host admitted must never be refused partway, or the
     // participant stays off the synchronizer until the reaper ends the copy.
-    // So the blocks of an admitted copy, the final one included, spend no
-    // budget and write no row here: the copy's teardown records how it ended.
+    // So the next block of an open copy, the final one included, spends no
+    // budget and writes no row here: the copy's teardown records how it ended.
     // Every other block spends budget: block 1, which opens a copy, block 0,
-    // which does not exist, and a block that no admitted copy takes.
-    if body.seq > 1 && import_is_admitted(&data, &body).await {
+    // which does not exist, and a block that no open copy takes next.
+    if body.seq > 1 && is_next_import_block(&data, &body).await {
         return tenant_acs_import_on_this_host(&data, &body, None).await;
     }
     if let Err(resp) = charge_tenant_key(&data, key.as_ref(), http_req.path()) {
         return resp;
     }
-    let on_end = (body.seq == 1).then(|| record_import_end(&data, key.clone(), &body.party_id));
-    let response = tenant_acs_import_on_this_host(&data, &body, on_end).await;
     let endpoint = if body.seq <= 1 {
         TenantEndpoint::AcsImportStart
     } else if body.end {
         TenantEndpoint::AcsImportEnd
     } else {
-        return response;
+        return tenant_acs_import_on_this_host(&data, &body, None).await;
     };
-    audited(&data, key.as_ref(), endpoint, &body.party_id, response).await
+    let on_end = (body.seq == 1).then(|| record_import_end(&data, key.clone(), &body.party_id));
+    let body = body.into_inner();
+    let party_id = body.party_id.clone();
+    audited_write(&data, key, endpoint, party_id, move |data| async move {
+        tenant_acs_import_on_this_host(&data, &body, on_end).await
+    })
+    .await
 }
 
-/// Whether the block belongs to an import that this host has open.
-async fn import_is_admitted(data: &AppState, body: &TenantAcsImportRequest) -> bool {
+/// Whether the block is the next one that an import open on this host will
+/// take. A block of an open copy with another sequence number is refused with
+/// a 409, so it spends budget like any block that no copy takes. Two requests
+/// that carry the same next block both pass here, and the import takes one:
+/// a wallet that retries a block it saw time out must not get a 429.
+async fn is_next_import_block(data: &AppState, body: &TenantAcsImportRequest) -> bool {
     match replication_target(
         &body.party_id,
         data.config.participant_id(),
@@ -835,7 +845,7 @@ async fn import_is_admitted(data: &AppState, body: &TenantAcsImportRequest) -> b
     ) {
         Ok(target) => {
             data.relay_sessions
-                .is_importing(&target.instance_name)
+                .is_next_block(&target.instance_name, body.seq)
                 .await
         }
         Err(_) => false,
@@ -1099,13 +1109,14 @@ pub async fn tenant_threshold_authorize(
         Ok(key) => key,
         Err(resp) => return resp,
     };
-    let response = tenant_threshold_authorize_on_this_host(&data, &body).await;
-    audited(
+    let body = body.into_inner();
+    let party_id = body.party_id.clone();
+    audited_write(
         &data,
-        key.as_ref(),
+        key,
         TenantEndpoint::ThresholdAuthorize,
-        &body.party_id,
-        response,
+        party_id,
+        move |data| async move { tenant_threshold_authorize_on_this_host(&data, &body).await },
     )
     .await
 }
@@ -1174,13 +1185,14 @@ pub async fn tenant_threshold_execute(
         Ok(key) => key,
         Err(resp) => return resp,
     };
-    let response = tenant_threshold_execute_on_this_host(&data, &body).await;
-    audited(
+    let body = body.into_inner();
+    let party_id = body.party_id.clone();
+    audited_write(
         &data,
-        key.as_ref(),
+        key,
         TenantEndpoint::ThresholdExecute,
-        &body.party_id,
-        response,
+        party_id,
+        move |data| async move { tenant_threshold_execute_on_this_host(&data, &body).await },
     )
     .await
 }
@@ -1344,43 +1356,102 @@ fn tenant_requester(key_index: Option<usize>) -> String {
     }
 }
 
-/// Record a write call in the tenant call audit, and return its response
-/// unchanged.
+/// Run one tenant write and record it in the audit, in a task of its own, and
+/// return the write's answer unchanged.
 ///
-/// A failed insert is logged and does not fail the call, because the Canton
-/// write may already have happened and the caller must still see its outcome.
-async fn audited(
-    data: &AppState,
+/// A client that goes away drops its request, and actix drops the handler with
+/// it. The task does not depend on the handler, so the write still finishes
+/// and its row is still written. A write that panics answers 500, and the row
+/// says so if the handler is still there to write it.
+async fn audited_write<W, F>(
+    data: &web::Data<AppState>,
+    key: Option<TenantKey>,
+    endpoint: TenantEndpoint,
+    party_id: String,
+    write: W,
+) -> HttpResponse
+where
+    W: FnOnce(web::Data<AppState>) -> F + Send + 'static,
+    F: Future<Output = HttpResponse> + Send + 'static,
+{
+    let task = tokio::spawn({
+        let data = data.clone();
+        let key = key.clone();
+        let party_id = party_id.clone();
+        async move {
+            let answer = Answer::of(write(data.clone()).await);
+            record_answer(&data.db, key.as_ref(), endpoint, &party_id, &answer).await;
+            answer
+        }
+    });
+    let answer = match task.await {
+        Ok(answer) => answer,
+        Err(e) => {
+            tracing::error!(
+                endpoint = endpoint.as_str(),
+                %party_id,
+                "a tenant write did not complete: {e}"
+            );
+            let answer = Answer::of(HttpResponse::InternalServerError().json(ErrorResponse {
+                error: "The call failed on this host; see the host's logs".to_string(),
+            }));
+            record_answer(&data.db, key.as_ref(), endpoint, &party_id, &answer).await;
+            answer
+        }
+    };
+    answer.into_response()
+}
+
+/// A write's answer as plain data, so it can leave the task the write ran in.
+struct Answer {
+    status: actix_web::http::StatusCode,
+    headers: actix_web::http::header::HeaderMap,
+    body: actix_web::web::Bytes,
+}
+
+impl Answer {
+    fn of(response: HttpResponse) -> Self {
+        let (head, body) = response.into_parts();
+        let body = body.try_into_bytes().unwrap_or_else(|_| {
+            // The handlers here answer with JSON, which is never streamed.
+            tracing::error!("a tenant write answered with a streamed body, which is dropped");
+            actix_web::web::Bytes::new()
+        });
+        Self {
+            status: head.status(),
+            headers: head.headers().clone(),
+            body,
+        }
+    }
+
+    fn into_response(self) -> HttpResponse {
+        let mut response = HttpResponse::with_body(self.status, self.body).map_into_boxed_body();
+        *response.headers_mut() = self.headers;
+        response
+    }
+}
+
+/// Insert the audit row for a write's answer. The error text is kept only for
+/// a refusal (4xx/5xx).
+async fn record_answer(
+    db: &sqlx::SqlitePool,
     key: Option<&TenantKey>,
     endpoint: TenantEndpoint,
     party_id: &str,
-    response: HttpResponse,
-) -> HttpResponse {
-    let status = response.status();
-    let (response, error) = if status.is_client_error() || status.is_server_error() {
-        let (head, body) = response.into_parts();
-        match body.try_into_bytes() {
-            Ok(bytes) => {
-                let error = error_text(&bytes);
-                (head.set_body(bytes).map_into_boxed_body(), error)
-            }
-            // A streamed body cannot be read without consuming it. The
-            // handlers here answer with JSON, which is never streamed.
-            Err(body) => (head.set_body(body), None),
-        }
-    } else {
-        (response, None)
-    };
+    answer: &Answer,
+) {
+    let error = (answer.status.is_client_error() || answer.status.is_server_error())
+        .then(|| error_text(&answer.body))
+        .flatten();
     let call = NewTenantCall {
         key_index: key.map(|k| k.index),
         key_id: key.map(|k| k.id.as_str()),
         endpoint,
         party_id: Some(party_id),
-        http_status: Some(status.as_u16()),
+        http_status: Some(answer.status.as_u16()),
         error: error.as_deref(),
     };
-    record(&data.db, &call).await;
-    response
+    record(db, &call).await;
 }
 
 /// What an import that block 1 opens calls when it is retired: it records how
@@ -1518,14 +1589,11 @@ pub async fn tenant_local_party_adopt_execute(
         Ok(key) => key,
         Err(resp) => return resp,
     };
-    let response = tenant_local_party_adopt_execute_on_this_host(&data, &body).await;
-    audited(
-        &data,
-        key.as_ref(),
-        TenantEndpoint::LocalPartyAdoptExecute,
-        &body.party_id,
-        response,
-    )
+    let body = body.into_inner();
+    let party_id = body.party_id.clone();
+    audited_write(&data, key, TenantEndpoint::LocalPartyAdoptExecute, party_id, move |data| async move {
+        tenant_local_party_adopt_execute_on_this_host(&data, &body).await
+    })
     .await
 }
 
@@ -2012,6 +2080,14 @@ mod audit_tests {
         format!("alice::1220{}", "aa".repeat(32))
     }
 
+    /// The instance name of the copy of `party` onto this node at serial 1.
+    fn instance_of(state: &AppState, party: &str) -> String {
+        match replication_target(party, state.config.participant_id(), 1) {
+            Ok(target) => target.instance_name,
+            Err(e) => panic!("the test party must name a replication: {e}"),
+        }
+    }
+
     /// A state on `db` that checks the tenant keys `keys` against a budget of
     /// `limit` calls per minute, as a production node does.
     fn keyed_state(db: SqlitePool, keys: &[&str], limit: u32) -> web::Data<AppState> {
@@ -2303,6 +2379,159 @@ mod audit_tests {
                 ("/v0/tenant/add-hosts/import (completed)", None),
                 ("/v0/tenant/add-hosts/import (start)", Some(400)),
             ]
+        );
+        Ok(())
+    }
+
+    /// A block of an open copy that is not the next one is refused, so it is
+    /// not part of the copy. It spends budget, and a refused final block gets
+    /// its own row.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_wrong_block_of_an_open_copy_spends_budget_and_records_its_end(
+        db: SqlitePool,
+    ) -> anyhow::Result<()> {
+        let state = keyed_state(db.clone(), &["key"], 1);
+        let party = valid_party();
+        state
+            .relay_sessions
+            .open_test_import(&instance_of(&state, &party), None, Ok(()))
+            .await;
+        let app = actix_test::init_service(
+            App::new()
+                .app_data(state)
+                .wrap(AuthMiddleware)
+                .service(tenant_acs_import),
+        )
+        .await;
+
+        let wrong_end =
+            actix_test::call_service(&app, import(&party, 5, "", true).to_request()).await;
+        assert_eq!(wrong_end.status(), StatusCode::CONFLICT);
+        let wrong_data =
+            actix_test::call_service(&app, import(&party, 6, "", false).to_request()).await;
+        assert_eq!(wrong_data.status(), StatusCode::TOO_MANY_REQUESTS);
+
+        let rows = audit_rows(&db).await?;
+        let seen: Vec<(&str, Option<u16>)> = rows
+            .iter()
+            .map(|r| (r.endpoint.as_str(), r.http_status))
+            .collect();
+        assert_eq!(seen, [("/v0/tenant/add-hosts/import (end)", Some(409))]);
+        Ok(())
+    }
+
+    /// The next block of an open copy passes with the budget spent, so a copy
+    /// is never refused partway.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn the_next_block_of_an_open_copy_passes_with_the_budget_spent(
+        db: SqlitePool,
+    ) -> anyhow::Result<()> {
+        let state = keyed_state(db.clone(), &["key"], 1);
+        let party = valid_party();
+        state
+            .relay_sessions
+            .open_test_import(&instance_of(&state, &party), None, Ok(()))
+            .await;
+        let app = actix_test::init_service(
+            App::new()
+                .app_data(state)
+                .wrap(AuthMiddleware)
+                .service(tenant_acs_import),
+        )
+        .await;
+        let chunk = STANDARD.encode(b"block");
+
+        let wrong =
+            actix_test::call_service(&app, import(&party, 7, &chunk, false).to_request()).await;
+        assert_eq!(wrong.status(), StatusCode::CONFLICT);
+        let spent =
+            actix_test::call_service(&app, import(&party, 7, &chunk, false).to_request()).await;
+        assert_eq!(spent.status(), StatusCode::TOO_MANY_REQUESTS);
+
+        for seq in 2..=3 {
+            let next =
+                actix_test::call_service(&app, import(&party, seq, &chunk, false).to_request())
+                    .await;
+            assert_eq!(next.status(), StatusCode::OK, "block {seq}");
+        }
+        Ok(())
+    }
+
+    /// A client that goes away drops the handler. The write runs on in its own
+    /// task, so its row is still written.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_write_whose_caller_went_away_is_still_recorded(
+        db: SqlitePool,
+    ) -> anyhow::Result<()> {
+        let state = keyed_state(db.clone(), &["key"], 0);
+        let (finish, finished) = tokio::sync::oneshot::channel::<()>();
+        let call = audited_write(
+            &state,
+            Some(the_key()),
+            TenantEndpoint::AddHostsExecute,
+            PARTY.to_string(),
+            move |_| async move {
+                // Stands for a Canton write that is still running.
+                let _ = finished.await;
+                HttpResponse::Conflict().json(ErrorResponse {
+                    error: "the pinned serial moved".to_string(),
+                })
+            },
+        );
+
+        let gone = tokio::time::timeout(std::time::Duration::from_millis(50), call).await;
+        assert!(
+            gone.is_err(),
+            "the write must still run when the caller goes"
+        );
+        assert!(audit_rows(&db).await?.is_empty());
+        let _ = finish.send(());
+
+        let mut rows = Vec::new();
+        for _ in 0..200 {
+            rows = audit_rows(&db).await?;
+            if !rows.is_empty() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert_eq!(rows[0].endpoint, "/v0/tenant/add-hosts/execute");
+        assert_eq!(rows[0].http_status, Some(409));
+        assert_eq!(rows[0].error.as_deref(), Some("the pinned serial moved"));
+        assert_eq!(rows[0].key_id, Some(the_key().id));
+        Ok(())
+    }
+
+    fn a_broken_write() -> HttpResponse {
+        panic!("the write broke")
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_write_that_panics_answers_500_and_is_recorded(db: SqlitePool) -> anyhow::Result<()> {
+        let state = keyed_state(db.clone(), &["key"], 0);
+
+        let response = audited_write(
+            &state,
+            Some(the_key()),
+            TenantEndpoint::ThresholdExecute,
+            PARTY.to_string(),
+            move |_| async move { a_broken_write() },
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let rows = audit_rows(&db).await?;
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert_eq!(rows[0].endpoint, "/v0/tenant/threshold/execute");
+        assert_eq!(rows[0].http_status, Some(500));
+        assert!(
+            rows[0]
+                .error
+                .as_deref()
+                .is_some_and(|e| e.contains("failed on this host")),
+            "{:?}",
+            rows[0].error
         );
         Ok(())
     }
