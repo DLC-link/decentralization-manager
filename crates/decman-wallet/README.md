@@ -47,7 +47,9 @@ report it. `execute_co_validated` records a failed host in its report rather tha
 aborting, and onboarding is idempotent, so stragglers can simply be retried.
 
 The wallet signs one hash per topology transaction, each hash computed by Canton
-and returned by the prepare step. Nothing on either side re-derives a Canton hash.
+and returned by the prepare step. The wallet does not re-derive topology hashes.
+For a transaction, the wallet does recompute the hash before it signs. See
+[the check before signing](#the-check-before-signing).
 
 Onboarding rides Canton's **admin** API rather than the Ledger API's
 `AllocateExternalParty`. That RPC is a convenience wrapper around the same topology
@@ -63,15 +65,173 @@ later; a threshold of `N` is rejected.
 
 ## Transacting
 
-Transacting as the party is **not** part of DecMan's tenant API, and not part of
-this crate's node-facing client. Once a party is onboarded it is an ordinary
-Canton external party: a wallet reads its contracts and signs its submissions
-directly against Canton's Ledger API, authorizing each with the
-[`ExternalKeyPair`] it holds. DecMan's role ends at onboarding — it has no business
-holding a Ledger-API credential on the party's behalf.
+Transacting as the party is **not** part of DecMan's tenant API. DecMan holds no
+Ledger API credential for the party. Once onboarded, the party is an ordinary
+Canton external party.
 
-This crate gives you the two halves a wallet needs for that: [`ExternalKeyPair`]
-for the signing, and the onboarding flow above to bring the party up.
+The wallet talks to a participant's JSON Ledger API itself. This crate gives it
+two Token Standard flows:
+
+- `send_transfer` sends an asset from the party.
+- `accept_transfer` accepts a transfer that another party offered to it.
+
+```rust
+use std::time::Duration;
+
+use decman_wallet::{
+    LedgerClient, RegistryClient, TransferArgs, accept_transfer, send_transfer,
+};
+
+// One participant that hosts the party, and the instrument's registry.
+let ledger = LedgerClient::new(
+    "http://localhost:7575/api/json-api",
+    Some(ledger_token),
+    "wallet-user",
+)?;
+let registry = RegistryClient::new("https://scan.example.com", None)?;
+
+// Send 1.25 Canton Coin. The offer expires after 24 hours.
+let args = TransferArgs::new(
+    &party_id,
+    &receiver,
+    "1.25",
+    &dso_party,
+    "Amulet",
+    Duration::from_secs(24 * 3600),
+);
+let sent = send_transfer(&ledger, &registry, &key, &args).await?;
+tracing::info!(kind = %sent.transfer_kind, update_id = %sent.update_id, "sent");
+
+// Accept every transfer offered to the party.
+for offer in ledger.transfer_instructions(&party_id).await? {
+    accept_transfer(&ledger, &registry, &key, &party_id, &offer.contract_id).await?;
+}
+```
+
+### The steps, next to the SDK
+
+The flows follow the splice-wallet-kernel SDK step for step.
+
+| Step | This crate | splice-wallet-kernel SDK | Endpoint |
+|---|---|---|---|
+| Read holdings | `LedgerClient::holdings`, `unlocked_holdings` | `token.utxos.list` | `GET /v2/state/ledger-end`, `POST /v2/state/active-contracts` |
+| Fix the arguments | `TransferArgs::new` | `buildTransferChoiceArgs` | none |
+| Get the factory | `RegistryClient::transfer_factory` | `fetchTransferFactoryChoiceContext` | `POST {registry}/registry/transfer-instruction/v1/transfer-factory` |
+| Build the command | `transfer_choice_argument` | `createTransferFromContext` | none |
+| Prepare | `LedgerClient::prepare` | `ledger.prepare` | `POST /v2/interactive-submission/prepare` |
+| Check | the check below | `computePreparedTransactionHash`, optional | none |
+| Sign | `Signer::sign` | `sign` | none |
+| Execute | `LedgerClient::execute` | `execute` | `POST /v2/interactive-submission/executeAndWait` |
+| List offers | `LedgerClient::transfer_instructions` | `token.transfer.pending` | `POST /v2/state/active-contracts` |
+| Accept | `accept_transfer` | `token.transfer.accept` | `POST {registry}/registry/transfer-instruction/v1/{cid}/choice-contexts/accept`, then prepare to execute |
+
+The crate differs from the SDK in three ways:
+
+- It sends the hashing scheme version that the prepare returned. The SDK always sends V2.
+- It spends every unlocked holding of the instrument, up to 100. The SDK picks holdings by amount.
+- It skips every holding with a lock. The SDK also spends a holding whose lock has expired.
+
+### The check before signing
+
+The wallet does not sign a hash until it knows what the hash covers. A
+participant could return one transaction with the hash of another. It could also return a
+different transaction with that transaction's correct hash.
+
+So the wallet checks each prepared transaction before the key signs:
+
+1. It decodes the `PreparedTransaction` protobuf.
+2. It recomputes the hash with `decman_lib::canton_hash`. The hash must equal
+   the one the participant returned.
+3. It reads the root of the transaction. There must be exactly one root, and it
+   must be an exercise.
+4. The exercise must use the expected interface, choice and contract. Its only
+   acting party must be the wallet's party.
+5. For a send, the choice argument must name the requested sender, receiver,
+   amount and instrument.
+
+A transaction that fails returns `Error::TransactionRefused`. The `Refusal` in
+it names what did not match. The wallet signs nothing and executes nothing.
+
+The check covers hashing schemes V2 and V3. Canton 3.6 prepares with V2 unless
+the request asks for another version, and the wallet never asks. The check
+refuses V4 and any unknown version.
+
+The check does not judge what happens below the root exercise. That part is
+the instrument admin's code, such as the factory's transfer logic.
+
+### The registry
+
+The registry is the instrument admin's service. The caller passes its root URL,
+and the client adds the `/registry/...` paths.
+
+| Instrument | Registry root |
+|---|---|
+| Canton Coin (`Amulet`) | The base URL of a Splice scan |
+| CBTC and other utility instruments | `{utility}/api/token-standard/v0/registrars/{admin}` |
+
+Canton Coin and CBTC use the same code. Only the registry root differs.
+
+No scan URL is fixed. Read the scans from the DSO endpoint, then keep the first
+one that answers. Many advertised scans do not answer.
+
+```sh
+dso=https://docs.dev.global.canton.network.sync.global/dso
+for scan in $(curl -s "$dso" \
+    | jq -r '.sv_node_states[].contract.payload.state.synchronizerNodes[][1].scan.publicUrl // empty' \
+    | sed 's:/*$::' | sort -u); do
+  curl -sf -o /dev/null "$scan/registry/metadata/v1/instruments" && echo "$scan"
+done
+```
+
+### What the wallet needs from the participant
+
+The ledger user needs `CanReadAs` and `CanExecuteAs` for the party. Never grant
+it `CanActAs`. The participant relays what the key signed and must not submit
+on its own.
+
+### Two-step transfers
+
+A receiver without a `TransferPreapproval` must accept each transfer. The
+registry then answers `transfer_kind: "offer"`. The asset moves only when the
+receiver calls `accept_transfer`.
+
+A new party holds nothing, so it cannot send. It can still receive, and it can
+accept an offer.
+
+### Amounts
+
+Amounts are decimal strings, such as `"1.25"`. The crate never parses them as
+numbers, so it never rounds them. The ledger writes amounts with ten decimals,
+such as `"1.2500000000"`. The check ignores trailing zeros when it compares
+amounts.
+
+### The example
+
+`examples/token_transfer.rs` runs each flow from the command line. Set `MODE` to
+`list`, `pending`, `send` or `accept`.
+
+| Variable | Modes | Meaning |
+|---|---|---|
+| `PARTY_ID` | all | The party's id |
+| `LEDGER_JSON_API_URL` | all | The JSON Ledger API URL, with its path prefix |
+| `LEDGER_USER_ID` | all | The ledger user the wallet submits as |
+| `LEDGER_TOKEN` | all, optional | A bearer token for the Ledger API |
+| `DECMAN_WALLET_SEED` | `send`, `accept` | The party's base64 Ed25519 seed |
+| `REGISTRY_URL` | `send`, `accept` | The registry root |
+| `REGISTRY_TOKEN` | `send`, `accept`, optional | A bearer token for the registry |
+| `RECEIVER`, `AMOUNT` | `send` | Who gets how much |
+| `INSTRUMENT_ADMIN`, `INSTRUMENT_ID` | `send` | The instrument, such as the DSO party and `Amulet` |
+| `VALIDITY_HOURS` | `send`, optional | How long the offer stays open; 24 by default |
+| `INSTRUCTION_CID` | `accept` | The transfer instruction to accept |
+
+The example never prints the seed. It refuses a seed whose fingerprint is not
+the party's.
+
+```sh
+MODE=pending PARTY_ID=bob::1220… LEDGER_USER_ID=wallet \
+  LEDGER_JSON_API_URL=http://localhost:7575/api/json-api \
+  cargo run -p decman-wallet --example token_transfer
+```
 
 ## Why the key belongs in the embedding process
 

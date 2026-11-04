@@ -342,6 +342,9 @@ a signature over the prepared hash, then `ExecuteSubmission`.
 The wallet needs a Ledger API user on that participant that may read as the
 party and execute submissions for it. The host operator grants those rights.
 
+The `decman-wallet` crate sends and accepts Token Standard transfers this way.
+See [its README](../crates/decman-wallet/README.md#transacting).
+
 ## Set up a transfer preapproval
 
 A `TransferPreapproval` lets the party receive Canton Coin from any sender
