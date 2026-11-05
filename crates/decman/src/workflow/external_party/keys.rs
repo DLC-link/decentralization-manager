@@ -4,8 +4,9 @@
 //! The derivation itself lives in [`common::fingerprint`] so the wallet-side
 //! client (`decman-wallet`) computes party ids exactly the way this node
 //! validates them. Key generation and signing live entirely on the client — a
-//! production binary cannot make or hold a party key, so nothing of the sort
-//! appears here.
+//! production binary cannot make or hold an external party's key, so nothing
+//! of the sort appears here. A decentralized party's one-shot deploy key is a
+//! different case; see [`crate::signing::one_shot`].
 
 use canton_proto_rs::com::digitalasset::canton::{
     crypto::v30::{Signature, SignatureFormat, SigningAlgorithmSpec, SigningKeySpec},

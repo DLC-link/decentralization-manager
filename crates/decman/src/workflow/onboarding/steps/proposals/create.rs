@@ -44,7 +44,7 @@ use crate::{
 /// 5. Once the dec_party_id is known, copies every peer's
 ///    `PEER_PUBLIC_KEYS` + `PARTICIPANT_ID` artefact into
 ///    `dec_party_identity` so the rows survive the workflow run's dismissal
-///    (read by `contracts::sign_submissions`, future kicks, etc.).
+///    (read by later kicks and membership changes).
 ///
 /// **Note**: If you encounter TOPOLOGY_NO_APPROPRIATE_SIGNING_KEY_IN_STORE errors,
 /// ensure the participant is properly connected to a synchronizer first.

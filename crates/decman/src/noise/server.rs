@@ -528,6 +528,10 @@ impl<S: WorkflowStep + 'static> NoiseServer<S> {
                 self.handle_peer_data(peer_id, message.payload, "P2P signatures")
                     .await
             }
+            MessageType::OneShotKey => {
+                self.handle_peer_data(peer_id, message.payload, "one-shot public key")
+                    .await
+            }
             MessageType::SubmissionSignatures => {
                 self.handle_peer_data(peer_id, message.payload, "submission signatures")
                     .await
@@ -580,6 +584,12 @@ impl<S: WorkflowStep + 'static> NoiseServer<S> {
         if has_completed {
             // Peer has completed current step, tell them to wait
             tracing::debug!("Sending Wait to {peer_id} (already completed current step)");
+            return Ok(Message::new_empty(MessageType::Wait));
+        }
+
+        // A step limited to chosen peers has nothing for the others.
+        if self.workflow_state.leaves_out(&peer_id).await {
+            tracing::debug!("Sending Wait to {peer_id} (not chosen for the current step)");
             return Ok(Message::new_empty(MessageType::Wait));
         }
 

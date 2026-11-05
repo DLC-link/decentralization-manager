@@ -1,24 +1,52 @@
-use std::sync::Arc;
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+};
 
 use anyhow::Context;
+use canton_proto_rs::com::digitalasset::canton::{
+    crypto::v30::{Signature, SigningPublicKey},
+    protocol::v30::SignedTopologyTransaction,
+};
 
 use crate::{
     auth::WorkflowAuth,
+    canton_id::CantonId,
     config::{NetworkConfig, NodeConfig},
     error::Result,
     noise::server::{ActiveWorkflow, NoiseServer},
     server::{WorkflowInstance, peer_status::LastSeen},
+    signing::{
+        PreparedTransactionHash,
+        one_shot::{self, OneShotKey},
+    },
     utils,
     workflow::{
         state::WorkflowState,
         storage::{WorkflowStorage, artifact_kinds},
+        topology,
     },
 };
 
 use super::{
     ContractsConfig, ContractsStep,
-    steps::{execute_submissions, prepare_submissions, sign_submissions},
+    steps::{
+        execute_submissions, prepare_submissions,
+        rotate::{self, SignerReply},
+        sign::{encode_messages_length_prefixed, verified_hashes},
+    },
 };
+
+/// What the coordinator keeps from `BuildRotation` until `PublishRotation`.
+/// Only in memory: a restart in between announces fresh keys.
+struct Round {
+    rotation: SignedTopologyTransaction,
+    keys: Vec<SigningPublicKey>,
+    hashes: Vec<PreparedTransactionHash>,
+    /// The coordinator's signature on each create.
+    daml: Vec<Signature>,
+    signers: HashSet<CantonId>,
+}
 
 pub async fn start_coordinator(
     node_config: NodeConfig,
@@ -94,6 +122,13 @@ async fn run_workflow(
     let auth = workflow_auth
         .ok_or_else(|| anyhow::anyhow!("Auth not configured, cannot run contracts workflow"))?;
 
+    // The peers' one-shot keys reached this process only in memory. A run
+    // that resumes at AnnounceKeys therefore asks every peer again.
+    if workflow_state.current_step().await == ContractsStep::AnnounceKeys {
+        workflow_state.restart_step().await;
+    }
+    let mut round: Option<Round> = None;
+
     loop {
         let current_step = workflow_state.current_step().await;
 
@@ -118,53 +153,59 @@ async fn run_workflow(
                     &creds.user_id,
                 )
                 .await?;
-
-                // Load prepared submissions from storage to ship to peers with the
-                // SignSubmissions command. Pair with the contracts config so the
-                // peer can recover the instance name + dec party id on its side.
-                let submissions_payload =
-                    load_prepared_submissions_payload(&db, &instance_name, &config).await?;
-                workflow_state
-                    .set_command_payload(submissions_payload)
-                    .await;
-
+                workflow_state.clear_command_payload().await;
                 workflow_state.advance_step().await;
             }
-            ContractsStep::SignSubmissions => {
-                tracing::info!("Coordinator executing: Sign submissions");
-                let intents = &config.committed()?.intents;
-                sign_submissions(&node_config, &db, &instance_name, &dec_party_id, intents)
-                    .await
-                    .context("Failed to sign submissions")?;
+            ContractsStep::AnnounceKeys | ContractsStep::SignSubmissions => {
                 if coordinator_only {
-                    // Coordinator's signature (just produced) already meets M=1;
-                    // advance without waiting for peer signatures.
-                    workflow_state
-                        .advance_step_if(ContractsStep::SignSubmissions)
-                        .await;
+                    workflow_state.advance_step_if(current_step).await;
                 }
                 tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
             }
+            ContractsStep::BuildRotation => {
+                tracing::info!("Coordinator executing: Build key rotation");
+                let built = build_round(
+                    &node_config,
+                    &db,
+                    &instance_name,
+                    &config,
+                    workflow_state.get_all_peer_data().await,
+                )
+                .await
+                .context("Failed to build the key rotation")?;
+                workflow_state.clear_peer_data().await;
+                workflow_state
+                    .set_command_payload(
+                        load_signing_payload(&db, &instance_name, &config, &built.rotation).await?,
+                    )
+                    .await;
+                workflow_state
+                    .limit_step_to(ContractsStep::SignSubmissions, built.signers.clone())
+                    .await;
+                round = Some(built);
+                workflow_state.advance_step().await;
+            }
+            ContractsStep::PublishRotation => {
+                tracing::info!("Coordinator executing: Publish key rotation");
+                let built = round.take().ok_or_else(|| {
+                    anyhow::anyhow!("PublishRotation reached without a built rotation")
+                })?;
+                let replies = workflow_state.get_all_peer_data().await;
+                workflow_state.clear_peer_data().await;
+                publish_round(
+                    &node_config,
+                    &db,
+                    &instance_name,
+                    &dec_party_id,
+                    built,
+                    replies,
+                )
+                .await
+                .context("Failed to publish the key rotation")?;
+                workflow_state.advance_step().await;
+            }
             ContractsStep::ExecuteSubmissions => {
                 tracing::info!("Coordinator executing: Execute submissions");
-
-                // Persist each peer's `SUBMISSION_SIGNATURES` blob into
-                // workflow storage keyed by peer id, so `execute_submissions`
-                // can read them via `list_artifacts`. The coordinator's own
-                // bundle was already written by `sign_submissions` above.
-                let peer_data = workflow_state.get_all_peer_data().await;
-                for (peer_id, payload) in &peer_data {
-                    let peer_key = peer_id.to_string();
-                    db.write_artifact(
-                        &instance_name,
-                        artifact_kinds::SUBMISSION_SIGNATURES,
-                        Some(&peer_key),
-                        payload,
-                    )
-                    .await?;
-                }
-                workflow_state.clear_peer_data().await;
-
                 let creds = auth.get_credentials(&config.decentralized_party_id).await?;
                 execute_submissions(
                     &node_config,
@@ -188,18 +229,158 @@ async fn run_workflow(
     Ok(())
 }
 
-/// Load all prepared submission artefacts from storage and encode them for
-/// transmission to peers. The blobs are keyed by zero-padded ordinal so
-/// `list_artifacts` returns them in their original creation order, which the
-/// receiving peer preserves when it re-keys them on its side.
+/// Choose the signers, make the coordinator's own one-shot key, and build and
+/// sign the rotation and the creates with it.
 ///
-/// Returns a payload of shape `[config_json][files_payload]` (length-prefixed),
-/// where each file is `(ordinal, blob)` — same wire shape the previous
-/// file-based implementation produced.
-async fn load_prepared_submissions_payload(
+/// The party's namespace threshold M sets the number of signers: the
+/// coordinator and M-1 peers, taken in id order from those that announced a
+/// key. The coordinator's key is dropped before this returns.
+async fn build_round(
+    node_config: &NodeConfig,
     db: &sqlx::SqlitePool,
     instance_name: &str,
     config: &ContractsConfig,
+    announced: HashMap<CantonId, Vec<u8>>,
+) -> Result<Round> {
+    let dec_party_id = &config.decentralized_party_id;
+    let synchronizer_id = utils::get_synchronizer_id(node_config).await?;
+    let (_, namespace) = topology::fetch_namespace_definition_at_head(
+        node_config,
+        &synchronizer_id,
+        &dec_party_id.namespace.to_hex(),
+    )
+    .await?;
+    let needed = usize::try_from(namespace.threshold)?.saturating_sub(1);
+
+    let mut announced: Vec<(CantonId, SigningPublicKey)> = announced
+        .into_iter()
+        .map(|(peer, payload)| {
+            let key: SigningPublicKey = prost::Message::decode(payload.as_slice())?;
+            one_shot::protocol_verifying_key(&key)
+                .with_context(|| format!("{peer} announced an unusable key"))?;
+            Ok((peer, key))
+        })
+        .collect::<Result<_>>()?;
+    announced.sort_by(|a, b| a.0.cmp(&b.0));
+    anyhow::ensure!(
+        announced.len() >= needed,
+        "{count} peer(s) announced a one-shot key, but the namespace threshold needs {needed}",
+        count = announced.len()
+    );
+    announced.truncate(needed);
+
+    let hashes = verified_hashes(
+        db,
+        instance_name,
+        dec_party_id,
+        &config.committed()?.intents,
+    )
+    .await?;
+    let key = OneShotKey::generate();
+    let keys: Vec<SigningPublicKey> = std::iter::once(key.public_key().clone())
+        .chain(announced.iter().map(|(_, k)| k.clone()))
+        .collect();
+    let mut rotation = rotate::build_rotation(
+        node_config,
+        &synchronizer_id,
+        instance_name,
+        dec_party_id,
+        keys.clone(),
+    )
+    .await?;
+    rotate::check_rotation(
+        node_config,
+        &synchronizer_id,
+        dec_party_id,
+        &rotation,
+        key.fingerprint(),
+    )
+    .await?;
+    rotation
+        .signatures
+        .push(key.sign_topology(&rotation.transaction));
+    let daml = key.sign_prepared(&hashes);
+    tracing::info!(
+        signers = keys.len(),
+        "Built the key rotation for {dec_party_id}; waiting for the chosen peers to sign"
+    );
+    Ok(Round {
+        rotation,
+        keys,
+        hashes,
+        daml,
+        signers: announced.into_iter().map(|(peer, _)| peer).collect(),
+    })
+}
+
+/// Merge the signers' replies, check every signature, store each create's
+/// signatures for `ExecuteSubmissions`, and publish the rotation.
+async fn publish_round(
+    node_config: &NodeConfig,
+    db: &sqlx::SqlitePool,
+    instance_name: &str,
+    dec_party_id: &CantonId,
+    round: Round,
+    replies: HashMap<CantonId, Vec<u8>>,
+) -> Result {
+    let mut copies = Vec::with_capacity(round.signers.len());
+    let mut by_create: Vec<Vec<Signature>> = round.daml.into_iter().map(|s| vec![s]).collect();
+    for signer in &round.signers {
+        let payload = replies
+            .get(signer)
+            .ok_or_else(|| anyhow::anyhow!("{signer} sent no signatures"))?;
+        let reply = SignerReply::decode(payload)
+            .with_context(|| format!("{signer} sent signatures that do not decode"))?;
+        anyhow::ensure!(
+            reply.daml.len() == by_create.len(),
+            "{signer} signed {signed} creates of {total}",
+            signed = reply.daml.len(),
+            total = by_create.len()
+        );
+        for (signatures, signature) in by_create.iter_mut().zip(reply.daml) {
+            signatures.push(signature);
+        }
+        copies.push(reply.rotation);
+    }
+    let rotation = rotate::merge_rotations(round.rotation, copies)?;
+    rotate::check_signatures(&rotation, &round.keys, &round.hashes, &by_create)?;
+
+    let ordinals = db
+        .list_artifacts(instance_name, artifact_kinds::PREPARED_SUBMISSION)
+        .await?;
+    for ((ordinal, _), signatures) in ordinals.iter().zip(&by_create) {
+        db.write_artifact(
+            instance_name,
+            artifact_kinds::SUBMISSION_SIGNATURES,
+            Some(ordinal),
+            &encode_messages_length_prefixed(signatures),
+        )
+        .await?;
+    }
+
+    let synchronizer_id = utils::get_synchronizer_id(node_config).await?;
+    rotate::publish_rotation(
+        node_config,
+        &synchronizer_id,
+        dec_party_id,
+        rotation,
+        &round.keys,
+    )
+    .await
+}
+
+/// Encode what a chosen peer signs: the contracts config, the rotation, and
+/// the prepared submissions. The submissions are keyed by zero-padded ordinal
+/// so `list_artifacts` returns them in creation order, which the peer keeps
+/// when it stores them on its side.
+///
+/// Returns `[config_json][rotation][files_payload]`, length-prefixed, where
+/// each file is `(ordinal, blob)`.
+async fn load_signing_payload(
+    db: &sqlx::SqlitePool,
+    instance_name: &str,
+    config: &ContractsConfig,
+    rotation: &SignedTopologyTransaction,
 ) -> Result<Vec<u8>> {
     tracing::info!("Loading prepared submissions from storage for distribution");
 
@@ -220,6 +401,7 @@ async fn load_prepared_submissions_payload(
     let files_payload = utils::encode_files(&submission_rows);
     Ok(utils::encode_length_prefixed(&[
         &config_data,
+        &utils::encode_length_prefixed_message(rotation),
         &files_payload,
     ]))
 }

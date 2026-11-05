@@ -38,6 +38,7 @@ use crate::{
     error::Result,
     noise::{MessageType, NoiseError, client::NoiseClient, is_transient, server::ActiveWorkflow},
     server::{DeclineInvitationPayload, WorkflowInstance, WorkflowKind, peer_status::LastSeen},
+    signing::one_shot::OneShotKey,
     utils,
     workflow::{
         state::WorkflowStep,
@@ -321,6 +322,8 @@ async fn run_peer(
     let mut consecutive_errors = 0;
     let mut consecutive_no_workflow = 0;
     let mut consecutive_step_failures = 0;
+    // This run's one-shot Daml key, from AnnounceKey until SignSubmissions.
+    let mut one_shot: Option<OneShotKey> = None;
     loop {
         // Poll coordinator for next command (with payload for commands that need data)
         let message = match client.get_next_command_with_payload().await {
@@ -664,16 +667,27 @@ async fn run_peer(
                     }
                 }
             }
-            MessageType::SignSubmissions => {
-                tracing::info!("Executing: Sign submissions");
-
-                if payload.is_empty() {
-                    fail_step!("No submissions payload received from coordinator");
-                    continue;
+            MessageType::AnnounceKey => {
+                tracing::info!("Executing: Announce a one-shot key");
+                // A repeated command replaces the key, so a key never serves
+                // two attempts.
+                let key = OneShotKey::generate();
+                let public_key = prost::Message::encode_to_vec(key.public_key());
+                tracing::info!(
+                    "Made one-shot key {fingerprint}",
+                    fingerprint = key.fingerprint()
+                );
+                one_shot = Some(key);
+                consecutive_step_failures = 0;
+                if let Err(e) = client.send_one_shot_key(public_key).await {
+                    tracing::error!("Failed to send the one-shot key to the coordinator: {e}");
                 }
+            }
+            MessageType::SignSubmissions => {
+                tracing::info!("Executing: Sign the key rotation and the submissions");
 
-                // Decode config and files from payload: [config_json, files_payload]
-                let items = match utils::decode_length_prefixed(&payload, 2) {
+                // [config_json, rotation, files_payload]
+                let items = match utils::decode_length_prefixed(&payload, 3) {
                     Ok(items) => items,
                     Err(e) => {
                         fail_step!("Failed to decode SignSubmissions payload: {e}");
@@ -696,37 +710,39 @@ async fn run_peer(
                     continue;
                 }
 
-                // Persist the prepared submissions sent by the coordinator into
-                // this peer's workflow_artifacts so sign_submissions can
-                // read them back via list_artifacts.
                 if let Err(e) =
-                    save_prepared_submissions_from_payload(&items[1], &db, &instance_name).await
+                    save_prepared_submissions_from_payload(&items[2], &db, &instance_name).await
                 {
                     fail_step!("Failed to save prepared submissions from coordinator: {e}");
                     continue;
                 }
 
-                if let Err(e) = contracts::sign_submissions(
+                // The key serves this one signing step, whatever its outcome.
+                let Some(key) = one_shot.take() else {
+                    fail_step!(
+                        "No one-shot key for this run; the coordinator must announce keys again"
+                    );
+                    continue;
+                };
+                let reply = match contracts::steps::rotate::sign_rotation(
                     &node_config,
                     &db,
                     &instance_name,
                     &dec_party_id,
                     &expectations.contract_intents,
+                    &items[1],
+                    key,
                 )
                 .await
                 {
-                    fail_step!("Step execution failed: {e:#}");
-                    continue;
-                }
+                    Ok(reply) => reply,
+                    Err(e) => {
+                        fail_step!("Step execution failed: {e:#}");
+                        continue;
+                    }
+                };
                 consecutive_step_failures = 0;
-                if let Err(e) = contracts::peer::send_submission_signatures_to_coordinator(
-                    &client,
-                    &db,
-                    &instance_name,
-                    &node_config,
-                )
-                .await
-                {
+                if let Err(e) = client.send_submission_signatures(reply).await {
                     tracing::error!("Failed to send submission signatures to coordinator: {e}");
                 }
             }
@@ -1374,6 +1390,7 @@ fn peer_step_for_command(
         }
         WorkflowKind::Contracts => {
             let step = match command {
+                MessageType::AnnounceKey => ContractsStep::AnnounceKeys,
                 MessageType::SignSubmissions => ContractsStep::SignSubmissions,
                 MessageType::Disconnect => ContractsStep::Complete,
                 _ => return None,
@@ -1570,6 +1587,7 @@ mod tests {
             (WorkflowKind::Onboarding, MessageType::Disconnect),
             (WorkflowKind::Kick, MessageType::SignKick),
             (WorkflowKind::Kick, MessageType::Disconnect),
+            (WorkflowKind::Contracts, MessageType::AnnounceKey),
             (WorkflowKind::Contracts, MessageType::SignSubmissions),
             (WorkflowKind::Contracts, MessageType::Disconnect),
             (WorkflowKind::Dars, MessageType::UploadDars),
