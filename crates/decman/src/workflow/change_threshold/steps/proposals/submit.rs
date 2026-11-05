@@ -1,5 +1,5 @@
 use canton_proto_rs::com::digitalasset::canton::{
-    protocol::v30::{DecentralizedNamespaceDefinition, PartyToParticipant},
+    protocol::v30::{DecentralizedNamespaceDefinition, PartyToParticipant, topology_mapping},
     topology::admin::v30::{
         ListDecentralizedNamespaceDefinitionRequest, ListPartyToParticipantRequest,
         topology_manager_read_service_client::TopologyManagerReadServiceClient,
@@ -18,7 +18,7 @@ use crate::{
         change_threshold::ChangeThresholdConfig,
         storage::{WorkflowStorage, artifact_kinds},
         thresholds::PartyThresholds,
-        topology,
+        topology, topology_version,
     },
 };
 
@@ -93,6 +93,14 @@ pub async fn submit_change(
         &p2p_transaction,
     )
     .await?;
+    let Some(topology_mapping::Mapping::PartyToParticipant(proposed)) =
+        topology_version::decode_transaction(&p2p_transaction.transaction)?
+            .mapping
+            .and_then(|m| m.mapping)
+    else {
+        anyhow::bail!("The change-threshold P2P proposal carries no PartyToParticipant");
+    };
+    let keeps_keys = proposed.party_signing_keys.is_some();
 
     topology::submit_dns_then_p2p(
         config,
@@ -117,6 +125,7 @@ pub async fn submit_change(
                 &synchronizer_id,
                 &party_id,
                 change_config.thresholds(),
+                keeps_keys,
             )
         },
     )
@@ -182,12 +191,14 @@ async fn wait_for_dns_in_topology(
 /// Wait until the party mapping's head state carries both `expected`
 /// thresholds. Like the DNS poll, the mapping already exists (the party id is
 /// stable), so we poll on the threshold values, not existence. Either one can
-/// be the only one that moves.
+/// be the only one that moves. `keeps_keys` says whether the change keeps
+/// the party's signing keys or publishes it without them.
 async fn wait_for_p2p_in_topology(
     config: &NodeConfig,
     synchronizer_id: &str,
     party_id: &CantonId,
     expected: PartyThresholds,
+    keeps_keys: bool,
 ) -> Result {
     let party_id_str = party_id.to_string();
     let mut topology_read_client =
@@ -210,7 +221,7 @@ async fn wait_for_p2p_in_topology(
 
         if topology::p2p_rows(response.results)?
             .iter()
-            .any(|(_, p)| carries_thresholds(p, expected))
+            .any(|(_, p)| carries_thresholds(p, expected, keeps_keys))
         {
             tracing::info!(
                 "P2P thresholds {expected:?} confirmed in topology after {attempt} attempt(s)"
@@ -232,13 +243,17 @@ async fn wait_for_p2p_in_topology(
 }
 
 /// The confirmation threshold sits on the mapping, the namespace one on its
-/// signing keys.
-fn carries_thresholds(mapping: &PartyToParticipant, expected: PartyThresholds) -> bool {
+/// signing keys. A change that drops the keys has landed once they are gone.
+fn carries_thresholds(
+    mapping: &PartyToParticipant,
+    expected: PartyThresholds,
+    keeps_keys: bool,
+) -> bool {
     i32::try_from(mapping.threshold) == Ok(expected.confirmation)
-        && mapping
-            .party_signing_keys
-            .as_ref()
-            .is_some_and(|keys| i32::try_from(keys.threshold) == Ok(expected.namespace))
+        && match &mapping.party_signing_keys {
+            Some(keys) => keeps_keys && i32::try_from(keys.threshold) == Ok(expected.namespace),
+            None => !keeps_keys,
+        }
 }
 
 #[cfg(test)]
@@ -264,15 +279,37 @@ mod tests {
     #[test]
     fn waits_for_both_thresholds() {
         let expected = PartyThresholds::new(1, Some(3));
-        assert!(carries_thresholds(&mapping(3, 1), expected));
-        assert!(!carries_thresholds(&mapping(3, 3), expected));
-        assert!(!carries_thresholds(&mapping(1, 1), expected));
+        assert!(carries_thresholds(&mapping(3, 1), expected, true));
+        assert!(!carries_thresholds(&mapping(3, 3), expected, true));
+        assert!(!carries_thresholds(&mapping(1, 1), expected, true));
         assert!(!carries_thresholds(
             &PartyToParticipant {
                 party_signing_keys: None,
                 ..mapping(3, 1)
             },
-            expected
+            expected,
+            true
+        ));
+    }
+
+    /// A change that drops the signing keys lands when the keys are gone and
+    /// the confirmation threshold moved.
+    #[test]
+    fn a_change_without_keys_waits_for_them_to_go() {
+        let expected = PartyThresholds::new(1, Some(3));
+        let keyless = PartyToParticipant {
+            party_signing_keys: None,
+            ..mapping(3, 1)
+        };
+        assert!(carries_thresholds(&keyless, expected, false));
+        assert!(!carries_thresholds(&mapping(3, 1), expected, false));
+        assert!(!carries_thresholds(
+            &PartyToParticipant {
+                threshold: 2,
+                ..keyless
+            },
+            expected,
+            false
         ));
     }
 }

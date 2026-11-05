@@ -10,7 +10,8 @@ use crate::{
         kick::KickConfig,
         proposal_store,
         signing_keys::{
-            adopt_legacy_signing_keys, known_signing_keys_by_member, signing_keys_without_member,
+            adopt_legacy_signing_keys, known_signing_keys_by_member, membership_change_keeps_keys,
+            signing_keys_without_member,
         },
         storage::{WorkflowStorage, artifact_kinds},
         thresholds::{PartyThresholds, ensure_carried_from},
@@ -156,37 +157,45 @@ pub async fn create_proposals(
         .iter()
         .map(|p| p.participant_uid.clone())
         .collect();
-    let new_signing_keys = if current_signing_keys.len() < member_count {
+    let new_signing_keys = if !membership_change_keeps_keys(config, &synchronizer_id, &party_id)
+        .await?
+    {
+        None
+    } else if current_signing_keys.len() < member_count {
         // A party onboarded before Canton 3.4 keeps its keys in a deprecated
         // PartyToKeyMapping, and a pre-1.10.0 add leaves a party holding some
         // inline and the rest there. Adopting the survivors' keys moves them
         // inline and leaves the departing member's behind in the same step.
-        adopt_legacy_signing_keys(
-            config,
-            storage,
-            &synchronizer_id,
-            &party_id,
-            &survivors,
-            &current_signing_keys,
+        Some(
+            adopt_legacy_signing_keys(
+                config,
+                storage,
+                &synchronizer_id,
+                &party_id,
+                &survivors,
+                &current_signing_keys,
+            )
+            .await?,
         )
-        .await?
     } else {
         let claims =
             known_signing_keys_by_member(config, storage, &party_id, &current_signing_keys).await?;
-        signing_keys_without_member(
+        Some(signing_keys_without_member(
             &current_signing_keys,
             &kick_participant_str,
             &survivors,
             &claims,
-        )?
+        )?)
     };
 
-    if new_signing_keys.len() != new_participants.len() {
+    if let Some(keys) = &new_signing_keys
+        && keys.len() != new_participants.len()
+    {
         anyhow::bail!(
             "Kick would leave the party with {keys} signing key(s) for {members} member(s). \
              Every member contributes exactly one, so the party's key set does not match \
              its membership and the peers would refuse the proposal",
-            keys = new_signing_keys.len(),
+            keys = keys.len(),
             members = new_participants.len()
         );
     }

@@ -540,7 +540,7 @@ impl PeerExpectations {
     /// # Errors
     ///
     /// Errors on any mismatch with the accepted invitation.
-    pub fn check_clear_onboarding(&self, payload: &[u8]) -> Result {
+    pub async fn check_clear_onboarding(&self, config: &NodeConfig, payload: &[u8]) -> Result {
         let dec_party_id = self.dec_party_id.as_ref().ok_or_else(|| {
             anyhow::anyhow!("accepted add-party invitation carries no dec party id")
         })?;
@@ -555,6 +555,15 @@ impl PeerExpectations {
         }
         self.check_p2p_membership(&mapping)?;
         self.check_p2p_thresholds(&mapping)?;
+        if mapping.party_signing_keys.is_none() {
+            let synchronizer_id = utils::get_synchronizer_id(config).await?;
+            ensure_no_legacy_fallback(
+                topology::fetch_party_to_key_mapping(config, &synchronizer_id, dec_party_id)
+                    .await?
+                    .is_some(),
+                dec_party_id,
+            )?;
+        }
 
         if let Some(still_onboarding) = mapping
             .participants
@@ -805,17 +814,20 @@ impl PeerExpectations {
             self.confirmation_threshold.or(self.threshold),
         )?;
 
-        // Signing a mapping with no party signing keys does not merely leave a
-        // threshold unchecked — it submits a party that can no longer
-        // authorize anything. Every mapping this tool produces carries them
-        // (onboarding sets them, and the kick / add-party / change-threshold /
-        // clearing proposals all derive from the current on-chain mapping), so
-        // an absent set is a stripped proposal.
+        // A membership change publishes the party without signing keys: the
+        // keys a deploy installs belong to no member, and the next deploy
+        // installs fresh ones. The on-chain checks refuse that while a legacy
+        // PartyToKeyMapping exists, because Canton would fall back to it.
+        // Onboarding always sets the keys, so an absent set there is a
+        // stripped proposal.
         let Some(signing_keys) = &mapping.party_signing_keys else {
-            anyhow::bail!(
-                "P2P proposal carries no party signing keys, which would leave the party \
-                 unable to authorize anything"
-            );
+            if self.kind == WorkflowKind::Onboarding {
+                anyhow::bail!(
+                    "P2P proposal carries no party signing keys, which would leave the party \
+                     unable to authorize anything"
+                );
+            }
+            return Ok(());
         };
 
         self.check_threshold(
@@ -902,6 +914,11 @@ impl PeerExpectations {
         mapping: &PartyToParticipant,
         when_unrecorded: WhenUnrecorded,
     ) -> Result {
+        // A proposal without signing keys carries no member's key, and
+        // `check_p2p_thresholds` allows that only for a membership change.
+        if mapping.party_signing_keys.is_none() && self.kind != WorkflowKind::Onboarding {
+            return Ok(());
+        }
         let keys = match self.own_keys(storage, instance_name).await? {
             Some(keys) => keys,
             None if when_unrecorded == WhenUnrecorded::Fail => anyhow::bail!(
@@ -1154,6 +1171,13 @@ async fn check_against_head(
         return Ok(());
     }
 
+    let Some(proposed_keys) = mapping.party_signing_keys.as_ref() else {
+        return ensure_no_legacy_fallback(
+            head.party_to_key_mapping(dec_party_id).await?.is_some(),
+            dec_party_id,
+        );
+    };
+
     // A party onboarded before Canton 3.4 keeps its keys in a legacy
     // PartyToKeyMapping that still holds departed members' keys, so the
     // proposal adopts a subset of it rather than the whole set.
@@ -1189,11 +1213,6 @@ async fn check_against_head(
         (union, true)
     };
 
-    let proposed_keys = mapping
-        .party_signing_keys
-        .as_ref()
-        .ok_or_else(|| anyhow::anyhow!("P2P proposal carries no party signing keys"))?;
-
     check_set_delta(
         "party signing key",
         kind,
@@ -1209,6 +1228,18 @@ async fn check_against_head(
         new_member.map(|(_, daml)| daml),
         legacy,
     )
+}
+
+/// Refuse a proposal that drops the party's signing keys while it still has
+/// a `PartyToKeyMapping`. Canton would fall back to that mapping, which can
+/// hold former members' keys.
+fn ensure_no_legacy_fallback(has_legacy_mapping: bool, dec_party_id: &CantonId) -> Result {
+    anyhow::ensure!(
+        !has_legacy_mapping,
+        "P2P proposal drops the signing keys of {dec_party_id}, which still has a legacy \
+         PartyToKeyMapping; Canton would fall back to that mapping and its former members' keys"
+    );
+    Ok(())
 }
 
 /// Whether a proposal is the head transaction itself. The same serial with a
@@ -1820,12 +1851,28 @@ mod tests {
     }
 
     #[test]
-    fn rejects_a_proposal_with_no_party_signing_keys() -> Result {
+    fn onboarding_rejects_a_proposal_with_no_party_signing_keys() -> Result {
         let (a, b) = (canton_id("p1", 1)?, canton_id("p2", 2)?);
-        let expectations = expectations(vec![a.clone(), b.clone()], a.clone());
+        let mut expectations = expectations(vec![a.clone(), b.clone()], a.clone());
+        expectations.kind = WorkflowKind::Onboarding;
         let mapping = p2p("dec::x", &[a, b], 2);
         assert!(mapping.party_signing_keys.is_none());
         assert!(expectations.check_p2p_thresholds(&mapping).is_err());
+        Ok(())
+    }
+
+    /// A membership change publishes the party without signing keys; its
+    /// confirmation threshold is still held to the accepted one.
+    #[test]
+    fn a_membership_change_may_drop_the_signing_keys() -> Result {
+        let (a, b) = (canton_id("p1", 1)?, canton_id("p2", 2)?);
+        let expectations = expectations(vec![a.clone(), b.clone()], a.clone());
+        expectations.check_p2p_thresholds(&p2p("dec::x", &[a.clone(), b.clone()], 2))?;
+        assert!(
+            expectations
+                .check_p2p_thresholds(&p2p("dec::x", &[a, b], 1))
+                .is_err()
+        );
         Ok(())
     }
 
@@ -2006,8 +2053,8 @@ mod tests {
         Ok(())
     }
 
-    #[test]
-    fn rejects_a_clearing_proposal_that_still_flags_onboarding() -> Result {
+    #[tokio::test]
+    async fn rejects_a_clearing_proposal_that_still_flags_onboarding() -> Result {
         let (a, b) = (canton_id("p1", 1)?, canton_id("p2", 2)?);
         let party = canton_id("dec", 7)?;
         let mut expectations = expectations(vec![a.clone(), b.clone()], a.clone());
@@ -2021,7 +2068,8 @@ mod tests {
         let payload = encode_proposal(topology_mapping::Mapping::PartyToParticipant(mapping));
 
         let error = expectations
-            .check_clear_onboarding(&payload)
+            .check_clear_onboarding(&NodeConfig::default(), &payload)
+            .await
             .err()
             .map(|e| e.to_string())
             .unwrap_or_default();
@@ -2679,6 +2727,33 @@ mod tests {
             error.contains("must remove exactly 0"),
             "unexpected error: {error}"
         );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn dropping_the_keys_is_refused_only_while_a_legacy_mapping_exists() -> Result {
+        let def = namespace(&["a", "b", "c"]);
+        let against = |legacy_keys| {
+            let def = def.clone();
+            async move {
+                let head = StubHead {
+                    dns: Some((2, def.clone())),
+                    p2p: Some((5, keyed_p2p(Some(signing_keys(2, 2)))?)),
+                    legacy_keys,
+                };
+                check_against_head(
+                    &head,
+                    WorkflowKind::ChangeThreshold,
+                    &canton_id("party", 9)?,
+                    (3, &def),
+                    (6, &keyed_p2p(None)?),
+                    None,
+                )
+                .await
+            }
+        };
+        against(None).await?;
+        assert!(against(Some(signing_keys(3, 2).keys)).await.is_err());
         Ok(())
     }
 

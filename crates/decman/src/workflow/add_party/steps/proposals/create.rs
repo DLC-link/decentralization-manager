@@ -23,7 +23,9 @@ use crate::{
         add_party::AddPartyConfig,
         onboarding::steps::proposals::create::decode_keys_payload,
         proposal_store,
-        signing_keys::{adopt_legacy_signing_keys, own_namespace_key},
+        signing_keys::{
+            adopt_legacy_signing_keys, membership_change_keeps_keys, own_namespace_key,
+        },
         storage::{WorkflowStorage, artifact_kinds, identity_kinds},
         thresholds::{PartyThresholds, ensure_carried_from},
         topology, topology_version,
@@ -190,7 +192,10 @@ pub async fn create_proposals(
         .party_signing_keys
         .map(|sk| sk.keys)
         .unwrap_or_default();
-    let mut signing_keys = if current_signing_keys.len() < current_p2p.participants.len() {
+    let keeps_keys = membership_change_keeps_keys(config, &synchronizer_id, party_id).await?;
+    let mut signing_keys = if !keeps_keys {
+        Vec::new()
+    } else if current_signing_keys.len() < current_p2p.participants.len() {
         let members: Vec<String> = current_p2p
             .participants
             .iter()
@@ -211,14 +216,15 @@ pub async fn create_proposals(
 
     // Merge the new member's Daml key into the party signing keys, deduped by
     // fingerprint so a retried run can't double-add it.
-    if !signing_keys
-        .iter()
-        .any(|k| utils::compute_fingerprint(k) == new_daml_fingerprint)
+    if keeps_keys
+        && !signing_keys
+            .iter()
+            .any(|k| utils::compute_fingerprint(k) == new_daml_fingerprint)
     {
         signing_keys.push(new_daml_key);
     }
 
-    if signing_keys.len() != new_participants.len() {
+    if keeps_keys && signing_keys.len() != new_participants.len() {
         anyhow::bail!(
             "Add-party would leave the party with {keys} signing key(s) for {members} \
              member(s). Every member contributes exactly one, so the key set does not match \
@@ -228,8 +234,11 @@ pub async fn create_proposals(
         );
     }
 
-    let new_p2p =
-        thresholds.party_to_participant(party_id.to_string(), new_participants, signing_keys)?;
+    let new_p2p = thresholds.party_to_participant(
+        party_id.to_string(),
+        new_participants,
+        keeps_keys.then_some(signing_keys),
+    )?;
 
     // Publishing the P2P proposal before submit (below) is safe only while it
     // adds the new member as a host, so check that before anything is signed.

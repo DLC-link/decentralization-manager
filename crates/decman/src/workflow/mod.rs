@@ -1198,7 +1198,10 @@ async fn run_peer(
                     continue;
                 }
 
-                if let Err(e) = expectations.check_clear_onboarding(&items[1]) {
+                if let Err(e) = expectations
+                    .check_clear_onboarding(&node_config, &items[1])
+                    .await
+                {
                     fail_step!("Refusing the coordinator's clearing proposal: {e}");
                     continue;
                 }

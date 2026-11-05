@@ -229,7 +229,7 @@ pub async fn create_proposals(
                 onboarding: None,
             })
             .collect(),
-        daml_keys.clone(),
+        Some(daml_keys.clone()),
     )?;
 
     // Debug: Log all Daml key fingerprints being added to P2P mapping
