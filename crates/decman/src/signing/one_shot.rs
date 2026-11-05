@@ -128,7 +128,8 @@ pub fn topology_hash(transaction: &[u8]) -> [u8; 34] {
 /// # Errors
 ///
 /// Errors unless the key is an Ed25519 DER `SubjectPublicKeyInfo` with
-/// `Protocol` usage and nothing else.
+/// `Protocol` usage. The only other usage allowed is proof of ownership,
+/// which Canton adds to a key it writes into a mapping.
 pub fn protocol_verifying_key(key: &SigningPublicKey) -> Result<VerifyingKey> {
     anyhow::ensure!(
         key.format == CryptoKeyFormat::DerX509SubjectPublicKeyInfo as i32
@@ -136,9 +137,12 @@ pub fn protocol_verifying_key(key: &SigningPublicKey) -> Result<VerifyingKey> {
         "Party signing key {fingerprint} is not an Ed25519 SubjectPublicKeyInfo",
         fingerprint = utils::compute_fingerprint(key)
     );
+    let protocol = SigningKeyUsage::Protocol as i32;
+    let ownership = SigningKeyUsage::ProofOfOwnership as i32;
     anyhow::ensure!(
-        key.usage == [SigningKeyUsage::Protocol as i32],
-        "Party signing key {fingerprint} must have Protocol usage only",
+        key.usage.contains(&protocol)
+            && key.usage.iter().all(|u| *u == protocol || *u == ownership),
+        "Party signing key {fingerprint} must have Protocol usage and no other role",
         fingerprint = utils::compute_fingerprint(key)
     );
     let raw: [u8; 32] = key
@@ -245,5 +249,16 @@ mod tests {
         let mut key = OneShotKey::generate().public_key().clone();
         key.usage.push(SigningKeyUsage::Namespace as i32);
         assert!(protocol_verifying_key(&key).is_err());
+    }
+
+    #[test]
+    fn the_proof_of_ownership_usage_canton_adds_is_accepted() -> Result {
+        let mut key = OneShotKey::generate().public_key().clone();
+        key.usage.push(SigningKeyUsage::ProofOfOwnership as i32);
+        protocol_verifying_key(&key)?;
+
+        key.usage = vec![SigningKeyUsage::ProofOfOwnership as i32];
+        assert!(protocol_verifying_key(&key).is_err());
+        Ok(())
     }
 }
