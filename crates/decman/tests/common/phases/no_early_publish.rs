@@ -388,6 +388,7 @@ async fn move_p2p_serial(
             AuthorizeRequest {
                 r#type: Some(authorize_request::Type::Proposal(
                     authorize_request::Proposal {
+                        protocol_version: None,
                         change: TopologyChangeOp::AddReplace as i32,
                         serial,
                         mapping: Some(authorize_request::proposal::Mapping::V30(TopologyMapping {

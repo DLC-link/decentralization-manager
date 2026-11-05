@@ -36,6 +36,7 @@ pub fn commands_envelope(
         package_id_selection_preference: vec![],
         prefetch_contract_keys: vec![],
         taps_max_passes: None,
+        account_id: String::new(),
     }
 }
 

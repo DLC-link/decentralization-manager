@@ -140,6 +140,7 @@ pub async fn prepare_submissions(
 
         let prepared_submission = submission_client
             .prepare_submission(tonic::Request::new(PrepareSubmissionRequest {
+                account_id: String::new(),
                 user_id: user_id.to_string(),
                 command_id: contract_def.id.clone(),
                 commands: vec![create_command],

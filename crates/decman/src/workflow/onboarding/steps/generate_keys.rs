@@ -279,6 +279,7 @@ pub(crate) async fn propose_namespace_delegation(
     let request = tonic::Request::new(AuthorizeRequest {
         r#type: Some(authorize_request::Type::Proposal(
             authorize_request::Proposal {
+                protocol_version: None,
                 change: TopologyChangeOp::AddReplace as i32,
                 serial: 0,
                 mapping: Some(authorize_request::proposal::Mapping::V30(TopologyMapping {

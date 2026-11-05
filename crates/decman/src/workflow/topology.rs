@@ -513,6 +513,7 @@ fn legacy_retirement_request(
     Ok(AuthorizeRequest {
         r#type: Some(authorize_request::Type::Proposal(
             authorize_request::Proposal {
+                protocol_version: None,
                 change: enums::TopologyChangeOp::Remove as i32,
                 serial: serial
                     .checked_add(1)

@@ -484,6 +484,7 @@ pub(crate) fn proposal_request(
     AuthorizeRequest {
         r#type: Some(authorize_request::Type::Proposal(
             authorize_request::Proposal {
+                protocol_version: None,
                 change: enums::TopologyChangeOp::AddReplace as i32,
                 serial: 0,
                 mapping: Some(authorize_request::proposal::Mapping::V30(TopologyMapping {

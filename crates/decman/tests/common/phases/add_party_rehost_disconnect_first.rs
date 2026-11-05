@@ -199,6 +199,7 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
                 AuthorizeRequest {
                     r#type: Some(authorize_request::Type::Proposal(
                         authorize_request::Proposal {
+                            protocol_version: None,
                             change: TopologyChangeOp::AddReplace as i32,
                             serial: 0,
                             mapping: Some(authorize_request::proposal::Mapping::V30(

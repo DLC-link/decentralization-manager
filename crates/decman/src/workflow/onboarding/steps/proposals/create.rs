@@ -250,6 +250,7 @@ pub async fn create_proposals(
     let dns_request = tonic::Request::new(AuthorizeRequest {
         r#type: Some(authorize_request::Type::Proposal(
             authorize_request::Proposal {
+                protocol_version: None,
                 change: enums::TopologyChangeOp::AddReplace as i32,
                 serial: 1,
                 mapping: Some(authorize_request::proposal::Mapping::V30(TopologyMapping {
@@ -278,6 +279,7 @@ pub async fn create_proposals(
     let p2p_request = tonic::Request::new(AuthorizeRequest {
         r#type: Some(authorize_request::Type::Proposal(
             authorize_request::Proposal {
+                protocol_version: None,
                 change: enums::TopologyChangeOp::AddReplace as i32,
                 serial: 0,
                 mapping: Some(authorize_request::proposal::Mapping::V30(TopologyMapping {
