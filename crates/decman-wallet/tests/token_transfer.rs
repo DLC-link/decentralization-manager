@@ -991,6 +991,9 @@ async fn send_transfer_runs_the_steps_in_order_and_signs_the_hash_locally() {
     assert_eq!(prepare["userId"], "wallet-user");
     assert_eq!(prepare["actAs"], json!([sender]));
     assert_eq!(prepare["readAs"], json!([]));
+    // Canton 3.6 refuses a prepare body without these two fields.
+    assert_eq!(prepare["synchronizerId"], "");
+    assert_eq!(prepare["packageIdSelectionPreference"], json!([]));
     assert_eq!(prepare["disclosedContracts"], disclosed());
     let command = &prepare["commands"][0]["ExerciseCommand"];
     assert_eq!(command["templateId"], TRANSFER_FACTORY_INTERFACE_ID);
@@ -1482,6 +1485,8 @@ async fn accept_transfer_exercises_the_instruction_with_the_registry_context() {
 
     let prepare = &bodies(&server, PREPARE_PATH).await[0];
     assert_eq!(prepare["actAs"], json!([receiver]));
+    assert_eq!(prepare["synchronizerId"], "");
+    assert_eq!(prepare["packageIdSelectionPreference"], json!([]));
     assert_eq!(prepare["disclosedContracts"], disclosed());
     let command = &prepare["commands"][0]["ExerciseCommand"];
     assert_eq!(command["templateId"], TRANSFER_INSTRUCTION_INTERFACE_ID);

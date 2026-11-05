@@ -251,9 +251,13 @@ pub struct PrepareRequest {
     /// JSON Ledger API commands, for example `{"ExerciseCommand": {...}}`.
     pub commands: Vec<Value>,
     pub disclosed_contracts: Vec<DisclosedContract>,
-    /// `None` lets the participant choose the synchronizer.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub synchronizer_id: Option<String>,
+    /// Empty lets the participant choose the synchronizer. The JSON Ledger
+    /// API refuses a body without this field, though its spec marks it
+    /// optional.
+    pub synchronizer_id: String,
+    /// Empty lets the participant choose each package's version. Required on
+    /// the wire, like `synchronizer_id`.
+    pub package_id_selection_preference: Vec<String>,
     pub verbose_hashing: bool,
 }
 

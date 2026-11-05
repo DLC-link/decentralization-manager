@@ -362,7 +362,8 @@ async fn submit(
             read_as: Vec::new(),
             commands: vec![command],
             disclosed_contracts,
-            synchronizer_id: None,
+            synchronizer_id: String::new(),
+            package_id_selection_preference: Vec::new(),
             verbose_hashing: false,
         })
         .await?;
