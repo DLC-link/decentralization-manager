@@ -69,8 +69,11 @@ use common::{
 };
 use dec_party_manager::{
     config::NodeConfig,
-    workflow::topology::{
-        authorize_with_topology_retry, head_state_query, p2p_rows, synchronizer_store_id,
+    workflow::{
+        topology::{
+            authorize_with_topology_retry, head_state_query, p2p_rows, synchronizer_store_id,
+        },
+        topology_version,
     },
 };
 use reqwest::header::{AUTHORIZATION, CONTENT_TYPE};
@@ -199,7 +202,9 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
                 AuthorizeRequest {
                     r#type: Some(authorize_request::Type::Proposal(
                         authorize_request::Proposal {
-                            protocol_version: None,
+                            protocol_version: topology_version::proposal_protocol_version(
+                                &synchronizer_id,
+                            ),
                             change: TopologyChangeOp::AddReplace as i32,
                             serial: 0,
                             mapping: Some(authorize_request::proposal::Mapping::V30(

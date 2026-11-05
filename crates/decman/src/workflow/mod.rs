@@ -12,6 +12,7 @@ pub mod state;
 pub mod storage;
 pub mod thresholds;
 pub mod topology;
+pub mod topology_version;
 pub mod validation;
 
 #[cfg(test)]
@@ -20,11 +21,9 @@ mod peer_retry_tests;
 use std::sync::Arc;
 
 use anyhow::Context;
-use canton_proto_rs::com::digitalasset::canton::{
-    protocol::v30::{SignedTopologyTransaction, TopologyTransaction, topology_mapping},
-    version::v1::{UntypedVersionedMessage, untyped_versioned_message},
+use canton_proto_rs::com::digitalasset::canton::protocol::v30::{
+    SignedTopologyTransaction, topology_mapping,
 };
-use prost::Message;
 use sqlx::SqlitePool;
 
 use crate::{
@@ -1315,17 +1314,8 @@ async fn send_skip_status(client: &NoiseClient, step: &str) {
 fn extract_party_id_from_p2p_payload(payload: &[u8]) -> Result<CantonId> {
     let signed: SignedTopologyTransaction = utils::read_first_message_from_bytes(payload)?;
 
-    // `signed.transaction` is an UntypedVersionedMessage envelope (not raw
-    // TopologyTransaction bytes) — Canton wraps every protocol-versioned
-    // message this way. Unwrap one layer, then decode the inner data.
-    let versioned = UntypedVersionedMessage::decode(signed.transaction.as_slice())
-        .context("Failed to decode UntypedVersionedMessage from SignedTopologyTransaction")?;
-    let inner_bytes = match versioned.wrapper {
-        Some(untyped_versioned_message::Wrapper::Data(b)) => b,
-        None => anyhow::bail!("UntypedVersionedMessage has no wrapper data"),
-    };
-    let tx = TopologyTransaction::decode(inner_bytes.as_slice())
-        .context("Failed to decode TopologyTransaction from versioned wrapper")?;
+    let tx = topology_version::decode_transaction(&signed.transaction)
+        .context("Failed to decode the TopologyTransaction in the SignedTopologyTransaction")?;
     let mapping = tx
         .mapping
         .and_then(|m| m.mapping)

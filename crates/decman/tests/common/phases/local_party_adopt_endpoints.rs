@@ -37,6 +37,7 @@ use dec_party_manager::{
     workflow::{
         external_party::add_hosts::read_party_to_participant,
         topology::{authorize_with_topology_retry, synchronizer_store_id},
+        topology_version,
     },
 };
 use decman_wallet::ExternalKeyPair;
@@ -71,7 +72,7 @@ async fn allocate_local_party(config: &NodeConfig, party_id: &str) -> anyhow::Re
         AuthorizeRequest {
             r#type: Some(authorize_request::Type::Proposal(
                 authorize_request::Proposal {
-                    protocol_version: None,
+                    protocol_version: topology_version::proposal_protocol_version(&synchronizer_id),
                     change: TopologyChangeOp::AddReplace as i32,
                     serial: 0,
                     mapping: Some(authorize_request::proposal::Mapping::V30(TopologyMapping {

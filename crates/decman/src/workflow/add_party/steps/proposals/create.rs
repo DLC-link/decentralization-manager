@@ -26,7 +26,7 @@ use crate::{
         signing_keys::{adopt_legacy_signing_keys, own_namespace_key},
         storage::{WorkflowStorage, artifact_kinds, identity_kinds},
         thresholds::{PartyThresholds, ensure_carried_from},
-        topology,
+        topology, topology_version,
     },
 };
 
@@ -484,7 +484,7 @@ pub(crate) fn proposal_request(
     AuthorizeRequest {
         r#type: Some(authorize_request::Type::Proposal(
             authorize_request::Proposal {
-                protocol_version: None,
+                protocol_version: topology_version::proposal_protocol_version(synchronizer_id),
                 change: enums::TopologyChangeOp::AddReplace as i32,
                 serial: 0,
                 mapping: Some(authorize_request::proposal::Mapping::V30(TopologyMapping {
