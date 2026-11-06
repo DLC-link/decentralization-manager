@@ -12,7 +12,7 @@ use crate::{
         kick::KickConfig,
         proposal_store,
         signing_keys::{
-            adopt_legacy_signing_keys, known_signing_keys_by_member, signing_keys_without_member,
+            adopt_legacy_signing_keys, known_signing_keys_by_member, signing_keys_after_kick,
         },
         storage::{WorkflowStorage, artifact_kinds},
         thresholds::{PartyThresholds, ensure_carried_from},
@@ -185,15 +185,16 @@ pub async fn create_proposals(
         .await?
     } else if kicked_host.is_some() || current_signing_keys.len() > member_count {
         // A member that removes its own hosting entry leaves its key behind,
-        // so an owner that hosts nothing may still hold one. Its kick takes
-        // that key out along with the owner key.
+        // so an owner that hosts nothing may still hold one. A kick takes out
+        // every such key along with the kicked member's, so one key per host
+        // stays, as the peers require.
         let removed = kick_config.participant_id.as_ref().map_or_else(
             || kick_config.namespace_fingerprint.clone(),
             ToString::to_string,
         );
         let claims =
             known_signing_keys_by_member(config, storage, &party_id, &current_signing_keys).await?;
-        signing_keys_without_member(&current_signing_keys, &removed, &survivors, &claims)?
+        signing_keys_after_kick(&current_signing_keys, &removed, &survivors, &claims)?
     } else {
         current_signing_keys
     };
