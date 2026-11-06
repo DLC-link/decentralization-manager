@@ -1138,7 +1138,8 @@ impl TopologyHead for SynchronizerHead<'_> {
 /// `new_member` is this node's `(namespace, daml)` fingerprints when it is the
 /// new member. `kicked_owner` is the owner key a kick invitation names.
 ///
-/// A kick removes one owner key. It removes a host only when the departing
+/// Only add-party hosts a participant the on-chain mapping does not, and only
+/// one. A kick removes one owner key. It removes a host only when the departing
 /// member hosts the party. It removes every signing key above one per host
 /// left: the host's own key, or the key a member left behind when it removed
 /// its own hosting entry. A kick that removes no host must name the owner key,
@@ -1162,6 +1163,17 @@ async fn check_against_head(
         anyhow::anyhow!("cannot read the current signing keys of {dec_party_id}: {e:#}")
     })?;
 
+    // The host set must match the accepted invitation, but the invitation
+    // comes from the coordinator. Only add-party may host a participant the
+    // on-chain mapping does not, and only the one it adds.
+    let hosts_added = hosts_added(&current_p2p, mapping);
+    let max_hosts_added = usize::from(kind == WorkflowKind::AddParty);
+    if hosts_added.len() > max_hosts_added {
+        anyhow::bail!(
+            "{kind:?} proposal hosts {hosts_added:?}, which the on-chain mapping does not \
+             host; it may add at most {max_hosts_added}"
+        );
+    }
     let hosts_removed = hosts_removed(&current_p2p, mapping);
     let kicked_owner = if kind == WorkflowKind::Kick {
         kicked_owner
@@ -1262,6 +1274,21 @@ async fn check_against_head(
             .collect::<Vec<String>>(),
         legacy,
     )
+}
+
+/// The hosts of the proposal that the on-chain mapping does not host.
+fn hosts_added<'a>(current: &PartyToParticipant, proposed: &'a PartyToParticipant) -> Vec<&'a str> {
+    let current: BTreeSet<&str> = current
+        .participants
+        .iter()
+        .map(|p| p.participant_uid.as_str())
+        .collect();
+    proposed
+        .participants
+        .iter()
+        .map(|p| p.participant_uid.as_str())
+        .filter(|uid| !current.contains(uid))
+        .collect()
 }
 
 /// How many of the on-chain hosts the proposal no longer hosts.
@@ -3112,6 +3139,88 @@ mod tests {
             None,
         )
         .await
+    }
+
+    /// A proposal from `kind` that hosts `hosts` with one key each. The party
+    /// is [`owner_only_head`] with owner "c" still holding key 3, so a new
+    /// host can take that key over and no key check catches it.
+    async fn host_set_change(kind: WorkflowKind, hosts: &[CantonId], owners: &[&str]) -> Result {
+        let head = StubHead {
+            p2p: Some((
+                5,
+                PartyToParticipant {
+                    party_signing_keys: Some(signing_keys(3, 2)),
+                    ..p2p("party", &[canton_id("p1", 1)?, canton_id("p2", 2)?], 2)
+                },
+            )),
+            ..owner_only_head()?
+        };
+        let proposal = PartyToParticipant {
+            party_signing_keys: Some(signing_keys(u8::try_from(hosts.len())?, 1)),
+            ..p2p("party", hosts, 1)
+        };
+        check_against_head(
+            &head,
+            kind,
+            &canton_id("party", 9)?,
+            (3, &namespace(owners)),
+            (6, &proposal),
+            None,
+            None,
+        )
+        .await
+    }
+
+    fn expect_host_refusal(outcome: Result, what: &str) -> Result {
+        let error = match outcome {
+            Ok(()) => anyhow::bail!("{what} must be refused"),
+            Err(error) => error.to_string(),
+        };
+        assert!(
+            error.contains("which the on-chain mapping does not host"),
+            "unexpected error: {error}"
+        );
+        Ok(())
+    }
+
+    /// A kick that drops p2 and hosts p3 instead would hand p3 the party,
+    /// even when the invitation lists p3.
+    #[tokio::test]
+    async fn a_kick_refuses_to_host_a_new_participant() -> Result {
+        let swapped = [canton_id("p1", 1)?, canton_id("p3", 3)?];
+        expect_host_refusal(
+            host_set_change(WorkflowKind::Kick, &swapped, &["a", "c"]).await,
+            "a kick that hosts p3",
+        )
+    }
+
+    #[tokio::test]
+    async fn a_change_threshold_refuses_to_host_a_new_participant() -> Result {
+        let hosts = [
+            canton_id("p1", 1)?,
+            canton_id("p2", 2)?,
+            canton_id("p3", 3)?,
+        ];
+        expect_host_refusal(
+            host_set_change(WorkflowKind::ChangeThreshold, &hosts, &["a", "b", "c"]).await,
+            "a change of threshold that hosts p3",
+        )
+    }
+
+    #[tokio::test]
+    async fn an_add_party_hosts_at_most_one_new_participant() -> Result {
+        let one = [
+            canton_id("p1", 1)?,
+            canton_id("p2", 2)?,
+            canton_id("p3", 3)?,
+        ];
+        let two = [one.as_slice(), &[canton_id("p4", 4)?]].concat();
+        let owners = ["a", "b", "c", "d"];
+        host_set_change(WorkflowKind::AddParty, &one, &owners).await?;
+        expect_host_refusal(
+            host_set_change(WorkflowKind::AddParty, &two, &owners).await,
+            "an add-party that hosts p3 and p4",
+        )
     }
 
     /// The owner set may outnumber the members: a member can own the
