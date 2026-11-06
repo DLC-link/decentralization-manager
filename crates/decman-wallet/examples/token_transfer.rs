@@ -19,7 +19,9 @@
 //! `VALIDITY_HOURS` (24 by default). `accept` needs `INSTRUCTION_CID` and
 //! `INSTRUCTION_TEMPLATE`, the template the instruction must have, such as
 //! `#splice-amulet:Splice.AmuletTransferInstruction:AmuletTransferInstruction`.
-//! `pending` prints each offer's template, as the participant reports it.
+//! A template written as `<package-id>:Module:Entity` pins one package.
+//! `pending` prints each offer's template and package id, as the participant
+//! reports them.
 //!
 //! ```sh
 //! MODE=send PARTY_ID=alice::1220… DECMAN_WALLET_SEED=… \
@@ -167,6 +169,7 @@ async fn log_pending(ledger: &LedgerClient, party: &str) -> Result {
         tracing::info!(
             instruction_cid = %instruction.contract_id,
             template = %instruction.template,
+            package_id = %instruction.package_id,
             sender = %instruction.sender,
             instrument_id = %instruction.instrument_id,
             amount = %instruction.amount,

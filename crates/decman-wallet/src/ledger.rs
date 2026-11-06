@@ -134,6 +134,7 @@ impl LedgerClient {
             .map(|viewed| TransferInstruction {
                 contract_id: viewed.contract_id,
                 template: viewed.template,
+                package_id: viewed.package_id,
                 sender: viewed.view.transfer.sender,
                 receiver: viewed.view.transfer.receiver,
                 amount: viewed.view.transfer.amount,
@@ -211,13 +212,15 @@ impl LedgerClient {
                     .into_iter()
                     .find_map(|view| view.view_value)?;
                 // The created event names the package by id. The listing
-                // names it by package name, as the wallet's constants do.
-                let qualified = event
+                // names it by package name, as the wallet's constants do,
+                // and keeps the id apart.
+                let (package_id, qualified) = event
                     .template_id
                     .split_once(':')
-                    .map_or(event.template_id.as_str(), |(_, qualified)| qualified);
+                    .unwrap_or(("", event.template_id.as_str()));
                 Some(Viewed {
                     template: format!("#{package}:{qualified}", package = event.package_name),
+                    package_id: package_id.to_string(),
                     contract_id: event.contract_id,
                     view,
                 })
@@ -249,6 +252,11 @@ pub struct TransferInstruction {
     /// binds the template the caller passes to
     /// [`accept_transfer`](crate::accept_transfer), never this one.
     pub template: String,
+    /// The package id of the instruction's template. To pin this package,
+    /// pass the template to [`accept_transfer`](crate::accept_transfer) as
+    /// `package-id:Module:Entity`. The host supplies the id, so check it
+    /// against the package you trust before you pin it.
+    pub package_id: String,
     pub sender: String,
     pub receiver: String,
     /// The decimal amount as the ledger wrote it.
@@ -338,6 +346,8 @@ struct Viewed<V> {
     contract_id: String,
     /// `#package-name:Module:Entity`.
     template: String,
+    /// The package id the created event names.
+    package_id: String,
     view: V,
 }
 

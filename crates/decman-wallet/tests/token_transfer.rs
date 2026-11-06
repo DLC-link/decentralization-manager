@@ -396,6 +396,36 @@ async fn transfer_instructions_are_only_the_offers_the_party_can_accept_now() {
     assert_eq!(listed, vec!["00b1"]);
 }
 
+/// An operator reads the package id here to pin it in an accept.
+#[tokio::test]
+async fn transfer_instructions_carry_the_package_id_of_their_template() {
+    let server = MockServer::start().await;
+    stub_ledger_end(&server, 7).await;
+    let mut offer = acs_entry(
+        "00b1",
+        "pkg:Splice.Api.Token.TransferInstructionV1:TransferInstruction",
+        instruction_view(
+            SENDER,
+            RECEIVER,
+            "1.2500000000",
+            awaiting_receiver(),
+            OPEN_UNTIL,
+        ),
+    );
+    offer["contractEntry"]["JsActiveContract"]["createdEvent"]["templateId"] =
+        json!("amuletpkgid:Splice.AmuletTransferInstruction:AmuletTransferInstruction");
+    stub_acs(&server, vec![offer]).await;
+
+    let pending = match ledger_for(&server).transfer_instructions(RECEIVER).await {
+        Ok(pending) => pending,
+        Err(e) => panic!("transfer instructions must read: {e}"),
+    };
+
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].package_id, "amuletpkgid");
+    assert_eq!(pending[0].template, AMULET_TRANSFER_INSTRUCTION_TEMPLATE);
+}
+
 /// The active-contracts endpoint answers with a JSON array, with one JSON
 /// object per line, or with an empty body. Each must read the same.
 #[tokio::test]
@@ -1602,6 +1632,15 @@ fn accept_transaction(contract_id: &str, receiver: &str) -> PreparedTransaction 
 /// `root`, and return the refusal. Panics unless the wallet refused to sign
 /// and executed nothing.
 async fn refused_accept(seed: u8, root: impl FnOnce(&str) -> Exercise) -> Refusal {
+    refused_accept_expecting(seed, AMULET_TRANSFER_INSTRUCTION_TEMPLATE, root).await
+}
+
+/// Like [`refused_accept`], with the accept expecting `template`.
+async fn refused_accept_expecting(
+    seed: u8,
+    template: &str,
+    root: impl FnOnce(&str) -> Exercise,
+) -> Refusal {
     let key = ExternalKeyPair::from_seed([seed; 32]);
     let receiver = key.party_id("bob");
     let server = MockServer::start().await;
@@ -1613,7 +1652,7 @@ async fn refused_accept(seed: u8, root: impl FnOnce(&str) -> Exercise) -> Refusa
         &key,
         &receiver,
         INSTRUCTION_CID,
-        AMULET_TRANSFER_INSTRUCTION_TEMPLATE,
+        template,
     )
     .await;
 
@@ -1816,6 +1855,105 @@ async fn an_accept_prepared_on_another_template_is_not_signed() {
             other => panic!("{template}: expected a template mismatch, got {other}"),
         }
     }
+}
+
+/// The package id [`on_template`] gives Canton Coin's instruction template.
+const AMULET_PACKAGE_ID: &str = "splice-amulet-package-id";
+
+/// Canton Coin's instruction template, pinned to `package_id`.
+fn pinned_to(package_id: &str) -> String {
+    let (_, qualified) = AMULET_TRANSFER_INSTRUCTION_TEMPLATE
+        .split_once(':')
+        .unwrap_or_default();
+    format!("{package_id}:{qualified}")
+}
+
+/// `root` on a package with the same name, module and entity, and another
+/// package id.
+fn on_look_alike(root: Exercise) -> Exercise {
+    let template_id = root.template_id.map(|id| Identifier {
+        package_id: "look-alike-package-id".to_string(),
+        ..id
+    });
+    Exercise {
+        template_id,
+        ..root
+    }
+}
+
+/// Run an accept of `INSTRUCTION_CID` that expects `template`, against a
+/// participant that prepares `root`. Panics unless the wallet signed the
+/// transaction's hash and executed it once.
+async fn signed_accept(seed: u8, template: &str, root: impl FnOnce(&str) -> Exercise) {
+    let key = ExternalKeyPair::from_seed([seed; 32]);
+    let receiver = key.party_id("bob");
+    let transaction = prepared(root(&receiver), &receiver);
+    let server = MockServer::start().await;
+    stub_accept(&server, honestly(transaction.clone())).await;
+
+    let result = accept_transfer(
+        &ledger_for(&server),
+        &registry_for(&server),
+        &key,
+        &receiver,
+        INSTRUCTION_CID,
+        template,
+    )
+    .await;
+
+    if let Err(e) = result {
+        panic!("{template}: the accept must be signed: {e}");
+    }
+    let hash = hash_of(&for_command(transaction, &sent_command_id(&server).await));
+    let executes = bodies(&server, EXECUTE_PATH).await;
+    assert_eq!(executes.len(), 1, "{template}: one execute");
+    let (_, _, signature) = signature_of(&executes[0]);
+    assert!(
+        verifying_key(&key).verify(&hash, &signature).is_ok(),
+        "{template}: the signature must cover the transaction's hash"
+    );
+}
+
+/// A pinned template binds the package id, so a look-alike package with the
+/// same name is refused. The refusal shows the id the root really has.
+#[tokio::test]
+async fn an_accept_pinned_to_another_package_id_is_not_signed() {
+    let pinned = pinned_to(AMULET_PACKAGE_ID);
+
+    let reason = refused_accept_expecting(53, &pinned, |receiver| {
+        on_look_alike(accept_exercise(INSTRUCTION_CID, receiver, extra_args()))
+    })
+    .await;
+
+    match reason {
+        Refusal::Mismatch {
+            field,
+            expected,
+            found,
+        } => {
+            assert_eq!(field, "template");
+            assert_eq!(expected, pinned);
+            assert_eq!(found, pinned_to("look-alike-package-id"));
+        }
+        other => panic!("expected a template mismatch, got {other}"),
+    }
+}
+
+#[tokio::test]
+async fn an_accept_pinned_to_the_instructions_package_id_is_signed() {
+    signed_accept(54, &pinned_to(AMULET_PACKAGE_ID), |receiver| {
+        accept_exercise(INSTRUCTION_CID, receiver, extra_args())
+    })
+    .await;
+}
+
+/// The name form does not pin the package id.
+#[tokio::test]
+async fn an_accept_by_package_name_is_signed_on_a_look_alike_package() {
+    signed_accept(55, AMULET_TRANSFER_INSTRUCTION_TEMPLATE, |receiver| {
+        on_look_alike(accept_exercise(INSTRUCTION_CID, receiver, extra_args()))
+    })
+    .await;
 }
 
 /// The registry's context and the empty `meta` the wallet sends are signed

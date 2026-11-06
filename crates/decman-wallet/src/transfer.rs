@@ -324,6 +324,11 @@ pub async fn send_transfer(
 /// from the participant's own listing. Any template can implement the
 /// interface, so the caller names the one it trusts.
 ///
+/// The `#` form passes any package of that name. To pin one package, pass
+/// `package-id:Module:Entity` instead. A package upgrade changes the id, so
+/// a pinned accept is refused after an upgrade until the caller passes the
+/// new id.
+///
 /// `key` must be the party's key. The wallet signs only after the prepared
 /// transaction passes its check: the hash is recomputed, and the root must be
 /// `TransferInstruction_Accept` on this instruction, acting as `party` alone.

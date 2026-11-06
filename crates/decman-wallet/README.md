@@ -169,8 +169,8 @@ So the wallet checks each prepared transaction before the key signs:
    prepare. The hash covers this id. The completion lookup after
    `Error::ExecuteOutcomeUnknown` uses it.
 6. For an accept, the instruction must have the template the caller passed to
-   `accept_transfer`. The check compares the package name, the module and the
-   entity.
+   `accept_transfer`. The check compares the module and the entity. It also
+   compares the package name, or the package id when the caller gave one.
 7. For a send, the choice argument must match the request. The check compares
    the instrument admin, sender, receiver, amount and instrument. It also
    compares both times, and the input holdings in order.
@@ -200,6 +200,18 @@ names the template it trusts:
 `TransferInstruction::template` shows each listed offer's template. The
 participant supplies it, so it is for display only.
 
+The `#` form names the package by name. Any package with that name passes,
+including a look-alike package with another package id. To pin one package,
+pass the template as `<package-id>:Module:Entity`, without the `#`. The check
+then compares the package id too.
+
+`TransferInstruction::package_id` holds each listed offer's package id. The
+example's `pending` mode prints it. The participant supplies this id, so check
+it against the package you trust before you pin it.
+
+Every package upgrade changes the package id. A pinned wallet refuses accepts
+after an upgrade until the operator updates the id.
+
 The check covers hashing schemes V2 and V3. Canton 3.6 prepares with V2 unless
 the request asks for another version, and the wallet never asks. The check
 refuses V4 and any unknown version.
@@ -208,8 +220,8 @@ The check does not compare these:
 
 - Anything below the root exercise. That part is the instrument admin's code,
   such as the factory's transfer logic.
-- The template's package id. The check compares the package name, so any
-  package with that name passes.
+- The template's package id, unless the expected template names one. The `#`
+  form compares the package name, so any package with that name passes.
 - The factory's template on a send. The factory's contract id comes from the
   registry, and a contract id names one contract of one template.
 - The rest of the transaction's metadata, such as its submitting parties, its
@@ -320,7 +332,7 @@ participant, so a retry is safe.
 | `INSTRUMENT_ADMIN`, `INSTRUMENT_ID` | `send` | The instrument, such as the DSO party and `Amulet` |
 | `VALIDITY_HOURS` | `send`, optional | How long the offer stays open; 24 by default |
 | `INSTRUCTION_CID` | `accept` | The transfer instruction to accept |
-| `INSTRUCTION_TEMPLATE` | `accept` | The template the instruction must have, such as `#splice-amulet:Splice.AmuletTransferInstruction:AmuletTransferInstruction` |
+| `INSTRUCTION_TEMPLATE` | `accept` | The template the instruction must have, such as `#splice-amulet:Splice.AmuletTransferInstruction:AmuletTransferInstruction`. Write `<package-id>:Module:Entity` to pin one package. |
 
 The example never prints the seed. It refuses a seed whose fingerprint is not
 the party's.

@@ -35,8 +35,9 @@ use crate::{
 pub(crate) struct Expected<'a> {
     /// The interface the root exercises, as `#package-name:Module:Entity`.
     pub(crate) interface_id: &'a str,
-    /// The template the root must act on, as `#package-name:Module:Entity`.
-    /// `None` leaves the template unchecked.
+    /// The template the root must act on, as `#package-name:Module:Entity`,
+    /// or as `package-id:Module:Entity` to pin one package. `None` leaves
+    /// the template unchecked.
     pub(crate) template_id: Option<&'a str>,
     pub(crate) choice: &'a str,
     pub(crate) contract_id: &'a str,
@@ -154,7 +155,7 @@ fn check_root(
         command_id_of(transaction),
     )?;
     if let Some(template) = expected.template_id {
-        same("template", template, &template_of(exercise)?)?;
+        same("template", template, &template_of(exercise, template)?)?;
     }
 
     let argument = exercise
@@ -185,17 +186,24 @@ fn command_id_of(transaction: &PreparedTransaction) -> &str {
         .map_or("", |submitter| submitter.command_id.as_str())
 }
 
-/// The template the exercise acts on, as `#package-name:Module:Entity`.
-/// The package id is left out: the wallet names packages by name, so any
-/// package of that name passes.
-fn template_of(exercise: &Exercise) -> std::result::Result<String, Refusal> {
+/// The template the exercise acts on, in the form of `like`.
+///
+/// A `like` that starts with `#` names the package by name, so the result
+/// is `#package-name:Module:Entity`, and any package of that name passes.
+/// Any other `like` names the package by id, so the result is
+/// `package-id:Module:Entity`, and only that one package passes.
+fn template_of(exercise: &Exercise, like: &str) -> std::result::Result<String, Refusal> {
     let id = exercise
         .template_id
         .as_ref()
         .ok_or_else(|| Refusal::Shape("its root exercise names no template".to_string()))?;
+    let package = if like.starts_with('#') {
+        format!("#{name}", name = exercise.package_name)
+    } else {
+        id.package_id.clone()
+    };
     Ok(format!(
-        "#{package}:{module}:{entity}",
-        package = exercise.package_name,
+        "{package}:{module}:{entity}",
         module = id.module_name,
         entity = id.entity_name
     ))
