@@ -307,6 +307,8 @@ impl MessageType {
 /// Bump this on any framing change; the decoder rejects mismatches with a
 /// clear error, and future versions can branch on it instead of forcing
 /// another lockstep upgrade.
+/// The byte must only ever increase: `NoiseError::WireVersionMismatch` and the
+/// peer status tooltip compare bytes to say which side runs the older build.
 ///
 /// 0xD1 -> 0xD2: the `ImportAcs` payload dropped the inline snapshot for
 /// `[config, package_ids]` and the ACS moved to `GetNextAcsBlock`. This one had
@@ -520,6 +522,15 @@ pub enum NoiseError {
     )]
     BadStatusCode(StatusCode, Option<String>),
 
+    /// The peer refused our frame and answered with a frame on its own wire
+    /// version, so the key is fine; one side must upgrade.
+    #[error(
+        "Noise wire version mismatch: peer speaks 0x{peer:02x}, this node speaks \
+         0x{WIRE_VERSION:02x} — {side}",
+        side = upgrade_side(*peer),
+    )]
+    WireVersionMismatch { peer: u8 },
+
     #[error("Invalid URI: {0}")]
     InvalidUri(#[from] http::uri::InvalidUri),
 
@@ -558,6 +569,38 @@ impl From<hyper_noise::ClientError> for NoiseError {
             hyper_noise::ClientError::Noise(noise_err) => NoiseError::Noise(noise_err),
             hyper_noise::ClientError::RequestTimeout => NoiseError::RequestTimeout,
         }
+    }
+}
+
+impl NoiseError {
+    /// Classify the body a peer sent with a non-2xx status.
+    ///
+    /// The listener answers a refusal with an `Error` frame that starts with
+    /// its own `WIRE_VERSION`. A different byte there means the session keys
+    /// matched and the builds do not. A byte up to 0x03 is a legacy frame's
+    /// `MessageType` high byte, which carries no version to report.
+    pub(crate) fn from_refusal(status: StatusCode, body: &[u8]) -> Self {
+        match body.first().copied() {
+            None | Some(0x00..=0x03) => Self::BadStatusCode(status, None),
+            Some(WIRE_VERSION) => {
+                let reason = Message::from_bytes(body)
+                    .ok()
+                    .filter(|m| m.msg_type == MessageType::Error)
+                    .map(|m| String::from_utf8_lossy(&m.payload).into_owned());
+                Self::BadStatusCode(status, reason)
+            }
+            Some(peer) => Self::WireVersionMismatch { peer },
+        }
+    }
+}
+
+/// Which side of a wire-version mismatch must upgrade. `WIRE_VERSION` only
+/// increases, so the lower byte is the older build.
+fn upgrade_side(peer: u8) -> &'static str {
+    if peer < WIRE_VERSION {
+        "the peer runs an older dec-party-manager and must upgrade"
+    } else {
+        "this node runs an older dec-party-manager and must upgrade"
     }
 }
 
@@ -646,22 +689,15 @@ async fn send_noise_message_with_timeout(
         hyper_noise::client::send_request(tcp_stream, initiator, request, Some(timeout)).await?;
 
     if response.status() != StatusCode::OK {
-        // Read the body before giving up. The listener's deny paths answer a
-        // non-2xx with a `MessageType::Error` frame naming the reason, and this
-        // is the path every peer-to-peer call takes (`send_noise_message`), so
-        // dropping it here would leave the fan-out exactly as blind as before
-        // (#332). Best-effort and bounded by the same timeout: a peer that
-        // sends no body, or an unparseable one, still yields the bare status.
+        // The refusal body names the peer's reason or its wire version.
+        // Best-effort and bounded by the same timeout as the request.
         let status = response.status();
-        let reason =
+        let body =
             match tokio::time::timeout(timeout, hyper::body::to_bytes(response.body_mut())).await {
-                Ok(Ok(bytes)) if !bytes.is_empty() => Message::from_bytes(&bytes)
-                    .ok()
-                    .filter(|m| m.msg_type == MessageType::Error)
-                    .map(|m| String::from_utf8_lossy(&m.payload).into_owned()),
-                _ => None,
+                Ok(Ok(bytes)) => bytes,
+                _ => Bytes::new(),
             };
-        return Err(NoiseError::BadStatusCode(status, reason));
+        return Err(NoiseError::from_refusal(status, &body));
     }
 
     let resp_body_bytes = hyper::body::to_bytes(response.body_mut()).await?;
@@ -885,6 +921,7 @@ pub(crate) fn is_transient(err: &NoiseError) -> bool {
         NoiseError::BadStatusCode(code, _) => code.is_server_error(),
         NoiseError::Noise(_)
         | NoiseError::HandshakeFailed
+        | NoiseError::WireVersionMismatch { .. }
         | NoiseError::DecryptionError
         | NoiseError::InvalidMessage
         | NoiseError::JsonSerialization(_)
@@ -1155,6 +1192,11 @@ mod tests {
     use bytes::Bytes;
 
     use super::*;
+    use crate::{
+        canton_id::CantonId,
+        config::{NodeConfig, Peer},
+        noise::client::NoiseClient,
+    };
 
     fn test_retry_config() -> NoiseRetryConfig {
         // Zero backoff so the `retry_loop_*` tests don't sleep in real time.
@@ -1281,6 +1323,129 @@ mod tests {
                 "accepted an old {command:?} frame"
             );
         }
+    }
+
+    /// The body a listener on `version` sends when it cannot decode our frame.
+    fn refusal_on(version: u8) -> Vec<u8> {
+        let mut frame = Message::new(
+            MessageType::Error,
+            b"request rejected: Noise protocol version mismatch".to_vec(),
+        )
+        .to_bytes();
+        frame[0] = version;
+        frame
+    }
+
+    #[test]
+    fn from_refusal_reports_an_older_peer_version() {
+        let older = WIRE_VERSION - 1;
+        let err = NoiseError::from_refusal(StatusCode::SERVICE_UNAVAILABLE, &refusal_on(older));
+
+        assert!(
+            matches!(err, NoiseError::WireVersionMismatch { peer } if peer == older),
+            "expected a version mismatch, got: {err:?}"
+        );
+        let rendered = err.to_string();
+        for needle in [
+            format!("0x{older:02x}"),
+            format!("0x{WIRE_VERSION:02x}"),
+            "the peer runs an older".to_string(),
+        ] {
+            assert!(
+                rendered.contains(&needle),
+                "{needle:?} missing from: {rendered}"
+            );
+        }
+    }
+
+    #[test]
+    fn from_refusal_reports_a_newer_peer_version() {
+        let newer = WIRE_VERSION + 1;
+        let err = NoiseError::from_refusal(StatusCode::SERVICE_UNAVAILABLE, &refusal_on(newer));
+
+        assert!(
+            matches!(err, NoiseError::WireVersionMismatch { peer } if peer == newer),
+            "expected a version mismatch, got: {err:?}"
+        );
+        let rendered = err.to_string();
+        for needle in [
+            format!("0x{newer:02x}"),
+            format!("0x{WIRE_VERSION:02x}"),
+            "this node runs an older".to_string(),
+        ] {
+            assert!(
+                rendered.contains(&needle),
+                "{needle:?} missing from: {rendered}"
+            );
+        }
+    }
+
+    /// A legacy frame starts with its `MessageType` high byte, 0x00 to 0x03.
+    /// None of those may read as a wire version.
+    #[test]
+    fn from_refusal_ignores_a_legacy_frame() {
+        for msg_type in [
+            MessageType::UploadDars,
+            MessageType::Ack,
+            MessageType::AddPartyKeysUpload,
+            MessageType::ChunkedCommand,
+        ] {
+            let mut legacy = msg_type.to_u16().to_be_bytes().to_vec();
+            legacy.extend_from_slice(&3u32.to_be_bytes());
+            legacy.extend_from_slice(b"old");
+
+            let err = NoiseError::from_refusal(StatusCode::SERVICE_UNAVAILABLE, &legacy);
+
+            assert!(
+                matches!(
+                    err,
+                    NoiseError::BadStatusCode(StatusCode::SERVICE_UNAVAILABLE, None)
+                ),
+                "{msg_type:?} frame read as: {err:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn from_refusal_ignores_an_empty_body() {
+        let err = NoiseError::from_refusal(StatusCode::SERVICE_UNAVAILABLE, &[]);
+
+        assert!(
+            matches!(
+                err,
+                NoiseError::BadStatusCode(StatusCode::SERVICE_UNAVAILABLE, None)
+            ),
+            "got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn from_refusal_keeps_the_reason_on_our_version() {
+        let denied = Message::new(
+            MessageType::Error,
+            b"request rejected: unknown sender".to_vec(),
+        )
+        .to_bytes();
+        let pong = Message::new_empty(MessageType::Pong).to_bytes();
+
+        let denied = NoiseError::from_refusal(StatusCode::SERVICE_UNAVAILABLE, &denied);
+        let pong = NoiseError::from_refusal(StatusCode::SERVICE_UNAVAILABLE, &pong);
+
+        assert!(
+            matches!(
+                &denied,
+                NoiseError::BadStatusCode(StatusCode::SERVICE_UNAVAILABLE, Some(reason))
+                    if reason == "request rejected: unknown sender"
+            ),
+            "got: {denied:?}"
+        );
+        assert!(
+            matches!(
+                pong,
+                NoiseError::BadStatusCode(StatusCode::SERVICE_UNAVAILABLE, None)
+            ),
+            "got: {pong:?}"
+        );
     }
 
     #[test]
@@ -1496,6 +1661,37 @@ mod tests {
         })
         .await;
         assert!(matches!(result, Err(NoiseError::BadStatusCode(..))));
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn wire_version_mismatch_is_not_transient() {
+        assert!(!is_transient(&NoiseError::WireVersionMismatch {
+            peer: WIRE_VERSION - 1,
+        }));
+    }
+
+    /// The peer answers 503, which alone would retry, but no retry can make
+    /// two builds agree on a wire version.
+    #[tokio::test]
+    async fn retry_loop_does_not_retry_on_wire_version_mismatch() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let calls_clone = calls.clone();
+        let result = retry_loop("test-peer", &test_retry_config(), move || {
+            let calls = calls_clone.clone();
+            async move {
+                calls.fetch_add(1, Ordering::SeqCst);
+                Err::<Bytes, _>(NoiseError::from_refusal(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    &refusal_on(WIRE_VERSION - 1),
+                ))
+            }
+        })
+        .await;
+        assert!(matches!(
+            result,
+            Err(NoiseError::WireVersionMismatch { .. })
+        ));
         assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
 
@@ -1741,6 +1937,213 @@ mod tests {
             "{} of {ROUNDS} rounds failed: {failures:?}",
             failures.len()
         );
+        Ok(())
+    }
+
+    /// A peer listener that answers every request with `status` and `body`
+    /// over a real Noise session. Returns its port and how many requests it
+    /// served.
+    async fn refusing_peer(
+        psk: [u8; 32],
+        status: StatusCode,
+        body: Vec<u8>,
+    ) -> Result<(u16, Arc<AtomicUsize>, tokio::task::JoinHandle<()>)> {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let port = listener.local_addr()?.port();
+        let served = Arc::new(AtomicUsize::new(0));
+        let counter = served.clone();
+        let body = Bytes::from(body);
+        let server = accept_loop(listener, move |socket| {
+            let counter = counter.clone();
+            let body = body.clone();
+            async move {
+                let respond = move |_: &[u8], _: Request<Body>| {
+                    counter.fetch_add(1, Ordering::SeqCst);
+                    let mut response = hyper::Response::new(Body::from(body.clone()));
+                    *response.status_mut() = status;
+                    async move { Ok::<_, hyper::Error>(response) }
+                };
+                let responder =
+                    tokio_noise::handshakes::nn_psk2::Responder::new(move |_: &[u8]| Some(psk));
+                if let Err(e) = hyper_noise::server::serve_http(
+                    socket,
+                    responder,
+                    respond,
+                    Some(NOISE_HANDLER_TIMEOUT),
+                )
+                .await
+                {
+                    tracing::warn!("test peer connection failed: {e}");
+                }
+            }
+        });
+        Ok((port, served, server))
+    }
+
+    fn three_attempts() -> NoiseRetryConfig {
+        NoiseRetryConfig {
+            per_attempt_timeout_secs: 5,
+            max_attempts: 3,
+            backoff_ms: 0,
+        }
+    }
+
+    /// The probe path: an older peer refuses with a 503, and the client names
+    /// the peer's byte without spending its retries on it.
+    #[tokio::test]
+    async fn an_older_peers_refusal_is_a_mismatch_after_one_attempt() -> Result {
+        let psk = [9u8; 32];
+        let older = WIRE_VERSION - 1;
+        let (port, served, server) =
+            refusing_peer(psk, StatusCode::SERVICE_UNAVAILABLE, refusal_on(older)).await?;
+
+        let result = send_noise_message_with_retry(
+            "127.0.0.1",
+            port,
+            &psk,
+            b"self",
+            &Message::new_empty(MessageType::Health),
+            &three_attempts(),
+        )
+        .await;
+        server.abort();
+
+        assert!(
+            matches!(result, Err(NoiseError::WireVersionMismatch { peer }) if peer == older),
+            "got: {result:?}"
+        );
+        assert_eq!(served.load(Ordering::SeqCst), 1);
+        Ok(())
+    }
+
+    /// Control for the test above: the same 503 with no body is retried, so
+    /// the single attempt there comes from the body.
+    #[tokio::test]
+    async fn an_empty_503_is_retried_to_the_last_attempt() -> Result {
+        let psk = [9u8; 32];
+        let (port, served, server) =
+            refusing_peer(psk, StatusCode::SERVICE_UNAVAILABLE, Vec::new()).await?;
+        let config = three_attempts();
+
+        let result = send_noise_message_with_retry(
+            "127.0.0.1",
+            port,
+            &psk,
+            b"self",
+            &Message::new_empty(MessageType::Health),
+            &config,
+        )
+        .await;
+        server.abort();
+
+        assert!(
+            matches!(
+                result,
+                Err(NoiseError::BadStatusCode(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    None
+                ))
+            ),
+            "got: {result:?}"
+        );
+        assert_eq!(served.load(Ordering::SeqCst), config.max_attempts);
+        Ok(())
+    }
+
+    /// The single-shot fan-out path names a newer peer the same way.
+    #[tokio::test]
+    async fn a_newer_peers_refusal_is_a_mismatch_on_the_single_shot_path() -> Result {
+        let psk = [9u8; 32];
+        let newer = WIRE_VERSION + 1;
+        let (port, served, server) =
+            refusing_peer(psk, StatusCode::SERVICE_UNAVAILABLE, refusal_on(newer)).await?;
+
+        let result = send_noise_message(
+            "127.0.0.1",
+            port,
+            &psk,
+            b"self",
+            &Message::new_empty(MessageType::RequestOwnerKeys),
+        )
+        .await;
+        server.abort();
+
+        assert!(
+            matches!(result, Err(NoiseError::WireVersionMismatch { peer }) if peer == newer),
+            "got: {result:?}"
+        );
+        assert_eq!(served.load(Ordering::SeqCst), 1);
+        Ok(())
+    }
+
+    /// A peer on our own version that refuses us still reports why (#332).
+    #[tokio::test]
+    async fn a_same_version_refusal_keeps_the_peers_reason() -> Result {
+        let psk = [9u8; 32];
+        let denied = Message::new(
+            MessageType::Error,
+            b"request rejected: unknown sender".to_vec(),
+        );
+        let (port, _, server) =
+            refusing_peer(psk, StatusCode::SERVICE_UNAVAILABLE, denied.to_bytes()).await?;
+
+        let result = send_noise_message(
+            "127.0.0.1",
+            port,
+            &psk,
+            b"self",
+            &Message::new_empty(MessageType::Health),
+        )
+        .await;
+        server.abort();
+
+        assert!(
+            matches!(
+                &result,
+                Err(NoiseError::BadStatusCode(StatusCode::SERVICE_UNAVAILABLE, Some(reason)))
+                    if reason == "request rejected: unknown sender"
+            ),
+            "got: {result:?}"
+        );
+        Ok(())
+    }
+
+    /// The workflow client a peer uses to reach its coordinator names an
+    /// older coordinator too.
+    #[tokio::test]
+    async fn the_workflow_client_names_an_older_coordinator() -> Result {
+        let root = tempfile::tempdir()?;
+        let mut config = NodeConfig::default().with_root_dir(root.path());
+        config.node.participant_id =
+            Some(CantonId::parse(&format!("peer::1220{}", "a".repeat(64)))?);
+        let keys = NoiseKeypair::generate();
+        tokio::fs::create_dir_all(config.data_dir()).await?;
+        keys.save_to_file(config.key_file_path()).await?;
+        let coordinator_keys = NoiseKeypair::generate();
+        let psk = *coordinator_keys.derive_psk(&keys.public_key);
+        let older = WIRE_VERSION - 1;
+        let (port, served, server) =
+            refusing_peer(psk, StatusCode::SERVICE_UNAVAILABLE, refusal_on(older)).await?;
+        let coordinator = Peer {
+            participant_id: CantonId::parse(&format!("coordinator::1220{}", "b".repeat(64)))?,
+            name: "Older coordinator".into(),
+            address: "127.0.0.1".into(),
+            port,
+            public_key: coordinator_keys.public_key_hex(),
+            party: None,
+        };
+        let client = NoiseClient::new(config, coordinator, "run-1".into()).await?;
+
+        let result = client
+            .send_message(&Message::new_empty(MessageType::GetNextCommand))
+            .await;
+        server.abort();
+
+        assert!(
+            matches!(result, Err(NoiseError::WireVersionMismatch { peer }) if peer == older),
+            "got: {result:?}"
+        );
+        assert_eq!(served.load(Ordering::SeqCst), 1);
         Ok(())
     }
 

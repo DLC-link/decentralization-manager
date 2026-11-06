@@ -53,4 +53,10 @@ ignore = [
   "RUSTSEC-2026-0367",
   "RUSTSEC-2026-0368",
   "RUSTSEC-2026-0369",
+  # `pin-utils` is unmaintained (RUSTSEC-2026-0441): its repository was
+  # archived, and it is not a vulnerability. Only the AWS SDK crates
+  # (aws-smithy-http, aws-smithy-runtime, aws-smithy-types) pull it in, and
+  # their latest releases still do, so no update removes it. Drop this once
+  # the AWS SDK moves to `core::pin::pin!` or pin-project-lite.
+  "RUSTSEC-2026-0441",
 ]
