@@ -64,9 +64,10 @@ interface GovernableAction where
   choice GovernableAction_ProposerCancel : ()  -- controller: proposer
 ```
 
-Three rules follow from the engine's behavior in [`Governance.Rules`](../daml/governance-core/daml/Governance/Rules.daml):
+Four rules follow from the engine's behavior in [`Governance.Rules`](../daml/governance-core/daml/Governance/Rules.daml):
 
 - **Authority flow** — `GovernanceRules` (signed by `governanceParty`) exercises `GovernableAction_Execute`. Your `executeImpl` therefore runs *with* the governance party's authority and can create / exercise anything the governance party is entitled to.
+- **The proposer's authority is present too.** The signatory of the proposal is `proposer`, so `executeImpl` also runs with the proposer's authority. The proposer chooses every field of the proposal, including each contract ID in it. Your action must check that each target contract belongs to `governanceParty`. Without this check, a proposer can name a contract that they control. Their own authority then passes the controller check of the choice. [`CreateTransferRule`](../daml/governance-utility-onboarding/daml/Governance/UtilityOnboarding/CreateTransferRule.daml) shows the check.
 - **`governanceParty` must match** — `GovernanceRules_ConfirmAction` checks that the proposal's view targets the same `governanceParty` as the rules contract.
 - **`proposer` must be authorized** — at confirm time, the proposer is required to be either a member or in the `additionalProposers` allowlist on the `GovernanceRules` contract.
 
@@ -97,6 +98,11 @@ template PauseProposal
         description = "Pause " <> show targetCid <> ": " <> reason
 
       executeImpl = do
+        -- The proposer's authority is in scope here, so pin the target
+        -- to the governance party.
+        resource <- fetch targetCid
+        assertMsg "The resource must belong to the governance party"
+          (resource.owner == governanceParty)
         exercise targetCid MyResource_Pause
         pure ()
 ```
@@ -429,9 +435,9 @@ Use this when every field on your template maps to one of the variants of [`Fiel
 | `optional` | `{ "type": "optional", "inner": { ... } }` | `Some <inner>` |
 | `none` | `{ "type": "none" }` | `None` |
 | `record` | `{ "type": "record", "fields": [...] }` | nested record |
-| `governance_threshold` | `{ "type": "governance_threshold" }` (calculated majority) or `{ "type": "governance_threshold", "value": N }` (explicit) | `Int` |
+| `governance_threshold` | `{ "type": "governance_threshold" }` (the party's namespace threshold) or `{ "type": "governance_threshold", "value": N }` (explicit) | `Int` |
 
-The serializer is defined at [`crates/decman/src/workflow/contracts/steps/prepare.rs:212`](../crates/decman/src/workflow/contracts/steps/prepare.rs). Field order in the JSON must match the field order in the Daml template.
+[`crates/decman/src/workflow/contracts/steps/prepare.rs:336`](../crates/decman/src/workflow/contracts/steps/prepare.rs) defines the serializer. Field order in the JSON must match the field order in the Daml template.
 
 Example body for the `PauseProposal` template above (instantiated as a proposal — note that proposals are usually created by a single party, so a dedicated multi-party `/contracts` workflow is overkill; this path is mainly for the *infrastructure* contracts a custom package ships with — `GovernanceRules`-style admin templates, configuration contracts, etc.):
 
