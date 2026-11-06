@@ -179,6 +179,11 @@ async fn governance_workflows_e2e() -> anyhow::Result<()> {
     // Threshold change on the restored 3-member party: down to 1 and back to
     // 2, so later phases still find the party at threshold 2.
     phases::change_threshold::run(&mut f).await?;
+    // A fresh party in the MainNet shape: P3 removes its own hosting entry and
+    // stays a namespace owner. P1 lists P3's key as an owner that hosts
+    // nothing, then kicks it with P2. Its own party, so the shared one stays
+    // as change_threshold left it.
+    phases::kick_owner_only::run(&mut f).await?;
 
     // ----------------------------------------------------------------------
     // Negative-path / chaos tests. They mutate workflow_runs (cancel/dismiss)

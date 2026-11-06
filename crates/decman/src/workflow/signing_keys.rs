@@ -386,6 +386,64 @@ pub fn signing_keys_without_member(
         .collect())
 }
 
+/// The key set a party should carry once a kick removes `removed`.
+///
+/// A member that removes its own hosting entry leaves its signing key behind.
+/// When only one key is surplus, [`signing_keys_without_member`] finds it.
+/// When more are, the kick also takes out keys other members left behind. No
+/// survivor claims any of those, so the survivors' own keys stay and the rest
+/// go.
+///
+/// # Errors
+///
+/// Errors when the surplus keys cannot be told apart from the survivors'.
+/// With several to remove, that needs every survivor's claim, and each claim
+/// must be a distinct key the party carries.
+pub fn signing_keys_after_kick(
+    current: &[SigningPublicKey],
+    removed: &str,
+    survivors: &[String],
+    claims: &BTreeMap<String, Fingerprint>,
+) -> Result<Vec<SigningPublicKey>> {
+    if current.len() <= survivors.len() + 1 {
+        return signing_keys_without_member(current, removed, survivors, claims);
+    }
+    let fingerprints: Vec<Fingerprint> = current.iter().map(utils::compute_fingerprint).collect();
+    let mut kept = BTreeSet::new();
+    for survivor in survivors {
+        let Some(fingerprint) = claims.get(survivor) else {
+            anyhow::bail!(
+                "The kick of {removed} must remove {count} of the party's {total} signing keys, \
+                 but {survivor} has not reported which key is its own. Refresh \
+                 /decentralized-parties so every member reports its signing key, then retry",
+                count = current.len() - survivors.len(),
+                total = current.len()
+            );
+        };
+        if !fingerprints.contains(fingerprint) {
+            anyhow::bail!(
+                "{survivor} claims signing key {fingerprint}, which the party does not carry. \
+                 Refresh /decentralized-parties, then retry"
+            );
+        }
+        if !kept.insert(fingerprint) {
+            anyhow::bail!(
+                "{survivor} claims signing key {fingerprint}, which another member also claims"
+            );
+        }
+    }
+    tracing::info!(
+        "Removing {count} signing keys that no remaining member claims",
+        count = current.len() - kept.len()
+    );
+    Ok(current
+        .iter()
+        .zip(&fingerprints)
+        .filter(|(_, fingerprint)| kept.contains(fingerprint))
+        .map(|(key, _)| key.clone())
+        .collect())
+}
+
 /// Load the party's signing keys from its deprecated `PartyToKeyMapping` and
 /// attribute them to `members`.
 ///
@@ -589,6 +647,50 @@ mod tests {
 
     fn uids(names: &[&str]) -> Vec<String> {
         names.iter().map(|n| (*n).to_string()).collect()
+    }
+
+    fn seeds(keys: &[SigningPublicKey]) -> Vec<Fingerprint> {
+        keys.iter().map(utils::compute_fingerprint).collect()
+    }
+
+    /// p1 and p2 host. p3 and p4 removed their own hosting entries and left
+    /// keys 3 and 4 behind. Kicking p3 leaves two hosts, so both keys go.
+    /// The same holds when p3 hosts and only p4 left its key behind.
+    #[test]
+    fn a_kick_drops_every_key_no_survivor_claims() -> Result {
+        let current = vec![key(1), key(2), key(3), key(4)];
+        let survivors = uids(&["p1", "p2"]);
+        for claims in [
+            claims(&[("p1", 1), ("p2", 2)]),
+            claims(&[("p1", 1), ("p2", 2), ("p3", 3)]),
+        ] {
+            let kept = signing_keys_after_kick(&current, "p3", &survivors, &claims)?;
+            assert_eq!(seeds(&kept), vec![fingerprint(1), fingerprint(2)]);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn a_kick_that_drops_several_keys_needs_every_survivor_claim() {
+        let current = vec![key(1), key(2), key(3), key(4)];
+        let claims = claims(&[("p1", 1), ("p3", 3)]);
+        match signing_keys_after_kick(&current, "p3", &uids(&["p1", "p2"]), &claims) {
+            Ok(kept) => panic!("expected a refusal, kept {:?}", seeds(&kept)),
+            Err(error) => assert!(
+                error.to_string().contains("p2 has not reported"),
+                "unexpected error: {error}"
+            ),
+        }
+    }
+
+    /// One surplus key needs only the kicked member's claim.
+    #[test]
+    fn a_kick_that_drops_one_key_needs_only_the_kicked_claim() -> Result {
+        let current = vec![key(1), key(2), key(3)];
+        let claims = claims(&[("p3", 3)]);
+        let kept = signing_keys_after_kick(&current, "p3", &uids(&["p1", "p2"]), &claims)?;
+        assert_eq!(seeds(&kept), vec![fingerprint(1), fingerprint(2)]);
+        Ok(())
     }
 
     #[test]

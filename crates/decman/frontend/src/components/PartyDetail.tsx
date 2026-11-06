@@ -56,6 +56,7 @@ import type {
   GovernanceState,
   GovernanceStateResponse,
   Network,
+  NonHostingOwner,
   PartyAuthStatus,
   RewardStatusResponse,
 } from "../types";
@@ -193,6 +194,10 @@ export const PartyDetail = ({
   const [contractsDialogOpen, setContractsDialogOpen] = useState(false);
   const [configDialogOpen, setConfigDialogOpen] = useState(false);
   const [selectedParticipant, setSelectedParticipant] = useState("");
+  // Set when the kick targets an owner that does not host the party.
+  const [selectedOwner, setSelectedOwner] = useState<NonHostingOwner | null>(
+    null,
+  );
   const [participantsExpanded, setParticipantsExpanded] = useState(true);
   const [contractsExpanded, setContractsExpanded] = useState(false);
   const [holdingsExpanded, setHoldingsExpanded] = useState(false);
@@ -357,9 +362,18 @@ export const PartyDetail = ({
   }, [party.party_id, canRead]);
 
   const handleKickClick = (participantUid: string) => {
+    setSelectedOwner(null);
     setSelectedParticipant(participantUid);
     setKickDialogOpen(true);
   };
+
+  const handleKickOwnerClick = (owner: NonHostingOwner) => {
+    setSelectedOwner(owner);
+    setKickDialogOpen(true);
+  };
+
+  // The server leaves the field out when every owner hosts the party.
+  const nonHostingOwners = party.non_hosting_owners ?? [];
 
   const prefix = party.party_id.split("::")[0];
   const actions = [
@@ -589,11 +603,11 @@ export const PartyDetail = ({
         title="Participants"
         expanded={participantsExpanded}
         onToggle={() => setParticipantsExpanded(!participantsExpanded)}
-        helpText="Canton participants hosting this party. One participant per row, with its permission level."
+        helpText="Canton participants hosting this party, one per row with its permission level. Owners of the party's namespace that do not host it follow the hosts, marked Owner only."
         badge={
           <>
             <Chip
-              label={party.participants.length}
+              label={party.participants.length + nonHostingOwners.length}
               size="small"
               sx={{ ml: 1 }}
             />
@@ -676,6 +690,60 @@ export const PartyDetail = ({
                             !ADMIN_ACCESS ||
                             p.participant_uid === selfParticipantId
                           }
+                        >
+                          <PersonRemoveIcon fontSize="small" />
+                        </IconButton>
+                      </span>
+                    </Tooltip>
+                  </TableCell>
+                </TableRow>
+              ))}
+              {nonHostingOwners.map((owner, idx) => (
+                <TableRow
+                  key={owner.owner_key}
+                  sx={zebraRow(party.participants.length + idx)}
+                  data-testid="owner-only-row"
+                  data-owner-key={owner.owner_key}
+                >
+                  <TableCell sx={{ py: 1 }}>
+                    {owner.participant_uid ? (
+                      <HostingParticipant
+                        participantId={owner.participant_uid}
+                        isSelf={false}
+                        peers={peers}
+                        sharedCount={
+                          sharedCounts?.get(owner.participant_uid) ?? null
+                        }
+                        onOpenPeerConfig={onOpenPeerConfig}
+                        onShowSharedParties={onShowSharedParties}
+                      />
+                    ) : (
+                      <Box>
+                        <Typography variant="body2" sx={{ fontWeight: 500 }}>
+                          Unclaimed owner key
+                        </Typography>
+                        <CopyableText
+                          text={owner.owner_key}
+                          truncate={{ start: 10, end: 8 }}
+                          variant="caption"
+                        />
+                      </Box>
+                    )}
+                  </TableCell>
+                  <TableCell sx={{ py: 1 }}>
+                    <Tooltip title="Owns the party's namespace key but does not host the party">
+                      <Chip label="Owner only" size="small" variant="outlined" />
+                    </Tooltip>
+                  </TableCell>
+                  <TableCell sx={{ py: 1 }} align="right">
+                    <Tooltip title="Kick owner">
+                      <span>
+                        <IconButton
+                          size="small"
+                          color="error"
+                          aria-label="Kick owner"
+                          onClick={() => handleKickOwnerClick(owner)}
+                          disabled={!ADMIN_ACCESS}
                         >
                           <PersonRemoveIcon fontSize="small" />
                         </IconButton>
@@ -885,14 +953,20 @@ export const PartyDetail = ({
           onNavigateToNotifications();
         }}
         partyId={party.party_id}
-        participantUid={selectedParticipant}
-        participantOwnerKey={
-          party.participants.find(
-            (p) => p.participant_uid === selectedParticipant,
-          )?.owner_key
+        participantUid={
+          selectedOwner ? selectedOwner.participant_uid : selectedParticipant
         }
+        participantOwnerKey={
+          selectedOwner
+            ? selectedOwner.owner_key
+            : party.participants.find(
+                (p) => p.participant_uid === selectedParticipant,
+              )?.owner_key
+        }
+        hosting={selectedOwner === null}
         currentThreshold={party.threshold}
         currentOwnerCount={party.owners.length}
+        currentHostCount={party.participants.length}
       />
 
       <AddPartyDialog

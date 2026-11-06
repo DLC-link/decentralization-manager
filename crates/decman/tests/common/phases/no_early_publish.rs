@@ -89,13 +89,13 @@ async fn signing_publishes_nothing_and_a_moved_serial_is_refused(
         party,
         &before,
         Some(new_dns),
-        new_p2p,
+        Some(new_p2p),
         topology::party_proposal_force_flags(),
     )
     .await
     .context("sign the raise in a temporary store")?;
     let dns = signed.dns.context("no DNS proposal was signed")?;
-    let p2p = signed.p2p;
+    let p2p = signed.p2p.context("no P2P proposal was signed")?;
 
     let dns_serial = utils::decode_versioned::<TopologyTransaction>(&dns.transaction)?.serial;
     let p2p_serial = utils::decode_versioned::<TopologyTransaction>(&p2p.transaction)?.serial;

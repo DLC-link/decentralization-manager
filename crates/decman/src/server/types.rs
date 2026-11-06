@@ -50,10 +50,10 @@ pub use common::api::{
 pub use common::types::{
     AcsTransferProgress, AuditLogEntry, AuthConfigResponse, ConnectionStatus, ContractInfo,
     DecentralizedParty, ExpectedPackageVersion, ExpectedVersionsResponse, HandledInvitation,
-    InvitationOutcome, InvitationType, PackageInfo, ParticipantInfo, ParticipantStatus,
-    ParticipantsStatusResponse, PartyMetadata, PeerErrorKind, PeerPackageComparison,
-    PeerPackageResult, PendingInvitation, Permission, VettedPackageInfo, WorkflowKind,
-    WorkflowProgress, WorkflowRole, WorkflowRun,
+    InvitationOutcome, InvitationType, NonHostingOwner, PackageInfo, ParticipantInfo,
+    ParticipantStatus, ParticipantsStatusResponse, PartyMetadata, PeerErrorKind,
+    PeerPackageComparison, PeerPackageResult, PendingInvitation, Permission, VettedPackageInfo,
+    WorkflowKind, WorkflowProgress, WorkflowRole, WorkflowRun,
 };
 pub use decman_lib::catalog::types::{
     AcceptTransferDetails, AppRewardBeneficiary, BillingParams, RewardBeneficiary,
@@ -1304,6 +1304,7 @@ mod tests {
             previous_threshold: None,
             new_threshold: None,
             kicked_participant: None,
+            kicked_owner_key: None,
             added_participant: None,
             package_names: Vec::new(),
             dar_filenames: Vec::new(),

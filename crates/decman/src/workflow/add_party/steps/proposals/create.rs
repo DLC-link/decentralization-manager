@@ -251,7 +251,7 @@ pub async fn create_proposals(
         party_id,
         &head,
         (!rehost).then(|| new_namespace_def.clone()),
-        new_p2p,
+        Some(new_p2p),
         topology::party_proposal_force_flags(),
     )
     .await?;
@@ -266,7 +266,9 @@ pub async fn create_proposals(
             .await?
         }
     };
-    let p2p_transaction = signed.p2p;
+    let p2p_transaction = signed
+        .p2p
+        .ok_or_else(|| anyhow::anyhow!("No P2P add-party proposal was signed"))?;
 
     // Published before submit on purpose. The new member disconnects before
     // the mapping that hosts it is authorized (#469), and its ACS import needs
