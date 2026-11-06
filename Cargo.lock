@@ -1901,13 +1901,16 @@ dependencies = [
 name = "decman-lib"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "canton-proto-rs",
  "chrono",
  "common 0.1.0",
  "common 0.12.0",
+ "hex",
  "insta",
  "prost-types",
  "serde",
+ "sha2 0.11.1",
  "thiserror 2.0.21",
  "tracing",
  "ts-rs",
@@ -1920,8 +1923,11 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "base64 0.23.1",
+ "chrono",
  "common 0.1.0",
+ "decman-lib",
  "ed25519-dalek",
+ "prost",
  "rand 0.10.3",
  "reqwest 0.13.3",
  "serde",
@@ -1929,6 +1935,8 @@ dependencies = [
  "thiserror 2.0.21",
  "tokio",
  "tracing",
+ "tracing-subscriber",
+ "uuid",
  "wiremock",
  "zeroize",
 ]

@@ -15,12 +15,9 @@ use canton_proto_rs::com::daml::ledger::api::v2::interactive::{
     transaction::v1::{Create, Exercise, Fetch, Node, QueryByKey, Rollback, node::NodeType},
 };
 
-use crate::{
-    canton_hash::{
-        HashingScheme,
-        encoding::{Encoder, required, sha256},
-    },
-    error::Result,
+use crate::canton_hash::{
+    HashingScheme, Result,
+    encoding::{Encoder, required, sha256},
 };
 
 /// Node tags. A node's kind is part of its encoding so two different node
@@ -72,7 +69,7 @@ impl<'a> NodeHasher<'a> {
                 "versioned node (only v1 nodes are supported)",
             )?;
             if nodes.insert(node.node_id.as_str(), inner).is_some() {
-                anyhow::bail!("duplicate node id {id} in transaction", id = node.node_id);
+                bail!("duplicate node id {id} in transaction", id = node.node_id);
             }
         }
 
@@ -104,7 +101,7 @@ impl<'a> NodeHasher<'a> {
         path: &mut HashSet<String>,
     ) -> Result<[u8; 32]> {
         if depth > MAX_NODE_DEPTH {
-            anyhow::bail!("transaction tree exceeds the {MAX_NODE_DEPTH} level depth limit");
+            bail!("transaction tree exceeds the {MAX_NODE_DEPTH} level depth limit");
         }
         if let Some(hash) = self.memo.borrow().get(node_id) {
             return Ok(*hash);
@@ -113,12 +110,12 @@ impl<'a> NodeHasher<'a> {
         // rather than served from the memo: a node only reaches the memo once
         // its whole subtree has been hashed without revisiting it.
         if !path.insert(node_id.to_string()) {
-            anyhow::bail!("transaction tree references node {node_id} cyclically");
+            bail!("transaction tree references node {node_id} cyclically");
         }
         let node = self
             .nodes
             .get(node_id)
-            .ok_or_else(|| anyhow::anyhow!("transaction references missing node {node_id}"))?;
+            .ok_or_else(|| hash_error!("transaction references missing node {node_id}"))?;
         let encoded = self.encode_node(node, node_id, depth, path)?;
         path.remove(node_id);
         let hash = sha256(&encoded);
@@ -231,7 +228,7 @@ impl<'a> NodeHasher<'a> {
         // the hash: a field we do not hash is a field a coordinator can
         // change without invalidating our signature.
         if !exercise.external_call_results.is_empty() {
-            anyhow::bail!(
+            bail!(
                 "exercise node carries external call results, which hashing scheme \
                  {scheme} does not cover",
                 scheme = self.scheme
@@ -239,7 +236,7 @@ impl<'a> NodeHasher<'a> {
         }
         let seed = self
             .seed(node_id)
-            .ok_or_else(|| anyhow::anyhow!("exercise node {node_id} has no node seed"))?;
+            .ok_or_else(|| hash_error!("exercise node {node_id} has no node seed"))?;
 
         encoder.string(&exercise.lf_version)?;
         encoder.byte(EXERCISE_TAG);
@@ -280,7 +277,7 @@ impl<'a> NodeHasher<'a> {
 
     fn encode_query_by_key(&self, encoder: &mut Encoder, query: &QueryByKey) -> Result<()> {
         if self.scheme == HashingScheme::V2 {
-            anyhow::bail!("QueryByKey nodes are not supported by hashing scheme V2");
+            bail!("QueryByKey nodes are not supported by hashing scheme V2");
         }
         encoder.string(&query.lf_version)?;
         encoder.byte(QUERY_BY_KEY_TAG);
@@ -318,7 +315,7 @@ impl<'a> NodeHasher<'a> {
         match self.scheme {
             HashingScheme::V2 => {
                 if key.is_some() {
-                    anyhow::bail!(
+                    bail!(
                         "{node_kind} node carries a contract key, which hashing scheme V2 \
                          does not cover"
                     );
@@ -333,7 +330,7 @@ impl<'a> NodeHasher<'a> {
         match self.scheme {
             HashingScheme::V2 => {
                 if by_key {
-                    anyhow::bail!(
+                    bail!(
                         "{node_kind} node is flagged by-key, which hashing scheme V2 does \
                          not cover"
                     );

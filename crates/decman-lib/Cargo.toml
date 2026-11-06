@@ -16,12 +16,15 @@ canton-common = { workspace = true }
 canton-proto-rs = { workspace = true }
 chrono = { workspace = true }
 common = { workspace = true }
+hex = { workspace = true }
 serde = { workspace = true }
+sha2 = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 ts-rs = { workspace = true, optional = true }
 utoipa = { workspace = true, optional = true }
 
 [dev-dependencies]
+anyhow = { workspace = true }
 insta = { workspace = true }
 prost-types = { workspace = true }

@@ -1,4 +1,4 @@
-//! Errors surfaced by the tenant client.
+//! Errors surfaced by the tenant, ledger and registry clients.
 
 use thiserror::Error;
 
@@ -33,6 +33,29 @@ pub enum Error {
         message: String,
     },
 
+    /// The base URL does not parse, or its scheme is not `http` or `https`.
+    #[error("{host} is not a base URL this client can use: {reason}")]
+    InvalidUrl { host: String, reason: String },
+
+    /// The base URL uses plain `http` to a host that is not loopback. The
+    /// bearer token and the prepared transaction would cross the network
+    /// unencrypted.
+    #[error(
+        "{host} uses plain http to a host that is not loopback. \
+         Set ClientOptions::allow_plain_http to allow it."
+    )]
+    InsecureUrl { host: String },
+
+    /// The answer was larger than the client reads. See
+    /// [`ClientOptions::max_response_bytes`](crate::ClientOptions::max_response_bytes).
+    #[error("{host}: {method} {path} returned more than {limit} bytes")]
+    ResponseTooLarge {
+        host: String,
+        method: &'static str,
+        path: String,
+        limit: usize,
+    },
+
     #[error("{host}: {method} {path} returned a body this client cannot read: {source}")]
     Decode {
         host: String,
@@ -40,6 +63,16 @@ pub enum Error {
         path: String,
         #[source]
         source: reqwest::Error,
+    },
+
+    /// The body arrived as text, but it is not the JSON this client expects.
+    #[error("{host}: {method} {path} returned JSON this client cannot read: {source}")]
+    Json {
+        host: String,
+        method: &'static str,
+        path: String,
+        #[source]
+        source: serde_json::Error,
     },
 
     #[error("{host} returned a {field} that is not valid base64: {source}")]
@@ -110,6 +143,80 @@ pub enum Error {
         operation: &'static str,
         role: &'static str,
     },
+
+    /// The sender owns no unlocked holding of the instrument, so a send has
+    /// nothing to spend. Nothing was asked of the registry or the ledger.
+    #[error("{party} holds no unlocked {instrument_id} from {instrument_admin}")]
+    NoHoldings {
+        party: String,
+        instrument_admin: String,
+        instrument_id: String,
+    },
+
+    /// The prepared transaction failed the check the wallet runs before it
+    /// signs. Nothing was signed and nothing was executed.
+    #[error("{host} prepared a transaction this wallet will not sign: {reason}")]
+    TransactionRefused { host: String, reason: Refusal },
+
+    /// The id is not a Canton contract id. Nothing was sent anywhere.
+    #[error(
+        "{contract_id} is not a Canton contract id. \
+         A contract id is lowercase hex of even length, starts with 00 and has at least 66 digits."
+    )]
+    InvalidContractId { contract_id: String },
+
+    /// The signed execute left the wallet, but its answer did not arrive,
+    /// could not be read, or came from a gateway. The participant may have
+    /// committed the transaction. Check the ledger before sending the
+    /// transfer again: a new send is a new transaction.
+    #[error(
+        "the execute of command {command_id} has an unknown outcome: {source}. \
+         The transaction may have committed. \
+         Do not resend it before you check the ledger."
+    )]
+    ExecuteOutcomeUnknown {
+        host: String,
+        /// The command id of the prepared transaction. Its completion
+        /// tells whether the transaction committed.
+        command_id: String,
+        submission_id: String,
+        /// The hash the wallet signed, base64.
+        prepared_transaction_hash: String,
+        /// The error that hid the outcome: [`Error::Transport`],
+        /// [`Error::Decode`], [`Error::Json`], [`Error::ResponseTooLarge`],
+        /// or [`Error::Api`] with a 502, 503 or 504. It names the host too.
+        #[source]
+        source: Box<Error>,
+    },
+}
+
+/// Why the wallet refused to sign a prepared transaction.
+#[derive(Debug, Error)]
+pub enum Refusal {
+    /// The wallet could not recompute the hash, so it cannot know what the
+    /// hash commits to. An unknown hashing scheme lands here.
+    #[error("its hash cannot be recomputed: {0}")]
+    Unverifiable(String),
+
+    /// The hash that came with the transaction is not the transaction's hash.
+    #[error("it came with hash {supplied}, but it hashes to {recomputed}")]
+    HashMismatch {
+        supplied: String,
+        recomputed: String,
+    },
+
+    /// The transaction is not one exercise at its root, or the exercise's
+    /// argument lacks a field the check reads.
+    #[error("{0}")]
+    Shape(String),
+
+    /// The root exercise differs from what the wallet asked for.
+    #[error("its {field} is {found}, not {expected}")]
+    Mismatch {
+        field: &'static str,
+        expected: String,
+        found: String,
+    },
 }
 
 impl Error {
@@ -117,16 +224,27 @@ impl Error {
     pub fn host(&self) -> &str {
         match self {
             Self::Client { host, .. }
+            | Self::InvalidUrl { host, .. }
+            | Self::InsecureUrl { host }
+            | Self::ResponseTooLarge { host, .. }
+            | Self::ExecuteOutcomeUnknown { host, .. }
             | Self::Transport { host, .. }
             | Self::Api { host, .. }
             | Self::Decode { host, .. }
+            | Self::Json { host, .. }
             | Self::Base64 { host, .. }
             | Self::PartyIdMismatch { host, .. }
             | Self::MalformedPreparation { host, .. }
-            | Self::HostDisagreement { host, .. } => host,
-            // Not about any one host: a signing failure is local, and a missing
-            // host set has nobody to name.
-            Self::NotEnoughHosts(_) | Self::Signing { .. } | Self::NoHosts { .. } => "",
+            | Self::HostDisagreement { host, .. }
+            | Self::TransactionRefused { host, .. } => host,
+            // Not about any one host: a signing failure is local, a missing
+            // host set has nobody to name, and an empty wallet or a bad
+            // contract id is the wallet's own state.
+            Self::NotEnoughHosts(_)
+            | Self::Signing { .. }
+            | Self::NoHosts { .. }
+            | Self::NoHoldings { .. }
+            | Self::InvalidContractId { .. } => "",
         }
     }
 

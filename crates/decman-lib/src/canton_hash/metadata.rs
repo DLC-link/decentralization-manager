@@ -9,13 +9,10 @@ use canton_proto_rs::com::daml::ledger::api::v2::interactive::{
     Metadata, metadata::InputContract, metadata::input_contract::Contract,
 };
 
-use crate::{
-    canton_hash::{
-        HashingScheme,
-        encoding::{Encoder, required},
-        nodes::NodeHasher,
-    },
-    error::Result,
+use crate::canton_hash::{
+    HashingScheme, Result,
+    encoding::{Encoder, required},
+    nodes::NodeHasher,
 };
 
 /// V2 prefixes the metadata with the version of the protobuf used to encode
@@ -33,7 +30,7 @@ pub(super) fn hash_metadata(scheme: HashingScheme, metadata: &Metadata) -> Resul
     encoder.string(&submitter.command_id)?;
     encoder.string(&metadata.transaction_uuid)?;
     let mediator_group = i32::try_from(metadata.mediator_group).map_err(|_| {
-        anyhow::anyhow!(
+        hash_error!(
             "mediator group {group} exceeds the int32 the encoding uses",
             group = metadata.mediator_group
         )
@@ -81,7 +78,7 @@ fn contract_id(contract: &InputContract) -> Result<&str> {
 /// not have come from Canton.
 fn timestamp(micros: u64, what: &str) -> Result<i64> {
     i64::try_from(micros)
-        .map_err(|_| anyhow::anyhow!("{what} {micros} exceeds the int64 the encoding uses"))
+        .map_err(|_| hash_error!("{what} {micros} exceeds the int64 the encoding uses"))
 }
 
 fn encode_optional_timestamp(encoder: &mut Encoder, micros: Option<u64>) -> Result {
