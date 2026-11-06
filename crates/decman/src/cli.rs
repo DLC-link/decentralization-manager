@@ -55,6 +55,12 @@ pub enum Commands {
         #[arg(long, env = "DECPM_DB_ENCRYPTION_KEY")]
         db_encryption_key: Option<String>,
 
+        /// File holding the 32-byte key that encrypts DecMan's party key
+        /// store: raw bytes, hex or base64. Defaults to {dir}/data/key-store.key,
+        /// created on first use next to the database.
+        #[arg(long, env = "DECPM_KEY_STORE_KEY_FILE")]
+        key_store_key_file: Option<PathBuf>,
+
         // Node settings
         /// Address to listen on for Noise protocol connections
         #[arg(long, env = "DECPM_LISTEN_ADDRESS")]

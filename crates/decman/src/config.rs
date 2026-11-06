@@ -319,6 +319,11 @@ pub struct NodeConfig {
     /// Splice cleanup. Not serialized.
     #[serde(skip)]
     pub validator_operator_party: Option<CantonId>,
+    /// File holding the key that encrypts DecMan's party key store. `None`
+    /// uses `key-store.key` in the data directory, created on first use. Not
+    /// serialized.
+    #[serde(skip)]
+    pub key_store_key_file: Option<PathBuf>,
     /// Root directory containing data/ subdirectory
     #[serde(skip)]
     root_dir: PathBuf,
@@ -344,6 +349,7 @@ impl Default for NodeConfig {
             tenant_api_keys: Vec::new(),
             tenant_rate_limit_per_minute: 120,
             validator_operator_party: None,
+            key_store_key_file: None,
             root_dir: PathBuf::new(),
         }
     }
