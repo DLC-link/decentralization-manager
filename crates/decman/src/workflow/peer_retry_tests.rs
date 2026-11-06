@@ -172,7 +172,8 @@ fn assert_reported(run: &PeerRun, kind: WorkflowKind) {
 async fn malformed_commands_back_off_and_exhaust_the_budget() -> Result {
     let mut cases = Vec::new();
     for (kind, command, item_count) in [
-        (WorkflowKind::Contracts, MessageType::SignSubmissions, 3),
+        (WorkflowKind::Contracts, MessageType::SignRotation, 2),
+        (WorkflowKind::Contracts, MessageType::SignSubmissions, 2),
         (WorkflowKind::Kick, MessageType::SignKick, 3),
         (
             WorkflowKind::ChangeThreshold,

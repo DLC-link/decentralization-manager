@@ -543,6 +543,10 @@ impl<S: WorkflowStep + 'static> NoiseServer<S> {
                 self.handle_peer_data(peer_id, message.payload, "one-shot public key")
                     .await
             }
+            MessageType::RotationSignatures => {
+                self.handle_peer_data(peer_id, message.payload, "rotation signatures")
+                    .await
+            }
             MessageType::SubmissionSignatures => {
                 self.handle_peer_data(peer_id, message.payload, "submission signatures")
                     .await

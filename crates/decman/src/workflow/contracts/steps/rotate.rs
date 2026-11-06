@@ -28,9 +28,7 @@ use crate::{
     },
     utils,
     workflow::{
-        contracts::steps::sign::{
-            encode_messages_length_prefixed, read_all_messages_from_bytes, verified_hashes,
-        },
+        contracts::steps::sign::{encode_messages_length_prefixed, verified_hashes},
         proposal_store, topology, topology_version,
     },
 };
@@ -171,24 +169,20 @@ fn check_rotation_against(
     Ok(signing.keys.clone())
 }
 
-/// A peer's part of a deploy: check the rotation, sign it with this node's
-/// namespace key and `key`, and sign each prepared create with `key`. Returns
-/// the reply for the coordinator. `key` is dropped before this returns.
+/// A peer's signature on the rotation: check it against this node's view of
+/// the party, then sign it with this node's namespace key and with `key`.
+/// Returns the signed rotation for the coordinator. The caller keeps `key`
+/// for the creates.
 ///
 /// # Errors
 ///
-/// Errors when a prepared create or the rotation fails its checks, or when
-/// Canton refuses to sign.
+/// Errors when the rotation fails its checks or Canton refuses to sign.
 pub async fn sign_rotation(
     config: &NodeConfig,
-    db: &SqlitePool,
-    instance_name: &str,
     dec_party_id: &CantonId,
-    intents: &[common::api::ContractDeploymentIntent],
     rotation_payload: &[u8],
-    key: OneShotKey,
+    key: &OneShotKey,
 ) -> Result<Vec<u8>> {
-    let hashes = verified_hashes(db, instance_name, dec_party_id, intents).await?;
     let rotation: SignedTopologyTransaction =
         utils::read_first_message_from_bytes(rotation_payload)?;
     let synchronizer_id = utils::get_synchronizer_id(config).await?;
@@ -205,13 +199,26 @@ pub async fn sign_rotation(
     signed
         .signatures
         .push(key.sign_topology(&signed.transaction));
+    Ok(utils::encode_length_prefixed_message(&signed))
+}
+
+/// A peer's signatures on the creates: check each prepared create, sign it
+/// with `key`, and drop `key`. Returns the signatures for the coordinator.
+///
+/// # Errors
+///
+/// Errors when a prepared create fails its checks.
+pub async fn sign_creates(
+    db: &SqlitePool,
+    instance_name: &str,
+    dec_party_id: &CantonId,
+    intents: &[common::api::ContractDeploymentIntent],
+    key: OneShotKey,
+) -> Result<Vec<u8>> {
+    let hashes = verified_hashes(db, instance_name, dec_party_id, intents).await?;
     let daml = key.sign_prepared(&hashes);
     drop(key);
-
-    Ok(utils::encode_length_prefixed(&[
-        &utils::encode_length_prefixed_message(&signed),
-        &encode_messages_length_prefixed(&daml),
-    ]))
+    Ok(encode_messages_length_prefixed(&daml))
 }
 
 /// Add this node's namespace signature to the rotation.
@@ -242,25 +249,6 @@ async fn countersign(
     Ok(signed)
 }
 
-/// One signer's reply: its signed rotation and its signature on each create.
-pub struct SignerReply {
-    pub rotation: SignedTopologyTransaction,
-    pub daml: Vec<Signature>,
-}
-
-impl SignerReply {
-    /// # Errors
-    ///
-    /// Errors when the reply does not decode.
-    pub fn decode(payload: &[u8]) -> Result<Self> {
-        let items = utils::decode_length_prefixed(payload, 2)?;
-        Ok(Self {
-            rotation: utils::read_first_message_from_bytes(&items[0])?,
-            daml: read_all_messages_from_bytes(&items[1])?,
-        })
-    }
-}
-
 /// Join the signers' copies of one rotation into one transaction.
 ///
 /// # Errors
@@ -281,55 +269,64 @@ pub fn merge_rotations(
     Ok(rotation)
 }
 
-/// Check that every signer's one-shot key signed the rotation and every
-/// prepared create, so nothing reaches Canton that it would refuse.
+/// Check that every one-shot key signed the rotation, so nothing reaches
+/// Canton that it would refuse.
 ///
 /// # Errors
 ///
 /// Errors when a key's signature is missing or does not verify.
-pub fn check_signatures(
+pub fn check_rotation_signed(
     rotation: &SignedTopologyTransaction,
     keys: &[SigningPublicKey],
-    hashes: &[PreparedTransactionHash],
-    daml: &[Vec<Signature>],
 ) -> Result {
     let topology_hash = one_shot::topology_hash(&rotation.transaction);
     for key in keys {
-        let fingerprint = utils::compute_fingerprint(key);
-        let signature = rotation
-            .signatures
-            .iter()
-            .find(|s| s.signed_by == fingerprint.as_str())
-            .ok_or_else(|| {
-                anyhow::anyhow!("One-shot key {fingerprint} did not sign the rotation")
-            })?;
-        one_shot::verify(key, &topology_hash, signature)?;
+        one_shot::verify(
+            key,
+            &topology_hash,
+            signature_by(&rotation.signatures, key)?,
+        )?;
     }
-    for (index, (hash, signatures)) in hashes.iter().zip(daml).enumerate() {
+    Ok(())
+}
+
+/// Check that every one-shot key signed every prepared create. `signatures`
+/// holds each create's signatures, in the order of `hashes`.
+///
+/// # Errors
+///
+/// Errors when a create's signature is missing or does not verify.
+pub fn check_create_signatures(
+    keys: &[SigningPublicKey],
+    hashes: &[PreparedTransactionHash],
+    signatures: &[Vec<Signature>],
+) -> Result {
+    anyhow::ensure!(
+        hashes.len() == signatures.len(),
+        "Signatures cover {signed} creates of {total}",
+        signed = signatures.len(),
+        total = hashes.len()
+    );
+    for (index, (hash, on_create)) in hashes.iter().zip(signatures).enumerate() {
         anyhow::ensure!(
-            signatures.len() == keys.len(),
+            on_create.len() == keys.len(),
             "Create {index} has {found} signatures for {expected} keys",
-            found = signatures.len(),
+            found = on_create.len(),
             expected = keys.len()
         );
         for key in keys {
-            let fingerprint = utils::compute_fingerprint(key);
-            let signature = signatures
-                .iter()
-                .find(|s| s.signed_by == fingerprint.as_str())
-                .ok_or_else(|| {
-                    anyhow::anyhow!("One-shot key {fingerprint} did not sign create {index}")
-                })?;
-            one_shot::verify(key, hash.as_bytes(), signature)?;
+            one_shot::verify(key, hash.as_bytes(), signature_by(on_create, key)?)?;
         }
     }
-    anyhow::ensure!(
-        hashes.len() == daml.len(),
-        "Signatures cover {signed} creates of {total}",
-        signed = daml.len(),
-        total = hashes.len()
-    );
     Ok(())
+}
+
+fn signature_by<'a>(signatures: &'a [Signature], key: &SigningPublicKey) -> Result<&'a Signature> {
+    let fingerprint = utils::compute_fingerprint(key);
+    signatures
+        .iter()
+        .find(|s| s.signed_by == fingerprint.as_str())
+        .ok_or_else(|| anyhow::anyhow!("One-shot key {fingerprint} did not sign"))
 }
 
 /// Publish the rotation and wait until this node sees the new keys, so a
@@ -550,7 +547,19 @@ mod tests {
     }
 
     #[test]
-    fn signatures_from_every_key_pass_and_a_missing_one_fails() -> Result {
+    fn a_rotation_signed_by_every_key_passes_and_a_partial_one_fails() -> Result {
+        let f = Fixture::new();
+        let merged = merge_rotations(
+            signed(b"rotation", &f.signers[..1]),
+            [signed(b"rotation", &f.signers[1..])],
+        )?;
+        check_rotation_signed(&merged, &f.keys())?;
+        assert!(check_rotation_signed(&signed(b"rotation", &f.signers[..1]), &f.keys()).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn creates_signed_by_every_key_pass_and_a_short_set_fails() -> Result {
         let f = Fixture::new();
         let hashes = vec![PreparedTransactionHash::new(vec![3; 32])];
         let daml: Vec<Vec<Signature>> = vec![
@@ -559,17 +568,13 @@ mod tests {
                 .flat_map(|k| k.sign_prepared(&hashes))
                 .collect(),
         ];
-        let merged = merge_rotations(
-            signed(b"rotation", &f.signers[..1]),
-            [signed(b"rotation", &f.signers[1..])],
-        )?;
-        check_signatures(&merged, &f.keys(), &hashes, &daml)?;
-
-        let partial = signed(b"rotation", &f.signers[..1]);
-        assert!(check_signatures(&partial, &f.keys(), &hashes, &daml).is_err());
+        check_create_signatures(&f.keys(), &hashes, &daml)?;
 
         let short = vec![daml[0][..1].to_vec()];
-        assert!(check_signatures(&merged, &f.keys(), &hashes, &short).is_err());
+        assert!(check_create_signatures(&f.keys(), &hashes, &short).is_err());
+
+        let other = vec![PreparedTransactionHash::new(vec![4; 32])];
+        assert!(check_create_signatures(&f.keys(), &other, &daml).is_err());
         Ok(())
     }
 

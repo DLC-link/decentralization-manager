@@ -323,6 +323,7 @@ async fn run_peer(
     let mut consecutive_no_workflow = 0;
     let mut consecutive_step_failures = 0;
     // This run's one-shot Daml key, from AnnounceKey until SignSubmissions.
+    // A repeated AnnounceKey replaces it, so a key serves one attempt.
     let mut one_shot: Option<OneShotKey> = None;
     loop {
         // Poll coordinator for next command (with payload for commands that need data)
@@ -683,18 +684,17 @@ async fn run_peer(
                     tracing::error!("Failed to send the one-shot key to the coordinator: {e}");
                 }
             }
-            MessageType::SignSubmissions => {
-                tracing::info!("Executing: Sign the key rotation and the submissions");
+            MessageType::SignRotation => {
+                tracing::info!("Executing: Sign the key rotation");
 
-                // [config_json, rotation, files_payload]
-                let items = match utils::decode_length_prefixed(&payload, 3) {
+                // [config_json, rotation]
+                let items = match utils::decode_length_prefixed(&payload, 2) {
                     Ok(items) => items,
                     Err(e) => {
-                        fail_step!("Failed to decode SignSubmissions payload: {e}");
+                        fail_step!("Failed to decode SignRotation payload: {e}");
                         continue;
                     }
                 };
-
                 let contracts_config: contracts::ContractsConfig =
                     match serde_json::from_slice(&items[0]) {
                         Ok(config) => config,
@@ -703,15 +703,62 @@ async fn run_peer(
                             continue;
                         }
                     };
-
                 let dec_party_id = contracts_config.decentralized_party_id.clone();
                 if let Err(e) = expectations.check_dec_party(&dec_party_id) {
                     fail_step!("Refusing the coordinator's contracts config: {e}");
                     continue;
                 }
+                let Some(key) = one_shot.as_ref() else {
+                    fail_step!(
+                        "No one-shot key for this run; the coordinator must announce keys again"
+                    );
+                    continue;
+                };
+                let reply = match contracts::steps::rotate::sign_rotation(
+                    &node_config,
+                    &dec_party_id,
+                    &items[1],
+                    key,
+                )
+                .await
+                {
+                    Ok(reply) => reply,
+                    Err(e) => {
+                        fail_step!("Step execution failed: {e:#}");
+                        continue;
+                    }
+                };
+                consecutive_step_failures = 0;
+                if let Err(e) = client.send_rotation_signatures(reply).await {
+                    tracing::error!("Failed to send rotation signatures to coordinator: {e}");
+                }
+            }
+            MessageType::SignSubmissions => {
+                tracing::info!("Executing: Sign submissions");
 
+                // [config_json, files_payload]
+                let items = match utils::decode_length_prefixed(&payload, 2) {
+                    Ok(items) => items,
+                    Err(e) => {
+                        fail_step!("Failed to decode SignSubmissions payload: {e}");
+                        continue;
+                    }
+                };
+                let contracts_config: contracts::ContractsConfig =
+                    match serde_json::from_slice(&items[0]) {
+                        Ok(config) => config,
+                        Err(e) => {
+                            fail_step!("Failed to deserialize contracts config: {e}");
+                            continue;
+                        }
+                    };
+                let dec_party_id = contracts_config.decentralized_party_id.clone();
+                if let Err(e) = expectations.check_dec_party(&dec_party_id) {
+                    fail_step!("Refusing the coordinator's contracts config: {e}");
+                    continue;
+                }
                 if let Err(e) =
-                    save_prepared_submissions_from_payload(&items[2], &db, &instance_name).await
+                    save_prepared_submissions_from_payload(&items[1], &db, &instance_name).await
                 {
                     fail_step!("Failed to save prepared submissions from coordinator: {e}");
                     continue;
@@ -724,13 +771,11 @@ async fn run_peer(
                     );
                     continue;
                 };
-                let reply = match contracts::steps::rotate::sign_rotation(
-                    &node_config,
+                let reply = match contracts::steps::rotate::sign_creates(
                     &db,
                     &instance_name,
                     &dec_party_id,
                     &expectations.contract_intents,
-                    &items[1],
                     key,
                 )
                 .await
@@ -1394,6 +1439,7 @@ fn peer_step_for_command(
         WorkflowKind::Contracts => {
             let step = match command {
                 MessageType::AnnounceKey => ContractsStep::AnnounceKeys,
+                MessageType::SignRotation => ContractsStep::SignRotation,
                 MessageType::SignSubmissions => ContractsStep::SignSubmissions,
                 MessageType::Disconnect => ContractsStep::Complete,
                 _ => return None,
@@ -1591,6 +1637,7 @@ mod tests {
             (WorkflowKind::Kick, MessageType::SignKick),
             (WorkflowKind::Kick, MessageType::Disconnect),
             (WorkflowKind::Contracts, MessageType::AnnounceKey),
+            (WorkflowKind::Contracts, MessageType::SignRotation),
             (WorkflowKind::Contracts, MessageType::SignSubmissions),
             (WorkflowKind::Contracts, MessageType::Disconnect),
             (WorkflowKind::Dars, MessageType::UploadDars),
