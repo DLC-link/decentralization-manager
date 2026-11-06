@@ -2,13 +2,21 @@
 
 A web application for managing decentralized parties in Canton blockchain networks. Provides a user interface for onboarding new parties, deploying governance contracts, and managing participant membership.
 
+## How it works
+
+Decentralization Manager lets several organizations control one Canton party together. This party is the Decentralized Party. The Daml code calls it `governanceParty`. Each organization runs a participant node. The participant nodes host the Decentralized Party and own its namespace. Enough of these namespace owners to meet the namespace threshold must sign each topology change. For example, a topology change adds or removes a host.
+
+The organizations act through member parties. `GovernanceRules.members` lists the member parties, and each one is a normal Canton party. Member parties propose governed actions and confirm them through a `GovernanceRules` contract. The Decentralized Party is the signatory of that contract. When enough member parties confirm an action, one of them executes it. The action then runs with the authority of the Decentralized Party and of the proposer.
+
+The [Threshold Model](docs/ARCHITECTURE.md#threshold-model) lists the party's three thresholds and what each one counts.
+
 ## Features
 
 - **Web-Based Management UI**: React frontend for managing decentralized parties
 - **Multi-Party Onboarding**: Coordinated workflow for creating decentralized party namespaces
 - **Contract Deployment**: Upload DAR files and deploy governance contracts with multi-party signing
 - **Governance Actions**: View and manage governance confirmations with threshold-based execution
-- **Participant Management**: View party membership, kick participants with threshold-based voting
+- **Participant Management**: View party membership and kick participants. A kick is a topology change, and enough namespace owners to meet the namespace threshold sign it. A kick is not a governance vote
 - **OAuth Authentication (Keycloak or Auth0)**: Supports M2M (client_credentials) and password flows for Ledger API access; per-node choice of provider for both frontend gating and outbound Canton tokens
 - **Secure P2P Communication**: Noise Protocol Framework for encrypted coordinator-peer communication
 - **Real-time Status**: Live peer connectivity monitoring and workflow progress tracking
@@ -16,6 +24,7 @@ A web application for managing decentralized parties in Canton blockchain networ
 
 ## Documentation
 
+- [Public documentation](https://docs.bitsafe.finance/decentralization-manager) -- The Decentralization Manager guides on docs.bitsafe.finance
 - [Architecture Overview](docs/ARCHITECTURE.md) -- System architecture, core concepts, communication protocol, and technical constraints
 - [User Guide](USER_GUIDE.md) -- Running a single node with Docker: images, ports, and the main settings
 - [Adding a Member to a Decentralized Party](docs/ADDING_A_MEMBER_TO_A_DECENTRALIZED_PARTY.md) -- Running the add-party workflow: prerequisites, downtime, and recovery
@@ -26,6 +35,21 @@ A web application for managing decentralized parties in Canton blockchain networ
 - [Deployment Guide](docs/DEPLOYMENT_GUIDE.md) -- Deploying a node to Kubernetes from scratch: manifests, identity-provider setup, and configuration reference
 - [Use Cases](docs/USE_CASES.md) -- Joint custody governance, FAR rewards, multi-sig wallet, and utility service walkthroughs
 - [Contributing Guide](docs/CONTRIBUTING.md) -- Development setup, coding standards, commit conventions, and the PR process
+
+### Reading these docs with an AI assistant
+
+The public docs serve every page as plain Markdown for AI assistants and other tools:
+
+- [`llms.txt`](https://docs.bitsafe.finance/llms.txt) lists every page with a one-line description and a link to its Markdown copy.
+- If you add `.md` to a page URL, the site returns that page as Markdown. An example is <https://docs.bitsafe.finance/decentralization-manager.md>.
+- [`llms-full.txt`](https://docs.bitsafe.finance/llms-full.txt) holds every page in one file. It covers every BitSafe product, so it is large.
+
+To learn the concepts from this repository, give the assistant these files in this order:
+
+1. This README.
+2. The [Core Concepts](https://github.com/DLC-link/decentralization-manager/blob/main/docs/ARCHITECTURE.md#core-concepts) and [Governance System](https://github.com/DLC-link/decentralization-manager/blob/main/docs/ARCHITECTURE.md#governance-system) sections of `docs/ARCHITECTURE.md`.
+3. [`docs/CUSTOM_DAML_TEMPLATES.md`](https://github.com/DLC-link/decentralization-manager/blob/main/docs/CUSTOM_DAML_TEMPLATES.md), if you write your own governed actions.
+4. The Daml source of the governance engine: [`Rules.daml`](https://github.com/DLC-link/decentralization-manager/blob/main/daml/governance-core/daml/Governance/Rules.daml) and [`Action.daml`](https://github.com/DLC-link/decentralization-manager/blob/main/daml/governance-action-v1/daml/Governance/Action.daml).
 
 ## Architecture
 

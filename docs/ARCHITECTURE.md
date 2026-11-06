@@ -37,13 +37,15 @@ The PartyToParticipant topology mapping connects a decentralized party to its ho
 
 ### Threshold Model
 
-The system defaults to a majority threshold for both topology changes and governance actions:
+A decentralized party has three thresholds. Each one counts a different thing:
 
 | Operation | Threshold |
 |-----------|-----------|
 | Topology changes (DNS/P2P) | `ceil(n/2)` of namespace owners must sign by default (bare majority for even `n`); set at creation and adjustable via the change-threshold workflow |
 | Transaction confirmation (P2P) | Hosting participants that must confirm; equal to the namespace threshold unless set apart at creation or by change-threshold. Kick and add-party keep the two equal when they already are |
-| Governance actions | Configurable per `GovernanceRules` contract |
+| Governance actions (`GovernanceRules.threshold`) | The number of member-party confirmations that a governed action needs. By default, Deploy Contracts copies the namespace threshold into it. After deployment, it changes separately from the topology thresholds |
+
+The party's Daml signing keys use the namespace threshold. P2P stores a copy in `party_signing_keys.threshold`, and DecMan always keeps the two equal. Deploy Contracts is the only DecMan workflow that submits as the party, so it is the only one that needs these signatures.
 
 ### Key Types
 
@@ -651,14 +653,16 @@ The system is split into the following Daml packages:
 
 | Package | Purpose |
 |---------|---------|
-| `governance-core` | Core governance engine, interfaces, confirmation lifecycle, generic voting |
+| `governance-action-v1` | The `GovernableAction` interface that every governed action implements |
+| `governance-core` | Core governance engine (`GovernanceRules`), confirmation lifecycle, generic voting |
 | `governance-token-custody` | Token transfer and preapproval actions |
 | `governance-utility-onboarding` | Utility-registry onboarding actions and token mint / burn |
 | `governance-utility-credential` | Credential domain: offer/accept free and paid credentials |
+| `governance-rewards-automation` | Reward-coupon reassignment and minting delegation actions |
 
 ### GovernableAction Interface
 
-The `GovernableAction` interface (from `Governance.Action`) is the single extension point for all domain-specific governance actions. Any Daml template implementing this interface can be governed without modifying the core governance contracts.
+The `GovernableAction` interface (module `Governance.Action` in the `governance-action-v1` package) is the single extension point for all domain-specific governance actions. Governance can control any Daml template that implements this interface, with no change to the core governance contracts.
 
 ```
 interface GovernableAction where
@@ -683,7 +687,7 @@ data GovernableActionView = GovernableActionView with
 Key design properties:
 - **Authority propagation**: When `GovernanceRules` executes a `GovernableAction`, the governance party's authority flows through the exercise chain, allowing domain actions to create contracts or exercise choices that require governance party authorization
 - **Open for extension**: New action types are added by creating new templates that implement the interface -- no changes to `GovernanceRules` required
-- **Permissionless proposals**: Anyone can create a proposal template instance, but only governance members can confirm and execute it
+- **Permissionless proposals**: Anyone can create a proposal template instance, but only governance members can confirm and execute it. `GovernanceRules_ConfirmAction` also rejects a proposal whose `proposer` is not a member or an additional proposer. Such a proposal therefore never reaches the threshold
 
 ### GovernanceRules Contract
 
@@ -900,7 +904,7 @@ Weights are decimal strings and must sum to exactly 1.0; `SetProviderAppRewardBe
 |----------|---------------------|
 | Onboarding | 2 |
 | Kick | 2 (remaining members) |
-| Contracts | 3 |
+| Contracts | No fixed minimum. The request must list enough participant parties to meet the namespace threshold, because DecMan submits the deployment as the party |
 | DARs | 2 |
 | Add Party | 2 (an existing member + the joiner). The threshold may not count the joiner: it carries Canton's onboarding marker until its ACS import completes, and a write at threshold = post-add member count never becomes effective |
 | Change Threshold | 2 (party members) |
@@ -919,10 +923,12 @@ The system depends on the following Daml packages:
 
 | Package ID | Purpose |
 |------------|---------|
-| `#governance-core-<version>` | GovernanceRules, GovernableAction interface, GenericVoteProposal |
+| `#governance-action-<version>` | GovernableAction interface |
+| `#governance-core-<version>` | GovernanceRules, GovernanceConfirmation, GenericVoteProposal |
 | `#governance-token-custody-<version>` | TransferProposal, AcceptTransferProposal, preapproval proposals |
 | `#governance-utility-onboarding-<version>` | SetupUtility, six granular onboarding proposals, MintProposal, BurnProposal |
 | `#governance-utility-credential-<version>` | Credential domain: offer/accept free and paid credentials |
+| `#governance-rewards-automation-<version>` | CouponReassignmentDelegation and the reward and minting delegation proposals |
 | `#utility-registry-app-v0` | ProviderService, UserService, AllocationFactory |
 | `#utility-credential-app-v0` | Credential offer/accept templates |
 | `#utility-commercials-v0` | DelegatedBatchedMarkersProxy (required by `CreateDelegatedBatchedMarkersProxy`) |
