@@ -16,7 +16,10 @@ use crate::{
     canton_id::{CantonId, validate_party_id_prefix},
     config::{NetworkConfig, NodeConfig},
     consts::MIN_PEER_VERSION,
-    db::schema::{Commitable, SchemaRead, SchemaWrite},
+    db::{
+        rows::{DecPartyOwnerRow, DecPartyParticipantRow},
+        schema::{Commitable, SchemaRead, SchemaWrite},
+    },
     error::Result,
     noise::{
         Message, MessageType, NoiseKeypair, parse_public_key, send_noise_message,
@@ -114,6 +117,7 @@ where
         previous_threshold: None,
         new_threshold: None,
         kicked_participant: None,
+        kicked_owner_key: None,
         added_participant: None,
         package_names: Vec::new(),
         dar_filenames: Vec::new(),
@@ -365,6 +369,203 @@ fn party_member_count(members: &HashSet<CantonId>, self_id: &CantonId) -> usize 
     members.len() + usize::from(!members.contains(self_id))
 }
 
+/// The highest threshold a kick may set.
+///
+/// The namespace threshold counts the owners left, and the signing threshold
+/// that follows it counts the hosts' keys left. A host's kick takes one of
+/// each. An owner that hosts nothing leaves every host in place.
+fn kick_threshold_bound(target_hosts: bool, member_count: usize, owner_count: usize) -> i32 {
+    let hosts_left = member_count.saturating_sub(usize::from(target_hosts));
+    let owners_left = if owner_count == 0 {
+        // A party missing from the owner cache bounds by its hosts alone, as
+        // the kick always did.
+        hosts_left
+    } else {
+        owner_count - 1
+    };
+    i32::try_from(hosts_left.min(owners_left)).unwrap_or(i32::MAX)
+}
+
+/// The member a kick removes.
+#[derive(Debug, PartialEq)]
+struct KickTarget {
+    /// The namespace owner key the kick removes.
+    owner_key: String,
+    /// The participant named for the member, when one is known.
+    participant: Option<CantonId>,
+    /// Whether that participant hosts the party, and so leaves the mapping too.
+    hosts: bool,
+}
+
+#[derive(Debug, PartialEq)]
+enum KickTargetError {
+    BadRequest(String),
+    Conflict(String),
+}
+
+impl KickTargetError {
+    fn into_response(self) -> HttpResponse {
+        match self {
+            Self::BadRequest(error) => HttpResponse::BadRequest().json(ErrorResponse { error }),
+            Self::Conflict(error) => HttpResponse::Conflict().json(ErrorResponse { error }),
+        }
+    }
+}
+
+/// Work out which member a kick request names, from the cached membership.
+///
+/// A host is named by its participant, and its owner key comes from the cache.
+/// An owner that hosts nothing is named by its owner key, or by the
+/// participant that claimed the key. An unclaimed key counts as hosting
+/// nothing only once every host's own key is known, because until then it may
+/// belong to a host whose key has not been resolved.
+fn resolve_kick_target(
+    participant: Option<&CantonId>,
+    owner_key: Option<&str>,
+    hosts: &[DecPartyParticipantRow],
+    owners: &[DecPartyOwnerRow],
+) -> std::result::Result<KickTarget, KickTargetError> {
+    const REFRESH: &str = "Try refreshing /decentralized-parties first.";
+    let host_of = |uid: &CantonId| {
+        let uid = uid.to_string();
+        hosts.iter().find(|host| host.participant_uid == uid)
+    };
+
+    let Some(key) = owner_key else {
+        let Some(participant) = participant else {
+            return Err(KickTargetError::BadRequest(
+                "Name the member to kick with participant_id, owner_key, or both".to_string(),
+            ));
+        };
+        if let Some(host) = host_of(participant) {
+            return match &host.owner_key {
+                Some(key) => Ok(KickTarget {
+                    owner_key: key.clone(),
+                    participant: Some(participant.clone()),
+                    hosts: true,
+                }),
+                None => Err(KickTargetError::Conflict(format!(
+                    "Participant {participant} hosts the party, but its owner key has not been \
+                     resolved yet. {REFRESH}"
+                ))),
+            };
+        }
+        let uid = participant.to_string();
+        let claimed: Vec<&DecPartyOwnerRow> = owners
+            .iter()
+            .filter(|owner| owner.participant_uid.as_deref() == Some(uid.as_str()))
+            .collect();
+        return match claimed.as_slice() {
+            [] => Err(KickTargetError::BadRequest(format!(
+                "Cannot kick {participant}: not a member of this decentralized party"
+            ))),
+            [owner] => Ok(KickTarget {
+                owner_key: owner.owner_key.clone(),
+                participant: Some(participant.clone()),
+                hosts: false,
+            }),
+            several => Err(KickTargetError::Conflict(format!(
+                "Participant {participant} claims {count} owner keys of this party. Name the \
+                 one to remove with owner_key",
+                count = several.len()
+            ))),
+        };
+    };
+
+    let Some(owner) = owners.iter().find(|owner| owner.owner_key == key) else {
+        return Err(KickTargetError::BadRequest(format!(
+            "Owner key {key} is not an owner of this decentralized party. {REFRESH}"
+        )));
+    };
+
+    if let Some(host) = hosts
+        .iter()
+        .find(|host| host.owner_key.as_deref() == Some(key))
+    {
+        let uid = CantonId::parse(&host.participant_uid).map_err(|e| {
+            KickTargetError::Conflict(format!(
+                "Owner key {key} belongs to host {uid}, whose cached id does not parse: {e}",
+                uid = host.participant_uid
+            ))
+        })?;
+        if let Some(participant) = participant
+            && *participant != uid
+        {
+            return Err(KickTargetError::BadRequest(format!(
+                "Owner key {key} belongs to {uid}, not {participant}"
+            )));
+        }
+        return Ok(KickTarget {
+            owner_key: key.to_string(),
+            participant: Some(uid),
+            hosts: true,
+        });
+    }
+
+    let claimant = owner
+        .participant_uid
+        .as_deref()
+        .and_then(|uid| CantonId::parse(uid).ok());
+    if let Some(claimant) = &claimant
+        && host_of(claimant).is_some()
+    {
+        return Err(KickTargetError::Conflict(format!(
+            "Owner key {key} was claimed by host {claimant}, but the cache holds another key \
+             for it. {REFRESH}"
+        )));
+    }
+    if claimant.is_none()
+        && let Some(unresolved) = hosts.iter().find(|host| host.owner_key.is_none())
+    {
+        return Err(KickTargetError::Conflict(format!(
+            "Cannot tell whether owner key {key} belongs to host {uid}, whose owner key has not \
+             been resolved yet. {REFRESH}",
+            uid = unresolved.participant_uid
+        )));
+    }
+    if let Some(participant) = participant {
+        if host_of(participant).is_some() {
+            return Err(KickTargetError::BadRequest(format!(
+                "Participant {participant} hosts the party under another owner key, not {key}"
+            )));
+        }
+        match &claimant {
+            Some(claimant) if claimant == participant => {}
+            Some(claimant) => {
+                return Err(KickTargetError::BadRequest(format!(
+                    "Owner key {key} was claimed by {claimant}, not {participant}"
+                )));
+            }
+            None => {
+                return Err(KickTargetError::BadRequest(format!(
+                    "No peer has claimed owner key {key}, so it cannot be tied to \
+                     {participant}. Name only the owner key"
+                )));
+            }
+        }
+    }
+    Ok(KickTarget {
+        owner_key: key.to_string(),
+        participant: claimant,
+        hosts: false,
+    })
+}
+
+/// The namespace threshold of the cached party, or `None` when the party is
+/// not cached.
+async fn cached_namespace_threshold(db: &SqlitePool, party: &CantonId) -> Result<Option<usize>> {
+    let party_id = party.to_string();
+    let Some(row) = db
+        .get_dec_parties_by_prefix(&party.prefix)
+        .await?
+        .into_iter()
+        .find(|row| row.party_id == party_id)
+    else {
+        return Ok(None);
+    };
+    Ok(Some(usize::try_from(row.threshold)?))
+}
+
 /// The confirmation threshold a kick or add-party carries over, worked out
 /// from the cached party. A party missing from the cache counts as one whose
 /// thresholds match; the coordinator checks the chain before it signs.
@@ -411,50 +612,66 @@ pub async fn start_kick(
     }
 
     tracing::info!(
-        "Kick request received: party={}, participant_to_kick={}, threshold={}",
+        "Kick request received: party={}, participant_to_kick={:?}, owner_key={:?}, \
+         threshold={}",
         body.decentralized_party_id,
         body.participant_id,
+        body.owner_key,
         body.new_threshold
     );
 
     // KickRequest's CantonId fields validate during deserialization, so by
     // the time we get here both ids are well-formed.
     let decentralized_party_id = body.decentralized_party_id.clone();
-    let participant_id = body.participant_id.clone();
+    let self_id = data.config.participant_id().clone();
 
-    // Prevent kicking ourselves
-    if participant_id == *data.config.participant_id() {
+    if body.participant_id.as_ref() == Some(&self_id) {
         return HttpResponse::BadRequest().json(ErrorResponse {
             error: "Cannot kick yourself".to_string(),
         });
     }
 
-    // Derive the namespace fingerprint from the cache. Server-side
-    // derivation removes a redundant client field and turns empty-prefill
-    // into a clear server error rather than a silent invalid request.
-    let namespace_fingerprint = match data
+    let member_rows = match data
         .db
-        .get_dec_party_participant_owner_key(&decentralized_party_id, &participant_id.to_string())
+        .get_dec_party_participants(&decentralized_party_id)
         .await
     {
-        Ok(Some(key)) => key,
-        Ok(None) => {
-            return HttpResponse::Conflict().json(ErrorResponse {
-                error: format!(
-                    "Participant {participant_id} is not present in cached \
-                     decentralized party {decentralized_party_id}, or its \
-                     owner key has not yet been resolved. Try refreshing \
-                     /decentralized-parties first."
-                ),
-            });
-        }
+        Ok(rows) => rows,
         Err(e) => {
-            tracing::error!("DB lookup for owner_key failed: {e}");
+            tracing::error!("Failed to load dec party participants for kick: {e}");
             return HttpResponse::InternalServerError().json(ErrorResponse {
-                error: "Failed to look up owner key".to_string(),
+                error: "Failed to load decentralized party members".to_string(),
             });
         }
     };
+    let owner_rows = match data.db.get_dec_party_owners(&decentralized_party_id).await {
+        Ok(rows) => rows,
+        Err(e) => {
+            tracing::error!("Failed to load dec party owners for kick: {e}");
+            return HttpResponse::InternalServerError().json(ErrorResponse {
+                error: "Failed to load decentralized party owners".to_string(),
+            });
+        }
+    };
+
+    // The server works out the owner key from the cache rather than taking
+    // it from the client, so an empty prefill becomes a clear error.
+    let target = match resolve_kick_target(
+        body.participant_id.as_ref(),
+        body.owner_key.as_deref(),
+        &member_rows,
+        &owner_rows,
+    ) {
+        Ok(target) => target,
+        Err(e) => return e.into_response(),
+    };
+    if target.participant.as_ref() == Some(&self_id) {
+        return HttpResponse::BadRequest().json(ErrorResponse {
+            error: "Cannot kick yourself".to_string(),
+        });
+    }
+    // The participant that leaves the hosting mapping, if the member hosts.
+    let kicked_host = target.participant.clone().filter(|_| target.hosts);
 
     // Load peers once: we use the count to bound `new_threshold` per the
     // audit finding, then filter into `invitees`. A DB error here is fatal
@@ -478,33 +695,21 @@ pub async fn start_kick(
     // not cached yet, or every `participant_uid` in a legacy/invalid format —
     // since scoping to an empty member set would reject the kick with a
     // misleading "need at least 2 party members" error.
-    let party_member_ids: HashSet<CantonId> = match data
-        .db
-        .get_dec_party_participants(&decentralized_party_id)
-        .await
-    {
-        Ok(rows) => {
-            let parsed: HashSet<CantonId> = rows
-                .iter()
-                .filter_map(|r| CantonId::parse(&r.participant_uid).ok())
-                .collect();
-            if parsed.is_empty() {
-                tracing::warn!(
-                    "No usable cached participants for {decentralized_party_id} \
-                     ({count} rows); falling back to all configured peers for \
-                     kick scoping",
-                    count = rows.len()
-                );
-                peers.iter().map(|p| p.participant_id.clone()).collect()
-            } else {
-                parsed
-            }
-        }
-        Err(e) => {
-            tracing::error!("Failed to load dec party participants for kick: {e}");
-            return HttpResponse::InternalServerError().json(ErrorResponse {
-                error: "Failed to load decentralized party members".to_string(),
-            });
+    let party_member_ids: HashSet<CantonId> = {
+        let parsed: HashSet<CantonId> = member_rows
+            .iter()
+            .filter_map(|r| CantonId::parse(&r.participant_uid).ok())
+            .collect();
+        if parsed.is_empty() {
+            tracing::warn!(
+                "No usable cached participants for {decentralized_party_id} \
+                 ({count} rows); falling back to all configured peers for \
+                 kick scoping",
+                count = member_rows.len()
+            );
+            peers.iter().map(|p| p.participant_id.clone()).collect()
+        } else {
+            parsed
         }
     };
     let peers: Vec<_> = peers
@@ -513,24 +718,27 @@ pub async fn start_kick(
         .collect();
 
     // Preconditions for a kick: there must be at least one peer left
-    // after the kick (so the surviving signer set is non-empty), and the
-    // participant being kicked must be a known peer. Without these checks
+    // after the kick (so the surviving signer set is non-empty), and a host
+    // being kicked must be a known peer. Without these checks
     // the `post_kick_member_count` below could go negative and produce
     // a "between 1 and -1" error that obscures the real problem.
-    if peers.len() < 2 {
+    let co_signers = peers
+        .iter()
+        .filter(|p| Some(&p.participant_id) != kicked_host.as_ref())
+        .count();
+    if co_signers < 1 {
         return HttpResponse::BadRequest().json(ErrorResponse {
             error: format!(
-                "Cannot kick: need the target plus at least one other party member \
-                 besides this node to co-sign, have {n}",
-                n = peers.len(),
+                "Cannot kick: need at least one other hosting member besides this node \
+                 to co-sign, have {co_signers}"
             ),
         });
     }
-    if !peers.iter().any(|p| p.participant_id == participant_id) {
+    if let Some(host) = &kicked_host
+        && !peers.iter().any(|p| p.participant_id == *host)
+    {
         return HttpResponse::BadRequest().json(ErrorResponse {
-            error: format!(
-                "Cannot kick {participant_id}: not a member of this decentralized party"
-            ),
+            error: format!("Cannot kick {host}: not a member of this decentralized party"),
         });
     }
 
@@ -548,23 +756,59 @@ pub async fn start_kick(
     // value at all: the peers reject anything below the current threshold, and
     // this check rejects anything at or above it. The add-party and
     // change-threshold bounds below already count the party set.
-    let self_id = data.config.participant_id().clone();
-    let post_kick_member_count = party_member_count(&party_member_ids, &self_id) as i32 - 1;
-    if body.new_threshold < 1 || body.new_threshold > post_kick_member_count {
+    //
+    // The party's signing threshold follows the namespace one and counts the
+    // hosts' keys, so the hosts left after the kick bound it as well as the
+    // owners left. An owner that hosts nothing leaves every host in place.
+    let member_count = party_member_count(&party_member_ids, &self_id);
+    let post_kick_member_count = member_count - usize::from(target.hosts);
+    let max_threshold = kick_threshold_bound(target.hosts, member_count, owner_rows.len());
+    if body.new_threshold < 1 || body.new_threshold > max_threshold {
+        let reason = if target.hosts {
+            format!("party member count {member_count}, minus the participant being kicked")
+        } else {
+            format!(
+                "the party keeps its {member_count} hosts and {owners} owners",
+                owners = owner_rows.len().saturating_sub(1)
+            )
+        };
         return HttpResponse::BadRequest().json(ErrorResponse {
             error: format!(
-                "new_threshold must be between 1 and {post_kick_member_count} \
-                 (party member count {n}, minus the participant being kicked); got {got}",
-                n = party_member_count(&party_member_ids, &self_id),
+                "new_threshold must be between 1 and {max_threshold} ({reason}); got {got}",
                 got = body.new_threshold,
             ),
         });
     }
 
+    // Only the hosts sign. An owner that hosts nothing cannot be asked, so
+    // the namespace threshold in force must be reachable without it.
+    if !target.hosts {
+        match cached_namespace_threshold(&data.db, &decentralized_party_id).await {
+            Ok(Some(threshold)) if threshold > member_count => {
+                return HttpResponse::BadRequest().json(ErrorResponse {
+                    error: format!(
+                        "Cannot kick owner key {key}: the party's namespace threshold is \
+                         {threshold}, but only its {member_count} hosting members can sign. \
+                         The owner being removed would have to sign too, and a kick cannot \
+                         ask it",
+                        key = target.owner_key
+                    ),
+                });
+            }
+            Ok(_) => {}
+            Err(e) => {
+                tracing::error!("Failed to read the cached threshold for kick: {e}");
+                return HttpResponse::InternalServerError().json(ErrorResponse {
+                    error: "Failed to read the party's cached thresholds".to_string(),
+                });
+            }
+        }
+    }
+
     let confirmation_threshold = match cached_confirmation_threshold(
         &data.db,
         &decentralized_party_id,
-        post_kick_member_count as usize,
+        post_kick_member_count,
     )
     .await
     {
@@ -583,7 +827,7 @@ pub async fn start_kick(
     let invitees: Vec<CantonId> = peers
         .into_iter()
         .map(|p| p.participant_id)
-        .filter(|p| p != data.config.participant_id() && p != &participant_id)
+        .filter(|p| *p != self_id && Some(p) != kicked_host.as_ref())
         .collect();
 
     // Compute instance name + config up-front so the persisted workflow_runs row
@@ -603,8 +847,8 @@ pub async fn start_kick(
 
     let kick_config = workflow::KickConfig::new(
         decentralized_party_id.clone(),
-        participant_id.clone(),
-        namespace_fingerprint,
+        target.participant,
+        target.owner_key,
         body.new_threshold,
         confirmation_threshold,
         body.previous_threshold,
@@ -831,11 +1075,12 @@ async fn send_kick_invites(
     let keypair = NoiseKeypair::from_file(&config.key_file_path()).await?;
 
     let current_participant_id = config.participant_id();
-    let kicked_participant = &kick_config.participant_id;
+    let kicked_participant = kick_config.participant_id.as_ref();
     let invitee_set: HashSet<&CantonId> = invitees.iter().collect();
     let payload = KickInvitePayload {
         dec_party_id: kick_config.decentralized_party_id.clone(),
-        kicked_participant: kicked_participant.clone(),
+        kicked_participant: kicked_participant.cloned(),
+        kicked_owner_key: Some(kick_config.namespace_fingerprint.clone()),
         new_threshold: kick_config.new_threshold,
         previous_threshold: kick_config.previous_threshold,
         confirmation_threshold: kick_config.confirmation_threshold,
@@ -846,9 +1091,9 @@ async fn send_kick_invites(
     let invite_message = Message::new(MessageType::InviteKick, payload_bytes);
 
     tracing::info!(
-        "Kick invites: self={}, kicked={}",
-        current_participant_id,
-        kicked_participant
+        "Kick invites: self={current_participant_id}, kicked={kicked_participant:?}, \
+         owner key={}",
+        kick_config.namespace_fingerprint
     );
 
     for peer in &network_config.peers {
@@ -856,7 +1101,7 @@ async fn send_kick_invites(
             "Checking peer {}: self_match={}, kicked_match={}",
             peer.participant_id,
             peer.participant_id == *current_participant_id,
-            peer.participant_id == *kicked_participant
+            Some(&peer.participant_id) == kicked_participant
         );
 
         // Only invite this run's surviving party members (see start_kick). The
@@ -872,7 +1117,7 @@ async fn send_kick_invites(
         }
 
         // Skip the peer being kicked (they won't participate in the kick workflow)
-        if peer.participant_id == *kicked_participant {
+        if Some(&peer.participant_id) == kicked_participant {
             tracing::info!(
                 "Skipping invite to {} - they are being kicked",
                 peer.participant_id
@@ -3606,6 +3851,8 @@ fn enrich_from_config_json(run: &mut WorkflowRun) {
         // Kick configs only.
         #[serde(default)]
         participant_id: Option<CantonId>,
+        #[serde(default)]
+        namespace_fingerprint: Option<String>,
         // AddParty configs only.
         #[serde(default)]
         new_participant_id: Option<CantonId>,
@@ -3645,6 +3892,9 @@ fn enrich_from_config_json(run: &mut WorkflowRun) {
         // sent one (it defaults to 0); 0 means "unknown", render as new-only.
         run.previous_threshold = shape.previous_threshold.filter(|t| *t > 0);
         run.kicked_participant = shape.participant_id;
+        if run.kind == WorkflowKind::Kick {
+            run.kicked_owner_key = shape.namespace_fingerprint;
+        }
         run.added_participant = shape.new_participant_id;
         // Package names: peer's flat list wins; otherwise derive from the
         // coordinator's contract definitions. Both converge to the same set.
@@ -4205,6 +4455,7 @@ mod tests {
             previous_threshold: None,
             new_threshold: None,
             kicked_participant: None,
+            kicked_owner_key: None,
             added_participant: None,
             package_names: Vec::new(),
             dar_filenames: Vec::new(),
@@ -4313,6 +4564,163 @@ mod tests {
             1
         );
         Ok(())
+    }
+
+    fn host_row(uid: &CantonId, owner_key: Option<&str>) -> DecPartyParticipantRow {
+        DecPartyParticipantRow {
+            dec_party_id: "party".to_string(),
+            participant_uid: uid.to_string(),
+            permission: "confirmation".to_string(),
+            owner_key: owner_key.map(str::to_string),
+            signing_key: None,
+        }
+    }
+
+    fn owner_row(owner_key: &str, claimant: Option<&CantonId>) -> DecPartyOwnerRow {
+        DecPartyOwnerRow {
+            dec_party_id: "party".to_string(),
+            owner_key: owner_key.to_string(),
+            participant_uid: claimant.map(ToString::to_string),
+        }
+    }
+
+    /// Hosts p1 and p2 hold keys "k1" and "k2"; "k3" is owned by p3, which
+    /// hosts nothing, and "k4" by nobody that has said so.
+    fn owner_only_party() -> anyhow::Result<(Vec<DecPartyParticipantRow>, Vec<DecPartyOwnerRow>)> {
+        let (p1, p2, p3) = (pid(1)?, pid(2)?, pid(3)?);
+        Ok((
+            vec![host_row(&p1, Some("k1")), host_row(&p2, Some("k2"))],
+            vec![
+                owner_row("k1", Some(&p1)),
+                owner_row("k2", None),
+                owner_row("k3", Some(&p3)),
+                owner_row("k4", None),
+            ],
+        ))
+    }
+
+    #[test]
+    fn a_host_is_named_by_its_participant() -> anyhow::Result<()> {
+        let (hosts, owners) = owner_only_party()?;
+        let target = resolve_kick_target(Some(&pid(2)?), None, &hosts, &owners);
+        assert_eq!(
+            target,
+            Ok(KickTarget {
+                owner_key: "k2".to_string(),
+                participant: Some(pid(2)?),
+                hosts: true,
+            })
+        );
+        Ok(())
+    }
+
+    /// An owner key a host holds kicks that host, whoever is named for it.
+    #[test]
+    fn a_host_key_kicks_its_host() -> anyhow::Result<()> {
+        let (hosts, owners) = owner_only_party()?;
+        let target = resolve_kick_target(None, Some("k2"), &hosts, &owners);
+        assert_eq!(
+            target,
+            Ok(KickTarget {
+                owner_key: "k2".to_string(),
+                participant: Some(pid(2)?),
+                hosts: true,
+            })
+        );
+        let mismatch = resolve_kick_target(Some(&pid(1)?), Some("k2"), &hosts, &owners);
+        assert!(
+            matches!(&mismatch, Err(KickTargetError::BadRequest(e)) if e.contains("belongs to")),
+            "unexpected result: {mismatch:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn an_owner_that_hosts_nothing_is_named_by_its_claimant_or_its_key() -> anyhow::Result<()> {
+        let (hosts, owners) = owner_only_party()?;
+        let expected = KickTarget {
+            owner_key: "k3".to_string(),
+            participant: Some(pid(3)?),
+            hosts: false,
+        };
+        assert_eq!(
+            resolve_kick_target(Some(&pid(3)?), None, &hosts, &owners).as_ref(),
+            Ok(&expected)
+        );
+        assert_eq!(
+            resolve_kick_target(None, Some("k3"), &hosts, &owners),
+            Ok(expected)
+        );
+        assert_eq!(
+            resolve_kick_target(None, Some("k4"), &hosts, &owners),
+            Ok(KickTarget {
+                owner_key: "k4".to_string(),
+                participant: None,
+                hosts: false,
+            })
+        );
+        Ok(())
+    }
+
+    /// Until every host's key is known, an unclaimed key may be the key of a
+    /// host, and kicking it would strip that host of its ownership.
+    #[test]
+    fn an_unclaimed_key_waits_for_every_host_key() -> anyhow::Result<()> {
+        let (mut hosts, owners) = owner_only_party()?;
+        hosts[1].owner_key = None;
+        let target = resolve_kick_target(None, Some("k4"), &hosts, &owners);
+        assert!(
+            matches!(&target, Err(KickTargetError::Conflict(e)) if e.contains("not been resolved")),
+            "unexpected result: {target:?}"
+        );
+        // A claim is the holder's own word, so it needs no other host key.
+        let claimed = resolve_kick_target(None, Some("k3"), &hosts, &owners);
+        assert!(claimed.is_ok(), "unexpected result: {claimed:?}");
+        Ok(())
+    }
+
+    /// A participant label must come from a claim, or the run card would name
+    /// a participant nobody tied to the key.
+    #[test]
+    fn a_participant_must_match_the_claim_on_the_key() -> anyhow::Result<()> {
+        let (hosts, owners) = owner_only_party()?;
+        for (participant, key, expected) in [
+            (pid(4)?, "k3", "was claimed by"),
+            (pid(4)?, "k4", "No peer has claimed"),
+            (pid(1)?, "k4", "under another owner key"),
+        ] {
+            let target = resolve_kick_target(Some(&participant), Some(key), &hosts, &owners);
+            assert!(
+                matches!(&target, Err(KickTargetError::BadRequest(e)) if e.contains(expected)),
+                "{participant} / {key}: unexpected result: {target:?}"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn a_kick_must_name_a_member() -> anyhow::Result<()> {
+        let (hosts, owners) = owner_only_party()?;
+        for (participant, key) in [(None, None), (Some(pid(5)?), None), (None, Some("k9"))] {
+            let target = resolve_kick_target(participant.as_ref(), key, &hosts, &owners);
+            assert!(
+                matches!(target, Err(KickTargetError::BadRequest(_))),
+                "unexpected result: {target:?}"
+            );
+        }
+        Ok(())
+    }
+
+    /// Three hosts and four owners. A host's kick leaves two keys to sign
+    /// with; an owner-only kick leaves all three.
+    #[test]
+    fn the_kick_bound_counts_the_hosts_and_the_owners_left() {
+        assert_eq!(kick_threshold_bound(true, 3, 4), 2);
+        assert_eq!(kick_threshold_bound(false, 3, 4), 3);
+        // Two owners hosting nothing: the hosts left bound it below the owners.
+        assert_eq!(kick_threshold_bound(false, 2, 4), 2);
+        // An uncached owner set bounds by the hosts, as before.
+        assert_eq!(kick_threshold_bound(true, 4, 0), 3);
     }
 
     /// The bug in the numbers that produced it: a 4-member party at threshold
@@ -4452,6 +4860,7 @@ mod tests {
             previous_threshold: None,
             new_threshold: None,
             kicked_participant: None,
+            kicked_owner_key: None,
             added_participant: None,
             package_names: Vec::new(),
             dar_filenames: Vec::new(),

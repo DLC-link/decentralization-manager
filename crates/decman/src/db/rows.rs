@@ -143,10 +143,13 @@ pub struct DecPartyRow {
     pub confirmation_threshold: Option<i64>,
 }
 
-#[derive(Debug, sqlx::FromRow)]
+#[derive(Clone, Debug, PartialEq, Eq, sqlx::FromRow)]
 pub struct DecPartyOwnerRow {
     pub dec_party_id: String,
     pub owner_key: String,
+    /// The participant that reported holding this key over the OwnerKeys
+    /// exchange or that topology ties it to. `None` until one does.
+    pub participant_uid: Option<String>,
 }
 
 #[derive(Debug, sqlx::FromRow)]
@@ -214,6 +217,7 @@ pub struct PendingInvitationRow {
     pub dar_filenames: Option<String>,
     pub dar_hashes: Option<String>,
     pub kicked_participant: Option<String>,
+    pub kicked_owner_key: Option<String>,
     pub new_participant: Option<String>,
     pub new_threshold: Option<i64>,
     pub previous_threshold: Option<i64>,
@@ -264,6 +268,7 @@ impl PendingInvitationRow {
             dar_filenames: encode_list(&inv.dar_filenames, "pending invitation dar_filenames")?,
             dar_hashes: encode_list(&inv.dar_hashes, "pending invitation dar_hashes")?,
             kicked_participant: inv.kicked_participant.as_ref().map(|p| p.to_string()),
+            kicked_owner_key: inv.kicked_owner_key.clone(),
             new_participant: inv.new_participant.as_ref().map(|p| p.to_string()),
             new_threshold: inv.new_threshold.map(i64::from),
             previous_threshold: inv.previous_threshold.map(i64::from),
@@ -318,6 +323,7 @@ impl PendingInvitationRow {
             dar_filenames,
             dar_hashes,
             kicked_participant,
+            kicked_owner_key: self.kicked_owner_key,
             new_participant,
             new_threshold: self.new_threshold.map(|v| v as i32),
             previous_threshold: self.previous_threshold.map(|v| v as i32),
@@ -495,6 +501,7 @@ impl WorkflowRunRow {
             previous_threshold: None,
             new_threshold: None,
             kicked_participant: None,
+            kicked_owner_key: None,
             added_participant: None,
             package_names: Vec::new(),
             dar_filenames: Vec::new(),
@@ -527,6 +534,7 @@ mod tests {
             dar_filenames: None,
             dar_hashes: None,
             kicked_participant: None,
+            kicked_owner_key: None,
             new_participant: None,
             new_threshold: None,
             previous_threshold: None,

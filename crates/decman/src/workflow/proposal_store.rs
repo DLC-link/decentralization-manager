@@ -245,11 +245,15 @@ pub async fn fetch_party_head(
 pub struct SignedProposals {
     /// `None` when the run leaves the namespace as it is.
     pub dns: Option<SignedTopologyTransaction>,
-    pub p2p: SignedTopologyTransaction,
+    /// `None` when the run leaves the hosting mapping as it is.
+    pub p2p: Option<SignedTopologyTransaction>,
 }
 
-/// Sign the party's new DNS (when `new_dns` is set) and new P2P at the serial
-/// after `head`'s.
+/// Sign the party's new DNS (when `new_dns` is set) and new P2P (when
+/// `new_p2p` is set) at the serial after `head`'s.
+///
+/// Canton refuses a mapping equal to the one in force at any other serial, so
+/// a run that leaves a mapping as it is must pass `None` for it.
 ///
 /// `head` must be what the proposals were built from. The proposals are
 /// signed in a temporary store seeded until its heads equal `head`'s serials,
@@ -271,7 +275,7 @@ pub async fn sign_party_proposals(
     party_id: &CantonId,
     head: &PartyHead,
     new_dns: Option<DecentralizedNamespaceDefinition>,
-    new_p2p: PartyToParticipant,
+    new_p2p: Option<PartyToParticipant>,
     force_flags: Vec<i32>,
 ) -> Result<SignedProposals> {
     // A temporary store is created at the protocol version of the store its
@@ -373,11 +377,14 @@ enum Attempt {
     FallBack(String),
 }
 
-/// Sign the DNS (when there is one) and then the P2P in `store`.
+/// Sign the DNS and then the P2P in `store`, each when there is one.
 async fn sign(
     channel: &Channel,
     store: &StoreId,
-    (new_dns, new_p2p): (Option<DecentralizedNamespaceDefinition>, PartyToParticipant),
+    (new_dns, new_p2p): (
+        Option<DecentralizedNamespaceDefinition>,
+        Option<PartyToParticipant>,
+    ),
     (dns_serial, p2p_serial): (u32, u32),
     force_flags: Vec<i32>,
     format: ProposalFormat,
@@ -398,17 +405,22 @@ async fn sign(
         ),
         None => None,
     };
-    let p2p = authorize(
-        channel,
-        proposal_request(
-            store.clone(),
-            topology_mapping::Mapping::PartyToParticipant(new_p2p),
-            p2p_serial,
-            force_flags,
-            format,
+    let p2p = match new_p2p {
+        Some(mapping) => Some(
+            authorize(
+                channel,
+                proposal_request(
+                    store.clone(),
+                    topology_mapping::Mapping::PartyToParticipant(mapping),
+                    p2p_serial,
+                    force_flags,
+                    format,
+                ),
+            )
+            .await?,
         ),
-    )
-    .await?;
+        None => None,
+    };
     Ok(SignedProposals { dns, p2p })
 }
 
@@ -419,7 +431,10 @@ async fn sign(
 async fn sign_on_synchronizer(
     config: &NodeConfig,
     store: &StoreId,
-    (new_dns, new_p2p): (Option<DecentralizedNamespaceDefinition>, PartyToParticipant),
+    (new_dns, new_p2p): (
+        Option<DecentralizedNamespaceDefinition>,
+        Option<PartyToParticipant>,
+    ),
     (dns_serial, p2p_serial): (u32, u32),
     force_flags: Vec<i32>,
     format: ProposalFormat,
@@ -446,20 +461,23 @@ async fn sign_on_synchronizer(
         )?),
         None => None,
     };
-    let p2p = signed(
-        topology::authorize_with_topology_retry(
-            config,
-            proposal_request(
-                store.clone(),
-                topology_mapping::Mapping::PartyToParticipant(new_p2p),
-                p2p_serial,
-                force_flags,
-                format,
-            ),
-            "P2P proposal",
-        )
-        .await?,
-    )?;
+    let p2p = match new_p2p {
+        Some(mapping) => Some(signed(
+            topology::authorize_with_topology_retry(
+                config,
+                proposal_request(
+                    store.clone(),
+                    topology_mapping::Mapping::PartyToParticipant(mapping),
+                    p2p_serial,
+                    force_flags,
+                    format,
+                ),
+                "P2P proposal",
+            )
+            .await?,
+        )?),
+        None => None,
+    };
     Ok(SignedProposals { dns, p2p })
 }
 

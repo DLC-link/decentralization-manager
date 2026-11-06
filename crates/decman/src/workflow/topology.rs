@@ -676,6 +676,41 @@ pub async fn fetch_signed_namespace_definition(
     })
 }
 
+/// The signed `PartyToParticipant` transaction in force for `party_id`, as
+/// the synchronizer store holds it.
+///
+/// A kick that leaves the hosting mapping as it is still runs the peers'
+/// signing round on a DNS and a P2P transaction. Handing them the one already
+/// in force keeps that round unchanged; submit does not send it again.
+///
+/// # Errors
+/// Returns an error if the store holds no such transaction.
+pub async fn fetch_signed_party_to_participant(
+    config: &NodeConfig,
+    synchronizer_id: &str,
+    party_id: &CantonId,
+) -> Result<SignedTopologyTransaction> {
+    let party = party_id.to_string();
+    signed_head_for(
+        config,
+        synchronizer_id,
+        &party_id.namespace.to_hex(),
+        |mapping| {
+            matches!(
+                mapping,
+                topology_mapping::Mapping::PartyToParticipant(p2p) if p2p.party == party
+            )
+        },
+    )
+    .await?
+    .map(|(signed, _)| signed)
+    .ok_or_else(|| {
+        anyhow::anyhow!(
+            "No PartyToParticipant transaction for {party} in the synchronizer head state"
+        )
+    })
+}
+
 /// The first add-or-replace transaction in the synchronizer head state under
 /// `namespace_hex` whose mapping `wanted` accepts, signed and decoded.
 ///
