@@ -147,6 +147,27 @@ fn extra_args(context: &Value) -> Value {
     })
 }
 
+/// Refuse an id that is not a Canton contract id: lowercase hex of even
+/// length that starts with `00` and has at least 66 digits.
+///
+/// An instruction id goes into the registry's URL path. Anything other than
+/// hex could change that path.
+pub(crate) fn check_contract_id(contract_id: &str) -> Result<()> {
+    let valid = contract_id.len() >= 66
+        && contract_id.len().is_multiple_of(2)
+        && contract_id.starts_with("00")
+        && contract_id
+            .bytes()
+            .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'));
+    if valid {
+        Ok(())
+    } else {
+        Err(Error::InvalidContractId {
+            contract_id: contract_id.to_string(),
+        })
+    }
+}
+
 /// The holdings a send may spend: owned by `owner`, of the instrument
 /// `(admin, id)`, and not locked. At most [`MAX_INPUT_HOLDINGS`] of them.
 pub fn unlocked_holdings<'a>(
@@ -208,8 +229,10 @@ pub struct AcceptReceipt {
 /// # Errors
 /// [`Error::NoHoldings`] before any registry or prepare call when there is
 /// nothing to spend. [`Error::TransactionRefused`] when the prepared
-/// transaction fails the check; nothing is signed or executed then. Any
-/// ledger, registry or signer error otherwise.
+/// transaction fails the check; nothing is signed or executed then.
+/// [`Error::ExecuteOutcomeUnknown`] when the execute got no answer; the
+/// transaction may have committed, so do not send again before checking.
+/// Any ledger, registry or signer error otherwise.
 pub async fn send_transfer(
     ledger: &LedgerClient,
     registry: &RegistryClient,
@@ -305,9 +328,12 @@ pub async fn send_transfer(
 /// be the ones the wallet sent.
 ///
 /// # Errors
-/// [`Error::TransactionRefused`] when the prepared transaction fails the
-/// check; nothing is signed or executed then. Any ledger, registry or signer
-/// error otherwise.
+/// [`Error::InvalidContractId`] before any call when `instruction_cid` is not
+/// a contract id. [`Error::TransactionRefused`] when the prepared transaction
+/// fails the check; nothing is signed or executed then.
+/// [`Error::ExecuteOutcomeUnknown`] when the execute got no answer; the
+/// transaction may have committed. Any ledger, registry or signer error
+/// otherwise.
 pub async fn accept_transfer(
     ledger: &LedgerClient,
     registry: &RegistryClient,
@@ -316,6 +342,7 @@ pub async fn accept_transfer(
     instruction_cid: &str,
     instruction_template: &str,
 ) -> Result<AcceptReceipt> {
+    check_contract_id(instruction_cid)?;
     let context = registry.accept_context(instruction_cid).await?;
     tracing::info!(
         registry = registry.root(),
@@ -384,10 +411,11 @@ async fn submit(
     disclosed_contracts: Vec<DisclosedContract>,
     expected: &Expected<'_>,
 ) -> Result<Submitted> {
+    let command_id = Uuid::new_v4().to_string();
     let prepared = ledger
         .prepare(&PrepareRequest {
             user_id: ledger.user_id().to_string(),
-            command_id: Uuid::new_v4().to_string(),
+            command_id: command_id.clone(),
             act_as: vec![party.to_string()],
             read_as: Vec::new(),
             commands: vec![command],
@@ -407,10 +435,11 @@ async fn submit(
     );
     let signature = key.sign_b64_async(&hash).await?;
 
+    let submission_id = Uuid::new_v4().to_string();
     let executed = ledger
         .execute(&ExecuteRequest {
             user_id: ledger.user_id().to_string(),
-            submission_id: Uuid::new_v4().to_string(),
+            submission_id: submission_id.clone(),
             prepared_transaction: prepared.prepared_transaction,
             hashing_scheme_version: prepared.hashing_scheme_version,
             deduplication_period: json!({ "Empty": {} }),
@@ -426,7 +455,15 @@ async fn submit(
                 }],
             }),
         })
-        .await?;
+        .await
+        .map_err(|error| {
+            after_execute(
+                error,
+                &command_id,
+                &submission_id,
+                &prepared.prepared_transaction_hash,
+            )
+        })?;
     tracing::info!(
         party,
         update_id = %executed.update_id,
@@ -438,6 +475,32 @@ async fn submit(
         executed,
         prepared_transaction_hash: prepared.prepared_transaction_hash,
     })
+}
+
+/// An execute error, as the caller must read it.
+///
+/// A transport error after the connection opened means the request left the
+/// wallet. The participant may have committed the transaction, so the error
+/// becomes [`Error::ExecuteOutcomeUnknown`]. A connection that never opened
+/// reached nobody and stays [`Error::Transport`].
+fn after_execute(
+    error: Error,
+    command_id: &str,
+    submission_id: &str,
+    prepared_transaction_hash: &str,
+) -> Error {
+    match error {
+        Error::Transport { host, source, .. } if !source.is_connect() => {
+            Error::ExecuteOutcomeUnknown {
+                host,
+                command_id: command_id.to_string(),
+                submission_id: submission_id.to_string(),
+                prepared_transaction_hash: prepared_transaction_hash.to_string(),
+                source,
+            }
+        }
+        other => other,
+    }
 }
 
 #[cfg(test)]
@@ -466,6 +529,98 @@ mod tests {
             amount: "10.0000000000".to_string(),
             locked,
         }
+    }
+
+    #[test]
+    fn only_a_canton_contract_id_passes() {
+        let id = format!("00{}", "ab".repeat(32));
+        assert!(check_contract_id(&id).is_ok());
+        assert!(check_contract_id(&format!("{id}ca111220aa")).is_ok());
+        for bad in [
+            String::new(),
+            "00b1".to_string(),
+            format!("{id}a"),
+            format!("11{}", "ab".repeat(32)),
+            format!("00{}", "AB".repeat(32)),
+            format!("00{}/../admin", "ab".repeat(32)),
+            format!("00{}?x=1", "ab".repeat(32)),
+        ] {
+            assert!(
+                matches!(check_contract_id(&bad), Err(Error::InvalidContractId { contract_id }) if contract_id == bad),
+                "{bad} must be refused"
+            );
+        }
+    }
+
+    fn transport(source: reqwest::Error) -> Error {
+        Error::Transport {
+            host: "http://127.0.0.1".to_string(),
+            method: "POST",
+            path: "/v2/interactive-submission/executeAndWait".to_string(),
+            source,
+        }
+    }
+
+    /// Nothing listens on the port, so the request never left the wallet.
+    #[tokio::test]
+    async fn an_execute_that_never_connected_keeps_its_transport_error() {
+        let address = match std::net::TcpListener::bind("127.0.0.1:0")
+            .and_then(|listener| listener.local_addr())
+        {
+            Ok(address) => address,
+            Err(e) => panic!("a free port must be found: {e}"),
+        };
+        let source = match reqwest::Client::new()
+            .post(format!("http://{address}/"))
+            .send()
+            .await
+        {
+            Ok(_) => panic!("nothing listens on {address}"),
+            Err(e) => e,
+        };
+        assert!(source.is_connect(), "{source}");
+
+        let error = after_execute(transport(source), "command-1", "submission-1", "aGFzaA==");
+
+        assert!(matches!(error, Error::Transport { .. }), "{error}");
+    }
+
+    /// The request reached the participant and the answer did not come back.
+    #[tokio::test]
+    async fn an_execute_that_timed_out_has_an_unknown_outcome() {
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::any())
+            .respond_with(wiremock::ResponseTemplate::new(200).set_delay(Duration::from_secs(3)))
+            .mount(&server)
+            .await;
+        let source = match reqwest::Client::builder()
+            .timeout(Duration::from_millis(200))
+            .build()
+            .map(|client| client.post(server.uri()).send())
+        {
+            Ok(sent) => match sent.await {
+                Ok(_) => panic!("the answer must come too late"),
+                Err(e) => e,
+            },
+            Err(e) => panic!("the client must build: {e}"),
+        };
+
+        let error = after_execute(transport(source), "command-1", "submission-1", "aGFzaA==");
+
+        match &error {
+            Error::ExecuteOutcomeUnknown {
+                command_id,
+                submission_id,
+                prepared_transaction_hash,
+                ..
+            } => {
+                assert_eq!(command_id, "command-1");
+                assert_eq!(submission_id, "submission-1");
+                assert_eq!(prepared_transaction_hash, "aGFzaA==");
+            }
+            other => panic!("expected an unknown outcome, got {other}"),
+        }
+        assert!(error.to_string().contains("may have committed"), "{error}");
     }
 
     #[test]

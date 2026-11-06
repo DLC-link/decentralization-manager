@@ -9,9 +9,9 @@ use serde_json::{Value, json};
 
 use crate::{
     error::Result,
-    http::JsonHost,
+    http::{ClientOptions, JsonHost},
     ledger::DisclosedContract,
-    transfer::{TransferArgs, transfer_choice_argument},
+    transfer::{TransferArgs, check_contract_id, transfer_choice_argument},
 };
 
 /// A registry client bound to one registry root.
@@ -27,14 +27,31 @@ impl RegistryClient {
     /// For Canton Coin the root is a Splice scan's base URL. For a utility
     /// instrument such as CBTC it is
     /// `{utility}/api/token-standard/v0/registrars/{admin}`. `token` is sent
-    /// as a bearer token when present.
+    /// as a bearer token when present. The client uses the default
+    /// [`ClientOptions`].
     ///
     /// # Errors
-    /// Returns [`Error::Client`](crate::Error::Client) if the HTTP client
-    /// cannot be built.
+    /// The errors of [`RegistryClient::with_options`].
     pub fn new(root: impl Into<String>, token: Option<String>) -> Result<Self> {
+        Self::with_options(root, token, ClientOptions::default())
+    }
+
+    /// Like [`RegistryClient::new`], with a timeout, a body cap and a plain
+    /// `http` rule of the caller's choosing.
+    ///
+    /// # Errors
+    /// [`Error::InvalidUrl`](crate::Error::InvalidUrl) for a URL that is not
+    /// `http` or `https`. [`Error::InsecureUrl`](crate::Error::InsecureUrl)
+    /// for plain `http` to a host that is not loopback, unless `options`
+    /// allows it. [`Error::Client`](crate::Error::Client) if the HTTP client
+    /// cannot be built.
+    pub fn with_options(
+        root: impl Into<String>,
+        token: Option<String>,
+        options: ClientOptions,
+    ) -> Result<Self> {
         Ok(Self {
-            host: JsonHost::new(root, token)?,
+            host: JsonHost::with_options(root, token, options)?,
         })
     }
 
@@ -66,8 +83,11 @@ impl RegistryClient {
     /// the context for accepting the transfer instruction `instruction_cid`.
     ///
     /// # Errors
-    /// Fails if the call fails.
+    /// [`Error::InvalidContractId`](crate::Error::InvalidContractId) before
+    /// any call when `instruction_cid` is not a contract id. Fails if the
+    /// call fails.
     pub async fn accept_context(&self, instruction_cid: &str) -> Result<ChoiceContext> {
+        check_contract_id(instruction_cid)?;
         let path =
             format!("/registry/transfer-instruction/v1/{instruction_cid}/choice-contexts/accept");
         self.host

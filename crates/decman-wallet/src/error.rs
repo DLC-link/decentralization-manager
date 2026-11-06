@@ -33,6 +33,29 @@ pub enum Error {
         message: String,
     },
 
+    /// The base URL does not parse, or its scheme is not `http` or `https`.
+    #[error("{host} is not a base URL this client can use: {reason}")]
+    InvalidUrl { host: String, reason: String },
+
+    /// The base URL uses plain `http` to a host that is not loopback. The
+    /// bearer token and the prepared transaction would cross the network
+    /// unencrypted.
+    #[error(
+        "{host} uses plain http to a host that is not loopback. \
+         Set ClientOptions::allow_plain_http to allow it."
+    )]
+    InsecureUrl { host: String },
+
+    /// The answer was larger than the client reads. See
+    /// [`ClientOptions::max_response_bytes`](crate::ClientOptions::max_response_bytes).
+    #[error("{host}: {method} {path} returned more than {limit} bytes")]
+    ResponseTooLarge {
+        host: String,
+        method: &'static str,
+        path: String,
+        limit: usize,
+    },
+
     #[error("{host}: {method} {path} returned a body this client cannot read: {source}")]
     Decode {
         host: String,
@@ -134,6 +157,33 @@ pub enum Error {
     /// signs. Nothing was signed and nothing was executed.
     #[error("{host} prepared a transaction this wallet will not sign: {reason}")]
     TransactionRefused { host: String, reason: Refusal },
+
+    /// The id is not a Canton contract id. Nothing was sent anywhere.
+    #[error(
+        "{contract_id} is not a Canton contract id. \
+         A contract id is lowercase hex of even length, starts with 00 and has at least 66 digits."
+    )]
+    InvalidContractId { contract_id: String },
+
+    /// The signed execute left the wallet, but no answer came back. The
+    /// participant may have committed the transaction. Check the ledger
+    /// before sending the transfer again: a new send is a new transaction.
+    #[error(
+        "{host} gave no answer to the execute of command {command_id}: {source}. \
+         The transaction may have committed. \
+         Do not resend it before you check the ledger."
+    )]
+    ExecuteOutcomeUnknown {
+        host: String,
+        /// The command id of the prepared transaction. Its completion
+        /// tells whether the transaction committed.
+        command_id: String,
+        submission_id: String,
+        /// The hash the wallet signed, base64.
+        prepared_transaction_hash: String,
+        #[source]
+        source: reqwest::Error,
+    },
 }
 
 /// Why the wallet refused to sign a prepared transaction.
@@ -170,6 +220,10 @@ impl Error {
     pub fn host(&self) -> &str {
         match self {
             Self::Client { host, .. }
+            | Self::InvalidUrl { host, .. }
+            | Self::InsecureUrl { host }
+            | Self::ResponseTooLarge { host, .. }
+            | Self::ExecuteOutcomeUnknown { host, .. }
             | Self::Transport { host, .. }
             | Self::Api { host, .. }
             | Self::Decode { host, .. }
@@ -180,12 +234,13 @@ impl Error {
             | Self::HostDisagreement { host, .. }
             | Self::TransactionRefused { host, .. } => host,
             // Not about any one host: a signing failure is local, a missing
-            // host set has nobody to name, and an empty wallet is the
-            // wallet's own state.
+            // host set has nobody to name, and an empty wallet or a bad
+            // contract id is the wallet's own state.
             Self::NotEnoughHosts(_)
             | Self::Signing { .. }
             | Self::NoHosts { .. }
-            | Self::NoHoldings { .. } => "",
+            | Self::NoHoldings { .. }
+            | Self::InvalidContractId { .. } => "",
         }
     }
 

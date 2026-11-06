@@ -67,6 +67,7 @@ pub use flow::{
     AddedHosts, HostReport, OnboardedParty, WalletHost, add_hosts, execute_co_validated,
     raise_threshold, statuses,
 };
+pub use http::ClientOptions;
 pub use key::ExternalKeyPair;
 pub use ledger::{
     DisclosedContract, ExecuteRequest, Executed, Holding, LedgerClient, PrepareRequest,

@@ -256,6 +256,36 @@ numbers, so it never rounds them. The ledger writes amounts with ten decimals,
 such as `"1.2500000000"`. The check ignores trailing zeros when it compares
 amounts.
 
+### Timeouts and retries
+
+Each call times out after 60 seconds. Pass another `ClientOptions::timeout` to
+`LedgerClient::with_options` or `RegistryClient::with_options`.
+
+The execute step commits the transaction. If its request left the wallet and
+no answer came back, the flow returns `Error::ExecuteOutcomeUnknown`. The
+transaction may have committed. A new send builds a new transaction, so a blind
+retry can pay twice. Before you try again, check one of these:
+
+- The party's holdings. A committed send has consumed its input holdings.
+- The party's pending offers. A committed accept has removed its offer.
+- The completion for the error's `command_id`.
+
+A connection that never opened returns `Error::Transport`. Nothing reached the
+participant, so a retry is safe.
+
+### What the clients refuse
+
+- Plain `http` to a host that is not loopback returns `Error::InsecureUrl`.
+  Loopback is `localhost`, `127.0.0.0/8` and `::1`. Set
+  `ClientOptions::allow_plain_http` to allow another host, such as a service
+  inside a private cluster network.
+- A response body over 64 MiB returns `Error::ResponseTooLarge`. Set
+  `ClientOptions::max_response_bytes` to change the cap.
+- An instruction id that is not a Canton contract id returns
+  `Error::InvalidContractId`, before any call. A contract id is lowercase hex
+  of even length. It starts with `00` and has at least 66 digits. The registry
+  call puts the id in its URL path, so the wallet checks it first.
+
 ### The example
 
 `examples/token_transfer.rs` runs each flow from the command line. Set `MODE` to

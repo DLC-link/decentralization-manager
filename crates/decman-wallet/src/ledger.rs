@@ -11,7 +11,7 @@ use serde_json::{Value, json};
 
 use crate::{
     error::Result,
-    http::JsonHost,
+    http::{ClientOptions, JsonHost},
     transfer::{HOLDING_INTERFACE_ID, TRANSFER_INSTRUCTION_INTERFACE_ID},
 };
 
@@ -31,18 +31,36 @@ impl LedgerClient {
     /// Build a client for `base_url`, which includes any path prefix, for
     /// example `http://localhost:7575/api/json-api`. `token` is sent as a
     /// bearer token when present. `user_id` is the ledger user the
-    /// submissions are made as.
+    /// submissions are made as. The client uses the default
+    /// [`ClientOptions`].
     ///
     /// # Errors
-    /// Returns [`Error::Client`](crate::Error::Client) if the HTTP client
-    /// cannot be built.
+    /// The errors of [`LedgerClient::with_options`].
     pub fn new(
         base_url: impl Into<String>,
         token: Option<String>,
         user_id: impl Into<String>,
     ) -> Result<Self> {
+        Self::with_options(base_url, token, user_id, ClientOptions::default())
+    }
+
+    /// Like [`LedgerClient::new`], with a timeout, a body cap and a plain
+    /// `http` rule of the caller's choosing.
+    ///
+    /// # Errors
+    /// [`Error::InvalidUrl`](crate::Error::InvalidUrl) for a URL that is not
+    /// `http` or `https`. [`Error::InsecureUrl`](crate::Error::InsecureUrl)
+    /// for plain `http` to a host that is not loopback, unless `options`
+    /// allows it. [`Error::Client`](crate::Error::Client) if the HTTP client
+    /// cannot be built.
+    pub fn with_options(
+        base_url: impl Into<String>,
+        token: Option<String>,
+        user_id: impl Into<String>,
+        options: ClientOptions,
+    ) -> Result<Self> {
         Ok(Self {
-            host: JsonHost::new(base_url, token)?,
+            host: JsonHost::with_options(base_url, token, options)?,
             user_id: user_id.into(),
         })
     }
@@ -142,7 +160,8 @@ impl LedgerClient {
     ///
     /// # Errors
     /// Fails if the call fails, for example when the signature is refused or
-    /// the transaction does not commit.
+    /// the transaction does not commit. A timeout after the request was sent
+    /// does not mean the transaction failed: it may still have committed.
     pub async fn execute(&self, req: &ExecuteRequest) -> Result<Executed> {
         self.host
             .post("/v2/interactive-submission/executeAndWait", req)

@@ -24,9 +24,11 @@ use decman_lib::{
         value::Sum,
     },
 };
+use std::time::Duration;
+
 use decman_wallet::{
-    AMULET_TRANSFER_INSTRUCTION_TEMPLATE, Error, ExternalKeyPair, LedgerClient, Refusal,
-    RegistryClient, TransferArgs, accept_transfer, send_transfer,
+    AMULET_TRANSFER_INSTRUCTION_TEMPLATE, ClientOptions, Error, ExternalKeyPair, LedgerClient,
+    Refusal, RegistryClient, TransferArgs, accept_transfer, send_transfer,
     transfer::{
         ACCEPT_CHOICE, HOLDING_INTERFACE_ID, TRANSFER_CHOICE, TRANSFER_FACTORY_INTERFACE_ID,
         TRANSFER_INSTRUCTION_INTERFACE_ID,
@@ -570,7 +572,9 @@ async fn a_ledger_api_refusal_carries_the_endpoint_and_message() {
 // ---------------------------------------------------------------------------
 
 const FACTORY_ID: &str = "00f1";
-const INSTRUCTION_CID: &str = "00b1";
+/// A contract id in Canton's form: `00`, a 32-byte discriminator, and a
+/// suffix.
+const INSTRUCTION_CID: &str = "005a92f6f089f63f0d476ba2494aa0848b93dbd0bcb7f058544e10992e67f09c98ca111220a1b7c6f1aa933f882745c9a905739790";
 const MALLORY: &str = "mallory::1220ff";
 const PREPARE_PATH: &str = "/api/json-api/v2/interactive-submission/prepare";
 const EXECUTE_PATH: &str = "/api/json-api/v2/interactive-submission/executeAndWait";
@@ -1672,7 +1676,8 @@ async fn accept_transfer_exercises_the_instruction_with_the_registry_context() {
 async fn an_accept_prepared_for_another_instruction_is_not_signed() {
     let key = ExternalKeyPair::from_seed([28u8; 32]);
     let receiver = key.party_id("bob");
-    let transaction = accept_transaction("00b9", &receiver);
+    let other = "00b94be5545fed18b849ded12c42afc6874093183fc8b14afc1c43a3c6dea15d8cca11122066570dd9d0a5e9c559d3d8b6830f3de9";
+    let transaction = accept_transaction(other, &receiver);
     let server = MockServer::start().await;
     stub_accept(
         &server,
@@ -1696,7 +1701,7 @@ async fn an_accept_prepared_for_another_instruction_is_not_signed() {
             ..
         }) => {
             assert_eq!(field, "contract id");
-            assert_eq!(found, "00b9");
+            assert_eq!(found, other);
         }
         Err(other) => panic!("expected a contract id mismatch, got {other}"),
         Ok(_) => panic!("an accept of another instruction must not be signed"),
@@ -1813,4 +1818,147 @@ async fn a_send_with_extra_args_or_meta_other_than_the_wallet_sent_is_not_signed
             other => panic!("{path}: expected a mismatch, got {other}"),
         }
     }
+}
+
+/// The execute is the step that commits. When its request left the wallet
+/// but no answer came back, the transfer may have happened, and the error
+/// says so.
+#[tokio::test]
+async fn an_execute_without_an_answer_has_an_unknown_outcome() {
+    let key = ExternalKeyPair::from_seed([37u8; 32]);
+    let sender = key.party_id("alice");
+    let (transaction, response) = faithful_send(&sender);
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path(EXECUTE_PATH))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(json!({ "updateId": "update-1", "completionOffset": 43 }))
+                .set_delay(Duration::from_secs(3)),
+        )
+        .with_priority(1)
+        .mount(&server)
+        .await;
+    stub_send(&server, &sender, response).await;
+    let ledger = match LedgerClient::with_options(
+        format!("{uri}{LEDGER_PREFIX}", uri = server.uri()),
+        None,
+        "wallet-user",
+        ClientOptions {
+            timeout: Duration::from_secs(1),
+            ..ClientOptions::default()
+        },
+    ) {
+        Ok(client) => client,
+        Err(e) => panic!("ledger client must build: {e}"),
+    };
+
+    let error =
+        match send_transfer(&ledger, &registry_for(&server), &key, &send_args(&sender)).await {
+            Ok(_) => panic!("an execute without an answer must not look like a success"),
+            Err(e) => e,
+        };
+
+    let prepare = &bodies(&server, PREPARE_PATH).await[0];
+    let executes = bodies(&server, EXECUTE_PATH).await;
+    assert_eq!(executes.len(), 1, "the wallet does not resend the execute");
+    match &error {
+        Error::ExecuteOutcomeUnknown {
+            host,
+            command_id,
+            submission_id,
+            prepared_transaction_hash,
+            ..
+        } => {
+            assert!(host.ends_with(LEDGER_PREFIX), "{host}");
+            assert_eq!(
+                prepared_transaction_hash,
+                &STANDARD.encode(hash_of(&transaction))
+            );
+            assert_eq!(Some(command_id.as_str()), prepare["commandId"].as_str());
+            assert_eq!(
+                Some(submission_id.as_str()),
+                executes[0]["submissionId"].as_str()
+            );
+        }
+        other => panic!("expected an unknown outcome, got {other}"),
+    }
+    assert!(error.to_string().contains("may have committed"), "{error}");
+}
+
+/// The instruction id goes into the registry's URL path, so anything other
+/// than a contract id is refused before any call.
+#[tokio::test]
+async fn an_instruction_id_that_is_not_a_contract_id_is_refused_before_any_call() {
+    let key = ExternalKeyPair::from_seed([38u8; 32]);
+    let receiver = key.party_id("bob");
+    // No stubs: any call would be recorded, and the test counts them.
+    let server = MockServer::start().await;
+    let ledger = ledger_for(&server);
+    let registry = registry_for(&server);
+
+    for bad in [
+        "00b1".to_string(),
+        format!("{INSTRUCTION_CID}/../../transfer-factory"),
+        INSTRUCTION_CID.to_uppercase(),
+        format!("{INSTRUCTION_CID}0"),
+    ] {
+        let accepted = accept_transfer(
+            &ledger,
+            &registry,
+            &key,
+            &receiver,
+            &bad,
+            AMULET_TRANSFER_INSTRUCTION_TEMPLATE,
+        )
+        .await;
+        assert!(
+            matches!(&accepted, Err(Error::InvalidContractId { contract_id }) if *contract_id == bad),
+            "{bad}: expected InvalidContractId, got {:?}",
+            accepted.err()
+        );
+        let context = registry.accept_context(&bad).await;
+        assert!(
+            matches!(&context, Err(Error::InvalidContractId { contract_id }) if *contract_id == bad),
+            "{bad}: expected InvalidContractId, got {:?}",
+            context.err()
+        );
+    }
+
+    assert_eq!(
+        server.received_requests().await.unwrap_or_default().len(),
+        0,
+        "nothing is sent"
+    );
+}
+
+#[test]
+fn the_clients_refuse_plain_http_to_another_host_unless_allowed() {
+    let allowed = ClientOptions {
+        allow_plain_http: true,
+        ..ClientOptions::default()
+    };
+
+    assert!(matches!(
+        LedgerClient::new(
+            "http://ledger.example.com/api/json-api",
+            None,
+            "wallet-user"
+        ),
+        Err(Error::InsecureUrl { .. })
+    ));
+    assert!(matches!(
+        RegistryClient::new("http://scan.example.com", None),
+        Err(Error::InsecureUrl { .. })
+    ));
+    assert!(
+        LedgerClient::with_options(
+            "http://ledger.example.com/api/json-api",
+            None,
+            "wallet-user",
+            allowed.clone(),
+        )
+        .is_ok()
+    );
+    assert!(RegistryClient::with_options("http://scan.example.com", None, allowed).is_ok());
 }
