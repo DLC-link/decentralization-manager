@@ -6,7 +6,8 @@
 //! - `list` (the default): the party's holdings.
 //! - `pending`: the transfers waiting for the party to accept them.
 //! - `send`: send `AMOUNT` of the instrument to `RECEIVER`.
-//! - `accept`: accept the transfer instruction `INSTRUCTION_CID`.
+//! - `accept`: accept the transfer instruction `INSTRUCTION_CID`, of the
+//!   template `INSTRUCTION_TEMPLATE`.
 //!
 //! Every mode needs `PARTY_ID`, `LEDGER_JSON_API_URL` and `LEDGER_USER_ID`.
 //! `LEDGER_TOKEN` is the optional bearer token for the Ledger API.
@@ -15,7 +16,10 @@
 //! Ed25519 seed, and `REGISTRY_URL`, the instrument's registry root.
 //! `REGISTRY_TOKEN` is optional. `send` needs `RECEIVER`, `AMOUNT`,
 //! `INSTRUMENT_ADMIN` and `INSTRUMENT_ID`, and takes an optional
-//! `VALIDITY_HOURS` (24 by default). `accept` needs `INSTRUCTION_CID`.
+//! `VALIDITY_HOURS` (24 by default). `accept` needs `INSTRUCTION_CID` and
+//! `INSTRUCTION_TEMPLATE`, the template the instruction must have, such as
+//! `#splice-amulet:Splice.AmuletTransferInstruction:AmuletTransferInstruction`.
+//! `pending` prints each offer's template, as the participant reports it.
 //!
 //! ```sh
 //! MODE=send PARTY_ID=alice::1220… DECMAN_WALLET_SEED=… \
@@ -92,9 +96,18 @@ async fn accept(ledger: &LedgerClient, party: &str) -> Result {
     let key = key_for(party)?;
     let registry = registry()?;
     let instruction_cid = required("INSTRUCTION_CID")?;
+    let instruction_template = required("INSTRUCTION_TEMPLATE")?;
 
     log_holdings(ledger, party, "holding before").await?;
-    let receipt = accept_transfer(ledger, &registry, &key, party, &instruction_cid).await?;
+    let receipt = accept_transfer(
+        ledger,
+        &registry,
+        &key,
+        party,
+        &instruction_cid,
+        &instruction_template,
+    )
+    .await?;
     tracing::info!(
         instruction_cid = %receipt.instruction_cid,
         signed_hash = %receipt.prepared_transaction_hash,
@@ -153,6 +166,7 @@ async fn log_pending(ledger: &LedgerClient, party: &str) -> Result {
     for instruction in pending {
         tracing::info!(
             instruction_cid = %instruction.contract_id,
+            template = %instruction.template,
             sender = %instruction.sender,
             instrument_id = %instruction.instrument_id,
             amount = %instruction.amount,

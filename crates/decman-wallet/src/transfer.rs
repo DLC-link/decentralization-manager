@@ -16,7 +16,7 @@ use serde_json::{Value, json};
 use uuid::Uuid;
 
 use crate::{
-    check::{Expected, check_prepared},
+    check::{Expected, SentTransfer, check_prepared},
     error::{Error, Result},
     ledger::{DisclosedContract, ExecuteRequest, Executed, Holding, LedgerClient, PrepareRequest},
     registry::RegistryClient,
@@ -30,6 +30,13 @@ pub const HOLDING_INTERFACE_ID: &str =
 pub const TRANSFER_FACTORY_INTERFACE_ID: &str = "#splice-api-token-transfer-instruction-v1:Splice.Api.Token.TransferInstructionV1:TransferFactory";
 /// The `TransferInstruction` interface, by package name.
 pub const TRANSFER_INSTRUCTION_INTERFACE_ID: &str = "#splice-api-token-transfer-instruction-v1:Splice.Api.Token.TransferInstructionV1:TransferInstruction";
+/// Canton Coin's transfer instruction template, by package name.
+pub const AMULET_TRANSFER_INSTRUCTION_TEMPLATE: &str =
+    "#splice-amulet:Splice.AmuletTransferInstruction:AmuletTransferInstruction";
+/// CBTC's transfer instruction template on DA's Utility registry, by package
+/// name.
+pub const CBTC_TRANSFER_INSTRUCTION_TEMPLATE: &str =
+    "#utility-registry-app-v0:Utility.Registry.App.V0.Model.Transfer:TransferOffer";
 /// The choice that sends.
 pub const TRANSFER_CHOICE: &str = "TransferFactory_Transfer";
 /// The choice that accepts a transfer offered to the party.
@@ -191,7 +198,12 @@ pub struct AcceptReceipt {
 /// `TransferFactory_Transfer` on the registry's factory, acting as the sender
 /// alone. Its argument must carry these arguments: the instrument admin,
 /// sender, receiver, amount, instrument, both times, and the input holdings
-/// in order.
+/// in order. Its `transfer.meta` and `extraArgs` must be the ones the wallet
+/// sent.
+///
+/// The check does not bind the factory's template. The factory's contract id
+/// comes from the registry, and a contract id names one contract of one
+/// template.
 ///
 /// # Errors
 /// [`Error::NoHoldings`] before any registry or prepare call when there is
@@ -238,18 +250,24 @@ pub async fn send_transfer(
         "fetched the transfer factory"
     );
 
+    let argument = transfer_choice_argument(&args, &factory.choice_context.choice_context_data);
     let command = exercise(
         TRANSFER_FACTORY_INTERFACE_ID,
         &factory.factory_id,
         TRANSFER_CHOICE,
-        transfer_choice_argument(&args, &factory.choice_context.choice_context_data),
+        &argument,
     );
     let expected = Expected {
         interface_id: TRANSFER_FACTORY_INTERFACE_ID,
+        template_id: None,
         choice: TRANSFER_CHOICE,
         contract_id: &factory.factory_id,
         party: &args.sender,
-        transfer: Some(&args),
+        extra_args: &argument["extraArgs"],
+        transfer: Some(SentTransfer {
+            args: &args,
+            meta: &argument["transfer"]["meta"],
+        }),
     };
     let submitted = submit(
         ledger,
@@ -274,9 +292,17 @@ pub async fn send_transfer(
 /// Accept the transfer instruction `instruction_cid` as `party`, its
 /// receiver.
 ///
+/// `instruction_template` is the template the instruction must have, as
+/// `#package-name:Module:Entity`, for example
+/// [`AMULET_TRANSFER_INSTRUCTION_TEMPLATE`]. The instruction id usually comes
+/// from the participant's own listing. Any template can implement the
+/// interface, so the caller names the one it trusts.
+///
 /// `key` must be the party's key. The wallet signs only after the prepared
 /// transaction passes its check: the hash is recomputed, and the root must be
 /// `TransferInstruction_Accept` on this instruction, acting as `party` alone.
+/// The instruction must have `instruction_template`, and the `extraArgs` must
+/// be the ones the wallet sent.
 ///
 /// # Errors
 /// [`Error::TransactionRefused`] when the prepared transaction fails the
@@ -288,6 +314,7 @@ pub async fn accept_transfer(
     key: &dyn Signer,
     party: &str,
     instruction_cid: &str,
+    instruction_template: &str,
 ) -> Result<AcceptReceipt> {
     let context = registry.accept_context(instruction_cid).await?;
     tracing::info!(
@@ -296,17 +323,20 @@ pub async fn accept_transfer(
         "fetched the accept context"
     );
 
+    let argument = accept_choice_argument(&context.choice_context_data);
     let command = exercise(
         TRANSFER_INSTRUCTION_INTERFACE_ID,
         instruction_cid,
         ACCEPT_CHOICE,
-        accept_choice_argument(&context.choice_context_data),
+        &argument,
     );
     let expected = Expected {
         interface_id: TRANSFER_INSTRUCTION_INTERFACE_ID,
+        template_id: Some(instruction_template),
         choice: ACCEPT_CHOICE,
         contract_id: instruction_cid,
         party,
+        extra_args: &argument["extraArgs"],
         transfer: None,
     };
     let submitted = submit(
@@ -328,7 +358,7 @@ pub async fn accept_transfer(
 }
 
 /// A JSON Ledger API exercise through an interface.
-fn exercise(interface_id: &str, contract_id: &str, choice: &str, argument: Value) -> Value {
+fn exercise(interface_id: &str, contract_id: &str, choice: &str, argument: &Value) -> Value {
     json!({
         "ExerciseCommand": {
             "templateId": interface_id,

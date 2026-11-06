@@ -75,5 +75,6 @@ pub use ledger::{
 pub use registry::{ChoiceContext, RegistryClient, TransferFactory};
 pub use signer::Signer;
 pub use transfer::{
-    AcceptReceipt, TransferArgs, TransferReceipt, accept_transfer, send_transfer, unlocked_holdings,
+    AMULET_TRANSFER_INSTRUCTION_TEMPLATE, AcceptReceipt, CBTC_TRANSFER_INSTRUCTION_TEMPLATE,
+    TransferArgs, TransferReceipt, accept_transfer, send_transfer, unlocked_holdings,
 };

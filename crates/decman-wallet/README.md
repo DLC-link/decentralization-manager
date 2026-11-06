@@ -79,7 +79,8 @@ two Token Standard flows:
 use std::time::Duration;
 
 use decman_wallet::{
-    LedgerClient, RegistryClient, TransferArgs, accept_transfer, send_transfer,
+    AMULET_TRANSFER_INSTRUCTION_TEMPLATE, LedgerClient, RegistryClient, TransferArgs,
+    accept_transfer, send_transfer,
 };
 
 // One participant that hosts the party, and the instrument's registry.
@@ -102,9 +103,22 @@ let args = TransferArgs::new(
 let sent = send_transfer(&ledger, &registry, &key, &args).await?;
 tracing::info!(kind = %sent.transfer_kind, update_id = %sent.update_id, "sent");
 
-// Accept every offer the party can accept now.
+// Accept every Canton Coin offer the party can accept now. The listed
+// template comes from the participant and only picks the offers to try.
+// The check binds the template the wallet passes.
 for offer in ledger.transfer_instructions(&party_id).await? {
-    accept_transfer(&ledger, &registry, &key, &party_id, &offer.contract_id).await?;
+    if offer.template != AMULET_TRANSFER_INSTRUCTION_TEMPLATE {
+        continue;
+    }
+    accept_transfer(
+        &ledger,
+        &registry,
+        &key,
+        &party_id,
+        &offer.contract_id,
+        AMULET_TRANSFER_INSTRUCTION_TEMPLATE,
+    )
+    .await?;
 }
 ```
 
@@ -128,7 +142,11 @@ The flows follow the splice-wallet-kernel SDK step for step.
 The crate differs from the SDK in four ways:
 
 - It sends the hashing scheme version that the prepare returned. The SDK always sends V2.
-- It spends every unlocked holding of the instrument, up to 100. The SDK picks holdings by amount.
+- It spends every unlocked holding of the instrument, up to 100. The SDK picks
+  holdings by amount. With more than 100 unlocked holdings, the send takes the
+  first 100 that the ledger lists. If those hold less than the amount, the send
+  fails at the prepare step, although the party holds enough. The caller can
+  then name the holdings to spend in `TransferArgs::input_holding_cids`.
 - It skips every holding with a lock. The SDK also spends a holding whose lock has expired.
 - It lists only offers that wait for the receiver and have not expired. The SDK's `pending` lists every instruction.
 
@@ -147,19 +165,50 @@ So the wallet checks each prepared transaction before the key signs:
    must be an exercise.
 4. The exercise must use the expected interface, choice and contract. Its only
    acting party must be the wallet's party.
-5. For a send, the choice argument must match the request. The check compares
+5. For an accept, the instruction must have the template the caller passed to
+   `accept_transfer`. The check compares the package name, the module and the
+   entity.
+6. For a send, the choice argument must match the request. The check compares
    the instrument admin, sender, receiver, amount and instrument. It also
    compares both times, and the input holdings in order.
+7. The choice argument's `extraArgs` must equal the ones the wallet sent. That
+   is the registry's context and an empty `meta`. For a send, `transfer.meta`
+   must be empty too.
 
 A transaction that fails returns `Error::TransactionRefused`. The `Refusal` in
 it names what did not match. The wallet signs nothing and executes nothing.
+
+The check compares `extraArgs` and `meta` in the JSON Ledger API's encoding.
+It ignores spellings that do not change a value. An Int64 may be a number or a
+string. A decimal may carry trailing zeros. A time may carry fractional
+seconds or an offset. The check refuses a value it cannot read, such as a
+generic map.
+
+The accept binds the template because the instruction's contract id usually
+comes from the participant's own listing. Any template can implement the
+`TransferInstruction` interface, and its accept can do anything. So the caller
+names the template it trusts:
+
+| Instrument | Template |
+|---|---|
+| Canton Coin | `AMULET_TRANSFER_INSTRUCTION_TEMPLATE`, `#splice-amulet:Splice.AmuletTransferInstruction:AmuletTransferInstruction` |
+| CBTC on DA's Utility registry | `CBTC_TRANSFER_INSTRUCTION_TEMPLATE`, `#utility-registry-app-v0:Utility.Registry.App.V0.Model.Transfer:TransferOffer` |
+
+`TransferInstruction::template` shows each listed offer's template. The
+participant supplies it, so it is for display only.
 
 The check covers hashing schemes V2 and V3. Canton 3.6 prepares with V2 unless
 the request asks for another version, and the wallet never asks. The check
 refuses V4 and any unknown version.
 
-The check does not judge what happens below the root exercise. That part is
-the instrument admin's code, such as the factory's transfer logic.
+The check does not compare these:
+
+- Anything below the root exercise. That part is the instrument admin's code,
+  such as the factory's transfer logic.
+- The template's package id. The check compares the package name, so any
+  package with that name passes.
+- The factory's template on a send. The factory's contract id comes from the
+  registry, and a contract id names one contract of one template.
 
 ### The registry
 
@@ -225,6 +274,7 @@ amounts.
 | `INSTRUMENT_ADMIN`, `INSTRUMENT_ID` | `send` | The instrument, such as the DSO party and `Amulet` |
 | `VALIDITY_HOURS` | `send`, optional | How long the offer stays open; 24 by default |
 | `INSTRUCTION_CID` | `accept` | The transfer instruction to accept |
+| `INSTRUCTION_TEMPLATE` | `accept` | The template the instruction must have, such as `#splice-amulet:Splice.AmuletTransferInstruction:AmuletTransferInstruction` |
 
 The example never prints the seed. It refuses a seed whose fingerprint is not
 the party's.

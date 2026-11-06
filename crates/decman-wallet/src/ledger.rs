@@ -73,18 +73,18 @@ impl LedgerClient {
     /// # Errors
     /// Fails if either the ledger-end or the ACS call fails.
     pub async fn holdings(&self, party_id: &str) -> Result<Vec<Holding>> {
-        let views: Vec<(String, HoldingView)> =
+        let views: Vec<Viewed<HoldingView>> =
             self.interface_views(party_id, HOLDING_INTERFACE_ID).await?;
         Ok(views
             .into_iter()
-            .filter(|(_, view)| view.owner == party_id)
-            .map(|(contract_id, view)| Holding {
-                contract_id,
-                owner: view.owner,
-                instrument_admin: view.instrument_id.admin,
-                instrument_id: view.instrument_id.id,
-                amount: view.amount,
-                locked: view.lock.is_some(),
+            .filter(|viewed| viewed.view.owner == party_id)
+            .map(|viewed| Holding {
+                contract_id: viewed.contract_id,
+                owner: viewed.view.owner,
+                instrument_admin: viewed.view.instrument_id.admin,
+                instrument_id: viewed.view.instrument_id.id,
+                amount: viewed.view.amount,
+                locked: viewed.view.lock.is_some(),
             })
             .collect())
     }
@@ -100,27 +100,29 @@ impl LedgerClient {
     /// # Errors
     /// Fails if either the ledger-end or the ACS call fails.
     pub async fn transfer_instructions(&self, party_id: &str) -> Result<Vec<TransferInstruction>> {
-        let views: Vec<(String, TransferInstructionView)> = self
+        let views: Vec<Viewed<TransferInstructionView>> = self
             .interface_views(party_id, TRANSFER_INSTRUCTION_INTERFACE_ID)
             .await?;
         let now = Utc::now();
         Ok(views
             .into_iter()
-            .filter(|(_, view)| {
+            .filter(|viewed| {
+                let view = &viewed.view;
                 view.transfer.receiver == party_id
                     && view.status.tag == PENDING_RECEIVER_ACCEPTANCE
                     && DateTime::parse_from_rfc3339(&view.transfer.execute_before)
                         .is_ok_and(|deadline| deadline > now)
             })
-            .map(|(contract_id, view)| TransferInstruction {
-                contract_id,
-                sender: view.transfer.sender,
-                receiver: view.transfer.receiver,
-                amount: view.transfer.amount,
-                instrument_admin: view.transfer.instrument_id.admin,
-                instrument_id: view.transfer.instrument_id.id,
-                status: view.status.tag,
-                execute_before: view.transfer.execute_before,
+            .map(|viewed| TransferInstruction {
+                contract_id: viewed.contract_id,
+                template: viewed.template,
+                sender: viewed.view.transfer.sender,
+                receiver: viewed.view.transfer.receiver,
+                amount: viewed.view.transfer.amount,
+                instrument_admin: viewed.view.transfer.instrument_id.admin,
+                instrument_id: viewed.view.transfer.instrument_id.id,
+                status: viewed.view.status.tag,
+                execute_before: viewed.view.transfer.execute_before,
             })
             .collect())
     }
@@ -154,7 +156,7 @@ impl LedgerClient {
         &self,
         party_id: &str,
         interface_id: &str,
-    ) -> Result<Vec<(String, V)>> {
+    ) -> Result<Vec<Viewed<V>>> {
         let offset = self.ledger_end().await?;
         let request = json!({
             "activeAtOffset": offset,
@@ -189,7 +191,17 @@ impl LedgerClient {
                     .interface_views
                     .into_iter()
                     .find_map(|view| view.view_value)?;
-                Some((event.contract_id, view))
+                // The created event names the package by id. The listing
+                // names it by package name, as the wallet's constants do.
+                let qualified = event
+                    .template_id
+                    .split_once(':')
+                    .map_or(event.template_id.as_str(), |(_, qualified)| qualified);
+                Some(Viewed {
+                    template: format!("#{package}:{qualified}", package = event.package_name),
+                    contract_id: event.contract_id,
+                    view,
+                })
             })
             .collect())
     }
@@ -213,6 +225,11 @@ pub struct Holding {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct TransferInstruction {
     pub contract_id: String,
+    /// The instruction's template, as `#package-name:Module:Entity`. The
+    /// host supplies it, so it is for display only. The check before signing
+    /// binds the template the caller passes to
+    /// [`accept_transfer`](crate::accept_transfer), never this one.
+    pub template: String,
     pub sender: String,
     pub receiver: String,
     /// The decimal amount as the ledger wrote it.
@@ -297,6 +314,14 @@ pub struct Executed {
     pub completion_offset: i64,
 }
 
+/// One active contract seen through an interface.
+struct Viewed<V> {
+    contract_id: String,
+    /// `#package-name:Module:Entity`.
+    template: String,
+    view: V,
+}
+
 #[derive(Deserialize)]
 struct LedgerEnd {
     offset: i64,
@@ -328,6 +353,11 @@ struct ActiveContract<V> {
 #[serde(rename_all = "camelCase", bound = "V: DeserializeOwned")]
 struct CreatedEvent<V> {
     contract_id: String,
+    /// `<package-id>:Module:Entity`.
+    #[serde(default)]
+    template_id: String,
+    #[serde(default)]
+    package_name: String,
     #[serde(default = "Vec::new")]
     interface_views: Vec<InterfaceView<V>>,
 }

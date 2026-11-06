@@ -13,7 +13,7 @@ use base64::{Engine, engine::general_purpose::STANDARD};
 use decman_lib::{
     canton_hash::{HashingScheme, compute_prepared_transaction_hash},
     canton_proto_rs::com::daml::ledger::api::v2::{
-        Identifier, List, Record, RecordField, TextMap, Value as DamlValue,
+        Identifier, List, Record, RecordField, TextMap, Value as DamlValue, Variant,
         interactive::{
             DamlTransaction, Metadata, PreparedTransaction,
             daml_transaction::{Node, NodeSeed, node::VersionedNode},
@@ -25,8 +25,8 @@ use decman_lib::{
     },
 };
 use decman_wallet::{
-    Error, ExternalKeyPair, LedgerClient, Refusal, RegistryClient, TransferArgs, accept_transfer,
-    send_transfer,
+    AMULET_TRANSFER_INSTRUCTION_TEMPLATE, Error, ExternalKeyPair, LedgerClient, Refusal,
+    RegistryClient, TransferArgs, accept_transfer, send_transfer,
     transfer::{
         ACCEPT_CHOICE, HOLDING_INTERFACE_ID, TRANSFER_CHOICE, TRANSFER_FACTORY_INTERFACE_ID,
         TRANSFER_INSTRUCTION_INTERFACE_ID,
@@ -267,20 +267,23 @@ async fn transfer_instructions_are_the_ones_naming_the_party_as_receiver() {
     let server = MockServer::start().await;
     stub_ledger_end(&server, 7).await;
     let interface = "pkg:Splice.Api.Token.TransferInstructionV1:TransferInstruction";
+    let mut offer = acs_entry(
+        "00b1",
+        interface,
+        instruction_view(
+            SENDER,
+            RECEIVER,
+            "1.2500000000",
+            awaiting_receiver(),
+            OPEN_UNTIL,
+        ),
+    );
+    offer["contractEntry"]["JsActiveContract"]["createdEvent"]["templateId"] =
+        json!("amuletpkgid:Splice.AmuletTransferInstruction:AmuletTransferInstruction");
     stub_acs(
         &server,
         vec![
-            acs_entry(
-                "00b1",
-                interface,
-                instruction_view(
-                    SENDER,
-                    RECEIVER,
-                    "1.2500000000",
-                    awaiting_receiver(),
-                    OPEN_UNTIL,
-                ),
-            ),
+            offer,
             // The receiver's own outgoing offer: not one it can accept.
             acs_entry(
                 "00b2",
@@ -304,6 +307,10 @@ async fn transfer_instructions_are_the_ones_naming_the_party_as_receiver() {
 
     assert_eq!(pending.len(), 1);
     assert_eq!(pending[0].contract_id, "00b1");
+    assert_eq!(
+        pending[0].template, AMULET_TRANSFER_INSTRUCTION_TEMPLATE,
+        "the package id is replaced by the package name"
+    );
     assert_eq!(pending[0].sender, SENDER);
     assert_eq!(pending[0].receiver, RECEIVER);
     assert_eq!(pending[0].amount, "1.2500000000");
@@ -589,28 +596,87 @@ fn party(id: &str) -> DamlValue {
     daml(Sum::Party(id.to_string()))
 }
 
-fn empty_metadata() -> DamlValue {
-    record(vec![("values", daml(Sum::TextMap(TextMap::default())))])
+fn text_map_of(entries: Vec<(&str, DamlValue)>) -> DamlValue {
+    daml(Sum::TextMap(TextMap {
+        entries: entries
+            .into_iter()
+            .map(|(key, value)| text_map::Entry {
+                key: key.to_string(),
+                value: Some(value),
+            })
+            .collect(),
+    }))
 }
 
-/// `ExtraArgs` as the ledger writes it, carrying one context entry.
-fn extra_args() -> DamlValue {
-    let entry = text_map::Entry {
-        key: "amulet-rules".to_string(),
-        value: Some(daml(Sum::Text("00c1".to_string()))),
-    };
+fn any_contract_id(cid: &str) -> DamlValue {
+    daml(Sum::Variant(Box::new(Variant {
+        variant_id: None,
+        constructor: "AV_ContractId".to_string(),
+        value: Some(Box::new(daml(Sum::ContractId(cid.to_string())))),
+    })))
+}
+
+fn empty_metadata() -> DamlValue {
+    record(vec![("values", text_map_of(Vec::new()))])
+}
+
+/// `Metadata` with one entry the wallet never sends.
+fn filled_metadata() -> DamlValue {
+    record(vec![(
+        "values",
+        text_map_of(vec![("note", daml(Sum::Text("pay mallory".to_string())))]),
+    )])
+}
+
+/// `ExtraArgs` with these context entries and an empty `meta`.
+fn extra_args_with(context: Vec<(&str, DamlValue)>) -> DamlValue {
     record(vec![
-        (
-            "context",
-            record(vec![(
-                "values",
-                daml(Sum::TextMap(TextMap {
-                    entries: vec![entry],
-                })),
-            )]),
-        ),
+        ("context", record(vec![("values", text_map_of(context))])),
         ("meta", empty_metadata()),
     ])
+}
+
+/// `ExtraArgs` as the ledger writes it for `context_data()`.
+fn extra_args() -> DamlValue {
+    extra_args_with(vec![("amulet-rules", any_contract_id("00c1"))])
+}
+
+/// `value` with the record field at `path` set to `new`, or removed when
+/// `new` is `None`.
+fn with_field(mut value: DamlValue, path: &str, new: Option<DamlValue>) -> DamlValue {
+    let (parents, last) = path.rsplit_once('.').unwrap_or(("", path));
+    let mut current = &mut value;
+    for label in parents.split('.').filter(|label| !label.is_empty()) {
+        current = match current.sum.as_mut() {
+            Some(Sum::Record(record)) => record
+                .fields
+                .iter_mut()
+                .find(|field| field.label == label)
+                .and_then(|field| field.value.as_mut()),
+            _ => None,
+        }
+        .unwrap_or_else(|| panic!("the fixture has no {label} on the way to {path}"));
+    }
+    let Some(Sum::Record(record)) = current.sum.as_mut() else {
+        panic!("{path} is not a record field");
+    };
+    let position = record.fields.iter().position(|field| field.label == last);
+    match (position, new) {
+        (Some(index), Some(new)) => {
+            if let Some(field) = record.fields.get_mut(index) {
+                field.value = Some(new);
+            }
+        }
+        (Some(index), None) => {
+            record.fields.remove(index);
+        }
+        (None, Some(new)) => record.fields.push(RecordField {
+            label: last.to_string(),
+            value: Some(new),
+        }),
+        (None, None) => panic!("the fixture has no {path} to remove"),
+    }
+    value
 }
 
 /// `args()`'s `requestedAt` and `executeBefore`, in microseconds since the
@@ -684,7 +750,8 @@ fn transfer_value(transfer: &OnLedger<'_>) -> DamlValue {
     ])
 }
 
-/// The root exercise of a Token Standard transaction, through `interface`.
+/// The root exercise of a Token Standard transaction, through `interface`,
+/// on Canton Coin's external party rules.
 fn exercise(
     contract_id: &str,
     interface: &str,
@@ -1422,17 +1489,106 @@ async fn stub_accept(server: &MockServer, prepare_response: Value) {
     stub_prepare_and_execute(server, prepare_response).await;
 }
 
-fn accept_transaction(contract_id: &str, receiver: &str) -> PreparedTransaction {
-    prepared(
+/// `root` acting on `template`, given as `#package-name:Module:Entity`.
+fn on_template(root: Exercise, template: &str) -> Exercise {
+    let parts: Vec<&str> = template.trim_start_matches('#').splitn(3, ':').collect();
+    let [package_name, module_name, entity_name] = parts.as_slice() else {
+        panic!("{template} must be #package-name:Module:Entity");
+    };
+    Exercise {
+        package_name: (*package_name).to_string(),
+        template_id: Some(Identifier {
+            package_id: format!("{package_name}-package-id"),
+            module_name: (*module_name).to_string(),
+            entity_name: (*entity_name).to_string(),
+        }),
+        ..root
+    }
+}
+
+/// The root of an accept of a Canton Coin instruction, with `extra_args` as
+/// its argument's `extraArgs`.
+fn accept_exercise(contract_id: &str, receiver: &str, extra_args: DamlValue) -> Exercise {
+    on_template(
         exercise(
             contract_id,
             "TransferInstruction",
             ACCEPT_CHOICE,
             &[receiver],
-            record(vec![("extraArgs", extra_args())]),
+            record(vec![("extraArgs", extra_args)]),
         ),
+        AMULET_TRANSFER_INSTRUCTION_TEMPLATE,
+    )
+}
+
+fn accept_transaction(contract_id: &str, receiver: &str) -> PreparedTransaction {
+    prepared(
+        accept_exercise(contract_id, receiver, extra_args()),
         receiver,
     )
+}
+
+/// Run an accept of `INSTRUCTION_CID` against a participant that prepares
+/// `root`, and return the refusal. Panics unless the wallet refused to sign
+/// and executed nothing.
+async fn refused_accept(seed: u8, root: impl FnOnce(&str) -> Exercise) -> Refusal {
+    let key = ExternalKeyPair::from_seed([seed; 32]);
+    let receiver = key.party_id("bob");
+    let transaction = prepared(root(&receiver), &receiver);
+    let server = MockServer::start().await;
+    stub_accept(
+        &server,
+        prepare_response(&transaction, &hash_of(&transaction)),
+    )
+    .await;
+
+    let result = accept_transfer(
+        &ledger_for(&server),
+        &registry_for(&server),
+        &key,
+        &receiver,
+        INSTRUCTION_CID,
+        AMULET_TRANSFER_INSTRUCTION_TEMPLATE,
+    )
+    .await;
+
+    assert_eq!(count(&server, EXECUTE_PATH).await, 0, "nothing is executed");
+    match result {
+        Err(Error::TransactionRefused { reason, .. }) => reason,
+        Err(other) => panic!("expected a refusal, got {other}"),
+        Ok(_) => panic!("the accept must not be signed"),
+    }
+}
+
+/// Run a send against a participant that prepares `root` for the sender,
+/// and return the refusal. Panics unless the wallet refused to sign and
+/// executed nothing.
+async fn refused_send(seed: u8, root: impl FnOnce(&str) -> Exercise) -> Refusal {
+    let key = ExternalKeyPair::from_seed([seed; 32]);
+    let sender = key.party_id("alice");
+    let transaction = prepared(root(&sender), &sender);
+    let server = MockServer::start().await;
+    stub_send(
+        &server,
+        &sender,
+        prepare_response(&transaction, &hash_of(&transaction)),
+    )
+    .await;
+
+    let result = send_transfer(
+        &ledger_for(&server),
+        &registry_for(&server),
+        &key,
+        &send_args(&sender),
+    )
+    .await;
+
+    assert_eq!(count(&server, EXECUTE_PATH).await, 0, "nothing is executed");
+    match result {
+        Err(Error::TransactionRefused { reason, .. }) => reason,
+        Err(other) => panic!("expected a refusal, got {other}"),
+        Ok(_) => panic!("the send must not be signed"),
+    }
 }
 
 #[tokio::test]
@@ -1451,6 +1607,7 @@ async fn accept_transfer_exercises_the_instruction_with_the_registry_context() {
         &key,
         &receiver,
         INSTRUCTION_CID,
+        AMULET_TRANSFER_INSTRUCTION_TEMPLATE,
     )
     .await
     {
@@ -1529,6 +1686,7 @@ async fn an_accept_prepared_for_another_instruction_is_not_signed() {
         &key,
         &receiver,
         INSTRUCTION_CID,
+        AMULET_TRANSFER_INSTRUCTION_TEMPLATE,
     )
     .await;
 
@@ -1544,4 +1702,115 @@ async fn an_accept_prepared_for_another_instruction_is_not_signed() {
         Ok(_) => panic!("an accept of another instruction must not be signed"),
     }
     assert_eq!(count(&server, EXECUTE_PATH).await, 0, "nothing is executed");
+}
+
+/// Any template can implement `TransferInstruction`. An accept prepared on a
+/// template the caller did not name is refused, even with the right
+/// interface, choice, contract id and party.
+#[tokio::test]
+async fn an_accept_prepared_on_another_template_is_not_signed() {
+    for (seed, template) in [
+        (
+            29,
+            "#mallory-amulet:Splice.AmuletTransferInstruction:AmuletTransferInstruction",
+        ),
+        (
+            30,
+            "#splice-amulet:Splice.AmuletTransferInstruction:DrainOnAccept",
+        ),
+    ] {
+        let reason = refused_accept(seed, |receiver| {
+            on_template(
+                accept_exercise(INSTRUCTION_CID, receiver, extra_args()),
+                template,
+            )
+        })
+        .await;
+
+        match reason {
+            Refusal::Mismatch {
+                field,
+                expected,
+                found,
+            } => {
+                assert_eq!(field, "template");
+                assert_eq!(expected, AMULET_TRANSFER_INSTRUCTION_TEMPLATE);
+                assert_eq!(found, template);
+            }
+            other => panic!("{template}: expected a template mismatch, got {other}"),
+        }
+    }
+}
+
+/// The registry's context and the empty `meta` the wallet sends are signed
+/// as sent. A participant that changes them is refused.
+#[tokio::test]
+async fn an_accept_with_extra_args_other_than_the_wallet_sent_is_not_signed() {
+    let other_rules = extra_args_with(vec![("amulet-rules", any_contract_id("00c2"))]);
+    let added = extra_args_with(vec![
+        ("amulet-rules", any_contract_id("00c1")),
+        ("open-round", any_contract_id("00c3")),
+    ]);
+    let removed = extra_args_with(Vec::new());
+    let filled_meta = with_field(extra_args(), "meta", Some(filled_metadata()));
+
+    for (seed, case, extra_args) in [
+        (31, "a changed context entry", other_rules),
+        (32, "an added context entry", added),
+        (33, "a removed context entry", removed),
+        (34, "a filled meta", filled_meta),
+    ] {
+        let reason = refused_accept(seed, |receiver| {
+            accept_exercise(INSTRUCTION_CID, receiver, extra_args)
+        })
+        .await;
+
+        match reason {
+            Refusal::Mismatch {
+                field,
+                expected,
+                found,
+            } => {
+                assert_eq!(field, "extraArgs", "{case}");
+                assert_eq!(
+                    serde_json::from_str::<Value>(&expected).ok(),
+                    Some(json!({ "context": context_data(), "meta": { "values": {} } })),
+                    "{case}: the refusal shows what the wallet sent"
+                );
+                assert_ne!(expected, found, "{case}");
+            }
+            other => panic!("{case}: expected an extraArgs mismatch, got {other}"),
+        }
+    }
+}
+
+/// A send compares its own `extraArgs` and `transfer.meta` too.
+#[tokio::test]
+async fn a_send_with_extra_args_or_meta_other_than_the_wallet_sent_is_not_signed() {
+    let cases: [(u8, &str, &str, DamlValue); 2] = [
+        (
+            35,
+            "extraArgs",
+            "extraArgs.context.values",
+            text_map_of(vec![("amulet-rules", any_contract_id("00c2"))]),
+        ),
+        (36, "transfer.meta", "transfer.meta", filled_metadata()),
+    ];
+    for (seed, expected_field, path, value) in cases {
+        let reason = refused_send(seed, |sender| {
+            exercise(
+                FACTORY_ID,
+                "TransferFactory",
+                TRANSFER_CHOICE,
+                &[sender],
+                with_field(transfer_value(&faithful(sender)), path, Some(value)),
+            )
+        })
+        .await;
+
+        match reason {
+            Refusal::Mismatch { field, .. } => assert_eq!(field, expected_field),
+            other => panic!("{path}: expected a mismatch, got {other}"),
+        }
+    }
 }
