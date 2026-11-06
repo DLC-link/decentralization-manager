@@ -310,6 +310,36 @@ describe("browser Back out of a shared view", { timeout: 20_000 }, () => {
   });
 });
 
+describe("peer status hover", { timeout: 20_000 }, () => {
+  it("names a protocol mismatch from the status response", async () => {
+    // This node's byte comes from the response's top level, not from a row.
+    fetchMock.mockImplementation((input: RequestInfo | URL) =>
+      new URL(String(input), "http://x").pathname === "/participants-status"
+        ? json({
+            statuses: [{ id: bravo, status: "HandshakeFailed", wire_version: 0xd2 }],
+            wire_version: 0xd3,
+          })
+        : backend(input),
+    );
+
+    await renderApp("#config");
+
+    const bravoRow = await waitFor(() => {
+      const row = document.querySelector<HTMLElement>(
+        `tr[data-participant-uid="${bravo}"]`,
+      );
+      expect(row).toBeTruthy();
+      return row!;
+    });
+    expect(
+      await within(bravoRow).findByLabelText(
+        "Protocol version mismatch: the peer runs an older decman protocol " +
+          "(0xD2, this node 0xD3) — the peer must upgrade decman",
+      ),
+    ).toBeTruthy();
+  });
+});
+
 describe("party details to peer config", { timeout: 20_000 }, () => {
   it("opens the configuration tab at the peer's row", async () => {
     await renderApp(`#parties/${partyId("alpha")}`);

@@ -52,6 +52,16 @@ describe("peerStatusTooltip", () => {
     ).toBe("Connected via Noise protocol");
   });
 
+  it("keeps the text of every other status", () => {
+    expect(
+      peerStatusTooltip(status({ status: "CurrentNode", wire_version: SELF }), SELF),
+    ).toBe("This is the current node");
+    expect(peerStatusTooltip(status({ status: "Unreachable" }), SELF)).toBe(
+      "Cannot reach peer (TCP connection failed)",
+    );
+    expect(peerStatusTooltip(undefined, SELF)).toBe("Status unknown");
+  });
+
   it("appends latency and the peer's workflow", () => {
     const steps = WORKFLOW_STEPS.Onboarding;
     const st = status({
