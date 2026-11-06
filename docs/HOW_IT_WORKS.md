@@ -8,7 +8,7 @@ Decentralization Manager lets several organizations control one Canton party tog
 |---|---|
 | Participant node | A Canton server that one organization runs. It stores contracts and validates transactions for the parties that it hosts. A participant node is infrastructure, not a party. Other pages also call it a participant or a member node. |
 | Decentralization Manager node | The Decentralization Manager application that one organization runs next to its participant node. The Decentralization Manager nodes of the organizations coordinate workflows with each other. |
-| Canton party | An identity on the ledger. A party can sign contracts and exercise choices, but only through the participant nodes that host it. |
+| Canton party | An identity on the ledger. A party can sign contracts and exercise choices. The participant nodes that host it confirm each transaction that involves it. |
 | Signatory | A party that must authorize a contract. A contract cannot exist without the authority of all its signatories. |
 | Controller | A party that can exercise a choice on a contract. A choice runs with the authority of the signatories of the contract and the controllers of the choice. |
 | Host | A participant node that hosts a party. The host stores the contracts of the party and confirms its transactions. Decentralization Manager gives each host of the Decentralized Party Confirmation permission. With this permission, a host can confirm transactions for the party, but it cannot submit them. |
@@ -20,7 +20,7 @@ Decentralization Manager lets several organizations control one Canton party tog
 | Executor | The member party that executes a proposal after enough member parties confirm it. The code calls it `executor`. |
 | `GovernanceRules` | The Daml contract that lists the member parties and the governance threshold. The Decentralized Party is its signatory. |
 | Governed action | A proposal contract that implements the `GovernableAction` interface. Its `executeImpl` function holds the action to run. |
-| Governance vote | The process in which member parties confirm a proposal. The vote passes when the confirmations meet the governance threshold. Each confirmation is a `GovernanceConfirmation` contract. |
+| Governance vote | The process in which member parties confirm a proposal. The vote passes when the confirmations meet the governance threshold. Each confirmation is a contract: `GovernanceConfirmation` for a governed action, or `GovernanceSelfConfirmation` for a self-management action. |
 
 ## Participant nodes, member parties and the Decentralized Party
 
@@ -49,19 +49,20 @@ A Decentralized Party has three thresholds. Each threshold counts a different th
 |---|---|---|---|---|---|
 | Namespace threshold | Threshold | `DecentralizedNamespaceDefinition.threshold` | Signatures from namespace owners | Each topology change | The operator sets it when they create the party |
 | Confirmation threshold | Confirmation Threshold | `PartyToParticipant.threshold` | Hosts that confirm | Each transaction that needs the approval of the Decentralized Party. This includes each governed action | The namespace threshold. An operator can set a different value at creation or with **Change Threshold** |
-| Governance threshold | Gov Threshold | `GovernanceRules.threshold` | Confirmations from member parties | The execution of a governed action | Deploy Contracts copies the namespace threshold into it. After that, it changes separately from the other two thresholds |
+| Governance threshold | Gov Threshold | `GovernanceRules.threshold` | Confirmations from member parties | The execution of a governed action | Deploy Contracts sets it. The dialog suggests two thirds of the hosts, rounded up, with a minimum of 2. An API request with no value uses the namespace threshold. After that, it changes separately from the other two thresholds |
 
 A transaction submitted as the Decentralized Party needs Daml signing keys from enough participant nodes to meet the namespace threshold. Canton stores a copy of this value in `PartyToParticipant.party_signing_keys.threshold`. Decentralization Manager always keeps the copy equal to the namespace threshold.
 
-Decentralization Manager writes the namespace threshold and the confirmation threshold in [`thresholds.rs`](https://github.com/DLC-link/decentralization-manager/blob/v1.14.0/crates/decman/src/workflow/thresholds.rs#L1-L57). It copies the governance threshold in [`prepare.rs`](https://github.com/DLC-link/decentralization-manager/blob/v1.14.0/crates/decman/src/workflow/contracts/steps/prepare.rs#L199-L216).
+Decentralization Manager writes the namespace threshold and the confirmation threshold in [`thresholds.rs`](https://github.com/DLC-link/decentralization-manager/blob/v1.14.0/crates/decman/src/workflow/thresholds.rs#L1-L57). The Deploy Contracts dialog suggests the governance threshold in [`ContractsDialog.tsx`](https://github.com/DLC-link/decentralization-manager/blob/v1.14.0/crates/decman/frontend/src/components/ContractsDialog.tsx#L155-L166). [`prepare.rs`](https://github.com/DLC-link/decentralization-manager/blob/v1.14.0/crates/decman/src/workflow/contracts/steps/prepare.rs#L439-L441) uses the namespace threshold when a request sends no value.
 
 ### Recommended setup
 
 - Give each organization one participant node and one member party. Then each threshold counts organizations, and no organization counts twice.
 - Keep the namespace threshold and the confirmation threshold at or above the governance threshold. If one of them is lower, fewer node operators than a governance vote needs can act for the Decentralized Party. Canton's [decentralization guide](https://github.com/digital-asset/canton/blob/main/docs-open/src/sphinx/overview/explanations/canton/decentralization.rst#decentralized-validation) gives the same advice for the confirmation threshold.
 
-Deploy Contracts copies the namespace threshold into `GovernanceRules`. If no operator set a different confirmation threshold, the three thresholds are then equal. Decentralization Manager does not check the thresholds after deployment. Two types of change can break the recommendation:
+The Deploy Contracts dialog does not use the namespace threshold. Its suggestion equals the default namespace threshold only when the party has 3 hosts. With any other number of hosts, the suggestion is higher. Decentralization Manager does not check the thresholds after deployment, so check all three thresholds right after Deploy Contracts. Three types of change can break the recommendation:
 
+- Deploy Contracts sets a governance threshold above the namespace threshold or the confirmation threshold. A governance vote can lower it, or **Change Threshold** can raise the other two.
 - A governance vote raises the governance threshold above the namespace threshold or the confirmation threshold. After this change, run **Change Threshold** to raise the lower thresholds.
 - A kick or a **Change Threshold** run lowers the namespace threshold or the confirmation threshold below the governance threshold.
 
@@ -80,7 +81,7 @@ Canton does not accept a normal command from a party whose confirmation threshol
 
 `GovernanceRules` also does these things, which key signatures alone cannot do:
 
-- Member parties confirm at different times. Each confirmation is a `GovernanceConfirmation` contract on the ledger.
+- Member parties confirm at different times. Each confirmation is a separate contract on the ledger.
 - Each action has a type. Each action is a template that implements `GovernableAction`, and the member parties confirm its exact fields.
 - Confirmations expire. Each confirmation has an `expiresAt` time.
 - Anyone can create a proposal, but member parties can confirm only a proposal from a listed proposer. The list holds the member parties and the `additionalProposers`.
@@ -116,7 +117,7 @@ Some actions do not go through a governance vote. The Decentralized Party is the
 
 ## Worked example: a token transfer
 
-Three organizations each run a participant node. Alice, Bob and Carol are their member parties. Each of the three thresholds is 2 of 3, and these values follow the recommended setup. Two of the three member parties must therefore confirm a proposal.
+Three organizations each run a participant node. Alice, Bob and Carol are their member parties. Each of the three thresholds is 2 of 3, and these values follow the recommended setup. Two of the three member parties must therefore confirm a proposal. The receiver has a `TransferPreapproval`, so the tokens move in the same transaction.
 
 ![The diagram shows a governed token transfer. Alice proposes and confirms. Bob confirms and executes. The transfer runs with the authority of the Decentralized Party. The text version follows.](images/how-it-works-sequence.svg)
 
@@ -127,7 +128,7 @@ Text version of the diagram:
 3. Org B sends `POST /governance/confirm`. Decentralization Manager confirms the proposal as Bob. Each confirmation is a `GovernanceConfirmation` contract, not a key signature.
 4. Org B sends `POST /governance/execute`. Decentralization Manager exercises `GovernanceRules_ExecuteConfirmedAction` as Bob. Two confirmations meet the governance threshold, so Carol does not need to confirm.
 5. `GovernanceRules` exercises `GovernableAction_Execute` with the authority of the Decentralized Party.
-6. `executeImpl` exercises `TransferFactory_Transfer`. Decentralization Manager sets the Decentralized Party as the sender of the transfer.
+6. `executeImpl` exercises `TransferFactory_Transfer`. Decentralization Manager sets the Decentralized Party as the sender of the transfer. The proposal names the receiver's `TransferPreapproval` as the factory, so the transfer completes at once. With an `AllocationFactory`, the transfer creates a pending offer, and the receiver must accept it in a later transaction.
 7. `GovernanceRules` creates a `GovernanceExecutionResult`.
 8. The hosts confirm the transaction under the confirmation threshold. This step is Canton validation, not a governance vote. Steps 4 to 7 are one Canton transaction.
 
