@@ -419,6 +419,9 @@ impl KickTargetError {
 /// participant that claimed the key. An unclaimed key counts as hosting
 /// nothing only once every host's own key is known, because until then it may
 /// belong to a host whose key has not been resolved.
+///
+/// A host's cached key counts as known only while it is still an owner. A host
+/// that rotated its key would otherwise have its new key read as unclaimed.
 fn resolve_kick_target(
     participant: Option<&CantonId>,
     owner_key: Option<&str>,
@@ -430,6 +433,13 @@ fn resolve_kick_target(
         let uid = uid.to_string();
         hosts.iter().find(|host| host.participant_uid == uid)
     };
+    // A party missing from the owner cache has nothing to check a key
+    // against, so its hosts' cached keys stand as they are.
+    let known_key = |host: &DecPartyParticipantRow| {
+        host.owner_key
+            .clone()
+            .filter(|key| owners.is_empty() || owners.iter().any(|o| o.owner_key == *key))
+    };
 
     let Some(key) = owner_key else {
         let Some(participant) = participant else {
@@ -438,15 +448,15 @@ fn resolve_kick_target(
             ));
         };
         if let Some(host) = host_of(participant) {
-            return match &host.owner_key {
+            return match known_key(host) {
                 Some(key) => Ok(KickTarget {
-                    owner_key: key.clone(),
+                    owner_key: key,
                     participant: Some(participant.clone()),
                     hosts: true,
                 }),
                 None => Err(KickTargetError::Conflict(format!(
-                    "Participant {participant} hosts the party, but its owner key has not been \
-                     resolved yet. {REFRESH}"
+                    "Participant {participant} hosts the party, but its current owner key has \
+                     not been resolved yet. {REFRESH}"
                 ))),
             };
         }
@@ -515,11 +525,11 @@ fn resolve_kick_target(
         )));
     }
     if claimant.is_none()
-        && let Some(unresolved) = hosts.iter().find(|host| host.owner_key.is_none())
+        && let Some(unresolved) = hosts.iter().find(|host| known_key(host).is_none())
     {
         return Err(KickTargetError::Conflict(format!(
-            "Cannot tell whether owner key {key} belongs to host {uid}, whose owner key has not \
-             been resolved yet. {REFRESH}",
+            "Cannot tell whether owner key {key} belongs to host {uid}, whose current owner key \
+             has not been resolved yet. {REFRESH}",
             uid = unresolved.participant_uid
         )));
     }
@@ -4676,6 +4686,23 @@ mod tests {
         // A claim is the holder's own word, so it needs no other host key.
         let claimed = resolve_kick_target(None, Some("k3"), &hosts, &owners);
         assert!(claimed.is_ok(), "unexpected result: {claimed:?}");
+        Ok(())
+    }
+
+    /// Host 2 rotated its owner key to k4, and the cache still holds k2. The
+    /// unclaimed k4 may be host 2's new key, so neither k4 nor host 2 can be
+    /// kicked until a refresh resolves it.
+    #[test]
+    fn a_host_key_that_is_no_longer_an_owner_counts_as_unresolved() -> anyhow::Result<()> {
+        let (hosts, mut owners) = owner_only_party()?;
+        owners.retain(|owner| owner.owner_key != "k2");
+        for (participant, key) in [(None, Some("k4")), (Some(pid(2)?), None)] {
+            let target = resolve_kick_target(participant.as_ref(), key, &hosts, &owners);
+            assert!(
+                matches!(&target, Err(KickTargetError::Conflict(e)) if e.contains("not been resolved")),
+                "{participant:?} / {key:?}: unexpected result: {target:?}"
+            );
+        }
         Ok(())
     }
 
