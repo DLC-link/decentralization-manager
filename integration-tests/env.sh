@@ -249,6 +249,21 @@ configure_localnet_commitments() {
     }
 }
 
+# Splice 0.10 turns Canton's repair commands off by default, which removes
+# PurgeContracts. DecMan's purge of a former party needs it, and an operator
+# who purges turns it on the same way. Idempotent, like the patch above.
+configure_localnet_repair() {
+    local conf="$LOCALNET_COMPOSE_DIR/conf/canton/app.conf"
+    if grep -q "enable-repair-commands" "$conf"; then
+        return 0
+    fi
+    printf '\ncanton.features.enable-repair-commands = yes\n' >> "$conf"
+    grep -q "enable-repair-commands" "$conf" || {
+        echo "Failed to turn on Canton's repair commands in $conf" >&2
+        return 1
+    }
+}
+
 localnet_compose() {
     export IMAGE_TAG="$LOCALNET_VERSION"
     docker compose \
@@ -269,6 +284,7 @@ start_localnet() {
 
     configure_localnet_reconciliation
     configure_localnet_commitments
+    configure_localnet_repair
 
     echo "Starting localnet..."
     # Only start the services our tests actually use. The 3 active profiles
