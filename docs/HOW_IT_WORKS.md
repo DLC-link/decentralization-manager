@@ -8,7 +8,7 @@ Decentralization Manager lets several organizations control one Canton party tog
 |---|---|
 | Participant node | A Canton server that one organization runs. It stores contracts and validates transactions for the parties that it hosts. A participant node is infrastructure, not a party. Other pages also call it a participant or a member node. |
 | Decentralization Manager node | The Decentralization Manager application that one organization runs next to its participant node. The Decentralization Manager nodes of the organizations coordinate workflows with each other. |
-| Canton party | An identity on the ledger. A party can sign contracts and exercise choices. The participant nodes that host it confirm each transaction that involves it. |
+| Canton party | An identity on the ledger. A party can sign contracts and exercise choices. The participant nodes that host it confirm each transaction that needs its approval. |
 | Signatory | A party that must authorize a contract. A contract cannot exist without the authority of all its signatories. |
 | Controller | A party that can exercise a choice on a contract. A choice runs with the authority of the signatories of the contract and the controllers of the choice. |
 | Host | A participant node that hosts a party. The host stores the contracts of the party and confirms its transactions. Decentralization Manager gives each host of the Decentralized Party Confirmation permission. With this permission, a host can confirm transactions for the party, but it cannot submit them. |
