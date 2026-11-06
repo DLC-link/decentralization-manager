@@ -1,5 +1,5 @@
 use super::rows::{
-    ChainAuditCacheRow, DecPartyContractRow, DecPartyParticipantRow, DecPartyRow,
+    ChainAuditCacheRow, DecPartyContractRow, DecPartyOwnerRow, DecPartyParticipantRow, DecPartyRow,
     FormerDecPartyRow, GovernanceAuditRow,
 };
 use crate::{
@@ -57,8 +57,9 @@ pub trait SchemaRead {
     /// One former party, dismissed or not.
     async fn get_former_dec_party(&self, party_id: &CantonId) -> Result<Option<FormerDecPartyRow>>;
 
-    /// Get owner keys for a decentralized party
-    async fn get_dec_party_owners(&self, party_id: &CantonId) -> Result<Vec<String>>;
+    /// Get the owner keys of a decentralized party, with the participant
+    /// that claimed each one.
+    async fn get_dec_party_owners(&self, party_id: &CantonId) -> Result<Vec<DecPartyOwnerRow>>;
 
     /// Get participants for a decentralized party
     async fn get_dec_party_participants(
@@ -81,7 +82,7 @@ pub trait SchemaRead {
     ) -> Result<Vec<DecPartyContractRow>>;
 
     /// Get all owners for parties matching a prefix (bulk query)
-    async fn get_all_dec_party_owners(&self, prefix: &str) -> Result<Vec<(String, String)>>;
+    async fn get_all_dec_party_owners(&self, prefix: &str) -> Result<Vec<DecPartyOwnerRow>>;
 
     /// Get all participants for parties matching a prefix (bulk query)
     async fn get_all_dec_party_participants(
@@ -269,8 +270,21 @@ pub trait Commitable {
     /// Upsert a decentralized party
     async fn upsert_dec_party(&mut self, row: &DecPartyRow) -> Result;
 
-    /// Replace all owners for a decentralized party
+    /// Replace all owners for a decentralized party. An owner that stays
+    /// keeps the participant that claimed it.
     async fn replace_dec_party_owners(&mut self, party_id: &CantonId, owners: &[String]) -> Result;
+
+    /// Remove a single owner key from a decentralized party.
+    async fn delete_dec_party_owner(&mut self, party_id: &CantonId, owner_key: &str) -> Result;
+
+    /// Record the participant that holds an owner key of a decentralized
+    /// party. A key the party does not list is left alone.
+    async fn update_owner_claim(
+        &mut self,
+        party_id: &CantonId,
+        owner_key: &str,
+        participant_uid: &str,
+    ) -> Result;
 
     /// Replace all participants for a decentralized party
     async fn replace_dec_party_participants(

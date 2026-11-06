@@ -28,7 +28,11 @@ pub async fn start_coordinator(
     tracing::info!("Initializing Noise server...");
 
     // Exclude the participant being kicked from peers
-    let excluded_participants = vec![kick_config.participant_id.to_string()];
+    let excluded_participants = kick_config
+        .participant_id
+        .iter()
+        .map(ToString::to_string)
+        .collect();
 
     let server = NoiseServer::new(
         node_config.clone(),
@@ -151,13 +155,16 @@ pub async fn start_coordinator(
                         if let Err(e) = prune_cached_membership(
                             &db,
                             &kick_config.decentralized_party_id,
-                            &kick_config.participant_id,
+                            kick_config.participant_id.as_ref(),
+                            &kick_config.namespace_fingerprint,
                         )
                         .await
                         {
                             tracing::warn!(
-                                "Kick submitted but pruning {} from cached membership failed: \
-                                 {e}. Refresh /decentralized-parties before re-adding it.",
+                                "Kick submitted but pruning owner key {} ({:?}) from cached \
+                                 membership failed: {e}. Refresh /decentralized-parties before \
+                                 re-adding it.",
+                                kick_config.namespace_fingerprint,
                                 kick_config.participant_id
                             );
                         }

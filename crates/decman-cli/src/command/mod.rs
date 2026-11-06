@@ -1181,7 +1181,8 @@ fn run_parties(client: &mut DecmanClient, command: PartiesCommand) -> Result<Out
             let party = resolve_party(client, &party)?;
             let body = to_body(&KickRequest {
                 decentralized_party_id: canton_id(&party.id)?,
-                participant_id: canton_id(&participant)?,
+                participant_id: Some(canton_id(&participant)?),
+                owner_key: None,
                 new_threshold: threshold,
                 previous_threshold: known_threshold(&party)?,
             })?;

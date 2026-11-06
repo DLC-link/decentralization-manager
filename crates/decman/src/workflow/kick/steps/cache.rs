@@ -6,7 +6,8 @@ use crate::{
     error::Result,
 };
 
-/// Drop the kicked participant from this node's cached membership.
+/// Drop the kicked member from this node's cached membership: its owner key,
+/// and its participant row when it hosted the party.
 ///
 /// `POST /add-party` and `POST /kick` validate against `dec_party_participants`,
 /// which in production is only ever written by the `/decentralized-parties`
@@ -21,14 +22,21 @@ use crate::{
 pub async fn prune_cached_membership(
     db: &SqlitePool,
     party_id: &CantonId,
-    kicked: &CantonId,
+    kicked: Option<&CantonId>,
+    owner_key: &str,
 ) -> Result {
     let mut tx = db.begin_transaction().await?;
-    tx.delete_dec_party_participant(party_id, &kicked.to_string())
-        .await?;
+    if let Some(kicked) = kicked {
+        tx.delete_dec_party_participant(party_id, &kicked.to_string())
+            .await?;
+    }
+    tx.delete_dec_party_owner(party_id, owner_key).await?;
     Commitable::commit(tx).await?;
 
-    tracing::info!("Removed kicked participant {kicked} from cached membership of {party_id}");
+    tracing::info!(
+        "Removed kicked member {kicked:?} (owner key {owner_key}) from cached membership of \
+         {party_id}"
+    );
     Ok(())
 }
 
@@ -78,6 +86,8 @@ mod tests {
         .await?;
         tx.replace_dec_party_participants(&party_id, &participants)
             .await?;
+        let owners: Vec<String> = (1..=uids.len() + 1).map(|n| format!("owner-{n}")).collect();
+        tx.replace_dec_party_owners(&party_id, &owners).await?;
         Commitable::commit(tx).await?;
         Ok(party_id)
     }
@@ -90,11 +100,31 @@ mod tests {
         let party_id = seed(&pool, &[NODE1, NODE2]).await?;
         let kicked = CantonId::parse(NODE2)?;
 
-        prune_cached_membership(&pool, &party_id, &kicked).await?;
+        prune_cached_membership(&pool, &party_id, Some(&kicked), "owner-2").await?;
 
         let remaining = pool.get_dec_party_participants(&party_id).await?;
         assert_eq!(remaining.len(), 1);
         assert_eq!(remaining[0].participant_uid, NODE1);
+        Ok(())
+    }
+
+    /// A member that owns the namespace without hosting the party leaves only
+    /// the owner set, so every host row stays.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn an_owner_only_kick_drops_only_the_owner(pool: SqlitePool) -> Result {
+        let party_id = seed(&pool, &[NODE1, NODE2]).await?;
+
+        prune_cached_membership(&pool, &party_id, None, "owner-3").await?;
+
+        assert_eq!(pool.get_dec_party_participants(&party_id).await?.len(), 2);
+        let mut owners: Vec<String> = pool
+            .get_dec_party_owners(&party_id)
+            .await?
+            .into_iter()
+            .map(|owner| owner.owner_key)
+            .collect();
+        owners.sort();
+        assert_eq!(owners, vec!["owner-1", "owner-2"]);
         Ok(())
     }
 
@@ -106,7 +136,7 @@ mod tests {
         let party_id = seed(&pool, &[NODE1, NODE2]).await?;
         let never_a_member = CantonId::parse(NODE9)?;
 
-        prune_cached_membership(&pool, &party_id, &never_a_member).await?;
+        prune_cached_membership(&pool, &party_id, Some(&never_a_member), "owner-9").await?;
 
         let remaining = pool.get_dec_party_participants(&party_id).await?;
         assert_eq!(remaining.len(), 2);
@@ -135,7 +165,8 @@ mod tests {
         .await?;
         Commitable::commit(tx).await?;
 
-        prune_cached_membership(&pool, &party_id, &CantonId::parse(NODE2)?).await?;
+        prune_cached_membership(&pool, &party_id, Some(&CantonId::parse(NODE2)?), "owner-2")
+            .await?;
 
         let remaining = pool.get_dec_party_participants(&party_id).await?;
         assert_eq!(remaining.len(), 1);

@@ -78,6 +78,35 @@ describe("Threshold changes in the feed", () => {
     expect(struckThrough()).toEqual([]);
   });
 
+  it("names the owner key on a Kick invitation for an owner that hosts nothing", () => {
+    const ownerKey = `1220${"d".repeat(64)}`;
+    renderFeed({
+      pendingInvitations: [
+        {
+          id: "kick-owner-invite",
+          invitation_type: "Kick",
+          coordinator_pubkey: "c0ffee".repeat(8),
+          received_at: 1_700_000_000,
+          participants: [],
+          dar_filenames: [],
+          dar_hashes: [],
+          package_names: [],
+          contract_intents: [],
+          dec_party_id: partyId,
+          kicked_owner_key: ownerKey,
+          previous_threshold: 2,
+          new_threshold: 2,
+        },
+      ],
+    });
+
+    expect(screen.getByText(/Remove owner key 1220dddddd…dddddddd/)).toBeTruthy();
+    openReview();
+    expect(screen.getByTestId("kicked-owner-key").textContent).toContain(
+      "1220dddddd…dddddddd",
+    );
+  });
+
   it("shows the confirmation threshold a change-threshold invitation asks for", () => {
     renderFeed({
       pendingInvitations: [

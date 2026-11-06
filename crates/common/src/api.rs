@@ -287,7 +287,15 @@ pub struct ReconnectFormerPartyRequest {
 #[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 pub struct KickRequest {
     pub decentralized_party_id: CantonId,
-    pub participant_id: CantonId,
+    /// The member to remove. A member that hosts the party is named by its
+    /// participant. A member that only owns the namespace can be named by its
+    /// participant when a peer has claimed its key, or by `owner_key`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub participant_id: Option<CantonId>,
+    /// The namespace owner key to remove. An owner key that no peer has
+    /// claimed has no participant, so this is the only way to name it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_key: Option<String>,
     pub new_threshold: i32,
     /// The party's threshold *before* the kick. Display-only — surfaced on
     /// the workflow run card as "old → new" so the operator can see the
@@ -1153,7 +1161,14 @@ pub struct RequestDarPayload {
 #[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 pub struct KickInvitePayload {
     pub dec_party_id: CantonId,
-    pub kicked_participant: CantonId,
+    /// The participant that leaves. `None` for an owner key that no peer has
+    /// claimed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kicked_participant: Option<CantonId>,
+    /// The namespace owner key the kick removes. Absent from coordinators
+    /// that predate the field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kicked_owner_key: Option<String>,
     pub new_threshold: i32,
     pub previous_threshold: i32,
     /// The confirmation threshold the coordinator will propose. `None` means

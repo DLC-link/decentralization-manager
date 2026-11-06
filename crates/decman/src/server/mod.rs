@@ -649,6 +649,7 @@ impl WorkflowTriggers {
         let mut dar_filenames = Vec::new();
         let mut dar_hashes = Vec::new();
         let mut kicked_participant = None;
+        let mut kicked_owner_key = None;
         let mut new_participant = None;
         let mut new_threshold = None;
         let mut previous_threshold = None;
@@ -673,7 +674,8 @@ impl WorkflowTriggers {
                 workflow_instance = p.workflow_instance;
             }
             InvitationMeta::Kick(p) => {
-                kicked_participant = Some(p.kicked_participant);
+                kicked_participant = p.kicked_participant;
+                kicked_owner_key = p.kicked_owner_key;
                 new_threshold = Some(p.new_threshold);
                 previous_threshold = Some(p.previous_threshold);
                 confirmation_threshold = p.confirmation_threshold;
@@ -732,6 +734,7 @@ impl WorkflowTriggers {
             dar_filenames,
             dar_hashes,
             kicked_participant,
+            kicked_owner_key,
             new_participant,
             new_threshold,
             previous_threshold,
@@ -2994,6 +2997,7 @@ mod tests {
                 previous_threshold: None,
                 new_threshold: None,
                 kicked_participant: None,
+                kicked_owner_key: None,
                 added_participant: None,
                 package_names: Vec::new(),
                 dar_filenames: Vec::new(),

@@ -29,6 +29,7 @@ pub mod identity_survives_dismiss;
 pub mod invite_cap;
 pub mod invite_survives_peer_restart;
 pub mod kick;
+pub mod kick_owner_only;
 pub mod legacy_key_retirement;
 pub mod local_party_adopt_endpoints;
 pub mod local_party_adopt_key;
