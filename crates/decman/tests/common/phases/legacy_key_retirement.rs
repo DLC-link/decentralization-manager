@@ -70,6 +70,18 @@ async fn head(
     }))
 }
 
+/// Whether two key mappings carry the same party, threshold and keys. Canton
+/// stores the keys sorted by fingerprint, so their order does not count.
+fn same_keys(a: &PartyToKeyMapping, b: &PartyToKeyMapping) -> bool {
+    let fingerprints = |m: &PartyToKeyMapping| {
+        m.signing_keys
+            .iter()
+            .map(utils::compute_fingerprint)
+            .collect::<std::collections::BTreeSet<_>>()
+    };
+    a.party == b.party && a.threshold == b.threshold && fingerprints(a) == fingerprints(b)
+}
+
 /// The Daml key a participant's vault holds for the party, under the name
 /// onboarding and add-party give it.
 async fn member_daml_key(config: &NodeConfig, prefix: &str) -> anyhow::Result<SigningPublicKey> {
@@ -158,11 +170,8 @@ pub async fn seed(f: &Fixture) -> anyhow::Result<Legacy> {
     }
     poll_until(Duration::from_secs(60), || async {
         for config in &configs {
-            if topology::fetch_party_to_key_mapping(config, &sync, &party)
-                .await?
-                .as_ref()
-                != Some(&mapping)
-            {
+            let active = topology::fetch_party_to_key_mapping(config, &sync, &party).await?;
+            if !active.is_some_and(|active| same_keys(&active, &mapping)) {
                 return Ok(false);
             }
         }
@@ -184,7 +193,7 @@ pub async fn assert_removed(f: &Fixture, legacy: &Legacy) -> anyhow::Result<()> 
             };
             if serial != legacy.0 + 1
                 || operation != TopologyChangeOp::Remove as i32
-                || mapping != legacy.1
+                || !same_keys(&mapping, &legacy.1)
             {
                 return Ok(false);
             }
