@@ -281,6 +281,8 @@ participant, so a retry is safe.
   inside a private cluster network.
 - A response body over 64 MiB returns `Error::ResponseTooLarge`. Set
   `ClientOptions::max_response_bytes` to change the cap.
+- A redirect returns `Error::Api` with its 3xx status. The clients follow no
+  redirect, because it could resend the request to a URL they never checked.
 - An instruction id that is not a Canton contract id returns
   `Error::InvalidContractId`, before any call. A contract id is lowercase hex
   of even length. It starts with `00` and has at least 66 digits. The registry

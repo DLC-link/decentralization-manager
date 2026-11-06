@@ -1975,6 +1975,63 @@ fn the_clients_refuse_plain_http_to_another_host_unless_allowed() {
     assert!(RegistryClient::with_options("http://scan.example.com", None, allowed).is_ok());
 }
 
+/// A 307 or 308 would make the client send the prepare body again, to a URL
+/// the plain `http` rule never checked. The client follows no redirect.
+#[tokio::test]
+async fn a_send_with_a_redirected_prepare_is_not_signed() {
+    for (seed, status) in [(45u8, 307u16), (46, 308)] {
+        let key = ExternalKeyPair::from_seed([seed; 32]);
+        let sender = key.party_id("alice");
+        let elsewhere = MockServer::start().await;
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path(PREPARE_PATH))
+            .respond_with(ResponseTemplate::new(status).insert_header(
+                "location",
+                format!("{uri}{PREPARE_PATH}", uri = elsewhere.uri()),
+            ))
+            .with_priority(1)
+            .mount(&server)
+            .await;
+        stub_send(&server, &sender, faithful_send(&sender).1).await;
+
+        let result = send_transfer(
+            &ledger_for(&server),
+            &registry_for(&server),
+            &key,
+            &send_args(&sender),
+        )
+        .await;
+
+        match result {
+            Err(Error::Api {
+                path,
+                status: found,
+                ..
+            }) => {
+                assert_eq!(path, "/v2/interactive-submission/prepare");
+                assert_eq!(found, status);
+            }
+            Err(other) => panic!("{status}: expected the redirect as an API error, got {other}"),
+            Ok(_) => panic!("{status}: a redirected prepare must not be signed"),
+        }
+        assert_eq!(
+            count(&server, EXECUTE_PATH).await,
+            0,
+            "{status}: nothing is executed"
+        );
+        assert_eq!(
+            elsewhere
+                .received_requests()
+                .await
+                .unwrap_or_default()
+                .len(),
+            0,
+            "{status}: the redirect is not followed"
+        );
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Transactions of a shape the check does not accept.
 // ---------------------------------------------------------------------------

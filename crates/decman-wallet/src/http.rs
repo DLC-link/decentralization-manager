@@ -8,7 +8,7 @@ use std::{
     time::Duration,
 };
 
-use reqwest::{Client, RequestBuilder, Response, Url};
+use reqwest::{Client, RequestBuilder, Response, Url, redirect::Policy};
 use serde::{Serialize, de::DeserializeOwned};
 use serde_json::Value;
 
@@ -62,8 +62,11 @@ impl JsonHost {
     ) -> Result<Self> {
         let base_url = base_url.into().trim_end_matches('/').to_string();
         check_url(&base_url, options.allow_plain_http)?;
+        // A followed redirect would resend the request, body and all, to a
+        // URL that `check_url` never saw.
         let http = Client::builder()
             .timeout(options.timeout)
+            .redirect(Policy::none())
             .build()
             .map_err(|source| Error::Client {
                 host: base_url.clone(),
