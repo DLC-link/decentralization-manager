@@ -1358,6 +1358,10 @@ fn non_hosting_owners(
 
 /// Fill in from the cache what a live Canton read cannot know: the owner key
 /// each other host reported, and the participant that claimed each owner.
+///
+/// A cached key that is no longer an owner stays out. The host may have
+/// rotated its key, and a filled-in key stops the topology fallback from
+/// looking up the new one.
 async fn with_cached_owner_claims(
     db: &SqlitePool,
     party_id: &CantonId,
@@ -1378,6 +1382,7 @@ async fn with_cached_owner_claims(
         if participant.owner_key.is_none() {
             participant.owner_key = cached_keys
                 .get(&participant.participant_uid.to_string())
+                .filter(|key| owners.contains(*key))
                 .cloned();
         }
     }
@@ -2897,6 +2902,48 @@ mod tests {
                 participant_uid: Some(uid(3)?),
             }]
         );
+        Ok(())
+    }
+
+    /// Host 2 rotated its owner key from k2 to k4, and the cache still holds
+    /// k2. The live read leaves host 2's key unknown, so the topology fallback
+    /// looks it up, and the unclaimed k4 is not listed as hosting nothing.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_live_read_drops_a_cached_key_that_is_no_longer_an_owner(
+        pool: SqlitePool,
+    ) -> anyhow::Result<()> {
+        let party_id = CantonId::parse(&format!("net-a::1220{}", "ab".repeat(32)))?;
+        let mut tx = pool.begin_transaction().await?;
+        tx.upsert_dec_party(&DecPartyRow {
+            party_id: party_id.to_string(),
+            prefix: "net-a".to_string(),
+            threshold: 2,
+            updated_at: 0,
+            my_owner_key: Some("k1".to_string()),
+            confirmation_threshold: None,
+        })
+        .await?;
+        tx.replace_dec_party_participants(
+            &party_id,
+            &[DecPartyParticipantRow {
+                dec_party_id: party_id.to_string(),
+                participant_uid: uid(2)?.to_string(),
+                permission: "confirmation".to_string(),
+                owner_key: Some("k2".to_string()),
+                signing_key: None,
+            }],
+        )
+        .await?;
+        tx.replace_dec_party_owners(&party_id, &keys(&["k1", "k4"]))
+            .await?;
+        Commitable::commit(tx).await?;
+
+        let live = vec![host(1, Some("k1"))?, host(2, None)?];
+        let (participants, listed) =
+            with_cached_owner_claims(&pool, &party_id, &keys(&["k1", "k4"]), live).await;
+
+        assert_eq!(participants[1].owner_key, None);
+        assert_eq!(listed, Vec::new());
         Ok(())
     }
 
