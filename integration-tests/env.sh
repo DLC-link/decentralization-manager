@@ -264,6 +264,22 @@ configure_localnet_repair() {
     }
 }
 
+# Splice 0.10 turns Canton's key export off by default. A party onboarded on
+# a 0.10 node gets its Daml key from the participant's vault, and DecMan
+# copies it into its own key store on the first deploy. An operator turns the
+# export on the same way until DecMan holds every key. Idempotent.
+configure_localnet_key_download() {
+    local conf="$LOCALNET_COMPOSE_DIR/conf/canton/app.conf"
+    if grep -q "enable-key-download" "$conf"; then
+        return 0
+    fi
+    printf '\ncanton.parameters.enable-key-download = yes\n' >> "$conf"
+    grep -q "enable-key-download" "$conf" || {
+        echo "Failed to turn on Canton's key export in $conf" >&2
+        return 1
+    }
+}
+
 localnet_compose() {
     export IMAGE_TAG="$LOCALNET_VERSION"
     docker compose \
@@ -285,6 +301,7 @@ start_localnet() {
     configure_localnet_reconciliation
     configure_localnet_commitments
     configure_localnet_repair
+    configure_localnet_key_download
 
     echo "Starting localnet..."
     # Only start the services our tests actually use. The 3 active profiles
