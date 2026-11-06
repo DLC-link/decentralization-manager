@@ -38,7 +38,7 @@ use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use prost::Message;
 use serde_json::{Value, json};
 use wiremock::{
-    Mock, MockServer, ResponseTemplate,
+    Mock, MockServer, Request, ResponseTemplate,
     matchers::{method, path},
 };
 
@@ -797,7 +797,8 @@ fn prepared(root: Exercise, act_as: &str) -> PreparedTransaction {
     prepared_node(NodeType::Exercise(root), act_as)
 }
 
-/// A one-node transaction with a node of any kind at its root.
+/// A one-node transaction with a node of any kind at its root. Its command id
+/// is `command-1` until [`for_command`] sets another.
 fn prepared_node(root: NodeType, act_as: &str) -> PreparedTransaction {
     PreparedTransaction {
         transaction: Some(DamlTransaction {
@@ -828,6 +829,18 @@ fn prepared_node(root: NodeType, act_as: &str) -> PreparedTransaction {
     }
 }
 
+/// `transaction` as prepared for the command `command_id`.
+fn for_command(mut transaction: PreparedTransaction, command_id: &str) -> PreparedTransaction {
+    if let Some(submitter) = transaction
+        .metadata
+        .as_mut()
+        .and_then(|metadata| metadata.submitter_info.as_mut())
+    {
+        submitter.command_id = command_id.to_string();
+    }
+    transaction
+}
+
 fn hash_of(transaction: &PreparedTransaction) -> Vec<u8> {
     match compute_prepared_transaction_hash(HashingScheme::V2, transaction) {
         Ok(hash) => hash,
@@ -844,9 +857,9 @@ fn prepare_response(transaction: &PreparedTransaction, hash: &[u8]) -> Value {
     })
 }
 
-/// A faithful send transaction for `sender`, and the prepare response for it.
-fn faithful_send(sender: &str) -> (PreparedTransaction, Value) {
-    let transaction = prepared(
+/// A faithful send transaction for `sender`.
+fn faithful_send(sender: &str) -> PreparedTransaction {
+    prepared(
         exercise(
             FACTORY_ID,
             "TransferFactory",
@@ -855,9 +868,42 @@ fn faithful_send(sender: &str) -> (PreparedTransaction, Value) {
             transfer_value(&faithful(sender)),
         ),
         sender,
-    );
-    let response = prepare_response(&transaction, &hash_of(&transaction));
-    (transaction, response)
+    )
+}
+
+/// What the stub participant answers a prepare with, given the command id
+/// the wallet sent.
+trait Preparer: Fn(&str) -> Value + Send + Sync + 'static {}
+
+impl<F: Fn(&str) -> Value + Send + Sync + 'static> Preparer for F {}
+
+/// A participant that prepares `transaction` for the command id the wallet
+/// sends, and answers with what `respond` makes of it.
+fn preparing(
+    transaction: PreparedTransaction,
+    respond: impl Fn(&PreparedTransaction) -> Value + Send + Sync + 'static,
+) -> impl Preparer {
+    move |command_id| respond(&for_command(transaction.clone(), command_id))
+}
+
+/// A participant that prepares `transaction` for the command id the wallet
+/// sends, and answers with its V2 hash.
+fn honestly(transaction: PreparedTransaction) -> impl Preparer {
+    preparing(transaction, |transaction| {
+        prepare_response(transaction, &hash_of(transaction))
+    })
+}
+
+/// The command id the wallet sent with its prepare.
+async fn sent_command_id(server: &MockServer) -> String {
+    let prepares = bodies(server, PREPARE_PATH).await;
+    match prepares
+        .first()
+        .and_then(|prepare| prepare["commandId"].as_str())
+    {
+        Some(command_id) if !command_id.is_empty() => command_id.to_string(),
+        _ => panic!("the wallet must send a command id with its prepare"),
+    }
 }
 
 fn context_data() -> Value {
@@ -890,10 +936,16 @@ async fn stub_factory(server: &MockServer) {
         .await;
 }
 
-async fn stub_prepare_and_execute(server: &MockServer, prepare_response: Value) {
+async fn stub_prepare_and_execute(server: &MockServer, prepare: impl Preparer) {
     Mock::given(method("POST"))
         .and(path(PREPARE_PATH))
-        .respond_with(ResponseTemplate::new(200).set_body_json(prepare_response))
+        .respond_with(move |request: &Request| {
+            let command_id = serde_json::from_slice::<Value>(&request.body)
+                .ok()
+                .and_then(|body| body["commandId"].as_str().map(str::to_string))
+                .unwrap_or_default();
+            ResponseTemplate::new(200).set_body_json(prepare(&command_id))
+        })
         .mount(server)
         .await;
     Mock::given(method("POST"))
@@ -908,7 +960,7 @@ async fn stub_prepare_and_execute(server: &MockServer, prepare_response: Value) 
 
 /// A ledger and registry ready for `sender` to send: one unlocked Amulet
 /// holding it owns, plus holdings the send must not spend.
-async fn stub_send(server: &MockServer, sender: &str, prepare_response: Value) {
+async fn stub_send(server: &MockServer, sender: &str, prepare: impl Preparer) {
     let lock =
         json!({ "holders": [DSO], "expiresAt": null, "expiresAfter": null, "context": null });
     let holding = "pkg:Splice.Api.Token.HoldingV1:Holding";
@@ -940,7 +992,7 @@ async fn stub_send(server: &MockServer, sender: &str, prepare_response: Value) {
     )
     .await;
     stub_factory(server).await;
-    stub_prepare_and_execute(server, prepare_response).await;
+    stub_prepare_and_execute(server, prepare).await;
 }
 
 fn send_args(sender: &str) -> TransferArgs {
@@ -1003,10 +1055,8 @@ async fn assert_no_seed_on_the_wire(server: &MockServer, key: &ExternalKeyPair) 
 async fn send_transfer_runs_the_steps_in_order_and_signs_the_hash_locally() {
     let key = ExternalKeyPair::from_seed([21u8; 32]);
     let sender = key.party_id("alice");
-    let (transaction, response) = faithful_send(&sender);
-    let hash = hash_of(&transaction);
     let server = MockServer::start().await;
-    stub_send(&server, &sender, response.clone()).await;
+    stub_send(&server, &sender, honestly(faithful_send(&sender))).await;
 
     let receipt = match send_transfer(
         &ledger_for(&server),
@@ -1020,6 +1070,8 @@ async fn send_transfer_runs_the_steps_in_order_and_signs_the_hash_locally() {
         Err(e) => panic!("the send must succeed: {e}"),
     };
 
+    let transaction = for_command(faithful_send(&sender), &sent_command_id(&server).await);
+    let hash = hash_of(&transaction);
     assert_eq!(receipt.update_id, "update-1");
     assert_eq!(receipt.completion_offset, 43);
     assert_eq!(receipt.factory_id, FACTORY_ID);
@@ -1096,7 +1148,7 @@ async fn send_transfer_runs_the_steps_in_order_and_signs_the_hash_locally() {
     let execute = &bodies(&server, EXECUTE_PATH).await[0];
     assert_eq!(
         execute["preparedTransaction"],
-        response["preparedTransaction"]
+        STANDARD.encode(transaction.encode_to_vec())
     );
     assert_eq!(execute["hashingSchemeVersion"], "HASHING_SCHEME_VERSION_V2");
     assert_eq!(execute["deduplicationPeriod"], json!({ "Empty": {} }));
@@ -1140,7 +1192,7 @@ async fn send_transfer_refuses_when_the_party_holds_nothing_unlocked() {
     )
     .await;
     stub_factory(&server).await;
-    stub_prepare_and_execute(&server, faithful_send(&sender).1).await;
+    stub_prepare_and_execute(&server, honestly(faithful_send(&sender))).await;
 
     let error = match send_transfer(
         &ledger_for(&server),
@@ -1175,7 +1227,7 @@ async fn send_transfer_refuses_when_the_party_holds_nothing_unlocked() {
 async fn a_hash_that_does_not_match_the_transaction_is_not_signed() {
     let key = ExternalKeyPair::from_seed([23u8; 32]);
     let sender = key.party_id("alice");
-    let (shown, _) = faithful_send(&sender);
+    let shown = faithful_send(&sender);
     let other = prepared(
         exercise(
             FACTORY_ID,
@@ -1190,7 +1242,14 @@ async fn a_hash_that_does_not_match_the_transaction_is_not_signed() {
         &sender,
     );
     let server = MockServer::start().await;
-    stub_send(&server, &sender, prepare_response(&shown, &hash_of(&other))).await;
+    stub_send(
+        &server,
+        &sender,
+        preparing(shown, move |shown| {
+            prepare_response(shown, &hash_of(&other))
+        }),
+    )
+    .await;
 
     let error = match send_transfer(
         &ledger_for(&server),
@@ -1241,12 +1300,7 @@ async fn a_transaction_for_a_different_receiver_is_not_signed() {
         &sender,
     );
     let server = MockServer::start().await;
-    stub_send(
-        &server,
-        &sender,
-        prepare_response(&redirected, &hash_of(&redirected)),
-    )
-    .await;
+    stub_send(&server, &sender, honestly(redirected)).await;
 
     let error = match send_transfer(
         &ledger_for(&server),
@@ -1410,14 +1464,8 @@ async fn each_field_the_check_reads_refuses_a_tampered_transaction() {
     ];
 
     for (expected_field, root) in tampered {
-        let transaction = prepared(root, &sender);
         let server = MockServer::start().await;
-        stub_send(
-            &server,
-            &sender,
-            prepare_response(&transaction, &hash_of(&transaction)),
-        )
-        .await;
+        stub_send(&server, &sender, honestly(prepared(root, &sender))).await;
 
         let result = send_transfer(
             &ledger_for(&server),
@@ -1449,10 +1497,13 @@ async fn each_field_the_check_reads_refuses_a_tampered_transaction() {
 async fn an_unsupported_hashing_scheme_is_not_signed() {
     let key = ExternalKeyPair::from_seed([26u8; 32]);
     let sender = key.party_id("alice");
-    let (_, mut response) = faithful_send(&sender);
-    response["hashingSchemeVersion"] = json!("HASHING_SCHEME_VERSION_V4");
+    let named_v4 = preparing(faithful_send(&sender), |transaction| {
+        let mut response = prepare_response(transaction, &hash_of(transaction));
+        response["hashingSchemeVersion"] = json!("HASHING_SCHEME_VERSION_V4");
+        response
+    });
     let server = MockServer::start().await;
-    stub_send(&server, &sender, response).await;
+    stub_send(&server, &sender, named_v4).await;
 
     let error = match send_transfer(
         &ledger_for(&server),
@@ -1486,7 +1537,7 @@ fn accept_path() -> String {
 }
 
 /// A ledger and registry ready for `receiver` to accept `INSTRUCTION_CID`.
-async fn stub_accept(server: &MockServer, prepare_response: Value) {
+async fn stub_accept(server: &MockServer, prepare: impl Preparer) {
     Mock::given(method("POST"))
         .and(path(accept_path()))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
@@ -1495,7 +1546,7 @@ async fn stub_accept(server: &MockServer, prepare_response: Value) {
         })))
         .mount(server)
         .await;
-    stub_prepare_and_execute(server, prepare_response).await;
+    stub_prepare_and_execute(server, prepare).await;
 }
 
 /// `root` acting on `template`, given as `#package-name:Module:Entity`.
@@ -1543,13 +1594,8 @@ fn accept_transaction(contract_id: &str, receiver: &str) -> PreparedTransaction 
 async fn refused_accept(seed: u8, root: impl FnOnce(&str) -> Exercise) -> Refusal {
     let key = ExternalKeyPair::from_seed([seed; 32]);
     let receiver = key.party_id("bob");
-    let transaction = prepared(root(&receiver), &receiver);
     let server = MockServer::start().await;
-    stub_accept(
-        &server,
-        prepare_response(&transaction, &hash_of(&transaction)),
-    )
-    .await;
+    stub_accept(&server, honestly(prepared(root(&receiver), &receiver))).await;
 
     let result = accept_transfer(
         &ledger_for(&server),
@@ -1583,13 +1629,15 @@ async fn refused_send_of(
 ) -> Refusal {
     let key = ExternalKeyPair::from_seed([seed; 32]);
     let sender = key.party_id("alice");
-    let transaction = transaction(&sender);
     // A transaction the hasher cannot hash gets a stand-in hash. The wallet
     // must refuse it when it fails to recompute the hash.
-    let hash = compute_prepared_transaction_hash(HashingScheme::V2, &transaction)
-        .unwrap_or_else(|_| vec![0; 32]);
+    let participant = preparing(transaction(&sender), |transaction| {
+        let hash = compute_prepared_transaction_hash(HashingScheme::V2, transaction)
+            .unwrap_or_else(|_| vec![0; 32]);
+        prepare_response(transaction, &hash)
+    });
     let server = MockServer::start().await;
-    stub_send(&server, &sender, prepare_response(&transaction, &hash)).await;
+    stub_send(&server, &sender, participant).await;
 
     let result = send_transfer(
         &ledger_for(&server),
@@ -1611,11 +1659,12 @@ async fn refused_send_of(
 async fn accept_transfer_exercises_the_instruction_with_the_registry_context() {
     let key = ExternalKeyPair::from_seed([27u8; 32]);
     let receiver = key.party_id("bob");
-    let transaction = accept_transaction(INSTRUCTION_CID, &receiver);
-    let hash = hash_of(&transaction);
-    let response = prepare_response(&transaction, &hash);
     let server = MockServer::start().await;
-    stub_accept(&server, response.clone()).await;
+    stub_accept(
+        &server,
+        honestly(accept_transaction(INSTRUCTION_CID, &receiver)),
+    )
+    .await;
 
     let receipt = match accept_transfer(
         &ledger_for(&server),
@@ -1631,6 +1680,11 @@ async fn accept_transfer_exercises_the_instruction_with_the_registry_context() {
         Err(e) => panic!("the accept must succeed: {e}"),
     };
 
+    let transaction = for_command(
+        accept_transaction(INSTRUCTION_CID, &receiver),
+        &sent_command_id(&server).await,
+    );
+    let hash = hash_of(&transaction);
     assert_eq!(receipt.update_id, "update-1");
     assert_eq!(receipt.instruction_cid, INSTRUCTION_CID);
     assert_eq!(receipt.prepared_transaction_hash, STANDARD.encode(&hash));
@@ -1673,7 +1727,7 @@ async fn accept_transfer_exercises_the_instruction_with_the_registry_context() {
     let execute = &bodies(&server, EXECUTE_PATH).await[0];
     assert_eq!(
         execute["preparedTransaction"],
-        response["preparedTransaction"]
+        STANDARD.encode(transaction.encode_to_vec())
     );
     assert_eq!(execute["hashingSchemeVersion"], "HASHING_SCHEME_VERSION_V2");
     let (signed_party, signed_by, signature) = signature_of(execute);
@@ -1689,13 +1743,8 @@ async fn an_accept_prepared_for_another_instruction_is_not_signed() {
     let key = ExternalKeyPair::from_seed([28u8; 32]);
     let receiver = key.party_id("bob");
     let other = "00b94be5545fed18b849ded12c42afc6874093183fc8b14afc1c43a3c6dea15d8cca11122066570dd9d0a5e9c559d3d8b6830f3de9";
-    let transaction = accept_transaction(other, &receiver);
     let server = MockServer::start().await;
-    stub_accept(
-        &server,
-        prepare_response(&transaction, &hash_of(&transaction)),
-    )
-    .await;
+    stub_accept(&server, honestly(accept_transaction(other, &receiver))).await;
 
     let result = accept_transfer(
         &ledger_for(&server),
@@ -1832,6 +1881,45 @@ async fn a_send_with_extra_args_or_meta_other_than_the_wallet_sent_is_not_signed
     }
 }
 
+/// The hash covers the command id, and the ledger finds a completion by it.
+/// A transaction prepared under another command id is refused.
+#[tokio::test]
+async fn a_send_with_another_command_id_is_not_signed() {
+    let key = ExternalKeyPair::from_seed([47u8; 32]);
+    let sender = key.party_id("alice");
+    let transaction = for_command(faithful_send(&sender), "another-command");
+    let response = prepare_response(&transaction, &hash_of(&transaction));
+    let server = MockServer::start().await;
+    stub_send(&server, &sender, move |_: &str| response.clone()).await;
+
+    let result = send_transfer(
+        &ledger_for(&server),
+        &registry_for(&server),
+        &key,
+        &send_args(&sender),
+    )
+    .await;
+
+    match result {
+        Err(Error::TransactionRefused {
+            reason:
+                Refusal::Mismatch {
+                    field,
+                    expected,
+                    found,
+                },
+            ..
+        }) => {
+            assert_eq!(field, "command id");
+            assert_eq!(expected, sent_command_id(&server).await);
+            assert_eq!(found, "another-command");
+        }
+        Err(other) => panic!("expected a command id mismatch, got {other}"),
+        Ok(_) => panic!("a transaction for another command must not be signed"),
+    }
+    assert_eq!(count(&server, EXECUTE_PATH).await, 0, "nothing is executed");
+}
+
 /// The execute is the step that commits. When its request left the wallet
 /// but no answer came back, the transfer may have happened, and the error
 /// says so.
@@ -1839,7 +1927,6 @@ async fn a_send_with_extra_args_or_meta_other_than_the_wallet_sent_is_not_signed
 async fn an_execute_without_an_answer_has_an_unknown_outcome() {
     let key = ExternalKeyPair::from_seed([37u8; 32]);
     let sender = key.party_id("alice");
-    let (transaction, response) = faithful_send(&sender);
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path(EXECUTE_PATH))
@@ -1851,7 +1938,7 @@ async fn an_execute_without_an_answer_has_an_unknown_outcome() {
         .with_priority(1)
         .mount(&server)
         .await;
-    stub_send(&server, &sender, response).await;
+    stub_send(&server, &sender, honestly(faithful_send(&sender))).await;
     let ledger = match LedgerClient::with_options(
         format!("{uri}{LEDGER_PREFIX}", uri = server.uri()),
         None,
@@ -1871,7 +1958,8 @@ async fn an_execute_without_an_answer_has_an_unknown_outcome() {
             Err(e) => e,
         };
 
-    let prepare = &bodies(&server, PREPARE_PATH).await[0];
+    let wallet_command_id = sent_command_id(&server).await;
+    let transaction = for_command(faithful_send(&sender), &wallet_command_id);
     let executes = bodies(&server, EXECUTE_PATH).await;
     assert_eq!(executes.len(), 1, "the wallet does not resend the execute");
     match &error {
@@ -1887,7 +1975,7 @@ async fn an_execute_without_an_answer_has_an_unknown_outcome() {
                 prepared_transaction_hash,
                 &STANDARD.encode(hash_of(&transaction))
             );
-            assert_eq!(Some(command_id.as_str()), prepare["commandId"].as_str());
+            assert_eq!(command_id, &wallet_command_id);
             assert_eq!(
                 Some(submission_id.as_str()),
                 executes[0]["submissionId"].as_str()
@@ -1993,7 +2081,7 @@ async fn a_send_with_a_redirected_prepare_is_not_signed() {
             .with_priority(1)
             .mount(&server)
             .await;
-        stub_send(&server, &sender, faithful_send(&sender).1).await;
+        stub_send(&server, &sender, honestly(faithful_send(&sender))).await;
 
         let result = send_transfer(
             &ledger_for(&server),
@@ -2162,6 +2250,20 @@ async fn a_root_exercise_without_an_interface_is_not_signed() {
     }
 }
 
+fn v3_hash_of(transaction: &PreparedTransaction) -> Vec<u8> {
+    match compute_prepared_transaction_hash(HashingScheme::V3, transaction) {
+        Ok(hash) => hash,
+        Err(e) => panic!("the fixture must hash with V3: {e}"),
+    }
+}
+
+/// The prepare response for `transaction`, naming V3 and carrying `hash`.
+fn named_v3(transaction: &PreparedTransaction, hash: &[u8]) -> Value {
+    let mut response = prepare_response(transaction, hash);
+    response["hashingSchemeVersion"] = json!("HASHING_SCHEME_VERSION_V3");
+    response
+}
+
 /// Canton prepares with V3 when asked. The wallet recomputes the hash with
 /// the scheme the prepare names, signs that hash, and echoes the scheme.
 #[tokio::test]
@@ -2169,23 +2271,12 @@ async fn a_transaction_prepared_with_hashing_scheme_v3_is_checked_and_signed_wit
     let key = ExternalKeyPair::from_seed([44u8; 32]);
     let sender = key.party_id("alice");
     let transaction = prepared(faithful_root(&sender), &sender);
-    let v3 = match compute_prepared_transaction_hash(HashingScheme::V3, &transaction) {
-        Ok(hash) => hash,
-        Err(e) => panic!("the fixture must hash with V3: {e}"),
-    };
-    assert_ne!(
-        v3,
-        hash_of(&transaction),
-        "the test needs a transaction the two schemes hash differently"
-    );
-    let v3_response = |hash: &[u8]| {
-        let mut response = prepare_response(&transaction, hash);
-        response["hashingSchemeVersion"] = json!("HASHING_SCHEME_VERSION_V3");
-        response
-    };
 
     let server = MockServer::start().await;
-    stub_send(&server, &sender, v3_response(&v3)).await;
+    let participant = preparing(transaction.clone(), |transaction| {
+        named_v3(transaction, &v3_hash_of(transaction))
+    });
+    stub_send(&server, &sender, participant).await;
     let receipt = match send_transfer(
         &ledger_for(&server),
         &registry_for(&server),
@@ -2198,6 +2289,13 @@ async fn a_transaction_prepared_with_hashing_scheme_v3_is_checked_and_signed_wit
         Err(e) => panic!("a V3 transaction must be signed: {e}"),
     };
 
+    let sent = for_command(transaction.clone(), &sent_command_id(&server).await);
+    let v3 = v3_hash_of(&sent);
+    assert_ne!(
+        v3,
+        hash_of(&sent),
+        "the test needs a transaction the two schemes hash differently"
+    );
     assert_eq!(receipt.prepared_transaction_hash, STANDARD.encode(&v3));
     let execute = &bodies(&server, EXECUTE_PATH).await[0];
     assert_eq!(execute["hashingSchemeVersion"], "HASHING_SCHEME_VERSION_V3");
@@ -2209,7 +2307,10 @@ async fn a_transaction_prepared_with_hashing_scheme_v3_is_checked_and_signed_wit
 
     // Named V3 but carrying the V2 hash: the wallet hashed with V3.
     let server = MockServer::start().await;
-    stub_send(&server, &sender, v3_response(&hash_of(&transaction))).await;
+    let participant = preparing(transaction, |transaction| {
+        named_v3(transaction, &hash_of(transaction))
+    });
+    stub_send(&server, &sender, participant).await;
     let result = send_transfer(
         &ledger_for(&server),
         &registry_for(&server),

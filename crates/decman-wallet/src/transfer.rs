@@ -217,10 +217,10 @@ pub struct AcceptReceipt {
 /// `key` must be the sender's key. The wallet signs only after the prepared
 /// transaction passes its check: the hash is recomputed, and the root must be
 /// `TransferFactory_Transfer` on the registry's factory, acting as the sender
-/// alone. Its argument must carry these arguments: the instrument admin,
-/// sender, receiver, amount, instrument, both times, and the input holdings
-/// in order. Its `transfer.meta` and `extraArgs` must be the ones the wallet
-/// sent.
+/// alone. The transaction must carry the command id the wallet sent. The
+/// root's argument must carry these arguments: the instrument admin, sender,
+/// receiver, amount, instrument, both times, and the input holdings in order.
+/// Its `transfer.meta` and `extraArgs` must be the ones the wallet sent.
 ///
 /// The check does not bind the factory's template. The factory's contract id
 /// comes from the registry, and a contract id names one contract of one
@@ -280,12 +280,14 @@ pub async fn send_transfer(
         TRANSFER_CHOICE,
         &argument,
     );
+    let command_id = Uuid::new_v4().to_string();
     let expected = Expected {
         interface_id: TRANSFER_FACTORY_INTERFACE_ID,
         template_id: None,
         choice: TRANSFER_CHOICE,
         contract_id: &factory.factory_id,
         party: &args.sender,
+        command_id: &command_id,
         extra_args: &argument["extraArgs"],
         transfer: Some(SentTransfer {
             args: &args,
@@ -324,8 +326,9 @@ pub async fn send_transfer(
 /// `key` must be the party's key. The wallet signs only after the prepared
 /// transaction passes its check: the hash is recomputed, and the root must be
 /// `TransferInstruction_Accept` on this instruction, acting as `party` alone.
-/// The instruction must have `instruction_template`, and the `extraArgs` must
-/// be the ones the wallet sent.
+/// The transaction must carry the command id the wallet sent. The
+/// instruction must have `instruction_template`, and the `extraArgs` must be
+/// the ones the wallet sent.
 ///
 /// # Errors
 /// [`Error::InvalidContractId`] before any call when `instruction_cid` is not
@@ -357,12 +360,14 @@ pub async fn accept_transfer(
         ACCEPT_CHOICE,
         &argument,
     );
+    let command_id = Uuid::new_v4().to_string();
     let expected = Expected {
         interface_id: TRANSFER_INSTRUCTION_INTERFACE_ID,
         template_id: Some(instruction_template),
         choice: ACCEPT_CHOICE,
         contract_id: instruction_cid,
         party,
+        command_id: &command_id,
         extra_args: &argument["extraArgs"],
         transfer: None,
     };
@@ -401,8 +406,8 @@ struct Submitted {
     prepared_transaction_hash: String,
 }
 
-/// Prepare `command` as `party`, check the result, sign its hash with `key`,
-/// and execute it.
+/// Prepare `command` as `party` under `expected.command_id`, check the
+/// result, sign its hash with `key`, and execute it.
 async fn submit(
     ledger: &LedgerClient,
     key: &dyn Signer,
@@ -411,11 +416,10 @@ async fn submit(
     disclosed_contracts: Vec<DisclosedContract>,
     expected: &Expected<'_>,
 ) -> Result<Submitted> {
-    let command_id = Uuid::new_v4().to_string();
     let prepared = ledger
         .prepare(&PrepareRequest {
             user_id: ledger.user_id().to_string(),
-            command_id: command_id.clone(),
+            command_id: expected.command_id.to_string(),
             act_as: vec![party.to_string()],
             read_as: Vec::new(),
             commands: vec![command],
@@ -459,7 +463,7 @@ async fn submit(
         .map_err(|error| {
             after_execute(
                 error,
-                &command_id,
+                expected.command_id,
                 &submission_id,
                 &prepared.prepared_transaction_hash,
             )

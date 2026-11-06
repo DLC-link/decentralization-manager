@@ -165,13 +165,16 @@ So the wallet checks each prepared transaction before the key signs:
    must be an exercise.
 4. The exercise must use the expected interface, choice and contract. Its only
    acting party must be the wallet's party.
-5. For an accept, the instruction must have the template the caller passed to
+5. The transaction's metadata must carry the command id the wallet sent to the
+   prepare. The hash covers this id. The completion lookup after
+   `Error::ExecuteOutcomeUnknown` uses it.
+6. For an accept, the instruction must have the template the caller passed to
    `accept_transfer`. The check compares the package name, the module and the
    entity.
-6. For a send, the choice argument must match the request. The check compares
+7. For a send, the choice argument must match the request. The check compares
    the instrument admin, sender, receiver, amount and instrument. It also
    compares both times, and the input holdings in order.
-7. The choice argument's `extraArgs` must equal the ones the wallet sent. That
+8. The choice argument's `extraArgs` must equal the ones the wallet sent. That
    is the registry's context and an empty `meta`. For a send, `transfer.meta`
    must be empty too.
 
@@ -209,6 +212,8 @@ The check does not compare these:
   package with that name passes.
 - The factory's template on a send. The factory's contract id comes from the
   registry, and a contract id names one contract of one template.
+- The rest of the transaction's metadata, such as its submitting parties, its
+  synchronizer and its preparation time.
 
 ### The registry
 

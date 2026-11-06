@@ -42,6 +42,9 @@ pub(crate) struct Expected<'a> {
     pub(crate) contract_id: &'a str,
     /// The one party the exercise may act as.
     pub(crate) party: &'a str,
+    /// The command id the wallet sent to the prepare. The hash covers it, and
+    /// the completion lookup after an unknown outcome needs it.
+    pub(crate) command_id: &'a str,
     /// The `extraArgs` the wallet sent, in the JSON Ledger API's encoding.
     pub(crate) extra_args: &'a Json,
     /// For a send, the transfer the choice argument must describe.
@@ -145,6 +148,11 @@ fn check_root(
         expected.party,
         &exercise.acting_parties.join(", "),
     )?;
+    same(
+        "command id",
+        expected.command_id,
+        command_id_of(transaction),
+    )?;
     if let Some(template) = expected.template_id {
         same("template", template, &template_of(exercise)?)?;
     }
@@ -166,6 +174,15 @@ fn check_root(
         expected.extra_args,
         field_at(argument, "extraArgs")?,
     )
+}
+
+/// The command id in the transaction's metadata, or `""` when it has none.
+fn command_id_of(transaction: &PreparedTransaction) -> &str {
+    transaction
+        .metadata
+        .as_ref()
+        .and_then(|metadata| metadata.submitter_info.as_ref())
+        .map_or("", |submitter| submitter.command_id.as_str())
 }
 
 /// The template the exercise acts on, as `#package-name:Module:Entity`.
