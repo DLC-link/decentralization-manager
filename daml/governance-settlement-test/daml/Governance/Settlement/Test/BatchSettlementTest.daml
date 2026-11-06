@@ -1,0 +1,321 @@
+-- Copyright (c) 2026 DLC-Link, Inc. and/or its affiliates. All rights reserved.
+-- SPDX-License-Identifier: Apache-2.0
+
+-- | Tests for the BatchSettlementProposal governable action.
+--
+-- Two properties belong to this module rather than to the Token Standard:
+-- the settlement runs only at threshold, and only through the vote. The
+-- `ensure` clause carries a third, that the settlement's executors are
+-- exactly the governance party and the proposer, because executeImpl holds
+-- no other authority.
+module Governance.Settlement.Test.BatchSettlementTest where
+
+import DA.Optional (isNone)
+
+import Daml.Script
+
+import Splice.Api.Token.MetadataV1 (emptyMetadata)
+import Splice.Api.Token.AllocationV2 qualified as V2
+import Splice.Api.Token.AllocationInstructionV2 qualified as V2
+import Splice.TokenStandard.Utils (basicAccount)
+
+import Governance.Action
+import Governance.Rules
+import Governance.Settlement.BatchSettlement
+import Governance.Settlement.TestUtils
+
+import TestHarness
+
+-- ============================================================================
+-- Fixtures
+-- ============================================================================
+
+-- | What a settlement should have changed: the receivers credited, the sender
+-- debited, and the proposal consumed.
+data SettledOutcome = SettledOutcome
+  with
+    receiverBalances : [Decimal]
+    proposerBalance : Decimal
+    proposalArchived : Bool
+
+data SettlementFixture = SettlementFixture
+  with
+    parties : SettlementTestParties
+    cash : Cash
+    rulesCid : ContractId GovernanceRules
+    settlement : V2.SettlementInfo
+    transferLegs : [V2.TransferLeg]
+    allocationCids : [ContractId V2.Allocation]
+
+-- ============================================================================
+-- Helpers
+-- ============================================================================
+
+-- | Three legs, one per receiver, paying 100, 200 and 300.
+buildLegs : SettlementTestParties -> Cash -> [V2.TransferLeg]
+buildLegs parties cash =
+  [ leg i receiver amount
+  | (i, receiver, amount) <-
+      [ (1, parties.receiver1, 100.0)
+      , (2, parties.receiver2, 200.0)
+      , (3, parties.receiver3, 300.0) ]
+  ]
+  where
+    leg : Int -> Party -> Decimal -> V2.TransferLeg
+    leg i receiver amount = V2.TransferLeg with
+      transferLegId = "leg-" <> show i
+      sender = basicAccount parties.proposer
+      receiver = basicAccount receiver
+      amount
+      instrumentId = cash.instrument.id
+      meta = emptyMetadata
+
+settlementFor : [Party] -> V2.SettlementInfo
+settlementFor executors = V2.SettlementInfo with
+  executors
+  id = "BATCH-1"
+  cid = None
+  meta = emptyMetadata
+
+-- | Allocate both sides of the batch: one committed send, one receipt each.
+allocateBothSides : SettlementTestParties -> Cash -> V2.SettlementInfo -> [V2.TransferLeg] -> Script [ContractId V2.Allocation]
+allocateBothSides parties cash settlement transferLegs = do
+  now <- requestedAt
+  inputHoldingCids <- unlockedHoldingCids cash parties.proposer
+  sendResult <- submit (actAs parties.proposer <> disclose cash.rules) $
+    exerciseCmd (toInterfaceContractId @V2.AllocationFactory cash.rulesCid)
+      V2.AllocationFactory_Allocate with
+        settlement
+        allocation = sendAllocationSpec cash.instrument (basicAccount parties.proposer) transferLegs
+        requestedAt = now
+        inputHoldingCids
+        extraArgs = cash.extraArgs
+        actors = [parties.proposer]
+  sendCid <- case sendResult.output of
+    V2.AllocationInstructionResult_Completed cid -> pure cid
+    _ -> fail "send allocation did not complete"
+  receiptCids <- forA [parties.receiver1, parties.receiver2, parties.receiver3] $ \r -> do
+    let mine = [ l | l <- transferLegs, l.receiver == basicAccount r ]
+    result <- submit (actAs r <> disclose cash.rules) $
+      exerciseCmd (toInterfaceContractId @V2.AllocationFactory cash.rulesCid)
+        V2.AllocationFactory_Allocate with
+          settlement
+          allocation = receiptAllocationSpec cash.instrument (basicAccount r) mine
+          requestedAt = now
+          inputHoldingCids = []
+          extraArgs = cash.extraArgs
+          actors = [r]
+    case result.output of
+      V2.AllocationInstructionResult_Completed cid -> pure cid
+      _ -> fail "receipt allocation did not complete"
+  pure (sendCid :: receiptCids)
+
+-- | The proposal over the fixture's batch, with one field overridden at a time.
+proposalOver : SettlementFixture -> V2.SettlementInfo -> [V2.TransferLeg] -> [ContractId V2.Allocation] -> BatchSettlementProposal
+proposalOver f settlement transferLegs allocationCids = BatchSettlementProposal with
+  governanceParty = f.parties.governanceParty
+  proposer = f.parties.proposer
+  factoryCid = toInterfaceContractId f.cash.rulesCid
+  settlement
+  transferLegs
+  allocationCids
+  extraArgs = f.cash.extraArgs
+  label = "BatchSettlement"
+  description = "Three legs, 600.0 in total"
+
+fileProposal : SettlementFixture -> V2.SettlementInfo -> [V2.TransferLeg] -> [ContractId V2.Allocation] -> Script (ContractId BatchSettlementProposal)
+fileProposal f settlement transferLegs allocationCids =
+  submit f.parties.proposer $ createCmd (proposalOver f settlement transferLegs allocationCids)
+
+fileProposalMustFail : SettlementFixture -> V2.SettlementInfo -> [V2.TransferLeg] -> [ContractId V2.Allocation] -> Script ()
+fileProposalMustFail f settlement transferLegs allocationCids =
+  submitMustFail f.parties.proposer $ createCmd (proposalOver f settlement transferLegs allocationCids)
+
+-- | The submission a real caller makes: the executing member acting as itself,
+-- reading the governance party, and carrying the disclosures the engine needs.
+--
+-- Both the below-threshold and the at-threshold test use this, so the number
+-- of confirmations is the only difference between them. An earlier version
+-- differed in two ways, and the below-threshold test then failed on a missing
+-- disclosure whichever way the threshold check went.
+executeAs : SettlementFixture -> Party -> Script SubmitOptions
+executeAs f member = do
+  disclosures <- executeDisclosures f.cash f.parties.proposer
+  pure (actAs member <> readAs f.parties.governanceParty <> mconcat (map disclose disclosures))
+
+-- ============================================================================
+-- Given
+-- ============================================================================
+
+given_governance_with_allocated_batch : Script SettlementFixture
+given_governance_with_allocated_batch = do
+  parties <- allocateSettlementTestParties
+  cash <- setupCash parties.registry
+  rulesCid <- createTestGovernance parties
+  fund cash parties.proposer 10000.0
+  let settlement = settlementFor [parties.proposer, parties.governanceParty]
+      transferLegs = buildLegs parties cash
+  allocationCids <- allocateBothSides parties cash settlement transferLegs
+  pure SettlementFixture with ..
+
+-- ============================================================================
+-- When
+-- ============================================================================
+
+when_one_confirmation_then_execute : SettlementFixture -> Script ()
+when_one_confirmation_then_execute f = do
+  proposalCid <- fileProposal f f.settlement f.transferLegs f.allocationCids
+  let actionCid : ContractId GovernableAction = toInterfaceContractId proposalCid
+  confirmationCids <- submitConfirmations f.parties.governanceParty f.rulesCid actionCid
+    [f.parties.member1]
+  options <- executeAs f f.parties.member1
+  submitMustFail options $
+    exerciseCmd f.rulesCid GovernanceRules_ExecuteConfirmedAction with
+      executor = f.parties.member1
+      actionProposalCid = actionCid
+      confirmations = confirmationCids
+
+-- | The property this module adds: the action cannot be run outside the vote.
+-- GovernableAction_Execute is controlled by the governance party, so the
+-- proposer exercising it directly is refused.
+when_proposer_executes_directly : SettlementFixture -> Script ()
+when_proposer_executes_directly f = do
+  proposalCid <- fileProposal f f.settlement f.transferLegs f.allocationCids
+  let actionCid : ContractId GovernableAction = toInterfaceContractId proposalCid
+  submitMustFail (actAs f.parties.proposer <> disclose f.cash.rules) $
+    exerciseCmd actionCid GovernableAction_Execute
+
+when_threshold_reached_then_execute : SettlementFixture -> Script SettledOutcome
+when_threshold_reached_then_execute f = do
+  proposalCid <- fileProposal f f.settlement f.transferLegs f.allocationCids
+  let actionCid : ContractId GovernableAction = toInterfaceContractId proposalCid
+  confirmationCids <- submitConfirmations f.parties.governanceParty f.rulesCid actionCid
+    [f.parties.member1, f.parties.member2]
+  options <- executeAs f f.parties.member1
+  _ <- submit options $
+    exerciseCmd f.rulesCid GovernanceRules_ExecuteConfirmedAction with
+      executor = f.parties.member1
+      actionProposalCid = actionCid
+      confirmations = confirmationCids
+  receiverBalances <- forA [f.parties.receiver1, f.parties.receiver2, f.parties.receiver3] (balance f.cash)
+  proposerBalance <- balance f.cash f.parties.proposer
+  stillThere <- queryContractId f.parties.proposer proposalCid
+  pure SettledOutcome with
+    receiverBalances
+    proposerBalance
+    proposalArchived = isNone stillThere
+
+when_governance_party_not_an_executor : SettlementFixture -> Script ()
+when_governance_party_not_an_executor f =
+  fileProposalMustFail f (settlementFor [f.parties.proposer]) f.transferLegs f.allocationCids
+
+-- | The mirror of the case above, and the third `ensure` conjunct.
+--
+-- `executeImpl` runs with the governance party's authority and the proposer's
+-- together, so a settlement naming only the governance party is one this
+-- action could never execute, and it is refused at creation rather than after
+-- the members have voted on it.
+--
+-- Exactly one value differs from the passing case, so the test can only fail
+-- for the conjunct it names.
+when_proposer_not_an_executor : SettlementFixture -> Script ()
+when_proposer_not_an_executor f =
+  fileProposalMustFail f (settlementFor [f.parties.governanceParty]) f.transferLegs f.allocationCids
+
+-- | executeImpl holds only the governance party's and the proposer's
+-- authority, so a third executor must be refused at creation rather than
+-- after the members have voted on it.
+when_extra_executor : SettlementFixture -> Script ()
+when_extra_executor f =
+  fileProposalMustFail f
+    (settlementFor [f.parties.proposer, f.parties.governanceParty, f.parties.outsider])
+    f.transferLegs f.allocationCids
+
+when_duplicate_leg_ids : SettlementFixture -> Script ()
+when_duplicate_leg_ids f = do
+  let duplicated = case f.transferLegs of
+        (l :: rest) -> l :: l :: rest
+        [] -> []
+  fileProposalMustFail f f.settlement duplicated f.allocationCids
+
+when_no_legs : SettlementFixture -> Script ()
+when_no_legs f = fileProposalMustFail f f.settlement [] f.allocationCids
+
+when_no_allocations : SettlementFixture -> Script ()
+when_no_allocations f = fileProposalMustFail f f.settlement f.transferLegs []
+
+-- ============================================================================
+-- Then
+-- ============================================================================
+
+then_nothing_to_verify : SettlementFixture -> () -> Script Failures
+then_nothing_to_verify _ _ = pure []
+
+-- | The money left the sender, reached the receivers, and the proposal is gone.
+-- The debit matters as much as the credits: without it the test would pass if
+-- the cash had come from somewhere other than the proposer.
+then_receivers_paid : SettlementFixture -> SettledOutcome -> Script Failures
+then_receivers_paid _ o =
+  pure $ concat
+    [ shouldBe "receiver balances after settlement" [100.0, 200.0, 300.0] o.receiverBalances
+    , shouldBe "proposer debited by the total" 9400.0 o.proposerBalance
+    , shouldBe "the proposal is archived" True o.proposalArchived
+    ]
+
+-- ============================================================================
+-- Tests
+-- ============================================================================
+
+test_when_below_threshold_then_execution_rejected = script do
+  run Test with
+    given = given_governance_with_allocated_batch
+    when = when_one_confirmation_then_execute
+    then_ = then_nothing_to_verify
+
+test_when_proposer_executes_directly_then_rejected = script do
+  run Test with
+    given = given_governance_with_allocated_batch
+    when = when_proposer_executes_directly
+    then_ = then_nothing_to_verify
+
+test_when_threshold_reached_then_receivers_paid = script do
+  run Test with
+    given = given_governance_with_allocated_batch
+    when = when_threshold_reached_then_execute
+    then_ = then_receivers_paid
+
+test_when_governance_party_not_an_executor_then_proposal_rejected = script do
+  run Test with
+    given = given_governance_with_allocated_batch
+    when = when_governance_party_not_an_executor
+    then_ = then_nothing_to_verify
+
+test_when_proposer_not_an_executor_then_proposal_rejected = script do
+  run Test with
+    given = given_governance_with_allocated_batch
+    when = when_proposer_not_an_executor
+    then_ = then_nothing_to_verify
+
+test_when_extra_executor_then_proposal_rejected = script do
+  run Test with
+    given = given_governance_with_allocated_batch
+    when = when_extra_executor
+    then_ = then_nothing_to_verify
+
+test_when_duplicate_leg_ids_then_proposal_rejected = script do
+  run Test with
+    given = given_governance_with_allocated_batch
+    when = when_duplicate_leg_ids
+    then_ = then_nothing_to_verify
+
+test_when_no_legs_then_proposal_rejected = script do
+  run Test with
+    given = given_governance_with_allocated_batch
+    when = when_no_legs
+    then_ = then_nothing_to_verify
+
+test_when_no_allocations_then_proposal_rejected = script do
+  run Test with
+    given = given_governance_with_allocated_batch
+    when = when_no_allocations
+    then_ = then_nothing_to_verify
