@@ -1,8 +1,8 @@
-//! Canton regression for shadowed pre-3.4 party keys. The live party already
-//! has inline keys; seed the legacy mapping that migration used to leave behind,
-//! including an unclaimed key. Run a real threshold-change workflow and verify
-//! the removal on all participants. Also interrupt a partial retirement and
-//! retry it with another namespace owner's signature.
+//! Canton regression for pre-3.4 party keys. Seed the legacy mapping such a
+//! party keeps: every member's Daml key, plus one key no member claims. Run a
+//! real threshold-change workflow, which moves the members' keys inline, and
+//! verify the removal on all participants. Also interrupt a partial retirement
+//! and retry it with another namespace owner's signature.
 
 use std::time::Duration;
 
@@ -10,10 +10,11 @@ use anyhow::Context;
 use canton_proto_rs::com::digitalasset::canton::{
     crypto::{
         admin::v30::{
-            GenerateSigningKeyRequest, generate_signing_key_response,
+            GenerateSigningKeyRequest, ListKeysFilters, ListMyKeysRequest,
+            generate_signing_key_response, private_key_metadata,
             vault_service_client::VaultServiceClient,
         },
-        v30::SigningKeyUsage,
+        v30::{SigningKeyUsage, SigningPublicKey, public_key},
     },
     protocol::v30::{
         PartyToKeyMapping, TopologyMapping, enums::TopologyChangeOp, topology_mapping,
@@ -24,7 +25,11 @@ use canton_proto_rs::com::digitalasset::canton::{
         topology_manager_read_service_client::TopologyManagerReadServiceClient,
     },
 };
-use dec_party_manager::{config::NodeConfig, utils, workflow::topology};
+use dec_party_manager::{
+    config::NodeConfig,
+    utils,
+    workflow::{signing_keys::party_daml_key_name, topology},
+};
 
 use crate::common::{Fixture, chaos::poll_until};
 
@@ -65,15 +70,42 @@ async fn head(
     }))
 }
 
+/// The Daml key a participant's vault holds for the party, under the name
+/// onboarding and add-party give it.
+async fn member_daml_key(config: &NodeConfig, prefix: &str) -> anyhow::Result<SigningPublicKey> {
+    let response = VaultServiceClient::new(config.admin_channel().await?)
+        .list_my_keys(ListMyKeysRequest {
+            filters: Some(ListKeysFilters {
+                name: party_daml_key_name(prefix),
+                usage_v30: vec![SigningKeyUsage::Protocol as i32],
+                ..Default::default()
+            }),
+            base_request: None,
+        })
+        .await?
+        .into_inner();
+    response
+        .private_keys_metadata
+        .into_iter()
+        .find_map(|meta| {
+            let private_key_metadata::PublicKeyWithName::V30(named) = meta.public_key_with_name?;
+            match named.public_key?.key? {
+                public_key::Key::SigningPublicKey(key) => Some(key),
+                _ => None,
+            }
+        })
+        .context("fixture needs each member's Daml key in its vault")
+}
+
 #[allow(deprecated)]
 pub async fn seed(f: &Fixture) -> anyhow::Result<Legacy> {
     let configs = configs(f)?;
     let party: common::canton_id::CantonId = f.party_id()?.parse()?;
     let sync = utils::get_synchronizer_id(&configs[0]).await?;
-    let inline = topology::fetch_p2p_mapping(&configs[0], &sync, &party)
-        .await?
-        .party_signing_keys
-        .context("fixture needs inline keys")?;
+    let mut members = Vec::with_capacity(configs.len());
+    for config in &configs {
+        members.push(member_daml_key(config, &party.prefix).await?);
+    }
     let serial = head(&configs[0], &sync, &party.to_string())
         .await?
         .map_or(1, |(serial, _, _)| serial + 1);
@@ -90,10 +122,12 @@ pub async fn seed(f: &Fixture) -> anyhow::Result<Legacy> {
     let Some(generate_signing_key_response::PublicKey::V30(key)) = generated.public_key else {
         anyhow::bail!("fixture key generation returned no key");
     };
+    let mut signing_keys = members;
+    signing_keys.push(key);
     let mapping = PartyToKeyMapping {
         party: party.to_string(),
         threshold: 1,
-        signing_keys: vec![key],
+        signing_keys,
     };
     let request = AuthorizeRequest {
         r#type: Some(authorize_request::Type::Proposal(
@@ -112,9 +146,9 @@ pub async fn seed(f: &Fixture) -> anyhow::Result<Legacy> {
         must_fully_authorize: false,
         ..Default::default()
     };
-    // At threshold 1 only P1 is needed; at threshold 2 both contribute.
-    // Avoid reauthorizing an already-effective AddReplace with the same serial.
-    for config in configs.iter().take(inline.threshold as usize) {
+    // Every key in the mapping must sign it, and each member holds its own,
+    // so all three participants authorize.
+    for config in &configs {
         topology::authorize_with_topology_retry(
             config,
             request.clone(),
