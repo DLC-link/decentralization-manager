@@ -165,11 +165,12 @@ pub enum Error {
     )]
     InvalidContractId { contract_id: String },
 
-    /// The signed execute left the wallet, but no answer came back. The
-    /// participant may have committed the transaction. Check the ledger
-    /// before sending the transfer again: a new send is a new transaction.
+    /// The signed execute left the wallet, but its answer did not arrive or
+    /// could not be read. The participant may have committed the
+    /// transaction. Check the ledger before sending the transfer again: a
+    /// new send is a new transaction.
     #[error(
-        "{host} gave no answer to the execute of command {command_id}: {source}. \
+        "the execute of command {command_id} has an unknown outcome: {source}. \
          The transaction may have committed. \
          Do not resend it before you check the ledger."
     )]
@@ -181,8 +182,11 @@ pub enum Error {
         submission_id: String,
         /// The hash the wallet signed, base64.
         prepared_transaction_hash: String,
+        /// The error that hid the outcome: [`Error::Transport`],
+        /// [`Error::Decode`], [`Error::Json`] or [`Error::ResponseTooLarge`].
+        /// It names the host too.
         #[source]
-        source: reqwest::Error,
+        source: Box<Error>,
     },
 }
 

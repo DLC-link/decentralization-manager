@@ -24,7 +24,12 @@ use decman_lib::{
         value::Sum,
     },
 };
-use std::time::Duration;
+use std::{
+    io::{BufRead, BufReader, Read, Write},
+    net::{TcpListener, TcpStream},
+    sync::mpsc,
+    time::Duration,
+};
 
 use decman_wallet::{
     AMULET_TRANSFER_INSTRUCTION_TEMPLATE, ClientOptions, Error, ExternalKeyPair, LedgerClient,
@@ -1536,8 +1541,8 @@ fn accept_path() -> String {
     )
 }
 
-/// A ledger and registry ready for `receiver` to accept `INSTRUCTION_CID`.
-async fn stub_accept(server: &MockServer, prepare: impl Preparer) {
+/// A registry ready to give the context for accepting `INSTRUCTION_CID`.
+async fn stub_accept_context(server: &MockServer) {
     Mock::given(method("POST"))
         .and(path(accept_path()))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
@@ -1546,6 +1551,11 @@ async fn stub_accept(server: &MockServer, prepare: impl Preparer) {
         })))
         .mount(server)
         .await;
+}
+
+/// A ledger and registry ready for `receiver` to accept `INSTRUCTION_CID`.
+async fn stub_accept(server: &MockServer, prepare: impl Preparer) {
+    stub_accept_context(server).await;
     stub_prepare_and_execute(server, prepare).await;
 }
 
@@ -1984,6 +1994,209 @@ async fn an_execute_without_an_answer_has_an_unknown_outcome() {
         other => panic!("expected an unknown outcome, got {other}"),
     }
     assert!(error.to_string().contains("may have committed"), "{error}");
+}
+
+/// How the stub participant answers the execute.
+#[derive(Clone, Copy, Debug)]
+enum ExecuteAnswer {
+    /// 200, part of the body, then silence until the wallet gives up.
+    Stalls,
+    /// 200, part of the body, then the connection closes.
+    CutShort,
+    /// 200 with a whole body that is not JSON.
+    NotJson,
+    /// 200 with a body larger than the wallet reads.
+    OverTheCap,
+}
+
+impl ExecuteAnswer {
+    /// Whether `error` is the read error this answer causes.
+    fn explains(self, error: &Error) -> bool {
+        match (self, error) {
+            (Self::Stalls, Error::Decode { source, .. }) => source.is_timeout(),
+            (Self::CutShort, Error::Decode { source, .. }) => !source.is_timeout(),
+            (Self::NotJson, Error::Json { .. }) => true,
+            (Self::OverTheCap, Error::ResponseTooLarge { .. }) => true,
+            _ => false,
+        }
+    }
+}
+
+/// The body cap of the ledger client that reads these answers. The prepare
+/// answer fits under it.
+const SMALL_CAP: usize = 64 * 1024;
+
+/// One HTTP/1.1 request from `stream`: its path and its JSON body.
+fn read_request(stream: &TcpStream) -> Option<(String, Value)> {
+    let mut reader = BufReader::new(stream);
+    let mut line = String::new();
+    reader.read_line(&mut line).ok()?;
+    let request_path = line.split_whitespace().nth(1)?.to_string();
+    let mut length = 0;
+    loop {
+        line.clear();
+        reader.read_line(&mut line).ok()?;
+        let header = line.trim_end();
+        if header.is_empty() {
+            break;
+        }
+        if let Some((name, value)) = header.split_once(':')
+            && name.eq_ignore_ascii_case("content-length")
+        {
+            length = value.trim().parse().ok()?;
+        }
+    }
+    let mut body = vec![0; length];
+    reader.read_exact(&mut body).ok()?;
+    Some((request_path, serde_json::from_slice(&body).ok()?))
+}
+
+/// A participant for one accept by `receiver`, on a plain socket, because
+/// the mock server cannot stall or cut a body. It prepares the accept for
+/// the command id the wallet sends, and answers the execute as `answer`
+/// says. It passes on each request it reads.
+fn raw_participant(
+    receiver: String,
+    answer: ExecuteAnswer,
+) -> (String, mpsc::Receiver<(String, Value)>) {
+    let listener = match TcpListener::bind("127.0.0.1:0") {
+        Ok(listener) => listener,
+        Err(e) => panic!("the stub participant must bind: {e}"),
+    };
+    let base_url = match listener.local_addr() {
+        Ok(address) => format!("http://{address}{LEDGER_PREFIX}"),
+        Err(e) => panic!("the stub participant must have an address: {e}"),
+    };
+    let (requests, received) = mpsc::channel();
+    std::thread::spawn(move || {
+        let head = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\n";
+        for stream in listener.incoming().take(2) {
+            let Ok(mut stream) = stream else { return };
+            let Some((request_path, body)) = read_request(&stream) else {
+                return;
+            };
+            let command_id = body["commandId"].as_str().unwrap_or_default().to_string();
+            let is_prepare = request_path == PREPARE_PATH;
+            let _ = requests.send((request_path, body));
+            if is_prepare {
+                let transaction =
+                    for_command(accept_transaction(INSTRUCTION_CID, &receiver), &command_id);
+                let json = prepare_response(&transaction, &hash_of(&transaction)).to_string();
+                let _ = write!(stream, "{head}Content-Length: {}\r\n\r\n{json}", json.len());
+                continue;
+            }
+            let _ = match answer {
+                ExecuteAnswer::Stalls | ExecuteAnswer::CutShort => write!(
+                    stream,
+                    "{head}Content-Length: 64\r\n\r\n{{\"updateId\": \"upd"
+                ),
+                ExecuteAnswer::NotJson => {
+                    write!(stream, "{head}Content-Length: 8\r\n\r\nnot json")
+                }
+                ExecuteAnswer::OverTheCap => {
+                    write!(stream, "{head}Content-Length: {}\r\n\r\n", SMALL_CAP + 1)
+                }
+            };
+            if !matches!(answer, ExecuteAnswer::CutShort) {
+                // Keep the connection open until the wallet closes it.
+                let _ = stream.set_read_timeout(Some(Duration::from_secs(10)));
+                let _ = stream.read(&mut [0; 1]);
+            }
+        }
+    });
+    (base_url, received)
+}
+
+/// The participant may have committed the transaction even when its answer
+/// to the execute cannot be read. The error keeps the ids and the hash that
+/// a completion lookup needs.
+#[tokio::test]
+async fn an_execute_whose_answer_cannot_be_read_has_an_unknown_outcome() {
+    for (seed, answer) in [
+        (48u8, ExecuteAnswer::Stalls),
+        (49, ExecuteAnswer::CutShort),
+        (50, ExecuteAnswer::NotJson),
+        (51, ExecuteAnswer::OverTheCap),
+    ] {
+        let key = ExternalKeyPair::from_seed([seed; 32]);
+        let receiver = key.party_id("bob");
+        let registry = MockServer::start().await;
+        stub_accept_context(&registry).await;
+        let (base_url, requests) = raw_participant(receiver.clone(), answer);
+        let ledger = match LedgerClient::with_options(
+            base_url,
+            None,
+            "wallet-user",
+            ClientOptions {
+                timeout: Duration::from_millis(500),
+                max_response_bytes: SMALL_CAP,
+                ..ClientOptions::default()
+            },
+        ) {
+            Ok(client) => client,
+            Err(e) => panic!("ledger client must build: {e}"),
+        };
+
+        let result = accept_transfer(
+            &ledger,
+            &registry_for(&registry),
+            &key,
+            &receiver,
+            INSTRUCTION_CID,
+            AMULET_TRANSFER_INSTRUCTION_TEMPLATE,
+        )
+        .await;
+
+        let requests: Vec<(String, Value)> = requests.try_iter().collect();
+        let [(prepare_path, prepare), (execute_path, execute)] = requests.as_slice() else {
+            panic!(
+                "{answer:?}: expected one prepare and one execute, got {} requests",
+                requests.len()
+            );
+        };
+        assert_eq!(prepare_path, PREPARE_PATH, "{answer:?}");
+        assert_eq!(execute_path, EXECUTE_PATH, "{answer:?}");
+        let transaction = for_command(
+            accept_transaction(INSTRUCTION_CID, &receiver),
+            prepare["commandId"].as_str().unwrap_or_default(),
+        );
+        let error = match result {
+            Ok(_) => panic!("{answer:?}: an unreadable answer must not look like a success"),
+            Err(e) => e,
+        };
+        match &error {
+            Error::ExecuteOutcomeUnknown {
+                host,
+                command_id,
+                submission_id,
+                prepared_transaction_hash,
+                source,
+            } => {
+                assert!(host.ends_with(LEDGER_PREFIX), "{answer:?}: {host}");
+                assert_eq!(
+                    Some(command_id.as_str()),
+                    prepare["commandId"].as_str(),
+                    "{answer:?}"
+                );
+                assert_eq!(
+                    Some(submission_id.as_str()),
+                    execute["submissionId"].as_str(),
+                    "{answer:?}"
+                );
+                assert_eq!(
+                    prepared_transaction_hash,
+                    &STANDARD.encode(hash_of(&transaction)),
+                    "{answer:?}"
+                );
+                assert!(
+                    answer.explains(source),
+                    "{answer:?}: the source is {source}"
+                );
+            }
+            other => panic!("{answer:?}: expected an unknown outcome, got {other}"),
+        }
+        assert!(error.to_string().contains("may have committed"), "{error}");
+    }
 }
 
 /// The instruction id goes into the registry's URL path, so anything other

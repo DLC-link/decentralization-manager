@@ -230,8 +230,9 @@ pub struct AcceptReceipt {
 /// [`Error::NoHoldings`] before any registry or prepare call when there is
 /// nothing to spend. [`Error::TransactionRefused`] when the prepared
 /// transaction fails the check; nothing is signed or executed then.
-/// [`Error::ExecuteOutcomeUnknown`] when the execute got no answer; the
-/// transaction may have committed, so do not send again before checking.
+/// [`Error::ExecuteOutcomeUnknown`] when the execute's answer did not arrive
+/// or could not be read; the transaction may have committed, so do not send
+/// again before checking.
 /// Any ledger, registry or signer error otherwise.
 pub async fn send_transfer(
     ledger: &LedgerClient,
@@ -334,9 +335,9 @@ pub async fn send_transfer(
 /// [`Error::InvalidContractId`] before any call when `instruction_cid` is not
 /// a contract id. [`Error::TransactionRefused`] when the prepared transaction
 /// fails the check; nothing is signed or executed then.
-/// [`Error::ExecuteOutcomeUnknown`] when the execute got no answer; the
-/// transaction may have committed. Any ledger, registry or signer error
-/// otherwise.
+/// [`Error::ExecuteOutcomeUnknown`] when the execute's answer did not arrive
+/// or could not be read; the transaction may have committed. Any ledger,
+/// registry or signer error otherwise.
 pub async fn accept_transfer(
     ledger: &LedgerClient,
     registry: &RegistryClient,
@@ -483,27 +484,35 @@ async fn submit(
 
 /// An execute error, as the caller must read it.
 ///
-/// A transport error after the connection opened means the request left the
-/// wallet. The participant may have committed the transaction, so the error
-/// becomes [`Error::ExecuteOutcomeUnknown`]. A connection that never opened
-/// reached nobody and stays [`Error::Transport`].
+/// Once the request has left the wallet, the participant may have committed
+/// the transaction. So a transport error after the connection opened becomes
+/// [`Error::ExecuteOutcomeUnknown`], and so does an answer the client could
+/// not read: a body that ended early or timed out, that is not JSON, or
+/// that is over the cap. A connection that never opened reached nobody and stays
+/// [`Error::Transport`]. A non-2xx answer stays [`Error::Api`].
+///
+/// [`Error::ResponseTooLarge`] does not carry the status, so a non-2xx
+/// answer with a body over the cap also becomes an unknown outcome.
 fn after_execute(
     error: Error,
     command_id: &str,
     submission_id: &str,
     prepared_transaction_hash: &str,
 ) -> Error {
-    match error {
-        Error::Transport { host, source, .. } if !source.is_connect() => {
-            Error::ExecuteOutcomeUnknown {
-                host,
-                command_id: command_id.to_string(),
-                submission_id: submission_id.to_string(),
-                prepared_transaction_hash: prepared_transaction_hash.to_string(),
-                source,
-            }
-        }
-        other => other,
+    let left_the_wallet = match &error {
+        Error::Transport { source, .. } => !source.is_connect(),
+        Error::Decode { .. } | Error::Json { .. } | Error::ResponseTooLarge { .. } => true,
+        _ => false,
+    };
+    if !left_the_wallet {
+        return error;
+    }
+    Error::ExecuteOutcomeUnknown {
+        host: error.host().to_string(),
+        command_id: command_id.to_string(),
+        submission_id: submission_id.to_string(),
+        prepared_transaction_hash: prepared_transaction_hash.to_string(),
+        source: Box::new(error),
     }
 }
 
@@ -625,6 +634,23 @@ mod tests {
             other => panic!("expected an unknown outcome, got {other}"),
         }
         assert!(error.to_string().contains("may have committed"), "{error}");
+    }
+
+    #[test]
+    fn an_execute_answered_with_an_error_status_keeps_its_api_error() {
+        for status in [400, 503] {
+            let answered = Error::Api {
+                host: "http://127.0.0.1".to_string(),
+                method: "POST",
+                path: "/v2/interactive-submission/executeAndWait".to_string(),
+                status,
+                message: "refused".to_string(),
+            };
+
+            let error = after_execute(answered, "command-1", "submission-1", "aGFzaA==");
+
+            assert!(error.is_status(status), "{status}: {error}");
+        }
     }
 
     #[test]

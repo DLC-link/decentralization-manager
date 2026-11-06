@@ -266,10 +266,18 @@ amounts.
 Each call times out after 60 seconds. Pass another `ClientOptions::timeout` to
 `LedgerClient::with_options` or `RegistryClient::with_options`.
 
-The execute step commits the transaction. If its request left the wallet and
-no answer came back, the flow returns `Error::ExecuteOutcomeUnknown`. The
-transaction may have committed. A new send builds a new transaction, so a blind
-retry can pay twice. Before you try again, check one of these:
+The execute step commits the transaction. The flow returns
+`Error::ExecuteOutcomeUnknown` when the request left the wallet but its answer
+does not tell the outcome. These cases return it:
+
+- The call timed out or the connection broke before the answer arrived.
+- The answer's body ended early or did not finish before the timeout.
+- The answer's body is not the JSON the client expects.
+- The answer's body is larger than `ClientOptions::max_response_bytes`.
+
+The error's `source` holds the error behind it. The transaction may have
+committed. A new send builds a new transaction, so a blind retry can pay twice.
+Before you try again, check one of these:
 
 - The party's holdings. A committed send has consumed its input holdings.
 - The party's pending offers. A committed accept has removed its offer.
