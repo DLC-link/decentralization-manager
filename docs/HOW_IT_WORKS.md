@@ -102,7 +102,7 @@ The steps below follow one governed action from its execution to the end of its 
 
 A governed action needs no signature from a Daml signing key.
 
-A self-management action changes `GovernanceRules` itself, for example its threshold. It has no proposal contract. Member parties confirm it with `GovernanceRules_ConfirmGovernanceAction` and execute it with `GovernanceRules_ExecuteGovernanceAction`. The [Governance lifecycle](https://docs.bitsafe.finance/decentralization-manager/concepts-and-development/governance-lifecycle) page describes both types of action.
+Most self-management actions change `GovernanceRules` itself, for example its threshold. `SelfAction_CancelAction` is the exception: it cancels the proposal of a governed action. A self-management action has no proposal contract of its own. Member parties confirm it with `GovernanceRules_ConfirmGovernanceAction` and execute it with `GovernanceRules_ExecuteGovernanceAction`. The [Governance lifecycle](https://docs.bitsafe.finance/decentralization-manager/concepts-and-development/governance-lifecycle) page describes both types of action.
 
 ## Paths outside the governance vote
 
