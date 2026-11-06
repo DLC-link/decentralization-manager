@@ -794,6 +794,11 @@ fn exercise(
 
 /// A one-node transaction with `root` at its root, submitted as `act_as`.
 fn prepared(root: Exercise, act_as: &str) -> PreparedTransaction {
+    prepared_node(NodeType::Exercise(root), act_as)
+}
+
+/// A one-node transaction with a node of any kind at its root.
+fn prepared_node(root: NodeType, act_as: &str) -> PreparedTransaction {
     PreparedTransaction {
         transaction: Some(DamlTransaction {
             version: "2.1".to_string(),
@@ -801,7 +806,7 @@ fn prepared(root: Exercise, act_as: &str) -> PreparedTransaction {
             nodes: vec![Node {
                 node_id: "0".to_string(),
                 versioned_node: Some(VersionedNode::V1(v1::Node {
-                    node_type: Some(NodeType::Exercise(root)),
+                    node_type: Some(root),
                 })),
             }],
             node_seeds: vec![NodeSeed {
@@ -1568,16 +1573,23 @@ async fn refused_accept(seed: u8, root: impl FnOnce(&str) -> Exercise) -> Refusa
 /// and return the refusal. Panics unless the wallet refused to sign and
 /// executed nothing.
 async fn refused_send(seed: u8, root: impl FnOnce(&str) -> Exercise) -> Refusal {
+    refused_send_of(seed, |sender| prepared(root(sender), sender)).await
+}
+
+/// Like [`refused_send`], for a whole transaction.
+async fn refused_send_of(
+    seed: u8,
+    transaction: impl FnOnce(&str) -> PreparedTransaction,
+) -> Refusal {
     let key = ExternalKeyPair::from_seed([seed; 32]);
     let sender = key.party_id("alice");
-    let transaction = prepared(root(&sender), &sender);
+    let transaction = transaction(&sender);
+    // A transaction the hasher cannot hash gets a stand-in hash. The wallet
+    // must refuse it when it fails to recompute the hash.
+    let hash = compute_prepared_transaction_hash(HashingScheme::V2, &transaction)
+        .unwrap_or_else(|_| vec![0; 32]);
     let server = MockServer::start().await;
-    stub_send(
-        &server,
-        &sender,
-        prepare_response(&transaction, &hash_of(&transaction)),
-    )
-    .await;
+    stub_send(&server, &sender, prepare_response(&transaction, &hash)).await;
 
     let result = send_transfer(
         &ledger_for(&server),
@@ -1961,4 +1973,202 @@ fn the_clients_refuse_plain_http_to_another_host_unless_allowed() {
         .is_ok()
     );
     assert!(RegistryClient::with_options("http://scan.example.com", None, allowed).is_ok());
+}
+
+// ---------------------------------------------------------------------------
+// Transactions of a shape the check does not accept.
+// ---------------------------------------------------------------------------
+
+/// The root a faithful send prepares for `sender`.
+fn faithful_root(sender: &str) -> Exercise {
+    exercise(
+        FACTORY_ID,
+        "TransferFactory",
+        TRANSFER_CHOICE,
+        &[sender],
+        transfer_value(&faithful(sender)),
+    )
+}
+
+fn assert_shape(reason: Refusal, wanted: &str) {
+    match reason {
+        Refusal::Shape(found) => assert_eq!(found, wanted),
+        other => panic!("expected the shape refusal \"{wanted}\", got {other}"),
+    }
+}
+
+/// A second root could do anything, and the check reads only one.
+#[tokio::test]
+async fn a_transaction_with_two_roots_is_not_signed() {
+    let reason = refused_send_of(39, |sender| {
+        let mut transaction = prepared(faithful_root(sender), sender);
+        if let Some(tree) = transaction.transaction.as_mut() {
+            tree.roots.push("1".to_string());
+            tree.nodes.push(Node {
+                node_id: "1".to_string(),
+                versioned_node: Some(VersionedNode::V1(v1::Node {
+                    node_type: Some(NodeType::Exercise(faithful_root(sender))),
+                })),
+            });
+            tree.node_seeds.push(NodeSeed {
+                node_id: 1,
+                seed: vec![8; 32],
+            });
+        }
+        transaction
+    })
+    .await;
+
+    assert_shape(reason, "it has 2 root nodes, not one");
+}
+
+#[tokio::test]
+async fn a_transaction_whose_root_is_a_create_is_not_signed() {
+    let reason = refused_send_of(40, |sender| {
+        let create = v1::Create {
+            lf_version: "2.1".to_string(),
+            contract_id: "00e1".to_string(),
+            package_name: "splice-amulet".to_string(),
+            template_id: Some(Identifier {
+                package_id: "amulet-package-id".to_string(),
+                module_name: "Splice.Amulet".to_string(),
+                entity_name: "Amulet".to_string(),
+            }),
+            argument: Some(record(vec![("owner", party(MALLORY))])),
+            signatories: vec![sender.to_string()],
+            stakeholders: vec![sender.to_string(), MALLORY.to_string()],
+            ..v1::Create::default()
+        };
+        prepared_node(NodeType::Create(create), sender)
+    })
+    .await;
+
+    assert_shape(reason, "its root node is not an exercise");
+}
+
+/// The hash covers the choice argument, so without one the wallet cannot
+/// recompute the hash, and it refuses there.
+#[tokio::test]
+async fn a_root_exercise_without_a_choice_argument_is_not_signed() {
+    let reason = refused_send(41, |sender| Exercise {
+        chosen_value: None,
+        ..faithful_root(sender)
+    })
+    .await;
+
+    match reason {
+        Refusal::Unverifiable(why) => assert!(why.contains("chosen value"), "{why}"),
+        other => panic!("expected an unverifiable hash, got {other}"),
+    }
+}
+
+#[tokio::test]
+async fn a_send_whose_argument_lacks_the_receiver_is_not_signed() {
+    let reason = refused_send(42, |sender| {
+        exercise(
+            FACTORY_ID,
+            "TransferFactory",
+            TRANSFER_CHOICE,
+            &[sender],
+            with_field(transfer_value(&faithful(sender)), "transfer.receiver", None),
+        )
+    })
+    .await;
+
+    assert_shape(reason, "its choice argument has no transfer.receiver");
+}
+
+/// An exercise without an interface is a direct template choice, not the
+/// Token Standard choice the wallet asked for.
+#[tokio::test]
+async fn a_root_exercise_without_an_interface_is_not_signed() {
+    let reason = refused_send(43, |sender| Exercise {
+        interface_id: None,
+        ..faithful_root(sender)
+    })
+    .await;
+
+    match reason {
+        Refusal::Mismatch {
+            field,
+            expected,
+            found,
+        } => {
+            assert_eq!(field, "interface");
+            assert_eq!(
+                expected,
+                "Splice.Api.Token.TransferInstructionV1:TransferFactory"
+            );
+            assert_eq!(found, "");
+        }
+        other => panic!("expected an interface mismatch, got {other}"),
+    }
+}
+
+/// Canton prepares with V3 when asked. The wallet recomputes the hash with
+/// the scheme the prepare names, signs that hash, and echoes the scheme.
+#[tokio::test]
+async fn a_transaction_prepared_with_hashing_scheme_v3_is_checked_and_signed_with_v3() {
+    let key = ExternalKeyPair::from_seed([44u8; 32]);
+    let sender = key.party_id("alice");
+    let transaction = prepared(faithful_root(&sender), &sender);
+    let v3 = match compute_prepared_transaction_hash(HashingScheme::V3, &transaction) {
+        Ok(hash) => hash,
+        Err(e) => panic!("the fixture must hash with V3: {e}"),
+    };
+    assert_ne!(
+        v3,
+        hash_of(&transaction),
+        "the test needs a transaction the two schemes hash differently"
+    );
+    let v3_response = |hash: &[u8]| {
+        let mut response = prepare_response(&transaction, hash);
+        response["hashingSchemeVersion"] = json!("HASHING_SCHEME_VERSION_V3");
+        response
+    };
+
+    let server = MockServer::start().await;
+    stub_send(&server, &sender, v3_response(&v3)).await;
+    let receipt = match send_transfer(
+        &ledger_for(&server),
+        &registry_for(&server),
+        &key,
+        &send_args(&sender),
+    )
+    .await
+    {
+        Ok(receipt) => receipt,
+        Err(e) => panic!("a V3 transaction must be signed: {e}"),
+    };
+
+    assert_eq!(receipt.prepared_transaction_hash, STANDARD.encode(&v3));
+    let execute = &bodies(&server, EXECUTE_PATH).await[0];
+    assert_eq!(execute["hashingSchemeVersion"], "HASHING_SCHEME_VERSION_V3");
+    let (_, _, signature) = signature_of(execute);
+    assert!(
+        verifying_key(&key).verify(&v3, &signature).is_ok(),
+        "the signature must cover the V3 hash"
+    );
+
+    // Named V3 but carrying the V2 hash: the wallet hashed with V3.
+    let server = MockServer::start().await;
+    stub_send(&server, &sender, v3_response(&hash_of(&transaction))).await;
+    let result = send_transfer(
+        &ledger_for(&server),
+        &registry_for(&server),
+        &key,
+        &send_args(&sender),
+    )
+    .await;
+    assert!(
+        matches!(
+            result,
+            Err(Error::TransactionRefused {
+                reason: Refusal::HashMismatch { .. },
+                ..
+            })
+        ),
+        "a V2 hash named V3 must be refused"
+    );
+    assert_eq!(count(&server, EXECUTE_PATH).await, 0, "nothing is executed");
 }
