@@ -687,7 +687,7 @@ data GovernableActionView = GovernableActionView with
 Key design properties:
 - **Authority propagation**: When `GovernanceRules` executes a `GovernableAction`, the governance party's authority flows through the exercise chain, allowing domain actions to create contracts or exercise choices that require governance party authorization
 - **Open for extension**: New action types are added by creating new templates that implement the interface -- no changes to `GovernanceRules` required
-- **Permissionless proposals**: Anyone can create a proposal template instance, but only governance members can confirm and execute it. `GovernanceRules_ConfirmAction` also rejects a proposal whose `proposer` is not a member or an additional proposer. Such a proposal therefore never reaches the threshold
+- **Permissionless proposals**: Anyone can create a proposal template instance, but only governance members can confirm and execute it. `GovernanceRules_ConfirmAction` also rejects a proposal whose `proposer` is not a member or an additional proposer. This check runs only at confirmation. Execution does not check the proposer again. Confirmations that members gave before a change to the proposer list still count
 
 ### GovernanceRules Contract
 
