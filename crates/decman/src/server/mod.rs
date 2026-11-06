@@ -2135,8 +2135,6 @@ async fn handle_incoming_connection(
                         | MessageType::KeysUpload
                         | MessageType::DnsSignature
                         | MessageType::P2pSignatures
-                        | MessageType::OneShotKey
-                        | MessageType::RotationSignatures
                         | MessageType::SubmissionSignatures
                         | MessageType::KickSignatures
                         | MessageType::AddPartyKeysUpload

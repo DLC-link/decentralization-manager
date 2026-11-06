@@ -65,7 +65,7 @@ pub struct PreparedTopology {
 /// SEQUENCE holding the `id-Ed25519` (1.3.101.112) AlgorithmIdentifier and a
 /// 33-byte BIT STRING (unused-bits octet + the 32-byte key). Fixed for Ed25519,
 /// so the whole encoding is this prefix followed by the raw key.
-pub(crate) const ED25519_SPKI_DER_PREFIX: [u8; 12] = [
+const ED25519_SPKI_DER_PREFIX: [u8; 12] = [
     0x30, 0x2a, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x03, 0x21, 0x00,
 ];
 
@@ -77,7 +77,7 @@ pub(crate) const ED25519_SPKI_DER_PREFIX: [u8; 12] = [
 /// fingerprint is still computed over the *raw* key (Canton unwraps the SPKI
 /// first — see `utils::compute_fingerprint`), so wrapping here does not change the
 /// party id the wallet derived.
-pub(crate) fn ed25519_spki_der(public_key: &[u8; 32]) -> Vec<u8> {
+fn ed25519_spki_der(public_key: &[u8; 32]) -> Vec<u8> {
     let mut der = Vec::with_capacity(ED25519_SPKI_DER_PREFIX.len() + public_key.len());
     der.extend_from_slice(&ED25519_SPKI_DER_PREFIX);
     der.extend_from_slice(public_key);

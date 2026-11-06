@@ -34,7 +34,6 @@ impl PartyThresholds {
     }
 
     /// The party's `PartyToParticipant` with each threshold in its place.
-    /// `None` for `signing_keys` publishes the party without signing keys.
     ///
     /// # Errors
     ///
@@ -43,16 +42,15 @@ impl PartyThresholds {
         self,
         party: String,
         participants: Vec<HostingParticipant>,
-        signing_keys: Option<Vec<SigningPublicKey>>,
+        signing_keys: Vec<SigningPublicKey>,
     ) -> Result<PartyToParticipant> {
-        let namespace = u32::try_from(self.namespace)?;
         Ok(PartyToParticipant {
             party,
             threshold: self.confirmation.try_into()?,
             participants,
-            party_signing_keys: signing_keys.map(|keys| SigningKeysWithThreshold {
-                keys,
-                threshold: namespace,
+            party_signing_keys: Some(SigningKeysWithThreshold {
+                keys: signing_keys,
+                threshold: self.namespace.try_into()?,
             }),
         })
     }
@@ -146,7 +144,7 @@ mod tests {
         let mapping = PartyThresholds::new(1, Some(3)).party_to_participant(
             "party".to_string(),
             vec![host("a"), host("b"), host("c")],
-            Some(vec![key(1), key(2), key(3)]),
+            vec![key(1), key(2), key(3)],
         )?;
 
         assert_eq!(mapping.threshold, 3);
@@ -165,25 +163,10 @@ mod tests {
         let thresholds = PartyThresholds::new(2, None);
         assert_eq!(thresholds.confirmation, 2);
 
-        let mapping = thresholds.party_to_participant(
-            "party".to_string(),
-            vec![host("a")],
-            Some(vec![key(1)]),
-        )?;
+        let mapping =
+            thresholds.party_to_participant("party".to_string(), vec![host("a")], vec![key(1)])?;
         assert_eq!(mapping.threshold, 2);
         assert_eq!(mapping.party_signing_keys.map(|k| k.threshold), Some(2));
-        Ok(())
-    }
-
-    #[test]
-    fn a_party_without_signing_keys_keeps_its_confirmation_threshold() -> Result {
-        let mapping = PartyThresholds::new(2, Some(1)).party_to_participant(
-            "party".into(),
-            vec![host("a")],
-            None,
-        )?;
-        assert_eq!(mapping.threshold, 1);
-        assert!(mapping.party_signing_keys.is_none());
         Ok(())
     }
 
@@ -192,7 +175,7 @@ mod tests {
         let built = PartyThresholds::new(2, Some(-1)).party_to_participant(
             "party".to_string(),
             Vec::new(),
-            Some(Vec::new()),
+            Vec::new(),
         );
         assert!(built.is_err());
     }

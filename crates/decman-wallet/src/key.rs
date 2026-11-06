@@ -1,6 +1,6 @@
 //! The party's Ed25519 namespace key — generated and held by the wallet.
 //!
-//! DecMan never sees this private key and cannot make one: the node-side library
+//! DecMan never sees the private key and cannot make one: the node-side library
 //! only derives fingerprints from *public* keys. Everything secret lives here,
 //! in the wallet's own process.
 

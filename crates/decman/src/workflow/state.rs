@@ -75,9 +75,6 @@ pub struct WorkflowState<S> {
     peer_data: RwLock<HashMap<CantonId, Vec<u8>>>,
     /// Payload data to send with the next command (e.g., proposals for signing)
     command_payload: RwLock<Vec<u8>>,
-    /// A step that only some peers take part in, with those peers. Not
-    /// persisted: a run that restarts in such a step must choose again.
-    limited_step: RwLock<Option<(S, HashSet<CantonId>)>>,
     /// The source's open ACS export, held between block requests, with the one
     /// participant allowed to pull from it.
     ///
@@ -112,7 +109,6 @@ impl<S: WorkflowStep + 'static> WorkflowState<S> {
             completed_peers: RwLock::new(HashSet::new()),
             peer_data: RwLock::new(HashMap::new()),
             command_payload: RwLock::new(Vec::new()),
-            limited_step: RwLock::new(None),
             acs_export: Mutex::new(None),
             _p: PhantomData,
         })
@@ -139,7 +135,6 @@ impl<S: WorkflowStep + 'static> WorkflowState<S> {
             completed_peers: RwLock::new(completed_peers.into_iter().collect()),
             peer_data: RwLock::new(HashMap::new()),
             command_payload: RwLock::new(Vec::new()),
-            limited_step: RwLock::new(None),
             acs_export: Mutex::new(None),
             _p: PhantomData,
         })
@@ -173,18 +168,13 @@ impl<S: WorkflowStep + 'static> WorkflowState<S> {
         if *self.current_step.read().await != step {
             return None;
         }
-        let limited = self.limited_to(step).await;
-        let required = limited.as_ref().unwrap_or(&self.expected_peers);
-        let mut missing: Vec<(CantonId, String)> = required
+        let mut missing: Vec<(CantonId, String)> = self
+            .expected_peers
             .iter()
             .filter(|peer| !completed.contains(*peer))
             .filter_map(|peer| unavailable.get(peer).map(|why| (peer.clone(), why.clone())))
             .collect();
-        let quorum = match limited {
-            Some(ref peers) => peers.len(),
-            None => self.peers_quorum(),
-        };
-        if required.len() - missing.len() >= quorum {
+        if self.expected_peers.len() - missing.len() >= self.peers_quorum() {
             return None;
         }
         missing.sort();
@@ -200,37 +190,6 @@ impl<S: WorkflowStep + 'static> WorkflowState<S> {
     /// Get payload data to send with command (clones the data)
     pub async fn get_command_payload(&self) -> Vec<u8> {
         self.command_payload.read().await.clone()
-    }
-
-    /// Limit `step` to `peers`. Only they receive its command, and the step
-    /// waits for every one of them instead of for the quorum.
-    pub async fn limit_step_to(&self, step: S, peers: HashSet<CantonId>) {
-        *self.limited_step.write().await = Some((step, peers));
-    }
-
-    /// The peers `step` is limited to, or `None` when every peer takes part.
-    async fn limited_to(&self, step: S) -> Option<HashSet<CantonId>> {
-        match &*self.limited_step.read().await {
-            Some((limited, peers)) if *limited == step => Some(peers.clone()),
-            _ => None,
-        }
-    }
-
-    /// Whether the current step leaves `peer` out.
-    pub async fn leaves_out(&self, peer: &CantonId) -> bool {
-        let step = self.current_step().await;
-        self.limited_to(step)
-            .await
-            .is_some_and(|peers| !peers.contains(peer))
-    }
-
-    /// Forget the current step's completions and peer data, so every peer
-    /// runs the step again. For a step whose peer data a restart has lost.
-    pub async fn restart_step(&self) {
-        let step = self.current_step().await;
-        self.completed_peers.write().await.clear();
-        self.peer_data.write().await.clear();
-        self.persist_step_progress(step, Vec::new()).await;
     }
 
     /// Install a freshly opened export session, replacing any previous one.
@@ -370,13 +329,8 @@ impl<S: WorkflowStep + 'static> WorkflowState<S> {
             // M-of-N party, so we do NOT also wait for every *connected* peer: a
             // peer that connected but then never signs (crash, refusal, or a
             // straggler) must not hold the gate open. Waiting on the connected
-            // set is what hung the run in the connect-then-stall case. A step
-            // limited to chosen peers waits for each of them instead.
-            let completed = self.completed_peers.read().await.clone();
-            match self.limited_to(cur).await {
-                Some(peers) => peers.is_subset(&completed),
-                None => completed.len() >= quorum,
-            }
+            // set is what hung the run in the connect-then-stall case.
+            self.completed_peers.read().await.len() >= quorum
         } else {
             false
         };
@@ -458,14 +412,6 @@ impl<S: WorkflowStep + 'static> WorkflowState<S> {
         if !self.expected_peers.contains(&peer_id) {
             tracing::warn!(
                 "ignoring step completion from unexpected peer {peer_id} (not in expected set for {})",
-                self.instance_name
-            );
-            return;
-        }
-        if self.leaves_out(&peer_id).await {
-            tracing::warn!(
-                "ignoring step completion from {peer_id}: the current step of {} does not \
-                 include it",
                 self.instance_name
             );
             return;
@@ -665,68 +611,6 @@ mod tests {
 
         state.peer_completed(peer(2)).await;
         assert_eq!(state.current_step().await, TestStep::Done);
-    }
-
-    #[sqlx::test(migrator = "MIGRATOR")]
-    async fn a_limited_step_waits_for_each_chosen_peer_and_ignores_the_rest(pool: SqlitePool) {
-        let state = WorkflowState::new(
-            pool,
-            "test-run".to_string(),
-            TestStep::Sign,
-            vec![peer(1), peer(2), peer(3)],
-            Some(1),
-        );
-        state
-            .limit_step_to(TestStep::Sign, [peer(1), peer(2)].into())
-            .await;
-
-        assert!(state.leaves_out(&peer(3)).await);
-        assert!(!state.leaves_out(&peer(1)).await);
-
-        // A quorum of one would advance here; the chosen peer 2 has not signed.
-        state.peer_completed(peer(3)).await;
-        state.peer_completed(peer(1)).await;
-        assert_eq!(state.current_step().await, TestStep::Sign);
-        assert!(!state.has_peer_completed(&peer(3)).await);
-
-        state.peer_completed(peer(2)).await;
-        assert_eq!(state.current_step().await, TestStep::Done);
-        assert!(!state.leaves_out(&peer(3)).await);
-    }
-
-    #[sqlx::test(migrator = "MIGRATOR")]
-    async fn a_limited_step_is_stranded_by_any_chosen_peer(pool: SqlitePool) {
-        let state = WorkflowState::new(
-            pool,
-            "test-run".to_string(),
-            TestStep::Sign,
-            vec![peer(1), peer(2), peer(3)],
-            Some(1),
-        );
-        state.limit_step_to(TestStep::Sign, [peer(1)].into()).await;
-
-        let gone = |n| HashMap::from([(peer(n), "has gone".to_string())]);
-        assert!(state.stranded_by(&gone(3)).await.is_none());
-        assert!(state.stranded_by(&gone(1)).await.is_some());
-    }
-
-    #[sqlx::test(migrator = "MIGRATOR")]
-    async fn restarting_a_step_forgets_its_completions_and_data(pool: SqlitePool) {
-        let state = WorkflowState::new(
-            pool,
-            "test-run".to_string(),
-            TestStep::Sign,
-            vec![peer(1), peer(2)],
-            None,
-        );
-        state.store_peer_data(peer(1), vec![1]).await;
-        state.peer_completed(peer(1)).await;
-
-        state.restart_step().await;
-
-        assert!(!state.has_peer_completed(&peer(1)).await);
-        assert!(state.get_all_peer_data().await.is_empty());
-        assert_eq!(state.current_step().await, TestStep::Sign);
     }
 
     #[sqlx::test(migrator = "MIGRATOR")]

@@ -242,27 +242,6 @@ impl NoiseClient {
         .await
     }
 
-    /// Send this node's one-shot public key for a contracts run to the
-    /// coordinator.
-    pub async fn send_one_shot_key(&self, public_key: Vec<u8>) -> Result<(), NoiseError> {
-        self.send_and_verify_ack(
-            MessageType::OneShotKey,
-            public_key,
-            "Sending one-shot public key to coordinator",
-        )
-        .await
-    }
-
-    /// Send this node's signed key rotation to the coordinator.
-    pub async fn send_rotation_signatures(&self, rotation: Vec<u8>) -> Result<(), NoiseError> {
-        self.send_and_verify_ack(
-            MessageType::RotationSignatures,
-            rotation,
-            "Sending rotation signatures to coordinator",
-        )
-        .await
-    }
-
     /// Send submission signatures to coordinator
     pub async fn send_submission_signatures(
         &self,

@@ -97,12 +97,6 @@ pub enum MessageType {
     /// `RequestDarPayload`; the answer is the DAR's bytes, chunked when they
     /// outgrow a frame. Only a peer the run invited is served.
     RequestDar = 0x0027,
-    /// Command: a contracts signer makes a one-shot Daml key and returns its
-    /// public half.
-    AnnounceKey = 0x0028,
-    /// Command: a chosen contracts signer signs the key rotation and keeps
-    /// its one-shot key for the creates.
-    SignRotation = 0x0029,
 
     // Invites (0x0010 - 0x001F)
     InviteOnboarding = 0x0010,
@@ -158,10 +152,6 @@ pub enum MessageType {
     AddPartyClearProposal = 0x0209,
     /// Peer → coordinator: signed change-threshold DNS + P2P pair.
     ChangeThresholdSignatures = 0x020A,
-    /// Peer → coordinator: the public half of its one-shot Daml key.
-    OneShotKey = 0x020B,
-    /// Peer → coordinator: the key rotation with its signatures.
-    RotationSignatures = 0x020C,
 
     // Chunked Transfer (0x0300 - 0x03FF)
     /// Command with chunked payload - payload contains: [command_type (2 bytes)] [total_size (4 bytes)] [chunk_count (4 bytes)]
@@ -270,8 +260,6 @@ impl TryFrom<u16> for MessageType {
             0x0025 => Ok(Self::SignChangeThreshold),
             0x0026 => Ok(Self::RetireLegacyKeys),
             0x0027 => Ok(Self::RequestDar),
-            0x0028 => Ok(Self::AnnounceKey),
-            0x0029 => Ok(Self::SignRotation),
             0x0018 => Ok(Self::InviteChangeThreshold),
             0x0101 => Ok(Self::Ack),
             0x0102 => Ok(Self::Data),
@@ -294,8 +282,6 @@ impl TryFrom<u16> for MessageType {
             0x0208 => Ok(Self::AddPartyClearSignatures),
             0x0209 => Ok(Self::AddPartyClearProposal),
             0x020A => Ok(Self::ChangeThresholdSignatures),
-            0x020B => Ok(Self::OneShotKey),
-            0x020C => Ok(Self::RotationSignatures),
             0x0300 => Ok(Self::ChunkedCommand),
             0x0301 => Ok(Self::GetChunk),
             0x0302 => Ok(Self::Chunk),
@@ -336,10 +322,7 @@ impl MessageType {
 /// not silently ignore the commitments and contribute unchecked signatures.
 /// The version byte rejects both old invitations and old command streams,
 /// including retries of persisted runs; health preflight rejects mixed meshes.
-/// 0xD3 -> 0xD4: Contracts signers sign with a one-shot key that the run adds
-/// to the party first. An old peer would sign with its vault key, which a
-/// Canton 3.7 node no longer exports.
-pub const WIRE_VERSION: u8 = 0xD4;
+pub const WIRE_VERSION: u8 = 0xD3;
 
 /// Message structure for Noise protocol communication.
 ///

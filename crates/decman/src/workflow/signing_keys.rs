@@ -48,35 +48,6 @@ use crate::{
     },
 };
 
-/// Whether a membership change keeps the party's signing keys.
-///
-/// A deploy installs one-shot keys that no member holds, so kick, add-party
-/// and change-threshold publish the party without signing keys, and the next
-/// deploy installs fresh ones. The exception is a party that still has a
-/// deprecated `PartyToKeyMapping`: Canton falls back to that mapping when the
-/// party carries no keys, and it can hold former members' keys. Such a party
-/// keeps attributing and adopting its keys as before.
-///
-/// # Errors
-///
-/// Errors when the legacy mapping cannot be read.
-pub async fn membership_change_keeps_keys(
-    config: &NodeConfig,
-    synchronizer_id: &str,
-    party_id: &CantonId,
-) -> Result<bool> {
-    let legacy = topology::fetch_party_to_key_mapping(config, synchronizer_id, party_id)
-        .await?
-        .is_some();
-    if !legacy {
-        tracing::info!(
-            "{party_id} has no legacy PartyToKeyMapping; this change publishes it without \
-             signing keys, and its next deploy installs fresh ones"
-        );
-    }
-    Ok(legacy)
-}
-
 /// Vault name of the Daml signing key a node holds for the party with this
 /// id prefix. Onboarding and add-party both mint the key under this name, and
 /// `get_or_create_signing_key` finds it again by it, so it is the local

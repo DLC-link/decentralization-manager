@@ -1846,7 +1846,6 @@ dependencies = [
  "prometheus",
  "prost",
  "prost-types",
- "rand 0.10.3",
  "rcgen",
  "registry",
  "reqwest 0.13.3",

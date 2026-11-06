@@ -11,7 +11,7 @@ use crate::{
     workflow::{
         change_threshold::ChangeThresholdConfig,
         proposal_store,
-        signing_keys::{adopt_legacy_signing_keys, membership_change_keeps_keys},
+        signing_keys::adopt_legacy_signing_keys,
         storage::{WorkflowStorage, artifact_kinds},
         thresholds::{PartyThresholds, check_confirmation_threshold},
         topology,
@@ -111,10 +111,7 @@ pub async fn create_proposals(
         .party_signing_keys
         .map(|sk| sk.keys)
         .unwrap_or_default();
-    let signing_keys = if !membership_change_keeps_keys(config, &synchronizer_id, &party_id).await?
-    {
-        None
-    } else if current_signing_keys.len() < current_p2p.participants.len() {
+    let signing_keys = if current_signing_keys.len() < current_p2p.participants.len() {
         // A party onboarded before Canton 3.4 keeps its keys in a deprecated
         // PartyToKeyMapping, which carries a threshold of its own, and a
         // pre-1.10.0 add leaves a party holding some inline and the rest there.
@@ -124,19 +121,17 @@ pub async fn create_proposals(
             .iter()
             .map(|p| p.participant_uid.clone())
             .collect();
-        Some(
-            adopt_legacy_signing_keys(
-                config,
-                storage,
-                &synchronizer_id,
-                &party_id,
-                &members,
-                &current_signing_keys,
-            )
-            .await?,
+        adopt_legacy_signing_keys(
+            config,
+            storage,
+            &synchronizer_id,
+            &party_id,
+            &members,
+            &current_signing_keys,
         )
+        .await?
     } else {
-        Some(current_signing_keys)
+        current_signing_keys
     };
 
     let new_p2p = thresholds.party_to_participant(

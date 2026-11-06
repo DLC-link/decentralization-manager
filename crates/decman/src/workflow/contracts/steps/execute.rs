@@ -1,5 +1,4 @@
-use std::collections::HashMap;
-
+use bytes::Buf;
 use sqlx::SqlitePool;
 use uuid::Uuid;
 
@@ -19,7 +18,7 @@ use crate::{
     error::Result,
     utils,
     workflow::{
-        contracts::{ContractsConfig, steps::sign::read_all_messages_from_bytes},
+        contracts::ContractsConfig,
         storage::{WorkflowStorage, artifact_kinds},
     },
 };
@@ -65,30 +64,57 @@ pub async fn execute_submissions(
         );
     }
 
-    // Step 3: load the signatures. PublishRotation wrote one row per
-    // submission, keyed like the submission, holding every signer's signature.
-    let mut signatures_by_ordinal: HashMap<String, Vec<u8>> = db
-        .list_artifacts(instance_name, artifact_kinds::SUBMISSION_SIGNATURES)
-        .await?
-        .into_iter()
-        .collect();
-
-    let mut submissions: Vec<(PrepareSubmissionResponse, Vec<CantonSignature>)> =
+    let mut prepared_submissions: Vec<PrepareSubmissionResponse> =
         Vec::with_capacity(submission_rows.len());
     for (ordinal, payload) in &submission_rows {
         let prepared_sub: PrepareSubmissionResponse =
             utils::read_first_message_from_bytes(payload)?;
-        let signatures = signatures_by_ordinal.remove(ordinal).ok_or_else(|| {
-            anyhow::anyhow!(
-                "No signatures for prepared submission {ordinal} of {instance_name} — did \
-                 PublishRotation complete?"
-            )
-        })?;
-        submissions.push((prepared_sub, read_all_messages_from_bytes(&signatures)?));
+        tracing::debug!("Loaded prepared submission ordinal {ordinal}");
+        prepared_submissions.push(prepared_sub);
     }
+
+    let num_submissions = prepared_submissions.len();
+    tracing::debug!("Loaded {num_submissions} prepared submissions");
+
+    // Step 3: Load all per-peer signature bundles from storage.
+    tracing::info!("Loading peer signatures...");
+    let signature_rows = db
+        .list_artifacts(instance_name, artifact_kinds::SUBMISSION_SIGNATURES)
+        .await?;
     tracing::debug!(
-        "Loaded {count} signed submissions",
-        count = submissions.len()
+        "Found signatures from {count} peer(s)",
+        count = signature_rows.len()
+    );
+
+    if signature_rows.is_empty() {
+        anyhow::bail!(
+            "No SUBMISSION_SIGNATURES artifacts found for instance {instance_name} — \
+             did SignSubmissions complete?"
+        );
+    }
+
+    // Each row is `varint(len)||proto` × N messages produced by
+    // `sign_submissions`. Decode them per-peer.
+    let mut all_signatures: Vec<Vec<CantonSignature>> = Vec::new();
+    for (peer_id, payload) in &signature_rows {
+        tracing::debug!("Loading signatures from peer {peer_id}");
+
+        let sigs: Vec<CantonSignature> = read_all_messages_from_bytes(payload)?;
+
+        if sigs.len() != num_submissions {
+            anyhow::bail!(
+                "Expected {num_submissions} signatures from peer {peer_id}, \
+                 but found {count}",
+                count = sigs.len()
+            );
+        }
+
+        all_signatures.push(sigs);
+    }
+
+    tracing::info!(
+        "Loaded signatures from {count} peers",
+        count = all_signatures.len()
     );
 
     // Step 4: Execute each submission
@@ -99,19 +125,25 @@ pub async fn execute_submissions(
     // committed transaction response, purely so we can log how many we made.
     let mut all_created_contract_ids: Vec<String> = Vec::new();
 
-    for (idx, (prepared_response, signatures)) in submissions.iter().enumerate() {
+    for (idx, prepared_response) in prepared_submissions.iter().enumerate() {
         tracing::info!("Executing submission {index}...", index = idx + 1);
 
-        // The Ledger API signature has no `signature_delegation` field.
-        let signatures_for_submission: Vec<Signature> = signatures
-            .iter()
-            .map(|canton_sig| Signature {
+        // Collect signatures for this submission from all peers
+        let mut signatures_for_submission = Vec::new();
+        for peer_sigs in &all_signatures {
+            let canton_sig = &peer_sigs[idx];
+
+            // Convert Canton Signature to Ledger API Signature
+            // The Ledger API Signature doesn't have signature_delegation field
+            let ledger_sig = Signature {
                 format: canton_sig.format,
                 signature: canton_sig.signature.clone(),
                 signed_by: canton_sig.signed_by.clone(),
                 signing_algorithm_spec: canton_sig.signing_algorithm_spec,
-            })
-            .collect();
+            };
+
+            signatures_for_submission.push(ledger_sig);
+        }
 
         tracing::debug!(
             "Collected {count} signatures for submission {idx}",
@@ -206,6 +238,27 @@ fn created_contract_ids(transaction: &Option<Transaction>) -> Vec<String> {
             })
         })
         .collect()
+}
+
+/// Decode a sequence of `varint(len)||proto` messages from a byte slice. Mirrors
+/// `utils::read_all_messages_from_file` but operates on in-memory data — used
+/// to round-trip blobs we used to read from disk.
+fn read_all_messages_from_bytes<M: prost::Message + Default>(data: &[u8]) -> Result<Vec<M>> {
+    let mut cursor = data;
+    let mut messages = Vec::new();
+    while cursor.has_remaining() {
+        let len = prost::encoding::decode_varint(&mut cursor)? as usize;
+        if cursor.remaining() < len {
+            anyhow::bail!(
+                "Incomplete message: expected {len} bytes, but only {remaining} remaining",
+                remaining = cursor.remaining()
+            );
+        }
+        let message_bytes = &cursor[..len];
+        cursor.advance(len);
+        messages.push(M::decode(message_bytes)?);
+    }
+    Ok(messages)
 }
 
 #[cfg(test)]

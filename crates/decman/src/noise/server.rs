@@ -202,8 +202,7 @@ async fn resolve_peer_threshold(
             // `PartyToKeyMapping` moves every survivor's key inline, and
             // Canton makes each added key sign the transaction that adds it.
             // A quorum would leave the proposal short of signatures, so that
-            // kick needs every survivor, not a quorum. Any other kick drops
-            // the keys, which needs only the namespace quorum.
+            // kick needs every survivor, not a quorum.
             if kind == WorkflowKind::Kick && party_keys_are_legacy(config, party_id).await {
                 tracing::info!(
                     "{party_id} keeps its signing keys in a legacy PartyToKeyMapping; this \
@@ -217,11 +216,10 @@ async fn resolve_peer_threshold(
     }
 }
 
-/// Whether a party still keeps signing keys in the deprecated
-/// `PartyToKeyMapping` that a kick must move inline: the mapping exists, and
-/// the inline keys do not cover every member.
+/// Whether a party still keeps its signing keys in the deprecated
+/// `PartyToKeyMapping` instead of inline on its `PartyToParticipant`.
 ///
-/// Answers `true` when either mapping cannot be read. The cost of being
+/// Answers `true` when the mapping cannot be read at all. The cost of being
 /// wrong that way is a run that waits for every peer; the cost of the other
 /// way is a run that advances without the signatures Canton demands.
 async fn party_keys_are_legacy(config: &NodeConfig, party_id: &CantonId) -> bool {
@@ -232,19 +230,10 @@ async fn party_keys_are_legacy(config: &NodeConfig, party_id: &CantonId) -> bool
             return true;
         }
     };
-    match topology::fetch_party_to_key_mapping(config, &synchronizer_id, party_id).await {
-        Ok(None) => return false,
-        Ok(Some(_)) => {}
-        Err(e) => {
-            tracing::warn!("Cannot read the PartyToKeyMapping for {party_id}: {e:#}");
-            return true;
-        }
-    }
     match topology::fetch_p2p_mapping(config, &synchronizer_id, party_id).await {
-        Ok(mapping) => {
-            mapping.party_signing_keys.map_or(0, |keys| keys.keys.len())
-                < mapping.participants.len()
-        }
+        Ok(mapping) => mapping
+            .party_signing_keys
+            .is_none_or(|keys| keys.keys.is_empty()),
         Err(e) => {
             tracing::warn!("Cannot read the P2P mapping for {party_id}: {e:#}");
             true
@@ -539,14 +528,6 @@ impl<S: WorkflowStep + 'static> NoiseServer<S> {
                 self.handle_peer_data(peer_id, message.payload, "P2P signatures")
                     .await
             }
-            MessageType::OneShotKey => {
-                self.handle_peer_data(peer_id, message.payload, "one-shot public key")
-                    .await
-            }
-            MessageType::RotationSignatures => {
-                self.handle_peer_data(peer_id, message.payload, "rotation signatures")
-                    .await
-            }
             MessageType::SubmissionSignatures => {
                 self.handle_peer_data(peer_id, message.payload, "submission signatures")
                     .await
@@ -599,12 +580,6 @@ impl<S: WorkflowStep + 'static> NoiseServer<S> {
         if has_completed {
             // Peer has completed current step, tell them to wait
             tracing::debug!("Sending Wait to {peer_id} (already completed current step)");
-            return Ok(Message::new_empty(MessageType::Wait));
-        }
-
-        // A step limited to chosen peers has nothing for the others.
-        if self.workflow_state.leaves_out(&peer_id).await {
-            tracing::debug!("Sending Wait to {peer_id} (not chosen for the current step)");
             return Ok(Message::new_empty(MessageType::Wait));
         }
 
