@@ -215,8 +215,9 @@ everything that follows (`workflow::validation::PeerExpectations`).
   namespace definition and `PartyToParticipant` from the synchronizer and
   requires each proposal to be exactly the expected change: change-threshold
   keeps the owners and signing keys as they are, and add-party adds at most
-  one of each (none to the owners when a former host is hosted again). A kick
-  removes exactly one owner, and that owner must be the key the invitation
+  one of each (none to the owners when a former host is hosted again). Only
+  add-party hosts a participant the current mapping does not, and only one. A
+  kick removes exactly one owner, and that owner must be the key the invitation
   names. It removes a host only when the member hosts the party. It removes
   every signing key above one per host left. A kick that removes no host must
   name the owner key, because nothing else ties the removal to the invitation.
