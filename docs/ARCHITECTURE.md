@@ -446,7 +446,9 @@ Removes a member from an existing decentralized party. The member is a hosting
 participant, or a namespace owner that does not host the party. A member that
 removed its own hosting entry is one of the second kind, and it can leave its
 signing key in the party. Kicking such an owner removes its owner key and that
-leftover key, and every host stays. When the hosting mapping would not change,
+leftover key, and every host stays. Any kick also removes the keys other
+members left behind, so one key per host stays. That needs every remaining
+host's reported signing key. When the hosting mapping would not change,
 the coordinator hands the peers the mapping already in force. Canton refuses an
 unchanged mapping at a new serial, so submit does not send it again.
 
