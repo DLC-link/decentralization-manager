@@ -496,6 +496,7 @@ impl PeerExpectations {
             synchronizer_id: utils::get_synchronizer_id(config).await?,
         };
         let new_member = self.new_member_fingerprints(storage, instance_name).await?;
+        let kicked_participant = self.kicked_participant.as_ref().map(ToString::to_string);
         check_against_head(
             &head,
             self.kind,
@@ -505,7 +506,10 @@ impl PeerExpectations {
             new_member
                 .as_ref()
                 .map(|(namespace, daml)| (namespace.as_str(), daml.as_str())),
-            self.kicked_owner_key.as_deref(),
+            Departing {
+                participant: kicked_participant.as_deref(),
+                owner_key: self.kicked_owner_key.as_deref(),
+            },
         )
         .await
     }
@@ -1135,15 +1139,28 @@ impl TopologyHead for SynchronizerHead<'_> {
     }
 }
 
+/// The member an accepted kick invitation names. Other runs name none.
+#[derive(Clone, Copy, Debug, Default)]
+struct Departing<'a> {
+    /// The kicked participant, when the invitation names one.
+    participant: Option<&'a str>,
+    /// The kicked owner key. Absent from coordinators that predate the field.
+    owner_key: Option<&'a str>,
+}
+
 /// `new_member` is this node's `(namespace, daml)` fingerprints when it is the
-/// new member. `kicked_owner` is the owner key a kick invitation names.
+/// new member. `departing` is the member a kick invitation names.
 ///
-/// Only add-party hosts a participant the on-chain mapping does not, and only
-/// one. A kick removes one owner key. It removes a host only when the departing
-/// member hosts the party. It removes every signing key above one per host
-/// left: the host's own key, or the key a member left behind when it removed
-/// its own hosting entry. A kick that removes no host must name the owner key,
-/// because the unchanged hosts give a peer nothing else to tie the removal to.
+/// The host set must match the accepted invitation, but the coordinator writes
+/// the invitation, so the host changes are pinned here too. Only add-party
+/// hosts a participant the on-chain mapping does not, and only one. Only a
+/// kick stops hosting one, and only the participant the invitation names.
+///
+/// A kick removes one owner key. It removes every signing key above one per
+/// host left: the host's own key, or the key a member left behind when it
+/// removed its own hosting entry. A kick that removes no host must name the
+/// owner key, because the unchanged hosts give a peer nothing else to tie the
+/// removal to.
 async fn check_against_head(
     head: &impl TopologyHead,
     kind: WorkflowKind,
@@ -1151,7 +1168,7 @@ async fn check_against_head(
     (dns_serial, namespace_def): (u32, &DecentralizedNamespaceDefinition),
     (p2p_serial, mapping): (u32, &PartyToParticipant),
     new_member: Option<(&str, &str)>,
-    kicked_owner: Option<&str>,
+    departing: Departing<'_>,
 ) -> Result {
     let (head_dns_serial, current_def) = head
         .namespace_definition(&dec_party_id.namespace.to_hex())
@@ -1163,10 +1180,7 @@ async fn check_against_head(
         anyhow::anyhow!("cannot read the current signing keys of {dec_party_id}: {e:#}")
     })?;
 
-    // The host set must match the accepted invitation, but the invitation
-    // comes from the coordinator. Only add-party may host a participant the
-    // on-chain mapping does not, and only the one it adds.
-    let hosts_added = hosts_added(&current_p2p, mapping);
+    let hosts_added = hosts_not_in(mapping, &current_p2p);
     let max_hosts_added = usize::from(kind == WorkflowKind::AddParty);
     if hosts_added.len() > max_hosts_added {
         anyhow::bail!(
@@ -1174,22 +1188,26 @@ async fn check_against_head(
              host; it may add at most {max_hosts_added}"
         );
     }
-    let hosts_removed = hosts_removed(&current_p2p, mapping);
-    let kicked_owner = if kind == WorkflowKind::Kick {
-        kicked_owner
+    let departing = if kind == WorkflowKind::Kick {
+        departing
     } else {
-        None
+        Departing::default()
     };
+    let hosts_removed = hosts_not_in(&current_p2p, mapping);
+    if let Some(evicted) = hosts_removed
+        .iter()
+        .find(|uid| Some(**uid) != departing.participant)
+    {
+        anyhow::bail!(
+            "{kind:?} proposal stops hosting {evicted}, which the accepted invitation does not \
+             name as departing"
+        );
+    }
+    let kicked_owner = departing.owner_key;
     if kind == WorkflowKind::Kick {
-        if hosts_removed > 1 {
-            anyhow::bail!(
-                "Kick proposal removes {hosts_removed} hosts from the on-chain mapping; it may \
-                 remove at most 1"
-            );
-        }
         // A DNS proposal at the head serial is the namespace already in force
         // (or refused below), so it removes nothing that needs pinning.
-        if hosts_removed == 0 && kicked_owner.is_none() && dns_serial != head_dns_serial {
+        if hosts_removed.is_empty() && kicked_owner.is_none() && dns_serial != head_dns_serial {
             anyhow::bail!(
                 "Kick proposal removes no host, so it removes an owner that does not host the \
                  party, but the accepted invitation names no owner key to check it against"
@@ -1276,33 +1294,18 @@ async fn check_against_head(
     )
 }
 
-/// The hosts of the proposal that the on-chain mapping does not host.
-fn hosts_added<'a>(current: &PartyToParticipant, proposed: &'a PartyToParticipant) -> Vec<&'a str> {
-    let current: BTreeSet<&str> = current
+/// The hosts of `from` that `other` does not host.
+fn hosts_not_in<'a>(from: &'a PartyToParticipant, other: &PartyToParticipant) -> Vec<&'a str> {
+    let other: BTreeSet<&str> = other
         .participants
         .iter()
         .map(|p| p.participant_uid.as_str())
         .collect();
-    proposed
-        .participants
+    from.participants
         .iter()
         .map(|p| p.participant_uid.as_str())
-        .filter(|uid| !current.contains(uid))
+        .filter(|uid| !other.contains(uid))
         .collect()
-}
-
-/// How many of the on-chain hosts the proposal no longer hosts.
-fn hosts_removed(current: &PartyToParticipant, proposed: &PartyToParticipant) -> usize {
-    let proposed: BTreeSet<&str> = proposed
-        .participants
-        .iter()
-        .map(|p| p.participant_uid.as_str())
-        .collect();
-    current
-        .participants
-        .iter()
-        .filter(|p| !proposed.contains(p.participant_uid.as_str()))
-        .count()
 }
 
 /// Whether a proposal is the head transaction itself. The same serial with a
@@ -2817,7 +2820,7 @@ mod tests {
             (3, &def),
             (6, &keyed_p2p(Some(signing_keys(3, 2)))?),
             None,
-            None,
+            Departing::default(),
         )
         .await
     }
@@ -2906,7 +2909,7 @@ mod tests {
                 (3, &def),
                 (6, &proposal),
                 None,
-                None,
+                Departing::default(),
             )
             .await
             {
@@ -2953,7 +2956,10 @@ mod tests {
             (3, &namespace(proposed_owners)),
             (6, &proposal),
             None,
-            kicked_owner,
+            Departing {
+                owner_key: kicked_owner,
+                ..Departing::default()
+            },
         )
         .await
     }
@@ -3026,7 +3032,10 @@ mod tests {
                 (3, &namespace(&["a", "b"])),
                 (6, &proposal),
                 None,
-                Some("c"),
+                Departing {
+                    owner_key: Some("c"),
+                    ..Departing::default()
+                },
             )
             .await
         };
@@ -3076,7 +3085,7 @@ mod tests {
             (dns.0, &dns.1),
             (p2p.0, &p2p.1),
             None,
-            None,
+            Departing::default(),
         )
         .await
     }
@@ -3095,6 +3104,7 @@ mod tests {
             let head = owner_only_head();
             let proposal = proposal(keys);
             let party = party.clone();
+            let kicked = p2.to_string();
             async move {
                 check_against_head(
                     &head?,
@@ -3103,7 +3113,10 @@ mod tests {
                     (3, &namespace(&["a", "c"])),
                     (6, &proposal),
                     None,
-                    Some("b"),
+                    Departing {
+                        participant: Some(&kicked),
+                        owner_key: Some("b"),
+                    },
                 )
                 .await
             }
@@ -3136,7 +3149,7 @@ mod tests {
             (3, &namespace(&["a", "b", "c"])),
             (6, &proposal),
             None,
-            None,
+            Departing::default(),
         )
         .await
     }
@@ -3166,7 +3179,7 @@ mod tests {
             (3, &namespace(owners)),
             (6, &proposal),
             None,
-            None,
+            Departing::default(),
         )
         .await
     }
@@ -3205,6 +3218,86 @@ mod tests {
             host_set_change(WorkflowKind::ChangeThreshold, &hosts, &["a", "b", "c"]).await,
             "a change of threshold that hosts p3",
         )
+    }
+
+    fn expect_eviction_refusal(outcome: Result, what: &str) -> Result {
+        let error = match outcome {
+            Ok(()) => anyhow::bail!("{what} must be refused"),
+            Err(error) => error.to_string(),
+        };
+        assert!(
+            error.contains("stops hosting p2::"),
+            "unexpected error: {error}"
+        );
+        Ok(())
+    }
+
+    /// A kick of owner "c", which hosts nothing, that also stops hosting p2.
+    /// The invitation lists only p1, so p2's absence matches it, but the
+    /// invitation names c's member as departing, not p2.
+    #[tokio::test]
+    async fn a_kick_stops_hosting_only_the_participant_it_names() -> Result {
+        let p1 = canton_id("p1", 1)?;
+        let proposal = PartyToParticipant {
+            party_signing_keys: Some(signing_keys(1, 1)),
+            ..p2p("party", std::slice::from_ref(&p1), 1)
+        };
+        let claimant = canton_id("p3", 3)?.to_string();
+        for participant in [None, Some(claimant.as_str())] {
+            expect_eviction_refusal(
+                check_against_head(
+                    &owner_only_head()?,
+                    WorkflowKind::Kick,
+                    &canton_id("party", 9)?,
+                    (3, &namespace(&["a", "b"])),
+                    (6, &proposal),
+                    None,
+                    Departing {
+                        participant,
+                        owner_key: Some("c"),
+                    },
+                )
+                .await,
+                "a kick of c that drops p2",
+            )?;
+        }
+        Ok(())
+    }
+
+    /// A legacy party's keys allow any removal, so only the host check stops
+    /// a change of threshold from dropping p3.
+    #[tokio::test]
+    async fn a_change_threshold_refuses_to_stop_hosting_a_participant() -> Result {
+        let def = namespace(&["a", "b", "c"]);
+        let head = StubHead {
+            dns: Some((2, def.clone())),
+            p2p: Some((5, keyed_p2p(None)?)),
+            legacy_keys: Some(signing_keys(3, 2).keys),
+        };
+        let hosts = [canton_id("p1", 1)?, canton_id("p2", 2)?];
+        let proposal = PartyToParticipant {
+            party_signing_keys: Some(signing_keys(2, 2)),
+            ..p2p("party", &hosts, 2)
+        };
+        let error = match check_against_head(
+            &head,
+            WorkflowKind::ChangeThreshold,
+            &canton_id("party", 9)?,
+            (3, &def),
+            (6, &proposal),
+            None,
+            Departing::default(),
+        )
+        .await
+        {
+            Ok(()) => anyhow::bail!("a change of threshold that drops p3 must be refused"),
+            Err(error) => error.to_string(),
+        };
+        assert!(
+            error.contains("stops hosting p3::"),
+            "unexpected error: {error}"
+        );
+        Ok(())
     }
 
     #[tokio::test]
