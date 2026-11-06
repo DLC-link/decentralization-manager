@@ -1192,6 +1192,11 @@ mod tests {
     use bytes::Bytes;
 
     use super::*;
+    use crate::{
+        canton_id::CantonId,
+        config::{NodeConfig, Peer},
+        noise::client::NoiseClient,
+    };
 
     fn test_retry_config() -> NoiseRetryConfig {
         // Zero backoff so the `retry_loop_*` tests don't sleep in real time.
@@ -1363,28 +1368,42 @@ mod tests {
             "expected a version mismatch, got: {err:?}"
         );
         let rendered = err.to_string();
-        assert!(
-            rendered.contains("this node runs an older"),
-            "wrong side named: {rendered}"
-        );
+        for needle in [
+            format!("0x{newer:02x}"),
+            format!("0x{WIRE_VERSION:02x}"),
+            "this node runs an older".to_string(),
+        ] {
+            assert!(
+                rendered.contains(&needle),
+                "{needle:?} missing from: {rendered}"
+            );
+        }
     }
 
+    /// A legacy frame starts with its `MessageType` high byte, 0x00 to 0x03.
+    /// None of those may read as a wire version.
     #[test]
     fn from_refusal_ignores_a_legacy_frame() {
-        // Starts with a MessageType high byte where the version now lives.
-        let mut legacy = vec![0x00, 0x01];
-        legacy.extend_from_slice(&[0x00, 0x00, 0x00, 0x00]);
-        legacy.extend_from_slice(&[0x00, 0x00, 0x00]);
+        for msg_type in [
+            MessageType::UploadDars,
+            MessageType::Ack,
+            MessageType::AddPartyKeysUpload,
+            MessageType::ChunkedCommand,
+        ] {
+            let mut legacy = msg_type.to_u16().to_be_bytes().to_vec();
+            legacy.extend_from_slice(&3u32.to_be_bytes());
+            legacy.extend_from_slice(b"old");
 
-        let err = NoiseError::from_refusal(StatusCode::SERVICE_UNAVAILABLE, &legacy);
+            let err = NoiseError::from_refusal(StatusCode::SERVICE_UNAVAILABLE, &legacy);
 
-        assert!(
-            matches!(
-                err,
-                NoiseError::BadStatusCode(StatusCode::SERVICE_UNAVAILABLE, None)
-            ),
-            "got: {err:?}"
-        );
+            assert!(
+                matches!(
+                    err,
+                    NoiseError::BadStatusCode(StatusCode::SERVICE_UNAVAILABLE, None)
+                ),
+                "{msg_type:?} frame read as: {err:?}"
+            );
+        }
     }
 
     #[test]
@@ -1918,6 +1937,213 @@ mod tests {
             "{} of {ROUNDS} rounds failed: {failures:?}",
             failures.len()
         );
+        Ok(())
+    }
+
+    /// A peer listener that answers every request with `status` and `body`
+    /// over a real Noise session. Returns its port and how many requests it
+    /// served.
+    async fn refusing_peer(
+        psk: [u8; 32],
+        status: StatusCode,
+        body: Vec<u8>,
+    ) -> Result<(u16, Arc<AtomicUsize>, tokio::task::JoinHandle<()>)> {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let port = listener.local_addr()?.port();
+        let served = Arc::new(AtomicUsize::new(0));
+        let counter = served.clone();
+        let body = Bytes::from(body);
+        let server = accept_loop(listener, move |socket| {
+            let counter = counter.clone();
+            let body = body.clone();
+            async move {
+                let respond = move |_: &[u8], _: Request<Body>| {
+                    counter.fetch_add(1, Ordering::SeqCst);
+                    let mut response = hyper::Response::new(Body::from(body.clone()));
+                    *response.status_mut() = status;
+                    async move { Ok::<_, hyper::Error>(response) }
+                };
+                let responder =
+                    tokio_noise::handshakes::nn_psk2::Responder::new(move |_: &[u8]| Some(psk));
+                if let Err(e) = hyper_noise::server::serve_http(
+                    socket,
+                    responder,
+                    respond,
+                    Some(NOISE_HANDLER_TIMEOUT),
+                )
+                .await
+                {
+                    tracing::warn!("test peer connection failed: {e}");
+                }
+            }
+        });
+        Ok((port, served, server))
+    }
+
+    fn three_attempts() -> NoiseRetryConfig {
+        NoiseRetryConfig {
+            per_attempt_timeout_secs: 5,
+            max_attempts: 3,
+            backoff_ms: 0,
+        }
+    }
+
+    /// The probe path: an older peer refuses with a 503, and the client names
+    /// the peer's byte without spending its retries on it.
+    #[tokio::test]
+    async fn an_older_peers_refusal_is_a_mismatch_after_one_attempt() -> Result {
+        let psk = [9u8; 32];
+        let older = WIRE_VERSION - 1;
+        let (port, served, server) =
+            refusing_peer(psk, StatusCode::SERVICE_UNAVAILABLE, refusal_on(older)).await?;
+
+        let result = send_noise_message_with_retry(
+            "127.0.0.1",
+            port,
+            &psk,
+            b"self",
+            &Message::new_empty(MessageType::Health),
+            &three_attempts(),
+        )
+        .await;
+        server.abort();
+
+        assert!(
+            matches!(result, Err(NoiseError::WireVersionMismatch { peer }) if peer == older),
+            "got: {result:?}"
+        );
+        assert_eq!(served.load(Ordering::SeqCst), 1);
+        Ok(())
+    }
+
+    /// Control for the test above: the same 503 with no body is retried, so
+    /// the single attempt there comes from the body.
+    #[tokio::test]
+    async fn an_empty_503_is_retried_to_the_last_attempt() -> Result {
+        let psk = [9u8; 32];
+        let (port, served, server) =
+            refusing_peer(psk, StatusCode::SERVICE_UNAVAILABLE, Vec::new()).await?;
+        let config = three_attempts();
+
+        let result = send_noise_message_with_retry(
+            "127.0.0.1",
+            port,
+            &psk,
+            b"self",
+            &Message::new_empty(MessageType::Health),
+            &config,
+        )
+        .await;
+        server.abort();
+
+        assert!(
+            matches!(
+                result,
+                Err(NoiseError::BadStatusCode(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    None
+                ))
+            ),
+            "got: {result:?}"
+        );
+        assert_eq!(served.load(Ordering::SeqCst), config.max_attempts);
+        Ok(())
+    }
+
+    /// The single-shot fan-out path names a newer peer the same way.
+    #[tokio::test]
+    async fn a_newer_peers_refusal_is_a_mismatch_on_the_single_shot_path() -> Result {
+        let psk = [9u8; 32];
+        let newer = WIRE_VERSION + 1;
+        let (port, served, server) =
+            refusing_peer(psk, StatusCode::SERVICE_UNAVAILABLE, refusal_on(newer)).await?;
+
+        let result = send_noise_message(
+            "127.0.0.1",
+            port,
+            &psk,
+            b"self",
+            &Message::new_empty(MessageType::RequestOwnerKeys),
+        )
+        .await;
+        server.abort();
+
+        assert!(
+            matches!(result, Err(NoiseError::WireVersionMismatch { peer }) if peer == newer),
+            "got: {result:?}"
+        );
+        assert_eq!(served.load(Ordering::SeqCst), 1);
+        Ok(())
+    }
+
+    /// A peer on our own version that refuses us still reports why (#332).
+    #[tokio::test]
+    async fn a_same_version_refusal_keeps_the_peers_reason() -> Result {
+        let psk = [9u8; 32];
+        let denied = Message::new(
+            MessageType::Error,
+            b"request rejected: unknown sender".to_vec(),
+        );
+        let (port, _, server) =
+            refusing_peer(psk, StatusCode::SERVICE_UNAVAILABLE, denied.to_bytes()).await?;
+
+        let result = send_noise_message(
+            "127.0.0.1",
+            port,
+            &psk,
+            b"self",
+            &Message::new_empty(MessageType::Health),
+        )
+        .await;
+        server.abort();
+
+        assert!(
+            matches!(
+                &result,
+                Err(NoiseError::BadStatusCode(StatusCode::SERVICE_UNAVAILABLE, Some(reason)))
+                    if reason == "request rejected: unknown sender"
+            ),
+            "got: {result:?}"
+        );
+        Ok(())
+    }
+
+    /// The workflow client a peer uses to reach its coordinator names an
+    /// older coordinator too.
+    #[tokio::test]
+    async fn the_workflow_client_names_an_older_coordinator() -> Result {
+        let root = tempfile::tempdir()?;
+        let mut config = NodeConfig::default().with_root_dir(root.path());
+        config.node.participant_id =
+            Some(CantonId::parse(&format!("peer::1220{}", "a".repeat(64)))?);
+        let keys = NoiseKeypair::generate();
+        tokio::fs::create_dir_all(config.data_dir()).await?;
+        keys.save_to_file(config.key_file_path()).await?;
+        let coordinator_keys = NoiseKeypair::generate();
+        let psk = *coordinator_keys.derive_psk(&keys.public_key);
+        let older = WIRE_VERSION - 1;
+        let (port, served, server) =
+            refusing_peer(psk, StatusCode::SERVICE_UNAVAILABLE, refusal_on(older)).await?;
+        let coordinator = Peer {
+            participant_id: CantonId::parse(&format!("coordinator::1220{}", "b".repeat(64)))?,
+            name: "Older coordinator".into(),
+            address: "127.0.0.1".into(),
+            port,
+            public_key: coordinator_keys.public_key_hex(),
+            party: None,
+        };
+        let client = NoiseClient::new(config, coordinator, "run-1".into()).await?;
+
+        let result = client
+            .send_message(&Message::new_empty(MessageType::GetNextCommand))
+            .await;
+        server.abort();
+
+        assert!(
+            matches!(result, Err(NoiseError::WireVersionMismatch { peer }) if peer == older),
+            "got: {result:?}"
+        );
+        assert_eq!(served.load(Ordering::SeqCst), 1);
         Ok(())
     }
 
