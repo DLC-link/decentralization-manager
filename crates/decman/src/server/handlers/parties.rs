@@ -38,8 +38,8 @@ use crate::{
     },
     error::Result,
     noise::{
-        Message, MessageType, NoiseError, NoiseKeypair, parse_public_key, send_noise_message,
-        send_noise_message_with_retry,
+        Message, MessageType, NoiseError, NoiseKeypair, WIRE_VERSION, parse_public_key,
+        send_noise_message, send_noise_message_with_retry,
     },
     server::{
         AppState, former_parties,
@@ -946,6 +946,7 @@ enum OwnerKeysFailureKind {
     Unreachable,
     TimedOut,
     HandshakeFailed,
+    WireVersionMismatch,
     Denied,
     ConnectionBroken,
     BadPeerConfig,
@@ -1099,6 +1100,7 @@ fn request_failure_kind(err: &NoiseError) -> OwnerKeysFailureKind {
         NoiseError::Noise(_) | NoiseError::HandshakeFailed | NoiseError::DecryptionError => {
             Kind::HandshakeFailed
         }
+        NoiseError::WireVersionMismatch { .. } => Kind::WireVersionMismatch,
         NoiseError::BadStatusCode(..) => Kind::Denied,
         NoiseError::InvalidMessage => Kind::UnparsableReply,
         NoiseError::JsonSerialization(_) => Kind::BadPayload,
@@ -2247,6 +2249,7 @@ async fn check_participants_status(
                     workflow: None,
                     version: Some(crate::build_info::SEMVER.to_string()),
                     build_version: Some(crate::build_info::build_version().to_string()),
+                    wire_version: Some(WIRE_VERSION),
                 }
             }));
             continue;
@@ -2269,6 +2272,7 @@ async fn check_participants_status(
                     workflow: None,
                     version: None,
                     build_version: None,
+                    wire_version: None,
                 };
             };
 
@@ -2296,19 +2300,24 @@ async fn check_participants_status(
                         workflow: reply.workflow,
                         version: reply.version,
                         build_version: reply.build_version,
+                        wire_version: Some(WIRE_VERSION),
                     }
                 }
                 Err(e) => {
                     // Map NoiseError -> ConnectionStatus (binary semantics — Unreachable
                     // covers transport-side failures; HandshakeFailed covers everything
-                    // else, matching prior behavior of this endpoint).
-                    let status = match &e {
+                    // else). A version mismatch stays HandshakeFailed so older clients
+                    // still read it; `wire_version` tells it apart.
+                    let (status, wire_version) = match &e {
                         NoiseError::TcpConnectionTimeout(_)
                         | NoiseError::TcpConnectionFailed(_)
                         | NoiseError::Io(_)
                         | NoiseError::Hyper(_)
-                        | NoiseError::RequestTimeout => ConnectionStatus::Unreachable,
-                        _ => ConnectionStatus::HandshakeFailed,
+                        | NoiseError::RequestTimeout => (ConnectionStatus::Unreachable, None),
+                        NoiseError::WireVersionMismatch { peer } => {
+                            (ConnectionStatus::HandshakeFailed, Some(*peer))
+                        }
+                        _ => (ConnectionStatus::HandshakeFailed, None),
                     };
                     ParticipantStatus {
                         id: peer_id,
@@ -2317,6 +2326,7 @@ async fn check_participants_status(
                         workflow: None,
                         version: None,
                         build_version: None,
+                        wire_version,
                     }
                 }
             }
@@ -2326,7 +2336,10 @@ async fn check_participants_status(
     let results = futures::future::join_all(status_futures).await;
     let statuses: Vec<ParticipantStatus> = results.into_iter().filter_map(|r| r.ok()).collect();
 
-    Ok(ParticipantsStatusResponse { statuses })
+    Ok(ParticipantsStatusResponse {
+        statuses,
+        wire_version: Some(WIRE_VERSION),
+    })
 }
 
 /// Query parameters for the peer package comparison
@@ -2394,6 +2407,10 @@ fn peer_failure_hint(err: &NoiseError) -> &'static str {
         NoiseError::Noise(_) | NoiseError::HandshakeFailed | NoiseError::DecryptionError => {
             "the Noise handshake failed — this node's key or the derived PSK does not match what \
              the peer expects, so check each side has the other's current public key"
+        }
+        NoiseError::WireVersionMismatch { .. } => {
+            "the peer speaks a different decman wire protocol, so the key is not the problem — \
+             the error names both versions; upgrade whichever side is older"
         }
         NoiseError::BadStatusCode(..) => {
             "the peer answered but refused the request — it may not have this node registered as \
@@ -3255,6 +3272,7 @@ mod tests {
             NoiseError::HandshakeFailed,
             NoiseError::DecryptionError,
             NoiseError::BadStatusCode(StatusCode::SERVICE_UNAVAILABLE, None),
+            NoiseError::WireVersionMismatch { peer: 0xD2 },
             NoiseError::InvalidMessage,
             NoiseError::UnknownPeer("x".into()),
         ];
@@ -3272,6 +3290,11 @@ mod tests {
         assert_ne!(
             peer_failure_hint(&NoiseError::InvalidMessage),
             peer_failure_hint(&NoiseError::TcpConnectionFailed("x".into())),
+        );
+        // A version mismatch must not send the operator to check the key.
+        assert_ne!(
+            peer_failure_hint(&NoiseError::WireVersionMismatch { peer: 0xD2 }),
+            peer_failure_hint(&NoiseError::HandshakeFailed),
         );
     }
 
@@ -3310,9 +3333,12 @@ mod tests {
             StatusCode::SERVICE_UNAVAILABLE,
             Some("not a registered peer".into()),
         );
+        let mismatch = NoiseError::WireVersionMismatch { peer: 0xD2 };
         assert_eq!(next(&down), OwnerKeysLog::Warn);
         assert_eq!(next(&down), OwnerKeysLog::Debug);
         assert_eq!(next(&denied), OwnerKeysLog::Warn);
+        assert_eq!(next(&mismatch), OwnerKeysLog::Warn);
+        assert_eq!(next(&mismatch), OwnerKeysLog::Debug);
         assert_eq!(next(&NoiseError::HandshakeFailed), OwnerKeysLog::Warn);
         assert_eq!(next(&NoiseError::DecryptionError), OwnerKeysLog::Debug);
     }

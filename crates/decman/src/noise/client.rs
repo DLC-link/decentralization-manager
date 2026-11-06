@@ -142,29 +142,21 @@ impl NoiseClient {
         )
         .await?;
 
-        // Check response status.
-        //
-        // Read the body before giving up: the listener's deny paths answer a
-        // non-2xx with a `MessageType::Error` frame naming the reason, and
-        // discarding it here is what left the requester unable to tell "the
-        // peer refused us" from "the peer is down" (#332). Bounded by the same
-        // request timeout as the success path, and best-effort — a peer that
-        // sends no body, or an unparseable one, still yields the bare status.
+        // The refusal body names the peer's reason or its wire version, which
+        // tells "the peer refused us" apart from "the peer is down" (#332).
+        // Best-effort and bounded by the same request timeout.
         if response.status() != hyper::StatusCode::OK {
             let status = response.status();
-            let reason = match tokio::time::timeout(
+            let body = match tokio::time::timeout(
                 request_timeout,
                 hyper::body::to_bytes(response.body_mut()),
             )
             .await
             {
-                Ok(Ok(bytes)) if !bytes.is_empty() => Message::from_bytes(&bytes)
-                    .ok()
-                    .filter(|m| m.msg_type == MessageType::Error)
-                    .map(|m| String::from_utf8_lossy(&m.payload).into_owned()),
-                _ => None,
+                Ok(Ok(bytes)) => bytes,
+                _ => Bytes::new(),
             };
-            return Err(NoiseError::BadStatusCode(status, reason));
+            return Err(NoiseError::from_refusal(status, &body));
         }
 
         // Read response body, bounded by `request_timeout`. `send_request`'s
