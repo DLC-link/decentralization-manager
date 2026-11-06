@@ -17,7 +17,10 @@ use crate::{
     config::NodeConfig,
     db::schema::SchemaRead,
     error::Result,
-    signing::{key_store::KeyStore, vault_export::export_private_key},
+    signing::{
+        key_store::KeyStore,
+        vault_export::{export_private_key, export_protocol_version},
+    },
     workflow::contracts::steps::sign::own_daml_key,
 };
 
@@ -57,6 +60,7 @@ pub async fn run_key_migration(config: NodeConfig, db: SqlitePool) {
 pub async fn migrate_all(config: &NodeConfig, db: &SqlitePool) -> Result {
     let store = KeyStore::open(config, db.clone()).await?;
     let channel = config.admin_channel().await?;
+    let protocol_version = export_protocol_version(config).await?;
     for row in db.get_dec_parties_by_prefix("").await? {
         let party = match CantonId::parse(&row.party_id) {
             Ok(party) => party,
@@ -65,7 +69,7 @@ pub async fn migrate_all(config: &NodeConfig, db: &SqlitePool) -> Result {
                 continue;
             }
         };
-        match migrate_party(config, db, &store, &channel, &party).await {
+        match migrate_party(config, db, &store, (&channel, protocol_version), &party).await {
             Ok(Outcome::Stored) => {
                 tracing::info!("Copied this node's Daml key for {party} into DecMan's key store")
             }
@@ -85,7 +89,7 @@ async fn migrate_party(
     config: &NodeConfig,
     db: &SqlitePool,
     store: &KeyStore,
-    channel: &Channel,
+    (channel, protocol_version): (&Channel, i32),
     party: &CantonId,
 ) -> Result<Outcome> {
     let key = own_daml_key(config, db, party).await?;
@@ -95,7 +99,7 @@ async fn migrate_party(
     if store.get(party, &key.fingerprint).await?.is_some() {
         return Ok(Outcome::AlreadyStored);
     }
-    let seed = export_private_key(channel, &key).await?;
+    let seed = export_private_key(channel, &key, protocol_version).await?;
     store
         .put(party, &key.fingerprint, &key.public_key, &seed)
         .await?;

@@ -1,15 +1,15 @@
 use async_trait::async_trait;
 use canton_proto_rs::com::digitalasset::canton::crypto::v30::{Signature, SigningPublicKey};
-use tonic::transport::Channel;
 
 use crate::{
     canton_id::{CantonId, Fingerprint},
+    config::NodeConfig,
     error::Result,
     signing::{
         SigningError,
         aws_kms::AwsKmsSigner,
         key_store::{KeyStore, StoredKeySigner},
-        vault_export::VaultExportSigner,
+        vault_export::{VaultExportSigner, export_protocol_version},
     },
 };
 
@@ -87,12 +87,11 @@ pub trait TransactionSigner: Send + Sync {
 /// from the key's custody, so the concrete type differs per call; the one
 /// dynamic dispatch is noise next to the signing RPCs themselves.
 ///
-/// Takes the caller's already-open admin-API `channel` so the export backend
-/// reuses one connection instead of opening a second. Async because the KMS
-/// backend resolves AWS credentials when it is built.
+/// Async because the store is read, and because the KMS backend resolves AWS
+/// credentials when it is built.
 pub async fn select_signer(
     key: &SigningKeyContext,
-    channel: Channel,
+    config: &NodeConfig,
     store: &KeyStore,
     party: &CantonId,
 ) -> Result<Box<dyn TransactionSigner>> {
@@ -106,7 +105,11 @@ pub async fn select_signer(
         Ok(Box::new(AwsKmsSigner::new().await))
     } else {
         Ok(Box::new(
-            VaultExportSigner::new(channel).storing_into(store.clone(), party.clone()),
+            VaultExportSigner::new(
+                config.admin_channel().await?,
+                export_protocol_version(config).await?,
+            )
+            .storing_into(store.clone(), party.clone()),
         ))
     }
 }

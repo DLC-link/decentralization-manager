@@ -17,12 +17,14 @@ use zeroize::Zeroizing;
 
 use crate::{
     canton_id::CantonId,
-    consts::CANTON_PROTOCOL_VERSION,
+    config::NodeConfig,
     error::Result,
     signing::{
         PreparedTransactionHash, SigningError, SigningKeyContext, TransactionSigner,
         key_store::KeyStore,
     },
+    utils,
+    workflow::topology_version,
 };
 
 /// DER OCTET STRING tag
@@ -38,13 +40,17 @@ pub struct VaultExportSigner {
     /// Admin-API channel (carries the configured TLS settings), built by
     /// `select_signer` from `NodeConfig::admin_channel`.
     admin_channel: Channel,
+    /// The protocol version the export is serialized in; see
+    /// [`export_protocol_version`].
+    protocol_version: i32,
     store: Option<(KeyStore, CantonId)>,
 }
 
 impl VaultExportSigner {
-    pub fn new(admin_channel: Channel) -> Self {
+    pub fn new(admin_channel: Channel, protocol_version: i32) -> Self {
         Self {
             admin_channel,
+            protocol_version,
             store: None,
         }
     }
@@ -63,7 +69,7 @@ impl TransactionSigner for VaultExportSigner {
         hashes: &[PreparedTransactionHash],
         key: &SigningKeyContext,
     ) -> Result<Vec<Signature>, SigningError> {
-        let seed = export_private_key(&self.admin_channel, key).await?;
+        let seed = export_private_key(&self.admin_channel, key, self.protocol_version).await?;
         if let Some((store, party)) = &self.store {
             // Signing goes ahead either way; the next run exports again.
             match store
@@ -96,6 +102,7 @@ impl TransactionSigner for VaultExportSigner {
 pub async fn export_private_key(
     admin_channel: &Channel,
     key: &SigningKeyContext,
+    protocol_version: i32,
 ) -> Result<Zeroizing<[u8; 32]>, SigningError> {
     let key_fingerprint = &key.fingerprint;
 
@@ -108,7 +115,7 @@ pub async fn export_private_key(
     let mut export_response = vault_client
         .export_key_pair(tonic::Request::new(ExportKeyPairRequest {
             fingerprint: key_fingerprint.to_string(),
-            protocol_version: CANTON_PROTOCOL_VERSION,
+            protocol_version,
             password: String::new(), // Empty: the exported key pair is not passphrase-protected.
         }))
         .await
@@ -217,6 +224,20 @@ pub async fn export_private_key(
 
     tracing::info!("Successfully verified Ed25519 private key");
     Ok(key_bytes)
+}
+
+/// The protocol version to serialize an export in: the connected
+/// synchronizer's. Canton deletes old protocol versions over time (3.7 refuses
+/// 35), and the synchronizer's version is one the participant supports.
+///
+/// # Errors
+///
+/// Errors when the synchronizer id cannot be read or carries no version.
+pub async fn export_protocol_version(config: &NodeConfig) -> Result<i32> {
+    let synchronizer_id = utils::get_synchronizer_id(config).await?;
+    Ok(i32::try_from(topology_version::protocol_version_of(
+        &synchronizer_id,
+    )?)?)
 }
 
 /// The raw 32-byte Ed25519 key inside a DER `SubjectPublicKeyInfo`.
