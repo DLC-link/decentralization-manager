@@ -40,7 +40,7 @@ The [Threshold Model](docs/ARCHITECTURE.md#threshold-model) lists the party's th
 
 The public docs serve every page as plain Markdown for AI assistants and other tools:
 
-- [`llms.txt`](https://docs.bitsafe.finance/llms.txt) lists every page with a one-line description and a link to its Markdown copy.
+- [`llms.txt`](https://docs.bitsafe.finance/llms.txt) lists every page with a link to its Markdown copy.
 - If you add `.md` to a page URL, the site returns that page as Markdown. An example is <https://docs.bitsafe.finance/decentralization-manager.md>.
 - [`llms-full.txt`](https://docs.bitsafe.finance/llms-full.txt) holds every page in one file. It covers every BitSafe product, so it is large.
 
