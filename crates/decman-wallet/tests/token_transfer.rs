@@ -10,6 +10,7 @@
 //! participant would send.
 
 use base64::{Engine, engine::general_purpose::STANDARD};
+use chrono::{DateTime, SecondsFormat, TimeDelta, Utc};
 use decman_lib::{
     canton_hash::{HashingScheme, compute_prepared_transaction_hash},
     canton_proto_rs::com::daml::ledger::api::v2::{
@@ -834,7 +835,8 @@ fn prepared(root: Exercise, act_as: &str) -> PreparedTransaction {
 }
 
 /// A one-node transaction with a node of any kind at its root. Its command id
-/// is `command-1` until [`for_command`] sets another.
+/// is `command-1` until [`for_command`] sets another. It has no max record
+/// time until [`for_request`] sets one.
 fn prepared_node(root: NodeType, act_as: &str) -> PreparedTransaction {
     PreparedTransaction {
         transaction: Some(DamlTransaction {
@@ -877,6 +879,35 @@ fn for_command(mut transaction: PreparedTransaction, command_id: &str) -> Prepar
     transaction
 }
 
+/// `transaction` as a participant prepares it for `request`, the prepare
+/// body the wallet sent. Its metadata takes the request's command id,
+/// acting parties and max record time, as Canton's does.
+fn for_request(transaction: PreparedTransaction, request: &Value) -> PreparedTransaction {
+    let mut transaction = for_command(
+        transaction,
+        request["commandId"].as_str().unwrap_or_default(),
+    );
+    if let Some(metadata) = transaction.metadata.as_mut() {
+        metadata.max_record_time = request["maxRecordTime"]
+            .as_str()
+            .and_then(|time| DateTime::parse_from_rfc3339(time).ok())
+            .and_then(|time| u64::try_from(time.timestamp_micros()).ok());
+        if let Some(submitter) = metadata.submitter_info.as_mut() {
+            submitter.act_as = request["actAs"]
+                .as_array()
+                .map(|parties| {
+                    parties
+                        .iter()
+                        .filter_map(Value::as_str)
+                        .map(str::to_string)
+                        .collect()
+                })
+                .unwrap_or_default();
+        }
+    }
+    transaction
+}
+
 fn hash_of(transaction: &PreparedTransaction) -> Vec<u8> {
     match compute_prepared_transaction_hash(HashingScheme::V2, transaction) {
         Ok(hash) => hash,
@@ -907,27 +938,35 @@ fn faithful_send(sender: &str) -> PreparedTransaction {
     )
 }
 
-/// What the stub participant answers a prepare with, given the command id
+/// What the stub participant answers a prepare with, given the prepare body
 /// the wallet sent.
-trait Preparer: Fn(&str) -> Value + Send + Sync + 'static {}
+trait Preparer: Fn(&Value) -> Value + Send + Sync + 'static {}
 
-impl<F: Fn(&str) -> Value + Send + Sync + 'static> Preparer for F {}
+impl<F: Fn(&Value) -> Value + Send + Sync + 'static> Preparer for F {}
 
-/// A participant that prepares `transaction` for the command id the wallet
+/// A participant that prepares `transaction` for the prepare the wallet
 /// sends, and answers with what `respond` makes of it.
 fn preparing(
     transaction: PreparedTransaction,
     respond: impl Fn(&PreparedTransaction) -> Value + Send + Sync + 'static,
 ) -> impl Preparer {
-    move |command_id| respond(&for_command(transaction.clone(), command_id))
+    move |request| respond(&for_request(transaction.clone(), request))
 }
 
-/// A participant that prepares `transaction` for the command id the wallet
+/// A participant that prepares `transaction` for the prepare the wallet
 /// sends, and answers with its V2 hash.
 fn honestly(transaction: PreparedTransaction) -> impl Preparer {
     preparing(transaction, |transaction| {
         prepare_response(transaction, &hash_of(transaction))
     })
+}
+
+/// The body of the wallet's prepare.
+async fn sent_prepare(server: &MockServer) -> Value {
+    match bodies(server, PREPARE_PATH).await.into_iter().next() {
+        Some(prepare) => prepare,
+        None => panic!("the wallet must send a prepare"),
+    }
 }
 
 /// The command id the wallet sent with its prepare.
@@ -996,11 +1035,8 @@ async fn stub_prepare_and_execute(server: &MockServer, prepare: impl Preparer) {
     Mock::given(method("POST"))
         .and(path(PREPARE_PATH))
         .respond_with(move |request: &Request| {
-            let command_id = serde_json::from_slice::<Value>(&request.body)
-                .ok()
-                .and_then(|body| body["commandId"].as_str().map(str::to_string))
-                .unwrap_or_default();
-            ResponseTemplate::new(200).set_body_json(prepare(&command_id))
+            let body = serde_json::from_slice::<Value>(&request.body).unwrap_or_default();
+            ResponseTemplate::new(200).set_body_json(prepare(&body))
         })
         .mount(server)
         .await;
@@ -1114,6 +1150,8 @@ async fn send_transfer_runs_the_steps_in_order_and_signs_the_hash_locally() {
     let server = MockServer::start().await;
     stub_send(&server, &sender, honestly(faithful_send(&sender))).await;
 
+    let started = Utc::now();
+
     let receipt = match send_transfer(
         &ledger_for(&server),
         &registry_for(&server),
@@ -1126,7 +1164,7 @@ async fn send_transfer_runs_the_steps_in_order_and_signs_the_hash_locally() {
         Err(e) => panic!("the send must succeed: {e}"),
     };
 
-    let transaction = for_command(faithful_send(&sender), &sent_command_id(&server).await);
+    let transaction = for_request(faithful_send(&sender), &sent_prepare(&server).await);
     let hash = hash_of(&transaction);
     assert_eq!(receipt.update_id, "update-1");
     assert_eq!(receipt.completion_offset, 43);
@@ -1184,6 +1222,24 @@ async fn send_transfer_runs_the_steps_in_order_and_signs_the_hash_locally() {
     assert_eq!(prepare["synchronizerId"], "");
     assert_eq!(prepare["packageIdSelectionPreference"], json!([]));
     assert_eq!(prepare["disclosedContracts"], factory_disclosed());
+    // The synchronizer records the transaction within five minutes, or never.
+    let max_record_time = match prepare["maxRecordTime"]
+        .as_str()
+        .map(DateTime::parse_from_rfc3339)
+    {
+        Some(Ok(time)) => time.with_timezone(&Utc),
+        other => panic!("the prepare must carry an RFC 3339 maxRecordTime, got {other:?}"),
+    };
+    assert_eq!(
+        prepare["maxRecordTime"],
+        max_record_time.to_rfc3339_opts(SecondsFormat::Micros, true),
+        "the time is written in UTC with microseconds"
+    );
+    assert!(
+        max_record_time > started + TimeDelta::minutes(4)
+            && max_record_time < started + TimeDelta::minutes(6),
+        "{max_record_time} must lie about five minutes after {started}"
+    );
     let command = &prepare["commands"][0]["ExerciseCommand"];
     assert_eq!(command["templateId"], TRANSFER_FACTORY_INTERFACE_ID);
     assert_eq!(command["contractId"], FACTORY_ID);
@@ -1766,9 +1822,9 @@ async fn accept_transfer_exercises_the_instruction_with_the_registry_context() {
         Err(e) => panic!("the accept must succeed: {e}"),
     };
 
-    let transaction = for_command(
+    let transaction = for_request(
         accept_transaction(INSTRUCTION_CID, &receiver),
-        &sent_command_id(&server).await,
+        &sent_prepare(&server).await,
     );
     let hash = hash_of(&transaction);
     assert_eq!(receipt.update_id, "update-1");
@@ -1798,6 +1854,12 @@ async fn accept_transfer_exercises_the_instruction_with_the_registry_context() {
 
     let prepare = &bodies(&server, PREPARE_PATH).await[0];
     assert_eq!(prepare["actAs"], json!([receiver]));
+    assert!(
+        prepare["maxRecordTime"]
+            .as_str()
+            .is_some_and(|time| DateTime::parse_from_rfc3339(time).is_ok()),
+        "the accept's prepare carries a max record time too"
+    );
     assert_eq!(prepare["synchronizerId"], "");
     assert_eq!(prepare["packageIdSelectionPreference"], json!([]));
     assert_eq!(prepare["disclosedContracts"], disclosed());
@@ -1943,7 +2005,7 @@ async fn signed_accept(seed: u8, template: &str, root: impl FnOnce(&str) -> Exer
     if let Err(e) = result {
         panic!("{template}: the accept must be signed: {e}");
     }
-    let hash = hash_of(&for_command(transaction, &sent_command_id(&server).await));
+    let hash = hash_of(&for_request(transaction, &sent_prepare(&server).await));
     let executes = bodies(&server, EXECUTE_PATH).await;
     assert_eq!(executes.len(), 1, "{template}: one execute");
     let (_, _, signature) = signature_of(&executes[0]);
@@ -2055,9 +2117,9 @@ async fn a_send_pinned_to_the_factorys_package_id_is_signed_and_prefers_that_pac
         json!([AMULET_PACKAGE_ID])
     );
     assert_eq!(receipt.factory_template, Some(pinned));
-    let hash = hash_of(&for_command(
+    let hash = hash_of(&for_request(
         faithful_send(&sender),
-        &sent_command_id(&server).await,
+        &sent_prepare(&server).await,
     ));
     let executes = bodies(&server, EXECUTE_PATH).await;
     assert_eq!(executes.len(), 1, "one execute");
@@ -2150,7 +2212,7 @@ async fn a_send_with_another_command_id_is_not_signed() {
     let transaction = for_command(faithful_send(&sender), "another-command");
     let response = prepare_response(&transaction, &hash_of(&transaction));
     let server = MockServer::start().await;
-    stub_send(&server, &sender, move |_: &str| response.clone()).await;
+    stub_send(&server, &sender, move |_: &Value| response.clone()).await;
 
     let result = send_transfer(
         &ledger_for(&server),
@@ -2178,6 +2240,80 @@ async fn a_send_with_another_command_id_is_not_signed() {
         Ok(_) => panic!("a transaction for another command must not be signed"),
     }
     assert_eq!(count(&server, EXECUTE_PATH).await, 0, "nothing is executed");
+}
+
+/// One minute after `time`, as the refusal writes it.
+fn a_minute_after(time: &str, _sender: &str) -> String {
+    match DateTime::parse_from_rfc3339(time) {
+        Ok(time) => (time.with_timezone(&Utc) + TimeDelta::minutes(1))
+            .to_rfc3339_opts(SecondsFormat::Micros, true),
+        Err(e) => panic!("{time} must be RFC 3339: {e}"),
+    }
+}
+
+/// The metadata must name the sender alone and carry the max record time
+/// the wallet asked for. A participant that changes or drops either is
+/// refused, even with a correct hash.
+#[tokio::test]
+async fn a_send_prepared_with_other_metadata_is_not_signed() {
+    type Alter = fn(&mut Metadata);
+    type Found = fn(&str, &str) -> String;
+    let cases: [(u8, &str, Alter, Found); 3] = [
+        (
+            59,
+            "max record time",
+            |metadata| {
+                metadata.max_record_time =
+                    metadata.max_record_time.map(|micros| micros + 60_000_000);
+            },
+            a_minute_after,
+        ),
+        (
+            60,
+            "max record time",
+            |metadata| metadata.max_record_time = None,
+            |_, _| "none".to_string(),
+        ),
+        (
+            61,
+            "acting parties in the metadata",
+            |metadata| {
+                if let Some(submitter) = metadata.submitter_info.as_mut() {
+                    submitter.act_as.push(MALLORY.to_string());
+                }
+            },
+            |_, sender| format!("{sender}, {MALLORY}"),
+        ),
+    ];
+
+    for (seed, expected_field, alter, wanted) in cases {
+        let sender = ExternalKeyPair::from_seed([seed; 32]).party_id("alice");
+        let reason = refused_send_against(seed, None, |sender| {
+            preparing(faithful_send(sender), move |transaction| {
+                let mut transaction = transaction.clone();
+                if let Some(metadata) = transaction.metadata.as_mut() {
+                    alter(metadata);
+                }
+                prepare_response(&transaction, &hash_of(&transaction))
+            })
+        })
+        .await;
+
+        match reason {
+            Refusal::Mismatch {
+                field,
+                expected,
+                found,
+            } => {
+                assert_eq!(field, expected_field, "seed {seed}");
+                assert_eq!(found, wanted(&expected, &sender), "seed {seed}");
+                if field == "acting parties in the metadata" {
+                    assert_eq!(expected, sender);
+                }
+            }
+            other => panic!("{expected_field}: expected a mismatch, got {other}"),
+        }
+    }
 }
 
 /// The execute is the step that commits. When its request left the wallet
@@ -2219,7 +2355,8 @@ async fn an_execute_without_an_answer_has_an_unknown_outcome() {
         };
 
     let wallet_command_id = sent_command_id(&server).await;
-    let transaction = for_command(faithful_send(&sender), &wallet_command_id);
+    let prepare = sent_prepare(&server).await;
+    let transaction = for_request(faithful_send(&sender), &prepare);
     let executes = bodies(&server, EXECUTE_PATH).await;
     assert_eq!(executes.len(), 1, "the wallet does not resend the execute");
     match &error {
@@ -2228,6 +2365,7 @@ async fn an_execute_without_an_answer_has_an_unknown_outcome() {
             command_id,
             submission_id,
             prepared_transaction_hash,
+            max_record_time,
             ..
         } => {
             assert!(host.ends_with(LEDGER_PREFIX), "{host}");
@@ -2236,6 +2374,7 @@ async fn an_execute_without_an_answer_has_an_unknown_outcome() {
                 &STANDARD.encode(hash_of(&transaction))
             );
             assert_eq!(command_id, &wallet_command_id);
+            assert_eq!(Some(&**max_record_time), prepare["maxRecordTime"].as_str());
             assert_eq!(
                 Some(submission_id.as_str()),
                 executes[0]["submissionId"].as_str()
@@ -2244,6 +2383,7 @@ async fn an_execute_without_an_answer_has_an_unknown_outcome() {
         other => panic!("expected an unknown outcome, got {other}"),
     }
     assert!(error.to_string().contains("may have committed"), "{error}");
+    assert_tells_when_a_resend_is_safe(&error, &prepare);
 }
 
 /// A gateway in front of the participant answers 504 when it stops waiting.
@@ -2274,7 +2414,8 @@ async fn an_execute_answered_with_a_gateway_timeout_has_an_unknown_outcome() {
     };
 
     let wallet_command_id = sent_command_id(&server).await;
-    let transaction = for_command(faithful_send(&sender), &wallet_command_id);
+    let prepare = sent_prepare(&server).await;
+    let transaction = for_request(faithful_send(&sender), &prepare);
     let executes = bodies(&server, EXECUTE_PATH).await;
     assert_eq!(executes.len(), 1, "the wallet does not resend the execute");
     match &error {
@@ -2283,10 +2424,12 @@ async fn an_execute_answered_with_a_gateway_timeout_has_an_unknown_outcome() {
             command_id,
             submission_id,
             prepared_transaction_hash,
+            max_record_time,
             source,
         } => {
             assert!(host.ends_with(LEDGER_PREFIX), "{host}");
             assert_eq!(command_id, &wallet_command_id);
+            assert_eq!(Some(&**max_record_time), prepare["maxRecordTime"].as_str());
             assert_eq!(
                 Some(submission_id.as_str()),
                 executes[0]["submissionId"].as_str()
@@ -2300,6 +2443,7 @@ async fn an_execute_answered_with_a_gateway_timeout_has_an_unknown_outcome() {
         other => panic!("expected an unknown outcome, got {other}"),
     }
     assert!(error.to_string().contains("may have committed"), "{error}");
+    assert_tells_when_a_resend_is_safe(&error, &prepare);
 }
 
 /// Canton's JSON API answers 500 for an internal gRPC error, which can come
@@ -2335,7 +2479,8 @@ async fn an_execute_answered_with_an_internal_error_has_an_unknown_outcome() {
     };
 
     let wallet_command_id = sent_command_id(&server).await;
-    let transaction = for_command(faithful_send(&sender), &wallet_command_id);
+    let prepare = sent_prepare(&server).await;
+    let transaction = for_request(faithful_send(&sender), &prepare);
     let executes = bodies(&server, EXECUTE_PATH).await;
     assert_eq!(executes.len(), 1, "the wallet does not resend the execute");
     match &error {
@@ -2344,10 +2489,12 @@ async fn an_execute_answered_with_an_internal_error_has_an_unknown_outcome() {
             command_id,
             submission_id,
             prepared_transaction_hash,
+            max_record_time,
             source,
         } => {
             assert!(host.ends_with(LEDGER_PREFIX), "{host}");
             assert_eq!(command_id, &wallet_command_id);
+            assert_eq!(Some(&**max_record_time), prepare["maxRecordTime"].as_str());
             assert_eq!(
                 Some(submission_id.as_str()),
                 executes[0]["submissionId"].as_str()
@@ -2361,6 +2508,20 @@ async fn an_execute_answered_with_an_internal_error_has_an_unknown_outcome() {
         other => panic!("expected an unknown outcome, got {other}"),
     }
     assert!(error.to_string().contains("may have committed"), "{error}");
+    assert_tells_when_a_resend_is_safe(&error, &prepare);
+}
+
+/// The unknown-outcome message names the max record time the prepare asked
+/// for, after which a resend is safe.
+fn assert_tells_when_a_resend_is_safe(error: &Error, prepare: &Value) {
+    let message = error.to_string();
+    let Some(max_record_time) = prepare["maxRecordTime"].as_str() else {
+        panic!("the prepare must carry a max record time");
+    };
+    assert!(
+        message.contains(&format!("After {max_record_time}, with no completion")),
+        "{message}"
+    );
 }
 
 /// How the stub participant answers the execute.
@@ -2442,12 +2603,10 @@ fn raw_participant(
             let Some((request_path, body)) = read_request(&stream) else {
                 return;
             };
-            let command_id = body["commandId"].as_str().unwrap_or_default().to_string();
-            let is_prepare = request_path == PREPARE_PATH;
+            let prepared = (request_path == PREPARE_PATH)
+                .then(|| for_request(accept_transaction(INSTRUCTION_CID, &receiver), &body));
             let _ = requests.send((request_path, body));
-            if is_prepare {
-                let transaction =
-                    for_command(accept_transaction(INSTRUCTION_CID, &receiver), &command_id);
+            if let Some(transaction) = prepared {
                 let json = prepare_response(&transaction, &hash_of(&transaction)).to_string();
                 let _ = write!(stream, "{head}Content-Length: {}\r\n\r\n{json}", json.len());
                 continue;
@@ -2523,10 +2682,7 @@ async fn an_execute_whose_answer_cannot_be_read_has_an_unknown_outcome() {
         };
         assert_eq!(prepare_path, PREPARE_PATH, "{answer:?}");
         assert_eq!(execute_path, EXECUTE_PATH, "{answer:?}");
-        let transaction = for_command(
-            accept_transaction(INSTRUCTION_CID, &receiver),
-            prepare["commandId"].as_str().unwrap_or_default(),
-        );
+        let transaction = for_request(accept_transaction(INSTRUCTION_CID, &receiver), prepare);
         let error = match result {
             Ok(_) => panic!("{answer:?}: an unreadable answer must not look like a success"),
             Err(e) => e,
@@ -2537,9 +2693,15 @@ async fn an_execute_whose_answer_cannot_be_read_has_an_unknown_outcome() {
                 command_id,
                 submission_id,
                 prepared_transaction_hash,
+                max_record_time,
                 source,
             } => {
                 assert!(host.ends_with(LEDGER_PREFIX), "{answer:?}: {host}");
+                assert_eq!(
+                    Some(&**max_record_time),
+                    prepare["maxRecordTime"].as_str(),
+                    "{answer:?}"
+                );
                 assert_eq!(
                     Some(command_id.as_str()),
                     prepare["commandId"].as_str(),
@@ -2563,6 +2725,7 @@ async fn an_execute_whose_answer_cannot_be_read_has_an_unknown_outcome() {
             other => panic!("{answer:?}: expected an unknown outcome, got {other}"),
         }
         assert!(error.to_string().contains("may have committed"), "{error}");
+        assert_tells_when_a_resend_is_safe(&error, prepare);
     }
 }
 
@@ -2869,7 +3032,7 @@ async fn a_transaction_prepared_with_hashing_scheme_v3_is_checked_and_signed_wit
         Err(e) => panic!("a V3 transaction must be signed: {e}"),
     };
 
-    let sent = for_command(transaction.clone(), &sent_command_id(&server).await);
+    let sent = for_request(transaction.clone(), &sent_prepare(&server).await);
     let v3 = v3_hash_of(&sent);
     assert_ne!(
         v3,

@@ -5,8 +5,9 @@
 //! So the wallet recomputes the hash from the transaction, and then reads the
 //! transaction's root to see that it does what the wallet asked for.
 //!
-//! The check reads only the root exercise. It does not judge the
-//! sub-transaction the factory or the instruction produces.
+//! The check reads the root exercise and the metadata fields the wallet
+//! asked for. It does not judge the sub-transaction the factory or the
+//! instruction produces.
 
 use base64::{Engine, engine::general_purpose::STANDARD};
 use chrono::{DateTime, NaiveDate, SecondsFormat, Utc};
@@ -46,6 +47,8 @@ pub(crate) struct Expected<'a> {
     /// The command id the wallet sent to the prepare. The hash covers it, and
     /// the completion lookup after an unknown outcome needs it.
     pub(crate) command_id: &'a str,
+    /// The max record time the wallet sent to the prepare, RFC 3339.
+    pub(crate) max_record_time: &'a str,
     /// The `extraArgs` the wallet sent, in the JSON Ledger API's encoding.
     pub(crate) extra_args: &'a Json,
     /// For a send, the transfer the choice argument must describe.
@@ -149,10 +152,28 @@ fn check_root(
         expected.party,
         &exercise.acting_parties.join(", "),
     )?;
+    let submitter = transaction
+        .metadata
+        .as_ref()
+        .and_then(|metadata| metadata.submitter_info.as_ref());
     same(
         "command id",
         expected.command_id,
-        command_id_of(transaction),
+        submitter.map_or("", |submitter| submitter.command_id.as_str()),
+    )?;
+    // Canton authorizes the transaction with the authority of the metadata's
+    // submitters, and the hash covers them. They must be the party alone.
+    same(
+        "acting parties in the metadata",
+        expected.party,
+        &submitter.map_or_else(String::new, |submitter| submitter.act_as.join(", ")),
+    )?;
+    same_max_record_time(
+        expected.max_record_time,
+        transaction
+            .metadata
+            .as_ref()
+            .and_then(|metadata| metadata.max_record_time),
     )?;
     if let Some(template) = expected.template_id {
         same("template", template, &template_of(exercise, template)?)?;
@@ -177,13 +198,29 @@ fn check_root(
     )
 }
 
-/// The command id in the transaction's metadata, or `""` when it has none.
-fn command_id_of(transaction: &PreparedTransaction) -> &str {
-    transaction
-        .metadata
-        .as_ref()
-        .and_then(|metadata| metadata.submitter_info.as_ref())
-        .map_or("", |submitter| submitter.command_id.as_str())
+/// Compare the max record time in the transaction's metadata, in
+/// microseconds, with the RFC 3339 time the wallet asked for.
+///
+/// Without a max record time, Canton may record the signed transaction long
+/// after the wallet stopped waiting for it. So a missing one is refused too.
+fn same_max_record_time(asked: &str, found: Option<u64>) -> std::result::Result<(), Refusal> {
+    let asked_micros = DateTime::parse_from_rfc3339(asked)
+        .ok()
+        .map(|time| time.timestamp_micros());
+    let found_micros = found.and_then(|micros| i64::try_from(micros).ok());
+    if asked_micros.is_some() && asked_micros == found_micros {
+        return Ok(());
+    }
+    Err(Refusal::Mismatch {
+        field: "max record time",
+        expected: asked.to_string(),
+        found: match found {
+            None => "none".to_string(),
+            Some(micros) => found_micros
+                .and_then(canonical_time)
+                .unwrap_or_else(|| micros.to_string()),
+        },
+    })
 }
 
 /// The template the exercise acts on, in the form of `like`.
@@ -823,6 +860,38 @@ mod tests {
                     assert!(reason.ends_with("cannot compare its extraArgs"), "{reason}")
                 }
                 other => panic!("{value:?} must be refused, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn the_max_record_time_must_be_the_one_the_wallet_asked_for() {
+        let asked = "2026-11-04T10:00:00.000000Z";
+        assert!(same_max_record_time(asked, Some(TEN_AM.unsigned_abs())).is_ok());
+        assert!(
+            same_max_record_time("2026-11-04T11:00:00+01:00", Some(TEN_AM.unsigned_abs())).is_ok(),
+            "the same instant in another offset is the same time"
+        );
+
+        for (found, shown) in [
+            (
+                Some(TEN_AM.unsigned_abs() + 1),
+                "2026-11-04T10:00:00.000001Z",
+            ),
+            (None, "none"),
+            (Some(u64::MAX), "18446744073709551615"),
+        ] {
+            match same_max_record_time(asked, found) {
+                Err(Refusal::Mismatch {
+                    field,
+                    expected,
+                    found,
+                }) => {
+                    assert_eq!(field, "max record time");
+                    assert_eq!(expected, asked);
+                    assert_eq!(found, shown);
+                }
+                other => panic!("{shown} must be refused, got {other:?}"),
             }
         }
     }

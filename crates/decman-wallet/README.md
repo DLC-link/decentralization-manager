@@ -172,17 +172,22 @@ So the wallet checks each prepared transaction before the key signs:
 5. The transaction's metadata must carry the command id the wallet sent to the
    prepare. The hash covers this id. The completion lookup after
    `Error::ExecuteOutcomeUnknown` uses it.
-6. The root must act on the template the caller names. For an accept, that is
+6. The metadata's acting parties must be the wallet's party alone. Canton
+   authorizes the transaction with their authority, and the hash covers them.
+7. The metadata's max record time must be the one the wallet asked for. A
+   metadata without one is refused. See
+   [Timeouts and retries](#timeouts-and-retries).
+8. The root must act on the template the caller names. For an accept, that is
    the template passed to `accept_transfer`. For a send, it is
    `TransferArgs::factory_template`, when set. The check compares the module
    and the entity. It also compares the package name, or the package id when
    the caller gave one.
-7. For a send, the choice argument must match the request. The check compares
+9. For a send, the choice argument must match the request. The check compares
    the instrument admin, sender, receiver, amount and instrument. It also
    compares both times, and the input holdings in order.
-8. The choice argument's `extraArgs` must equal the ones the wallet sent. That
-   is the registry's context and an empty `meta`. For a send, `transfer.meta`
-   must be empty too.
+10. The choice argument's `extraArgs` must equal the ones the wallet sent.
+    That is the registry's context and an empty `meta`. For a send,
+    `transfer.meta` must be empty too.
 
 A transaction that fails returns `Error::TransactionRefused`. The `Refusal` in
 it names what did not match. The wallet signs nothing and executes nothing.
@@ -242,8 +247,8 @@ The check does not compare these:
   form compares the package name, so any package with that name passes.
 - The factory's template on a send, unless `TransferArgs::factory_template`
   names one.
-- The rest of the transaction's metadata, such as its submitting parties, its
-  synchronizer and its preparation time.
+- The rest of the transaction's metadata, such as its synchronizer and its
+  preparation time.
 
 ### The registry
 
@@ -315,6 +320,18 @@ Before you try again, check one of these:
 - The party's holdings. A committed send has consumed its input holdings.
 - The party's pending offers. A committed accept has removed its offer.
 - The completion for the error's `command_id`.
+
+After the error's `max_record_time`, with no completion for the `command_id`,
+the transaction did not commit. A resend is then safe.
+
+Each prepare asks for a max record time `MAX_RECORD_DELAY` ahead, five
+minutes. The synchronizer refuses the transaction after that time. Hashing
+scheme V3 covers the time, so no host can move it once the key has signed. V2
+does not cover it, and Canton 3.6 prepares with V2. Under V2, the participant
+that executes applies the time the wallet checked. Without a max record time,
+one execute must still be recorded within the ledger time tolerance, 60
+seconds by default. But the signed transaction then stays valid for another
+execute until its preparation time is 24 hours old.
 
 A connection that never opened returns `Error::Transport`. Nothing reached the
 participant, so a retry is safe.

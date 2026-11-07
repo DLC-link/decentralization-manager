@@ -304,6 +304,10 @@ pub struct PrepareRequest {
     /// like `synchronizer_id`.
     pub package_id_selection_preference: Vec<String>,
     pub verbose_hashing: bool,
+    /// The latest time the synchronizer may record the transaction, RFC 3339.
+    /// Canton refuses the transaction after this time. The prepared
+    /// transaction's metadata carries it back.
+    pub max_record_time: String,
 }
 
 /// What a prepare returns: the transaction, its hash, and the hashing scheme.

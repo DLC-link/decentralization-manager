@@ -44,6 +44,13 @@ pub const ACCEPT_CHOICE: &str = "TransferInstruction_Accept";
 /// The most holdings one transfer takes as inputs.
 pub const MAX_INPUT_HOLDINGS: usize = 100;
 
+/// How long after the prepare the synchronizer may record the transaction.
+///
+/// A prepare, a signature and an execute take seconds. The rest of the five
+/// minutes absorbs clock drift and a slow host. After this time, Canton
+/// refuses the transaction, so a resend cannot pay twice.
+pub const MAX_RECORD_DELAY: Duration = Duration::from_secs(5 * 60);
+
 /// How far `requested_at` is set into the past. Canton Coin's factory
 /// refuses a request time that is not in the past, and this absorbs clock
 /// drift. The splice-wallet-kernel SDK uses the same minute.
@@ -235,9 +242,11 @@ pub struct AcceptReceipt {
 /// `key` must be the sender's key. The wallet signs only after the prepared
 /// transaction passes its check: the hash is recomputed, and the root must be
 /// `TransferFactory_Transfer` on the registry's factory, acting as the sender
-/// alone. The transaction must carry the command id the wallet sent. The
-/// root's argument must carry these arguments: the instrument admin, sender,
-/// receiver, amount, instrument, both times, and the input holdings in order.
+/// alone. The transaction's metadata must carry the command id and the max
+/// record time the wallet sent, and name the sender alone as its acting
+/// party. The root's argument must carry these arguments: the instrument
+/// admin, sender, receiver, amount, instrument, both times, and the input
+/// holdings in order.
 /// Its `transfer.meta` and `extraArgs` must be the ones the wallet sent.
 ///
 /// When `args.factory_template` names a template, the factory must have it.
@@ -303,6 +312,7 @@ pub async fn send_transfer(
         &argument,
     );
     let command_id = Uuid::new_v4().to_string();
+    let max_record_time = max_record_time_from_now();
     let expected = Expected {
         interface_id: TRANSFER_FACTORY_INTERFACE_ID,
         template_id: args.factory_template.as_deref(),
@@ -310,6 +320,7 @@ pub async fn send_transfer(
         contract_id: &factory.factory_id,
         party: &args.sender,
         command_id: &command_id,
+        max_record_time: &max_record_time,
         extra_args: &argument["extraArgs"],
         transfer: Some(SentTransfer {
             args: &args,
@@ -363,7 +374,8 @@ pub async fn send_transfer(
 /// `key` must be the party's key. The wallet signs only after the prepared
 /// transaction passes its check: the hash is recomputed, and the root must be
 /// `TransferInstruction_Accept` on this instruction, acting as `party` alone.
-/// The transaction must carry the command id the wallet sent. The
+/// The transaction's metadata must carry the command id and the max record
+/// time the wallet sent, and name `party` alone as its acting party. The
 /// instruction must have `instruction_template`, and the `extraArgs` must be
 /// the ones the wallet sent.
 ///
@@ -399,6 +411,7 @@ pub async fn accept_transfer(
         &argument,
     );
     let command_id = Uuid::new_v4().to_string();
+    let max_record_time = max_record_time_from_now();
     let expected = Expected {
         interface_id: TRANSFER_INSTRUCTION_INTERFACE_ID,
         template_id: Some(instruction_template),
@@ -406,6 +419,7 @@ pub async fn accept_transfer(
         contract_id: instruction_cid,
         party,
         command_id: &command_id,
+        max_record_time: &max_record_time,
         extra_args: &argument["extraArgs"],
         transfer: None,
     };
@@ -439,13 +453,24 @@ fn exercise(interface_id: &str, contract_id: &str, choice: &str, argument: &Valu
     })
 }
 
+/// Now plus [`MAX_RECORD_DELAY`], as RFC 3339 with microseconds. The ledger
+/// keeps microseconds, so the check can compare this time exactly.
+fn max_record_time_from_now() -> String {
+    let now = Utc::now();
+    let delay = TimeDelta::from_std(MAX_RECORD_DELAY).unwrap_or(TimeDelta::MAX);
+    now.checked_add_signed(delay)
+        .unwrap_or(DateTime::<Utc>::MAX_UTC)
+        .to_rfc3339_opts(SecondsFormat::Micros, true)
+}
+
 struct Submitted {
     executed: Executed,
     prepared_transaction_hash: String,
 }
 
-/// Prepare `command` as `party` under `expected.command_id`, check the
-/// result, sign its hash with `key`, and execute it.
+/// Prepare `command` as `party` under `expected.command_id` and
+/// `expected.max_record_time`, check the result, sign its hash with `key`,
+/// and execute it.
 async fn submit(
     ledger: &LedgerClient,
     key: &dyn Signer,
@@ -467,6 +492,7 @@ async fn submit(
                 .into_iter()
                 .collect(),
             verbose_hashing: false,
+            max_record_time: expected.max_record_time.to_string(),
         })
         .await?;
 
@@ -506,6 +532,7 @@ async fn submit(
                 expected.command_id,
                 &submission_id,
                 &prepared.prepared_transaction_hash,
+                expected.max_record_time,
             )
         })?;
     tracing::info!(
@@ -557,6 +584,7 @@ fn after_execute(
     command_id: &str,
     submission_id: &str,
     prepared_transaction_hash: &str,
+    max_record_time: &str,
 ) -> Error {
     let left_the_wallet = match &error {
         Error::Transport { source, .. } => !source.is_connect(),
@@ -572,6 +600,7 @@ fn after_execute(
         command_id: command_id.to_string(),
         submission_id: submission_id.to_string(),
         prepared_transaction_hash: prepared_transaction_hash.to_string(),
+        max_record_time: max_record_time.into(),
         source: Box::new(error),
     }
 }
@@ -642,6 +671,8 @@ mod tests {
         }
     }
 
+    const MAX_RECORD_TIME: &str = "2026-11-07T12:05:00.000000Z";
+
     fn transport(source: reqwest::Error) -> Error {
         Error::Transport {
             host: "http://127.0.0.1".to_string(),
@@ -670,7 +701,13 @@ mod tests {
         };
         assert!(source.is_connect(), "{source}");
 
-        let error = after_execute(transport(source), "command-1", "submission-1", "aGFzaA==");
+        let error = after_execute(
+            transport(source),
+            "command-1",
+            "submission-1",
+            "aGFzaA==",
+            MAX_RECORD_TIME,
+        );
 
         assert!(matches!(error, Error::Transport { .. }), "{error}");
     }
@@ -695,22 +732,38 @@ mod tests {
             Err(e) => panic!("the client must build: {e}"),
         };
 
-        let error = after_execute(transport(source), "command-1", "submission-1", "aGFzaA==");
+        let error = after_execute(
+            transport(source),
+            "command-1",
+            "submission-1",
+            "aGFzaA==",
+            MAX_RECORD_TIME,
+        );
 
         match &error {
             Error::ExecuteOutcomeUnknown {
                 command_id,
                 submission_id,
                 prepared_transaction_hash,
+                max_record_time,
                 ..
             } => {
                 assert_eq!(command_id, "command-1");
                 assert_eq!(submission_id, "submission-1");
                 assert_eq!(prepared_transaction_hash, "aGFzaA==");
+                assert_eq!(&**max_record_time, MAX_RECORD_TIME);
             }
             other => panic!("expected an unknown outcome, got {other}"),
         }
-        assert!(error.to_string().contains("may have committed"), "{error}");
+        let message = error.to_string();
+        assert!(message.contains("may have committed"), "{message}");
+        assert!(
+            message.contains(
+                "After 2026-11-07T12:05:00.000000Z, with no completion for command command-1, \
+                 the transaction did not commit and a new one is safe."
+            ),
+            "{message}"
+        );
     }
 
     fn answered(status: u16) -> Error {
@@ -726,7 +779,13 @@ mod tests {
     #[test]
     fn an_execute_answered_with_an_error_status_keeps_its_api_error() {
         for status in [400, 409, 429] {
-            let error = after_execute(answered(status), "command-1", "submission-1", "aGFzaA==");
+            let error = after_execute(
+                answered(status),
+                "command-1",
+                "submission-1",
+                "aGFzaA==",
+                MAX_RECORD_TIME,
+            );
 
             assert!(error.is_status(status), "{status}: {error}");
         }
@@ -737,19 +796,27 @@ mod tests {
     #[test]
     fn an_execute_answered_with_a_status_that_leaves_the_outcome_open_is_unknown() {
         for status in [408, 500, 502, 503, 504] {
-            let error = after_execute(answered(status), "command-1", "submission-1", "aGFzaA==");
+            let error = after_execute(
+                answered(status),
+                "command-1",
+                "submission-1",
+                "aGFzaA==",
+                MAX_RECORD_TIME,
+            );
 
             match &error {
                 Error::ExecuteOutcomeUnknown {
                     command_id,
                     submission_id,
                     prepared_transaction_hash,
+                    max_record_time,
                     source,
                     ..
                 } => {
                     assert_eq!(command_id, "command-1");
                     assert_eq!(submission_id, "submission-1");
                     assert_eq!(prepared_transaction_hash, "aGFzaA==");
+                    assert_eq!(&**max_record_time, MAX_RECORD_TIME);
                     assert!(source.is_status(status), "{status}: {source}");
                 }
                 other => panic!("{status}: expected an unknown outcome, got {other}"),
