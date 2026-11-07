@@ -633,8 +633,10 @@ Splice 0.10 runs Canton 3.7. Two of its changes need decman in place first.
   decode. Every member needs this decman version before the synchronizer moves
   to protocol version 37.
 
-A participant that upgraded before its decman needs
-`canton.parameters.enable-key-download = yes` until decman holds the keys.
+A participant that upgraded before its decman needs key download until
+decman holds the keys. Set `enableKeyDownload: true` in the
+`splice-participant` Helm values. A participant without the chart sets
+`canton.parameters.enable-key-download = yes`.
 [KMS_SIGNING.md](KMS_SIGNING.md) explains that case and its risk.
 
 ## Legacy party-key retirement

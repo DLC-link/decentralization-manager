@@ -422,8 +422,9 @@ pub(crate) async fn check_purge_allowed(
     if !purge_offered(config, alias).await? {
         return refuse(
             "This participant does not offer Canton's PurgeContracts repair command. Splice \
-             0.10 turns repair commands off by default; set \
-             `canton.features.enable-repair-commands = yes` on the participant to purge"
+             0.10 turns repair commands off by default. To purge, set `enableRepairCommands: \
+             true` in the participant's splice-participant Helm values, or \
+             `canton.features.enable-repair-commands = yes` in its Canton config"
                 .to_string(),
         );
     }

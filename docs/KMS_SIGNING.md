@@ -155,9 +155,10 @@ Run this decman version on every node before its participant moves to Splice
 0.10. The task then copies the keys while export still works. The log reports
 `Copied this node's Daml key for <party> into DecMan's key store`.
 
-`canton.parameters.enable-key-download = yes` is the last resort. Canton's
-configuration reference says the setting "should not be enabled in
-production". While it is on, the admin API exports every key in the vault.
+Key download is the last resort. The `splice-participant` Helm chart turns it
+on with `enableKeyDownload: true`. A participant without the chart sets
+`canton.parameters.enable-key-download = yes`. Canton's configuration
+reference says the setting "should not be enabled in production". While it is on, the admin API exports every key in the vault.
 Two cases need it:
 
 - **The participant moved to Splice 0.10 before decman.** Set the flag and
