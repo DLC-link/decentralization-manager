@@ -37,7 +37,8 @@ use crate::{
             },
             keys::PartySignatureScheme,
         },
-        topology, topology_version,
+        topology,
+        topology_version::{self, ProposalFormat},
     },
 };
 
@@ -198,14 +199,10 @@ pub async fn authorize_threshold(
         config,
         AuthorizeRequest {
             r#type: Some(authorize_request::Type::Proposal(
-                authorize_request::Proposal {
-                    protocol_version: topology_version::proposal_protocol_version(&synchronizer_id),
-                    change: TopologyChangeOp::AddReplace as i32,
-                    serial: next_serial,
-                    mapping: Some(authorize_request::proposal::Mapping::V30(TopologyMapping {
-                        mapping: Some(topology_mapping::Mapping::PartyToParticipant(mapping)),
-                    })),
-                },
+                ProposalFormat::for_synchronizer(&synchronizer_id).proposal(
+                    next_serial,
+                    topology_mapping::Mapping::PartyToParticipant(mapping),
+                ),
             )),
             // This node holds the only signature Canton wants, so the change is
             // authorized outright rather than left as a proposal.

@@ -3,7 +3,7 @@ use std::collections::BTreeMap;
 use canton_proto_rs::com::digitalasset::canton::{
     crypto::v30::SigningKeyUsage,
     protocol::v30::{
-        DecentralizedNamespaceDefinition, PartyToParticipant, TopologyMapping, enums,
+        DecentralizedNamespaceDefinition, PartyToParticipant, enums,
         party_to_participant::{HostingParticipant, hosting_participant},
         topology_mapping,
     },
@@ -26,7 +26,8 @@ use crate::{
         signing_keys::{adopt_legacy_signing_keys, own_namespace_key},
         storage::{WorkflowStorage, artifact_kinds, identity_kinds},
         thresholds::{PartyThresholds, ensure_carried_from},
-        topology, topology_version,
+        topology,
+        topology_version::ProposalFormat,
     },
 };
 
@@ -483,14 +484,7 @@ pub(crate) fn proposal_request(
 ) -> AuthorizeRequest {
     AuthorizeRequest {
         r#type: Some(authorize_request::Type::Proposal(
-            authorize_request::Proposal {
-                protocol_version: topology_version::proposal_protocol_version(synchronizer_id),
-                change: enums::TopologyChangeOp::AddReplace as i32,
-                serial: 0,
-                mapping: Some(authorize_request::proposal::Mapping::V30(TopologyMapping {
-                    mapping: Some(mapping),
-                })),
-            },
+            ProposalFormat::for_synchronizer(synchronizer_id).proposal(0, mapping),
         )),
         must_fully_authorize: false,
         force_changes: vec![ForceFlag::AllowUnvalidatedSigningKeys as i32],

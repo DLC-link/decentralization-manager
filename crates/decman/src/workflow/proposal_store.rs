@@ -43,7 +43,7 @@ use std::{
 use canton_proto_rs::com::digitalasset::canton::{
     protocol::v30::{
         DecentralizedNamespaceDefinition, PartyToParticipant, SignedTopologyTransaction,
-        TopologyMapping, TopologyTransaction, enums, topology_mapping,
+        TopologyTransaction, topology_mapping,
     },
     topology::admin::v30::{
         AddTransactionsRequest, AuthorizeRequest, AuthorizeResponse,
@@ -62,7 +62,7 @@ use crate::{
     utils,
     workflow::{
         topology,
-        topology_version::{self, proposal_protocol_version, protocol_version_of},
+        topology_version::{self, ProposalFormat, protocol_version_of},
     },
 };
 
@@ -277,7 +277,7 @@ pub async fn sign_party_proposals(
     // A temporary store is created at the protocol version of the store its
     // transactions are published to.
     let protocol_version = protocol_version_of(synchronizer_id)?;
-    let proposal_version = proposal_protocol_version(synchronizer_id);
+    let format = ProposalFormat::for_synchronizer(synchronizer_id);
     let serials = (
         next_serial("DNS", head.dns_serial)?,
         next_serial("P2P", head.p2p_serial)?,
@@ -324,7 +324,7 @@ pub async fn sign_party_proposals(
                             proposals,
                             serials,
                             force_flags,
-                            proposal_version,
+                            format,
                         )
                         .await?;
                         Ok(Attempt::Signed(signed))
@@ -358,15 +358,9 @@ pub async fn sign_party_proposals(
                  pending until the members sign"
             );
             let store = topology::synchronizer_store_id(synchronizer_id);
-            let signed = sign_on_synchronizer(
-                config,
-                &store,
-                proposals,
-                serials,
-                force_flags,
-                proposal_version,
-            )
-            .await?;
+            let signed =
+                sign_on_synchronizer(config, &store, proposals, serials, force_flags, format)
+                    .await?;
             Ok(signed)
         }
     }
@@ -386,7 +380,7 @@ async fn sign(
     (new_dns, new_p2p): (Option<DecentralizedNamespaceDefinition>, PartyToParticipant),
     (dns_serial, p2p_serial): (u32, u32),
     force_flags: Vec<i32>,
-    protocol_version: Option<u32>,
+    format: ProposalFormat,
 ) -> Result<SignedProposals> {
     let dns = match new_dns {
         Some(definition) => Some(
@@ -397,7 +391,7 @@ async fn sign(
                     topology_mapping::Mapping::DecentralizedNamespaceDefinition(definition),
                     dns_serial,
                     force_flags.clone(),
-                    protocol_version,
+                    format,
                 ),
             )
             .await?,
@@ -411,7 +405,7 @@ async fn sign(
             topology_mapping::Mapping::PartyToParticipant(new_p2p),
             p2p_serial,
             force_flags,
-            protocol_version,
+            format,
         ),
     )
     .await?;
@@ -428,7 +422,7 @@ async fn sign_on_synchronizer(
     (new_dns, new_p2p): (Option<DecentralizedNamespaceDefinition>, PartyToParticipant),
     (dns_serial, p2p_serial): (u32, u32),
     force_flags: Vec<i32>,
-    protocol_version: Option<u32>,
+    format: ProposalFormat,
 ) -> Result<SignedProposals> {
     let signed = |response: AuthorizeResponse| {
         response
@@ -444,7 +438,7 @@ async fn sign_on_synchronizer(
                     topology_mapping::Mapping::DecentralizedNamespaceDefinition(definition),
                     dns_serial,
                     force_flags.clone(),
-                    protocol_version,
+                    format,
                 ),
                 "DNS proposal",
             )
@@ -460,7 +454,7 @@ async fn sign_on_synchronizer(
                 topology_mapping::Mapping::PartyToParticipant(new_p2p),
                 p2p_serial,
                 force_flags,
-                protocol_version,
+                format,
             ),
             "P2P proposal",
         )
@@ -729,25 +723,18 @@ fn next_serial(what: &str, head: u32) -> Result<u32> {
 /// party's authorization, and the peers' signatures are merged in before
 /// submit. The serial is explicit: a temporary store is not where the
 /// transaction is published, and against the synchronizer store it refuses a
-/// head that moved. `protocol_version` comes from
-/// [`proposal_protocol_version`].
+/// head that moved. `format` writes the mapping as the synchronizer's
+/// protocol version needs it.
 fn proposal_request(
     store: StoreId,
     mapping: topology_mapping::Mapping,
     serial: u32,
     force_flags: Vec<i32>,
-    protocol_version: Option<u32>,
+    format: ProposalFormat,
 ) -> AuthorizeRequest {
     AuthorizeRequest {
         r#type: Some(authorize_request::Type::Proposal(
-            authorize_request::Proposal {
-                protocol_version,
-                change: enums::TopologyChangeOp::AddReplace as i32,
-                serial,
-                mapping: Some(authorize_request::proposal::Mapping::V30(TopologyMapping {
-                    mapping: Some(mapping),
-                })),
-            },
+            format.proposal(serial, mapping),
         )),
         must_fully_authorize: false,
         force_changes: force_flags,
@@ -1069,7 +1056,9 @@ mod tests {
 
     use canton_proto_rs::com::digitalasset::canton::{
         crypto::v30::SigningPublicKey,
-        protocol::v30::{NamespaceDelegation, party_to_participant::HostingParticipant},
+        protocol::v30::{
+            NamespaceDelegation, TopologyMapping, enums, party_to_participant::HostingParticipant,
+        },
         version::v1::{UntypedVersionedMessage, untyped_versioned_message},
     };
     use prost::Message;
@@ -1305,7 +1294,7 @@ mod tests {
             topology_mapping::Mapping::DecentralizedNamespaceDefinition(Default::default()),
             7,
             vec![ForceFlag::AllowUnvalidatedSigningKeys as i32],
-            Some(36),
+            ProposalFormat::for_synchronizer("global-domain::1220ab::37-0"),
         );
 
         assert!(!request.must_fully_authorize);
@@ -1319,7 +1308,7 @@ mod tests {
         };
         assert_eq!(proposal.serial, 7);
         assert_eq!(proposal.change, enums::TopologyChangeOp::AddReplace as i32);
-        assert_eq!(proposal.protocol_version, Some(36));
+        assert_eq!(proposal.protocol_version, Some(37));
         Ok(())
     }
 

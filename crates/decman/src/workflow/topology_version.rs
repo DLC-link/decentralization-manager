@@ -6,16 +6,16 @@
 //! where `v30` has an onboarding flag, and it moves the party signing keys to
 //! another field. So a `v30` decode of a `v31` party mapping fails.
 //!
-//! DecMan works in `v30`. It reads a `v31` transaction by converting it. On a
-//! protocol version 37 synchronizer, it asks Canton to write its own party
-//! proposals for protocol version 36. They then stay in `v30`, with the
-//! onboarding rules that DecMan's workflows rely on.
+//! DecMan works in `v30`. It reads a `v31` transaction by converting it, and
+//! [`ProposalFormat`] converts its own proposals to `v31` on a protocol
+//! version 37 synchronizer.
 
 use anyhow::Context;
 use canton_proto_rs::com::digitalasset::canton::{
     protocol::{
         v30::{
             PartyToParticipant, TopologyMapping, TopologyTransaction,
+            enums::TopologyChangeOp,
             party_to_participant::{HostingParticipant, hosting_participant::Onboarding},
             topology_mapping::Mapping,
         },
@@ -24,6 +24,7 @@ use canton_proto_rs::com::digitalasset::canton::{
             topology_mapping::Mapping as V31Mapping,
         },
     },
+    topology::admin::v30::{authorize_request, generate_transactions_request},
     version::v1::{UntypedVersionedMessage, untyped_versioned_message},
 };
 use prost::Message;
@@ -33,9 +34,9 @@ use crate::error::Result;
 /// The first protocol version that writes topology transactions in `v31`.
 const FIRST_V31_PROTOCOL_VERSION: u32 = 37;
 
-/// The last protocol version that writes topology transactions in `v30`. A
-/// store on protocol version 37 still admits transactions of this version.
-const LAST_V30_PROTOCOL_VERSION: u32 = 36;
+/// The first protocol version that DecMan names in its proposals. It is the
+/// oldest version a Canton 3.7 participant runs.
+const FIRST_NAMED_PROTOCOL_VERSION: u32 = 36;
 
 /// The proto version that the envelope of a `v30` transaction names.
 const V30_PROTO_VERSION: i32 = 30;
@@ -61,18 +62,82 @@ pub fn protocol_version_of(synchronizer_id: &str) -> Result<u32> {
         })
 }
 
-/// The protocol version to request when DecMan proposes a party mapping
-/// that will be published on `synchronizer_id`.
+/// How DecMan writes a topology proposal for one synchronizer.
 ///
-/// On protocol version 37 or later this is 36, so that Canton writes the
-/// proposal in `v30`. Below 37 it is `None`, which keeps the store's own
-/// version. An id without a protocol version also gets `None`, which is
-/// Canton's default and DecMan's behavior before protocol version 37.
-pub fn proposal_protocol_version(synchronizer_id: &str) -> Option<u32> {
-    protocol_version_of(synchronizer_id)
-        .ok()
-        .filter(|version| *version >= FIRST_V31_PROTOCOL_VERSION)
-        .map(|_| LAST_V30_PROTOCOL_VERSION)
+/// From protocol version 37, the mapping goes to Canton in `v31`, with a
+/// hosting state for each host. Below 37 it goes in `v30`.
+///
+/// From protocol version 36, the proposal also names the synchronizer's
+/// protocol version. Without it, the participant's authorized store writes
+/// at the participant's newest version. A Canton 3.7 participant would then
+/// write `v31` for a synchronizer on protocol version 36. Below 36 the
+/// proposal names no version, so an older participant gets the same request
+/// as before.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ProposalFormat {
+    protocol_version: Option<u32>,
+}
+
+/// A mapping in one of the two formats.
+enum Versioned {
+    V30(TopologyMapping),
+    V31(v31::TopologyMapping),
+}
+
+impl ProposalFormat {
+    /// The format for `synchronizer_id`. An id without a protocol version
+    /// gets `v30` and Canton's default version.
+    pub fn for_synchronizer(synchronizer_id: &str) -> Self {
+        Self {
+            protocol_version: protocol_version_of(synchronizer_id).ok(),
+        }
+    }
+
+    /// An `AddReplace` proposal of `mapping` at `serial`. Serial 0 lets Canton
+    /// pick the next serial.
+    pub fn proposal(self, serial: u32, mapping: Mapping) -> authorize_request::Proposal {
+        authorize_request::Proposal {
+            protocol_version: self
+                .protocol_version
+                .filter(|version| *version >= FIRST_NAMED_PROTOCOL_VERSION),
+            change: TopologyChangeOp::AddReplace as i32,
+            serial,
+            mapping: Some(match self.versioned(mapping) {
+                Versioned::V30(mapping) => authorize_request::proposal::Mapping::V30(mapping),
+                Versioned::V31(mapping) => authorize_request::proposal::Mapping::V31(mapping),
+            }),
+        }
+    }
+
+    /// `mapping` in the form a `GenerateTransactions` proposal takes.
+    pub fn generated_mapping(
+        self,
+        mapping: Mapping,
+    ) -> generate_transactions_request::proposal::Mapping {
+        match self.versioned(mapping) {
+            Versioned::V30(mapping) => {
+                generate_transactions_request::proposal::Mapping::V30(mapping)
+            }
+            Versioned::V31(mapping) => {
+                generate_transactions_request::proposal::Mapping::V31(mapping)
+            }
+        }
+    }
+
+    fn versioned(self, mapping: Mapping) -> Versioned {
+        if self
+            .protocol_version
+            .is_some_and(|version| version >= FIRST_V31_PROTOCOL_VERSION)
+        {
+            Versioned::V31(v31::TopologyMapping {
+                mapping: Some(mapping_to_v31(mapping)),
+            })
+        } else {
+            Versioned::V30(TopologyMapping {
+                mapping: Some(mapping),
+            })
+        }
+    }
 }
 
 /// Decode a topology transaction from its versioned envelope, as `v30`.
@@ -199,6 +264,60 @@ pub fn p2p_from_v31(mapping: v31::PartyToParticipant) -> Result<PartyToParticipa
         participants,
         party_signing_keys: mapping.party_signing_keys,
     })
+}
+
+#[allow(deprecated)] // `PartyToKeyMapping` has to be carried over like the rest.
+fn mapping_to_v31(mapping: Mapping) -> V31Mapping {
+    match mapping {
+        Mapping::NamespaceDelegation(m) => V31Mapping::NamespaceDelegation(m),
+        Mapping::DecentralizedNamespaceDefinition(m) => {
+            V31Mapping::DecentralizedNamespaceDefinition(m)
+        }
+        Mapping::OwnerToKeyMapping(m) => V31Mapping::OwnerToKeyMapping(m),
+        Mapping::SynchronizerTrustCertificate(m) => V31Mapping::SynchronizerTrustCertificate(m),
+        Mapping::ParticipantPermission(m) => V31Mapping::ParticipantPermission(m),
+        Mapping::PartyHostingLimits(m) => V31Mapping::PartyHostingLimits(m),
+        Mapping::VettedPackages(m) => V31Mapping::VettedPackages(m),
+        Mapping::PartyToParticipant(m) => V31Mapping::PartyToParticipant(p2p_to_v31(m)),
+        Mapping::SynchronizerParametersState(m) => V31Mapping::SynchronizerParametersState(m),
+        Mapping::MediatorSynchronizerState(m) => V31Mapping::MediatorSynchronizerState(m),
+        Mapping::SequencerSynchronizerState(m) => V31Mapping::SequencerSynchronizerState(m),
+        Mapping::SequencingDynamicParametersState(m) => {
+            V31Mapping::SequencingDynamicParametersState(m)
+        }
+        Mapping::PartyToKeyMapping(m) => V31Mapping::PartyToKeyMapping(m),
+        Mapping::SynchronizerUpgradeAnnouncement(m) => {
+            V31Mapping::SynchronizerUpgradeAnnouncement(m)
+        }
+        Mapping::SequencerConnectionSuccessor(m) => V31Mapping::SequencerConnectionSuccessor(m),
+    }
+}
+
+/// The `v31` form of a `v30` `PartyToParticipant`.
+///
+/// A host with the onboarding flag is `ONBOARDING`, and any other host is
+/// `ACTIVE`. So DecMan only ever moves a host forward: it adds the host as
+/// onboarding and later clears the flag.
+pub fn p2p_to_v31(mapping: PartyToParticipant) -> v31::PartyToParticipant {
+    let participants = mapping
+        .participants
+        .into_iter()
+        .map(|host| v31::party_to_participant::HostingParticipant {
+            participant_uid: host.participant_uid,
+            permission: host.permission,
+            state: if host.onboarding.is_some() {
+                HostingState::Onboarding
+            } else {
+                HostingState::Active
+            } as i32,
+        })
+        .collect();
+    v31::PartyToParticipant {
+        party: mapping.party,
+        threshold: mapping.threshold,
+        participants,
+        party_signing_keys: mapping.party_signing_keys,
+    }
 }
 
 #[cfg(test)]
@@ -395,20 +514,105 @@ mod tests {
         Ok(())
     }
 
+    fn p2p_mapping() -> Mapping {
+        Mapping::PartyToParticipant(PartyToParticipant {
+            party: PARTY.to_string(),
+            threshold: 2,
+            participants: vec![v30_host("p1::1220bb", false), v30_host("p2::1220cc", true)],
+            party_signing_keys: Some(SigningKeysWithThreshold {
+                keys: vec![],
+                threshold: 1,
+            }),
+        })
+    }
+
+    fn proposal_for(synchronizer_id: &str) -> authorize_request::Proposal {
+        ProposalFormat::for_synchronizer(synchronizer_id).proposal(5, p2p_mapping())
+    }
+
     #[test]
-    fn proposals_ask_for_v30_only_from_protocol_version_37() {
+    fn a_proposal_is_v31_from_protocol_version_37() {
+        let proposal = proposal_for("global-domain::1220ab::37-0");
+
+        assert_eq!(proposal.protocol_version, Some(37));
+        assert_eq!(proposal.serial, 5);
+        assert_eq!(proposal.change, TopologyChangeOp::AddReplace as i32);
         assert_eq!(
-            proposal_protocol_version("global-domain::1220ab::37-0"),
-            Some(36)
+            proposal.mapping,
+            Some(authorize_request::proposal::Mapping::V31(
+                v31::TopologyMapping {
+                    mapping: Some(V31Mapping::PartyToParticipant(v31_p2p(vec![
+                        v31_host("p1::1220bb", HostingState::Active),
+                        v31_host("p2::1220cc", HostingState::Onboarding),
+                    ]))),
+                }
+            ))
         );
+    }
+
+    /// A Canton 3.7 participant's authorized store writes at protocol
+    /// version 37 unless the proposal names 36.
+    #[test]
+    fn a_proposal_names_protocol_version_36_and_stays_v30() {
+        let proposal = proposal_for("global-domain::1220ab::36-7");
+
+        assert_eq!(proposal.protocol_version, Some(36));
         assert_eq!(
-            proposal_protocol_version("global-domain::1220ab::36-7"),
-            None
+            proposal.mapping,
+            Some(authorize_request::proposal::Mapping::V30(TopologyMapping {
+                mapping: Some(p2p_mapping()),
+            }))
         );
-        assert_eq!(
-            proposal_protocol_version("global-domain::1220ab::35-6"),
-            None
-        );
-        assert_eq!(proposal_protocol_version("global-domain::1220ab"), None);
+    }
+
+    #[test]
+    fn an_older_or_unknown_protocol_version_keeps_the_old_request() {
+        for synchronizer_id in ["global-domain::1220ab::35-6", "global-domain::1220ab"] {
+            let proposal = proposal_for(synchronizer_id);
+            assert_eq!(proposal.protocol_version, None, "{synchronizer_id}");
+            assert_eq!(
+                proposal.mapping,
+                Some(authorize_request::proposal::Mapping::V30(TopologyMapping {
+                    mapping: Some(p2p_mapping()),
+                })),
+                "{synchronizer_id}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_generated_proposal_takes_the_same_format() {
+        let format = ProposalFormat::for_synchronizer("global-domain::1220ab::37-0");
+        assert!(matches!(
+            format.generated_mapping(p2p_mapping()),
+            generate_transactions_request::proposal::Mapping::V31(_)
+        ));
+        let format = ProposalFormat::for_synchronizer("global-domain::1220ab::36-0");
+        assert!(matches!(
+            format.generated_mapping(p2p_mapping()),
+            generate_transactions_request::proposal::Mapping::V30(_)
+        ));
+    }
+
+    /// Peers read DecMan's `v31` proposals through the `v30` conversion, so
+    /// the two conversions must undo each other.
+    #[test]
+    fn a_party_mapping_survives_the_trip_through_v31() -> Result {
+        let Mapping::PartyToParticipant(p2p) = p2p_mapping() else {
+            unreachable!("p2p_mapping builds a party mapping");
+        };
+        assert_eq!(p2p_from_v31(p2p_to_v31(p2p.clone()))?, p2p);
+        Ok(())
+    }
+
+    #[test]
+    fn every_other_mapping_converts_to_v31_unchanged() -> Result {
+        let dns = Mapping::DecentralizedNamespaceDefinition(DecentralizedNamespaceDefinition {
+            decentralized_namespace: "1220dd".to_string(),
+            threshold: 2,
+            owners: vec!["1220ee".to_string()],
+        });
+        assert_eq!(mapping_from_v31(mapping_to_v31(dns.clone()))?, dns);
+        Ok(())
     }
 }

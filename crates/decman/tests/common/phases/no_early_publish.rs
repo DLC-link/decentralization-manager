@@ -19,7 +19,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::Context;
 use canton_proto_rs::com::digitalasset::canton::{
-    protocol::v30::{TopologyMapping, enums::TopologyChangeOp, topology_mapping},
+    protocol::v30::topology_mapping,
     topology::admin::v30::{
         AuthorizeRequest, ListAvailableStoresRequest, authorize_request, store_id,
         topology_manager_read_service_client::TopologyManagerReadServiceClient,
@@ -385,14 +385,10 @@ async fn move_p2p_serial(
             config,
             AuthorizeRequest {
                 r#type: Some(authorize_request::Type::Proposal(
-                    authorize_request::Proposal {
-                        protocol_version: topology_version::proposal_protocol_version(sync),
-                        change: TopologyChangeOp::AddReplace as i32,
+                    topology_version::ProposalFormat::for_synchronizer(sync).proposal(
                         serial,
-                        mapping: Some(authorize_request::proposal::Mapping::V30(TopologyMapping {
-                            mapping: Some(topology_mapping::Mapping::PartyToParticipant(mapping)),
-                        })),
-                    },
+                        topology_mapping::Mapping::PartyToParticipant(mapping),
+                    ),
                 )),
                 must_fully_authorize: true,
                 store: Some(topology::synchronizer_store_id(sync)),

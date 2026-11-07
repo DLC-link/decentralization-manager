@@ -21,9 +21,7 @@ use anyhow::Context;
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use canton_proto_rs::com::digitalasset::canton::{
     protocol::v30::{
-        PartyToParticipant, TopologyMapping,
-        enums::{ParticipantPermission, TopologyChangeOp},
-        party_to_participant::HostingParticipant,
+        PartyToParticipant, enums::ParticipantPermission, party_to_participant::HostingParticipant,
         topology_mapping,
     },
     topology::admin::v30::{AuthorizeRequest, authorize_request},
@@ -71,25 +69,19 @@ async fn allocate_local_party(config: &NodeConfig, party_id: &str) -> anyhow::Re
         config,
         AuthorizeRequest {
             r#type: Some(authorize_request::Type::Proposal(
-                authorize_request::Proposal {
-                    protocol_version: topology_version::proposal_protocol_version(&synchronizer_id),
-                    change: TopologyChangeOp::AddReplace as i32,
-                    serial: 0,
-                    mapping: Some(authorize_request::proposal::Mapping::V30(TopologyMapping {
-                        mapping: Some(topology_mapping::Mapping::PartyToParticipant(
-                            PartyToParticipant {
-                                party: party_id.to_string(),
-                                threshold: 1,
-                                participants: vec![HostingParticipant {
-                                    participant_uid: config.participant_id().to_string(),
-                                    permission: ParticipantPermission::Submission as i32,
-                                    onboarding: None,
-                                }],
-                                party_signing_keys: None,
-                            },
-                        )),
-                    })),
-                },
+                topology_version::ProposalFormat::for_synchronizer(&synchronizer_id).proposal(
+                    0,
+                    topology_mapping::Mapping::PartyToParticipant(PartyToParticipant {
+                        party: party_id.to_string(),
+                        threshold: 1,
+                        participants: vec![HostingParticipant {
+                            participant_uid: config.participant_id().to_string(),
+                            permission: ParticipantPermission::Submission as i32,
+                            onboarding: None,
+                        }],
+                        party_signing_keys: None,
+                    }),
+                ),
             )),
             must_fully_authorize: true,
             force_changes: vec![],

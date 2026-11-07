@@ -104,14 +104,8 @@ async fn submit_mapping(config: &NodeConfig, mapping: PartyToParticipant) -> any
         config,
         AuthorizeRequest {
             r#type: Some(authorize_request::Type::Proposal(
-                authorize_request::Proposal {
-                    protocol_version: topology_version::proposal_protocol_version(&synchronizer_id),
-                    change: TopologyChangeOp::AddReplace as i32,
-                    serial: 0,
-                    mapping: Some(authorize_request::proposal::Mapping::V30(TopologyMapping {
-                        mapping: Some(topology_mapping::Mapping::PartyToParticipant(mapping)),
-                    })),
-                },
+                topology_version::ProposalFormat::for_synchronizer(&synchronizer_id)
+                    .proposal(0, topology_mapping::Mapping::PartyToParticipant(mapping)),
             )),
             // The participant holds the party's namespace key, so this is not a
             // proposal awaiting anyone.

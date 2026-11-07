@@ -32,10 +32,8 @@ use canton_proto_rs::com::{
     },
     digitalasset::canton::{
         protocol::v30::{
-            PartyToParticipant, TopologyMapping,
-            enums::{ParticipantPermission, TopologyChangeOp},
-            party_to_participant::HostingParticipant,
-            topology_mapping,
+            PartyToParticipant, enums::ParticipantPermission,
+            party_to_participant::HostingParticipant, topology_mapping,
         },
         topology::admin::v30::{
             AuthorizeRequest, ForceFlag, ListDecentralizedNamespaceDefinitionRequest,
@@ -66,7 +64,8 @@ use crate::{
             },
         },
         party_replication::relay::{HoldRefused, PartyHold, RelaySessions},
-        topology, topology_version,
+        topology,
+        topology_version::ProposalFormat,
     },
 };
 
@@ -978,14 +977,10 @@ async fn leave_topology(
         config,
         AuthorizeRequest {
             r#type: Some(authorize_request::Type::Proposal(
-                authorize_request::Proposal {
-                    protocol_version: topology_version::proposal_protocol_version(&synchronizer_id),
-                    change: TopologyChangeOp::AddReplace as i32,
-                    serial: submitted,
-                    mapping: Some(authorize_request::proposal::Mapping::V30(TopologyMapping {
-                        mapping: Some(topology_mapping::Mapping::PartyToParticipant(mapping)),
-                    })),
-                },
+                ProposalFormat::for_synchronizer(&synchronizer_id).proposal(
+                    submitted,
+                    topology_mapping::Mapping::PartyToParticipant(mapping),
+                ),
             )),
             // This node's namespace alone authorizes its own departure, so the
             // write must be complete when this returns.

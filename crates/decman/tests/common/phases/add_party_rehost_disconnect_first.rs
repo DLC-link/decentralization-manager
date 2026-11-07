@@ -54,7 +54,7 @@ use canton_proto_rs::com::digitalasset::canton::{
         participant_repair_service_client::ParticipantRepairServiceClient,
         synchronizer_connectivity_service_client::SynchronizerConnectivityServiceClient,
     },
-    protocol::v30::{TopologyMapping, enums::TopologyChangeOp, topology_mapping},
+    protocol::v30::topology_mapping,
     topology::admin::v30::{
         AuthorizeRequest, ForceFlag, ListDecentralizedNamespaceDefinitionRequest,
         ListPartyToParticipantRequest, ListSynchronizerParametersStateRequest, authorize_request,
@@ -201,20 +201,8 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
                 &p3,
                 AuthorizeRequest {
                     r#type: Some(authorize_request::Type::Proposal(
-                        authorize_request::Proposal {
-                            protocol_version: topology_version::proposal_protocol_version(
-                                &synchronizer_id,
-                            ),
-                            change: TopologyChangeOp::AddReplace as i32,
-                            serial: 0,
-                            mapping: Some(authorize_request::proposal::Mapping::V30(
-                                TopologyMapping {
-                                    mapping: Some(topology_mapping::Mapping::PartyToParticipant(
-                                        mapping,
-                                    )),
-                                },
-                            )),
-                        },
+                        topology_version::ProposalFormat::for_synchronizer(&synchronizer_id)
+                            .proposal(0, topology_mapping::Mapping::PartyToParticipant(mapping)),
                     )),
                     must_fully_authorize: true,
                     // Canton refuses to let a participant drop a party it holds

@@ -73,7 +73,8 @@ use crate::{
             ArtifactStore, ReplicationArtifacts, ReplicationTarget, capture_offset_once,
         },
         storage::artifact_kinds,
-        topology, topology_version,
+        topology,
+        topology_version::{self, ProposalFormat},
     },
 };
 
@@ -399,11 +400,10 @@ pub async fn prepare_add_hosts(
             proposals: vec![generate_transactions_request::Proposal {
                 operation: TopologyChangeOp::AddReplace as i32,
                 serial: next_serial,
-                mapping: Some(generate_transactions_request::proposal::Mapping::V30(
-                    TopologyMapping {
-                        mapping: Some(topology_mapping::Mapping::PartyToParticipant(mapping)),
-                    },
-                )),
+                mapping: Some(
+                    ProposalFormat::for_synchronizer(&synchronizer_id)
+                        .generated_mapping(topology_mapping::Mapping::PartyToParticipant(mapping)),
+                ),
                 store: Some(topology::synchronizer_store_id(&synchronizer_id)),
             }],
             base_request: None,
@@ -670,14 +670,10 @@ pub async fn authorize_add_hosts(
         config,
         AuthorizeRequest {
             r#type: Some(authorize_request::Type::Proposal(
-                authorize_request::Proposal {
-                    protocol_version: topology_version::proposal_protocol_version(&synchronizer_id),
-                    change: TopologyChangeOp::AddReplace as i32,
-                    serial: next_serial,
-                    mapping: Some(authorize_request::proposal::Mapping::V30(TopologyMapping {
-                        mapping: Some(topology_mapping::Mapping::PartyToParticipant(mapping)),
-                    })),
-                },
+                ProposalFormat::for_synchronizer(&synchronizer_id).proposal(
+                    next_serial,
+                    topology_mapping::Mapping::PartyToParticipant(mapping),
+                ),
             )),
             // Neither node holds both halves, so demanding full authorization
             // would fail on whichever one calls first.
