@@ -15,7 +15,7 @@ use super::parties::resolve_owner_keys_from_peers;
 use crate::{
     canton_id::{CantonId, validate_party_id_prefix},
     config::{NetworkConfig, NodeConfig},
-    consts::MIN_PEER_VERSION,
+    consts::{MIN_PEER_VERSION, OWNER_ONLY_KICK},
     db::{
         rows::{DecPartyOwnerRow, DecPartyParticipantRow},
         schema::{Commitable, SchemaRead, SchemaWrite},
@@ -27,7 +27,7 @@ use crate::{
     },
     server::{
         AppState, external_parties,
-        health::classify_health_reply,
+        health::{HealthReply, classify_health_reply},
         middleware::require_admin,
         package_inventory::fetch_dar_for_package,
         respawn_coordinator,
@@ -892,11 +892,22 @@ pub async fn start_kick(
 
     // Refuse to invite any peer that can't speak the concurrent-workflows wire
     // format — NO invites are sent if even one invitee fails the version gate.
-    let incompatible = preflight_incompatible_peers(&data.config, &data.db, &invitees).await;
+    let health = probe_invitee_health(&data.config, &data.db, &invitees).await;
+    let incompatible = incompatible_versions(&health);
     if !incompatible.is_empty() {
         return HttpResponse::Conflict().json(ErrorResponse {
             error: format_incompatible_peers(&incompatible),
         });
+    }
+    // An older peer refuses an owner-only kick with an error that does not
+    // say why, so the run would fail after the invites went out.
+    if !target.hosts {
+        let lacking = lacking_feature(&health, OWNER_ONLY_KICK);
+        if !lacking.is_empty() {
+            return HttpResponse::Conflict().json(ErrorResponse {
+                error: format_peers_lacking_owner_only_kick(&lacking),
+            });
+        }
     }
 
     // Register + persist atomically w.r.t. duplicates (registry insert dedups
@@ -4156,17 +4167,25 @@ pub async fn retry_workflow(
 /// equals `prefix`. Returns the matching `party_id` if found — used by the
 /// onboarding pre-flight to refuse duplicate-prefix runs.
 /// Probe every invitee's `Health` and return those that cannot POSITIVELY be
-/// verified to run dec-party-manager >= [`MIN_PEER_VERSION`]. 0.1.9's Noise
-/// wire format is breaking — an older peer cannot parse our frames at all, so
-/// inviting it would strand the run. An old build answers the probe with a
-/// 503 (it can't decode the request), so any failure to obtain a parseable
-/// version report blocks the start: for this gate, unverifiable means
-/// incompatible, never "assume OK".
+/// verified to run dec-party-manager >= [`MIN_PEER_VERSION`].
 async fn preflight_incompatible_peers(
     config: &NodeConfig,
     db: &SqlitePool,
     invitees: &[CantonId],
 ) -> Vec<(String, String)> {
+    incompatible_versions(&probe_invitee_health(config, db, invitees).await)
+}
+
+/// One invitee's reply to a `Health` probe, or why no reply came.
+type InviteeHealth = (String, std::result::Result<HealthReply, String>);
+
+/// Probe every invitee's `Health` over Noise. An invitee missing from the
+/// peer table, or with a public key that does not parse, is not probed.
+async fn probe_invitee_health(
+    config: &NodeConfig,
+    db: &SqlitePool,
+    invitees: &[CantonId],
+) -> Vec<InviteeHealth> {
     let Ok(peers) = db.get_all_peers().await else {
         return Vec::new();
     };
@@ -4191,7 +4210,7 @@ async fn preflight_incompatible_peers(
         let identity = identity.clone();
         let retry = config.noise_retry.clone();
         probes.push(tokio::spawn(async move {
-            match send_noise_message_with_retry(
+            let reply = send_noise_message_with_retry(
                 &address,
                 port,
                 &psk,
@@ -4200,27 +4219,77 @@ async fn preflight_incompatible_peers(
                 &retry,
             )
             .await
-            {
-                Ok(response) => match classify_health_reply(&response).version {
-                    Some(v) if utils::version_at_least(&v, MIN_PEER_VERSION) => None,
-                    Some(v) => Some((id, format!("running version {v}"))),
-                    None => Some((
-                        id,
-                        "reachable but reported no version (pre-0.1.9 build)".to_string(),
-                    )),
-                },
-                Err(e) => Some((id, format!("could not verify version: {e}"))),
-            }
+            .map(|response| classify_health_reply(&response))
+            .map_err(|e| e.to_string());
+            (id, reply)
         }));
     }
 
-    let mut incompatible = Vec::new();
+    let mut replies = Vec::new();
     for probe in probes {
-        if let Ok(Some(hit)) = probe.await {
-            incompatible.push(hit);
+        if let Ok(reply) = probe.await {
+            replies.push(reply);
         }
     }
-    incompatible
+    replies
+}
+
+/// The invitees that cannot POSITIVELY be verified to run at least
+/// dec-party-manager [`MIN_PEER_VERSION`]. 0.1.9's Noise wire format is
+/// breaking — an older peer cannot parse our frames at all, so inviting it
+/// would strand the run. An old build answers the probe with a 503 (it can't
+/// decode the request), so any failure to obtain a parseable version report
+/// blocks the start: for this gate, unverifiable means incompatible, never
+/// "assume OK".
+fn incompatible_versions(replies: &[InviteeHealth]) -> Vec<(String, String)> {
+    replies
+        .iter()
+        .filter_map(|(id, reply)| match reply {
+            Ok(reply) => match &reply.version {
+                Some(v) if utils::version_at_least(v, MIN_PEER_VERSION) => None,
+                Some(v) => Some((id.clone(), format!("running version {v}"))),
+                None => Some((
+                    id.clone(),
+                    "reachable but reported no version (pre-0.1.9 build)".to_string(),
+                )),
+            },
+            Err(e) => Some((id.clone(), format!("could not verify version: {e}"))),
+        })
+        .collect()
+}
+
+/// The invitees whose `Health` reply does not list `feature`, each with the
+/// version it reported. Unverifiable means lacking, as for the version gate.
+fn lacking_feature(replies: &[InviteeHealth], feature: &str) -> Vec<(String, String)> {
+    replies
+        .iter()
+        .filter_map(|(id, reply)| match reply {
+            Ok(reply) if reply.features.iter().any(|f| f == feature) => None,
+            Ok(reply) => Some((
+                id.clone(),
+                format!(
+                    "running version {}",
+                    reply.version.as_deref().unwrap_or("unknown")
+                ),
+            )),
+            Err(e) => Some((id.clone(), format!("could not verify: {e}"))),
+        })
+        .collect()
+}
+
+/// Operator-facing 409 message naming each peer that cannot sign an
+/// owner-only kick.
+fn format_peers_lacking_owner_only_kick(lacking: &[(String, String)]) -> String {
+    let list = lacking
+        .iter()
+        .map(|(id, reason)| format!("{id} ({reason})"))
+        .collect::<Vec<_>>()
+        .join("; ");
+    format!(
+        "Cannot start the kick: removing an owner that hosts no participant needs every \
+         invited peer to support it, and older builds refuse to sign. Blocking peer(s): \
+         {list}. Upgrade them and retry."
+    )
 }
 
 /// Operator-facing 409 message naming each peer that blocks the start and why.
@@ -4750,6 +4819,39 @@ mod tests {
             );
         }
         Ok(())
+    }
+
+    fn health_reply(version: &str, features: &[&str]) -> HealthReply {
+        HealthReply {
+            status: crate::server::ConnectionStatus::Connected,
+            workflow: None,
+            version: Some(version.to_string()),
+            build_version: None,
+            features: features.iter().map(ToString::to_string).collect(),
+        }
+    }
+
+    /// Every build reports one version until a release bumps it, so only the
+    /// feature list tells a peer that can sign an owner-only kick. A peer that
+    /// lists no features, or that did not answer, cannot.
+    #[test]
+    fn an_owner_only_kick_needs_every_peer_to_list_the_feature() {
+        let replies: Vec<InviteeHealth> = vec![
+            (
+                "p2".to_string(),
+                Ok(health_reply("1.14.0", &[OWNER_ONLY_KICK])),
+            ),
+            ("p3".to_string(), Ok(health_reply("1.14.0", &[]))),
+            ("p4".to_string(), Err("timed out".to_string())),
+        ];
+        assert_eq!(
+            lacking_feature(&replies, OWNER_ONLY_KICK),
+            vec![
+                ("p3".to_string(), "running version 1.14.0".to_string()),
+                ("p4".to_string(), "could not verify: timed out".to_string()),
+            ]
+        );
+        assert!(incompatible_versions(&replies[..2]).is_empty());
     }
 
     /// Three hosts and four owners. A host's kick leaves two keys to sign

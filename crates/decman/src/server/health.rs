@@ -36,6 +36,10 @@ pub struct HealthResponse {
     /// payloads from peers that predate this field still parse.
     #[serde(default)]
     pub build_version: String,
+    /// Workflow features this node supports (`consts::FEATURES`). `default`
+    /// so payloads from peers that predate this field parse as listing none.
+    #[serde(default)]
+    pub features: Vec<String>,
 }
 
 impl HealthResponse {
@@ -90,6 +94,10 @@ pub async fn build_health_response(db: &SqlitePool, participant_id: &str) -> Hea
         workflow_count,
         version: crate::build_info::SEMVER.to_string(),
         build_version: crate::build_info::build_version().to_string(),
+        features: crate::consts::FEATURES
+            .iter()
+            .map(ToString::to_string)
+            .collect(),
     }
 }
 
@@ -104,6 +112,8 @@ pub(crate) struct HealthReply {
     /// Display build identity the peer reported. `None` for peers on code that
     /// predates the field (they send an empty string, normalized to `None`).
     pub build_version: Option<String>,
+    /// Workflow features the peer listed. Empty for peers on older code.
+    pub features: Vec<String>,
 }
 
 /// Classify a successful Noise reply to a `Health` probe. Any reply that isn't a
@@ -123,6 +133,7 @@ pub(crate) fn classify_health_reply(reply: &[u8]) -> HealthReply {
             workflow: h.workflow,
             version: Some(h.version),
             build_version,
+            features: h.features,
         };
     }
     HealthReply {
@@ -130,6 +141,7 @@ pub(crate) fn classify_health_reply(reply: &[u8]) -> HealthReply {
         workflow: None,
         version: None,
         build_version: None,
+        features: Vec::new(),
     }
 }
 
@@ -160,6 +172,7 @@ mod tests {
             workflow_count: 1,
             version: "0.1.0".into(),
             build_version: "v0.1.0".into(),
+            features: vec![crate::consts::OWNER_ONLY_KICK.into()],
         };
         let back =
             HealthResponse::from_payload(&h.to_payload()).context("payload should round-trip")?;
@@ -186,6 +199,7 @@ mod tests {
             workflow_count: 1,
             version: "0.1.0".into(),
             build_version: "v0.1.0".into(),
+            features: vec![crate::consts::OWNER_ONLY_KICK.into()],
         };
         let reply = Message::new(MessageType::HealthResponse, hr.to_payload()).to_bytes();
         let r = classify_health_reply(&reply);
@@ -196,6 +210,7 @@ mod tests {
         );
         assert_eq!(r.version.as_deref(), Some("0.1.0"));
         assert_eq!(r.build_version.as_deref(), Some("v0.1.0"));
+        assert_eq!(r.features, vec![crate::consts::OWNER_ONLY_KICK.to_string()]);
 
         // Peer that predates build_version: sends an empty string → normalized
         // to None, while version still parses.
@@ -206,6 +221,7 @@ mod tests {
             workflow_count: 0,
             version: "0.1.9".into(),
             build_version: String::new(),
+            features: Vec::new(),
         };
         let reply = Message::new(MessageType::HealthResponse, hr_old.to_payload()).to_bytes();
         let r = classify_health_reply(&reply);
@@ -235,5 +251,28 @@ mod tests {
         assert!(!h.in_workflow);
         assert!(h.workflow.is_none());
         assert_eq!(h.participant_id, "p1::1220ab");
+        assert!(
+            h.features
+                .iter()
+                .any(|f| f == crate::consts::OWNER_ONLY_KICK)
+        );
+    }
+
+    /// A peer that predates the feature list still reports its version, and
+    /// lists no features.
+    #[test]
+    fn a_health_reply_without_features_lists_none() -> Result {
+        let payload = serde_json::to_vec(&serde_json::json!({
+            "participant_id": "p3::1220",
+            "in_workflow": false,
+            "workflow": null,
+            "version": "1.14.0",
+            "build_version": "v1.14.0",
+        }))?;
+        let reply = Message::new(MessageType::HealthResponse, payload).to_bytes();
+        let r = classify_health_reply(&reply);
+        assert_eq!(r.version.as_deref(), Some("1.14.0"));
+        assert!(r.features.is_empty());
+        Ok(())
     }
 }
