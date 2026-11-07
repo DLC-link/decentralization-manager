@@ -222,8 +222,15 @@ everything that follows (`workflow::validation::PeerExpectations`).
   names. It removes a host only when the member hosts the party. It removes
   every signing key above one per host left. A kick that removes no host must
   name the owner key, because nothing else ties the removal to the invitation.
-  The owner count is not held to the member count, because a member can own
-  the namespace without hosting the party. The new member also pins the added owner and
+  The peer also checks the named key against the owner keys it has on record.
+  The key must be the departing host's recorded key, and no staying host's.
+  The peer refuses while it has no current key on record for a host. It also
+  refuses a namespace in force that still lists the key. Accepting a kick
+  refreshes the party and asks the peers for their keys first. A kick
+  invitation without an owner key comes from an older coordinator, and its
+  DNS proposal must keep one owner per member.
+  Otherwise the owner count is not held to the member count, because a member
+  can own the namespace without hosting the party. The new member also pins the added owner and
   key to its own, and refuses the proposal if its own key bundle is missing.
   A party whose keys still sit in a legacy `PartyToKeyMapping` may drop
   departed members' keys, and may gain only the new member's key on
@@ -274,14 +281,14 @@ and they are load-bearing enough to state rather than imply:
   member's refusal blocks only the P2P, where an added host must sign. Closing
   this needs an attestation of the added owner from the new member's
   participant namespace key.
-- **A kick does not tie the removed owner and key to the kicked member.** A
-  peer only knows its own owner and key. It checks that the owner the
-  invitation names goes, that the right number of keys go, and that its own
-  stay. The coordinator chooses the owner key the invitation names, so it can
-  name the key of another member that does not sign this round. The signing
-  key it drops is not tied to any member either. Only the member whose entries
-  vanish can catch it. Closing this needs every surviving member to sign a
-  kick, or an attested key bundle for the kicked member.
+- **A kick ties the removed owner to the kicked member only through each
+  peer's records.** Each member reports its own owner key over
+  `RequestOwnerKeys`, and a peer keeps one holder on record for each key. A
+  member that reports another member's key before that member does keeps the
+  record, so its kick would remove the other member's key. A later report of
+  the same key is refused and logged. The signing key a kick drops is not tied
+  to any member. Only the member whose key vanishes can catch it. Closing this
+  needs an attested key bundle for each member.
 - **A legacy `PartyToKeyMapping` does not bound how many keys a proposal
   drops.** It still holds departed members' keys, so the removal count is not
   checked for any workflow kind. A change-threshold or add-party can drop a
@@ -452,6 +459,11 @@ members left behind, so one key per host stays. That needs every remaining
 host's reported signing key. When the hosting mapping would not change,
 the coordinator hands the peers the mapping already in force. Canton refuses an
 unchanged mapping at a new serial, so submit does not send it again.
+
+Older builds refuse to sign a kick of an owner that hosts nothing. Each node
+lists the workflow features it supports in its Health reply. The coordinator
+refuses such a kick before it sends any invitation when an invited peer does
+not list `owner-only-kick`.
 
 **Steps:**
 
