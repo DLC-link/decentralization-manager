@@ -37,6 +37,9 @@ const FIRST_V31_PROTOCOL_VERSION: u32 = 37;
 /// store on protocol version 37 still admits transactions of this version.
 const LAST_V30_PROTOCOL_VERSION: u32 = 36;
 
+/// The proto version that the envelope of a `v30` transaction names.
+const V30_PROTO_VERSION: i32 = 30;
+
 /// The proto version that the envelope of a `v31` transaction names.
 const V31_PROTO_VERSION: i32 = 31;
 
@@ -74,26 +77,32 @@ pub fn proposal_protocol_version(synchronizer_id: &str) -> Option<u32> {
 
 /// Decode a topology transaction from its versioned envelope, as `v30`.
 ///
-/// A `v31` transaction is converted with [`transaction_from_v31`]. Any other
-/// envelope version decodes as `v30`, as it did before protocol version 37.
+/// A `v31` transaction is converted with [`transaction_from_v31`].
 ///
 /// # Errors
 ///
-/// Errors when the envelope or the transaction inside it fails to decode, or
-/// when a `v31` transaction has no `v30` form.
+/// Errors when the envelope names a version other than 30 or 31, when the
+/// envelope or the transaction inside it fails to decode, or when a `v31`
+/// transaction has no `v30` form.
 pub fn decode_transaction(bytes: &[u8]) -> Result<TopologyTransaction> {
     let versioned = UntypedVersionedMessage::decode(bytes)
         .context("Failed to decode the topology transaction's versioned envelope")?;
     let Some(untyped_versioned_message::Wrapper::Data(inner)) = versioned.wrapper else {
         anyhow::bail!("The topology transaction's versioned envelope has no data");
     };
-    if versioned.version == V31_PROTO_VERSION {
-        let transaction = v31::TopologyTransaction::decode(inner.as_slice())
-            .context("Failed to decode the v31 topology transaction")?;
-        return transaction_from_v31(transaction);
+    match versioned.version {
+        V30_PROTO_VERSION => TopologyTransaction::decode(inner.as_slice())
+            .context("Failed to decode the versioned message payload"),
+        V31_PROTO_VERSION => {
+            let transaction = v31::TopologyTransaction::decode(inner.as_slice())
+                .context("Failed to decode the v31 topology transaction")?;
+            transaction_from_v31(transaction)
+        }
+        other => anyhow::bail!(
+            "The topology transaction is in proto version {other}, and DecMan reads only 30 \
+             and 31"
+        ),
     }
-    TopologyTransaction::decode(inner.as_slice())
-        .context("Failed to decode the versioned message payload")
 }
 
 /// The `v30` form of a `v31` topology transaction.
@@ -275,6 +284,26 @@ mod tests {
             transaction
         );
         Ok(())
+    }
+
+    #[test]
+    fn an_unknown_envelope_version_is_refused() {
+        let transaction = TopologyTransaction {
+            operation: enums::TopologyChangeOp::AddReplace as i32,
+            serial: 1,
+            mapping: None,
+        };
+        for version in [0, 29, 32] {
+            let error = decode_transaction(&envelope(version, transaction.clone()))
+                .err()
+                .map(|e| e.to_string());
+            assert!(
+                error
+                    .as_deref()
+                    .is_some_and(|e| e.contains(&format!("proto version {version}"))),
+                "version {version} gave {error:?}"
+            );
+        }
     }
 
     #[test]
