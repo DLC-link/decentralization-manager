@@ -239,7 +239,8 @@ pub fn p2p_from_v31(mapping: v31::PartyToParticipant) -> Result<PartyToParticipa
                 Ok(HostingState::Onboarding) => Some(Onboarding {}),
                 Ok(state @ (HostingState::Nominated | HostingState::Freezing)) => anyhow::bail!(
                     "Participant {participant} hosts party {party} in the {state} state, which \
-                     DecMan does not support",
+                     DecMan does not support. DecMan reads the party again once that host is \
+                     onboarding or active",
                     participant = host.participant_uid,
                     party = mapping.party,
                     state = state.as_str_name(),

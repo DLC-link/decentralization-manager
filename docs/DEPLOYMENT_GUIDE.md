@@ -632,6 +632,17 @@ Splice 0.10 runs Canton 3.7. Two of its changes need decman in place first.
   `PartyToParticipant` transactions in `v31`, which an older decman cannot
   decode. Every member needs this decman version before the synchronizer moves
   to protocol version 37.
+- **Hosts that Canton adds.** Canton 3.7 can add a host to a party in the
+  `NOMINATED` or `FREEZING` state, before the host serves the party. decman
+  cannot read the party's mapping while a host is in either state. Its
+  workflows for that party fail until the host is onboarding or active.
+  decman itself never proposes these states.
+- **Downgrade.** This version adds migration `000028`. An older decman
+  refuses to start on a database that holds a migration it does not know.
+  Before you downgrade, run the `000028` down migration or restore the
+  database from before the upgrade. The down migration drops
+  `party_key_store`, which deletes decman's copies of the keys. The vault
+  keeps its copies.
 
 A participant that upgraded before its decman needs key download until
 decman holds the keys. Set `enableKeyDownload: true` in the
