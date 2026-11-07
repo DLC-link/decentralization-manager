@@ -275,8 +275,8 @@ fn error_message(body: String) -> String {
     bounded(&readable_part(body))
 }
 
-/// `message` with each control character replaced by a space, and cut at
-/// [`MAX_ERROR_MESSAGE_CHARS`] characters.
+/// `message` with each control or format character replaced by a space,
+/// and cut at [`MAX_ERROR_MESSAGE_CHARS`] characters.
 ///
 /// The host chooses the body, and the message reaches logs and terminals. A
 /// newline could forge a log line, and an escape sequence could drive a
@@ -285,7 +285,7 @@ fn bounded(message: &str) -> String {
     let mut kept: String = message
         .chars()
         .take(MAX_ERROR_MESSAGE_CHARS)
-        .map(|c| if c.is_control() { ' ' } else { c })
+        .map(|c| if is_unprintable(c) { ' ' } else { c })
         .collect();
     let more = message
         .chars()
@@ -295,6 +295,21 @@ fn bounded(message: &str) -> String {
         kept.push_str(&format!(" ... ({more} more characters)"));
     }
     kept
+}
+
+/// A control character, or a Unicode format character that changes how the
+/// text around it reads: a zero-width or joiner character, a line or
+/// paragraph separator, a bidirectional override, or a byte order mark.
+fn is_unprintable(c: char) -> bool {
+    c.is_control()
+        || matches!(
+            c,
+            '\u{200B}'..='\u{200F}'
+                | '\u{2028}'..='\u{202E}'
+                | '\u{2060}'..='\u{2064}'
+                | '\u{2066}'..='\u{2069}'
+                | '\u{FEFF}'
+        )
 }
 
 /// The readable part of an error body: a registry's `{"error": ...}`, or a
@@ -510,10 +525,11 @@ mod tests {
     }
 
     /// A host could send a body of any size, with newlines that forge log
-    /// lines and escape sequences that drive a terminal.
+    /// lines, escape sequences that drive a terminal, and a bidirectional
+    /// override that reverses what a reader sees.
     #[test]
     fn error_message_replaces_control_characters_and_cuts_a_long_body() {
-        let body: String = "refused\n\u{1b}[2J\u{1b}[31mred\r\n"
+        let body: String = "refused\n\u{1b}[2J\u{1b}[31mred\u{202E}\r\n"
             .chars()
             .cycle()
             .take(10 * 1024)
@@ -525,10 +541,10 @@ mod tests {
         assert!(message.ends_with(suffix), "{message}");
         assert_eq!(message.chars().count(), 1024 + suffix.len());
         assert!(
-            message.starts_with("refused  [2J [31mred  refused "),
+            message.starts_with("refused  [2J [31mred   refused "),
             "{message}"
         );
-        assert!(!message.chars().any(char::is_control), "{message}");
+        assert!(!message.chars().any(is_unprintable), "{message}");
     }
 
     /// The cut counts characters, so a multi-byte character is never split,
