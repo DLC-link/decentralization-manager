@@ -267,9 +267,39 @@ fn parse_stream<T: DeserializeOwned>(text: &str) -> serde_json::Result<Vec<T>> {
         .collect()
 }
 
+/// The most characters of a host's error message that the client keeps.
+const MAX_ERROR_MESSAGE_CHARS: usize = 1024;
+
+/// The readable part of an error body, made safe to print with [`bounded`].
+fn error_message(body: String) -> String {
+    bounded(&readable_part(body))
+}
+
+/// `message` with each control character replaced by a space, and cut at
+/// [`MAX_ERROR_MESSAGE_CHARS`] characters.
+///
+/// The host chooses the body, and the message reaches logs and terminals. A
+/// newline could forge a log line, and an escape sequence could drive a
+/// terminal. A body of megabytes would flood both.
+fn bounded(message: &str) -> String {
+    let mut kept: String = message
+        .chars()
+        .take(MAX_ERROR_MESSAGE_CHARS)
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect();
+    let more = message
+        .chars()
+        .count()
+        .saturating_sub(MAX_ERROR_MESSAGE_CHARS);
+    if more > 0 {
+        kept.push_str(&format!(" ... ({more} more characters)"));
+    }
+    kept
+}
+
 /// The readable part of an error body: a registry's `{"error": ...}`, or a
 /// Canton error's code and cause. Anything else is returned as it came.
-fn error_message(body: String) -> String {
+fn readable_part(body: String) -> String {
     let Ok(value) = serde_json::from_str::<Value>(&body) else {
         return body;
     };
@@ -477,5 +507,48 @@ mod tests {
             "NOT_FOUND: no such contract"
         );
         assert_eq!(error_message("plain text".to_string()), "plain text");
+    }
+
+    /// A host could send a body of any size, with newlines that forge log
+    /// lines and escape sequences that drive a terminal.
+    #[test]
+    fn error_message_replaces_control_characters_and_cuts_a_long_body() {
+        let body: String = "refused\n\u{1b}[2J\u{1b}[31mred\r\n"
+            .chars()
+            .cycle()
+            .take(10 * 1024)
+            .collect();
+
+        let message = error_message(body);
+
+        let suffix = " ... (9216 more characters)";
+        assert!(message.ends_with(suffix), "{message}");
+        assert_eq!(message.chars().count(), 1024 + suffix.len());
+        assert!(
+            message.starts_with("refused  [2J [31mred  refused "),
+            "{message}"
+        );
+        assert!(!message.chars().any(char::is_control), "{message}");
+    }
+
+    /// The cut counts characters, so a multi-byte character is never split,
+    /// and a message from a JSON body is cut too.
+    #[test]
+    fn error_message_cuts_a_long_registry_error_at_a_character_boundary() {
+        let body = json!({ "error": "é".repeat(3000) }).to_string();
+
+        let message = error_message(body);
+
+        assert_eq!(
+            message,
+            format!("{} ... (1976 more characters)", "é".repeat(1024))
+        );
+    }
+
+    #[test]
+    fn error_message_keeps_a_message_of_exactly_the_cap() {
+        let body = "x".repeat(MAX_ERROR_MESSAGE_CHARS);
+
+        assert_eq!(error_message(body.clone()), body);
     }
 }
