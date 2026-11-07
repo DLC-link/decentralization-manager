@@ -16,7 +16,10 @@
 //! Ed25519 seed, and `REGISTRY_URL`, the instrument's registry root.
 //! `REGISTRY_TOKEN` is optional. `send` needs `RECEIVER`, `AMOUNT`,
 //! `INSTRUMENT_ADMIN` and `INSTRUMENT_ID`, and takes an optional
-//! `VALIDITY_HOURS` (24 by default). `accept` needs `INSTRUCTION_CID` and
+//! `VALIDITY_HOURS` (24 by default). Its optional `FACTORY_TEMPLATE` is the
+//! template the factory must have, written `<package-id>:Module:Entity` to
+//! pin one package. The send prints the factory's template as the registry
+//! names it. `accept` needs `INSTRUCTION_CID` and
 //! `INSTRUCTION_TEMPLATE`, the template the instruction must have, such as
 //! `#splice-amulet:Splice.AmuletTransferInstruction:AmuletTransferInstruction`.
 //! A template written as `<package-id>:Module:Entity` pins one package.
@@ -71,19 +74,23 @@ async fn send(ledger: &LedgerClient, party: &str) -> Result {
         Ok(hours) => hours.parse::<u64>()?,
         Err(_) => 24,
     };
-    let args = TransferArgs::new(
-        party,
-        required("RECEIVER")?,
-        required("AMOUNT")?,
-        required("INSTRUMENT_ADMIN")?,
-        required("INSTRUMENT_ID")?,
-        Duration::from_secs(validity_hours.saturating_mul(3600)),
-    );
+    let args = TransferArgs {
+        factory_template: env::var("FACTORY_TEMPLATE").ok(),
+        ..TransferArgs::new(
+            party,
+            required("RECEIVER")?,
+            required("AMOUNT")?,
+            required("INSTRUMENT_ADMIN")?,
+            required("INSTRUMENT_ID")?,
+            Duration::from_secs(validity_hours.saturating_mul(3600)),
+        )
+    };
 
     log_holdings(ledger, party, "holding before").await?;
     let receipt = send_transfer(ledger, &registry, &key, &args).await?;
     tracing::info!(
         factory_id = %receipt.factory_id,
+        factory_template = receipt.factory_template.as_deref().unwrap_or("not named"),
         transfer_kind = %receipt.transfer_kind,
         inputs = ?receipt.input_holding_cids,
         signed_hash = %receipt.prepared_transaction_hash,

@@ -81,6 +81,7 @@ fn args() -> TransferArgs {
         input_holding_cids: Vec::new(),
         requested_at: "2026-11-04T10:00:00.000Z".to_string(),
         execute_before: "2026-11-05T10:00:00.000Z".to_string(),
+        factory_template: None,
     }
 }
 
@@ -803,7 +804,7 @@ fn exercise(
         contract_id: contract_id.to_string(),
         package_name: "splice-amulet".to_string(),
         template_id: Some(Identifier {
-            package_id: "amulet-package-id".to_string(),
+            package_id: AMULET_PACKAGE_ID.to_string(),
             module_name: "Splice.ExternalPartyAmuletRules".to_string(),
             entity_name: "ExternalPartyAmuletRules".to_string(),
         }),
@@ -954,6 +955,26 @@ fn disclosed() -> Value {
     }])
 }
 
+/// Canton Coin's factory template, pinned to `package_id`.
+fn factory_pinned_to(package_id: &str) -> String {
+    format!("{package_id}:Splice.ExternalPartyAmuletRules:ExternalPartyAmuletRules")
+}
+
+/// The contracts the registry discloses for a send: the context's contract,
+/// then the factory, as Splice's registry names them.
+fn factory_disclosed() -> Value {
+    let mut contracts = disclosed();
+    if let Some(list) = contracts.as_array_mut() {
+        list.push(json!({
+            "templateId": factory_pinned_to(AMULET_PACKAGE_ID),
+            "contractId": FACTORY_ID,
+            "createdEventBlob": "ZmFjdG9yeQ==",
+            "synchronizerId": "global-domain::1220ee",
+        }));
+    }
+    contracts
+}
+
 async fn stub_factory(server: &MockServer) {
     Mock::given(method("POST"))
         .and(path(format!(
@@ -964,7 +985,7 @@ async fn stub_factory(server: &MockServer) {
             "transferKind": "offer",
             "choiceContext": {
                 "choiceContextData": context_data(),
-                "disclosedContracts": disclosed(),
+                "disclosedContracts": factory_disclosed(),
             },
         })))
         .mount(server)
@@ -1110,6 +1131,11 @@ async fn send_transfer_runs_the_steps_in_order_and_signs_the_hash_locally() {
     assert_eq!(receipt.update_id, "update-1");
     assert_eq!(receipt.completion_offset, 43);
     assert_eq!(receipt.factory_id, FACTORY_ID);
+    assert_eq!(
+        receipt.factory_template,
+        Some(factory_pinned_to(AMULET_PACKAGE_ID)),
+        "the receipt names the template of the factory's disclosed contract"
+    );
     assert_eq!(receipt.transfer_kind, "offer");
     assert_eq!(receipt.input_holding_cids, vec!["00a1".to_string()]);
     assert_eq!(receipt.prepared_transaction_hash, STANDARD.encode(&hash));
@@ -1157,7 +1183,7 @@ async fn send_transfer_runs_the_steps_in_order_and_signs_the_hash_locally() {
     // Canton 3.6 refuses a prepare body without these two fields.
     assert_eq!(prepare["synchronizerId"], "");
     assert_eq!(prepare["packageIdSelectionPreference"], json!([]));
-    assert_eq!(prepare["disclosedContracts"], disclosed());
+    assert_eq!(prepare["disclosedContracts"], factory_disclosed());
     let command = &prepare["commands"][0]["ExerciseCommand"];
     assert_eq!(command["templateId"], TRANSFER_FACTORY_INTERFACE_ID);
     assert_eq!(command["contractId"], FACTORY_ID);
@@ -1676,25 +1702,36 @@ async fn refused_send_of(
     seed: u8,
     transaction: impl FnOnce(&str) -> PreparedTransaction,
 ) -> Refusal {
+    refused_send_against(seed, None, |sender| {
+        // A transaction the hasher cannot hash gets a stand-in hash. The
+        // wallet must refuse it when it fails to recompute the hash.
+        preparing(transaction(sender), |transaction| {
+            let hash = compute_prepared_transaction_hash(HashingScheme::V2, transaction)
+                .unwrap_or_else(|_| vec![0; 32]);
+            prepare_response(transaction, &hash)
+        })
+    })
+    .await
+}
+
+/// Run a send that expects `factory_template` against the participant
+/// `participant` makes for the sender, and return the refusal. Panics
+/// unless the wallet refused to sign and executed nothing.
+async fn refused_send_against<P: Preparer>(
+    seed: u8,
+    factory_template: Option<&str>,
+    participant: impl FnOnce(&str) -> P,
+) -> Refusal {
     let key = ExternalKeyPair::from_seed([seed; 32]);
     let sender = key.party_id("alice");
-    // A transaction the hasher cannot hash gets a stand-in hash. The wallet
-    // must refuse it when it fails to recompute the hash.
-    let participant = preparing(transaction(&sender), |transaction| {
-        let hash = compute_prepared_transaction_hash(HashingScheme::V2, transaction)
-            .unwrap_or_else(|_| vec![0; 32]);
-        prepare_response(transaction, &hash)
-    });
     let server = MockServer::start().await;
-    stub_send(&server, &sender, participant).await;
+    stub_send(&server, &sender, participant(&sender)).await;
+    let args = TransferArgs {
+        factory_template: factory_template.map(str::to_string),
+        ..send_args(&sender)
+    };
 
-    let result = send_transfer(
-        &ledger_for(&server),
-        &registry_for(&server),
-        &key,
-        &send_args(&sender),
-    )
-    .await;
+    let result = send_transfer(&ledger_for(&server), &registry_for(&server), &key, &args).await;
 
     assert_eq!(count(&server, EXECUTE_PATH).await, 0, "nothing is executed");
     match result {
@@ -1857,7 +1894,9 @@ async fn an_accept_prepared_on_another_template_is_not_signed() {
     }
 }
 
-/// The package id [`on_template`] gives Canton Coin's instruction template.
+/// The package id of the `splice-amulet` package in these fixtures. The
+/// factory of [`exercise`] and the template [`on_template`] gives Canton
+/// Coin's instruction both use it.
 const AMULET_PACKAGE_ID: &str = "splice-amulet-package-id";
 
 /// Canton Coin's instruction template, pinned to `package_id`.
@@ -1882,9 +1921,9 @@ fn on_look_alike(root: Exercise) -> Exercise {
 }
 
 /// Run an accept of `INSTRUCTION_CID` that expects `template`, against a
-/// participant that prepares `root`. Panics unless the wallet signed the
-/// transaction's hash and executed it once.
-async fn signed_accept(seed: u8, template: &str, root: impl FnOnce(&str) -> Exercise) {
+/// participant that prepares `root`, and return the prepare body. Panics
+/// unless the wallet signed the transaction's hash and executed it once.
+async fn signed_accept(seed: u8, template: &str, root: impl FnOnce(&str) -> Exercise) -> Value {
     let key = ExternalKeyPair::from_seed([seed; 32]);
     let receiver = key.party_id("bob");
     let transaction = prepared(root(&receiver), &receiver);
@@ -1912,6 +1951,7 @@ async fn signed_accept(seed: u8, template: &str, root: impl FnOnce(&str) -> Exer
         verifying_key(&key).verify(&hash, &signature).is_ok(),
         "{template}: the signature must cover the transaction's hash"
     );
+    bodies(&server, PREPARE_PATH).await.remove(0)
 }
 
 /// A pinned template binds the package id, so a look-alike package with the
@@ -1939,21 +1979,93 @@ async fn an_accept_pinned_to_another_package_id_is_not_signed() {
     }
 }
 
+/// The pinned accept asks the participant to prefer the pinned package, so
+/// an upgraded package does not replace it.
 #[tokio::test]
 async fn an_accept_pinned_to_the_instructions_package_id_is_signed() {
-    signed_accept(54, &pinned_to(AMULET_PACKAGE_ID), |receiver| {
+    let prepare = signed_accept(54, &pinned_to(AMULET_PACKAGE_ID), |receiver| {
         accept_exercise(INSTRUCTION_CID, receiver, extra_args())
     })
     .await;
+
+    assert_eq!(
+        prepare["packageIdSelectionPreference"],
+        json!([AMULET_PACKAGE_ID])
+    );
 }
 
 /// The name form does not pin the package id.
 #[tokio::test]
 async fn an_accept_by_package_name_is_signed_on_a_look_alike_package() {
-    signed_accept(55, AMULET_TRANSFER_INSTRUCTION_TEMPLATE, |receiver| {
+    let prepare = signed_accept(55, AMULET_TRANSFER_INSTRUCTION_TEMPLATE, |receiver| {
         on_look_alike(accept_exercise(INSTRUCTION_CID, receiver, extra_args()))
     })
     .await;
+
+    assert_eq!(prepare["packageIdSelectionPreference"], json!([]));
+}
+
+/// With smart contract upgrade, the participant may interpret the factory
+/// with another package of the same name. A send pinned to the factory's
+/// package id refuses it.
+#[tokio::test]
+async fn a_send_pinned_to_another_package_id_is_not_signed() {
+    let pinned = factory_pinned_to(AMULET_PACKAGE_ID);
+
+    let reason = refused_send_against(56, Some(&pinned), |sender| {
+        honestly(prepared(on_look_alike(faithful_root(sender)), sender))
+    })
+    .await;
+
+    match reason {
+        Refusal::Mismatch {
+            field,
+            expected,
+            found,
+        } => {
+            assert_eq!(field, "template");
+            assert_eq!(expected, pinned);
+            assert_eq!(found, factory_pinned_to("look-alike-package-id"));
+        }
+        other => panic!("expected a template mismatch, got {other}"),
+    }
+}
+
+#[tokio::test]
+async fn a_send_pinned_to_the_factorys_package_id_is_signed_and_prefers_that_package() {
+    let key = ExternalKeyPair::from_seed([57u8; 32]);
+    let sender = key.party_id("alice");
+    let pinned = factory_pinned_to(AMULET_PACKAGE_ID);
+    let server = MockServer::start().await;
+    stub_send(&server, &sender, honestly(faithful_send(&sender))).await;
+    let args = TransferArgs {
+        factory_template: Some(pinned.clone()),
+        ..send_args(&sender)
+    };
+
+    let receipt =
+        match send_transfer(&ledger_for(&server), &registry_for(&server), &key, &args).await {
+            Ok(receipt) => receipt,
+            Err(e) => panic!("a send pinned to the factory's package must be signed: {e}"),
+        };
+
+    let prepare = &bodies(&server, PREPARE_PATH).await[0];
+    assert_eq!(
+        prepare["packageIdSelectionPreference"],
+        json!([AMULET_PACKAGE_ID])
+    );
+    assert_eq!(receipt.factory_template, Some(pinned));
+    let hash = hash_of(&for_command(
+        faithful_send(&sender),
+        &sent_command_id(&server).await,
+    ));
+    let executes = bodies(&server, EXECUTE_PATH).await;
+    assert_eq!(executes.len(), 1, "one execute");
+    let (_, _, signature) = signature_of(&executes[0]);
+    assert!(
+        verifying_key(&key).verify(&hash, &signature).is_ok(),
+        "the signature must cover the transaction's hash"
+    );
 }
 
 /// The registry's context and the empty `meta` the wallet sends are signed

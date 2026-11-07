@@ -299,8 +299,9 @@ pub struct PrepareRequest {
     /// API refuses a body without this field, though its spec marks it
     /// optional.
     pub synchronizer_id: String,
-    /// Empty lets the participant choose each package's version. Required on
-    /// the wire, like `synchronizer_id`.
+    /// Empty lets the participant choose each package's version. The flows
+    /// send the package id of a pinned template here. Required on the wire,
+    /// like `synchronizer_id`.
     pub package_id_selection_preference: Vec<String>,
     pub verbose_hashing: bool,
 }

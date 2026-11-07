@@ -66,6 +66,18 @@ pub struct TransferArgs {
     pub requested_at: String,
     /// RFC 3339.
     pub execute_before: String,
+    /// The template the factory must have. `None` leaves it unchecked.
+    ///
+    /// Write `package-id:Module:Entity` to pin one package, or
+    /// `#package-name:Module:Entity` to pass any package of that name. A
+    /// pinned send also asks the participant to prefer that package. A
+    /// package upgrade changes the id, so a pinned send is refused after an
+    /// upgrade until the caller passes the new id.
+    ///
+    /// [`TransferReceipt::factory_template`] shows the id the registry
+    /// names. A host supplies that id, so check it against a package you
+    /// trust before you pin it.
+    pub factory_template: Option<String>,
 }
 
 impl TransferArgs {
@@ -98,6 +110,7 @@ impl TransferArgs {
             input_holding_cids: Vec::new(),
             requested_at: requested_at.to_rfc3339_opts(SecondsFormat::Millis, true),
             execute_before: execute_before.to_rfc3339_opts(SecondsFormat::Millis, true),
+            factory_template: None,
         }
     }
 }
@@ -191,6 +204,11 @@ pub struct TransferReceipt {
     pub update_id: String,
     pub completion_offset: i64,
     pub factory_id: String,
+    /// The factory's template, as `package-id:Module:Entity`. It is the
+    /// template id of the registry's disclosed contract for the factory, or
+    /// `None` when the registry names none. The registry supplies it, so it
+    /// is for display until you check it against a package you trust.
+    pub factory_template: Option<String>,
     /// `offer` means the receiver must accept before the asset moves.
     pub transfer_kind: String,
     pub input_holding_cids: Vec<String>,
@@ -222,9 +240,12 @@ pub struct AcceptReceipt {
 /// receiver, amount, instrument, both times, and the input holdings in order.
 /// Its `transfer.meta` and `extraArgs` must be the ones the wallet sent.
 ///
-/// The check does not bind the factory's template. The factory's contract id
-/// comes from the registry, and a contract id names one contract of one
-/// template.
+/// When `args.factory_template` names a template, the factory must have it.
+/// The pinned form binds the package id too, and the prepare asks the
+/// participant to prefer that package. Without `factory_template`, the check
+/// leaves the factory's template open. With smart contract upgrade, the
+/// participant may then interpret the factory with any version of its
+/// package.
 ///
 /// # Errors
 /// [`Error::NoHoldings`] before any registry or prepare call when there is
@@ -284,7 +305,7 @@ pub async fn send_transfer(
     let command_id = Uuid::new_v4().to_string();
     let expected = Expected {
         interface_id: TRANSFER_FACTORY_INTERFACE_ID,
-        template_id: None,
+        template_id: args.factory_template.as_deref(),
         choice: TRANSFER_CHOICE,
         contract_id: &factory.factory_id,
         party: &args.sender,
@@ -305,10 +326,17 @@ pub async fn send_transfer(
     )
     .await?;
 
+    let factory_template = factory
+        .choice_context
+        .disclosed_contracts
+        .iter()
+        .find(|contract| contract.contract_id == factory.factory_id)
+        .and_then(|contract| contract.template_id.clone());
     Ok(TransferReceipt {
         update_id: submitted.executed.update_id,
         completion_offset: submitted.executed.completion_offset,
         factory_id: factory.factory_id,
+        factory_template,
         transfer_kind: factory.transfer_kind,
         input_holding_cids: args.input_holding_cids,
         prepared_transaction_hash: submitted.prepared_transaction_hash,
@@ -325,9 +353,12 @@ pub async fn send_transfer(
 /// interface, so the caller names the one it trusts.
 ///
 /// The `#` form passes any package of that name. To pin one package, pass
-/// `package-id:Module:Entity` instead. A package upgrade changes the id, so
+/// `package-id:Module:Entity` instead. A pinned accept also asks the
+/// participant to prefer that package. A package upgrade changes the id, so
 /// a pinned accept is refused after an upgrade until the caller passes the
-/// new id.
+/// new id. An id read from a host, such as
+/// [`TransferInstruction::package_id`](crate::TransferInstruction::package_id),
+/// must be checked against a package you trust before you pin it.
 ///
 /// `key` must be the party's key. The wallet signs only after the prepared
 /// transaction passes its check: the hash is recomputed, and the root must be
@@ -431,7 +462,9 @@ async fn submit(
             commands: vec![command],
             disclosed_contracts,
             synchronizer_id: String::new(),
-            package_id_selection_preference: Vec::new(),
+            package_id_selection_preference: pinned_package(expected.template_id)
+                .into_iter()
+                .collect(),
             verbose_hashing: false,
         })
         .await?;
@@ -485,6 +518,17 @@ async fn submit(
         executed,
         prepared_transaction_hash: prepared.prepared_transaction_hash,
     })
+}
+
+/// The package id of a pinned template, `package-id:Module:Entity`.
+///
+/// With smart contract upgrade, the participant picks a version of each
+/// package by name. A pinned check refuses every version but one, so the
+/// prepare asks for that one. The `#` form pins nothing.
+fn pinned_package(template_id: Option<&str>) -> Option<String> {
+    let template = template_id.filter(|template| !template.starts_with('#'))?;
+    let (package_id, _) = template.split_once(':')?;
+    (!package_id.is_empty()).then(|| package_id.to_string())
 }
 
 /// An execute error, as the caller must read it.
@@ -542,6 +586,7 @@ mod tests {
             input_holding_cids: vec!["00aa".to_string()],
             requested_at: "2026-11-04T10:00:00.000Z".to_string(),
             execute_before: "2026-11-05T10:00:00.000Z".to_string(),
+            factory_template: None,
         }
     }
 
@@ -574,6 +619,22 @@ mod tests {
                 matches!(check_contract_id(&bad), Err(Error::InvalidContractId { contract_id }) if contract_id == bad),
                 "{bad} must be refused"
             );
+        }
+    }
+
+    #[test]
+    fn only_a_pinned_template_names_a_package_to_prefer() {
+        assert_eq!(
+            pinned_package(Some("amuletpkg:Splice.Amulet:Amulet")).as_deref(),
+            Some("amuletpkg")
+        );
+        for unpinned in [
+            None,
+            Some(AMULET_TRANSFER_INSTRUCTION_TEMPLATE),
+            Some(":Splice.Amulet:Amulet"),
+            Some("Amulet"),
+        ] {
+            assert_eq!(pinned_package(unpinned), None, "{unpinned:?}");
         }
     }
 
