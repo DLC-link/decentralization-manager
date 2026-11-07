@@ -124,9 +124,15 @@ jobs:
         run: ./code-coverage.sh
 
   integration-test:
-    name: Integration Tests
+    name: Integration Tests (Splice ${{ matrix.splice }})
     runs-on: ubuntu-very-big
     timeout-minutes: 45
+    # MainNet runs Splice 0.9 until its upgrade, and DevNet and TestNet run
+    # 0.10, so each version gets a full run.
+    strategy:
+      fail-fast: false
+      matrix:
+        splice: ["0.9.4", "0.10.0"]
     steps:
       - uses: actions/checkout@v7
       - uses: ./.github/actions/setup-build-env
@@ -149,7 +155,7 @@ jobs:
         uses: actions/cache@v6
         with:
           path: .localnet/
-          key: localnet-0.10.0
+          key: localnet-${{ matrix.splice }}
       # Generate the frontend TS bindings before the integration build (which
       # builds the decman binary → build.rs → frontend, needing this file).
       - name: Generate frontend TypeScript bindings
@@ -157,12 +163,13 @@ jobs:
       - name: Run integration tests
         run: ./integration-tests/run.sh
         env:
+          LOCALNET_VERSION: ${{ matrix.splice }}
           DECPM_IT_LOG_DIR: ${{ github.workspace }}/it-node-logs
       - name: Upload node logs
         if: failure()
         uses: actions/upload-artifact@v7
         with:
-          name: it-node-logs
+          name: it-node-logs-${{ matrix.splice }}
           path: it-node-logs/
           retention-days: 7
 

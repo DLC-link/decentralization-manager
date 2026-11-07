@@ -44,8 +44,8 @@ export DECPM_EXTERNAL_PARTIES_TTL_SECS=3
 # there a coordinator step is a real Canton round trip.
 export DECPM_PEER_WAIT_POLL_DELAY_MS=500
 
-# Localnet
-LOCALNET_VERSION="0.10.0"
+# Localnet. CI runs the suite once per Splice version and sets this.
+LOCALNET_VERSION="${LOCALNET_VERSION:-0.10.0}"
 LOCALNET_BUNDLE_URL="https://github.com/digital-asset/decentralized-canton-sync/releases/download/v${LOCALNET_VERSION}/${LOCALNET_VERSION}_splice-node.tar.gz"
 LOCALNET_CACHE_DIR="$SCRIPT_DIR/.localnet"
 LOCALNET_COMPOSE_DIR="$LOCALNET_CACHE_DIR/splice-node/docker-compose/localnet"
@@ -270,6 +270,10 @@ configure_localnet_repair() {
 # export on the same way until DecMan holds every key. Idempotent.
 configure_localnet_key_download() {
     local conf="$LOCALNET_COMPOSE_DIR/conf/canton/app.conf"
+    # Splice 0.9 runs Canton 3.6, which exports keys without the setting.
+    case "$LOCALNET_VERSION" in
+        0.[0-9].*) return 0 ;;
+    esac
     if grep -q "enable-key-download" "$conf"; then
         return 0
     fi
