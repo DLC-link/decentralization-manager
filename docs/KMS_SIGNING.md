@@ -146,7 +146,10 @@ copy of each key.
 ### Copying existing keys
 
 A background task copies each party's key into the store at boot and then
-every 15 minutes. It skips KMS-backed keys and keys the store already holds.
+every 15 minutes. It copies only the parties that this node hosts. It skips
+KMS-backed keys and keys the store already holds. When a run cannot reach the
+participant, the task retries after 30 seconds. Each further failure doubles
+the wait, up to 15 minutes.
 
 Run this decman version on every node before its participant moves to Splice
 0.10. The task then copies the keys while export still works. The log reports
@@ -159,8 +162,8 @@ Two cases need it:
 
 - **The participant moved to Splice 0.10 before decman.** Set the flag and
   restart the participant. Wait until the log stops reporting
-  `Could not copy this node's Daml key`. Then remove the flag and restart
-  again.
+  `Canton refused to export this node's Daml key`. Then remove the flag and
+  restart again.
 - **A party onboarded on a Splice 0.10 node.** The party's Daml key comes from
   the participant's vault, so its first deploy needs the flag. This stays true
   until decman generates party keys itself.

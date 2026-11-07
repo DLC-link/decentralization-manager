@@ -91,6 +91,21 @@ impl TransactionSigner for VaultExportSigner {
     }
 }
 
+/// What Canton says when it refuses an export because key download is off.
+const KEY_DOWNLOAD_DISABLED: &str =
+    "Remote export of private keys only allowed when explicitly enabled";
+
+/// Whether `error` is Canton refusing an export because the participant
+/// does not allow key download. Splice's own export matches the same text.
+pub fn key_download_disabled(error: &SigningError) -> bool {
+    matches!(
+        error,
+        SigningError::VaultRpc(status)
+            if status.code() == tonic::Code::FailedPrecondition
+                && status.message().contains(KEY_DOWNLOAD_DISABLED)
+    )
+}
+
 /// Export a party key's Ed25519 seed from the participant's vault, and check
 /// that it produces the key's public half.
 ///
@@ -346,6 +361,32 @@ mod tests {
 
     fn key_from_seed(seed: u8) -> SigningKey {
         SigningKey::from_bytes(&[seed; 32])
+    }
+
+    #[test]
+    fn only_canton_s_key_download_refusal_counts_as_one() {
+        let refused = |code, message: &str| {
+            key_download_disabled(&SigningError::VaultRpc(tonic::Status::new(
+                code,
+                message.to_string(),
+            )))
+        };
+        assert!(refused(
+            tonic::Code::FailedPrecondition,
+            "FAILED_PRECONDITION: Remote export of private keys only allowed when explicitly \
+             enabled"
+        ));
+        assert!(!refused(
+            tonic::Code::FailedPrecondition,
+            "The synchronizer is not connected"
+        ));
+        assert!(!refused(
+            tonic::Code::Unavailable,
+            "Remote export of private keys only allowed when explicitly enabled"
+        ));
+        assert!(!key_download_disabled(&SigningError::Other(
+            anyhow::anyhow!("Remote export of private keys only allowed when explicitly enabled")
+        )));
     }
 
     #[test]
