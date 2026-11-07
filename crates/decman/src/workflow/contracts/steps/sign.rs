@@ -122,7 +122,7 @@ pub async fn sign_submissions(
         .collect();
 
     let store = KeyStore::open(config, db.clone()).await?;
-    let signer = select_signer(&key_context, config, &store, dec_party_id).await?;
+    let signer = select_signer(&key_context, config, store.as_ref(), dec_party_id).await?;
     let signatures = signer.sign(&hashes, &key_context).await?;
 
     // Step 5: Persist signatures bundle as `SUBMISSION_SIGNATURES` artefact.

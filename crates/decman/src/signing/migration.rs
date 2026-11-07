@@ -18,7 +18,7 @@ use crate::{
     db::schema::SchemaRead,
     error::Result,
     signing::{
-        key_store::KeyStore,
+        key_store::{KeyStore, STORE_OFF_HINT},
         vault_export::{export_private_key, export_protocol_version},
     },
     workflow::contracts::steps::sign::own_daml_key,
@@ -58,7 +58,13 @@ pub async fn run_key_migration(config: NodeConfig, db: SqlitePool) {
 /// Errors when the store cannot be opened or the parties cannot be listed. A
 /// party whose key cannot be copied is logged and skipped.
 pub async fn migrate_all(config: &NodeConfig, db: &SqlitePool) -> Result {
-    let store = KeyStore::open(config, db.clone()).await?;
+    let Some(store) = KeyStore::open(config, db.clone()).await? else {
+        tracing::error!(
+            "{STORE_OFF_HINT}. DecMan copies no keys, and it cannot sign for a party once \
+             the participant stops exporting keys"
+        );
+        return Ok(());
+    };
     let channel = config.admin_channel().await?;
     let protocol_version = export_protocol_version(config).await?;
     for row in db.get_dec_parties_by_prefix("").await? {
@@ -96,8 +102,10 @@ async fn migrate_party(
     if key.kms_key_id.is_some() {
         return Ok(Outcome::KmsHeld);
     }
-    if store.get(party, &key.fingerprint).await?.is_some() {
-        return Ok(Outcome::AlreadyStored);
+    match store.get(party, &key.fingerprint).await {
+        Ok(Some(_)) => return Ok(Outcome::AlreadyStored),
+        Ok(None) => {}
+        Err(e) => tracing::warn!("{e:#}. Copying the key again"),
     }
     let seed = export_private_key(channel, &key, protocol_version).await?;
     store

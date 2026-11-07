@@ -160,6 +160,11 @@ setup_directories() {
     for i in 1 2 3; do
         mkdir -p "$DEV_DIR/participant-$i"
     done
+    # DecMan's key store takes its encryption key from this file, and all
+    # three nodes share it. The export reaches the nodes that the chaos phases
+    # respawn from the Rust harness, too.
+    export DECPM_KEY_STORE_KEY_FILE="$DEV_DIR/key-store.key"
+    ( umask 077 && head -c 32 /dev/urandom | base64 > "$DECPM_KEY_STORE_KEY_FILE" )
 }
 
 # ============================================================================

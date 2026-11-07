@@ -119,13 +119,24 @@ copy of each key.
 - decman stores this node's Daml key for each party in the `party_key_store`
   table. Each key is encrypted with AES-256-GCM, bound to its party and
   fingerprint.
-- The encryption key comes from `DECPM_KEY_STORE_KEY_FILE`. Mount that file
-  from a Secret, apart from the data volume. When the variable is unset,
-  decman creates `key-store.key` in its data directory. That file sits next to
-  the database it protects, so treat it as a stopgap.
+- decman takes the encryption key from the first of these sources that is
+  set:
+  1. The file named by `DECPM_KEY_STORE_KEY_FILE`. Mount it from a Secret,
+     apart from the data volume. The file holds 64 hex characters or the
+     base64 of 32 bytes, such as the output of `openssl rand -base64 32`.
+  2. A key derived from `DECPM_DB_ENCRYPTION_KEY`.
+  3. In insecure mode only, `key-store.key` in the data directory. decman
+     creates it on first use. It sits next to the database, so it suits local
+     tests only.
+- With none of these, the store is off. decman logs an error every 15 minutes
+  and signs as it did before Splice 0.10.
 - A deploy signs with the stored key first. A KMS-backed key signs through
   `AwsKmsSigner` as before. Any other key is exported, used, and stored for the
   next deploy.
+- A stored key that does not decrypt is skipped. That happens when the
+  encryption key changes or is lost. decman then exports the key again and
+  replaces the stored copy. A Splice 0.10 participant refuses that export by
+  default, so keep the encryption key stable and keep a copy of it.
 - decman never deletes a key from the vault.
 
 ### Copying existing keys
@@ -133,15 +144,20 @@ copy of each key.
 A background task copies each party's key into the store at boot and then
 every 15 minutes. It skips KMS-backed keys and keys the store already holds.
 
-- **Participant on Splice 0.9 or older.** Run this decman version before the
-  node upgrades. The task copies the keys while export still works. The log
-  reports `Copied this node's Daml key for <party> into DecMan's key store`.
-- **Participant already on Splice 0.10.** Set
-  `canton.parameters.enable-key-download = yes` on the participant and restart
-  it. Wait until the log stops reporting `Could not copy this node's Daml key`.
-  Then remove the setting and restart again.
+Run this decman version on every node before its participant moves to Splice
+0.10. The task then copies the keys while export still works. The log reports
+`Copied this node's Daml key for <party> into DecMan's key store`.
 
-A party onboarded on a Splice 0.10 node gets its Daml key from the
-participant's vault, so its first deploy also needs the setting until decman
-generates party keys itself.
+`canton.parameters.enable-key-download = yes` is the last resort. Canton's
+configuration reference says the setting "should not be enabled in
+production". While it is on, the admin API exports every key in the vault.
+Two cases need it:
+
+- **The participant moved to Splice 0.10 before decman.** Set the flag and
+  restart the participant. Wait until the log stops reporting
+  `Could not copy this node's Daml key`. Then remove the flag and restart
+  again.
+- **A party onboarded on a Splice 0.10 node.** The party's Daml key comes from
+  the participant's vault, so its first deploy needs the flag. This stays true
+  until decman generates party keys itself.
 

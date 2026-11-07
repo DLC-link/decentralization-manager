@@ -74,11 +74,12 @@ pub trait TransactionSigner: Send + Sync {
 ///
 /// 1. A key DecMan holds in its own [`KeyStore`] signs from there
 ///    ([`StoredKeySigner`]). Canton 3.7 no longer exports vault keys by
-///    default, so this is the path that keeps working after the upgrade.
+///    default, so this is the path that keeps working after the upgrade. A
+///    stored copy that does not decrypt is skipped.
 /// 2. A key that carries a `kms_key_id` is non-exportable and can only be
 ///    signed through the KMS ([`AwsKmsSigner`]).
-/// 3. Any other vault key is exported and signed by [`VaultExportSigner`],
-///    which also copies it into the store for the next run.
+/// 3. Any other vault key is exported and signed by [`VaultExportSigner`].
+///    When the store is on, the export also copies the key into it.
 ///
 /// This is the single extension point for new backends (e.g. an MPCH
 /// client-API signer).
@@ -92,11 +93,18 @@ pub trait TransactionSigner: Send + Sync {
 pub async fn select_signer(
     key: &SigningKeyContext,
     config: &NodeConfig,
-    store: &KeyStore,
+    store: Option<&KeyStore>,
     party: &CantonId,
 ) -> Result<Box<dyn TransactionSigner>> {
-    if let Some(seed) = store.get(party, &key.fingerprint).await? {
-        return Ok(Box::new(StoredKeySigner::new(seed)));
+    if let Some(store) = store {
+        match store.get(party, &key.fingerprint).await {
+            Ok(Some(seed)) => return Ok(Box::new(StoredKeySigner::new(seed))),
+            Ok(None) => {}
+            Err(e) => tracing::warn!(
+                "{e:#}. Signing through the KMS or a fresh export instead, which also \
+                 replaces the stored copy"
+            ),
+        }
     }
     if key.kms_key_id.is_some() {
         // Only AWS KMS is supported so far. A key held by a different KMS
@@ -104,12 +112,13 @@ pub async fn select_signer(
         // with a clear KMS error until a dedicated backend exists.
         Ok(Box::new(AwsKmsSigner::new().await))
     } else {
-        Ok(Box::new(
-            VaultExportSigner::new(
-                config.admin_channel().await?,
-                export_protocol_version(config).await?,
-            )
-            .storing_into(store.clone(), party.clone()),
-        ))
+        let signer = VaultExportSigner::new(
+            config.admin_channel().await?,
+            export_protocol_version(config).await?,
+        );
+        Ok(Box::new(match store {
+            Some(store) => signer.storing_into(store.clone(), party.clone()),
+            None => signer,
+        }))
     }
 }

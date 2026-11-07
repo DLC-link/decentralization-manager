@@ -5,6 +5,7 @@ use aes_gcm::{
     aead::{Aead, Generate},
 };
 use anyhow::Context;
+use zeroize::Zeroizing;
 
 use crate::error::Result;
 
@@ -25,6 +26,25 @@ pub fn init_key(passphrase: &str) {
 /// Check if encryption is enabled
 pub fn is_enabled() -> bool {
     ENCRYPTION_KEY.get().is_some()
+}
+
+/// A 32-byte key for `label`, derived from the database encryption key.
+/// `None` when database encryption is off.
+pub fn derive_key(label: &str) -> Option<Zeroizing<[u8; 32]>> {
+    ENCRYPTION_KEY
+        .get()
+        .map(|base| derive_key_from(base, label))
+}
+
+fn derive_key_from(base: &[u8; 32], label: &str) -> Zeroizing<[u8; 32]> {
+    use sha2::{Digest, Sha256};
+
+    // The NUL ends the label, so one label is never a prefix of another's input.
+    let mut hasher = Sha256::new();
+    hasher.update(label.as_bytes());
+    hasher.update([0]);
+    hasher.update(base);
+    Zeroizing::new(hasher.finalize().into())
 }
 
 /// Encrypt a plaintext string with an explicit key. Returns base64-encoded
@@ -221,6 +241,21 @@ mod tests {
             plaintext.to_vec()
         );
         Ok(())
+    }
+
+    #[test]
+    fn a_derived_key_depends_on_the_label_and_differs_from_the_base() {
+        let derived = derive_key_from(&TEST_KEY, "decman-party-key-store-v1");
+        assert_eq!(
+            *derived,
+            *derive_key_from(&TEST_KEY, "decman-party-key-store-v1")
+        );
+        assert_ne!(*derived, TEST_KEY);
+        assert_ne!(*derived, *derive_key_from(&TEST_KEY, "another-use"));
+        assert_ne!(
+            *derived,
+            *derive_key_from(&OTHER_KEY, "decman-party-key-store-v1")
+        );
     }
 
     #[test]

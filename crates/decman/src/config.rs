@@ -320,8 +320,8 @@ pub struct NodeConfig {
     #[serde(skip)]
     pub validator_operator_party: Option<CantonId>,
     /// File holding the key that encrypts DecMan's party key store. `None`
-    /// uses `key-store.key` in the data directory, created on first use. Not
-    /// serialized.
+    /// derives the key from the database encryption key, or, in insecure
+    /// mode, uses `key-store.key` in the data directory. Not serialized.
     #[serde(skip)]
     pub key_store_key_file: Option<PathBuf>,
     /// Root directory containing data/ subdirectory

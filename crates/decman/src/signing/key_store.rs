@@ -6,10 +6,16 @@
 //! prepared transactions with. It copies the key out of the participant while
 //! the participant still allows that, and it never deletes the vault's copy.
 //!
-//! Each key is encrypted with AES-256-GCM. The encryption key comes from a
-//! file outside the database: the path in `DECPM_KEY_STORE_KEY_FILE`, or
-//! `key-store.key` in the data directory, which DecMan creates on first use.
-//! The second is a stopgap: that file sits next to the database it protects.
+//! Each key is encrypted with AES-256-GCM. DecMan takes the encryption key
+//! from the first of these sources that is set:
+//!
+//! 1. The file named by `DECPM_KEY_STORE_KEY_FILE`.
+//! 2. A key derived from `DECPM_DB_ENCRYPTION_KEY`.
+//! 3. In insecure mode only, `key-store.key` in the data directory. DecMan
+//!    creates that file on first use.
+//!
+//! With none of them, the store is off, and DecMan signs through the KMS or
+//! a fresh export as before.
 
 use std::path::{Path, PathBuf};
 
@@ -32,10 +38,18 @@ use crate::{
         PreparedTransactionHash, SigningError, SigningKeyContext, TransactionSigner,
         vault_export::{ed25519_public_key, sign_with_seed},
     },
+    utils::compute_fingerprint,
 };
 
-/// Name of the encryption key file DecMan creates when none is configured.
+/// Name of the encryption key file DecMan creates in insecure mode.
 pub const DEFAULT_KEY_FILENAME: &str = "key-store.key";
+
+/// Label of the key derived from the database encryption key.
+const DERIVED_KEY_LABEL: &str = "decman-party-key-store-v1";
+
+/// What `open` tells the operator when no encryption key is configured.
+pub const STORE_OFF_HINT: &str = "DecMan's key store is off. Set DECPM_KEY_STORE_KEY_FILE to a \
+     mounted secret, or set DECPM_DB_ENCRYPTION_KEY";
 
 /// Domain label in the associated data, so a ciphertext from another use of
 /// the same key never decrypts here.
@@ -50,19 +64,24 @@ pub struct KeyStore {
 }
 
 impl KeyStore {
-    /// Open the store with the configured encryption key, creating the
-    /// default key file when no path is configured and none exists yet.
+    /// Open the store with the configured encryption key. Returns `None`
+    /// when no source of an encryption key is configured.
     ///
     /// # Errors
     ///
     /// Errors when a configured key file is missing or unreadable, or when a
     /// key file does not hold a 32-byte key.
-    pub async fn open(config: &NodeConfig, db: SqlitePool) -> Result<Self> {
-        let key = match &config.key_store_key_file {
-            Some(path) => read_key_file(path).await?,
-            None => read_or_create_default(&config.data_dir().join(DEFAULT_KEY_FILENAME)).await?,
+    pub async fn open(config: &NodeConfig, db: SqlitePool) -> Result<Option<Self>> {
+        let key = if let Some(path) = &config.key_store_key_file {
+            read_key_file(path).await?
+        } else if let Some(key) = crate::db::crypto::derive_key(DERIVED_KEY_LABEL) {
+            key
+        } else if config.insecure {
+            read_or_create_default(&config.data_dir().join(DEFAULT_KEY_FILENAME)).await?
+        } else {
+            return Ok(None);
         };
-        Ok(Self { db, key })
+        Ok(Some(Self { db, key }))
     }
 
     /// The stored seed of `fingerprint`'s key for `party`, if DecMan holds it.
@@ -76,16 +95,32 @@ impl KeyStore {
         party: &CantonId,
         fingerprint: &Fingerprint,
     ) -> Result<Option<Zeroizing<[u8; 32]>>> {
-        let row: Option<(Vec<u8>, Vec<u8>)> = sqlx::query_as(
+        match self.read_row(party, fingerprint).await? {
+            Some(row) => self.open_row(party, fingerprint, row).map(Some),
+            None => Ok(None),
+        }
+    }
+
+    async fn read_row(
+        &self,
+        party: &CantonId,
+        fingerprint: &Fingerprint,
+    ) -> Result<Option<(Vec<u8>, Vec<u8>)>> {
+        Ok(sqlx::query_as(
             "SELECT nonce, ciphertext FROM party_key_store WHERE party_id = ?1 AND fingerprint = ?2",
         )
         .bind(party.to_string())
         .bind(fingerprint.as_str())
         .fetch_optional(&self.db)
-        .await?;
-        let Some((nonce, ciphertext)) = row else {
-            return Ok(None);
-        };
+        .await?)
+    }
+
+    fn open_row(
+        &self,
+        party: &CantonId,
+        fingerprint: &Fingerprint,
+        (nonce, ciphertext): (Vec<u8>, Vec<u8>),
+    ) -> Result<Zeroizing<[u8; 32]>> {
         let nonce: [u8; 12] = nonce
             .try_into()
             .map_err(|_| anyhow::anyhow!("Stored key {fingerprint} has a malformed nonce"))?;
@@ -109,15 +144,17 @@ impl KeyStore {
             .as_slice()
             .try_into()
             .map_err(|_| anyhow::anyhow!("Stored key {fingerprint} is not a 32-byte seed"))?;
-        Ok(Some(Zeroizing::new(seed)))
+        Ok(Zeroizing::new(seed))
     }
 
-    /// Store `seed` as `party`'s key `public_key`, unless DecMan already holds
-    /// a key with that fingerprint. Returns whether it stored the seed.
+    /// Store `seed` as `party`'s key `public_key`. A row that still decrypts
+    /// is kept. A row that does not decrypt is replaced, because the seed is
+    /// checked against the public key first. Returns whether it wrote a row.
     ///
     /// # Errors
     ///
-    /// Errors when the seed does not belong to `public_key`, or the write fails.
+    /// Errors when the seed does not belong to `public_key`, when `fingerprint`
+    /// is not `public_key`'s, or when the write fails.
     pub async fn put(
         &self,
         party: &CantonId,
@@ -130,6 +167,22 @@ impl KeyStore {
             SigningKey::from_bytes(seed).verifying_key().to_bytes() == expected,
             "The seed for {fingerprint} does not produce that public key; not storing it"
         );
+        anyhow::ensure!(
+            compute_fingerprint(public_key) == *fingerprint,
+            "{fingerprint} is not the fingerprint of that public key; not storing the seed"
+        );
+        let replace = match self.read_row(party, fingerprint).await? {
+            None => false,
+            Some(row) => {
+                if self.open_row(party, fingerprint, row).is_ok() {
+                    return Ok(false);
+                }
+                tracing::warn!(
+                    "Replacing DecMan's unreadable copy of key {fingerprint} for {party}"
+                );
+                true
+            }
+        };
         let nonce: [u8; 12] = Generate::try_generate()
             .map_err(|e| anyhow::anyhow!("nonce generation failed: {e}"))?;
         let ciphertext = self
@@ -143,17 +196,21 @@ impl KeyStore {
             )
             .map_err(|e| anyhow::anyhow!("encryption failed: {e}"))?;
         let stored_at = chrono::Utc::now().timestamp();
-        let result = sqlx::query(
+        let statement = if replace {
+            "UPDATE party_key_store SET nonce = ?3, ciphertext = ?4, stored_at = ?5 \
+             WHERE party_id = ?1 AND fingerprint = ?2"
+        } else {
             "INSERT INTO party_key_store (party_id, fingerprint, nonce, ciphertext, stored_at) \
-             VALUES (?1, ?2, ?3, ?4, ?5) ON CONFLICT (party_id, fingerprint) DO NOTHING",
-        )
-        .bind(party.to_string())
-        .bind(fingerprint.as_str())
-        .bind(nonce.as_slice())
-        .bind(ciphertext)
-        .bind(stored_at)
-        .execute(&self.db)
-        .await?;
+             VALUES (?1, ?2, ?3, ?4, ?5) ON CONFLICT (party_id, fingerprint) DO NOTHING"
+        };
+        let result = sqlx::query(statement)
+            .bind(party.to_string())
+            .bind(fingerprint.as_str())
+            .bind(nonce.as_slice())
+            .bind(ciphertext)
+            .bind(stored_at)
+            .execute(&self.db)
+            .await?;
         Ok(result.rows_affected() == 1)
     }
 
@@ -167,8 +224,8 @@ fn associated_data(party: &CantonId, fingerprint: &Fingerprint) -> Vec<u8> {
     format!("{AAD_LABEL}\0{party}\0{fingerprint}").into_bytes()
 }
 
-/// Read an encryption key file: 32 raw bytes, 64 hex characters, or the
-/// base64 of 32 bytes.
+/// Read an encryption key file: 64 hex characters, or the base64 of 32
+/// bytes.
 async fn read_key_file(path: &Path) -> Result<Zeroizing<[u8; 32]>> {
     let contents = Zeroizing::new(tokio::fs::read(path).await.map_err(|e| {
         anyhow::anyhow!(
@@ -178,16 +235,14 @@ async fn read_key_file(path: &Path) -> Result<Zeroizing<[u8; 32]>> {
     })?);
     parse_key(&contents).ok_or_else(|| {
         anyhow::anyhow!(
-            "{path} holds no 32-byte key: expected 32 raw bytes, 64 hex characters or base64",
+            "{path} holds no 32-byte key: expected 64 hex characters or the base64 of 32 bytes",
             path = path.display()
         )
     })
 }
 
+/// Raw bytes are refused, so a 32-character passphrase never becomes a key.
 fn parse_key(contents: &[u8]) -> Option<Zeroizing<[u8; 32]>> {
-    if let Ok(raw) = <[u8; 32]>::try_from(contents) {
-        return Some(Zeroizing::new(raw));
-    }
     let text = std::str::from_utf8(contents).ok()?.trim();
     let decoded = Zeroizing::new(
         hex::decode(text)
@@ -208,7 +263,15 @@ async fn read_or_create_default(path: &PathBuf) -> Result<Zeroizing<[u8; 32]>> {
         <[u8; 32]>::try_generate().map_err(|e| anyhow::anyhow!("key generation failed: {e}"))?,
     );
     let encoded = Zeroizing::new(STANDARD.encode(key.as_slice()));
-    write_private(path, encoded.as_bytes()).await?;
+    if let Err(e) = write_private(path, encoded.as_bytes()).await {
+        // Another process created the file first, so use its key.
+        if e.downcast_ref::<std::io::Error>().map(std::io::Error::kind)
+            == Some(std::io::ErrorKind::AlreadyExists)
+        {
+            return read_key_file(path).await;
+        }
+        return Err(e);
+    }
     tracing::warn!(
         path = %path.display(),
         "Created the key-store encryption key next to the database. Set \
@@ -217,18 +280,32 @@ async fn read_or_create_default(path: &PathBuf) -> Result<Zeroizing<[u8; 32]>> {
     Ok(key)
 }
 
-/// Create `path` readable by this user only. Fails if the file exists, so two
-/// processes never write different keys.
+/// Create `path` readable by this user only. The contents go to a temporary
+/// file first and are linked into place whole, so a crash never leaves a
+/// partial key. Fails if `path` exists, so two processes never write
+/// different keys.
 async fn write_private(path: &Path, contents: &[u8]) -> Result {
     use tokio::io::AsyncWriteExt;
+    let suffix: [u8; 8] = Generate::try_generate()
+        .map_err(|e| anyhow::anyhow!("temporary name generation failed: {e}"))?;
+    let mut temporary = path.as_os_str().to_owned();
+    temporary.push(format!(".tmp-{}", hex::encode(suffix)));
+    let temporary = PathBuf::from(temporary);
     let mut options = tokio::fs::OpenOptions::new();
     options.write(true).create_new(true);
     #[cfg(unix)]
     options.mode(0o600);
-    let mut file = options.open(path).await?;
-    file.write_all(contents).await?;
-    file.sync_all().await?;
-    Ok(())
+    let written = async {
+        let mut file = options.open(&temporary).await?;
+        file.write_all(contents).await?;
+        file.sync_all().await?;
+        tokio::fs::hard_link(&temporary, path).await
+    }
+    .await;
+    // The link holds the contents now, or the write failed. Either way the
+    // temporary name has no further use.
+    let _ = tokio::fs::remove_file(&temporary).await;
+    Ok(written?)
 }
 
 /// Signs with a key from DecMan's store.
@@ -311,7 +388,7 @@ mod tests {
     }
 
     #[sqlx::test(migrator = "MIGRATOR")]
-    async fn a_stored_key_is_never_replaced(db: SqlitePool) -> Result {
+    async fn a_readable_stored_key_is_never_replaced(db: SqlitePool) -> Result {
         let seed = [7u8; 32];
         let public = public_key(&seed);
         let fingerprint = utils::compute_fingerprint(&public);
@@ -319,6 +396,47 @@ mod tests {
 
         assert!(store.put(&party(1), &fingerprint, &public, &seed).await?);
         assert!(!store.put(&party(1), &fingerprint, &public, &seed).await?);
+        Ok(())
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_row_under_an_old_encryption_key_is_replaced(db: SqlitePool) -> Result {
+        let seed = [7u8; 32];
+        let public = public_key(&seed);
+        let fingerprint = utils::compute_fingerprint(&public);
+        store(db.clone(), 1)
+            .put(&party(1), &fingerprint, &public, &seed)
+            .await?;
+
+        let new_store = store(db.clone(), 2);
+        assert!(new_store.get(&party(1), &fingerprint).await.is_err());
+        assert!(
+            new_store
+                .put(&party(1), &fingerprint, &public, &seed)
+                .await?
+        );
+        assert_eq!(
+            new_store.get(&party(1), &fingerprint).await?.as_deref(),
+            Some(&seed)
+        );
+        let rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM party_key_store")
+            .fetch_one(&db)
+            .await?;
+        assert_eq!(rows, 1);
+        Ok(())
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_seed_under_another_fingerprint_is_refused(db: SqlitePool) -> Result {
+        let seed = [7u8; 32];
+        let public = public_key(&seed);
+        let other = utils::compute_fingerprint(&public_key(&[8u8; 32]));
+        assert!(
+            store(db, 1)
+                .put(&party(1), &other, &public, &seed)
+                .await
+                .is_err()
+        );
         Ok(())
     }
 
@@ -390,10 +508,9 @@ mod tests {
     }
 
     #[test]
-    fn a_key_file_may_be_raw_hex_or_base64() {
+    fn a_key_file_holds_hex_or_base64() {
         let key = [9u8; 32];
         for contents in [
-            key.to_vec(),
             format!("{}\n", hex::encode(key)).into_bytes(),
             STANDARD.encode(key).into_bytes(),
         ] {
@@ -401,6 +518,12 @@ mod tests {
         }
         assert!(parse_key(b"too short").is_none());
         assert!(parse_key(STANDARD.encode([9u8; 16]).as_bytes()).is_none());
+    }
+
+    #[test]
+    fn a_32_byte_passphrase_is_not_a_key() {
+        assert!(parse_key(b"correct horse battery staple 123").is_none());
+        assert!(parse_key(&[9u8; 32]).is_none());
     }
 
     #[tokio::test]
@@ -411,6 +534,12 @@ mod tests {
         let created = read_or_create_default(&path).await?;
         let read = read_or_create_default(&path).await?;
         assert_eq!(*created, *read);
+        let mut names = Vec::new();
+        let mut entries = tokio::fs::read_dir(&dir).await?;
+        while let Some(entry) = entries.next_entry().await? {
+            names.push(entry.file_name());
+        }
+        assert_eq!(names, [DEFAULT_KEY_FILENAME]);
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
