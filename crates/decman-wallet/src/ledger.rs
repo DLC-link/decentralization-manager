@@ -88,6 +88,10 @@ impl LedgerClient {
     /// `Holding` interface. Holdings the party can see but does not own are
     /// left out.
     ///
+    /// Every holding the party sees arrives in one answer. So
+    /// [`ClientOptions::max_response_bytes`] caps how many holdings this
+    /// read can return.
+    ///
     /// # Errors
     /// Fails if either the ledger-end or the ACS call fails.
     pub async fn holdings(&self, party_id: &str) -> Result<Vec<Holding>> {

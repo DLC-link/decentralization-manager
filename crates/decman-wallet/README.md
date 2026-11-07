@@ -146,11 +146,12 @@ The flows follow the splice-wallet-kernel SDK step for step.
 The crate differs from the SDK in four ways:
 
 - It sends the hashing scheme version that the prepare returned. The SDK always sends V2.
-- It spends every unlocked holding of the instrument, up to 100. The SDK picks
-  holdings by amount. With more than 100 unlocked holdings, the send takes the
-  first 100 that the ledger lists. If those hold less than the amount, the send
-  fails at the prepare step, although the party holds enough. The caller can
-  then name the holdings to spend in `TransferArgs::input_holding_cids`.
+- It spends the 100 largest unlocked holdings of the instrument, or all of
+  them when there are fewer. The SDK picks holdings by amount. If the 100
+  largest hold less than the amount, the send fails at the prepare step. The
+  holdings read fetches every holding the party sees in one answer, under
+  `ClientOptions::max_response_bytes` (64 MiB). A party with tens of thousands
+  of holdings needs a larger cap or `TransferArgs::input_holding_cids`.
 - It skips every holding with a lock. The SDK also spends a holding whose lock has expired.
 - It lists only offers that wait for the receiver and have not expired. The SDK's `pending` lists every instruction.
 

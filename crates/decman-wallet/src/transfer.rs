@@ -8,7 +8,7 @@
 //! Canton Coin and utility instruments such as CBTC use the same interfaces
 //! and the same choice arguments. Only the registry root differs.
 
-use std::time::Duration;
+use std::{cmp::Ordering, iter, time::Duration};
 
 use chrono::{DateTime, SecondsFormat, TimeDelta, Utc};
 use serde::Serialize;
@@ -65,9 +65,9 @@ pub struct TransferArgs {
     pub amount: String,
     pub instrument_admin: String,
     pub instrument_id: String,
-    /// The holdings to spend. When empty, the send uses every unlocked
-    /// holding of the instrument the sender owns, up to
-    /// [`MAX_INPUT_HOLDINGS`].
+    /// The holdings to spend. When empty, the send spends the
+    /// [`MAX_INPUT_HOLDINGS`] largest unlocked holdings of the instrument
+    /// that the sender owns.
     pub input_holding_cids: Vec<String>,
     /// RFC 3339.
     pub requested_at: String,
@@ -189,20 +189,65 @@ pub(crate) fn check_contract_id(contract_id: &str) -> Result<()> {
 }
 
 /// The holdings a send may spend: owned by `owner`, of the instrument
-/// `(admin, id)`, and not locked. At most [`MAX_INPUT_HOLDINGS`] of them.
+/// `(admin, id)`, and not locked. The [`MAX_INPUT_HOLDINGS`] largest of
+/// them, largest first. Holdings of equal amount keep the ledger's order.
+///
+/// The largest holdings cover the amount with the fewest inputs. The first
+/// holdings the ledger lists could hold too little, though the party holds
+/// enough.
 pub fn unlocked_holdings<'a>(
     holdings: &'a [Holding],
     owner: &str,
     admin: &str,
     id: &str,
 ) -> Vec<&'a Holding> {
-    holdings
+    let mut unlocked: Vec<&Holding> = holdings
         .iter()
         .filter(|h| {
             h.owner == owner && h.instrument_admin == admin && h.instrument_id == id && !h.locked
         })
-        .take(MAX_INPUT_HOLDINGS)
-        .collect()
+        .collect();
+    unlocked.sort_by(|a, b| cmp_decimal(&b.amount, &a.amount));
+    unlocked.truncate(MAX_INPUT_HOLDINGS);
+    unlocked
+}
+
+/// Order two non-negative decimal strings, such as `10.0000000000`, by
+/// value. A text that is not such a decimal sorts lowest.
+///
+/// The text is compared digit by digit, so no amount is rounded. The longer
+/// integer part is larger. Equal integer parts fall to the fraction, padded
+/// with zeros to one length.
+fn cmp_decimal(a: &str, b: &str) -> Ordering {
+    match (decimal_parts(a), decimal_parts(b)) {
+        (Some((a_integer, a_fraction)), Some((b_integer, b_fraction))) => a_integer
+            .len()
+            .cmp(&b_integer.len())
+            .then_with(|| a_integer.cmp(b_integer))
+            .then_with(|| {
+                let width = a_fraction.len().max(b_fraction.len());
+                let padded = |fraction: &str| {
+                    fraction
+                        .bytes()
+                        .chain(iter::repeat(b'0'))
+                        .take(width)
+                        .collect::<Vec<u8>>()
+                };
+                padded(a_fraction).cmp(&padded(b_fraction))
+            }),
+        (Some(_), None) => Ordering::Greater,
+        (None, Some(_)) => Ordering::Less,
+        (None, None) => Ordering::Equal,
+    }
+}
+
+/// The integer and fraction digits of a decimal such as `10.25`, with the
+/// integer's leading zeros removed. `None` for any other text.
+fn decimal_parts(text: &str) -> Option<(&str, &str)> {
+    let (integer, fraction) = text.split_once('.').unwrap_or((text, ""));
+    let digits = |part: &str| part.bytes().all(|byte| byte.is_ascii_digit());
+    (!integer.is_empty() && digits(integer) && digits(fraction))
+        .then(|| (integer.trim_start_matches('0'), fraction))
 }
 
 /// What a committed send produced.
@@ -235,9 +280,13 @@ pub struct AcceptReceipt {
 
 /// Send `args.amount` of an instrument from `args.sender` to `args.receiver`.
 ///
-/// When `args.input_holding_cids` is empty, the send spends every unlocked
-/// holding of the instrument the sender owns, up to [`MAX_INPUT_HOLDINGS`].
-/// The factory consumes what it needs and returns the change.
+/// When `args.input_holding_cids` is empty, the send spends the 100 largest
+/// unlocked holdings of the instrument the sender owns. The factory consumes
+/// what it needs and returns the change. The holdings read fetches every
+/// holding the party sees in one answer, under
+/// [`ClientOptions::max_response_bytes`](crate::ClientOptions::max_response_bytes).
+/// A party with tens of thousands of holdings needs a larger cap, or
+/// `input_holding_cids`.
 ///
 /// `key` must be the sender's key. The wallet signs only after the prepared
 /// transaction passes its check: the hash is recomputed, and the root must be
@@ -890,6 +939,75 @@ mod tests {
         assert!(execute_before > before + TimeDelta::minutes(59));
         assert!(args.input_holding_cids.is_empty());
         assert_eq!(args.amount, "1.25");
+    }
+
+    #[test]
+    fn cmp_decimal_orders_decimal_text_by_value() {
+        for (a, b, order) in [
+            ("10.0000000000", "9.9999999999", Ordering::Greater),
+            ("1.25", "1.2500000000", Ordering::Equal),
+            ("1.25", "1.3", Ordering::Less),
+            ("0.5", "00.50", Ordering::Equal),
+            ("100", "99.99", Ordering::Greater),
+            ("0.0000000001", "0", Ordering::Greater),
+            // Past the 53 bits of a float, the digits still decide.
+            (
+                "12345678901234567890.0000000001",
+                "12345678901234567890",
+                Ordering::Greater,
+            ),
+            ("not a number", "0", Ordering::Less),
+            ("-5", "0", Ordering::Less),
+            ("1e3", "2", Ordering::Less),
+            (".5", "0", Ordering::Less),
+            ("", "0", Ordering::Less),
+            ("x", "y", Ordering::Equal),
+        ] {
+            assert_eq!(cmp_decimal(a, b), order, "{a} against {b}");
+            assert_eq!(cmp_decimal(b, a), order.reverse(), "{b} against {a}");
+        }
+    }
+
+    fn holding_of(contract_id: &str, amount: &str) -> Holding {
+        Holding {
+            amount: amount.to_string(),
+            ..holding(contract_id, "alice", "Amulet", false)
+        }
+    }
+
+    #[test]
+    fn unlocked_holdings_spends_the_largest_holdings_first() {
+        let holdings = vec![
+            holding_of("00b1", "2.5000000000"),
+            holding_of("00b2", "10.0000000000"),
+            holding_of("00b3", "not a number"),
+            holding_of("00b4", "9.9999999999"),
+            holding_of("00b5", "2.5"),
+            holding_of("00b6", "0.0000000001"),
+        ];
+
+        let picked = unlocked_holdings(&holdings, "alice", "DSO::1220dd", "Amulet");
+
+        let picked: Vec<&str> = picked.iter().map(|h| h.contract_id.as_str()).collect();
+        assert_eq!(picked, vec!["00b2", "00b4", "00b1", "00b5", "00b6", "00b3"]);
+    }
+
+    /// Past the cap, the smallest holdings are the ones left out.
+    #[test]
+    fn unlocked_holdings_leaves_out_the_smallest_holdings_past_the_cap() {
+        let holdings: Vec<Holding> = (0..MAX_INPUT_HOLDINGS + 5)
+            .map(|i| holding_of(&format!("{i:04x}"), &format!("{i}.5")))
+            .collect();
+
+        let picked = unlocked_holdings(&holdings, "alice", "DSO::1220dd", "Amulet");
+
+        assert_eq!(picked.len(), MAX_INPUT_HOLDINGS);
+        assert_eq!(
+            picked.first().map(|h| h.amount.as_str()),
+            Some("104.5"),
+            "the largest comes first"
+        );
+        assert_eq!(picked.last().map(|h| h.amount.as_str()), Some("5.5"));
     }
 
     #[test]
