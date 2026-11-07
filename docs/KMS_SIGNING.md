@@ -133,6 +133,10 @@ copy of each key.
 - A deploy signs with the stored key first. A KMS-backed key signs through
   `AwsKmsSigner` as before. Any other key is exported, used, and stored for the
   next deploy.
+- A node can move from the derived key to a key file. Keep
+  `DECPM_DB_ENCRYPTION_KEY` set when you mount the file. decman then reads
+  the older rows with the derived key and re-encrypts each one under the
+  file's key.
 - A stored key that does not decrypt is skipped. That happens when the
   encryption key changes or is lost. decman then exports the key again and
   replaces the stored copy. A Splice 0.10 participant refuses that export by

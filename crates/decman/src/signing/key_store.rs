@@ -16,6 +16,10 @@
 //!
 //! With none of them, the store is off, and DecMan signs through the KMS or
 //! a fresh export as before.
+//!
+//! A node may copy its keys under the derived key and mount a key file
+//! later. DecMan then still reads those rows with the derived key, and it
+//! re-encrypts each one under the file's key when it first reads it.
 
 use std::path::{Path, PathBuf};
 
@@ -61,6 +65,18 @@ const AAD_LABEL: &str = "decman-party-key-v1";
 pub struct KeyStore {
     db: SqlitePool,
     key: Zeroizing<[u8; 32]>,
+    /// The key derived from the database encryption key, when a key file
+    /// takes precedence over it. Rows written before the file was mounted
+    /// are under this key.
+    derived: Option<Zeroizing<[u8; 32]>>,
+}
+
+/// What the store holds for one key.
+enum Row {
+    Missing,
+    Readable(Zeroizing<[u8; 32]>),
+    /// The row decrypts under no key the store has.
+    Unreadable(anyhow::Error),
 }
 
 impl KeyStore {
@@ -72,16 +88,20 @@ impl KeyStore {
     /// Errors when a configured key file is missing or unreadable, or when a
     /// key file does not hold a 32-byte key.
     pub async fn open(config: &NodeConfig, db: SqlitePool) -> Result<Option<Self>> {
-        let key = if let Some(path) = &config.key_store_key_file {
-            read_key_file(path).await?
-        } else if let Some(key) = crate::db::crypto::derive_key(DERIVED_KEY_LABEL) {
-            key
+        let derived = crate::db::crypto::derive_key(DERIVED_KEY_LABEL);
+        let (key, derived) = if let Some(path) = &config.key_store_key_file {
+            (read_key_file(path).await?, derived)
+        } else if let Some(key) = derived {
+            (key, None)
         } else if config.insecure {
-            read_or_create_default(&config.data_dir().join(DEFAULT_KEY_FILENAME)).await?
+            (
+                read_or_create_default(&config.data_dir().join(DEFAULT_KEY_FILENAME)).await?,
+                None,
+            )
         } else {
             return Ok(None);
         };
-        Ok(Some(Self { db, key }))
+        Ok(Some(Self { db, key, derived }))
     }
 
     /// The stored seed of `fingerprint`'s key for `party`, if DecMan holds it.
@@ -95,10 +115,40 @@ impl KeyStore {
         party: &CantonId,
         fingerprint: &Fingerprint,
     ) -> Result<Option<Zeroizing<[u8; 32]>>> {
-        match self.read_row(party, fingerprint).await? {
-            Some(row) => self.open_row(party, fingerprint, row).map(Some),
-            None => Ok(None),
+        match self.load(party, fingerprint).await? {
+            Row::Missing => Ok(None),
+            Row::Readable(seed) => Ok(Some(seed)),
+            Row::Unreadable(e) => Err(e),
         }
+    }
+
+    /// Read and decrypt the row of `fingerprint`'s key for `party`. A row
+    /// that only the derived key decrypts is re-encrypted under the key file.
+    async fn load(&self, party: &CantonId, fingerprint: &Fingerprint) -> Result<Row> {
+        let Some(row) = self.read_row(party, fingerprint).await? else {
+            return Ok(Row::Missing);
+        };
+        let error = match open_row(&self.key, party, fingerprint, &row) {
+            Ok(seed) => return Ok(Row::Readable(seed)),
+            Err(e) => e,
+        };
+        let Some(seed) = self
+            .derived
+            .as_ref()
+            .and_then(|derived| open_row(derived, party, fingerprint, &row).ok())
+        else {
+            return Ok(Row::Unreadable(error));
+        };
+        match self.write_row(party, fingerprint, &seed, true).await {
+            Ok(_) => tracing::info!(
+                "Re-encrypted DecMan's copy of key {fingerprint} for {party} under the key file"
+            ),
+            Err(e) => tracing::warn!(
+                "Could not re-encrypt DecMan's copy of key {fingerprint} for {party} under the \
+                 key file: {e:#}"
+            ),
+        }
+        Ok(Row::Readable(seed))
     }
 
     async fn read_row(
@@ -113,38 +163,6 @@ impl KeyStore {
         .bind(fingerprint.as_str())
         .fetch_optional(&self.db)
         .await?)
-    }
-
-    fn open_row(
-        &self,
-        party: &CantonId,
-        fingerprint: &Fingerprint,
-        (nonce, ciphertext): (Vec<u8>, Vec<u8>),
-    ) -> Result<Zeroizing<[u8; 32]>> {
-        let nonce: [u8; 12] = nonce
-            .try_into()
-            .map_err(|_| anyhow::anyhow!("Stored key {fingerprint} has a malformed nonce"))?;
-        let plaintext = Zeroizing::new(
-            self.cipher()
-                .decrypt(
-                    &nonce.into(),
-                    Payload {
-                        msg: &ciphertext,
-                        aad: &associated_data(party, fingerprint),
-                    },
-                )
-                .map_err(|_| {
-                    anyhow::anyhow!(
-                        "Stored key {fingerprint} for {party} does not decrypt. The key-store \
-                         encryption key changed, or the row was altered"
-                    )
-                })?,
-        );
-        let seed: [u8; 32] = plaintext
-            .as_slice()
-            .try_into()
-            .map_err(|_| anyhow::anyhow!("Stored key {fingerprint} is not a 32-byte seed"))?;
-        Ok(Zeroizing::new(seed))
     }
 
     /// Store `seed` as `party`'s key `public_key`. A row that still decrypts
@@ -171,22 +189,32 @@ impl KeyStore {
             compute_fingerprint(public_key) == *fingerprint,
             "{fingerprint} is not the fingerprint of that public key; not storing the seed"
         );
-        let replace = match self.read_row(party, fingerprint).await? {
-            None => false,
-            Some(row) => {
-                if self.open_row(party, fingerprint, row).is_ok() {
-                    return Ok(false);
-                }
+        let replace = match self.load(party, fingerprint).await? {
+            Row::Missing => false,
+            Row::Readable(_) => return Ok(false),
+            Row::Unreadable(_) => {
                 tracing::warn!(
                     "Replacing DecMan's unreadable copy of key {fingerprint} for {party}"
                 );
                 true
             }
         };
+        self.write_row(party, fingerprint, seed, replace).await
+    }
+
+    /// Encrypt `seed` under the store's key and write it. `replace` updates
+    /// the existing row, and otherwise an existing row is kept. Returns
+    /// whether it wrote a row.
+    async fn write_row(
+        &self,
+        party: &CantonId,
+        fingerprint: &Fingerprint,
+        seed: &[u8; 32],
+        replace: bool,
+    ) -> Result<bool> {
         let nonce: [u8; 12] = Generate::try_generate()
             .map_err(|e| anyhow::anyhow!("nonce generation failed: {e}"))?;
-        let ciphertext = self
-            .cipher()
+        let ciphertext = cipher(&self.key)
             .encrypt(
                 &nonce.into(),
                 Payload {
@@ -213,11 +241,44 @@ impl KeyStore {
             .await?;
         Ok(result.rows_affected() == 1)
     }
+}
 
-    fn cipher(&self) -> Aes256Gcm {
-        let key: &[u8; 32] = &self.key;
-        Aes256Gcm::new(key.into())
-    }
+fn cipher(key: &[u8; 32]) -> Aes256Gcm {
+    Aes256Gcm::new(key.into())
+}
+
+/// Decrypt a row with `key`.
+fn open_row(
+    key: &[u8; 32],
+    party: &CantonId,
+    fingerprint: &Fingerprint,
+    (nonce, ciphertext): &(Vec<u8>, Vec<u8>),
+) -> Result<Zeroizing<[u8; 32]>> {
+    let nonce: [u8; 12] = nonce
+        .as_slice()
+        .try_into()
+        .map_err(|_| anyhow::anyhow!("Stored key {fingerprint} has a malformed nonce"))?;
+    let plaintext = Zeroizing::new(
+        cipher(key)
+            .decrypt(
+                &nonce.into(),
+                Payload {
+                    msg: ciphertext,
+                    aad: &associated_data(party, fingerprint),
+                },
+            )
+            .map_err(|_| {
+                anyhow::anyhow!(
+                    "Stored key {fingerprint} for {party} does not decrypt. The key-store \
+                     encryption key changed, or the row was altered"
+                )
+            })?,
+    );
+    let seed: [u8; 32] = plaintext
+        .as_slice()
+        .try_into()
+        .map_err(|_| anyhow::anyhow!("Stored key {fingerprint} is not a 32-byte seed"))?;
+    Ok(Zeroizing::new(seed))
 }
 
 fn associated_data(party: &CantonId, fingerprint: &Fingerprint) -> Vec<u8> {
@@ -368,6 +429,7 @@ mod tests {
         KeyStore {
             db,
             key: Zeroizing::new([key; 32]),
+            derived: None,
         }
     }
 
@@ -423,6 +485,57 @@ mod tests {
             .fetch_one(&db)
             .await?;
         assert_eq!(rows, 1);
+        Ok(())
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_row_under_the_derived_key_moves_to_the_key_file(db: SqlitePool) -> Result {
+        let seed = [7u8; 32];
+        let public = public_key(&seed);
+        let fingerprint = utils::compute_fingerprint(&public);
+        store(db.clone(), 1)
+            .put(&party(1), &fingerprint, &public, &seed)
+            .await?;
+
+        let with_file = KeyStore {
+            db: db.clone(),
+            key: Zeroizing::new([2; 32]),
+            derived: Some(Zeroizing::new([1; 32])),
+        };
+        assert_eq!(
+            with_file.get(&party(1), &fingerprint).await?.as_deref(),
+            Some(&seed)
+        );
+        assert!(
+            !with_file
+                .put(&party(1), &fingerprint, &public, &seed)
+                .await?
+        );
+
+        // The file's key alone now reads the row.
+        assert_eq!(
+            store(db, 2).get(&party(1), &fingerprint).await?.as_deref(),
+            Some(&seed)
+        );
+        Ok(())
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_row_under_neither_key_stays_unreadable(db: SqlitePool) -> Result {
+        let seed = [7u8; 32];
+        let public = public_key(&seed);
+        let fingerprint = utils::compute_fingerprint(&public);
+        store(db.clone(), 1)
+            .put(&party(1), &fingerprint, &public, &seed)
+            .await?;
+
+        let with_file = KeyStore {
+            db: db.clone(),
+            key: Zeroizing::new([2; 32]),
+            derived: Some(Zeroizing::new([3; 32])),
+        };
+        assert!(with_file.get(&party(1), &fingerprint).await.is_err());
+        assert!(store(db, 1).get(&party(1), &fingerprint).await?.is_some());
         Ok(())
     }
 
