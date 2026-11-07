@@ -2302,6 +2302,67 @@ async fn an_execute_answered_with_a_gateway_timeout_has_an_unknown_outcome() {
     assert!(error.to_string().contains("may have committed"), "{error}");
 }
 
+/// Canton's JSON API answers 500 for an internal gRPC error, which can come
+/// after the participant accepted the submission. The outcome is unknown.
+#[tokio::test]
+async fn an_execute_answered_with_an_internal_error_has_an_unknown_outcome() {
+    let key = ExternalKeyPair::from_seed([58u8; 32]);
+    let sender = key.party_id("alice");
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path(EXECUTE_PATH))
+        .respond_with(ResponseTemplate::new(500).set_body_json(json!({
+            "code": "LEDGER_API_INTERNAL_ERROR",
+            "cause": "An error occurred. Please contact the operator.",
+            "context": {},
+            "errorCategory": 4,
+        })))
+        .with_priority(1)
+        .mount(&server)
+        .await;
+    stub_send(&server, &sender, honestly(faithful_send(&sender))).await;
+
+    let error = match send_transfer(
+        &ledger_for(&server),
+        &registry_for(&server),
+        &key,
+        &send_args(&sender),
+    )
+    .await
+    {
+        Ok(_) => panic!("a 500 from the execute must not look like a success"),
+        Err(e) => e,
+    };
+
+    let wallet_command_id = sent_command_id(&server).await;
+    let transaction = for_command(faithful_send(&sender), &wallet_command_id);
+    let executes = bodies(&server, EXECUTE_PATH).await;
+    assert_eq!(executes.len(), 1, "the wallet does not resend the execute");
+    match &error {
+        Error::ExecuteOutcomeUnknown {
+            host,
+            command_id,
+            submission_id,
+            prepared_transaction_hash,
+            source,
+        } => {
+            assert!(host.ends_with(LEDGER_PREFIX), "{host}");
+            assert_eq!(command_id, &wallet_command_id);
+            assert_eq!(
+                Some(submission_id.as_str()),
+                executes[0]["submissionId"].as_str()
+            );
+            assert_eq!(
+                prepared_transaction_hash,
+                &STANDARD.encode(hash_of(&transaction))
+            );
+            assert!(source.is_status(500), "{source}");
+        }
+        other => panic!("expected an unknown outcome, got {other}"),
+    }
+    assert!(error.to_string().contains("may have committed"), "{error}");
+}
+
 /// How the stub participant answers the execute.
 #[derive(Clone, Copy, Debug)]
 enum ExecuteAnswer {

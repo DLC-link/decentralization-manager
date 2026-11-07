@@ -252,8 +252,8 @@ pub struct AcceptReceipt {
 /// nothing to spend. [`Error::TransactionRefused`] when the prepared
 /// transaction fails the check; nothing is signed or executed then.
 /// [`Error::ExecuteOutcomeUnknown`] when the execute's answer did not arrive,
-/// could not be read, or came from a gateway; the transaction may have
-/// committed, so do not send again before checking.
+/// could not be read, or had a status that leaves the outcome open; the
+/// transaction may have committed, so do not send again before checking.
 /// Any ledger, registry or signer error otherwise.
 pub async fn send_transfer(
     ledger: &LedgerClient,
@@ -372,8 +372,9 @@ pub async fn send_transfer(
 /// a contract id. [`Error::TransactionRefused`] when the prepared transaction
 /// fails the check; nothing is signed or executed then.
 /// [`Error::ExecuteOutcomeUnknown`] when the execute's answer did not arrive,
-/// could not be read, or came from a gateway; the transaction may have
-/// committed. Any ledger, registry or signer error otherwise.
+/// could not be read, or had a status that leaves the outcome open; the
+/// transaction may have committed. Any ledger, registry or signer error
+/// otherwise.
 pub async fn accept_transfer(
     ledger: &LedgerClient,
     registry: &RegistryClient,
@@ -539,12 +540,15 @@ fn pinned_package(template_id: Option<&str>) -> Option<String> {
 /// - A transport error after the connection opened.
 /// - An answer the client could not read: a body that ended early or timed
 ///   out, that is not JSON, or that is over the cap.
+/// - A 408 or 500 from the participant. Its HTTP server answers 408 when it
+///   stops waiting, while the submission may still run. Canton's JSON API
+///   answers 500 for an internal, unknown or data-loss gRPC error. That
+///   error can follow a submission the participant accepted.
 /// - A 502, 503 or 504. A gateway in front of the participant answers these
 ///   while the participant may still execute.
 ///
 /// A connection that never opened reached nobody and stays
-/// [`Error::Transport`]. Any other non-2xx answer, 500 included, stays
-/// [`Error::Api`].
+/// [`Error::Transport`]. Any other non-2xx answer stays [`Error::Api`].
 ///
 /// [`Error::ResponseTooLarge`] does not carry the status, so a non-2xx
 /// answer with a body over the cap also becomes an unknown outcome.
@@ -557,7 +561,7 @@ fn after_execute(
     let left_the_wallet = match &error {
         Error::Transport { source, .. } => !source.is_connect(),
         Error::Decode { .. } | Error::Json { .. } | Error::ResponseTooLarge { .. } => true,
-        Error::Api { status, .. } => matches!(status, 502..=504),
+        Error::Api { status, .. } => matches!(status, 408 | 500 | 502..=504),
         _ => false,
     };
     if !left_the_wallet {
@@ -721,16 +725,18 @@ mod tests {
 
     #[test]
     fn an_execute_answered_with_an_error_status_keeps_its_api_error() {
-        for status in [400, 500] {
+        for status in [400, 409, 429] {
             let error = after_execute(answered(status), "command-1", "submission-1", "aGFzaA==");
 
             assert!(error.is_status(status), "{status}: {error}");
         }
     }
 
+    /// A 408 or 500 from the participant, or a gateway's 502, 503 or 504,
+    /// can follow a submission that still commits.
     #[test]
-    fn an_execute_answered_by_a_gateway_has_an_unknown_outcome() {
-        for status in [502, 503, 504] {
+    fn an_execute_answered_with_a_status_that_leaves_the_outcome_open_is_unknown() {
+        for status in [408, 500, 502, 503, 504] {
             let error = after_execute(answered(status), "command-1", "submission-1", "aGFzaA==");
 
             match &error {

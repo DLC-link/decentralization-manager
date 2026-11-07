@@ -166,9 +166,9 @@ pub enum Error {
     InvalidContractId { contract_id: String },
 
     /// The signed execute left the wallet, but its answer did not arrive,
-    /// could not be read, or came from a gateway. The participant may have
-    /// committed the transaction. Check the ledger before sending the
-    /// transfer again: a new send is a new transaction.
+    /// could not be read, or had a status that leaves the outcome open. The
+    /// participant may have committed the transaction. Check the ledger
+    /// before sending the transfer again: a new send is a new transaction.
     #[error(
         "the execute of command {command_id} has an unknown outcome: {source}. \
          The transaction may have committed. \
@@ -184,7 +184,8 @@ pub enum Error {
         prepared_transaction_hash: String,
         /// The error that hid the outcome: [`Error::Transport`],
         /// [`Error::Decode`], [`Error::Json`], [`Error::ResponseTooLarge`],
-        /// or [`Error::Api`] with a 502, 503 or 504. It names the host too.
+        /// or [`Error::Api`] with a 408, 500, 502, 503 or 504. It names the
+        /// host too.
         #[source]
         source: Box<Error>,
     },
