@@ -33,7 +33,10 @@ use crate::{
     canton_id::{CantonId, Fingerprint},
     config::{NetworkConfig, NodeConfig, PartyCredentials, Peer, default_package_config},
     db::{
-        rows::{DecPartyContractRow, DecPartyOwnerRow, DecPartyParticipantRow, DecPartyRow},
+        rows::{
+            DecPartyContractRow, DecPartyOwnerRow, DecPartyParticipantRow, DecPartyRow,
+            OwnerKeyRefusal,
+        },
         schema::{Commitable, SchemaRead, SchemaWrite},
     },
     error::Result,
@@ -857,6 +860,22 @@ async fn cached_parties(db: &SqlitePool, prefix: &str) -> Vec<DecentralizedParty
     }
 }
 
+/// A peer reported an owner key that this node kept off its records. Either
+/// a peer reports a key that is not its own, or a host changed its key while
+/// the old one is still an owner. Both need an operator to look.
+fn warn_owner_key_refusal(peer: &str, party_id: &str, owner_key: &str, refusal: &OwnerKeyRefusal) {
+    match refusal {
+        OwnerKeyRefusal::HeldBy(holder) => tracing::warn!(
+            "{peer} reports owner key {owner_key} of {party_id}, which this node has on record \
+             for {holder}; the record stays with {holder}"
+        ),
+        OwnerKeyRefusal::KeepsKey(kept) => tracing::warn!(
+            "{peer} reports owner key {owner_key} of {party_id}, but this node has {kept} on \
+             record for {peer} and {kept} is still an owner; the record stays {kept}"
+        ),
+    }
+}
+
 /// Query each peer via Noise for their owner keys, then update the DB
 pub async fn resolve_owner_keys_from_peers(
     config: &NodeConfig,
@@ -944,19 +963,29 @@ pub async fn resolve_owner_keys_from_peers(
                     );
                     continue;
                 };
-                if let Err(e) = tx
+                let mut refusal = match tx
                     .update_participant_owner_key(&party_id_canton, &peer_uid, owner_key)
                     .await
                 {
-                    tracing::debug!("Failed to update owner key for {peer_uid}: {e}");
-                }
+                    Ok(refusal) => refusal,
+                    Err(e) => {
+                        tracing::debug!("Failed to update owner key for {peer_uid}: {e}");
+                        None
+                    }
+                };
                 // A peer that owns the namespace without hosting the party has
                 // no participant row, so the claim also goes on the owner.
-                if let Err(e) = tx
+                match tx
                     .update_owner_claim(&party_id_canton, owner_key, &peer_uid)
                     .await
                 {
-                    tracing::debug!("Failed to record the owner claim of {peer_uid}: {e}");
+                    Ok(claim_refusal) => refusal = refusal.or(claim_refusal),
+                    Err(e) => {
+                        tracing::debug!("Failed to record the owner claim of {peer_uid}: {e}");
+                    }
+                }
+                if let Some(refusal) = &refusal {
+                    warn_owner_key_refusal(&peer_uid, party_id, owner_key, refusal);
                 }
 
                 // Absent from peers that predate the field. Nothing else can
@@ -1320,12 +1349,22 @@ async fn supplement_owner_keys_from_topology(
                     continue;
                 }
             };
-            if let Err(e) = tx
+            match tx
                 .update_participant_owner_key(&party.party_id, &uid, owner_key)
                 .await
             {
-                tracing::debug!("Topology fallback: update_participant_owner_key for {uid}: {e}");
-                continue;
+                Ok(None) => {}
+                Ok(Some(refusal)) => {
+                    tracing::debug!(
+                        "Topology fallback: {uid} keeps no key {owner_key}: {refusal:?}"
+                    );
+                }
+                Err(e) => {
+                    tracing::debug!(
+                        "Topology fallback: update_participant_owner_key for {uid}: {e}"
+                    );
+                    continue;
+                }
             }
             if let Err(e) = Commitable::commit(tx).await {
                 tracing::debug!("Topology fallback: commit failed: {e}");
@@ -1357,7 +1396,9 @@ async fn supplement_owner_keys_from_topology(
     if !claims.is_empty() {
         let mut tx = db.begin_transaction().await?;
         for (party_id, owner_key, uid) in claims {
-            tx.update_owner_claim(party_id, owner_key, &uid).await?;
+            if let Some(refusal) = tx.update_owner_claim(party_id, owner_key, &uid).await? {
+                tracing::debug!("Topology fallback: {uid} claims no key {owner_key}: {refusal:?}");
+            }
         }
         Commitable::commit(tx).await?;
     }

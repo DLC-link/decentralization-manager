@@ -152,6 +152,18 @@ pub struct DecPartyOwnerRow {
     pub participant_uid: Option<String>,
 }
 
+/// Why an owner key a peer reported was not recorded.
+///
+/// Any peer can report any key, so one key has one holder on record. A
+/// holder's recorded key changes only once that key is no longer an owner.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum OwnerKeyRefusal {
+    /// Another participant has the key on record.
+    HeldBy(String),
+    /// The participant has another key on record that is still an owner.
+    KeepsKey(String),
+}
+
 #[derive(Debug, sqlx::FromRow)]
 pub struct DecPartyParticipantRow {
     pub dec_party_id: String,
