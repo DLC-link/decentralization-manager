@@ -416,9 +416,10 @@ impl KickTargetError {
 ///
 /// A host is named by its participant, and its owner key comes from the cache.
 /// An owner that hosts nothing is named by its owner key, or by the
-/// participant that claimed the key. An unclaimed key counts as hosting
-/// nothing only once every host's own key is known, because until then it may
-/// belong to a host whose key has not been resolved.
+/// participant that claimed the key. Such a kick waits until every host's own
+/// key is known, because until then the key may belong to a host whose key
+/// has not been resolved. A claim does not settle it: any peer can claim any
+/// key, and every peer refuses to sign until it knows each host's key.
 ///
 /// A host's cached key counts as known only while it is still an owner. A host
 /// that rotated its key would otherwise have its new key read as unclaimed.
@@ -439,6 +440,18 @@ fn resolve_kick_target(
         host.owner_key
             .clone()
             .filter(|key| owners.is_empty() || owners.iter().any(|o| o.owner_key == *key))
+    };
+    let unresolved_host = |key: &str| {
+        hosts
+            .iter()
+            .find(|host| known_key(host).is_none())
+            .map(|host| {
+                KickTargetError::Conflict(format!(
+                    "Cannot tell whether owner key {key} belongs to host {uid}, whose current \
+                     owner key has not been resolved yet. {REFRESH}",
+                    uid = host.participant_uid
+                ))
+            })
     };
 
     let Some(key) = owner_key else {
@@ -469,11 +482,14 @@ fn resolve_kick_target(
             [] => Err(KickTargetError::BadRequest(format!(
                 "Cannot kick {participant}: not a member of this decentralized party"
             ))),
-            [owner] => Ok(KickTarget {
-                owner_key: owner.owner_key.clone(),
-                participant: Some(participant.clone()),
-                hosts: false,
-            }),
+            [owner] => match unresolved_host(&owner.owner_key) {
+                Some(error) => Err(error),
+                None => Ok(KickTarget {
+                    owner_key: owner.owner_key.clone(),
+                    participant: Some(participant.clone()),
+                    hosts: false,
+                }),
+            },
             several => Err(KickTargetError::Conflict(format!(
                 "Participant {participant} claims {count} owner keys of this party. Name the \
                  one to remove with owner_key",
@@ -524,14 +540,8 @@ fn resolve_kick_target(
              for it. {REFRESH}"
         )));
     }
-    if claimant.is_none()
-        && let Some(unresolved) = hosts.iter().find(|host| known_key(host).is_none())
-    {
-        return Err(KickTargetError::Conflict(format!(
-            "Cannot tell whether owner key {key} belongs to host {uid}, whose current owner key \
-             has not been resolved yet. {REFRESH}",
-            uid = unresolved.participant_uid
-        )));
+    if let Some(error) = unresolved_host(key) {
+        return Err(error);
     }
     if let Some(participant) = participant {
         if host_of(participant).is_some() {
@@ -4672,20 +4682,24 @@ mod tests {
         Ok(())
     }
 
-    /// Until every host's key is known, an unclaimed key may be the key of a
-    /// host, and kicking it would strip that host of its ownership.
+    /// Until every host's key is known, an owner key may be the key of a
+    /// host, and kicking it would strip that host of its ownership. A claim
+    /// does not settle it, because any peer can claim any key.
     #[test]
-    fn an_unclaimed_key_waits_for_every_host_key() -> anyhow::Result<()> {
+    fn an_owner_only_kick_waits_for_every_host_key() -> anyhow::Result<()> {
         let (mut hosts, owners) = owner_only_party()?;
         hosts[1].owner_key = None;
-        let target = resolve_kick_target(None, Some("k4"), &hosts, &owners);
-        assert!(
-            matches!(&target, Err(KickTargetError::Conflict(e)) if e.contains("not been resolved")),
-            "unexpected result: {target:?}"
-        );
-        // A claim is the holder's own word, so it needs no other host key.
-        let claimed = resolve_kick_target(None, Some("k3"), &hosts, &owners);
-        assert!(claimed.is_ok(), "unexpected result: {claimed:?}");
+        for (participant, key) in [
+            (None, Some("k4")),
+            (None, Some("k3")),
+            (Some(pid(3)?), None),
+        ] {
+            let target = resolve_kick_target(participant.as_ref(), key, &hosts, &owners);
+            assert!(
+                matches!(&target, Err(KickTargetError::Conflict(e)) if e.contains("not been resolved")),
+                "{participant:?} / {key:?}: unexpected result: {target:?}"
+            );
+        }
         Ok(())
     }
 
