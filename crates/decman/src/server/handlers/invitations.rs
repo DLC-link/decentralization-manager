@@ -13,7 +13,9 @@ use crate::{
         send_noise_message_with_chunked_response,
     },
     server::{
-        AppState, mark_failed_via_pool,
+        AppState, InvitationType,
+        handlers::refresh_party_for_kick,
+        mark_failed_via_pool,
         middleware::require_admin,
         types::{
             DeclineInvitationPayload, ErrorResponse, HandledInvitationsResponse,
@@ -380,6 +382,14 @@ pub async fn accept_invitation(
                 )
             }));
         }
+    }
+
+    // The peer checks a kick's owner key against the hosts' keys it has on
+    // record, and its cache may predate the party's current hosts.
+    if invitation.invitation_type == InvitationType::Kick
+        && let Some(party) = &invitation.dec_party_id
+    {
+        refresh_party_for_kick(&data, party).await;
     }
 
     // Persist a peer-side workflow_runs row so the operator's feed shows

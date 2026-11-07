@@ -803,6 +803,60 @@ async fn refresh_and_cache_parties(data: &web::Data<AppState>, prefix: &str) {
     }
 }
 
+/// Refresh one party's cached hosts and owner keys before this node checks a
+/// kick of it.
+///
+/// A peer refuses a kick unless it has every host's owner key on record. Its
+/// cache fills only at startup and on a party read, so a party that changed
+/// since then would have no keys to check. A discovery already running for
+/// the prefix is left to finish, and the keys are resolved for the hosts the
+/// cache holds now. Failures are logged: the check that follows refuses the
+/// kick if a key is still missing.
+pub(crate) async fn refresh_party_for_kick(data: &web::Data<AppState>, party: &CantonId) {
+    let auth = data.auth.read().await.clone();
+    let party_creds = data.party_credentials.read().await.clone();
+    let parties = match discover_and_cache(
+        &DiscoveryGate::of(data),
+        &data.config,
+        &data.db,
+        &party.prefix,
+        auth,
+        &party_creds,
+        PartyReadOpts::default(),
+    )
+    .await
+    {
+        Discovery::Done(response) => response.parties,
+        Discovery::Failed(e) => {
+            tracing::warn!("Kick accept: refreshing {party} failed: {e:#}; using the cache");
+            cached_parties(&data.db, &party.prefix).await
+        }
+        Discovery::InFlight | Discovery::Superseded | Discovery::AtCapacity => {
+            cached_parties(&data.db, &party.prefix).await
+        }
+    };
+    let parties: Vec<DecentralizedParty> = parties
+        .into_iter()
+        .filter(|cached| cached.party_id == *party)
+        .collect();
+    if parties.is_empty() {
+        tracing::warn!("Kick accept: {party} is not in this node's party cache");
+        return;
+    }
+    resolve_owner_keys_from_peers(&data.config, &data.db, &parties).await;
+}
+
+async fn cached_parties(db: &SqlitePool, prefix: &str) -> Vec<DecentralizedParty> {
+    match load_cached_parties(db, prefix).await {
+        Ok(Some((response, _))) => response.parties,
+        Ok(None) => Vec::new(),
+        Err(e) => {
+            tracing::warn!("Reading the party cache for prefix '{prefix}' failed: {e:#}");
+            Vec::new()
+        }
+    }
+}
+
 /// Query each peer via Noise for their owner keys, then update the DB
 pub async fn resolve_owner_keys_from_peers(
     config: &NodeConfig,
