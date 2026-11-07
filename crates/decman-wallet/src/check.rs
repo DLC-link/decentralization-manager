@@ -202,7 +202,8 @@ fn check_root(
 /// microseconds, with the RFC 3339 time the wallet asked for.
 ///
 /// Without a max record time, Canton may record the signed transaction long
-/// after the wallet stopped waiting for it. So a missing one is refused too.
+/// after the wallet stopped waiting for it. So the check refuses a missing
+/// one too.
 fn same_max_record_time(asked: &str, found: Option<u64>) -> std::result::Result<(), Refusal> {
     let asked_micros = DateTime::parse_from_rfc3339(asked)
         .ok()

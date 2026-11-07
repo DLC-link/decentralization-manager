@@ -83,8 +83,8 @@ pub struct TransferArgs {
     /// Write `package-id:Module:Entity` to pin one package, or
     /// `#package-name:Module:Entity` to pass any package of that name. A
     /// pinned send also asks the participant to prefer that package. A
-    /// package upgrade changes the id, so a pinned send is refused after an
-    /// upgrade until the caller passes the new id.
+    /// package upgrade changes the id, so an upgrade stops a pinned send
+    /// until the caller passes the new id.
     ///
     /// [`TransferReceipt::factory_template`] shows the id the registry
     /// names. A host supplies that id, so check it against a package you
@@ -420,8 +420,8 @@ pub async fn send_transfer(
 /// The `#` form passes any package of that name. To pin one package, pass
 /// `package-id:Module:Entity` instead. A pinned accept also asks the
 /// participant to prefer that package. A package upgrade changes the id, so
-/// a pinned accept is refused after an upgrade until the caller passes the
-/// new id. An id read from a host, such as
+/// an upgrade stops a pinned accept until the caller passes the new id. An
+/// id read from a host, such as
 /// [`TransferInstruction::package_id`](crate::TransferInstruction::package_id),
 /// must be checked against a package you trust before you pin it.
 ///

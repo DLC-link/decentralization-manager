@@ -176,8 +176,8 @@ So the wallet checks each prepared transaction before the key signs:
    `Error::ExecuteOutcomeUnknown` uses it.
 6. The metadata's acting parties must be the wallet's party alone. Canton
    authorizes the transaction with their authority, and the hash covers them.
-7. The metadata's max record time must be the one the wallet asked for. A
-   metadata without one is refused. See
+7. The metadata's max record time must be the one the wallet asked for. The
+   check refuses a metadata without one. See
    [Timeouts and retries](#timeouts-and-retries).
 8. The root must act on the template the caller names. For an accept, that is
    the template passed to `accept_transfer`. For a send, it is
@@ -314,6 +314,7 @@ does not tell the outcome. These cases return it:
 - The answer's body is larger than `ClientOptions::max_response_bytes`.
 - The participant answered 408 or 500. Canton's JSON API answers 500 for an
   internal gRPC error, which can follow a submission the participant accepted.
+  The JSON API can also answer 500 for a refused bearer token.
 - The participant's gateway answered 502, 503 or 504.
 
 The error's `source` holds the error behind it. The transaction may have
