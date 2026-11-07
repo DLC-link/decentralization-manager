@@ -63,6 +63,7 @@ use dec_party_manager::{
             authorize_with_topology_retry, sign_transactions_with_topology_retry,
             synchronizer_store_id,
         },
+        topology_version,
     },
 };
 use decman_wallet::ExternalKeyPair;
@@ -104,6 +105,7 @@ async fn submit_mapping(config: &NodeConfig, mapping: PartyToParticipant) -> any
         AuthorizeRequest {
             r#type: Some(authorize_request::Type::Proposal(
                 authorize_request::Proposal {
+                    protocol_version: topology_version::proposal_protocol_version(&synchronizer_id),
                     change: TopologyChangeOp::AddReplace as i32,
                     serial: 0,
                     mapping: Some(authorize_request::proposal::Mapping::V30(TopologyMapping {

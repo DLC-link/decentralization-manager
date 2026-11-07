@@ -30,7 +30,7 @@ use anyhow::Context;
 use canton_proto_rs::com::digitalasset::canton::{
     crypto::v30::{Signature, SignatureFormat, SigningAlgorithmSpec, SigningKeysWithThreshold},
     protocol::v30::{
-        PartyToParticipant, SignedTopologyTransaction, TopologyMapping, TopologyTransaction,
+        PartyToParticipant, SignedTopologyTransaction, TopologyMapping,
         enums::{ParticipantPermission, TopologyChangeOp},
         topology_mapping,
     },
@@ -39,9 +39,7 @@ use canton_proto_rs::com::digitalasset::canton::{
         generate_transactions_request,
         topology_manager_write_service_client::TopologyManagerWriteServiceClient,
     },
-    version::v1::{UntypedVersionedMessage, untyped_versioned_message},
 };
-use prost::Message as _;
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -52,7 +50,7 @@ use crate::{
             add_hosts::{AddHostsError, CurrentPartyTopology, read_party_to_participant},
             steps::party_signing_key,
         },
-        topology,
+        topology, topology_version,
     },
 };
 
@@ -271,14 +269,7 @@ pub fn validate_adoption_topology(
     let expected = adoption_mapping(config, &current.mapping, &bundle.public_key)?;
 
     for (index, serialized) in bundle.topology_transactions.iter().enumerate() {
-        let versioned =
-            UntypedVersionedMessage::decode(serialized.as_slice()).with_context(|| {
-                format!("topology transaction {index} is not a versioned Canton message")
-            })?;
-        let Some(untyped_versioned_message::Wrapper::Data(inner)) = versioned.wrapper else {
-            anyhow::bail!("topology transaction {index} carries no payload");
-        };
-        let transaction = TopologyTransaction::decode(inner.as_slice()).with_context(|| {
+        let transaction = topology_version::decode_transaction(serialized).with_context(|| {
             format!("topology transaction {index} is not a TopologyTransaction")
         })?;
 
@@ -457,9 +448,14 @@ pub async fn submit_adoption(
 
 #[cfg(test)]
 mod tests {
-    use canton_proto_rs::com::digitalasset::canton::protocol::v30::party_to_participant::{
-        HostingParticipant, hosting_participant,
+    use canton_proto_rs::com::digitalasset::canton::{
+        protocol::v30::{
+            TopologyTransaction,
+            party_to_participant::{HostingParticipant, hosting_participant},
+        },
+        version::v1::{UntypedVersionedMessage, untyped_versioned_message},
     };
+    use prost::Message as _;
 
     use crate::{canton_id::CantonId, workflow::external_party::steps};
 

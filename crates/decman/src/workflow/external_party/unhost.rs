@@ -66,7 +66,7 @@ use crate::{
             },
         },
         party_replication::relay::{HoldRefused, PartyHold, RelaySessions},
-        topology,
+        topology, topology_version,
     },
 };
 
@@ -979,6 +979,7 @@ async fn leave_topology(
         AuthorizeRequest {
             r#type: Some(authorize_request::Type::Proposal(
                 authorize_request::Proposal {
+                    protocol_version: topology_version::proposal_protocol_version(&synchronizer_id),
                     change: TopologyChangeOp::AddReplace as i32,
                     serial: submitted,
                     mapping: Some(authorize_request::proposal::Mapping::V30(TopologyMapping {

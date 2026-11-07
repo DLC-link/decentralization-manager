@@ -19,9 +19,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::Context;
 use canton_proto_rs::com::digitalasset::canton::{
-    protocol::v30::{
-        TopologyMapping, TopologyTransaction, enums::TopologyChangeOp, topology_mapping,
-    },
+    protocol::v30::{TopologyMapping, enums::TopologyChangeOp, topology_mapping},
     topology::admin::v30::{
         AuthorizeRequest, ListAvailableStoresRequest, authorize_request, store_id,
         topology_manager_read_service_client::TopologyManagerReadServiceClient,
@@ -33,7 +31,7 @@ use dec_party_manager::{
     utils,
     workflow::{
         proposal_store::{self, PartyHead},
-        topology,
+        topology, topology_version,
     },
 };
 use serde_json::json;
@@ -97,8 +95,8 @@ async fn signing_publishes_nothing_and_a_moved_serial_is_refused(
     let dns = signed.dns.context("no DNS proposal was signed")?;
     let p2p = signed.p2p;
 
-    let dns_serial = utils::decode_versioned::<TopologyTransaction>(&dns.transaction)?.serial;
-    let p2p_serial = utils::decode_versioned::<TopologyTransaction>(&p2p.transaction)?.serial;
+    let dns_serial = topology_version::decode_transaction(&dns.transaction)?.serial;
+    let p2p_serial = topology_version::decode_transaction(&p2p.transaction)?.serial;
     anyhow::ensure!(
         (dns_serial, p2p_serial) == (before.dns_serial + 1, before.p2p_serial + 1),
         "proposals pinned to DNS {dns_serial} / P2P {p2p_serial}, expected {} / {}",
@@ -388,6 +386,7 @@ async fn move_p2p_serial(
             AuthorizeRequest {
                 r#type: Some(authorize_request::Type::Proposal(
                     authorize_request::Proposal {
+                        protocol_version: topology_version::proposal_protocol_version(sync),
                         change: TopologyChangeOp::AddReplace as i32,
                         serial,
                         mapping: Some(authorize_request::proposal::Mapping::V30(TopologyMapping {

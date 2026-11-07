@@ -22,7 +22,7 @@ use crate::{
     canton_id::CantonId,
     config::NodeConfig,
     error::Result,
-    signing::{PreparedTransactionHash, SigningKeyContext, select_signer},
+    signing::{PreparedTransactionHash, SigningKeyContext, key_store::KeyStore, select_signer},
     utils,
     workflow::{
         signing_keys::{own_namespace_key, vault_holds},
@@ -59,6 +59,108 @@ pub async fn sign_submissions(
         "Contracts invitation has no deployment commitments; restart this workflow with an upgraded coordinator"
     );
 
+    let node_id = config.participant_id().to_string();
+    let key_context = own_daml_key(config, db, dec_party_id).await?;
+
+    // Step 3: Dynamically load all prepared submissions from storage. They were
+    // written by `prepare_submissions` keyed by zero-padded ordinal so
+    // `list_artifacts` returns them sorted by their original creation order.
+    tracing::info!("Loading prepared submissions...");
+    let submission_rows = db
+        .list_artifacts(instance_name, artifact_kinds::PREPARED_SUBMISSION)
+        .await?;
+
+    if submission_rows.is_empty() {
+        anyhow::bail!(
+            "No PREPARED_SUBMISSION artifacts found for instance {instance_name} — \
+             did PrepareSubmissions run?"
+        );
+    }
+
+    // Decode the per-submission `varint(len)||proto` blobs.
+    //
+    // The coordinator prepared these, so the hash it wants signed is only
+    // trustworthy once we have recomputed it from the transaction beside it —
+    // otherwise it could show a harmless transaction and collect a signature
+    // over a different one. `verify_prepared_transaction` also pins the acting
+    // party, so a signature can only ever authorize the dec party this run is
+    // for.
+    let mut prepared_submissions: Vec<PrepareSubmissionResponse> =
+        Vec::with_capacity(submission_rows.len());
+    anyhow::ensure!(
+        submission_rows.len() == intents.len(),
+        "Prepared submission count differs from the accepted invitation"
+    );
+    for ((ordinal, payload), intent) in submission_rows.iter().zip(intents) {
+        let prepared_sub: PrepareSubmissionResponse =
+            utils::read_first_message_from_bytes(payload)?;
+        verify_prepared_transaction(&prepared_sub, dec_party_id)
+            .with_context(|| format!("prepared submission {ordinal} failed validation"))?;
+        verify_deployment_intent(&prepared_sub, intent).with_context(|| {
+            format!("prepared submission {ordinal} differs from the accepted create")
+        })?;
+        tracing::debug!("Loaded prepared submission ordinal {ordinal}");
+        prepared_submissions.push(prepared_sub);
+    }
+    tracing::info!(
+        "Verified {count} prepared submission(s) against their transactions",
+        count = prepared_submissions.len()
+    );
+
+    tracing::debug!(
+        "Loaded {count} prepared submissions",
+        count = prepared_submissions.len()
+    );
+
+    // Step 4: Sign each prepared-transaction hash with the party's Daml key via
+    // the selected signing backend: DecMan's stored copy, the KMS, or a fresh
+    // export from the vault (see `select_signer`). Everything else in this
+    // step is provider-independent.
+    let hashes: Vec<PreparedTransactionHash> = prepared_submissions
+        .into_iter()
+        .map(|s| PreparedTransactionHash::new(s.prepared_transaction_hash))
+        .collect();
+
+    let store = KeyStore::open(config, db.clone()).await?;
+    let signer = select_signer(&key_context, config, &store, dec_party_id).await?;
+    let signatures = signer.sign(&hashes, &key_context).await?;
+
+    // Step 5: Persist signatures bundle as `SUBMISSION_SIGNATURES` artefact.
+    // The blob is the same multi-message `varint(len)||proto` framing the
+    // previous on-disk `submission-signatures-{node_id}.bin` used; the
+    // execute step will read it back via `read_all_messages_from_bytes`.
+    let payload = encode_messages_length_prefixed(&signatures);
+    tracing::info!(
+        "Saving signatures to artifact key {node_id} ({len} bytes)",
+        len = payload.len()
+    );
+    db.write_artifact(
+        instance_name,
+        artifact_kinds::SUBMISSION_SIGNATURES,
+        Some(&node_id),
+        &payload,
+    )
+    .await?;
+
+    tracing::info!("Signatures saved successfully");
+    Ok(())
+}
+
+/// This node's Daml signing key for `dec_party_id`, as the vault holds it.
+///
+/// The public half comes from the key bundle onboarding recorded, falling back
+/// to the onboarding artifacts and then to the party's on-chain keys. The
+/// vault must still hold the key, and its metadata says whether a KMS holds
+/// the private half.
+///
+/// # Errors
+///
+/// Errors when no source names this node's key, or the vault does not hold it.
+pub async fn own_daml_key(
+    config: &NodeConfig,
+    db: &SqlitePool,
+    dec_party_id: &CantonId,
+) -> Result<SigningKeyContext> {
     let node_id = config.participant_id().to_string();
 
     // Step 1: Load the Daml public key bundle that was exported during onboarding.
@@ -147,10 +249,8 @@ pub async fn sign_submissions(
     tracing::info!("Using Daml key with fingerprint: {key_fingerprint}");
     tracing::debug!("This is the key that was generated in step 1 and added to P2P mapping");
 
-    // Verify this key exists in Canton's vault. Keep the channel: the signing
-    // backend reuses it instead of opening a second connection.
-    let admin_channel = config.admin_channel().await?;
-    let mut vault_client = VaultServiceClient::new(admin_channel.clone());
+    // Verify this key exists in Canton's vault.
+    let mut vault_client = VaultServiceClient::new(config.admin_channel().await?);
 
     let keys_response = vault_client
         .list_my_keys(tonic::Request::new(ListMyKeysRequest {
@@ -184,94 +284,11 @@ pub async fn sign_submissions(
         .first()
         .and_then(|m| m.kms_key_id.clone());
 
-    // Step 3: Dynamically load all prepared submissions from storage. They were
-    // written by `prepare_submissions` keyed by zero-padded ordinal so
-    // `list_artifacts` returns them sorted by their original creation order.
-    tracing::info!("Loading prepared submissions...");
-    let submission_rows = db
-        .list_artifacts(instance_name, artifact_kinds::PREPARED_SUBMISSION)
-        .await?;
-
-    if submission_rows.is_empty() {
-        anyhow::bail!(
-            "No PREPARED_SUBMISSION artifacts found for instance {instance_name} — \
-             did PrepareSubmissions run?"
-        );
-    }
-
-    // Decode the per-submission `varint(len)||proto` blobs.
-    //
-    // The coordinator prepared these, so the hash it wants signed is only
-    // trustworthy once we have recomputed it from the transaction beside it —
-    // otherwise it could show a harmless transaction and collect a signature
-    // over a different one. `verify_prepared_transaction` also pins the acting
-    // party, so a signature can only ever authorize the dec party this run is
-    // for.
-    let mut prepared_submissions: Vec<PrepareSubmissionResponse> =
-        Vec::with_capacity(submission_rows.len());
-    anyhow::ensure!(
-        submission_rows.len() == intents.len(),
-        "Prepared submission count differs from the accepted invitation"
-    );
-    for ((ordinal, payload), intent) in submission_rows.iter().zip(intents) {
-        let prepared_sub: PrepareSubmissionResponse =
-            utils::read_first_message_from_bytes(payload)?;
-        verify_prepared_transaction(&prepared_sub, dec_party_id)
-            .with_context(|| format!("prepared submission {ordinal} failed validation"))?;
-        verify_deployment_intent(&prepared_sub, intent).with_context(|| {
-            format!("prepared submission {ordinal} differs from the accepted create")
-        })?;
-        tracing::debug!("Loaded prepared submission ordinal {ordinal}");
-        prepared_submissions.push(prepared_sub);
-    }
-    tracing::info!(
-        "Verified {count} prepared submission(s) against their transactions",
-        count = prepared_submissions.len()
-    );
-
-    tracing::debug!(
-        "Loaded {count} prepared submissions",
-        count = prepared_submissions.len()
-    );
-
-    // Step 4: Sign each prepared-transaction hash with the party's Daml key via
-    // the selected signing backend. The backend abstracts *how* the key signs —
-    // exporting it and signing locally with Ed25519 today (JCE keys), or asking
-    // a KMS to sign a non-exportable key (follow-up). Everything else in this
-    // step is provider-independent.
-    let hashes: Vec<PreparedTransactionHash> = prepared_submissions
-        .into_iter()
-        .map(|s| PreparedTransactionHash::new(s.prepared_transaction_hash))
-        .collect();
-
-    let key_context = SigningKeyContext {
-        fingerprint: key_fingerprint.clone(),
+    Ok(SigningKeyContext {
+        fingerprint: key_fingerprint,
         public_key: signing_public_key.clone(),
         kms_key_id,
-    };
-
-    let signer = select_signer(&key_context, admin_channel).await?;
-    let signatures = signer.sign(&hashes, &key_context).await?;
-
-    // Step 5: Persist signatures bundle as `SUBMISSION_SIGNATURES` artefact.
-    // The blob is the same multi-message `varint(len)||proto` framing the
-    // previous on-disk `submission-signatures-{node_id}.bin` used; the
-    // execute step will read it back via `read_all_messages_from_bytes`.
-    let payload = encode_messages_length_prefixed(&signatures);
-    tracing::info!(
-        "Saving signatures to artifact key {node_id} ({len} bytes)",
-        len = payload.len()
-    );
-    db.write_artifact(
-        instance_name,
-        artifact_kinds::SUBMISSION_SIGNATURES,
-        Some(&node_id),
-        &payload,
-    )
-    .await?;
-
-    tracing::info!("Signatures saved successfully");
-    Ok(())
+    })
 }
 
 fn verify_deployment_intent(

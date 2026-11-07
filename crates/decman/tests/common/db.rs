@@ -411,6 +411,18 @@ pub async fn count_completed_runs(db_path: &Path, kind: &str, role: &str) -> any
     Ok(n)
 }
 
+/// How many Daml keys DecMan's key store holds for `party_id`.
+pub async fn count_stored_party_keys(db_path: &Path, party_id: &str) -> anyhow::Result<i64> {
+    let pool = open(db_path).await?;
+    let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM party_key_store WHERE party_id = ?1")
+        .bind(party_id)
+        .fetch_one(&pool)
+        .await
+        .context("count_stored_party_keys")?;
+    pool.close().await;
+    Ok(n)
+}
+
 pub async fn count_artifacts(db_path: &Path, instance_name: &str) -> anyhow::Result<i64> {
     let pool = open(db_path).await?;
     let n: i64 =

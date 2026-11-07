@@ -10,7 +10,7 @@ use serde_json::{Value, json};
 use tracing::info;
 
 use crate::common::{
-    Fixture, MemberCreds, ParticipantAdminCreds, TestTarget,
+    Fixture, MemberCreds, ParticipantAdminCreds, TestTarget, db,
     http::{probe_workflow_run_visible, probe_workflow_status},
     invitations::{InvitationIds, post_accept_invitation, probe_pending_invitation},
     ledger_api::{P1_JSON_API, P2_JSON_API, P3_JSON_API},
@@ -497,6 +497,35 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
 
                     f.rules_contract_id = Some(cid);
                     Some(Ok(()))
+                })
+            },
+        )
+        // Splice 0.10 exports a vault key only while the localnet allows it.
+        // The deploy must keep each signer's key, so later deploys sign
+        // without exporting. The coordinator always signs; at threshold 2 at
+        // least one peer signs too.
+        .then(
+            "each signer kept its Daml key in DecMan's key store",
+            Duration::from_secs(30),
+            |f, _| {
+                Box::pin(async move {
+                    // Only a localnet run has the nodes' databases at hand.
+                    if !matches!(f.target, TestTarget::Localnet) {
+                        return Some(Ok(()));
+                    }
+                    let party_id = match f.party_id() {
+                        Ok(p) => p.to_string(),
+                        Err(e) => return Some(Err(e)),
+                    };
+                    let mut stored = Vec::with_capacity(3);
+                    for participant in 1..=3 {
+                        match db::count_stored_party_keys(&f.db_path(participant), &party_id).await
+                        {
+                            Ok(count) => stored.push(count),
+                            Err(e) => return Some(Err(e)),
+                        }
+                    }
+                    (stored[0] == 1 && stored.iter().sum::<i64>() >= 2).then_some(Ok(()))
                 })
             },
         )

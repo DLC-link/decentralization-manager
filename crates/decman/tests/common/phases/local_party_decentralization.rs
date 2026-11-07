@@ -75,6 +75,7 @@ use dec_party_manager::{
     workflow::{
         external_party::add_hosts::read_party_to_participant,
         topology::{authorize_with_topology_retry, synchronizer_store_id},
+        topology_version,
     },
 };
 use decman_wallet::ExternalKeyPair;
@@ -140,6 +141,7 @@ async fn allocate_local_party(config: &NodeConfig, party_id: &str) -> anyhow::Re
         AuthorizeRequest {
             r#type: Some(authorize_request::Type::Proposal(
                 authorize_request::Proposal {
+                    protocol_version: topology_version::proposal_protocol_version(&synchronizer_id),
                     change: TopologyChangeOp::AddReplace as i32,
                     serial: 0,
                     mapping: Some(authorize_request::proposal::Mapping::V30(TopologyMapping {
@@ -253,6 +255,7 @@ pub(super) async fn create_marker_as_converted(
 
     let prepared = client
         .prepare_submission(tonic::Request::new(PrepareSubmissionRequest {
+            account_id: String::new(),
             user_id: LEDGER_USER.to_string(),
             command_id: format!("converted-marker-{marker}-{}", Uuid::new_v4()),
             commands: vec![create],
@@ -285,6 +288,7 @@ pub(super) async fn create_marker_as_converted(
     let response = client
         .execute_submission_and_wait_for_transaction(tonic::Request::new(
             ExecuteSubmissionAndWaitForTransactionRequest {
+                account_id: String::new(),
                 prepared_transaction: prepared.prepared_transaction.clone(),
                 party_signatures: Some(PartySignatures {
                     signatures: vec![SinglePartySignatures {

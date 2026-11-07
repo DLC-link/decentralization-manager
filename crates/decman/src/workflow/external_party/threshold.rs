@@ -14,7 +14,7 @@
 use anyhow::Context;
 use canton_proto_rs::com::digitalasset::canton::{
     protocol::v30::{
-        PartyToParticipant, SignedTopologyTransaction, TopologyMapping, TopologyTransaction,
+        PartyToParticipant, SignedTopologyTransaction, TopologyMapping,
         enums::{ParticipantPermission, TopologyChangeOp},
         topology_mapping,
     },
@@ -23,9 +23,7 @@ use canton_proto_rs::com::digitalasset::canton::{
         generate_transactions_request,
         topology_manager_write_service_client::TopologyManagerWriteServiceClient,
     },
-    version::v1::{UntypedVersionedMessage, untyped_versioned_message},
 };
-use prost::Message as _;
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -39,7 +37,7 @@ use crate::{
             },
             keys::PartySignatureScheme,
         },
-        topology,
+        topology, topology_version,
     },
 };
 
@@ -201,6 +199,7 @@ pub async fn authorize_threshold(
         AuthorizeRequest {
             r#type: Some(authorize_request::Type::Proposal(
                 authorize_request::Proposal {
+                    protocol_version: topology_version::proposal_protocol_version(&synchronizer_id),
                     change: TopologyChangeOp::AddReplace as i32,
                     serial: next_serial,
                     mapping: Some(authorize_request::proposal::Mapping::V30(TopologyMapping {
@@ -367,14 +366,7 @@ pub fn validate_threshold_topology(
     })?;
 
     for (index, serialized) in bundle.topology_transactions.iter().enumerate() {
-        let versioned =
-            UntypedVersionedMessage::decode(serialized.as_slice()).with_context(|| {
-                format!("topology transaction {index} is not a versioned Canton message")
-            })?;
-        let Some(untyped_versioned_message::Wrapper::Data(inner)) = versioned.wrapper else {
-            anyhow::bail!("topology transaction {index} carries no payload");
-        };
-        let transaction = TopologyTransaction::decode(inner.as_slice()).with_context(|| {
+        let transaction = topology_version::decode_transaction(serialized).with_context(|| {
             format!("topology transaction {index} is not a TopologyTransaction")
         })?;
 

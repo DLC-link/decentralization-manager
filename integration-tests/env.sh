@@ -45,7 +45,7 @@ export DECPM_EXTERNAL_PARTIES_TTL_SECS=3
 export DECPM_PEER_WAIT_POLL_DELAY_MS=500
 
 # Localnet
-LOCALNET_VERSION="0.9.4"
+LOCALNET_VERSION="0.10.0"
 LOCALNET_BUNDLE_URL="https://github.com/digital-asset/decentralized-canton-sync/releases/download/v${LOCALNET_VERSION}/${LOCALNET_VERSION}_splice-node.tar.gz"
 LOCALNET_CACHE_DIR="$SCRIPT_DIR/.localnet"
 LOCALNET_COMPOSE_DIR="$LOCALNET_CACHE_DIR/splice-node/docker-compose/localnet"
@@ -249,6 +249,37 @@ configure_localnet_commitments() {
     }
 }
 
+# Splice 0.10 turns Canton's repair commands off by default, which removes
+# PurgeContracts. DecMan's purge of a former party needs it, and an operator
+# who purges turns it on the same way. Idempotent, like the patch above.
+configure_localnet_repair() {
+    local conf="$LOCALNET_COMPOSE_DIR/conf/canton/app.conf"
+    if grep -q "enable-repair-commands" "$conf"; then
+        return 0
+    fi
+    printf '\ncanton.features.enable-repair-commands = yes\n' >> "$conf"
+    grep -q "enable-repair-commands" "$conf" || {
+        echo "Failed to turn on Canton's repair commands in $conf" >&2
+        return 1
+    }
+}
+
+# Splice 0.10 turns Canton's key export off by default. A party onboarded on
+# a 0.10 node gets its Daml key from the participant's vault, and DecMan
+# copies it into its own key store on the first deploy. An operator turns the
+# export on the same way until DecMan holds every key. Idempotent.
+configure_localnet_key_download() {
+    local conf="$LOCALNET_COMPOSE_DIR/conf/canton/app.conf"
+    if grep -q "enable-key-download" "$conf"; then
+        return 0
+    fi
+    printf '\ncanton.parameters.enable-key-download = yes\n' >> "$conf"
+    grep -q "enable-key-download" "$conf" || {
+        echo "Failed to turn on Canton's key export in $conf" >&2
+        return 1
+    }
+}
+
 localnet_compose() {
     export IMAGE_TAG="$LOCALNET_VERSION"
     docker compose \
@@ -269,6 +300,8 @@ start_localnet() {
 
     configure_localnet_reconciliation
     configure_localnet_commitments
+    configure_localnet_repair
+    configure_localnet_key_download
 
     echo "Starting localnet..."
     # Only start the services our tests actually use. The 3 active profiles

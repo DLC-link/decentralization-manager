@@ -41,7 +41,7 @@ use crate::{
         },
         signing_keys::{own_namespace_key, vault_holds},
         storage::{WorkflowStorage, artifact_kinds, identity_kinds},
-        topology,
+        topology, topology_version,
     },
 };
 
@@ -1332,7 +1332,7 @@ fn decode_proposal_serial(payload: &[u8]) -> Result<u32> {
 
 fn decode_add_replace(payload: &[u8]) -> Result<TopologyTransaction> {
     let signed: SignedTopologyTransaction = utils::read_first_message_from_bytes(payload)?;
-    let transaction = utils::decode_versioned::<TopologyTransaction>(&signed.transaction)?;
+    let transaction = topology_version::decode_transaction(&signed.transaction)?;
 
     if transaction.operation != enums::TopologyChangeOp::AddReplace as i32 {
         anyhow::bail!(

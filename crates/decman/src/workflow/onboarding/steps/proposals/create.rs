@@ -23,6 +23,7 @@ use crate::{
         onboarding::OnboardingConfig,
         storage::{WorkflowStorage, artifact_kinds, identity_kinds},
         thresholds::{PartyThresholds, check_confirmation_threshold},
+        topology_version,
     },
 };
 
@@ -242,6 +243,8 @@ pub async fn create_proposals(
     }
 
     let mut topology_client = TopologyManagerWriteServiceClient::new(config.admin_channel().await?);
+    let proposal_version =
+        topology_version::proposal_protocol_version(&utils::get_synchronizer_id(config).await?);
 
     // Create DNS proposal in Authorized store
     // The coordinator creates this proposal locally, which will later be shared with peers
@@ -250,6 +253,7 @@ pub async fn create_proposals(
     let dns_request = tonic::Request::new(AuthorizeRequest {
         r#type: Some(authorize_request::Type::Proposal(
             authorize_request::Proposal {
+                protocol_version: proposal_version,
                 change: enums::TopologyChangeOp::AddReplace as i32,
                 serial: 1,
                 mapping: Some(authorize_request::proposal::Mapping::V30(TopologyMapping {
@@ -278,6 +282,7 @@ pub async fn create_proposals(
     let p2p_request = tonic::Request::new(AuthorizeRequest {
         r#type: Some(authorize_request::Type::Proposal(
             authorize_request::Proposal {
+                protocol_version: proposal_version,
                 change: enums::TopologyChangeOp::AddReplace as i32,
                 serial: 0,
                 mapping: Some(authorize_request::proposal::Mapping::V30(TopologyMapping {

@@ -1236,7 +1236,7 @@ dependencies = [
 [[package]]
 name = "canton-proto-rs"
 version = "3.4.0"
-source = "git+https://github.com/DLC-link/canton-lib?rev=ca3548140910ee10f6d0095d39e4c6cd0ba6adfd#ca3548140910ee10f6d0095d39e4c6cd0ba6adfd"
+source = "git+https://github.com/DLC-link/canton-lib?rev=4e2a0f110164890d6eb87235f4d2d9ea3797a421#4e2a0f110164890d6eb87235f4d2d9ea3797a421"
 dependencies = [
  "prost",
  "prost-types",
@@ -1438,7 +1438,7 @@ dependencies = [
 [[package]]
 name = "common"
 version = "0.12.0"
-source = "git+https://github.com/DLC-link/canton-lib?rev=ca3548140910ee10f6d0095d39e4c6cd0ba6adfd#ca3548140910ee10f6d0095d39e4c6cd0ba6adfd"
+source = "git+https://github.com/DLC-link/canton-lib?rev=4e2a0f110164890d6eb87235f4d2d9ea3797a421#4e2a0f110164890d6eb87235f4d2d9ea3797a421"
 dependencies = [
  "canton-api-client",
  "rust_decimal",
@@ -2884,7 +2884,7 @@ dependencies = [
  "libc",
  "percent-encoding",
  "pin-project-lite",
- "socket2 0.5.10",
+ "socket2 0.6.3",
  "system-configuration",
  "tokio",
  "tower-service",
@@ -3243,7 +3243,7 @@ dependencies = [
 [[package]]
 name = "keycloak"
 version = "0.12.0"
-source = "git+https://github.com/DLC-link/canton-lib?rev=ca3548140910ee10f6d0095d39e4c6cd0ba6adfd#ca3548140910ee10f6d0095d39e4c6cd0ba6adfd"
+source = "git+https://github.com/DLC-link/canton-lib?rev=4e2a0f110164890d6eb87235f4d2d9ea3797a421#4e2a0f110164890d6eb87235f4d2d9ea3797a421"
 dependencies = [
  "base64 0.22.1",
  "reqwest 0.12.28",
@@ -4311,7 +4311,7 @@ dependencies = [
  "quinn-udp",
  "rustc-hash",
  "rustls",
- "socket2 0.5.10",
+ "socket2 0.6.3",
  "thiserror 2.0.21",
  "tokio",
  "tracing",
@@ -4350,7 +4350,7 @@ dependencies = [
  "cfg_aliases",
  "libc",
  "once_cell",
- "socket2 0.5.10",
+ "socket2 0.6.3",
  "tracing",
  "windows-sys 0.52.0",
 ]
@@ -4635,7 +4635,7 @@ checksum = "dc897dd8d9e8bd1ed8cdad82b5966c3e0ecae09fb1907d58efaa013543185d0a"
 [[package]]
 name = "registry"
 version = "0.12.0"
-source = "git+https://github.com/DLC-link/canton-lib?rev=ca3548140910ee10f6d0095d39e4c6cd0ba6adfd#ca3548140910ee10f6d0095d39e4c6cd0ba6adfd"
+source = "git+https://github.com/DLC-link/canton-lib?rev=4e2a0f110164890d6eb87235f4d2d9ea3797a421#4e2a0f110164890d6eb87235f4d2d9ea3797a421"
 dependencies = [
  "common 0.12.0",
  "reqwest 0.12.28",
@@ -6923,7 +6923,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.48.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

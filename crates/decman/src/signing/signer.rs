@@ -1,11 +1,16 @@
 use async_trait::async_trait;
 use canton_proto_rs::com::digitalasset::canton::crypto::v30::{Signature, SigningPublicKey};
-use tonic::transport::Channel;
 
 use crate::{
-    canton_id::Fingerprint,
+    canton_id::{CantonId, Fingerprint},
+    config::NodeConfig,
     error::Result,
-    signing::{SigningError, aws_kms::AwsKmsSigner, vault_export::VaultExportSigner},
+    signing::{
+        SigningError,
+        aws_kms::AwsKmsSigner,
+        key_store::{KeyStore, StoredKeySigner},
+        vault_export::{VaultExportSigner, export_protocol_version},
+    },
 };
 
 /// An interactive-submission prepared-transaction hash, as returned by the
@@ -65,29 +70,46 @@ pub trait TransactionSigner: Send + Sync {
 
 /// Choose the signing backend for a given party key.
 ///
-/// The choice is forced by how the key is held, not by preference: a key that
-/// carries a `kms_key_id` is non-exportable and can only be signed through
-/// the KMS ([`AwsKmsSigner`]); an exportable vault key is signed by
-/// [`VaultExportSigner`]. This is the single extension point for new backends
-/// (e.g. an MPCH client-API signer).
+/// The choice is forced by how the key is held, not by preference:
+///
+/// 1. A key DecMan holds in its own [`KeyStore`] signs from there
+///    ([`StoredKeySigner`]). Canton 3.7 no longer exports vault keys by
+///    default, so this is the path that keeps working after the upgrade.
+/// 2. A key that carries a `kms_key_id` is non-exportable and can only be
+///    signed through the KMS ([`AwsKmsSigner`]).
+/// 3. Any other vault key is exported and signed by [`VaultExportSigner`],
+///    which also copies it into the store for the next run.
+///
+/// This is the single extension point for new backends (e.g. an MPCH
+/// client-API signer).
 ///
 /// Returns a boxed trait object because the backend is picked at *runtime*
 /// from the key's custody, so the concrete type differs per call; the one
 /// dynamic dispatch is noise next to the signing RPCs themselves.
 ///
-/// Takes the caller's already-open admin-API `channel` so the export backend
-/// reuses one connection instead of opening a second. Async because the KMS
-/// backend resolves AWS credentials when it is built.
+/// Async because the store is read, and because the KMS backend resolves AWS
+/// credentials when it is built.
 pub async fn select_signer(
     key: &SigningKeyContext,
-    channel: Channel,
+    config: &NodeConfig,
+    store: &KeyStore,
+    party: &CantonId,
 ) -> Result<Box<dyn TransactionSigner>> {
+    if let Some(seed) = store.get(party, &key.fingerprint).await? {
+        return Ok(Box::new(StoredKeySigner::new(seed)));
+    }
     if key.kms_key_id.is_some() {
         // Only AWS KMS is supported so far. A key held by a different KMS
         // driver (e.g. MPCH) also carries a kms_key_id; its Sign call fails
         // with a clear KMS error until a dedicated backend exists.
         Ok(Box::new(AwsKmsSigner::new().await))
     } else {
-        Ok(Box::new(VaultExportSigner::new(channel)))
+        Ok(Box::new(
+            VaultExportSigner::new(
+                config.admin_channel().await?,
+                export_protocol_version(config).await?,
+            )
+            .storing_into(store.clone(), party.clone()),
+        ))
     }
 }

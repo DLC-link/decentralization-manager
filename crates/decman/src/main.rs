@@ -202,6 +202,7 @@ async fn run() -> Result {
             tenant_api_keys,
             tenant_rate_limit_per_minute,
             validator_operator_party,
+            key_store_key_file,
             ..
         } => {
             if let Some(key) = db_encryption_key {
@@ -357,6 +358,7 @@ async fn run() -> Result {
                 .map(CantonId::parse)
                 .transpose()
                 .context("DECPM_VALIDATOR_OPERATOR_PARTY is not a valid party id")?;
+            config.key_store_key_file = key_store_key_file.clone();
 
             config.insecure = *insecure;
             // Only ingest the unsafe HMAC settings when insecure mode is on;
