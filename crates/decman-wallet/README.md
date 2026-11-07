@@ -105,7 +105,11 @@ tracing::info!(kind = %sent.transfer_kind, update_id = %sent.update_id, "sent");
 
 // Accept every Canton Coin offer the party can accept now. The listed
 // template comes from the participant and only picks the offers to try.
-// The check binds the template the wallet passes.
+// The check binds the template the wallet passes: here, one pinned to a
+// package id the operator checked.
+let pinned = format!(
+    "{checked_package_id}:Splice.AmuletTransferInstruction:AmuletTransferInstruction"
+);
 for offer in ledger.transfer_instructions(&party_id).await? {
     if offer.template != AMULET_TRANSFER_INSTRUCTION_TEMPLATE {
         continue;
@@ -116,7 +120,7 @@ for offer in ledger.transfer_instructions(&party_id).await? {
         &key,
         &party_id,
         &offer.contract_id,
-        AMULET_TRANSFER_INSTRUCTION_TEMPLATE,
+        &pinned,
     )
     .await?;
 }
@@ -202,24 +206,29 @@ names the template it trusts:
 `TransferInstruction::template` shows each listed offer's template. The
 participant supplies it, so it is for display only.
 
-The `#` form names the package by name. Any package with that name passes,
-including a look-alike package with another package id. To pin one package,
-pass the template as `<package-id>:Module:Entity`, without the `#`. The check
-then compares the package id too. The prepare also names that id in its
+Pinning the package is the recommended way to call `accept_transfer` and to
+set `TransferArgs::factory_template`. To pin one package, pass the template as
+`<package-id>:Module:Entity`, without the `#`. The check then compares the
+package id too. The prepare also names that id in its
 `packageIdSelectionPreference`, so the participant interprets the choice with
 that package.
 
-`TransferInstruction::package_id` holds each listed offer's package id. The
-example's `pending` mode prints it. The participant supplies this id, so check
-it against the package you trust before you pin it.
+The `#` form names the package by name only. Any package with that name
+passes, including a look-alike package with another package id.
 
-A send pins the factory the same way, with `TransferArgs::factory_template`.
-`TransferReceipt::factory_template` shows the factory's template as the
-registry names it, with its package id. Check that id the same way before you
-pin it.
+To get the id to pin:
 
-Every package upgrade changes the package id. A pinned wallet refuses accepts
-after an upgrade until the operator updates the id.
+1. For an accept, run the example's `pending` mode. It prints each offer's
+   pinned template on a line of its own. `TransferInstruction::package_id`
+   holds the same id. For a send, read `TransferReceipt::factory_template`.
+2. Check the package id against a package you trust.
+3. Pass the pinned template to `accept_transfer`, or set it in
+   `TransferArgs::factory_template`.
+
+The participant or the registry supplies the id, so never skip step 2. Every
+package upgrade changes the package id. A pinned call then fails until you
+check and pin the new id. That is the point: the key signs only for a package
+that someone checked.
 
 The check covers hashing schemes V2 and V3. Canton 3.6 prepares with V2 unless
 the request asks for another version, and the wallet never asks. The check
@@ -342,7 +351,7 @@ participant, so a retry is safe.
 | `VALIDITY_HOURS` | `send`, optional | How long the offer stays open; 24 by default |
 | `FACTORY_TEMPLATE` | `send`, optional | The template the factory must have. Write `<package-id>:Module:Entity` to pin one package. |
 | `INSTRUCTION_CID` | `accept` | The transfer instruction to accept |
-| `INSTRUCTION_TEMPLATE` | `accept` | The template the instruction must have, such as `#splice-amulet:Splice.AmuletTransferInstruction:AmuletTransferInstruction`. Write `<package-id>:Module:Entity` to pin one package. |
+| `INSTRUCTION_TEMPLATE` | `accept` | The template the instruction must have. Write `<package-id>:Module:Entity` to pin one package, as `pending` prints it. The `#` form, such as `#splice-amulet:Splice.AmuletTransferInstruction:AmuletTransferInstruction`, passes any package of that name. |
 
 The example never prints the seed. It refuses a seed whose fingerprint is not
 the party's.

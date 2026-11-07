@@ -19,12 +19,18 @@
 //! `VALIDITY_HOURS` (24 by default). Its optional `FACTORY_TEMPLATE` is the
 //! template the factory must have, written `<package-id>:Module:Entity` to
 //! pin one package. The send prints the factory's template as the registry
-//! names it. `accept` needs `INSTRUCTION_CID` and
-//! `INSTRUCTION_TEMPLATE`, the template the instruction must have, such as
-//! `#splice-amulet:Splice.AmuletTransferInstruction:AmuletTransferInstruction`.
-//! A template written as `<package-id>:Module:Entity` pins one package.
+//! names it.
+//!
+//! `accept` needs `INSTRUCTION_CID` and `INSTRUCTION_TEMPLATE`, the template
+//! the instruction must have. Pin it to one package as
+//! `<package-id>:Module:Entity`. The `#` form, such as
+//! `#splice-amulet:Splice.AmuletTransferInstruction:AmuletTransferInstruction`,
+//! passes any package of that name.
+//!
 //! `pending` prints each offer's template and package id, as the participant
-//! reports them.
+//! reports them. It then prints the offer's pinned template on a line of its
+//! own, ready to copy into `INSTRUCTION_TEMPLATE`. Check the package id
+//! against a package you trust before you pin it.
 //!
 //! ```sh
 //! MODE=send PARTY_ID=alice::1220… DECMAN_WALLET_SEED=… \
@@ -183,6 +189,12 @@ async fn log_pending(ledger: &LedgerClient, party: &str) -> Result {
             execute_before = %instruction.execute_before,
             "pending transfer"
         );
+        // Plain text on its own line, so the operator can copy it whole.
+        if let Some((_, qualified)) = instruction.template.split_once(':')
+            && !instruction.package_id.is_empty()
+        {
+            println!("{}:{qualified}", instruction.package_id);
+        }
     }
     Ok(())
 }
