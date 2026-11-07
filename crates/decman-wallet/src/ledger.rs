@@ -312,6 +312,10 @@ pub struct PrepareRequest {
     /// Canton refuses the transaction after this time. The prepared
     /// transaction's metadata carries it back.
     pub max_record_time: String,
+    /// The hashing scheme the wallet wants, such as
+    /// `HASHING_SCHEME_VERSION_V3`. The prepare returns the scheme it used,
+    /// and the check recomputes the hash with that one.
+    pub hashing_scheme_version: String,
 }
 
 /// What a prepare returns: the transaction, its hash, and the hashing scheme.

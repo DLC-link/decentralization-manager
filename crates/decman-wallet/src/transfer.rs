@@ -51,6 +51,11 @@ pub const MAX_INPUT_HOLDINGS: usize = 100;
 /// refuses the transaction, so a resend cannot pay twice.
 pub const MAX_RECORD_DELAY: Duration = Duration::from_secs(5 * 60);
 
+/// The hashing scheme each prepare asks for. V3 signs the max record time,
+/// and V2 does not. A participant on a protocol version before 35 answers
+/// V2, and the check accepts V2 too.
+pub const PREPARE_HASHING_SCHEME: &str = "HASHING_SCHEME_VERSION_V3";
+
 /// How far `requested_at` is set into the past. Canton Coin's factory
 /// refuses a request time that is not in the past, and this absorbs clock
 /// drift. The splice-wallet-kernel SDK uses the same minute.
@@ -542,6 +547,7 @@ async fn submit(
                 .collect(),
             verbose_hashing: false,
             max_record_time: expected.max_record_time.to_string(),
+            hashing_scheme_version: PREPARE_HASHING_SCHEME.to_string(),
         })
         .await?;
 

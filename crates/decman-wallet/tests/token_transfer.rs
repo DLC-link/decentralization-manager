@@ -1221,6 +1221,7 @@ async fn send_transfer_runs_the_steps_in_order_and_signs_the_hash_locally() {
     // Canton 3.6 refuses a prepare body without these two fields.
     assert_eq!(prepare["synchronizerId"], "");
     assert_eq!(prepare["packageIdSelectionPreference"], json!([]));
+    assert_eq!(prepare["hashingSchemeVersion"], "HASHING_SCHEME_VERSION_V3");
     assert_eq!(prepare["disclosedContracts"], factory_disclosed());
     // The synchronizer records the transaction within five minutes, or never.
     let max_record_time = match prepare["maxRecordTime"]
@@ -1862,6 +1863,7 @@ async fn accept_transfer_exercises_the_instruction_with_the_registry_context() {
     );
     assert_eq!(prepare["synchronizerId"], "");
     assert_eq!(prepare["packageIdSelectionPreference"], json!([]));
+    assert_eq!(prepare["hashingSchemeVersion"], "HASHING_SCHEME_VERSION_V3");
     assert_eq!(prepare["disclosedContracts"], disclosed());
     let command = &prepare["commands"][0]["ExerciseCommand"];
     assert_eq!(command["templateId"], TRANSFER_INSTRUCTION_INTERFACE_ID);
@@ -2065,6 +2067,7 @@ async fn an_accept_by_package_name_is_signed_on_a_look_alike_package() {
     .await;
 
     assert_eq!(prepare["packageIdSelectionPreference"], json!([]));
+    assert_eq!(prepare["hashingSchemeVersion"], "HASHING_SCHEME_VERSION_V3");
 }
 
 /// With smart contract upgrade, the participant may interpret the factory

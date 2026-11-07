@@ -145,7 +145,8 @@ The flows follow the splice-wallet-kernel SDK step for step.
 
 The crate differs from the SDK in four ways:
 
-- It sends the hashing scheme version that the prepare returned. The SDK always sends V2.
+- It asks for hashing scheme V3, which signs the max record time, and sends
+  the scheme the prepare returned. The SDK always sends V2.
 - It spends the 100 largest unlocked holdings of the instrument, or all of
   them when there are fewer. The SDK picks holdings by amount. If the 100
   largest hold less than the amount, the send fails at the prepare step. The
@@ -236,8 +237,9 @@ package upgrade changes the package id. A pinned call then fails until you
 check and pin the new id. That is the point: the key signs only for a package
 that someone checked.
 
-The check covers hashing schemes V2 and V3. Canton 3.6 prepares with V2 unless
-the request asks for another version, and the wallet never asks. The check
+The check covers hashing schemes V2 and V3. Each prepare asks for V3. A
+participant on a protocol version before 35 answers V2, and the check accepts
+that too. The check
 refuses V4 and any unknown version.
 
 The check does not compare these:
@@ -326,13 +328,14 @@ After the error's `max_record_time`, with no completion for the `command_id`,
 the transaction did not commit. A resend is then safe.
 
 Each prepare asks for a max record time `MAX_RECORD_DELAY` ahead, five
-minutes. The synchronizer refuses the transaction after that time. Hashing
-scheme V3 covers the time, so no host can move it once the key has signed. V2
-does not cover it, and Canton 3.6 prepares with V2. Under V2, the participant
-that executes applies the time the wallet checked. Without a max record time,
-one execute must still be recorded within the ledger time tolerance, 60
-seconds by default. But the signed transaction then stays valid for another
-execute until its preparation time is 24 hours old.
+minutes, and for hashing scheme V3. The synchronizer refuses the transaction
+after that time. V3 signs the time, so no host can change it once the key has
+signed. A participant on an older protocol version answers V2, which does not
+sign the time. The check still refuses a transaction without the time, but
+under V2 only the executing host applies it. Without a max record time, the
+synchronizer must still record an execute within 60 seconds of its ledger
+time, by default. But a signed transaction stays valid for a new execute until
+its preparation time is 24 hours old.
 
 A connection that never opened returns `Error::Transport`. Nothing reached the
 participant, so a retry is safe.
