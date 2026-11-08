@@ -46,6 +46,9 @@ pub enum Outcome {
     /// Canton refused the export, because the participant does not allow key
     /// download.
     ExportRefused,
+    /// DecMan's copy does not decrypt, and Canton refused a new export. The
+    /// store's encryption key changed.
+    CopyUnreadable,
 }
 
 /// Run the migration at boot and then every [`MIGRATION_INTERVAL`]. A run
@@ -108,6 +111,12 @@ pub async fn migrate_all(config: &NodeConfig, db: &SqlitePool) -> Result {
                  values, or canton.parameters.enable-key-download = yes, until this message \
                  stops. Then turn it off again"
             ),
+            Ok(Outcome::CopyUnreadable) => tracing::error!(
+                "DecMan's copy of this node's Daml key for {party} does not decrypt, and \
+                 Canton refused a new export. The key store's encryption key changed. Restore \
+                 the previous DECPM_KEY_STORE_KEY_FILE or DECPM_DB_ENCRYPTION_KEY. Turn on key \
+                 download only if that key is lost"
+            ),
             Ok(outcome) => tracing::debug!("Key migration of {party}: {outcome:?}"),
             Err(e) => tracing::warn!(
                 "Could not copy this node's Daml key for {party} into DecMan's key store: {e:#}"
@@ -151,14 +160,23 @@ async fn migrate_party(
     if key.kms_key_id.is_some() {
         return Ok(Outcome::KmsHeld);
     }
-    match store.get(party, &key.fingerprint).await {
+    let unreadable = match store.get(party, &key.fingerprint).await {
         Ok(Some(_)) => return Ok(Outcome::AlreadyStored),
-        Ok(None) => {}
-        Err(e) => tracing::warn!("{e:#}. Copying the key again"),
-    }
+        Ok(None) => false,
+        Err(e) => {
+            tracing::warn!("{e:#}. Copying the key again");
+            true
+        }
+    };
     let seed = match export_private_key(channel, &key, protocol_version).await {
         Ok(seed) => seed,
-        Err(e) if key_download_disabled(&e) => return Ok(Outcome::ExportRefused),
+        Err(e) if key_download_disabled(&e) => {
+            return Ok(if unreadable {
+                Outcome::CopyUnreadable
+            } else {
+                Outcome::ExportRefused
+            });
+        }
         Err(e) => return Err(e.into()),
     };
     store

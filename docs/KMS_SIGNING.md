@@ -142,7 +142,8 @@ copy of each key.
 - A stored key that does not decrypt is skipped. That happens when the
   encryption key changes or is lost. decman then exports the key again and
   replaces the stored copy. A Splice 0.10 participant refuses that export by
-  default, so keep the encryption key stable and keep a copy of it.
+  default, so keep the encryption key stable and keep a copy of it. When it
+  refuses, the copy task logs an error that says to restore the previous key.
 - decman never deletes a key from the vault.
 
 ### Copying existing keys
