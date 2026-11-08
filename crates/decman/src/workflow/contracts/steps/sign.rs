@@ -21,6 +21,7 @@ use crate::{
     canton_hash,
     canton_id::CantonId,
     config::NodeConfig,
+    db::crypto,
     error::Result,
     signing::{PreparedTransactionHash, SigningKeyContext, key_store::KeyStore, select_signer},
     utils,
@@ -515,7 +516,7 @@ async fn backfill_peer_keys_from_chain(
 /// the given dec_party_id, by joining `workflow_artifacts` to `workflow_runs`.
 /// Used as a one-shot backfill for parties whose onboarding ran before the
 /// `dec_party_identity` write hook was added.
-async fn backfill_peer_keys(
+pub async fn backfill_peer_keys(
     db: &SqlitePool,
     dec_party_id: &CantonId,
     node_id: &str,
@@ -537,7 +538,8 @@ async fn backfill_peer_keys(
     .bind(node_id)
     .fetch_optional(db)
     .await?;
-    Ok(row.map(|(bytes,)| bytes))
+    row.map(|(bytes,)| crypto::decrypt_bytes(&bytes))
+        .transpose()
 }
 
 #[cfg(test)]
