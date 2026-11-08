@@ -1017,13 +1017,9 @@ pub async fn resolve_owner_keys_from_peers(
         }
     }
 
-    // Topology-driven fallback: covers the case where the participant whose
-    // owner_key we need is offline / unreachable via Noise. The mapping
-    // (participant_uid → owner_key in a party) is recoverable from public
-    // synchronizer state — each participant publishes `NamespaceDelegation`
-    // entries listing the signing keys delegated under its namespace, and
-    // one of those fingerprints is what appears in the party's `owners`
-    // list. This is independent of peer reachability.
+    // Topology fallback for a peer that does not answer over Noise. It reads
+    // the namespace delegations that each participant publishes. See
+    // `supplement_owner_keys_from_topology` for the owners it can resolve.
     if let Err(e) = supplement_owner_keys_from_topology(config, db, parties).await {
         tracing::debug!("Topology-based owner-key fallback skipped: {e:#}");
     }
@@ -1268,12 +1264,16 @@ fn forget_removed_peers(peers: &[Peer]) {
         .retain(|peer, _| listed.contains(peer));
 }
 
-/// Fill in missing `dec_party_participant.owner_key` rows by reading public
-/// Canton topology state. For each (party, participant) where the local
-/// cache hasn't learned the owner_key yet, we query the participant's
-/// `NamespaceDelegation` entries, fingerprint their target keys, and
-/// intersect with the party's `owners` list. Whatever matches is the
-/// participant's contribution to the decentralized namespace.
+/// Fills in owner keys that this node lacks from public Canton topology. For
+/// each participant without a known owner key, it lists the
+/// `NamespaceDelegation` entries in the participant's namespace. It then
+/// matches their target keys against the party's owners.
+///
+/// The match succeeds only when an owner is the participant's namespace key
+/// or a key delegated under it. decman creates each owner key as the root of
+/// its own namespace, so this resolves nothing for a party that decman
+/// created. It covers a party whose owners are the members' participant
+/// namespaces, such as one set up with the Canton console.
 async fn supplement_owner_keys_from_topology(
     config: &NodeConfig,
     db: &SqlitePool,

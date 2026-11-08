@@ -321,6 +321,10 @@ pub async fn list_handled_invitations(
 }
 
 /// Accept a pending invitation and trigger the workflow
+///
+/// A kick accept first refreshes the party and asks the peers for their owner
+/// keys, because the peer check needs every host's current key. So a kick
+/// accept takes longer than other accepts.
 #[utoipa::path(
     tag = "Invitations",
     request_body = InvitationActionRequest,
