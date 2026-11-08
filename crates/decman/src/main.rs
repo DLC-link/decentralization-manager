@@ -208,6 +208,14 @@ async fn run() -> Result {
             if let Some(key) = db_encryption_key {
                 dec_party_manager::db::crypto::init_key(key);
                 tracing::info!("Database encryption enabled");
+                if key_store_key_file.is_none() && !dec_party_manager::db::crypto::derives_keys(key)
+                {
+                    tracing::warn!(
+                        "DECPM_DB_ENCRYPTION_KEY has fewer than {} characters, so DecMan does \
+                         not derive the key store's key from it",
+                        dec_party_manager::db::crypto::MIN_DERIVING_PASSPHRASE_CHARS
+                    );
+                }
             }
             if let Some(addr) = listen_address {
                 config.node.listen_address = addr.clone();

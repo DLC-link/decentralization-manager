@@ -5,10 +5,12 @@ use std::sync::Once;
 
 use dec_party_manager::{
     canton_id::CantonId,
+    config::NodeConfig,
     db::{
         MIGRATOR, crypto,
         schema::{Commitable, SchemaRead, SchemaWrite},
     },
+    signing::key_store::KeyStore,
     workflow::{contracts::steps::sign::backfill_peer_keys, storage::artifact_kinds},
 };
 use sqlx::SqlitePool;
@@ -21,9 +23,13 @@ const MEMBER: &str = "member::1220bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
 const NODE: &str =
     "participant1::1220cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
 
+/// Shorter than `crypto::MIN_DERIVING_PASSPHRASE_CHARS`, so it encrypts the
+/// database but derives no other key.
+const PASSPHRASE: &str = "database encryption test";
+
 fn encryption_on() {
     static ON: Once = Once::new();
-    ON.call_once(|| crypto::init_key("database encryption test"));
+    ON.call_once(|| crypto::init_key(PASSPHRASE));
 }
 
 async fn completed_onboarding(db: &SqlitePool, instance: &str) -> Result {
@@ -105,5 +111,17 @@ async fn rows_written_before_the_key_existed_stay_readable(db: SqlitePool) -> Re
         .expect("the credentials row");
     assert_eq!(credentials.keycloak.client_id, "decman");
     assert_eq!(credentials.keycloak.client_secret.as_deref(), Some(secret));
+    Ok(())
+}
+
+#[sqlx::test(migrator = "MIGRATOR")]
+async fn a_short_passphrase_leaves_the_key_store_off(db: SqlitePool) -> Result {
+    encryption_on();
+    assert!(!crypto::derives_keys(PASSPHRASE));
+    assert!(crypto::is_enabled());
+    assert!(crypto::derive_key("any label").is_none());
+
+    let store = KeyStore::open(&NodeConfig::default(), db).await?;
+    assert!(store.is_none(), "no key file and no long passphrase");
     Ok(())
 }

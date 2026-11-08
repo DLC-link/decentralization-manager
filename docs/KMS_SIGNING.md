@@ -124,7 +124,9 @@ copy of each key.
   1. The file named by `DECPM_KEY_STORE_KEY_FILE`. Mount it from a Secret,
      apart from the data volume. The file holds 64 hex characters or the
      base64 of 32 bytes, such as the output of `openssl rand -base64 32`.
-  2. A key derived from `DECPM_DB_ENCRYPTION_KEY`.
+  2. A key derived from `DECPM_DB_ENCRYPTION_KEY`, when that value has at
+     least 32 characters. One SHA-256 pass makes a shorter value cheap to
+     guess.
   3. In insecure mode only, `key-store.key` in the data directory. decman
      creates it on first use. It sits next to the database, so it suits local
      tests only.

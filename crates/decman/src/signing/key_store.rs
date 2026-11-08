@@ -53,7 +53,7 @@ const DERIVED_KEY_LABEL: &str = "decman-party-key-store-v1";
 
 /// What `open` tells the operator when no encryption key is configured.
 pub const STORE_OFF_HINT: &str = "DecMan's key store is off. Set DECPM_KEY_STORE_KEY_FILE to a \
-     mounted secret, or set DECPM_DB_ENCRYPTION_KEY";
+     mounted secret, or set DECPM_DB_ENCRYPTION_KEY to at least 32 characters";
 
 /// Domain label in the associated data, so a ciphertext from another use of
 /// the same key never decrypts here.

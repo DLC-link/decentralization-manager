@@ -266,10 +266,12 @@ stringData:
   # DECPM_ADMIN_ROLE: "decman-admin"
 
   # Optional: encryption key for secrets stored in the SQLite database
-  # (Keycloak client secrets per party). Any sufficiently long random
-  # passphrase — it is hashed with SHA-256 to derive the actual 32-byte
-  # key. If unset, secrets are stored in plaintext in the DB.
-  # DECPM_DB_ENCRYPTION_KEY: "<long-random-passphrase>"
+  # (Keycloak client secrets per party). Generate it with
+  # `openssl rand -base64 32`; it is hashed with SHA-256 to derive the
+  # actual 32-byte key. Without DECPM_KEY_STORE_KEY_FILE, it also protects
+  # decman's copies of party Daml keys, and only a value of at least 32
+  # characters does that. If unset, secrets are stored in plaintext in the DB.
+  # DECPM_DB_ENCRYPTION_KEY: "<output of openssl rand -base64 32>"
 
   # Optional: tighten CORS to a specific origin if the UI is served from a
   # different host than the API (reverse-proxy / dev server). Defaults to
@@ -566,8 +568,8 @@ Most variables have a default that's only useful for local development (loopback
 | `DECPM_JWT_ROLE_CLAIM` | unset | optional | Provider-specific JWT claim containing a role-name array; needed only when the admin role arrives as a namespaced custom claim |
 | `DECPM_ADMIN_ROLE` | unset | recommended | IdP role required for privileged endpoints. If unset, every authenticated caller is treated as admin. |
 | `DECPM_ALLOWED_ORIGIN` | same-origin | optional | CORS origin if UI host ≠ API host |
-| `DECPM_DB_ENCRYPTION_KEY` | unset | recommended | Random passphrase (hashed via SHA-256) protecting party secrets at rest. If unset, secrets are stored in plaintext in the SQLite DB. |
-| `DECPM_KEY_STORE_KEY_FILE` | unset | recommended | File holding the key that encrypts decman's copies of party Daml keys, as 64 hex characters or the base64 of 32 bytes. Mount it from a Secret, apart from the data volume. When unset, decman derives the key from `DECPM_DB_ENCRYPTION_KEY`. With neither, the key store is off. A move from the derived key to a file keeps the stored keys readable while `DECPM_DB_ENCRYPTION_KEY` stays set. Changing or losing the key makes decman export each key again, which a Splice 0.10 participant refuses by default. See [KMS_SIGNING.md](KMS_SIGNING.md) |
+| `DECPM_DB_ENCRYPTION_KEY` | unset | recommended | Random value (hashed via SHA-256) protecting party secrets at rest. Generate it with `openssl rand -base64 32`. Without `DECPM_KEY_STORE_KEY_FILE`, it also protects decman's copies of party Daml keys, but only when it has at least 32 characters. If unset, secrets are stored in plaintext in the SQLite DB. |
+| `DECPM_KEY_STORE_KEY_FILE` | unset | recommended | File holding the key that encrypts decman's copies of party Daml keys, as 64 hex characters or the base64 of 32 bytes. Mount it from a Secret, apart from the data volume. When unset, decman derives the key from a `DECPM_DB_ENCRYPTION_KEY` of at least 32 characters. With neither, the key store is off. A move from the derived key to a file keeps the stored keys readable while `DECPM_DB_ENCRYPTION_KEY` stays set. Changing or losing the key makes decman export each key again, which a Splice 0.10 participant refuses by default. See [KMS_SIGNING.md](KMS_SIGNING.md) |
 | `DECPM_TENANT_API_KEYS` | unset | optional | Comma-separated bearer keys for the tenant API (`/v0/tenant/*`). Set it only on a node that hosts external parties, or that adds hosts to a local party. Unset turns the tenant API off. Keep the keys in the Secret |
 | `DECPM_TENANT_RATE_LIMIT_PER_MINUTE` | `120` | optional | Calls per minute that one tenant API key may make. A call past the limit gets a 429 with `Retry-After`. The ACS block read does not count. An ACS block import counts only when it opens a copy, or when no open copy takes it. `0` turns the limit off |
 | `DECPM_VALIDATOR_OPERATOR_PARTY` | unset | optional | This node's Splice validator operator party. Set it on a node whose validator serves external parties. An unhost then archives the `ValidatorRight` and `TransferPreapproval` contracts this party holds for the party that the node leaves. The operator party also needs a party credential: see the README's [Party credentials for the validator operator](../README.md#party-credentials-for-the-validator-operator) |
