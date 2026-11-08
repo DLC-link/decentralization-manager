@@ -11,7 +11,10 @@ use dec_party_manager::{
         schema::{Commitable, SchemaRead, SchemaWrite},
     },
     signing::key_store::KeyStore,
-    workflow::{contracts::steps::sign::backfill_peer_keys, storage::artifact_kinds},
+    workflow::{
+        contracts::steps::sign::{backfill_peer_keys, own_daml_key},
+        storage::{WorkflowStorage, artifact_kinds, identity_kinds},
+    },
 };
 use sqlx::SqlitePool;
 
@@ -123,5 +126,41 @@ async fn a_short_passphrase_leaves_the_key_store_off(db: SqlitePool) -> Result {
 
     let store = KeyStore::open(&NodeConfig::default(), db).await?;
     assert!(store.is_none(), "no key file and no long passphrase");
+    Ok(())
+}
+
+#[sqlx::test(migrator = "MIGRATOR")]
+async fn an_onboarding_record_that_does_not_decrypt_is_never_saved_as_the_keys(
+    db: SqlitePool,
+) -> Result {
+    encryption_on();
+    completed_onboarding(&db, "onboarding-1").await?;
+    // A record written under another key fails the GCM check, so DecMan
+    // reads back the ciphertext unchanged.
+    sqlx::query(
+        "INSERT INTO workflow_artifacts (instance_name, artifact_kind, peer_id, payload, \
+         created_at) VALUES ('onboarding-1', ?, ?, ?, 1)",
+    )
+    .bind(artifact_kinds::PEER_PUBLIC_KEYS)
+    .bind(NODE)
+    .bind(&[0xA5u8; 60][..])
+    .execute(&db)
+    .await?;
+    // Nothing listens on the port, so the chain lookup fails too.
+    let closed_port = std::net::TcpListener::bind("127.0.0.1:0")?
+        .local_addr()?
+        .port();
+    let mut config = NodeConfig::default();
+    config.node.participant_id = Some(CantonId::parse(NODE)?);
+    config.canton.admin_api_port = closed_port;
+    config.canton.ledger_api_port = closed_port;
+    let party = CantonId::parse(PARTY)?;
+
+    assert!(own_daml_key(&config, &db, &party).await.is_err());
+
+    let saved = db
+        .read_identity(&party, identity_kinds::PEER_PUBLIC_KEYS, NODE)
+        .await?;
+    assert!(saved.is_none(), "the next deploy retries the backfill");
     Ok(())
 }

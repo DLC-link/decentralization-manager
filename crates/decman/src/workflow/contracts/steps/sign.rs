@@ -178,26 +178,39 @@ pub async fn own_daml_key(
     tracing::info!(
         "Loading Daml public key bundle for {node_id} on {dec_party_id} from identity table..."
     );
-    let keys_bytes = match db
+    let exported_keys = match db
         .read_identity(dec_party_id, identity_kinds::PEER_PUBLIC_KEYS, &node_id)
         .await?
     {
-        Some(bytes) => bytes,
+        Some(bytes) => decode_peer_keys(&bytes, &node_id)?,
         None => {
             tracing::warn!(
                 "PEER_PUBLIC_KEYS missing in identity table for {node_id} on {dec_party_id}; \
                  attempting backfill from completed onboarding artifacts"
             );
-            let from_local = backfill_peer_keys(db, dec_party_id, &node_id).await?;
-            let bytes = match from_local {
-                Some(b) => b,
+            // A record that does not decode, such as one that no longer
+            // decrypts, is never mirrored. The chain lookup replaces it.
+            let from_local = match backfill_peer_keys(db, dec_party_id, &node_id).await? {
+                Some(bytes) => match decode_peer_keys(&bytes, &node_id) {
+                    Ok(keys) => Some((bytes, keys)),
+                    Err(e) => {
+                        tracing::warn!(
+                            "Skipping the onboarding record of {node_id} on {dec_party_id}: {e:#}"
+                        );
+                        None
+                    }
+                },
+                None => None,
+            };
+            let (bytes, keys) = match from_local {
+                Some(found) => found,
                 None => {
                     tracing::warn!(
                         "Local artifacts backfill failed; querying Canton's on-chain \
                          topology (PartyToParticipant / legacy PartyToKeyMapping) to \
                          recover this node's Daml signing key for {dec_party_id}"
                     );
-                    backfill_peer_keys_from_chain(config, dec_party_id)
+                    let bytes = backfill_peer_keys_from_chain(config, dec_party_id)
                         .await?
                         .ok_or_else(|| {
                             anyhow::anyhow!(
@@ -207,7 +220,9 @@ pub async fn own_daml_key(
                                  {node_id} on {dec_party_id} — onboarding may not have \
                                  completed yet"
                             )
-                        })?
+                        })?;
+                    let keys = decode_peer_keys(&bytes, &node_id)?;
+                    (bytes, keys)
                 }
             };
             // Best-effort populate identity table for future calls; a failure
@@ -225,21 +240,9 @@ pub async fn own_daml_key(
                     "Failed to write backfilled PEER_PUBLIC_KEYS to identity table: {e:#}"
                 );
             }
-            bytes
+            keys
         }
     };
-
-    // The blob is two `varint(len)||SigningPublicKey` messages, written by
-    // onboarding. Decode unchanged so the bytes-on-the-wire shape stays
-    // identical to the previous file-based format.
-    let exported_keys: Vec<SigningPublicKey> = read_all_messages_from_bytes(&keys_bytes)?;
-
-    if exported_keys.len() != 2 {
-        anyhow::bail!(
-            "Expected 2 keys in PEER_PUBLIC_KEYS for {node_id}, but found {count}",
-            count = exported_keys.len()
-        );
-    }
 
     // Second key is the Daml signing key (first is namespace key)
     let signing_public_key = &exported_keys[1];
@@ -382,6 +385,20 @@ fn verify_prepared_transaction(
 /// Decode a sequence of `varint(len)||proto` messages from a byte slice. Mirrors
 /// `utils::read_all_messages_from_file` but operates on in-memory data — used
 /// to round-trip blobs we used to read from disk.
+/// The namespace key and the Daml signing key in a `PEER_PUBLIC_KEYS` blob.
+/// The blob is two `varint(len)||SigningPublicKey` messages, written by
+/// onboarding.
+fn decode_peer_keys(bytes: &[u8], node_id: &str) -> Result<Vec<SigningPublicKey>> {
+    let keys: Vec<SigningPublicKey> = read_all_messages_from_bytes(bytes)?;
+    if keys.len() != 2 {
+        anyhow::bail!(
+            "Expected 2 keys in PEER_PUBLIC_KEYS for {node_id}, but found {count}",
+            count = keys.len()
+        );
+    }
+    Ok(keys)
+}
+
 fn read_all_messages_from_bytes<M: prost::Message + Default>(data: &[u8]) -> Result<Vec<M>> {
     let mut cursor = data;
     let mut messages = Vec::new();
