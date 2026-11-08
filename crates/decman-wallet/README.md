@@ -217,8 +217,9 @@ Pinning the package is the recommended way to call `accept_transfer` and to
 set `TransferArgs::factory_template`. To pin one package, pass the template as
 `<package-id>:Module:Entity`, without the `#`. The check then compares the
 package id too. The prepare also names that id in its
-`packageIdSelectionPreference`, so the participant interprets the choice with
-that package.
+`packageIdSelectionPreference`, which asks the participant to interpret the
+choice with that package. The check is what refuses a root on any other
+package.
 
 The `#` form names the package by name only. Any package with that name
 passes, including a look-alike package with another package id.
@@ -326,18 +327,23 @@ Before you try again, check one of these:
 - The party's pending offers. A committed accept has removed its offer.
 - The completion for the error's `command_id`.
 
-After the error's `max_record_time`, with no completion for the `command_id`,
-the transaction did not commit. A resend is then safe.
+Once the participant's ledger time has passed the error's `max_record_time`
+and it shows no completion for the `command_id`, the transaction did not
+commit. A resend is then safe. A participant that is behind the synchronizer
+shows no completion yet, so wait until its ledger time has passed that time.
 
 Each prepare asks for a max record time `MAX_RECORD_DELAY` ahead, five
-minutes, and for hashing scheme V3. The synchronizer refuses the transaction
-after that time. V3 signs the time, so no host can change it once the key has
-signed. A participant on an older protocol version answers V2, which does not
-sign the time. The check still refuses a transaction without the time, but
-under V2 only the executing host applies it. Without a max record time, the
-synchronizer must still record an execute within 60 seconds of its ledger
-time, by default. But a signed transaction stays valid for a new execute until
-its preparation time is 24 hours old.
+minutes, and for hashing scheme V3. The executing host sets the transaction's
+max sequencing time from it, and the synchronizer refuses the transaction
+after that. V3 signs the time, so a host cannot change it without breaking
+the signature. A participant on an older protocol version answers V2, which
+does not sign the time. The check refuses a transaction without the time
+under both schemes. But in the Canton source we read, only the executing
+host applies the time, and no confirming participant compares the record
+time with the signed value. Against a host you do not trust, the bound is
+Canton's preparation-time tolerance: a signed transaction stays valid for a
+new execute until its preparation time is 24 hours old, by default. Ask a
+host you trust for the completion, or ask more than one host.
 
 A connection that never opened returns `Error::Transport`. Nothing reached the
 participant, so a retry is safe.

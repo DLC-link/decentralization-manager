@@ -2606,14 +2606,18 @@ async fn an_execute_refused_with_409_keeps_its_api_error() {
 }
 
 /// The unknown-outcome message names the max record time the prepare asked
-/// for, after which a resend is safe.
+/// for. A resend is safe once a participant's ledger time has passed it with
+/// no completion.
 fn assert_tells_when_a_resend_is_safe(error: &Error, prepare: &Value) {
     let message = error.to_string();
     let Some(max_record_time) = prepare["maxRecordTime"].as_str() else {
         panic!("the prepare must carry a max record time");
     };
     assert!(
-        message.contains(&format!("After {max_record_time}, with no completion")),
+        message.contains(&format!(
+            "Once a participant's ledger time has passed {max_record_time} and it shows \
+             no completion"
+        )),
         "{message}"
     );
 }

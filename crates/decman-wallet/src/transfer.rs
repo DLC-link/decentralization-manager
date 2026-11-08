@@ -47,8 +47,9 @@ pub const MAX_INPUT_HOLDINGS: usize = 100;
 /// How long after the prepare the synchronizer may record the transaction.
 ///
 /// A prepare, a signature and an execute take seconds. The rest of the five
-/// minutes absorbs clock drift and a slow host. After this time, Canton
-/// refuses the transaction, so a resend cannot pay twice.
+/// minutes absorbs clock drift and a slow host. The executing host sets the
+/// transaction's max sequencing time from the max record time, and the
+/// synchronizer refuses the transaction after that.
 pub const MAX_RECORD_DELAY: Duration = Duration::from_secs(5 * 60);
 
 /// The hashing scheme each prepare asks for. V3 signs the max record time,
@@ -824,8 +825,9 @@ mod tests {
         assert!(message.contains("may have committed"), "{message}");
         assert!(
             message.contains(
-                "After 2026-11-07T12:05:00.000000Z, with no completion for command command-1, \
-                 the transaction did not commit and a new one is safe."
+                "Once a participant's ledger time has passed 2026-11-07T12:05:00.000000Z \
+                 and it shows no completion for command command-1, the transaction did \
+                 not commit, and a new one is safe."
             ),
             "{message}"
         );

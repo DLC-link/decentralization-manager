@@ -173,8 +173,9 @@ pub enum Error {
         "the execute of command {command_id} has an unknown outcome: {source}. \
          The transaction may have committed. \
          Do not resend it before you check the ledger. \
-         After {max_record_time}, with no completion for command {command_id}, \
-         the transaction did not commit and a new one is safe."
+         Once a participant's ledger time has passed {max_record_time} and it \
+         shows no completion for command {command_id}, the transaction did not \
+         commit, and a new one is safe."
     )]
     ExecuteOutcomeUnknown {
         host: String,
@@ -185,9 +186,9 @@ pub enum Error {
         /// The hash the wallet signed, base64.
         prepared_transaction_hash: String,
         /// The max record time the prepare asked for, RFC 3339. The
-        /// synchronizer refuses the transaction after this time. A `Box<str>`
-        /// keeps every `Result` of this crate under clippy's 128-byte limit
-        /// for an error.
+        /// executing host applies it, and the synchronizer then refuses the
+        /// transaction after this time. A `Box<str>` keeps every `Result` of
+        /// this crate under clippy's 128-byte limit for an error.
         max_record_time: Box<str>,
         /// The error that hid the outcome: [`Error::Transport`],
         /// [`Error::Decode`], [`Error::Json`], [`Error::ResponseTooLarge`],
