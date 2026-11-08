@@ -151,6 +151,10 @@ KMS-backed keys and keys the store already holds. When a run cannot reach the
 participant, the task retries after 30 seconds. Each further failure doubles
 the wait, up to 15 minutes.
 
+The task finds the hosted parties in decman's party cache. A new database holds
+an empty cache until someone opens the party list. The task then copies those
+keys on its next run, within 15 minutes.
+
 Run this decman version on every node before its participant moves to Splice
 0.10. The task then copies the keys while export still works. The log reports
 `Copied this node's Daml key for <party> into DecMan's key store`.
