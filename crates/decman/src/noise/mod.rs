@@ -598,9 +598,9 @@ impl NoiseError {
 /// increases, so the lower byte is the older build.
 fn upgrade_side(peer: u8) -> &'static str {
     if peer < WIRE_VERSION {
-        "the peer runs an older dec-party-manager and must upgrade"
+        "the peer runs an older decman and must upgrade"
     } else {
-        "this node runs an older dec-party-manager and must upgrade"
+        "this node runs an older decman and must upgrade"
     }
 }
 
