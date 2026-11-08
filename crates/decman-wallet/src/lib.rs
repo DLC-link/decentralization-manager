@@ -51,6 +51,7 @@
 
 mod check;
 mod http;
+mod text;
 
 pub mod client;
 pub mod error;

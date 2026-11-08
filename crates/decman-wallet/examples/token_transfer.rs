@@ -29,8 +29,9 @@
 //!
 //! `pending` prints each offer's template and package id, as the participant
 //! reports them. It then prints the offer's pinned template on a line of its
-//! own, ready to copy into `INSTRUCTION_TEMPLATE`. Check the package id
-//! against a package you trust before you pin it.
+//! own, ready to copy into `INSTRUCTION_TEMPLATE`. It prints that line only
+//! for a package id of 64 lowercase hex digits. Check the package id against
+//! a package you trust before you pin it.
 //!
 //! ```sh
 //! MODE=send PARTY_ID=alice::1220… DECMAN_WALLET_SEED=… \
@@ -189,14 +190,32 @@ async fn log_pending(ledger: &LedgerClient, party: &str) -> Result {
             execute_before = %instruction.execute_before,
             "pending transfer"
         );
-        // Plain text on its own line, so the operator can copy it whole.
-        if let Some((_, qualified)) = instruction.template.split_once(':')
-            && !instruction.package_id.is_empty()
-        {
-            println!("{}:{qualified}", instruction.package_id);
+        // Plain text on its own line, so the operator can copy it whole. The
+        // participant supplies both parts. A newline or an escape sequence
+        // in either could print a second, look-alike line.
+        match instruction.template.split_once(':') {
+            Some((_, qualified))
+                if is_package_id(&instruction.package_id)
+                    && qualified.bytes().all(|byte| byte.is_ascii_graphic()) =>
+            {
+                println!("{}:{qualified}", instruction.package_id);
+            }
+            _ => tracing::warn!(
+                instruction_cid = %instruction.contract_id,
+                "the package id is not 64 lowercase hex digits, or the template is not \
+                 printable ASCII, so the pinned template is not printed"
+            ),
         }
     }
     Ok(())
+}
+
+/// A Daml package id is the SHA-256 of the package, in lowercase hex.
+fn is_package_id(text: &str) -> bool {
+    text.len() == 64
+        && text
+            .bytes()
+            .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
 }
 
 fn required(name: &str) -> Result<String> {

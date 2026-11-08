@@ -29,6 +29,7 @@ use serde_json::{Map, Value as Json, json};
 use crate::{
     error::{Error, Refusal, Result},
     ledger::PreparedSubmission,
+    text,
     transfer::TransferArgs,
 };
 
@@ -263,7 +264,12 @@ fn root_exercise(transaction: &PreparedTransaction) -> std::result::Result<&Exer
         .nodes
         .iter()
         .find(|node| &node.node_id == root)
-        .ok_or_else(|| Refusal::Shape(format!("its root node {root} is missing")))?;
+        .ok_or_else(|| {
+            Refusal::Shape(format!(
+                "its root node {root} is missing",
+                root = text::bounded(root)
+            ))
+        })?;
     let Some(VersionedNode::V1(node)) = node.versioned_node.as_ref() else {
         return Err(Refusal::Shape("its root node has no content".to_string()));
     };
@@ -599,7 +605,12 @@ fn canonical_date(days: i32) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use decman_lib::canton_proto_rs::com::daml::ledger::api::v2::{
-        GenMap, List, Optional, Record, RecordField, TextMap, Variant, text_map,
+        GenMap, Identifier, List, Optional, Record, RecordField, TextMap, Variant,
+        interactive::{
+            DamlTransaction, Metadata, daml_transaction::Node, metadata::SubmitterInfo,
+            transaction::v1,
+        },
+        text_map,
     };
 
     use super::*;
@@ -895,6 +906,98 @@ mod tests {
                 other => panic!("{shown} must be refused, got {other:?}"),
             }
         }
+    }
+
+    /// The host names the template, so a refusal must not print a long
+    /// name whole, nor a newline in it.
+    #[test]
+    fn a_refusal_bounds_a_long_template_from_the_host() {
+        let module = format!("Forged\n{}", "x".repeat(2993));
+        assert_eq!(module.chars().count(), 3000);
+        let exercise = Exercise {
+            contract_id: "00c1".to_string(),
+            package_name: "splice-amulet".to_string(),
+            template_id: Some(Identifier {
+                package_id: "package-id".to_string(),
+                module_name: module,
+                entity_name: "AmuletTransferInstruction".to_string(),
+            }),
+            acting_parties: vec!["alice::1220aa".to_string()],
+            interface_id: Some(Identifier {
+                package_id: "interface-package-id".to_string(),
+                module_name: "Splice.Api.Token.TransferInstructionV1".to_string(),
+                entity_name: "TransferInstruction".to_string(),
+            }),
+            choice_id: "TransferInstruction_Accept".to_string(),
+            ..Exercise::default()
+        };
+        let transaction = PreparedTransaction {
+            transaction: Some(DamlTransaction {
+                roots: vec!["0".to_string()],
+                nodes: vec![Node {
+                    node_id: "0".to_string(),
+                    versioned_node: Some(VersionedNode::V1(v1::Node {
+                        node_type: Some(NodeType::Exercise(exercise)),
+                    })),
+                }],
+                ..DamlTransaction::default()
+            }),
+            metadata: Some(Metadata {
+                submitter_info: Some(SubmitterInfo {
+                    act_as: vec!["alice::1220aa".to_string()],
+                    command_id: "command-1".to_string(),
+                }),
+                max_record_time: Some(TEN_AM.unsigned_abs()),
+                ..Metadata::default()
+            }),
+        };
+        let expected = Expected {
+            interface_id: "#splice-api-token-transfer-instruction-v1:Splice.Api.Token.TransferInstructionV1:TransferInstruction",
+            template_id: Some(
+                "#splice-amulet:Splice.AmuletTransferInstruction:AmuletTransferInstruction",
+            ),
+            choice: "TransferInstruction_Accept",
+            contract_id: "00c1",
+            party: "alice::1220aa",
+            command_id: "command-1",
+            max_record_time: "2026-11-04T10:00:00.000000Z",
+            extra_args: &json!({}),
+            transfer: None,
+        };
+
+        let refusal = match check_root(&transaction, &expected) {
+            Err(refusal) => refusal,
+            Ok(()) => panic!("the long template must be refused"),
+        };
+
+        assert!(
+            matches!(
+                refusal,
+                Refusal::Mismatch {
+                    field: "template",
+                    ..
+                }
+            ),
+            "{refusal:?}"
+        );
+        let message = refusal.to_string();
+        assert!(message.contains(" ... ("), "{message}");
+        assert!(message.chars().count() < 1300, "{message}");
+        assert!(!message.contains('\n'), "{message}");
+    }
+
+    /// The host names the hashing scheme, so the refusal bounds that name.
+    #[test]
+    fn a_refusal_bounds_an_unknown_scheme_name_from_the_host() {
+        let name = format!("V9\n{}", "x".repeat(2000));
+
+        let message = match hashing_scheme(&name) {
+            Err(refusal) => refusal.to_string(),
+            Ok(_) => panic!("an unknown scheme must be refused"),
+        };
+
+        assert!(message.contains(" ... ("), "{message}");
+        assert!(!message.contains('\n'), "{message}");
     }
 
     #[test]

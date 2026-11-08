@@ -202,8 +202,9 @@ pub enum Error {
 #[derive(Debug, Error)]
 pub enum Refusal {
     /// The wallet could not recompute the hash, so it cannot know what the
-    /// hash commits to. An unknown hashing scheme lands here.
-    #[error("its hash cannot be recomputed: {0}")]
+    /// hash commits to. An unknown hashing scheme lands here. The reason can
+    /// quote the host's text, so the message bounds it.
+    #[error("its hash cannot be recomputed: {}", crate::text::bounded(.0))]
     Unverifiable(String),
 
     /// The hash that came with the transaction is not the transaction's hash.
@@ -218,8 +219,9 @@ pub enum Refusal {
     #[error("{0}")]
     Shape(String),
 
-    /// The root exercise differs from what the wallet asked for.
-    #[error("its {field} is {found}, not {expected}")]
+    /// The root exercise differs from what the wallet asked for. The host
+    /// chose `found`, so the message bounds it.
+    #[error("its {field} is {}, not {expected}", crate::text::bounded(.found))]
     Mismatch {
         field: &'static str,
         expected: String,
