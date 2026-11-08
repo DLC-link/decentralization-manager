@@ -218,7 +218,8 @@ pub fn unlocked_holdings<'a>(
 }
 
 /// Order two non-negative decimal strings, such as `10.0000000000`, by
-/// value. A text that is not such a decimal sorts lowest.
+/// value. A text that is not such a decimal, or longer than a Daml decimal,
+/// sorts lowest.
 ///
 /// The text is compared digit by digit, so no amount is rounded. The longer
 /// integer part is larger. Equal integer parts fall to the fraction, padded
@@ -246,9 +247,18 @@ fn cmp_decimal(a: &str, b: &str) -> Ordering {
     }
 }
 
+/// The most characters of a Daml `Decimal`: 28 digits, a point and 10 digits.
+const MAX_DECIMAL_CHARS: usize = 39;
+
 /// The integer and fraction digits of a decimal such as `10.25`, with the
-/// integer's leading zeros removed. `None` for any other text.
+/// integer's leading zeros removed. `None` for any other text, and for a
+/// text longer than [`MAX_DECIMAL_CHARS`].
 fn decimal_parts(text: &str) -> Option<(&str, &str)> {
+    // The host chooses the amount text, and each comparison pads the
+    // fractions to the longer one. The cap bounds the work of a comparison.
+    if text.len() > MAX_DECIMAL_CHARS {
+        return None;
+    }
     let (integer, fraction) = text.split_once('.').unwrap_or((text, ""));
     let digits = |part: &str| part.bytes().all(|byte| byte.is_ascii_digit());
     (!integer.is_empty() && digits(integer) && digits(fraction))
@@ -972,6 +982,20 @@ mod tests {
             assert_eq!(cmp_decimal(a, b), order, "{a} against {b}");
             assert_eq!(cmp_decimal(b, a), order.reverse(), "{b} against {a}");
         }
+    }
+
+    /// A text longer than any Daml decimal is not one, so it sorts lowest
+    /// and costs no padding. The largest Daml decimal still reads.
+    #[test]
+    fn cmp_decimal_sorts_a_text_longer_than_a_daml_decimal_lowest() {
+        let long_fraction = format!("0.{}", "9".repeat(41));
+        assert_eq!(cmp_decimal(&long_fraction, "0.0000000001"), Ordering::Less);
+        assert_eq!(decimal_parts(&long_fraction), None);
+
+        let largest = format!("{}.{}", "9".repeat(28), "9".repeat(10));
+        assert_eq!(largest.len(), MAX_DECIMAL_CHARS);
+        assert!(decimal_parts(&largest).is_some(), "{largest}");
+        assert_eq!(cmp_decimal(&largest, "1"), Ordering::Greater);
     }
 
     fn holding_of(contract_id: &str, amount: &str) -> Holding {
