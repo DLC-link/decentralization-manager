@@ -297,18 +297,37 @@ fn bounded(message: &str) -> String {
     kept
 }
 
-/// A control character, or a Unicode format character that changes how the
-/// text around it reads: a zero-width or joiner character, a line or
-/// paragraph separator, a bidirectional override, or a byte order mark.
+/// A control character, a line or paragraph separator, or any Unicode
+/// format character (general category Cf): zero-width and joiner
+/// characters, bidirectional controls, the byte order mark, interlinear
+/// annotations, and the invisible tag characters.
+///
+/// The list is the Cf category of Unicode 15.1.
 fn is_unprintable(c: char) -> bool {
     c.is_control()
         || matches!(
             c,
-            '\u{200B}'..='\u{200F}'
+            '\u{00AD}'
+                | '\u{0600}'..='\u{0605}'
+                | '\u{061C}'
+                | '\u{06DD}'
+                | '\u{070F}'
+                | '\u{0890}'..='\u{0891}'
+                | '\u{08E2}'
+                | '\u{180E}'
+                | '\u{200B}'..='\u{200F}'
                 | '\u{2028}'..='\u{202E}'
                 | '\u{2060}'..='\u{2064}'
-                | '\u{2066}'..='\u{2069}'
+                | '\u{2066}'..='\u{206F}'
                 | '\u{FEFF}'
+                | '\u{FFF9}'..='\u{FFFB}'
+                | '\u{110BD}'
+                | '\u{110CD}'
+                | '\u{13430}'..='\u{1343F}'
+                | '\u{1BCA0}'..='\u{1BCA3}'
+                | '\u{1D173}'..='\u{1D17A}'
+                | '\u{E0001}'
+                | '\u{E0020}'..='\u{E007F}'
         )
 }
 
@@ -545,6 +564,13 @@ mod tests {
             "{message}"
         );
         assert!(!message.chars().any(is_unprintable), "{message}");
+    }
+
+    /// Tag characters are invisible, so they can hide text in a log. A soft
+    /// hyphen and an Arabic letter mark are format characters too.
+    #[test]
+    fn bounded_replaces_tag_characters_and_other_format_characters() {
+        assert_eq!(bounded("a\u{E0041}b\u{00AD}c\u{061C}d"), "a b c d");
     }
 
     /// The cut counts characters, so a multi-byte character is never split,
