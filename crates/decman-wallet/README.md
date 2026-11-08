@@ -312,10 +312,11 @@ does not tell the outcome. These cases return it:
 - The answer's body ended early or did not finish before the timeout.
 - The answer's body is not the JSON the client expects.
 - The answer's body is larger than `ClientOptions::max_response_bytes`.
-- The participant answered 408 or 500. Canton's JSON API answers 500 for an
-  internal gRPC error, which can follow a submission the participant accepted.
-  The JSON API can also answer 500 for a refused bearer token.
-- The participant's gateway answered 502, 503 or 504.
+- The answer is a 408, or any status from 500 up. A proxy answers 408 when it
+  stops waiting for the request. A gateway answers 502, 503, 504, 520 or 524
+  while the participant may still execute. Canton's JSON API answers 500 for
+  an internal, unknown or data-loss gRPC error, and for a refused bearer
+  token.
 
 The error's `source` holds the error behind it. The transaction may have
 committed. A new send builds a new transaction, so a blind retry can pay twice.

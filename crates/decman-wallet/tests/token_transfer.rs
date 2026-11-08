@@ -2514,6 +2514,97 @@ async fn an_execute_answered_with_an_internal_error_has_an_unknown_outcome() {
     assert_tells_when_a_resend_is_safe(&error, &prepare);
 }
 
+/// A gateway answers 524 when the participant behind it is slow to answer.
+/// No standard names that status, but the participant may still execute,
+/// so the outcome is unknown.
+#[tokio::test]
+async fn an_execute_answered_by_a_gateway_with_524_has_an_unknown_outcome() {
+    let key = ExternalKeyPair::from_seed([63u8; 32]);
+    let sender = key.party_id("alice");
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path(EXECUTE_PATH))
+        .respond_with(ResponseTemplate::new(524).set_body_string("A timeout occurred"))
+        .with_priority(1)
+        .mount(&server)
+        .await;
+    stub_send(&server, &sender, honestly(faithful_send(&sender))).await;
+
+    let error = match send_transfer(
+        &ledger_for(&server),
+        &registry_for(&server),
+        &key,
+        &send_args(&sender),
+    )
+    .await
+    {
+        Ok(_) => panic!("a 524 from the execute must not look like a success"),
+        Err(e) => e,
+    };
+
+    let wallet_command_id = sent_command_id(&server).await;
+    let prepare = sent_prepare(&server).await;
+    let executes = bodies(&server, EXECUTE_PATH).await;
+    assert_eq!(executes.len(), 1, "the wallet does not resend the execute");
+    match &error {
+        Error::ExecuteOutcomeUnknown {
+            command_id, source, ..
+        } => {
+            assert_eq!(command_id, &wallet_command_id);
+            assert!(source.is_status(524), "{source}");
+        }
+        other => panic!("expected an unknown outcome, got {other}"),
+    }
+    assert_tells_when_a_resend_is_safe(&error, &prepare);
+}
+
+/// Canton's JSON API answers 409 when the transaction was refused, for
+/// example over a contract another transaction holds. Nothing committed,
+/// so the error stays a plain API error.
+#[tokio::test]
+async fn an_execute_refused_with_409_keeps_its_api_error() {
+    let key = ExternalKeyPair::from_seed([65u8; 32]);
+    let sender = key.party_id("alice");
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path(EXECUTE_PATH))
+        .respond_with(ResponseTemplate::new(409).set_body_json(json!({
+            "code": "LOCAL_VERDICT_LOCKED_CONTRACTS",
+            "cause": "Rejected transaction as some of the contracts are locked",
+            "context": {},
+        })))
+        .with_priority(1)
+        .mount(&server)
+        .await;
+    stub_send(&server, &sender, honestly(faithful_send(&sender))).await;
+
+    let error = match send_transfer(
+        &ledger_for(&server),
+        &registry_for(&server),
+        &key,
+        &send_args(&sender),
+    )
+    .await
+    {
+        Ok(_) => panic!("a 409 from the execute must not look like a success"),
+        Err(e) => e,
+    };
+
+    assert_eq!(count(&server, EXECUTE_PATH).await, 1);
+    match &error {
+        Error::Api {
+            status, message, ..
+        } => {
+            assert_eq!(*status, 409);
+            assert!(
+                message.starts_with("LOCAL_VERDICT_LOCKED_CONTRACTS: "),
+                "{message}"
+            );
+        }
+        other => panic!("expected the API error, got {other}"),
+    }
+}
+
 /// The unknown-outcome message names the max record time the prepare asked
 /// for, after which a resend is safe.
 fn assert_tells_when_a_resend_is_safe(error: &Error, prepare: &Value) {

@@ -622,15 +622,15 @@ fn pinned_package(template_id: Option<&str>) -> Option<String> {
 /// - A transport error after the connection opened.
 /// - An answer the client could not read: a body that ended early or timed
 ///   out, that is not JSON, or that is over the cap.
-/// - A 408 or 500 from the participant. Its HTTP server answers 408 when it
-///   stops waiting, while the submission may still run. Canton's JSON API
-///   answers 500 for an internal, unknown or data-loss gRPC error. That
-///   error can follow a submission the participant accepted.
-/// - A 502, 503 or 504. A gateway in front of the participant answers these
-///   while the participant may still execute.
+/// - A 408, or any status from 500 up. A proxy answers 408 when it stops
+///   waiting for the request. A gateway answers 502, 503, 504, 520 or 524
+///   while the participant may still execute. Canton's JSON API answers 500
+///   for an internal, unknown or data-loss gRPC error, and for a refused
+///   bearer token.
 ///
 /// A connection that never opened reached nobody and stays
 /// [`Error::Transport`]. Any other non-2xx answer stays [`Error::Api`].
+/// 400, 401, 403, 404, 409 and 429 are the JSON API's definite refusals.
 ///
 /// [`Error::ResponseTooLarge`] does not carry the status, so a non-2xx
 /// answer with a body over the cap also becomes an unknown outcome.
@@ -644,7 +644,7 @@ fn after_execute(
     let left_the_wallet = match &error {
         Error::Transport { source, .. } => !source.is_connect(),
         Error::Decode { .. } | Error::Json { .. } | Error::ResponseTooLarge { .. } => true,
-        Error::Api { status, .. } => matches!(status, 408 | 500 | 502..=504),
+        Error::Api { status, .. } => *status == 408 || *status >= 500,
         _ => false,
     };
     if !left_the_wallet {
@@ -833,7 +833,7 @@ mod tests {
 
     #[test]
     fn an_execute_answered_with_an_error_status_keeps_its_api_error() {
-        for status in [400, 409, 429] {
+        for status in [400, 401, 403, 404, 409, 429] {
             let error = after_execute(
                 answered(status),
                 "command-1",
@@ -846,11 +846,11 @@ mod tests {
         }
     }
 
-    /// A 408 or 500 from the participant, or a gateway's 502, 503 or 504,
-    /// can follow a submission that still commits.
+    /// A 408, or any status from 500 up, can follow a submission that still
+    /// commits. A gateway can answer a status that no standard names.
     #[test]
     fn an_execute_answered_with_a_status_that_leaves_the_outcome_open_is_unknown() {
-        for status in [408, 500, 502, 503, 504] {
+        for status in [408, 500, 501, 502, 503, 504, 520, 524, 598, 599] {
             let error = after_execute(
                 answered(status),
                 "command-1",

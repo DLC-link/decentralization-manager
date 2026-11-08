@@ -191,8 +191,8 @@ pub enum Error {
         max_record_time: Box<str>,
         /// The error that hid the outcome: [`Error::Transport`],
         /// [`Error::Decode`], [`Error::Json`], [`Error::ResponseTooLarge`],
-        /// or [`Error::Api`] with a 408, 500, 502, 503 or 504. It names the
-        /// host too.
+        /// or [`Error::Api`] with a 408 or a status from 500 up. It names
+        /// the host too.
         #[source]
         source: Box<Error>,
     },
