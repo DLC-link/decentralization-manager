@@ -18,6 +18,8 @@
 //! Unsupported input fails closed: an unknown scheme version, or a field a
 //! scheme does not cover, produces an error rather than a hash that omits it.
 
+#[macro_use]
+mod error;
 mod encoding;
 mod metadata;
 mod nodes;
@@ -26,10 +28,9 @@ use canton_proto_rs::com::daml::ledger::api::v2::interactive::{
     HashingSchemeVersion, PrepareSubmissionResponse, PreparedTransaction,
 };
 
-use crate::{
-    canton_hash::encoding::{Encoder, required},
-    error::Result,
-};
+use crate::canton_hash::encoding::{Encoder, required};
+
+pub use error::{HashError, Result};
 
 /// The hashing scheme versions this implementation covers.
 ///
@@ -70,12 +71,12 @@ impl HashingScheme {
         match HashingSchemeVersion::try_from(version) {
             Ok(HashingSchemeVersion::V2) => Ok(Self::V2),
             Ok(HashingSchemeVersion::V3) => Ok(Self::V3),
-            Ok(other) => anyhow::bail!(
+            Ok(other) => bail!(
                 "hashing scheme {name} is not supported; the transaction hash cannot be \
                  verified, so it will not be signed",
                 name = other.as_str_name()
             ),
-            Err(_) => anyhow::bail!(
+            Err(_) => bail!(
                 "unknown hashing scheme version {version}; the transaction hash cannot be \
                  verified, so it will not be signed"
             ),
@@ -124,7 +125,7 @@ pub fn verify_prepared_submission(response: &PrepareSubmissionResponse) -> Resul
     let recomputed = compute_prepared_transaction_hash(scheme, prepared)?;
 
     if recomputed != response.prepared_transaction_hash {
-        anyhow::bail!(
+        bail!(
             "prepared transaction hash mismatch: the coordinator asked for a signature over \
              {supplied} but the transaction it sent hashes to {recomputed} under scheme \
              {scheme}",
@@ -151,7 +152,7 @@ fn normalize_intent_value(
     depth: usize,
 ) -> Result {
     use canton_proto_rs::com::daml::ledger::api::v2::value::Sum;
-    anyhow::ensure!(depth <= 100, "Intent value nesting exceeds 100 levels");
+    ensure!(depth <= 100, "Intent value nesting exceeds 100 levels");
     let normalize = |v: &mut canton_proto_rs::com::daml::ledger::api::v2::Value| {
         normalize_intent_value(v, depth + 1)
     };
@@ -164,7 +165,7 @@ fn normalize_intent_value(
                     field
                         .value
                         .as_mut()
-                        .ok_or_else(|| anyhow::anyhow!("Missing record field value"))?,
+                        .ok_or_else(|| hash_error!("Missing record field value"))?,
                 )?;
             }
             // LF's upgrade-friendly normalization omits trailing optional None
@@ -183,7 +184,7 @@ fn normalize_intent_value(
                 variant
                     .value
                     .as_deref_mut()
-                    .ok_or_else(|| anyhow::anyhow!("Missing variant value"))?,
+                    .ok_or_else(|| hash_error!("Missing variant value"))?,
             )?;
         }
         Some(Sum::Enum(v)) => v.enum_id = None,
@@ -203,11 +204,11 @@ fn normalize_intent_value(
                     entry
                         .value
                         .as_mut()
-                        .ok_or_else(|| anyhow::anyhow!("Missing map value"))?,
+                        .ok_or_else(|| hash_error!("Missing map value"))?,
                 )?;
             }
             v.entries.sort_by(|a, b| a.key.cmp(&b.key));
-            anyhow::ensure!(
+            ensure!(
                 !v.entries.windows(2).any(|p| p[0].key == p[1].key),
                 "Duplicate map key"
             );
@@ -218,7 +219,7 @@ fn normalize_intent_value(
                 let key = entry
                     .key
                     .as_mut()
-                    .ok_or_else(|| anyhow::anyhow!("Missing map key"))?;
+                    .ok_or_else(|| hash_error!("Missing map key"))?;
                 normalize(key)?;
                 let mut encoder = Encoder::new();
                 encoder.value(key)?;
@@ -226,12 +227,12 @@ fn normalize_intent_value(
                     entry
                         .value
                         .as_mut()
-                        .ok_or_else(|| anyhow::anyhow!("Missing map value"))?,
+                        .ok_or_else(|| hash_error!("Missing map value"))?,
                 )?;
                 entries.push((encoder.into_bytes(), entry));
             }
             entries.sort_by(|a, b| a.0.cmp(&b.0));
-            anyhow::ensure!(
+            ensure!(
                 !entries.windows(2).any(|p| p[0].0 == p[1].0),
                 "Duplicate map key"
             );
@@ -256,6 +257,8 @@ mod tests {
     };
 
     use super::*;
+
+    type Result<T = ()> = anyhow::Result<T>;
 
     // Fixtures mirroring Canton's `BaseNodeHashTest` / `HashUtilsTest`, so the
     // expected hashes below are Canton's own, lifted from its test suite at

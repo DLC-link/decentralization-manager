@@ -10,7 +10,7 @@
 use canton_proto_rs::com::daml::ledger::api::v2::{Identifier, Value, value};
 use sha2::{Digest, Sha256};
 
-use crate::error::Result;
+use crate::canton_hash::Result;
 
 /// `HashPurpose.PreparedSubmission` (48) as a 4-byte big-endian integer. Every
 /// hash in the scheme is domain-separated with this prefix.
@@ -85,7 +85,7 @@ impl Encoder {
     /// rather than truncate into a different (attacker-chosen) encoding.
     fn length(&mut self, length: usize) -> Result {
         let length = i32::try_from(length)
-            .map_err(|_| anyhow::anyhow!("length {length} exceeds the int32 the encoding uses"))?;
+            .map_err(|_| hash_error!("length {length} exceeds the int32 the encoding uses"))?;
         self.int32(length);
         Ok(())
     }
@@ -104,7 +104,7 @@ impl Encoder {
     /// hex rendering of those bytes.
     pub(super) fn hex_string(&mut self, value: &str) -> Result {
         let raw = hex::decode(value)
-            .map_err(|e| anyhow::anyhow!("expected a hex-encoded value, got {value:?}: {e}"))?;
+            .map_err(|e| hash_error!("expected a hex-encoded value, got {value:?}: {e}"))?;
         self.bytes(&raw)
     }
 
@@ -179,12 +179,12 @@ impl Encoder {
 
     fn value_at_depth(&mut self, value: &Value, depth: usize) -> Result {
         if depth > MAX_VALUE_DEPTH {
-            anyhow::bail!("value nesting exceeds the {MAX_VALUE_DEPTH} level limit");
+            bail!("value nesting exceeds the {MAX_VALUE_DEPTH} level limit");
         }
         let sum = value
             .sum
             .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("value has no variant set"))?;
+            .ok_or_else(|| hash_error!("value has no variant set"))?;
         match sum {
             value::Sum::Unit(()) => self.byte(0x00),
             value::Sum::Bool(v) => {
@@ -295,7 +295,7 @@ impl Encoder {
 
 /// Unwrap a protobuf field the encoding treats as required.
 pub(super) fn required<T>(value: Option<T>, what: &str) -> Result<T> {
-    value.ok_or_else(|| anyhow::anyhow!("prepared transaction is missing its {what}"))
+    value.ok_or_else(|| hash_error!("prepared transaction is missing its {what}"))
 }
 
 #[cfg(test)]
