@@ -71,6 +71,14 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
     })
     .await
     .context("Canton still exports P1's key after the restart")?;
+    for (participant, port) in [(1, f.p1.http), (2, f.p2.http)] {
+        let f = &*f;
+        chaos::poll_until(Duration::from_secs(180), || async move {
+            Ok(synchronizer_connected(f, port).await)
+        })
+        .await
+        .with_context(|| format!("P{participant} did not reconnect to the synchronizer"))?;
+    }
 
     let offsets = [log_len(f, 1).await?, log_len(f, 2).await?];
     deploy().run(f).await?;
@@ -158,6 +166,17 @@ async fn export_is_refused(config: &NodeConfig, party: &CantonId) -> anyhow::Res
             Ok(false)
         }
     }
+}
+
+/// Whether the node reports a healthy synchronizer connection. The restart
+/// drops it, and a deploy before it comes back would fail for that reason.
+async fn synchronizer_connected(f: &Fixture, port: u16) -> bool {
+    let Some(health) = f.probe_get_json::<Value>(port, "/node-health").await else {
+        return false;
+    };
+    health["synchronizers"]
+        .as_array()
+        .is_some_and(|all| all.iter().any(|s| s["healthy"] == Value::Bool(true)))
 }
 
 fn log_path(f: &Fixture, participant: usize) -> std::path::PathBuf {
