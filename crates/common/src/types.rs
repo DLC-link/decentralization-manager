@@ -206,7 +206,9 @@ pub enum ConnectionStatus {
     Connected,
     /// Failed to establish TCP connection (peer not reachable)
     Unreachable,
-    /// Noise handshake/decryption failed (likely wrong public key configured)
+    /// Noise handshake/decryption failed (likely wrong public key configured).
+    /// Also covers a peer that refused our frame because it speaks a different
+    /// wire version; `ParticipantStatus::wire_version` then carries its byte.
     HandshakeFailed,
 }
 
@@ -235,6 +237,11 @@ pub struct ParticipantStatus {
     /// on code that predates the field. This is what the peers table shows.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub build_version: Option<String>,
+    /// Noise wire version the peer's listener speaks, when known: ours for the
+    /// current node and for a `Connected` peer, the peer's own byte when it
+    /// refused our frame, `None` otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wire_version: Option<u8>,
 }
 
 /// Response for the participants status endpoint
@@ -243,6 +250,11 @@ pub struct ParticipantStatus {
 #[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 pub struct ParticipantsStatusResponse {
     pub statuses: Vec<ParticipantStatus>,
+    /// Noise wire version this node speaks. Set even when this node is not in
+    /// its own peers table, so a client can always tell which side of a
+    /// mismatch is older. `None` only from a node that predates the field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wire_version: Option<u8>,
 }
 
 /// Progress status of a workflow (kick, onboarding, etc.)

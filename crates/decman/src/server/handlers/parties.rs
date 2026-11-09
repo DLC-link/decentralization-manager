@@ -38,8 +38,8 @@ use crate::{
     },
     error::Result,
     noise::{
-        Message, MessageType, NoiseError, NoiseKeypair, parse_public_key, send_noise_message,
-        send_noise_message_with_retry,
+        Message, MessageType, NoiseError, NoiseKeypair, WIRE_VERSION, parse_public_key,
+        send_noise_message, send_noise_message_with_retry,
     },
     server::{
         AppState, former_parties,
@@ -946,6 +946,7 @@ enum OwnerKeysFailureKind {
     Unreachable,
     TimedOut,
     HandshakeFailed,
+    WireVersionMismatch,
     Denied,
     ConnectionBroken,
     BadPeerConfig,
@@ -1099,6 +1100,7 @@ fn request_failure_kind(err: &NoiseError) -> OwnerKeysFailureKind {
         NoiseError::Noise(_) | NoiseError::HandshakeFailed | NoiseError::DecryptionError => {
             Kind::HandshakeFailed
         }
+        NoiseError::WireVersionMismatch { .. } => Kind::WireVersionMismatch,
         NoiseError::BadStatusCode(..) => Kind::Denied,
         NoiseError::InvalidMessage => Kind::UnparsableReply,
         NoiseError::JsonSerialization(_) => Kind::BadPayload,
@@ -2247,6 +2249,7 @@ async fn check_participants_status(
                     workflow: None,
                     version: Some(crate::build_info::SEMVER.to_string()),
                     build_version: Some(crate::build_info::build_version().to_string()),
+                    wire_version: Some(WIRE_VERSION),
                 }
             }));
             continue;
@@ -2269,6 +2272,7 @@ async fn check_participants_status(
                     workflow: None,
                     version: None,
                     build_version: None,
+                    wire_version: None,
                 };
             };
 
@@ -2296,19 +2300,24 @@ async fn check_participants_status(
                         workflow: reply.workflow,
                         version: reply.version,
                         build_version: reply.build_version,
+                        wire_version: Some(WIRE_VERSION),
                     }
                 }
                 Err(e) => {
                     // Map NoiseError -> ConnectionStatus (binary semantics — Unreachable
                     // covers transport-side failures; HandshakeFailed covers everything
-                    // else, matching prior behavior of this endpoint).
-                    let status = match &e {
+                    // else). A version mismatch stays HandshakeFailed so older clients
+                    // still read it; `wire_version` tells it apart.
+                    let (status, wire_version) = match &e {
                         NoiseError::TcpConnectionTimeout(_)
                         | NoiseError::TcpConnectionFailed(_)
                         | NoiseError::Io(_)
                         | NoiseError::Hyper(_)
-                        | NoiseError::RequestTimeout => ConnectionStatus::Unreachable,
-                        _ => ConnectionStatus::HandshakeFailed,
+                        | NoiseError::RequestTimeout => (ConnectionStatus::Unreachable, None),
+                        NoiseError::WireVersionMismatch { peer } => {
+                            (ConnectionStatus::HandshakeFailed, Some(*peer))
+                        }
+                        _ => (ConnectionStatus::HandshakeFailed, None),
                     };
                     ParticipantStatus {
                         id: peer_id,
@@ -2317,6 +2326,7 @@ async fn check_participants_status(
                         workflow: None,
                         version: None,
                         build_version: None,
+                        wire_version,
                     }
                 }
             }
@@ -2326,7 +2336,10 @@ async fn check_participants_status(
     let results = futures::future::join_all(status_futures).await;
     let statuses: Vec<ParticipantStatus> = results.into_iter().filter_map(|r| r.ok()).collect();
 
-    Ok(ParticipantsStatusResponse { statuses })
+    Ok(ParticipantsStatusResponse {
+        statuses,
+        wire_version: Some(WIRE_VERSION),
+    })
 }
 
 /// Query parameters for the peer package comparison
@@ -2394,6 +2407,10 @@ fn peer_failure_hint(err: &NoiseError) -> &'static str {
         NoiseError::Noise(_) | NoiseError::HandshakeFailed | NoiseError::DecryptionError => {
             "the Noise handshake failed — this node's key or the derived PSK does not match what \
              the peer expects, so check each side has the other's current public key"
+        }
+        NoiseError::WireVersionMismatch { .. } => {
+            "the peer speaks a different decman wire protocol, so the key is not the problem — \
+             the error names both versions; upgrade whichever side is older"
         }
         NoiseError::BadStatusCode(..) => {
             "the peer answered but refused the request — it may not have this node registered as \
@@ -2605,10 +2622,17 @@ async fn get_local_namespace_fingerprints(config: &NodeConfig) -> Result<HashSet
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
     use http::StatusCode;
+    use tokio::net::TcpListener;
+    use tokio_noise::handshakes::nn_psk2::Responder as NoiseResponder;
 
     use super::*;
-    use crate::{config::Network, db::MIGRATOR};
+    use crate::{
+        config::{Network, NoiseRetryConfig},
+        db::MIGRATOR,
+    };
 
     fn test_peer(name: &str) -> anyhow::Result<Peer> {
         Ok(Peer {
@@ -3255,6 +3279,7 @@ mod tests {
             NoiseError::HandshakeFailed,
             NoiseError::DecryptionError,
             NoiseError::BadStatusCode(StatusCode::SERVICE_UNAVAILABLE, None),
+            NoiseError::WireVersionMismatch { peer: 0xD2 },
             NoiseError::InvalidMessage,
             NoiseError::UnknownPeer("x".into()),
         ];
@@ -3272,6 +3297,17 @@ mod tests {
         assert_ne!(
             peer_failure_hint(&NoiseError::InvalidMessage),
             peer_failure_hint(&NoiseError::TcpConnectionFailed("x".into())),
+        );
+        // A version mismatch must not send the operator to check the key.
+        let mismatch = peer_failure_hint(&NoiseError::WireVersionMismatch { peer: 0xD2 });
+        assert_ne!(mismatch, peer_failure_hint(&NoiseError::HandshakeFailed));
+        assert!(
+            mismatch.contains("protocol") && mismatch.contains("upgrade"),
+            "the mismatch hint does not name the fix: {mismatch}"
+        );
+        assert!(
+            !mismatch.contains("public key"),
+            "the mismatch hint points at the key: {mismatch}"
         );
     }
 
@@ -3310,9 +3346,12 @@ mod tests {
             StatusCode::SERVICE_UNAVAILABLE,
             Some("not a registered peer".into()),
         );
+        let mismatch = NoiseError::WireVersionMismatch { peer: 0xD2 };
         assert_eq!(next(&down), OwnerKeysLog::Warn);
         assert_eq!(next(&down), OwnerKeysLog::Debug);
         assert_eq!(next(&denied), OwnerKeysLog::Warn);
+        assert_eq!(next(&mismatch), OwnerKeysLog::Warn);
+        assert_eq!(next(&mismatch), OwnerKeysLog::Debug);
         assert_eq!(next(&NoiseError::HandshakeFailed), OwnerKeysLog::Warn);
         assert_eq!(next(&NoiseError::DecryptionError), OwnerKeysLog::Debug);
     }
@@ -3361,6 +3400,144 @@ mod tests {
             rendered.contains("unknown sender"),
             "reason missing from Display: {rendered}"
         );
+    }
+
+    /// A peer listener that answers every request with `status` and `body`
+    /// over a real Noise session. Returns its port and how many requests it
+    /// served.
+    async fn stub_peer(
+        psk: [u8; 32],
+        status: StatusCode,
+        body: Vec<u8>,
+    ) -> anyhow::Result<(u16, Arc<AtomicUsize>, tokio::task::JoinHandle<()>)> {
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let port = listener.local_addr()?.port();
+        let served = Arc::new(AtomicUsize::new(0));
+        let counter = served.clone();
+        let server = tokio::spawn(async move {
+            while let Ok((socket, _)) = listener.accept().await {
+                let counter = counter.clone();
+                let body = body.clone();
+                tokio::spawn(async move {
+                    let respond = move |_: &[u8], _: hyper::Request<hyper::Body>| {
+                        counter.fetch_add(1, Ordering::SeqCst);
+                        let mut response = hyper::Response::new(hyper::Body::from(body.clone()));
+                        *response.status_mut() = status;
+                        async move { Ok::<_, hyper::Error>(response) }
+                    };
+                    let responder = NoiseResponder::new(move |_: &[u8]| Some(psk));
+                    if let Err(e) =
+                        hyper_noise::server::serve_http(socket, responder, respond, None).await
+                    {
+                        tracing::warn!("stub peer connection failed: {e}");
+                    }
+                });
+            }
+        });
+        Ok((port, served, server))
+    }
+
+    /// A refusing peer stays `HandshakeFailed` either way. Only a refusal on
+    /// another wire version carries a byte, so the hover can tell the two
+    /// apart, and only that refusal is not retried.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn the_status_probe_reports_only_a_mismatched_peers_wire_version(
+        db: SqlitePool,
+    ) -> anyhow::Result<()> {
+        let root = tempfile::tempdir()?;
+        let mut config = NodeConfig::default().with_root_dir(root.path());
+        let self_id = CantonId::parse(&format!("self::1220{}", "a".repeat(64)))?;
+        config.node.participant_id = Some(self_id.clone());
+        config.noise_retry = NoiseRetryConfig {
+            per_attempt_timeout_secs: 5,
+            max_attempts: 2,
+            backoff_ms: 0,
+        };
+        let keys = NoiseKeypair::generate();
+        tokio::fs::create_dir_all(config.data_dir()).await?;
+        keys.save_to_file(config.key_file_path()).await?;
+
+        let older = WIRE_VERSION - 1;
+        let mut mismatch = Message::new(
+            MessageType::Error,
+            b"request rejected: Noise protocol version mismatch".to_vec(),
+        )
+        .to_bytes();
+        mismatch[0] = older;
+        let denied = Message::new(
+            MessageType::Error,
+            b"request rejected: unknown sender".to_vec(),
+        )
+        .to_bytes();
+        let pong = Message::new_empty(MessageType::Pong).to_bytes();
+
+        let mut peers = vec![Peer {
+            participant_id: self_id,
+            name: "self".into(),
+            address: "127.0.0.1".into(),
+            port: 1,
+            public_key: keys.public_key_hex(),
+            party: None,
+        }];
+        let mut stubs = HashMap::new();
+        for (name, fill, status, body) in [
+            ("older", 'b', StatusCode::SERVICE_UNAVAILABLE, mismatch),
+            ("denying", 'c', StatusCode::SERVICE_UNAVAILABLE, denied),
+            ("healthy", 'd', StatusCode::OK, pong),
+        ] {
+            let peer_keys = NoiseKeypair::generate();
+            let psk = *peer_keys.derive_psk(&keys.public_key);
+            let (port, served, server) = stub_peer(psk, status, body).await?;
+            peers.push(Peer {
+                participant_id: CantonId::parse(&format!(
+                    "{name}::1220{}",
+                    fill.to_string().repeat(64)
+                ))?,
+                name: name.into(),
+                address: "127.0.0.1".into(),
+                port,
+                public_key: peer_keys.public_key_hex(),
+                party: None,
+            });
+            stubs.insert(name, (served, server));
+        }
+        let mut tx = db.begin_transaction().await?;
+        for peer in &peers {
+            tx.insert_peer(peer).await?;
+        }
+        Commitable::commit(tx).await?;
+
+        let response = check_participants_status(&config, &db).await?;
+        for (_, server) in stubs.values() {
+            server.abort();
+        }
+
+        let row = |name: &str| {
+            response
+                .statuses
+                .iter()
+                .find(|s| s.id.starts_with(&format!("{name}::")))
+                .map(|s| (s.status, s.wire_version))
+                .ok_or_else(|| anyhow::anyhow!("no status row for {name}"))
+        };
+        let served = |name: &str| stubs.get(name).map(|(n, _)| n.load(Ordering::SeqCst));
+        assert_eq!(response.wire_version, Some(WIRE_VERSION));
+        assert_eq!(
+            row("self")?,
+            (ConnectionStatus::CurrentNode, Some(WIRE_VERSION))
+        );
+        assert_eq!(
+            row("older")?,
+            (ConnectionStatus::HandshakeFailed, Some(older))
+        );
+        assert_eq!(row("denying")?, (ConnectionStatus::HandshakeFailed, None));
+        assert_eq!(
+            row("healthy")?,
+            (ConnectionStatus::Connected, Some(WIRE_VERSION))
+        );
+        assert_eq!(served("older"), Some(1));
+        assert_eq!(served("denying"), Some(config.noise_retry.max_attempts));
+        Ok(())
     }
 }
 
