@@ -197,24 +197,33 @@ const truncateKey = (key: string): string =>
  * without hosting the party may have no participant, so the key is the one
  * name every kick card can show.
  */
-const KickedOwnerKeyRow = ({ ownerKey }: { ownerKey: string }) => {
+/** A labelled key fingerprint, shortened, with a button that copies it whole. */
+const KeyRow = ({
+  label,
+  fingerprint,
+  testId,
+}: {
+  label: string;
+  fingerprint: string;
+  testId: string;
+}) => {
   const { showSnackbar } = useSnackbar();
   return (
     <Box
       sx={{ display: "flex", alignItems: "center", gap: 1 }}
-      data-testid="kicked-owner-key"
+      data-testid={testId}
     >
       <Typography variant="caption" color="text.secondary" sx={{ minWidth: 96 }}>
-        Owner key
+        {label}
       </Typography>
       <Typography variant="body2" sx={{ fontFamily: "var(--font-mono)" }}>
-        {truncateKey(ownerKey)}
+        {truncateKey(fingerprint)}
       </Typography>
-      <Tooltip title="Copy owner key">
+      <Tooltip title={`Copy ${label.toLowerCase()}`}>
         <IconButton
           size="small"
           onClick={async () => {
-            const ok = await copyToClipboard(ownerKey);
+            const ok = await copyToClipboard(fingerprint);
             showSnackbar(ok ? "Copied to clipboard" : "Failed to copy");
           }}
           sx={{ p: 0.25 }}
@@ -225,6 +234,10 @@ const KickedOwnerKeyRow = ({ ownerKey }: { ownerKey: string }) => {
     </Box>
   );
 };
+
+const KickedOwnerKeyRow = ({ ownerKey }: { ownerKey: string }) => (
+  <KeyRow label="Owner key" fingerprint={ownerKey} testId="kicked-owner-key" />
+);
 
 const InvitationCard = ({
   invitation,
@@ -316,6 +329,7 @@ const InvitationCard = ({
     !!invitation.dec_party_id ||
     !!invitation.kicked_participant ||
     !!invitation.kicked_owner_key ||
+    !!invitation.rotated_key ||
     !!invitation.new_participant ||
     invitation.new_threshold != null ||
     (invitation.participants?.length ?? 0) > 0 ||
@@ -332,6 +346,8 @@ const InvitationCard = ({
       ? `Remove ${truncatePartyId(invitation.kicked_participant)}`
       : invitation.kicked_owner_key
         ? `Remove owner key ${truncateKey(invitation.kicked_owner_key)}`
+        : invitation.rotated_key
+        ? `Replace Daml key ${truncateKey(invitation.rotated_key)}`
         : pkgCount > 0
         ? `Deploy ${pkgCount} package${pkgCount === 1 ? "" : "s"}`
         : darCount > 0
@@ -503,6 +519,13 @@ const InvitationCard = ({
           )}
           {invitation.kicked_owner_key && (
             <KickedOwnerKeyRow ownerKey={invitation.kicked_owner_key} />
+          )}
+          {invitation.rotated_key && (
+            <KeyRow
+              label="Replaced key"
+              fingerprint={invitation.rotated_key}
+              testId="rotated-key"
+            />
           )}
           {invitation.new_participant && (
             <Box sx={{ display: "flex", alignItems: "center", gap: 1 }}>

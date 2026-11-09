@@ -330,6 +330,7 @@ enum InvitationMeta {
     Contracts(ContractsInvitePayload),
     AddParty(AddPartyInvitePayload),
     ChangeThreshold(ChangeThresholdInvitePayload),
+    RotateKey(RotateKeyInvitePayload),
 }
 
 /// On boot, re-spawn any InProgress workflow runs that were interrupted by the
@@ -420,6 +421,7 @@ pub(crate) async fn respawn_coordinator(
     let mut dars_config = None;
     let mut add_party_config = None;
     let mut change_threshold_config = None;
+    let mut rotate_key_config = None;
     let parsed = match kind {
         WorkflowKind::Onboarding => {
             serde_json::from_str::<workflow::OnboardingConfig>(&run.config_json)
@@ -440,6 +442,10 @@ pub(crate) async fn respawn_coordinator(
         WorkflowKind::ChangeThreshold => {
             serde_json::from_str::<workflow::ChangeThresholdConfig>(&run.config_json)
                 .map(|c| change_threshold_config = Some(c))
+        }
+        WorkflowKind::RotateKey => {
+            serde_json::from_str::<workflow::RotateKeyConfig>(&run.config_json)
+                .map(|c| rotate_key_config = Some(c))
         }
     };
     if let Err(e) = parsed {
@@ -496,6 +502,7 @@ pub(crate) async fn respawn_coordinator(
         dars_config,
         add_party_config,
         change_threshold_config,
+        rotate_key_config,
         auth_snapshot,
         last_seen,
     );
@@ -519,6 +526,7 @@ fn spawn_coordinator_run(
     dars_config: Option<workflow::DarsConfig>,
     add_party_config: Option<workflow::AddPartyConfig>,
     change_threshold_config: Option<workflow::ChangeThresholdConfig>,
+    rotate_key_config: Option<workflow::RotateKeyConfig>,
     auth: Option<WorkflowAuth>,
     last_seen: LastSeen,
 ) -> tokio::task::JoinHandle<()> {
@@ -529,6 +537,7 @@ fn spawn_coordinator_run(
         WorkflowKind::Dars => WorkflowType::Dars,
         WorkflowKind::AddParty => WorkflowType::AddParty,
         WorkflowKind::ChangeThreshold => WorkflowType::ChangeThreshold,
+        WorkflowKind::RotateKey => WorkflowType::RotateKey,
     };
     tokio::spawn(async move {
         let instance_name = instance.instance_name.clone();
@@ -545,6 +554,7 @@ fn spawn_coordinator_run(
             dars_config,
             add_party_config,
             change_threshold_config,
+            rotate_key_config,
             auth,
             last_seen,
             instance.clone(),
@@ -650,6 +660,7 @@ impl WorkflowTriggers {
         let mut dar_hashes = Vec::new();
         let mut kicked_participant = None;
         let mut kicked_owner_key = None;
+        let mut rotated_key = None;
         let mut new_participant = None;
         let mut new_threshold = None;
         let mut previous_threshold = None;
@@ -707,6 +718,14 @@ impl WorkflowTriggers {
                 participants = p.participants;
                 workflow_instance = p.workflow_instance;
             }
+            InvitationMeta::RotateKey(p) => {
+                rotated_key = Some(p.rotated_key);
+                new_threshold = Some(p.threshold);
+                confirmation_threshold = Some(p.confirmation_threshold);
+                dec_party_id = Some(p.dec_party_id);
+                participants = p.participants;
+                workflow_instance = p.workflow_instance;
+            }
         }
         // Key the id on the coordinator's run instance when available so a
         // NEW run's invite never silently morphs an older card in place — an
@@ -735,6 +754,7 @@ impl WorkflowTriggers {
             dar_hashes,
             kicked_participant,
             kicked_owner_key,
+            rotated_key,
             new_participant,
             new_threshold,
             previous_threshold,
@@ -1502,6 +1522,9 @@ pub async fn start_server(
             .service(handlers::start_change_threshold)
             .service(handlers::get_change_threshold_status)
             .service(handlers::cancel_change_threshold)
+            .service(handlers::start_rotate_key)
+            .service(handlers::get_rotate_key_status)
+            .service(handlers::cancel_rotate_key)
             .service(handlers::list_external_parties)
             .service(handlers::unhost_external_party)
             .service(handlers::preview_unhost_external_party)
@@ -2156,6 +2179,7 @@ async fn handle_incoming_connection(
                         | MessageType::AddPartyClearSignatures
                         | MessageType::AddPartyClearProposal
                         | MessageType::ChangeThresholdSignatures
+                        | MessageType::RotateKeySignatures
                         | MessageType::StatusUpdate
                         | MessageType::DeclineInvitation => {
                             // Route workflow-command traffic to the coordinator
@@ -2199,7 +2223,8 @@ async fn handle_incoming_connection(
                         | MessageType::InviteContracts
                         | MessageType::InviteDars
                         | MessageType::InviteAddParty
-                        | MessageType::InviteChangeThreshold => {
+                        | MessageType::InviteChangeThreshold
+                        | MessageType::InviteRotateKey => {
                             // Invites are accepted unconditionally: workflows are
                             // multi-instance now, so a node already coordinating or
                             // participating in runs can take part in more
@@ -2216,6 +2241,7 @@ async fn handle_incoming_connection(
                                 MessageType::InviteChangeThreshold => {
                                     InvitationType::ChangeThreshold
                                 }
+                                MessageType::InviteRotateKey => InvitationType::RotateKey,
                                 _ => unreachable!(),
                             };
                             tracing::info!(
@@ -2298,6 +2324,19 @@ async fn handle_incoming_connection(
                                             Err(e) => {
                                                 tracing::warn!(
                                                     "Change-threshold invite payload was unparseable: {e}"
+                                                );
+                                                InvitationMeta::None
+                                            }
+                                        }
+                                    }
+                                    InvitationType::RotateKey => {
+                                        match serde_json::from_slice::<RotateKeyInvitePayload>(
+                                            &msg.payload,
+                                        ) {
+                                            Ok(p) => InvitationMeta::RotateKey(p),
+                                            Err(e) => {
+                                                tracing::warn!(
+                                                    "Rotate-key invite payload was unparseable: {e}"
                                                 );
                                                 InvitationMeta::None
                                             }
@@ -2735,10 +2774,18 @@ async fn list_my_owner_keys(
             continue;
         }
 
+        // A rotation leaves the old key in the vault under the onboarding
+        // name, next to the new one under its own name. Only the party's key
+        // list says which one is in force, so two named keys go to the
+        // fingerprint match below.
         let named = full_party_id.rsplit_once("::").and_then(|(prefix, _)| {
-            my_protocol_keys_by_name
-                .get(&workflow::signing_keys::party_daml_key_name(prefix))
-                .cloned()
+            let mut named = my_protocol_keys_by_name
+                .iter()
+                .filter(|(name, _)| workflow::signing_keys::is_party_daml_key_name(name, prefix));
+            match (named.next(), named.next()) {
+                (Some((_, fingerprint)), None) => Some(fingerprint.clone()),
+                _ => None,
+            }
         });
         // Falling back to the fingerprint matters for the parties that need it
         // most: a peer that reports no key cannot be attributed by a

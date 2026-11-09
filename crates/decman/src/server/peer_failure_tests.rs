@@ -171,6 +171,7 @@ async fn a_peer_that_gives_up_fails_the_coordinator_run(db: SqlitePool) -> Resul
         None,
         None,
         None,
+        None,
         last_seen,
         instance,
     ));

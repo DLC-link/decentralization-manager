@@ -59,6 +59,26 @@ pub fn party_daml_key_name(party_id_prefix: &str) -> String {
     format!("{party_id_prefix}-daml-transactions")
 }
 
+/// Vault name of the Daml key a rotation creates for the party with this id
+/// prefix. The run's instance name makes it unique to the run, so a retry
+/// finds the key again and a later rotation creates a new one.
+pub fn rotated_daml_key_name(party_id_prefix: &str, instance_name: &str) -> String {
+    format!(
+        "{base}-rotated-{instance_name}",
+        base = party_daml_key_name(party_id_prefix)
+    )
+}
+
+/// Whether a vault name is one this tool gives a Daml key of the party with
+/// this id prefix: the onboarding name or a rotation's name.
+pub fn is_party_daml_key_name(name: &str, party_id_prefix: &str) -> bool {
+    let base = party_daml_key_name(party_id_prefix);
+    name == base
+        || name
+            .strip_prefix(&base)
+            .is_some_and(|rest| rest.starts_with("-rotated-"))
+}
+
 /// Whether this node's vault holds the private half of a key.
 ///
 /// # Errors
@@ -818,6 +838,21 @@ mod tests {
         rows::{DecPartyParticipantRow, DecPartyRow},
         schema::{Commitable, SchemaWrite},
     };
+
+    #[test]
+    fn recognizes_the_onboarding_and_the_rotation_key_names() {
+        assert!(is_party_daml_key_name("xyz-daml-transactions", "xyz"));
+        assert!(is_party_daml_key_name(
+            &rotated_daml_key_name("xyz", "xyz-rotate-key-1"),
+            "xyz"
+        ));
+        assert!(!is_party_daml_key_name(
+            "xyz-daml-transactions-other",
+            "xyz"
+        ));
+        assert!(!is_party_daml_key_name("xy-daml-transactions", "xyz"));
+        assert!(!is_party_daml_key_name("xyz-namespace", "xyz"));
+    }
 
     /// A `SigningPublicKey` whose fingerprint is stable and distinct per
     /// `seed` — the tests only ever compare fingerprints.

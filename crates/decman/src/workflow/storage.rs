@@ -184,6 +184,16 @@ pub mod artifact_kinds {
     pub const SIGNED_CHANGE_THRESHOLD_P2P: &str = "signed_change_threshold_p2p";
     /// Full party id (plaintext) — used by submit to poll the P2P mapping.
     pub const CHANGE_THRESHOLD_PARTY_ID: &str = "change_threshold_party_id";
+
+    // Rotate-key (workflow_artifacts during a run)
+    /// The coordinator's new Daml `SigningPublicKey`, written in GenerateKey.
+    /// Length-prefixed proto.
+    pub const ROTATE_KEY_NEW_KEY: &str = "rotate_key_new_key";
+    /// The P2P proposal that swaps the coordinator's Daml key, signed by the
+    /// coordinator in CreateProposal. Length-prefixed proto.
+    pub const ROTATE_KEY_P2P_PROPOSAL: &str = "rotate_key_p2p_proposal";
+    /// Per-peer signed rotation proposal — single length-prefixed proto.
+    pub const SIGNED_ROTATE_KEY_P2P: &str = "signed_rotate_key_p2p";
 }
 
 /// Identity-table artefact kinds. These survive the originating workflow run's

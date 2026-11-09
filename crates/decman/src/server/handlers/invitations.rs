@@ -26,7 +26,7 @@ use crate::{
     },
     workflow::{
         AddPartyStep, ChangeThresholdStep, ContractsStep, DarsStep, KickStep, OnboardingStep,
-        state::WorkflowStep,
+        RotateKeyStep, state::WorkflowStep,
     },
 };
 
@@ -121,6 +121,7 @@ fn step_total_for(kind: WorkflowKind) -> i64 {
         WorkflowKind::Dars => DarsStep::step_total(),
         WorkflowKind::AddParty => AddPartyStep::step_total(),
         WorkflowKind::ChangeThreshold => ChangeThresholdStep::step_total(),
+        WorkflowKind::RotateKey => RotateKeyStep::step_total(),
     }
 }
 
@@ -178,6 +179,7 @@ pub(crate) async fn insert_peer_run(
             "dar_hashes": invitation.dar_hashes,
             "participant_id": invitation.kicked_participant,
             "namespace_fingerprint": invitation.kicked_owner_key,
+            "rotated_key": invitation.rotated_key,
             "new_participant_id": invitation.new_participant,
             "new_threshold": invitation.new_threshold,
             "confirmation_threshold": invitation.confirmation_threshold,
@@ -870,6 +872,7 @@ mod handled_invitation_tests {
             dar_hashes: Vec::new(),
             kicked_participant: None,
             kicked_owner_key: None,
+            rotated_key: None,
             new_participant: None,
             new_threshold: None,
             previous_threshold: None,
