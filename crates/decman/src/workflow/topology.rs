@@ -40,7 +40,7 @@ use crate::{
     },
     error::Result,
     utils,
-    workflow::storage::WorkflowStorage,
+    workflow::{storage::WorkflowStorage, topology_version},
 };
 
 /// Call `sign_transactions` on the participant's TopologyManagerWriteService,
@@ -232,20 +232,17 @@ pub fn history_query(synchronizer_id: &str) -> BaseQuery {
 
 /// The `v30` mapping of a `ListPartyToParticipant` row.
 ///
-/// Canton 3.6 can also return a `v31` mapping, but only on an alpha protocol
-/// version. DecMan reads `v30` alone. Skipping a `v31` row would report a
-/// mapping as missing, so it is an error instead.
+/// A synchronizer on protocol version 37 returns a `v31` mapping, which is
+/// converted with [`topology_version::p2p_from_v31`]. Skipping such a row
+/// would report a mapping as missing.
 ///
 /// # Errors
 ///
-/// Errors when the row holds a `v31` mapping.
+/// Errors when the row holds a `v31` mapping that has no `v30` form.
 pub fn p2p_v30(item: P2pItem) -> Result<PartyToParticipant> {
     match item {
         P2pItem::V30(mapping) => Ok(mapping),
-        P2pItem::V31(_) => anyhow::bail!(
-            "Canton returned a v31 PartyToParticipant mapping, which only an alpha protocol \
-             version uses. DecMan supports v30 mappings only"
-        ),
+        P2pItem::V31(mapping) => topology_version::p2p_from_v31(mapping),
     }
 }
 
@@ -254,7 +251,7 @@ pub fn p2p_v30(item: P2pItem) -> Result<PartyToParticipant> {
 ///
 /// # Errors
 ///
-/// Errors when a row holds a `v31` mapping.
+/// Errors when a row holds a `v31` mapping that has no `v30` form.
 pub fn p2p_rows(
     results: Vec<list_party_to_participant_response::Result>,
 ) -> Result<Vec<(Option<BaseResult>, PartyToParticipant)>> {
@@ -513,6 +510,7 @@ fn legacy_retirement_request(
     Ok(AuthorizeRequest {
         r#type: Some(authorize_request::Type::Proposal(
             authorize_request::Proposal {
+                protocol_version: None,
                 change: enums::TopologyChangeOp::Remove as i32,
                 serial: serial
                     .checked_add(1)
@@ -592,7 +590,7 @@ pub async fn check_added_signing_keys_signed(
     transaction: &SignedTopologyTransaction,
 ) -> Result {
     let topology_transaction: TopologyTransaction =
-        utils::decode_versioned(&transaction.transaction)?;
+        topology_version::decode_transaction(&transaction.transaction)?;
     let Some(topology_mapping::Mapping::PartyToParticipant(proposed)) =
         topology_transaction.mapping.and_then(|m| m.mapping)
     else {
@@ -704,7 +702,8 @@ async fn signed_head_for(
         .into_inner();
     for item in response.result.map(|r| r.items).unwrap_or_default() {
         let signed: SignedTopologyTransaction = utils::decode_versioned(&item.transaction)?;
-        let transaction: TopologyTransaction = utils::decode_versioned(&signed.transaction)?;
+        let transaction: TopologyTransaction =
+            topology_version::decode_transaction(&signed.transaction)?;
         if transaction.operation != enums::TopologyChangeOp::AddReplace as i32 {
             continue;
         }
@@ -789,7 +788,8 @@ pub async fn check_proposal_standing(
     synchronizer_id: &str,
     proposal: &SignedTopologyTransaction,
 ) -> Result<Standing> {
-    let transaction: TopologyTransaction = utils::decode_versioned(&proposal.transaction)?;
+    let transaction: TopologyTransaction =
+        topology_version::decode_transaction(&proposal.transaction)?;
     let (what, head) = match transaction
         .mapping
         .as_ref()
@@ -1233,6 +1233,11 @@ where
 
 #[cfg(test)]
 mod tests {
+    use canton_proto_rs::com::digitalasset::canton::protocol::{
+        v30::party_to_participant,
+        v31::{self, party_to_participant as v31_p2p},
+    };
+
     use super::*;
 
     #[test]
@@ -1386,19 +1391,56 @@ mod tests {
         assert_eq!(rows[0].1, mapping);
     }
 
-    #[test]
-    fn p2p_rows_rejects_a_v31_row() {
-        let v31 = canton_proto_rs::com::digitalasset::canton::protocol::v31::PartyToParticipant {
+    fn v31_row_hosted_in(state: v31_p2p::hosting_participant::HostingState) -> Option<P2pItem> {
+        Some(P2pItem::V31(v31::PartyToParticipant {
             party: "alice::1220aa".to_string(),
-            ..Default::default()
-        };
+            threshold: 1,
+            participants: vec![v31_p2p::HostingParticipant {
+                participant_uid: "p1::1220bb".to_string(),
+                permission: enums::ParticipantPermission::Submission as i32,
+                state: state as i32,
+            }],
+            party_signing_keys: None,
+        }))
+    }
+
+    #[test]
+    fn p2p_rows_converts_a_v31_row() -> Result {
+        let rows = p2p_rows(vec![p2p_row(
+            2,
+            v31_row_hosted_in(v31_p2p::hosting_participant::HostingState::Active),
+        )])?;
+
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].0.as_ref().map(|context| context.serial), Some(2));
+        assert_eq!(
+            rows[0].1,
+            PartyToParticipant {
+                party: "alice::1220aa".to_string(),
+                threshold: 1,
+                participants: vec![party_to_participant::HostingParticipant {
+                    participant_uid: "p1::1220bb".to_string(),
+                    permission: enums::ParticipantPermission::Submission as i32,
+                    onboarding: None,
+                }],
+                party_signing_keys: None,
+            }
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn p2p_rows_refuses_a_v31_row_it_cannot_convert() {
         let error = p2p_rows(vec![
             p2p_row(1, Some(P2pItem::V30(PartyToParticipant::default()))),
-            p2p_row(2, Some(P2pItem::V31(v31))),
+            p2p_row(
+                2,
+                v31_row_hosted_in(v31_p2p::hosting_participant::HostingState::Nominated),
+            ),
         ])
         .expect_err("a v31 row must not be skipped")
         .to_string();
-        assert!(error.contains("v31"), "{error}");
+        assert!(error.contains("NOMINATED"), "{error}");
     }
 
     #[test]

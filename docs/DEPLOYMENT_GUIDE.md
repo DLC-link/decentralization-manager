@@ -266,10 +266,12 @@ stringData:
   # DECPM_ADMIN_ROLE: "decman-admin"
 
   # Optional: encryption key for secrets stored in the SQLite database
-  # (Keycloak client secrets per party). Any sufficiently long random
-  # passphrase — it is hashed with SHA-256 to derive the actual 32-byte
-  # key. If unset, secrets are stored in plaintext in the DB.
-  # DECPM_DB_ENCRYPTION_KEY: "<long-random-passphrase>"
+  # (Keycloak client secrets per party). Generate it with
+  # `openssl rand -base64 32`; it is hashed with SHA-256 to derive the
+  # actual 32-byte key. Without DECPM_KEY_STORE_KEY_FILE, it also protects
+  # decman's copies of party Daml keys, and only a value of at least 32
+  # characters does that. If unset, secrets are stored in plaintext in the DB.
+  # DECPM_DB_ENCRYPTION_KEY: "<output of openssl rand -base64 32>"
 
   # Optional: tighten CORS to a specific origin if the UI is served from a
   # different host than the API (reverse-proxy / dev server). Defaults to
@@ -376,6 +378,12 @@ spec:
           volumeMounts:
             - name: data
               mountPath: /app
+            # The key that encrypts decman's copies of party Daml keys. It
+            # lives apart from the data volume, so a copy of the volume alone
+            # cannot decrypt them.
+            - name: key-store
+              mountPath: /etc/decman
+              readOnly: true
           resources:
             requests: { memory: "128Mi", cpu: "100m" }
             limits:   { memory: "1Gi", cpu: "500m" }
@@ -392,6 +400,8 @@ spec:
             # Set 0 to disable.
             - name: DECPM_METRICS_PORT
               value: "9464"
+            - name: DECPM_KEY_STORE_KEY_FILE
+              value: /etc/decman/key-store.key
           envFrom:
             - secretRef:
                 name: dec-party-manager-secrets
@@ -399,6 +409,20 @@ spec:
         - name: data
           persistentVolumeClaim:
             claimName: dec-party-manager-data
+        # fsGroup above makes the file group-readable by the app.
+        - name: key-store
+          secret:
+            secretName: dec-party-manager-key-store
+            defaultMode: 0440
+```
+
+Create the key-store Secret once, before the first start. Keep a copy of the key
+outside the cluster: decman cannot read its stored keys without it.
+
+```shell
+openssl rand -base64 32 > key-store.key
+kubectl -n <your-namespace> create secret generic dec-party-manager-key-store \
+  --from-file=key-store.key
 ```
 
 ### 3d. Service
@@ -544,7 +568,8 @@ Most variables have a default that's only useful for local development (loopback
 | `DECPM_JWT_ROLE_CLAIM` | unset | optional | Provider-specific JWT claim containing a role-name array; needed only when the admin role arrives as a namespaced custom claim |
 | `DECPM_ADMIN_ROLE` | unset | recommended | IdP role required for privileged endpoints. If unset, every authenticated caller is treated as admin. |
 | `DECPM_ALLOWED_ORIGIN` | same-origin | optional | CORS origin if UI host ≠ API host |
-| `DECPM_DB_ENCRYPTION_KEY` | unset | recommended | Random passphrase (hashed via SHA-256) protecting party secrets at rest. If unset, secrets are stored in plaintext in the SQLite DB. |
+| `DECPM_DB_ENCRYPTION_KEY` | unset | recommended | Random value (hashed via SHA-256) protecting party secrets at rest. Generate it with `openssl rand -base64 32`. Without `DECPM_KEY_STORE_KEY_FILE`, it also protects decman's copies of party Daml keys, but only when it has at least 32 characters. If unset, secrets are stored in plaintext in the SQLite DB. |
+| `DECPM_KEY_STORE_KEY_FILE` | unset | recommended | File holding the key that encrypts decman's copies of party Daml keys, as 64 hex characters or the base64 of 32 bytes. Mount it from a Secret, apart from the data volume. When unset, decman derives the key from a `DECPM_DB_ENCRYPTION_KEY` of at least 32 characters. With neither, the key store is off. A move from the derived key to a file keeps the stored keys readable while `DECPM_DB_ENCRYPTION_KEY` stays set. Changing or losing the key makes decman export each key again, which a Splice 0.10 participant refuses by default. See [KMS_SIGNING.md](KMS_SIGNING.md) |
 | `DECPM_TENANT_API_KEYS` | unset | optional | Comma-separated bearer keys for the tenant API (`/v0/tenant/*`). Set it only on a node that hosts external parties, or that adds hosts to a local party. Unset turns the tenant API off. Keep the keys in the Secret |
 | `DECPM_TENANT_RATE_LIMIT_PER_MINUTE` | `120` | optional | Calls per minute that one tenant API key may make. A call past the limit gets a 429 with `Retry-After`. The ACS block read does not count. An ACS block import counts only when it opens a copy, or when no open copy takes it. `0` turns the limit off |
 | `DECPM_VALIDATOR_OPERATOR_PARTY` | unset | optional | This node's Splice validator operator party. Set it on a node whose validator serves external parties. An unhost then archives the `ValidatorRight` and `TransferPreapproval` contracts this party holds for the party that the node leaves. The operator party also needs a party credential: see the README's [Party credentials for the validator operator](../README.md#party-credentials-for-the-validator-operator) |
@@ -594,6 +619,38 @@ older builds with an explicit version-mismatch error in its logs.
 Downgrading requires reversing migration `000014` and `000013`; note the
 `000013` down-migration fails while concurrent InProgress rows exist (finish
 or dismiss them first).
+
+## Upgrading to Splice 0.10
+
+Splice 0.10 runs Canton 3.7. Two of its changes need decman in place first.
+
+- **Key export.** Canton 3.7 refuses to export a vault key by default, and
+  decman signs contract deploys with each party's Daml key. Deploy this decman
+  version, with the key-store Secret from step 3c, before the participant
+  moves to 0.10. decman then copies every key while export still works. Check
+  the log for `Copied this node's Daml key for <party> into DecMan's key store`
+  before you upgrade the participant.
+- **Protocol version 37.** From protocol version 37, Canton writes
+  `PartyToParticipant` transactions in `v31`, which an older decman cannot
+  decode. Every member needs this decman version before the synchronizer moves
+  to protocol version 37.
+- **Hosts that Canton adds.** Canton 3.7 can add a host to a party in the
+  `NOMINATED` or `FREEZING` state, before the host serves the party. decman
+  cannot read the party's mapping while a host is in either state. Its
+  workflows for that party fail until the host is onboarding or active.
+  decman itself never proposes these states.
+- **Downgrade.** This version adds migration `000028`. An older decman
+  refuses to start on a database that holds a migration it does not know.
+  Before you downgrade, run the `000028` down migration or restore the
+  database from before the upgrade. The down migration drops
+  `party_key_store`, which deletes decman's copies of the keys. The vault
+  keeps its copies.
+
+A participant that upgraded before its decman needs key download until
+decman holds the keys. Set `enableKeyDownload: true` in the
+`splice-participant` Helm values. A participant without the chart sets
+`canton.parameters.enable-key-download = yes`.
+[KMS_SIGNING.md](KMS_SIGNING.md) explains that case and its risk.
 
 ## Legacy party-key retirement
 

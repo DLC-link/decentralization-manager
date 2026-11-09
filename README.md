@@ -169,6 +169,7 @@ The database file path can be overridden with the `--db` CLI flag.
 | `DECPM_METRICS_PORT` | Port serving Prometheus metrics at `/metrics`, separate from the HTTP/UI port (`0` disables it) | `9464` |
 | `DECPM_DB_PATH` | SQLite database path override (CLI flag `--db`) | _(defaults to `{dir}/data/decpm.db`)_ |
 | `DECPM_DB_ENCRYPTION_KEY` | Encryption key for secrets stored in the database | _(none)_ |
+| `DECPM_KEY_STORE_KEY_FILE` | File with the key that encrypts DecMan's copies of party Daml keys, as 64 hex characters or the base64 of 32 bytes. When unset, DecMan derives the key from a `DECPM_DB_ENCRYPTION_KEY` of at least 32 characters. See [docs/KMS_SIGNING.md](docs/KMS_SIGNING.md) | _(none)_ |
 | `DECPM_ADMIN_ROLE` | Role name that gates sensitive endpoints (unset skips the role check) | _(none)_ |
 | `DECPM_ALLOWED_ORIGIN` | Origin permitted by CORS (e.g. `https://decman.example.com`) | _(none, same-origin only)_ |
 | `DECPM_LOG_FORMAT` | Log format. `text` gives the readable console format for local work; any other value gives one JSON object per line | `json` |

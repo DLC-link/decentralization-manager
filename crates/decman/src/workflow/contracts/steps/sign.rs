@@ -21,8 +21,9 @@ use sqlx::SqlitePool;
 use crate::{
     canton_id::CantonId,
     config::NodeConfig,
+    db::crypto,
     error::Result,
-    signing::{PreparedTransactionHash, SigningKeyContext, select_signer},
+    signing::{PreparedTransactionHash, SigningKeyContext, key_store::KeyStore, select_signer},
     utils,
     workflow::{
         signing_keys::{own_namespace_key, vault_holds},
@@ -60,129 +61,7 @@ pub async fn sign_submissions(
     );
 
     let node_id = config.participant_id().to_string();
-
-    // Step 1: Load the Daml public key bundle that was exported during onboarding.
-    // It MUST come from `dec_party_identity` (long-lived, survives the
-    // originating onboarding run's dismissal) — not from `workflow_artifacts`,
-    // because by the time contracts runs the onboarding run may have been
-    // dismissed/aged out.
-    //
-    // Backfill path: onboardings that completed before the
-    // `dec_party_identity` write hook was added didn't populate that table.
-    // For those parties we fall back to the original onboarding run's
-    // `workflow_artifacts` row, then mirror it into `dec_party_identity` so
-    // subsequent contracts runs hit the fast path.
-    tracing::info!(
-        "Loading Daml public key bundle for {node_id} on {dec_party_id} from identity table..."
-    );
-    let keys_bytes = match db
-        .read_identity(dec_party_id, identity_kinds::PEER_PUBLIC_KEYS, &node_id)
-        .await?
-    {
-        Some(bytes) => bytes,
-        None => {
-            tracing::warn!(
-                "PEER_PUBLIC_KEYS missing in identity table for {node_id} on {dec_party_id}; \
-                 attempting backfill from completed onboarding artifacts"
-            );
-            let from_local = backfill_peer_keys(db, dec_party_id, &node_id).await?;
-            let bytes = match from_local {
-                Some(b) => b,
-                None => {
-                    tracing::warn!(
-                        "Local artifacts backfill failed; querying Canton's on-chain \
-                         topology (PartyToParticipant / legacy PartyToKeyMapping) to \
-                         recover this node's Daml signing key for {dec_party_id}"
-                    );
-                    backfill_peer_keys_from_chain(config, dec_party_id)
-                        .await?
-                        .ok_or_else(|| {
-                            anyhow::anyhow!(
-                                "PEER_PUBLIC_KEYS not found in identity table, completed \
-                                 onboarding artifacts, OR on-chain topology \
-                                 (PartyToParticipant / legacy PartyToKeyMapping) for \
-                                 {node_id} on {dec_party_id} — onboarding may not have \
-                                 completed yet"
-                            )
-                        })?
-                }
-            };
-            // Best-effort populate identity table for future calls; a failure
-            // here is non-fatal — we still have the keys we need to sign now.
-            if let Err(e) = db
-                .write_identity(
-                    dec_party_id,
-                    identity_kinds::PEER_PUBLIC_KEYS,
-                    &node_id,
-                    &bytes,
-                )
-                .await
-            {
-                tracing::warn!(
-                    "Failed to write backfilled PEER_PUBLIC_KEYS to identity table: {e:#}"
-                );
-            }
-            bytes
-        }
-    };
-
-    // The blob is two `varint(len)||SigningPublicKey` messages, written by
-    // onboarding. Decode unchanged so the bytes-on-the-wire shape stays
-    // identical to the previous file-based format.
-    let exported_keys: Vec<SigningPublicKey> = read_all_messages_from_bytes(&keys_bytes)?;
-
-    if exported_keys.len() != 2 {
-        anyhow::bail!(
-            "Expected 2 keys in PEER_PUBLIC_KEYS for {node_id}, but found {count}",
-            count = exported_keys.len()
-        );
-    }
-
-    // Second key is the Daml signing key (first is namespace key)
-    let signing_public_key = &exported_keys[1];
-
-    // Compute fingerprint of the newly generated Daml key
-    let key_fingerprint = utils::compute_fingerprint(signing_public_key);
-
-    tracing::info!("Using Daml key with fingerprint: {key_fingerprint}");
-    tracing::debug!("This is the key that was generated in step 1 and added to P2P mapping");
-
-    // Verify this key exists in Canton's vault. Keep the channel: the signing
-    // backend reuses it instead of opening a second connection.
-    let admin_channel = config.admin_channel().await?;
-    let mut vault_client = VaultServiceClient::new(admin_channel.clone());
-
-    let keys_response = vault_client
-        .list_my_keys(tonic::Request::new(ListMyKeysRequest {
-            filters: Some(ListKeysFilters {
-                fingerprint: key_fingerprint.to_string(),
-                name: String::new(), // Search by fingerprint, not name
-                purpose: vec![],
-                usage_v30: vec![],
-            }),
-            base_request: None,
-        }))
-        .await?
-        .into_inner();
-
-    if keys_response.private_keys_metadata.is_empty() {
-        anyhow::bail!(
-            "Daml signing key with fingerprint {key_fingerprint} not found in Canton vault. \
-             This should not happen - the key was generated in step 1."
-        );
-    }
-
-    tracing::debug!(
-        "Verified key exists in Canton vault (found {count} matching keys)",
-        count = keys_response.private_keys_metadata.len()
-    );
-
-    // Capture the underlying KMS key id, present only for KMS-backed keys. The
-    // signer selection uses it to route a non-exportable key to a KMS backend.
-    let kms_key_id = keys_response
-        .private_keys_metadata
-        .first()
-        .and_then(|m| m.kms_key_id.clone());
+    let key_context = own_daml_key(config, db, dec_party_id).await?;
 
     // Step 3: Dynamically load all prepared submissions from storage. They were
     // written by `prepare_submissions` keyed by zero-padded ordinal so
@@ -235,22 +114,16 @@ pub async fn sign_submissions(
     );
 
     // Step 4: Sign each prepared-transaction hash with the party's Daml key via
-    // the selected signing backend. The backend abstracts *how* the key signs —
-    // exporting it and signing locally with Ed25519 today (JCE keys), or asking
-    // a KMS to sign a non-exportable key (follow-up). Everything else in this
+    // the selected signing backend: DecMan's stored copy, the KMS, or a fresh
+    // export from the vault (see `select_signer`). Everything else in this
     // step is provider-independent.
     let hashes: Vec<PreparedTransactionHash> = prepared_submissions
         .into_iter()
         .map(|s| PreparedTransactionHash::new(s.prepared_transaction_hash))
         .collect();
 
-    let key_context = SigningKeyContext {
-        fingerprint: key_fingerprint.clone(),
-        public_key: signing_public_key.clone(),
-        kms_key_id,
-    };
-
-    let signer = select_signer(&key_context, admin_channel).await?;
+    let store = KeyStore::open(config, db.clone()).await?;
+    let signer = select_signer(&key_context, config, store.as_ref(), dec_party_id).await?;
     let signatures = signer.sign(&hashes, &key_context).await?;
 
     // Step 5: Persist signatures bundle as `SUBMISSION_SIGNATURES` artefact.
@@ -272,6 +145,154 @@ pub async fn sign_submissions(
 
     tracing::info!("Signatures saved successfully");
     Ok(())
+}
+
+/// This node's Daml signing key for `dec_party_id`, as the vault holds it.
+///
+/// The public half comes from the key bundle onboarding recorded, falling back
+/// to the onboarding artifacts and then to the party's on-chain keys. The
+/// vault must still hold the key, and its metadata says whether a KMS holds
+/// the private half.
+///
+/// # Errors
+///
+/// Errors when no source names this node's key, or the vault does not hold it.
+pub async fn own_daml_key(
+    config: &NodeConfig,
+    db: &SqlitePool,
+    dec_party_id: &CantonId,
+) -> Result<SigningKeyContext> {
+    let node_id = config.participant_id().to_string();
+
+    // Step 1: Load the Daml public key bundle that was exported during onboarding.
+    // It MUST come from `dec_party_identity` (long-lived, survives the
+    // originating onboarding run's dismissal) — not from `workflow_artifacts`,
+    // because by the time contracts runs the onboarding run may have been
+    // dismissed/aged out.
+    //
+    // Backfill path: onboardings that completed before the
+    // `dec_party_identity` write hook was added didn't populate that table.
+    // For those parties we fall back to the original onboarding run's
+    // `workflow_artifacts` row, then mirror it into `dec_party_identity` so
+    // subsequent contracts runs hit the fast path.
+    tracing::info!(
+        "Loading Daml public key bundle for {node_id} on {dec_party_id} from identity table..."
+    );
+    let exported_keys = match db
+        .read_identity(dec_party_id, identity_kinds::PEER_PUBLIC_KEYS, &node_id)
+        .await?
+    {
+        Some(bytes) => decode_peer_keys(&bytes, &node_id)?,
+        None => {
+            tracing::warn!(
+                "PEER_PUBLIC_KEYS missing in identity table for {node_id} on {dec_party_id}; \
+                 attempting backfill from completed onboarding artifacts"
+            );
+            // A record that does not decode, such as one that no longer
+            // decrypts, is never mirrored. The chain lookup replaces it.
+            let from_local = match backfill_peer_keys(db, dec_party_id, &node_id).await? {
+                Some(bytes) => match decode_peer_keys(&bytes, &node_id) {
+                    Ok(keys) => Some((bytes, keys)),
+                    Err(e) => {
+                        tracing::warn!(
+                            "Skipping the onboarding record of {node_id} on {dec_party_id}: {e:#}"
+                        );
+                        None
+                    }
+                },
+                None => None,
+            };
+            let (bytes, keys) = match from_local {
+                Some(found) => found,
+                None => {
+                    tracing::warn!(
+                        "Local artifacts backfill failed; querying Canton's on-chain \
+                         topology (PartyToParticipant / legacy PartyToKeyMapping) to \
+                         recover this node's Daml signing key for {dec_party_id}"
+                    );
+                    let bytes = backfill_peer_keys_from_chain(config, dec_party_id)
+                        .await?
+                        .ok_or_else(|| {
+                            anyhow::anyhow!(
+                                "PEER_PUBLIC_KEYS not found in identity table, completed \
+                                 onboarding artifacts, OR on-chain topology \
+                                 (PartyToParticipant / legacy PartyToKeyMapping) for \
+                                 {node_id} on {dec_party_id} — onboarding may not have \
+                                 completed yet"
+                            )
+                        })?;
+                    let keys = decode_peer_keys(&bytes, &node_id)?;
+                    (bytes, keys)
+                }
+            };
+            // Best-effort populate identity table for future calls; a failure
+            // here is non-fatal — we still have the keys we need to sign now.
+            if let Err(e) = db
+                .write_identity(
+                    dec_party_id,
+                    identity_kinds::PEER_PUBLIC_KEYS,
+                    &node_id,
+                    &bytes,
+                )
+                .await
+            {
+                tracing::warn!(
+                    "Failed to write backfilled PEER_PUBLIC_KEYS to identity table: {e:#}"
+                );
+            }
+            keys
+        }
+    };
+
+    // Second key is the Daml signing key (first is namespace key)
+    let signing_public_key = &exported_keys[1];
+
+    // Compute fingerprint of the newly generated Daml key
+    let key_fingerprint = utils::compute_fingerprint(signing_public_key);
+
+    tracing::info!("Using Daml key with fingerprint: {key_fingerprint}");
+    tracing::debug!("This is the key that was generated in step 1 and added to P2P mapping");
+
+    // Verify this key exists in Canton's vault.
+    let mut vault_client = VaultServiceClient::new(config.admin_channel().await?);
+
+    let keys_response = vault_client
+        .list_my_keys(tonic::Request::new(ListMyKeysRequest {
+            filters: Some(ListKeysFilters {
+                fingerprint: key_fingerprint.to_string(),
+                name: String::new(), // Search by fingerprint, not name
+                purpose: vec![],
+                usage_v30: vec![],
+            }),
+            base_request: None,
+        }))
+        .await?
+        .into_inner();
+
+    if keys_response.private_keys_metadata.is_empty() {
+        anyhow::bail!(
+            "Daml signing key with fingerprint {key_fingerprint} not found in Canton vault. \
+             This should not happen - the key was generated in step 1."
+        );
+    }
+
+    tracing::debug!(
+        "Verified key exists in Canton vault (found {count} matching keys)",
+        count = keys_response.private_keys_metadata.len()
+    );
+
+    // Capture the underlying KMS key id, present only for KMS-backed keys. The
+    // signer selection uses it to route a non-exportable key to a KMS backend.
+    let kms_key_id = keys_response
+        .private_keys_metadata
+        .first()
+        .and_then(|m| m.kms_key_id.clone());
+
+    Ok(SigningKeyContext {
+        fingerprint: key_fingerprint,
+        public_key: signing_public_key.clone(),
+        kms_key_id,
+    })
 }
 
 fn verify_deployment_intent(
@@ -364,6 +385,20 @@ fn verify_prepared_transaction(
 /// Decode a sequence of `varint(len)||proto` messages from a byte slice. Mirrors
 /// `utils::read_all_messages_from_file` but operates on in-memory data — used
 /// to round-trip blobs we used to read from disk.
+/// The namespace key and the Daml signing key in a `PEER_PUBLIC_KEYS` blob.
+/// The blob is two `varint(len)||SigningPublicKey` messages, written by
+/// onboarding.
+fn decode_peer_keys(bytes: &[u8], node_id: &str) -> Result<Vec<SigningPublicKey>> {
+    let keys: Vec<SigningPublicKey> = read_all_messages_from_bytes(bytes)?;
+    if keys.len() != 2 {
+        anyhow::bail!(
+            "Expected 2 keys in PEER_PUBLIC_KEYS for {node_id}, but found {count}",
+            count = keys.len()
+        );
+    }
+    Ok(keys)
+}
+
 fn read_all_messages_from_bytes<M: prost::Message + Default>(data: &[u8]) -> Result<Vec<M>> {
     let mut cursor = data;
     let mut messages = Vec::new();
@@ -498,7 +533,7 @@ async fn backfill_peer_keys_from_chain(
 /// the given dec_party_id, by joining `workflow_artifacts` to `workflow_runs`.
 /// Used as a one-shot backfill for parties whose onboarding ran before the
 /// `dec_party_identity` write hook was added.
-async fn backfill_peer_keys(
+pub async fn backfill_peer_keys(
     db: &SqlitePool,
     dec_party_id: &CantonId,
     node_id: &str,
@@ -520,7 +555,8 @@ async fn backfill_peer_keys(
     .bind(node_id)
     .fetch_optional(db)
     .await?;
-    Ok(row.map(|(bytes,)| bytes))
+    row.map(|(bytes,)| crypto::decrypt_bytes(&bytes))
+        .transpose()
 }
 
 #[cfg(test)]

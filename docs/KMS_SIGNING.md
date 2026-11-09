@@ -98,39 +98,81 @@ that account. Signatures are still verified against the registered public key.
 - Only AWS KMS is supported. A participant with a different KMS driver (for
   example MPCH) also reports a `kms_key_id`; signing then fails with a clear
   KMS error until a dedicated backend exists.
-- Parties created before this feature hold Ed25519 vault keys on JCE nodes;
-  those continue to sign through the export path with no changes. The next
-  section explains why that path stays.
+- Parties created before this feature hold Ed25519 vault keys on JCE nodes.
+  decman copies those keys into its own key store, as the next section
+  explains.
 
 ## Signing on a node without KMS
 
 A participant with the JCE crypto provider keeps exportable keys in its vault.
-On such a node decman uses `VaultExportSigner`. It exports the party's Daml key
-with `VaultService.ExportKeyPair` and signs each hash locally with Ed25519.
-This path stays as the supported fallback. The team chose it in #241.
+Canton offers no RPC that signs a submission hash with a vault key, so decman
+must hold the private key itself.
 
-The reasons:
+Before Splice 0.10, decman exported the key with `VaultService.ExportKeyPair`
+for every deploy (`VaultExportSigner`). Canton 3.7, which Splice 0.10 runs,
+refuses that export unless the node sets
+`canton.parameters.enable-key-download = yes`. decman therefore keeps its own
+copy of each key.
 
-- Canton offers no public RPC that signs a submission hash with a vault key.
-  On a JCE node, the only other option is a key that decman holds outside the
-  vault.
-- A key outside the vault makes every operator store and back up a private key.
-  The vault already stores the key with the rest of the participant's state.
-- decman already has access to the participant's admin API, and that API
-  allows key export. The export path gives decman no new access.
-- Each member exports only its own key, into its own decman. No private key
-  goes to another node.
-- Canton does not document the export format, so decman searches the exported
-  bytes. It keeps a candidate only when the derived public key matches the
-  registered key. A format change therefore fails the signing step, and it
-  cannot produce a wrong signature.
-- Existing parties hold their Daml keys in the vault. A move away from export
-  would need a key rotation for every party.
+### decman's key store
 
-Revisit this choice when one of these happens:
+- decman stores this node's Daml key for each party in the `party_key_store`
+  table. Each key is encrypted with AES-256-GCM, bound to its party and
+  fingerprint.
+- decman takes the encryption key from the first of these sources that is
+  set:
+  1. The file named by `DECPM_KEY_STORE_KEY_FILE`. Mount it from a Secret,
+     apart from the data volume. The file holds 64 hex characters or the
+     base64 of 32 bytes, such as the output of `openssl rand -base64 32`.
+  2. A key derived from `DECPM_DB_ENCRYPTION_KEY`, when that value has at
+     least 32 characters. One SHA-256 pass makes a shorter value cheap to
+     guess.
+  3. In insecure mode only, `key-store.key` in the data directory. decman
+     creates it on first use. It sits next to the database, so it suits local
+     tests only.
+- With none of these, the store is off. decman logs an error every 15 minutes
+  and signs as it did before Splice 0.10.
+- A deploy signs with the stored key first. A KMS-backed key signs through
+  `AwsKmsSigner` as before. Any other key is exported, used, and stored for the
+  next deploy.
+- A node can move from the derived key to a key file. Keep
+  `DECPM_DB_ENCRYPTION_KEY` set when you mount the file. decman then reads
+  the older rows with the derived key and re-encrypts each one under the
+  file's key.
+- A stored key that does not decrypt is skipped. That happens when the
+  encryption key changes or is lost. decman then exports the key again and
+  replaces the stored copy. A Splice 0.10 participant refuses that export by
+  default, so keep the encryption key stable and keep a copy of it. When it
+  refuses, the copy task logs an error that says to restore the previous key.
+- decman never deletes a key from the vault.
 
-- Canton disables key export, or encrypts exported keys by default.
-- Canton adds a public RPC that signs with a vault key.
-- A deployment requires that the private key never leaves the participant.
-  Such a deployment should run a KMS node instead.
+### Copying existing keys
+
+A background task copies each party's key into the store at boot and then
+every 15 minutes. It copies only the parties that this node hosts. It skips
+KMS-backed keys and keys the store already holds. When a run cannot reach the
+participant, the task retries after 30 seconds. Each further failure doubles
+the wait, up to 15 minutes.
+
+The task finds the hosted parties in decman's party cache. A new database holds
+an empty cache until someone opens the party list. The task then copies those
+keys on its next run, within 15 minutes.
+
+Run this decman version on every node before its participant moves to Splice
+0.10. The task then copies the keys while export still works. The log reports
+`Copied this node's Daml key for <party> into DecMan's key store`.
+
+Key download is the last resort. The `splice-participant` Helm chart turns it
+on with `enableKeyDownload: true`. A participant without the chart sets
+`canton.parameters.enable-key-download = yes`. Canton's configuration
+reference says the setting "should not be enabled in production". While it is on, the admin API exports every key in the vault.
+Two cases need it:
+
+- **The participant moved to Splice 0.10 before decman.** Set the flag and
+  restart the participant. Wait until the log stops reporting
+  `Canton refused to export this node's Daml key`. Then remove the flag and
+  restart again.
+- **A party onboarded on a Splice 0.10 node.** The party's Daml key comes from
+  the participant's vault, so its first deploy needs the flag. This stays true
+  until decman generates party keys itself.
 

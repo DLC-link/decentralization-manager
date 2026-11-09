@@ -204,6 +204,7 @@ where
     };
 
     let acs_request = GetActiveContractsRequest {
+        include_incomplete_reassignments: false,
         active_at_offset: ledger_end,
         event_format: Some(party_event_format(party_id, vec![filter], true)),
         stream_continuation_token: None,

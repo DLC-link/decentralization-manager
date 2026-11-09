@@ -44,7 +44,7 @@
 use anyhow::Context;
 use canton_proto_rs::com::digitalasset::canton::{
     protocol::v30::{
-        PartyToParticipant, SignedTopologyTransaction, TopologyMapping, TopologyTransaction,
+        PartyToParticipant, SignedTopologyTransaction, TopologyMapping,
         enums::{ParticipantPermission, TopologyChangeOp},
         party_to_participant::{HostingParticipant, hosting_participant},
         topology_mapping,
@@ -56,10 +56,8 @@ use canton_proto_rs::com::digitalasset::canton::{
         topology_manager_read_service_client::TopologyManagerReadServiceClient,
         topology_manager_write_service_client::TopologyManagerWriteServiceClient,
     },
-    version::v1::{UntypedVersionedMessage, untyped_versioned_message},
 };
 use common::api::HostPermission;
-use prost::Message as _;
 use serde::{Deserialize, Serialize};
 
 use sqlx::SqlitePool;
@@ -76,6 +74,7 @@ use crate::{
         },
         storage::artifact_kinds,
         topology,
+        topology_version::{self, ProposalFormat},
     },
 };
 
@@ -401,11 +400,10 @@ pub async fn prepare_add_hosts(
             proposals: vec![generate_transactions_request::Proposal {
                 operation: TopologyChangeOp::AddReplace as i32,
                 serial: next_serial,
-                mapping: Some(generate_transactions_request::proposal::Mapping::V30(
-                    TopologyMapping {
-                        mapping: Some(topology_mapping::Mapping::PartyToParticipant(mapping)),
-                    },
-                )),
+                mapping: Some(
+                    ProposalFormat::for_synchronizer(&synchronizer_id)
+                        .generated_mapping(topology_mapping::Mapping::PartyToParticipant(mapping)),
+                ),
                 store: Some(topology::synchronizer_store_id(&synchronizer_id)),
             }],
             base_request: None,
@@ -672,13 +670,10 @@ pub async fn authorize_add_hosts(
         config,
         AuthorizeRequest {
             r#type: Some(authorize_request::Type::Proposal(
-                authorize_request::Proposal {
-                    change: TopologyChangeOp::AddReplace as i32,
-                    serial: next_serial,
-                    mapping: Some(authorize_request::proposal::Mapping::V30(TopologyMapping {
-                        mapping: Some(topology_mapping::Mapping::PartyToParticipant(mapping)),
-                    })),
-                },
+                ProposalFormat::for_synchronizer(&synchronizer_id).proposal(
+                    next_serial,
+                    topology_mapping::Mapping::PartyToParticipant(mapping),
+                ),
             )),
             // Neither node holds both halves, so demanding full authorization
             // would fail on whichever one calls first.
@@ -807,14 +802,7 @@ pub fn validate_add_hosts_topology(
     let this_participant = config.participant_id().to_string();
 
     for (index, serialized) in bundle.topology_transactions.iter().enumerate() {
-        let versioned =
-            UntypedVersionedMessage::decode(serialized.as_slice()).with_context(|| {
-                format!("topology transaction {index} is not a versioned Canton message")
-            })?;
-        let Some(untyped_versioned_message::Wrapper::Data(inner)) = versioned.wrapper else {
-            anyhow::bail!("topology transaction {index} carries no payload");
-        };
-        let transaction = TopologyTransaction::decode(inner.as_slice()).with_context(|| {
+        let transaction = topology_version::decode_transaction(serialized).with_context(|| {
             format!("topology transaction {index} is not a TopologyTransaction")
         })?;
 
@@ -1020,13 +1008,7 @@ fn submitted_mapping_matches(
     authorized: &PartyToParticipant,
 ) -> bool {
     bundle.topology_transactions.iter().any(|serialized| {
-        let Ok(versioned) = UntypedVersionedMessage::decode(serialized.as_slice()) else {
-            return false;
-        };
-        let Some(untyped_versioned_message::Wrapper::Data(inner)) = versioned.wrapper else {
-            return false;
-        };
-        let Ok(transaction) = TopologyTransaction::decode(inner.as_slice()) else {
+        let Ok(transaction) = topology_version::decode_transaction(serialized) else {
             return false;
         };
         matches!(
@@ -1166,10 +1148,15 @@ pub async fn submit_add_hosts(
 
 #[cfg(test)]
 mod tests {
-    use canton_proto_rs::com::digitalasset::canton::crypto::v30::{
-        CryptoKeyFormat, SigningKeySpec, SigningKeyUsage, SigningKeysWithThreshold,
-        SigningPublicKey,
+    use canton_proto_rs::com::digitalasset::canton::{
+        crypto::v30::{
+            CryptoKeyFormat, SigningKeySpec, SigningKeyUsage, SigningKeysWithThreshold,
+            SigningPublicKey,
+        },
+        protocol::v30::TopologyTransaction,
+        version::v1::{UntypedVersionedMessage, untyped_versioned_message},
     };
+    use prost::Message as _;
 
     use super::*;
 

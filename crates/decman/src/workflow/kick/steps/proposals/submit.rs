@@ -21,7 +21,7 @@ use crate::{
     utils,
     workflow::{
         storage::{WorkflowStorage, artifact_kinds},
-        topology,
+        topology, topology_version,
     },
 };
 
@@ -83,8 +83,10 @@ pub async fn submit_kick(config: &NodeConfig, storage: &SqlitePool, instance_nam
     )
     .await?;
 
-    let dns_tx: TopologyTransaction = utils::decode_versioned(&dns_transaction.transaction)?;
-    let p2p_tx: TopologyTransaction = utils::decode_versioned(&p2p_transaction.transaction)?;
+    let dns_tx: TopologyTransaction =
+        topology_version::decode_transaction(&dns_transaction.transaction)?;
+    let p2p_tx: TopologyTransaction =
+        topology_version::decode_transaction(&p2p_transaction.transaction)?;
     let Some(topology_mapping::Mapping::PartyToParticipant(expected_p2p)) =
         p2p_tx.mapping.and_then(|mapping| mapping.mapping)
     else {

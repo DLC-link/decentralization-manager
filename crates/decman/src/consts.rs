@@ -176,11 +176,6 @@ pub fn peer_wait_poll_delay_ms() -> u64 {
         .unwrap_or(PEER_WAIT_POLL_DELAY_MS)
 }
 
-/// Canton protocol version used for key export and topology operations.
-/// Bumped 34 -> 35 alongside the localnet 0.6.7 -> 0.6.11 test target; the
-/// network (testnet) has live-upgraded to protocol version 35.
-pub const CANTON_PROTOCOL_VERSION: i32 = 35;
-
 /// Additional wait time in seconds for Canton topology propagation
 /// After topology becomes effective, Canton needs time to propagate updates
 /// to the sequencer's topology state. Without this wait, transactions may be

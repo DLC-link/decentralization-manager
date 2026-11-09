@@ -1276,6 +1276,17 @@ pub async fn start_server(
         },
     );
 
+    let key_migration_config = config.clone();
+    let key_migration_db = db.clone();
+    spawn_supervised(
+        "party key migration",
+        "keys not yet in DecMan's key store stay uncopied until this node restarts",
+        async move {
+            crate::signing::migration::run_key_migration(key_migration_config, key_migration_db)
+                .await;
+        },
+    );
+
     let governance_poller_state = app_state.clone();
     spawn_supervised(
         "governance poller",

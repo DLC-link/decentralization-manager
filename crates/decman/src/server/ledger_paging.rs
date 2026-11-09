@@ -150,6 +150,7 @@ where
 
     loop {
         let request = GetActiveContractsPageRequest {
+            include_incomplete_reassignments: false,
             active_at_offset: Some(offset),
             event_format: Some(event_format.clone()),
             max_page_size: Some(page_size),
@@ -230,6 +231,7 @@ where
 
     loop {
         let request = GetActiveContractsPageRequest {
+            include_incomplete_reassignments: false,
             active_at_offset: Some(ledger_end),
             event_format: Some(event_format.clone()),
             max_page_size: Some(page_size),
@@ -300,6 +302,7 @@ where
     let mut client = utils::create_state_client(config, token).await?;
 
     let request = GetActiveContractsRequest {
+        include_incomplete_reassignments: false,
         active_at_offset: ledger_end,
         event_format: Some(event_format),
         stream_continuation_token: None,

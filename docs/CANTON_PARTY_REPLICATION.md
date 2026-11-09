@@ -112,6 +112,8 @@ Use this method when adding a member to a party with **existing active contracts
    # In canton config
    canton.features.enable-repair-commands = true
    ```
+   With the `splice-participant` Helm chart, set `enableRepairCommands: true`
+   instead.
    ⚠️ **Requires participant restart**
 
 2. **Vet all packages** on target participant where the party is a stakeholder

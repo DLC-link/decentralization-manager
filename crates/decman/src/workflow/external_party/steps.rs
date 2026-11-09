@@ -23,7 +23,7 @@ use canton_proto_rs::com::digitalasset::canton::{
         SigningKeyUsage, SigningKeysWithThreshold, SigningPublicKey,
     },
     protocol::v30::{
-        PartyToParticipant, SignedTopologyTransaction, TopologyMapping, TopologyTransaction,
+        PartyToParticipant, SignedTopologyTransaction, TopologyMapping,
         enums::{ParticipantPermission, TopologyChangeOp},
         party_to_participant::HostingParticipant,
         topology_mapping,
@@ -36,9 +36,7 @@ use canton_proto_rs::com::digitalasset::canton::{
         topology_manager_read_service_client::TopologyManagerReadServiceClient,
         topology_manager_write_service_client::TopologyManagerWriteServiceClient,
     },
-    version::v1::{UntypedVersionedMessage, untyped_versioned_message},
 };
-use prost::Message as _;
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -46,7 +44,7 @@ use crate::{
     config::NodeConfig,
     error::Result,
     utils,
-    workflow::{external_party::keys, topology},
+    workflow::{external_party::keys, topology, topology_version},
 };
 
 /// The unsigned onboarding topology, plus the hash the party must sign for each
@@ -127,14 +125,7 @@ fn validate_onboarding_topology(
     for (index, serialized) in bundle.topology_transactions.iter().enumerate() {
         // Two layers: Canton wraps a stable-versioned message in
         // `UntypedVersionedMessage`, whose `data` is the `TopologyTransaction`.
-        let versioned =
-            UntypedVersionedMessage::decode(serialized.as_slice()).with_context(|| {
-                format!("topology transaction {index} is not a versioned Canton message")
-            })?;
-        let Some(untyped_versioned_message::Wrapper::Data(inner)) = versioned.wrapper else {
-            anyhow::bail!("topology transaction {index} carries no payload");
-        };
-        let transaction = TopologyTransaction::decode(inner.as_slice()).with_context(|| {
+        let transaction = topology_version::decode_transaction(serialized).with_context(|| {
             format!("topology transaction {index} is not a TopologyTransaction")
         })?;
 
@@ -768,6 +759,12 @@ pub async fn list_hosted_external_parties(config: &NodeConfig) -> Result<Vec<Hos
 
 #[cfg(test)]
 mod tests {
+    use canton_proto_rs::com::digitalasset::canton::{
+        protocol::v30::TopologyTransaction,
+        version::v1::{UntypedVersionedMessage, untyped_versioned_message},
+    };
+    use prost::Message as _;
+
     use super::*;
 
     #[test]

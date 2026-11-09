@@ -660,6 +660,7 @@ async fn collect_entries(
     template_index: &HashMap<(String, String), &'static str>,
 ) -> Result<AuditPage> {
     let update_format = UpdateFormat {
+        include_transactions_and_reassignments: None,
         include_transactions: Some(TransactionFormat {
             event_format: Some(party_event_format(party_id, cumulative, true)),
             transaction_shape: TransactionShape::LedgerEffects as i32,

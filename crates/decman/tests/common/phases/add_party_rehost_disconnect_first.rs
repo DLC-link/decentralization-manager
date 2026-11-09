@@ -54,7 +54,7 @@ use canton_proto_rs::com::digitalasset::canton::{
         participant_repair_service_client::ParticipantRepairServiceClient,
         synchronizer_connectivity_service_client::SynchronizerConnectivityServiceClient,
     },
-    protocol::v30::{TopologyMapping, enums::TopologyChangeOp, topology_mapping},
+    protocol::v30::topology_mapping,
     topology::admin::v30::{
         AuthorizeRequest, ForceFlag, ListDecentralizedNamespaceDefinitionRequest,
         ListPartyToParticipantRequest, ListSynchronizerParametersStateRequest, authorize_request,
@@ -69,8 +69,11 @@ use common::{
 };
 use dec_party_manager::{
     config::NodeConfig,
-    workflow::topology::{
-        authorize_with_topology_retry, head_state_query, p2p_rows, synchronizer_store_id,
+    workflow::{
+        topology::{
+            authorize_with_topology_retry, head_state_query, p2p_rows, synchronizer_store_id,
+        },
+        topology_version,
     },
 };
 use reqwest::header::{AUTHORIZATION, CONTENT_TYPE};
@@ -198,17 +201,8 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
                 &p3,
                 AuthorizeRequest {
                     r#type: Some(authorize_request::Type::Proposal(
-                        authorize_request::Proposal {
-                            change: TopologyChangeOp::AddReplace as i32,
-                            serial: 0,
-                            mapping: Some(authorize_request::proposal::Mapping::V30(
-                                TopologyMapping {
-                                    mapping: Some(topology_mapping::Mapping::PartyToParticipant(
-                                        mapping,
-                                    )),
-                                },
-                            )),
-                        },
+                        topology_version::ProposalFormat::for_synchronizer(&synchronizer_id)
+                            .proposal(0, topology_mapping::Mapping::PartyToParticipant(mapping)),
                     )),
                     must_fully_authorize: true,
                     // Canton refuses to let a participant drop a party it holds
