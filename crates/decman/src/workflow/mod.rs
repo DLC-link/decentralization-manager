@@ -7,6 +7,7 @@ pub mod kick;
 pub mod onboarding;
 pub mod party_replication;
 pub mod proposal_store;
+pub mod rotate_key;
 pub mod signing_keys;
 pub mod state;
 pub mod storage;
@@ -52,6 +53,7 @@ pub use contracts::{ContractsConfig, ContractsStep};
 pub use dars::{DarsConfig, DarsStep};
 pub use kick::{KickConfig, KickStep};
 pub use onboarding::{OnboardingConfig, OnboardingStep};
+pub use rotate_key::{RotateKeyConfig, RotateKeyStep};
 pub use state::WorkflowState;
 
 /// Workflow types that can be run
@@ -63,6 +65,7 @@ pub enum WorkflowType {
     Kick,
     AddParty,
     ChangeThreshold,
+    RotateKey,
 }
 
 /// Result from a coordinator workflow, optionally containing the created party ID
@@ -83,6 +86,7 @@ pub async fn start_coordinator(
     dars_config: Option<DarsConfig>,
     add_party_config: Option<AddPartyConfig>,
     change_threshold_config: Option<ChangeThresholdConfig>,
+    rotate_key_config: Option<RotateKeyConfig>,
     workflow_auth: Option<WorkflowAuth>,
     last_seen: LastSeen,
     instance: Arc<WorkflowInstance>,
@@ -183,6 +187,23 @@ pub async fn start_coordinator(
                 anyhow::anyhow!("ChangeThresholdConfig is required for ChangeThreshold workflow")
             })?;
             change_threshold::coordinator::start_coordinator(
+                node_config,
+                network_config,
+                config,
+                db,
+                last_seen,
+                instance,
+            )
+            .await?;
+            Ok(CoordinatorResult {
+                created_party_id: None,
+            })
+        }
+        WorkflowType::RotateKey => {
+            let config = rotate_key_config.ok_or_else(|| {
+                anyhow::anyhow!("RotateKeyConfig is required for RotateKey workflow")
+            })?;
+            rotate_key::coordinator::start_coordinator(
                 node_config,
                 network_config,
                 config,
@@ -846,6 +867,83 @@ async fn run_peer(
                     );
                 }
             }
+            MessageType::SignRotateKey => {
+                tracing::info!("Executing: Sign rotate-key proposal");
+                let items = match utils::decode_length_prefixed(&payload, 2) {
+                    Ok(items) => items,
+                    Err(e) => {
+                        fail_step!("Failed to decode SignRotateKey payload: {e}");
+                        continue;
+                    }
+                };
+                if let Err(e) = serde_json::from_slice::<rotate_key::RotateKeyConfig>(&items[0]) {
+                    fail_step!("Failed to deserialize rotate-key config: {e}");
+                    continue;
+                }
+                if let Err(e) = expectations
+                    .check_rotation_proposal(&node_config, &db, &instance_name, &items[1])
+                    .await
+                {
+                    fail_step!("Refusing the coordinator's rotate-key proposal: {e}");
+                    continue;
+                }
+                if let Err(e) =
+                    rotate_key::steps::sign_proposal(&node_config, &db, &instance_name, &items[1])
+                        .await
+                {
+                    fail_step!("Step execution failed: {e}");
+                    continue;
+                }
+                consecutive_step_failures = 0;
+                if let Err(e) = rotate_key::peer::send_rotate_key_signatures_to_coordinator(
+                    &client,
+                    &db,
+                    &instance_name,
+                    &node_config,
+                )
+                .await
+                {
+                    tracing::error!("Failed to send rotate-key signatures to coordinator: {e}");
+                }
+            }
+            MessageType::RecordRotatedKey => {
+                tracing::info!("Executing: Record the coordinator's new Daml key");
+                // The party, the coordinator and the replaced key all come
+                // from the accepted invitation; the payload only names the
+                // new key, which the topology must already carry.
+                let recorded = match (
+                    expectations.dec_party_id.as_ref(),
+                    expectations.rotated_key.as_ref(),
+                ) {
+                    (Some(party), Some(rotated_key)) => {
+                        match rotate_key::steps::decode_recorded_key(&payload) {
+                            Ok(new_key) => {
+                                rotate_key::steps::record_peer_key(
+                                    &node_config,
+                                    &db,
+                                    party,
+                                    &expectations.coordinator_id,
+                                    rotated_key,
+                                    new_key,
+                                )
+                                .await
+                            }
+                            Err(e) => Err(e),
+                        }
+                    }
+                    _ => Err(anyhow::anyhow!(
+                        "the accepted rotate-key invitation names no party or no replaced key"
+                    )),
+                };
+                if let Err(e) = recorded {
+                    fail_step!("Failed to record the coordinator's new key: {e}");
+                    continue;
+                }
+                consecutive_step_failures = 0;
+                client
+                    .send_status(b"RecordRotatedKey completed".to_vec())
+                    .await?;
+            }
             MessageType::GenerateAddPartyKeys => {
                 tracing::info!("Executing: Generate add-party keys");
                 let add_party_config = match decode_add_party_config(&payload) {
@@ -1427,6 +1525,20 @@ fn peer_step_for_command(
                 step.step_name(),
                 step.step_index(),
                 ChangeThresholdStep::step_total(),
+            ))
+        }
+        WorkflowKind::RotateKey => {
+            let step = match command {
+                MessageType::SignRotateKey => RotateKeyStep::SignProposal,
+                MessageType::RetireLegacyKeys => RotateKeyStep::RetireLegacyKeys,
+                MessageType::RecordRotatedKey => RotateKeyStep::RecordKey,
+                MessageType::Disconnect => RotateKeyStep::Complete,
+                _ => return None,
+            };
+            Some((
+                step.step_name(),
+                step.step_index(),
+                RotateKeyStep::step_total(),
             ))
         }
     }

@@ -35,6 +35,7 @@ use crate::{
         kick::{KickConfig, KickStep, coordinator::split_signed_kick_pair},
         onboarding::OnboardingStep,
         party_replication::pipe::{PipeBlock, encode_block},
+        rotate_key::RotateKeyStep,
         signing_keys::requires_signing_key_adoption,
         state::WorkflowStep,
         storage::{WorkflowStorage, artifact_kinds},
@@ -114,6 +115,7 @@ pub enum ActiveWorkflow {
     Dars(Arc<NoiseServer<DarsStep>>),
     AddParty(Arc<NoiseServer<AddPartyStep>>),
     ChangeThreshold(Arc<NoiseServer<ChangeThresholdStep>>),
+    RotateKey(Arc<NoiseServer<RotateKeyStep>>),
 }
 
 impl ActiveWorkflow {
@@ -130,6 +132,7 @@ impl ActiveWorkflow {
             Self::Dars(s) => s.handle_command(peer_id, message).await,
             Self::AddParty(s) => s.handle_command(peer_id, message).await,
             Self::ChangeThreshold(s) => s.handle_command(peer_id, message).await,
+            Self::RotateKey(s) => s.handle_command(peer_id, message).await,
         }
     }
 
@@ -143,6 +146,7 @@ impl ActiveWorkflow {
             Self::Dars(s) => s.wait_until_stranded().await,
             Self::AddParty(s) => s.wait_until_stranded().await,
             Self::ChangeThreshold(s) => s.wait_until_stranded().await,
+            Self::RotateKey(s) => s.wait_until_stranded().await,
         }
     }
 
@@ -157,6 +161,7 @@ impl ActiveWorkflow {
             Self::Dars(s) => s.workflow_state.connected_peers().await,
             Self::AddParty(s) => s.workflow_state.connected_peers().await,
             Self::ChangeThreshold(s) => s.workflow_state.connected_peers().await,
+            Self::RotateKey(s) => s.workflow_state.connected_peers().await,
         }
     }
 
@@ -198,7 +203,8 @@ async fn resolve_peer_threshold(
         WorkflowKind::Onboarding
         | WorkflowKind::Dars
         | WorkflowKind::AddParty
-        | WorkflowKind::ChangeThreshold => None,
+        | WorkflowKind::ChangeThreshold
+        | WorkflowKind::RotateKey => None,
         // Existing M-of-N party: a quorum is enough.
         WorkflowKind::Kick | WorkflowKind::Contracts => {
             let run = run?;
@@ -659,6 +665,10 @@ impl<S: WorkflowStep + 'static> NoiseServer<S> {
                     artifact_kinds::CHANGE_THRESHOLD_SIGNATURE_UPLOAD,
                 )
                 .await
+            }
+            MessageType::RotateKeySignatures => {
+                self.handle_peer_data(peer_id, message.payload, "rotate-key signatures")
+                    .await
             }
             MessageType::StatusUpdate => self.handle_status_update(peer_id, message.payload).await,
             MessageType::DeclineInvitation => Ok(self

@@ -269,6 +269,19 @@ impl NoiseClient {
         .await
     }
 
+    /// Send the signed rotate-key P2P proposal to the coordinator.
+    pub async fn send_rotate_key_signatures(
+        &self,
+        signatures_data: Vec<u8>,
+    ) -> Result<(), NoiseError> {
+        self.send_and_verify_ack(
+            MessageType::RotateKeySignatures,
+            signatures_data,
+            "Sending rotate-key signatures to coordinator",
+        )
+        .await
+    }
+
     /// Upload the new member's `keys||participant_id` payload to the
     /// coordinator of an add-party run.
     pub async fn upload_add_party_keys(&self, keys_data: Vec<u8>) -> Result<(), NoiseError> {

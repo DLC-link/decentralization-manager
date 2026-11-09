@@ -1015,6 +1015,35 @@ fn set_threshold_keeps_a_confirmation_threshold_that_differs() {
 }
 
 #[test]
+fn rotate_key_posts_only_the_resolved_party() {
+    // Arrange
+    let fake = Fake::start();
+    fake.token_grant("password", "a-1", 1);
+    fake.mount(
+        Mock::given(method("GET"))
+            .and(path("/decentralized-parties"))
+            .respond_with(party_list(ALPHA, 2, &["PAR::1", "PAR::2"]))
+            .expect(1),
+    );
+    fake.mount(
+        Mock::given(method("POST"))
+            .and(path("/rotate-key"))
+            .and(body_json(json!({ "decentralized_party_id": ALPHA })))
+            .respond_with(
+                ResponseTemplate::new(202).set_body_json(json!({ "instance_name": "rk-1" })),
+            )
+            .expect(1),
+    );
+
+    // Act
+    let outcome =
+        run_command(&fake, parse(&["parties", "rotate-key", "--party", "alpha"])).unwrap();
+
+    // Assert
+    assert_eq!(outcome.value["instance_name"], "rk-1");
+}
+
+#[test]
 fn create_sends_the_confirmation_threshold() {
     // Arrange
     let fake = Fake::start();

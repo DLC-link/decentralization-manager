@@ -815,6 +815,7 @@ async fn write_invitation(
             dar_hashes,
             kicked_participant,
             kicked_owner_key,
+            rotated_key,
             new_participant,
             new_threshold,
             previous_threshold,
@@ -825,7 +826,7 @@ async fn write_invitation(
             workflow_instance,
             status,
             handled_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ",
     )
     .bind(&row.id)
@@ -838,6 +839,7 @@ async fn write_invitation(
     .bind(&row.dar_hashes)
     .bind(&row.kicked_participant)
     .bind(&row.kicked_owner_key)
+    .bind(&row.rotated_key)
     .bind(&row.new_participant)
     .bind(row.new_threshold)
     .bind(row.previous_threshold)
@@ -3366,6 +3368,7 @@ mod tests {
             dar_hashes: Vec::new(),
             kicked_participant: None,
             kicked_owner_key: None,
+            rotated_key: None,
             new_participant: None,
             new_threshold: None,
             previous_threshold: None,
@@ -3387,6 +3390,7 @@ mod tests {
             dar_hashes: Vec::new(),
             kicked_participant: Some(CantonId::parse(&format!("kicked::{TEST_NS}")).unwrap()),
             kicked_owner_key: Some("1220kicked".to_string()),
+            rotated_key: None,
             new_participant: None,
             new_threshold: Some(2),
             previous_threshold: Some(3),
@@ -3414,6 +3418,7 @@ mod tests {
             dar_hashes: Vec::new(),
             kicked_participant: None,
             kicked_owner_key: None,
+            rotated_key: None,
             new_participant: None,
             new_threshold: None,
             previous_threshold: None,
@@ -3475,6 +3480,7 @@ mod tests {
             dar_hashes: Vec::new(),
             kicked_participant: None,
             kicked_owner_key: None,
+            rotated_key: None,
             new_participant: None,
             new_threshold: None,
             previous_threshold: None,
@@ -3727,6 +3733,7 @@ mod tests {
             dar_hashes: Vec::new(),
             kicked_participant: None,
             kicked_owner_key: None,
+            rotated_key: None,
             new_participant: None,
             new_threshold: None,
             previous_threshold: None,
@@ -4333,6 +4340,7 @@ mod tests {
             dar_hashes: Vec::new(),
             kicked_participant: None,
             kicked_owner_key: None,
+            rotated_key: None,
             new_participant: None,
             new_threshold: None,
             previous_threshold: None,
@@ -4354,6 +4362,7 @@ mod tests {
             dar_hashes: Vec::new(),
             kicked_participant: None,
             kicked_owner_key: None,
+            rotated_key: None,
             new_participant: None,
             new_threshold: None,
             previous_threshold: None,

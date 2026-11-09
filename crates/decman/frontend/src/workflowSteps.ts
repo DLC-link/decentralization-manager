@@ -20,6 +20,7 @@ export const WORKFLOW_KIND_LABELS: Record<WorkflowKind, string> = {
   Dars: "DARs",
   AddParty: "Add party",
   ChangeThreshold: "Change threshold",
+  RotateKey: "Rotate key",
 };
 
 export const WORKFLOW_STEPS: Record<WorkflowKind, WorkflowStepInfo[]> = {
@@ -235,6 +236,50 @@ export const WORKFLOW_STEPS: Record<WorkflowKind, WorkflowStepInfo[]> = {
       name: "Complete",
       label: "Complete",
       description: "The party runs with the new threshold.",
+    },
+  ],
+  RotateKey: [
+    WAITING_FOR_PEERS,
+    {
+      name: "GenerateKey",
+      label: "Creating the new key",
+      description:
+        "The coordinator's vault creates a new Daml key, in KMS on a KMS participant.",
+    },
+    {
+      name: "CreateProposal",
+      label: "Creating the proposal",
+      description:
+        "The coordinator builds a proposal that swaps its old key for the new one.",
+    },
+    {
+      name: "SignProposal",
+      label: "Signing the proposal",
+      description:
+        "Every member checks that only the coordinator's key changes, then signs.",
+    },
+    {
+      name: "Submit",
+      label: "Submitting the change",
+      description:
+        "The coordinator submits the new key list to the synchronizer.",
+    },
+    {
+      name: "RetireLegacyKeys",
+      label: "Retiring legacy keys",
+      description:
+        "The members remove an old PartyToKeyMapping that the new key list replaces.",
+    },
+    {
+      name: "RecordKey",
+      label: "Recording the new key",
+      description:
+        "Every member records the coordinator's new key for later changes.",
+    },
+    {
+      name: "Complete",
+      label: "Complete",
+      description: "The party signs with the coordinator's new key.",
     },
   ],
 };

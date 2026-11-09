@@ -13,8 +13,10 @@ use prometheus::IntCounterVec;
 use sqlx::SqlitePool;
 
 use super::parties::resolve_owner_keys_from_peers;
+use canton_proto_rs::com::digitalasset::canton::crypto::admin::v30::vault_service_client::VaultServiceClient;
+
 use crate::{
-    canton_id::{CantonId, validate_party_id_prefix},
+    canton_id::{CantonId, Fingerprint, validate_party_id_prefix},
     config::{NetworkConfig, NodeConfig},
     consts::{MIN_PEER_VERSION, OWNER_ONLY_KICK},
     db::{
@@ -39,15 +41,17 @@ use crate::{
             ErrorResponse, ExternalPartiesResponse, ExternalPartyHost, ExternalPartyInfo,
             KickInvitePayload, KickRequest, KickResponse, KickStatus, MessageResponse,
             MissingEdgeKind, MissingPeerEdge, OnboardingInvitePayload, OnboardingMeshErrorResponse,
-            OnboardingRequest, OnboardingResponse, OnboardingStatus, SuccessResponse,
-            WorkflowGuard, WorkflowInstance, WorkflowKind, WorkflowProgress, WorkflowResponse,
-            WorkflowRole, WorkflowRun, WorkflowRunsResponse, WorkflowStatusResponse,
-            permission_from_proto,
+            OnboardingRequest, OnboardingResponse, OnboardingStatus, RotateKeyInvitePayload,
+            RotateKeyRequest, SuccessResponse, WorkflowGuard, WorkflowInstance, WorkflowKind,
+            WorkflowProgress, WorkflowResponse, WorkflowRole, WorkflowRun, WorkflowRunsResponse,
+            WorkflowStatusResponse, permission_from_proto,
         },
     },
+    signing::custody,
     utils,
     workflow::{
         self, AddPartyStep, ChangeThresholdStep, ContractsStep, DarsStep, KickStep, OnboardingStep,
+        RotateKeyStep,
         contracts::DarFile,
         signing_keys::{
             KeyClaimError, ensure_survivor_keys_preserved, kick_key_claims,
@@ -172,6 +176,7 @@ where
         WorkflowKind::Dars => "DARs",
         WorkflowKind::AddParty => "add-party",
         WorkflowKind::ChangeThreshold => "change-threshold",
+        WorkflowKind::RotateKey => "rotate-key",
     };
 
     if !data.workflows.insert(instance.clone()) {
@@ -293,13 +298,14 @@ static RUNS_FINISHED: LazyLock<IntCounterVec> = LazyLock::new(|| {
 
 /// Every kind, for exporting each series at zero. Extend it with
 /// [`run_kind_label`], whose match fails to compile for a new kind.
-const RUN_KINDS: [WorkflowKind; 6] = [
+const RUN_KINDS: [WorkflowKind; 7] = [
     WorkflowKind::Onboarding,
     WorkflowKind::Kick,
     WorkflowKind::Contracts,
     WorkflowKind::Dars,
     WorkflowKind::AddParty,
     WorkflowKind::ChangeThreshold,
+    WorkflowKind::RotateKey,
 ];
 
 /// The `kind` label, fixed per variant so the series stay bounded.
@@ -311,6 +317,7 @@ fn run_kind_label(kind: WorkflowKind) -> &'static str {
         WorkflowKind::Dars => "dars",
         WorkflowKind::AddParty => "add_party",
         WorkflowKind::ChangeThreshold => "change_threshold",
+        WorkflowKind::RotateKey => "rotate_key",
     }
 }
 
@@ -1271,6 +1278,7 @@ pub async fn start_kick(
             None, // No dars config
             None, // No add-party config
             None, // No change-threshold config
+            None, // No rotate-key config
             None, // No auth registry for kick
             last_seen,
             instance_for_coord,
@@ -1778,6 +1786,7 @@ pub async fn start_add_party(
             None, // No dars config
             Some(add_party_config),
             None, // No change-threshold config
+            None, // No rotate-key config
             workflow_auth,
             last_seen,
             instance_for_coord,
@@ -2173,6 +2182,7 @@ pub async fn start_change_threshold(
             None, // No dars config
             None, // No add-party config
             Some(change_config),
+            None, // No rotate-key config
             None, // No auth registry for change-threshold
             last_seen,
             instance_for_coord,
@@ -2341,6 +2351,372 @@ async fn send_change_threshold_invites(
         }
     }
 
+    Ok(())
+}
+
+// ============================================================================
+// Rotate-Key Workflow
+// ============================================================================
+
+/// Start a rotate-key workflow: replace this node's Daml signing key for a
+/// decentralized party with a new key from its vault.
+///
+/// The vault must keep its keys in KMS, unless this node runs in insecure
+/// mode. The members and thresholds stay the same, and every member signs.
+#[utoipa::path(
+    tag = "Workflows",
+    request_body = RotateKeyRequest,
+    responses(
+        (status = 202, description = "Rotate-key workflow started", body = WorkflowResponse),
+        (status = 400, description = "Bad request, such as a participant without KMS", body = ErrorResponse),
+        (status = 409, description = "Workflow already in progress, or this node's key is not the party's", body = ErrorResponse),
+        (status = 500, description = "Internal server error", body = ErrorResponse)
+    )
+)]
+#[post("/rotate-key")]
+pub async fn start_rotate_key(
+    http_req: HttpRequest,
+    data: web::Data<AppState>,
+    body: web::Json<RotateKeyRequest>,
+) -> impl Responder {
+    if let Err(resp) = require_admin(&http_req, data.admin_role.as_deref()) {
+        return resp;
+    }
+    let party = body.decentralized_party_id.clone();
+    tracing::info!("Rotate-key request received: party={party}");
+
+    let members: HashSet<CantonId> = match data.db.get_dec_party_participants(&party).await {
+        Ok(rows) => rows
+            .iter()
+            .filter_map(|r| CantonId::parse(&r.participant_uid).ok())
+            .collect(),
+        Err(e) => {
+            tracing::error!("Failed to load dec party participants for rotate-key: {e}");
+            return HttpResponse::InternalServerError().json(ErrorResponse {
+                error: "Failed to load decentralized party members".to_string(),
+            });
+        }
+    };
+    if members.is_empty() {
+        return HttpResponse::Conflict().json(ErrorResponse {
+            error: format!(
+                "No cached membership for {party}. Try refreshing /decentralized-parties first."
+            ),
+        });
+    }
+    if !members.contains(data.config.participant_id()) {
+        return HttpResponse::BadRequest().json(ErrorResponse {
+            error: format!("This node is not a member of {party}, so it holds no key to rotate"),
+        });
+    }
+    if members.len() < 2 {
+        return HttpResponse::BadRequest().json(ErrorResponse {
+            error: format!("Cannot rotate a key of {party}: it has only one member"),
+        });
+    }
+
+    if let Err(e) = require_kms_for_rotation(&data.config).await {
+        return HttpResponse::BadRequest().json(ErrorResponse {
+            error: format!("{e:#}"),
+        });
+    }
+    let rotation = match rotation_baseline(&data.config, &data.db, &party).await {
+        Ok(rotation) => rotation,
+        Err(e) => {
+            return HttpResponse::Conflict().json(ErrorResponse {
+                error: format!("{e:#}"),
+            });
+        }
+    };
+
+    let invitees: Vec<CantonId> = match data.db.get_all_peers().await {
+        Ok(peers) => peers
+            .into_iter()
+            .map(|p| p.participant_id)
+            .filter(|p| members.contains(p) && p != data.config.participant_id())
+            .collect(),
+        Err(e) => {
+            tracing::error!("Failed to load peers for rotate-key: {e}");
+            return HttpResponse::InternalServerError().json(ErrorResponse {
+                error: "Failed to load peers".to_string(),
+            });
+        }
+    };
+
+    let instance_name = format!("{}-rotate-key-{}", party.prefix, now_secs());
+    let instance = WorkflowInstance::new(
+        instance_name.clone(),
+        WorkflowKind::RotateKey,
+        WorkflowRole::Coordinator,
+    );
+    let rotate_config = workflow::RotateKeyConfig {
+        decentralized_party_id: party.clone(),
+        rotated_key: rotation.rotated_key,
+        threshold: rotation.threshold,
+        confirmation_threshold: rotation.confirmation_threshold,
+        instance_name: instance_name.clone(),
+    };
+
+    if let Some((run, kind)) = find_inprogress_run_for_party(&data.db, &party).await {
+        return HttpResponse::Conflict().json(ErrorResponse {
+            error: format!(
+                "Party {party} already has a {kind} workflow in flight (run {run}); wait for it \
+                 to finish or cancel it first"
+            ),
+        });
+    }
+    let incompatible = preflight_incompatible_peers(&data.config, &data.db, &invitees).await;
+    if !incompatible.is_empty() {
+        return HttpResponse::Conflict().json(ErrorResponse {
+            error: format_incompatible_peers(&incompatible),
+        });
+    }
+    if let Err(resp) = register_and_persist(
+        &data,
+        &instance,
+        RotateKeyStep::WaitingForPeers,
+        &rotate_config,
+        &invitees,
+        Some(party.clone()),
+    )
+    .await
+    {
+        return resp;
+    }
+
+    let state = &instance.http;
+    *state.invited_peers.write().await = invitees.clone();
+
+    let config = data.config.clone();
+    let db = data.db.clone();
+    let state_clone = instance.http.clone();
+    let instance_for_coord = instance.clone();
+    let kind = instance.kind;
+    let workflows = data.workflows.clone();
+    let last_seen = data.last_seen.clone();
+    let instance_for_task = instance_name.clone();
+
+    // abort_handle/status/error are flipped under simultaneously-held locks —
+    // see start_dars for the cancel-race rationale.
+    let mut abort_guard = state.abort_handle.lock().await;
+    let mut status_guard = state.status.write().await;
+    let mut error_guard = state.error.write().await;
+
+    let join_handle = tokio::spawn(async move {
+        let _workflow_guard = WorkflowGuard::new(workflows, instance_for_task.clone());
+
+        if let Err(e) = send_rotate_key_invites(&config, &db, &rotate_config, &invitees).await {
+            tracing::error!("Failed to send rotate-key invites: {e}");
+            let msg = format!("Failed to send invites: {e}");
+            mark_run_failed(&db, kind, &instance_for_task, &msg).await;
+            *state_clone.status.write().await = WorkflowProgress::Failed;
+            *state_clone.error.write().await = Some(msg);
+            return;
+        }
+
+        // Give peers time to start their peer workflows
+        tokio::time::sleep(Duration::from_secs(2)).await;
+
+        let result = workflow::start_coordinator(
+            config,
+            db.clone(),
+            workflow::WorkflowType::RotateKey,
+            None, // No onboarding config
+            None, // No kick config
+            None, // No contracts config
+            None, // No dars config
+            None, // No add-party config
+            None, // No change-threshold config
+            Some(rotate_config),
+            None, // No auth registry for rotate-key
+            last_seen,
+            instance_for_coord,
+        )
+        .await;
+
+        // Durable row first, in-memory status second: see start_change_threshold.
+        match result {
+            Ok(_) => {
+                mark_run_completed(&db, kind, &instance_for_task).await;
+                *state_clone.status.write().await = WorkflowProgress::Completed;
+                tracing::info!("Rotate-key workflow completed successfully");
+            }
+            Err(e) => {
+                let msg = format!("{e}");
+                mark_run_failed(&db, kind, &instance_for_task, &msg).await;
+                *state_clone.status.write().await = WorkflowProgress::Failed;
+                *state_clone.error.write().await = Some(msg);
+                tracing::error!("Rotate-key workflow failed: {e}");
+            }
+        }
+    });
+    *abort_guard = Some(join_handle.abort_handle());
+    *status_guard = WorkflowProgress::InProgress;
+    *error_guard = None;
+    drop(error_guard);
+    drop(status_guard);
+    drop(abort_guard);
+
+    HttpResponse::Accepted().json(WorkflowResponse {
+        status: WorkflowProgress::InProgress,
+        message: "Rotate-key workflow started".to_string(),
+        instance_name,
+    })
+}
+
+/// Get the current status of the rotate-key workflow
+#[utoipa::path(
+    tag = "Workflows",
+    responses(
+        (status = 200, description = "Rotate-key workflow status", body = WorkflowStatusResponse)
+    )
+)]
+#[get("/rotate-key/status")]
+pub async fn get_rotate_key_status(data: web::Data<AppState>) -> impl Responder {
+    HttpResponse::Ok().json(kind_status(&data, WorkflowKind::RotateKey).await)
+}
+
+#[utoipa::path(
+    tag = "Workflows",
+    responses(
+        (status = 200, description = "Workflow cancelled", body = MessageResponse),
+        (status = 409, description = "No workflow in progress", body = ErrorResponse)
+    )
+)]
+#[post("/rotate-key/cancel")]
+pub async fn cancel_rotate_key(http_req: HttpRequest, data: web::Data<AppState>) -> impl Responder {
+    if let Err(resp) = require_admin(&http_req, data.admin_role.as_deref()) {
+        return resp;
+    }
+    cancel_workflow_state(&data, "Rotate-key", WorkflowKind::RotateKey).await
+}
+
+/// Refuse a rotation before any invitation goes out when the new key could
+/// not live in KMS.
+async fn require_kms_for_rotation(config: &NodeConfig) -> Result {
+    let mut vault_client = VaultServiceClient::new(config.admin_channel().await?);
+    custody::require_kms_participant(config, &mut vault_client).await
+}
+
+/// What a rotation pins when it starts.
+struct RotationBaseline {
+    rotated_key: Fingerprint,
+    threshold: i32,
+    confirmation_threshold: i32,
+}
+
+/// Read this node's current Daml key for `party` and the party's thresholds.
+///
+/// # Errors
+///
+/// Errors when the topology cannot be read, when this node's key is unknown,
+/// or when the party does not carry it.
+async fn rotation_baseline(
+    config: &NodeConfig,
+    db: &SqlitePool,
+    party: &CantonId,
+) -> Result<RotationBaseline> {
+    let synchronizer_id = utils::get_synchronizer_id(config).await?;
+    let (_, namespace) = workflow::topology::fetch_namespace_definition_at_head(
+        config,
+        &synchronizer_id,
+        &party.namespace.to_hex(),
+    )
+    .await?;
+    let (_, p2p) =
+        workflow::topology::fetch_p2p_mapping_at_head(config, &synchronizer_id, party).await?;
+
+    let own = workflow::contracts::steps::sign::own_daml_key(config, db, party).await?;
+    let mut keys = p2p
+        .party_signing_keys
+        .as_ref()
+        .map(|k| k.keys.clone())
+        .unwrap_or_default();
+    if keys.len() < p2p.participants.len() {
+        keys.extend(
+            workflow::topology::fetch_party_to_key_mapping(config, &synchronizer_id, party)
+                .await?
+                .map(|mapping| mapping.signing_keys)
+                .unwrap_or_default(),
+        );
+    }
+    if !keys
+        .iter()
+        .any(|key| utils::compute_fingerprint(key) == own.fingerprint)
+    {
+        anyhow::bail!(
+            "This node's Daml key {fingerprint} is not among {party}'s signing keys, so there \
+             is no key of its to rotate",
+            fingerprint = own.fingerprint
+        );
+    }
+
+    Ok(RotationBaseline {
+        rotated_key: own.fingerprint,
+        threshold: namespace.threshold,
+        confirmation_threshold: i32::try_from(p2p.threshold)?,
+    })
+}
+
+/// Send rotate-key invites over Noise to every other member.
+async fn send_rotate_key_invites(
+    config: &NodeConfig,
+    db: &SqlitePool,
+    rotate_config: &workflow::RotateKeyConfig,
+    invitees: &[CantonId],
+) -> Result {
+    let network_config = NetworkConfig::from_peers(db.get_all_peers().await?);
+    let keypair = NoiseKeypair::from_file(&config.key_file_path()).await?;
+
+    let mut participants = invitees.to_vec();
+    participants.push(config.participant_id().clone());
+    let payload = RotateKeyInvitePayload {
+        dec_party_id: rotate_config.decentralized_party_id.clone(),
+        rotated_key: rotate_config.rotated_key.to_string(),
+        threshold: rotate_config.threshold,
+        confirmation_threshold: rotate_config.confirmation_threshold,
+        participants,
+        workflow_instance: Some(rotate_config.instance_name.clone()),
+    };
+    let invite_message = Message::new(
+        MessageType::InviteRotateKey,
+        serde_json::to_vec(&payload).context("encode RotateKeyInvitePayload")?,
+    );
+
+    let invitee_set: HashSet<&CantonId> = invitees.iter().collect();
+    for peer in &network_config.peers {
+        if !invitee_set.contains(&peer.participant_id) {
+            continue;
+        }
+        let peer_pub_key = match parse_public_key(&peer.public_key) {
+            Ok(pk) => pk,
+            Err(e) => {
+                tracing::warn!(
+                    "Skipping rotate-key invite to {} - invalid public key: {e}",
+                    peer.participant_id
+                );
+                continue;
+            }
+        };
+        let psk = keypair.derive_psk(&peer_pub_key);
+        let identity = config.participant_id().to_string();
+        tracing::info!("Sending rotate-key invite to {}", peer.participant_id);
+        match send_noise_message(
+            &peer.address,
+            peer.port,
+            &psk,
+            identity.as_bytes(),
+            &invite_message,
+        )
+        .await
+        {
+            Ok(response) => interpret_invite_reply(&peer.participant_id, "rotate-key", &response)?,
+            Err(e) => tracing::error!(
+                "Failed to send rotate-key invite to {}: {e}",
+                peer.participant_id
+            ),
+        }
+    }
     Ok(())
 }
 
@@ -2604,6 +2980,7 @@ pub async fn start_onboarding(
             None, // No dars config
             None, // No add-party config
             None, // No change-threshold config
+            None, // No rotate-key config
             None, // No auth registry for onboarding
             last_seen,
             instance_for_coord,
@@ -3199,6 +3576,7 @@ pub async fn start_contracts(
             None, // No dars config
             None, // No add-party config
             None, // No change-threshold config
+            None, // No rotate-key config
             workflow_auth,
             last_seen,
             instance_for_coord,
@@ -3670,6 +4048,7 @@ async fn launch_dars(
             Some(dars_config),
             None, // No add-party config
             None, // No change-threshold config
+            None, // No rotate-key config
             None, // No auth
             last_seen,
             instance_for_coord,
@@ -6507,7 +6886,8 @@ mod tests {
                 "contracts",
                 "dars",
                 "add_party",
-                "change_threshold"
+                "change_threshold",
+                "rotate_key"
             ]
         );
     }

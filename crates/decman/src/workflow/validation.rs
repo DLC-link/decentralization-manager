@@ -40,8 +40,8 @@ use crate::{
             compute_decentralized_namespace, decode_keys_payload,
         },
         signing_keys::{
-            ensure_survivor_keys_preserved, kick_key_claims, own_namespace_key,
-            recorded_signing_keys_by_member, vault_holds,
+            ensure_survivor_keys_preserved, kick_key_claims, known_signing_keys_by_member,
+            own_namespace_key, recorded_signing_keys_by_member, vault_holds,
         },
         storage::{WorkflowStorage, artifact_kinds, identity_kinds},
         topology, topology_version,
@@ -98,6 +98,10 @@ pub struct PeerExpectations {
     /// Dars only: SHA-256 of each accepted DAR, index-aligned with
     /// `dar_filenames`. Empty when the coordinator predates the field.
     pub dar_hashes: Vec<String>,
+    /// RotateKey only: the coordinator's Daml key that the rotation replaces.
+    pub rotated_key: Option<Fingerprint>,
+    /// The participant that coordinates the run.
+    pub coordinator_id: CantonId,
     /// This node's own participant id.
     pub self_id: CantonId,
 }
@@ -127,6 +131,8 @@ struct PeerRunConfig {
     new_threshold: Option<i32>,
     #[serde(default)]
     confirmation_threshold: Option<i32>,
+    #[serde(default)]
+    rotated_key: Option<String>,
 }
 
 impl PeerExpectations {
@@ -153,6 +159,13 @@ impl PeerExpectations {
 
         let mut members: BTreeSet<CantonId> = config.participants.into_iter().collect();
         members.insert(coordinator_id.clone());
+        let rotated_key = config
+            .rotated_key
+            .map(|key| key.parse::<Fingerprint>())
+            .transpose()
+            .map_err(|e| {
+                anyhow::anyhow!("the accepted invitation names a malformed rotated key: {e:#}")
+            })?;
 
         Ok(Self {
             kind: run.kind,
@@ -167,6 +180,8 @@ impl PeerExpectations {
             new_participant: config.new_participant_id,
             dar_filenames: config.dar_filenames,
             dar_hashes: config.dar_hashes,
+            rotated_key,
+            coordinator_id: coordinator_id.clone(),
             self_id: node_config.participant_id().clone(),
         })
     }
@@ -470,6 +485,81 @@ impl PeerExpectations {
         let claims = recorded_signing_keys_by_member(storage, party).await?;
         let claims = kick_key_claims(removed.as_deref(), &survivors, &claims, &[])?;
         ensure_survivor_keys_preserved(&keys.keys, &survivors, &claims)
+    }
+
+    /// Validate the P2P proposal of a rotate-key run.
+    ///
+    /// The proposal must keep the accepted members and thresholds, and swap
+    /// exactly the key the invitation names for one new key. This node's
+    /// own records must attribute that key to the coordinator.
+    ///
+    /// # Errors
+    ///
+    /// Errors on any mismatch with the accepted invitation, the chain, or this
+    /// node's records.
+    pub async fn check_rotation_proposal(
+        &self,
+        config: &NodeConfig,
+        storage: &SqlitePool,
+        instance_name: &str,
+        p2p_payload: &[u8],
+    ) -> Result {
+        let dec_party_id = self.dec_party_id.as_ref().ok_or_else(|| {
+            anyhow::anyhow!(
+                "accepted rotate-key invitation carries no dec party id, so the proposal \
+                 cannot be checked against it"
+            )
+        })?;
+        let rotated_key = self.rotated_key.as_ref().ok_or_else(|| {
+            anyhow::anyhow!(
+                "accepted rotate-key invitation names no key to replace, so the proposal \
+                 cannot be checked against it"
+            )
+        })?;
+
+        let mapping = decode_party_to_participant(p2p_payload)?;
+        if mapping.party != dec_party_id.to_string() {
+            anyhow::bail!(
+                "P2P proposal is for party {found} but the accepted invitation is for \
+                 {dec_party_id}",
+                found = mapping.party
+            );
+        }
+        self.check_p2p_membership(&mapping)?;
+        self.check_onboarding_markers(&mapping)?;
+        self.check_p2p_thresholds(&mapping)?;
+        self.check_own_daml_key(
+            config,
+            storage,
+            instance_name,
+            &mapping,
+            WhenUnrecorded::Skip,
+        )
+        .await?;
+
+        let head = SynchronizerHead {
+            config,
+            synchronizer_id: utils::get_synchronizer_id(config).await?,
+        };
+        let Some(current_keys) = check_rotation_against_head(
+            &head,
+            dec_party_id,
+            (decode_proposal_serial(p2p_payload)?, &mapping),
+            rotated_key,
+        )
+        .await?
+        else {
+            return Ok(());
+        };
+        let claims =
+            known_signing_keys_by_member(config, storage, dec_party_id, &current_keys).await?;
+        check_rotated_key_owner(&self.coordinator_id.to_string(), rotated_key, &claims)?;
+
+        tracing::info!(
+            "Rotate-key proposal for {dec_party_id} swaps only {coordinator}'s key {rotated_key}",
+            coordinator = self.coordinator_id
+        );
+        Ok(())
     }
 
     /// The checks on a party DNS proposal that need no topology read: the
@@ -1344,40 +1434,7 @@ async fn check_against_head(
         return Ok(());
     }
 
-    // A party onboarded before Canton 3.4 keeps its keys in a legacy
-    // PartyToKeyMapping that still holds departed members' keys, so the
-    // proposal adopts a subset of it rather than the whole set.
-    //
-    // The baseline has to match what the coordinator built its proposal from,
-    // or the keys it restored read as additions and the peer refuses to sign.
-    // A pre-1.10.0 add left parties half-migrated, holding one member's key
-    // inline and the rest in the mapping, so a short inline set means the
-    // baseline is both sources together.
-    let members = current_p2p.participants.len();
-    let inline = current_p2p
-        .party_signing_keys
-        .map(|keys| keys.keys)
-        .unwrap_or_default();
-    let (current_keys, legacy) = if inline.len() >= members && !inline.is_empty() {
-        (inline, false)
-    } else {
-        let legacy_keys = head.party_to_key_mapping(dec_party_id).await?;
-        if legacy_keys.is_none() && inline.is_empty() {
-            anyhow::bail!(
-                "{dec_party_id} carries neither inline signing keys nor a PartyToKeyMapping, \
-                 so the proposed keys cannot be checked"
-            );
-        }
-        let mut union = legacy_keys.map(|m| m.signing_keys).unwrap_or_default();
-        let mut seen: BTreeSet<Fingerprint> =
-            union.iter().map(utils::compute_fingerprint).collect();
-        for key in inline {
-            if seen.insert(utils::compute_fingerprint(&key)) {
-                union.push(key);
-            }
-        }
-        (union, true)
-    };
+    let (current_keys, legacy) = signing_key_baseline(head, dec_party_id, &current_p2p).await?;
 
     let proposed_keys = mapping
         .party_signing_keys
@@ -1406,6 +1463,161 @@ async fn check_against_head(
             .collect::<Vec<String>>(),
         legacy,
     )
+}
+
+/// The signing keys a proposal for `dec_party_id` is built from, and whether
+/// they include a legacy `PartyToKeyMapping`.
+///
+/// A party onboarded before Canton 3.4 keeps its keys in a legacy
+/// PartyToKeyMapping that still holds departed members' keys, so the proposal
+/// adopts a subset of it rather than the whole set.
+///
+/// The baseline has to match what the coordinator built its proposal from, or
+/// the keys it restored read as additions and the peer refuses to sign. A
+/// pre-1.10.0 add left parties half-migrated, holding one member's key inline
+/// and the rest in the mapping, so a short inline set means the baseline is
+/// both sources together.
+async fn signing_key_baseline(
+    head: &impl TopologyHead,
+    dec_party_id: &CantonId,
+    current_p2p: &PartyToParticipant,
+) -> Result<(Vec<SigningPublicKey>, bool)> {
+    let members = current_p2p.participants.len();
+    let inline = current_p2p
+        .party_signing_keys
+        .clone()
+        .map(|keys| keys.keys)
+        .unwrap_or_default();
+    if inline.len() >= members && !inline.is_empty() {
+        return Ok((inline, false));
+    }
+    let legacy_keys = head.party_to_key_mapping(dec_party_id).await?;
+    if legacy_keys.is_none() && inline.is_empty() {
+        anyhow::bail!(
+            "{dec_party_id} carries neither inline signing keys nor a PartyToKeyMapping, \
+             so the proposed keys cannot be checked"
+        );
+    }
+    let mut union = legacy_keys.map(|m| m.signing_keys).unwrap_or_default();
+    let mut seen: BTreeSet<Fingerprint> = union.iter().map(utils::compute_fingerprint).collect();
+    for key in inline {
+        if seen.insert(utils::compute_fingerprint(&key)) {
+            union.push(key);
+        }
+    }
+    Ok((union, true))
+}
+
+/// Hold a rotate-key proposal to the party's on-chain state.
+///
+/// The hosts stay as they are, and the key set changes by exactly one swap:
+/// `rotated_key` leaves and one new key joins. Returns the on-chain key set
+/// the proposal was built from, or `None` when the proposal is already in
+/// force and there is nothing left to check.
+async fn check_rotation_against_head(
+    head: &impl TopologyHead,
+    dec_party_id: &CantonId,
+    (p2p_serial, mapping): (u32, &PartyToParticipant),
+    rotated_key: &Fingerprint,
+) -> Result<Option<Vec<SigningPublicKey>>> {
+    let kind = WorkflowKind::RotateKey;
+    let (head_p2p_serial, current_p2p) = head.p2p_mapping(dec_party_id).await.map_err(|e| {
+        anyhow::anyhow!("cannot read the current signing keys of {dec_party_id}: {e:#}")
+    })?;
+    if already_applied(
+        "P2P",
+        (p2p_serial, mapping),
+        (head_p2p_serial, &current_p2p),
+    )? {
+        return Ok(None);
+    }
+
+    let added = hosts_not_in(mapping, &current_p2p);
+    let removed = hosts_not_in(&current_p2p, mapping);
+    if !added.is_empty() || !removed.is_empty() {
+        anyhow::bail!(
+            "{kind:?} proposal changes the hosts (added {added:?}, removed {removed:?}); a key \
+             rotation keeps them"
+        );
+    }
+
+    let (current_keys, legacy) = signing_key_baseline(head, dec_party_id, &current_p2p).await?;
+    let current: BTreeSet<String> = current_keys
+        .iter()
+        .map(|key| utils::compute_fingerprint(key).into())
+        .collect();
+    if !current.contains(rotated_key.as_str()) {
+        anyhow::bail!(
+            "{dec_party_id} does not carry the key {rotated_key} that the accepted invitation \
+             replaces"
+        );
+    }
+    let proposed: Vec<String> = mapping
+        .party_signing_keys
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("P2P proposal carries no party signing keys"))?
+        .keys
+        .iter()
+        .map(|key| utils::compute_fingerprint(key).into())
+        .collect();
+    if proposed.iter().any(|key| key == rotated_key.as_str()) {
+        anyhow::bail!("{kind:?} proposal keeps the key {rotated_key} it is meant to replace");
+    }
+    let additions = proposed
+        .iter()
+        .filter(|key| !current.contains(*key))
+        .count();
+    if additions != 1 {
+        anyhow::bail!("{kind:?} proposal adds {additions} signing key(s); a rotation adds one");
+    }
+
+    let mut allowed = AllowedDelta::of("party signing key", kind)?;
+    // A legacy baseline may also drop departed members' keys, so the removed
+    // key is pinned above instead of here.
+    allowed.removed = (!legacy).then_some(rotated_key.as_str());
+    check_set_delta(
+        "party signing key",
+        kind,
+        allowed,
+        &current,
+        &proposed,
+        legacy,
+    )?;
+    Ok(Some(current_keys))
+}
+
+/// The key a rotation replaces must be the coordinator's by this node's own
+/// records, and no other member's.
+///
+/// Every member signs with its namespace key, but only its own Daml key is
+/// one it can vouch for. Without this check a coordinator could swap another
+/// member's key for one it controls, and so hold two of the party's keys.
+fn check_rotated_key_owner(
+    coordinator: &str,
+    rotated_key: &Fingerprint,
+    claims: &BTreeMap<String, Fingerprint>,
+) -> Result {
+    match claims.get(coordinator) {
+        Some(claimed) if claimed == rotated_key => {}
+        Some(claimed) => anyhow::bail!(
+            "The rotation replaces {rotated_key}, but this node has {claimed} on record as \
+             {coordinator}'s Daml key"
+        ),
+        None => anyhow::bail!(
+            "This node has no Daml key on record for {coordinator}, so it cannot tell whether \
+             {rotated_key} is theirs. Refresh /decentralized-parties on this node and retry"
+        ),
+    }
+    if let Some((member, _)) = claims
+        .iter()
+        .find(|(member, key)| member.as_str() != coordinator && *key == rotated_key)
+    {
+        anyhow::bail!(
+            "The rotation replaces {rotated_key}, which this node has on record as {member}'s \
+             Daml key"
+        );
+    }
+    Ok(())
 }
 
 /// The hosts of `from` that `other` does not host.
@@ -1572,13 +1784,15 @@ struct AllowedDelta<'a> {
 
 impl AllowedDelta<'_> {
     /// The delta a run of `kind` makes by default: nothing for
-    /// change-threshold, one entry removed for kick, and at most one added
-    /// for add-party (none when a former host is hosted again).
+    /// change-threshold, one entry removed for kick, at most one added for
+    /// add-party (none when a former host is hosted again), and one swapped
+    /// for rotate-key.
     fn of(what: &str, kind: WorkflowKind) -> Result<Self> {
         let (max_added, removals) = match kind {
             WorkflowKind::ChangeThreshold => (0, 0),
             WorkflowKind::Kick => (0, 1),
             WorkflowKind::AddParty => (1, 0),
+            WorkflowKind::RotateKey => (1, 1),
             other => anyhow::bail!("no on-chain {what} delta is defined for a {other:?} run"),
         };
         Ok(Self {
@@ -1766,6 +1980,8 @@ mod tests {
             new_participant: None,
             dar_filenames: Vec::new(),
             dar_hashes: Vec::new(),
+            rotated_key: None,
+            coordinator_id: self_id.clone(),
             self_id,
         }
     }
@@ -3976,5 +4192,175 @@ mod tests {
     fn rejects_a_delta_for_a_kind_without_one() {
         let error = delta_error(WorkflowKind::Onboarding, &[], &["a"], None, false);
         assert!(error.contains("no on-chain"), "unexpected error: {error}");
+    }
+
+    fn key_of(seed: u8) -> SigningPublicKey {
+        SigningPublicKey {
+            public_key: vec![seed; 32],
+            ..Default::default()
+        }
+    }
+
+    fn keyed(seeds: &[u8]) -> SigningKeysWithThreshold {
+        SigningKeysWithThreshold {
+            keys: seeds.iter().copied().map(key_of).collect(),
+            threshold: 2,
+        }
+    }
+
+    /// A rotation on a three-member party whose on-chain keys are `head`
+    /// (inline, at serial 5). The proposal carries `proposed` at `serial`
+    /// and replaces the key of seed `rotated`.
+    async fn rotation_against(
+        head: Option<&[u8]>,
+        legacy: Option<&[u8]>,
+        (serial, proposed): (u32, &PartyToParticipant),
+        rotated: u8,
+    ) -> Result<Option<Vec<SigningPublicKey>>> {
+        let stub = StubHead {
+            dns: None,
+            p2p: Some((5, keyed_p2p(head.map(keyed))?)),
+            legacy_keys: legacy.map(|seeds| seeds.iter().copied().map(key_of).collect()),
+        };
+        check_rotation_against_head(
+            &stub,
+            &canton_id("party", 9)?,
+            (serial, proposed),
+            &utils::compute_fingerprint(&key_of(rotated)),
+        )
+        .await
+    }
+
+    async fn rotation_error(proposed: &PartyToParticipant, rotated: u8) -> Result<String> {
+        match rotation_against(Some(&[1, 2, 3]), None, (6, proposed), rotated).await {
+            Ok(_) => anyhow::bail!("expected the rotation to be refused"),
+            Err(error) => Ok(error.to_string()),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_rotation_may_swap_the_named_key_for_one_new_key() -> Result {
+        let proposed = keyed_p2p(Some(keyed(&[1, 9, 3])))?;
+        let baseline = rotation_against(Some(&[1, 2, 3]), None, (6, &proposed), 2).await?;
+        assert_eq!(baseline.map(|keys| keys.len()), Some(3));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_rotation_must_drop_the_key_the_invitation_names() -> Result {
+        let error = rotation_error(&keyed_p2p(Some(keyed(&[9, 2, 3])))?, 2).await?;
+        assert!(error.contains("keeps the key"), "unexpected error: {error}");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_rotation_adds_exactly_one_key() -> Result {
+        let error = rotation_error(&keyed_p2p(Some(keyed(&[8, 9, 3])))?, 2).await?;
+        assert!(
+            error.contains("adds 2 signing key"),
+            "unexpected error: {error}"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_rotation_keeps_the_hosts() -> Result {
+        let mut proposed = keyed_p2p(Some(keyed(&[1, 9, 3])))?;
+        proposed.participants[2].participant_uid = canton_id("p4", 4)?.to_string();
+        let error = rotation_error(&proposed, 2).await?;
+        assert!(
+            error.contains("changes the hosts"),
+            "unexpected error: {error}"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_rotation_of_a_key_the_party_does_not_carry_is_refused() -> Result {
+        let error = rotation_error(&keyed_p2p(Some(keyed(&[1, 9, 3])))?, 7).await?;
+        assert!(
+            error.contains("does not carry the key"),
+            "unexpected error: {error}"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_rotation_only_signs_the_next_serial() -> Result {
+        let proposed = keyed_p2p(Some(keyed(&[1, 9, 3])))?;
+        let error = match rotation_against(Some(&[1, 2, 3]), None, (7, &proposed), 2).await {
+            Ok(_) => anyhow::bail!("a serial gap must be refused"),
+            Err(error) => error.to_string(),
+        };
+        assert!(
+            error.contains("only the next serial"),
+            "unexpected error: {error}"
+        );
+        Ok(())
+    }
+
+    /// A retried peer may be handed the proposal after it went into force.
+    #[tokio::test]
+    async fn a_rotation_already_in_force_has_nothing_left_to_check() -> Result {
+        let in_force = keyed_p2p(Some(keyed(&[1, 2, 3])))?;
+        assert!(
+            rotation_against(Some(&[1, 2, 3]), None, (5, &in_force), 2)
+                .await?
+                .is_none()
+        );
+        Ok(())
+    }
+
+    /// A legacy party moves its keys inline in the same proposal, which also
+    /// drops a departed member's key. Only the new key may be added.
+    #[tokio::test]
+    async fn a_legacy_rotation_may_drop_departed_keys_but_adds_only_the_new_one() -> Result {
+        let proposed = keyed_p2p(Some(keyed(&[1, 9, 3])))?;
+        rotation_against(None, Some(&[1, 2, 3, 4]), (6, &proposed), 2).await?;
+
+        let stranger = keyed_p2p(Some(keyed(&[8, 9, 3])))?;
+        let error = match rotation_against(None, Some(&[1, 2, 3, 4]), (6, &stranger), 2).await {
+            Ok(_) => anyhow::bail!("two new keys must be refused"),
+            Err(error) => error.to_string(),
+        };
+        assert!(
+            error.contains("adds 2 signing key"),
+            "unexpected error: {error}"
+        );
+        Ok(())
+    }
+
+    fn member_claims(entries: &[(&str, u8)]) -> BTreeMap<String, Fingerprint> {
+        entries
+            .iter()
+            .map(|(member, seed)| {
+                (
+                    (*member).to_string(),
+                    utils::compute_fingerprint(&key_of(*seed)),
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_rotated_key_must_be_the_coordinators_on_record() -> Result {
+        let rotated = utils::compute_fingerprint(&key_of(2));
+        check_rotated_key_owner("p2", &rotated, &member_claims(&[("p1", 1), ("p2", 2)]))?;
+
+        for (claims, expected) in [
+            (member_claims(&[("p1", 1), ("p2", 5)]), "on record as p2's"),
+            (
+                member_claims(&[("p1", 1)]),
+                "Refresh /decentralized-parties",
+            ),
+            (member_claims(&[("p1", 2), ("p2", 2)]), "on record as p1's"),
+        ] {
+            let error = match check_rotated_key_owner("p2", &rotated, &claims) {
+                Ok(()) => anyhow::bail!("expected a refusal for {claims:?}"),
+                Err(error) => error.to_string(),
+            };
+            assert!(error.contains(expected), "unexpected error: {error}");
+        }
+        Ok(())
     }
 }
