@@ -506,6 +506,8 @@ The table below is a curated subset. A complete, interactive API reference is av
 | `/add-party/status` | GET | Returns add-party progress |
 | `/change-threshold` | POST | Starts change-threshold workflow |
 | `/change-threshold/status` | GET | Returns change-threshold progress |
+| `/rotate-key` | POST | Starts rotate-key workflow, which replaces this node's Daml key for a party |
+| `/rotate-key/status` | GET | Returns rotate-key progress |
 | `/workflows` | GET | Lists workflow instances and their lifecycle state |
 | `/workflows/{instance_name}/dismiss` | POST | Dismisses a workflow instance |
 | `/workflows/{instance_name}/retry` | POST | Retries a failed workflow instance |
@@ -514,6 +516,7 @@ The table below is a curated subset. A complete, interactive API reference is av
 | `/kick/cancel` | POST | Cancels the kick workflow |
 | `/add-party/cancel` | POST | Cancels the add-party workflow |
 | `/change-threshold/cancel` | POST | Cancels the change-threshold workflow |
+| `/rotate-key/cancel` | POST | Cancels the rotate-key workflow |
 | `/dars/cancel` | POST | Cancels the DARs distribution workflow |
 | `/invitations` | GET | Returns pending workflow invitations |
 | `/invitations/accept` | POST | Accepts a pending invitation |
