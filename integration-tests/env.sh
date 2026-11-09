@@ -284,6 +284,22 @@ configure_localnet_key_download() {
     }
 }
 
+# Turn Canton's key export off again and restart Canton, so its participants
+# refuse every export. The key_download_off phase runs this last, to show that
+# a deploy then signs from DecMan's key store.
+disable_localnet_key_download() {
+    local conf="$LOCALNET_COMPOSE_DIR/conf/canton/app.conf"
+    sed -i.bak '/enable-key-download/d' "$conf"
+    rm -f "$conf.bak"
+    if grep -q "enable-key-download" "$conf"; then
+        echo "Failed to turn off Canton's key export in $conf" >&2
+        return 1
+    fi
+    echo "Restarting Canton without key download..."
+    localnet_compose restart canton
+    localnet_compose up -d --wait canton splice postgres
+}
+
 localnet_compose() {
     export IMAGE_TAG="$LOCALNET_VERSION"
     docker compose \

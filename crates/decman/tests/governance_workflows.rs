@@ -179,6 +179,10 @@ async fn governance_workflows_e2e() -> anyhow::Result<()> {
     // Threshold change on the restored 3-member party: down to 1 and back to
     // 2, so later phases still find the party at threshold 2.
     phases::change_threshold::run(&mut f).await?;
+    // P1 swaps its Daml key for a new one, and the other members record it.
+    // P1 then coordinates a deploy, which only completes with the new key.
+    // Localnet only: a software-vault key needs a test-mode build.
+    phases::rotate_key::run(&mut f).await?;
     // A fresh party in the MainNet shape: P3 removes its own hosting entry and
     // stays a namespace owner. P1 lists P3's key as an owner that hosts
     // nothing, then kicks it with P2. Its own party, so the shared one stays
@@ -260,6 +264,10 @@ async fn governance_workflows_e2e() -> anyhow::Result<()> {
     if matches!(f.target, common::TestTarget::Localnet) {
         phases::purge_former_party::run(&mut f).await?;
     }
+    // Restarts Canton with key download off and deploys once more for the
+    // party, which must sign from DecMan's key store (#608). It runs last
+    // because key download stays off. Splice 0.10 localnet only.
+    phases::key_download_off::run(&mut f).await?;
     Ok(())
 }
 
