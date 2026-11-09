@@ -6,6 +6,27 @@ party's signing keys are created inside AWS KMS and cannot be exported. decman
 therefore signs ledger transactions by calling the AWS KMS `Sign` API. That
 call needs IAM permission, which the operator must grant once per node.
 
+## New party keys require KMS
+
+decman creates a party's keys only on a participant that keeps its keys in a
+KMS. Onboarding, add-party and rotate-key check this before they create a key.
+They refuse a participant whose vault keys carry no KMS key id, and they refuse
+a key that a name lookup finds outside the KMS.
+
+The rule exists because of Splice 0.10. Canton 3.7 refuses to export a key from
+its software vault unless key download is on, and Canton says not to turn that
+on in production. A KMS key never needs an export, because decman signs with
+the KMS `Sign` API.
+
+- A vault that only wraps its software keys with a KMS key does not count.
+  Those keys still need an export to sign.
+- Insecure mode (`DECPM_INSECURE`, devnet only) skips the rule, and so do
+  `test-mode` builds. A party created there gets software keys. On Splice 0.10
+  its first deploy needs key download, as the last section explains.
+- Parties created before this rule keep their software keys. decman signs with
+  its stored copies, as the section on nodes without KMS explains. To move
+  such a party's key into KMS, see [Rotating a Daml key](#rotating-a-daml-key).
+
 ## Background
 
 Each decentralized-party member holds two keys:
@@ -93,6 +114,32 @@ that account. Signatures are still verified against the registered public key.
 | `failed local verification against the registered public key` | The KMS key does not match the registered public key. Check that the `kms_key_id` belongs to this party's Daml key. |
 | Workflow fails at export with `ExportKeyPair` | The key carries no `kms_key_id`, so decman used the vault-export path. Expected on JCE nodes; on a KMS node this means the key metadata is inconsistent. |
 
+## Rotating a Daml key
+
+The rotate-key workflow replaces one member's Daml key for a party with a new
+key from that member's vault. The members, the owners and both thresholds stay
+the same. Use it to move a key into KMS after the participant moved to KMS, or
+to replace a key you no longer trust.
+
+1. On the member whose key changes, open the party and choose **Rotate my Daml
+   key**. `decman-cli parties rotate-key` and `POST /rotate-key` do the same.
+2. Every other member accepts the invitation. Each one checks the proposal
+   before it signs. The proposal may only swap the named key for one new key,
+   and the member's own records must name that key as the coordinator's.
+3. decman submits the change. Every member then records the new key, so a
+   later kick or rotation attributes it to the right member.
+
+The new key gets a name of the form `<prefix>-daml-transactions-rotated-<run>`.
+The old key stays in the vault and in decman's key store, because decman never
+deletes a key. A party whose keys still sit in a legacy `PartyToKeyMapping` has
+its members' keys moved inline in the same change.
+
+Every member must run a decman version that knows the workflow. A member on an
+older version cannot read the invitation, and the run fails.
+
+On a KMS node, step 2 of the setup above applies to the new key too. Grant
+decman's role `kms:Sign` on it before the next deploy.
+
 ## Scope
 
 - Only AWS KMS is supported. A participant with a different KMS driver (for
@@ -172,7 +219,8 @@ Two cases need it:
   restart the participant. Wait until the log stops reporting
   `Canton refused to export this node's Daml key`. Then remove the flag and
   restart again.
-- **A party onboarded on a Splice 0.10 node.** The party's Daml key comes from
-  the participant's vault, so its first deploy needs the flag. This stays true
-  until decman generates party keys itself.
+- **A party onboarded in insecure mode on a Splice 0.10 node.** The party's
+  Daml key comes from the participant's software vault, so its first deploy
+  needs the flag. Outside insecure mode, decman refuses to create such a key,
+  as [New party keys require KMS](#new-party-keys-require-kms) explains.
 

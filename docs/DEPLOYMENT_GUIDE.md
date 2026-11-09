@@ -646,6 +646,16 @@ Splice 0.10 runs Canton 3.7. Two of its changes need decman in place first.
   `party_key_store`, which deletes decman's copies of the keys. The vault
   keeps its copies.
 
+- **KMS for new keys.** From this version, decman creates party keys only on a
+  participant that keeps its keys in a KMS. Onboarding, add-party and
+  rotate-key refuse any other participant, unless decman runs in insecure
+  mode. Existing parties keep signing with their stored keys.
+  [KMS_SIGNING.md](KMS_SIGNING.md) explains the rule and how to rotate a key
+  into KMS.
+- **Downgrade from rotate-key.** This version adds migration `000031`, which
+  adds a column to `pending_invitations`. Run its down migration before you
+  downgrade.
+
 A participant that upgraded before its decman needs key download until
 decman holds the keys. Set `enableKeyDownload: true` in the
 `splice-participant` Helm values. A participant without the chart sets

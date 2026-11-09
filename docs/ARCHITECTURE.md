@@ -227,6 +227,12 @@ everything that follows (`workflow::validation::PeerExpectations`).
   every signing key above one per host left. A kick that removes no host must
   name the owner key, because nothing else ties the removal to the invitation.
   The peer also checks the named key against the owner keys it has on record.
+- For rotate-key, the peer reads the party's current `PartyToParticipant` and
+  requires the proposal to keep every host and both thresholds. It may remove
+  only the key its invitation names, and it must add exactly one new key. The
+  peer's own records must name that removed key as the coordinator's, and as
+  no other member's. Without this check, a coordinator could swap another
+  member's key for one it controls.
   The key must be the departing host's recorded key, and no staying host's.
   The peer refuses while it has no current key on record for a host. It also
   refuses a namespace in force that still lists the key. Accepting a kick
