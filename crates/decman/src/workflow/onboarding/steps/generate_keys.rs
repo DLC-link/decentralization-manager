@@ -26,6 +26,7 @@ use crate::{
     canton_id::Fingerprint,
     config::NodeConfig,
     error::Result,
+    signing::custody,
     utils::{compute_fingerprint, get_participant_id},
     workflow::{
         onboarding::OnboardingConfig,
@@ -34,6 +35,9 @@ use crate::{
 };
 
 /// Generate cryptographic keys and export them
+///
+/// Refuses a participant that does not keep its keys in KMS, unless this node
+/// runs in insecure mode (see [`custody`]).
 ///
 /// Generates:
 /// 1. Namespace signing key (for namespace delegation)
@@ -53,6 +57,7 @@ pub async fn generate_keys(
     tracing::info!("Generating cryptographic keys...");
 
     let mut vault_client = VaultServiceClient::new(config.admin_channel().await?);
+    custody::require_kms_participant(config, &mut vault_client).await?;
 
     // Derive key names from party_id_prefix
     let namespace_key_name = onboarding_config.namespace_key_name();
@@ -71,6 +76,7 @@ pub async fn generate_keys(
 
     let namespace_fingerprint = compute_fingerprint(&namespace_key);
     tracing::debug!("Namespace key fingerprint: {namespace_fingerprint}");
+    custody::require_kms_key(config, &mut vault_client, &namespace_fingerprint).await?;
 
     // Propose the namespace delegation unless the topology already carries it.
     // Re-proposing an authorized delegation errors, but keying the skip on
@@ -95,6 +101,7 @@ pub async fn generate_keys(
     let (daml_key, _) =
         get_or_create_signing_key(&mut vault_client, &daml_key_name, SigningKeyUsage::Protocol)
             .await?;
+    custody::require_kms_key(config, &mut vault_client, &compute_fingerprint(&daml_key)).await?;
 
     // Persist keys + participant id under this node's own canton id so the
     // coordinator can later list every peer's keys/ids.
