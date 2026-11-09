@@ -70,4 +70,14 @@ ignore = [
   "RUSTSEC-2026-0367",
   "RUSTSEC-2026-0368",
   "RUSTSEC-2026-0369",
+  # SQLite before 3.54.0 can return uninitialized page-cache memory when a
+  # process opens a database together with a crafted `-wal` file of another
+  # page size (RUSTSEC-2026-0459). The attack needs a less trusted party to
+  # write both files. DecMan opens only its own database, in its data
+  # directory, which only DecMan writes.
+  #
+  # The fix is in libsqlite3-sys 0.39, and the latest sqlx (0.9.0) requires
+  # libsqlite3-sys below 0.38, so this cannot be resolved by updating. Drop
+  # it once a sqlx release allows 0.39. Mirrors the ignore in deny.toml.
+  "RUSTSEC-2026-0459",
 ]
