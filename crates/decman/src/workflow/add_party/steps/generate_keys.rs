@@ -6,6 +6,7 @@ use sqlx::SqlitePool;
 use crate::{
     config::NodeConfig,
     error::Result,
+    signing::custody,
     utils::{compute_fingerprint, get_participant_id},
     workflow::{
         add_party::AddPartyConfig,
@@ -22,10 +23,11 @@ use crate::{
 /// needs locally.
 ///
 /// Mirrors onboarding's `generate_keys` (same key names, same idempotent
-/// get-or-create path, same delegation proposal), plus one add-party-specific
-/// extra: the participant's current ledger offset is captured BEFORE the
-/// party gets activated here, because `ClearPartyOnboardingFlag` later needs
-/// a `begin_offset_exclusive` that precedes the activation.
+/// get-or-create path, same KMS requirement, same delegation proposal), plus
+/// one add-party-specific extra: the participant's current ledger offset is
+/// captured BEFORE the party gets activated here, because
+/// `ClearPartyOnboardingFlag` later needs a `begin_offset_exclusive` that
+/// precedes the activation.
 pub async fn generate_keys(
     config: &NodeConfig,
     storage: &SqlitePool,
@@ -36,6 +38,7 @@ pub async fn generate_keys(
     tracing::info!("Generating cryptographic keys for add-party...");
 
     let mut vault_client = VaultServiceClient::new(config.admin_channel().await?);
+    custody::require_kms_participant(config, &mut vault_client).await?;
 
     let namespace_key_name = add_party_config.namespace_key_name();
     let daml_key_name = add_party_config.daml_key_name();
@@ -49,6 +52,7 @@ pub async fn generate_keys(
 
     let namespace_fingerprint = compute_fingerprint(&namespace_key);
     tracing::debug!("Namespace key fingerprint: {namespace_fingerprint}");
+    custody::require_kms_key(config, &mut vault_client, &namespace_fingerprint).await?;
 
     if !namespace_was_existing {
         propose_namespace_delegation(config, &namespace_key, &namespace_fingerprint).await?;
@@ -62,6 +66,7 @@ pub async fn generate_keys(
     let (daml_key, _) =
         get_or_create_signing_key(&mut vault_client, &daml_key_name, SigningKeyUsage::Protocol)
             .await?;
+    custody::require_kms_key(config, &mut vault_client, &compute_fingerprint(&daml_key)).await?;
 
     let self_id = config.participant_id().to_string();
 

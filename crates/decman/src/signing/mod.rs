@@ -15,6 +15,9 @@
 //!   participant's vault (`VaultService.ExportKeyPair`) and signs locally with
 //!   Ed25519. It also stores the key for the next run.
 //!
+//! A new party Daml key goes only into a KMS-backed vault ([`custody`]), so
+//! the export path serves only keys created before that rule.
+//!
 //! [`select_signer`] picks the backend. New backends (e.g. an MPCH client-API
 //! signer) implement [`TransactionSigner`] and add a branch there; nothing
 //! else in the signing flow changes.
@@ -25,6 +28,7 @@
 //! stays in `workflow::contracts::steps::sign`.
 
 pub mod aws_kms;
+pub mod custody;
 mod error;
 pub mod key_store;
 pub mod migration;
