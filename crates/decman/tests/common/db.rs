@@ -423,6 +423,43 @@ pub async fn count_stored_party_keys(db_path: &Path, party_id: &str) -> anyhow::
     Ok(n)
 }
 
+/// The fingerprints of the Daml keys DecMan's key store holds for `party_id`.
+pub async fn stored_party_key_fingerprints(
+    db_path: &Path,
+    party_id: &str,
+) -> anyhow::Result<Vec<String>> {
+    let pool = open(db_path).await?;
+    let fingerprints =
+        sqlx::query_scalar("SELECT fingerprint FROM party_key_store WHERE party_id = ?1")
+            .bind(party_id)
+            .fetch_all(&pool)
+            .await
+            .context("stored_party_key_fingerprints")?;
+    pool.close().await;
+    Ok(fingerprints)
+}
+
+/// The Daml key fingerprint this node has on record for `participant_uid`
+/// in `dec_party_id`'s cached membership.
+pub async fn cached_signing_key(
+    db_path: &Path,
+    dec_party_id: &str,
+    participant_uid: &str,
+) -> anyhow::Result<Option<String>> {
+    let pool = open(db_path).await?;
+    let key: Option<Option<String>> = sqlx::query_scalar(
+        "SELECT signing_key FROM dec_party_participant \
+         WHERE dec_party_id = ?1 AND participant_uid = ?2",
+    )
+    .bind(dec_party_id)
+    .bind(participant_uid)
+    .fetch_optional(&pool)
+    .await
+    .context("cached_signing_key")?;
+    pool.close().await;
+    Ok(key.flatten())
+}
+
 pub async fn count_artifacts(db_path: &Path, instance_name: &str) -> anyhow::Result<i64> {
     let pool = open(db_path).await?;
     let n: i64 =

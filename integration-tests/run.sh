@@ -260,6 +260,9 @@ export P3_PID="${PIDS[2]}"
 #   exporting; the chaos respawn path needs them in child env. devnet.env.sh
 #   already exports its own values, so this block leaves devnet alone.
 if [ "$TARGET" = "localnet" ]; then
+    # The key_download_off phase reads it to tell a Splice 0.10 localnet,
+    # whose Canton refuses exports, from a 0.9 one.
+    export LOCALNET_VERSION
     export MOCK_TOKEN
     export P1_CANTON_LEDGER P2_CANTON_LEDGER P3_CANTON_LEDGER
     export P1_CANTON_ADMIN P2_CANTON_ADMIN P3_CANTON_ADMIN
