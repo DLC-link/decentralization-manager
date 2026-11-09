@@ -827,6 +827,7 @@ async fn p3_lists_as_former(f: &Fixture) -> Option<anyhow::Result<bool>> {
 pub(super) fn admin_config(f: &Fixture, n: u8) -> anyhow::Result<NodeConfig> {
     let (port_var, participant_id) = match n {
         1 => ("P1_CANTON_ADMIN", &f.p1.participant_id),
+        2 => ("P2_CANTON_ADMIN", &f.p2.participant_id),
         3 => ("P3_CANTON_ADMIN", &f.p3.participant_id),
         _ => anyhow::bail!("no admin config for participant {n}"),
     };

@@ -10,9 +10,10 @@ use sqlx::{
 use super::{
     crypto,
     rows::{
-        ChainAuditCacheRow, DecPartyContractRow, DecPartyIdentityRow, DecPartyParticipantRow,
-        DecPartyRow, FormerDecPartyRow, GovernanceAuditRow, HandledInvitationRow,
-        PartyCredentialsRow, PeerRow, PendingInvitationRow, WorkflowArtifactRow, WorkflowRunRow,
+        ChainAuditCacheRow, DecPartyContractRow, DecPartyIdentityRow, DecPartyOwnerRow,
+        DecPartyParticipantRow, DecPartyRow, FormerDecPartyRow, GovernanceAuditRow,
+        HandledInvitationRow, OwnerKeyRefusal, PartyCredentialsRow, PeerRow, PendingInvitationRow,
+        WorkflowArtifactRow, WorkflowRunRow,
     },
     schema::{Commitable, SchemaRead, SchemaWrite},
 };
@@ -236,15 +237,18 @@ impl SchemaRead for SqlitePool {
         Ok(rows)
     }
 
-    async fn get_dec_party_owners(&self, party_id: &CantonId) -> Result<Vec<String>> {
-        let rows = sqlx::query_as::<_, (String,)>(
-            "SELECT owner_key FROM dec_party_owner WHERE dec_party_id = ?",
+    async fn get_dec_party_owners(&self, party_id: &CantonId) -> Result<Vec<DecPartyOwnerRow>> {
+        let rows = sqlx::query_as::<_, DecPartyOwnerRow>(
+            r"
+            SELECT dec_party_id, owner_key, participant_uid
+            FROM dec_party_owner WHERE dec_party_id = ?
+            ",
         )
         .bind(party_id.to_string())
         .fetch_all(self)
         .await?;
 
-        Ok(rows.into_iter().map(|(k,)| k).collect())
+        Ok(rows)
     }
 
     async fn get_dec_party_participants(
@@ -293,11 +297,11 @@ impl SchemaRead for SqlitePool {
         Ok(rows)
     }
 
-    async fn get_all_dec_party_owners(&self, prefix: &str) -> Result<Vec<(String, String)>> {
+    async fn get_all_dec_party_owners(&self, prefix: &str) -> Result<Vec<DecPartyOwnerRow>> {
         let rows = if prefix.is_empty() {
-            sqlx::query_as::<_, (String, String)>(
+            sqlx::query_as::<_, DecPartyOwnerRow>(
                 r"
-                SELECT o.dec_party_id, o.owner_key
+                SELECT o.dec_party_id, o.owner_key, o.participant_uid
                 FROM dec_party_owner o
                 INNER JOIN dec_party p ON p.party_id = o.dec_party_id
                 ",
@@ -305,9 +309,9 @@ impl SchemaRead for SqlitePool {
             .fetch_all(self)
             .await?
         } else {
-            sqlx::query_as::<_, (String, String)>(
+            sqlx::query_as::<_, DecPartyOwnerRow>(
                 r"
-                SELECT o.dec_party_id, o.owner_key
+                SELECT o.dec_party_id, o.owner_key, o.participant_uid
                 FROM dec_party_owner o
                 INNER JOIN dec_party p ON p.party_id = o.dec_party_id
                 WHERE p.prefix = ?
@@ -810,6 +814,7 @@ async fn write_invitation(
             dar_filenames,
             dar_hashes,
             kicked_participant,
+            kicked_owner_key,
             new_participant,
             new_threshold,
             previous_threshold,
@@ -820,7 +825,7 @@ async fn write_invitation(
             workflow_instance,
             status,
             handled_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ",
     )
     .bind(&row.id)
@@ -832,6 +837,7 @@ async fn write_invitation(
     .bind(&row.dar_filenames)
     .bind(&row.dar_hashes)
     .bind(&row.kicked_participant)
+    .bind(&row.kicked_owner_key)
     .bind(&row.new_participant)
     .bind(row.new_threshold)
     .bind(row.previous_threshold)
@@ -846,6 +852,64 @@ async fn write_invitation(
     .await?;
 
     Ok(())
+}
+
+/// Why `owner_key` must not go on record for `participant_uid`: another
+/// participant has the key on record, as a host's key or as a claim, or
+/// `participant_uid` has another key on record that is still an owner.
+async fn owner_key_refusal(
+    conn: &mut SqliteConnection,
+    party_id: &str,
+    owner_key: &str,
+    participant_uid: &str,
+) -> Result<Option<OwnerKeyRefusal>> {
+    let holder: Option<String> = sqlx::query_scalar(
+        r"
+        SELECT participant_uid FROM dec_party_participant
+        WHERE dec_party_id = ? AND owner_key = ? AND participant_uid != ?
+        UNION
+        SELECT participant_uid FROM dec_party_owner
+        WHERE dec_party_id = ? AND owner_key = ? AND participant_uid != ?
+        LIMIT 1
+        ",
+    )
+    .bind(party_id)
+    .bind(owner_key)
+    .bind(participant_uid)
+    .bind(party_id)
+    .bind(owner_key)
+    .bind(participant_uid)
+    .fetch_optional(&mut *conn)
+    .await?;
+    if let Some(holder) = holder {
+        return Ok(Some(OwnerKeyRefusal::HeldBy(holder)));
+    }
+
+    // Every dec_party_owner row is a current owner of the party.
+    let kept: Option<String> = sqlx::query_scalar(
+        r"
+        SELECT owner.owner_key FROM dec_party_owner AS owner
+        WHERE owner.dec_party_id = ?
+            AND owner.owner_key != ?
+            AND (
+                owner.participant_uid = ?
+                OR EXISTS (
+                    SELECT 1 FROM dec_party_participant AS participant
+                    WHERE participant.dec_party_id = owner.dec_party_id
+                        AND participant.participant_uid = ?
+                        AND participant.owner_key = owner.owner_key
+                )
+            )
+        LIMIT 1
+        ",
+    )
+    .bind(party_id)
+    .bind(owner_key)
+    .bind(participant_uid)
+    .bind(participant_uid)
+    .fetch_optional(&mut *conn)
+    .await?;
+    Ok(kept.map(OwnerKeyRefusal::KeepsKey))
 }
 
 impl Commitable for sqlx::Transaction<'static, sqlx::Sqlite> {
@@ -968,16 +1032,33 @@ impl Commitable for sqlx::Transaction<'static, sqlx::Sqlite> {
 
     async fn replace_dec_party_owners(&mut self, party_id: &CantonId, owners: &[String]) -> Result {
         let party_id_str = party_id.to_string();
-        sqlx::query("DELETE FROM dec_party_owner WHERE dec_party_id = ?")
-            .bind(&party_id_str)
-            .execute(&mut **self)
-            .await?;
+        // An owner that stays keeps its claim. The live Canton fetch carries
+        // no claims, and a refresh that wiped them would hide every owner that
+        // does not host the party until the next OwnerKeys round.
+        if owners.is_empty() {
+            sqlx::query("DELETE FROM dec_party_owner WHERE dec_party_id = ?")
+                .bind(&party_id_str)
+                .execute(&mut **self)
+                .await?;
+        } else {
+            let placeholders = owners.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+            let query = format!(
+                "DELETE FROM dec_party_owner WHERE dec_party_id = ? \
+                 AND owner_key NOT IN ({placeholders})"
+            );
+            let mut q = sqlx::query(&query).bind(&party_id_str);
+            for owner in owners {
+                q = q.bind(owner);
+            }
+            q.execute(&mut **self).await?;
+        }
 
         for owner in owners {
             sqlx::query(
                 r"
                 INSERT INTO dec_party_owner (dec_party_id, owner_key)
                 VALUES (?, ?)
+                ON CONFLICT(dec_party_id, owner_key) DO NOTHING
                 ",
             )
             .bind(&party_id_str)
@@ -987,6 +1068,42 @@ impl Commitable for sqlx::Transaction<'static, sqlx::Sqlite> {
         }
 
         Ok(())
+    }
+
+    async fn delete_dec_party_owner(&mut self, party_id: &CantonId, owner_key: &str) -> Result {
+        sqlx::query("DELETE FROM dec_party_owner WHERE dec_party_id = ? AND owner_key = ?")
+            .bind(party_id.to_string())
+            .bind(owner_key)
+            .execute(&mut **self)
+            .await?;
+        Ok(())
+    }
+
+    async fn update_owner_claim(
+        &mut self,
+        party_id: &CantonId,
+        owner_key: &str,
+        participant_uid: &str,
+    ) -> Result<Option<OwnerKeyRefusal>> {
+        let party_id = party_id.to_string();
+        if let Some(refusal) =
+            owner_key_refusal(self, &party_id, owner_key, participant_uid).await?
+        {
+            return Ok(Some(refusal));
+        }
+        sqlx::query(
+            r"
+            UPDATE dec_party_owner
+            SET participant_uid = ?
+            WHERE dec_party_id = ? AND owner_key = ?
+            ",
+        )
+        .bind(participant_uid)
+        .bind(&party_id)
+        .bind(owner_key)
+        .execute(&mut **self)
+        .await?;
+        Ok(None)
     }
 
     async fn replace_dec_party_participants(
@@ -1158,7 +1275,13 @@ impl Commitable for sqlx::Transaction<'static, sqlx::Sqlite> {
         party_id: &CantonId,
         participant_uid: &str,
         owner_key: &str,
-    ) -> Result {
+    ) -> Result<Option<OwnerKeyRefusal>> {
+        let party_id = party_id.to_string();
+        if let Some(refusal) =
+            owner_key_refusal(self, &party_id, owner_key, participant_uid).await?
+        {
+            return Ok(Some(refusal));
+        }
         sqlx::query(
             r"
             UPDATE dec_party_participant
@@ -1167,12 +1290,12 @@ impl Commitable for sqlx::Transaction<'static, sqlx::Sqlite> {
             ",
         )
         .bind(owner_key)
-        .bind(party_id.to_string())
+        .bind(&party_id)
         .bind(participant_uid)
         .execute(&mut **self)
         .await?;
 
-        Ok(())
+        Ok(None)
     }
 
     async fn update_participant_signing_key(
@@ -1612,7 +1735,10 @@ mod tests {
         canton_id::{CantonId, Fingerprint},
         config::{Auth0M2MConfig, KeycloakConfig, PackageConfig, PartyCredentials, Peer},
         db::{
-            rows::{DecPartyContractRow, DecPartyParticipantRow, DecPartyRow},
+            rows::{
+                DecPartyContractRow, DecPartyOwnerRow, DecPartyParticipantRow, DecPartyRow,
+                OwnerKeyRefusal,
+            },
             schema::{Commitable, SchemaRead, SchemaWrite},
         },
         error::Result,
@@ -2212,8 +2338,8 @@ mod tests {
 
         let result = pool.get_dec_party_owners(&party_id).await?;
         assert_eq!(result.len(), 2);
-        assert!(result.contains(&"owner-key-1".to_string()));
-        assert!(result.contains(&"owner-key-2".to_string()));
+        assert!(result.iter().any(|o| o.owner_key == "owner-key-1"));
+        assert!(result.iter().any(|o| o.owner_key == "owner-key-2"));
 
         let mut tx = pool.begin_transaction().await?;
         tx.replace_dec_party_owners(&party_id, &["only-owner".to_string()])
@@ -2223,6 +2349,177 @@ mod tests {
         let result = pool.get_dec_party_owners(&party_id).await?;
         assert_eq!(result.len(), 1);
 
+        Ok(())
+    }
+
+    /// A party refresh rewrites the owner set from Canton, which knows
+    /// nothing of claims. An owner that stays must keep the participant that
+    /// claimed it, or every owner that does not host the party drops out of
+    /// the list until the next OwnerKeys round.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn an_owner_keeps_its_claim_across_a_refresh(pool: SqlitePool) -> Result {
+        let mut tx = pool.begin_transaction().await?;
+        tx.upsert_dec_party(&test_dec_party("net-a")).await?;
+        let party_id = CantonId::parse(&format!("net-a::{TEST_NS}"))?;
+        tx.replace_dec_party_owners(&party_id, &["kept".to_string(), "dropped".to_string()])
+            .await?;
+        tx.update_owner_claim(&party_id, "kept", "p2::1220ab")
+            .await?;
+        tx.update_owner_claim(&party_id, "not-an-owner", "p3::1220cd")
+            .await?;
+        Commitable::commit(tx).await?;
+
+        let mut tx = pool.begin_transaction().await?;
+        tx.replace_dec_party_owners(&party_id, &["kept".to_string(), "new".to_string()])
+            .await?;
+        Commitable::commit(tx).await?;
+
+        let mut owners = pool.get_dec_party_owners(&party_id).await?;
+        owners.sort_by(|a, b| a.owner_key.cmp(&b.owner_key));
+        let claims: Vec<(&str, Option<&str>)> = owners
+            .iter()
+            .map(|o| (o.owner_key.as_str(), o.participant_uid.as_deref()))
+            .collect();
+        assert_eq!(claims, vec![("kept", Some("p2::1220ab")), ("new", None)]);
+        Ok(())
+    }
+
+    /// A party with owners k1 to k3, hosted by p1 and p2 with no keys known.
+    async fn party_with_unkeyed_hosts(pool: &SqlitePool) -> Result<CantonId> {
+        let mut tx = pool.begin_transaction().await?;
+        tx.upsert_dec_party(&test_dec_party("net-a")).await?;
+        let party_id = CantonId::parse(&format!("net-a::{TEST_NS}"))?;
+        let owners = ["k1", "k2", "k3"].map(str::to_string);
+        tx.replace_dec_party_owners(&party_id, &owners).await?;
+        let host = |uid: &str| DecPartyParticipantRow {
+            dec_party_id: party_id.to_string(),
+            participant_uid: uid.to_string(),
+            permission: "confirmation".to_string(),
+            owner_key: None,
+            signing_key: None,
+        };
+        tx.replace_dec_party_participants(&party_id, &[host("p1::1220aa"), host("p2::1220bb")])
+            .await?;
+        Commitable::commit(tx).await?;
+        Ok(party_id)
+    }
+
+    async fn host_key(pool: &SqlitePool, party_id: &CantonId, uid: &str) -> Result<Option<String>> {
+        Ok(pool
+            .get_dec_party_participants(party_id)
+            .await?
+            .into_iter()
+            .find(|row| row.participant_uid == uid)
+            .and_then(|row| row.owner_key))
+    }
+
+    async fn claimant(pool: &SqlitePool, party_id: &CantonId, key: &str) -> Result<Option<String>> {
+        Ok(pool
+            .get_dec_party_owners(party_id)
+            .await?
+            .into_iter()
+            .find(|row| row.owner_key == key)
+            .and_then(|row| row.participant_uid))
+    }
+
+    /// Any peer can report any key, so the first holder on record keeps it,
+    /// whether a host's key or a claim holds it.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn an_owner_key_has_one_holder_on_record(pool: SqlitePool) -> Result {
+        let party_id = party_with_unkeyed_hosts(&pool).await?;
+        let held_by = |uid: &str| Some(OwnerKeyRefusal::HeldBy(uid.to_string()));
+        let mut tx = pool.begin_transaction().await?;
+        assert_eq!(
+            tx.update_participant_owner_key(&party_id, "p1::1220aa", "k1")
+                .await?,
+            None
+        );
+        assert_eq!(
+            tx.update_participant_owner_key(&party_id, "p2::1220bb", "k1")
+                .await?,
+            held_by("p1::1220aa")
+        );
+        assert_eq!(
+            tx.update_owner_claim(&party_id, "k1", "p3::1220cc").await?,
+            held_by("p1::1220aa")
+        );
+        assert_eq!(
+            tx.update_owner_claim(&party_id, "k3", "p3::1220cc").await?,
+            None
+        );
+        assert_eq!(
+            tx.update_owner_claim(&party_id, "k3", "p4::1220dd").await?,
+            held_by("p3::1220cc")
+        );
+        assert_eq!(
+            tx.update_participant_owner_key(&party_id, "p2::1220bb", "k3")
+                .await?,
+            held_by("p3::1220cc")
+        );
+        Commitable::commit(tx).await?;
+
+        assert_eq!(host_key(&pool, &party_id, "p2::1220bb").await?, None);
+        assert_eq!(claimant(&pool, &party_id, "k1").await?, None);
+        assert_eq!(
+            claimant(&pool, &party_id, "k3").await?.as_deref(),
+            Some("p3::1220cc")
+        );
+        Ok(())
+    }
+
+    /// A holder's recorded key changes only once it is no longer an owner.
+    /// Until then a second key would let a peer swap its record for another
+    /// participant's key.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_recorded_owner_key_changes_once_it_leaves_the_owners(pool: SqlitePool) -> Result {
+        let party_id = party_with_unkeyed_hosts(&pool).await?;
+        let keeps = |key: &str| Some(OwnerKeyRefusal::KeepsKey(key.to_string()));
+        let mut tx = pool.begin_transaction().await?;
+        tx.update_participant_owner_key(&party_id, "p1::1220aa", "k1")
+            .await?;
+        tx.update_owner_claim(&party_id, "k3", "p3::1220cc").await?;
+        assert_eq!(
+            tx.update_participant_owner_key(&party_id, "p1::1220aa", "k2")
+                .await?,
+            keeps("k1")
+        );
+        assert_eq!(
+            tx.update_owner_claim(&party_id, "k2", "p1::1220aa").await?,
+            keeps("k1")
+        );
+        assert_eq!(
+            tx.update_owner_claim(&party_id, "k2", "p3::1220cc").await?,
+            keeps("k3")
+        );
+        tx.replace_dec_party_owners(&party_id, &["k2".to_string(), "k3".to_string()])
+            .await?;
+        assert_eq!(
+            tx.update_participant_owner_key(&party_id, "p1::1220aa", "k2")
+                .await?,
+            None
+        );
+        Commitable::commit(tx).await?;
+
+        assert_eq!(
+            host_key(&pool, &party_id, "p1::1220aa").await?.as_deref(),
+            Some("k2")
+        );
+        Ok(())
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn deleting_an_owner_leaves_the_others(pool: SqlitePool) -> Result {
+        let mut tx = pool.begin_transaction().await?;
+        tx.upsert_dec_party(&test_dec_party("net-a")).await?;
+        let party_id = CantonId::parse(&format!("net-a::{TEST_NS}"))?;
+        tx.replace_dec_party_owners(&party_id, &["a".to_string(), "b".to_string()])
+            .await?;
+        tx.delete_dec_party_owner(&party_id, "b").await?;
+        Commitable::commit(tx).await?;
+
+        let owners = pool.get_dec_party_owners(&party_id).await?;
+        assert_eq!(owners.len(), 1);
+        assert_eq!(owners[0].owner_key, "a");
         Ok(())
     }
 
@@ -3018,6 +3315,7 @@ mod tests {
             dar_filenames: Vec::new(),
             dar_hashes: Vec::new(),
             kicked_participant: None,
+            kicked_owner_key: None,
             new_participant: None,
             new_threshold: None,
             previous_threshold: None,
@@ -3038,6 +3336,7 @@ mod tests {
             dar_filenames: Vec::new(),
             dar_hashes: Vec::new(),
             kicked_participant: Some(CantonId::parse(&format!("kicked::{TEST_NS}")).unwrap()),
+            kicked_owner_key: Some("1220kicked".to_string()),
             new_participant: None,
             new_threshold: Some(2),
             previous_threshold: Some(3),
@@ -3064,6 +3363,7 @@ mod tests {
             dar_filenames: vec!["app.dar".to_string(), "lib.dar".to_string()],
             dar_hashes: Vec::new(),
             kicked_participant: None,
+            kicked_owner_key: None,
             new_participant: None,
             new_threshold: None,
             previous_threshold: None,
@@ -3085,6 +3385,7 @@ mod tests {
         assert_eq!(loaded[0].confirmation_threshold, None);
         assert_eq!(loaded[1].invitation_type, InvitationType::Kick);
         assert_eq!(loaded[1].confirmation_threshold, Some(1));
+        assert_eq!(loaded[1].kicked_owner_key.as_deref(), Some("1220kicked"));
         assert!(loaded[1].prefix.is_none());
         assert!(loaded[1].participants.is_empty());
         assert_eq!(loaded[2].invitation_type, InvitationType::Dars);
@@ -3123,6 +3424,7 @@ mod tests {
             dar_filenames: Vec::new(),
             dar_hashes: Vec::new(),
             kicked_participant: None,
+            kicked_owner_key: None,
             new_participant: None,
             new_threshold: None,
             previous_threshold: None,
@@ -3374,6 +3676,7 @@ mod tests {
             dar_filenames: Vec::new(),
             dar_hashes: Vec::new(),
             kicked_participant: None,
+            kicked_owner_key: None,
             new_participant: None,
             new_threshold: None,
             previous_threshold: None,
@@ -3458,6 +3761,7 @@ mod tests {
             previous_threshold: None,
             new_threshold: None,
             kicked_participant: None,
+            kicked_owner_key: None,
             added_participant: None,
             package_names: Vec::new(),
             dar_filenames: Vec::new(),
@@ -3936,10 +4240,17 @@ mod tests {
         // Specific prefix → only that party's rows.
         let a_owners = pool.get_all_dec_party_owners("net-a").await?;
         assert_eq!(a_owners.len(), 2);
-        assert!(a_owners.iter().all(|(id, _)| *id == party_a_str));
+        assert!(a_owners.iter().all(|o| o.dec_party_id == party_a_str));
         let b_owners = pool.get_all_dec_party_owners("net-b").await?;
         assert_eq!(b_owners.len(), 1);
-        assert_eq!(b_owners[0], (party_b_str.clone(), "b-owner-1".to_string()));
+        assert_eq!(
+            b_owners[0],
+            DecPartyOwnerRow {
+                dec_party_id: party_b_str.clone(),
+                owner_key: "b-owner-1".to_string(),
+                participant_uid: None,
+            }
+        );
 
         let a_participants = pool.get_all_dec_party_participants("net-a").await?;
         assert_eq!(a_participants.len(), 1);
@@ -3971,6 +4282,7 @@ mod tests {
             dar_filenames: Vec::new(),
             dar_hashes: Vec::new(),
             kicked_participant: None,
+            kicked_owner_key: None,
             new_participant: None,
             new_threshold: None,
             previous_threshold: None,
@@ -3991,6 +4303,7 @@ mod tests {
             dar_filenames: vec!["app.dar".to_string()],
             dar_hashes: Vec::new(),
             kicked_participant: None,
+            kicked_owner_key: None,
             new_participant: None,
             new_threshold: None,
             previous_threshold: None,

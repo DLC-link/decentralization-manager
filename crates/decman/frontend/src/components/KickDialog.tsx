@@ -15,6 +15,7 @@ import { API_BASE } from "../constants";
 import { authenticatedFetch } from "../api";
 import { useSnackbar } from "../contexts";
 import { fieldHelpAdornment } from "./FieldHelp";
+import { kickThresholdBound } from "../kickThreshold";
 import type {
   DecentralizedPartiesResponse,
   KickRequest,
@@ -26,10 +27,14 @@ interface KickDialogProps {
   onClose: () => void;
   onKickComplete: () => void;
   partyId: string;
-  participantUid: string;
+  /** Absent for an owner key that no peer has claimed. */
+  participantUid?: string;
   participantOwnerKey?: string;
+  /** False for a member that owns the namespace without hosting the party. */
+  hosting?: boolean;
   currentThreshold: number;
   currentOwnerCount: number;
+  currentHostCount: number;
 }
 
 export const KickDialog = ({
@@ -39,8 +44,10 @@ export const KickDialog = ({
   partyId,
   participantUid,
   participantOwnerKey,
+  hosting = true,
   currentThreshold,
   currentOwnerCount,
+  currentHostCount,
 }: KickDialogProps) => {
   const [newThreshold, setNewThreshold] = useState(1);
   const [loading, setLoading] = useState(false);
@@ -60,7 +67,7 @@ export const KickDialog = ({
   }, [participantOwnerKey]);
 
   useEffect(() => {
-    if (!open || resolvedOwnerKey) return;
+    if (!open || resolvedOwnerKey || !participantUid) return;
     const partyPrefix = partyId.split("::")[0];
     if (!partyPrefix) return;
     let cancelled = false;
@@ -100,14 +107,13 @@ export const KickDialog = ({
     };
   }, [open, resolvedOwnerKey, partyId, participantUid]);
 
-  // Calculate suggested threshold when owner count changes
-  const remainingOwners = currentOwnerCount - 1;
-  const suggestedThreshold = Math.max(1, Math.ceil(remainingOwners / 2));
+  const maxThreshold = kickThresholdBound(hosting, currentHostCount, currentOwnerCount);
+  const suggestedThreshold = Math.max(1, Math.ceil(maxThreshold / 2));
 
   useEffect(() => {
     // Reset threshold to suggested value when dialog opens with new data
-    setNewThreshold(Math.min(currentThreshold, remainingOwners) || suggestedThreshold);
-  }, [currentThreshold, remainingOwners, suggestedThreshold]);
+    setNewThreshold(Math.min(currentThreshold, maxThreshold) || suggestedThreshold);
+  }, [currentThreshold, maxThreshold, suggestedThreshold]);
 
   useEffect(() => {
     if (!open) {
@@ -158,9 +164,12 @@ export const KickDialog = ({
     setLoading(true);
     setError(null);
 
+    // A host is named by its participant. An owner that hosts nothing is
+    // named by its key, with the participant that claimed it when known.
     const request: KickRequest = {
       decentralized_party_id: partyId,
       participant_id: participantUid,
+      owner_key: hosting ? undefined : resolvedOwnerKey,
       new_threshold: newThreshold,
       previous_threshold: currentThreshold,
     };
@@ -218,13 +227,21 @@ export const KickDialog = ({
 
   return (
     <Dialog open={open} onClose={handleClose} maxWidth="sm" fullWidth>
-      <DialogTitle>Kick Participant</DialogTitle>
+      <DialogTitle>{hosting ? "Kick Participant" : "Kick Owner"}</DialogTitle>
       <DialogContent>
         <Box sx={{ display: "flex", flexDirection: "column", gap: 2, mt: 1 }}>
           <Typography variant="body2" color="text.secondary">
             Remove a participant from the decentralized party. This action
             requires coordination with other participants.
           </Typography>
+
+          {!hosting && (
+            <Alert severity="info" data-testid="kick-owner-only-note">
+              This member owns the party&apos;s namespace but does not host
+              the party. The kick removes its owner key. The hosting
+              participants and their signing keys stay as they are.
+            </Alert>
+          )}
 
           <TextField
             label="Decentralized Party ID"
@@ -244,7 +261,7 @@ export const KickDialog = ({
 
           <TextField
             label="Participant ID to Kick"
-            value={participantUid}
+            value={participantUid ?? "Not claimed by any peer"}
             disabled
             fullWidth
             size="small"
@@ -288,7 +305,7 @@ export const KickDialog = ({
             size="small"
             disabled={loading}
             slotProps={{
-              htmlInput: { min: 1, max: remainingOwners },
+              htmlInput: { min: 1, max: maxThreshold },
               input: {
                 endAdornment: fieldHelpAdornment(
                   "Number of remaining owners that must sign topology changes for this party after the kick. Must be between 1 and the number of owners left.",
@@ -296,7 +313,7 @@ export const KickDialog = ({
                 ),
               },
             }}
-            helperText={`Threshold after kick (suggested: ${suggestedThreshold}, max: ${remainingOwners})`}
+            helperText={`Threshold after kick (suggested: ${suggestedThreshold}, max: ${maxThreshold})`}
           />
 
           {error && (
@@ -350,9 +367,15 @@ export const KickDialog = ({
             onClick={handleKick}
             variant="contained"
             color="error"
-            disabled={loading || newThreshold < 1 || newThreshold > remainingOwners || !resolvedOwnerKey}
+            disabled={loading || newThreshold < 1 || newThreshold > maxThreshold || !resolvedOwnerKey}
           >
-            {loading ? <CircularProgress size={20} /> : "Kick Participant"}
+            {loading ? (
+              <CircularProgress size={20} />
+            ) : hosting ? (
+              "Kick Participant"
+            ) : (
+              "Kick Owner"
+            )}
           </Button>
         ) : null}
       </DialogActions>

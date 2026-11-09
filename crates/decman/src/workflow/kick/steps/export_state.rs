@@ -20,7 +20,7 @@ use crate::{
 /// This step exports:
 /// - Current namespace definition (`KICK_NAMESPACE_DEF`)
 /// - Kick target (`KICK_TARGET_NAMESPACE` — the namespace fingerprint to remove)
-/// - Kick participant ID (`KICK_TARGET_PARTICIPANT`)
+/// - Kick participant ID (`KICK_TARGET_PARTICIPANT`), when the run names one
 /// - New threshold after kick (`KICK_NEW_THRESHOLD`)
 pub async fn export_state(
     config: &NodeConfig,
@@ -115,23 +115,28 @@ pub async fn export_state(
         .transpose()?
         .ok_or_else(|| anyhow::anyhow!("No P2P mapping found for party {party_id}"))?;
 
-    let kick_participant = &kick_config.participant_id;
-    tracing::info!("Participant to kick: {kick_participant}");
-
-    if !p2p_mapping
-        .participants
-        .iter()
-        .any(|p| p.participant_uid == kick_participant.to_string())
-    {
-        anyhow::bail!("Participant {kick_participant} not in P2P mapping");
-    }
+    let kick_participant = kick_config.participant_id.as_ref();
+    let hosted = kick_participant.is_some_and(|kicked| {
+        p2p_mapping
+            .participants
+            .iter()
+            .any(|p| p.participant_uid == kicked.to_string())
+    });
+    // A member that owns the namespace without hosting the party leaves only
+    // the owner set; create_proposals keeps every host and key.
+    tracing::info!(
+        "Member to kick: {kick_participant:?}, {}",
+        if hosted {
+            "hosts the party"
+        } else {
+            "does not host the party"
+        }
+    );
 
     // Use the namespace fingerprint provided as parameter
     let kick_target_hex = &kick_config.namespace_fingerprint;
 
-    tracing::info!(
-        "Using provided namespace fingerprint for participant {kick_participant}: {kick_target_hex}"
-    );
+    tracing::info!("Using provided namespace fingerprint: {kick_target_hex}");
 
     // Verify that the namespace fingerprint is in the DNS owners list
     if !namespace_def.owners.contains(kick_target_hex) {
@@ -141,9 +146,7 @@ pub async fn export_state(
         );
     }
 
-    tracing::info!(
-        "Successfully mapped participant {kick_participant} to DNS owner {kick_target_hex}"
-    );
+    tracing::info!("Owner key {kick_target_hex} is a DNS owner");
 
     // Save kick target — plaintext, mirrors the previous file write that
     // included a trailing newline so existing reader trim behaviour matches.
@@ -157,14 +160,16 @@ pub async fn export_state(
         .await?;
 
     // Save kick participant ID — plaintext.
-    storage
-        .write_artifact(
-            instance_name,
-            artifact_kinds::KICK_TARGET_PARTICIPANT,
-            None,
-            format!("{kick_participant}\n").as_bytes(),
-        )
-        .await?;
+    if let Some(kick_participant) = kick_participant {
+        storage
+            .write_artifact(
+                instance_name,
+                artifact_kinds::KICK_TARGET_PARTICIPANT,
+                None,
+                format!("{kick_participant}\n").as_bytes(),
+            )
+            .await?;
+    }
 
     // Use the threshold configured by the user
     let remaining_members = namespace_def.owners.len() - 1;

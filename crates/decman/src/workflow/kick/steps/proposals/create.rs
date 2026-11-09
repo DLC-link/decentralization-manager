@@ -1,4 +1,6 @@
-use canton_proto_rs::com::digitalasset::canton::protocol::v30::DecentralizedNamespaceDefinition;
+use canton_proto_rs::com::digitalasset::canton::protocol::v30::{
+    DecentralizedNamespaceDefinition, PartyToParticipant,
+};
 use sqlx::SqlitePool;
 
 use crate::{
@@ -10,7 +12,7 @@ use crate::{
         kick::KickConfig,
         proposal_store,
         signing_keys::{
-            adopt_legacy_signing_keys, known_signing_keys_by_member, signing_keys_without_member,
+            adopt_legacy_signing_keys, known_signing_keys_by_member, signing_keys_after_kick,
         },
         storage::{WorkflowStorage, artifact_kinds},
         thresholds::{PartyThresholds, ensure_carried_from},
@@ -120,8 +122,19 @@ pub async fn create_proposals(
         count = current_p2p.participants.len()
     );
 
-    // Create new P2P mapping without kicked participant
-    let kick_participant_str = kick_config.participant_id.to_string();
+    // Create new P2P mapping without kicked participant. A member that owns
+    // the namespace without hosting the party has no host entry, so its kick
+    // keeps every host.
+    let kicked_host = kick_config
+        .participant_id
+        .as_ref()
+        .map(ToString::to_string)
+        .filter(|uid| {
+            current_p2p
+                .participants
+                .iter()
+                .any(|p| &p.participant_uid == uid)
+        });
     let member_count = current_p2p.participants.len();
     let on_chain = PartyThresholds::new(
         current_namespace_def.threshold,
@@ -130,7 +143,7 @@ pub async fn create_proposals(
     let new_participants: Vec<_> = current_p2p
         .participants
         .into_iter()
-        .filter(|p| p.participant_uid != kick_participant_str)
+        .filter(|p| Some(&p.participant_uid) != kicked_host.as_ref())
         .collect();
 
     tracing::info!(
@@ -170,15 +183,20 @@ pub async fn create_proposals(
             &current_signing_keys,
         )
         .await?
-    } else {
+    } else if kicked_host.is_some() || current_signing_keys.len() > member_count {
+        // A member that removes its own hosting entry leaves its key behind,
+        // so an owner that hosts nothing may still hold one. A kick takes out
+        // every such key along with the kicked member's, so one key per host
+        // stays, as the peers require.
+        let removed = kick_config.participant_id.as_ref().map_or_else(
+            || kick_config.namespace_fingerprint.clone(),
+            ToString::to_string,
+        );
         let claims =
             known_signing_keys_by_member(config, storage, &party_id, &current_signing_keys).await?;
-        signing_keys_without_member(
-            &current_signing_keys,
-            &kick_participant_str,
-            &survivors,
-            &claims,
-        )?
+        signing_keys_after_kick(&current_signing_keys, &removed, &survivors, &claims)?
+    } else {
+        current_signing_keys
     };
 
     if new_signing_keys.len() != new_participants.len() {
@@ -200,6 +218,7 @@ pub async fn create_proposals(
     // Signed without being published: nothing reaches the synchronizer until
     // submit, so a member that never signs leaves the party unchanged (#448).
     tracing::info!("Signing kick proposals...");
+    let p2p_change = changed_mapping(&head.p2p, new_p2p);
     let signed = proposal_store::sign_party_proposals(
         config,
         &synchronizer_id,
@@ -207,14 +226,24 @@ pub async fn create_proposals(
         &party_id,
         &head,
         Some(new_namespace_def.clone()),
-        new_p2p,
+        p2p_change,
         topology::party_proposal_force_flags(),
     )
     .await?;
     let dns_transaction = signed
         .dns
         .ok_or_else(|| anyhow::anyhow!("No DNS kick proposal was signed"))?;
-    let p2p_transaction = signed.p2p;
+    // An owner that hosts nothing, left no key behind and keeps the threshold
+    // leaves the hosting mapping as it is. Canton refuses to re-sign that at a
+    // new serial, so the peers get the transaction already in force. They see
+    // it as applied, and submit skips it.
+    let p2p_transaction = match signed.p2p {
+        Some(p2p) => p2p,
+        None => {
+            tracing::info!("The kick leaves the hosting mapping as it is");
+            topology::fetch_signed_party_to_participant(config, &synchronizer_id, &party_id).await?
+        }
+    };
 
     // Persist proposals + supporting data to workflow storage. Each protobuf
     // is written with the same `varint(len)||proto` framing the original file
@@ -265,4 +294,62 @@ pub async fn create_proposals(
 
     tracing::info!("Kick proposals created and saved successfully");
     Ok(())
+}
+
+/// The mapping to propose, or `None` when it equals the one in force.
+fn changed_mapping(
+    current: &PartyToParticipant,
+    proposed: PartyToParticipant,
+) -> Option<PartyToParticipant> {
+    (proposed != *current).then_some(proposed)
+}
+
+#[cfg(test)]
+mod tests {
+    use canton_proto_rs::com::digitalasset::canton::{
+        crypto::v30::{SigningKeysWithThreshold, SigningPublicKey},
+        protocol::v30::party_to_participant::HostingParticipant,
+    };
+
+    use super::*;
+
+    fn mapping(threshold: u32, keys: u8) -> PartyToParticipant {
+        PartyToParticipant {
+            party: "party".to_string(),
+            threshold,
+            participants: vec![HostingParticipant {
+                participant_uid: "p1".to_string(),
+                permission: 2,
+                onboarding: None,
+            }],
+            party_signing_keys: Some(SigningKeysWithThreshold {
+                keys: (1..=keys)
+                    .map(|seed| SigningPublicKey {
+                        public_key: vec![seed; 32],
+                        ..Default::default()
+                    })
+                    .collect(),
+                threshold,
+            }),
+        }
+    }
+
+    /// Canton refuses a mapping equal to the one in force at a new serial, so
+    /// an owner-only kick at the same threshold proposes none.
+    #[test]
+    fn an_unchanged_mapping_is_not_proposed() {
+        assert_eq!(changed_mapping(&mapping(1, 1), mapping(1, 1)), None);
+    }
+
+    #[test]
+    fn a_new_threshold_or_a_dropped_key_is_proposed() {
+        assert_eq!(
+            changed_mapping(&mapping(2, 1), mapping(1, 1)),
+            Some(mapping(1, 1))
+        );
+        assert_eq!(
+            changed_mapping(&mapping(1, 2), mapping(1, 1)),
+            Some(mapping(1, 1))
+        );
+    }
 }

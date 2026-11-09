@@ -27,6 +27,7 @@ const party: DecentralizedParty = {
     participant_uid,
     permission: "confirmation",
   })),
+  non_hosting_owners: [],
   contracts: [],
 };
 
