@@ -241,6 +241,13 @@ pub async fn wait_for_server(http_port: u16, deadline: Duration) -> Result<()> {
     }
 }
 
+/// The `DECPM_ALLOW_SOFTWARE_PARTY_KEYS` value that bash bring-up gave
+/// `participant` (`integration-tests/common.sh::start_nodes`).
+fn allow_software_party_keys(participant: u8) -> String {
+    std::env::var(format!("P{participant}_ALLOW_SOFTWARE_PARTY_KEYS"))
+        .unwrap_or_else(|_| "true".to_string())
+}
+
 /// Spawn a fresh dec-party-manager with the same args env.sh used at boot.
 /// Returns the new PID; also appends it to `$DEV_DIR/restarted-pids` so the
 /// bash cleanup trap can SIGKILL it if cargo test exits abnormally.
@@ -284,6 +291,14 @@ pub async fn spawn_node(spawn: &NodeSpawn, restarted_pids_file: &PathBuf) -> Res
         )
         .env("DECPM_METRICS_PORT", spawn.metrics_port.to_string())
         .env("DECPM_NOISE_PORT", spawn.noise_port.to_string())
+        .env(
+            "DECPM_ALLOW_SOFTWARE_PARTY_KEYS",
+            allow_software_party_keys(spawn.participant),
+        )
+        .env(
+            "DECPM_TEST_ROTATE_KEY_REPLACE_FILE",
+            spawn.data_dir.join("rotate-key-replace"),
+        )
         .envs(
             spawn
                 .extra_env

@@ -322,6 +322,26 @@ pub async fn workflow_run_error(
     Ok(s.flatten())
 }
 
+/// The error the peer-side run of a coordinator run recorded, matched as
+/// [`peer_run_status_by_coordinator_instance`] matches it.
+pub async fn peer_run_error_by_coordinator_instance(
+    db_path: &Path,
+    coordinator_instance: &str,
+) -> anyhow::Result<Option<String>> {
+    let pool = open(db_path).await?;
+    let s: Option<Option<String>> = sqlx::query_scalar(
+        "SELECT error FROM workflow_runs \
+         WHERE role = 'Peer' AND coordinator_instance = ?1 \
+         ORDER BY created_at DESC LIMIT 1",
+    )
+    .bind(coordinator_instance)
+    .fetch_optional(&pool)
+    .await
+    .context("peer_run_error_by_coordinator_instance")?;
+    pool.close().await;
+    Ok(s.flatten())
+}
+
 /// Status of the (single) peer-side run that belongs to the given coordinator
 /// run, matched via the `coordinator_instance` column persisted at accept
 /// time. Returns `None` while the peer hasn't accepted (no row yet).
