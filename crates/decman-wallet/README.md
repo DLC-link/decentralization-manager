@@ -47,7 +47,9 @@ report it. `execute_co_validated` records a failed host in its report rather tha
 aborting, and onboarding is idempotent, so stragglers can simply be retried.
 
 The wallet signs one hash per topology transaction, each hash computed by Canton
-and returned by the prepare step. Nothing on either side re-derives a Canton hash.
+and returned by the prepare step. The wallet does not re-derive topology hashes.
+For a transaction, the wallet does recompute the hash before it signs. See
+[the check before signing](#the-check-before-signing).
 
 Onboarding rides Canton's **admin** API rather than the Ledger API's
 `AllocateExternalParty`. That RPC is a convenience wrapper around the same topology
@@ -63,15 +65,333 @@ later; a threshold of `N` is rejected.
 
 ## Transacting
 
-Transacting as the party is **not** part of DecMan's tenant API, and not part of
-this crate's node-facing client. Once a party is onboarded it is an ordinary
-Canton external party: a wallet reads its contracts and signs its submissions
-directly against Canton's Ledger API, authorizing each with the
-[`ExternalKeyPair`] it holds. DecMan's role ends at onboarding — it has no business
-holding a Ledger-API credential on the party's behalf.
+Transacting as the party is **not** part of DecMan's tenant API. DecMan holds no
+Ledger API credential for the party. Once onboarded, the party is an ordinary
+Canton external party.
 
-This crate gives you the two halves a wallet needs for that: [`ExternalKeyPair`]
-for the signing, and the onboarding flow above to bring the party up.
+The wallet talks to a participant's JSON Ledger API itself. This crate gives it
+two Token Standard flows:
+
+- `send_transfer` sends an asset from the party.
+- `accept_transfer` accepts a transfer that another party offered to it.
+
+```rust
+use std::time::Duration;
+
+use decman_wallet::{
+    AMULET_TRANSFER_INSTRUCTION_TEMPLATE, LedgerClient, RegistryClient, TransferArgs,
+    accept_transfer, send_transfer,
+};
+
+// One participant that hosts the party, and the instrument's registry.
+let ledger = LedgerClient::new(
+    "http://localhost:7575/api/json-api",
+    Some(ledger_token),
+    "wallet-user",
+)?;
+let registry = RegistryClient::new("https://scan.example.com", None)?;
+
+// Send 1.25 Canton Coin. The offer expires after 24 hours.
+let args = TransferArgs::new(
+    &party_id,
+    &receiver,
+    "1.25",
+    &dso_party,
+    "Amulet",
+    Duration::from_secs(24 * 3600),
+);
+let sent = send_transfer(&ledger, &registry, &key, &args).await?;
+tracing::info!(kind = %sent.transfer_kind, update_id = %sent.update_id, "sent");
+
+// Accept every Canton Coin offer the party can accept now. The listed
+// template comes from the participant and only picks the offers to try.
+// The check binds the template the wallet passes: here, one pinned to a
+// package id the operator checked.
+let pinned = format!(
+    "{checked_package_id}:Splice.AmuletTransferInstruction:AmuletTransferInstruction"
+);
+for offer in ledger.transfer_instructions(&party_id).await? {
+    if offer.template != AMULET_TRANSFER_INSTRUCTION_TEMPLATE {
+        continue;
+    }
+    accept_transfer(
+        &ledger,
+        &registry,
+        &key,
+        &party_id,
+        &offer.contract_id,
+        &pinned,
+    )
+    .await?;
+}
+```
+
+### The steps, next to the SDK
+
+The flows follow the splice-wallet-kernel SDK step for step.
+
+| Step | This crate | splice-wallet-kernel SDK | Endpoint |
+|---|---|---|---|
+| Read holdings | `LedgerClient::holdings`, `unlocked_holdings` | `token.utxos.list` | `GET /v2/state/ledger-end`, `POST /v2/state/active-contracts` |
+| Fix the arguments | `TransferArgs::new` | `buildTransferChoiceArgs` | none |
+| Get the factory | `RegistryClient::transfer_factory` | `fetchTransferFactoryChoiceContext` | `POST {registry}/registry/transfer-instruction/v1/transfer-factory` |
+| Build the command | `transfer_choice_argument` | `createTransferFromContext` | none |
+| Prepare | `LedgerClient::prepare` | `ledger.prepare` | `POST /v2/interactive-submission/prepare` |
+| Check | the check below | `computePreparedTransactionHash`, optional | none |
+| Sign | `Signer::sign` | `sign` | none |
+| Execute | `LedgerClient::execute` | `execute` | `POST /v2/interactive-submission/executeAndWait` |
+| List offers | `LedgerClient::transfer_instructions` | `token.transfer.pending` | `POST /v2/state/active-contracts` |
+| Accept | `accept_transfer` | `token.transfer.accept` | `POST {registry}/registry/transfer-instruction/v1/{cid}/choice-contexts/accept`, then prepare to execute |
+
+The crate differs from the SDK in four ways:
+
+- It asks for hashing scheme V3, which signs the max record time, and sends
+  the scheme the prepare returned. The SDK always sends V2.
+- It spends the 100 largest unlocked holdings of the instrument, or all of
+  them when there are fewer. The SDK picks holdings by amount. If the 100
+  largest hold less than the amount, the send fails at the prepare step. The
+  holdings read fetches every holding the party sees in one answer, under
+  `ClientOptions::max_response_bytes` (64 MiB). A party with tens of thousands
+  of holdings needs a larger cap or `TransferArgs::input_holding_cids`.
+- It skips every holding with a lock. The SDK also spends a holding whose lock has expired.
+- It lists only offers that wait for the receiver and have not expired. The SDK's `pending` lists every instruction.
+
+### The check before signing
+
+The wallet does not sign a hash until it knows what the hash covers. A
+participant could return one transaction with the hash of another. It could also return a
+different transaction with that transaction's correct hash.
+
+So the wallet checks each prepared transaction before the key signs:
+
+1. It decodes the `PreparedTransaction` protobuf.
+2. It recomputes the hash with `decman_lib::canton_hash`. The hash must equal
+   the one the participant returned.
+3. It reads the root of the transaction. There must be exactly one root, and it
+   must be an exercise.
+4. The exercise must use the expected interface, choice and contract. Its only
+   acting party must be the wallet's party.
+5. The transaction's metadata must carry the command id the wallet sent to the
+   prepare. The hash covers this id. The completion lookup after
+   `Error::ExecuteOutcomeUnknown` uses it.
+6. The metadata's acting parties must be the wallet's party alone. Canton
+   authorizes the transaction with their authority, and the hash covers them.
+7. The metadata's max record time must be the one the wallet asked for. The
+   check refuses a metadata without one. See
+   [Timeouts and retries](#timeouts-and-retries).
+8. The root must act on the template the caller names. For an accept, that is
+   the template passed to `accept_transfer`. For a send, it is
+   `TransferArgs::factory_template`, when set. The check compares the module
+   and the entity. It also compares the package name, or the package id when
+   the caller gave one.
+9. For a send, the choice argument must match the request. The check compares
+   the instrument admin, sender, receiver, amount and instrument. It also
+   compares both times, and the input holdings in order.
+10. The choice argument's `extraArgs` must equal the ones the wallet sent.
+    That is the registry's context and an empty `meta`. For a send,
+    `transfer.meta` must be empty too.
+
+A transaction that fails returns `Error::TransactionRefused`. The `Refusal` in
+it names what did not match. The wallet signs nothing and executes nothing.
+
+The check compares `extraArgs` and `meta` in the JSON Ledger API's encoding.
+It ignores spellings that do not change a value. An Int64 may be a number or a
+string. A decimal may carry trailing zeros. A time may carry fractional
+seconds or an offset. The check refuses a value it cannot read, such as a
+generic map.
+
+The accept binds the template because the instruction's contract id usually
+comes from the participant's own listing. Any template can implement the
+`TransferInstruction` interface, and its accept can do anything. So the caller
+names the template it trusts:
+
+| Instrument | Template |
+|---|---|
+| Canton Coin | `AMULET_TRANSFER_INSTRUCTION_TEMPLATE`, `#splice-amulet:Splice.AmuletTransferInstruction:AmuletTransferInstruction` |
+| CBTC on DA's Utility registry | `CBTC_TRANSFER_INSTRUCTION_TEMPLATE`, `#utility-registry-app-v0:Utility.Registry.App.V0.Model.Transfer:TransferOffer` |
+
+`TransferInstruction::template` shows each listed offer's template. The
+participant supplies it, so it is for display only.
+
+Pinning the package is the recommended way to call `accept_transfer` and to
+set `TransferArgs::factory_template`. To pin one package, pass the template as
+`<package-id>:Module:Entity`, without the `#`. The check then compares the
+package id too. The prepare also names that id in its
+`packageIdSelectionPreference`, which asks the participant to interpret the
+choice with that package. The check is what refuses a root on any other
+package.
+
+The `#` form names the package by name only. Any package with that name
+passes, including a look-alike package with another package id.
+
+To get the id to pin:
+
+1. For an accept, run the example's `pending` mode. It prints each offer's
+   pinned template on a line of its own. `TransferInstruction::package_id`
+   holds the same id. For a send, read `TransferReceipt::factory_template`.
+2. Check the package id against a package you trust.
+3. Pass the pinned template to `accept_transfer`, or set it in
+   `TransferArgs::factory_template`.
+
+The participant or the registry supplies the id, so never skip step 2. Every
+package upgrade changes the package id. A pinned call then fails until you
+check and pin the new id. That is the point: the key signs only for a package
+that someone checked.
+
+The check covers hashing schemes V2 and V3. Each prepare asks for V3. A
+participant on a protocol version before 35 answers V2, and the check accepts
+that too. The check
+refuses V4 and any unknown version.
+
+The check does not compare these:
+
+- Anything below the root exercise. That part is the instrument admin's code,
+  such as the factory's transfer logic.
+- The template's package id, unless the expected template names one. The `#`
+  form compares the package name, so any package with that name passes.
+- The factory's template on a send, unless `TransferArgs::factory_template`
+  names one.
+- The rest of the transaction's metadata, such as its synchronizer and its
+  preparation time.
+
+### The registry
+
+The registry is the instrument admin's service. The caller passes its root URL,
+and the client adds the `/registry/...` paths.
+
+| Instrument | Registry root |
+|---|---|
+| Canton Coin (`Amulet`) | The base URL of a Splice scan |
+| CBTC and other utility instruments | `{utility}/api/token-standard/v0/registrars/{admin}` |
+
+Canton Coin and CBTC use the same code. Only the registry root differs.
+
+No scan URL is fixed. Read the scans from the DSO endpoint, then keep the first
+one that answers. Many advertised scans do not answer.
+
+```sh
+dso=https://docs.dev.global.canton.network.sync.global/dso
+for scan in $(curl -s "$dso" \
+    | jq -r '.sv_node_states[].contract.payload.state.synchronizerNodes[][1].scan.publicUrl // empty' \
+    | sed 's:/*$::' | sort -u); do
+  curl -sf -o /dev/null "$scan/registry/metadata/v1/instruments" && echo "$scan"
+done
+```
+
+### What the wallet needs from the participant
+
+The ledger user needs `CanReadAs` and `CanExecuteAs` for the party. Never grant
+it `CanActAs`. The participant relays what the key signed and must not submit
+on its own.
+
+### Two-step transfers
+
+A receiver without a `TransferPreapproval` must accept each transfer. The
+registry then answers `transfer_kind: "offer"`. The asset moves only when the
+receiver calls `accept_transfer`.
+
+A new party holds nothing, so it cannot send. It can still receive, and it can
+accept an offer.
+
+### Amounts
+
+Amounts are decimal strings, such as `"1.25"`. The crate never parses them as
+numbers, so it never rounds them. The ledger writes amounts with ten decimals,
+such as `"1.2500000000"`. The check ignores trailing zeros when it compares
+amounts.
+
+### Timeouts and retries
+
+Each call times out after 60 seconds. Pass another `ClientOptions::timeout` to
+`LedgerClient::with_options` or `RegistryClient::with_options`.
+
+The execute step commits the transaction. The flow returns
+`Error::ExecuteOutcomeUnknown` when the request left the wallet but its answer
+does not tell the outcome. These cases return it:
+
+- The call timed out or the connection broke before the answer arrived.
+- The answer's body ended early or did not finish before the timeout.
+- The answer's body is not the JSON the client expects.
+- The answer's body is larger than `ClientOptions::max_response_bytes`.
+- The answer is a 408, or any status from 500 up. A proxy answers 408 when it
+  stops waiting for the request. A gateway answers 502, 503, 504, 520 or 524
+  while the participant may still execute. Canton's JSON API answers 500 for
+  an internal, unknown or data-loss gRPC error, and for a refused bearer
+  token.
+
+The error's `source` holds the error behind it. The transaction may have
+committed. A new send builds a new transaction, so a blind retry can pay twice.
+Before you try again, check one of these:
+
+- The party's holdings. A committed send has consumed its input holdings.
+- The party's pending offers. A committed accept has removed its offer.
+- The completion for the error's `command_id`.
+
+Once the participant's ledger time has passed the error's `max_record_time`
+and it shows no completion for the `command_id`, the transaction did not
+commit. A resend is then safe. A participant that is behind the synchronizer
+shows no completion yet, so wait until its ledger time has passed that time.
+
+Each prepare asks for a max record time `MAX_RECORD_DELAY` ahead, five
+minutes, and for hashing scheme V3. The executing host sets the transaction's
+max sequencing time from it, and the synchronizer refuses the transaction
+after that. V3 signs the time, so a host cannot change it without breaking
+the signature. A participant on an older protocol version answers V2, which
+does not sign the time. The check refuses a transaction without the time
+under both schemes. But in the Canton source we read, only the executing
+host applies the time, and no confirming participant compares the record
+time with the signed value. Against a host you do not trust, the bound is
+Canton's preparation-time tolerance: a signed transaction stays valid for a
+new execute until its preparation time is 24 hours old, by default. Ask a
+host you trust for the completion, or ask more than one host.
+
+A connection that never opened returns `Error::Transport`. Nothing reached the
+participant, so a retry is safe.
+
+### What the clients refuse
+
+- Plain `http` to a host that is not loopback returns `Error::InsecureUrl`.
+  Loopback is `localhost`, `127.0.0.0/8` and `::1`. Set
+  `ClientOptions::allow_plain_http` to allow another host, such as a service
+  inside a private cluster network.
+- A response body over 64 MiB returns `Error::ResponseTooLarge`. Set
+  `ClientOptions::max_response_bytes` to change the cap.
+- A redirect returns `Error::Api` with its 3xx status. The clients follow no
+  redirect, because it could resend the request to a URL they never checked.
+- An instruction id that is not a Canton contract id returns
+  `Error::InvalidContractId`, before any call. A contract id is lowercase hex
+  of even length. It starts with `00` and has at least 66 digits. The registry
+  call puts the id in its URL path, so the wallet checks it first.
+
+### The example
+
+`examples/token_transfer.rs` runs each flow from the command line. Set `MODE` to
+`list`, `pending`, `send` or `accept`.
+
+| Variable | Modes | Meaning |
+|---|---|---|
+| `PARTY_ID` | all | The party's id |
+| `LEDGER_JSON_API_URL` | all | The JSON Ledger API URL, with its path prefix |
+| `LEDGER_USER_ID` | all | The ledger user the wallet submits as |
+| `LEDGER_TOKEN` | all, optional | A bearer token for the Ledger API |
+| `DECMAN_WALLET_SEED` | `send`, `accept` | The party's base64 Ed25519 seed |
+| `REGISTRY_URL` | `send`, `accept` | The registry root |
+| `REGISTRY_TOKEN` | `send`, `accept`, optional | A bearer token for the registry |
+| `RECEIVER`, `AMOUNT` | `send` | Who gets how much |
+| `INSTRUMENT_ADMIN`, `INSTRUMENT_ID` | `send` | The instrument, such as the DSO party and `Amulet` |
+| `VALIDITY_HOURS` | `send`, optional | How long the offer stays open; 24 by default |
+| `FACTORY_TEMPLATE` | `send`, optional | The template the factory must have. Write `<package-id>:Module:Entity` to pin one package. |
+| `INSTRUCTION_CID` | `accept` | The transfer instruction to accept |
+| `INSTRUCTION_TEMPLATE` | `accept` | The template the instruction must have. Write `<package-id>:Module:Entity` to pin one package, as `pending` prints it. The `#` form, such as `#splice-amulet:Splice.AmuletTransferInstruction:AmuletTransferInstruction`, passes any package of that name. |
+
+The example never prints the seed. It refuses a seed whose fingerprint is not
+the party's.
+
+```sh
+MODE=pending PARTY_ID=bob::1220… LEDGER_USER_ID=wallet \
+  LEDGER_JSON_API_URL=http://localhost:7575/api/json-api \
+  cargo run -p decman-wallet --example token_transfer
+```
 
 ## Why the key belongs in the embedding process
 

@@ -5,6 +5,7 @@ use canton_proto_rs::com::daml::ledger::api::v2::{
 use canton_proto_rs::com::digitalasset::canton::admin::participant::v30::{
     ListPackagesRequest, PackageDescription, package_service_client::PackageServiceClient,
 };
+use decman_lib::canton_hash;
 use sqlx::SqlitePool;
 
 use crate::{
@@ -140,6 +141,7 @@ pub async fn prepare_submissions(
 
         let prepared_submission = submission_client
             .prepare_submission(tonic::Request::new(PrepareSubmissionRequest {
+                account_id: String::new(),
                 user_id: user_id.to_string(),
                 command_id: contract_def.id.clone(),
                 commands: vec![create_command],
@@ -283,7 +285,7 @@ pub async fn commit_deployment(
                 package_id: contract.package_id.clone(),
                 module_name: contract.module_name.clone(),
                 entity_name: contract.entity_name.clone(),
-                argument_hash: crate::canton_hash::hash_value(&argument)?,
+                argument_hash: canton_hash::hash_value(&argument)?,
             })
         })
         .collect::<Result<_>>()?;

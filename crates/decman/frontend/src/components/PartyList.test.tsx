@@ -10,6 +10,7 @@ const party = (name: string): DecentralizedParty => ({
   threshold: 1,
   owners: [],
   participants: [],
+  non_hosting_owners: [],
   contracts: [],
 });
 

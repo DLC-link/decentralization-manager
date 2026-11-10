@@ -33,13 +33,16 @@ use crate::{
     canton_id::{CantonId, Fingerprint},
     config::{NetworkConfig, NodeConfig, PartyCredentials, Peer, default_package_config},
     db::{
-        rows::{DecPartyContractRow, DecPartyParticipantRow, DecPartyRow},
+        rows::{
+            DecPartyContractRow, DecPartyOwnerRow, DecPartyParticipantRow, DecPartyRow,
+            OwnerKeyRefusal,
+        },
         schema::{Commitable, SchemaRead, SchemaWrite},
     },
     error::Result,
     noise::{
-        Message, MessageType, NoiseError, NoiseKeypair, parse_public_key, send_noise_message,
-        send_noise_message_with_retry,
+        Message, MessageType, NoiseError, NoiseKeypair, WIRE_VERSION, parse_public_key,
+        send_noise_message, send_noise_message_with_retry,
     },
     server::{
         AppState, former_parties,
@@ -52,7 +55,7 @@ use crate::{
         },
         types::{
             ConnectionStatus, ContractInfo, DecentralizedPartiesResponse, DecentralizedParty,
-            ErrorResponse, ExpectedVersionsResponse, PackageInfo, ParticipantInfo,
+            ErrorResponse, ExpectedVersionsResponse, NonHostingOwner, PackageInfo, ParticipantInfo,
             ParticipantStatus, ParticipantsStatusResponse, PeerErrorKind, PeerPackageComparison,
             PeerPackageResult, Permission, ResponseSource, VettedPackageInfo,
             permission_from_proto,
@@ -803,6 +806,76 @@ async fn refresh_and_cache_parties(data: &web::Data<AppState>, prefix: &str) {
     }
 }
 
+/// Refresh one party's cached hosts and owner keys before this node checks a
+/// kick of it.
+///
+/// A peer refuses a kick unless it has every host's owner key on record. Its
+/// cache fills only at startup and on a party read, so a party that changed
+/// since then would have no keys to check. A discovery already running for
+/// the prefix is left to finish, and the keys are resolved for the hosts the
+/// cache holds now. Failures are logged: the check that follows refuses the
+/// kick if a key is still missing.
+pub(crate) async fn refresh_party_for_kick(data: &web::Data<AppState>, party: &CantonId) {
+    let auth = data.auth.read().await.clone();
+    let party_creds = data.party_credentials.read().await.clone();
+    let parties = match discover_and_cache(
+        &DiscoveryGate::of(data),
+        &data.config,
+        &data.db,
+        &party.prefix,
+        auth,
+        &party_creds,
+        PartyReadOpts::default(),
+    )
+    .await
+    {
+        Discovery::Done(response) => response.parties,
+        Discovery::Failed(e) => {
+            tracing::warn!("Kick accept: refreshing {party} failed: {e:#}; using the cache");
+            cached_parties(&data.db, &party.prefix).await
+        }
+        Discovery::InFlight | Discovery::Superseded | Discovery::AtCapacity => {
+            cached_parties(&data.db, &party.prefix).await
+        }
+    };
+    let parties: Vec<DecentralizedParty> = parties
+        .into_iter()
+        .filter(|cached| cached.party_id == *party)
+        .collect();
+    if parties.is_empty() {
+        tracing::warn!("Kick accept: {party} is not in this node's party cache");
+        return;
+    }
+    resolve_owner_keys_from_peers(&data.config, &data.db, &parties).await;
+}
+
+async fn cached_parties(db: &SqlitePool, prefix: &str) -> Vec<DecentralizedParty> {
+    match load_cached_parties(db, prefix).await {
+        Ok(Some((response, _))) => response.parties,
+        Ok(None) => Vec::new(),
+        Err(e) => {
+            tracing::warn!("Reading the party cache for prefix '{prefix}' failed: {e:#}");
+            Vec::new()
+        }
+    }
+}
+
+/// A peer reported an owner key that this node kept off its records. Either
+/// a peer reports a key that is not its own, or a host changed its key while
+/// the old one is still an owner. Both need an operator to look.
+fn warn_owner_key_refusal(peer: &str, party_id: &str, owner_key: &str, refusal: &OwnerKeyRefusal) {
+    match refusal {
+        OwnerKeyRefusal::HeldBy(holder) => tracing::warn!(
+            "{peer} reports owner key {owner_key} of {party_id}, which this node has on record \
+             for {holder}; the record stays with {holder}"
+        ),
+        OwnerKeyRefusal::KeepsKey(kept) => tracing::warn!(
+            "{peer} reports owner key {owner_key} of {party_id}, but this node has {kept} on \
+             record for {peer} and {kept} is still an owner; the record stays {kept}"
+        ),
+    }
+}
+
 /// Query each peer via Noise for their owner keys, then update the DB
 pub async fn resolve_owner_keys_from_peers(
     config: &NodeConfig,
@@ -890,11 +963,29 @@ pub async fn resolve_owner_keys_from_peers(
                     );
                     continue;
                 };
-                if let Err(e) = tx
+                let mut refusal = match tx
                     .update_participant_owner_key(&party_id_canton, &peer_uid, owner_key)
                     .await
                 {
-                    tracing::debug!("Failed to update owner key for {peer_uid}: {e}");
+                    Ok(refusal) => refusal,
+                    Err(e) => {
+                        tracing::debug!("Failed to update owner key for {peer_uid}: {e}");
+                        None
+                    }
+                };
+                // A peer that owns the namespace without hosting the party has
+                // no participant row, so the claim also goes on the owner.
+                match tx
+                    .update_owner_claim(&party_id_canton, owner_key, &peer_uid)
+                    .await
+                {
+                    Ok(claim_refusal) => refusal = refusal.or(claim_refusal),
+                    Err(e) => {
+                        tracing::debug!("Failed to record the owner claim of {peer_uid}: {e}");
+                    }
+                }
+                if let Some(refusal) = &refusal {
+                    warn_owner_key_refusal(&peer_uid, party_id, owner_key, refusal);
                 }
 
                 // Absent from peers that predate the field. Nothing else can
@@ -926,13 +1017,9 @@ pub async fn resolve_owner_keys_from_peers(
         }
     }
 
-    // Topology-driven fallback: covers the case where the participant whose
-    // owner_key we need is offline / unreachable via Noise. The mapping
-    // (participant_uid → owner_key in a party) is recoverable from public
-    // synchronizer state — each participant publishes `NamespaceDelegation`
-    // entries listing the signing keys delegated under its namespace, and
-    // one of those fingerprints is what appears in the party's `owners`
-    // list. This is independent of peer reachability.
+    // Topology fallback for a peer that does not answer over Noise. It reads
+    // the namespace delegations that each participant publishes. See
+    // `supplement_owner_keys_from_topology` for the owners it can resolve.
     if let Err(e) = supplement_owner_keys_from_topology(config, db, parties).await {
         tracing::debug!("Topology-based owner-key fallback skipped: {e:#}");
     }
@@ -946,6 +1033,7 @@ enum OwnerKeysFailureKind {
     Unreachable,
     TimedOut,
     HandshakeFailed,
+    WireVersionMismatch,
     Denied,
     ConnectionBroken,
     BadPeerConfig,
@@ -1099,6 +1187,7 @@ fn request_failure_kind(err: &NoiseError) -> OwnerKeysFailureKind {
         NoiseError::Noise(_) | NoiseError::HandshakeFailed | NoiseError::DecryptionError => {
             Kind::HandshakeFailed
         }
+        NoiseError::WireVersionMismatch { .. } => Kind::WireVersionMismatch,
         NoiseError::BadStatusCode(..) => Kind::Denied,
         NoiseError::InvalidMessage => Kind::UnparsableReply,
         NoiseError::JsonSerialization(_) => Kind::BadPayload,
@@ -1175,12 +1264,16 @@ fn forget_removed_peers(peers: &[Peer]) {
         .retain(|peer, _| listed.contains(peer));
 }
 
-/// Fill in missing `dec_party_participant.owner_key` rows by reading public
-/// Canton topology state. For each (party, participant) where the local
-/// cache hasn't learned the owner_key yet, we query the participant's
-/// `NamespaceDelegation` entries, fingerprint their target keys, and
-/// intersect with the party's `owners` list. Whatever matches is the
-/// participant's contribution to the decentralized namespace.
+/// Fills in owner keys that this node lacks from public Canton topology. For
+/// each participant without a known owner key, it lists the
+/// `NamespaceDelegation` entries in the participant's namespace. It then
+/// matches their target keys against the party's owners.
+///
+/// The match succeeds only when an owner is the participant's namespace key
+/// or a key delegated under it. decman creates each owner key as the root of
+/// its own namespace, so this resolves nothing for a party that decman
+/// created. It covers a party whose owners are the members' participant
+/// namespaces, such as one set up with the Canton console.
 async fn supplement_owner_keys_from_topology(
     config: &NodeConfig,
     db: &SqlitePool,
@@ -1208,6 +1301,34 @@ async fn supplement_owner_keys_from_topology(
     // Cache per-namespace fingerprints so a participant who appears in many
     // parties is only queried once.
     let mut delegated_fingerprints: HashMap<String, HashSet<String>> = HashMap::new();
+    let mut delegated = async |namespace: &str| -> HashSet<String> {
+        if let Some(known) = delegated_fingerprints.get(namespace) {
+            return known.clone();
+        }
+        let mut fingerprints: HashSet<String> = HashSet::new();
+        match topology_client
+            .list_namespace_delegation(tonic::Request::new(ListNamespaceDelegationRequest {
+                base_query: Some(base_query()),
+                filter_namespace: namespace.to_string(),
+                filter_target_key_fingerprint: String::new(),
+            }))
+            .await
+        {
+            Ok(resp) => {
+                for result in resp.into_inner().results {
+                    if let Some(NsDelegationItem::V30(item)) = result.item
+                        && let Some(target_key) = item.target_key
+                    {
+                        fingerprints.insert(utils::compute_fingerprint(&target_key).into());
+                    }
+                }
+            }
+            // Cached empty so we don't retry on every party.
+            Err(e) => tracing::debug!("ListNamespaceDelegation for {namespace} failed: {e}"),
+        }
+        delegated_fingerprints.insert(namespace.to_string(), fingerprints.clone());
+        fingerprints
+    };
 
     for party in parties {
         for participant in &party.participants {
@@ -1216,45 +1337,7 @@ async fn supplement_owner_keys_from_topology(
                 continue;
             }
             let uid = participant.participant_uid.to_string();
-            let Some((_, namespace)) = uid.rsplit_once("::") else {
-                continue;
-            };
-            let namespace = namespace.to_string();
-
-            if !delegated_fingerprints.contains_key(&namespace) {
-                let resp = match topology_client
-                    .list_namespace_delegation(tonic::Request::new(
-                        ListNamespaceDelegationRequest {
-                            base_query: Some(base_query()),
-                            filter_namespace: namespace.clone(),
-                            filter_target_key_fingerprint: String::new(),
-                        },
-                    ))
-                    .await
-                {
-                    Ok(r) => r.into_inner(),
-                    Err(e) => {
-                        tracing::debug!("ListNamespaceDelegation for {namespace} failed: {e}");
-                        // Cache empty set so we don't retry on every party.
-                        delegated_fingerprints.insert(namespace.clone(), HashSet::new());
-                        continue;
-                    }
-                };
-                let mut fingerprints: HashSet<String> = HashSet::new();
-                for result in resp.results {
-                    if let Some(NsDelegationItem::V30(item)) = result.item
-                        && let Some(target_key) = item.target_key
-                    {
-                        fingerprints.insert(utils::compute_fingerprint(&target_key).into());
-                    }
-                }
-                delegated_fingerprints.insert(namespace.clone(), fingerprints);
-            }
-
-            let fingerprints = match delegated_fingerprints.get(&namespace) {
-                Some(s) if !s.is_empty() => s,
-                _ => continue,
-            };
+            let fingerprints = delegated(&participant.participant_uid.namespace.to_hex()).await;
             let Some(owner_key) = party.owners.iter().find(|o| fingerprints.contains(*o)) else {
                 continue;
             };
@@ -1266,19 +1349,147 @@ async fn supplement_owner_keys_from_topology(
                     continue;
                 }
             };
-            if let Err(e) = tx
+            match tx
                 .update_participant_owner_key(&party.party_id, &uid, owner_key)
                 .await
             {
-                tracing::debug!("Topology fallback: update_participant_owner_key for {uid}: {e}");
-                continue;
+                Ok(None) => {}
+                Ok(Some(refusal)) => {
+                    tracing::debug!(
+                        "Topology fallback: {uid} keeps no key {owner_key}: {refusal:?}"
+                    );
+                }
+                Err(e) => {
+                    tracing::debug!(
+                        "Topology fallback: update_participant_owner_key for {uid}: {e}"
+                    );
+                    continue;
+                }
             }
             if let Err(e) = Commitable::commit(tx).await {
                 tracing::debug!("Topology fallback: commit failed: {e}");
             }
         }
     }
+
+    // An owner that hosts nothing has no participant row to fill, so its
+    // claim goes on the owner instead. Only configured peers are looked up:
+    // they are the participants this node can name.
+    let peers = db.get_all_peers().await?;
+    let mut claims: Vec<(&CantonId, &String, String)> = Vec::new();
+    for party in parties {
+        if party.owners.len() <= party.participants.len() {
+            continue;
+        }
+        let hosts: HashSet<&CantonId> = party
+            .participants
+            .iter()
+            .map(|p| &p.participant_uid)
+            .collect();
+        for peer in peers.iter().filter(|p| !hosts.contains(&p.participant_id)) {
+            let fingerprints = delegated(&peer.participant_id.namespace.to_hex()).await;
+            for owner in party.owners.iter().filter(|o| fingerprints.contains(*o)) {
+                claims.push((&party.party_id, owner, peer.participant_id.to_string()));
+            }
+        }
+    }
+    if !claims.is_empty() {
+        let mut tx = db.begin_transaction().await?;
+        for (party_id, owner_key, uid) in claims {
+            if let Some(refusal) = tx.update_owner_claim(party_id, owner_key, &uid).await? {
+                tracing::debug!("Topology fallback: {uid} claims no key {owner_key}: {refusal:?}");
+            }
+        }
+        Commitable::commit(tx).await?;
+    }
     Ok(())
+}
+
+/// The participant that claimed each owner key, by key.
+fn owner_claims(rows: Vec<DecPartyOwnerRow>) -> HashMap<String, CantonId> {
+    rows.into_iter()
+        .filter_map(|row| {
+            let uid = CantonId::parse(row.participant_uid.as_deref()?).ok()?;
+            Some((row.owner_key, uid))
+        })
+        .collect()
+}
+
+/// The party's owners that host nothing, as far as this node can tell.
+///
+/// An owner claimed by a participant that does not host is one. An unclaimed
+/// owner is one only once every host's own key is known and listed, because
+/// until then it may belong to a host whose answer has not arrived.
+fn non_hosting_owners(
+    owners: &[String],
+    participants: &[ParticipantInfo],
+    claims: &HashMap<String, CantonId>,
+) -> Vec<NonHostingOwner> {
+    let host_keys: HashSet<&str> = participants
+        .iter()
+        .filter_map(|p| p.owner_key.as_deref())
+        .collect();
+    let hosts: HashSet<&CantonId> = participants.iter().map(|p| &p.participant_uid).collect();
+    let every_host_known = participants
+        .iter()
+        .all(|p| p.owner_key.as_ref().is_some_and(|key| owners.contains(key)));
+    owners
+        .iter()
+        .filter(|owner| !host_keys.contains(owner.as_str()))
+        .filter_map(|owner| match claims.get(owner) {
+            Some(claimant) if hosts.contains(claimant) => None,
+            Some(claimant) => Some(NonHostingOwner {
+                owner_key: owner.clone(),
+                participant_uid: Some(claimant.clone()),
+            }),
+            None if every_host_known => Some(NonHostingOwner {
+                owner_key: owner.clone(),
+                participant_uid: None,
+            }),
+            None => None,
+        })
+        .collect()
+}
+
+/// Fill in from the cache what a live Canton read cannot know: the owner key
+/// each other host reported, and the participant that claimed each owner.
+///
+/// A cached key that is no longer an owner stays out. The host may have
+/// rotated its key, and a filled-in key stops the topology fallback from
+/// looking up the new one.
+async fn with_cached_owner_claims(
+    db: &SqlitePool,
+    party_id: &CantonId,
+    owners: &[String],
+    mut participants: Vec<ParticipantInfo>,
+) -> (Vec<ParticipantInfo>, Vec<NonHostingOwner>) {
+    let cached_keys: HashMap<String, String> = match db.get_dec_party_participants(party_id).await {
+        Ok(rows) => rows
+            .into_iter()
+            .filter_map(|row| Some((row.participant_uid, row.owner_key?)))
+            .collect(),
+        Err(e) => {
+            tracing::debug!("Failed to read the cached owner keys of {party_id}: {e}");
+            HashMap::new()
+        }
+    };
+    for participant in &mut participants {
+        if participant.owner_key.is_none() {
+            participant.owner_key = cached_keys
+                .get(&participant.participant_uid.to_string())
+                .filter(|key| owners.contains(*key))
+                .cloned();
+        }
+    }
+    let claims = match db.get_dec_party_owners(party_id).await {
+        Ok(rows) => owner_claims(rows),
+        Err(e) => {
+            tracing::debug!("Failed to read the cached owner claims of {party_id}: {e}");
+            HashMap::new()
+        }
+    };
+    let non_hosting = non_hosting_owners(owners, &participants, &claims);
+    (participants, non_hosting)
 }
 
 /// Load cached parties from the dec_party tables.
@@ -1299,8 +1510,16 @@ async fn load_cached_parties(
 
     // Group by party_id
     let mut owners_map: HashMap<String, Vec<String>> = HashMap::new();
-    for (party_id, owner_key) in all_owners {
-        owners_map.entry(party_id).or_default().push(owner_key);
+    let mut claims_map: HashMap<String, Vec<DecPartyOwnerRow>> = HashMap::new();
+    for row in all_owners {
+        owners_map
+            .entry(row.dec_party_id.clone())
+            .or_default()
+            .push(row.owner_key.clone());
+        claims_map
+            .entry(row.dec_party_id.clone())
+            .or_default()
+            .push(row);
     }
 
     let mut participants_map: HashMap<String, Vec<ParticipantInfo>> = HashMap::new();
@@ -1344,13 +1563,17 @@ async fn load_cached_parties(
 
     let mut parties = Vec::with_capacity(rows.len());
     for row in rows {
+        let owners = owners_map.remove(&row.party_id).unwrap_or_default();
+        let participants = participants_map.remove(&row.party_id).unwrap_or_default();
+        let claims = owner_claims(claims_map.remove(&row.party_id).unwrap_or_default());
         parties.push(DecentralizedParty {
             party_id: CantonId::parse(&row.party_id)?,
             threshold: row.threshold as i32,
             confirmation_threshold: row.confirmation_threshold.map(|t| t as i32),
-            owners: owners_map.remove(&row.party_id).unwrap_or_default(),
+            non_hosting_owners: non_hosting_owners(&owners, &participants, &claims),
+            owners,
             my_owner_key: row.my_owner_key,
-            participants: participants_map.remove(&row.party_id).unwrap_or_default(),
+            participants,
             contracts: contracts_map.remove(&row.party_id).unwrap_or_default(),
             local_metadata: None,
         });
@@ -2039,7 +2262,7 @@ async fn fetch_decentralized_parties(
                 };
 
                 let self_uid = config.participant_id().to_string();
-                let participants = p2p
+                let participants: Vec<ParticipantInfo> = p2p
                     .participants
                     .iter()
                     .filter_map(|p| {
@@ -2057,6 +2280,9 @@ async fn fetch_decentralized_parties(
                     })
                     .collect();
 
+                let (participants, non_hosting_owners) =
+                    with_cached_owner_claims(db, &party_id, &item.owners, participants).await;
+
                 Ok::<_, anyhow::Error>(DecentralizedParty {
                     party_id,
                     threshold: item.threshold,
@@ -2064,6 +2290,7 @@ async fn fetch_decentralized_parties(
                     owners: item.owners,
                     my_owner_key: Some(my_owner_key),
                     participants,
+                    non_hosting_owners,
                     contracts,
                     local_metadata,
                 })
@@ -2247,6 +2474,7 @@ async fn check_participants_status(
                     workflow: None,
                     version: Some(crate::build_info::SEMVER.to_string()),
                     build_version: Some(crate::build_info::build_version().to_string()),
+                    wire_version: Some(WIRE_VERSION),
                 }
             }));
             continue;
@@ -2269,6 +2497,7 @@ async fn check_participants_status(
                     workflow: None,
                     version: None,
                     build_version: None,
+                    wire_version: None,
                 };
             };
 
@@ -2296,19 +2525,24 @@ async fn check_participants_status(
                         workflow: reply.workflow,
                         version: reply.version,
                         build_version: reply.build_version,
+                        wire_version: Some(WIRE_VERSION),
                     }
                 }
                 Err(e) => {
                     // Map NoiseError -> ConnectionStatus (binary semantics — Unreachable
                     // covers transport-side failures; HandshakeFailed covers everything
-                    // else, matching prior behavior of this endpoint).
-                    let status = match &e {
+                    // else). A version mismatch stays HandshakeFailed so older clients
+                    // still read it; `wire_version` tells it apart.
+                    let (status, wire_version) = match &e {
                         NoiseError::TcpConnectionTimeout(_)
                         | NoiseError::TcpConnectionFailed(_)
                         | NoiseError::Io(_)
                         | NoiseError::Hyper(_)
-                        | NoiseError::RequestTimeout => ConnectionStatus::Unreachable,
-                        _ => ConnectionStatus::HandshakeFailed,
+                        | NoiseError::RequestTimeout => (ConnectionStatus::Unreachable, None),
+                        NoiseError::WireVersionMismatch { peer } => {
+                            (ConnectionStatus::HandshakeFailed, Some(*peer))
+                        }
+                        _ => (ConnectionStatus::HandshakeFailed, None),
                     };
                     ParticipantStatus {
                         id: peer_id,
@@ -2317,6 +2551,7 @@ async fn check_participants_status(
                         workflow: None,
                         version: None,
                         build_version: None,
+                        wire_version,
                     }
                 }
             }
@@ -2326,7 +2561,10 @@ async fn check_participants_status(
     let results = futures::future::join_all(status_futures).await;
     let statuses: Vec<ParticipantStatus> = results.into_iter().filter_map(|r| r.ok()).collect();
 
-    Ok(ParticipantsStatusResponse { statuses })
+    Ok(ParticipantsStatusResponse {
+        statuses,
+        wire_version: Some(WIRE_VERSION),
+    })
 }
 
 /// Query parameters for the peer package comparison
@@ -2394,6 +2632,10 @@ fn peer_failure_hint(err: &NoiseError) -> &'static str {
         NoiseError::Noise(_) | NoiseError::HandshakeFailed | NoiseError::DecryptionError => {
             "the Noise handshake failed — this node's key or the derived PSK does not match what \
              the peer expects, so check each side has the other's current public key"
+        }
+        NoiseError::WireVersionMismatch { .. } => {
+            "the peer speaks a different decman wire protocol, so the key is not the problem — \
+             the error names both versions; upgrade whichever side is older"
         }
         NoiseError::BadStatusCode(..) => {
             "the peer answered but refused the request — it may not have this node registered as \
@@ -2605,10 +2847,17 @@ async fn get_local_namespace_fingerprints(config: &NodeConfig) -> Result<HashSet
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
     use http::StatusCode;
+    use tokio::net::TcpListener;
+    use tokio_noise::handshakes::nn_psk2::Responder as NoiseResponder;
 
     use super::*;
-    use crate::{config::Network, db::MIGRATOR};
+    use crate::{
+        config::{Network, NoiseRetryConfig},
+        db::MIGRATOR,
+    };
 
     fn test_peer(name: &str) -> anyhow::Result<Peer> {
         Ok(Peer {
@@ -2621,6 +2870,176 @@ mod tests {
             public_key: String::new(),
             party: None,
         })
+    }
+
+    fn uid(tag: u8) -> anyhow::Result<CantonId> {
+        let ns = format!("1220{:0>64}", format!("{tag:02x}"));
+        CantonId::parse(&format!("p{tag}::{ns}"))
+    }
+
+    fn host(tag: u8, owner_key: Option<&str>) -> anyhow::Result<ParticipantInfo> {
+        Ok(ParticipantInfo {
+            participant_uid: uid(tag)?,
+            permission: Permission::Confirmation,
+            owner_key: owner_key.map(str::to_string),
+        })
+    }
+
+    fn keys(items: &[&str]) -> Vec<String> {
+        items.iter().map(|item| (*item).to_string()).collect()
+    }
+
+    /// An owner nobody hosts with shows up, named by whoever claimed it.
+    #[test]
+    fn an_owner_no_host_holds_is_listed() -> anyhow::Result<()> {
+        let hosts = [host(1, Some("k1"))?, host(2, Some("k2"))?];
+        let claims: HashMap<String, CantonId> = [("k3".to_string(), uid(3)?)].into();
+
+        let listed = non_hosting_owners(&keys(&["k1", "k2", "k3", "k4"]), &hosts, &claims);
+
+        assert_eq!(
+            listed,
+            vec![
+                NonHostingOwner {
+                    owner_key: "k3".to_string(),
+                    participant_uid: Some(uid(3)?),
+                },
+                NonHostingOwner {
+                    owner_key: "k4".to_string(),
+                    participant_uid: None,
+                },
+            ]
+        );
+        Ok(())
+    }
+
+    /// While a host's key is unknown, an unclaimed owner may be that host's,
+    /// so only owners that a non-host claimed are listed.
+    #[test]
+    fn an_unclaimed_owner_waits_for_every_host_key() -> anyhow::Result<()> {
+        let hosts = [host(1, Some("k1"))?, host(2, None)?];
+        let claims: HashMap<String, CantonId> = [("k3".to_string(), uid(3)?)].into();
+
+        let listed = non_hosting_owners(&keys(&["k1", "k2", "k3"]), &hosts, &claims);
+
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].owner_key, "k3");
+        Ok(())
+    }
+
+    /// A cached key that is no longer an owner says nothing about the host's
+    /// current key, so it does not count as known.
+    #[test]
+    fn a_stale_host_key_does_not_count_as_known() -> anyhow::Result<()> {
+        let hosts = [host(1, Some("k1"))?, host(2, Some("old"))?];
+
+        let listed = non_hosting_owners(&keys(&["k1", "k2"]), &hosts, &HashMap::new());
+
+        assert!(listed.is_empty(), "listed {listed:?}");
+        Ok(())
+    }
+
+    /// A claim by a host is that host's key, even when the host row has not
+    /// learned it yet.
+    #[test]
+    fn a_key_a_host_claimed_is_not_listed() -> anyhow::Result<()> {
+        let hosts = [host(1, Some("k1"))?, host(2, None)?];
+        let claims: HashMap<String, CantonId> = [("k2".to_string(), uid(2)?)].into();
+
+        let listed = non_hosting_owners(&keys(&["k1", "k2"]), &hosts, &claims);
+
+        assert!(listed.is_empty(), "listed {listed:?}");
+        Ok(())
+    }
+
+    /// The live read knows only this node's key. The cache fills in the other
+    /// hosts' keys and the claims, so the live answer lists the same owners
+    /// as a cached one.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_live_read_lists_owners_from_the_cache(pool: SqlitePool) -> anyhow::Result<()> {
+        let party_id = CantonId::parse(&format!("net-a::1220{}", "ab".repeat(32)))?;
+        let mut tx = pool.begin_transaction().await?;
+        tx.upsert_dec_party(&DecPartyRow {
+            party_id: party_id.to_string(),
+            prefix: "net-a".to_string(),
+            threshold: 2,
+            updated_at: 0,
+            my_owner_key: Some("k1".to_string()),
+            confirmation_threshold: None,
+        })
+        .await?;
+        tx.replace_dec_party_participants(
+            &party_id,
+            &[DecPartyParticipantRow {
+                dec_party_id: party_id.to_string(),
+                participant_uid: uid(2)?.to_string(),
+                permission: "confirmation".to_string(),
+                owner_key: Some("k2".to_string()),
+                signing_key: None,
+            }],
+        )
+        .await?;
+        tx.replace_dec_party_owners(&party_id, &keys(&["k1", "k2", "k3"]))
+            .await?;
+        tx.update_owner_claim(&party_id, "k3", &uid(3)?.to_string())
+            .await?;
+        Commitable::commit(tx).await?;
+
+        let live = vec![host(1, Some("k1"))?, host(2, None)?];
+        let (participants, listed) =
+            with_cached_owner_claims(&pool, &party_id, &keys(&["k1", "k2", "k3"]), live).await;
+
+        assert_eq!(participants[1].owner_key.as_deref(), Some("k2"));
+        assert_eq!(
+            listed,
+            vec![NonHostingOwner {
+                owner_key: "k3".to_string(),
+                participant_uid: Some(uid(3)?),
+            }]
+        );
+        Ok(())
+    }
+
+    /// Host 2 rotated its owner key from k2 to k4, and the cache still holds
+    /// k2. The live read leaves host 2's key unknown, so the topology fallback
+    /// looks it up, and the unclaimed k4 is not listed as hosting nothing.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_live_read_drops_a_cached_key_that_is_no_longer_an_owner(
+        pool: SqlitePool,
+    ) -> anyhow::Result<()> {
+        let party_id = CantonId::parse(&format!("net-a::1220{}", "ab".repeat(32)))?;
+        let mut tx = pool.begin_transaction().await?;
+        tx.upsert_dec_party(&DecPartyRow {
+            party_id: party_id.to_string(),
+            prefix: "net-a".to_string(),
+            threshold: 2,
+            updated_at: 0,
+            my_owner_key: Some("k1".to_string()),
+            confirmation_threshold: None,
+        })
+        .await?;
+        tx.replace_dec_party_participants(
+            &party_id,
+            &[DecPartyParticipantRow {
+                dec_party_id: party_id.to_string(),
+                participant_uid: uid(2)?.to_string(),
+                permission: "confirmation".to_string(),
+                owner_key: Some("k2".to_string()),
+                signing_key: None,
+            }],
+        )
+        .await?;
+        tx.replace_dec_party_owners(&party_id, &keys(&["k1", "k4"]))
+            .await?;
+        Commitable::commit(tx).await?;
+
+        let live = vec![host(1, Some("k1"))?, host(2, None)?];
+        let (participants, listed) =
+            with_cached_owner_claims(&pool, &party_id, &keys(&["k1", "k4"]), live).await;
+
+        assert_eq!(participants[1].owner_key, None);
+        assert_eq!(listed, Vec::new());
+        Ok(())
     }
 
     #[test]
@@ -3134,6 +3553,7 @@ mod tests {
             owners: Vec::new(),
             my_owner_key: None,
             participants: Vec::new(),
+            non_hosting_owners: Vec::new(),
             contracts: Vec::new(),
             local_metadata: None,
         })
@@ -3255,6 +3675,7 @@ mod tests {
             NoiseError::HandshakeFailed,
             NoiseError::DecryptionError,
             NoiseError::BadStatusCode(StatusCode::SERVICE_UNAVAILABLE, None),
+            NoiseError::WireVersionMismatch { peer: 0xD2 },
             NoiseError::InvalidMessage,
             NoiseError::UnknownPeer("x".into()),
         ];
@@ -3272,6 +3693,17 @@ mod tests {
         assert_ne!(
             peer_failure_hint(&NoiseError::InvalidMessage),
             peer_failure_hint(&NoiseError::TcpConnectionFailed("x".into())),
+        );
+        // A version mismatch must not send the operator to check the key.
+        let mismatch = peer_failure_hint(&NoiseError::WireVersionMismatch { peer: 0xD2 });
+        assert_ne!(mismatch, peer_failure_hint(&NoiseError::HandshakeFailed));
+        assert!(
+            mismatch.contains("protocol") && mismatch.contains("upgrade"),
+            "the mismatch hint does not name the fix: {mismatch}"
+        );
+        assert!(
+            !mismatch.contains("public key"),
+            "the mismatch hint points at the key: {mismatch}"
         );
     }
 
@@ -3310,9 +3742,12 @@ mod tests {
             StatusCode::SERVICE_UNAVAILABLE,
             Some("not a registered peer".into()),
         );
+        let mismatch = NoiseError::WireVersionMismatch { peer: 0xD2 };
         assert_eq!(next(&down), OwnerKeysLog::Warn);
         assert_eq!(next(&down), OwnerKeysLog::Debug);
         assert_eq!(next(&denied), OwnerKeysLog::Warn);
+        assert_eq!(next(&mismatch), OwnerKeysLog::Warn);
+        assert_eq!(next(&mismatch), OwnerKeysLog::Debug);
         assert_eq!(next(&NoiseError::HandshakeFailed), OwnerKeysLog::Warn);
         assert_eq!(next(&NoiseError::DecryptionError), OwnerKeysLog::Debug);
     }
@@ -3361,6 +3796,144 @@ mod tests {
             rendered.contains("unknown sender"),
             "reason missing from Display: {rendered}"
         );
+    }
+
+    /// A peer listener that answers every request with `status` and `body`
+    /// over a real Noise session. Returns its port and how many requests it
+    /// served.
+    async fn stub_peer(
+        psk: [u8; 32],
+        status: StatusCode,
+        body: Vec<u8>,
+    ) -> anyhow::Result<(u16, Arc<AtomicUsize>, tokio::task::JoinHandle<()>)> {
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let port = listener.local_addr()?.port();
+        let served = Arc::new(AtomicUsize::new(0));
+        let counter = served.clone();
+        let server = tokio::spawn(async move {
+            while let Ok((socket, _)) = listener.accept().await {
+                let counter = counter.clone();
+                let body = body.clone();
+                tokio::spawn(async move {
+                    let respond = move |_: &[u8], _: hyper::Request<hyper::Body>| {
+                        counter.fetch_add(1, Ordering::SeqCst);
+                        let mut response = hyper::Response::new(hyper::Body::from(body.clone()));
+                        *response.status_mut() = status;
+                        async move { Ok::<_, hyper::Error>(response) }
+                    };
+                    let responder = NoiseResponder::new(move |_: &[u8]| Some(psk));
+                    if let Err(e) =
+                        hyper_noise::server::serve_http(socket, responder, respond, None).await
+                    {
+                        tracing::warn!("stub peer connection failed: {e}");
+                    }
+                });
+            }
+        });
+        Ok((port, served, server))
+    }
+
+    /// A refusing peer stays `HandshakeFailed` either way. Only a refusal on
+    /// another wire version carries a byte, so the hover can tell the two
+    /// apart, and only that refusal is not retried.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn the_status_probe_reports_only_a_mismatched_peers_wire_version(
+        db: SqlitePool,
+    ) -> anyhow::Result<()> {
+        let root = tempfile::tempdir()?;
+        let mut config = NodeConfig::default().with_root_dir(root.path());
+        let self_id = CantonId::parse(&format!("self::1220{}", "a".repeat(64)))?;
+        config.node.participant_id = Some(self_id.clone());
+        config.noise_retry = NoiseRetryConfig {
+            per_attempt_timeout_secs: 5,
+            max_attempts: 2,
+            backoff_ms: 0,
+        };
+        let keys = NoiseKeypair::generate();
+        tokio::fs::create_dir_all(config.data_dir()).await?;
+        keys.save_to_file(config.key_file_path()).await?;
+
+        let older = WIRE_VERSION - 1;
+        let mut mismatch = Message::new(
+            MessageType::Error,
+            b"request rejected: Noise protocol version mismatch".to_vec(),
+        )
+        .to_bytes();
+        mismatch[0] = older;
+        let denied = Message::new(
+            MessageType::Error,
+            b"request rejected: unknown sender".to_vec(),
+        )
+        .to_bytes();
+        let pong = Message::new_empty(MessageType::Pong).to_bytes();
+
+        let mut peers = vec![Peer {
+            participant_id: self_id,
+            name: "self".into(),
+            address: "127.0.0.1".into(),
+            port: 1,
+            public_key: keys.public_key_hex(),
+            party: None,
+        }];
+        let mut stubs = HashMap::new();
+        for (name, fill, status, body) in [
+            ("older", 'b', StatusCode::SERVICE_UNAVAILABLE, mismatch),
+            ("denying", 'c', StatusCode::SERVICE_UNAVAILABLE, denied),
+            ("healthy", 'd', StatusCode::OK, pong),
+        ] {
+            let peer_keys = NoiseKeypair::generate();
+            let psk = *peer_keys.derive_psk(&keys.public_key);
+            let (port, served, server) = stub_peer(psk, status, body).await?;
+            peers.push(Peer {
+                participant_id: CantonId::parse(&format!(
+                    "{name}::1220{}",
+                    fill.to_string().repeat(64)
+                ))?,
+                name: name.into(),
+                address: "127.0.0.1".into(),
+                port,
+                public_key: peer_keys.public_key_hex(),
+                party: None,
+            });
+            stubs.insert(name, (served, server));
+        }
+        let mut tx = db.begin_transaction().await?;
+        for peer in &peers {
+            tx.insert_peer(peer).await?;
+        }
+        Commitable::commit(tx).await?;
+
+        let response = check_participants_status(&config, &db).await?;
+        for (_, server) in stubs.values() {
+            server.abort();
+        }
+
+        let row = |name: &str| {
+            response
+                .statuses
+                .iter()
+                .find(|s| s.id.starts_with(&format!("{name}::")))
+                .map(|s| (s.status, s.wire_version))
+                .ok_or_else(|| anyhow::anyhow!("no status row for {name}"))
+        };
+        let served = |name: &str| stubs.get(name).map(|(n, _)| n.load(Ordering::SeqCst));
+        assert_eq!(response.wire_version, Some(WIRE_VERSION));
+        assert_eq!(
+            row("self")?,
+            (ConnectionStatus::CurrentNode, Some(WIRE_VERSION))
+        );
+        assert_eq!(
+            row("older")?,
+            (ConnectionStatus::HandshakeFailed, Some(older))
+        );
+        assert_eq!(row("denying")?, (ConnectionStatus::HandshakeFailed, None));
+        assert_eq!(
+            row("healthy")?,
+            (ConnectionStatus::Connected, Some(WIRE_VERSION))
+        );
+        assert_eq!(served("older"), Some(1));
+        assert_eq!(served("denying"), Some(config.noise_retry.max_attempts));
+        Ok(())
     }
 }
 

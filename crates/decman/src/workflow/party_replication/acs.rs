@@ -772,6 +772,7 @@ pub async fn collect_party_package_ids(
     );
 
     let request = GetActiveContractsRequest {
+        include_incomplete_reassignments: false,
         active_at_offset: ledger_end,
         event_format: Some(EventFormat {
             filters_by_party,

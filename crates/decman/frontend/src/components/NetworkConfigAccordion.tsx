@@ -34,7 +34,8 @@ import { fieldHelpAdornment } from "./FieldHelp";
 import { StatusDot } from "./StatusDot";
 import { SharedPartiesChip } from "./SharedPartiesChip";
 import { useSharedPartyCounts } from "../usePeerLinks";
-import { currentStepLabel, workflowKindLabel } from "../workflowSteps";
+import { workflowKindLabel } from "../workflowSteps";
+import { peerStatusTooltip } from "../peerStatus";
 import { PeersCsvDialog, type PeersCsvMode } from "./PeersCsvDialog";
 import { parsePeersCsv, peerToCsvRow } from "../peerCsv";
 import type {
@@ -43,7 +44,6 @@ import type {
   ParticipantStatus,
   NodeConfig,
   KeyStatusResponse,
-  ConnectionStatus,
 } from "../types";
 
 interface NetworkConfigAccordionProps {
@@ -51,6 +51,8 @@ interface NetworkConfigAccordionProps {
   nodeConfig?: NodeConfig;
   keyStatus?: KeyStatusResponse;
   participantStatuses?: ParticipantStatus[];
+  /** This node's Noise wire version, to tell which side of a mismatch is older. */
+  selfWireVersion?: number;
   /** Our own round-trip latency to the backend (ms), shown on the "you" row. */
   selfLatencyMs?: number;
   onSave?: (peers: Peer[]) => Promise<void>;
@@ -73,6 +75,7 @@ export const NetworkConfigAccordion = ({
   nodeConfig,
   keyStatus,
   participantStatuses,
+  selfWireVersion,
   selfLatencyMs,
   onSave,
   focusParticipantId,
@@ -125,33 +128,6 @@ export const NetworkConfigAccordion = ({
 
   const getStat = (id: string): ParticipantStatus | undefined =>
     participantStatuses?.find((s) => s.id === id);
-
-  const getStatusTooltip = (status: ConnectionStatus | undefined): string => {
-    switch (status) {
-      case "Connected":
-        return "Connected via Noise protocol";
-      case "CurrentNode":
-        return "This is the current node";
-      case "Unreachable":
-        return "Cannot reach peer (TCP connection failed)";
-      case "HandshakeFailed":
-        return "Noise handshake failed - check if the public key is correct";
-      default:
-        return "Status unknown";
-    }
-  };
-
-  // Tooltip enriched with round-trip latency and the peer's active workflow.
-  const statusTooltip = (st: ParticipantStatus | undefined): string => {
-    let title = getStatusTooltip(st?.status);
-    if (st?.latency_ms != null) title += ` — ${st.latency_ms} ms`;
-    if (st?.workflow) {
-      const w = st.workflow;
-      const step = currentStepLabel({ ...w, current_step: w.step });
-      title += ` — in ${workflowKindLabel(w.kind)} (${step})`;
-    }
-    return title;
-  };
 
   // Build display list: self first, then other peers
   const selfPeer = config.peers.find((p) => p.participant_id === selfNodeId);
@@ -541,7 +517,7 @@ export const NetworkConfigAccordion = ({
                     sx={zebraRow(idx)}
                   >
                     <TableCell sx={{ py: 1 }}>
-                      <StatusDot status={st?.status} title={statusTooltip(st)} />
+                      <StatusDot status={st?.status} title={peerStatusTooltip(st, selfWireVersion)} />
                     </TableCell>
                     <TableCell sx={{ py: 1, whiteSpace: "nowrap" }}>
                       {p.name || truncateParticipantId(p.participant_id)}

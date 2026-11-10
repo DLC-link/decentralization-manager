@@ -3,8 +3,8 @@ use std::collections::HashSet;
 use canton_proto_rs::com::digitalasset::canton::{
     crypto::v30::SigningPublicKey,
     protocol::v30::{
-        DecentralizedNamespaceDefinition, TopologyMapping, enums,
-        party_to_participant::HostingParticipant, topology_mapping,
+        DecentralizedNamespaceDefinition, enums, party_to_participant::HostingParticipant,
+        topology_mapping,
     },
     topology::admin::v30::{
         AuthorizeRequest, ForceFlag, StoreId, authorize_request, store_id,
@@ -23,6 +23,7 @@ use crate::{
         onboarding::OnboardingConfig,
         storage::{WorkflowStorage, artifact_kinds, identity_kinds},
         thresholds::{PartyThresholds, check_confirmation_threshold},
+        topology_version::ProposalFormat,
     },
 };
 
@@ -242,23 +243,17 @@ pub async fn create_proposals(
     }
 
     let mut topology_client = TopologyManagerWriteServiceClient::new(config.admin_channel().await?);
+    let format = ProposalFormat::for_synchronizer(&utils::get_synchronizer_id(config).await?);
 
     // Create DNS proposal in Authorized store
     // The coordinator creates this proposal locally, which will later be shared with peers
     tracing::info!("Creating DNS proposal...");
 
     let dns_request = tonic::Request::new(AuthorizeRequest {
-        r#type: Some(authorize_request::Type::Proposal(
-            authorize_request::Proposal {
-                change: enums::TopologyChangeOp::AddReplace as i32,
-                serial: 1,
-                mapping: Some(authorize_request::proposal::Mapping::V30(TopologyMapping {
-                    mapping: Some(topology_mapping::Mapping::DecentralizedNamespaceDefinition(
-                        namespace_def.clone(),
-                    )),
-                })),
-            },
-        )),
+        r#type: Some(authorize_request::Type::Proposal(format.proposal(
+            1,
+            topology_mapping::Mapping::DecentralizedNamespaceDefinition(namespace_def.clone()),
+        ))),
         must_fully_authorize: false,
         force_changes: vec![ForceFlag::AllowUnvalidatedSigningKeys as i32],
         signed_by: vec![], // Auto-select appropriate signing keys from Authorized store
@@ -276,15 +271,10 @@ pub async fn create_proposals(
     // Create P2P proposal in Authorized store
     tracing::info!("Creating P2P proposal...");
     let p2p_request = tonic::Request::new(AuthorizeRequest {
-        r#type: Some(authorize_request::Type::Proposal(
-            authorize_request::Proposal {
-                change: enums::TopologyChangeOp::AddReplace as i32,
-                serial: 0,
-                mapping: Some(authorize_request::proposal::Mapping::V30(TopologyMapping {
-                    mapping: Some(topology_mapping::Mapping::PartyToParticipant(p2p_mapping)),
-                })),
-            },
-        )),
+        r#type: Some(authorize_request::Type::Proposal(format.proposal(
+            0,
+            topology_mapping::Mapping::PartyToParticipant(p2p_mapping),
+        ))),
         must_fully_authorize: false,
         force_changes: vec![ForceFlag::AllowUnvalidatedSigningKeys as i32],
         signed_by: vec![],

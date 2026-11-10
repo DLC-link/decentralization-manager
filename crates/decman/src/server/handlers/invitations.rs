@@ -13,7 +13,9 @@ use crate::{
         send_noise_message_with_chunked_response,
     },
     server::{
-        AppState, mark_failed_via_pool,
+        AppState, InvitationType,
+        handlers::refresh_party_for_kick,
+        mark_failed_via_pool,
         middleware::require_admin,
         types::{
             DeclineInvitationPayload, ErrorResponse, HandledInvitationsResponse,
@@ -175,6 +177,7 @@ pub(crate) async fn insert_peer_run(
             "dar_filenames": invitation.dar_filenames,
             "dar_hashes": invitation.dar_hashes,
             "participant_id": invitation.kicked_participant,
+            "namespace_fingerprint": invitation.kicked_owner_key,
             "new_participant_id": invitation.new_participant,
             "new_threshold": invitation.new_threshold,
             "confirmation_threshold": invitation.confirmation_threshold,
@@ -201,6 +204,7 @@ pub(crate) async fn insert_peer_run(
         previous_threshold: None,
         new_threshold: None,
         kicked_participant: None,
+        kicked_owner_key: None,
         added_participant: None,
         package_names: Vec::new(),
         dar_filenames: Vec::new(),
@@ -317,6 +321,10 @@ pub async fn list_handled_invitations(
 }
 
 /// Accept a pending invitation and trigger the workflow
+///
+/// A kick accept first refreshes the party and asks the peers for their owner
+/// keys, because the peer check needs every host's current key. So a kick
+/// accept takes longer than other accepts.
 #[utoipa::path(
     tag = "Invitations",
     request_body = InvitationActionRequest,
@@ -378,6 +386,14 @@ pub async fn accept_invitation(
                 )
             }));
         }
+    }
+
+    // The peer checks a kick's owner key against the hosts' keys it has on
+    // record, and its cache may predate the party's current hosts.
+    if invitation.invitation_type == InvitationType::Kick
+        && let Some(party) = &invitation.dec_party_id
+    {
+        refresh_party_for_kick(&data, party).await;
     }
 
     // Persist a peer-side workflow_runs row so the operator's feed shows
@@ -853,6 +869,7 @@ mod handled_invitation_tests {
             dar_filenames: Vec::new(),
             dar_hashes: Vec::new(),
             kicked_participant: None,
+            kicked_owner_key: None,
             new_participant: None,
             new_threshold: None,
             previous_threshold: None,

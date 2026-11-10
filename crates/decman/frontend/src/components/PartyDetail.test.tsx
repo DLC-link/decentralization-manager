@@ -26,6 +26,7 @@ const party: DecentralizedParty = {
   threshold: 2,
   owners: [],
   participants: [],
+  non_hosting_owners: [],
   contracts: [],
 };
 
@@ -303,3 +304,49 @@ describe("PartyDetail rewards", () => {
     }
   });
 });
+
+describe("PartyDetail owners that do not host the party", () => {
+  const host = `p1::1220${"1".repeat(64)}`;
+  const claimant = `p3::1220${"3".repeat(64)}`;
+  const claimedKey = `1220${"c".repeat(64)}`;
+  const unclaimedKey = `1220${"d".repeat(64)}`;
+  const withOwners: DecentralizedParty = {
+    ...party,
+    owners: [`1220${"b".repeat(64)}`, claimedKey, unclaimedKey],
+    participants: [{ participant_uid: host, permission: "confirmation" }],
+    non_hosting_owners: [
+      { owner_key: claimedKey, participant_uid: claimant },
+      { owner_key: unclaimedKey },
+    ],
+  };
+
+  it("lists each one after the hosts, marked owner only", () => {
+    render(detail(authStatus(), withOwners));
+
+    const rows = screen.getAllByTestId("owner-only-row");
+    expect(rows.map((row) => row.getAttribute("data-owner-key"))).toEqual([
+      claimedKey,
+      unclaimedKey,
+    ]);
+    expect(screen.getAllByText("Owner only")).toHaveLength(2);
+    expect(screen.getByText("Unclaimed owner key")).toBeTruthy();
+    expect(screen.getAllByTestId("participant-row")).toHaveLength(1);
+  });
+
+  it("opens the kick for an owner-only member", () => {
+    render(detail(authStatus(), withOwners));
+
+    act(() => {
+      screen.getAllByRole("button", { name: "Kick owner" })[1].click();
+    });
+
+    expect(screen.getByRole("heading", { name: "Kick Owner" })).toBeTruthy();
+    expect(screen.getByTestId("kick-owner-only-note")).toBeTruthy();
+  });
+
+  it("lists none when every owner hosts the party", () => {
+    render(detail(authStatus()));
+    expect(screen.queryAllByTestId("owner-only-row")).toEqual([]);
+  });
+});
+

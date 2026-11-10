@@ -56,10 +56,8 @@ use canton_proto_rs::com::{
     digitalasset::canton::{
         crypto::v30::{SignatureFormat, SigningAlgorithmSpec},
         protocol::v30::{
-            PartyToParticipant, TopologyMapping,
-            enums::{ParticipantPermission, TopologyChangeOp},
-            party_to_participant::HostingParticipant,
-            topology_mapping,
+            PartyToParticipant, enums::ParticipantPermission,
+            party_to_participant::HostingParticipant, topology_mapping,
         },
         topology::admin::v30::{AuthorizeRequest, authorize_request},
     },
@@ -75,6 +73,7 @@ use dec_party_manager::{
     workflow::{
         external_party::add_hosts::read_party_to_participant,
         topology::{authorize_with_topology_retry, synchronizer_store_id},
+        topology_version,
     },
 };
 use decman_wallet::ExternalKeyPair;
@@ -139,24 +138,19 @@ async fn allocate_local_party(config: &NodeConfig, party_id: &str) -> anyhow::Re
         config,
         AuthorizeRequest {
             r#type: Some(authorize_request::Type::Proposal(
-                authorize_request::Proposal {
-                    change: TopologyChangeOp::AddReplace as i32,
-                    serial: 0,
-                    mapping: Some(authorize_request::proposal::Mapping::V30(TopologyMapping {
-                        mapping: Some(topology_mapping::Mapping::PartyToParticipant(
-                            PartyToParticipant {
-                                party: party_id.to_string(),
-                                threshold: 1,
-                                participants: vec![HostingParticipant {
-                                    participant_uid: config.participant_id().to_string(),
-                                    permission: ParticipantPermission::Submission as i32,
-                                    onboarding: None,
-                                }],
-                                party_signing_keys: None,
-                            },
-                        )),
-                    })),
-                },
+                topology_version::ProposalFormat::for_synchronizer(&synchronizer_id).proposal(
+                    0,
+                    topology_mapping::Mapping::PartyToParticipant(PartyToParticipant {
+                        party: party_id.to_string(),
+                        threshold: 1,
+                        participants: vec![HostingParticipant {
+                            participant_uid: config.participant_id().to_string(),
+                            permission: ParticipantPermission::Submission as i32,
+                            onboarding: None,
+                        }],
+                        party_signing_keys: None,
+                    }),
+                ),
             )),
             must_fully_authorize: true,
             force_changes: vec![],
@@ -253,6 +247,7 @@ pub(super) async fn create_marker_as_converted(
 
     let prepared = client
         .prepare_submission(tonic::Request::new(PrepareSubmissionRequest {
+            account_id: String::new(),
             user_id: LEDGER_USER.to_string(),
             command_id: format!("converted-marker-{marker}-{}", Uuid::new_v4()),
             commands: vec![create],
@@ -285,6 +280,7 @@ pub(super) async fn create_marker_as_converted(
     let response = client
         .execute_submission_and_wait_for_transaction(tonic::Request::new(
             ExecuteSubmissionAndWaitForTransactionRequest {
+                account_id: String::new(),
                 prepared_transaction: prepared.prepared_transaction.clone(),
                 party_signatures: Some(PartySignatures {
                     signatures: vec![SinglePartySignatures {

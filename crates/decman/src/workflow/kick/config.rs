@@ -10,8 +10,11 @@ pub struct KickConfig {
     /// Decentralized party ID to remove participant from
     pub decentralized_party_id: CantonId,
 
-    /// Participant ID to kick
-    pub participant_id: CantonId,
+    /// The participant that leaves. `None` for an owner key that no peer
+    /// has claimed. A participant that does not host the party leaves only
+    /// the owner set.
+    #[serde(default)]
+    pub participant_id: Option<CantonId>,
 
     /// Namespace fingerprint (DNS owner key) to remove
     pub namespace_fingerprint: String,
@@ -40,7 +43,7 @@ pub struct KickConfig {
 impl KickConfig {
     pub fn new(
         decentralized_party_id: CantonId,
-        participant_id: CantonId,
+        participant_id: Option<CantonId>,
         namespace_fingerprint: String,
         new_threshold: i32,
         confirmation_threshold: Option<i32>,
@@ -79,6 +82,7 @@ mod tests {
             "_p": null,
         }))?;
         assert_eq!(config.confirmation_threshold, None);
+        assert!(config.participant_id.is_some());
         Ok(())
     }
 }

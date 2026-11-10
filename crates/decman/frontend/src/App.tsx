@@ -162,6 +162,7 @@ const App = () => {
   const [participantStatuses, setParticipantStatuses] = useState<
     ParticipantStatus[]
   >([]);
+  const [selfWireVersion, setSelfWireVersion] = useState<number | undefined>();
   // Our own round-trip latency to the backend (ms). The peers table fills the
   // peer rows from Noise health probes but never the "you" row; this fills it.
   //
@@ -651,6 +652,7 @@ const App = () => {
         if (res.ok) {
           const data = await res.json();
           setParticipantStatuses(data.statuses);
+          setSelfWireVersion(data.wire_version);
         }
       } catch {
         // Ignore polling errors
@@ -1537,6 +1539,7 @@ const App = () => {
                   nodeConfig={nodeConfig ?? undefined}
                   keyStatus={keyStatus ?? undefined}
                   participantStatuses={participantStatuses}
+                  selfWireVersion={selfWireVersion}
                   selfLatencyMs={selfLatency.ms}
                   onSave={savePeers}
                   focusParticipantId={configPeerId}

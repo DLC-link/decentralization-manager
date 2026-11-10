@@ -150,14 +150,16 @@ pub async fn create_proposals(
         &party_id,
         &head,
         Some(new_namespace_def.clone()),
-        new_p2p,
+        Some(new_p2p),
         topology::party_proposal_force_flags(),
     )
     .await?;
     let dns_transaction = signed
         .dns
         .ok_or_else(|| anyhow::anyhow!("No DNS change-threshold proposal was signed"))?;
-    let p2p_transaction = signed.p2p;
+    let p2p_transaction = signed
+        .p2p
+        .ok_or_else(|| anyhow::anyhow!("No P2P change-threshold proposal was signed"))?;
 
     // Persist proposals + supporting data. Each protobuf is written with the
     // same `varint(len)||proto` framing the file path used, so

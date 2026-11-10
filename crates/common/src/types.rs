@@ -53,6 +53,19 @@ pub struct ParticipantInfo {
     pub owner_key: Option<String>,
 }
 
+/// A namespace owner of a decentralized party that does not host the party.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
+pub struct NonHostingOwner {
+    /// The owner's namespace key fingerprint, as the party's owner set lists it.
+    pub owner_key: String,
+    /// The participant that reported holding the key. `None` when no peer has
+    /// claimed it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub participant_uid: Option<CantonId>,
+}
+
 /// Contract information surfaced in the dec_party detail view.
 ///
 /// `template_id` is the short `Module.Path:Entity` form (NOT the fully
@@ -188,6 +201,9 @@ pub struct DecentralizedParty {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub my_owner_key: Option<String>,
     pub participants: Vec<ParticipantInfo>,
+    /// Namespace owners that do not host the party.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub non_hosting_owners: Vec<NonHostingOwner>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub contracts: Vec<ContractInfo>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -206,7 +222,9 @@ pub enum ConnectionStatus {
     Connected,
     /// Failed to establish TCP connection (peer not reachable)
     Unreachable,
-    /// Noise handshake/decryption failed (likely wrong public key configured)
+    /// Noise handshake/decryption failed (likely wrong public key configured).
+    /// Also covers a peer that refused our frame because it speaks a different
+    /// wire version; `ParticipantStatus::wire_version` then carries its byte.
     HandshakeFailed,
 }
 
@@ -235,6 +253,11 @@ pub struct ParticipantStatus {
     /// on code that predates the field. This is what the peers table shows.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub build_version: Option<String>,
+    /// Noise wire version the peer's listener speaks, when known: ours for the
+    /// current node and for a `Connected` peer, the peer's own byte when it
+    /// refused our frame, `None` otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wire_version: Option<u8>,
 }
 
 /// Response for the participants status endpoint
@@ -243,6 +266,11 @@ pub struct ParticipantStatus {
 #[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 pub struct ParticipantsStatusResponse {
     pub statuses: Vec<ParticipantStatus>,
+    /// Noise wire version this node speaks. Set even when this node is not in
+    /// its own peers table, so a client can always tell which side of a
+    /// mismatch is older. `None` only from a node that predates the field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wire_version: Option<u8>,
 }
 
 /// Progress status of a workflow (kick, onboarding, etc.)
@@ -495,6 +523,10 @@ pub struct WorkflowRun {
     /// Kick runs only: the participant being kicked.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kicked_participant: Option<CantonId>,
+    /// Kick runs only: the namespace owner key being removed. It is the only
+    /// name for a member that owns the namespace without hosting the party.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kicked_owner_key: Option<String>,
     /// AddParty runs only: the participant being added. Lifted from
     /// `config_json` by the API layer (not a DB column), same as `prefix`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -591,6 +623,9 @@ pub struct PendingInvitation {
     /// Kick-only: the participant being removed from the party.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kicked_participant: Option<CantonId>,
+    /// Kick-only: the namespace owner key being removed from the party.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kicked_owner_key: Option<String>,
     /// Kick-only: threshold after the kick.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub new_threshold: Option<i32>,
