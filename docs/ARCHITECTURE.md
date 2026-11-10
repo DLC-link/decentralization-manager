@@ -232,7 +232,9 @@ everything that follows (`workflow::validation::PeerExpectations`).
   only the key its invitation names, and it must add exactly one new key. The
   peer's own records must name that removed key as the coordinator's, and as
   no other member's. Without this check, a coordinator could swap another
-  member's key for one it controls.
+  member's key for one it controls. Before the coordinator invites anyone, it
+  requires every other member to be a configured peer and to list the
+  `rotate-key` feature in its Health reply.
   The key must be the departing host's recorded key, and no staying host's.
   The peer refuses while it has no current key on record for a host. It also
   refuses a namespace in force that still lists the key. Accepting a kick
