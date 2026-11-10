@@ -324,6 +324,10 @@ pub struct NodeConfig {
     /// mode, uses `key-store.key` in the data directory. Not serialized.
     #[serde(skip)]
     pub key_store_key_file: Option<PathBuf>,
+    /// Whether a participant without KMS may hold new party keys, which
+    /// DecMan then copies into its key store. Not serialized.
+    #[serde(skip)]
+    pub allow_software_party_keys: bool,
     /// Root directory containing data/ subdirectory
     #[serde(skip)]
     root_dir: PathBuf,
@@ -350,6 +354,7 @@ impl Default for NodeConfig {
             tenant_rate_limit_per_minute: 120,
             validator_operator_party: None,
             key_store_key_file: None,
+            allow_software_party_keys: false,
             root_dir: PathBuf::new(),
         }
     }

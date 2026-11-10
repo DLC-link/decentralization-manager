@@ -126,6 +126,26 @@ pub async fn migrate_all(config: &NodeConfig, db: &SqlitePool) -> Result {
     Ok(())
 }
 
+/// Copy this node's Daml key for one party now, as the copy task does for
+/// every hosted party.
+///
+/// # Errors
+///
+/// Errors when the store is off or cannot be opened, or when the participant
+/// cannot be reached or reports the key wrongly.
+pub async fn copy_party_key(
+    config: &NodeConfig,
+    db: &SqlitePool,
+    party: &CantonId,
+) -> Result<Outcome> {
+    let store = KeyStore::open(config, db.clone())
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("{STORE_OFF_HINT}"))?;
+    let channel = config.admin_channel().await?;
+    let protocol_version = export_protocol_version(config).await?;
+    migrate_party(config, db, &store, (&channel, protocol_version), party).await
+}
+
 /// The decentralized parties that DecMan's party cache lists
 /// `participant_uid` as a host of. The cache also holds parties that other
 /// members host, and this node has no key for those.

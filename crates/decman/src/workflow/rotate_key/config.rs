@@ -26,10 +26,10 @@ pub struct RotateKeyConfig {
 }
 
 impl RotateKeyConfig {
-    /// The vault name of the new key. It is unique to the run, so a retry of
-    /// the same run finds the key it already created.
+    /// The vault name of the new key. It depends on the key being replaced,
+    /// so every run that replaces that key reuses the same new key.
     pub fn new_key_name(&self) -> String {
-        rotated_daml_key_name(&self.decentralized_party_id.prefix, &self.instance_name)
+        rotated_daml_key_name(&self.decentralized_party_id.prefix, &self.rotated_key)
     }
 
     /// The thresholds the proposal keeps.

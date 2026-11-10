@@ -48,7 +48,7 @@ pub async fn generate_key(
     rotate: &RotateKeyConfig,
 ) -> Result {
     let mut vault_client = VaultServiceClient::new(config.admin_channel().await?);
-    custody::require_kms_participant(config, &mut vault_client).await?;
+    custody::require_kms_participant(config, storage, &mut vault_client).await?;
 
     let name = rotate.new_key_name();
     let (key, existed) =
@@ -58,7 +58,22 @@ pub async fn generate_key(
         fingerprint != rotate.rotated_key,
         "The vault returned the key being replaced, {fingerprint}, under the name {name}"
     );
-    custody::require_kms_key(config, &mut vault_client, &fingerprint).await?;
+    let kms_key_id = custody::require_kms_key(config, &mut vault_client, &fingerprint).await?;
+    match kms_key_id.as_deref() {
+        Some(kms_key_id) => {
+            custody::require_kms_sign_access(&fingerprint, &key, kms_key_id).await?;
+        }
+        None => {
+            custody::secure_software_daml_key(
+                config,
+                storage,
+                &key,
+                None,
+                Some(&rotate.decentralized_party_id),
+            )
+            .await?;
+        }
+    }
     tracing::info!(
         "{verb} Daml key {fingerprint} ({name}) to replace {old} for {party}",
         verb = if existed { "Reusing" } else { "Created" },

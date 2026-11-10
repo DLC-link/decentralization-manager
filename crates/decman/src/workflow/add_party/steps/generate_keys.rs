@@ -38,7 +38,7 @@ pub async fn generate_keys(
     tracing::info!("Generating cryptographic keys for add-party...");
 
     let mut vault_client = VaultServiceClient::new(config.admin_channel().await?);
-    custody::require_kms_participant(config, &mut vault_client).await?;
+    custody::require_kms_participant(config, storage, &mut vault_client).await?;
 
     let namespace_key_name = add_party_config.namespace_key_name();
     let daml_key_name = add_party_config.daml_key_name();
@@ -66,7 +66,17 @@ pub async fn generate_keys(
     let (daml_key, _) =
         get_or_create_signing_key(&mut vault_client, &daml_key_name, SigningKeyUsage::Protocol)
             .await?;
-    custody::require_kms_key(config, &mut vault_client, &compute_fingerprint(&daml_key)).await?;
+    let kms_key_id =
+        custody::require_kms_key(config, &mut vault_client, &compute_fingerprint(&daml_key))
+            .await?;
+    custody::secure_software_daml_key(
+        config,
+        storage,
+        &daml_key,
+        kms_key_id.as_deref(),
+        Some(&add_party_config.decentralized_party_id),
+    )
+    .await?;
 
     let self_id = config.participant_id().to_string();
 

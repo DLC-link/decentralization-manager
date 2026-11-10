@@ -57,7 +57,7 @@ pub async fn generate_keys(
     tracing::info!("Generating cryptographic keys...");
 
     let mut vault_client = VaultServiceClient::new(config.admin_channel().await?);
-    custody::require_kms_participant(config, &mut vault_client).await?;
+    custody::require_kms_participant(config, storage, &mut vault_client).await?;
 
     // Derive key names from party_id_prefix
     let namespace_key_name = onboarding_config.namespace_key_name();
@@ -101,7 +101,13 @@ pub async fn generate_keys(
     let (daml_key, _) =
         get_or_create_signing_key(&mut vault_client, &daml_key_name, SigningKeyUsage::Protocol)
             .await?;
-    custody::require_kms_key(config, &mut vault_client, &compute_fingerprint(&daml_key)).await?;
+    let kms_key_id =
+        custody::require_kms_key(config, &mut vault_client, &compute_fingerprint(&daml_key))
+            .await?;
+    // The party does not exist yet, so this only proves the export works.
+    // The member copies the key once it learns the party id.
+    custody::secure_software_daml_key(config, storage, &daml_key, kms_key_id.as_deref(), None)
+        .await?;
 
     // Persist keys + participant id under this node's own canton id so the
     // coordinator can later list every peer's keys/ids.

@@ -686,6 +686,12 @@ async fn run_peer(
                         {
                             tracing::error!("Failed to copy self identity for {dec_party_id}: {e}");
                         }
+                        crate::signing::custody::copy_new_party_key(
+                            &node_config,
+                            &db,
+                            &dec_party_id,
+                        )
+                        .await;
                     }
                     Err(e) => {
                         tracing::error!("Failed to extract dec_party_id from P2P payload: {e}");
