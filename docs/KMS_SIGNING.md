@@ -20,12 +20,33 @@ the KMS `Sign` API.
 
 - A vault that only wraps its software keys with a KMS key does not count.
   Those keys still need an export to sign.
-- Insecure mode (`DECPM_INSECURE`, devnet only) skips the rule, and so do
-  `test-mode` builds. A party created there gets software keys. On Splice 0.10
-  its first deploy needs key download, as the last section explains.
 - Parties created before this rule keep their software keys. decman signs with
   its stored copies, as the section on nodes without KMS explains. To move
   such a party's key into KMS, see [Rotating a Daml key](#rotating-a-daml-key).
+- decman logs at boot whether its participant keeps its keys in KMS, and which
+  rule applies.
+
+### Participants without KMS
+
+A participant that has not moved to KMS yet can still hold new party keys.
+Set `DECPM_ALLOW_SOFTWARE_PARTY_KEYS=true` on its decman. decman then keeps a
+copy of each new Daml key in its key store:
+
+1. Before it creates a key, decman checks that its key store is on. It
+   refuses the run otherwise.
+2. After it creates the Daml key, decman exports it at once. If Canton refuses
+   the export, decman stops the run before the key joins the party.
+3. decman stores the copy as soon as it knows the party. Add-party and
+   rotate-key know the party from the start. Onboarding learns it when the
+   members sign the party's `PartyToParticipant` proposal.
+
+On Splice 0.9, Canton always exports, so this works without other settings.
+On Splice 0.10, the export needs key download while the keys are created.
+Turn it off again afterwards, as the last section explains.
+
+Insecure mode (`DECPM_INSECURE`, devnet only) also allows software keys. It
+only logs a warning and makes no copy, so a party created there on Splice 0.10
+needs key download for its first deploy.
 
 ## Background
 
@@ -112,6 +133,8 @@ that account. Signatures are still verified against the registered public key.
 | `KMS signing failed: ... dispatch failure` | No AWS credentials or wrong region (step 1). |
 | `Invalid kms_key_id` | Vault metadata contains an ARN, alias, or malformed ID. Use the bare ID of the participant's key and credentials for its account. |
 | `failed local verification against the registered public key` | The KMS key does not match the registered public key. Check that the `kms_key_id` belongs to this party's Daml key. |
+| Rotation fails at GenerateKey with `DecMan cannot sign with the new KMS key` | decman's role lacks `kms:Sign` on the new key. Grant it and start the rotation again, as [the KMS grant for the new key](#the-kms-grant-for-the-new-key) explains. |
+| Run fails with `Canton refused to export the new Daml key` | The node allows software keys, but Canton refuses exports. Turn on key download while the keys are created, or move the participant to KMS. |
 | Workflow fails at export with `ExportKeyPair` | The key carries no `kms_key_id`, so decman used the vault-export path. Expected on JCE nodes; on a KMS node this means the key metadata is inconsistent. |
 
 ## Rotating a Daml key
@@ -126,19 +149,40 @@ to replace a key you no longer trust.
 2. Every other member accepts the invitation. Each one checks the proposal
    before it signs. The proposal may only swap the named key for one new key,
    and the member's own records must name that key as the coordinator's.
-3. decman submits the change. Every member then records the new key, so a
+3. decman creates the new key and checks that it can sign with it. On a KMS
+   node, it signs a fixed test message through KMS. On a node without KMS, it
+   copies the key into its key store.
+4. decman submits the change. Every member then records the new key, so a
    later kick or rotation attributes it to the right member.
 
-The new key gets a name of the form `<prefix>-daml-transactions-rotated-<run>`.
-The old key stays in the vault and in decman's key store, because decman never
-deletes a key. A party whose keys still sit in a legacy `PartyToKeyMapping` has
-its members' keys moved inline in the same change.
+decman starts a rotation only when every other member is a configured peer
+and runs a version that knows the workflow. Otherwise it refuses with a 409
+that names those members.
 
-Every member must run a decman version that knows the workflow. A member on an
-older version cannot read the invitation, and the run fails.
+The new key gets a name of the form
+`<prefix>-daml-transactions-rotated-from-<old key fingerprint>`. The name
+depends only on the key it replaces. A rotation that failed and starts again
+therefore reuses the same new key. The old key stays in the vault and in
+decman's key store, because decman never deletes a key. A party whose keys
+still sit in a legacy `PartyToKeyMapping` has its members' keys moved inline
+in the same change, and the members then retire the legacy mapping.
 
-On a KMS node, step 2 of the setup above applies to the new key too. Grant
-decman's role `kms:Sign` on it before the next deploy.
+### The KMS grant for the new key
+
+On a KMS node, step 2 of the setup above applies to the new key too. The
+participant creates the key under its own role, so decman cannot sign with it
+until an operator grants `kms:Sign`. decman checks this before it submits the
+change:
+
+1. Start the rotation. If the grant is missing, the run fails at GenerateKey.
+   The error names the new KMS key id.
+2. Grant decman's role `kms:Sign` on that key, as step 2 of the setup
+   describes.
+3. Start the rotation again. It reuses the key from the first run, so the
+   grant applies, and the rotation completes.
+
+The party keeps its old key until the rotation completes, so deploys keep
+working while the grant is missing.
 
 ## Scope
 
