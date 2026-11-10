@@ -109,4 +109,7 @@ sqlx = { workspace = true, features = ["postgres"] }
 static_assertions = { workspace = true }
 tempfile = { workspace = true }
 tokio-rustls = { workspace = true }
+# Serves a fake Canton admin API in unit tests (signing/fake_admin_api.rs).
+# canton-proto-rs already builds on it, so this adds no new crate.
+tonic-prost = { workspace = true }
 wiremock = { workspace = true }

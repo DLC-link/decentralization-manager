@@ -315,3 +315,56 @@ pub(crate) async fn propose_namespace_delegation(
     tracing::debug!("Namespace delegation proposed successfully");
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        db::MIGRATOR,
+        signing::{
+            custody::SoftwareKeys,
+            fake_admin_api::{FakeAdminApi, VaultKey},
+            key_store::STORE_OFF_HINT,
+        },
+    };
+
+    fn onboarding() -> OnboardingConfig {
+        OnboardingConfig::new(
+            "party".to_string(),
+            "party-creation".to_string(),
+            None,
+            None,
+        )
+    }
+
+    async fn refusal(fake: &FakeAdminApi, rule: SoftwareKeys, db: &SqlitePool) -> Result<String> {
+        let node = fake.node(rule, false).await?;
+        match generate_keys(&node.config, db, "party-creation", &onboarding()).await {
+            Ok(()) => anyhow::bail!("onboarding created keys under {rule:?}"),
+            Err(e) => Ok(format!("{e:#}")),
+        }
+    }
+
+    /// A refused onboarding leaves nothing in the vault to clean up.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn refuses_a_participant_without_kms_before_making_a_key(db: SqlitePool) -> Result {
+        let fake = FakeAdminApi::start(vec![VaultKey::wrapped("participant", 1)]).await?;
+
+        let error = refusal(&fake, SoftwareKeys::Refused, &db).await?;
+
+        assert!(error.contains("software vault, not in a KMS"), "{error}");
+        assert!(fake.generated().is_empty());
+        Ok(())
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn the_opt_out_without_a_key_store_refuses_before_making_a_key(db: SqlitePool) -> Result {
+        let fake = FakeAdminApi::start(vec![VaultKey::software("participant", 1)]).await?;
+
+        let error = refusal(&fake, SoftwareKeys::Stored, &db).await?;
+
+        assert!(error.contains(STORE_OFF_HINT), "{error}");
+        assert!(fake.generated().is_empty());
+        Ok(())
+    }
+}

@@ -1839,6 +1839,7 @@ dependencies = [
  "tokio-noise",
  "tokio-rustls",
  "tonic",
+ "tonic-prost",
  "tracing",
  "tracing-subscriber",
  "ts-rs",
