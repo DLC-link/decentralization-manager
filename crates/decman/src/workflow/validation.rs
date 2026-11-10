@@ -1563,9 +1563,22 @@ async fn check_rotation_against_head(
              rotation keeps them"
         );
     }
+    // Same hosts is not enough: a changed permission or onboarding flag
+    // would change what a host may do.
+    let entries = |m: &PartyToParticipant| {
+        let mut hosts = m.participants.clone();
+        hosts.sort_by(|a, b| a.participant_uid.cmp(&b.participant_uid));
+        hosts
+    };
+    if entries(mapping) != entries(&current_p2p) {
+        anyhow::bail!(
+            "{kind:?} proposal changes a host's permission or onboarding state; a key rotation \
+             keeps them"
+        );
+    }
     // The invitation's thresholds come from the coordinator, so the chain
     // pins them here. DecMan keeps the signing threshold equal to the
-    // namespace threshold.
+    // namespace threshold, and a rotation keeps the one in force.
     if mapping.threshold != current_p2p.threshold {
         anyhow::bail!(
             "{kind:?} proposal changes the confirmation threshold from {from} to {to}; a key \
@@ -1589,6 +1602,15 @@ async fn check_rotation_against_head(
             "{kind:?} proposal sets the signing threshold to {signing:?}, but the party's \
              namespace threshold is {threshold}; a key rotation keeps it",
             threshold = namespace.threshold
+        );
+    }
+    if let Some(current) = current_p2p.party_signing_keys.as_ref()
+        && i32::try_from(current.threshold).ok() != signing
+    {
+        anyhow::bail!(
+            "{kind:?} proposal changes the signing threshold from {from} to {signing:?}; a key \
+             rotation keeps it",
+            from = current.threshold
         );
     }
 
@@ -4534,6 +4556,60 @@ mod tests {
         let error = rotation_error(&signing, 2).await?;
         assert!(
             error.contains("namespace threshold is 2"),
+            "unexpected error: {error}"
+        );
+        Ok(())
+    }
+
+    /// A permission or onboarding flag is part of what a host may do, so a
+    /// rotation that keeps the hosts must keep those too.
+    #[tokio::test]
+    async fn a_rotation_keeps_each_hosts_permission_and_onboarding_state() -> Result {
+        let mut observer = keyed_p2p(Some(keyed(&[1, 9, 3])))?;
+        observer.participants[0].permission = enums::ParticipantPermission::Observation as i32;
+        let error = rotation_error(&observer, 2).await?;
+        assert!(
+            error.contains("changes a host's permission or onboarding state"),
+            "unexpected error: {error}"
+        );
+        Ok(())
+    }
+
+    /// A party whose signing threshold differs from its namespace threshold
+    /// keeps its signing threshold. A rotation must not move it to the
+    /// namespace value.
+    #[tokio::test]
+    async fn a_rotation_keeps_the_signing_threshold_in_force() -> Result {
+        let stub = StubHead {
+            dns: Some((
+                2,
+                DecentralizedNamespaceDefinition {
+                    threshold: 2,
+                    ..namespace(&["a", "b", "c"])
+                },
+            )),
+            p2p: Some((
+                5,
+                keyed_p2p(Some(SigningKeysWithThreshold {
+                    threshold: 3,
+                    ..keyed(&[1, 2, 3])
+                }))?,
+            )),
+            legacy_keys: None,
+        };
+        let error = match check_rotation_against_head(
+            &stub,
+            &canton_id("party", 9)?,
+            (6, &keyed_p2p(Some(keyed(&[1, 9, 3])))?),
+            &utils::compute_fingerprint(&key_of(2)),
+        )
+        .await
+        {
+            Ok(_) => anyhow::bail!("lowering the signing threshold must be refused"),
+            Err(error) => error.to_string(),
+        };
+        assert!(
+            error.contains("changes the signing threshold from 3"),
             "unexpected error: {error}"
         );
         Ok(())

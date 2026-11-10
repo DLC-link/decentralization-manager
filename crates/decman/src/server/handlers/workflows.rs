@@ -2705,6 +2705,16 @@ async fn rotation_baseline(
         .iter()
         .map(|p| p.participant_uid.clone())
         .collect();
+    if let Some(signing) = p2p.party_signing_keys.as_ref()
+        && i32::try_from(signing.threshold).ok() != Some(namespace.threshold)
+    {
+        anyhow::bail!(
+            "{party}'s signing threshold {signing} differs from its namespace threshold \
+             {namespace}. A rotation keeps both, so set them equal with change-threshold first",
+            signing = signing.threshold,
+            namespace = namespace.threshold
+        );
+    }
     if let Some(difference) = stale_members(members, &hosts) {
         anyhow::bail!(
             "This node's cached members of {party} differ from the chain ({difference}). \
