@@ -2692,12 +2692,6 @@ async fn rotation_baseline(
     members: &HashSet<CantonId>,
 ) -> Result<RotationBaseline> {
     let synchronizer_id = utils::get_synchronizer_id(config).await?;
-    let (_, namespace) = workflow::topology::fetch_namespace_definition_at_head(
-        config,
-        &synchronizer_id,
-        &party.namespace.to_hex(),
-    )
-    .await?;
     let (_, p2p) =
         workflow::topology::fetch_p2p_mapping_at_head(config, &synchronizer_id, party).await?;
     let hosts: Vec<String> = p2p
@@ -2705,16 +2699,6 @@ async fn rotation_baseline(
         .iter()
         .map(|p| p.participant_uid.clone())
         .collect();
-    if let Some(signing) = p2p.party_signing_keys.as_ref()
-        && i32::try_from(signing.threshold).ok() != Some(namespace.threshold)
-    {
-        anyhow::bail!(
-            "{party}'s signing threshold {signing} differs from its namespace threshold \
-             {namespace}. A rotation keeps both, so set them equal with change-threshold first",
-            signing = signing.threshold,
-            namespace = namespace.threshold
-        );
-    }
     if let Some(difference) = stale_members(members, &hosts) {
         anyhow::bail!(
             "This node's cached members of {party} differ from the chain ({difference}). \
@@ -2728,14 +2712,20 @@ async fn rotation_baseline(
         .as_ref()
         .map(|k| k.keys.clone())
         .unwrap_or_default();
-    if keys.len() < p2p.participants.len() {
-        keys.extend(
-            workflow::topology::fetch_party_to_key_mapping(config, &synchronizer_id, party)
-                .await?
-                .map(|mapping| mapping.signing_keys)
-                .unwrap_or_default(),
-        );
-    }
+    let legacy = if keys.len() < p2p.participants.len() {
+        workflow::topology::fetch_party_to_key_mapping(config, &synchronizer_id, party).await?
+    } else {
+        None
+    };
+    keys.extend(
+        legacy
+            .as_ref()
+            .map(|mapping| mapping.signing_keys.clone())
+            .unwrap_or_default(),
+    );
+    let signing_threshold =
+        workflow::rotate_key::config::signing_threshold_in_force(&p2p, legacy.as_ref())
+            .ok_or_else(|| anyhow::anyhow!("{party} carries no signing keys to rotate"))?;
     if !keys
         .iter()
         .any(|key| utils::compute_fingerprint(key) == own.fingerprint)
@@ -2749,7 +2739,7 @@ async fn rotation_baseline(
 
     Ok(RotationBaseline {
         rotated_key: own.fingerprint,
-        threshold: namespace.threshold,
+        threshold: i32::try_from(signing_threshold)?,
         confirmation_threshold: i32::try_from(p2p.threshold)?,
     })
 }

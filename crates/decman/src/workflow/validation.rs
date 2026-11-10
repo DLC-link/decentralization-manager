@@ -39,6 +39,7 @@ use crate::{
         onboarding::steps::proposals::create::{
             compute_decentralized_namespace, decode_keys_payload,
         },
+        rotate_key::config::signing_threshold_in_force,
         signing_keys::{
             ensure_survivor_keys_preserved, kick_key_claims, known_signing_keys_by_member,
             own_namespace_key, recorded_signing_keys_by_member, vault_holds,
@@ -1577,8 +1578,8 @@ async fn check_rotation_against_head(
         );
     }
     // The invitation's thresholds come from the coordinator, so the chain
-    // pins them here. DecMan keeps the signing threshold equal to the
-    // namespace threshold, and a rotation keeps the one in force.
+    // pins them here. A rotation keeps the signing threshold in force, even
+    // where it differs from the namespace threshold.
     if mapping.threshold != current_p2p.threshold {
         anyhow::bail!(
             "{kind:?} proposal changes the confirmation threshold from {from} to {to}; a key \
@@ -1587,30 +1588,24 @@ async fn check_rotation_against_head(
             to = mapping.threshold
         );
     }
-    let (_, namespace) = head
-        .namespace_definition(&dec_party_id.namespace.to_hex())
-        .await
-        .map_err(|e| {
-            anyhow::anyhow!("cannot read the namespace threshold of {dec_party_id}: {e:#}")
-        })?;
+    let legacy_mapping = if current_p2p.party_signing_keys.is_none() {
+        head.party_to_key_mapping(dec_party_id).await?
+    } else {
+        None
+    };
+    let in_force = signing_threshold_in_force(&current_p2p, legacy_mapping.as_ref());
     let signing = mapping
         .party_signing_keys
         .as_ref()
-        .and_then(|keys| i32::try_from(keys.threshold).ok());
-    if signing != Some(namespace.threshold) {
+        .map(|keys| keys.threshold);
+    if signing != in_force {
+        let shown =
+            |threshold: Option<u32>| threshold.map_or("none".to_string(), |t| t.to_string());
         anyhow::bail!(
-            "{kind:?} proposal sets the signing threshold to {signing:?}, but the party's \
-             namespace threshold is {threshold}; a key rotation keeps it",
-            threshold = namespace.threshold
-        );
-    }
-    if let Some(current) = current_p2p.party_signing_keys.as_ref()
-        && i32::try_from(current.threshold).ok() != signing
-    {
-        anyhow::bail!(
-            "{kind:?} proposal changes the signing threshold from {from} to {signing:?}; a key \
-             rotation keeps it",
-            from = current.threshold
+            "{kind:?} proposal changes the signing threshold from {from} to {to}; a key rotation \
+             keeps it",
+            from = shown(in_force),
+            to = shown(signing)
         );
     }
 
@@ -3517,6 +3512,7 @@ mod tests {
                 .clone()
                 .map(|signing_keys| PartyToKeyMapping {
                     signing_keys,
+                    threshold: 2,
                     ..Default::default()
                 }))
         }
@@ -4555,7 +4551,17 @@ mod tests {
         }))?;
         let error = rotation_error(&signing, 2).await?;
         assert!(
-            error.contains("namespace threshold is 2"),
+            error.contains("changes the signing threshold from 2 to 1"),
+            "unexpected error: {error}"
+        );
+
+        // A legacy party keeps its mapping's threshold too.
+        let error = match rotation_against(None, Some(&[1, 2, 3, 4]), (6, &signing), 2).await {
+            Ok(_) => anyhow::bail!("a legacy rotation must keep the legacy threshold"),
+            Err(error) => error.to_string(),
+        };
+        assert!(
+            error.contains("changes the signing threshold from 2 to 1"),
             "unexpected error: {error}"
         );
         Ok(())

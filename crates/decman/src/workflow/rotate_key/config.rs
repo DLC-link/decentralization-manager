@@ -1,3 +1,6 @@
+use canton_proto_rs::com::digitalasset::canton::protocol::v30::{
+    PartyToKeyMapping, PartyToParticipant,
+};
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -17,7 +20,7 @@ pub struct RotateKeyConfig {
     pub decentralized_party_id: CantonId,
     /// The coordinator's current Daml key, which leaves the party.
     pub rotated_key: Fingerprint,
-    /// The namespace threshold, which the party's signing keys also use.
+    /// The party's signing threshold in force, which the rotation keeps.
     pub threshold: i32,
     /// The confirmation threshold of the party's P2P mapping.
     pub confirmation_threshold: i32,
@@ -36,4 +39,19 @@ impl RotateKeyConfig {
     pub fn thresholds(&self) -> PartyThresholds {
         PartyThresholds::new(self.threshold, Some(self.confirmation_threshold))
     }
+}
+
+/// The signing threshold that authorizes the party's transactions now.
+///
+/// Inline keys shadow a legacy `PartyToKeyMapping`, so their threshold wins.
+/// `None` means the party carries no signing keys at all. A rotation keeps
+/// this value, even where it differs from the namespace threshold.
+pub fn signing_threshold_in_force(
+    p2p: &PartyToParticipant,
+    legacy: Option<&PartyToKeyMapping>,
+) -> Option<u32> {
+    p2p.party_signing_keys
+        .as_ref()
+        .map(|keys| keys.threshold)
+        .or_else(|| legacy.map(|mapping| mapping.threshold))
 }
