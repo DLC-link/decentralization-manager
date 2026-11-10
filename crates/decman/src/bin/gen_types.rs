@@ -126,6 +126,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         MissingEdgeKind,
         MissingPeerEdge,
         NetworkInfo,
+        NonHostingOwner,
         OnboardingInvitePayload,
         OnboardingMeshErrorResponse,
         OnboardingRequest,

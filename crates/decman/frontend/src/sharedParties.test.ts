@@ -20,6 +20,7 @@ const party = (prefix: string, hosts: string[]): DecentralizedParty => ({
     participant_uid,
     permission: "submission",
   })),
+  non_hosting_owners: [],
   contracts: [],
 });
 

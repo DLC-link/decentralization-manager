@@ -1,6 +1,6 @@
 use super::rows::{
-    ChainAuditCacheRow, DecPartyContractRow, DecPartyParticipantRow, DecPartyRow,
-    FormerDecPartyRow, GovernanceAuditRow,
+    ChainAuditCacheRow, DecPartyContractRow, DecPartyOwnerRow, DecPartyParticipantRow, DecPartyRow,
+    FormerDecPartyRow, GovernanceAuditRow, OwnerKeyRefusal,
 };
 use crate::{
     canton_id::{CantonId, Fingerprint},
@@ -57,8 +57,9 @@ pub trait SchemaRead {
     /// One former party, dismissed or not.
     async fn get_former_dec_party(&self, party_id: &CantonId) -> Result<Option<FormerDecPartyRow>>;
 
-    /// Get owner keys for a decentralized party
-    async fn get_dec_party_owners(&self, party_id: &CantonId) -> Result<Vec<String>>;
+    /// Get the owner keys of a decentralized party, with the participant
+    /// that claimed each one.
+    async fn get_dec_party_owners(&self, party_id: &CantonId) -> Result<Vec<DecPartyOwnerRow>>;
 
     /// Get participants for a decentralized party
     async fn get_dec_party_participants(
@@ -81,7 +82,7 @@ pub trait SchemaRead {
     ) -> Result<Vec<DecPartyContractRow>>;
 
     /// Get all owners for parties matching a prefix (bulk query)
-    async fn get_all_dec_party_owners(&self, prefix: &str) -> Result<Vec<(String, String)>>;
+    async fn get_all_dec_party_owners(&self, prefix: &str) -> Result<Vec<DecPartyOwnerRow>>;
 
     /// Get all participants for parties matching a prefix (bulk query)
     async fn get_all_dec_party_participants(
@@ -269,8 +270,23 @@ pub trait Commitable {
     /// Upsert a decentralized party
     async fn upsert_dec_party(&mut self, row: &DecPartyRow) -> Result;
 
-    /// Replace all owners for a decentralized party
+    /// Replace all owners for a decentralized party. An owner that stays
+    /// keeps the participant that claimed it.
     async fn replace_dec_party_owners(&mut self, party_id: &CantonId, owners: &[String]) -> Result;
+
+    /// Remove a single owner key from a decentralized party.
+    async fn delete_dec_party_owner(&mut self, party_id: &CantonId, owner_key: &str) -> Result;
+
+    /// Record the participant that holds an owner key of a decentralized
+    /// party. A key the party does not list is left alone. So is a key
+    /// another participant has on record, or a second key for a participant
+    /// whose recorded key is still an owner.
+    async fn update_owner_claim(
+        &mut self,
+        party_id: &CantonId,
+        owner_key: &str,
+        participant_uid: &str,
+    ) -> Result<Option<OwnerKeyRefusal>>;
 
     /// Replace all participants for a decentralized party
     async fn replace_dec_party_participants(
@@ -303,13 +319,16 @@ pub trait Commitable {
     /// Delete decentralized parties not in the given set of IDs (within a prefix scope)
     async fn delete_stale_dec_parties(&mut self, prefix: &str, fresh_ids: &[String]) -> Result;
 
-    /// Update the owner key for a specific participant in a decentralized party
+    /// Update the owner key for a specific participant in a decentralized
+    /// party. The key is left alone when another participant has it on
+    /// record, or when the participant has another key on record that is
+    /// still an owner.
     async fn update_participant_owner_key(
         &mut self,
         party_id: &CantonId,
         participant_uid: &str,
         owner_key: &str,
-    ) -> Result;
+    ) -> Result<Option<OwnerKeyRefusal>>;
 
     /// Update the Daml signing-key fingerprint for a specific participant in
     /// a decentralized party

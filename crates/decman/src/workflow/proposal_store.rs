@@ -43,7 +43,7 @@ use std::{
 use canton_proto_rs::com::digitalasset::canton::{
     protocol::v30::{
         DecentralizedNamespaceDefinition, PartyToParticipant, SignedTopologyTransaction,
-        TopologyMapping, TopologyTransaction, enums, topology_mapping,
+        TopologyTransaction, topology_mapping,
     },
     topology::admin::v30::{
         AddTransactionsRequest, AuthorizeRequest, AuthorizeResponse,
@@ -55,7 +55,16 @@ use canton_proto_rs::com::digitalasset::canton::{
 };
 use tonic::transport::Channel;
 
-use crate::{canton_id::CantonId, config::NodeConfig, error::Result, utils, workflow::topology};
+use crate::{
+    canton_id::CantonId,
+    config::NodeConfig,
+    error::Result,
+    utils,
+    workflow::{
+        topology,
+        topology_version::{self, ProposalFormat, protocol_version_of},
+    },
+};
 
 /// What the replay into a temporary store came to.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -236,11 +245,15 @@ pub async fn fetch_party_head(
 pub struct SignedProposals {
     /// `None` when the run leaves the namespace as it is.
     pub dns: Option<SignedTopologyTransaction>,
-    pub p2p: SignedTopologyTransaction,
+    /// `None` when the run leaves the hosting mapping as it is.
+    pub p2p: Option<SignedTopologyTransaction>,
 }
 
-/// Sign the party's new DNS (when `new_dns` is set) and new P2P at the serial
-/// after `head`'s.
+/// Sign the party's new DNS (when `new_dns` is set) and new P2P (when
+/// `new_p2p` is set) at the serial after `head`'s.
+///
+/// Canton refuses a mapping equal to the one in force at any other serial, so
+/// a run that leaves a mapping as it is must pass `None` for it.
 ///
 /// `head` must be what the proposals were built from. The proposals are
 /// signed in a temporary store seeded until its heads equal `head`'s serials,
@@ -262,10 +275,13 @@ pub async fn sign_party_proposals(
     party_id: &CantonId,
     head: &PartyHead,
     new_dns: Option<DecentralizedNamespaceDefinition>,
-    new_p2p: PartyToParticipant,
+    new_p2p: Option<PartyToParticipant>,
     force_flags: Vec<i32>,
 ) -> Result<SignedProposals> {
+    // A temporary store is created at the protocol version of the store its
+    // transactions are published to.
     let protocol_version = protocol_version_of(synchronizer_id)?;
+    let format = ProposalFormat::for_synchronizer(synchronizer_id);
     let serials = (
         next_serial("DNS", head.dns_serial)?,
         next_serial("P2P", head.p2p_serial)?,
@@ -312,6 +328,7 @@ pub async fn sign_party_proposals(
                             proposals,
                             serials,
                             force_flags,
+                            format,
                         )
                         .await?;
                         Ok(Attempt::Signed(signed))
@@ -346,7 +363,8 @@ pub async fn sign_party_proposals(
             );
             let store = topology::synchronizer_store_id(synchronizer_id);
             let signed =
-                sign_on_synchronizer(config, &store, proposals, serials, force_flags).await?;
+                sign_on_synchronizer(config, &store, proposals, serials, force_flags, format)
+                    .await?;
             Ok(signed)
         }
     }
@@ -359,13 +377,17 @@ enum Attempt {
     FallBack(String),
 }
 
-/// Sign the DNS (when there is one) and then the P2P in `store`.
+/// Sign the DNS and then the P2P in `store`, each when there is one.
 async fn sign(
     channel: &Channel,
     store: &StoreId,
-    (new_dns, new_p2p): (Option<DecentralizedNamespaceDefinition>, PartyToParticipant),
+    (new_dns, new_p2p): (
+        Option<DecentralizedNamespaceDefinition>,
+        Option<PartyToParticipant>,
+    ),
     (dns_serial, p2p_serial): (u32, u32),
     force_flags: Vec<i32>,
+    format: ProposalFormat,
 ) -> Result<SignedProposals> {
     let dns = match new_dns {
         Some(definition) => Some(
@@ -376,22 +398,29 @@ async fn sign(
                     topology_mapping::Mapping::DecentralizedNamespaceDefinition(definition),
                     dns_serial,
                     force_flags.clone(),
+                    format,
                 ),
             )
             .await?,
         ),
         None => None,
     };
-    let p2p = authorize(
-        channel,
-        proposal_request(
-            store.clone(),
-            topology_mapping::Mapping::PartyToParticipant(new_p2p),
-            p2p_serial,
-            force_flags,
+    let p2p = match new_p2p {
+        Some(mapping) => Some(
+            authorize(
+                channel,
+                proposal_request(
+                    store.clone(),
+                    topology_mapping::Mapping::PartyToParticipant(mapping),
+                    p2p_serial,
+                    force_flags,
+                    format,
+                ),
+            )
+            .await?,
         ),
-    )
-    .await?;
+        None => None,
+    };
     Ok(SignedProposals { dns, p2p })
 }
 
@@ -402,9 +431,13 @@ async fn sign(
 async fn sign_on_synchronizer(
     config: &NodeConfig,
     store: &StoreId,
-    (new_dns, new_p2p): (Option<DecentralizedNamespaceDefinition>, PartyToParticipant),
+    (new_dns, new_p2p): (
+        Option<DecentralizedNamespaceDefinition>,
+        Option<PartyToParticipant>,
+    ),
     (dns_serial, p2p_serial): (u32, u32),
     force_flags: Vec<i32>,
+    format: ProposalFormat,
 ) -> Result<SignedProposals> {
     let signed = |response: AuthorizeResponse| {
         response
@@ -420,6 +453,7 @@ async fn sign_on_synchronizer(
                     topology_mapping::Mapping::DecentralizedNamespaceDefinition(definition),
                     dns_serial,
                     force_flags.clone(),
+                    format,
                 ),
                 "DNS proposal",
             )
@@ -427,19 +461,23 @@ async fn sign_on_synchronizer(
         )?),
         None => None,
     };
-    let p2p = signed(
-        topology::authorize_with_topology_retry(
-            config,
-            proposal_request(
-                store.clone(),
-                topology_mapping::Mapping::PartyToParticipant(new_p2p),
-                p2p_serial,
-                force_flags,
-            ),
-            "P2P proposal",
-        )
-        .await?,
-    )?;
+    let p2p = match new_p2p {
+        Some(mapping) => Some(signed(
+            topology::authorize_with_topology_retry(
+                config,
+                proposal_request(
+                    store.clone(),
+                    topology_mapping::Mapping::PartyToParticipant(mapping),
+                    p2p_serial,
+                    force_flags,
+                    format,
+                ),
+                "P2P proposal",
+            )
+            .await?,
+        )?),
+        None => None,
+    };
     Ok(SignedProposals { dns, p2p })
 }
 
@@ -688,27 +726,6 @@ fn temporary_store_id(name: &str) -> StoreId {
     }
 }
 
-/// The protocol version a physical synchronizer id ends with, e.g. `35` from
-/// `global-domain::1220ab::35-0`.
-///
-/// A temporary store is created at the protocol version of the store its
-/// transactions are published to.
-///
-/// # Errors
-///
-/// Errors when the id does not end in a protocol version.
-fn protocol_version_of(synchronizer_id: &str) -> Result<u32> {
-    synchronizer_id
-        .rsplit_once("::")
-        .and_then(|(_, suffix)| suffix.split('-').next())
-        .and_then(|version| version.parse::<u32>().ok())
-        .ok_or_else(|| {
-            anyhow::anyhow!(
-                "Cannot read a protocol version from physical synchronizer id {synchronizer_id}"
-            )
-        })
-}
-
 fn next_serial(what: &str, head: u32) -> Result<u32> {
     head.checked_add(1)
         .ok_or_else(|| anyhow::anyhow!("The {what} serial {head} has no successor"))
@@ -724,22 +741,18 @@ fn next_serial(what: &str, head: u32) -> Result<u32> {
 /// party's authorization, and the peers' signatures are merged in before
 /// submit. The serial is explicit: a temporary store is not where the
 /// transaction is published, and against the synchronizer store it refuses a
-/// head that moved.
+/// head that moved. `format` writes the mapping as the synchronizer's
+/// protocol version needs it.
 fn proposal_request(
     store: StoreId,
     mapping: topology_mapping::Mapping,
     serial: u32,
     force_flags: Vec<i32>,
+    format: ProposalFormat,
 ) -> AuthorizeRequest {
     AuthorizeRequest {
         r#type: Some(authorize_request::Type::Proposal(
-            authorize_request::Proposal {
-                change: enums::TopologyChangeOp::AddReplace as i32,
-                serial,
-                mapping: Some(authorize_request::proposal::Mapping::V30(TopologyMapping {
-                    mapping: Some(mapping),
-                })),
-            },
+            format.proposal(serial, mapping),
         )),
         must_fully_authorize: false,
         force_changes: force_flags,
@@ -916,7 +929,8 @@ fn party_replays(
     let mut replays = Vec::new();
     let mut namespaces = BTreeSet::new();
     for item in items {
-        let transaction: TopologyTransaction = utils::decode_versioned(&item.signed.transaction)?;
+        let transaction: TopologyTransaction =
+            topology_version::decode_transaction(&item.signed.transaction)?;
         let rank = match transaction
             .mapping
             .as_ref()
@@ -947,7 +961,8 @@ fn party_replays(
 fn delegation_replays(namespace: &str, items: Vec<HistoryItem>) -> Result<Vec<Replay>> {
     let mut replays = Vec::new();
     for item in items {
-        let transaction: TopologyTransaction = utils::decode_versioned(&item.signed.transaction)?;
+        let transaction: TopologyTransaction =
+            topology_version::decode_transaction(&item.signed.transaction)?;
         let Some(topology_mapping::Mapping::NamespaceDelegation(delegation)) = transaction
             .mapping
             .as_ref()
@@ -1059,7 +1074,9 @@ mod tests {
 
     use canton_proto_rs::com::digitalasset::canton::{
         crypto::v30::SigningPublicKey,
-        protocol::v30::{NamespaceDelegation, party_to_participant::HostingParticipant},
+        protocol::v30::{
+            NamespaceDelegation, TopologyMapping, enums, party_to_participant::HostingParticipant,
+        },
         version::v1::{UntypedVersionedMessage, untyped_versioned_message},
     };
     use prost::Message;
@@ -1282,15 +1299,6 @@ mod tests {
     }
 
     #[test]
-    fn reads_the_protocol_version_off_a_physical_synchronizer_id() -> Result {
-        assert_eq!(protocol_version_of("global-domain::1220ab::35-0")?, 35);
-        assert_eq!(protocol_version_of("global-domain::1220ab::34-12")?, 34);
-        assert!(protocol_version_of("global-domain::1220ab").is_err());
-        assert!(protocol_version_of("no-separator").is_err());
-        Ok(())
-    }
-
-    #[test]
     fn a_serial_at_the_ceiling_has_no_successor() -> Result {
         assert_eq!(next_serial("DNS", 4)?, 5);
         assert!(next_serial("DNS", u32::MAX).is_err());
@@ -1304,6 +1312,7 @@ mod tests {
             topology_mapping::Mapping::DecentralizedNamespaceDefinition(Default::default()),
             7,
             vec![ForceFlag::AllowUnvalidatedSigningKeys as i32],
+            ProposalFormat::for_synchronizer("global-domain::1220ab::37-0"),
         );
 
         assert!(!request.must_fully_authorize);
@@ -1317,6 +1326,7 @@ mod tests {
         };
         assert_eq!(proposal.serial, 7);
         assert_eq!(proposal.change, enums::TopologyChangeOp::AddReplace as i32);
+        assert_eq!(proposal.protocol_version, Some(37));
         Ok(())
     }
 
@@ -1411,7 +1421,8 @@ mod tests {
         order
             .iter()
             .map(|signed| {
-                let tx: TopologyTransaction = utils::decode_versioned(&signed.transaction)?;
+                let tx: TopologyTransaction =
+                    topology_version::decode_transaction(&signed.transaction)?;
                 let kind = match tx.mapping.and_then(|m| m.mapping) {
                     Some(topology_mapping::Mapping::NamespaceDelegation(_)) => "nsd",
                     Some(topology_mapping::Mapping::DecentralizedNamespaceDefinition(_)) => "dnd",

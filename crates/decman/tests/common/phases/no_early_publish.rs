@@ -19,9 +19,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::Context;
 use canton_proto_rs::com::digitalasset::canton::{
-    protocol::v30::{
-        TopologyMapping, TopologyTransaction, enums::TopologyChangeOp, topology_mapping,
-    },
+    protocol::v30::topology_mapping,
     topology::admin::v30::{
         AuthorizeRequest, ListAvailableStoresRequest, authorize_request, store_id,
         topology_manager_read_service_client::TopologyManagerReadServiceClient,
@@ -33,7 +31,7 @@ use dec_party_manager::{
     utils,
     workflow::{
         proposal_store::{self, PartyHead},
-        topology,
+        topology, topology_version,
     },
 };
 use serde_json::json;
@@ -89,16 +87,16 @@ async fn signing_publishes_nothing_and_a_moved_serial_is_refused(
         party,
         &before,
         Some(new_dns),
-        new_p2p,
+        Some(new_p2p),
         topology::party_proposal_force_flags(),
     )
     .await
     .context("sign the raise in a temporary store")?;
     let dns = signed.dns.context("no DNS proposal was signed")?;
-    let p2p = signed.p2p;
+    let p2p = signed.p2p.context("no P2P proposal was signed")?;
 
-    let dns_serial = utils::decode_versioned::<TopologyTransaction>(&dns.transaction)?.serial;
-    let p2p_serial = utils::decode_versioned::<TopologyTransaction>(&p2p.transaction)?.serial;
+    let dns_serial = topology_version::decode_transaction(&dns.transaction)?.serial;
+    let p2p_serial = topology_version::decode_transaction(&p2p.transaction)?.serial;
     anyhow::ensure!(
         (dns_serial, p2p_serial) == (before.dns_serial + 1, before.p2p_serial + 1),
         "proposals pinned to DNS {dns_serial} / P2P {p2p_serial}, expected {} / {}",
@@ -387,13 +385,10 @@ async fn move_p2p_serial(
             config,
             AuthorizeRequest {
                 r#type: Some(authorize_request::Type::Proposal(
-                    authorize_request::Proposal {
-                        change: TopologyChangeOp::AddReplace as i32,
+                    topology_version::ProposalFormat::for_synchronizer(sync).proposal(
                         serial,
-                        mapping: Some(authorize_request::proposal::Mapping::V30(TopologyMapping {
-                            mapping: Some(topology_mapping::Mapping::PartyToParticipant(mapping)),
-                        })),
-                    },
+                        topology_mapping::Mapping::PartyToParticipant(mapping),
+                    ),
                 )),
                 must_fully_authorize: true,
                 store: Some(topology::synchronizer_store_id(sync)),

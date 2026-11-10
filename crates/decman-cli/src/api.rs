@@ -2081,6 +2081,7 @@ mod tests {
             owners: Vec::new(),
             my_owner_key: None,
             participants: Vec::new(),
+            non_hosting_owners: Vec::new(),
             contracts: Vec::new(),
             local_metadata: None,
         }
@@ -2191,6 +2192,7 @@ mod tests {
             latency_ms: Some(12),
             version: Some("1.2.3".to_owned()),
             build_version: Some("v1.2.3".to_owned()),
+            wire_version: None,
             workflow,
         }
     }

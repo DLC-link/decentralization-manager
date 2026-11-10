@@ -5,11 +5,20 @@ use aes_gcm::{
     aead::{Aead, Generate},
 };
 use anyhow::Context;
+use zeroize::Zeroizing;
 
 use crate::error::Result;
 
+/// The shortest passphrase that `derive_key` derives from. One SHA-256 pass
+/// makes a shorter passphrase cheap to guess offline.
+pub const MIN_DERIVING_PASSPHRASE_CHARS: usize = 32;
+
 /// Global encryption key, set once at startup
 static ENCRYPTION_KEY: OnceLock<[u8; 32]> = OnceLock::new();
+
+/// The encryption key again, set only when its passphrase is long enough to
+/// derive other keys from.
+static DERIVING_KEY: OnceLock<[u8; 32]> = OnceLock::new();
 
 /// Initialize the encryption key from a passphrase.
 /// Derives a 32-byte key using SHA-256.
@@ -20,11 +29,39 @@ pub fn init_key(passphrase: &str) {
     ENCRYPTION_KEY
         .set(key)
         .expect("encryption key already initialized");
+    if derives_keys(passphrase) {
+        DERIVING_KEY
+            .set(key)
+            .expect("encryption key already initialized");
+    }
+}
+
+/// Whether `derive_key` derives from `passphrase`.
+pub fn derives_keys(passphrase: &str) -> bool {
+    passphrase.chars().count() >= MIN_DERIVING_PASSPHRASE_CHARS
 }
 
 /// Check if encryption is enabled
 pub fn is_enabled() -> bool {
     ENCRYPTION_KEY.get().is_some()
+}
+
+/// A 32-byte key for `label`, derived from the database encryption key.
+/// `None` when database encryption is off, or when its passphrase is shorter
+/// than [`MIN_DERIVING_PASSPHRASE_CHARS`].
+pub fn derive_key(label: &str) -> Option<Zeroizing<[u8; 32]>> {
+    DERIVING_KEY.get().map(|base| derive_key_from(base, label))
+}
+
+fn derive_key_from(base: &[u8; 32], label: &str) -> Zeroizing<[u8; 32]> {
+    use sha2::{Digest, Sha256};
+
+    // The NUL ends the label, so one label is never a prefix of another's input.
+    let mut hasher = Sha256::new();
+    hasher.update(label.as_bytes());
+    hasher.update([0]);
+    hasher.update(base);
+    Zeroizing::new(hasher.finalize().into())
 }
 
 /// Encrypt a plaintext string with an explicit key. Returns base64-encoded
@@ -221,6 +258,32 @@ mod tests {
             plaintext.to_vec()
         );
         Ok(())
+    }
+
+    #[test]
+    fn a_derived_key_depends_on_the_label_and_differs_from_the_base() {
+        let derived = derive_key_from(&TEST_KEY, "decman-party-key-store-v1");
+        assert_eq!(
+            *derived,
+            *derive_key_from(&TEST_KEY, "decman-party-key-store-v1")
+        );
+        assert_ne!(*derived, TEST_KEY);
+        assert_ne!(*derived, *derive_key_from(&TEST_KEY, "another-use"));
+        assert_ne!(
+            *derived,
+            *derive_key_from(&OTHER_KEY, "decman-party-key-store-v1")
+        );
+    }
+
+    #[test]
+    fn only_a_passphrase_of_32_characters_derives_keys() {
+        assert!(!derives_keys(""));
+        assert!(!derives_keys(&"a".repeat(31)));
+        assert!(derives_keys(&"a".repeat(32)));
+        // `openssl rand -base64 32` prints 44 characters.
+        assert!(derives_keys(&format!("{}=", "A".repeat(43))));
+        // Characters count, not bytes: 16 two-byte characters are too short.
+        assert!(!derives_keys(&"é".repeat(16)));
     }
 
     #[test]

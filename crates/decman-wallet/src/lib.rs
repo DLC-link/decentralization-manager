@@ -40,22 +40,43 @@
 //! ```
 //!
 //! Onboarding is asynchronous on the Canton side: poll [`statuses`] until every
-//! host reports the party hosted. Transacting as the party — reading its
-//! contracts and signing submissions — is done directly against Canton by the
-//! wallet, using the [`ExternalKeyPair`] this crate holds; it is not part of
-//! DecMan's tenant API.
+//! host reports the party hosted.
+//!
+//! Transacting as the party is not part of DecMan's tenant API. The wallet
+//! talks to a participant's JSON Ledger API directly, through
+//! [`LedgerClient`]. [`send_transfer`] and [`accept_transfer`] move Token
+//! Standard assets, with the instrument's [`RegistryClient`] supplying the
+//! choice context. Before the key signs, the wallet recomputes the prepared
+//! transaction's hash and checks that its root does what the wallet asked.
+
+mod check;
+mod http;
+mod text;
 
 pub mod client;
 pub mod error;
 pub mod flow;
 pub mod key;
+pub mod ledger;
+pub mod registry;
 pub mod signer;
+pub mod transfer;
 
 pub use client::{HostStatus, TenantClient};
-pub use error::{Error, Result};
+pub use error::{Error, Refusal, Result};
 pub use flow::{
     AddedHosts, HostReport, OnboardedParty, WalletHost, add_hosts, execute_co_validated,
     raise_threshold, statuses,
 };
+pub use http::ClientOptions;
 pub use key::ExternalKeyPair;
+pub use ledger::{
+    DisclosedContract, ExecuteRequest, Executed, Holding, LedgerClient, PrepareRequest,
+    PreparedSubmission, TransferInstruction,
+};
+pub use registry::{ChoiceContext, RegistryClient, TransferFactory};
 pub use signer::Signer;
+pub use transfer::{
+    AMULET_TRANSFER_INSTRUCTION_TEMPLATE, AcceptReceipt, CBTC_TRANSFER_INSTRUCTION_TEMPLATE,
+    TransferArgs, TransferReceipt, accept_transfer, send_transfer, unlocked_holdings,
+};

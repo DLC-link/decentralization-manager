@@ -3520,6 +3520,7 @@ mod tests {
             owners: Vec::new(),
             my_owner_key: None,
             participants: Vec::new(),
+            non_hosting_owners: Vec::new(),
             contracts: Vec::new(),
             local_metadata: None,
         }

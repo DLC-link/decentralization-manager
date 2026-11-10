@@ -418,6 +418,17 @@ pub(crate) async fn check_purge_allowed(
         ));
     }
 
+    // Asked before the purge disconnects anything.
+    if !purge_offered(config, alias).await? {
+        return refuse(
+            "This participant does not offer Canton's PurgeContracts repair command. Splice \
+             0.10 turns repair commands off by default. To purge, set `enableRepairCommands: \
+             true` in the participant's splice-participant Helm values, or \
+             `canton.features.enable-repair-commands = yes` in its Canton config"
+                .to_string(),
+        );
+    }
+
     let synchronizer_id = utils::get_synchronizer_id(config).await?;
     let Some(removed_at) = live_removal_time(config, &synchronizer_id, party).await? else {
         return refuse(
@@ -631,6 +642,32 @@ pub(crate) async fn reconnect_after_failed_purge(
     Ok(Ok(()))
 }
 
+/// Whether the participant serves `PurgeContracts`. With Canton's repair
+/// commands off the method does not exist. The probe purges nothing: Canton
+/// refuses a request without contract ids before it reads the synchronizer.
+async fn purge_offered(config: &NodeConfig, alias: &str) -> Result<bool> {
+    let probe = ParticipantRepairServiceClient::new(config.admin_channel().await?)
+        .purge_contracts(tonic::Request::new(PurgeContractsRequest {
+            synchronizer_alias: alias.to_string(),
+            contract_ids: Vec::new(),
+            ignore_already_purged: true,
+            force_repair_when_topology_transaction_at_ledger_end: false,
+        }))
+        .await;
+    purge_probe_result(probe.map(drop))
+}
+
+fn purge_probe_result(probe: std::result::Result<(), tonic::Status>) -> Result<bool> {
+    match probe {
+        Ok(()) => Ok(true),
+        Err(status) => match status.code() {
+            tonic::Code::Unimplemented => Ok(false),
+            tonic::Code::InvalidArgument => Ok(true),
+            _ => Err(status.into()),
+        },
+    }
+}
+
 async fn purge_in_batches(config: &NodeConfig, alias: &str, contract_ids: &[String]) -> Result {
     let mut repair = ParticipantRepairServiceClient::new(config.admin_channel().await?);
     for (index, batch) in contract_ids.chunks(PURGE_BATCH).enumerate() {
@@ -674,6 +711,18 @@ mod tests {
             valid_from,
             hosts_participant,
         }
+    }
+
+    #[test]
+    fn a_missing_purge_method_means_repair_commands_are_off() -> Result {
+        assert!(!purge_probe_result(Err(tonic::Status::unimplemented(
+            "Method not found"
+        )))?);
+        assert!(purge_probe_result(Err(tonic::Status::invalid_argument(
+            "Missing contract ids to purge"
+        )))?);
+        assert!(purge_probe_result(Err(tonic::Status::unavailable("down"))).is_err());
+        Ok(())
     }
 
     #[test]

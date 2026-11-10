@@ -118,6 +118,16 @@ pub const MAX_CONSECUTIVE_STEP_FAILURES: usize = 6;
 /// "no verifiable version" is treated as incompatible rather than assumed OK.
 pub const MIN_PEER_VERSION: &str = "0.1.9";
 
+/// A peer signs a kick of an owner that hosts no participant. Older peers
+/// refuse one, so a coordinator checks every invitee lists this first.
+pub const OWNER_ONLY_KICK: &str = "owner-only-kick";
+
+/// Workflow features this build supports beyond [`MIN_PEER_VERSION`]. The
+/// Health reply lists them, so a coordinator can refuse a run that a peer
+/// would refuse, before it invites anyone. Every build reports the same
+/// version until a release bumps it, so the version cannot tell them apart.
+pub const FEATURES: &[&str] = &[OWNER_ONLY_KICK];
+
 /// Retry budget for the peer's decline notification to the coordinator.
 ///
 /// Deliberately NOT the fast-transport `noise_retry` profile (2 attempts,
@@ -175,11 +185,6 @@ pub fn peer_wait_poll_delay_ms() -> u64 {
         .and_then(|s| s.parse::<u64>().ok())
         .unwrap_or(PEER_WAIT_POLL_DELAY_MS)
 }
-
-/// Canton protocol version used for key export and topology operations.
-/// Bumped 34 -> 35 alongside the localnet 0.6.7 -> 0.6.11 test target; the
-/// network (testnet) has live-upgraded to protocol version 35.
-pub const CANTON_PROTOCOL_VERSION: i32 = 35;
 
 /// Additional wait time in seconds for Canton topology propagation
 /// After topology becomes effective, Canton needs time to propagate updates

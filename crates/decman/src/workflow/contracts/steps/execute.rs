@@ -175,6 +175,7 @@ pub async fn execute_submissions(
         // Execute the submission
         // Note: User ID must match JWT token's "sub" claim
         let execute_request = ExecuteSubmissionAndWaitForTransactionRequest {
+            account_id: String::new(),
             prepared_transaction: prepared_response.prepared_transaction.clone(),
             party_signatures: Some(party_signatures),
             deduplication_period: None, // Use default

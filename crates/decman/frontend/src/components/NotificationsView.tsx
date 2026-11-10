@@ -189,6 +189,43 @@ const truncatePartyId = (id: string): string => {
   return `${prefix}::${namespace.slice(0, 6)}…${namespace.slice(-6)}`;
 };
 
+const truncateKey = (key: string): string =>
+  key.length > 20 ? `${key.slice(0, 10)}…${key.slice(-8)}` : key;
+
+/**
+ * The namespace owner key a kick removes. A member that owns the namespace
+ * without hosting the party may have no participant, so the key is the one
+ * name every kick card can show.
+ */
+const KickedOwnerKeyRow = ({ ownerKey }: { ownerKey: string }) => {
+  const { showSnackbar } = useSnackbar();
+  return (
+    <Box
+      sx={{ display: "flex", alignItems: "center", gap: 1 }}
+      data-testid="kicked-owner-key"
+    >
+      <Typography variant="caption" color="text.secondary" sx={{ minWidth: 96 }}>
+        Owner key
+      </Typography>
+      <Typography variant="body2" sx={{ fontFamily: "var(--font-mono)" }}>
+        {truncateKey(ownerKey)}
+      </Typography>
+      <Tooltip title="Copy owner key">
+        <IconButton
+          size="small"
+          onClick={async () => {
+            const ok = await copyToClipboard(ownerKey);
+            showSnackbar(ok ? "Copied to clipboard" : "Failed to copy");
+          }}
+          sx={{ p: 0.25 }}
+        >
+          <ContentCopyIcon sx={{ fontSize: 14 }} />
+        </IconButton>
+      </Tooltip>
+    </Box>
+  );
+};
+
 const InvitationCard = ({
   invitation,
   onAfter,
@@ -278,6 +315,7 @@ const InvitationCard = ({
     !!invitation.prefix ||
     !!invitation.dec_party_id ||
     !!invitation.kicked_participant ||
+    !!invitation.kicked_owner_key ||
     !!invitation.new_participant ||
     invitation.new_threshold != null ||
     (invitation.participants?.length ?? 0) > 0 ||
@@ -292,7 +330,9 @@ const InvitationCard = ({
     ? `Join party ${invitation.prefix}`
     : invitation.kicked_participant
       ? `Remove ${truncatePartyId(invitation.kicked_participant)}`
-      : pkgCount > 0
+      : invitation.kicked_owner_key
+        ? `Remove owner key ${truncateKey(invitation.kicked_owner_key)}`
+        : pkgCount > 0
         ? `Deploy ${pkgCount} package${pkgCount === 1 ? "" : "s"}`
         : darCount > 0
           ? `Distribute ${darCount} DAR${darCount === 1 ? "" : "s"}`
@@ -460,6 +500,9 @@ const InvitationCard = ({
                 </IconButton>
               </Tooltip>
             </Box>
+          )}
+          {invitation.kicked_owner_key && (
+            <KickedOwnerKeyRow ownerKey={invitation.kicked_owner_key} />
           )}
           {invitation.new_participant && (
             <Box sx={{ display: "flex", alignItems: "center", gap: 1 }}>
@@ -2092,6 +2135,7 @@ const WorkflowRunCard = ({
         run.dec_party_id ||
         run.new_threshold != null ||
         run.kicked_participant ||
+        run.kicked_owner_key ||
         run.added_participant ||
         (run.participants && run.participants.length > 0) ||
         (run.package_names && run.package_names.length > 0) ||
@@ -2149,6 +2193,9 @@ const WorkflowRunCard = ({
                 </IconButton>
               </Tooltip>
             </Box>
+          )}
+          {run.kicked_owner_key && (
+            <KickedOwnerKeyRow ownerKey={run.kicked_owner_key} />
           )}
           {run.added_participant && (
             <Box sx={{ display: "flex", alignItems: "center", gap: 1 }}>
