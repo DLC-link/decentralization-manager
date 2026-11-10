@@ -8,6 +8,10 @@
 //! their keys in DecMan's key store by now, so the deploy must succeed with no
 //! export.
 //!
+//! P1 then starts a key rotation. P1 has no KMS and runs with
+//! `DECPM_ALLOW_SOFTWARE_PARTY_KEYS`, so DecMan must export the new key. Canton
+//! refuses, and the rotation must stop before the key joins the party.
+//!
 //! It runs last because it restarts Canton and leaves key download off. By
 //! then `add_party_missing_dar` has kicked P3, so the party is P1 and P2, and
 //! both signed that phase's deploy.
@@ -32,7 +36,9 @@ use super::legacy_key_retirement::configs;
 use crate::common::{
     Fixture, TestTarget, chaos, db,
     http::probe_workflow_status,
-    invitations::{InvitationIds, post_accept_invitation, probe_pending_invitation},
+    invitations::{
+        InvitationIds, post_accept_invitation, probe_pending_invitation, probe_run_invitation,
+    },
     scenario::Scenario,
 };
 
@@ -95,6 +101,68 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
             );
         }
     }
+    a_rotation_without_export_is_refused(f, &config, &party).await
+}
+
+/// P1 rotates its key while Canton refuses exports. DecMan cannot copy the
+/// new key, so the run fails at GenerateKey and the party keeps its keys.
+async fn a_rotation_without_export_is_refused(
+    f: &Fixture,
+    config: &NodeConfig,
+    party: &CantonId,
+) -> anyhow::Result<()> {
+    let before = super::rotate_key::party_key_fingerprints(config, party).await?;
+    let p1_db = f.db_path(1);
+    let previous = db::latest_coordinator_instance(&p1_db, "RotateKey").await?;
+    let _: Value = f
+        .post_json(
+            f.p1.http,
+            "/rotate-key",
+            &json!({ "decentralized_party_id": party.to_string() }),
+        )
+        .await
+        .context("POST /rotate-key on P1")?;
+
+    let invitation = chaos::poll_for(Duration::from_secs(60), || {
+        let (p1_db, previous) = (&p1_db, &previous);
+        async move {
+            let Some(run) = db::latest_coordinator_instance(p1_db, "RotateKey").await? else {
+                return Ok(None);
+            };
+            if Some(&run) == previous.as_ref() {
+                return Ok(None);
+            }
+            Ok(probe_run_invitation(f, f.p2.http, &run).await)
+        }
+    })
+    .await
+    .context("the rotation's invitation never reached P2")?;
+    post_accept_invitation(f, f.p2.http, &invitation)
+        .await
+        .context("accept RotateKey on P2")?;
+
+    let error = chaos::poll_for(Duration::from_secs(180), || async move {
+        match probe_workflow_status(f, f.p1.http, "/rotate-key/status", "rotate-key").await {
+            Some(Err(e)) => Ok(Some(format!("{e:#}"))),
+            Some(Ok(())) => {
+                anyhow::bail!("the rotation completed, although Canton refuses every export")
+            }
+            None => Ok(None),
+        }
+    })
+    .await
+    .context("the rotation without export never failed")?;
+    anyhow::ensure!(
+        error.contains("Canton refused to export the new Daml key"),
+        "the rotation failed for another reason: {error}"
+    );
+    info!("P1 refused the rotation without export: {error}");
+
+    let after = super::rotate_key::party_key_fingerprints(config, party).await?;
+    anyhow::ensure!(
+        after == before,
+        "the refused rotation changed the party's keys from {before:?} to {after:?}"
+    );
     Ok(())
 }
 

@@ -177,6 +177,14 @@ start_nodes() {
     local canton_admin_ports=($P1_CANTON_ADMIN $P2_CANTON_ADMIN $P3_CANTON_ADMIN)
     local noise_ports=($P1_NOISE $P2_NOISE $P3_NOISE)
     local metrics_ports=($P1_METRICS $P2_METRICS $P3_METRICS)
+    # A node without KMS needs DECPM_ALLOW_SOFTWARE_PARTY_KEYS to create party
+    # keys. env.sh turns it off for the localnet's KMS node, so that node runs
+    # the strict rule. The Rust harness reads the same variables on respawn.
+    local software_keys=(
+        "${P1_ALLOW_SOFTWARE_PARTY_KEYS:-true}"
+        "${P2_ALLOW_SOFTWARE_PARTY_KEYS:-true}"
+        "${P3_ALLOW_SOFTWARE_PARTY_KEYS:-true}"
+    )
 
     for i in 1 2 3; do
         local idx=$((i - 1))
@@ -197,6 +205,8 @@ start_nodes() {
         DECPM_TEST_REWARD_ASSIGN_FAILURE_FILE="$DEV_DIR/participant-$i/reward-assign-failure" \
         DECPM_REWARD_AUTOMATION_INTERVAL_SECS="${DECPM_REWARD_AUTOMATION_INTERVAL_SECS:-15}" \
         DECPM_EXTERNAL_PARTIES_TTL_SECS="${DECPM_EXTERNAL_PARTIES_TTL_SECS:-15}" \
+        DECPM_ALLOW_SOFTWARE_PARTY_KEYS="${software_keys[$idx]}" \
+        DECPM_TEST_ROTATE_KEY_REPLACE_FILE="$DEV_DIR/participant-$i/rotate-key-replace" \
         "$BINARY" -d "$DEV_DIR/participant-$i" serve \
             >> "$log_file" 2>&1 &
         PIDS+=($!)

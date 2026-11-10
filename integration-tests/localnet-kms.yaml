@@ -1,0 +1,36 @@
+# Compose override for the localnet: a mock AWS KMS for one participant.
+#
+# The SV participant (DecMan's P3) uses Canton's AWS KMS crypto provider, so
+# its keys, and every party key DecMan creates there, live in this mock. env.sh
+# points the participant at it with `crypto.kms.endpoint-override`, and points
+# P3's DecMan at the host port with AWS_ENDPOINT_URL_KMS.
+#
+# local-kms needs no account or token. It serves every call Canton's AwsKms
+# makes (CreateKey with tags, DescribeKey, GetPublicKey, Sign with RAW
+# messages, Encrypt and Decrypt with RSAES_OAEP_SHA_256, ScheduleKeyDeletion).
+# Its keys live inside the container, so `down -v` starts the next run clean.
+services:
+  kms:
+    image: "nsmithuk/local-kms:3.11.7@sha256:360d7377b6f3687c89a622236791e4fa3f7316366267b437829edbdfa8a5fc60"
+    container_name: kms
+    environment:
+      KMS_REGION: us-east-1
+      KMS_ACCOUNT_ID: "111122223333"
+    ports:
+      - "127.0.0.1:${LOCALNET_KMS_PORT:-4599}:8080"
+    healthcheck:
+      test: ["CMD", "nc", "-z", "127.0.0.1", "8080"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  canton:
+    # Static credentials for the mock. Canton's AwsKms reads them through the
+    # default AWS credential chain.
+    environment:
+      AWS_ACCESS_KEY_ID: localnet
+      AWS_SECRET_ACCESS_KEY: localnet
+      AWS_REGION: us-east-1
+    depends_on:
+      kms:
+        condition: service_healthy

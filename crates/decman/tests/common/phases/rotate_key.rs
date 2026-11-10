@@ -5,8 +5,10 @@
 //! it to P1. P1 coordinates the deploy that follows, and a coordinator always
 //! signs, so the deploy only completes if P1 signs with the new key.
 //!
-//! Localnet only: its participants keep keys in Canton's software vault, which
-//! only a `test-mode` build accepts for a new party key.
+//! The phase first seeds a shadowed legacy `PartyToKeyMapping`, as Canton's
+//! 3.4 migration left on older parties. The rotation must retire it too.
+//!
+//! Localnet only: the legacy seed writes topology directly.
 
 use std::{collections::BTreeSet, time::Duration};
 
@@ -40,8 +42,10 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
         .context("no node config for P1")?;
     let party: CantonId = f.party_id()?.parse()?;
     let before = party_key_fingerprints(&config, &party).await?;
+    let legacy = super::legacy_key_retirement::seed(f).await?;
 
     rotation().run(f).await?;
+    super::legacy_key_retirement::assert_removed(f, &legacy).await?;
 
     let after = party_key_fingerprints(&config, &party).await?;
     let removed: Vec<&String> = before.difference(&after).collect();
@@ -72,7 +76,7 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn party_key_fingerprints(
+pub(super) async fn party_key_fingerprints(
     config: &NodeConfig,
     party: &CantonId,
 ) -> anyhow::Result<BTreeSet<String>> {

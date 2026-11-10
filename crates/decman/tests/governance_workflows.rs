@@ -180,9 +180,18 @@ async fn governance_workflows_e2e() -> anyhow::Result<()> {
     // 2, so later phases still find the party at threshold 2.
     phases::change_threshold::run(&mut f).await?;
     // P1 swaps its Daml key for a new one, and the other members record it.
-    // P1 then coordinates a deploy, which only completes with the new key.
-    // Localnet only: a software-vault key needs a test-mode build.
+    // The rotation also retires a seeded legacy PartyToKeyMapping. P1 then
+    // coordinates a deploy, which only completes with the new key. Localnet
+    // only: the legacy seed writes topology directly.
     phases::rotate_key::run(&mut f).await?;
+    // P3's participant keeps its keys in the localnet's mock AWS KMS. P3's
+    // party key carries a KMS key id, P3 signs a deploy through AwsKmsSigner,
+    // and then rotates its key to a new KMS key and signs again. Localnet only.
+    phases::kms_party_keys::run(&mut f).await?;
+    // A rotation that must stop: a node without KMS or the opt-out refuses to
+    // start one, a cancelled run changes nothing, and the peers refuse a
+    // proposal that replaces another member's key. Localnet only.
+    phases::rotate_key_refusals::run(&mut f).await?;
     // A fresh party in the MainNet shape: P3 removes its own hosting entry and
     // stays a namespace owner. P1 lists P3's key as an owner that hosts
     // nothing, then kicks it with P2. Its own party, so the shared one stays
