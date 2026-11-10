@@ -174,28 +174,31 @@ pub async fn secure_software_daml_key(
     Ok(())
 }
 
-/// Copy this node's Daml key for a party that onboarding just created.
+/// Copy this node's Daml key for a party that onboarding is creating.
 ///
-/// Onboarding creates the key before the party exists, and DecMan stores
-/// each key under its party. The background copy task would store it later,
-/// but key download may be off by then. A failure is only logged, because
-/// the party exists already and the copy task tries again.
-pub async fn copy_new_party_key(config: &NodeConfig, db: &SqlitePool, party: &CantonId) {
+/// Onboarding creates the key before the party id is known, and DecMan
+/// stores each key under its party. Each member calls this once it knows the
+/// id, and before it signs the party's `PartyToParticipant` mapping. A
+/// failure stops the member from signing, so the party never comes into
+/// force with a key DecMan holds no copy of.
+///
+/// # Errors
+///
+/// Errors on a node that allows software keys when the store is off, when
+/// Canton refuses the export, or when the copy cannot be stored.
+pub async fn copy_new_party_key(config: &NodeConfig, db: &SqlitePool, party: &CantonId) -> Result {
     if software_keys(config) != SoftwareKeys::Stored {
-        return;
+        return Ok(());
     }
-    match migration::copy_party_key(config, db, party).await {
-        Ok(Outcome::ExportRefused | Outcome::CopyUnreadable) => tracing::error!(
+    match migration::copy_party_key(config, db, party).await? {
+        Outcome::ExportRefused | Outcome::CopyUnreadable => anyhow::bail!(
             "Canton refused to export this node's Daml key for {party}, so DecMan holds no copy \
-             of it. Turn on key download until the copy task stores the key"
+             of it. Turn on key download while the party is created"
         ),
-        Ok(outcome) => {
-            tracing::info!("Key store copy of this node's Daml key for {party}: {outcome:?}")
+        outcome => {
+            tracing::info!("Key store copy of this node's Daml key for {party}: {outcome:?}");
+            Ok(())
         }
-        Err(e) => tracing::error!(
-            "Could not copy this node's Daml key for {party} into DecMan's key store: {e:#}. \
-             The copy task tries again every 15 minutes"
-        ),
     }
 }
 
@@ -689,7 +692,7 @@ mod against_a_vault {
         let node = fake.node(SoftwareKeys::Stored, true).await?;
         node.record_daml_key(&db, &party()?, &key).await?;
 
-        copy_new_party_key(&node.config, &db, &party()?).await;
+        copy_new_party_key(&node.config, &db, &party()?).await?;
 
         assert_eq!(fake.exported(), vec![key.fingerprint()]);
         assert_eq!(stored_seed(&node.config, &db, &key).await?, key.seed);
@@ -704,7 +707,7 @@ mod against_a_vault {
         for rule in [SoftwareKeys::Allowed, SoftwareKeys::Refused] {
             let node = fake.node(rule, true).await?;
             node.record_daml_key(&db, &party()?, &key).await?;
-            copy_new_party_key(&node.config, &db, &party()?).await;
+            copy_new_party_key(&node.config, &db, &party()?).await?;
         }
 
         assert!(fake.exported().is_empty());
@@ -712,17 +715,22 @@ mod against_a_vault {
         Ok(())
     }
 
-    /// The party exists already, so a refused copy is only logged.
+    /// A refused copy stops the member before it signs the party mapping.
     #[sqlx::test(migrator = "MIGRATOR")]
-    async fn a_refused_onboarding_copy_leaves_the_store_empty(db: SqlitePool) -> Result {
+    async fn a_refused_onboarding_copy_stops_the_member(db: SqlitePool) -> Result {
         let key = VaultKey::software("p-daml-transactions", 7);
         let fake = FakeAdminApi::start(vec![key.clone()]).await?;
         fake.turn_off_key_download();
         let node = fake.node(SoftwareKeys::Stored, true).await?;
         node.record_daml_key(&db, &party()?, &key).await?;
 
-        copy_new_party_key(&node.config, &db, &party()?).await;
+        let error = copy_new_party_key(&node.config, &db, &party()?)
+            .await
+            .err()
+            .map(|e| e.to_string())
+            .unwrap_or_default();
 
+        assert!(error.contains("Canton refused to export"), "{error}");
         assert_eq!(stored_rows(&db).await?, 0);
         Ok(())
     }

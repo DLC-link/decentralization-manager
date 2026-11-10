@@ -643,6 +643,42 @@ async fn run_peer(
                     fail_step!("Refusing the coordinator's P2P proposal: {e}");
                     continue;
                 }
+                // A node that allows software keys copies its new Daml key
+                // before it signs, so the party never comes into force with a
+                // key DecMan cannot sign with. The copy needs the identity
+                // rows, which the hook after signing writes again.
+                if crate::signing::custody::software_keys(&node_config)
+                    == crate::signing::custody::SoftwareKeys::Stored
+                {
+                    let copied = match extract_party_id_from_p2p_payload(&payload) {
+                        Ok(party) => match onboarding::peer::copy_self_identity_for_party(
+                            &db,
+                            &instance_name,
+                            &node_config,
+                            &party,
+                        )
+                        .await
+                        {
+                            Ok(()) => {
+                                crate::signing::custody::copy_new_party_key(
+                                    &node_config,
+                                    &db,
+                                    &party,
+                                )
+                                .await
+                            }
+                            Err(e) => Err(e),
+                        },
+                        Err(e) => Err(e),
+                    };
+                    if let Err(e) = copied {
+                        fail_step!(
+                            "Refusing to sign P2P: DecMan holds no copy of this node's new \
+                             Daml key: {e:#}"
+                        );
+                        continue;
+                    }
+                }
                 if let Err(e) =
                     onboarding::sign_p2p_proposals(&node_config, &db, &instance_name, &payload)
                         .await
@@ -686,12 +722,6 @@ async fn run_peer(
                         {
                             tracing::error!("Failed to copy self identity for {dec_party_id}: {e}");
                         }
-                        crate::signing::custody::copy_new_party_key(
-                            &node_config,
-                            &db,
-                            &dec_party_id,
-                        )
-                        .await;
                     }
                     Err(e) => {
                         tracing::error!("Failed to extract dec_party_id from P2P payload: {e}");

@@ -110,9 +110,9 @@ impl TransactionSigner for AwsKmsSigner {
     }
 }
 
-/// The message that [`AwsKmsSigner::check_access`] signs. A prepared
-/// transaction hash is 32 bytes, so a signature over this longer message can
-/// never authorize a transaction.
+/// The message that [`AwsKmsSigner::check_access`] signs. Canton signs 32-byte
+/// transaction hashes and 34-byte topology hashes, so a signature over this
+/// longer message can never authorize either.
 const ACCESS_CHECK_MESSAGE: &[u8] = b"DecMan checks that its AWS role may sign with this KMS key";
 
 impl AwsKmsSigner {
