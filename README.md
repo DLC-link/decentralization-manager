@@ -16,7 +16,7 @@ The [Threshold Model](docs/ARCHITECTURE.md#threshold-model) lists the party's th
 - **Multi-Party Onboarding**: Coordinated workflow for creating decentralized party namespaces
 - **Contract Deployment**: Upload DAR files and deploy governance contracts with multi-party signing
 - **Governance Actions**: View and manage governance confirmations with threshold-based execution
-- **Participant Management**: View party membership and kick participants. A kick is a topology change, and enough namespace owners to meet the namespace threshold sign it. A kick is not a governance vote
+- **Participant Management**: View party membership and kick participants. A kick is a topology change, and enough namespace owners to meet the namespace threshold sign it. A kick is not a governance vote. It leaves the organization's member party in `GovernanceRules`. A **Remove Governance Member** vote removes that party
 - **OAuth Authentication (Keycloak or Auth0)**: Supports M2M (client_credentials) and password flows for Ledger API access; per-node choice of provider for both frontend gating and outbound Canton tokens
 - **Secure P2P Communication**: Noise Protocol Framework for encrypted coordinator-peer communication
 - **Real-time Status**: Live peer connectivity monitoring and workflow progress tracking

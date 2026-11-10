@@ -102,7 +102,7 @@ template PauseProposal
         -- to the governance party.
         resource <- fetch targetCid
         assertMsg "The resource must belong to the governance party"
-          (resource.owner == governanceParty)
+          (resource.governanceParty == governanceParty)
         exercise targetCid MyResource_Pause
         pure ()
 ```

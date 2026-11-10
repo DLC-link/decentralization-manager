@@ -45,7 +45,7 @@ A decentralized party has three thresholds. Each one counts a different thing:
 | Transaction confirmation (P2P) | Hosting participants that must confirm; equal to the namespace threshold unless set apart at creation or by change-threshold. Kick and add-party keep the two equal when they already are |
 | Governance actions (`GovernanceRules.threshold`) | The number of member-party confirmations that a governed action needs. Deploy Contracts sets it. The dialog suggests two thirds of the hosts, rounded up, with a minimum of 2. An API request with no value uses the namespace threshold. After deployment, it changes separately from the topology thresholds |
 
-The party's Daml signing keys use the namespace threshold. P2P stores a copy in `party_signing_keys.threshold`, and DecMan always keeps the two equal. Deploy Contracts is the only DecMan workflow that submits as the party, so it is the only one that needs these signatures.
+The party's Daml signing keys have their own threshold, `party_signing_keys.threshold` in P2P. DecMan sets it to the namespace threshold each time it changes the topology. A topology change made directly through Canton can set the two apart. Deploy Contracts is the only DecMan workflow that submits as the party, so it is the only one that needs these signatures.
 
 ### Key Types
 
