@@ -408,3 +408,310 @@ mod tests {
         secure_software_daml_key(&config(false, false), &db, &key, None, None).await
     }
 }
+
+/// The custody rules against a fake Canton admin API, so the vault calls,
+/// the export and the key store all run.
+#[cfg(test)]
+mod against_a_vault {
+    use super::*;
+    use crate::{
+        db::MIGRATOR,
+        signing::fake_admin_api::{FakeAdminApi, VaultKey},
+    };
+
+    const PARTY: &str =
+        "party::1220bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+
+    fn party() -> Result<CantonId> {
+        CantonId::parse(PARTY)
+    }
+
+    /// The error text of a call that should have been refused.
+    fn refusal<T: std::fmt::Debug>(result: Result<T>) -> Result<String> {
+        match result {
+            Ok(value) => anyhow::bail!("expected a refusal, got {value:?}"),
+            Err(e) => Ok(format!("{e:#}")),
+        }
+    }
+
+    async fn vault(config: &NodeConfig) -> Result<VaultServiceClient<Channel>> {
+        Ok(VaultServiceClient::new(config.admin_channel().await?))
+    }
+
+    async fn stored_seed(
+        config: &NodeConfig,
+        db: &SqlitePool,
+        key: &VaultKey,
+    ) -> Result<Option<[u8; 32]>> {
+        let store = open_store(config, db).await?;
+        Ok(store
+            .get(&party()?, &key.fingerprint())
+            .await?
+            .map(|seed| *seed))
+    }
+
+    async fn stored_rows(db: &SqlitePool) -> Result<i64> {
+        Ok(sqlx::query_scalar("SELECT COUNT(*) FROM party_key_store")
+            .fetch_one(db)
+            .await?)
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_vault_without_a_kms_key_is_refused_under_the_strict_rule(db: SqlitePool) -> Result {
+        let fake = FakeAdminApi::start(vec![
+            VaultKey::software("p-namespace", 1),
+            VaultKey::wrapped("p-daml-transactions", 2),
+            VaultKey {
+                kms_key_id: Some(String::new()),
+                ..VaultKey::software("q-daml-transactions", 3)
+            },
+        ])
+        .await?;
+        let node = fake.node(SoftwareKeys::Refused, true).await?;
+
+        let error = refusal(
+            require_kms_participant(&node.config, &db, &mut vault(&node.config).await?).await,
+        )?;
+
+        assert!(error.contains("software vault, not in a KMS"), "{error}");
+        assert!(
+            error.contains("DECPM_ALLOW_SOFTWARE_PARTY_KEYS=true"),
+            "{error}"
+        );
+        Ok(())
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn one_kms_key_satisfies_the_strict_rule(db: SqlitePool) -> Result {
+        let fake = FakeAdminApi::start(vec![
+            VaultKey::software("old-daml-transactions", 1),
+            VaultKey::kms("participant-signing", 2)?,
+        ])
+        .await?;
+        let node = fake.node(SoftwareKeys::Refused, false).await?;
+
+        require_kms_participant(&node.config, &db, &mut vault(&node.config).await?).await
+    }
+
+    /// The opt-out keeps a copy of each new Daml key, so a node without a key
+    /// store is refused before any key exists. Insecure mode keeps no copy.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn the_opt_out_needs_the_key_store_before_any_key_is_made(db: SqlitePool) -> Result {
+        let fake = FakeAdminApi::start(vec![VaultKey::software("p-namespace", 1)]).await?;
+
+        let without_store = fake.node(SoftwareKeys::Stored, false).await?;
+        let error = refusal(
+            require_kms_participant(
+                &without_store.config,
+                &db,
+                &mut vault(&without_store.config).await?,
+            )
+            .await,
+        )?;
+        assert!(error.contains(STORE_OFF_HINT), "{error}");
+
+        let with_store = fake.node(SoftwareKeys::Stored, true).await?;
+        require_kms_participant(
+            &with_store.config,
+            &db,
+            &mut vault(&with_store.config).await?,
+        )
+        .await?;
+        let insecure = fake.node(SoftwareKeys::Allowed, false).await?;
+        require_kms_participant(&insecure.config, &db, &mut vault(&insecure.config).await?).await
+    }
+
+    /// A key found by name can predate the move to KMS, so each returned key
+    /// is checked on its own.
+    #[tokio::test]
+    async fn each_party_key_outside_kms_is_refused_under_the_strict_rule() -> Result {
+        let software = VaultKey::software("p-daml-transactions", 1);
+        let wrapped = VaultKey::wrapped("p-namespace", 2);
+        let kms = VaultKey::kms("q-daml-transactions", 3)?;
+        let fake =
+            FakeAdminApi::start(vec![software.clone(), wrapped.clone(), kms.clone()]).await?;
+        let strict = fake.node(SoftwareKeys::Refused, false).await?;
+        let mut client = vault(&strict.config).await?;
+
+        for key in [&software, &wrapped] {
+            let fingerprint = key.fingerprint();
+            let error = refusal(require_kms_key(&strict.config, &mut client, &fingerprint).await)?;
+            assert!(
+                error.contains(&format!("{fingerprint} is in Canton's software vault")),
+                "{error}"
+            );
+        }
+        assert_eq!(
+            require_kms_key(&strict.config, &mut client, &kms.fingerprint()).await?,
+            kms.kms_key_id
+        );
+
+        let opt_out = fake.node(SoftwareKeys::Stored, true).await?;
+        let mut client = vault(&opt_out.config).await?;
+        assert_eq!(
+            require_kms_key(&opt_out.config, &mut client, &software.fingerprint()).await?,
+            None
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_key_the_vault_does_not_hold_is_refused() -> Result {
+        let fake = FakeAdminApi::start(vec![VaultKey::kms("p-daml-transactions", 1)?]).await?;
+        let node = fake.node(SoftwareKeys::Allowed, false).await?;
+        let missing = VaultKey::software("elsewhere", 9).fingerprint();
+
+        let error = refusal(
+            require_kms_key(&node.config, &mut vault(&node.config).await?, &missing).await,
+        )?;
+
+        assert!(error.contains("does not hold the key"), "{error}");
+        Ok(())
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn the_opt_out_copies_a_new_daml_key_for_a_known_party(db: SqlitePool) -> Result {
+        let key = VaultKey::software("p-daml-transactions", 7);
+        let fake = FakeAdminApi::start(vec![key.clone()]).await?;
+        let node = fake.node(SoftwareKeys::Stored, true).await?;
+
+        secure_software_daml_key(&node.config, &db, &key.public_key, None, Some(&party()?)).await?;
+
+        assert_eq!(fake.exported(), vec![key.fingerprint()]);
+        assert_eq!(stored_seed(&node.config, &db, &key).await?, key.seed);
+        Ok(())
+    }
+
+    /// Onboarding creates the key before the party exists. The export still
+    /// runs at once, so a node with key download off fails before the party
+    /// is created.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn the_opt_out_exports_the_key_before_the_party_exists(db: SqlitePool) -> Result {
+        let key = VaultKey::software("p-daml-transactions", 7);
+        let fake = FakeAdminApi::start(vec![key.clone()]).await?;
+        let node = fake.node(SoftwareKeys::Stored, true).await?;
+
+        secure_software_daml_key(&node.config, &db, &key.public_key, None, None).await?;
+
+        assert_eq!(fake.exported(), vec![key.fingerprint()]);
+        assert_eq!(stored_rows(&db).await?, 0);
+        Ok(())
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_refused_export_stops_the_run(db: SqlitePool) -> Result {
+        let key = VaultKey::software("p-daml-transactions", 7);
+        let fake = FakeAdminApi::start(vec![key.clone()]).await?;
+        fake.turn_off_key_download();
+        let node = fake.node(SoftwareKeys::Stored, true).await?;
+
+        let error = refusal(
+            secure_software_daml_key(&node.config, &db, &key.public_key, None, Some(&party()?))
+                .await,
+        )?;
+
+        assert!(
+            error.contains(&format!(
+                "Canton refused to export the new Daml key {}",
+                key.fingerprint()
+            )),
+            "{error}"
+        );
+        assert_eq!(stored_rows(&db).await?, 0);
+        Ok(())
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn the_opt_out_without_a_key_store_refuses_before_any_export(db: SqlitePool) -> Result {
+        let key = VaultKey::software("p-daml-transactions", 7);
+        let fake = FakeAdminApi::start(vec![key.clone()]).await?;
+        let node = fake.node(SoftwareKeys::Stored, false).await?;
+
+        let error = refusal(
+            secure_software_daml_key(&node.config, &db, &key.public_key, None, Some(&party()?))
+                .await,
+        )?;
+
+        assert!(error.contains(STORE_OFF_HINT), "{error}");
+        assert!(fake.exported().is_empty());
+        Ok(())
+    }
+
+    /// A KMS key needs no copy, and the other rules keep none.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn only_the_opt_out_exports_a_software_key(db: SqlitePool) -> Result {
+        let software = VaultKey::software("p-daml-transactions", 7);
+        let kms = VaultKey::kms("q-daml-transactions", 8)?;
+        let fake = FakeAdminApi::start(vec![software.clone(), kms.clone()]).await?;
+
+        let opt_out = fake.node(SoftwareKeys::Stored, true).await?;
+        secure_software_daml_key(
+            &opt_out.config,
+            &db,
+            &kms.public_key,
+            kms.kms_key_id.as_deref(),
+            Some(&party()?),
+        )
+        .await?;
+        for rule in [SoftwareKeys::Allowed, SoftwareKeys::Refused] {
+            let node = fake.node(rule, true).await?;
+            secure_software_daml_key(
+                &node.config,
+                &db,
+                &software.public_key,
+                None,
+                Some(&party()?),
+            )
+            .await?;
+        }
+
+        assert!(fake.exported().is_empty());
+        assert_eq!(stored_rows(&db).await?, 0);
+        Ok(())
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn onboarding_copies_the_key_once_the_party_id_is_known(db: SqlitePool) -> Result {
+        let key = VaultKey::software("p-daml-transactions", 7);
+        let fake = FakeAdminApi::start(vec![key.clone()]).await?;
+        let node = fake.node(SoftwareKeys::Stored, true).await?;
+        node.record_daml_key(&db, &party()?, &key).await?;
+
+        copy_new_party_key(&node.config, &db, &party()?).await;
+
+        assert_eq!(fake.exported(), vec![key.fingerprint()]);
+        assert_eq!(stored_seed(&node.config, &db, &key).await?, key.seed);
+        Ok(())
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn onboarding_copies_nothing_outside_the_opt_out(db: SqlitePool) -> Result {
+        let key = VaultKey::software("p-daml-transactions", 7);
+        let fake = FakeAdminApi::start(vec![key.clone()]).await?;
+
+        for rule in [SoftwareKeys::Allowed, SoftwareKeys::Refused] {
+            let node = fake.node(rule, true).await?;
+            node.record_daml_key(&db, &party()?, &key).await?;
+            copy_new_party_key(&node.config, &db, &party()?).await;
+        }
+
+        assert!(fake.exported().is_empty());
+        assert_eq!(stored_rows(&db).await?, 0);
+        Ok(())
+    }
+
+    /// The party exists already, so a refused copy is only logged.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_refused_onboarding_copy_leaves_the_store_empty(db: SqlitePool) -> Result {
+        let key = VaultKey::software("p-daml-transactions", 7);
+        let fake = FakeAdminApi::start(vec![key.clone()]).await?;
+        fake.turn_off_key_download();
+        let node = fake.node(SoftwareKeys::Stored, true).await?;
+        node.record_daml_key(&db, &party()?, &key).await?;
+
+        copy_new_party_key(&node.config, &db, &party()?).await;
+
+        assert_eq!(stored_rows(&db).await?, 0);
+        Ok(())
+    }
+}

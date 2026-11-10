@@ -30,6 +30,8 @@
 pub mod aws_kms;
 pub mod custody;
 mod error;
+#[cfg(test)]
+pub(crate) mod fake_admin_api;
 pub mod key_store;
 pub mod migration;
 mod signer;

@@ -530,6 +530,183 @@ mod tests {
         assert!(error.contains("already carries"), "{error}");
     }
 
+    /// GenerateKey against a fake participant.
+    mod generate_key {
+        use super::*;
+        use crate::{
+            db::MIGRATOR,
+            server::{WorkflowKind, WorkflowRole},
+            signing::{
+                custody::SoftwareKeys,
+                fake_admin_api::{FakeAdminApi, VaultKey},
+                key_store::KeyStore,
+            },
+            workflow::signing_keys::party_daml_key_name,
+        };
+
+        const RUN: &str = "party-rotate-key-1";
+
+        fn party() -> Result<CantonId> {
+            CantonId::parse(
+                "party::1220bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            )
+        }
+
+        /// The coordinator's current Daml key, under its onboarding name.
+        fn old_key() -> Result<VaultKey> {
+            Ok(VaultKey::software(
+                &party_daml_key_name(&party()?.prefix),
+                1,
+            ))
+        }
+
+        /// A rotation of `old` on a run row the artifacts can hang off.
+        async fn rotation(db: &SqlitePool, old: &VaultKey) -> Result<RotateKeyConfig> {
+            sqlx::query(
+                "INSERT INTO workflow_runs
+                 (instance_name, kind, role, status, current_step, step_index, step_total,
+                  config_json, expected_peers_json, completed_peers_json, created_at, updated_at)
+                 VALUES (?, ?, ?, 'inprogress', 'GenerateKey', 0, 7, '{}', '[]', '[]', 0, 0)",
+            )
+            .bind(RUN)
+            .bind(WorkflowKind::RotateKey.as_str())
+            .bind(WorkflowRole::Coordinator.as_str())
+            .execute(db)
+            .await?;
+            Ok(RotateKeyConfig {
+                decentralized_party_id: party()?,
+                rotated_key: old.fingerprint(),
+                threshold: 2,
+                confirmation_threshold: 2,
+                instance_name: RUN.to_string(),
+            })
+        }
+
+        async fn new_key_artifact(db: &SqlitePool) -> Result<Option<SigningPublicKey>> {
+            db.read_artifact(RUN, artifact_kinds::ROTATE_KEY_NEW_KEY, None)
+                .await?
+                .map(|bytes| utils::read_first_message_from_bytes(&bytes))
+                .transpose()
+        }
+
+        fn refusal(result: Result) -> Result<String> {
+            match result {
+                Ok(()) => anyhow::bail!("expected GenerateKey to refuse"),
+                Err(e) => Ok(format!("{e:#}")),
+            }
+        }
+
+        /// The new key's name comes from the key it replaces, so a second run
+        /// finds the key the first one made.
+        #[sqlx::test(migrator = "MIGRATOR")]
+        async fn names_the_new_key_after_the_replaced_one_and_reuses_it(db: SqlitePool) -> Result {
+            let old = old_key()?;
+            let fake = FakeAdminApi::start(vec![old.clone()]).await?;
+            let node = fake.node(SoftwareKeys::Stored, true).await?;
+            let rotate = rotation(&db, &old).await?;
+            let name = format!("party-daml-transactions-rotated-from-{}", old.fingerprint());
+
+            generate_key(&node.config, &db, RUN, &rotate).await?;
+            generate_key(&node.config, &db, RUN, &rotate).await?;
+
+            assert_eq!(fake.generated(), vec![name.clone()]);
+            let new = fake
+                .key_named(&name)
+                .ok_or_else(|| anyhow::anyhow!("no key named {name}"))?;
+            assert_ne!(new.fingerprint(), old.fingerprint());
+            assert_eq!(new_key_artifact(&db).await?, Some(new.public_key.clone()));
+            Ok(())
+        }
+
+        /// Under the opt-out the new key is copied for the party at once, so
+        /// DecMan can sign with it after Canton stops exporting keys.
+        #[sqlx::test(migrator = "MIGRATOR")]
+        async fn copies_a_new_software_key_for_the_party(db: SqlitePool) -> Result {
+            let old = old_key()?;
+            let fake = FakeAdminApi::start(vec![old.clone()]).await?;
+            let node = fake.node(SoftwareKeys::Stored, true).await?;
+            let rotate = rotation(&db, &old).await?;
+
+            generate_key(&node.config, &db, RUN, &rotate).await?;
+
+            let new = fake
+                .key_named(&rotate.new_key_name())
+                .ok_or_else(|| anyhow::anyhow!("no new key"))?;
+            assert_eq!(fake.exported(), vec![new.fingerprint()]);
+            let store = KeyStore::open(&node.config, db.clone())
+                .await?
+                .ok_or_else(|| anyhow::anyhow!("the key store is off"))?;
+            let seed = store.get(&party()?, &new.fingerprint()).await?;
+            assert_eq!(seed.map(|seed| *seed), new.seed);
+            Ok(())
+        }
+
+        #[sqlx::test(migrator = "MIGRATOR")]
+        async fn stops_when_canton_refuses_to_export_the_new_key(db: SqlitePool) -> Result {
+            let old = old_key()?;
+            let fake = FakeAdminApi::start(vec![old.clone()]).await?;
+            fake.turn_off_key_download();
+            let node = fake.node(SoftwareKeys::Stored, true).await?;
+            let rotate = rotation(&db, &old).await?;
+
+            let error = refusal(generate_key(&node.config, &db, RUN, &rotate).await)?;
+
+            assert!(
+                error.contains("Canton refused to export the new Daml key"),
+                "{error}"
+            );
+            assert_eq!(new_key_artifact(&db).await?, None);
+            Ok(())
+        }
+
+        #[sqlx::test(migrator = "MIGRATOR")]
+        async fn refuses_a_participant_without_kms_before_making_a_key(db: SqlitePool) -> Result {
+            let old = old_key()?;
+            let fake = FakeAdminApi::start(vec![old.clone()]).await?;
+            let node = fake.node(SoftwareKeys::Refused, true).await?;
+            let rotate = rotation(&db, &old).await?;
+
+            let error = refusal(generate_key(&node.config, &db, RUN, &rotate).await)?;
+
+            assert!(error.contains("software vault, not in a KMS"), "{error}");
+            assert!(fake.generated().is_empty());
+            assert_eq!(new_key_artifact(&db).await?, None);
+            Ok(())
+        }
+
+        /// A vault that holds a KMS key may still return a software key, such
+        /// as one made before the participant moved to KMS.
+        #[sqlx::test(migrator = "MIGRATOR")]
+        async fn refuses_a_new_key_outside_kms(db: SqlitePool) -> Result {
+            let old = old_key()?;
+            let fake =
+                FakeAdminApi::start(vec![old.clone(), VaultKey::kms("participant", 2)?]).await?;
+            let node = fake.node(SoftwareKeys::Refused, true).await?;
+            let rotate = rotation(&db, &old).await?;
+
+            let error = refusal(generate_key(&node.config, &db, RUN, &rotate).await)?;
+
+            assert!(error.contains("is in Canton's software vault"), "{error}");
+            assert_eq!(new_key_artifact(&db).await?, None);
+            Ok(())
+        }
+
+        /// Insecure mode accepts a software key and keeps no copy of it.
+        #[sqlx::test(migrator = "MIGRATOR")]
+        async fn insecure_mode_accepts_a_software_key_without_a_copy(db: SqlitePool) -> Result {
+            let old = old_key()?;
+            let fake = FakeAdminApi::start(vec![old.clone()]).await?;
+            let node = fake.node(SoftwareKeys::Allowed, false).await?;
+            let rotate = rotation(&db, &old).await?;
+
+            generate_key(&node.config, &db, RUN, &rotate).await?;
+
+            assert!(fake.exported().is_empty());
+            assert!(new_key_artifact(&db).await?.is_some());
+            Ok(())
+        }
+    }
+
     #[test]
     fn a_rotation_lands_only_when_the_new_key_replaces_the_old_one() {
         let old = compute_fingerprint(&key(2));

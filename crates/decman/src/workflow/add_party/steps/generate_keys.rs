@@ -115,3 +115,42 @@ pub async fn generate_keys(
     tracing::info!("Add-party keys persisted to workflow_artifacts");
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        canton_id::CantonId,
+        db::MIGRATOR,
+        signing::{
+            custody::SoftwareKeys,
+            fake_admin_api::{FakeAdminApi, VaultKey},
+        },
+    };
+
+    /// A refused add leaves nothing in the vault to clean up.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn refuses_a_participant_without_kms_before_making_a_key(db: SqlitePool) -> Result {
+        let fake = FakeAdminApi::start(vec![VaultKey::software("participant", 1)]).await?;
+        let node = fake.node(SoftwareKeys::Refused, false).await?;
+        let add = AddPartyConfig::new(
+            CantonId::parse(
+                "party::1220bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            )?,
+            node.config.participant_id().clone(),
+            2,
+            None,
+            2,
+            "party-add-party-1".to_string(),
+        );
+
+        let error = match generate_keys(&node.config, &db, "party-add-party-1", &add, None).await {
+            Ok(()) => anyhow::bail!("add-party created keys without KMS"),
+            Err(e) => format!("{e:#}"),
+        };
+
+        assert!(error.contains("software vault, not in a KMS"), "{error}");
+        assert!(fake.generated().is_empty());
+        Ok(())
+    }
+}
