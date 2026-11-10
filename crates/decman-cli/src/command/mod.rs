@@ -255,8 +255,8 @@ pub enum PartiesCommand {
         wait: WaitArgs,
     },
     /// Replace this node's Daml signing key for a party with a new key from
-    /// its vault. The participant must keep its keys in KMS, and every other
-    /// member must sign.
+    /// its vault. The participant must keep its keys in KMS, unless the node
+    /// sets DECPM_ALLOW_SOFTWARE_PARTY_KEYS, and every other member must sign.
     RotateKey {
         #[command(flatten)]
         party: PartyArg,

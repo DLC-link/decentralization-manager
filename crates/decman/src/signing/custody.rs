@@ -53,12 +53,13 @@ pub enum SoftwareKeys {
     Refused,
 }
 
-/// This node's rule for new party keys outside KMS.
+/// This node's rule for new party keys outside KMS. The opt-out wins over
+/// insecure mode, because it keeps a copy that insecure mode would not.
 pub fn software_keys(config: &NodeConfig) -> SoftwareKeys {
-    if config.insecure {
-        SoftwareKeys::Allowed
-    } else if config.allow_software_party_keys {
+    if config.allow_software_party_keys {
         SoftwareKeys::Stored
+    } else if config.insecure {
+        SoftwareKeys::Allowed
     } else {
         SoftwareKeys::Refused
     }
@@ -223,8 +224,11 @@ pub async fn require_kms_sign_access(
         .check_access(&context)
         .await
         .map_err(|e| {
+            // The context shows the AWS cause, such as AccessDeniedException,
+            // instead of only "service error".
+            let cause = aws_sdk_kms::error::DisplayErrorContext(&e);
             anyhow::anyhow!(
-                "DecMan cannot sign with the new KMS key {kms_key_id} ({fingerprint}): {e}. \
+                "DecMan cannot sign with the new KMS key {kms_key_id} ({fingerprint}): {cause}. \
                  Give DecMan's AWS role kms:Sign on that key, as docs/KMS_SIGNING.md explains. \
                  Then start the rotation again, which reuses the same key"
             )
@@ -235,15 +239,23 @@ pub async fn require_kms_sign_access(
 /// learns it before a run fails. A participant that cannot be reached yet is
 /// skipped, because every run checks again.
 pub async fn log_rule_at_boot(config: &NodeConfig, db: &SqlitePool) {
-    let metadata = match config.admin_channel().await {
-        Ok(channel) => list_keys(&mut VaultServiceClient::new(channel), None).await,
-        Err(e) => Err(e),
-    };
-    let has_kms = match metadata {
-        Ok(metadata) => metadata.iter().any(in_kms),
-        Err(e) => {
-            tracing::debug!("Skipped the party key rule check at boot: {e:#}");
-            return;
+    let mut wait = std::time::Duration::from_secs(10);
+    let has_kms = loop {
+        let metadata = match config.admin_channel().await {
+            Ok(channel) => list_keys(&mut VaultServiceClient::new(channel), None).await,
+            Err(e) => Err(e),
+        };
+        match metadata {
+            Ok(metadata) => break metadata.iter().any(in_kms),
+            Err(e) => {
+                tracing::debug!(
+                    "The participant is not ready for the party key rule check: {e:#}. \
+                     Retrying in {}s",
+                    wait.as_secs()
+                );
+                tokio::time::sleep(wait).await;
+                wait = (wait * 2).min(std::time::Duration::from_secs(300));
+            }
         }
     };
     match (has_kms, software_keys(config)) {
@@ -264,8 +276,8 @@ pub async fn log_rule_at_boot(config: &NodeConfig, db: &SqlitePool) {
         },
         (false, SoftwareKeys::Refused) => tracing::warn!(
             "This participant keeps its keys in Canton's software vault, not in a KMS. DecMan \
-             refuses to create or join a party here, and to rotate a key. Set the participant's \
-             crypto provider to kms, or set DECPM_ALLOW_SOFTWARE_PARTY_KEYS=true"
+             refuses to create or join a party here, and to rotate a key. Move the participant \
+             to KMS, as docs/KMS_SIGNING.md explains, or set DECPM_ALLOW_SOFTWARE_PARTY_KEYS=true"
         ),
     }
 }
@@ -307,9 +319,9 @@ fn check(in_kms: bool, rule: SoftwareKeys, problem: &str) -> Result {
         }
         SoftwareKeys::Refused => anyhow::bail!(
             "{problem}. DecMan creates party keys only on a KMS-backed participant, because \
-             Canton 3.7 refuses to export a software key. Set the participant's crypto provider \
-             to kms (canton.participants.<name>.crypto.provider = kms). Until then, set \
-             DECPM_ALLOW_SOFTWARE_PARTY_KEYS=true to keep copies in DecMan's key store"
+             Canton 3.7 refuses to export a software key. Moving a participant to KMS is a \
+             Canton migration, not a config change; docs/KMS_SIGNING.md explains it. Until \
+             then, set DECPM_ALLOW_SOFTWARE_PARTY_KEYS=true to keep copies in DecMan's key store"
         ),
     }
 }
@@ -361,11 +373,11 @@ mod tests {
     }
 
     #[test]
-    fn the_rule_comes_from_insecure_mode_then_the_opt_out() {
+    fn the_opt_out_wins_over_insecure_mode() {
         assert_eq!(software_keys(&config(false, false)), SoftwareKeys::Refused);
         assert_eq!(software_keys(&config(false, true)), SoftwareKeys::Stored);
         assert_eq!(software_keys(&config(true, false)), SoftwareKeys::Allowed);
-        assert_eq!(software_keys(&config(true, true)), SoftwareKeys::Allowed);
+        assert_eq!(software_keys(&config(true, true)), SoftwareKeys::Stored);
     }
 
     #[test]
@@ -375,7 +387,7 @@ mod tests {
             .map(|e| e.to_string())
             .unwrap_or_default();
         assert!(error.contains("Software vault"), "{error}");
-        assert!(error.contains("crypto.provider = kms"), "{error}");
+        assert!(error.contains("Canton migration"), "{error}");
         assert!(error.contains("DECPM_ALLOW_SOFTWARE_PARTY_KEYS"), "{error}");
     }
 

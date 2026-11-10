@@ -85,13 +85,16 @@ export const RotateKeyDialog = ({
             list.
           </Typography>
           <Typography variant="body2" color="text.secondary">
-            The participant must keep its keys in KMS. DecMan refuses the
-            rotation otherwise.
+            The participant must keep its keys in KMS, unless this node sets
+            DECPM_ALLOW_SOFTWARE_PARTY_KEYS. DecMan refuses the rotation
+            otherwise.
           </Typography>
           <Typography variant="body2" color="text.secondary">
-            {others === 1
-              ? "The other member must sign the change."
-              : `The other ${others} members must sign the change.`}{" "}
+            {others < 1
+              ? "A party with one member cannot rotate a key."
+              : others === 1
+                ? "The other member must sign the change."
+                : `The other ${others} members must sign the change.`}{" "}
             The members, owners, and thresholds stay the same. The old key
             stays in the vault.
           </Typography>
