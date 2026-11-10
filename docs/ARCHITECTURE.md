@@ -4,6 +4,8 @@ The Decentralized Party Manager (DecMan) enables multiple organizations to joint
 
 ## Core Concepts
 
+If you are new to Decentralization Manager, read [How Decentralization Manager works](HOW_IT_WORKS.md) first. That page explains how the participant nodes, the parties, the three thresholds and `GovernanceRules` connect.
+
 ### Decentralized Namespace Definition (DNS)
 
 A decentralized namespace is a Canton topology primitive that allows multiple participants to jointly own a single party identity. The namespace is computed as a **SHA-256 domain-separated hash** of the initial owners' namespace fingerprints:

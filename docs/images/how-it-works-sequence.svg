@@ -1,0 +1,142 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1640 1006" width="1640" height="1006" role="img" aria-labelledby="t d">
+<title id="t">Approve and execute a governed action</title>
+<desc id="d">Alice and Bob are two of the three member parties of a Decentralized Party. The governance threshold is 2 of 3. Alice proposes a transfer and confirms it. Bob confirms it and executes it. GovernanceRules executes the action with the authority of the Decentralized Party. The action transfers the tokens, and GovernanceRules records the result. The hosts confirm the transaction. Below a dashed line, one note shows a path outside the governance vote. Two node operators meet the namespace threshold, so their Daml signing keys can submit any transaction as the Decentralized Party.</desc>
+<style>@import url('https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@1&amp;family=Roboto+Mono:wght@400;500&amp;family=Space+Grotesk:wght@400;500&amp;display=swap');</style>
+<rect width="1640" height="1006" fill="#fff"/>
+<text x="64" y="108" style="font-family:'Instrument Serif',Georgia,serif;font-style:italic;font-size:46px" fill="#1A1714">Approve and execute a governed action</text>
+<rect x="48" y="140" width="240" height="806" rx="8" fill="#FAF9F8" stroke="#F2F0EE"/>
+<rect x="60" y="152" width="216" height="58" rx="6" fill="#fff" stroke="#E0DBDA"/>
+<text x="168.0" y="178" text-anchor="middle" style="font-family:'Space Grotesk',system-ui,sans-serif;font-size:16px;font-weight:500" fill="#1A1714">Alice</text>
+<text x="168.0" y="197" text-anchor="middle" style="font-family:'Space Grotesk',system-ui,sans-serif;font-size:11px" fill="#66605C">Member party · Org A</text>
+<line x1="168.0" y1="210" x2="168.0" y2="926" stroke="#BDB6B1" stroke-width="1"/>
+<rect x="308" y="140" width="240" height="806" rx="8" fill="#FAF9F8" stroke="#F2F0EE"/>
+<rect x="320" y="152" width="216" height="58" rx="6" fill="#fff" stroke="#E0DBDA"/>
+<text x="428.0" y="178" text-anchor="middle" style="font-family:'Space Grotesk',system-ui,sans-serif;font-size:16px;font-weight:500" fill="#1A1714">Bob</text>
+<text x="428.0" y="197" text-anchor="middle" style="font-family:'Space Grotesk',system-ui,sans-serif;font-size:11px" fill="#66605C">Member party · Org B</text>
+<line x1="428.0" y1="210" x2="428.0" y2="926" stroke="#BDB6B1" stroke-width="1"/>
+<rect x="568" y="140" width="240" height="806" rx="8" fill="#FAF9F8" stroke="#F2F0EE"/>
+<rect x="580" y="152" width="216" height="58" rx="6" fill="#fff" stroke="#E0DBDA"/>
+<text x="688.0" y="178" text-anchor="middle" style="font-family:'Space Grotesk',system-ui,sans-serif;font-size:16px;font-weight:500" fill="#1A1714">GovernanceRules</text>
+<text x="688.0" y="197" text-anchor="middle" style="font-family:'Space Grotesk',system-ui,sans-serif;font-size:11px" fill="#66605C">Contract · signatory: Decentralized Party</text>
+<line x1="688.0" y1="210" x2="688.0" y2="926" stroke="#BDB6B1" stroke-width="1"/>
+<rect x="828" y="140" width="240" height="806" rx="8" fill="#FAF9F8" stroke="#F2F0EE"/>
+<rect x="840" y="152" width="216" height="58" rx="6" fill="#fff" stroke="#E0DBDA"/>
+<text x="948.0" y="178" text-anchor="middle" style="font-family:'Space Grotesk',system-ui,sans-serif;font-size:16px;font-weight:500" fill="#1A1714">TransferProposal</text>
+<text x="948.0" y="197" text-anchor="middle" style="font-family:'Space Grotesk',system-ui,sans-serif;font-size:11px" fill="#66605C">Governed action · signatory: Alice</text>
+<line x1="948.0" y1="210" x2="948.0" y2="926" stroke="#BDB6B1" stroke-width="1"/>
+<rect x="1088" y="140" width="240" height="806" rx="8" fill="#FAF9F8" stroke="#F2F0EE"/>
+<rect x="1100" y="152" width="216" height="58" rx="6" fill="#fff" stroke="#E0DBDA"/>
+<text x="1208.0" y="178" text-anchor="middle" style="font-family:'Space Grotesk',system-ui,sans-serif;font-size:16px;font-weight:500" fill="#1A1714">Token registry</text>
+<text x="1208.0" y="197" text-anchor="middle" style="font-family:'Space Grotesk',system-ui,sans-serif;font-size:11px" fill="#66605C">TransferFactory</text>
+<line x1="1208.0" y1="210" x2="1208.0" y2="926" stroke="#BDB6B1" stroke-width="1"/>
+<rect x="1348" y="140" width="240" height="806" rx="8" fill="#FAF9F8" stroke="#F2F0EE"/>
+<rect x="1360" y="152" width="216" height="58" rx="6" fill="#fff" stroke="#E0DBDA"/>
+<text x="1468.0" y="178" text-anchor="middle" style="font-family:'Space Grotesk',system-ui,sans-serif;font-size:16px;font-weight:500" fill="#1A1714">Hosts</text>
+<text x="1468.0" y="197" text-anchor="middle" style="font-family:'Space Grotesk',system-ui,sans-serif;font-size:11px" fill="#66605C">Nodes A, B and C</text>
+<line x1="1468.0" y1="210" x2="1468.0" y2="926" stroke="#BDB6B1" stroke-width="1"/>
+<rect x="944.0" y="258" width="8" height="24" rx="1" fill="#D9D4D1"/>
+<rect x="684.0" y="322" width="8" height="24" rx="1" fill="#D9D4D1"/>
+<rect x="684.0" y="386" width="8" height="24" rx="1" fill="#D9D4D1"/>
+<rect x="684.0" y="450" width="8" height="244" rx="1" fill="#D63A0F"/>
+<rect x="944.0" y="528" width="8" height="88" rx="1" fill="#D63A0F"/>
+<rect x="1204.0" y="592" width="8" height="24" rx="1" fill="#D63A0F"/>
+<rect x="424.0" y="670" width="8" height="24" rx="1" fill="#D9D4D1"/>
+<rect x="1464.0" y="734" width="8" height="24" rx="1" fill="#D9D4D1"/>
+<line x1="168.0" y1="270" x2="942.0" y2="270" stroke="#1A1714" stroke-width="1.2"/>
+<path d="M935.0 265 L942.0 270 L935.0 275" fill="none" stroke="#1A1714" stroke-width="1.2"/>
+<rect x="440.86" y="234.0" width="234.28000000000003" height="30" rx="4" fill="#fff" stroke="#E0DBDA"/>
+<rect x="446.86" y="240.0" width="18" height="18" rx="3" fill="#1A1714"/>
+<text x="455.86" y="253.0" text-anchor="middle" style="font-family:'Roboto Mono',ui-monospace,monospace;font-size:11px;font-weight:500" fill="#fff">1</text>
+<text x="473.86" y="253.5" style="font-family:'Space Grotesk',system-ui,sans-serif;font-size:13px" fill="#1A1714">Create a transfer proposal</text>
+<line x1="168.0" y1="334" x2="682.0" y2="334" stroke="#1A1714" stroke-width="1.2"/>
+<path d="M675.0 329 L682.0 334 L675.0 339" fill="none" stroke="#1A1714" stroke-width="1.2"/>
+<rect x="309.8" y="284.0" width="236.4" height="44" rx="4" fill="#fff" stroke="#E0DBDA"/>
+<rect x="315.8" y="297.0" width="18" height="18" rx="3" fill="#1A1714"/>
+<text x="324.8" y="310.0" text-anchor="middle" style="font-family:'Roboto Mono',ui-monospace,monospace;font-size:11px;font-weight:500" fill="#fff">2</text>
+<text x="342.8" y="303.0" style="font-family:'Space Grotesk',system-ui,sans-serif;font-size:13px" fill="#1A1714">Confirm the proposal</text>
+<text x="342.8" y="318.0" style="font-family:'Roboto Mono',ui-monospace,monospace;font-size:11px" fill="#66605C">GovernanceRules_ConfirmAction</text>
+<line x1="428.0" y1="398" x2="682.0" y2="398" stroke="#1A1714" stroke-width="1.2"/>
+<path d="M675.0 393 L682.0 398 L675.0 403" fill="none" stroke="#1A1714" stroke-width="1.2"/>
+<rect x="439.8" y="348.0" width="236.4" height="44" rx="4" fill="#fff" stroke="#E0DBDA"/>
+<rect x="445.8" y="361.0" width="18" height="18" rx="3" fill="#1A1714"/>
+<text x="454.8" y="374.0" text-anchor="middle" style="font-family:'Roboto Mono',ui-monospace,monospace;font-size:11px;font-weight:500" fill="#fff">3</text>
+<text x="472.8" y="367.0" style="font-family:'Space Grotesk',system-ui,sans-serif;font-size:13px" fill="#1A1714">Confirm the proposal</text>
+<text x="472.8" y="382.0" style="font-family:'Roboto Mono',ui-monospace,monospace;font-size:11px" fill="#66605C">GovernanceRules_ConfirmAction</text>
+<line x1="428.0" y1="462" x2="682.0" y2="462" stroke="#1A1714" stroke-width="1.2"/>
+<path d="M675.0 457 L682.0 462 L675.0 467" fill="none" stroke="#1A1714" stroke-width="1.2"/>
+<rect x="410.1" y="412.0" width="295.79999999999995" height="44" rx="4" fill="#fff" stroke="#E0DBDA"/>
+<rect x="416.1" y="425.0" width="18" height="18" rx="3" fill="#1A1714"/>
+<text x="425.1" y="438.0" text-anchor="middle" style="font-family:'Roboto Mono',ui-monospace,monospace;font-size:11px;font-weight:500" fill="#fff">4</text>
+<text x="443.1" y="431.0" style="font-family:'Space Grotesk',system-ui,sans-serif;font-size:13px" fill="#1A1714">Execute the proposal</text>
+<text x="443.1" y="446.0" style="font-family:'Roboto Mono',ui-monospace,monospace;font-size:11px" fill="#66605C">GovernanceRules_ExecuteConfirmedAction</text>
+<text x="558.0" y="482" text-anchor="middle" style="font-family:'Space Grotesk',system-ui,sans-serif;font-size:12px;font-weight:500" fill="#15803D">2 of 3 member parties confirmed</text>
+<line x1="688.0" y1="540" x2="942.0" y2="540" stroke="#D63A0F" stroke-width="1.2"/>
+<path d="M935.0 535 L942.0 540 L935.0 545" fill="none" stroke="#D63A0F" stroke-width="1.2"/>
+<rect x="671.74" y="490.0" width="292.52" height="44" rx="4" fill="#fff" stroke="#E0DBDA"/>
+<rect x="677.74" y="503.0" width="18" height="18" rx="3" fill="#D63A0F"/>
+<text x="686.74" y="516.0" text-anchor="middle" style="font-family:'Roboto Mono',ui-monospace,monospace;font-size:11px;font-weight:500" fill="#fff">5</text>
+<text x="704.74" y="509.0" style="font-family:'Space Grotesk',system-ui,sans-serif;font-size:13px" fill="#1A1714">Execute as the Decentralized Party</text>
+<text x="704.74" y="524.0" style="font-family:'Roboto Mono',ui-monospace,monospace;font-size:11px" fill="#66605C">GovernableAction_Execute</text>
+<line x1="948.0" y1="604" x2="1202.0" y2="604" stroke="#D63A0F" stroke-width="1.2"/>
+<path d="M1195.0 599 L1202.0 604 L1195.0 609" fill="none" stroke="#D63A0F" stroke-width="1.2"/>
+<rect x="976.3" y="554.0" width="203.4" height="44" rx="4" fill="#fff" stroke="#E0DBDA"/>
+<rect x="982.3" y="567.0" width="18" height="18" rx="3" fill="#D63A0F"/>
+<text x="991.3" y="580.0" text-anchor="middle" style="font-family:'Roboto Mono',ui-monospace,monospace;font-size:11px;font-weight:500" fill="#fff">6</text>
+<text x="1009.3" y="573.0" style="font-family:'Space Grotesk',system-ui,sans-serif;font-size:13px" fill="#1A1714">Transfer the tokens</text>
+<text x="1009.3" y="588.0" style="font-family:'Roboto Mono',ui-monospace,monospace;font-size:11px" fill="#66605C">TransferFactory_Transfer</text>
+<text x="1078.0" y="636" text-anchor="middle" style="font-family:'Space Grotesk',system-ui,sans-serif;font-size:12px;font-weight:500" fill="#15803D">Authority: Decentralized Party and proposer</text>
+<line x1="688.0" y1="682" x2="434.0" y2="682" stroke="#1A1714" stroke-width="1.2" stroke-dasharray="5 4"/>
+<path d="M441.0 677 L434.0 682 L441.0 687" fill="none" stroke="#1A1714" stroke-width="1.2"/>
+<rect x="453.0" y="632.0" width="210.0" height="44" rx="4" fill="#fff" stroke="#E0DBDA"/>
+<rect x="459.0" y="645.0" width="18" height="18" rx="3" fill="#1A1714"/>
+<text x="468.0" y="658.0" text-anchor="middle" style="font-family:'Roboto Mono',ui-monospace,monospace;font-size:11px;font-weight:500" fill="#fff">7</text>
+<text x="486.0" y="651.0" style="font-family:'Space Grotesk',system-ui,sans-serif;font-size:13px" fill="#1A1714">Record the result</text>
+<text x="486.0" y="666.0" style="font-family:'Roboto Mono',ui-monospace,monospace;font-size:11px" fill="#66605C">GovernanceExecutionResult</text>
+<line x1="1468.0" y1="746" x2="694.0" y2="746" stroke="#1A1714" stroke-width="1.2" stroke-dasharray="5 4"/>
+<path d="M701.0 741 L694.0 746 L701.0 751" fill="none" stroke="#1A1714" stroke-width="1.2"/>
+<rect x="971.78" y="710.0" width="212.44000000000003" height="30" rx="4" fill="#fff" stroke="#E0DBDA"/>
+<rect x="977.78" y="716.0" width="18" height="18" rx="3" fill="#1A1714"/>
+<text x="986.78" y="729.0" text-anchor="middle" style="font-family:'Roboto Mono',ui-monospace,monospace;font-size:11px;font-weight:500" fill="#fff">8</text>
+<text x="1004.78" y="729.5" style="font-family:'Space Grotesk',system-ui,sans-serif;font-size:13px" fill="#1A1714">Confirm the transaction</text>
+<text x="1078.0" y="766" text-anchor="middle" style="font-family:'Space Grotesk',system-ui,sans-serif;font-size:12px;font-weight:500" fill="#15803D">Canton validation, not a governance vote</text>
+<line x1="60" y1="816" x2="1580" y2="816" stroke="#BDB6B1" stroke-dasharray="3 4"/>
+<text x="64" y="840" style="font-family:'Roboto Mono',ui-monospace,monospace;font-size:10px;font-weight:500;letter-spacing:1.2px" fill="#66605C">OUTSIDE THE GOVERNANCE VOTE</text>
+<rect x="1464.0" y="864" width="8" height="24" rx="1" fill="#D9D4D1"/>
+<line x1="1464.0" y1="876" x2="1282.28" y2="876" stroke="#66605C" stroke-width="1.2" stroke-dasharray="5 4"/>
+<rect x="873.72" y="845" width="408.56000000000006" height="62" rx="4" fill="#fff" stroke="#66605C" stroke-dasharray="4 3"/>
+<text x="1078.0" y="864" text-anchor="middle" style="font-family:'Space Grotesk',system-ui,sans-serif;font-size:13px" fill="#1A1714">Two node operators meet the namespace threshold.</text>
+<text x="1078.0" y="880" text-anchor="middle" style="font-family:'Space Grotesk',system-ui,sans-serif;font-size:13px" fill="#1A1714">Their Daml signing keys can submit any transaction</text>
+<text x="1078.0" y="896" text-anchor="middle" style="font-family:'Space Grotesk',system-ui,sans-serif;font-size:13px" fill="#1A1714">as the Decentralized Party, with no governance vote.</text>
+<svg x="64" y="964" width="132" height="24" viewBox="0 0 154 28" fill="none">
+<g clip-path="url(#clip0_286_32)">
+<path d="M5.43434 0H0V7.79682H5.43434V0Z" fill="#F4652F"></path>
+<path d="M2.19007e-05 28H5.43436V25.4432V20.1971H0L2.19007e-05 28Z" fill="#F4652F"></path>
+<path d="M22.8907 11.6683C25.8455 12.4966 28 15.1964 28 18.4177C28 22.3139 24.8298 25.4432 20.9517 25.4432H14.3084V28H8.87407V25.4432V20.1971H14.3084H19.9359C20.9209 20.1971 21.7212 19.3995 21.7212 18.4177C21.7212 17.436 20.9209 16.6383 19.9359 16.6383H0V11.3615H15.1345C16.1194 11.3615 16.9197 10.5639 16.9197 9.58216C16.9197 8.60048 16.1194 7.80279 15.1345 7.80279L14.3084 7.79682H8.87407V2.5567V0H14.3084V2.5567H16.1502C20.0283 2.5567 23.1985 5.71664 23.1985 9.58216C23.1985 10.3185 23.0754 11.0241 22.8907 11.6683Z" fill="#F4652F"></path>
+</g>
+<g clip-path="url(#clip1_286_32)">
+<path d="M117.458 13.9374C117.458 9.55373 121.052 6 125.506 6H135.641V9.57501H126.259C124.473 9.57501 122.945 10.6177 122.257 12.1286H131.924V15.7462H121.848V21.8748H117.458V13.9374Z" fill="#1A1714"></path>
+<path d="M144.421 18.3H153.804V21.875L143.689 21.9176C139.235 21.9176 135.641 18.3638 135.641 13.9589C135.641 9.57528 139.235 6.02155 143.668 6.02155H153.804V9.6604H145.669C143.641 9.6604 142.386 10.1124 141.559 10.6605C141.081 11.0584 140.696 11.5595 140.432 12.1281H150.086V15.7404L140.432 15.7694C141.125 17.2582 142.647 18.3 144.421 18.3Z" fill="#1A1714"></path>
+<path d="M59.2493 6.02155H77.9708V9.6604H70.805V21.8963H66.4151V9.6604H59.2493V6.02155Z" fill="#1A1714"></path>
+<path d="M92.2611 12.1286C94.9726 12.1286 97.1888 14.2991 97.1888 17.0017C97.1888 19.7042 94.9726 21.896 92.2395 21.896H78.5284V18.2359H91.551C92.2395 18.2359 92.7991 17.6826 92.7991 17.0017C92.7991 16.3207 92.2395 15.7674 91.551 15.7674H83.5425C80.8094 15.7674 78.6144 13.5756 78.6144 10.8944C78.6144 8.19182 80.8094 6 83.5425 6H94.6638V9.63885H84.2526C83.5636 9.63885 83.0045 10.1921 83.0045 10.8731C83.0045 11.554 83.5636 12.1073 84.2526 12.1073H90.8193V12.1286H92.2611Z" fill="#1A1714"></path>
+<path d="M58.1341 21.8963H53.7658V6.02155H58.1341V21.8963Z" fill="#1A1714"></path>
+<path d="M49.0785 12.3414C51.1443 12.916 52.6506 14.7886 52.6506 17.023C52.6506 19.7255 50.4342 21.8961 47.7227 21.8961H34V6.0213H44.3658C47.0772 6.0213 49.2936 8.21312 49.2936 10.8944C49.2936 11.4051 49.2075 11.8945 49.0785 12.3414ZM43.6557 9.66015H38.3899V12.1286H43.6557C44.3443 12.1286 44.9038 11.5753 44.9038 10.8944C44.9038 10.2134 44.3443 9.66015 43.6557 9.66015ZM47.0126 18.2572C47.7013 18.2572 48.2607 17.7039 48.2607 17.023C48.2607 16.342 47.7013 15.7887 47.0126 15.7887H38.3899V18.2572H47.0126Z" fill="#1A1714"></path>
+<path d="M115.785 9.6604V21.9176H111.318V15.7342V12.1154V9.6604H115.785Z" fill="#1A1714"></path>
+<path d="M102.598 10.086C103.782 7.59625 106.299 6.02155 109.075 6.02155H115.785V9.6604H111.318H109.742C108.3 9.6604 106.988 10.4903 106.385 11.7671L106.221 12.1154L104.511 15.7342L103.329 18.2362L101.683 21.9176H97.0031L102.598 10.086Z" fill="#1A1714"></path>
+<path d="M106.221 12.1154H111.318V15.7342H104.511L106.221 12.1154Z" fill="#1A1714"></path>
+</g>
+<defs>
+<clipPath id="clip0_286_32">
+<rect width="28" height="28" fill="white"></rect>
+</clipPath>
+<clipPath id="clip1_286_32">
+<rect width="120" height="16" fill="white" transform="translate(34 6)"></rect>
+</clipPath>
+</defs>
+</svg>
+<line x1="900" y1="976" x2="930" y2="976" stroke="#1A1714" stroke-width="1.2"/><path d="M923 971 L930 976 L923 981" fill="none" stroke="#1A1714" stroke-width="1.2"/>
+<text x="938" y="980" style="font-family:'Space Grotesk',system-ui,sans-serif;font-size:11px" fill="#66605C">Action or transaction</text>
+<line x1="1080" y1="976" x2="1110" y2="976" stroke="#1A1714" stroke-width="1.2" stroke-dasharray="5 4"/><path d="M1103 971 L1110 976 L1103 981" fill="none" stroke="#1A1714" stroke-width="1.2"/>
+<text x="1118" y="980" style="font-family:'Space Grotesk',system-ui,sans-serif;font-size:11px" fill="#66605C">Result or confirmation</text>
+<line x1="1260" y1="976" x2="1290" y2="976" stroke="#D63A0F" stroke-width="1.2"/><path d="M1283 971 L1290 976 L1283 981" fill="none" stroke="#D63A0F" stroke-width="1.2"/>
+<text x="1298" y="980" style="font-family:'Space Grotesk',system-ui,sans-serif;font-size:11px" fill="#66605C">With the authority of the Decentralized Party</text>
+</svg>
