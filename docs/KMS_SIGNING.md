@@ -46,7 +46,8 @@ Turn it off again afterwards, as the last section explains.
 
 Insecure mode (`DECPM_INSECURE`, devnet only) also allows software keys. It
 only logs a warning and makes no copy, so a party created there on Splice 0.10
-needs key download for its first deploy.
+needs key download for its first deploy. A node that sets both settings
+follows the opt-out and keeps a copy.
 
 ## Background
 
@@ -110,8 +111,10 @@ that account. Signatures are still verified against the registered public key.
    ```
 
    To find the key id, list the participant's keys over the Admin API — the
-   party Daml key is named `<party-prefix>-daml-transactions` and its metadata
-   carries `kmsKeyId`:
+   party Daml key is named `<party-prefix>-daml-transactions`, or
+   `<party-prefix>-daml-transactions-rotated-from-<fingerprint>` after a
+   rotation, and its metadata carries `kmsKeyId`. A rotation that lacks the
+   grant names the key id in its error:
 
    ```bash
    grpcurl -plaintext -d '{"filters":{"name":"<party-prefix>-daml-transactions"}}' \
@@ -134,26 +137,36 @@ that account. Signatures are still verified against the registered public key.
 | `Invalid kms_key_id` | Vault metadata contains an ARN, alias, or malformed ID. Use the bare ID of the participant's key and credentials for its account. |
 | `failed local verification against the registered public key` | The KMS key does not match the registered public key. Check that the `kms_key_id` belongs to this party's Daml key. |
 | Rotation fails at GenerateKey with `DecMan cannot sign with the new KMS key` | decman's role lacks `kms:Sign` on the new key. Grant it and start the rotation again, as [the KMS grant for the new key](#the-kms-grant-for-the-new-key) explains. |
-| Run fails with `Canton refused to export the new Daml key` | The node allows software keys, but Canton refuses exports. Turn on key download while the keys are created, or move the participant to KMS. |
+| Run fails with `Canton refused to export the new Daml key` | The node allows software keys, but Canton refuses exports. Turn on key download while the keys are created, or [move the participant to KMS](#moving-a-participant-to-kms). |
+| A peer refuses a rotation: `has ... on record as ...'s Daml key` | The coordinator's last rotation failed after it was submitted, and this peer did not record the new key. Retry that run. Do not start a new one. |
+| A peer refuses a rotation: `has no Daml key on record for ...` | The peer's party cache lacks a member's key. Refresh `/decentralized-parties` on that peer and retry. |
 | Workflow fails at export with `ExportKeyPair` | The key carries no `kms_key_id`, so decman used the vault-export path. Expected on JCE nodes; on a KMS node this means the key metadata is inconsistent. |
 
 ## Rotating a Daml key
 
 The rotate-key workflow replaces one member's Daml key for a party with a new
 key from that member's vault. The members, the owners and both thresholds stay
-the same. Use it to move a key into KMS after the participant moved to KMS, or
-to replace a key you no longer trust.
+the same. Use it to replace a key you no longer trust. It also moves a key
+into KMS, when the participant kept its participant id through its move to
+KMS.
 
-1. On the member whose key changes, open the party and choose **Rotate my Daml
-   key**. `decman-cli parties rotate-key` and `POST /rotate-key` do the same.
-2. Every other member accepts the invitation. Each one checks the proposal
-   before it signs. The proposal may only swap the named key for one new key,
-   and the member's own records must name that key as the coordinator's.
+1. On the member whose key changes, open the party and choose **Rotate My Daml
+   Key**. `decman-cli parties rotate-key` and `POST /rotate-key` do the same.
+2. Every other member accepts the invitation.
 3. decman creates the new key and checks that it can sign with it. On a KMS
    node, it signs a fixed test message through KMS. On a node without KMS, it
    copies the key into its key store.
-4. decman submits the change. Every member then records the new key, so a
-   later kick or rotation attributes it to the right member.
+4. Each other member checks the proposal before it signs. The proposal must
+   keep the hosts and both on-chain thresholds, and swap only the named key
+   for one new key. The member's own records must name the replaced key as
+   the coordinator's, and every other member's key must stay.
+5. decman submits the change. Every member then records the new key, so a
+   later kick or rotation attributes it to the right member. A member records
+   only the key it checked in step 4.
+
+If a rotation fails after it was submitted, retry that run with
+`POST /workflows/<instance>/retry` or from the workflow list. Do not start a
+new rotation. A member that missed the new key would refuse it.
 
 decman starts a rotation only when every other member is a configured peer
 and runs a version that knows the workflow. Otherwise it refuses with a 409
@@ -183,6 +196,26 @@ change:
 
 The party keeps its old key until the rotation completes, so deploys keep
 working while the grant is missing.
+
+## Moving a participant to KMS
+
+Restarting a participant with `crypto.provider = kms` does not move its
+existing keys into KMS. Moving a running participant is a Canton migration.
+Follow the KMS migration guide for your Canton version, for example
+[Canton 3.4](https://docs.digitalasset.com/operate/3.4/howtos/secure/kms/migration/kms_migration.html).
+The Splice
+[validator security guide](https://docs.dev.sync.global/validator_operator/validator_security.html)
+says that moving an existing validator to KMS is not generally supported.
+
+What decman needs afterwards depends on the participant id:
+
+- **The participant id stays the same.** Rotate the Daml key of each party the
+  node hosts, as [Rotating a Daml key](#rotating-a-daml-key) explains.
+- **The participant gets a new id.** Add the new participant to each party
+  with add-party. Then kick the old participant.
+
+Until the move, set `DECPM_ALLOW_SOFTWARE_PARTY_KEYS=true`, so the node can
+still create and join parties.
 
 ## Scope
 
