@@ -548,7 +548,8 @@ fn validate_legacy_retirement(p2p: &PartyToParticipant, legacy: &PartyToKeyMappi
     // whose keys are not inline yet.
     anyhow::ensure!(
         distinct.len() >= p2p.participants.len(),
-        "Cannot retire legacy keys while {inline} inline keys cover {hosts} hosts",
+        "Cannot retire legacy keys while {inline} inline keys cover {hosts} hosts. The party \
+         keeps working with its legacy mapping",
         inline = distinct.len(),
         hosts = p2p.participants.len()
     );
