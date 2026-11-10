@@ -4263,6 +4263,71 @@ mod tests {
         Ok(())
     }
 
+    /// Dropping another member's key with the named one would leave that
+    /// member unable to sign for the party.
+    #[tokio::test]
+    async fn a_rotation_removes_no_key_but_the_named_one() -> Result {
+        let error = rotation_error(&keyed_p2p(Some(keyed(&[9, 3])))?, 2).await?;
+        assert!(
+            error.contains("it must remove exactly 1"),
+            "unexpected error: {error}"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_rotation_that_adds_no_key_is_refused() -> Result {
+        let error = rotation_error(&keyed_p2p(Some(keyed(&[1, 3])))?, 2).await?;
+        assert!(
+            error.contains("adds 0 signing key"),
+            "unexpected error: {error}"
+        );
+        Ok(())
+    }
+
+    /// The invitation pins both thresholds, and a rotation changes neither.
+    #[test]
+    fn a_rotation_keeps_both_thresholds() -> Result {
+        let hosts = [
+            canton_id("p1", 1)?,
+            canton_id("p2", 2)?,
+            canton_id("p3", 3)?,
+        ];
+        let rotation = PeerExpectations {
+            kind: WorkflowKind::RotateKey,
+            confirmation_threshold: Some(2),
+            ..expectations(hosts.to_vec(), hosts[0].clone())
+        };
+        let swapped = keyed_p2p(Some(keyed(&[1, 9, 3])))?;
+        rotation.check_p2p_thresholds(&swapped)?;
+
+        let confirmation = PartyToParticipant {
+            threshold: 3,
+            ..swapped.clone()
+        };
+        let signing = PartyToParticipant {
+            party_signing_keys: Some(SigningKeysWithThreshold {
+                threshold: 1,
+                ..keyed(&[1, 9, 3])
+            }),
+            ..swapped
+        };
+        for (proposal, expected) in [
+            (
+                confirmation,
+                "confirmation threshold 3 differs from the accepted 2",
+            ),
+            (signing, "signing threshold 1 differs from the accepted 2"),
+        ] {
+            let error = match rotation.check_p2p_thresholds(&proposal) {
+                Ok(()) => anyhow::bail!("expected a refusal: {expected}"),
+                Err(e) => e.to_string(),
+            };
+            assert!(error.contains(expected), "unexpected error: {error}");
+        }
+        Ok(())
+    }
+
     #[tokio::test]
     async fn a_rotation_keeps_the_hosts() -> Result {
         let mut proposed = keyed_p2p(Some(keyed(&[1, 9, 3])))?;
