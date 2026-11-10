@@ -395,6 +395,190 @@ mod tests {
         Ok(())
     }
 
+    /// `check_access` against a fake AWS KMS at the HTTP boundary.
+    mod check_access {
+        use base64::{Engine, engine::general_purpose::STANDARD};
+        use canton_proto_rs::com::digitalasset::canton::crypto::v30::{
+            CryptoKeyFormat, SigningPublicKey,
+        };
+        use wiremock::{
+            Mock, MockServer, Request, Respond, ResponseTemplate,
+            matchers::{header, method},
+        };
+
+        use super::*;
+
+        const KEY_ID: &str = "1234abcd-12ab-34cd-56ef-1234567890ab";
+
+        /// Answers `Sign` as KMS does for a key whose private half it holds:
+        /// an ECDSA-SHA256 signature over the raw message, in DER.
+        struct SignsWith(SigningKey);
+
+        impl Respond for SignsWith {
+            fn respond(&self, request: &Request) -> ResponseTemplate {
+                let message = sign_request(request)
+                    .ok()
+                    .and_then(|body| body["Message"].as_str().map(str::to_string))
+                    .and_then(|message| STANDARD.decode(message).ok())
+                    .unwrap_or_default();
+                let signature: P256Signature = self.0.sign(&message);
+                ResponseTemplate::new(200).set_body_raw(
+                    serde_json::json!({
+                        "KeyId": KEY_ID,
+                        "Signature": STANDARD.encode(signature.to_der().as_bytes()),
+                        "SigningAlgorithm": "ECDSA_SHA_256",
+                    })
+                    .to_string(),
+                    "application/x-amz-json-1.1",
+                )
+            }
+        }
+
+        fn sign_request(request: &Request) -> anyhow::Result<serde_json::Value> {
+            Ok(serde_json::from_slice(&request.body)?)
+        }
+
+        async fn kms_answering(response: impl Respond + 'static) -> MockServer {
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .and(header("x-amz-target", "TrentService.Sign"))
+                .respond_with(response)
+                .mount(&server)
+                .await;
+            server
+        }
+
+        fn signer_at(server: &MockServer) -> AwsKmsSigner {
+            let config = aws_sdk_kms::Config::builder()
+                .behavior_version_latest()
+                .region(aws_sdk_kms::config::Region::new("us-east-1"))
+                .endpoint_url(server.uri())
+                .credentials_provider(aws_sdk_kms::config::Credentials::new(
+                    "AKIDEXAMPLE",
+                    "secret",
+                    None,
+                    None,
+                    "test",
+                ))
+                .build();
+            AwsKmsSigner {
+                client: aws_sdk_kms::Client::from_conf(config),
+            }
+        }
+
+        /// The registered key: `signing_key`'s public half, held in KMS.
+        fn registered(
+            signing_key: &SigningKey,
+            kms_key_id: Option<&str>,
+        ) -> anyhow::Result<SigningKeyContext> {
+            let spki = signing_key.verifying_key().to_public_key_der()?;
+            Ok(SigningKeyContext {
+                fingerprint: fingerprint_from_public_key(spki.as_bytes()),
+                public_key: SigningPublicKey {
+                    format: CryptoKeyFormat::DerX509SubjectPublicKeyInfo as i32,
+                    public_key: spki.as_bytes().to_vec(),
+                    key_spec: SigningKeySpec::EcP256 as i32,
+                    ..Default::default()
+                },
+                kms_key_id: kms_key_id.map(str::to_string),
+            })
+        }
+
+        /// The check signs a fixed message through KMS. The message is longer
+        /// than a 32-byte transaction hash, so the signature can never
+        /// authorize a transaction.
+        #[tokio::test]
+        async fn signs_a_message_no_transaction_hash_can_match() -> anyhow::Result<()> {
+            let (signing_key, _) = key_pair(7)?;
+            let server = kms_answering(SignsWith(signing_key.clone())).await;
+
+            signer_at(&server)
+                .check_access(&registered(&signing_key, Some(KEY_ID))?)
+                .await?;
+
+            let requests = server.received_requests().await.unwrap_or_default();
+            let [request] = requests.as_slice() else {
+                anyhow::bail!("expected one Sign call, got {}", requests.len());
+            };
+            let body = sign_request(request)?;
+            assert_eq!(body["KeyId"], KEY_ID);
+            assert_eq!(body["MessageType"], "RAW");
+            assert_eq!(body["SigningAlgorithm"], "ECDSA_SHA_256");
+            let message = STANDARD.decode(body["Message"].as_str().unwrap_or_default())?;
+            assert!(message.len() > 32, "signed {} bytes", message.len());
+            Ok(())
+        }
+
+        #[tokio::test]
+        async fn refuses_a_kms_key_that_is_not_the_registered_key() -> anyhow::Result<()> {
+            let (registered_key, _) = key_pair(7)?;
+            let (kms_key, _) = key_pair(9)?;
+            let server = kms_answering(SignsWith(kms_key)).await;
+
+            let error = match signer_at(&server)
+                .check_access(&registered(&registered_key, Some(KEY_ID))?)
+                .await
+            {
+                Ok(()) => anyhow::bail!("a signature from another key was accepted"),
+                Err(e) => e.to_string(),
+            };
+
+            assert!(
+                error.contains(&format!(
+                    "KMS key {KEY_ID} does not match the registered public key"
+                )),
+                "{error}"
+            );
+            Ok(())
+        }
+
+        /// The participant creates a new key under its own AWS role, so KMS
+        /// refuses DecMan's `Sign` until an operator grants it.
+        #[tokio::test]
+        async fn fails_when_kms_denies_the_sign_call() -> anyhow::Result<()> {
+            let (signing_key, _) = key_pair(7)?;
+            let server = kms_answering(
+                ResponseTemplate::new(400).set_body_raw(
+                    serde_json::json!({
+                        "__type": "AccessDeniedException",
+                        "message": "User: arn:aws:sts::111122223333:assumed-role/decman is not \
+                                    authorized to perform: kms:Sign",
+                    })
+                    .to_string(),
+                    "application/x-amz-json-1.1",
+                ),
+            )
+            .await;
+
+            let error = match signer_at(&server)
+                .check_access(&registered(&signing_key, Some(KEY_ID))?)
+                .await
+            {
+                Ok(()) => anyhow::bail!("a denied Sign call passed the check"),
+                Err(e) => e,
+            };
+
+            let detail = aws_sdk_kms::error::DisplayErrorContext(&error).to_string();
+            assert!(matches!(error, SigningError::Kms(_)), "{detail}");
+            assert!(detail.contains("AccessDeniedException"), "{detail}");
+            Ok(())
+        }
+
+        #[tokio::test]
+        async fn needs_a_kms_key_id_before_it_calls_kms() -> anyhow::Result<()> {
+            let (signing_key, _) = key_pair(7)?;
+            let server = kms_answering(SignsWith(signing_key.clone())).await;
+
+            let result = signer_at(&server)
+                .check_access(&registered(&signing_key, None)?)
+                .await;
+
+            assert!(result.is_err());
+            assert_eq!(server.received_requests().await.map(|r| r.len()), Some(0));
+            Ok(())
+        }
+    }
+
     #[test]
     fn p256_maps_to_ecdsa_sha256() {
         let (kms, canton) = algorithms_for(SigningKeySpec::EcP256).unwrap();
