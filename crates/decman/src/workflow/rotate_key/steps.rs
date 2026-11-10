@@ -23,7 +23,7 @@ use crate::{
             proposals::create::decode_keys_payload,
         },
         proposal_store,
-        rotate_key::RotateKeyConfig,
+        rotate_key::{RotateKeyConfig, config::signing_threshold_in_force},
         signing_keys::{adopt_legacy_signing_keys, own_namespace_key},
         storage::{WorkflowStorage, artifact_kinds, identity_kinds},
         topology,
@@ -118,14 +118,21 @@ pub async fn create_proposal(
     let synchronizer_id = utils::get_synchronizer_id(config).await?;
 
     let head = proposal_store::fetch_party_head(config, &synchronizer_id, party).await?;
+    let legacy = if head.p2p.party_signing_keys.is_none() {
+        topology::fetch_party_to_key_mapping(config, &synchronizer_id, party).await?
+    } else {
+        None
+    };
+    let signing = signing_threshold_in_force(&head.p2p, legacy.as_ref())
+        .and_then(|threshold| i32::try_from(threshold).ok());
     let confirmation = i32::try_from(head.p2p.threshold)?;
-    if head.dns.threshold != rotate.threshold || confirmation != rotate.confirmation_threshold {
+    if signing != Some(rotate.threshold) || confirmation != rotate.confirmation_threshold {
         anyhow::bail!(
-            "{party}'s thresholds changed after this run started: namespace {now_ns} and \
-             confirmation {confirmation}, against {then_ns} and {then_conf}. Start the rotation \
+            "{party}'s thresholds changed after this run started: signing {now} and \
+             confirmation {confirmation}, against {then} and {then_conf}. Start the rotation \
              again so the invitation names the current ones",
-            now_ns = head.dns.threshold,
-            then_ns = rotate.threshold,
+            now = signing.map_or("none".to_string(), |t| t.to_string()),
+            then = rotate.threshold,
             then_conf = rotate.confirmation_threshold,
         );
     }
