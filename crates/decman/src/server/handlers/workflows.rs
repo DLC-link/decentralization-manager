@@ -18,7 +18,7 @@ use canton_proto_rs::com::digitalasset::canton::crypto::admin::v30::vault_servic
 use crate::{
     canton_id::{CantonId, Fingerprint, validate_party_id_prefix},
     config::{NetworkConfig, NodeConfig},
-    consts::{MIN_PEER_VERSION, OWNER_ONLY_KICK},
+    consts::{MIN_PEER_VERSION, OWNER_ONLY_KICK, ROTATE_KEY},
     db::{
         rows::{DecPartyOwnerRow, DecPartyParticipantRow},
         schema::{Commitable, SchemaRead, SchemaWrite},
@@ -2415,7 +2415,7 @@ pub async fn start_rotate_key(
         });
     }
 
-    if let Err(e) = require_kms_for_rotation(&data.config).await {
+    if let Err(e) = require_kms_for_rotation(&data.config, &data.db).await {
         return HttpResponse::BadRequest().json(ErrorResponse {
             error: format!("{e:#}"),
         });
@@ -2427,6 +2427,14 @@ pub async fn start_rotate_key(
                 error: format!("{e:#}"),
             });
         }
+    };
+    #[cfg(feature = "test-mode")]
+    let rotation = match injected_rotated_key().await {
+        Some(rotated_key) => RotationBaseline {
+            rotated_key,
+            ..rotation
+        },
+        None => rotation,
     };
 
     let invitees: Vec<CantonId> = match data.db.get_all_peers().await {
@@ -2442,6 +2450,18 @@ pub async fn start_rotate_key(
             });
         }
     };
+    // Every other member must record the new key. A member that is not a
+    // configured peer would keep the old key on record for this node.
+    let unreachable = members_missing_from_peers(&members, &invitees, data.config.participant_id());
+    if !unreachable.is_empty() {
+        return HttpResponse::Conflict().json(ErrorResponse {
+            error: format!(
+                "Cannot rotate this node's key of {party}: every other member must record the new \
+                 key, but these members are not configured peers: {list}. Add them as peers first",
+                list = unreachable.join(", ")
+            ),
+        });
+    }
 
     let instance_name = format!("{}-rotate-key-{}", party.prefix, now_secs());
     let instance = WorkflowInstance::new(
@@ -2465,10 +2485,19 @@ pub async fn start_rotate_key(
             ),
         });
     }
-    let incompatible = preflight_incompatible_peers(&data.config, &data.db, &invitees).await;
+    let health = probe_invitee_health(&data.config, &data.db, &invitees).await;
+    let incompatible = incompatible_versions(&health);
     if !incompatible.is_empty() {
         return HttpResponse::Conflict().json(ErrorResponse {
             error: format_incompatible_peers(&incompatible),
+        });
+    }
+    // An older peer cannot decode the invitation, so the run would stall
+    // after the invites went out.
+    let lacking = lacking_feature(&health, ROTATE_KEY);
+    if !lacking.is_empty() {
+        return HttpResponse::Conflict().json(ErrorResponse {
+            error: format_peers_lacking_rotate_key(&lacking),
         });
     }
     if let Err(resp) = register_and_persist(
@@ -2593,9 +2622,26 @@ pub async fn cancel_rotate_key(http_req: HttpRequest, data: web::Data<AppState>)
 
 /// Refuse a rotation before any invitation goes out when the new key could
 /// not live in KMS.
-async fn require_kms_for_rotation(config: &NodeConfig) -> Result {
+async fn require_kms_for_rotation(config: &NodeConfig, db: &SqlitePool) -> Result {
     let mut vault_client = VaultServiceClient::new(config.admin_channel().await?);
-    custody::require_kms_participant(config, &mut vault_client).await
+    custody::require_kms_participant(config, db, &mut vault_client).await
+}
+
+/// Localnet-only fault: name another key as the one this node replaces, so
+/// the e2e suite can show that the peers refuse the proposal. A per-node file
+/// lets the harness set the fault without a restart. The release binary does
+/// not compile this hook.
+#[cfg(feature = "test-mode")]
+async fn injected_rotated_key() -> Option<Fingerprint> {
+    let path = std::env::var_os("DECPM_TEST_ROTATE_KEY_REPLACE_FILE")?;
+    let fingerprint: Fingerprint = tokio::fs::read_to_string(path)
+        .await
+        .ok()?
+        .trim()
+        .parse()
+        .ok()?;
+    tracing::warn!("Test fault: this rotation names {fingerprint} as the key it replaces");
+    Some(fingerprint)
 }
 
 /// What a rotation pins when it starts.
@@ -5075,6 +5121,36 @@ fn format_peers_lacking_owner_only_kick(lacking: &[(String, String)]) -> String 
     )
 }
 
+/// Operator-facing 409 message naming each peer that cannot take part in a
+/// key rotation.
+fn format_peers_lacking_rotate_key(lacking: &[(String, String)]) -> String {
+    let list = lacking
+        .iter()
+        .map(|(id, reason)| format!("{id} ({reason})"))
+        .collect::<Vec<_>>()
+        .join("; ");
+    format!(
+        "Cannot start the key rotation: every other member must run a DecMan version that \
+         knows the rotate-key workflow, and older builds cannot read its invitation. Blocking \
+         peer(s): {list}. Upgrade them and retry."
+    )
+}
+
+/// The members, other than this node, that are not among the invitees.
+fn members_missing_from_peers(
+    members: &HashSet<CantonId>,
+    invitees: &[CantonId],
+    own_id: &CantonId,
+) -> Vec<String> {
+    let mut missing: Vec<String> = members
+        .iter()
+        .filter(|m| *m != own_id && !invitees.contains(m))
+        .map(ToString::to_string)
+        .collect();
+    missing.sort();
+    missing
+}
+
 /// Operator-facing 409 message naming each peer that blocks the start and why.
 fn format_incompatible_peers(incompatible: &[(String, String)]) -> String {
     let list = incompatible
@@ -5648,6 +5724,51 @@ mod tests {
             ]
         );
         assert!(incompatible_versions(&replies[..2]).is_empty());
+    }
+
+    /// This build lists the rotation, so a peer on it passes the gate. A peer
+    /// on an older build, or one that did not answer, blocks the start, and
+    /// the message names it.
+    #[test]
+    fn a_rotation_needs_every_peer_to_list_the_feature() {
+        assert!(crate::consts::FEATURES.contains(&ROTATE_KEY));
+        let replies: Vec<InviteeHealth> = vec![
+            (
+                "p2".to_string(),
+                Ok(health_reply("1.15.0", crate::consts::FEATURES)),
+            ),
+            (
+                "p3".to_string(),
+                Ok(health_reply("1.14.0", &[OWNER_ONLY_KICK])),
+            ),
+            ("p4".to_string(), Err("timed out".to_string())),
+        ];
+        let lacking = lacking_feature(&replies, ROTATE_KEY);
+        assert_eq!(
+            lacking,
+            vec![
+                ("p3".to_string(), "running version 1.14.0".to_string()),
+                ("p4".to_string(), "could not verify: timed out".to_string()),
+            ]
+        );
+        let message = format_peers_lacking_rotate_key(&lacking);
+        assert!(
+            message.contains("p3 (running version 1.14.0)") && message.contains("p4 ("),
+            "{message}"
+        );
+    }
+
+    /// A member that is not a configured peer gets no invitation, so it could
+    /// not record the new key. This node itself never counts as missing.
+    #[test]
+    fn a_rotation_needs_every_other_member_as_a_peer() -> anyhow::Result<()> {
+        let members: HashSet<CantonId> = [pid(1)?, pid(2)?, pid(3)?].into_iter().collect();
+        assert_eq!(
+            members_missing_from_peers(&members, &[pid(2)?], &pid(1)?),
+            vec![pid(3)?.to_string()]
+        );
+        assert!(members_missing_from_peers(&members, &[pid(2)?, pid(3)?], &pid(1)?).is_empty());
+        Ok(())
     }
 
     /// Three hosts and four owners. A host's kick leaves two keys to sign

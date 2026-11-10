@@ -1299,6 +1299,12 @@ pub async fn start_server(
         },
     );
 
+    let custody_config = config.clone();
+    let custody_db = db.clone();
+    tokio::spawn(async move {
+        crate::signing::custody::log_rule_at_boot(&custody_config, &custody_db).await;
+    });
+
     let key_migration_config = config.clone();
     let key_migration_db = db.clone();
     spawn_supervised(

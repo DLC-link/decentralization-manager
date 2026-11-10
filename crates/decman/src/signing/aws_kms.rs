@@ -61,42 +61,11 @@ impl TransactionSigner for AwsKmsSigner {
         hashes: &[PreparedTransactionHash],
         key: &SigningKeyContext,
     ) -> Result<Vec<Signature>, SigningError> {
-        let kms_key_id = key.kms_key_id.as_deref().ok_or_else(|| {
-            anyhow::anyhow!(
-                "AwsKmsSigner selected for key {fingerprint} but the key carries no kms_key_id",
-                fingerprint = key.fingerprint
-            )
-        })?;
-        validate_key_id(kms_key_id)?;
-
-        // Only EC-P256 is supported: it is the spec KMS-backed nodes generate
-        // (the KMS provider default), and the only one whose Canton signature
-        // rules and local verification this backend implements. Other specs
-        // are rejected here rather than signed on unverified assumptions.
-        let (kms_algorithm, canton_algorithm) = algorithms_for(key.public_key.key_spec())
-            .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "AwsKmsSigner does not support key spec {spec:?} \
-                     (key {fingerprint}); only EC-P256 is supported",
-                    spec = key.public_key.key_spec(),
-                    fingerprint = key.fingerprint
-                )
-            })?;
-
-        // Local verification key, parsed from the X.509 SPKI public key Canton
-        // returned at generation time. Verifying each signature locally before
-        // submission catches a wrong key or wrong signing semantics here,
-        // instead of as an opaque rejection at ExecuteSubmission.
-        let verifying_key =
-            VerifyingKey::from_public_key_der(&key.public_key.public_key).map_err(|e| {
-                anyhow::anyhow!(
-                    "Failed to parse P-256 public key for {fingerprint}: {e}",
-                    fingerprint = key.fingerprint
-                )
-            })?;
+        let kms = kms_key(key)?;
 
         tracing::info!(
             "Signing {count} transaction hashes via AWS KMS key {kms_key_id}...",
+            kms_key_id = kms.id,
             count = hashes.len()
         );
 
@@ -105,29 +74,12 @@ impl TransactionSigner for AwsKmsSigner {
         for (idx, hash) in hashes.iter().enumerate() {
             // MessageType::Raw: KMS applies the algorithm's digest (SHA-256)
             // to the hash bytes, matching Canton's message-verify semantics.
-            let output = self
-                .client
-                .sign()
-                .key_id(kms_key_id)
-                .message(Blob::new(hash.as_bytes()))
-                .message_type(MessageType::Raw)
-                .signing_algorithm(kms_algorithm.clone())
-                .send()
-                .await
-                .map_err(|e| SigningError::Kms(Box::new(e)))?;
-
-            let signature_der = output
-                .signature()
-                .ok_or_else(|| {
-                    anyhow::anyhow!("AWS KMS Sign returned no signature for key {kms_key_id}")
-                })?
-                .as_ref()
-                .to_vec();
+            let signature_der = self.sign_raw(&kms, hash.as_bytes()).await?;
 
             // Verify locally before submission. A signature that fails here is
             // guaranteed to be rejected at ExecuteSubmission, so fail loudly
             // with context instead of producing an opaque ledger error.
-            check_kms_signature(&verifying_key, hash.as_bytes(), &signature_der).map_err(
+            check_kms_signature(&kms.verifying_key, hash.as_bytes(), &signature_der).map_err(
                 |failure| match failure {
                     LocalCheck::NotDer(e) => {
                         anyhow::anyhow!("AWS KMS returned a signature that is not valid DER: {e}")
@@ -137,6 +89,7 @@ impl TransactionSigner for AwsKmsSigner {
                          verification against the registered public key \
                          {fingerprint}: {e}",
                         index = idx + 1,
+                        kms_key_id = kms.id,
                         fingerprint = key.fingerprint
                     ),
                 },
@@ -147,7 +100,7 @@ impl TransactionSigner for AwsKmsSigner {
                 format: SignatureFormat::Der as i32,
                 signature: signature_der,
                 signed_by: key.fingerprint.to_string(),
-                signing_algorithm_spec: canton_algorithm as i32,
+                signing_algorithm_spec: kms.canton_algorithm as i32,
                 signature_delegation: None,
             });
         }
@@ -155,6 +108,120 @@ impl TransactionSigner for AwsKmsSigner {
         tracing::debug!("Generated {count} signatures", count = signatures.len());
         Ok(signatures)
     }
+}
+
+/// The message that [`AwsKmsSigner::check_access`] signs. A prepared
+/// transaction hash is 32 bytes, so a signature over this longer message can
+/// never authorize a transaction.
+const ACCESS_CHECK_MESSAGE: &[u8] = b"DecMan checks that its AWS role may sign with this KMS key";
+
+impl AwsKmsSigner {
+    /// Check that DecMan's AWS role may sign with `key`, and that the KMS key
+    /// matches the key's registered public half. A rotation runs this before
+    /// it adds a new key to a party.
+    ///
+    /// # Errors
+    ///
+    /// Errors when the key is not one this backend signs with, when KMS
+    /// refuses the `Sign` call, or when the signature does not verify.
+    pub async fn check_access(&self, key: &SigningKeyContext) -> Result<(), SigningError> {
+        let kms = kms_key(key)?;
+        let signature = self.sign_raw(&kms, ACCESS_CHECK_MESSAGE).await?;
+        check_kms_signature(&kms.verifying_key, ACCESS_CHECK_MESSAGE, &signature).map_err(
+            |failure| match failure {
+                LocalCheck::NotDer(e) => {
+                    anyhow::anyhow!("AWS KMS returned a signature that is not valid DER: {e}")
+                }
+                LocalCheck::Mismatch(e) => anyhow::anyhow!(
+                    "KMS key {kms_key_id} does not match the registered public key \
+                     {fingerprint}: {e}",
+                    kms_key_id = kms.id,
+                    fingerprint = key.fingerprint
+                ),
+            },
+        )?;
+        tracing::info!(
+            "DecMan may sign with KMS key {kms_key_id} ({fingerprint})",
+            kms_key_id = kms.id,
+            fingerprint = key.fingerprint
+        );
+        Ok(())
+    }
+
+    /// One KMS `Sign` call over `message`, which KMS hashes with SHA-256
+    /// (`MessageType::Raw`). Returns the DER signature.
+    async fn sign_raw(&self, kms: &KmsKey<'_>, message: &[u8]) -> Result<Vec<u8>, SigningError> {
+        let output = self
+            .client
+            .sign()
+            .key_id(kms.id)
+            .message(Blob::new(message))
+            .message_type(MessageType::Raw)
+            .signing_algorithm(kms.kms_algorithm.clone())
+            .send()
+            .await
+            .map_err(|e| SigningError::Kms(Box::new(e)))?;
+        Ok(output
+            .signature()
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "AWS KMS Sign returned no signature for key {kms_key_id}",
+                    kms_key_id = kms.id
+                )
+            })?
+            .as_ref()
+            .to_vec())
+    }
+}
+
+/// What signing with one KMS key needs, checked before any KMS call.
+struct KmsKey<'a> {
+    id: &'a str,
+    kms_algorithm: KmsSigningAlgorithm,
+    canton_algorithm: SigningAlgorithmSpec,
+    verifying_key: VerifyingKey,
+}
+
+fn kms_key(key: &SigningKeyContext) -> Result<KmsKey<'_>, SigningError> {
+    let kms_key_id = key.kms_key_id.as_deref().ok_or_else(|| {
+        anyhow::anyhow!(
+            "AwsKmsSigner selected for key {fingerprint} but the key carries no kms_key_id",
+            fingerprint = key.fingerprint
+        )
+    })?;
+    validate_key_id(kms_key_id)?;
+
+    // Only EC-P256 is supported: it is the spec KMS-backed nodes generate
+    // (the KMS provider default), and the only one whose Canton signature
+    // rules and local verification this backend implements. Other specs
+    // are rejected here rather than signed on unverified assumptions.
+    let (kms_algorithm, canton_algorithm) =
+        algorithms_for(key.public_key.key_spec()).ok_or_else(|| {
+            anyhow::anyhow!(
+                "AwsKmsSigner does not support key spec {spec:?} \
+                 (key {fingerprint}); only EC-P256 is supported",
+                spec = key.public_key.key_spec(),
+                fingerprint = key.fingerprint
+            )
+        })?;
+
+    // Local verification key, parsed from the X.509 SPKI public key Canton
+    // returned at generation time. Verifying each signature locally before
+    // submission catches a wrong key or wrong signing semantics here,
+    // instead of as an opaque rejection at ExecuteSubmission.
+    let verifying_key =
+        VerifyingKey::from_public_key_der(&key.public_key.public_key).map_err(|e| {
+            anyhow::anyhow!(
+                "Failed to parse P-256 public key for {fingerprint}: {e}",
+                fingerprint = key.fingerprint
+            )
+        })?;
+    Ok(KmsKey {
+        id: kms_key_id,
+        kms_algorithm,
+        canton_algorithm,
+        verifying_key,
+    })
 }
 
 /// Why a KMS signature failed the local check.

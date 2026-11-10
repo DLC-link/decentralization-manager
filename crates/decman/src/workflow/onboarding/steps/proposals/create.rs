@@ -215,6 +215,7 @@ pub async fn create_proposals(
         "Persisted {count} peer identity records for {party_id}",
         count = key_payloads.len()
     );
+    crate::signing::custody::copy_new_party_key(config, storage, &party_id).await;
 
     // Step 9: Create PartyToParticipant mapping
     // PartyToParticipant carries the signing keys (Canton 3.4+); the standalone

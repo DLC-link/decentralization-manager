@@ -59,12 +59,14 @@ pub fn party_daml_key_name(party_id_prefix: &str) -> String {
     format!("{party_id_prefix}-daml-transactions")
 }
 
-/// Vault name of the Daml key a rotation creates for the party with this id
-/// prefix. The run's instance name makes it unique to the run, so a retry
-/// finds the key again and a later rotation creates a new one.
-pub fn rotated_daml_key_name(party_id_prefix: &str, instance_name: &str) -> String {
+/// Vault name of the Daml key that replaces `replaced` for the party with
+/// this id prefix. The name depends only on the replaced key. A retry, or a
+/// new run after a failed one, finds the same key again. An operator who
+/// granted DecMan access to that key then needs no second grant. A later
+/// rotation replaces a different key, so it creates a new one.
+pub fn rotated_daml_key_name(party_id_prefix: &str, replaced: &Fingerprint) -> String {
     format!(
-        "{base}-rotated-{instance_name}",
+        "{base}-rotated-from-{replaced}",
         base = party_daml_key_name(party_id_prefix)
     )
 }
@@ -843,7 +845,12 @@ mod tests {
     fn recognizes_the_onboarding_and_the_rotation_key_names() {
         assert!(is_party_daml_key_name("xyz-daml-transactions", "xyz"));
         assert!(is_party_daml_key_name(
-            &rotated_daml_key_name("xyz", "xyz-rotate-key-1"),
+            &rotated_daml_key_name(
+                "xyz",
+                &format!("1220{:0>64}", "ab")
+                    .parse::<Fingerprint>()
+                    .expect("fingerprint")
+            ),
             "xyz"
         ));
         assert!(!is_party_daml_key_name(
