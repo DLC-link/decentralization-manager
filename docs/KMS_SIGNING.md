@@ -37,12 +37,15 @@ copy of each new Daml key in its key store:
 2. After it creates the Daml key, decman exports it at once. If Canton refuses
    the export, decman stops the run before the key joins the party.
 3. decman stores the copy as soon as it knows the party. Add-party and
-   rotate-key know the party from the start. Onboarding learns it when the
-   members sign the party's `PartyToParticipant` proposal.
+   rotate-key know the party from the start. Onboarding learns it just before
+   the members sign the party's `PartyToParticipant` proposal. A member whose
+   copy fails refuses to sign, so the party does not come into force.
 
 On Splice 0.9, Canton always exports, so this works without other settings.
-On Splice 0.10, the export needs key download while the keys are created.
-Turn it off again afterwards, as the last section explains.
+On Splice 0.10, the export needs key download until the party is created.
+Turn it off again afterwards, as the last section explains. If an onboarding
+fails because Canton refused the export, turn on key download and retry the
+run from its coordinator.
 
 Insecure mode (`DECPM_INSECURE`, devnet only) also allows software keys. It
 only logs a warning and makes no copy, so a party created there on Splice 0.10
@@ -138,6 +141,7 @@ that account. Signatures are still verified against the registered public key.
 | `failed local verification against the registered public key` | The KMS key does not match the registered public key. Check that the `kms_key_id` belongs to this party's Daml key. |
 | Rotation fails at GenerateKey with `DecMan cannot sign with the new KMS key` | decman's role lacks `kms:Sign` on the new key. Grant it and start the rotation again, as [the KMS grant for the new key](#the-kms-grant-for-the-new-key) explains. |
 | Run fails with `Canton refused to export the new Daml key` | The node allows software keys, but Canton refuses exports. Turn on key download while the keys are created, or [move the participant to KMS](#moving-a-participant-to-kms). |
+| Onboarding fails with `Canton refused to export this node's Daml key` | The node allows software keys, but Canton refused the copy before the member signed. Turn on key download, then retry the run from its coordinator. |
 | A peer refuses a rotation: `has ... on record as ...'s Daml key` | The coordinator's last rotation failed after it was submitted, and this peer did not record the new key. Retry that run. Do not start a new one. |
 | A peer refuses a rotation: `has no Daml key on record for ...` | The peer's party cache lacks a member's key. Refresh `/decentralized-parties` on that peer and retry. |
 | Workflow fails at export with `ExportKeyPair` | The key carries no `kms_key_id`, so decman used the vault-export path. Expected on JCE nodes; on a KMS node this means the key metadata is inconsistent. |
@@ -157,8 +161,9 @@ KMS.
    node, it signs a fixed test message through KMS. On a node without KMS, it
    copies the key into its key store.
 4. Each other member checks the proposal before it signs. The proposal must
-   keep the hosts and both on-chain thresholds, and swap only the named key
-   for one new key. The member's own records must name the replaced key as
+   keep the host entries and both thresholds in force, and swap only the
+   named key for one new key. The signing threshold stays as it is, even
+   where it differs from the namespace threshold. The member's own records must name the replaced key as
    the coordinator's, and every other member's key must stay.
 5. decman submits the change. Every member then records the new key, so a
    later kick or rotation attributes it to the right member. A member records

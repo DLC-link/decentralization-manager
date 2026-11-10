@@ -193,7 +193,7 @@ pub async fn copy_new_party_key(config: &NodeConfig, db: &SqlitePool, party: &Ca
     match migration::copy_party_key(config, db, party).await? {
         Outcome::ExportRefused | Outcome::CopyUnreadable => anyhow::bail!(
             "Canton refused to export this node's Daml key for {party}, so DecMan holds no copy \
-             of it. Turn on key download while the party is created"
+             of it. Turn on key download, then retry the run from its coordinator"
         ),
         outcome => {
             tracing::info!("Key store copy of this node's Daml key for {party}: {outcome:?}");
