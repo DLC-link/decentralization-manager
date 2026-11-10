@@ -37,7 +37,7 @@ use crate::{
 /// Generate cryptographic keys and export them
 ///
 /// Refuses a participant that does not keep its keys in KMS, unless this node
-/// runs in insecure mode (see [`custody`]).
+/// allows software keys (see [`custody`]).
 ///
 /// Generates:
 /// 1. Namespace signing key (for namespace delegation)

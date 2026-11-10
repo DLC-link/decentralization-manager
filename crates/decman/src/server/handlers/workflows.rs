@@ -2361,15 +2361,17 @@ async fn send_change_threshold_invites(
 /// Start a rotate-key workflow: replace this node's Daml signing key for a
 /// decentralized party with a new key from its vault.
 ///
-/// The vault must keep its keys in KMS, unless this node runs in insecure
-/// mode. The members and thresholds stay the same, and every member signs.
+/// The vault must keep its keys in KMS, unless this node sets
+/// `DECPM_ALLOW_SOFTWARE_PARTY_KEYS` or runs in insecure mode. The members
+/// and thresholds stay the same, and every member signs.
 #[utoipa::path(
     tag = "Workflows",
     request_body = RotateKeyRequest,
     responses(
         (status = 202, description = "Rotate-key workflow started", body = WorkflowResponse),
-        (status = 400, description = "Bad request, such as a participant without KMS", body = ErrorResponse),
-        (status = 409, description = "Workflow already in progress, or this node's key is not the party's", body = ErrorResponse),
+        (status = 400, description = "Bad request, such as a participant without KMS and without the opt-out", body = ErrorResponse),
+        (status = 409, description = "Workflow already in progress, stale membership, a member on an older build or not a configured peer, or this node's key is not the party's", body = ErrorResponse),
+        (status = 502, description = "Canton's admin API could not be reached", body = ErrorResponse),
         (status = 500, description = "Internal server error", body = ErrorResponse)
     )
 )]
@@ -2406,7 +2408,9 @@ pub async fn start_rotate_key(
     }
     if !members.contains(data.config.participant_id()) {
         return HttpResponse::BadRequest().json(ErrorResponse {
-            error: format!("This node is not a member of {party}, so it holds no key to rotate"),
+            error: format!(
+                "This node does not host {party}, so it holds no Daml key of it to rotate"
+            ),
         });
     }
     if members.len() < 2 {
@@ -2416,11 +2420,14 @@ pub async fn start_rotate_key(
     }
 
     if let Err(e) = require_kms_for_rotation(&data.config, &data.db).await {
-        return HttpResponse::BadRequest().json(ErrorResponse {
-            error: format!("{e:#}"),
-        });
+        let error = format!("{e:#}");
+        return if canton_unreachable(&e) {
+            HttpResponse::BadGateway().json(ErrorResponse { error })
+        } else {
+            HttpResponse::BadRequest().json(ErrorResponse { error })
+        };
     }
-    let rotation = match rotation_baseline(&data.config, &data.db, &party).await {
+    let rotation = match rotation_baseline(&data.config, &data.db, &party, &members).await {
         Ok(rotation) => rotation,
         Err(e) => {
             return HttpResponse::Conflict().json(ErrorResponse {
@@ -2651,16 +2658,38 @@ struct RotationBaseline {
     confirmation_threshold: i32,
 }
 
+/// Whether an error came from reaching Canton, not from a rule refusal.
+fn canton_unreachable(error: &anyhow::Error) -> bool {
+    error
+        .chain()
+        .any(|cause| cause.is::<tonic::Status>() || cause.is::<tonic::transport::Error>())
+}
+
+/// The hosts that differ between the cached members and the chain, or `None`
+/// when both name the same hosts.
+fn stale_members(cached: &HashSet<CantonId>, on_chain: &[String]) -> Option<String> {
+    let cached: std::collections::BTreeSet<String> =
+        cached.iter().map(ToString::to_string).collect();
+    let on_chain: std::collections::BTreeSet<String> = on_chain.iter().cloned().collect();
+    (cached != on_chain).then(|| format!("cache {cached:?}, chain {on_chain:?}"))
+}
+
 /// Read this node's current Daml key for `party` and the party's thresholds.
+///
+/// The invitations go to the cached members, and the peers compare the
+/// proposal with the chain. So the cache must name the chain's hosts, or the
+/// run would fail late, after it created a key.
 ///
 /// # Errors
 ///
-/// Errors when the topology cannot be read, when this node's key is unknown,
-/// or when the party does not carry it.
+/// Errors when the topology cannot be read, when the cache names other hosts
+/// than the chain, when this node's key is unknown, or when the party does
+/// not carry it.
 async fn rotation_baseline(
     config: &NodeConfig,
     db: &SqlitePool,
     party: &CantonId,
+    members: &HashSet<CantonId>,
 ) -> Result<RotationBaseline> {
     let synchronizer_id = utils::get_synchronizer_id(config).await?;
     let (_, namespace) = workflow::topology::fetch_namespace_definition_at_head(
@@ -2671,6 +2700,17 @@ async fn rotation_baseline(
     .await?;
     let (_, p2p) =
         workflow::topology::fetch_p2p_mapping_at_head(config, &synchronizer_id, party).await?;
+    let hosts: Vec<String> = p2p
+        .participants
+        .iter()
+        .map(|p| p.participant_uid.clone())
+        .collect();
+    if let Some(difference) = stale_members(members, &hosts) {
+        anyhow::bail!(
+            "This node's cached members of {party} differ from the chain ({difference}). \
+             Refresh /decentralized-parties and retry"
+        );
+    }
 
     let own = workflow::contracts::steps::sign::own_daml_key(config, db, party).await?;
     let mut keys = p2p
@@ -5846,7 +5886,7 @@ mod tests {
             let (status, error) = rotate(data).await?;
 
             assert_eq!(status, StatusCode::BAD_REQUEST);
-            assert!(error.contains("This node is not a member"), "{error}");
+            assert!(error.contains("This node does not host"), "{error}");
             Ok(())
         }
 
@@ -5900,6 +5940,28 @@ mod tests {
         );
         assert!(members_missing_from_peers(&members, &[pid(2)?, pid(3)?], &pid(1)?).is_empty());
         Ok(())
+    }
+
+    /// A cache that names other hosts than the chain would send invitations
+    /// to the wrong members, and the peers would refuse late.
+    #[test]
+    fn a_rotation_needs_the_cached_hosts_to_match_the_chain() -> anyhow::Result<()> {
+        let cached: HashSet<CantonId> = [pid(1)?, pid(2)?].into_iter().collect();
+        assert!(stale_members(&cached, &[pid(2)?.to_string(), pid(1)?.to_string()]).is_none());
+        let difference = stale_members(&cached, &[pid(1)?.to_string(), pid(3)?.to_string()])
+            .context("a different host must count as stale")?;
+        assert!(difference.contains("validator-3"), "{difference}");
+        Ok(())
+    }
+
+    /// An unreachable Canton is not the operator's mistake, so it is no 400.
+    #[test]
+    fn only_a_canton_transport_error_counts_as_unreachable() {
+        let refused = anyhow::anyhow!("This participant keeps its keys in Canton's software vault");
+        assert!(!canton_unreachable(&refused));
+        let unreachable = anyhow::Error::from(tonic::Status::unavailable("connection refused"))
+            .context("listing the vault's keys");
+        assert!(canton_unreachable(&unreachable));
     }
 
     /// Three hosts and four owners. A host's kick leaves two keys to sign

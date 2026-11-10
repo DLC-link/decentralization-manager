@@ -91,5 +91,6 @@ describe("RotateKeyDialog", () => {
     renderDialog({ memberCount: 1 });
 
     expect(submitButton().disabled).toBe(true);
+    expect(screen.getByText(/A party with one member cannot rotate a key/)).toBeTruthy();
   });
 });
