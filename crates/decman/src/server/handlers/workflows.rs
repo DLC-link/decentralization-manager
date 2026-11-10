@@ -5758,6 +5758,137 @@ mod tests {
         );
     }
 
+    /// The rotate-key start checks that run before any topology read, on a
+    /// node whose admin API is a fake Canton.
+    mod start_rotate_key_refusals {
+        use super::*;
+        use crate::signing::{
+            custody::SoftwareKeys,
+            fake_admin_api::{FakeAdminApi, TestNode, VaultKey},
+            key_store::STORE_OFF_HINT,
+        };
+
+        /// A node `pid(1)` on `fake`, with `members` cached as the hosts of
+        /// party `pid(9)`. The node's files live as long as the `TestNode`.
+        async fn node(
+            pool: SqlitePool,
+            fake: &FakeAdminApi,
+            rule: SoftwareKeys,
+            members: &[CantonId],
+        ) -> anyhow::Result<(web::Data<AppState>, TestNode)> {
+            let party = pid(9)?;
+            cache_party(&pool, &party, 1, None).await?;
+            let rows: Vec<DecPartyParticipantRow> = members
+                .iter()
+                .map(|member| DecPartyParticipantRow {
+                    dec_party_id: party.to_string(),
+                    ..host_row(member, None)
+                })
+                .collect();
+            let mut tx = pool.begin_transaction().await?;
+            tx.replace_dec_party_participants(&party, &rows).await?;
+            Commitable::commit(tx).await?;
+
+            let mut test_node = fake.node(rule, false).await?;
+            test_node.config.node.participant_id = Some(pid(1)?);
+            let state = Arc::try_unwrap(AppState::for_test(None).await?.into_inner())
+                .map_err(|_| anyhow::anyhow!("a fresh test state has one owner"))?;
+            let data = web::Data::new(AppState {
+                db: pool,
+                config: test_node.config.clone(),
+                ..state
+            });
+            Ok((data, test_node))
+        }
+
+        /// Ask `data` to rotate its key of `pid(9)`, and return the status
+        /// and the error it gives.
+        async fn rotate(data: web::Data<AppState>) -> anyhow::Result<(StatusCode, String)> {
+            let db = data.db.clone();
+            let app =
+                actix_test::init_service(App::new().app_data(data).service(start_rotate_key)).await;
+            let request = actix_test::TestRequest::post()
+                .uri("/rotate-key")
+                .set_json(serde_json::json!({ "decentralized_party_id": pid(9)?.to_string() }))
+                .to_request();
+            request.extensions_mut().insert(Principal {
+                sub: "admin".to_string(),
+                issuer: "test".to_string(),
+                roles: Vec::new(),
+                email: None,
+            });
+
+            let response = actix_test::call_service(&app, request).await;
+            let status = response.status();
+            let body: serde_json::Value = actix_test::read_body_json(response).await;
+
+            let runs: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM workflow_runs")
+                .fetch_one(&db)
+                .await?;
+            assert_eq!(runs, 0, "a refused rotation persisted a run");
+            Ok((
+                status,
+                body["error"].as_str().unwrap_or_default().to_string(),
+            ))
+        }
+
+        /// The vault keeps its keys in KMS, so only the membership can refuse.
+        async fn kms_vault() -> anyhow::Result<FakeAdminApi> {
+            FakeAdminApi::start(vec![VaultKey::kms("participant", 1)?]).await
+        }
+
+        #[sqlx::test(migrator = "MIGRATOR")]
+        async fn refuses_a_node_that_is_not_a_member(pool: SqlitePool) -> anyhow::Result<()> {
+            let fake = kms_vault().await?;
+            let (data, _node) =
+                node(pool, &fake, SoftwareKeys::Refused, &[pid(2)?, pid(3)?]).await?;
+
+            let (status, error) = rotate(data).await?;
+
+            assert_eq!(status, StatusCode::BAD_REQUEST);
+            assert!(error.contains("This node is not a member"), "{error}");
+            Ok(())
+        }
+
+        #[sqlx::test(migrator = "MIGRATOR")]
+        async fn refuses_a_party_with_one_member(pool: SqlitePool) -> anyhow::Result<()> {
+            let fake = kms_vault().await?;
+            let (data, _node) = node(pool, &fake, SoftwareKeys::Refused, &[pid(1)?]).await?;
+
+            let (status, error) = rotate(data).await?;
+
+            assert_eq!(status, StatusCode::BAD_REQUEST);
+            assert!(error.contains("it has only one member"), "{error}");
+            Ok(())
+        }
+
+        #[sqlx::test(migrator = "MIGRATOR")]
+        async fn refuses_a_node_without_kms(pool: SqlitePool) -> anyhow::Result<()> {
+            let fake = FakeAdminApi::start(vec![VaultKey::software("participant", 1)]).await?;
+            let (data, _node) =
+                node(pool, &fake, SoftwareKeys::Refused, &[pid(1)?, pid(2)?]).await?;
+
+            let (status, error) = rotate(data).await?;
+
+            assert_eq!(status, StatusCode::BAD_REQUEST);
+            assert!(error.contains("software vault, not in a KMS"), "{error}");
+            Ok(())
+        }
+
+        #[sqlx::test(migrator = "MIGRATOR")]
+        async fn refuses_the_opt_out_without_a_key_store(pool: SqlitePool) -> anyhow::Result<()> {
+            let fake = FakeAdminApi::start(vec![VaultKey::software("participant", 1)]).await?;
+            let (data, _node) =
+                node(pool, &fake, SoftwareKeys::Stored, &[pid(1)?, pid(2)?]).await?;
+
+            let (status, error) = rotate(data).await?;
+
+            assert_eq!(status, StatusCode::BAD_REQUEST);
+            assert!(error.contains(STORE_OFF_HINT), "{error}");
+            Ok(())
+        }
+    }
+
     /// A member that is not a configured peer gets no invitation, so it could
     /// not record the new key. This node itself never counts as missing.
     #[test]
