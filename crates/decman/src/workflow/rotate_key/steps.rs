@@ -34,13 +34,15 @@ const LABEL: &str = "rotate-key";
 
 /// Create the coordinator's new Daml key in its vault.
 ///
-/// The key must live in KMS, unless this node runs in insecure mode. A retry
-/// finds the key it already created by its run-specific name.
+/// The key must live in KMS, unless this node allows software keys (see
+/// [`custody`]). A retry, or a new run that replaces the same key, finds the
+/// key by its name, which depends only on the replaced key.
 ///
 /// # Errors
 ///
-/// Errors when the vault refuses, when the key is not in KMS outside insecure
-/// mode, or when the vault returns the key being replaced.
+/// Errors when the vault refuses, when the key is not in KMS and this node's
+/// rule refuses software keys, when DecMan cannot sign with a new KMS key or
+/// copy a new software key, or when the vault returns the key being replaced.
 pub async fn generate_key(
     config: &NodeConfig,
     storage: &SqlitePool,
@@ -405,9 +407,10 @@ pub fn decode_recorded_key(payload: &[u8]) -> Result<SigningPublicKey> {
 
 /// Record the coordinator's new Daml key on a peer.
 ///
-/// The peer first checks that the party carries the key and no longer the
-/// one its operator accepted to replace, so a coordinator cannot have it
-/// record a key the party does not use. The identity row is updated only when
+/// The key must be the one this peer checked in SignProposal (`accepted`),
+/// so a coordinator cannot have it record another member's key. The peer
+/// also checks that the party carries the key and no longer the one its
+/// operator accepted to replace. The identity row is updated only when
 /// this node holds one for the coordinator, which is the case on the node
 /// that coordinated onboarding or added the coordinator.
 ///
@@ -419,11 +422,17 @@ pub async fn record_peer_key(
     storage: &SqlitePool,
     party: &CantonId,
     coordinator: &CantonId,
-    rotated_key: &Fingerprint,
+    (rotated_key, accepted): (&Fingerprint, &Fingerprint),
     new_key: SigningPublicKey,
 ) -> Result {
-    let synchronizer_id = utils::get_synchronizer_id(config).await?;
     let new_fingerprint = compute_fingerprint(&new_key);
+    if new_fingerprint != *accepted {
+        anyhow::bail!(
+            "The coordinator asks this node to record {new_fingerprint}, but this node checked \
+             {accepted} as the rotation's new key"
+        );
+    }
+    let synchronizer_id = utils::get_synchronizer_id(config).await?;
     let (_, mapping) = topology::fetch_p2p_mapping_at_head(config, &synchronizer_id, party).await?;
     if !carries_rotation(
         &mapping

@@ -487,11 +487,13 @@ impl PeerExpectations {
         ensure_survivor_keys_preserved(&keys.keys, &survivors, &claims)
     }
 
-    /// Validate the P2P proposal of a rotate-key run.
+    /// Validate the P2P proposal of a rotate-key run, and return the new key
+    /// it adds for the coordinator.
     ///
-    /// The proposal must keep the accepted members and thresholds, and swap
-    /// exactly the key the invitation names for one new key. This node's
-    /// own records must attribute that key to the coordinator.
+    /// The proposal must keep the members and both on-chain thresholds, and
+    /// swap exactly the key the invitation names for one new key. This
+    /// node's own records must attribute the replaced key to the coordinator
+    /// and every other key to the member that holds it.
     ///
     /// # Errors
     ///
@@ -503,7 +505,7 @@ impl PeerExpectations {
         storage: &SqlitePool,
         instance_name: &str,
         p2p_payload: &[u8],
-    ) -> Result {
+    ) -> Result<Fingerprint> {
         let dec_party_id = self.dec_party_id.as_ref().ok_or_else(|| {
             anyhow::anyhow!(
                 "accepted rotate-key invitation carries no dec party id, so the proposal \
@@ -541,25 +543,46 @@ impl PeerExpectations {
             config,
             synchronizer_id: utils::get_synchronizer_id(config).await?,
         };
-        let Some(current_keys) = check_rotation_against_head(
+        let proposed_keys = mapping
+            .party_signing_keys
+            .as_ref()
+            .map(|keys| keys.keys.clone())
+            .unwrap_or_default();
+        // A proposal already in force has no head left to compare with, but
+        // this node's records still decide which key it adds.
+        let candidates = check_rotation_against_head(
             &head,
             dec_party_id,
             (decode_proposal_serial(p2p_payload)?, &mapping),
             rotated_key,
         )
         .await?
-        else {
-            return Ok(());
-        };
+        .unwrap_or_else(|| proposed_keys.clone());
         let claims =
-            known_signing_keys_by_member(config, storage, dec_party_id, &current_keys).await?;
-        check_rotated_key_owner(&self.coordinator_id.to_string(), rotated_key, &claims)?;
+            known_signing_keys_by_member(config, storage, dec_party_id, &candidates).await?;
+        let members: Vec<String> = mapping
+            .participants
+            .iter()
+            .map(|p| p.participant_uid.clone())
+            .collect();
+        let proposed: Vec<Fingerprint> = proposed_keys
+            .iter()
+            .map(utils::compute_fingerprint)
+            .collect();
+        let new_key = check_rotation_claims(
+            &self.coordinator_id.to_string(),
+            rotated_key,
+            &members,
+            &proposed,
+            &claims,
+        )?;
 
         tracing::info!(
-            "Rotate-key proposal for {dec_party_id} swaps only {coordinator}'s key {rotated_key}",
+            "Rotate-key proposal for {dec_party_id} swaps only {coordinator}'s key {rotated_key} \
+             for {new_key}",
             coordinator = self.coordinator_id
         );
-        Ok(())
+        Ok(new_key)
     }
 
     /// The checks on a party DNS proposal that need no topology read: the
@@ -1540,6 +1563,34 @@ async fn check_rotation_against_head(
              rotation keeps them"
         );
     }
+    // The invitation's thresholds come from the coordinator, so the chain
+    // pins them here. DecMan keeps the signing threshold equal to the
+    // namespace threshold.
+    if mapping.threshold != current_p2p.threshold {
+        anyhow::bail!(
+            "{kind:?} proposal changes the confirmation threshold from {from} to {to}; a key \
+             rotation keeps it",
+            from = current_p2p.threshold,
+            to = mapping.threshold
+        );
+    }
+    let (_, namespace) = head
+        .namespace_definition(&dec_party_id.namespace.to_hex())
+        .await
+        .map_err(|e| {
+            anyhow::anyhow!("cannot read the namespace threshold of {dec_party_id}: {e:#}")
+        })?;
+    let signing = mapping
+        .party_signing_keys
+        .as_ref()
+        .and_then(|keys| i32::try_from(keys.threshold).ok());
+    if signing != Some(namespace.threshold) {
+        anyhow::bail!(
+            "{kind:?} proposal sets the signing threshold to {signing:?}, but the party's \
+             namespace threshold is {threshold}; a key rotation keeps it",
+            threshold = namespace.threshold
+        );
+    }
 
     let (current_keys, legacy) = signing_key_baseline(head, dec_party_id, &current_p2p).await?;
     let current: BTreeSet<String> = current_keys
@@ -1586,38 +1637,87 @@ async fn check_rotation_against_head(
     Ok(Some(current_keys))
 }
 
-/// The key a rotation replaces must be the coordinator's by this node's own
-/// records, and no other member's.
+/// Hold a rotation to this node's records of each member's Daml key, and
+/// return the key the proposal adds for the coordinator.
 ///
-/// Every member signs with its namespace key, but only its own Daml key is
-/// one it can vouch for. Without this check a coordinator could swap another
-/// member's key for one it controls, and so hold two of the party's keys.
-fn check_rotated_key_owner(
+/// Every other host must have a key on record here. That key must stay in
+/// the proposal, and it must not be the key the rotation replaces. Exactly
+/// one proposed key is then left, and it is the coordinator's new key. The
+/// replaced key must be the coordinator's on record. A node that already
+/// recorded the new key accepts it in place of the old one.
+///
+/// Without these checks a coordinator could swap or drop another member's
+/// key, or keep a departed member's key, and so hold two of the party's keys.
+fn check_rotation_claims(
     coordinator: &str,
     rotated_key: &Fingerprint,
+    members: &[String],
+    proposed: &[Fingerprint],
     claims: &BTreeMap<String, Fingerprint>,
-) -> Result {
+) -> Result<Fingerprint> {
+    let mut others: BTreeMap<&Fingerprint, &str> = BTreeMap::new();
+    for member in members.iter().filter(|m| m.as_str() != coordinator) {
+        let Some(claimed) = claims.get(member) else {
+            anyhow::bail!(
+                "This node has no Daml key on record for {member}, so it cannot tell whether \
+                 the rotation keeps theirs. Refresh /decentralized-parties on this node and retry"
+            );
+        };
+        if claimed == rotated_key {
+            anyhow::bail!(
+                "The rotation replaces {rotated_key}, which this node has on record as \
+                 {member}'s Daml key"
+            );
+        }
+        if !proposed.contains(claimed) {
+            anyhow::bail!(
+                "The rotation drops {claimed}, which this node has on record as {member}'s \
+                 Daml key"
+            );
+        }
+        if let Some(previous) = others.insert(claimed, member) {
+            anyhow::bail!(
+                "This node has {claimed} on record for both {previous} and {member}. Refresh \
+                 /decentralized-parties on this node and retry"
+            );
+        }
+    }
+
+    let left: Vec<&Fingerprint> = proposed
+        .iter()
+        .filter(|key| !others.contains_key(key))
+        .collect();
+    let [new_key] = left.as_slice() else {
+        anyhow::bail!(
+            "The rotation leaves {count} keys that no other member holds by this node's records \
+             ({left:?}); it may leave only the coordinator's new key",
+            count = left.len()
+        );
+    };
+    if *new_key == rotated_key {
+        anyhow::bail!("The rotation keeps the key {rotated_key} it is meant to replace");
+    }
+    if let Some((holder, _)) = claims
+        .iter()
+        .find(|(member, key)| member.as_str() != coordinator && key == new_key)
+    {
+        anyhow::bail!(
+            "The rotation adds {new_key}, which this node has on record as {holder}'s Daml key"
+        );
+    }
     match claims.get(coordinator) {
-        Some(claimed) if claimed == rotated_key => {}
+        Some(claimed) if claimed == rotated_key || claimed == *new_key => {}
         Some(claimed) => anyhow::bail!(
             "The rotation replaces {rotated_key}, but this node has {claimed} on record as \
-             {coordinator}'s Daml key"
+             {coordinator}'s Daml key. If {coordinator}'s last rotation failed after it was \
+             submitted, retry that run instead of starting a new one"
         ),
         None => anyhow::bail!(
             "This node has no Daml key on record for {coordinator}, so it cannot tell whether \
              {rotated_key} is theirs. Refresh /decentralized-parties on this node and retry"
         ),
     }
-    if let Some((member, _)) = claims
-        .iter()
-        .find(|(member, key)| member.as_str() != coordinator && *key == rotated_key)
-    {
-        anyhow::bail!(
-            "The rotation replaces {rotated_key}, which this node has on record as {member}'s \
-             Daml key"
-        );
-    }
-    Ok(())
+    Ok((*new_key).clone())
 }
 
 /// The hosts of `from` that `other` does not host.
@@ -4218,7 +4318,13 @@ mod tests {
         rotated: u8,
     ) -> Result<Option<Vec<SigningPublicKey>>> {
         let stub = StubHead {
-            dns: None,
+            dns: Some((
+                2,
+                DecentralizedNamespaceDefinition {
+                    threshold: 2,
+                    ..namespace(&["a", "b", "c"])
+                },
+            )),
             p2p: Some((5, keyed_p2p(head.map(keyed))?)),
             legacy_keys: legacy.map(|seeds| seeds.iter().copied().map(key_of).collect()),
         };
@@ -4407,25 +4513,111 @@ mod tests {
             .collect()
     }
 
-    #[test]
-    fn the_rotated_key_must_be_the_coordinators_on_record() -> Result {
-        let rotated = utils::compute_fingerprint(&key_of(2));
-        check_rotated_key_owner("p2", &rotated, &member_claims(&[("p1", 1), ("p2", 2)]))?;
+    /// A coordinator could otherwise set either threshold through its own
+    /// invitation, because the invitation only repeats what it chose.
+    #[tokio::test]
+    async fn a_rotation_keeps_both_thresholds_on_chain() -> Result {
+        let confirmation = PartyToParticipant {
+            threshold: 1,
+            ..keyed_p2p(Some(keyed(&[1, 9, 3])))?
+        };
+        let error = rotation_error(&confirmation, 2).await?;
+        assert!(
+            error.contains("changes the confirmation threshold from 2 to 1"),
+            "unexpected error: {error}"
+        );
 
-        for (claims, expected) in [
-            (member_claims(&[("p1", 1), ("p2", 5)]), "on record as p2's"),
+        let signing = keyed_p2p(Some(SigningKeysWithThreshold {
+            threshold: 1,
+            ..keyed(&[1, 9, 3])
+        }))?;
+        let error = rotation_error(&signing, 2).await?;
+        assert!(
+            error.contains("namespace threshold is 2"),
+            "unexpected error: {error}"
+        );
+        Ok(())
+    }
+
+    fn fingerprints(seeds: &[u8]) -> Vec<Fingerprint> {
+        seeds
+            .iter()
+            .map(|seed| utils::compute_fingerprint(&key_of(*seed)))
+            .collect()
+    }
+
+    /// p2 rotates its key 2 for key 9 on a party that p1, p2 and p3 host.
+    fn claims_check(proposed: &[u8], claims: &[(&str, u8)]) -> Result<Fingerprint> {
+        let members = ["p1", "p2", "p3"].map(str::to_string);
+        check_rotation_claims(
+            "p2",
+            &utils::compute_fingerprint(&key_of(2)),
+            &members,
+            &fingerprints(proposed),
+            &member_claims(claims),
+        )
+    }
+
+    #[test]
+    fn a_rotation_returns_the_one_key_no_other_member_holds() -> Result {
+        let new_key = claims_check(&[1, 9, 3], &[("p1", 1), ("p2", 2), ("p3", 3)])?;
+        assert_eq!(new_key, utils::compute_fingerprint(&key_of(9)));
+        // A node that already recorded the new key accepts the same proposal.
+        let again = claims_check(&[1, 9, 3], &[("p1", 1), ("p2", 9), ("p3", 3)])?;
+        assert_eq!(again, new_key);
+        Ok(())
+    }
+
+    /// Each refusal closes a way for a coordinator to take another member's
+    /// place, or to keep a key that no current member holds.
+    #[test]
+    fn a_rotation_is_refused_unless_every_other_key_is_accounted_for() {
+        for (proposed, claims, expected) in [
             (
-                member_claims(&[("p1", 1)]),
-                "Refresh /decentralized-parties",
+                &[1u8, 9, 3][..],
+                &[("p1", 1u8), ("p2", 2)][..],
+                "no Daml key on record for p3",
             ),
-            (member_claims(&[("p1", 2), ("p2", 2)]), "on record as p1's"),
+            (
+                &[1, 9, 3],
+                &[("p1", 2), ("p2", 2), ("p3", 3)],
+                "on record as p1's",
+            ),
+            (&[9, 3, 4], &[("p1", 1), ("p2", 2), ("p3", 3)], "drops"),
+            (
+                &[1, 9, 3, 4],
+                &[("p1", 1), ("p2", 2), ("p3", 3)],
+                "leaves 2 keys",
+            ),
+            (
+                &[1, 9, 3],
+                &[("p1", 3), ("p2", 2), ("p3", 3)],
+                "on record for both",
+            ),
+            (
+                &[1, 9, 3],
+                &[("p1", 1), ("p2", 2), ("p3", 3), ("p4", 9)],
+                "on record as p4's",
+            ),
+            (
+                &[1, 9, 3],
+                &[("p1", 1), ("p2", 5), ("p3", 3)],
+                "retry that run",
+            ),
+            (
+                &[1, 9, 3],
+                &[("p1", 1), ("p3", 3)],
+                "no Daml key on record for p2",
+            ),
         ] {
-            let error = match check_rotated_key_owner("p2", &rotated, &claims) {
-                Ok(()) => anyhow::bail!("expected a refusal for {claims:?}"),
+            let error = match claims_check(proposed, claims) {
+                Ok(key) => panic!("expected a refusal for {claims:?}, got {key}"),
                 Err(error) => error.to_string(),
             };
-            assert!(error.contains(expected), "unexpected error: {error}");
+            assert!(
+                error.contains(expected),
+                "{claims:?}: expected {expected:?} in: {error}"
+            );
         }
-        Ok(())
     }
 }

@@ -194,6 +194,9 @@ pub mod artifact_kinds {
     pub const ROTATE_KEY_P2P_PROPOSAL: &str = "rotate_key_p2p_proposal";
     /// Per-peer signed rotation proposal — single length-prefixed proto.
     pub const SIGNED_ROTATE_KEY_P2P: &str = "signed_rotate_key_p2p";
+    /// The new key a peer validated in SignProposal, as a UTF-8 fingerprint.
+    /// RecordKey records only this key for the coordinator.
+    pub const ROTATE_KEY_ACCEPTED_NEW_KEY: &str = "rotate_key_accepted_new_key";
 }
 
 /// Identity-table artefact kinds. These survive the originating workflow run's

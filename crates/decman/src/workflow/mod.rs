@@ -886,11 +886,27 @@ async fn run_peer(
                     fail_step!("Failed to deserialize rotate-key config: {e}");
                     continue;
                 }
-                if let Err(e) = expectations
+                let new_key = match expectations
                     .check_rotation_proposal(&node_config, &db, &instance_name, &items[1])
                     .await
                 {
-                    fail_step!("Refusing the coordinator's rotate-key proposal: {e}");
+                    Ok(new_key) => new_key,
+                    Err(e) => {
+                        fail_step!("Refusing the coordinator's rotate-key proposal: {e}");
+                        continue;
+                    }
+                };
+                // RecordKey later records only the key checked here.
+                if let Err(e) = db
+                    .write_artifact(
+                        &instance_name,
+                        artifact_kinds::ROTATE_KEY_ACCEPTED_NEW_KEY,
+                        None,
+                        new_key.as_str().as_bytes(),
+                    )
+                    .await
+                {
+                    fail_step!("Failed to record the checked rotation key: {e}");
                     continue;
                 }
                 if let Err(e) =
@@ -915,29 +931,47 @@ async fn run_peer(
             MessageType::RecordRotatedKey => {
                 tracing::info!("Executing: Record the coordinator's new Daml key");
                 // The party, the coordinator and the replaced key all come
-                // from the accepted invitation; the payload only names the
-                // new key, which the topology must already carry.
+                // from the accepted invitation. The payload names the new
+                // key, which must be the one this node checked in
+                // SignProposal, and which the topology must already carry.
+                let accepted = db
+                    .read_artifact(
+                        &instance_name,
+                        artifact_kinds::ROTATE_KEY_ACCEPTED_NEW_KEY,
+                        None,
+                    )
+                    .await;
                 let recorded = match (
                     expectations.dec_party_id.as_ref(),
                     expectations.rotated_key.as_ref(),
+                    accepted,
                 ) {
-                    (Some(party), Some(rotated_key)) => {
-                        match rotate_key::steps::decode_recorded_key(&payload) {
-                            Ok(new_key) => {
+                    (_, _, Err(e)) => Err(e),
+                    (_, _, Ok(None)) => Err(anyhow::anyhow!(
+                        "this node checked no proposal of this run, so it records no key"
+                    )),
+                    (Some(party), Some(rotated_key), Ok(Some(accepted))) => {
+                        match (
+                            rotate_key::steps::decode_recorded_key(&payload),
+                            String::from_utf8(accepted)
+                                .map_err(anyhow::Error::from)
+                                .and_then(|key| key.parse::<crate::canton_id::Fingerprint>()),
+                        ) {
+                            (Ok(new_key), Ok(accepted)) => {
                                 rotate_key::steps::record_peer_key(
                                     &node_config,
                                     &db,
                                     party,
                                     &expectations.coordinator_id,
-                                    rotated_key,
+                                    (rotated_key, &accepted),
                                     new_key,
                                 )
                                 .await
                             }
-                            Err(e) => Err(e),
+                            (Err(e), _) | (_, Err(e)) => Err(e),
                         }
                     }
-                    _ => Err(anyhow::anyhow!(
+                    (_, _, Ok(Some(_))) => Err(anyhow::anyhow!(
                         "the accepted rotate-key invitation names no party or no replaced key"
                     )),
                 };
