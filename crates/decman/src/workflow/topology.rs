@@ -544,6 +544,14 @@ fn validate_legacy_retirement(p2p: &PartyToParticipant, legacy: &PartyToKeyMappi
         distinct.len() == keys.keys.len(),
         "Inline signing keys contain duplicates"
     );
+    // A partly migrated party still needs the legacy mapping for the hosts
+    // whose keys are not inline yet.
+    anyhow::ensure!(
+        distinct.len() >= p2p.participants.len(),
+        "Cannot retire legacy keys while {inline} inline keys cover {hosts} hosts",
+        inline = distinct.len(),
+        hosts = p2p.participants.len()
+    );
     Ok(())
 }
 
@@ -1342,6 +1350,48 @@ mod tests {
         p2p.party = "another-party".into();
         assert!(validate_legacy_retirement(&p2p, &legacy).is_err());
         Ok(())
+    }
+
+    /// A partly migrated party still holds some hosts' keys only in the
+    /// legacy mapping, so retiring it would erase them.
+    #[test]
+    fn legacy_retirement_needs_an_inline_key_per_host() -> Result {
+        use canton_proto_rs::com::digitalasset::canton::{
+            crypto::v30::{SigningKeysWithThreshold, SigningPublicKey},
+            protocol::v30::party_to_participant::HostingParticipant,
+        };
+        let legacy = PartyToKeyMapping {
+            party: "party".into(),
+            ..Default::default()
+        };
+        let key = |seed: u8| SigningPublicKey {
+            public_key: vec![seed; 32],
+            ..Default::default()
+        };
+        let host = |name: &str| HostingParticipant {
+            participant_uid: name.into(),
+            ..Default::default()
+        };
+        let mut p2p = PartyToParticipant {
+            party: legacy.party.clone(),
+            participants: vec![host("a"), host("b"), host("c")],
+            party_signing_keys: Some(SigningKeysWithThreshold {
+                keys: vec![key(1)],
+                threshold: 1,
+            }),
+            ..Default::default()
+        };
+        let error = validate_legacy_retirement(&p2p, &legacy)
+            .err()
+            .map(|e| e.to_string())
+            .unwrap_or_default();
+        assert!(error.contains("1 inline keys cover 3 hosts"), "{error}");
+
+        p2p.party_signing_keys = Some(SigningKeysWithThreshold {
+            keys: vec![key(1), key(2), key(3)],
+            threshold: 2,
+        });
+        validate_legacy_retirement(&p2p, &legacy)
     }
 
     /// Real status text Canton returned from `sign_transactions` on devnet
