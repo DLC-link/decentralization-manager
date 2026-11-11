@@ -34,13 +34,13 @@ import {
   buildBillingParams,
   buildInitialDeposit,
   formatDecimal,
-  offerBillingSummary,
   offerDepositUsd,
   ownedAmulets,
   type AmuletOption,
 } from "../paidCredential";
 import { fieldHelpAdornment, TextHelp } from "./FieldHelp";
 import { ContractSelect } from "./governance/fields/ContractSelect";
+import { CredentialOfferPicker } from "./governance/fields/CredentialOfferPicker";
 import { HelpTextField } from "./governance/fields/HelpTextField";
 import { RequirementRows, type RequirementRow } from "./governance/fields/RequirementRows";
 import { SubmitButton } from "./governance/fields/SubmitButton";
@@ -54,7 +54,6 @@ import type {
   ProviderServicesResponse,
   UserServiceInfo,
   UserServicesResponse,
-  CredentialOfferInfo,
   CredentialOffersResponse,
   CredentialsResponse,
   RegistrarServicesResponse,
@@ -784,93 +783,6 @@ export const GovernanceSection = ({
       loading={servicesLoading}
       loadingText="Loading services…"
       emptyText="No user services found"
-    />
-  );
-
-  // CredentialOffer picker shared by the direct Accept Free Credential action
-  // and the Accept Free and Accept Paid Credential proposal forms. freeSolo
-  // keeps hand-pasting a cid possible when the offer isn't visible to this
-  // participant.
-  const renderCredentialOfferAutocomplete = (
-    value: string,
-    setValue: (v: string) => void,
-    offers: CredentialOfferInfo[] = acceptableCredentialOffers,
-    kind: "free" | "paid" = "free",
-  ) => (
-    <Autocomplete
-      size="small"
-      freeSolo
-      options={offers}
-      value={value}
-      loading={credentialOffersLoading}
-      onChange={(_event, newValue) => {
-        if (typeof newValue === "string" || newValue === null) {
-          setValue(newValue ?? "");
-        } else {
-          setValue(newValue.contract_id);
-        }
-      }}
-      onInputChange={(_event, newValue, reason) => {
-        // Keep the field in sync when the user types a cid by hand
-        // (freeSolo fallback). `reset` fires when an option is selected;
-        // we already handled that via `onChange`.
-        if (reason === "input") {
-          setValue(newValue);
-        }
-      }}
-      getOptionLabel={(option) =>
-        typeof option === "string" ? option : option.contract_id
-      }
-      isOptionEqualToValue={(option, val) =>
-        typeof val === "string"
-          ? option.contract_id === val
-          : option.contract_id === val.contract_id
-      }
-      renderOption={(props, option) => {
-        if (typeof option === "string") {
-          return <li {...props}>{option}</li>;
-        }
-        const issuerName = option.issuer.split("::")[0];
-        const cidTail = option.contract_id.slice(-8);
-        const billing = offerBillingSummary(option);
-        return (
-          <li {...props} key={option.contract_id}>
-            <Box sx={{ display: "flex", flexDirection: "column", gap: 0.25 }}>
-              <Typography variant="body2">
-                {option.credential_id} — {issuerName} (…{cidTail})
-              </Typography>
-              {option.description && (
-                <Typography variant="caption" color="text.secondary">
-                  {option.description}
-                </Typography>
-              )}
-              {billing && (
-                <Typography variant="caption" color="text.secondary">
-                  {billing}
-                </Typography>
-              )}
-            </Box>
-          </li>
-        );
-      }}
-      renderInput={(params) => (
-        <TextField
-          {...params}
-          label={
-            <TextHelp text="Contract id of the pending CredentialOffer to accept.">
-              CredentialOffer Contract ID
-            </TextHelp>
-          }
-          required
-          helperText={
-            credentialOffersLoading
-              ? "Loading pending offers…"
-              : offers.length === 0
-                ? `No pending ${kind} offers visible — paste a contract id directly if you have one`
-                : "Pick a pending offer, or paste a contract id"
-          }
-        />
-      )}
     />
   );
 
@@ -3842,10 +3754,13 @@ export const GovernanceSection = ({
                   {renderUserServiceSelect(
                     "Contract id of this governance party's UserService, used to accept the credential offer.",
                   )}
-                  {renderCredentialOfferAutocomplete(
-                    proposalCredentialOfferCid,
-                    setProposalCredentialOfferCid,
-                  )}
+                  <CredentialOfferPicker
+                    value={proposalCredentialOfferCid}
+                    setValue={setProposalCredentialOfferCid}
+                    offers={acceptableCredentialOffers}
+                    kind="free"
+                    loading={credentialOffersLoading}
+                  />
                 </>
               )}
 
@@ -3854,12 +3769,13 @@ export const GovernanceSection = ({
                   {renderUserServiceSelect(
                     "Contract id of this governance party's UserService, used to accept the credential offer.",
                   )}
-                  {renderCredentialOfferAutocomplete(
-                    proposalCredentialOfferCid,
-                    setProposalCredentialOfferCid,
-                    acceptablePaidCredentialOffers,
-                    "paid",
-                  )}
+                  <CredentialOfferPicker
+                    value={proposalCredentialOfferCid}
+                    setValue={setProposalCredentialOfferCid}
+                    offers={acceptablePaidCredentialOffers}
+                    kind="paid"
+                    loading={credentialOffersLoading}
+                  />
                   {chosenPaidOffer?.billing_params && chosenDepositUsd ? (
                     <Alert severity="info">
                       This accept locks a deposit of {formatDecimal(chosenDepositUsd)} USD, and
