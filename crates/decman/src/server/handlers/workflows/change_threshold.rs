@@ -15,6 +15,7 @@ use crate::{
     noise::{Message, MessageType, NoiseKeypair, parse_public_key, send_noise_message},
     server::{
         AppState,
+        error::ApiError,
         middleware::require_admin,
         types::{
             ChangeThresholdInvitePayload, ChangeThresholdRequest, ErrorResponse, MessageResponse,
@@ -60,7 +61,17 @@ pub async fn start_change_threshold(
     if let Err(resp) = require_admin(&http_req, data.admin_role.as_deref()) {
         return resp;
     }
+    start_change_threshold_run(&data, &body)
+        .await
+        .unwrap_or_else(ApiError::into_response)
+}
 
+/// Check a change-threshold request against the cached party and the peers,
+/// then register the run and start it.
+async fn start_change_threshold_run(
+    data: &web::Data<AppState>,
+    body: &ChangeThresholdRequest,
+) -> std::result::Result<HttpResponse, ApiError> {
     tracing::info!(
         "Change-threshold request received: party={}, threshold={}->{}, confirmation={:?}",
         body.decentralized_party_id,
@@ -73,48 +84,37 @@ pub async fn start_change_threshold(
 
     // Scope to the party's cached membership (same rationale as start_kick /
     // start_add_party — the party can be a strict subset of the mesh).
-    let party_member_ids: HashSet<CantonId> = match data
+    let party_member_ids: HashSet<CantonId> = data
         .db
         .get_dec_party_participants(&decentralized_party_id)
         .await
-    {
-        Ok(rows) => rows
-            .iter()
-            .filter_map(|r| CantonId::parse(&r.participant_uid).ok())
-            .collect(),
-        Err(e) => {
+        .map_err(|e| {
             tracing::error!("Failed to load dec party participants for change-threshold: {e}");
-            return HttpResponse::InternalServerError().json(ErrorResponse {
-                error: "Failed to load decentralized party members".to_string(),
-            });
-        }
-    };
+            ApiError::Internal("Failed to load decentralized party members".to_string())
+        })?
+        .iter()
+        .filter_map(|r| CantonId::parse(&r.participant_uid).ok())
+        .collect();
 
     if party_member_ids.is_empty() {
-        return HttpResponse::Conflict().json(ErrorResponse {
-            error: format!(
-                "No cached membership for {decentralized_party_id}. Try refreshing \
+        return Err(ApiError::Conflict(format!(
+            "No cached membership for {decentralized_party_id}. Try refreshing \
                  /decentralized-parties first."
-            ),
-        });
+        )));
     }
     if !party_member_ids.contains(data.config.participant_id()) {
-        return HttpResponse::BadRequest().json(ErrorResponse {
-            error: format!(
-                "This node is not a member of {decentralized_party_id}; only an existing \
+        return Err(ApiError::BadRequest(format!(
+            "This node is not a member of {decentralized_party_id}; only an existing \
                  member can coordinate a threshold change"
-            ),
-        });
+        )));
     }
     // Need at least one other member to reach a signing quorum — a solo-owner
     // party has a fixed threshold of 1 and nothing to change.
     if party_member_ids.len() < 2 {
-        return HttpResponse::BadRequest().json(ErrorResponse {
-            error: format!(
-                "Cannot change threshold: {decentralized_party_id} has only {n} member(s)",
-                n = party_member_ids.len()
-            ),
-        });
+        return Err(ApiError::BadRequest(format!(
+            "Cannot change threshold: {decentralized_party_id} has only {n} member(s)",
+            n = party_member_ids.len()
+        )));
     }
 
     // Bound the new threshold by the member count. The deeper validation
@@ -122,37 +122,32 @@ pub async fn start_change_threshold(
     // in ExportState.
     let member_count = party_member_ids.len() as i32;
     if body.new_threshold < 1 || body.new_threshold > member_count {
-        return HttpResponse::BadRequest().json(ErrorResponse {
-            error: format!(
-                "new_threshold must be between 1 and {member_count} (party member count); got {got}",
-                got = body.new_threshold,
-            ),
-        });
+        return Err(ApiError::BadRequest(format!(
+            "new_threshold must be between 1 and {member_count} (party member count); got {got}",
+            got = body.new_threshold,
+        )));
     }
     // Every member hosts the party, so the member count bounds the
     // confirmation threshold too.
     if let Some(confirmation) = body.confirmation_threshold
         && let Err(e) = check_confirmation_threshold(confirmation, party_member_ids.len())
     {
-        return HttpResponse::BadRequest().json(ErrorResponse {
-            error: e.to_string(),
-        });
+        return Err(ApiError::BadRequest(e.to_string()));
     }
 
     // Invitees: every member except self — they all sign.
-    let invitees: Vec<CantonId> = match data.db.get_all_peers().await {
-        Ok(peers) => peers
-            .into_iter()
-            .map(|p| p.participant_id)
-            .filter(|p| party_member_ids.contains(p) && p != data.config.participant_id())
-            .collect(),
-        Err(e) => {
+    let invitees: Vec<CantonId> = data
+        .db
+        .get_all_peers()
+        .await
+        .map_err(|e| {
             tracing::error!("Failed to load peers for change-threshold: {e}");
-            return HttpResponse::InternalServerError().json(ErrorResponse {
-                error: "Failed to load peers".to_string(),
-            });
-        }
-    };
+            ApiError::Internal("Failed to load peers".to_string())
+        })?
+        .into_iter()
+        .map(|p| p.participant_id)
+        .filter(|p| party_member_ids.contains(p) && p != data.config.participant_id())
+        .collect();
 
     let timestamp = now_secs();
     let instance_name = format!(
@@ -180,35 +175,28 @@ pub async fn start_change_threshold(
     if let Some((run, kind)) =
         find_inprogress_run_for_party(&data.db, &decentralized_party_id).await
     {
-        return HttpResponse::Conflict().json(ErrorResponse {
-            error: format!(
-                "Party {decentralized_party_id} already has a {kind} workflow in flight \
+        return Err(ApiError::Conflict(format!(
+            "Party {decentralized_party_id} already has a {kind} workflow in flight \
                  (run {run}); wait for it to finish or cancel it first"
-            ),
-        });
+        )));
     }
 
     // Refuse to invite any peer that can't speak the concurrent-workflows wire
     // format — NO invites are sent if even one invitee fails the version gate.
     let incompatible = preflight_incompatible_peers(&data.config, &data.db, &invitees).await;
     if !incompatible.is_empty() {
-        return HttpResponse::Conflict().json(ErrorResponse {
-            error: format_incompatible_peers(&incompatible),
-        });
+        return Err(ApiError::Conflict(format_incompatible_peers(&incompatible)));
     }
 
-    if let Err(error) = register_and_persist(
-        &data,
+    register_and_persist(
+        data,
         &instance,
         ChangeThresholdStep::WaitingForPeers,
         &change_config,
         &invitees,
         Some(decentralized_party_id.clone()),
     )
-    .await
-    {
-        return error.into_response();
-    }
+    .await?;
 
     let invitees_for_invites = invitees.clone();
     *change_state.invited_peers.write().await = invitees;
@@ -308,11 +296,11 @@ pub async fn start_change_threshold(
     drop(status_guard);
     drop(abort_guard);
 
-    HttpResponse::Accepted().json(WorkflowResponse {
+    Ok(HttpResponse::Accepted().json(WorkflowResponse {
         status: WorkflowProgress::InProgress,
         message: "Change-threshold workflow started".to_string(),
         instance_name,
-    })
+    }))
 }
 
 /// Get the current status of the change-threshold workflow
