@@ -23,7 +23,13 @@ use crate::{
     config::NodeConfig,
     error::Result,
     utils,
-    workflow::{external_party::keys, topology, topology_version},
+    workflow::{
+        external_party::{
+            keys,
+            topology_bundle::{BundleSerial, check_has_transactions, decode_p2p_change},
+        },
+        topology,
+    },
 };
 
 /// The unsigned onboarding topology, plus the hash the party must sign for each
@@ -94,45 +100,18 @@ fn validate_onboarding_topology(
     config: &NodeConfig,
     bundle: &ExternalPartyAllocatePayload,
 ) -> Result<()> {
-    if bundle.topology_transactions.is_empty() {
-        anyhow::bail!("external-party onboarding submitted no topology transactions");
-    }
+    check_has_transactions("external-party onboarding", &bundle.topology_transactions)?;
 
     let this_participant = config.participant_id().to_string();
     let expected_key = party_signing_key(&bundle.public_key);
 
     for (index, serialized) in bundle.topology_transactions.iter().enumerate() {
-        // Two layers: Canton wraps a stable-versioned message in
-        // `UntypedVersionedMessage`, whose `data` is the `TopologyTransaction`.
-        let transaction = topology_version::decode_transaction(serialized).with_context(|| {
-            format!("topology transaction {index} is not a TopologyTransaction")
-        })?;
-
-        if transaction.operation != TopologyChangeOp::AddReplace as i32 {
-            anyhow::bail!(
-                "topology transaction {index} must be an ADD_REPLACE, got operation {op}",
-                op = transaction.operation
-            );
-        }
-        // Onboarding creates a party; it never replaces an existing mapping. A
-        // higher serial here would be an attempt to rewrite topology that already
-        // exists — including some other party's.
-        if transaction.serial != 1 {
-            anyhow::bail!(
-                "topology transaction {index} must have serial 1 for onboarding, got {serial}",
-                serial = transaction.serial
-            );
-        }
-
-        let Some(TopologyMapping {
-            mapping: Some(topology_mapping::Mapping::PartyToParticipant(p2p)),
-        }) = transaction.mapping
-        else {
-            anyhow::bail!(
-                "topology transaction {index} must carry a PartyToParticipant mapping; this \
-                 endpoint onboards external parties and authorizes nothing else"
-            );
-        };
+        let p2p = decode_p2p_change(
+            index,
+            serialized,
+            BundleSerial::Onboarding,
+            "onboards external parties",
+        )?;
 
         if p2p.party != bundle.party_id {
             anyhow::bail!(

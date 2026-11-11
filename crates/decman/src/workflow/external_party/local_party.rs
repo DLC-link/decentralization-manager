@@ -26,13 +26,10 @@
 //! forever. That asymmetry is inherent to a local party and cannot be engineered
 //! away; it can only be disclosed.
 
-use anyhow::Context;
 use canton_proto_rs::com::digitalasset::canton::{
     crypto::v30::{Signature, SignatureFormat, SigningAlgorithmSpec, SigningKeysWithThreshold},
     protocol::v30::{
-        PartyToParticipant, TopologyMapping,
-        enums::{ParticipantPermission, TopologyChangeOp},
-        topology_mapping,
+        PartyToParticipant, TopologyMapping, enums::ParticipantPermission, topology_mapping,
     },
     topology::admin::v30::{ForceFlag, SignTransactionsRequest, generate_transactions_request},
 };
@@ -45,9 +42,12 @@ use crate::{
         external_party::{
             add_hosts::{AddHostsError, CurrentPartyTopology},
             steps::party_signing_key,
-            topology_bundle::{generate_p2p_change, party_signed, read_pinned, submit_signed},
+            topology_bundle::{
+                BundleSerial, check_bundle_envelope, decode_p2p_change, generate_p2p_change,
+                party_signed, read_pinned, serial_after, submit_signed,
+            },
         },
-        topology, topology_version,
+        topology,
     },
 };
 
@@ -193,58 +193,27 @@ pub fn validate_adoption_topology(
     current: &CurrentPartyTopology,
     bundle: &LocalPartyAdoptionPayload,
 ) -> anyhow::Result<()> {
-    if bundle.topology_transactions.is_empty() {
-        anyhow::bail!("local-party adoption submitted no topology transactions");
-    }
-    if bundle.signatures.len() != bundle.topology_transactions.len() {
-        anyhow::bail!(
-            "local-party adoption submitted {t} transaction(s) and {s} signature(s); they must \
-             be index-aligned",
-            t = bundle.topology_transactions.len(),
-            s = bundle.signatures.len()
-        );
-    }
-    let next_serial = current.serial.checked_add(1).with_context(|| {
-        format!(
-            "{party} is at serial {s}, which cannot be advanced",
-            party = current.mapping.party,
-            s = current.serial
-        )
-    })?;
+    check_bundle_envelope(
+        "local-party adoption",
+        &bundle.topology_transactions,
+        &bundle.signatures,
+    )?;
+    let next_serial = serial_after(current)?;
 
     // Rebuilt locally from the submitted public key, so the comparison below is
     // against what this node would itself have written.
     let expected = adoption_mapping(config, &current.mapping, &bundle.public_key)?;
 
     for (index, serialized) in bundle.topology_transactions.iter().enumerate() {
-        let transaction = topology_version::decode_transaction(serialized).with_context(|| {
-            format!("topology transaction {index} is not a TopologyTransaction")
-        })?;
-
-        if transaction.operation != TopologyChangeOp::AddReplace as i32 {
-            anyhow::bail!(
-                "topology transaction {index} must be an ADD_REPLACE, got operation {op}",
-                op = transaction.operation
-            );
-        }
-        if transaction.serial != next_serial {
-            anyhow::bail!(
-                "topology transaction {index} has serial {serial}, which must be exactly one past \
-                 the current {current_serial}",
-                serial = transaction.serial,
-                current_serial = current.serial
-            );
-        }
-
-        let Some(TopologyMapping {
-            mapping: Some(topology_mapping::Mapping::PartyToParticipant(p2p)),
-        }) = transaction.mapping
-        else {
-            anyhow::bail!(
-                "topology transaction {index} must carry a PartyToParticipant mapping; this \
-                 endpoint converts a local party and authorizes nothing else"
-            );
-        };
+        let p2p = decode_p2p_change(
+            index,
+            serialized,
+            BundleSerial::Next {
+                current: current.serial,
+                next: next_serial,
+            },
+            "converts a local party",
+        )?;
 
         // Canton rewrites the key's usage (it appends ProofOfOwnership), so the
         // key is compared on material rather than on equality, exactly as the
@@ -362,6 +331,7 @@ mod tests {
     use canton_proto_rs::com::digitalasset::canton::{
         protocol::v30::{
             TopologyTransaction,
+            enums::TopologyChangeOp,
             party_to_participant::{HostingParticipant, hosting_participant},
         },
         version::v1::{UntypedVersionedMessage, untyped_versioned_message},
