@@ -453,6 +453,46 @@ mod tests {
         }
     }
 
+    /// The text of the error `validate_party_id_prefix` gives `prefix`.
+    fn prefix_error(prefix: &str) -> Option<String> {
+        validate_party_id_prefix(prefix)
+            .err()
+            .map(|e| e.to_string())
+    }
+
+    /// The server puts these messages into its 400 bodies, so each must keep
+    /// its exact text.
+    #[test]
+    fn party_prefix_errors_keep_their_messages() {
+        assert_eq!(
+            prefix_error("").as_deref(),
+            Some("Party prefix must not be empty")
+        );
+        assert_eq!(
+            prefix_error(&"a".repeat(MAX_PARTY_ID_PREFIX_LEN + 1)).as_deref(),
+            Some("Party prefix must be at most 180 characters (got 181)")
+        );
+        assert_eq!(
+            prefix_error("1abc").as_deref(),
+            Some("Party prefix must start with a letter (a-z, A-Z)")
+        );
+        assert_eq!(
+            prefix_error("a.b").as_deref(),
+            Some(
+                "Party prefix contains invalid character '.'; only ASCII letters, digits, \
+                 '-' and '_' are allowed"
+            )
+        );
+        assert_eq!(
+            prefix_error("caf\u{e9}").as_deref(),
+            Some(
+                "Party prefix contains invalid character '\u{e9}'; only ASCII letters, \
+                 digits, '-' and '_' are allowed"
+            )
+        );
+        assert_eq!(prefix_error("a-b_1"), None);
+    }
+
     #[test]
     fn party_prefix_enforces_max_length() {
         let at_limit = "a".repeat(MAX_PARTY_ID_PREFIX_LEN);
