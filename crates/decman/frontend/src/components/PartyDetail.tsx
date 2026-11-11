@@ -251,7 +251,6 @@ export const PartyDetail = ({
   const governanceContracts =
     party.contracts?.filter((c) => isGovRulesContract(c.template_id)) ?? [];
   const rulesContract = governanceContracts[0];
-  const governanceType = "core_self" as const;
 
   const editingContract =
     editGovContractId != null
@@ -380,10 +379,10 @@ export const PartyDetail = ({
     isOwner && {
       key: "propose",
       icon: <UploadFileIcon fontSize="small" />,
-      label: governanceType === "core_self" ? "New Proposal" : "Deploy Contracts",
+      label: "New Proposal",
       disabled: !ADMIN_ACCESS,
       onClick: () => {
-        if (governanceType === "core_self" && rulesContract) {
+        if (rulesContract) {
           setGovDialogView("proposals");
           setEditGovContractId(rulesContract.contract_id);
         } else {
@@ -1030,7 +1029,6 @@ export const PartyDetail = ({
           rulesContractId={editingContract.contract_id}
           defaultOperatorParty={operatorParty}
           network={network}
-          governanceType={governanceType}
           onAfterAction={() => {
             setGovernanceRefreshNonce((n) => n + 1);
             onNavigateToNotifications();

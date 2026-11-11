@@ -105,7 +105,6 @@ interface GovernanceSectionProps {
   rulesContractId?: string;
   defaultOperatorParty?: string;
   network?: Network;
-  governanceType?: "core_self" | "core_domain";
   /// Called after every successful mutating action (propose / confirm /
   /// execute / revoke / expire / domain confirm / domain execute) so the
   /// parent can refresh sibling views (e.g. the audit trail tab).
@@ -116,7 +115,7 @@ interface GovernanceSectionProps {
   onProposalCreated?: () => void;
   /// Which half of the section to render:
   /// - "actions"   = governance-action confirmations + new-action form
-  /// - "proposals" = domain-proposal list + new-proposal form (core_self only)
+  /// - "proposals" = domain-proposal list + new-proposal form
   view: "actions" | "proposals";
   /// When provided, the inline Submit Confirmation / Submit Proposal button
   /// is rendered into this DOM node (via `Portal`) instead of inline at the
@@ -151,7 +150,6 @@ export const GovernanceSection = ({
   rulesContractId: initialRulesContractId,
   defaultOperatorParty,
   network,
-  governanceType = "core_self",
   onAfterAction,
   onProposalCreated,
   view,
@@ -312,9 +310,7 @@ export const GovernanceSection = ({
 
   // Action form state
   const [selectedActionType, setSelectedActionType] = useState<ActionTypeKey>(
-    governanceType === "core_self"
-      ? "governance_add_member"
-      : "utility_create_provider_request",
+    "governance_add_member",
   );
   const [formLoading, setFormLoading] = useState(false);
 
@@ -1769,7 +1765,7 @@ export const GovernanceSection = ({
         party_id: partyId,
         rules_contract_id: rulesContractId,
         action,
-        governance_type: governanceType,
+        governance_type: "core_self",
       };
 
       const res = await authenticatedFetch(`${API_BASE}/governance/confirm`, {
@@ -2641,13 +2637,9 @@ export const GovernanceSection = ({
                   MenuProps={{ disableScrollLock: true }}
                 >
                   {getActionTypeOptions(network).filter((opt) => {
-                    if (opt.hidden && governanceType !== "core_self") return false;
-                    if (governanceType === "core_self") {
-                      // For governance-core, only show self-management actions
-                      const selfActions = ["governance_add_member", "governance_remove_member", "governance_set_threshold", "governance_set_timeout", "governance_set_disclosure_observers"];
-                      return selfActions.includes(opt.value);
-                    }
-                    return !opt.hidden;
+                    // For governance-core, only show self-management actions
+                    const selfActions = ["governance_add_member", "governance_remove_member", "governance_set_threshold", "governance_set_timeout", "governance_set_disclosure_observers"];
+                    return selfActions.includes(opt.value);
                   }).map(
                     (opt) => (
                       <MenuItem key={opt.value} value={opt.value}>
@@ -2707,7 +2699,7 @@ export const GovernanceSection = ({
       )}
 
       {/* Proposals — only for governance-core */}
-      {showProposalsHalf && governanceType === "core_self" && data && (
+      {showProposalsHalf && data && (
         <Box>
           <Collapse in>
             <Box sx={{ display: "flex", flexDirection: "column", gap: 1.5 }}>
