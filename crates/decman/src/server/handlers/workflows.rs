@@ -5124,6 +5124,174 @@ mod tests {
         Ok(())
     }
 
+    /// Caches `party` at namespace threshold `threshold`, hosted by `hosts`
+    /// (this node is `pid(1)`), each under its own owner key `k{tag}`. The
+    /// keys in `owners_only` own the party without hosting it. Only `peers`
+    /// are configured peers of this node.
+    ///
+    /// The party also gets a run in flight. A kick that passes every check
+    /// then stops at the in-flight guard with a 409, before it probes or
+    /// invites any peer.
+    async fn cache_kick_party(
+        pool: &SqlitePool,
+        party: &CantonId,
+        threshold: i64,
+        hosts: &[u8],
+        owners_only: &[&str],
+        peers: &[u8],
+    ) -> Result {
+        cache_party(pool, party, threshold, None).await?;
+        let mut keys: Vec<String> = hosts.iter().map(|tag| format!("k{tag}")).collect();
+        let host_rows = hosts
+            .iter()
+            .zip(&keys)
+            .map(|(tag, key)| Ok(host_row(&pid(*tag)?, Some(key))))
+            .collect::<anyhow::Result<Vec<_>>>()?;
+        keys.extend(owners_only.iter().map(ToString::to_string));
+        let mut tx = pool.begin_transaction().await?;
+        tx.replace_dec_party_participants(party, &host_rows).await?;
+        tx.replace_dec_party_owners(party, &keys).await?;
+        for tag in peers {
+            tx.insert_peer(&crate::config::Peer {
+                participant_id: pid(*tag)?,
+                name: format!("peer-{tag}"),
+                address: "127.0.0.1".to_string(),
+                port: 1,
+                public_key: String::new(),
+                party: None,
+            })
+            .await?;
+        }
+        Commitable::commit(tx).await?;
+        insert_run(pool, &in_progress_run("contracts-in-flight", party)).await
+    }
+
+    async fn post_kick(pool: SqlitePool, body: serde_json::Value) -> Result<(StatusCode, String)> {
+        let app = actix_test::init_service(
+            App::new()
+                .app_data(kick_state_on(pool).await?)
+                .service(start_kick),
+        )
+        .await;
+        let request = actix_test::TestRequest::post()
+            .uri("/kick")
+            .set_json(body)
+            .to_request();
+        request.extensions_mut().insert(admin());
+        Ok(status_and_body(actix_test::call_service(&app, request).await).await)
+    }
+
+    /// Issue #617: the operator removed a lost host from the peer list, then
+    /// kicked it. The remaining members still reach the threshold, so the
+    /// kick must pass every check. It reaches the in-flight guard, the last
+    /// step before invitations.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_host_removed_from_the_peer_list_can_still_be_kicked(pool: SqlitePool) -> Result {
+        let party = pid(41)?;
+        cache_kick_party(&pool, &party, 2, &[1, 2, 3], &[], &[2]).await?;
+
+        let (status, body) = post_kick(
+            pool,
+            serde_json::json!({
+                "decentralized_party_id": party,
+                "participant_id": pid(3)?,
+                "new_threshold": 2,
+            }),
+        )
+        .await?;
+        assert_eq!(status, StatusCode::CONFLICT, "{body}");
+        assert!(body.contains("already has a"), "{body}");
+        Ok(())
+    }
+
+    /// The threshold bound counts every host that stays, a host that is not
+    /// a peer included. Counted from this node and its peers, the bound
+    /// would be 2 instead of 3.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn the_threshold_bound_counts_a_host_that_is_not_a_peer(pool: SqlitePool) -> Result {
+        let party = pid(42)?;
+        cache_kick_party(&pool, &party, 2, &[1, 2, 3, 4], &[], &[2, 3]).await?;
+        let kick = |new_threshold: i64| -> anyhow::Result<serde_json::Value> {
+            Ok(serde_json::json!({
+                "decentralized_party_id": party,
+                "participant_id": pid(3)?,
+                "new_threshold": new_threshold,
+            }))
+        };
+
+        let (status, body) = post_kick(pool.clone(), kick(4)?).await?;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        assert!(
+            body.contains("new_threshold must be between 1 and 3"),
+            "{body}"
+        );
+
+        // Threshold 3 is in bounds, and this node and pid(2) still reach the
+        // namespace threshold of 2 without pid(4).
+        let (status, body) = post_kick(pool, kick(3)?).await?;
+        assert_eq!(status, StatusCode::CONFLICT, "{body}");
+        assert!(body.contains("already has a"), "{body}");
+        Ok(())
+    }
+
+    /// A host kick at a threshold equal to the host count can never collect
+    /// enough signatures, because the kicked host does not sign. The refusal
+    /// comes before any invitation. It is about the signers, so it does not
+    /// name the target, whose peer entry the kick does not need.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_kick_short_of_signers_does_not_blame_the_target(pool: SqlitePool) -> Result {
+        let party = pid(43)?;
+        cache_kick_party(&pool, &party, 3, &[1, 2, 3], &[], &[2]).await?;
+
+        let (status, body) = post_kick(
+            pool,
+            serde_json::json!({
+                "decentralized_party_id": party,
+                "participant_id": pid(3)?,
+                "new_threshold": 2,
+            }),
+        )
+        .await?;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        assert!(
+            body.contains("namespace threshold is 3, but only 2 members can sign"),
+            "{body}"
+        );
+        assert!(!body.contains(&pid(3)?.to_string()), "{body}");
+        Ok(())
+    }
+
+    /// An owner-only kick removes no host, so every host stays and has to
+    /// sign. A host that is not a peer cannot be invited. When that leaves
+    /// the run short of the threshold, the refusal names that host.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn an_owner_only_kick_short_of_signers_names_the_host_that_is_not_a_peer(
+        pool: SqlitePool,
+    ) -> Result {
+        let party = pid(44)?;
+        cache_kick_party(&pool, &party, 3, &[1, 2, 3], &["k5"], &[2]).await?;
+
+        let (status, body) = post_kick(
+            pool,
+            serde_json::json!({
+                "decentralized_party_id": party,
+                "owner_key": "k5",
+                "new_threshold": 2,
+            }),
+        )
+        .await?;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        assert!(
+            body.contains(&format!(
+                "{} is a member of the party but is not a configured peer of this node",
+                pid(3)?
+            )),
+            "{body}"
+        );
+        assert!(body.contains("namespace threshold is 3"), "{body}");
+        Ok(())
+    }
+
     async fn cache_party(
         pool: &SqlitePool,
         party: &CantonId,
