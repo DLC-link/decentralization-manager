@@ -7,6 +7,7 @@ use std::{
 
 use sqlx::SqlitePool;
 
+use super::owner_claims::{non_hosting_owners, owner_claims};
 use crate::{
     canton_id::CantonId,
     db::{
@@ -22,8 +23,6 @@ use crate::{
         },
     },
 };
-
-use super::owner_claims::{non_hosting_owners, owner_claims};
 
 /// Load cached parties from the dec_party tables.
 /// Returns the response and the newest `updated_at` timestamp (unix seconds).

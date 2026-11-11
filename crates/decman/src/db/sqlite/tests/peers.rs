@@ -2,13 +2,14 @@
 
 use sqlx::SqlitePool;
 
-use crate::db::sqlite::connect::MIGRATOR;
+use super::fixtures::test_peer;
 use crate::{
-    db::schema::{Commitable, SchemaRead, SchemaWrite},
+    db::{
+        schema::{Commitable, SchemaRead, SchemaWrite},
+        sqlite::connect::MIGRATOR,
+    },
     error::Result,
 };
-
-use super::fixtures::test_peer;
 
 // ====================================================================
 // Peers

@@ -8,13 +8,12 @@ use tokio::sync::RwLock;
 use super::{
     connection::handle_incoming_connection, ping::run_peer_ping_loop, triggers::WorkflowTriggers,
 };
-use crate::server::startup::spawn_supervised;
 use crate::{
     canton_id::CantonId,
     config::NodeConfig,
     db::schema::SchemaRead,
     noise::{load_or_generate_keypair, parse_public_key},
-    server::peer_status::LastSeen,
+    server::{peer_status::LastSeen, startup::spawn_supervised},
 };
 
 /// Background task that runs a Noise server for handling pings and invites

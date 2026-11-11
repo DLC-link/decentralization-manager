@@ -2,10 +2,10 @@
 
 use sqlx::SqlitePool;
 
-use crate::db::sqlite::connect::{
-    MIGRATION_CHECKSUM_REPAIRS, MIGRATOR, repair_migration_checksums,
+use crate::{
+    db::sqlite::connect::{MIGRATION_CHECKSUM_REPAIRS, MIGRATOR, repair_migration_checksums},
+    error::Result,
 };
-use crate::error::Result;
 
 #[sqlx::test(migrator = "MIGRATOR")]
 async fn repair_migration_checksums_unblocks_pre_edit_database(pool: SqlitePool) -> Result {

@@ -17,21 +17,19 @@ use canton_proto_rs::com::digitalasset::canton::{
     },
 };
 use chrono::{DateTime, Utc};
+use common::canton_id::CantonId;
 use prost_types::Timestamp;
 use serde_json::Value;
 use tonic::transport::Channel;
 
-use common::canton_id::CantonId;
-
+use super::{
+    queries::compare_versions,
+    types::{ExpectedPackageVersion, VettedPackageInfo},
+};
 use crate::{
     config::NodeConfig,
     utils,
     workflow::{contracts::DarFile, topology},
-};
-
-use super::{
-    queries::compare_versions,
-    types::{ExpectedPackageVersion, VettedPackageInfo},
 };
 
 /// Derive the stable package-name prefix from a package reference by

@@ -6,14 +6,17 @@ use canton_common::decimal::DamlDecimal;
 use canton_proto_rs::com::daml::ledger::api::v2::{CreatedEvent, Identifier, Record, value};
 use decman_lib::framework::record::{field_numeric, field_party, field_text};
 
-use crate::{canton_id::CantonId, config::NodeConfig, error::Result};
-
 use super::contracts::{ContractQueryParams, query_contracts_by_template};
-use crate::server::{
-    event_filters::{interface_filter, party_event_format, template_filter},
-    ledger_paging::fetch_active_contracts_filtered,
-    record::{field_record, record_field},
-    types::HoldingInfo,
+use crate::{
+    canton_id::CantonId,
+    config::NodeConfig,
+    error::Result,
+    server::{
+        event_filters::{interface_filter, party_event_format, template_filter},
+        ledger_paging::fetch_active_contracts_filtered,
+        record::{field_record, record_field},
+        types::HoldingInfo,
+    },
 };
 
 // ============================================================================
@@ -345,9 +348,9 @@ fn extract_preapproval_entries(args: &Record) -> Vec<(String, String)> {
 
 #[cfg(test)]
 mod tests {
-    use super::super::test_values::*;
-    use super::*;
     use canton_proto_rs::com::daml::ledger::api::v2::{InterfaceView, Value};
+
+    use super::{super::test_values::*, *};
 
     // ------------------------------------------------------------------------
     // extract_holding_view

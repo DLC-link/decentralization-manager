@@ -7,6 +7,7 @@ use actix_web::web;
 use futures::future::BoxFuture;
 use sqlx::SqlitePool;
 
+use super::runs::{mark_run_completed, mark_run_failed};
 use crate::{
     auth::WorkflowAuth,
     config::NodeConfig,
@@ -23,8 +24,6 @@ use crate::{
         DarsConfig, KickConfig, OnboardingConfig,
     },
 };
-
-use super::runs::{mark_run_completed, mark_run_failed};
 
 /// The workflow a coordinator run drives, with its config. Each variant
 /// holds the config of its kind, so a start cannot pass the wrong one.
@@ -406,13 +405,14 @@ pub(crate) async fn launch_coordinator(
 
 #[cfg(test)]
 mod launch_tests {
+    use super::{
+        super::test_support::{CapturedLogs, in_progress_run, insert_run, pid, test_node},
+        *,
+    };
     use crate::{
         db::{MIGRATOR, schema::SchemaRead},
         server::types::WorkflowRole,
     };
-
-    use super::super::test_support::{CapturedLogs, in_progress_run, insert_run, pid, test_node};
-    use super::*;
 
     type TestResult = anyhow::Result<()>;
 

@@ -8,6 +8,7 @@ use std::{
 
 use sqlx::SqlitePool;
 
+use super::{cache::store_parties_to_db, fetch::fetch_decentralized_parties, list::PartyReadOpts};
 use crate::{
     auth::WorkflowAuth,
     canton_id::CantonId,
@@ -20,8 +21,6 @@ use crate::{
         types::{DecentralizedPartiesResponse, DecentralizedParty},
     },
 };
-
-use super::{cache::store_parties_to_db, fetch::fetch_decentralized_parties, list::PartyReadOpts};
 
 /// How many parties [`fetch_decentralized_parties`] reads at once.
 ///
@@ -416,8 +415,7 @@ async fn budgeted_fetch(
 }
 #[cfg(test)]
 mod tests {
-    use super::super::test_support::a_party;
-    use super::*;
+    use super::{super::test_support::a_party, *};
 
     /// A party this node does not belong to leaves no cached rows, so without
     /// a record of the completed discovery every request re-ran it. The

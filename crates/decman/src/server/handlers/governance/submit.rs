@@ -4,30 +4,34 @@ use std::collections::HashSet;
 
 use anyhow::Context;
 use base64::Engine;
-
 use canton_proto_rs::com::daml::ledger::api::v2::{
     CreatedEvent, DisclosedContract, SubmitAndWaitRequest,
     command_service_client::CommandServiceClient, value,
 };
-use decman_lib::catalog::commands::{
-    build_cancel_domain_confirmation, build_cancel_proposal, build_cancel_self_confirmation,
-    build_confirm_proposal, build_confirm_self_action, build_execute_proposal,
-    build_execute_self_action, build_expire_domain_confirmation, build_expire_self_confirmation,
+use decman_lib::{
+    catalog::{
+        commands::{
+            build_cancel_domain_confirmation, build_cancel_proposal,
+            build_cancel_self_confirmation, build_confirm_proposal, build_confirm_self_action,
+            build_execute_proposal, build_execute_self_action, build_expire_domain_confirmation,
+            build_expire_self_confirmation,
+        },
+        proposals::{credential::AcceptPaidCredential, utility::RequestDevNetFeaturedAppRight},
+        templates::{
+            domain_confirmation_template, governable_action_interface, governance_rules_template,
+            self_confirmation_template,
+        },
+    },
+    framework::record::record_field,
 };
-use decman_lib::catalog::proposals::credential::AcceptPaidCredential;
-use decman_lib::catalog::proposals::utility::RequestDevNetFeaturedAppRight;
-use decman_lib::catalog::templates::{
-    domain_confirmation_template, governable_action_interface, governance_rules_template,
-    self_confirmation_template,
-};
-use decman_lib::framework::record::record_field;
 
-use crate::server::handlers::token_standard::fetch_amulet_rules;
+use super::disclosures::{PaidAcceptPins, amulet_rules_disclosure, paid_accept_disclosures};
 use crate::{
     canton_id::CantonId,
     config::{NodeConfig, PackageConfig},
     error::Result,
     server::{
+        handlers::token_standard::fetch_amulet_rules,
         queries::resolve_contract_package_ref,
         transfer_context::{
             fetch_proposal_created_event, has_template, maybe_fetch_for_proposal_event,
@@ -40,8 +44,6 @@ use crate::{
     },
     utils,
 };
-
-use super::disclosures::{PaidAcceptPins, amulet_rules_disclosure, paid_accept_disclosures};
 
 // ============================================================================
 // Ledger Command Execution

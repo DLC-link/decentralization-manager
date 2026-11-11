@@ -5,10 +5,10 @@ use std::{
     sync::{Arc, RwLock as StdRwLock},
 };
 
+use common::types::{WorkflowKind, WorkflowProgress, WorkflowRole};
 use tokio::sync::RwLock;
 
 use crate::{canton_id::CantonId, noise::server::ActiveWorkflow};
-use common::types::{WorkflowKind, WorkflowProgress, WorkflowRole};
 
 /// Trait for workflow status types that can be used with HttpWorkflowState
 pub trait WorkflowStatus: Default + Copy + Send + Sync {}
@@ -234,6 +234,8 @@ impl WorkflowStatus for WorkflowProgress {}
 
 #[cfg(test)]
 mod tests {
+    use sqlx::SqlitePool;
+
     use super::*;
     use crate::{
         config::{NetworkConfig, NodeConfig},
@@ -243,7 +245,6 @@ mod tests {
         server::peer_status::LastSeen,
         workflow::OnboardingStep,
     };
-    use sqlx::SqlitePool;
 
     /// Build a real `ActiveWorkflow` (the enum is over `NoiseServer<S>`, which
     /// has no test double) for registry routing tests. `dir` must outlive the

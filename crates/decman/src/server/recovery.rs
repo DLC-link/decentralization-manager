@@ -5,20 +5,20 @@ use std::sync::Arc;
 use sqlx::SqlitePool;
 use tokio::sync::{RwLock, mpsc};
 
-use crate::server::types::{WorkflowProgress, WorkflowRole, WorkflowRun};
-use crate::server::{
-    PeerJob, WorkflowInstance, WorkflowRegistry, handlers,
-    handlers::{
-        CoordinatorRequest, NodeHandles, RunEnd, StatusOrder, TaskStart, run_log,
-        spawn_coordinator_task,
-    },
-};
 use crate::{
     auth::WorkflowAuth,
     config::NodeConfig,
     db::schema::{Commitable, SchemaRead, SchemaWrite},
     error::Result,
-    server::peer_status::LastSeen,
+    server::{
+        PeerJob, WorkflowInstance, WorkflowRegistry, handlers,
+        handlers::{
+            CoordinatorRequest, NodeHandles, RunEnd, StatusOrder, TaskStart, run_log,
+            spawn_coordinator_task,
+        },
+        peer_status::LastSeen,
+        types::{WorkflowProgress, WorkflowRole, WorkflowRun},
+    },
 };
 
 /// On boot, re-spawn any InProgress workflow runs that were interrupted by the

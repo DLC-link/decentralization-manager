@@ -8,6 +8,7 @@ use std::{
 
 use sqlx::SqlitePool;
 
+use super::owner_claims::supplement_owner_keys_from_topology;
 use crate::{
     canton_id::{CantonId, Fingerprint},
     config::{NodeConfig, Peer},
@@ -16,11 +17,8 @@ use crate::{
         schema::{Commitable, SchemaRead, SchemaWrite},
     },
     noise::{Message, MessageType, NoiseError, NoiseKeypair, parse_public_key, send_noise_message},
-    server::types::DecentralizedParty,
+    server::{handlers::packages::peer_failure_hint, types::DecentralizedParty},
 };
-
-use super::owner_claims::supplement_owner_keys_from_topology;
-use crate::server::handlers::packages::peer_failure_hint;
 
 /// A peer reported an owner key that this node kept off its records. Either
 /// a peer reports a key that is not its own, or a host changed its key while
@@ -428,8 +426,9 @@ fn forget_removed_peers(peers: &[Peer]) {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use http::StatusCode;
+
+    use super::*;
 
     /// The parties view asks every peer again about once a minute. A peer
     /// that keeps failing must warn once, not on every refresh (#332).

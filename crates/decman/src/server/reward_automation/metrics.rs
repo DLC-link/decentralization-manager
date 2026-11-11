@@ -3,9 +3,9 @@
 
 //! Reward automation metrics.
 
-use prometheus::{GaugeVec, IntCounter, IntCounterVec};
-
 use std::sync::LazyLock;
+
+use prometheus::{GaugeVec, IntCounter, IntCounterVec};
 
 // ============================================================================
 // Metrics

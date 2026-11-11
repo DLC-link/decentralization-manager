@@ -2,10 +2,15 @@
 
 use sqlx::SqlitePool;
 
-use crate::db::sqlite::{connect::MIGRATOR, read::RECENT_GOVERNANCE_AUDIT_SQL};
-use crate::{canton_id::CantonId, db::schema::SchemaRead, error::Result};
-
 use super::fixtures::TEST_NS;
+use crate::{
+    canton_id::CantonId,
+    db::{
+        schema::SchemaRead,
+        sqlite::{connect::MIGRATOR, read::RECENT_GOVERNANCE_AUDIT_SQL},
+    },
+    error::Result,
+};
 
 // ====================================================================
 // Governance Audit

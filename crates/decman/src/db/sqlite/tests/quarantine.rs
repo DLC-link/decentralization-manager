@@ -2,10 +2,12 @@
 
 use sqlx::SqlitePool;
 
-use crate::db::sqlite::connect::MIGRATOR;
 use crate::{
     canton_id::CantonId,
-    db::schema::{SchemaRead, SchemaWrite},
+    db::{
+        schema::{SchemaRead, SchemaWrite},
+        sqlite::connect::MIGRATOR,
+    },
     error::Result,
 };
 

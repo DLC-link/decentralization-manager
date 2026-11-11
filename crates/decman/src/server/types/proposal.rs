@@ -258,29 +258,33 @@ impl ProposalType {
 
 #[cfg(test)]
 mod tests {
-    use super::super::test_support::test_party;
-    use super::*;
     use common::api::InstrumentId;
-    use decman_lib::catalog::proposals::core::GenericVote;
-    use decman_lib::catalog::proposals::credential::{
-        AcceptFreeCredential, AcceptPaidCredential, OfferFreeCredential, OfferPaidCredential,
+    use decman_lib::catalog::{
+        proposals::{
+            core::GenericVote,
+            credential::{
+                AcceptFreeCredential, AcceptPaidCredential, OfferFreeCredential,
+                OfferPaidCredential,
+            },
+            custody::{AcceptTransfer, SetupCcPreapproval, SetupTokenPreapproval, Transfer},
+            rewards::{
+                AcceptExternalPartySetup, RevokeCouponReassignmentDelegation,
+                SetupCouponReassignmentDelegation, SetupMintingDelegation,
+            },
+            utility::{
+                AcceptBurnRequest, AcceptMintRequest, Burn, CreateDelegatedBatchedMarkersProxy,
+                CreateProviderConfiguration, CreateProviderServiceRequest,
+                CreateRegistrarServiceRequest, CreateTransferRule, CreateUserServiceRequest, Mint,
+                OffboardInstrumentIssuers, OnboardInstrumentIssuers, OnboardRegistrar,
+                ProvisionInstrument, ProvisionProviderService, RequestDevNetFeaturedAppRight,
+                SetEnableResultContracts, SetProviderAppRewardBeneficiaries, SetupUtility,
+                UpdateInstrumentConfiguration,
+            },
+        },
+        types::{AppTransferContextInput, BillingParams},
     };
-    use decman_lib::catalog::proposals::custody::{
-        AcceptTransfer, SetupCcPreapproval, SetupTokenPreapproval, Transfer,
-    };
-    use decman_lib::catalog::proposals::rewards::{
-        AcceptExternalPartySetup, RevokeCouponReassignmentDelegation,
-        SetupCouponReassignmentDelegation, SetupMintingDelegation,
-    };
-    use decman_lib::catalog::proposals::utility::{
-        AcceptBurnRequest, AcceptMintRequest, Burn, CreateDelegatedBatchedMarkersProxy,
-        CreateProviderConfiguration, CreateProviderServiceRequest, CreateRegistrarServiceRequest,
-        CreateTransferRule, CreateUserServiceRequest, Mint, OffboardInstrumentIssuers,
-        OnboardInstrumentIssuers, OnboardRegistrar, ProvisionInstrument, ProvisionProviderService,
-        RequestDevNetFeaturedAppRight, SetEnableResultContracts, SetProviderAppRewardBeneficiaries,
-        SetupUtility, UpdateInstrumentConfiguration,
-    };
-    use decman_lib::catalog::types::{AppTransferContextInput, BillingParams};
+
+    use super::{super::test_support::test_party, *};
 
     /// One minimal instance per `ProposalType` variant, in declaration order.
     /// Field values are placeholders — this only exercises which variants

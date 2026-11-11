@@ -5,7 +5,6 @@ use actix_web::{
 };
 use prometheus::{Encoder, TextEncoder};
 use serde::Serialize;
-
 use sqlx::SqlitePool;
 
 use crate::{
@@ -210,10 +209,11 @@ async fn save_peers_to_db(db: &SqlitePool, peers: &[Peer]) -> Result {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use actix_web::{App, http::StatusCode};
     use common::canton_id::CantonId;
     use utoipa::PartialSchema;
+
+    use super::*;
 
     // Compressed generator point: valid hex, valid length, and on the curve.
     const VALID_KEY: &str = "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798";

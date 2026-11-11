@@ -12,19 +12,18 @@ use canton_proto_rs::com::{
     },
 };
 
+use super::{templates::TemplateId, transfers::is_execute_before_expired};
 use crate::{
     canton_id::CantonId,
     config::{NodeConfig, PackageConfig},
     error::Result,
+    server::{
+        chain_audit::record_to_json,
+        event_filters::{interface_filter, party_event_format, template_filter},
+        ledger_paging::{FETCH_CHUNK, fetch_active_contracts_filtered, for_each_active_contract},
+        types::{ContractInfo, ContractWithBlob, PartyMetadata},
+    },
     utils,
-};
-
-use super::{templates::TemplateId, transfers::is_execute_before_expired};
-use crate::server::{
-    chain_audit::record_to_json,
-    event_filters::{interface_filter, party_event_format, template_filter},
-    ledger_paging::{FETCH_CHUNK, fetch_active_contracts_filtered, for_each_active_contract},
-    types::{ContractInfo, ContractWithBlob, PartyMetadata},
 };
 
 /// Get active contracts for a party
@@ -423,13 +422,13 @@ pub async fn query_contracts_by_template(
 
 #[cfg(test)]
 mod tests {
-    use super::super::test_values::*;
-    use super::*;
     use canton_proto_rs::com::daml::ledger::api::v2::{
         InterfaceView, List, Record, RecordField, Value,
         admin::{ObjectMeta, PartyDetails},
         value,
     };
+
+    use super::{super::test_values::*, *};
 
     fn ci(name: &str, version: &str, created_at: &str, contract_id: &str) -> ContractInfo {
         ContractInfo {

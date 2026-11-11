@@ -2,9 +2,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use sqlx::SqlitePool;
 
-use crate::{auth::Principal, canton_id::CantonId};
-
 use super::types::GovernanceType;
+use crate::{auth::Principal, canton_id::CantonId};
 
 /// Event types for the governance audit trail
 #[derive(Clone, Copy, Debug)]

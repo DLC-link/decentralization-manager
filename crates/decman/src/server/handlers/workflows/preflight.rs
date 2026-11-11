@@ -277,13 +277,19 @@ async fn broadcast_simple_message(
 
 #[cfg(test)]
 mod tests {
-    use super::super::runs::{mark_run_completed, mark_run_failed};
-    use super::super::test_support::{in_progress_run, pid};
-    use super::*;
-    use crate::db::MIGRATOR;
+    use super::{
+        super::{
+            runs::{mark_run_completed, mark_run_failed},
+            test_support::{in_progress_run, pid},
+        },
+        *,
+    };
     use crate::{
         consts::OWNER_ONLY_KICK,
-        db::schema::{Commitable, SchemaWrite},
+        db::{
+            MIGRATOR,
+            schema::{Commitable, SchemaWrite},
+        },
     };
 
     /// The invariant the completion ordering rests on: once a run row is

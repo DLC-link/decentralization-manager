@@ -3,6 +3,7 @@
 use actix_web::{HttpRequest, HttpResponse, Responder, get, post, web};
 use base64::{Engine, engine::general_purpose::STANDARD};
 
+use super::audit::{audited_write, record_import_end};
 use crate::{
     server::{
         AppState,
@@ -12,16 +13,16 @@ use crate::{
             ErrorResponse, TenantAcsBlockResponse, TenantAcsImportRequest, TenantAcsImportResponse,
         },
     },
-    workflow::external_party::add_hosts::{read_party_to_participant, replication_target},
-    workflow::party_replication::{
-        ClearOutcome, collect_party_package_ids, open_export_session,
-        pipe::{PipeBlock, PipeTrailer},
-        relay::{AcceptedBlock, OnImportEnd, ServedBlock},
-        request_onboarding_flag_clear,
+    workflow::{
+        external_party::add_hosts::{read_party_to_participant, replication_target},
+        party_replication::{
+            ClearOutcome, collect_party_package_ids, open_export_session,
+            pipe::{PipeBlock, PipeTrailer},
+            relay::{AcceptedBlock, OnImportEnd, ServedBlock},
+            request_onboarding_flag_clear,
+        },
     },
 };
-
-use super::audit::{audited_write, record_import_end};
 
 // ============================================================================
 // ACS replication, relayed by the wallet
@@ -475,9 +476,10 @@ fn relay_held_response(party_id: &str) -> HttpResponse {
 
 #[cfg(test)]
 mod tests {
-    use super::super::onboard::tenant_prepare;
-    use super::super::test_support::test_participant;
-    use super::*;
+    use super::{
+        super::{onboard::tenant_prepare, test_support::test_participant},
+        *,
+    };
 
     /// A party id that `replication_target` accepts.
     fn valid_party() -> String {

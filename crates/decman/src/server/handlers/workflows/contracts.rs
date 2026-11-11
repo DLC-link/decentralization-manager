@@ -3,11 +3,17 @@
 use std::collections::HashSet;
 
 use actix_web::{HttpRequest, HttpResponse, Responder, get, post, web};
-
 use anyhow::Context;
 use sqlx::SqlitePool;
 
-use crate::server::handlers::parties::resolve_owner_keys_from_peers;
+use super::{
+    invites::{InviteLabels, Recipients, invite_log, send_invites},
+    launch::{CoordinatorRequest, RunEnd, StatusOrder, launch_coordinator, run_log},
+    preflight::{
+        find_inprogress_run_for_party, format_incompatible_peers, preflight_incompatible_peers,
+    },
+    runs::{kind_status, now_secs, register_and_persist},
+};
 use crate::{
     canton_id::CantonId,
     config::{NodeConfig, Peer},
@@ -17,6 +23,7 @@ use crate::{
     server::{
         AppState,
         error::ApiError,
+        handlers::parties::resolve_owner_keys_from_peers,
         middleware::require_admin,
         types::{
             ContractsInvitePayload, ContractsRequest, ErrorResponse, WorkflowInstance,
@@ -24,15 +31,6 @@ use crate::{
         },
     },
     workflow::{self, ContractsStep},
-};
-
-use super::{
-    invites::{InviteLabels, Recipients, invite_log, send_invites},
-    launch::{CoordinatorRequest, RunEnd, StatusOrder, launch_coordinator, run_log},
-    preflight::{
-        find_inprogress_run_for_party, format_incompatible_peers, preflight_incompatible_peers,
-    },
-    runs::{kind_status, now_secs, register_and_persist},
 };
 
 // ============================================================================
@@ -343,10 +341,13 @@ async fn send_contracts_invites(
 
 #[cfg(test)]
 mod tests {
-    use super::super::test_support::{pid, test_cid};
-    use super::*;
-    use crate::{auth::Principal, server::AppState};
     use actix_web::{App, HttpMessage, http::StatusCode, test as actix_test};
+
+    use super::{
+        super::test_support::{pid, test_cid},
+        *,
+    };
+    use crate::{auth::Principal, server::AppState};
 
     #[test]
     fn contracts_invite_payload_roundtrips_with_defaults() -> anyhow::Result<()> {
@@ -414,14 +415,16 @@ mod start_contracts_tests {
     use actix_web::http::StatusCode;
     use serde_json::json;
 
-    use super::super::{
-        preflight::{format_incompatible_peers, preflight_incompatible_peers},
-        test_support::{
-            Answer, TestNode, break_table, cache_party, closed_port, in_progress_run, insert_peers,
-            insert_run, peer, pid, post_as, post_as_admin, test_node,
+    use super::{
+        super::{
+            preflight::{format_incompatible_peers, preflight_incompatible_peers},
+            test_support::{
+                Answer, TestNode, break_table, cache_party, closed_port, in_progress_run,
+                insert_peers, insert_run, peer, pid, post_as, post_as_admin, test_node,
+            },
         },
+        *,
     };
-    use super::*;
     use crate::db::MIGRATOR;
 
     type Result<T = ()> = anyhow::Result<T>;
@@ -588,8 +591,10 @@ mod plan_contracts_tests {
 
     use common::api::ContractDefinition;
 
-    use super::super::test_support::{peer, pid};
-    use super::*;
+    use super::{
+        super::test_support::{peer, pid},
+        *,
+    };
 
     type Result<T = ()> = anyhow::Result<T>;
 

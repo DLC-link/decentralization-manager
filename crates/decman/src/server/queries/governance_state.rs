@@ -7,16 +7,16 @@ use crate::{
     canton_id::CantonId,
     config::{NodeConfig, PackageConfig},
     error::Result,
-    utils,
-};
-
-use crate::server::{
-    event_filters::{party_event_format, template_filter, wildcard_filter},
-    ledger_paging::fetch_first_active_contract,
-    package_inventory::{
-        fetch_package_id_to_name, fetch_package_names, newest_matching_names, package_name_prefix,
+    server::{
+        event_filters::{party_event_format, template_filter, wildcard_filter},
+        ledger_paging::fetch_first_active_contract,
+        package_inventory::{
+            fetch_package_id_to_name, fetch_package_names, newest_matching_names,
+            package_name_prefix,
+        },
+        types::GovernanceState,
     },
-    types::GovernanceState,
+    utils,
 };
 
 // ============================================================================

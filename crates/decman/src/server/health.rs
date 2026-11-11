@@ -1,16 +1,16 @@
 use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
 
+// `WorkflowInfo` now lives in the shared `common` crate (consumed by both this
+// server and the `decman-cli` client). Re-exported here so the existing
+// `crate::server::health::WorkflowInfo` path keeps working.
+pub use common::types::WorkflowInfo;
+
 use crate::{
     db::schema::SchemaRead,
     noise::{Message, MessageType},
     server::ConnectionStatus,
 };
-
-// `WorkflowInfo` now lives in the shared `common` crate (consumed by both this
-// server and the `decman-cli` client). Re-exported here so the existing
-// `crate::server::health::WorkflowInfo` path keeps working.
-pub use common::types::WorkflowInfo;
 
 /// Health report a node returns in response to a `Health` Noise message.
 ///
@@ -149,13 +149,12 @@ pub(crate) fn classify_health_reply(reply: &[u8]) -> HealthReply {
 mod tests {
     use anyhow::Context;
 
+    use super::*;
     use crate::{
         db::MIGRATOR,
         error::Result,
         server::{WorkflowKind, WorkflowRole},
     };
-
-    use super::*;
 
     #[test]
     fn health_response_payload_round_trips() -> Result {

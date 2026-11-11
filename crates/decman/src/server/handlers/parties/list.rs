@@ -7,6 +7,14 @@ use canton_proto_rs::com::digitalasset::canton::crypto::admin::v30::vault_servic
 use serde::Deserialize;
 use sqlx::SqlitePool;
 
+use super::{
+    cache::load_cached_parties,
+    discovery::{
+        Discovery, DiscoveryGate, MAX_PREFIX_LEN, SINGLE_FLIGHT_WAIT, discover_and_cache,
+        discovery_completed_since, is_within_ttl, now_secs,
+    },
+    owner_keys::resolve_owner_keys_from_peers,
+};
 use crate::{
     canton_id::CantonId,
     config::NodeConfig,
@@ -17,15 +25,6 @@ use crate::{
         types::{DecentralizedPartiesResponse, DecentralizedParty, ErrorResponse, ResponseSource},
     },
     utils,
-};
-
-use super::{
-    cache::load_cached_parties,
-    discovery::{
-        Discovery, DiscoveryGate, MAX_PREFIX_LEN, SINGLE_FLIGHT_WAIT, discover_and_cache,
-        discovery_completed_since, is_within_ttl, now_secs,
-    },
-    owner_keys::resolve_owner_keys_from_peers,
 };
 
 /// Query parameters for decentralized parties endpoint

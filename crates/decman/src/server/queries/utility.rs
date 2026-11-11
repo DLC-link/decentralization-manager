@@ -4,21 +4,20 @@ use canton_common::decimal::DamlDecimal;
 use canton_proto_rs::com::daml::ledger::api::v2::{CreatedEvent, Record, value};
 use decman_lib::framework::record::{field_int64, field_numeric, field_party, field_text};
 
-use crate::{
-    canton_id::CantonId,
-    config::{NodeConfig, PackageConfig},
-    error::Result,
-};
-
 use super::templates::{
     credential_offer_template, credential_template, fetch_by_template, provider_service_template,
     user_service_template,
 };
-use crate::server::{
-    record::{field_record, record_field},
-    types::{
-        BillingParams, Claim, CredentialInfo, CredentialOfferInfo, ProviderServiceInfo,
-        UserServiceInfo,
+use crate::{
+    canton_id::CantonId,
+    config::{NodeConfig, PackageConfig},
+    error::Result,
+    server::{
+        record::{field_record, record_field},
+        types::{
+            BillingParams, Claim, CredentialInfo, CredentialOfferInfo, ProviderServiceInfo,
+            UserServiceInfo,
+        },
     },
 };
 
@@ -232,9 +231,9 @@ fn extract_credential_info(created: &CreatedEvent) -> Option<CredentialInfo> {
 
 #[cfg(test)]
 mod tests {
-    use super::super::test_values::*;
-    use super::*;
     use canton_proto_rs::com::daml::ledger::api::v2::Value;
+
+    use super::{super::test_values::*, *};
 
     // ------------------------------------------------------------------------
     // extract_credential_offer_info

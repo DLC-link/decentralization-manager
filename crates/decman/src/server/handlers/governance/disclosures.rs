@@ -4,17 +4,18 @@ use std::collections::HashSet;
 
 use anyhow::Context;
 use base64::Engine;
-
 use canton_proto_rs::com::daml::ledger::api::v2::{CreatedEvent, DisclosedContract, value};
 use decman_lib::framework::record::{
     extract_contract_id, field_contract_id, field_record, record_field,
 };
 
-use crate::server::handlers::token_standard::{AmuletRulesContract, fetch_amulet_rules};
 use crate::{
     config::NodeConfig,
     error::Result,
-    server::scan::{self, OpenMiningRound, ScanNotConfigured},
+    server::{
+        handlers::token_standard::{AmuletRulesContract, fetch_amulet_rules},
+        scan::{self, OpenMiningRound, ScanNotConfigured},
+    },
 };
 
 /// The `AmuletRules` disclosure for a `RequestDevNetFeaturedAppRight` or
@@ -171,17 +172,16 @@ fn open_round_disclosure(pinned: &str, rounds: &[OpenMiningRound]) -> Result<Dis
 #[cfg(test)]
 mod paid_accept_disclosure_tests {
     use actix_web::{body::to_bytes, http::StatusCode};
-    use decman_lib::catalog::types::AppTransferContextInput;
-    use decman_lib::framework::DamlProtoEncode;
+    use decman_lib::{
+        catalog::{proposals::credential::AcceptPaidCredential, types::AppTransferContextInput},
+        framework::DamlProtoEncode,
+    };
     use wiremock::{
         Mock, MockServer, ResponseTemplate,
         matchers::{method, path},
     };
 
-    use super::*;
-    use decman_lib::catalog::proposals::credential::AcceptPaidCredential;
-
-    use super::super::actions::execute_failure_response;
+    use super::{super::actions::execute_failure_response, *};
 
     const ROUNDS: &str = include_str!("../../testdata/scan/open_and_issuing_mining_rounds.json");
     const FEATURED_APP_RIGHT: &str = include_str!("../../testdata/scan/featured_app_right.json");

@@ -1,19 +1,19 @@
 //! Governance requests and responses, reward status and audit queries.
 
-use decman_lib::catalog::action::ActionType;
-
-use serde::{Deserialize, Serialize};
-
-use crate::canton_id::CantonId;
-use common::api::PAGE_SIZE;
 use common::api::{
     ChainAuditEntry, CouponReassignmentDelegationSummary, DisclosedContractInput, GovernanceType,
+    PAGE_SIZE,
 };
-use decman_lib::catalog::types::{
-    AcceptTransferDetails, RewardBeneficiary, ServiceRequestDetails, TransferProposalDetails,
+use decman_lib::catalog::{
+    action::ActionType,
+    types::{
+        AcceptTransferDetails, RewardBeneficiary, ServiceRequestDetails, TransferProposalDetails,
+    },
 };
+use serde::{Deserialize, Serialize};
 
 use super::proposal::ProposalType;
+use crate::canton_id::CantonId;
 
 /// Request to propose a governance domain action (creates proposal contract)
 #[derive(Clone, Debug, Deserialize, Serialize, utoipa::ToSchema)]
@@ -370,8 +370,7 @@ pub fn chain_audit_entry_from_row(row: crate::db::rows::ChainAuditCacheRow) -> C
 
 #[cfg(test)]
 mod tests {
-    use super::super::test_support::test_party;
-    use super::*;
+    use super::{super::test_support::test_party, *};
 
     /// `/governance/confirmations` is deserialized by the integration-test
     /// harness, so the response has to survive a round trip in the shape the

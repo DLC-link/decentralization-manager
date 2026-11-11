@@ -8,10 +8,13 @@ use canton_proto_rs::com::daml::ledger::api::v2::{
     get_active_contracts_response::ContractEntry,
 };
 
-use crate::{canton_id::CantonId, config::NodeConfig, utils};
-
-use crate::server::event_filters::{
-    interface_filter, party_event_format, template_filter, wildcard_filter,
+use crate::{
+    canton_id::CantonId,
+    config::NodeConfig,
+    server::event_filters::{
+        interface_filter, party_event_format, template_filter, wildcard_filter,
+    },
+    utils,
 };
 
 // ============================================================================

@@ -3,9 +3,12 @@
 use std::collections::HashMap;
 
 use actix_web::{HttpRequest, HttpResponse, Responder, get, post, web};
-
 use sqlx::SqlitePool;
 
+use super::{
+    preflight::send_retry_workflow,
+    runs::{count_run_started, now_secs},
+};
 use crate::{
     canton_id::CantonId,
     db::schema::{Commitable, SchemaRead, SchemaWrite},
@@ -20,11 +23,6 @@ use crate::{
         },
     },
     workflow::{self, storage::WorkflowStorage},
-};
-
-use super::{
-    preflight::send_retry_workflow,
-    runs::{count_run_started, now_secs},
 };
 
 // ============================================================================
@@ -491,8 +489,7 @@ pub async fn retry_workflow(
 
 #[cfg(test)]
 mod tests {
-    use super::super::test_support::test_cid;
-    use super::*;
+    use super::{super::test_support::test_cid, *};
 
     fn enrich_run(config_json: &str, expected_peers: Vec<CantonId>) -> WorkflowRun {
         WorkflowRun {

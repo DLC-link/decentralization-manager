@@ -11,6 +11,9 @@ use canton_proto_rs::com::digitalasset::canton::{
 };
 use sqlx::SqlitePool;
 
+use super::{
+    discovery::PARTY_READ_CONCURRENCY, list::PartyReadOpts, owner_claims::with_cached_owner_claims,
+};
 use crate::{
     auth::WorkflowAuth,
     canton_id::CantonId,
@@ -34,10 +37,6 @@ use crate::{
     },
     utils,
     workflow::topology,
-};
-
-use super::{
-    discovery::PARTY_READ_CONCURRENCY, list::PartyReadOpts, owner_claims::with_cached_owner_claims,
 };
 
 /// Fetch decentralized parties from Canton topology and ledger APIs.
@@ -343,9 +342,10 @@ pub(super) async fn fetch_decentralized_parties(
 
 #[cfg(test)]
 mod tests {
-    use super::super::cache::store_parties_to_db;
-    use super::super::test_support::a_party;
-    use super::*;
+    use super::{
+        super::{cache::store_parties_to_db, test_support::a_party},
+        *,
+    };
     use crate::{config::Network, db::MIGRATOR};
 
     /// Discovery is the same query on every network, because it reads the

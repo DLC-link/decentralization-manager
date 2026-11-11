@@ -2,11 +2,15 @@
 
 use sqlx::{SqliteConnection, SqlitePool};
 
-use crate::db::{
-    rows::{OwnerKeyRefusal, PendingInvitationRow},
-    schema::SchemaWrite,
+use crate::{
+    canton_id::CantonId,
+    db::{
+        rows::{OwnerKeyRefusal, PendingInvitationRow},
+        schema::SchemaWrite,
+    },
+    error::Result,
+    server::PendingInvitation,
 };
-use crate::{canton_id::CantonId, error::Result, server::PendingInvitation};
 
 impl SchemaWrite for SqlitePool {
     type Transaction = sqlx::Transaction<'static, sqlx::Sqlite>;

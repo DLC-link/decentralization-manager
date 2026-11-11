@@ -7,8 +7,8 @@ mod ping;
 mod replies;
 mod triggers;
 
-pub(crate) use heartbeat::run_heartbeat;
-pub(crate) use triggers::WorkflowTriggers;
 // The peer failure tests drive a connection directly.
 #[cfg(test)]
 pub(crate) use connection::handle_incoming_connection;
+pub(crate) use heartbeat::run_heartbeat;
+pub(crate) use triggers::WorkflowTriggers;

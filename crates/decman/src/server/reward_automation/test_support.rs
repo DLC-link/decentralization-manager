@@ -6,9 +6,8 @@
 use canton_proto_rs::com::daml::ledger::api::v2::{Record, RecordField, Value, value};
 use chrono::{DateTime, Utc};
 
-use crate::canton_id::CantonId;
-
 use super::coupons::CouponInfo;
+use crate::canton_id::CantonId;
 
 pub fn value(sum: value::Sum) -> Value {
     Value { sum: Some(sum) }

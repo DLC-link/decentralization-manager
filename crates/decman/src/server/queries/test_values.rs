@@ -1,10 +1,8 @@
 //! Ledger value builders shared by the query tests.
 
-use canton_proto_rs::com::daml::ledger::api::v2::{Record, value};
-
-use canton_proto_rs::com::daml::ledger::api::v2::Value;
-
-use canton_proto_rs::com::daml::ledger::api::v2::{List, Optional, RecordField, Variant};
+use canton_proto_rs::com::daml::ledger::api::v2::{
+    List, Optional, Record, RecordField, Value, Variant, value,
+};
 
 pub fn field(label: &str, value: Value) -> RecordField {
     RecordField {

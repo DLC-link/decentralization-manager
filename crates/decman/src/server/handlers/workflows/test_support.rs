@@ -7,6 +7,7 @@ use actix_web::{App, HttpMessage, dev::HttpServiceFactory, http::StatusCode, tes
 use sqlx::SqlitePool;
 
 use crate::{
+    auth::Principal,
     canton_id::CantonId,
     config::Peer,
     db::{
@@ -19,8 +20,6 @@ use crate::{
         types::{ErrorResponse, WorkflowKind, WorkflowProgress, WorkflowRole, WorkflowRun},
     },
 };
-
-use crate::auth::Principal;
 
 /// A minimal coordinator run row for `party`, in progress.
 pub fn in_progress_run(instance: &str, party: &CantonId) -> WorkflowRun {

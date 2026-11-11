@@ -1,24 +1,32 @@
 //! The propose endpoint.
 
 use actix_web::{HttpRequest, HttpResponse, Responder, post, web};
-
 use canton_proto_rs::com::daml::ledger::api::v2::{
     Commands, SubmitAndWaitForTransactionRequest, SubmitAndWaitRequest,
     command_service_client::CommandServiceClient,
 };
-use decman_lib::catalog::commands::build_confirm_proposal;
-use decman_lib::catalog::proposals::custody::{
-    AcceptTransfer, AcceptTransferWithContext, Transfer, TransferWithContext,
+use decman_lib::{
+    catalog::{
+        commands::build_confirm_proposal,
+        proposals::{
+            custody::{AcceptTransfer, AcceptTransferWithContext, Transfer, TransferWithContext},
+            rewards::SetupCouponReassignmentDelegation,
+            utility::WithCredentialIdNonce,
+        },
+        templates::governance_rules_template,
+    },
+    framework::{
+        commands::{build_propose, first_created_contract_id},
+        encode::TransferValidity,
+    },
 };
-use decman_lib::catalog::proposals::rewards::SetupCouponReassignmentDelegation;
-use decman_lib::catalog::proposals::utility::WithCredentialIdNonce;
-use decman_lib::catalog::templates::governance_rules_template;
-use decman_lib::framework::commands::{build_propose, first_created_contract_id};
-use decman_lib::framework::encode::TransferValidity;
-
 use sqlx::SqlitePool;
 use tonic::transport::Channel;
 
+use super::{
+    credentials::{PartySession, packages},
+    metrics::{ActionOutcome, ActionStep, count_action},
+};
 use crate::{
     canton_id::CantonId,
     config::{NodeConfig, PackageConfig},
@@ -39,11 +47,6 @@ use crate::{
         },
     },
     utils,
-};
-
-use super::{
-    credentials::{PartySession, packages},
-    metrics::{ActionOutcome, ActionStep, count_action},
 };
 
 // ============================================================================
@@ -736,8 +739,9 @@ mod propose_guard_tests {
 #[cfg(test)]
 mod propose_step_tests {
     use common::api::InstrumentId;
-    use decman_lib::catalog::proposals::core::GenericVote;
-    use decman_lib::framework::encode::TRANSFER_VALIDITY_WINDOW_MICROS;
+    use decman_lib::{
+        catalog::proposals::core::GenericVote, framework::encode::TRANSFER_VALIDITY_WINDOW_MICROS,
+    };
 
     use super::*;
 
@@ -965,8 +969,9 @@ mod confirm_tests {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use std::collections::HashSet;
+
+    use super::*;
 
     /// `core_domain` builds its choice from `proposal_cid` and never reads
     /// `action`, so both clients send `governance_set_threshold: 0` as a

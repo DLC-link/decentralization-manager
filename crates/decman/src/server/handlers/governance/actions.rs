@@ -1,21 +1,7 @@
 //! Confirm, execute, expire and cancel endpoints.
 
 use actix_web::{HttpRequest, HttpResponse, Responder, post, web};
-
 use sqlx::SqlitePool;
-
-use crate::canton_id::CantonId;
-use crate::server::{
-    AppState,
-    audit::{AuditEvent, AuditParams, spawn_audit_log},
-    error::ApiError,
-    middleware::require_admin,
-    scan::ScanNotConfigured,
-    types::{
-        CancelConfirmationRequest, CancelProposalRequest, ConfirmActionRequest, ErrorResponse,
-        ExecuteActionRequest, ExpireConfirmationRequest, GovernanceType, MessageResponse,
-    },
-};
 
 use super::{
     credentials::{PartySession, packages},
@@ -24,6 +10,20 @@ use super::{
     submit::{
         execute_cancel_confirmation, execute_cancel_proposal, execute_confirm_action,
         execute_confirmed_action, execute_expire_confirmation,
+    },
+};
+use crate::{
+    canton_id::CantonId,
+    server::{
+        AppState,
+        audit::{AuditEvent, AuditParams, spawn_audit_log},
+        error::ApiError,
+        middleware::require_admin,
+        scan::ScanNotConfigured,
+        types::{
+            CancelConfirmationRequest, CancelProposalRequest, ConfirmActionRequest, ErrorResponse,
+            ExecuteActionRequest, ExpireConfirmationRequest, GovernanceType, MessageResponse,
+        },
     },
 };
 

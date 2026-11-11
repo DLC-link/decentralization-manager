@@ -3,10 +3,12 @@
 use actix_web::{HttpRequest, HttpResponse, Responder, get, post, web};
 use base64::{Engine, engine::general_purpose::STANDARD};
 
+use super::{audit::audited_write, wire::decode_public_key};
 use crate::{
     canton_id::validate_party_id_prefix,
     server::{
         AppState,
+        handlers::workflows::validate_confirmation_threshold,
         middleware::tenant_caller,
         tenant_call_audit::TenantEndpoint,
         types::{
@@ -22,10 +24,6 @@ use crate::{
         },
     },
 };
-
-use crate::server::handlers::workflows::validate_confirmation_threshold;
-
-use super::{audit::audited_write, wire::decode_public_key};
 
 // ============================================================================
 // Onboarding (wallet-driven)

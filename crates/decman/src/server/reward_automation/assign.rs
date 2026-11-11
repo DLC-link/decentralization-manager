@@ -9,19 +9,9 @@ use canton_proto_rs::com::daml::ledger::api::v2::{
     command_service_client::CommandServiceClient, value,
 };
 use chrono::{DateTime, Utc};
-use decman_lib::framework::commands::commands_envelope;
-use decman_lib::framework::encode::{
-    field, make_contract_id, make_extra_args, make_list, make_party, make_text_map,
-};
-
-use crate::{
-    canton_id::CantonId,
-    config::{NodeConfig, PackageConfig},
-    utils,
-};
-
-use crate::server::{
-    package_inventory::fetch_package_id_to_name, queries::fetch_contract_template_id,
+use decman_lib::framework::{
+    commands::commands_envelope,
+    encode::{field, make_contract_id, make_extra_args, make_list, make_party, make_text_map},
 };
 
 use super::{
@@ -29,6 +19,12 @@ use super::{
     delegation::ActiveDelegation,
     metrics::{ASSIGNED, SKIPPED, ZERO_ASSIGNED},
     scheduler::sweep_assigned_nothing,
+};
+use crate::{
+    canton_id::CantonId,
+    config::{NodeConfig, PackageConfig},
+    server::{package_inventory::fetch_package_id_to_name, queries::fetch_contract_template_id},
+    utils,
 };
 
 // ============================================================================
@@ -555,10 +551,13 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::super::test_support::{DAVE, alice, canton_err, cids, coupon, dt};
-    use super::*;
     use anyhow::anyhow;
     use decman_lib::catalog::types::RewardBeneficiary;
+
+    use super::{
+        super::test_support::{DAVE, alice, canton_err, cids, coupon, dt},
+        *,
+    };
 
     /// Test-only helper mirroring `server::types` tests: builds a
     /// [`RewardBeneficiary`] from a Canton-ID prefix + a decimal percentage

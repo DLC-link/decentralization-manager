@@ -5,12 +5,11 @@ use std::sync::Arc;
 use sqlx::SqlitePool;
 use tokio::sync::{RwLock, mpsc};
 
-use crate::server::PeerJob;
-use crate::server::types::WorkflowProgress;
 use crate::{
     auth::WorkflowAuth,
     config::NodeConfig,
     db::schema::{Commitable, SchemaRead, SchemaWrite},
+    server::{PeerJob, types::WorkflowProgress},
     workflow,
 };
 

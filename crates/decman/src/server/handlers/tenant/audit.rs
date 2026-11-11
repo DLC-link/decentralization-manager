@@ -198,26 +198,29 @@ fn error_text(body: &[u8]) -> Option<String> {
 /// opened without Canton, so the tests need no participant.
 #[cfg(test)]
 mod tests {
-    use super::super::{
-        acs::tenant_acs_import,
-        add_hosts::{tenant_add_hosts_execute, tenant_add_hosts_execute_on_this_host},
-        onboard::tenant_execute,
+    use actix_web::{App, http::StatusCode, test as actix_test};
+    use base64::{Engine, engine::general_purpose::STANDARD};
+    use serde_json::json;
+    use sqlx::SqlitePool;
+
+    use super::{
+        super::{
+            acs::tenant_acs_import,
+            add_hosts::{tenant_add_hosts_execute, tenant_add_hosts_execute_on_this_host},
+            onboard::tenant_execute,
+        },
+        *,
     };
-    use super::*;
-    use crate::server::types::TenantAddHostsExecuteRequest;
-    use crate::workflow::external_party::add_hosts::replication_target;
     use crate::{
         canton_id::CantonId,
         db::MIGRATOR,
         server::{
             middleware::AuthMiddleware,
             tenant_call_audit::{PARTY_ID_CAP, TenantCallAuditRow},
+            types::TenantAddHostsExecuteRequest,
         },
+        workflow::external_party::add_hosts::replication_target,
     };
-    use actix_web::{App, http::StatusCode, test as actix_test};
-    use base64::{Engine, engine::general_purpose::STANDARD};
-    use serde_json::json;
-    use sqlx::SqlitePool;
 
     /// The audit names the key by its position, and must never carry the key.
     #[test]

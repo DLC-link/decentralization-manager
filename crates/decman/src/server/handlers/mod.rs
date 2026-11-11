@@ -26,6 +26,8 @@ pub(crate) use former_parties::{
     dismiss_former_party, list_former_parties, preview_former_party_purge, purge_former_party,
     reconnect_after_purge,
 };
+// Server startup forces the governance action counter through this.
+pub(crate) use governance::register_metrics as register_governance_metrics;
 pub(crate) use governance::{
     cancel_confirmation, cancel_proposal, confirm_action, execute_action, expire_confirmation,
     get_coupon_reassignment_delegation, get_governance, get_governance_audit,
@@ -36,8 +38,6 @@ pub(crate) use governance::{
 // governance-poller modules, re-exported here so they are reachable through the
 // private `governance` submodule.
 pub(crate) use governance::{get_party_credentials, packages};
-// Server startup forces the governance action counter through this.
-pub(crate) use governance::register_metrics as register_governance_metrics;
 pub(crate) use invitations::{
     accept_invitation, decline_invitation, get_invitation_dar, get_invitations,
     list_handled_invitations,

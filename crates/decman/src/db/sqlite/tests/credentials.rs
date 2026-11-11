@@ -2,15 +2,16 @@
 
 use sqlx::SqlitePool;
 
-use crate::db::sqlite::connect::MIGRATOR;
+use super::fixtures::{TEST_NS, test_creds};
 use crate::{
     canton_id::CantonId,
     config::{Auth0M2MConfig, PartyCredentials},
-    db::schema::{Commitable, SchemaRead, SchemaWrite},
+    db::{
+        schema::{Commitable, SchemaRead, SchemaWrite},
+        sqlite::connect::MIGRATOR,
+    },
     error::Result,
 };
-
-use super::fixtures::{TEST_NS, test_creds};
 
 // ====================================================================
 // Party Credentials

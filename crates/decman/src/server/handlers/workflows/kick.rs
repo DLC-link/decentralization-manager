@@ -3,10 +3,23 @@
 use std::collections::HashSet;
 
 use actix_web::{HttpRequest, HttpResponse, Responder, get, post, web};
-
 use anyhow::Context;
 use sqlx::SqlitePool;
 
+use super::{
+    invites::{InviteLabels, Recipients, invite_log, send_invites},
+    kick_target::{
+        KickTarget, cached_confirmation_threshold, cached_namespace_threshold,
+        kick_threshold_bound, party_member_count, resolve_kick_target,
+    },
+    launch::{CoordinatorRequest, RunEnd, StatusOrder, launch_coordinator, run_log},
+    preflight::{
+        find_inprogress_run_for_party, format_incompatible_peers,
+        format_peers_lacking_owner_only_kick, incompatible_versions, lacking_feature,
+        probe_invitee_health,
+    },
+    runs::{kind_status, now_secs, register_and_persist},
+};
 use crate::{
     canton_id::CantonId,
     config::{NodeConfig, Peer},
@@ -27,21 +40,6 @@ use crate::{
         },
     },
     workflow::{self, KickStep},
-};
-
-use super::{
-    invites::{InviteLabels, Recipients, invite_log, send_invites},
-    kick_target::{
-        KickTarget, cached_confirmation_threshold, cached_namespace_threshold,
-        kick_threshold_bound, party_member_count, resolve_kick_target,
-    },
-    launch::{CoordinatorRequest, RunEnd, StatusOrder, launch_coordinator, run_log},
-    preflight::{
-        find_inprogress_run_for_party, format_incompatible_peers,
-        format_peers_lacking_owner_only_kick, incompatible_versions, lacking_feature,
-        probe_invitee_health,
-    },
-    runs::{kind_status, now_secs, register_and_persist},
 };
 
 /// Start a kick workflow to remove a participant from a decentralized party
@@ -510,14 +508,16 @@ mod start_kick_tests {
     use actix_web::http::StatusCode;
     use serde_json::json;
 
-    use super::super::{
-        preflight::{format_incompatible_peers, incompatible_versions, probe_invitee_health},
-        test_support::{
-            Answer, TestNode, break_table, cache_party, closed_port, in_progress_run, insert_peers,
-            insert_run, peer, pid, post_as, post_as_admin, test_node,
+    use super::{
+        super::{
+            preflight::{format_incompatible_peers, incompatible_versions, probe_invitee_health},
+            test_support::{
+                Answer, TestNode, break_table, cache_party, closed_port, in_progress_run,
+                insert_peers, insert_run, peer, pid, post_as, post_as_admin, test_node,
+            },
         },
+        *,
     };
-    use super::*;
     use crate::db::MIGRATOR;
 
     type Result<T = ()> = anyhow::Result<T>;
@@ -857,8 +857,10 @@ mod plan_kick_tests {
     //! Calls the pure kick checks with members, owners and peers, and pins
     //! each refusal text.
 
-    use super::super::test_support::{peer, pid};
-    use super::*;
+    use super::{
+        super::test_support::{peer, pid},
+        *,
+    };
 
     type Result<T = ()> = anyhow::Result<T>;
 

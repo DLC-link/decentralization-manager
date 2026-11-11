@@ -6,7 +6,6 @@ use std::{
 };
 
 use actix_web::web;
-
 use prometheus::IntCounterVec;
 use sqlx::SqlitePool;
 
@@ -385,13 +384,23 @@ pub(super) async fn kind_status(
 
 #[cfg(test)]
 mod tests {
-    use super::super::test_support::{admin, in_progress_run, pid};
-    use super::super::{cancel::cancel_workflow_instance, listing::retry_workflow};
-    use super::*;
-    use crate::workflow::{self, AddPartyStep, OnboardingStep};
-    use crate::{db::MIGRATOR, server::AppState};
-    use actix_web::{App, HttpMessage, http::StatusCode, test as actix_test};
     use std::collections::HashSet;
+
+    use actix_web::{App, HttpMessage, http::StatusCode, test as actix_test};
+
+    use super::{
+        super::{
+            cancel::cancel_workflow_instance,
+            listing::retry_workflow,
+            test_support::{admin, in_progress_run, pid},
+        },
+        *,
+    };
+    use crate::{
+        db::MIGRATOR,
+        server::AppState,
+        workflow::{self, AddPartyStep, OnboardingStep},
+    };
 
     fn started(kind: WorkflowKind) -> u64 {
         RUNS_STARTED

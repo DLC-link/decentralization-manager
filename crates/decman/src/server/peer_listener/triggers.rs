@@ -2,22 +2,23 @@
 
 use std::sync::Arc;
 
+use common::api::ContractDeploymentIntent;
 use sqlx::SqlitePool;
 use tokio::sync::{RwLock, mpsc};
 
-use crate::server::state::PeerChunkCache;
-use common::api::ContractDeploymentIntent;
-
-use crate::canton_id::CantonId;
-use crate::server::types::{
-    AddPartyInvitePayload, ChangeThresholdInvitePayload, ContractsInvitePayload, DarsInvitePayload,
-    InvitationType, KickInvitePayload, OnboardingInvitePayload, PendingInvitation,
-    WorkflowProgress, WorkflowRole,
-};
-use crate::server::{PeerJob, WorkflowRegistry, refire_peer};
 use crate::{
+    canton_id::CantonId,
     config::{NodeConfig, PartyCredentials},
     db::schema::{Commitable, SchemaRead, SchemaWrite},
+    server::{
+        PeerJob, WorkflowRegistry, refire_peer,
+        state::PeerChunkCache,
+        types::{
+            AddPartyInvitePayload, ChangeThresholdInvitePayload, ContractsInvitePayload,
+            DarsInvitePayload, InvitationType, KickInvitePayload, OnboardingInvitePayload,
+            PendingInvitation, WorkflowProgress, WorkflowRole,
+        },
+    },
 };
 
 /// Workflow triggers shared across Noise server handlers

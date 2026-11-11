@@ -10,8 +10,6 @@ use chrono::Utc;
 use serde::Deserialize;
 use sqlx::SqlitePool;
 
-use crate::server::handlers::token_standard::fetch_dso_info;
-
 use crate::{
     canton_id::CantonId,
     config::{NodeConfig, Peer},
@@ -20,6 +18,7 @@ use crate::{
     noise::NoiseError,
     server::{
         AppState,
+        handlers::token_standard::fetch_dso_info,
         package_inventory::{TopologyReader, expected_splice_versions, fetch_vetted_packages},
         types::{
             ErrorResponse, ExpectedVersionsResponse, PackageInfo, PeerErrorKind,
@@ -357,8 +356,9 @@ fn peer_package_result(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use http::StatusCode;
+
+    use super::*;
 
     fn test_peer(name: &str) -> anyhow::Result<Peer> {
         Ok(Peer {

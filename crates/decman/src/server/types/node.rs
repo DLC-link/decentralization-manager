@@ -1,10 +1,11 @@
 //! Node liveness, participant permissions and workflow response aliases.
 
 use canton_proto_rs::com::digitalasset::canton::protocol::v30::enums::ParticipantPermission;
+use common::{
+    api::WorkflowResponse,
+    types::{Permission, WorkflowProgress},
+};
 use serde::Serialize;
-
-use common::api::WorkflowResponse;
-use common::types::{Permission, WorkflowProgress};
 
 /// Liveness response for the `/healthz` ping endpoint. The body is
 /// intentionally tiny: the frontend uses it to time its own round-trip to
@@ -48,13 +49,13 @@ pub type OnboardingResponse = WorkflowResponse;
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::canton_id::CantonId;
-    use crate::error::Result;
     use common::types::{
         AcsTransferDirection, AcsTransferProgress, WorkflowKind, WorkflowRole, WorkflowRun,
     };
     use serde_json::Value;
+
+    use super::*;
+    use crate::{canton_id::CantonId, error::Result};
 
     /// The card reads these field names and the lowercase direction straight
     /// off the wire, and `acs_progress` must vanish rather than appear as

@@ -7,12 +7,14 @@ use base64::{Engine, engine::general_purpose::STANDARD};
 use hyper::{Body, Response, StatusCode};
 use sqlx::SqlitePool;
 
-use crate::server::state::{PEER_CHUNK_CACHE_TTL, PeerChunkCache};
-use crate::server::types::{RequestDarPayload, WorkflowKind};
 use crate::{
     db::schema::SchemaRead,
     error::Result,
     noise::{CHUNK_SIZE, MAX_CHUNKED_TOTAL_SIZE, MAX_PAYLOAD_SIZE, Message, MessageType},
+    server::{
+        state::{PEER_CHUNK_CACHE_TTL, PeerChunkCache},
+        types::{RequestDarPayload, WorkflowKind},
+    },
     workflow,
 };
 
@@ -133,6 +135,9 @@ pub(super) async fn peer_payload_response(
 #[cfg(test)]
 mod tests {
     mod serving_a_dar_to_a_peer {
+        use base64::{Engine, engine::general_purpose::STANDARD};
+        use sqlx::SqlitePool;
+
         use super::super::dar_for_invited_peer;
         use crate::{
             canton_id::CantonId,
@@ -145,8 +150,6 @@ mod tests {
             },
             workflow::DarsConfig,
         };
-        use base64::{Engine, engine::general_purpose::STANDARD};
-        use sqlx::SqlitePool;
 
         const DAR: &[u8] = b"not really a DAR, but bytes are bytes";
 

@@ -4,6 +4,10 @@ use std::sync::Arc;
 
 use actix_web::{HttpRequest, HttpResponse, Responder, post, web};
 
+use super::{
+    preflight::send_cancel_invites,
+    runs::{mark_run_cancelled, pick_coordinator_run},
+};
 use crate::{
     db::schema::SchemaRead,
     server::{
@@ -14,11 +18,6 @@ use crate::{
             WorkflowRole,
         },
     },
-};
-
-use super::{
-    preflight::send_cancel_invites,
-    runs::{mark_run_cancelled, pick_coordinator_run},
 };
 
 /// Shared cancel logic for the legacy per-kind endpoints. Picks the coordinator

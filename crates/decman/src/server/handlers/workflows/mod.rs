@@ -16,6 +16,9 @@ mod runs;
 #[cfg(test)]
 mod test_support;
 
+// The onboarding and contracts handlers reach these as `super::…`.
+use super::{Discovery, DiscoveryGate, discover_and_cache};
+
 pub use add_party::{cancel_add_party, get_add_party_status, start_add_party};
 pub use cancel::{
     cancel_contracts, cancel_dars, cancel_kick, cancel_onboarding, cancel_workflow_instance,
@@ -34,6 +37,3 @@ pub(crate) use launch::{
 pub use listing::{dismiss_workflow, list_external_parties, list_workflows, retry_workflow};
 pub use onboarding::{get_onboarding_status, start_onboarding};
 pub(crate) use runs::{mark_run_failed, register_run_metrics};
-
-// The onboarding and contracts handlers reach these as `super::…`.
-use super::{Discovery, DiscoveryGate, discover_and_cache};

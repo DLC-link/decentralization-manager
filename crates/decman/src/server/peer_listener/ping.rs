@@ -5,12 +5,11 @@ use std::{collections::HashMap, sync::Arc, time::Duration};
 use sqlx::SqlitePool;
 use tokio::sync::RwLock;
 
-use crate::server::peer_status;
 use crate::{
     config::NodeConfig,
     db::schema::SchemaRead,
     noise::{Message, MessageType, NoiseKeypair, parse_public_key},
-    server::peer_status::LastSeen,
+    server::{peer_status, peer_status::LastSeen},
 };
 
 /// Ping peers every 5 seconds

@@ -44,14 +44,10 @@ mod serde_snapshots;
 pub(crate) mod health;
 pub(crate) mod peer_status;
 
-pub(crate) use package_inventory::fetch_vetted_package_ids;
-pub(crate) use queries::compare_versions;
-
 // Reached externally as `dec_party_manager::server::NodeConfigResponse` by the
 // `gen-types` binary (a separate crate from this lib), so it must stay `pub`.
 pub use handlers::NodeConfigResponse;
 pub(crate) use handlers::{CoordinatorRequest, mark_run_failed};
-pub(crate) use types::*;
 // These wire DTOs are likewise reached externally as `dec_party_manager::server::…`,
 // by `gen-types` (TS generation) and, for `GovernanceResponse`, by the integration
 // tests under `tests/` — both are separate crates that can only see `pub` items.
@@ -60,9 +56,12 @@ pub use node_health::{
     ComponentHealth, ComponentState, LinkHealth, NodeHealthResponse, NodeHealthStatus,
     ParticipantHealth, SynchronizerHealth, TopologyQueues,
 };
+pub(crate) use package_inventory::fetch_vetted_package_ids;
+pub(crate) use queries::compare_versions;
 pub(crate) use recovery::{mark_failed_via_pool, refire_peer, respawn_coordinator};
 pub use startup::{metrics_server, start_server};
 pub use state::AppState;
+pub(crate) use types::*;
 pub use types::{
     AcceptTransferDetails, ActionType, AppRewardBeneficiary, BillingParams, BurnRequestsResponse,
     ConfirmActionRequest, CredentialOfferInfo, CredentialOffersResponse, DomainConfirmation,

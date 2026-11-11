@@ -3,10 +3,18 @@
 use std::collections::HashSet;
 
 use actix_web::{HttpRequest, HttpResponse, Responder, get, post, web};
-
 use anyhow::Context;
 use sqlx::SqlitePool;
 
+use super::{
+    cancel::cancel_workflow_state,
+    invites::{InviteLabels, Recipients, invite_log, send_invites},
+    launch::{CoordinatorRequest, RunEnd, StatusOrder, launch_coordinator, run_log},
+    preflight::{
+        find_inprogress_run_for_party, format_incompatible_peers, preflight_incompatible_peers,
+    },
+    runs::{kind_status, now_secs, register_and_persist},
+};
 use crate::{
     canton_id::CantonId,
     config::NodeConfig,
@@ -24,16 +32,6 @@ use crate::{
         },
     },
     workflow::{self, ChangeThresholdStep, thresholds::check_confirmation_threshold},
-};
-
-use super::{
-    cancel::cancel_workflow_state,
-    invites::{InviteLabels, Recipients, invite_log, send_invites},
-    launch::{CoordinatorRequest, RunEnd, StatusOrder, launch_coordinator, run_log},
-    preflight::{
-        find_inprogress_run_for_party, format_incompatible_peers, preflight_incompatible_peers,
-    },
-    runs::{kind_status, now_secs, register_and_persist},
 };
 
 // ============================================================================
@@ -374,14 +372,16 @@ mod start_change_threshold_tests {
     use actix_web::http::StatusCode;
     use serde_json::json;
 
-    use super::super::{
-        preflight::{format_incompatible_peers, preflight_incompatible_peers},
-        test_support::{
-            Answer, TestNode, break_table, cache_party, closed_port, in_progress_run, insert_peers,
-            insert_run, peer, pid, post_as, post_as_admin, test_node,
+    use super::{
+        super::{
+            preflight::{format_incompatible_peers, preflight_incompatible_peers},
+            test_support::{
+                Answer, TestNode, break_table, cache_party, closed_port, in_progress_run,
+                insert_peers, insert_run, peer, pid, post_as, post_as_admin, test_node,
+            },
         },
+        *,
     };
-    use super::*;
     use crate::db::MIGRATOR;
 
     type Result<T = ()> = anyhow::Result<T>;
@@ -615,8 +615,7 @@ mod check_change_threshold_tests {
     //! Calls the pure threshold-change checks with members, and pins each
     //! refusal text.
 
-    use super::super::test_support::pid;
-    use super::*;
+    use super::{super::test_support::pid, *};
 
     type Result<T = ()> = anyhow::Result<T>;
 

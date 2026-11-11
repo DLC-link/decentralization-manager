@@ -2,6 +2,7 @@
 
 use actix_web::{HttpResponse, Responder, get, web};
 
+use super::credentials::{get_party_token, packages};
 use crate::{
     canton_id::CantonId,
     db::{rows::ChainAuditCacheRow, schema::SchemaRead},
@@ -14,8 +15,6 @@ use crate::{
         },
     },
 };
-
-use super::credentials::{get_party_token, packages};
 
 /// Get paginated governance audit trail
 ///
@@ -239,8 +238,7 @@ mod governance_audit_endpoint_tests {
     use sqlx::SqlitePool;
 
     use super::*;
-    use crate::db::MIGRATOR;
-    use crate::error::Result;
+    use crate::{db::MIGRATOR, error::Result};
 
     fn party(prefix: &str) -> Result<CantonId> {
         CantonId::parse(&format!("{prefix}::1220{}", "ab".repeat(32)))
