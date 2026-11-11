@@ -17,6 +17,10 @@ import Governance.Action (GovernableAction)
 -- field, so the governance party can expire or consume a confirmation
 -- without the confirmer's participant (#615). The confirmer authorizes the
 -- create as the controller of `GovernanceRules_ConfirmAction`.
+--
+-- Any party can sign a confirmation that names itself as the governance
+-- party. Every `GovernanceRules` choice that reads a confirmation therefore
+-- requires `governanceParty` to match its own.
 template GovernanceConfirmation
   with
     governanceParty : Party

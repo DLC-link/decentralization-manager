@@ -55,8 +55,8 @@ data GovernanceSelfAction
 
 -- | A confirmation for a governance self-management action.
 -- Uses value equality on GovernanceSelfAction for matching (closed enum, safe to compare).
--- Signed like `GovernanceConfirmation`: the governance party alone, with the
--- confirmer as a plain field.
+-- Signed and checked like `GovernanceConfirmation`: the governance party
+-- alone signs, and the confirmer is a plain field.
 template GovernanceSelfConfirmation
   with
     governanceParty : Party
@@ -346,6 +346,8 @@ template GovernanceRules
         -- before counting threshold — only member votes count toward N.
         now <- getTime
         fetched <- mapA (\cid -> exercise cid GovernanceSelfConfirmation_Consume) confirmations
+        require "All confirmations belong to this governance party"
+          (all (\c -> c.governanceParty == governanceParty) fetched)
         let valid = filter (\c -> c.expiresAt > now) fetched
         let memberVotes = filter (\c -> c.confirmer `Set.member` members) valid
         require "All confirmations must match the action being executed"
@@ -411,6 +413,9 @@ template GovernanceRules
       controller member
       do
         require "Only governance members can expire confirmations" (member `Set.member` members)
+        staleConfirmation <- fetch staleConfirmationCid
+        require "Confirmation belongs to this governance party"
+          (staleConfirmation.governanceParty == governanceParty)
         exercise staleConfirmationCid GovernanceSelfConfirmation_Expire
 
     -- ════════════════════════════════════════════════════════════════════════
@@ -462,6 +467,8 @@ template GovernanceRules
         -- Consume and validate confirmations
         now <- getTime
         fetched <- mapA (\cid -> exercise cid GovernanceConfirmation_Consume) confirmations
+        require "All confirmations belong to this governance party"
+          (all (\c -> c.governanceParty == governanceParty) fetched)
         let valid = filter (\c -> c.expiresAt > now) fetched
         require "All confirmations must reference the same proposal"
           (all (\c -> c.actionProposalCid == actionProposalCid) valid)
@@ -513,4 +520,7 @@ template GovernanceRules
       controller member
       do
         require "Only governance members can expire confirmations" (member `Set.member` members)
+        staleConfirmation <- fetch staleConfirmationCid
+        require "Confirmation belongs to this governance party"
+          (staleConfirmation.governanceParty == governanceParty)
         exercise staleConfirmationCid GovernanceConfirmation_Expire
