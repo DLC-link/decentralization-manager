@@ -62,8 +62,8 @@ pub async fn start_onboarding(
     // of the Canton party id (`<prefix>::<namespace>`), and a bad character
     // would otherwise fail deep in the workflow as an opaque Canton proto
     // deserialization error ~90s later. Fail fast with a clear 400 instead.
-    if let Err(msg) = validate_party_id_prefix(&body.party_id_prefix) {
-        return ApiError::BadRequest(msg).into_response();
+    if let Err(e) = validate_party_id_prefix(&body.party_id_prefix) {
+        return ApiError::BadRequest(e.to_string()).into_response();
     }
 
     // Pre-flight: every selected peer must have every other selected peer in

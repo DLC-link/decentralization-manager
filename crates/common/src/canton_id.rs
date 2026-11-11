@@ -296,6 +296,29 @@ impl FromStr for CantonId {
 /// Canton caps at 185 characters (`LfPartyId` / `String185`); we keep a margin.
 pub const MAX_PARTY_ID_PREFIX_LEN: usize = 180;
 
+/// Why [`validate_party_id_prefix`] refused a prefix. Each message names
+/// the rule the prefix breaks.
+#[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
+pub enum PartyPrefixError {
+    /// The prefix is empty.
+    #[error("Party prefix must not be empty")]
+    Empty,
+    /// The prefix has more than [`MAX_PARTY_ID_PREFIX_LEN`] characters. The
+    /// value is its character count.
+    #[error("Party prefix must be at most {MAX_PARTY_ID_PREFIX_LEN} characters (got {0})")]
+    TooLong(usize),
+    /// The first character is not an ASCII letter.
+    #[error("Party prefix must start with a letter (a-z, A-Z)")]
+    NoLeadingLetter,
+    /// The prefix holds a character outside ASCII letters, digits, `-` and
+    /// `_`. The value is the first such character.
+    #[error(
+        "Party prefix contains invalid character {0:?}; only ASCII letters, \
+         digits, '-' and '_' are allowed"
+    )]
+    InvalidChar(char),
+}
+
 /// Validate a decentralized-party prefix before it is used to build a Canton
 /// party id (`<prefix>::<namespace>`).
 ///
@@ -315,17 +338,15 @@ pub const MAX_PARTY_ID_PREFIX_LEN: usize = 180;
 ///
 /// # Errors
 ///
-/// Returns a human-readable message describing the first rule violated.
-pub fn validate_party_id_prefix(prefix: &str) -> Result<(), String> {
+/// Returns a [`PartyPrefixError`] for the first rule the prefix breaks.
+pub fn validate_party_id_prefix(prefix: &str) -> Result<(), PartyPrefixError> {
     if prefix.is_empty() {
-        return Err("Party prefix must not be empty".to_string());
+        return Err(PartyPrefixError::Empty);
     }
 
     let len = prefix.chars().count();
     if len > MAX_PARTY_ID_PREFIX_LEN {
-        return Err(format!(
-            "Party prefix must be at most {MAX_PARTY_ID_PREFIX_LEN} characters (got {len})"
-        ));
+        return Err(PartyPrefixError::TooLong(len));
     }
 
     if !prefix
@@ -333,17 +354,14 @@ pub fn validate_party_id_prefix(prefix: &str) -> Result<(), String> {
         .next()
         .is_some_and(|c| c.is_ascii_alphabetic())
     {
-        return Err("Party prefix must start with a letter (a-z, A-Z)".to_string());
+        return Err(PartyPrefixError::NoLeadingLetter);
     }
 
     if let Some(bad) = prefix
         .chars()
         .find(|c| !(c.is_ascii_alphanumeric() || *c == '-' || *c == '_'))
     {
-        return Err(format!(
-            "Party prefix contains invalid character {bad:?}; only ASCII letters, \
-             digits, '-' and '_' are allowed"
-        ));
+        return Err(PartyPrefixError::InvalidChar(bad));
     }
 
     Ok(())
