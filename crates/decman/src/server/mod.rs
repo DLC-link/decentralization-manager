@@ -27,6 +27,7 @@ mod queries;
 mod record;
 mod recovery;
 mod reward_automation;
+mod routes;
 mod scan;
 mod startup;
 mod state;
