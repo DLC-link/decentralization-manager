@@ -9,8 +9,8 @@ use crate::{
     server::{WorkflowInstance, peer_status::LastSeen},
     utils,
     workflow::{
-        kick::coordinator::split_signed_kick_pair,
         storage::{WorkflowStorage, artifact_kinds},
+        topology::split_signed_kick_pair,
     },
 };
 

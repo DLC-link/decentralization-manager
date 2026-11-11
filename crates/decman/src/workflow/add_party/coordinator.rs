@@ -11,12 +11,12 @@ use crate::{
     server::{WorkflowInstance, peer_status::LastSeen},
     utils,
     workflow::{
-        kick::coordinator::split_signed_kick_pair,
         party_replication::{
             collect_party_package_ids, open_export_session, wait_for_flag_cleared,
         },
         state::WorkflowState,
         storage::{WorkflowStorage, artifact_kinds, identity_kinds},
+        topology::split_signed_kick_pair,
     },
 };
 

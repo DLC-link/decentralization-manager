@@ -15,6 +15,7 @@ mod poll;
 mod reads;
 mod requests;
 mod retry;
+mod signed_pair;
 
 pub use dns_p2p::{
     DnsP2pArtifactKinds, DnsP2pSubmission, Standing, aggregate_dns_p2p_signatures,
@@ -35,3 +36,4 @@ pub use requests::{
     p2p_v30, synchronizer_store_id,
 };
 pub use retry::{authorize_with_topology_retry, sign_transactions_with_topology_retry};
+pub(crate) use signed_pair::split_signed_kick_pair;
