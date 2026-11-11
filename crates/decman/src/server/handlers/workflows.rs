@@ -419,15 +419,15 @@ fn kick_signers(
 
 /// Why a kick cannot collect enough signatures, or `None` when it can.
 ///
-/// This node and each invitee sign. The peers clamp their quorum to the
-/// invitees, so a run short of the namespace threshold would only fail at
-/// submission. An uncached threshold skips that part of the check.
+/// This node and each invitee sign. Both the current namespace threshold
+/// and the proposed one must be reachable, because the P2P mapping is
+/// submitted after the new namespace takes effect.
 fn kick_quorum_refusal(threshold: Option<usize>, signers: &KickSigners) -> Option<String> {
     let peers = signers.invitees.len();
     let available = 1 + peers;
     let mut message = match threshold {
         Some(threshold) if threshold > available => format!(
-            "Cannot kick: the party's namespace threshold is {threshold}, but only {available} \
+            "Cannot kick: the required namespace threshold is {threshold}, but only {available} \
              {members} can sign (this node and {peers} configured {peer_word}).",
             members = if available == 1 { "member" } else { "members" },
             peer_word = if peers == 1 { "peer" } else { "peers" },
@@ -830,24 +830,6 @@ pub async fn start_kick(
         });
     }
 
-    // Refuse before any invitation a kick that cannot collect enough
-    // signatures. Otherwise it fails only at submission.
-    if let Some(error) = kick_quorum_refusal(namespace_threshold, &signers) {
-        return HttpResponse::BadRequest().json(ErrorResponse { error });
-    }
-    if !signers.not_peers.is_empty() {
-        tracing::info!(
-            "Kick of {decentralized_party_id} proceeds without members that are not \
-             configured peers: {ids}",
-            ids = signers
-                .not_peers
-                .iter()
-                .map(ToString::to_string)
-                .collect::<Vec<_>>()
-                .join(", ")
-        );
-    }
-
     // Validate `new_threshold` before persisting anything. Negative or zero
     // values corrupt topology submission: DNS `authorize()` accepts a bare
     // i32 while the subsequent P2P proposal converts via `try_into()` to
@@ -883,6 +865,27 @@ pub async fn start_kick(
                 got = body.new_threshold,
             ),
         });
+    }
+
+    // The DNS changes first. Its signatures satisfy the current threshold,
+    // and the following P2P update must satisfy the proposed threshold too.
+    let required_threshold = namespace_threshold
+        .unwrap_or(1)
+        .max(body.new_threshold as usize);
+    if let Some(error) = kick_quorum_refusal(Some(required_threshold), &signers) {
+        return HttpResponse::BadRequest().json(ErrorResponse { error });
+    }
+    if !signers.not_peers.is_empty() {
+        tracing::info!(
+            "Kick of {decentralized_party_id} proceeds without members that are not \
+             configured peers: {ids}",
+            ids = signers
+                .not_peers
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
     }
 
     let confirmation_threshold = match cached_confirmation_threshold(
@@ -5204,11 +5207,10 @@ mod tests {
         Ok(())
     }
 
-    /// The threshold bound counts every host that stays, a host that is not
-    /// a peer included. Counted from this node and its peers, the bound
-    /// would be 2 instead of 3.
+    /// The bound includes every surviving host, but a higher threshold
+    /// still needs enough configured peers to sign the P2P update.
     #[sqlx::test(migrator = "MIGRATOR")]
-    async fn the_threshold_bound_counts_a_host_that_is_not_a_peer(pool: SqlitePool) -> Result {
+    async fn a_raised_threshold_needs_enough_reachable_signers(pool: SqlitePool) -> Result {
         let party = pid(42)?;
         cache_kick_party(&pool, &party, 2, &[1, 2, 3, 4], &[], &[2, 3]).await?;
         let kick = |new_threshold: i64| -> anyhow::Result<serde_json::Value> {
@@ -5226,9 +5228,35 @@ mod tests {
             "{body}"
         );
 
-        // Threshold 3 is in bounds, and this node and pid(2) still reach the
-        // namespace threshold of 2 without pid(4).
-        let (status, body) = post_kick(pool, kick(3)?).await?;
+        let (status, body) = post_kick(pool.clone(), kick(3)?).await?;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        assert!(
+            body.contains("namespace threshold is 3, but only 2 members can sign"),
+            "{body}"
+        );
+        assert!(body.contains(&pid(4)?.to_string()), "{body}");
+        assert!(!body.contains(&pid(3)?.to_string()), "{body}");
+
+        let (status, body) = post_kick(pool, kick(2)?).await?;
+        assert_eq!(status, StatusCode::CONFLICT, "{body}");
+        assert!(body.contains("already has a"), "{body}");
+        Ok(())
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_raised_threshold_at_reachable_quorum_passes(pool: SqlitePool) -> Result {
+        let party = pid(44)?;
+        cache_kick_party(&pool, &party, 2, &[1, 2, 3, 4], &[], &[2, 4]).await?;
+
+        let (status, body) = post_kick(
+            pool,
+            serde_json::json!({
+                "decentralized_party_id": party,
+                "participant_id": pid(3)?,
+                "new_threshold": 3,
+            }),
+        )
+        .await?;
         assert_eq!(status, StatusCode::CONFLICT, "{body}");
         assert!(body.contains("already has a"), "{body}");
         Ok(())

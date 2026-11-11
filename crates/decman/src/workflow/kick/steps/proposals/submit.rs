@@ -2,8 +2,8 @@ use std::collections::HashSet;
 
 use canton_proto_rs::com::digitalasset::canton::{
     protocol::v30::{
-        DecentralizedNamespaceDefinition, PartyToParticipant, TopologyTransaction,
-        enums::TopologyChangeOp, topology_mapping,
+        DecentralizedNamespaceDefinition, PartyToParticipant, SignedTopologyTransaction,
+        TopologyTransaction, enums::TopologyChangeOp, topology_mapping,
     },
     topology::admin::v30::{
         ListDecentralizedNamespaceDefinitionRequest, ListPartyToParticipantRequest,
@@ -58,6 +58,15 @@ pub async fn submit_kick(config: &NodeConfig, storage: &SqlitePool, instance_nam
     let new_namespace_def: DecentralizedNamespaceDefinition =
         utils::read_first_message_from_bytes(&new_namespace_bytes)?;
 
+    let current_namespace_bytes = storage
+        .read_artifact(instance_name, artifact_kinds::KICK_NAMESPACE_DEF, None)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("KICK_NAMESPACE_DEF artifact missing"))?;
+    let current_namespace_def: DecentralizedNamespaceDefinition =
+        utils::read_first_message_from_bytes(&current_namespace_bytes)?;
+    ensure_kick_signature_count(&dns_transaction, current_namespace_def.threshold, "DNS")?;
+    ensure_kick_signature_count(&p2p_transaction, new_namespace_def.threshold, "P2P")?;
+
     let party_id_bytes = storage
         .read_artifact(instance_name, artifact_kinds::KICK_PARTY_ID, None)
         .await?
@@ -108,6 +117,36 @@ pub async fn submit_kick(config: &NodeConfig, storage: &SqlitePool, instance_nam
     .await?;
 
     tracing::info!("Kick submitted and confirmed successfully");
+    Ok(())
+}
+
+/// A resumed run may predate the quorum checks. Reject a signature shortage
+/// before either write, including both signature forms. Extra signatures do
+/// not prove namespace authority; Canton still checks delegated signing keys.
+fn ensure_kick_signature_count(
+    transaction: &SignedTopologyTransaction,
+    threshold: i32,
+    label: &str,
+) -> Result {
+    let signed = transaction
+        .signatures
+        .iter()
+        .chain(
+            transaction
+                .multi_transaction_signatures
+                .iter()
+                .flat_map(|multi| multi.signatures.iter()),
+        )
+        .map(|signature| signature.signed_by.as_str())
+        .filter(|fingerprint| !fingerprint.is_empty())
+        .collect::<HashSet<_>>()
+        .len();
+    if threshold < 1 || signed < threshold as usize {
+        anyhow::bail!(
+            "Kick {label} proposal carries {signed} distinct signatures, but requires at least \
+             {threshold}. Refusing before changing the namespace."
+        );
+    }
     Ok(())
 }
 
@@ -251,9 +290,54 @@ fn p2p_matches(actual: &PartyToParticipant, expected: &PartyToParticipant) -> bo
 mod tests {
     use super::*;
     use canton_proto_rs::com::digitalasset::canton::{
-        crypto::v30::{SigningKeysWithThreshold, SigningPublicKey},
-        protocol::v30::party_to_participant::HostingParticipant,
+        crypto::v30::{Signature, SigningKeysWithThreshold, SigningPublicKey},
+        protocol::v30::{MultiTransactionSignatures, party_to_participant::HostingParticipant},
     };
+
+    fn signed_by(fingerprints: &[&str]) -> SignedTopologyTransaction {
+        SignedTopologyTransaction {
+            signatures: fingerprints
+                .iter()
+                .map(|fingerprint| Signature {
+                    signed_by: (*fingerprint).to_string(),
+                    ..Default::default()
+                })
+                .collect(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn a_resumed_kick_cannot_raise_its_threshold_with_too_few_signatures() -> Result {
+        let signed = signed_by(&["rotated-owner-1", "delegated-owner-2"]);
+        ensure_kick_signature_count(&signed, 2, "DNS")?;
+        let error = ensure_kick_signature_count(&signed, 3, "P2P")
+            .expect_err("two signatures cannot meet the proposed threshold")
+            .to_string();
+        assert!(error.contains("Kick P2P"), "{error}");
+        assert!(error.contains("2 distinct signatures"), "{error}");
+        assert!(error.contains("at least 3"), "{error}");
+        assert!(ensure_kick_signature_count(&signed, 3, "DNS").is_err());
+        ensure_kick_signature_count(&signed, 2, "P2P")
+    }
+
+    #[test]
+    fn duplicate_and_empty_fingerprints_cannot_fill_the_kick_quorum() {
+        let signed = signed_by(&["owner-1", "owner-1", "", ""]);
+        assert!(ensure_kick_signature_count(&signed, 2, "P2P").is_err());
+    }
+
+    #[test]
+    fn the_kick_guard_counts_both_signature_forms_once_per_fingerprint() -> Result {
+        let mut signed = signed_by(&["owner-1"]);
+        signed.multi_transaction_signatures = vec![MultiTransactionSignatures {
+            signatures: signed_by(&["owner-1", "delegated-owner-2", "rotated-owner-3"]).signatures,
+            ..Default::default()
+        }];
+        ensure_kick_signature_count(&signed, 3, "P2P")?;
+        assert!(ensure_kick_signature_count(&signed, 4, "P2P").is_err());
+        Ok(())
+    }
 
     #[test]
     fn post_kick_dns_rejects_old_authority_and_accepts_reordered_owners() {
