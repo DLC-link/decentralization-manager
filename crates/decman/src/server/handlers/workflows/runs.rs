@@ -5,7 +5,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use actix_web::{HttpResponse, web};
+use actix_web::web;
 
 use prometheus::IntCounterVec;
 use sqlx::SqlitePool;
@@ -16,9 +16,10 @@ use crate::{
     error::Result,
     server::{
         AppState,
+        error::ApiError,
         types::{
-            ErrorResponse, WorkflowInstance, WorkflowKind, WorkflowProgress, WorkflowRole,
-            WorkflowRun, WorkflowStatusResponse,
+            WorkflowInstance, WorkflowKind, WorkflowProgress, WorkflowRole, WorkflowRun,
+            WorkflowStatusResponse,
         },
     },
     workflow::state::WorkflowStep,
@@ -109,9 +110,8 @@ where
 /// rejected here BEFORE we persist, so a racing same-instance request can't
 /// upsert (and clobber) the in-flight run's row. If the persist then fails the
 /// registry entry is removed, so a run that never started can't leak and block
-/// future starts. On either failure returns the 409 `HttpResponse` the handler
-/// should return; on success the run is both registered and persisted.
-#[allow(clippy::result_large_err)]
+/// future starts. On either failure returns the 409 the handler should answer
+/// with; on success the run is both registered and persisted.
 pub(super) async fn register_and_persist<S, C>(
     data: &web::Data<AppState>,
     instance: &Arc<WorkflowInstance>,
@@ -119,7 +119,7 @@ pub(super) async fn register_and_persist<S, C>(
     config: &C,
     invitees: &[CantonId],
     dec_party_id: Option<CantonId>,
-) -> std::result::Result<(), HttpResponse>
+) -> std::result::Result<(), ApiError>
 where
     S: WorkflowStep,
     C: serde::Serialize,
@@ -136,9 +136,9 @@ where
     };
 
     if !data.workflows.insert(instance.clone()) {
-        return Err(HttpResponse::Conflict().json(ErrorResponse {
-            error: format!("A workflow with instance {instance_name} is already running"),
-        }));
+        return Err(ApiError::Conflict(format!(
+            "A workflow with instance {instance_name} is already running"
+        )));
     }
 
     if let Err(e) = insert_coordinator_run(
@@ -154,9 +154,9 @@ where
     {
         data.workflows.remove(instance_name);
         tracing::warn!("Failed to persist {label} workflow run: {e:#}");
-        return Err(HttpResponse::Conflict().json(ErrorResponse {
-            error: format!("Failed to start {label} workflow: {e}"),
-        }));
+        return Err(ApiError::Conflict(format!(
+            "Failed to start {label} workflow: {e}"
+        )));
     }
 
     count_run_started(kind);

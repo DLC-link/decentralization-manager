@@ -159,7 +159,7 @@ pub async fn start_contracts(
 
     // Register + persist atomically w.r.t. duplicates (registry insert dedups
     // before the upsert; a persist failure unregisters so nothing leaks).
-    if let Err(resp) = register_and_persist(
+    if let Err(error) = register_and_persist(
         &data,
         &instance,
         ContractsStep::WaitingForPeers,
@@ -169,7 +169,7 @@ pub async fn start_contracts(
     )
     .await
     {
-        return resp;
+        return error.into_response();
     }
 
     let config = data.config.clone();

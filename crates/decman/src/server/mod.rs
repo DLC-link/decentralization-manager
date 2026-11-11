@@ -10,6 +10,7 @@
 mod assets;
 mod audit;
 mod chain_audit;
+mod error;
 mod event_filters;
 mod external_parties;
 mod former_parties;

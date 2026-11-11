@@ -197,7 +197,7 @@ pub async fn start_change_threshold(
         });
     }
 
-    if let Err(resp) = register_and_persist(
+    if let Err(error) = register_and_persist(
         &data,
         &instance,
         ChangeThresholdStep::WaitingForPeers,
@@ -207,7 +207,7 @@ pub async fn start_change_threshold(
     )
     .await
     {
-        return resp;
+        return error.into_response();
     }
 
     let invitees_for_invites = invitees.clone();

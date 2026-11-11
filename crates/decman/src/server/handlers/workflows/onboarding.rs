@@ -192,7 +192,7 @@ pub async fn start_onboarding(
     // Onboarding's instance_name is deterministic (`{prefix}-creation`), so a
     // racing same-prefix request is realistic — register_and_persist's registry
     // insert rejects it before the upsert can clobber the in-flight run's row.
-    if let Err(resp) = register_and_persist(
+    if let Err(error) = register_and_persist(
         &data,
         &instance,
         OnboardingStep::WaitingForPeers,
@@ -202,7 +202,7 @@ pub async fn start_onboarding(
     )
     .await
     {
-        return resp;
+        return error.into_response();
     }
 
     let config = data.config.clone();

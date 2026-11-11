@@ -2,8 +2,6 @@
 
 use std::collections::HashSet;
 
-use actix_web::HttpResponse;
-
 use sqlx::SqlitePool;
 
 use crate::{
@@ -13,7 +11,7 @@ use crate::{
         schema::SchemaRead,
     },
     error::Result,
-    server::types::ErrorResponse,
+    server::error::ApiError,
     workflow::thresholds::{PartyThresholds, carried_confirmation_threshold},
 };
 
@@ -71,11 +69,11 @@ pub(super) enum KickTargetError {
     Conflict(String),
 }
 
-impl KickTargetError {
-    pub(super) fn into_response(self) -> HttpResponse {
-        match self {
-            Self::BadRequest(error) => HttpResponse::BadRequest().json(ErrorResponse { error }),
-            Self::Conflict(error) => HttpResponse::Conflict().json(ErrorResponse { error }),
+impl From<KickTargetError> for ApiError {
+    fn from(error: KickTargetError) -> Self {
+        match error {
+            KickTargetError::BadRequest(error) => Self::BadRequest(error),
+            KickTargetError::Conflict(error) => Self::Conflict(error),
         }
     }
 }
