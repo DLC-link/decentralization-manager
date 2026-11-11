@@ -30,7 +30,6 @@ use super::{
 };
 use crate::common::{
     Fixture, TestTarget, chaos, db,
-    http::probe_workflow_status,
     invitations::post_accept_invitation,
     ledger_api::{P1_JSON_API, P2_JSON_API, P3_JSON_API},
 };
@@ -131,15 +130,23 @@ async fn submit_new(
     new_id(f, party, created_template, &before).await
 }
 
-async fn accept_and_wait(f: &Fixture, run: &str, status: &str) -> anyhow::Result<()> {
+async fn accept_and_wait(f: &Fixture, run: &str) -> anyhow::Result<()> {
     for port in [f.p2.http, f.p3.http] {
         let invite = chaos::wait_for_invite_for_instance(f, port, run, WAIT).await?;
         post_accept_invitation(f, port, &invite).await?;
     }
     let deadline = Instant::now() + Duration::from_secs(240);
     loop {
-        if let Some(outcome) = probe_workflow_status(f, f.p1.http, status, run).await {
-            return outcome;
+        // Earlier chaos phases can leave other live runs of the same kind.
+        // Their legacy status endpoint cannot identify this instance.
+        if let Some(outcome) = db::probe_db_run_status(&f.db_path(1), run, "Coordinator").await {
+            if let Err(error) = outcome {
+                let detail = db::workflow_run_error(&f.db_path(1), run, "Coordinator").await?;
+                return Err(
+                    error.context(detail.unwrap_or_else(|| "no workflow error recorded".into()))
+                );
+            }
+            return Ok(());
         }
         ensure!(Instant::now() < deadline, "workflow {run} did not complete");
         sleep(Duration::from_secs(1)).await;
@@ -149,7 +156,7 @@ async fn accept_and_wait(f: &Fixture, run: &str, status: &str) -> anyhow::Result
 async fn create_party(f: &Fixture) -> anyhow::Result<String> {
     let prefix = chaos::fresh_prefix("v2-offline-confirmer");
     chaos::post_onboarding(f, &prefix).await?;
-    accept_and_wait(f, &format!("{prefix}-creation"), "/onboarding/status").await?;
+    accept_and_wait(f, &format!("{prefix}-creation")).await?;
     let deadline = Instant::now() + WAIT;
     loop {
         let path = format!("/decentralized-parties?prefix={prefix}&refresh=true");
@@ -209,7 +216,7 @@ async fn deploy_rules(f: &Fixture, party: &str, timeout_micros: i64) -> anyhow::
     let run = db::latest_coordinator_instance(&f.db_path(1), "Contracts")
         .await?
         .context("v2 rules deploy did not leave a coordinator run")?;
-    accept_and_wait(f, &run, "/contracts/status").await?;
+    accept_and_wait(f, &run).await?;
     new_id(f, party, RULES, &before).await
 }
 
