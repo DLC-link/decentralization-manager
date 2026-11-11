@@ -21,6 +21,7 @@ use crate::{
     utils,
     workflow::{
         storage::{WorkflowStorage, artifact_kinds},
+        thresholds::PartyThresholds,
         topology, topology_version,
     },
 };
@@ -31,7 +32,11 @@ use crate::{
 /// and submits the DNS mapping followed by the P2P mapping. A kicked owner's
 /// mapping already exists before submission, so both post-submit polls require
 /// the submitted serial and membership before legacy-key retirement can start.
-pub async fn submit_kick(config: &NodeConfig, storage: &SqlitePool, instance_name: &str) -> Result {
+pub async fn submit_kick(
+    config: &NodeConfig,
+    storage: &SqlitePool,
+    instance_name: &str,
+) -> Result<(i32, PartyThresholds)> {
     tracing::info!("Submitting kick to synchronizer...");
 
     let synchronizer_id = utils::get_synchronizer_id(config).await?;
@@ -102,6 +107,11 @@ pub async fn submit_kick(config: &NodeConfig, storage: &SqlitePool, instance_nam
         anyhow::bail!("Kick P2P proposal does not contain a PartyToParticipant mapping");
     };
 
+    let confirmed_thresholds = PartyThresholds::new(
+        new_namespace_def.threshold,
+        Some(i32::try_from(expected_p2p.threshold)?),
+    );
+
     topology::submit_dns_then_p2p(
         config,
         &synchronizer_id,
@@ -117,7 +127,7 @@ pub async fn submit_kick(config: &NodeConfig, storage: &SqlitePool, instance_nam
     .await?;
 
     tracing::info!("Kick submitted and confirmed successfully");
-    Ok(())
+    Ok((current_namespace_def.threshold, confirmed_thresholds))
 }
 
 /// A resumed run may predate the quorum checks. Reject a signature shortage

@@ -270,6 +270,18 @@ pub trait Commitable {
     /// Upsert a decentralized party
     async fn upsert_dec_party(&mut self, row: &DecPartyRow) -> Result;
 
+    /// Apply a completed kick's confirmed thresholds while the cache still
+    /// describes its old namespace and contains the removed owner's key.
+    /// A refresh that already removed the member or changed the threshold wins.
+    async fn update_dec_party_thresholds_after_kick(
+        &mut self,
+        party_id: &CantonId,
+        owner_key: &str,
+        previous_threshold: i64,
+        namespace_threshold: i64,
+        confirmation_threshold: Option<i64>,
+    ) -> Result;
+
     /// Replace all owners for a decentralized party. An owner that stays
     /// keeps the participant that claimed it.
     async fn replace_dec_party_owners(&mut self, party_id: &CantonId, owners: &[String]) -> Result;

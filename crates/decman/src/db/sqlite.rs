@@ -1030,6 +1030,33 @@ impl Commitable for sqlx::Transaction<'static, sqlx::Sqlite> {
         Ok(())
     }
 
+    async fn update_dec_party_thresholds_after_kick(
+        &mut self,
+        party_id: &CantonId,
+        owner_key: &str,
+        previous_threshold: i64,
+        namespace_threshold: i64,
+        confirmation_threshold: Option<i64>,
+    ) -> Result {
+        sqlx::query(
+            "UPDATE dec_party SET threshold = ?, confirmation_threshold = ? \
+             WHERE party_id = ? AND threshold = ? AND (\
+                 EXISTS (SELECT 1 FROM dec_party_owner \
+                         WHERE dec_party_id = dec_party.party_id AND owner_key = ?) OR \
+                 EXISTS (SELECT 1 FROM dec_party_participant \
+                         WHERE dec_party_id = dec_party.party_id AND owner_key = ?))",
+        )
+        .bind(namespace_threshold)
+        .bind(confirmation_threshold)
+        .bind(party_id.to_string())
+        .bind(previous_threshold)
+        .bind(owner_key)
+        .bind(owner_key)
+        .execute(&mut **self)
+        .await?;
+        Ok(())
+    }
+
     async fn replace_dec_party_owners(&mut self, party_id: &CantonId, owners: &[String]) -> Result {
         let party_id_str = party_id.to_string();
         // An owner that stays keeps its claim. The live Canton fetch carries

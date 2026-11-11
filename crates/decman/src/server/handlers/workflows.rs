@@ -4576,7 +4576,9 @@ mod tests {
     use actix_web::{App, HttpMessage, http::StatusCode, test as actix_test};
 
     use super::*;
-    use crate::{auth::Principal, db::MIGRATOR, server::AppState};
+    use crate::{
+        auth::Principal, db::MIGRATOR, server::AppState, workflow::kick::prune_cached_membership,
+    };
 
     /// A minimal coordinator run row for `party`, in progress.
     fn in_progress_run(instance: &str, party: &CantonId) -> WorkflowRun {
@@ -5257,6 +5259,37 @@ mod tests {
             }),
         )
         .await?;
+        assert_eq!(status, StatusCode::CONFLICT, "{body}");
+        assert!(body.contains("already has a"), "{body}");
+        Ok(())
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_lowered_kick_threshold_allows_an_immediate_second_kick(pool: SqlitePool) -> Result {
+        let party = pid(45)?;
+        cache_kick_party(&pool, &party, 3, &[1, 2, 3, 4], &[], &[2, 3, 4]).await?;
+
+        prune_cached_membership(
+            &pool,
+            &party,
+            Some(&pid(4)?),
+            "k4",
+            3,
+            PartyThresholds::new(2, None),
+        )
+        .await?;
+
+        let (status, body) = post_kick(
+            pool,
+            serde_json::json!({
+                "decentralized_party_id": party,
+                "participant_id": pid(3)?,
+                "new_threshold": 2,
+            }),
+        )
+        .await?;
+        // The second kick passes quorum and reaches the no-invitations
+        // in-flight guard. A stale cached threshold of 3 refuses it first.
         assert_eq!(status, StatusCode::CONFLICT, "{body}");
         assert!(body.contains("already has a"), "{body}");
         Ok(())

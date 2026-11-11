@@ -145,7 +145,8 @@ pub async fn start_coordinator(
                         }
                         workflow_state.clear_peer_data().await;
 
-                        submit_kick(&node_config, &db, &instance_name).await?;
+                        let (previous_threshold, confirmed_thresholds) =
+                            submit_kick(&node_config, &db, &instance_name).await?;
                         // Deliberately not fatal. The kick is durable at this
                         // point, so failing the step would leave the workflow
                         // on SubmitKick and a resume would resubmit the same
@@ -157,6 +158,8 @@ pub async fn start_coordinator(
                             &kick_config.decentralized_party_id,
                             kick_config.participant_id.as_ref(),
                             &kick_config.namespace_fingerprint,
+                            previous_threshold,
+                            confirmed_thresholds,
                         )
                         .await
                         {

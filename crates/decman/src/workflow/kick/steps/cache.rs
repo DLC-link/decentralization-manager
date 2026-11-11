@@ -4,10 +4,11 @@ use crate::{
     canton_id::CantonId,
     db::schema::{Commitable, SchemaWrite},
     error::Result,
+    workflow::thresholds::PartyThresholds,
 };
 
 /// Drop the kicked member from this node's cached membership: its owner key,
-/// and its participant row when it hosted the party.
+/// its participant row when it hosted the party, and the confirmed thresholds.
 ///
 /// `POST /add-party` and `POST /kick` validate against `dec_party_participants`,
 /// which in production is only ever written by the `/decentralized-parties`
@@ -24,8 +25,19 @@ pub async fn prune_cached_membership(
     party_id: &CantonId,
     kicked: Option<&CantonId>,
     owner_key: &str,
+    previous_threshold: i32,
+    confirmed_thresholds: PartyThresholds,
 ) -> Result {
     let mut tx = db.begin_transaction().await?;
+    tx.update_dec_party_thresholds_after_kick(
+        party_id,
+        owner_key,
+        i64::from(previous_threshold),
+        i64::from(confirmed_thresholds.namespace),
+        (confirmed_thresholds.confirmation != confirmed_thresholds.namespace)
+            .then_some(i64::from(confirmed_thresholds.confirmation)),
+    )
+    .await?;
     if let Some(kicked) = kicked {
         tx.delete_dec_party_participant(party_id, &kicked.to_string())
             .await?;
@@ -100,7 +112,15 @@ mod tests {
         let party_id = seed(&pool, &[NODE1, NODE2]).await?;
         let kicked = CantonId::parse(NODE2)?;
 
-        prune_cached_membership(&pool, &party_id, Some(&kicked), "owner-2").await?;
+        prune_cached_membership(
+            &pool,
+            &party_id,
+            Some(&kicked),
+            "owner-2",
+            2,
+            PartyThresholds::new(2, None),
+        )
+        .await?;
 
         let remaining = pool.get_dec_party_participants(&party_id).await?;
         assert_eq!(remaining.len(), 1);
@@ -114,7 +134,15 @@ mod tests {
     async fn an_owner_only_kick_drops_only_the_owner(pool: SqlitePool) -> Result {
         let party_id = seed(&pool, &[NODE1, NODE2]).await?;
 
-        prune_cached_membership(&pool, &party_id, None, "owner-3").await?;
+        prune_cached_membership(
+            &pool,
+            &party_id,
+            None,
+            "owner-3",
+            2,
+            PartyThresholds::new(2, None),
+        )
+        .await?;
 
         assert_eq!(pool.get_dec_party_participants(&party_id).await?.len(), 2);
         let mut owners: Vec<String> = pool
@@ -136,7 +164,15 @@ mod tests {
         let party_id = seed(&pool, &[NODE1, NODE2]).await?;
         let never_a_member = CantonId::parse(NODE9)?;
 
-        prune_cached_membership(&pool, &party_id, Some(&never_a_member), "owner-9").await?;
+        prune_cached_membership(
+            &pool,
+            &party_id,
+            Some(&never_a_member),
+            "owner-9",
+            2,
+            PartyThresholds::new(2, None),
+        )
+        .await?;
 
         let remaining = pool.get_dec_party_participants(&party_id).await?;
         assert_eq!(remaining.len(), 2);
@@ -165,13 +201,140 @@ mod tests {
         .await?;
         Commitable::commit(tx).await?;
 
-        prune_cached_membership(&pool, &party_id, Some(&CantonId::parse(NODE2)?), "owner-2")
-            .await?;
+        prune_cached_membership(
+            &pool,
+            &party_id,
+            Some(&CantonId::parse(NODE2)?),
+            "owner-2",
+            2,
+            PartyThresholds::new(2, None),
+        )
+        .await?;
 
         let remaining = pool.get_dec_party_participants(&party_id).await?;
         assert_eq!(remaining.len(), 1);
         assert_eq!(remaining[0].permission, "confirmation");
         assert_eq!(remaining[0].owner_key.as_deref(), Some("fingerprint-1"));
+        Ok(())
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_completed_kick_updates_both_cached_thresholds(pool: SqlitePool) -> Result {
+        let party = seed(&pool, &[NODE1, NODE2, NODE9]).await?;
+        sqlx::query("UPDATE dec_party SET threshold = 3 WHERE party_id = ?")
+            .bind(party.to_string())
+            .execute(&pool)
+            .await?;
+
+        prune_cached_membership(
+            &pool,
+            &party,
+            Some(&CantonId::parse(NODE2)?),
+            "owner-2",
+            3,
+            PartyThresholds::new(2, Some(1)),
+        )
+        .await?;
+
+        let cached = pool.get_dec_parties_by_prefix(&party.prefix).await?;
+        assert_eq!(cached.len(), 1);
+        assert_eq!(cached[0].threshold, 2);
+        assert_eq!(cached[0].confirmation_threshold, Some(1));
+        assert_eq!(cached[0].updated_at, 1000);
+        assert_eq!(pool.get_dec_party_participants(&party).await?.len(), 2);
+        Ok(())
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn pruning_cannot_overwrite_a_newer_refreshed_threshold(pool: SqlitePool) -> Result {
+        let party = seed(&pool, &[NODE1, NODE2]).await?;
+        sqlx::query(
+            "UPDATE dec_party SET threshold = 4, confirmation_threshold = 3, updated_at = 2000 \
+             WHERE party_id = ?",
+        )
+        .bind(party.to_string())
+        .execute(&pool)
+        .await?;
+
+        prune_cached_membership(
+            &pool,
+            &party,
+            Some(&CantonId::parse(NODE2)?),
+            "owner-2",
+            2,
+            PartyThresholds::new(1, None),
+        )
+        .await?;
+
+        let cached = pool.get_dec_parties_by_prefix(&party.prefix).await?;
+        assert_eq!(cached[0].threshold, 4);
+        assert_eq!(cached[0].confirmation_threshold, Some(3));
+        assert_eq!(cached[0].updated_at, 2000);
+        Ok(())
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn retrying_pruning_cannot_rewind_a_later_refresh(pool: SqlitePool) -> Result {
+        let party = seed(&pool, &[NODE1, NODE2]).await?;
+        let kicked = CantonId::parse(NODE2)?;
+        prune_cached_membership(
+            &pool,
+            &party,
+            Some(&kicked),
+            "owner-2",
+            2,
+            PartyThresholds::new(1, None),
+        )
+        .await?;
+        // A later topology update returned to the old threshold without
+        // re-adding the kicked member. A retry still must not rewind it.
+        sqlx::query("UPDATE dec_party SET threshold = 2 WHERE party_id = ?")
+            .bind(party.to_string())
+            .execute(&pool)
+            .await?;
+
+        prune_cached_membership(
+            &pool,
+            &party,
+            Some(&kicked),
+            "owner-2",
+            2,
+            PartyThresholds::new(1, None),
+        )
+        .await?;
+
+        let cached = pool.get_dec_parties_by_prefix(&party.prefix).await?;
+        assert_eq!(cached[0].threshold, 2);
+        Ok(())
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_failed_prune_rolls_back_threshold_and_membership_changes(
+        pool: SqlitePool,
+    ) -> Result {
+        let party = seed(&pool, &[NODE1, NODE2]).await?;
+        sqlx::query(
+            "CREATE TRIGGER refuse_owner_removal BEFORE DELETE ON dec_party_owner \
+             BEGIN SELECT RAISE(ABORT, 'owner removal failed'); END",
+        )
+        .execute(&pool)
+        .await?;
+
+        let result = prune_cached_membership(
+            &pool,
+            &party,
+            Some(&CantonId::parse(NODE2)?),
+            "owner-2",
+            2,
+            PartyThresholds::new(1, None),
+        )
+        .await;
+
+        assert!(result.is_err());
+        let cached = pool.get_dec_parties_by_prefix(&party.prefix).await?;
+        assert_eq!(cached[0].threshold, 2);
+        assert_eq!(pool.get_dec_party_participants(&party).await?.len(), 2);
+        assert_eq!(pool.get_dec_party_owners(&party).await?.len(), 3);
         Ok(())
     }
 }
