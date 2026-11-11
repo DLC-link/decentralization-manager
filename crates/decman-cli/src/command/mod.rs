@@ -283,6 +283,9 @@ pub enum DarsCommand {
         files: Vec<PathBuf>,
     },
     /// Distribute DAR files to peers. The peers must approve the invitation.
+    ///
+    /// One run carries at most 16 MiB of DAR files, including a few bytes of
+    /// framing for each file. Send a larger set in several runs.
     Distribute {
         /// DAR files to distribute.
         #[arg(required = true)]
@@ -294,6 +297,9 @@ pub enum DarsCommand {
         wait: WaitArgs,
     },
     /// Distribute a DAR this node already holds, named by one of its packages.
+    ///
+    /// One run carries at most 16 MiB of DAR files, including a few bytes of
+    /// framing for each file.
     DistributePackage {
         /// A package id in the DAR.
         #[arg(long)]

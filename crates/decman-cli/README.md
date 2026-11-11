@@ -225,6 +225,7 @@ the secret out of the body and use the node settings above.
 
 ```bash
 # Distribute a DAR to two peers and wait for the run to end.
+# One run carries at most 16 MiB of DAR files, so split a larger set.
 decman-cli -p devnet dars distribute my-app-1.0.0.dar \
   --peer PAR::1220aa... --peer PAR::1220bb... --wait
 
