@@ -5,8 +5,9 @@ use ratatui::crossterm::event::{KeyCode, KeyEvent};
 use crate::composer::{Composer, FieldKind, PickerOption, SelectOption};
 
 use crate::app::forms::{pc_field_mut, validate_peer_form};
-use crate::app::overlay::{ComposerKind, DeployForm, GrantForm, IdpMode, NetworkEditState};
-use crate::app::overlay::{OnboardForm, Overlay, PartyConfigForm, PcRow, PeerForm};
+use crate::app::overlay::{ChangeThresholdForm, ComposerKind, ComposerPick, DeployForm, GovView};
+use crate::app::overlay::{GrantForm, IdpMode, MemberChangeForm, NetworkEditState, OnboardForm};
+use crate::app::overlay::{Overlay, PartyConfigForm, PcRow, PeerChoice, PeerForm};
 use crate::app::state::App;
 
 /// What an overlay key resolves to, applied after the borrow of the overlay
@@ -39,123 +40,31 @@ enum Act {
 impl App {
     /// Handle a key while a modal overlay is open.
     pub(super) fn on_overlay_key(&mut self, key: KeyEvent) {
-        let mut act = Act::None;
-        match &mut self.overlay {
-            Overlay::PeerSelect { peers, cursor, .. } => match key.code {
-                KeyCode::Esc => act = Act::Close,
-                KeyCode::Up | KeyCode::Char('k') => *cursor = cursor.saturating_sub(1),
-                KeyCode::Down | KeyCode::Char('j') => {
-                    if *cursor + 1 < peers.len() {
-                        *cursor += 1;
-                    }
-                }
-                KeyCode::Char(' ') => {
-                    if let Some(peer) = peers.get_mut(*cursor) {
-                        peer.checked = !peer.checked;
-                    }
-                }
-                KeyCode::Enter => act = Act::Distribute,
-                _ => {}
-            },
+        let act = match &mut self.overlay {
+            Overlay::PeerSelect { peers, cursor, .. } => peer_select_key(peers, cursor, key),
             Overlay::Compare { scroll, .. }
             | Overlay::Json { scroll, .. }
             | Overlay::FeedDetail { scroll, .. }
-            | Overlay::ChainAudit { scroll, .. } => match key.code {
-                KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q') => act = Act::Close,
-                KeyCode::Up | KeyCode::Char('k') => *scroll = scroll.saturating_sub(1),
-                KeyCode::Down | KeyCode::Char('j') => *scroll = scroll.saturating_add(1),
-                _ => {}
-            },
-            Overlay::Onboard(form) => act = form.on_key(key),
-            Overlay::MemberChange(form) => match key.code {
-                KeyCode::Esc => act = Act::Close,
-                KeyCode::Enter => act = Act::MemberChange,
-                KeyCode::Up | KeyCode::Char('k') => {
-                    form.selected = form.selected.saturating_sub(1);
-                }
-                KeyCode::Down | KeyCode::Char('j') => {
-                    if form.selected + 1 < form.candidates.len() {
-                        form.selected += 1;
-                    }
-                }
-                KeyCode::Left | KeyCode::Char('-') => {
-                    form.new_threshold = (form.new_threshold - 1).max(1);
-                }
-                KeyCode::Right | KeyCode::Char('+') => {
-                    form.new_threshold = (form.new_threshold + 1).min(form.max_threshold);
-                }
-                _ => {}
-            },
-            Overlay::ChangeThreshold(form) => match key.code {
-                KeyCode::Esc => act = Act::Close,
-                KeyCode::Enter => act = Act::ChangeThreshold,
-                KeyCode::Left | KeyCode::Char('-') => {
-                    form.new_threshold = (form.new_threshold - 1).max(1);
-                }
-                KeyCode::Right | KeyCode::Char('+') => {
-                    form.new_threshold = (form.new_threshold + 1).min(form.max_threshold);
-                }
-                _ => {}
-            },
-            Overlay::Auth { parties, selected } => match key.code {
-                KeyCode::Esc | KeyCode::Char('q') => act = Act::Close,
-                KeyCode::Char('t') => act = Act::TestAuth,
-                KeyCode::Char('g') => act = Act::OpenGrant,
-                KeyCode::Char('e') => act = Act::OpenPartyConfig,
-                KeyCode::Up | KeyCode::Char('k') => *selected = selected.saturating_sub(1),
-                KeyCode::Down | KeyCode::Char('j') if *selected + 1 < parties.len() => {
-                    *selected += 1;
-                }
-                _ => {}
-            },
-            Overlay::GrantRights(form) => act = form.on_key(key),
-            Overlay::Governance(view) => match key.code {
-                KeyCode::Esc | KeyCode::Char('q') => act = Act::Close,
-                KeyCode::Up | KeyCode::Char('k') => {
-                    view.selected = view.selected.saturating_sub(1);
-                }
-                KeyCode::Down | KeyCode::Char('j') => {
-                    if view.selected + 1 < view.items.len() {
-                        view.selected += 1;
-                    }
-                }
-                KeyCode::Char('c') => act = Act::GovConfirm,
-                KeyCode::Char('e') => act = Act::GovExecute,
-                KeyCode::Char('r') => act = Act::GovRevoke,
-                KeyCode::Char('x') => act = Act::GovExpire,
-                KeyCode::Char('n') => act = Act::ComposeAction,
-                KeyCode::Char('p') => act = Act::ComposeProposal,
-                _ => {}
-            },
-            Overlay::ComposerPick(pick) => match key.code {
-                KeyCode::Esc | KeyCode::Char('q') => act = Act::Close,
-                KeyCode::Up => pick.selected = pick.selected.saturating_sub(1),
-                KeyCode::Down => {
-                    if pick.selected + 1 < pick.options.len() {
-                        pick.selected += 1;
-                    }
-                }
-                KeyCode::Enter => act = Act::OpenComposer,
-                _ => {}
-            },
-            Overlay::Composer(composer) => {
-                if key.code == KeyCode::Esc {
-                    act = Act::Close;
-                } else if composer_key(composer, key) {
-                    act = Act::SubmitComposer;
-                }
-            }
-            Overlay::Deploy(form) => act = form.on_key(key),
-            Overlay::NetworkEdit(state) => act = state.on_key(key),
-            Overlay::PartyConfig(form) => act = form.on_key(key),
-            Overlay::NodeInfo(_) | Overlay::Message(_) | Overlay::Busy(_) => {
-                if matches!(key.code, KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q')) {
-                    act = Act::Close;
-                }
-            }
-            Overlay::None => {}
-        }
+            | Overlay::ChainAudit { scroll, .. } => scroll_key(scroll, key),
+            Overlay::Onboard(form) => form.on_key(key),
+            Overlay::MemberChange(form) => form.on_key(key),
+            Overlay::ChangeThreshold(form) => form.on_key(key),
+            Overlay::Auth { parties, selected } => auth_key(parties.len(), selected, key),
+            Overlay::GrantRights(form) => form.on_key(key),
+            Overlay::Governance(view) => view.on_key(key),
+            Overlay::ComposerPick(pick) => pick.on_key(key),
+            Overlay::Composer(composer) => composer.on_key(key),
+            Overlay::Deploy(form) => form.on_key(key),
+            Overlay::NetworkEdit(state) => state.on_key(key),
+            Overlay::PartyConfig(form) => form.on_key(key),
+            Overlay::NodeInfo(_) | Overlay::Message(_) | Overlay::Busy(_) => dismiss_key(key),
+            Overlay::None => Act::None,
+        };
+        self.apply_act(act);
+    }
 
+    /// Carry out what an overlay key resolved to.
+    fn apply_act(&mut self, act: Act) {
         match act {
             Act::None => {}
             Act::Close => self.overlay = Overlay::None,
@@ -202,6 +111,144 @@ fn edit_text(field: Option<&mut String>, code: KeyCode) {
             field.pop();
         }
         _ => {}
+    }
+}
+
+/// Handle a key in the peer picker of a DAR distribution.
+fn peer_select_key(peers: &mut [PeerChoice], cursor: &mut usize, key: KeyEvent) -> Act {
+    match key.code {
+        KeyCode::Esc => return Act::Close,
+        KeyCode::Up | KeyCode::Char('k') => *cursor = cursor.saturating_sub(1),
+        KeyCode::Down | KeyCode::Char('j') => step_down(cursor, peers.len()),
+        KeyCode::Char(' ') => {
+            if let Some(peer) = peers.get_mut(*cursor) {
+                peer.checked = !peer.checked;
+            }
+        }
+        KeyCode::Enter => return Act::Distribute,
+        _ => {}
+    }
+    Act::None
+}
+
+/// Handle a key in a read-only overlay that scrolls.
+fn scroll_key(scroll: &mut u16, key: KeyEvent) -> Act {
+    match key.code {
+        KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q') => return Act::Close,
+        KeyCode::Up | KeyCode::Char('k') => *scroll = scroll.saturating_sub(1),
+        KeyCode::Down | KeyCode::Char('j') => *scroll = scroll.saturating_add(1),
+        _ => {}
+    }
+    Act::None
+}
+
+/// Handle a key in the authentication status overlay, which lists
+/// `party_count` parties.
+fn auth_key(party_count: usize, selected: &mut usize, key: KeyEvent) -> Act {
+    match key.code {
+        KeyCode::Esc | KeyCode::Char('q') => return Act::Close,
+        KeyCode::Char('t') => return Act::TestAuth,
+        KeyCode::Char('g') => return Act::OpenGrant,
+        KeyCode::Char('e') => return Act::OpenPartyConfig,
+        KeyCode::Up | KeyCode::Char('k') => *selected = selected.saturating_sub(1),
+        KeyCode::Down | KeyCode::Char('j') => step_down(selected, party_count),
+        _ => {}
+    }
+    Act::None
+}
+
+/// Close a message, busy or node-info overlay on Esc, Enter or q.
+fn dismiss_key(key: KeyEvent) -> Act {
+    if matches!(key.code, KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q')) {
+        Act::Close
+    } else {
+        Act::None
+    }
+}
+
+/// Lower `threshold` with ← or - (not below 1), or raise it with → or + (not
+/// above `max`). Other keys change nothing.
+fn adjust_threshold(threshold: &mut i32, max: i32, code: KeyCode) {
+    match code {
+        KeyCode::Left | KeyCode::Char('-') => *threshold = (*threshold - 1).max(1),
+        KeyCode::Right | KeyCode::Char('+') => *threshold = (*threshold + 1).min(max),
+        _ => {}
+    }
+}
+
+impl MemberChangeForm {
+    /// Handle a key in the kick or add-party form: pick a candidate and set
+    /// the new threshold.
+    fn on_key(&mut self, key: KeyEvent) -> Act {
+        match key.code {
+            KeyCode::Esc => return Act::Close,
+            KeyCode::Enter => return Act::MemberChange,
+            KeyCode::Up | KeyCode::Char('k') => self.selected = self.selected.saturating_sub(1),
+            KeyCode::Down | KeyCode::Char('j') => {
+                step_down(&mut self.selected, self.candidates.len());
+            }
+            code => adjust_threshold(&mut self.new_threshold, self.max_threshold, code),
+        }
+        Act::None
+    }
+}
+
+impl ChangeThresholdForm {
+    /// Handle a key in the change-threshold form.
+    fn on_key(&mut self, key: KeyEvent) -> Act {
+        match key.code {
+            KeyCode::Esc => return Act::Close,
+            KeyCode::Enter => return Act::ChangeThreshold,
+            code => adjust_threshold(&mut self.new_threshold, self.max_threshold, code),
+        }
+        Act::None
+    }
+}
+
+impl GovView {
+    /// Handle a key in the governance approvals list.
+    fn on_key(&mut self, key: KeyEvent) -> Act {
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('q') => return Act::Close,
+            KeyCode::Up | KeyCode::Char('k') => self.selected = self.selected.saturating_sub(1),
+            KeyCode::Down | KeyCode::Char('j') => step_down(&mut self.selected, self.items.len()),
+            KeyCode::Char('c') => return Act::GovConfirm,
+            KeyCode::Char('e') => return Act::GovExecute,
+            KeyCode::Char('r') => return Act::GovRevoke,
+            KeyCode::Char('x') => return Act::GovExpire,
+            KeyCode::Char('n') => return Act::ComposeAction,
+            KeyCode::Char('p') => return Act::ComposeProposal,
+            _ => {}
+        }
+        Act::None
+    }
+}
+
+impl ComposerPick {
+    /// Handle a key in the action or proposal type picker.
+    fn on_key(&mut self, key: KeyEvent) -> Act {
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('q') => return Act::Close,
+            KeyCode::Up => self.selected = self.selected.saturating_sub(1),
+            KeyCode::Down => step_down(&mut self.selected, self.options.len()),
+            KeyCode::Enter => return Act::OpenComposer,
+            _ => {}
+        }
+        Act::None
+    }
+}
+
+impl Composer {
+    /// Handle a key in the composer form. Esc closes it, and every other key
+    /// goes to [`composer_key`].
+    fn on_key(&mut self, key: KeyEvent) -> Act {
+        if key.code == KeyCode::Esc {
+            Act::Close
+        } else if composer_key(self, key) {
+            Act::SubmitComposer
+        } else {
+            Act::None
+        }
     }
 }
 
@@ -503,10 +550,11 @@ fn composer_key(composer: &mut Composer, key: KeyEvent) -> bool {
 mod tests {
     use std::sync::mpsc::{self, Receiver};
 
-    use crate::api::PeerEntry;
-    use crate::app::overlay::PeerChoice;
+    use crate::api::{AuthStatusKind, PartyAuthStatus, PeerEntry};
+    use crate::app::overlay::{Dar, GovItem, GovOp};
     use crate::app::worker::Request;
     use crate::composer::PickerOption;
+    use crate::composer::{ComposerField, ComposerSubmit};
 
     use super::*;
 
@@ -955,6 +1003,429 @@ mod tests {
             press(&mut app, KeyCode::Enter);
         }
         assert_eq!(party_config(&app).cursor, 7);
+        assert!(requests.try_recv().is_err());
+    }
+
+    fn change_threshold_form() -> Overlay {
+        Overlay::ChangeThreshold(ChangeThresholdForm {
+            party_id: "dec::1220".to_owned(),
+            party_name: "dec".to_owned(),
+            previous_threshold: 2,
+            new_threshold: 2,
+            max_threshold: 3,
+        })
+    }
+
+    fn new_threshold(app: &App) -> i32 {
+        match &app.overlay {
+            Overlay::ChangeThreshold(form) => form.new_threshold,
+            _ => panic!("expected the change-threshold form"),
+        }
+    }
+
+    #[test]
+    fn change_threshold_form_keys() {
+        let (mut app, requests) = app_with(change_threshold_form());
+        press(&mut app, KeyCode::Enter);
+        assert!(
+            requests.try_recv().is_err(),
+            "an unchanged threshold is not sent"
+        );
+        assert!(
+            matches!(&app.overlay, Overlay::Message(text) if text == "Threshold is already 2.")
+        );
+
+        let (mut app, requests) = app_with(change_threshold_form());
+        press(&mut app, KeyCode::Right);
+        press(&mut app, KeyCode::Char('+'));
+        assert_eq!(new_threshold(&app), 3, "the threshold stops at the maximum");
+        press(&mut app, KeyCode::Left);
+        press(&mut app, KeyCode::Char('-'));
+        press(&mut app, KeyCode::Char('-'));
+        assert_eq!(new_threshold(&app), 1, "the threshold stops at 1");
+        for code in [
+            KeyCode::Up,
+            KeyCode::Down,
+            KeyCode::Char('j'),
+            KeyCode::Char('q'),
+        ] {
+            press(&mut app, code);
+        }
+        assert_eq!(new_threshold(&app), 1, "other keys do nothing");
+        press(&mut app, KeyCode::Enter);
+        let Ok(Request::ChangeThreshold {
+            party_id,
+            new_threshold,
+            previous_threshold,
+        }) = requests.try_recv()
+        else {
+            panic!("expected a change-threshold request");
+        };
+        assert_eq!(
+            (party_id.as_str(), new_threshold, previous_threshold),
+            ("dec::1220", 1, 2)
+        );
+        assert_eq!(busy_text(&app), "Changing threshold…");
+        assert_esc_closes(change_threshold_form());
+    }
+
+    fn peer_select() -> Overlay {
+        let peer = |id: &str| PeerChoice {
+            id: id.to_owned(),
+            name: id.to_owned(),
+            checked: false,
+        };
+        Overlay::PeerSelect {
+            dar: Dar {
+                filename: "gov.dar".to_owned(),
+                data: "ZGFy".to_owned(),
+            },
+            peers: vec![peer("a"), peer("b")],
+            cursor: 0,
+        }
+    }
+
+    fn peer_select_state(app: &App) -> (usize, Vec<bool>) {
+        match &app.overlay {
+            Overlay::PeerSelect { peers, cursor, .. } => {
+                (*cursor, peers.iter().map(|p| p.checked).collect())
+            }
+            _ => panic!("expected the peer picker"),
+        }
+    }
+
+    #[test]
+    fn peer_select_keys() {
+        let (mut app, requests) = app_with(peer_select());
+        press(&mut app, KeyCode::Enter);
+        assert!(requests.try_recv().is_err(), "no peer is ticked");
+        assert_eq!(peer_select_state(&app), (0, vec![false, false]));
+        press(&mut app, KeyCode::Down);
+        press(&mut app, KeyCode::Char('j'));
+        assert_eq!(
+            peer_select_state(&app).0,
+            1,
+            "the cursor stops on the last peer"
+        );
+        press(&mut app, KeyCode::Char(' '));
+        press(&mut app, KeyCode::Char('k'));
+        press(&mut app, KeyCode::Up);
+        press(&mut app, KeyCode::Tab);
+        assert_eq!(peer_select_state(&app), (0, vec![false, true]));
+        press(&mut app, KeyCode::Enter);
+        let Ok(Request::Distribute {
+            filename,
+            data,
+            peer_ids,
+        }) = requests.try_recv()
+        else {
+            panic!("expected a distribute request");
+        };
+        assert_eq!(
+            (filename.as_str(), data.as_str(), peer_ids),
+            ("gov.dar", "ZGFy", vec!["b".to_owned()])
+        );
+        assert_eq!(busy_text(&app), "Distributing DAR…");
+        assert_esc_closes(peer_select());
+    }
+
+    #[test]
+    fn scroll_overlay_keys() {
+        let scroll_of = |app: &App| match &app.overlay {
+            Overlay::Compare { scroll, .. }
+            | Overlay::Json { scroll, .. }
+            | Overlay::ChainAudit { scroll, .. } => *scroll,
+            _ => panic!("expected a scrolling overlay"),
+        };
+        let overlays: [fn() -> Overlay; 3] = [
+            || Overlay::Compare {
+                comparison: common::types::PeerPackageComparison {
+                    local_packages: Vec::new(),
+                    peers: Vec::new(),
+                },
+                scroll: 0,
+            },
+            || Overlay::Json {
+                value: serde_json::Value::Null,
+                scroll: 0,
+            },
+            || Overlay::ChainAudit {
+                entries: Vec::new(),
+                scroll: 0,
+            },
+        ];
+        for overlay in overlays {
+            let (mut app, _requests) = app_with(overlay());
+            press(&mut app, KeyCode::Up);
+            assert_eq!(scroll_of(&app), 0);
+            press(&mut app, KeyCode::Down);
+            press(&mut app, KeyCode::Char('j'));
+            press(&mut app, KeyCode::Down);
+            press(&mut app, KeyCode::Char('k'));
+            press(&mut app, KeyCode::Char('x'));
+            assert_eq!(scroll_of(&app), 2);
+            for close in [KeyCode::Esc, KeyCode::Enter, KeyCode::Char('q')] {
+                let (mut app, _requests) = app_with(overlay());
+                press(&mut app, close);
+                assert!(matches!(app.overlay, Overlay::None));
+            }
+        }
+    }
+
+    fn auth_overlay() -> Overlay {
+        let party = |id: &str| PartyAuthStatus {
+            dec_party_id: id.to_owned(),
+            member_party_id: None,
+            user_id: None,
+            status: AuthStatusKind::Notconfigured,
+            rights: None,
+        };
+        Overlay::Auth {
+            parties: vec![party("one::1220"), party("two::1220")],
+            selected: 0,
+        }
+    }
+
+    fn auth_selected(app: &App) -> usize {
+        match &app.overlay {
+            Overlay::Auth { selected, .. } => *selected,
+            _ => panic!("expected the auth overlay"),
+        }
+    }
+
+    #[test]
+    fn auth_overlay_keys() {
+        let (mut app, requests) = app_with(auth_overlay());
+        press(&mut app, KeyCode::Down);
+        press(&mut app, KeyCode::Char('j'));
+        assert_eq!(
+            auth_selected(&app),
+            1,
+            "the selection stops on the last party"
+        );
+        press(&mut app, KeyCode::Char('k'));
+        press(&mut app, KeyCode::Up);
+        press(&mut app, KeyCode::Enter);
+        assert_eq!(auth_selected(&app), 0);
+        press(&mut app, KeyCode::Down);
+        press(&mut app, KeyCode::Char('e'));
+        assert!(matches!(requests.try_recv(), Ok(Request::PartyConfig(id)) if id == "two::1220"));
+        assert_eq!(busy_text(&app), "Loading party configuration…");
+
+        let (mut app, requests) = app_with(auth_overlay());
+        press(&mut app, KeyCode::Char('t'));
+        assert!(matches!(requests.try_recv(), Ok(Request::TestAuth)));
+        assert_eq!(busy_text(&app), "Testing authentication…");
+
+        let (mut app, requests) = app_with(auth_overlay());
+        press(&mut app, KeyCode::Char('g'));
+        assert!(requests.try_recv().is_err());
+        assert!(
+            matches!(&app.overlay, Overlay::GrantRights(form) if form.dec_party_id == "one::1220")
+        );
+
+        assert_esc_closes(auth_overlay());
+        let (mut app, _requests) = app_with(auth_overlay());
+        press(&mut app, KeyCode::Char('q'));
+        assert!(matches!(app.overlay, Overlay::None));
+    }
+
+    fn gov_overlay(items: usize) -> Overlay {
+        let item = || {
+            GovItem::Domain(crate::api::DomainGovAction {
+                proposal_cid: "00prop".to_owned(),
+                action_label: "Mint".to_owned(),
+                description: None,
+                confirmations: Vec::new(),
+                executable_confirmation_cids: None,
+                confirmation_count: 0,
+                can_execute: false,
+                orphaned: false,
+            })
+        };
+        Overlay::Governance(Box::new(GovView {
+            party_name: "dec".to_owned(),
+            party_id: "dec::1220".to_owned(),
+            rules_contract_id: "00rules".to_owned(),
+            member_party_id: "me::1220".to_owned(),
+            threshold: 2,
+            items: (0..items).map(|_| item()).collect(),
+            selected: 0,
+        }))
+    }
+
+    fn gov_selected(app: &App) -> usize {
+        match &app.overlay {
+            Overlay::Governance(view) => view.selected,
+            _ => panic!("expected the approvals overlay"),
+        }
+    }
+
+    #[test]
+    fn governance_overlay_keys() {
+        let (mut app, requests) = app_with(gov_overlay(2));
+        press(&mut app, KeyCode::Down);
+        press(&mut app, KeyCode::Char('j'));
+        assert_eq!(
+            gov_selected(&app),
+            1,
+            "the selection stops on the last item"
+        );
+        press(&mut app, KeyCode::Char('k'));
+        press(&mut app, KeyCode::Up);
+        press(&mut app, KeyCode::Enter);
+        assert_eq!(gov_selected(&app), 0);
+        assert!(requests.try_recv().is_err());
+
+        let sends = |code, busy: &str| {
+            let (mut app, requests) = app_with(gov_overlay(1));
+            press(&mut app, KeyCode::Char(code));
+            assert!(
+                matches!(requests.try_recv(), Ok(Request::GovAction(_))),
+                "{code}"
+            );
+            assert_eq!(busy_text(&app), busy);
+        };
+        sends('c', "Confirming action…");
+        let (mut app, _requests) = app_with(gov_overlay(1));
+        press(&mut app, KeyCode::Char('e'));
+        assert!(matches!(&app.overlay, Overlay::Message(text) if text.starts_with("Not enough")));
+        let (mut app, _requests) = app_with(gov_overlay(1));
+        press(&mut app, KeyCode::Char('r'));
+        assert!(matches!(&app.overlay, Overlay::Message(text) if text.starts_with("You have no")));
+        let (mut app, _requests) = app_with(gov_overlay(1));
+        press(&mut app, KeyCode::Char('x'));
+        assert!(matches!(&app.overlay, Overlay::Message(text) if text.starts_with("No expired")));
+
+        for (code, kind) in [('n', "action"), ('p', "proposal")] {
+            let (mut app, _requests) = app_with(gov_overlay(1));
+            press(&mut app, KeyCode::Char(code));
+            let Overlay::ComposerPick(pick) = &app.overlay else {
+                panic!("{code} opens the type picker");
+            };
+            let is_action = matches!(pick.kind, ComposerKind::Action);
+            assert_eq!(is_action, kind == "action");
+            assert_eq!(pick.party_id, "dec::1220");
+        }
+
+        assert_esc_closes(gov_overlay(1));
+        let (mut app, _requests) = app_with(gov_overlay(1));
+        press(&mut app, KeyCode::Char('q'));
+        assert!(matches!(app.overlay, Overlay::None));
+    }
+
+    fn composer_pick() -> Overlay {
+        Overlay::ComposerPick(Box::new(ComposerPick {
+            kind: ComposerKind::Proposal,
+            party_id: "dec::1220".to_owned(),
+            party_name: "dec".to_owned(),
+            rules_contract_id: "00rules".to_owned(),
+            default_threshold: 2,
+            options: crate::composer::proposal_types()
+                .into_iter()
+                .take(2)
+                .collect(),
+            selected: 0,
+        }))
+    }
+
+    fn pick_selected(app: &App) -> usize {
+        match &app.overlay {
+            Overlay::ComposerPick(pick) => pick.selected,
+            _ => panic!("expected the type picker"),
+        }
+    }
+
+    #[test]
+    fn composer_pick_keys() {
+        let (mut app, _requests) = app_with(composer_pick());
+        press(&mut app, KeyCode::Down);
+        press(&mut app, KeyCode::Down);
+        assert_eq!(
+            pick_selected(&app),
+            1,
+            "the selection stops on the last type"
+        );
+        press(&mut app, KeyCode::Char('k'));
+        assert_eq!(pick_selected(&app), 1, "k does not move the picker");
+        press(&mut app, KeyCode::Up);
+        press(&mut app, KeyCode::Up);
+        press(&mut app, KeyCode::Char('j'));
+        assert_eq!(pick_selected(&app), 0, "j does not move the picker");
+        press(&mut app, KeyCode::Down);
+        press(&mut app, KeyCode::Enter);
+        let Overlay::Composer(composer) = &app.overlay else {
+            panic!("Enter opens the composer");
+        };
+        assert_eq!(composer.action_type, "setup_cc_preapproval");
+
+        assert_esc_closes(composer_pick());
+        let (mut app, _requests) = app_with(composer_pick());
+        press(&mut app, KeyCode::Char('q'));
+        assert!(matches!(app.overlay, Overlay::None));
+    }
+
+    fn composer() -> Overlay {
+        Overlay::Composer(Box::new(Composer {
+            title: "Vote".to_owned(),
+            action_type: "generic_vote",
+            submit: ComposerSubmit::Propose,
+            party_id: "dec::1220".to_owned(),
+            party_name: "dec".to_owned(),
+            rules_contract_id: "00rules".to_owned(),
+            fields: vec![ComposerField {
+                key: "description",
+                label: "Description",
+                kind: FieldKind::Text,
+                value: String::new(),
+                optional: false,
+                help: "",
+            }],
+            cursor: 0,
+        }))
+    }
+
+    #[test]
+    fn composer_keys() {
+        let (mut app, requests) = app_with(composer());
+        type_text(&mut app, "hi q");
+        let Overlay::Composer(form) = &app.overlay else {
+            panic!("typing keeps the composer open");
+        };
+        assert_eq!(form.fields[0].value, "hi q");
+        press(&mut app, KeyCode::Enter);
+        press(&mut app, KeyCode::Enter);
+        let Ok(Request::GovAction(request)) = requests.try_recv() else {
+            panic!("Enter on the submit row proposes");
+        };
+        assert!(matches!(
+            &request.op,
+            GovOp::Propose { proposal } if proposal["description"] == "hi q"
+        ));
+        assert_eq!(busy_text(&app), "Submitting…");
+        assert_esc_closes(composer());
+    }
+
+    #[test]
+    fn message_overlays_close_on_esc_enter_or_q() {
+        let overlays: [fn() -> Overlay; 2] = [
+            || Overlay::Message("done".to_owned()),
+            || Overlay::Busy("working".to_owned()),
+        ];
+        for overlay in overlays {
+            for close in [KeyCode::Esc, KeyCode::Enter, KeyCode::Char('q')] {
+                let (mut app, _requests) = app_with(overlay());
+                press(&mut app, close);
+                assert!(matches!(app.overlay, Overlay::None));
+            }
+            let (mut app, _requests) = app_with(overlay());
+            press(&mut app, KeyCode::Char('x'));
+            press(&mut app, KeyCode::Down);
+            assert!(!matches!(app.overlay, Overlay::None));
+        }
+        let (mut app, requests) = app_with(Overlay::None);
+        press(&mut app, KeyCode::Enter);
+        assert!(matches!(app.overlay, Overlay::None));
         assert!(requests.try_recv().is_err());
     }
 }
