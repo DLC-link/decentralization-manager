@@ -21,6 +21,12 @@ pub(crate) enum ApiError {
     /// 500: the node failed.
     #[error("{0}")]
     Internal(String),
+    /// 502: a service the node called failed.
+    #[error("{0}")]
+    BadGateway(String),
+    /// 503: the node is not set up for the request.
+    #[error("{0}")]
+    ServiceUnavailable(String),
 }
 
 impl ApiError {
@@ -32,6 +38,10 @@ impl ApiError {
             Self::Conflict(error) => HttpResponse::Conflict().json(ErrorResponse { error }),
             Self::Internal(error) => {
                 HttpResponse::InternalServerError().json(ErrorResponse { error })
+            }
+            Self::BadGateway(error) => HttpResponse::BadGateway().json(ErrorResponse { error }),
+            Self::ServiceUnavailable(error) => {
+                HttpResponse::ServiceUnavailable().json(ErrorResponse { error })
             }
         }
     }
@@ -57,6 +67,14 @@ mod tests {
             (
                 ApiError::Internal("broke".into()),
                 StatusCode::INTERNAL_SERVER_ERROR,
+            ),
+            (
+                ApiError::BadGateway("upstream".into()),
+                StatusCode::BAD_GATEWAY,
+            ),
+            (
+                ApiError::ServiceUnavailable("not set up".into()),
+                StatusCode::SERVICE_UNAVAILABLE,
             ),
         ];
         for (error, status) in cases {
