@@ -15,8 +15,9 @@ mod worker;
 
 pub use login::{Outcome, run_login};
 pub use overlay::PeerForm;
-pub use overlay::{AddPartyForm, ChangeThresholdForm, ComposerKind, ComposerPick, DeployForm};
-pub use overlay::{DetailData, GovItem, GovView, GrantForm, IdpMode, KickForm, NetworkEditState};
+pub use overlay::{ChangeThresholdForm, ComposerKind, ComposerPick, DeployForm};
+pub use overlay::{DetailData, GovItem, GovView, GrantForm, IdpMode, NetworkEditState};
+pub use overlay::{MemberChange, MemberChangeForm};
 pub use overlay::{NodeInfoData, OnboardForm, Overlay, PartyConfigForm, PcRow, PeerChoice};
 pub use state::App;
 pub use tabs::{Status, Tab, TabView};

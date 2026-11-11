@@ -17,8 +17,7 @@ impl App {
             Close,
             Distribute,
             Onboard,
-            Kick,
-            AddParty,
+            MemberChange,
             ChangeThreshold,
             TestAuth,
             GovConfirm,
@@ -85,28 +84,9 @@ impl App {
                 KeyCode::Char(c) if form.on_prefix() => form.prefix.push(c),
                 _ => {}
             },
-            Overlay::Kick(form) => match key.code {
+            Overlay::MemberChange(form) => match key.code {
                 KeyCode::Esc => act = Act::Close,
-                KeyCode::Enter => act = Act::Kick,
-                KeyCode::Up | KeyCode::Char('k') => {
-                    form.selected = form.selected.saturating_sub(1);
-                }
-                KeyCode::Down | KeyCode::Char('j') => {
-                    if form.selected + 1 < form.candidates.len() {
-                        form.selected += 1;
-                    }
-                }
-                KeyCode::Left | KeyCode::Char('-') => {
-                    form.new_threshold = (form.new_threshold - 1).max(1);
-                }
-                KeyCode::Right | KeyCode::Char('+') => {
-                    form.new_threshold = (form.new_threshold + 1).min(form.max_threshold);
-                }
-                _ => {}
-            },
-            Overlay::AddParty(form) => match key.code {
-                KeyCode::Esc => act = Act::Close,
-                KeyCode::Enter => act = Act::AddParty,
+                KeyCode::Enter => act = Act::MemberChange,
                 KeyCode::Up | KeyCode::Char('k') => {
                     form.selected = form.selected.saturating_sub(1);
                 }
@@ -364,8 +344,7 @@ impl App {
             Act::Close => self.overlay = Overlay::None,
             Act::Distribute => self.confirm_distribute(),
             Act::Onboard => self.confirm_onboard(),
-            Act::Kick => self.confirm_kick(),
-            Act::AddParty => self.confirm_add_party(),
+            Act::MemberChange => self.confirm_member_change(),
             Act::ChangeThreshold => self.confirm_change_threshold(),
             Act::TestAuth => self.run_auth_test(),
             Act::GovConfirm => self.gov_confirm(),

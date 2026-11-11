@@ -64,30 +64,29 @@ pub struct KickCandidate {
     pub label: String,
 }
 
-/// The kick-participant form: pick an owner to remove and set the new
-/// signing threshold for the remaining owners.
-pub struct KickForm {
-    pub party_id: String,
-    pub party_name: String,
-    pub previous_threshold: i32,
-    pub candidates: Vec<KickCandidate>,
-    pub selected: usize,
-    pub new_threshold: i32,
-    /// Highest threshold allowed after the kick (remaining owner count).
-    pub max_threshold: i32,
+/// Which membership change a [`MemberChangeForm`] makes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MemberChange {
+    /// Remove an owner participant from the party.
+    Kick,
+    /// Add a configured peer that is not yet a member.
+    Add,
 }
 
-/// The add-party form: pick a configured peer that is not yet a member, and
-/// set the signing threshold for the party once it has joined.
-pub struct AddPartyForm {
+/// The kick-participant and add-party forms: pick a participant to remove
+/// or add, and set the signing threshold for the party after the change.
+pub struct MemberChangeForm {
+    pub kind: MemberChange,
     pub party_id: String,
     pub party_name: String,
     pub previous_threshold: i32,
-    /// Configured peers not already in the party (self excluded).
+    /// Kick: the owner participants (self excluded). Add: the configured
+    /// peers not already in the party (self excluded).
     pub candidates: Vec<KickCandidate>,
     pub selected: usize,
     pub new_threshold: i32,
-    /// Highest threshold allowed after the add (current members + the new one).
+    /// Highest threshold allowed after the change. Kick: the remaining owner
+    /// count. Add: the current owners plus the new one.
     pub max_threshold: i32,
 }
 
@@ -336,10 +335,8 @@ pub enum Overlay {
     },
     /// The onboarding (create-party) form.
     Onboard(OnboardForm),
-    /// The kick-participant form.
-    Kick(KickForm),
-    /// The add-party form (add a new member to an existing party).
-    AddParty(AddPartyForm),
+    /// The kick-participant or add-party form.
+    MemberChange(MemberChangeForm),
     /// The change-threshold form (change a party's signing threshold).
     ChangeThreshold(ChangeThresholdForm),
     /// A scrollable detail view of a feed item (workflow run or invitation).

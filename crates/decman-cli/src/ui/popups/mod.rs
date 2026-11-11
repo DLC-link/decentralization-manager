@@ -12,4 +12,4 @@ pub use info::{chain_audit_popup, detail_item, detail_kv, detail_label, feed_det
 pub use info::{json_popup, message_popup};
 pub use node::party_config_popup;
 pub use node::{auth_popup, grant_popup, id_prefix, network_edit_popup, node_info_popup};
-pub use party::{add_party_popup, change_threshold_popup, kick_popup, onboard_popup};
+pub use party::{change_threshold_popup, member_change_popup, onboard_popup};

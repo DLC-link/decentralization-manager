@@ -6,7 +6,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Clear, Paragraph};
 
-use crate::app::{AddPartyForm, ChangeThresholdForm, KickForm, OnboardForm};
+use crate::app::{ChangeThresholdForm, MemberChange, MemberChangeForm, OnboardForm};
 use crate::logo;
 
 use crate::ui::widgets::{centered_rect, dim_line, draw_shadow, popup_block, threshold_line};
@@ -60,69 +60,20 @@ pub fn onboard_popup(frame: &mut Frame, area: Rect, form: &OnboardForm) {
     frame.render_widget(paragraph, rect);
 }
 
-/// The kick-participant form popup: pick an owner to remove and set the new
-/// signing threshold.
-pub fn kick_popup(frame: &mut Frame, area: Rect, form: &KickForm) {
+/// The kick-participant and add-party form popup: pick a participant to
+/// remove or add, and set the new signing threshold.
+pub fn member_change_popup(frame: &mut Frame, area: Rect, form: &MemberChangeForm) {
+    let (title, heading) = match form.kind {
+        MemberChange::Kick => ("Kick participant", "Remove participant:"),
+        MemberChange::Add => ("Add party member", "Add participant:"),
+    };
     let mut lines = vec![
         Line::from(vec![
             Span::styled("Party  ", Style::default().fg(Color::DarkGray)),
             Span::raw(form.party_name.clone()),
         ]),
         Line::default(),
-        dim_line("Remove participant:"),
-    ];
-    for (i, candidate) in form.candidates.iter().enumerate() {
-        let focused = i == form.selected;
-        let marker = if focused { "▶ " } else { "  " };
-        let style = if focused {
-            Style::default()
-                .fg(logo::ORANGE)
-                .add_modifier(Modifier::BOLD)
-        } else {
-            Style::default()
-        };
-        lines.push(Line::from(Span::styled(
-            format!("{marker}{}", candidate.label),
-            style,
-        )));
-    }
-    lines.push(Line::default());
-    lines.push(Line::from(vec![
-        Span::styled("New threshold  ", Style::default().fg(Color::DarkGray)),
-        Span::styled(
-            format!("{} ", form.new_threshold),
-            Style::default()
-                .fg(logo::ORANGE)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(
-            format!(
-                "(was {prev}, max {max}) ←/→ adjust",
-                prev = form.previous_threshold,
-                max = form.max_threshold
-            ),
-            Style::default().fg(Color::DarkGray),
-        ),
-    ]));
-
-    let width = 64.min(area.width.saturating_sub(4));
-    let height = ((lines.len() as u16) + 2).clamp(8, area.height.saturating_sub(4));
-    let rect = centered_rect(width, height, area);
-    let paragraph = Paragraph::new(lines).block(popup_block("Kick participant"));
-    draw_shadow(frame, rect, area);
-    frame.render_widget(Clear, rect);
-    frame.render_widget(paragraph, rect);
-}
-
-/// The add-party form popup: pick a peer to add and set the new threshold.
-pub fn add_party_popup(frame: &mut Frame, area: Rect, form: &AddPartyForm) {
-    let mut lines = vec![
-        Line::from(vec![
-            Span::styled("Party  ", Style::default().fg(Color::DarkGray)),
-            Span::raw(form.party_name.clone()),
-        ]),
-        Line::default(),
-        dim_line("Add participant:"),
+        dim_line(heading),
     ];
     for (i, candidate) in form.candidates.iter().enumerate() {
         let focused = i == form.selected;
@@ -149,7 +100,7 @@ pub fn add_party_popup(frame: &mut Frame, area: Rect, form: &AddPartyForm) {
     let width = 64.min(area.width.saturating_sub(4));
     let height = ((lines.len() as u16) + 2).clamp(8, area.height.saturating_sub(4));
     let rect = centered_rect(width, height, area);
-    let paragraph = Paragraph::new(lines).block(popup_block("Add party member"));
+    let paragraph = Paragraph::new(lines).block(popup_block(title));
     draw_shadow(frame, rect, area);
     frame.render_widget(Clear, rect);
     frame.render_widget(paragraph, rect);
@@ -185,7 +136,7 @@ pub fn change_threshold_popup(frame: &mut Frame, area: Rect, form: &ChangeThresh
 mod tests {
 
     use crate::app::PeerChoice;
-    use crate::app::{AddPartyForm, ChangeThresholdForm, KickForm, OnboardForm, Overlay};
+    use crate::app::{ChangeThresholdForm, MemberChange, MemberChangeForm, OnboardForm, Overlay};
 
     use crate::ui::fixtures::render;
     use crate::ui::frame::draw_overlay;
@@ -212,7 +163,8 @@ mod tests {
     fn kick_popup_renders_candidates_and_threshold() {
         use crate::app::KickCandidate;
 
-        let overlay = Overlay::Kick(KickForm {
+        let overlay = Overlay::MemberChange(MemberChangeForm {
+            kind: MemberChange::Kick,
             party_id: "dec::1220".to_owned(),
             party_name: "cbtc-network".to_owned(),
             previous_threshold: 3,
@@ -235,7 +187,8 @@ mod tests {
     fn add_party_popup_renders_candidates_and_threshold() {
         use crate::app::KickCandidate;
 
-        let overlay = Overlay::AddParty(AddPartyForm {
+        let overlay = Overlay::MemberChange(MemberChangeForm {
+            kind: MemberChange::Add,
             party_id: "dec::1220".to_owned(),
             party_name: "cbtc-network".to_owned(),
             previous_threshold: 2,
