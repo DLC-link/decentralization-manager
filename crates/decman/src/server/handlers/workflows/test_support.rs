@@ -83,7 +83,8 @@ pub struct TestNode {
     _root: tempfile::TempDir,
 }
 
-/// A node whose participant id is `self_id`, on `pool`.
+/// A node whose participant id is `self_id`, on `pool`. Its Canton ports
+/// have nothing listening on them, so every Canton call fails.
 pub async fn test_node(pool: SqlitePool, self_id: &CantonId) -> anyhow::Result<TestNode> {
     let root = tempfile::tempdir()?;
     let mut state = AppState::for_test_on(None, pool).into_inner();
@@ -91,6 +92,8 @@ pub async fn test_node(pool: SqlitePool, self_id: &CantonId) -> anyhow::Result<T
         .ok_or_else(|| anyhow::anyhow!("a fresh test state has one owner"))?;
     node.config = node.config.clone().with_root_dir(root.path());
     node.config.node.participant_id = Some(self_id.clone());
+    node.config.canton.admin_api_port = closed_port()?;
+    node.config.canton.ledger_api_port = closed_port()?;
     tokio::fs::create_dir_all(node.config.data_dir()).await?;
     NoiseKeypair::generate()
         .save_to_file(node.config.key_file_path())

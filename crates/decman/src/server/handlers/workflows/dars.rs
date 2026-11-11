@@ -450,3 +450,222 @@ async fn send_dars_invites(
 
     Ok(())
 }
+
+#[cfg(test)]
+mod dar_handler_tests {
+    //! Pins every answer the DAR upload and distribution endpoints give
+    //! before they start a run: the status code and the exact JSON body.
+
+    use actix_web::http::StatusCode;
+    use serde_json::json;
+
+    use super::super::{
+        preflight::{format_incompatible_peers, preflight_incompatible_peers},
+        test_support::{
+            Answer, TestNode, break_table, closed_port, insert_peers, peer, pid, post_as,
+            post_as_admin, test_node,
+        },
+    };
+    use super::*;
+    use crate::db::MIGRATOR;
+
+    type Result<T = ()> = anyhow::Result<T>;
+
+    /// This node is `pid(1)`, and its peer `pid(2)` has no usable Noise key
+    /// unless `reachable_keys`.
+    async fn node_with_a_peer(pool: SqlitePool, reachable_keys: bool) -> Result<TestNode> {
+        insert_peers(&pool, &[peer(&pid(2)?, closed_port()?, reachable_keys)]).await?;
+        test_node(pool, &pid(1)?).await
+    }
+
+    fn dar_file() -> DarFile {
+        DarFile {
+            filename: "app.dar".to_string(),
+            data: STANDARD.encode(b"dar bytes"),
+        }
+    }
+
+    fn distribute(peer_ids: &[CantonId]) -> serde_json::Value {
+        json!({
+            "dar_files": [dar_file()],
+            "peer_ids": peer_ids.iter().map(ToString::to_string).collect::<Vec<_>>(),
+        })
+    }
+
+    fn distribute_package(peer_ids: &[CantonId]) -> serde_json::Value {
+        json!({
+            "package_id": "0000000000000000000000000000000000000000000000000000000000000001",
+            "peer_ids": peer_ids.iter().map(ToString::to_string).collect::<Vec<_>>(),
+        })
+    }
+
+    async fn post_distribute(node: &TestNode, request: serde_json::Value) -> Answer {
+        post_as_admin(&node.data, start_dars, "/dars/distribute", request).await
+    }
+
+    async fn post_distribute_package(node: &TestNode, request: serde_json::Value) -> Answer {
+        post_as_admin(
+            &node.data,
+            start_dars_for_package,
+            "/dars/distribute-package",
+            request,
+        )
+        .await
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn anonymous_callers_are_unauthorized(pool: SqlitePool) -> Result {
+        let node = node_with_a_peer(pool, false).await?;
+        let peers = [pid(2)?];
+        post_as(
+            &node.data,
+            upload_dars_local,
+            "/dars/upload",
+            distribute(&peers),
+            None,
+        )
+        .await
+        .assert_error(StatusCode::UNAUTHORIZED, "authentication required");
+        post_as(
+            &node.data,
+            start_dars,
+            "/dars/distribute",
+            distribute(&peers),
+            None,
+        )
+        .await
+        .assert_error(StatusCode::UNAUTHORIZED, "authentication required");
+        post_as(
+            &node.data,
+            start_dars_for_package,
+            "/dars/distribute-package",
+            distribute_package(&peers),
+            None,
+        )
+        .await
+        .assert_error(StatusCode::UNAUTHORIZED, "authentication required");
+        Ok(())
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn an_empty_local_upload_succeeds(pool: SqlitePool) -> Result {
+        let node = node_with_a_peer(pool, false).await?;
+        let answer = post_as_admin(
+            &node.data,
+            upload_dars_local,
+            "/dars/upload",
+            json!({ "dar_files": [] }),
+        )
+        .await;
+        assert_eq!(answer.status, StatusCode::OK, "{}", answer.body);
+        assert_eq!(answer.content_type.as_deref(), Some("application/json"));
+        assert_eq!(answer.body, r#"{"success":true}"#);
+        Ok(())
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_failed_local_upload_answers_500(pool: SqlitePool) -> Result {
+        let node = node_with_a_peer(pool, false).await?;
+        let error = workflow::contracts::upload_dars(&node.data.config, &[dar_file()])
+            .await
+            .err()
+            .ok_or_else(|| anyhow::anyhow!("a closed admin port must refuse the upload"))?;
+        post_as_admin(
+            &node.data,
+            upload_dars_local,
+            "/dars/upload",
+            distribute(&[]),
+        )
+        .await
+        .assert_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            &format!("Failed to upload DARs: {error}"),
+        );
+        Ok(())
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_distribution_needs_a_peer(pool: SqlitePool) -> Result {
+        let node = node_with_a_peer(pool, false).await?;
+        post_distribute(&node, distribute(&[])).await.assert_error(
+            StatusCode::BAD_REQUEST,
+            "peer_ids must contain at least one peer",
+        );
+        post_distribute_package(&node, distribute_package(&[]))
+            .await
+            .assert_error(
+                StatusCode::BAD_REQUEST,
+                "peer_ids must contain at least one peer",
+            );
+        Ok(())
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_failed_dar_read_answers_500(pool: SqlitePool) -> Result {
+        let node = node_with_a_peer(pool, false).await?;
+        let error = fetch_dar_for_package(
+            &node.data.config,
+            "0000000000000000000000000000000000000000000000000000000000000001",
+        )
+        .await
+        .err()
+        .ok_or_else(|| anyhow::anyhow!("a closed admin port must refuse the read"))?;
+        post_distribute_package(&node, distribute_package(&[pid(2)?]))
+            .await
+            .assert_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &format!("Failed to read the DAR: {error}"),
+            );
+        Ok(())
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn an_unverifiable_invitee_is_a_conflict(pool: SqlitePool) -> Result {
+        let node = node_with_a_peer(pool.clone(), true).await?;
+        let incompatible = preflight_incompatible_peers(&node.data.config, &pool, &[pid(2)?]).await;
+        assert_eq!(incompatible.len(), 1, "{incompatible:?}");
+        post_distribute(&node, distribute(&[pid(2)?]))
+            .await
+            .assert_error(
+                StatusCode::CONFLICT,
+                &format_incompatible_peers(&incompatible),
+            );
+        Ok(())
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_failed_run_write_is_a_conflict_and_leaves_no_run(pool: SqlitePool) -> Result {
+        let node = node_with_a_peer(pool.clone(), false).await?;
+        break_table(&pool, "workflow_runs").await?;
+        let answer = post_distribute(&node, distribute(&[pid(2)?])).await;
+        assert_eq!(answer.status, StatusCode::CONFLICT, "{}", answer.body);
+        assert_eq!(answer.content_type.as_deref(), Some("application/json"));
+        let body = answer.json()?;
+        let error = body["error"].as_str().unwrap_or_default();
+        assert!(
+            error.starts_with("Failed to start DARs workflow: ") && error.contains("workflow_runs"),
+            "{error}"
+        );
+        assert_eq!(body.as_object().map(|o| o.len()), Some(1), "{body}");
+        assert!(node.data.workflows.snapshot().is_empty());
+        Ok(())
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_valid_distribution_is_accepted(pool: SqlitePool) -> Result {
+        let node = node_with_a_peer(pool, false).await?;
+        let answer = post_distribute(&node, distribute(&[pid(2)?])).await;
+        assert_eq!(answer.status, StatusCode::ACCEPTED, "{}", answer.body);
+        assert_eq!(answer.content_type.as_deref(), Some("application/json"));
+        let body = answer.json()?;
+        let instance = body["instance_name"].as_str().unwrap_or_default();
+        assert!(instance.starts_with("dars-distribute-"), "{body}");
+        assert_eq!(
+            answer.body,
+            format!(
+                r#"{{"status":"inprogress","message":"DARs distribution workflow started","instance_name":"{instance}"}}"#
+            )
+        );
+        Ok(())
+    }
+}

@@ -690,3 +690,180 @@ mod tests {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod start_onboarding_tests {
+    //! Pins every answer `POST /onboarding` gives before it starts a run:
+    //! the status code and the exact JSON body.
+
+    use actix_web::http::StatusCode;
+    use common::api::OnboardingMeshErrorResponse;
+    use serde_json::json;
+
+    use super::super::test_support::{
+        Answer, TestNode, break_table, cache_party, pid, post_as, post_as_admin, test_node,
+    };
+    use super::*;
+    use crate::db::MIGRATOR;
+
+    type Result<T = ()> = anyhow::Result<T>;
+
+    async fn node(pool: SqlitePool) -> Result<TestNode> {
+        test_node(pool, &pid(1)?).await
+    }
+
+    async fn post(node: &TestNode, request: serde_json::Value) -> Answer {
+        post_as_admin(&node.data, start_onboarding, "/onboarding", request).await
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn an_anonymous_caller_is_unauthorized(pool: SqlitePool) -> Result {
+        let node = node(pool).await?;
+        let request = json!({ "party_id_prefix": "newparty", "peer_ids": [] });
+        post_as(&node.data, start_onboarding, "/onboarding", request, None)
+            .await
+            .assert_error(StatusCode::UNAUTHORIZED, "authentication required");
+        Ok(())
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_bad_prefix_is_a_bad_request(pool: SqlitePool) -> Result {
+        let node = node(pool).await?;
+        let request = json!({ "party_id_prefix": "1party", "peer_ids": [] });
+        post(&node, request).await.assert_error(
+            StatusCode::BAD_REQUEST,
+            "Party prefix must start with a letter (a-z, A-Z)",
+        );
+        Ok(())
+    }
+
+    /// The mesh refusal carries the edges as well as the text, so it keeps
+    /// its own body type.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn an_unknown_peer_fails_the_mesh_check(pool: SqlitePool) -> Result {
+        let node = node(pool).await?;
+        let (me, p5) = (pid(1)?, pid(5)?);
+        let request = json!({ "party_id_prefix": "newparty", "peer_ids": [p5.to_string()] });
+        let answer = post(&node, request).await;
+        assert_eq!(
+            answer.status,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "{}",
+            answer.body
+        );
+        assert_eq!(answer.content_type.as_deref(), Some("application/json"));
+        let expected = OnboardingMeshErrorResponse {
+            error: format!(
+                "Could not verify a full peer mesh. Two failure modes are folded together: \
+                 `unreachable from coordinator` (the coordinator cannot query that peer — \
+                 it's missing from network config, has no/invalid public key, didn't \
+                 answer, or replied with an unparsable peer list — fix the coordinator's \
+                 view of `to`, or `to` itself), and `mesh hole` (peer `from` is reachable \
+                 but does not have peer `to` in its peer list — add `to` to `from`'s \
+                 network config). Edges: [unreachable from coordinator] {me} → {p5}"
+            ),
+            missing_edges: vec![MissingPeerEdge {
+                from: me.to_string(),
+                to: p5.to_string(),
+                kind: MissingEdgeKind::UnreachableFromCoordinator,
+            }],
+        };
+        assert_eq!(answer.body, serde_json::to_string(&expected)?);
+        Ok(())
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_failed_mesh_check_answers_500(pool: SqlitePool) -> Result {
+        let node = node(pool.clone()).await?;
+        break_table(&pool, "peers").await?;
+        let request = json!({ "party_id_prefix": "newparty", "peer_ids": [] });
+        post(&node, request).await.assert_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Failed to verify peer mesh",
+        );
+        Ok(())
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_threshold_out_of_range_is_a_bad_request(pool: SqlitePool) -> Result {
+        let node = node(pool).await?;
+        let request = json!({ "party_id_prefix": "newparty", "peer_ids": [], "threshold": 2 });
+        post(&node, request).await.assert_error(
+            StatusCode::BAD_REQUEST,
+            "threshold must be between 1 and 1 (invited peers + this node); got 2",
+        );
+        Ok(())
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_confirmation_threshold_out_of_range_is_a_bad_request(pool: SqlitePool) -> Result {
+        let node = node(pool).await?;
+        let request = json!({
+            "party_id_prefix": "newparty",
+            "peer_ids": [],
+            "confirmation_threshold": 2,
+        });
+        post(&node, request).await.assert_error(
+            StatusCode::BAD_REQUEST,
+            "confirmation_threshold must be between 1 and 1 (the hosting participants); got 2",
+        );
+        Ok(())
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_taken_prefix_is_a_conflict(pool: SqlitePool) -> Result {
+        let (me, party) = (pid(1)?, pid(9)?);
+        cache_party(&pool, &party, 1, &[(&me, Some("k1"))], &[("k1", Some(&me))]).await?;
+        let node = node(pool).await?;
+        let request = json!({ "party_id_prefix": "validator-9", "peer_ids": [] });
+        post(&node, request).await.assert_error(
+            StatusCode::CONFLICT,
+            &format!(
+                "A decentralized party with the prefix 'validator-9' already exists \
+                 ({party}). Choose a different prefix."
+            ),
+        );
+        Ok(())
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_failed_run_write_is_a_conflict_and_leaves_no_run(pool: SqlitePool) -> Result {
+        let node = node(pool.clone()).await?;
+        break_table(&pool, "workflow_runs").await?;
+        let request = json!({ "party_id_prefix": "newparty", "peer_ids": [] });
+        let answer = post(&node, request).await;
+        assert_eq!(answer.status, StatusCode::CONFLICT, "{}", answer.body);
+        assert_eq!(answer.content_type.as_deref(), Some("application/json"));
+        let body = answer.json()?;
+        let error = body["error"].as_str().unwrap_or_default();
+        assert!(
+            error.starts_with("Failed to start onboarding workflow: ")
+                && error.contains("workflow_runs"),
+            "{error}"
+        );
+        assert_eq!(body.as_object().map(|o| o.len()), Some(1), "{body}");
+        assert!(node.data.workflows.snapshot().is_empty());
+        Ok(())
+    }
+
+    /// A second request for the same prefix finds the first run registered.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_valid_onboarding_is_accepted_once(pool: SqlitePool) -> Result {
+        let node = node(pool).await?;
+        let request = json!({ "party_id_prefix": "newparty", "peer_ids": [] });
+
+        let answer = post(&node, request.clone()).await;
+        assert_eq!(answer.status, StatusCode::ACCEPTED, "{}", answer.body);
+        assert_eq!(answer.content_type.as_deref(), Some("application/json"));
+        assert_eq!(
+            answer.body,
+            r#"{"status":"inprogress","message":"Onboarding workflow started","instance_name":"newparty-creation"}"#
+        );
+
+        post(&node, request).await.assert_error(
+            StatusCode::CONFLICT,
+            "A workflow with instance newparty-creation is already running",
+        );
+        Ok(())
+    }
+}

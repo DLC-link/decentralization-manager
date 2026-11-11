@@ -503,3 +503,179 @@ mod tests {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod start_contracts_tests {
+    //! Pins every answer `POST /contracts` gives before it starts a run: the
+    //! status code and the exact JSON error body.
+
+    use actix_web::http::StatusCode;
+    use serde_json::json;
+
+    use super::super::{
+        preflight::{format_incompatible_peers, preflight_incompatible_peers},
+        test_support::{
+            Answer, TestNode, break_table, cache_party, closed_port, in_progress_run, insert_peers,
+            insert_run, peer, pid, post_as, post_as_admin, test_node,
+        },
+    };
+    use super::*;
+    use crate::db::MIGRATOR;
+
+    type Result<T = ()> = anyhow::Result<T>;
+
+    const PACKAGE: &str = "0000000000000000000000000000000000000000000000000000000000000001";
+
+    /// This node is `pid(1)` and hosts the party `pid(9)`, threshold 1,
+    /// with its peer `pid(2)`, which has no usable Noise key unless
+    /// `reachable_keys`.
+    async fn two_host_party(pool: SqlitePool, reachable_keys: bool) -> Result<TestNode> {
+        let (p1, p2) = (pid(1)?, pid(2)?);
+        cache_party(
+            &pool,
+            &pid(9)?,
+            1,
+            &[(&p1, Some("k1")), (&p2, Some("k2"))],
+            &[("k1", Some(&p1)), ("k2", Some(&p2))],
+        )
+        .await?;
+        insert_peers(&pool, &[peer(&p2, closed_port()?, reachable_keys)]).await?;
+        test_node(pool, &p1).await
+    }
+
+    fn deploy(package_id: &str) -> Result<serde_json::Value> {
+        Ok(json!({
+            "decentralized_party_id": pid(9)?.to_string(),
+            "participant_ids": [pid(1)?.to_string(), pid(2)?.to_string()],
+            "participant_parties": [pid(11)?.to_string(), pid(12)?.to_string()],
+            "operator_party": pid(9)?.to_string(),
+            "contracts": [{
+                "id": "rules",
+                "name": "Governance Core",
+                "package_id": package_id,
+                "module_name": "Governance.Rules",
+                "entity_name": "GovernanceRules",
+                "fields": [],
+            }],
+        }))
+    }
+
+    async fn post(node: &TestNode, request: serde_json::Value) -> Answer {
+        post_as_admin(&node.data, start_contracts, "/contracts", request).await
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn an_anonymous_caller_is_unauthorized(pool: SqlitePool) -> Result {
+        let node = two_host_party(pool, false).await?;
+        post_as(
+            &node.data,
+            start_contracts,
+            "/contracts",
+            deploy(PACKAGE)?,
+            None,
+        )
+        .await
+        .assert_error(StatusCode::UNAUTHORIZED, "authentication required");
+        Ok(())
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_request_without_contracts_is_a_bad_request(pool: SqlitePool) -> Result {
+        let node = two_host_party(pool, false).await?;
+        let mut request = deploy(PACKAGE)?;
+        request["contracts"] = json!([]);
+        post(&node, request).await.assert_error(
+            StatusCode::BAD_REQUEST,
+            "The request lists no contracts to deploy",
+        );
+        Ok(())
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_party_with_a_run_in_flight_is_a_conflict(pool: SqlitePool) -> Result {
+        let party = pid(9)?;
+        let node = two_host_party(pool.clone(), false).await?;
+        insert_run(&pool, &in_progress_run("busy-run", &party)).await?;
+        post(&node, deploy(PACKAGE)?).await.assert_error(
+            StatusCode::CONFLICT,
+            &format!(
+                "Party {party} already has a Contracts workflow in flight (run busy-run); \
+                 wait for it to finish or cancel it first"
+            ),
+        );
+        Ok(())
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn an_unverifiable_invitee_is_a_conflict(pool: SqlitePool) -> Result {
+        let node = two_host_party(pool.clone(), true).await?;
+        let incompatible = preflight_incompatible_peers(&node.data.config, &pool, &[pid(2)?]).await;
+        assert_eq!(incompatible.len(), 1, "{incompatible:?}");
+        post(&node, deploy(PACKAGE)?).await.assert_error(
+            StatusCode::CONFLICT,
+            &format_incompatible_peers(&incompatible),
+        );
+        Ok(())
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn an_unresolvable_package_is_a_bad_request(pool: SqlitePool) -> Result {
+        let node = two_host_party(pool, false).await?;
+        post(&node, deploy("not-a-package")?).await.assert_error(
+            StatusCode::BAD_REQUEST,
+            "Cannot resolve deployment packages: Invalid package ID not-a-package",
+        );
+        Ok(())
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn an_uncached_party_cannot_commit_the_deployment(pool: SqlitePool) -> Result {
+        let node = test_node(pool, &pid(1)?).await?;
+        let party = pid(9)?;
+        post(&node, deploy(PACKAGE)?).await.assert_error(
+            StatusCode::BAD_REQUEST,
+            &format!(
+                "Cannot commit the deployment: Decentralized party {party} not found in \
+                 cache; refresh /decentralized-parties before deploying contracts"
+            ),
+        );
+        Ok(())
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_failed_run_write_is_a_conflict_and_leaves_no_run(pool: SqlitePool) -> Result {
+        let node = two_host_party(pool.clone(), false).await?;
+        break_table(&pool, "workflow_runs").await?;
+        let answer = post(&node, deploy(PACKAGE)?).await;
+        assert_eq!(answer.status, StatusCode::CONFLICT, "{}", answer.body);
+        assert_eq!(answer.content_type.as_deref(), Some("application/json"));
+        let body = answer.json()?;
+        let error = body["error"].as_str().unwrap_or_default();
+        assert!(
+            error.starts_with("Failed to start contracts workflow: ")
+                && error.contains("workflow_runs"),
+            "{error}"
+        );
+        assert_eq!(body.as_object().map(|o| o.len()), Some(1), "{body}");
+        assert!(node.data.workflows.snapshot().is_empty());
+        Ok(())
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_valid_deployment_is_accepted(pool: SqlitePool) -> Result {
+        let node = two_host_party(pool, false).await?;
+        let answer = post(&node, deploy(PACKAGE)?).await;
+        assert_eq!(answer.status, StatusCode::ACCEPTED, "{}", answer.body);
+        assert_eq!(answer.content_type.as_deref(), Some("application/json"));
+        let body = answer.json()?;
+        let instance = body["instance_name"].as_str().unwrap_or_default();
+        assert!(instance.starts_with("validator-9-contracts-"), "{body}");
+        assert_eq!(
+            answer.body,
+            format!(
+                r#"{{"status":"inprogress","message":"Contracts workflow started","instance_name":"{instance}"}}"#
+            )
+        );
+        Ok(())
+    }
+}
