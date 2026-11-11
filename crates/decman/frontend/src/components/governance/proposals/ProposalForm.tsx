@@ -1,12 +1,7 @@
-import { useCallback, useState } from "react";
+import { useState } from "react";
 import {
-  Autocomplete,
   Box,
-  Typography,
-  Button,
-  Alert,
   Collapse,
-  TextField,
   Select,
   MenuItem,
   FormControl,
@@ -16,19 +11,8 @@ import {
 } from "@mui/material";
 import { API_BASE } from "../../../constants";
 import { authenticatedFetch } from "../../../api";
-import { } from "../../../rewardBeneficiaries";
 import { TextHelp } from "../../FieldHelp";
-import { ContractSelect } from "../fields/ContractSelect";
-import { } from "../fields/CredentialOfferPicker";
-import { HelpTextField } from "../fields/HelpTextField";
-import { RequirementRows, type RequirementRow } from "../fields/RequirementRows";
 import { SubmitButton } from "../fields/SubmitButton";
-import {
-  buildRequirements,
-  credentialValidity,
-  parsePartyLines,
-  requiredClaimsText,
-} from "../proposalParse";
 import { TokenCustodyForms } from "./TokenCustodyForms";
 import {
   buildSetupCcPreapproval,
@@ -37,7 +21,6 @@ import {
 } from "./tokenCustodyPayloads";
 import { TransferForm } from "./TransferForm";
 import { buildTransfer, buildAcceptTransfer } from "./transferPayloads";
-import { } from "./AmuletRulesCidField";
 import { UtilityOnboardingForms } from "./UtilityOnboardingForms";
 import {
   buildSetupUtility,
@@ -74,14 +57,57 @@ import {
   buildCreateRegistrarServiceRequest,
   buildOnboardRegistrar,
 } from "./registrarPayloads";
+import { InstrumentForms } from "./InstrumentForms";
+import {
+  buildProvisionInstrument,
+  buildCreateTransferRule,
+  buildUpdateInstrumentConfiguration,
+  buildOnboardInstrumentIssuers,
+  buildOffboardInstrumentIssuers,
+} from "./instrumentPayloads";
 import { PROPOSAL_MENU, type FormProposalType } from "./proposalMenu";
 import type { ProposalState } from "./useProposalState";
 import type {
   Network,
-  PartyCredentialRequirement,
   ProposalType,
   ProposeActionRequest,
 } from "../../../types";
+
+// The payload builder of each proposal type the menu offers.
+const PROPOSAL_BUILDERS: {
+  [T in FormProposalType]: (state: ProposalState) => ProposalType;
+} = {
+  setup_cc_preapproval: buildSetupCcPreapproval,
+  setup_token_preapproval: buildSetupTokenPreapproval,
+  transfer: buildTransfer,
+  accept_transfer: buildAcceptTransfer,
+  generic_vote: buildGenericVote,
+  setup_utility: buildSetupUtility,
+  create_provider_service_request: buildCreateProviderServiceRequest,
+  create_user_service_request: buildCreateUserServiceRequest,
+  set_provider_app_reward_beneficiaries: buildSetProviderAppRewardBeneficiaries,
+  setup_coupon_reassignment_delegation: buildSetupCouponReassignmentDelegation,
+  revoke_coupon_reassignment_delegation: buildRevokeCouponReassignmentDelegation,
+  set_enable_result_contracts: buildSetEnableResultContracts,
+  create_delegated_batched_markers_proxy: buildCreateDelegatedBatchedMarkersProxy,
+  request_dev_net_featured_app_right: buildRequestDevNetFeaturedAppRight,
+  setup_minting_delegation: buildSetupMintingDelegation,
+  accept_external_party_setup: buildAcceptExternalPartySetup,
+  accept_mint_request: buildAcceptMintRequest,
+  accept_burn_request: buildAcceptBurnRequest,
+  offer_free_credential: buildOfferFreeCredential,
+  accept_free_credential: buildAcceptFreeCredential,
+  offer_paid_credential: buildOfferPaidCredential,
+  accept_paid_credential: buildAcceptPaidCredential,
+  create_provider_configuration: buildCreateProviderConfiguration,
+  create_registrar_service_request: buildCreateRegistrarServiceRequest,
+  onboard_registrar: buildOnboardRegistrar,
+  provision_instrument: buildProvisionInstrument,
+  create_transfer_rule: buildCreateTransferRule,
+  update_instrument_configuration: buildUpdateInstrumentConfiguration,
+  onboard_instrument_issuers: buildOnboardInstrumentIssuers,
+  offboard_instrument_issuers: buildOffboardInstrumentIssuers,
+};
 
 interface ProposalFormProps {
   /** The form fields and lookup lists, from useProposalState. */
@@ -110,76 +136,11 @@ export const ProposalForm = ({
     partyId,
     proposalType,
     setProposalType,
-    proposalCredentialValidFrom,
-    setProposalCredentialValidFrom,
-    proposalCredentialValidUntil,
-    setProposalCredentialValidUntil,
-    proposalInstrumentIdText,
-    setProposalInstrumentIdText,
-    proposalAdditionalIdentifiers,
-    setProposalAdditionalIdentifiers,
-    proposalInstrumentConfigurationCid,
-    setProposalInstrumentConfigurationCid,
-    proposalRegistrarServiceCid,
-    setProposalRegistrarServiceCid,
-    proposalHolderRequirements,
-    setProposalHolderRequirements,
-    proposalIssuerRequirements,
-    setProposalIssuerRequirements,
-    proposalInitialInstrumentIssuersText,
-    setProposalInitialInstrumentIssuersText,
-    proposalInstrumentIssuersText,
-    setProposalInstrumentIssuersText,
-    proposalOffboardRows,
-    setProposalOffboardRows,
-    availableCredentials,
-    credentialsLoading,
-    registrarServicesLoading,
-    instrumentsLoading,
-    ownRegistrarServices,
-    ownInstruments,
-    configurationToUpdate,
-    configurationToUpdateUnreadable,
     resetProposalForm,
     beneficiaryProblem,
     blockListProblem,
   } = state;
   const [proposalLoading, setProposalLoading] = useState(false);
-
-  // The update replaces every field, so picking a configuration fills the
-  // form with its current values. A field left empty is cleared.
-  const selectConfigurationToUpdate = (cid: string) => {
-    setProposalInstrumentConfigurationCid(cid);
-    const instrument = ownInstruments.find((inst) => inst.contract_id === cid);
-    const current = instrument?.configuration;
-    const toRows = (requirements: PartyCredentialRequirement[]): RequirementRow[] =>
-      requirements.map((requirement) => ({
-        issuer: requirement.issuer,
-        claimsText: requiredClaimsText(requirement.required_claims),
-        claims: requirement.required_claims,
-      }));
-    setProposalInstrumentIdText(instrument?.instrument_id ?? "");
-    setProposalAdditionalIdentifiers(current?.additional_identifiers ?? []);
-    setProposalIssuerRequirements(toRows(current?.issuer_requirements ?? []));
-    setProposalHolderRequirements(toRows(current?.holder_requirements ?? []));
-  };
-
-  // Candidate credentials for one offboard row: self-issued by this governance
-  // party, carrying claims that all name the row's party, and tagged as an
-  // instrument-issuer credential so a dual-role decparty's registrar
-  // credentials stay out.
-  const offboardableCredentialsFor = useCallback(
-    (party: string) =>
-      availableCredentials.filter(
-        (c) =>
-          c.issuer === partyId &&
-          c.holder === partyId &&
-          c.claims.length > 0 &&
-          c.claims.every((cl) => cl.subject === party) &&
-          c.credential_id.includes("-instrument-issuer-credential/"),
-      ),
-    [availableCredentials, partyId],
-  );
 
   const handleSubmitProposal = async () => {
     if (!rulesContractId) return;
@@ -187,158 +148,7 @@ export const ProposalForm = ({
     setError(null);
 
     try {
-      let proposal: ProposalType;
-      switch (proposalType) {
-        case "setup_cc_preapproval":
-          proposal = buildSetupCcPreapproval(state);
-          break;
-        case "setup_token_preapproval":
-          proposal = buildSetupTokenPreapproval(state);
-          break;
-        case "transfer":
-          proposal = buildTransfer(state);
-          break;
-        case "accept_transfer":
-          proposal = buildAcceptTransfer(state);
-          break;
-        case "generic_vote":
-          proposal = buildGenericVote(state);
-          break;
-        case "setup_utility":
-          proposal = buildSetupUtility(state);
-          break;
-        case "create_provider_service_request":
-          proposal = buildCreateProviderServiceRequest(state);
-          break;
-        case "create_user_service_request":
-          proposal = buildCreateUserServiceRequest(state);
-          break;
-        case "set_provider_app_reward_beneficiaries":
-          proposal = buildSetProviderAppRewardBeneficiaries(state);
-          break;
-        case "setup_coupon_reassignment_delegation":
-          proposal = buildSetupCouponReassignmentDelegation(state);
-          break;
-        case "revoke_coupon_reassignment_delegation":
-          proposal = buildRevokeCouponReassignmentDelegation(state);
-          break;
-        case "set_enable_result_contracts":
-          proposal = buildSetEnableResultContracts(state);
-          break;
-        case "create_delegated_batched_markers_proxy":
-          proposal = buildCreateDelegatedBatchedMarkersProxy(state);
-          break;
-        case "request_dev_net_featured_app_right":
-          proposal = buildRequestDevNetFeaturedAppRight(state);
-          break;
-        case "setup_minting_delegation":
-          proposal = buildSetupMintingDelegation(state);
-          break;
-        case "accept_external_party_setup":
-          proposal = buildAcceptExternalPartySetup(state);
-          break;
-        case "accept_mint_request":
-          proposal = buildAcceptMintRequest(state);
-          break;
-        case "accept_burn_request":
-          proposal = buildAcceptBurnRequest(state);
-          break;
-        case "offer_free_credential":
-          proposal = buildOfferFreeCredential(state);
-          break;
-        case "accept_free_credential":
-          proposal = buildAcceptFreeCredential(state);
-          break;
-        case "offer_paid_credential":
-          proposal = buildOfferPaidCredential(state);
-          break;
-        case "accept_paid_credential":
-          proposal = buildAcceptPaidCredential(state);
-          break;
-        case "create_provider_configuration":
-          proposal = buildCreateProviderConfiguration(state);
-          break;
-        case "create_registrar_service_request":
-          proposal = buildCreateRegistrarServiceRequest(state);
-          break;
-        case "onboard_registrar":
-          proposal = buildOnboardRegistrar(state);
-          break;
-        case "provision_instrument":
-          proposal = {
-            type: "provision_instrument",
-            registrar_service_cid: proposalRegistrarServiceCid,
-            instrument_id_text: proposalInstrumentIdText,
-            // No identifier editor, matching the Setup Utility form; extra
-            // identifiers go through the API directly.
-            additional_identifiers: [],
-            issuer_requirements: buildRequirements(
-              proposalIssuerRequirements,
-              "Issuer",
-            ),
-            holder_requirements: buildRequirements(
-              proposalHolderRequirements,
-              "Holder",
-            ),
-            initial_instrument_issuers: parsePartyLines(
-              proposalInitialInstrumentIssuersText,
-            ),
-            ...credentialValidity(proposalCredentialValidFrom, proposalCredentialValidUntil),
-          };
-          break;
-        case "create_transfer_rule":
-          proposal = {
-            type: "create_transfer_rule",
-            registrar_service_cid: proposalRegistrarServiceCid,
-          };
-          break;
-        case "update_instrument_configuration":
-          if (blockListProblem) throw new Error(blockListProblem);
-          proposal = {
-            type: "update_instrument_configuration",
-            registrar_service_cid: proposalRegistrarServiceCid,
-            instrument_configuration_cid: proposalInstrumentConfigurationCid,
-            instrument_id_text: proposalInstrumentIdText,
-            additional_identifiers: proposalAdditionalIdentifiers.map((row, idx) => {
-              // The id and scheme go out verbatim, so an unchanged identifier
-              // stays unchanged. The ledger requires only a nonempty id; an
-              // empty scheme is valid.
-              const identifier = {
-                source: row.source.trim(),
-                id: row.id,
-                scheme: row.scheme,
-              };
-              if (!identifier.source || !identifier.id) {
-                throw new Error(
-                  `Additional identifier ${idx + 1}: source and id are required`,
-                );
-              }
-              return identifier;
-            }),
-            issuer_requirements: buildRequirements(proposalIssuerRequirements, "Issuer"),
-            holder_requirements: buildRequirements(proposalHolderRequirements, "Holder"),
-            // The current flag, so the update keeps it.
-            use_block_list: configurationToUpdate?.check_block_list === false ? false : null,
-          };
-          break;
-        case "onboard_instrument_issuers":
-          proposal = {
-            type: "onboard_instrument_issuers",
-            instrument_configuration_cid: proposalInstrumentConfigurationCid,
-            instrument_issuers: parsePartyLines(proposalInstrumentIssuersText),
-            ...credentialValidity(proposalCredentialValidFrom, proposalCredentialValidUntil),
-          };
-          break;
-        case "offboard_instrument_issuers":
-          proposal = {
-            type: "offboard_instrument_issuers",
-            instrument_issuers: proposalOffboardRows.map((row) => ({
-              instrument_issuer: row.party,
-              credential_cids: row.cids,
-            })),
-          };
-          break;
-      }
+      const proposal = PROPOSAL_BUILDERS[proposalType](state);
 
       const request: ProposeActionRequest = {
         party_id: partyId,
@@ -437,339 +247,7 @@ export const ProposalForm = ({
 
           <RegistrarForms state={state} />
 
-          {proposalType === "provision_instrument" && (
-            <>
-              <ContractSelect
-                label="RegistrarService"
-                help="RegistrarService contract of this registrar decparty, used to create the InstrumentConfiguration."
-                value={proposalRegistrarServiceCid}
-                onChange={setProposalRegistrarServiceCid}
-                items={ownRegistrarServices}
-                loading={registrarServicesLoading}
-                loadingText="Loading services…"
-                emptyText='No RegistrarService for this party — run "Onboard Registrar" first'
-              />
-              <HelpTextField
-                size="small"
-                label="Instrument ID"
-                value={proposalInstrumentIdText}
-                onChange={(e) => setProposalInstrumentIdText(e.target.value)}
-                fullWidth
-                required
-                help={"Token name for the instrument this registrar will manage (e.g. \"cTM\")."}
-              />
-              <RequirementRows
-                label="Issuer Requirements"
-                help="Credential requirements an instrument issuer must meet. Rows whose issuer is this governance party are minted automatically for the initial issuers below."
-                rows={proposalIssuerRequirements}
-                setRows={setProposalIssuerRequirements}
-                defaultIssuer={partyId}
-              />
-              <RequirementRows
-                label="Holder Requirements"
-                help="Credential requirements a holder of this instrument must meet."
-                rows={proposalHolderRequirements}
-                setRows={setProposalHolderRequirements}
-                defaultIssuer={partyId}
-              />
-              <HelpTextField
-                size="small"
-                label="Initial Instrument Issuers (one party id per line)"
-                value={proposalInitialInstrumentIssuersText}
-                onChange={(e) => setProposalInitialInstrumentIssuersText(e.target.value)}
-                fullWidth
-                multiline
-                minRows={2}
-                maxRows={6}
-                help="Parties credentialed as instrument issuers at provisioning, one party id per line. Leave empty to onboard issuers later."
-                helpLabel="Initial Instrument Issuers"
-              />
-            </>
-          )}
-
-          {proposalType === "onboard_instrument_issuers" && (
-            <>
-              <ContractSelect
-                label="InstrumentConfiguration"
-                help="InstrumentConfiguration whose issuer requirements the new issuers are credentialed against."
-                value={proposalInstrumentConfigurationCid}
-                onChange={setProposalInstrumentConfigurationCid}
-                items={ownInstruments}
-                loading={instrumentsLoading}
-                loadingText="Loading instruments…"
-                emptyText='No instruments administered by this party — run "Provision Instrument" first'
-                rowLabel={(inst) => <>{inst.instrument_id} ({inst.contract_id.slice(0, 8)}…)</>}
-              />
-              <HelpTextField
-                size="small"
-                label="Instrument Issuers (one party id per line)"
-                value={proposalInstrumentIssuersText}
-                onChange={(e) => setProposalInstrumentIssuersText(e.target.value)}
-                fullWidth
-                required
-                multiline
-                minRows={2}
-                maxRows={6}
-                help="Parties to credential as instrument issuers, one party id per line. At least one is required."
-                helpLabel="Instrument Issuers"
-              />
-            </>
-          )}
-
-          {proposalType === "create_transfer_rule" && (
-            <ContractSelect
-              label="RegistrarService"
-              help="RegistrarService contract of this registrar decparty. The new TransferRule belongs to it. Setup creates the first rule when asked to, so use this to add one later."
-              value={proposalRegistrarServiceCid}
-              onChange={setProposalRegistrarServiceCid}
-              items={ownRegistrarServices}
-              loading={registrarServicesLoading}
-              loadingText="Loading services…"
-              emptyText='No RegistrarService for this party — run "Setup Utility" or "Onboard Registrar" first'
-            />
-          )}
-
-          {proposalType === "update_instrument_configuration" && (
-            <>
-              <Alert severity="info">
-                This replaces every field of the configuration. Picking a
-                configuration fills the form with its current values. A
-                field you clear is cleared on the ledger. The reward
-                beneficiaries stay as they are.
-              </Alert>
-              <ContractSelect
-                label="RegistrarService"
-                help="RegistrarService contract of this registrar decparty. The update runs through it."
-                value={proposalRegistrarServiceCid}
-                onChange={setProposalRegistrarServiceCid}
-                items={ownRegistrarServices}
-                loading={registrarServicesLoading}
-                loadingText="Loading services…"
-                emptyText='No RegistrarService for this party — run "Onboard Registrar" first'
-              />
-              <ContractSelect
-                label="InstrumentConfiguration"
-                help="The InstrumentConfiguration to replace. Execution archives it and creates a new one."
-                value={proposalInstrumentConfigurationCid}
-                onChange={selectConfigurationToUpdate}
-                items={ownInstruments}
-                loading={instrumentsLoading}
-                loadingText="Loading instruments…"
-                emptyText='No instruments administered by this party — run "Provision Instrument" first'
-                rowLabel={(inst) => <>{inst.instrument_id} ({inst.contract_id.slice(0, 8)}…)</>}
-              />
-              {configurationToUpdateUnreadable && (
-                <Alert severity="warning">
-                  DecMan could not read this configuration&apos;s current
-                  values. Enter every field by hand.
-                </Alert>
-              )}
-              {blockListProblem && <Alert severity="warning">{blockListProblem}</Alert>}
-              <HelpTextField
-                size="small"
-                label="Instrument ID"
-                value={proposalInstrumentIdText}
-                fullWidth
-                disabled
-                help="The instrument's id. Holdings name the instrument by it, so the update cannot change it."
-              />
-              <Typography variant="caption" color="text.secondary" sx={{ display: "block" }}>
-                <TextHelp text="Other identifiers of the instrument, each with its source party, id and scheme.">
-                  Additional Identifiers
-                </TextHelp>
-              </Typography>
-              {proposalAdditionalIdentifiers.map((row, idx) => (
-                <Box key={idx} sx={{ display: "flex", gap: 1, mb: 1, alignItems: "flex-start" }}>
-                  {(["source", "id", "scheme"] as const).map((key) => (
-                    <TextField
-                      key={key}
-                      label={`Identifier ${idx + 1} ${key === "source" ? "Source Party" : key === "id" ? "ID" : "Scheme"}`}
-                      value={row[key]}
-                      onChange={(e) => {
-                        const updated = [...proposalAdditionalIdentifiers];
-                        updated[idx] = { ...row, [key]: e.target.value };
-                        setProposalAdditionalIdentifiers(updated);
-                      }}
-                      size="small"
-                      sx={{ flex: key === "source" ? 2 : 1 }}
-                    />
-                  ))}
-                  <Button
-                    size="small"
-                    color="error"
-                    onClick={() =>
-                      setProposalAdditionalIdentifiers(
-                        proposalAdditionalIdentifiers.filter((_, i) => i !== idx),
-                      )
-                    }
-                  >
-                    Remove
-                  </Button>
-                </Box>
-              ))}
-              <Box>
-                <Button
-                  size="small"
-                  onClick={() =>
-                    setProposalAdditionalIdentifiers([
-                      ...proposalAdditionalIdentifiers,
-                      { source: partyId, id: "", scheme: "" },
-                    ])
-                  }
-                >
-                  Add Identifier
-                </Button>
-              </Box>
-              <RequirementRows
-                label="Issuer Requirements"
-                help="Credential requirements an instrument issuer must meet."
-                rows={proposalIssuerRequirements}
-                setRows={setProposalIssuerRequirements}
-                defaultIssuer={partyId}
-              />
-              <RequirementRows
-                label="Holder Requirements"
-                help="Credential requirements a holder of this instrument must meet."
-                rows={proposalHolderRequirements}
-                setRows={setProposalHolderRequirements}
-                defaultIssuer={partyId}
-              />
-            </>
-          )}
-
-          {(proposalType === "provision_instrument" ||
-            proposalType === "onboard_instrument_issuers") && (
-            <>
-              <HelpTextField
-                size="small"
-                label="Credentials Valid From (optional)"
-                type="datetime-local"
-                value={proposalCredentialValidFrom}
-                onChange={(e) => setProposalCredentialValidFrom(e.target.value)}
-                fullWidth
-                slotProps={{
-                  inputLabel: { shrink: true },
-                }}
-                help="When the minted credentials start to be valid. Leave empty for valid from the moment the action executes."
-                helpLabel="Credentials Valid From"
-              />
-              <HelpTextField
-                size="small"
-                label="Credentials Valid Until (optional)"
-                type="datetime-local"
-                value={proposalCredentialValidUntil}
-                onChange={(e) => setProposalCredentialValidUntil(e.target.value)}
-                fullWidth
-                slotProps={{
-                  inputLabel: { shrink: true },
-                }}
-                help="When the minted credentials expire. Leave empty for credentials that never expire; ending those takes an Offboard Instrument Issuers vote. The proposal description shows this window to voters, and execution is refused once it has passed."
-                helpLabel="Credentials Valid Until"
-              />
-            </>
-          )}
-
-          {proposalType === "offboard_instrument_issuers" && (
-            <>
-              <Typography variant="caption" color="text.secondary" sx={{ display: "block" }}>
-                <TextHelp text="One row per offboarded issuer. Each row lists the credentials this governance party issued for that issuer. An issuer keeps minting rights through any credential left out.">
-                  Instrument Issuers to Offboard (add issuer + credentials)
-                </TextHelp>
-              </Typography>
-              {proposalOffboardRows.map((row, idx) => (
-                <Box key={idx} sx={{ display: "flex", gap: 1, mb: 1, alignItems: "flex-start" }}>
-                  <HelpTextField
-                    label="Instrument Issuer Party"
-                    value={row.party}
-                    onChange={(e) => {
-                      const party = e.target.value;
-                      // Reset cids when the party changes. Stale
-                      // credentials name the wrong subject and fail at
-                      // execution.
-                      const updated = [...proposalOffboardRows];
-                      updated[idx] =
-                        party === row.party ? row : { ...row, party, cids: [] };
-                      setProposalOffboardRows(updated);
-                    }}
-                    size="small"
-                    sx={{ flex: 2 }}
-                    help="Party id of the issuer being offboarded. The credential list below filters to credentials whose claims all name this party."
-                  />
-                  <Autocomplete
-                    size="small"
-                    multiple
-                    freeSolo
-                    sx={{ flex: 3 }}
-                    options={offboardableCredentialsFor(row.party)}
-                    value={row.cids}
-                    loading={credentialsLoading}
-                    onChange={(_event, values) => {
-                      const updated = [...proposalOffboardRows];
-                      updated[idx] = {
-                        ...row,
-                        cids: values.map((value) =>
-                          typeof value === "string" ? value : value.contract_id,
-                        ),
-                      };
-                      setProposalOffboardRows(updated);
-                    }}
-                    getOptionLabel={(option) => {
-                      const cid =
-                        typeof option === "string" ? option : option.contract_id;
-                      const known =
-                        typeof option === "string"
-                          ? availableCredentials.find((c) => c.contract_id === option)
-                          : option;
-                      if (!known) {
-                        return cid;
-                      }
-                      return `${known.credential_id.split("/")[0]} (…${cid.slice(-8)})`;
-                    }}
-                    isOptionEqualToValue={(option, value) =>
-                      typeof value === "string"
-                        ? option.contract_id === value
-                        : option.contract_id === value.contract_id
-                    }
-                    renderInput={(params) => (
-                      <TextField
-                        {...params}
-                        label="Credentials to Revoke"
-                        helperText={
-                          credentialsLoading
-                            ? "Loading credentials…"
-                            : "Pick every credential of this issuer, or paste contract ids."
-                        }
-                      />
-                    )}
-                  />
-                  <Button
-                    size="small"
-                    color="error"
-                    onClick={() =>
-                      setProposalOffboardRows(
-                        proposalOffboardRows.filter((_, i) => i !== idx),
-                      )
-                    }
-                  >
-                    Remove
-                  </Button>
-                </Box>
-              ))}
-              <Box sx={{ display: "flex", alignItems: "center", gap: 2 }}>
-                <Button
-                  size="small"
-                  onClick={() =>
-                    setProposalOffboardRows([
-                      ...proposalOffboardRows,
-                      { party: "", cids: [] },
-                    ])
-                  }
-                >
-                  Add Issuer
-                </Button>
-              </Box>
-            </>
-          )}
+          <InstrumentForms state={state} />
 
           <SubmitButton
             label="Submit Proposal"
