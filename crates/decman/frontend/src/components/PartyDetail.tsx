@@ -36,7 +36,7 @@ import { TextHelp } from "./FieldHelp";
 import { AddPartyDialog } from "./AddPartyDialog";
 import { ChangeThresholdDialog } from "./ChangeThresholdDialog";
 import { KickDialog } from "./KickDialog";
-import { ContractsDialog } from "./ContractsDialog";
+import { ContractsDialog } from "./contracts/ContractsDialog";
 import { PartyConfigDialog } from "./PartyConfigDialog";
 import { GovernanceActionsDialog } from "./GovernanceActionsDialog";
 import { GovernanceAuditTrail } from "./GovernanceAuditTrail";
