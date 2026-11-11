@@ -375,6 +375,9 @@ fn write_private_file(path: &Path, bytes: &[u8]) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
+    use std::os::unix::fs::symlink;
+
     use super::*;
 
     fn response(json: &str) -> TokenResponse {
@@ -533,7 +536,7 @@ mod tests {
         cache.save(&target(), &tokens).unwrap();
         let real = dir.path().join("elsewhere.json");
         std::fs::rename(&cache.path, &real).unwrap();
-        std::os::unix::fs::symlink(&real, &cache.path).unwrap();
+        symlink(&real, &cache.path).unwrap();
 
         // Act / Assert
         assert!(cache.load().is_none());
