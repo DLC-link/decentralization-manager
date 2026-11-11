@@ -7,6 +7,7 @@ use std::{
 };
 
 use sqlx::SqlitePool;
+use tokio::sync::{RwLock, Semaphore};
 
 use super::{cache::store_parties_to_db, fetch::fetch_decentralized_parties, list::PartyReadOpts};
 use crate::{
@@ -131,7 +132,7 @@ pub(super) fn discovery_completed_since(entry: Option<u64>, current: Option<u64>
 /// Expired entries go on the way in and the map is capped, because `prefix`
 /// comes from the request.
 async fn record_discovery(
-    completed: &Arc<tokio::sync::RwLock<HashMap<String, i64>>>,
+    completed: &Arc<RwLock<HashMap<String, i64>>>,
     prefix: &str,
     parties: &[DecentralizedParty],
 ) {
@@ -160,10 +161,10 @@ async fn record_discovery(
 /// order, and the advertised concurrency cap stops meaning anything.
 #[derive(Clone)]
 pub(crate) struct DiscoveryGate {
-    claims: Arc<tokio::sync::RwLock<HashSet<String>>>,
-    permits: Arc<tokio::sync::Semaphore>,
-    completed: Arc<tokio::sync::RwLock<HashMap<String, i64>>>,
-    generations: Arc<tokio::sync::RwLock<HashMap<String, (u64, i64)>>>,
+    claims: Arc<RwLock<HashSet<String>>>,
+    permits: Arc<Semaphore>,
+    completed: Arc<RwLock<HashMap<String, i64>>>,
+    generations: Arc<RwLock<HashMap<String, (u64, i64)>>>,
 }
 
 impl DiscoveryGate {
@@ -415,6 +416,8 @@ async fn budgeted_fetch(
 }
 #[cfg(test)]
 mod tests {
+    use tokio::sync::RwLock;
+
     use super::{super::test_support::a_party, *};
 
     /// A party this node does not belong to leaves no cached rows, so without
@@ -445,7 +448,7 @@ mod tests {
     /// before that write answer empty for the whole TTL.
     #[tokio::test]
     async fn only_an_empty_discovery_is_recorded() -> anyhow::Result<()> {
-        let completed = Arc::new(tokio::sync::RwLock::new(HashMap::new()));
+        let completed = Arc::new(RwLock::new(HashMap::new()));
 
         record_discovery(&completed, "cbtc", &[a_party()?]).await;
         assert!(
@@ -480,7 +483,7 @@ mod tests {
     /// read the old mark as "this prefix has no parties".
     #[tokio::test]
     async fn a_non_empty_discovery_clears_a_standing_mark() -> anyhow::Result<()> {
-        let completed = Arc::new(tokio::sync::RwLock::new(HashMap::new()));
+        let completed = Arc::new(RwLock::new(HashMap::new()));
 
         record_discovery(&completed, "cbtc", &[]).await;
         assert!(completed.read().await.contains_key("cbtc"));
@@ -498,7 +501,7 @@ mod tests {
     /// flush the entry a real prefix depends on.
     #[tokio::test]
     async fn a_full_map_evicts_the_oldest_entry() {
-        let completed = Arc::new(tokio::sync::RwLock::new(HashMap::new()));
+        let completed = Arc::new(RwLock::new(HashMap::new()));
         let now = now_secs();
 
         // All fresh, so nothing is dropped for age. The oldest is the one
@@ -538,7 +541,7 @@ mod tests {
     /// is asking.
     #[tokio::test]
     async fn recording_drops_expired_entries_and_stays_bounded() {
-        let completed = Arc::new(tokio::sync::RwLock::new(HashMap::new()));
+        let completed = Arc::new(RwLock::new(HashMap::new()));
         let stale = now_secs() - PARTIES_CACHE_TTL_SECS - 1;
         completed.write().await.insert("expired".to_string(), stale);
 

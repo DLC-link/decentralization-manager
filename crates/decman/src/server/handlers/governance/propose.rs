@@ -33,10 +33,14 @@ use crate::{
     error::Result,
     server::{
         AppState,
-        audit::{AuditEvent, AuditParams, spawn_audit_log, with_proposal_cid},
+        audit::{
+            AuditEvent, AuditParams, action_summary, proposal_summary, spawn_audit_log,
+            with_proposal_cid,
+        },
         error::ApiError,
         middleware::require_admin,
         queries::{resolve_contract_package_ref, select_input_holdings},
+        reward_automation::active_delegation,
         transfer_context::{
             AcceptTransferContext, ProposeTransferArgs, fetch as fetch_accept_transfer_context,
             fetch_factory_for_propose, needs_registry_context,
@@ -207,15 +211,7 @@ async fn refuse_second_delegation(
     token: &str,
 ) -> Result<(), ApiError> {
     if may_create_second_delegation(proposal) {
-        match crate::server::reward_automation::active_delegation(
-            &data.config,
-            &packages(),
-            data.test_mode,
-            party_id,
-            token,
-        )
-        .await
-        {
+        match active_delegation(&data.config, &packages(), data.test_mode, party_id, token).await {
             Ok(Some(active)) => {
                 return Err(ApiError::Conflict(format!(
                     "a CouponReassignmentDelegation is already active ({}); set \
@@ -482,7 +478,7 @@ impl ProposeAudit {
     fn new(data: &AppState, request: &ProposeActionRequest, member_party_id: &CantonId) -> Self {
         Self {
             pool: data.db.clone(),
-            summary: crate::server::audit::proposal_summary(&request.proposal),
+            summary: proposal_summary(&request.proposal),
             details: serde_json::to_string(request).unwrap_or_default(),
             party_id: request.party_id.clone(),
             member_party_id: member_party_id.clone(),
@@ -683,7 +679,7 @@ pub(super) fn validate_inline_action(
         return Err(format!(
             "action '{}' is not a governance self-management action; submit it as a domain \
              proposal via POST /governance/propose",
-            crate::server::audit::action_summary(action)
+            action_summary(action)
         ));
     }
     action.validate().map_err(|e| e.to_string())
@@ -818,7 +814,7 @@ mod propose_step_tests {
 
 #[cfg(test)]
 mod confirm_tests {
-    use std::time::Duration;
+    use std::{net::TcpListener, sync::Arc, time::Duration};
 
     use decman_lib::catalog::proposals::core::GenericVote;
 
@@ -834,9 +830,7 @@ mod confirm_tests {
     }
 
     fn closed_port() -> anyhow::Result<u16> {
-        Ok(std::net::TcpListener::bind("127.0.0.1:0")?
-            .local_addr()?
-            .port())
+        Ok(TcpListener::bind("127.0.0.1:0")?.local_addr()?.port())
     }
 
     /// A propose on a node whose ledger API has nothing listening, with the
@@ -851,7 +845,7 @@ mod confirm_tests {
     fn propose(pool: SqlitePool) -> anyhow::Result<Propose> {
         let port = closed_port()?;
         let mut data = AppState::for_test_on(None, pool).into_inner();
-        let node = std::sync::Arc::get_mut(&mut data)
+        let node = Arc::get_mut(&mut data)
             .ok_or_else(|| anyhow::anyhow!("a fresh test state has one owner"))?;
         node.config.canton.ledger_api_port = port;
         let channel = Channel::from_shared(format!("http://127.0.0.1:{port}"))?.connect_lazy();

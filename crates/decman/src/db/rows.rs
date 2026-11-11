@@ -527,11 +527,13 @@ impl WorkflowRunRow {
 
 #[cfg(test)]
 mod tests {
+    use std::fmt::Debug;
+
     use super::*;
 
     /// Assert a `Result` is `Err`. Test-only helper that avoids `.unwrap_err()`
     /// (forbidden by the Bitsafe standard) while keeping the call sites terse.
-    fn assert_is_err<T: std::fmt::Debug>(result: Result<T>) {
+    fn assert_is_err<T: Debug>(result: Result<T>) {
         assert!(result.is_err(), "expected Err, got {result:?}");
     }
 

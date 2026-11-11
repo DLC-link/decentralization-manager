@@ -69,7 +69,7 @@ pub async fn start_add_party(
 async fn start_add_party_run(
     data: &web::Data<AppState>,
     body: &AddPartyRequest,
-) -> std::result::Result<HttpResponse, ApiError> {
+) -> Result<HttpResponse, ApiError> {
     tracing::info!(
         "Add-party request received: party={}, new_participant={}, threshold={}",
         body.decentralized_party_id,
@@ -208,10 +208,7 @@ async fn start_add_party_run(
 /// Refuse a new member that is not a configured peer. The new member must
 /// be a configured, known peer — invites travel over Noise, so a
 /// participant this node can't reach can't join.
-fn refuse_unknown_peer(
-    peers: &[Peer],
-    new_participant_id: &CantonId,
-) -> std::result::Result<(), ApiError> {
+fn refuse_unknown_peer(peers: &[Peer], new_participant_id: &CantonId) -> Result<(), ApiError> {
     if !peers
         .iter()
         .any(|p| p.participant_id == *new_participant_id)
@@ -230,7 +227,7 @@ fn plan_add_party(
     self_id: &CantonId,
     party_member_ids: &HashSet<CantonId>,
     peers: Vec<Peer>,
-) -> std::result::Result<Vec<CantonId>, ApiError> {
+) -> Result<Vec<CantonId>, ApiError> {
     let decentralized_party_id = &request.decentralized_party_id;
     let new_participant_id = &request.new_participant_id;
     if party_member_ids.is_empty() {

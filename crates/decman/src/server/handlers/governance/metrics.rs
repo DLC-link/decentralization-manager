@@ -106,6 +106,7 @@ mod action_metrics_tests {
         test as actix_test, web,
     };
     use anyhow::Context;
+    use tokio::sync::Mutex;
 
     use super::{
         super::{
@@ -192,7 +193,7 @@ mod action_metrics_tests {
 
     // The handler tests below read and move the same series, so they take
     // turns: every test in this binary shares one registry and runs in parallel.
-    static SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+    static SERIAL: Mutex<()> = Mutex::const_new(());
 
     /// Posts `body` as an admin through all six governance write handlers.
     async fn post(uri: &str, body: serde_json::Value) -> Result<StatusCode> {

@@ -70,7 +70,7 @@ pub async fn start_change_threshold(
 async fn start_change_threshold_run(
     data: &web::Data<AppState>,
     body: &ChangeThresholdRequest,
-) -> std::result::Result<HttpResponse, ApiError> {
+) -> Result<HttpResponse, ApiError> {
     tracing::info!(
         "Change-threshold request received: party={}, threshold={}->{}, confirmation={:?}",
         body.decentralized_party_id,
@@ -198,7 +198,7 @@ fn check_change_threshold(
     request: &ChangeThresholdRequest,
     self_id: &CantonId,
     party_member_ids: &HashSet<CantonId>,
-) -> std::result::Result<(), ApiError> {
+) -> Result<(), ApiError> {
     let decentralized_party_id = &request.decentralized_party_id;
     if party_member_ids.is_empty() {
         return Err(ApiError::Conflict(format!(

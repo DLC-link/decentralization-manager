@@ -3,7 +3,7 @@
 use std::collections::HashSet;
 
 use anyhow::Context;
-use base64::Engine;
+use base64::{Engine, engine::general_purpose::STANDARD};
 use canton_proto_rs::com::daml::ledger::api::v2::{CreatedEvent, DisclosedContract, value};
 use decman_lib::framework::record::{
     extract_contract_id, field_contract_id, field_record, record_field,
@@ -50,7 +50,7 @@ fn disclosure(contract_id: &str, blob: &str, what: &str) -> Result<DisclosedCont
     Ok(DisclosedContract {
         template_id: None,
         contract_id: contract_id.to_owned(),
-        created_event_blob: base64::engine::general_purpose::STANDARD
+        created_event_blob: STANDARD
             .decode(blob)
             .with_context(|| format!("Invalid base64 in the created_event_blob of {what}"))?,
         synchronizer_id: String::new(),
@@ -172,6 +172,7 @@ fn open_round_disclosure(pinned: &str, rounds: &[OpenMiningRound]) -> Result<Dis
 #[cfg(test)]
 mod paid_accept_disclosure_tests {
     use actix_web::{body::to_bytes, http::StatusCode};
+    use base64::engine::general_purpose::STANDARD;
     use decman_lib::{
         catalog::{proposals::credential::AcceptPaidCredential, types::AppTransferContextInput},
         framework::DamlProtoEncode,
@@ -298,7 +299,7 @@ mod paid_accept_disclosure_tests {
         // The blobs are the decoded `created_event_blob`s scan served.
         assert_eq!(
             disclosed[0].created_event_blob,
-            base64::engine::general_purpose::STANDARD.decode(&round.created_event_blob)?
+            STANDARD.decode(&round.created_event_blob)?
         );
         assert_eq!(disclosed[1].created_event_blob, b"far");
         Ok(())

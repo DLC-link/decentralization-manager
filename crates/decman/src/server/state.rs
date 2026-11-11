@@ -6,9 +6,13 @@ use std::{
     time::{Duration, Instant},
 };
 
+#[cfg(test)]
+use actix_web::web;
 use sqlx::SqlitePool;
 use tokio::sync::{Mutex, RwLock, Semaphore, mpsc};
 
+#[cfg(test)]
+use crate::{auth::MockValidator, server::handlers::MAX_CONCURRENT_DISCOVERIES};
 use crate::{
     auth::{TokenValidator, WorkflowAuth},
     config::{NodeConfig, PartyCredentials},
@@ -16,6 +20,7 @@ use crate::{
         HealthCache, PeerJob, WorkflowRegistry, external_parties, peer_status::LastSeen,
         tenant_rate_limit, types::PendingInvitation,
     },
+    workflow::party_replication::relay::RelaySessions,
 };
 
 /// TTL for a cached chunked response (per peer): a DAR a peer asked to read
@@ -62,7 +67,7 @@ pub struct AppState {
     /// Held here rather than per-request because both ends keep a Canton stream
     /// open across HTTP calls: the source an `ExportPartyAcs`, the joiner an
     /// `ImportPartyAcs` plus the synchronizer disconnect it requires.
-    pub relay_sessions: Arc<crate::workflow::party_replication::relay::RelaySessions>,
+    pub relay_sessions: Arc<RelaySessions>,
     /// Every in-flight workflow this node owns, keyed by `instance_name`.
     /// Replaces the single-tenant per-kind `HttpWorkflowState` singletons, the
     /// global in-flight gate, and the single `active_workflow` routing slot:
@@ -117,9 +122,7 @@ impl AppState {
     /// An `AppState` on an in-memory database, for tests that need one to reach
     /// the code under test. Every field a test cares about is `auth`; the rest
     /// are the cheapest value that satisfies the type.
-    pub(crate) async fn for_test(
-        auth: Option<crate::auth::WorkflowAuth>,
-    ) -> anyhow::Result<actix_web::web::Data<Self>> {
+    pub(crate) async fn for_test(auth: Option<WorkflowAuth>) -> anyhow::Result<web::Data<Self>> {
         Ok(Self::for_test_on(
             auth,
             SqlitePool::connect("sqlite::memory:").await?,
@@ -129,39 +132,36 @@ impl AppState {
     /// As [`Self::for_test`], on a database the test prepared, such as an
     /// `#[sqlx::test]` pool that already has the migrations applied. Nothing
     /// listens for peer jobs, so an accept fails at the enqueue.
-    pub(crate) fn for_test_on(
-        auth: Option<crate::auth::WorkflowAuth>,
-        db: SqlitePool,
-    ) -> actix_web::web::Data<Self> {
+    pub(crate) fn for_test_on(auth: Option<WorkflowAuth>, db: SqlitePool) -> web::Data<Self> {
         Self::for_test_with_peer_jobs(auth, db).0
     }
 
     /// As [`Self::for_test_on`], also returning the peer-job queue, so an
     /// accept succeeds the way it does with the peer listener running.
     pub(crate) fn for_test_with_peer_jobs(
-        auth: Option<crate::auth::WorkflowAuth>,
+        auth: Option<WorkflowAuth>,
         db: SqlitePool,
-    ) -> (actix_web::web::Data<Self>, mpsc::UnboundedReceiver<PeerJob>) {
+    ) -> (web::Data<Self>, mpsc::UnboundedReceiver<PeerJob>) {
         let (state, peer_jobs) = Self::test_state(auth, db);
-        (actix_web::web::Data::new(state), peer_jobs)
+        (web::Data::new(state), peer_jobs)
     }
 
     /// An `AppState` whose admin gate is on while every accepted token carries
     /// only a non-admin role, for tests that prove a handler turns such a
     /// caller away.
-    pub(crate) async fn for_test_as_non_admin() -> anyhow::Result<actix_web::web::Data<Self>> {
+    pub(crate) async fn for_test_as_non_admin() -> anyhow::Result<web::Data<Self>> {
         let (state, _) = Self::test_state(None, SqlitePool::connect("sqlite::memory:").await?);
-        Ok(actix_web::web::Data::new(Self {
-            token_validator: crate::auth::TokenValidator::Mock(Arc::new(
-                crate::auth::MockValidator::new("viewer".to_string()),
-            )),
+        Ok(web::Data::new(Self {
+            token_validator: TokenValidator::Mock(Arc::new(MockValidator::new(
+                "viewer".to_string(),
+            ))),
             admin_role: Some("decman-admin".to_string()),
             ..state
         }))
     }
 
     fn test_state(
-        auth: Option<crate::auth::WorkflowAuth>,
+        auth: Option<WorkflowAuth>,
         db: SqlitePool,
     ) -> (Self, mpsc::UnboundedReceiver<PeerJob>) {
         let (peer_job_sender, peer_jobs) = mpsc::unbounded_channel();
@@ -173,20 +173,16 @@ impl AppState {
             workflows: WorkflowRegistry::new(),
             pending_invitations: Arc::new(RwLock::new(Vec::new())),
             auth: Arc::new(RwLock::new(auth)),
-            token_validator: crate::auth::TokenValidator::Mock(Arc::new(
-                crate::auth::MockValidator::new("decman-admin".to_string()),
-            )),
+            token_validator: TokenValidator::Mock(Arc::new(MockValidator::new(
+                "decman-admin".to_string(),
+            ))),
             admin_role: None,
             party_credentials: Arc::new(RwLock::new(Vec::new())),
             bootstrap_mu: Arc::new(Mutex::new(())),
-            relay_sessions: Arc::new(
-                crate::workflow::party_replication::relay::RelaySessions::new(),
-            ),
+            relay_sessions: Arc::new(RelaySessions::new()),
             test_mode: true,
             refreshing_prefixes: Arc::new(RwLock::new(HashSet::new())),
-            discovery_permits: Arc::new(Semaphore::new(
-                crate::server::handlers::MAX_CONCURRENT_DISCOVERIES,
-            )),
+            discovery_permits: Arc::new(Semaphore::new(MAX_CONCURRENT_DISCOVERIES)),
             discovery_generations: Arc::new(RwLock::new(HashMap::new())),
             discovery_completed: Arc::new(RwLock::new(HashMap::new())),
             http_client: reqwest::Client::new(),

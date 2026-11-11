@@ -35,7 +35,7 @@ pub(super) async fn preflight_incompatible_peers(
 }
 
 /// One invitee's reply to a `Health` probe, or why no reply came.
-type InviteeHealth = (String, std::result::Result<HealthReply, String>);
+type InviteeHealth = (String, Result<HealthReply, String>);
 
 /// Probe every invitee's `Health` over Noise. An invitee missing from the
 /// peer table, or with a public key that does not parse, is not probed.
@@ -288,6 +288,7 @@ mod tests {
             MIGRATOR,
             schema::{Commitable, SchemaWrite},
         },
+        server::ConnectionStatus,
     };
 
     /// The invariant the completion ordering rests on: once a run row is
@@ -347,7 +348,7 @@ mod tests {
 
     fn health_reply(version: &str, features: &[&str]) -> HealthReply {
         HealthReply {
-            status: crate::server::ConnectionStatus::Connected,
+            status: ConnectionStatus::Connected,
             workflow: None,
             version: Some(version.to_string()),
             build_version: None,

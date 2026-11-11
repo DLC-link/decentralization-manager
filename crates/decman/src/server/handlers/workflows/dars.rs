@@ -139,7 +139,7 @@ pub async fn start_dars_for_package(
 async fn start_dars_for_package_run(
     data: &web::Data<AppState>,
     body: DistributePackageRequest,
-) -> std::result::Result<HttpResponse, ApiError> {
+) -> Result<HttpResponse, ApiError> {
     if body.peer_ids.is_empty() {
         return Err(ApiError::BadRequest(
             "peer_ids must contain at least one peer".to_string(),
@@ -171,7 +171,7 @@ async fn launch_dars(
     data: &web::Data<AppState>,
     dar_files: Vec<DarFile>,
     peer_ids: Vec<CantonId>,
-) -> std::result::Result<HttpResponse, ApiError> {
+) -> Result<HttpResponse, ApiError> {
     // Create DARs config from request
     let timestamp = now_secs();
     let instance_name = format!("dars-distribute-{timestamp}");
@@ -225,7 +225,7 @@ async fn launch_dars(
             // predates the field", which makes peers fall back to checking
             // filenames only — so a DAR we cannot decode has to fail the run rather
             // than quietly downgrade every peer's check.
-            let dar_hashes: std::result::Result<Vec<String>, _> = dars_config
+            let dar_hashes: Result<Vec<String>, _> = dars_config
                 .dar_files
                 .iter()
                 .map(|f| {

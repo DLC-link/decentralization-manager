@@ -1,5 +1,7 @@
 //! Commitable writes inside one SQLite transaction.
 
+use std::time::{SystemTime, UNIX_EPOCH};
+
 use anyhow::Context;
 
 use super::write::{owner_key_refusal, write_invitation};
@@ -765,8 +767,8 @@ impl Commitable for sqlx::Transaction<'static, sqlx::Sqlite> {
         payload: &[u8],
     ) -> Result {
         let encrypted = crypto::encrypt_bytes(payload)?;
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
             .map(|d| d.as_secs() as i64)
             .unwrap_or(0);
 
@@ -796,8 +798,8 @@ impl Commitable for sqlx::Transaction<'static, sqlx::Sqlite> {
         payload: &[u8],
     ) -> Result {
         let encrypted = crypto::encrypt_bytes(payload)?;
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
             .map(|d| d.as_secs() as i64)
             .unwrap_or(0);
 

@@ -222,7 +222,7 @@ async fn request_owner_keys(
     keypair: &NoiseKeypair,
     current_participant_id: &str,
     request_payload: Vec<u8>,
-) -> std::result::Result<Vec<serde_json::Value>, OwnerKeysFailure> {
+) -> Result<Vec<serde_json::Value>, OwnerKeysFailure> {
     let peer_uid = peer.participant_id.to_string();
     let peer_pub_key = parse_public_key(&peer.public_key).map_err(|e| {
         OwnerKeysFailure::new(

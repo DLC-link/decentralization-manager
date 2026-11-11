@@ -1,6 +1,9 @@
 //! The workflow triggers the listener shares across connections: invitations, cancel and retry.
 
-use std::sync::Arc;
+use std::{
+    sync::Arc,
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 use common::api::ContractDeploymentIntent;
 use sqlx::SqlitePool;
@@ -178,8 +181,8 @@ impl WorkflowTriggers {
             invitation_type,
             coordinator_pubkey: coordinator_pubkey.to_string(),
             coordinator_name: None,
-            received_at: std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
+            received_at: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
                 .map(|d| d.as_secs() as i64)
                 .unwrap_or(0),
             prefix,
@@ -328,8 +331,8 @@ impl WorkflowTriggers {
                 return;
             }
         };
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
             .map(|d| d.as_secs() as i64)
             .unwrap_or(0);
         for run in runs.into_iter().filter(|r| {
@@ -388,8 +391,8 @@ impl WorkflowTriggers {
                 return;
             }
         };
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
             .map(|d| d.as_secs() as i64)
             .unwrap_or(0);
         for run in runs.into_iter().filter(|r| {
@@ -443,6 +446,7 @@ mod record_invitation_tests {
 
     use std::collections::HashMap;
 
+    use serde::de::DeserializeOwned;
     use serde_json::{Value, json};
     use tokio::sync::Mutex;
 
@@ -469,7 +473,7 @@ mod record_invitation_tests {
         }
     }
 
-    fn payload<T: serde::de::DeserializeOwned>(value: Value) -> Result<T> {
+    fn payload<T: DeserializeOwned>(value: Value) -> Result<T> {
         Ok(serde_json::from_value(value)?)
     }
 

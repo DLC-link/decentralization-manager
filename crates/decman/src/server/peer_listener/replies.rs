@@ -136,6 +136,7 @@ pub(super) async fn peer_payload_response(
 mod tests {
     mod serving_a_dar_to_a_peer {
         use base64::{Engine, engine::general_purpose::STANDARD};
+        use common::api::DarFile;
         use sqlx::SqlitePool;
 
         use super::super::dar_for_invited_peer;
@@ -163,7 +164,7 @@ mod tests {
 
         fn dars_run(instance: &str, invited: Vec<CantonId>) -> anyhow::Result<WorkflowRun> {
             let config = DarsConfig {
-                dar_files: vec![common::api::DarFile {
+                dar_files: vec![DarFile {
                     filename: "app.dar".to_string(),
                     data: STANDARD.encode(DAR),
                 }],

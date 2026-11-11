@@ -1,6 +1,6 @@
 //! Token-standard holdings and transfer preapprovals.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use canton_common::decimal::DamlDecimal;
 use canton_proto_rs::com::daml::ledger::api::v2::{CreatedEvent, Identifier, Record, value};
@@ -226,7 +226,7 @@ pub async fn select_input_holdings(
 /// `TransferPreapproval` exists.
 struct PartyPreapprovals {
     has_amulet: bool,
-    utility: std::collections::HashSet<(String, String)>,
+    utility: HashSet<(String, String)>,
 }
 
 /// `NO_TEMPLATES_FOR_PACKAGE_NAME_AND_QUALIFIED_NAME` means the template
@@ -271,7 +271,7 @@ async fn fetch_preapproved_instruments(
         Ok(set) => set,
         Err(e) => {
             log_preapproval_lookup_error("utility TransferPreapproval", &e);
-            std::collections::HashSet::new()
+            HashSet::new()
         }
     };
 
@@ -285,7 +285,7 @@ async fn fetch_utility_preapproval_instruments(
     config: &NodeConfig,
     party_id: &CantonId,
     token: Option<String>,
-) -> Result<std::collections::HashSet<(String, String)>> {
+) -> Result<HashSet<(String, String)>> {
     let event_format = party_event_format(
         party_id,
         vec![template_filter(

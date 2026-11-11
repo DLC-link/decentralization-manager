@@ -5,6 +5,7 @@ use aes_gcm::{
     aead::{Aead, Generate},
 };
 use anyhow::Context;
+use base64::engine::general_purpose::STANDARD;
 use sha2::{Digest, Sha256};
 use zeroize::Zeroizing;
 
@@ -77,10 +78,7 @@ fn encrypt_str_with_key(key: &[u8; 32], plaintext: &str) -> Result<String> {
     combined.extend_from_slice(&nonce_bytes);
     combined.extend_from_slice(&ciphertext);
 
-    Ok(base64::Engine::encode(
-        &base64::engine::general_purpose::STANDARD,
-        &combined,
-    ))
+    Ok(base64::Engine::encode(&STANDARD, &combined))
 }
 
 /// Decrypt a base64-encoded `nonce || ciphertext` string with an explicit key.
@@ -88,7 +86,7 @@ fn encrypt_str_with_key(key: &[u8; 32], plaintext: &str) -> Result<String> {
 /// or when AES-GCM authentication fails (legacy plaintext / wrong-key
 /// compatibility).
 fn decrypt_str_with_key(key: &[u8; 32], stored: &str) -> Result<String> {
-    let decoded = match base64::Engine::decode(&base64::engine::general_purpose::STANDARD, stored) {
+    let decoded = match base64::Engine::decode(&STANDARD, stored) {
         Ok(d) if d.len() > 12 => d,
         _ => return Ok(stored.to_string()), // Not encrypted, return as-is
     };

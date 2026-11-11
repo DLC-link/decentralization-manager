@@ -13,6 +13,7 @@ use sqlx::SqlitePool;
 use tokio::{
     net::TcpListener,
     sync::{Mutex, RwLock, mpsc},
+    task::JoinHandle,
 };
 
 use super::{
@@ -103,7 +104,7 @@ async fn listen(
     db: SqlitePool,
     workflows: WorkflowRegistry,
     last_seen: LastSeen,
-) -> Result<tokio::task::JoinHandle<()>> {
+) -> Result<JoinHandle<()>> {
     let keypair = Arc::new(NoiseKeypair::from_file(coordinator.config.key_file_path()).await?);
     let self_id = coordinator.id();
     let triggers = WorkflowTriggers {

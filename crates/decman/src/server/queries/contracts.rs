@@ -1,8 +1,8 @@
 //! Contract lists, party metadata and the generic contract query.
 
-use std::{collections::HashMap, future::Future};
+use std::{cmp::Ordering, collections::HashMap, future::Future};
 
-use base64::Engine;
+use base64::{Engine, engine::general_purpose::STANDARD};
 use canton_proto_rs::com::{
     daml::ledger::api::v2::{
         CreatedEvent, Identifier,
@@ -120,20 +120,20 @@ pub fn sort_contracts(contracts: &mut Vec<ContractInfo>) {
     });
 }
 
-pub(crate) fn compare_versions(a: &str, b: &str) -> std::cmp::Ordering {
+pub(crate) fn compare_versions(a: &str, b: &str) -> Ordering {
     let mut ai = a.split('.');
     let mut bi = b.split('.');
     loop {
         match (ai.next(), bi.next()) {
-            (None, None) => return std::cmp::Ordering::Equal,
-            (None, Some(_)) => return std::cmp::Ordering::Less,
-            (Some(_), None) => return std::cmp::Ordering::Greater,
+            (None, None) => return Ordering::Equal,
+            (None, Some(_)) => return Ordering::Less,
+            (Some(_), None) => return Ordering::Greater,
             (Some(x), Some(y)) => {
                 let ord = match (x.parse::<u64>(), y.parse::<u64>()) {
                     (Ok(xn), Ok(yn)) => xn.cmp(&yn),
                     _ => x.cmp(y),
                 };
-                if ord != std::cmp::Ordering::Equal {
+                if ord != Ordering::Equal {
                     return ord;
                 }
             }
@@ -406,7 +406,7 @@ pub async fn query_contracts_by_template(
             return None;
         }
 
-        let blob = base64::engine::general_purpose::STANDARD.encode(&created.created_event_blob);
+        let blob = STANDARD.encode(&created.created_event_blob);
         let payload = params
             .include_payload
             .then(|| contract_payload(&created, params));
@@ -421,7 +421,7 @@ pub async fn query_contracts_by_template(
 
 #[cfg(test)]
 mod tests {
-    use std::cmp::Ordering;
+    use std::{cmp::Ordering, collections::VecDeque};
 
     use canton_proto_rs::com::daml::ledger::api::v2::{
         InterfaceView, List, Record, RecordField, Value,
@@ -528,7 +528,7 @@ mod tests {
         party_id: &str,
         pages: Vec<ListKnownPartiesResponse>,
     ) -> Result<Option<PartyMetadata>> {
-        let mut remaining = std::collections::VecDeque::from(pages);
+        let mut remaining = VecDeque::from(pages);
 
         find_party_annotations(party_id, |_page_token| {
             let page = remaining.pop_front();

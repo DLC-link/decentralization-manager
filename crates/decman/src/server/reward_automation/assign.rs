@@ -3,6 +3,8 @@
 
 //! The delegation-model assigner: the Delegation_Assign submit and the sweep.
 
+use std::{future::Future, io::ErrorKind};
+
 use anyhow::Context;
 use canton_proto_rs::com::daml::ledger::api::v2::{
     Command, ExerciseCommand, Identifier, Record, SubmitAndWaitRequest, Value, command,
@@ -79,7 +81,7 @@ async fn inject_assignment_failure(decparty: &CantonId) -> anyhow::Result<()> {
     };
     let contents = match tokio::fs::read_to_string(path).await {
         Ok(contents) => contents,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) if e.kind() == ErrorKind::NotFound => return Ok(()),
         Err(e) => return Err(e.into()),
     };
     let Some((party, error_id)) = contents.trim().split_once(' ') else {
@@ -447,7 +449,7 @@ async fn drain_assignable<'a, F, Fut>(
 ) -> usize
 where
     F: FnMut(&'a str, &'a [String]) -> Fut,
-    Fut: std::future::Future<Output = anyhow::Result<()>>,
+    Fut: Future<Output = anyhow::Result<()>>,
 {
     let size = chunk.max(1);
     let mut assigned = 0;
@@ -551,6 +553,8 @@ where
 
 #[cfg(test)]
 mod tests {
+    use std::{cell::RefCell, future::Ready, rc::Rc};
+
     use anyhow::anyhow;
     use decman_lib::catalog::types::RewardBeneficiary;
 
@@ -600,7 +604,7 @@ mod tests {
     }
 
     /// Sizes of the chunks a drain submitted, in order.
-    type ChunkSizes = std::rc::Rc<std::cell::RefCell<Vec<usize>>>;
+    type ChunkSizes = Rc<RefCell<Vec<usize>>>;
 
     /// Record each submitted chunk's size, answering with `outcomes` in order
     /// (`true` = Ok). Runs out of outcomes => Ok.
@@ -608,9 +612,9 @@ mod tests {
         outcomes: Vec<bool>,
     ) -> (
         ChunkSizes,
-        impl FnMut(&str, &[String]) -> std::future::Ready<anyhow::Result<()>>,
+        impl FnMut(&str, &[String]) -> Ready<anyhow::Result<()>>,
     ) {
-        let seen = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let seen = Rc::new(RefCell::new(Vec::new()));
         let log = seen.clone();
         let mut i = 0;
         let f = move |_p: &str, additional: &[String]| {
@@ -682,9 +686,9 @@ mod tests {
         err_id: &'static str,
     ) -> (
         ChunkSizes,
-        impl FnMut(&str, &[String]) -> std::future::Ready<anyhow::Result<()>>,
+        impl FnMut(&str, &[String]) -> Ready<anyhow::Result<()>>,
     ) {
-        let seen = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let seen = Rc::new(RefCell::new(Vec::new()));
         let log = seen.clone();
         let f = move |p: &str, additional: &[String]| {
             log.borrow_mut().push(additional.len() + 1);
@@ -699,9 +703,9 @@ mod tests {
         err_id: &'static str,
     ) -> (
         ChunkSizes,
-        impl FnMut(&str, &[String]) -> std::future::Ready<anyhow::Result<()>>,
+        impl FnMut(&str, &[String]) -> Ready<anyhow::Result<()>>,
     ) {
-        let seen = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let seen = Rc::new(RefCell::new(Vec::new()));
         let log = seen.clone();
         let f = move |_p: &str, additional: &[String]| {
             log.borrow_mut().push(additional.len() + 1);
@@ -800,7 +804,7 @@ mod tests {
         // Another assigner took the rest of the chunk while we were fanning out.
         // A fresh read is the cure, so stop — and keep what already committed.
         let all = cids(4);
-        let seen = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let seen = Rc::new(RefCell::new(Vec::new()));
         let log = seen.clone();
         let submit = move |_p: &str, additional: &[String]| {
             log.borrow_mut().push(additional.len() + 1);

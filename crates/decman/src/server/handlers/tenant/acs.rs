@@ -5,6 +5,7 @@ use base64::{Engine, engine::general_purpose::STANDARD};
 
 use super::audit::{audited_write, record_import_end};
 use crate::{
+    canton_id::CantonId,
     server::{
         AppState,
         middleware::{charge_tenant_key, tenant_caller},
@@ -16,7 +17,7 @@ use crate::{
     workflow::{
         external_party::add_hosts::{read_party_to_participant, replication_target},
         party_replication::{
-            ClearOutcome, collect_party_package_ids, open_export_session,
+            ClearOutcome, ReplicationTarget, collect_party_package_ids, open_export_session,
             pipe::{PipeBlock, PipeTrailer},
             relay::{AcceptedBlock, OnImportEnd, ServedBlock},
             request_onboarding_flag_clear,
@@ -72,7 +73,7 @@ pub async fn tenant_acs_snapshot(
         return resp;
     }
     let (party_id, target) = path.into_inner();
-    let target = match crate::canton_id::CantonId::parse(&target) {
+    let target = match CantonId::parse(&target) {
         Ok(id) => id,
         Err(e) => {
             return HttpResponse::BadRequest().json(ErrorResponse {
@@ -273,7 +274,7 @@ pub async fn tenant_acs_import(
 
 /// A relayed block that passed the checks that need no Canton call.
 struct CheckedBlock {
-    replication: crate::workflow::party_replication::ReplicationTarget,
+    replication: ReplicationTarget,
     block: PipeBlock,
 }
 
@@ -282,7 +283,7 @@ struct CheckedBlock {
 fn check_import_block(
     data: &AppState,
     body: &TenantAcsImportRequest,
-) -> std::result::Result<CheckedBlock, String> {
+) -> Result<CheckedBlock, String> {
     if body.seq == 0 {
         return Err("seq is 1-based; block 0 does not exist".to_string());
     }
@@ -315,7 +316,7 @@ fn check_import_block(
 async fn tenant_acs_import_on_this_host(
     data: &AppState,
     body: &TenantAcsImportRequest,
-    checked: std::result::Result<CheckedBlock, String>,
+    checked: Result<CheckedBlock, String>,
     on_end: Option<OnImportEnd>,
 ) -> HttpResponse {
     let CheckedBlock { replication, block } = match checked {
@@ -476,10 +477,18 @@ fn relay_held_response(party_id: &str) -> HttpResponse {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
+    use actix_web::{
+        http::{StatusCode, header},
+        test::TestRequest,
+    };
+
     use super::{
         super::{onboard::tenant_prepare, test_support::test_participant},
         *,
     };
+    use crate::{canton_id::CantonId, server::middleware::AuthMiddleware};
 
     /// A party id that `replication_target` accepts.
     fn valid_party() -> String {
@@ -492,8 +501,7 @@ mod tests {
         state.test_mode = false;
         state.config.tenant_api_keys = vec!["key".to_string()];
         state.config.tenant_rate_limit_per_minute = limit;
-        state.config.node.participant_id =
-            crate::canton_id::CantonId::parse(&test_participant()).ok();
+        state.config.node.participant_id = CantonId::parse(&test_participant()).ok();
         // Nothing listens here, so a Canton call fails at once.
         state.config.canton.admin_api_host = "127.0.0.1".to_string();
         state.config.canton.admin_api_port = 1;
@@ -504,7 +512,7 @@ mod tests {
         let Ok(state) = AppState::for_test(None).await else {
             panic!("the test state must build");
         };
-        let Ok(state) = std::sync::Arc::try_unwrap(state.into_inner()) else {
+        let Ok(state) = Arc::try_unwrap(state.into_inner()) else {
             panic!("the freshly built state has no other owner");
         };
         meter(state, limit)
@@ -519,8 +527,8 @@ mod tests {
     }
 
     /// Refused at validation, so it reaches no Canton.
-    fn prepare_without_peers() -> actix_web::test::TestRequest {
-        actix_web::test::TestRequest::post()
+    fn prepare_without_peers() -> TestRequest {
+        TestRequest::post()
             .uri("/v0/tenant/prepare")
             .insert_header(("Authorization", "Bearer key"))
             .set_json(serde_json::json!({
@@ -530,8 +538,8 @@ mod tests {
             }))
     }
 
-    fn import_block(party: &str, seq: u64, end: bool) -> actix_web::test::TestRequest {
-        actix_web::test::TestRequest::post()
+    fn import_block(party: &str, seq: u64, end: bool) -> TestRequest {
+        TestRequest::post()
             .uri("/v0/tenant/add-hosts/import")
             .insert_header(("Authorization", "Bearer key"))
             .set_json(serde_json::json!({
@@ -550,7 +558,7 @@ mod tests {
         let app = actix_web::test::init_service(
             actix_web::App::new()
                 .app_data(metered_state(2).await)
-                .wrap(crate::server::middleware::AuthMiddleware)
+                .wrap(AuthMiddleware)
                 .service(tenant_prepare),
         )
         .await;
@@ -560,21 +568,15 @@ mod tests {
                 actix_web::test::call_service(&app, prepare_without_peers().to_request()).await;
             assert_eq!(
                 response.status(),
-                actix_web::http::StatusCode::BAD_REQUEST,
+                StatusCode::BAD_REQUEST,
                 "call {i} is within a limit of 2"
             );
         }
 
         let third = actix_web::test::call_service(&app, prepare_without_peers().to_request()).await;
-        assert_eq!(
-            third.status(),
-            actix_web::http::StatusCode::TOO_MANY_REQUESTS
-        );
+        assert_eq!(third.status(), StatusCode::TOO_MANY_REQUESTS);
         assert!(
-            third
-                .headers()
-                .get(actix_web::http::header::RETRY_AFTER)
-                .is_some(),
+            third.headers().get(header::RETRY_AFTER).is_some(),
             "a 429 must say how long to wait"
         );
         let body: serde_json::Value = actix_web::test::read_body_json(third).await;
@@ -595,7 +597,7 @@ mod tests {
         let app = actix_web::test::init_service(
             actix_web::App::new()
                 .app_data(state)
-                .wrap(crate::server::middleware::AuthMiddleware)
+                .wrap(AuthMiddleware)
                 .service(tenant_prepare)
                 .service(tenant_acs_import),
         )
@@ -605,17 +607,13 @@ mod tests {
             let response =
                 actix_web::test::call_service(&app, import_block(&party, seq, false).to_request())
                     .await;
-            assert_eq!(
-                response.status(),
-                actix_web::http::StatusCode::OK,
-                "block {seq}"
-            );
+            assert_eq!(response.status(), StatusCode::OK, "block {seq}");
         }
         let prepare =
             actix_web::test::call_service(&app, prepare_without_peers().to_request()).await;
         assert_eq!(
             prepare.status(),
-            actix_web::http::StatusCode::BAD_REQUEST,
+            StatusCode::BAD_REQUEST,
             "the blocks must have left the whole budget"
         );
 
@@ -623,7 +621,7 @@ mod tests {
             actix_web::test::call_service(&app, import_block(&party, 5, false).to_request()).await;
         assert_eq!(
             response.status(),
-            actix_web::http::StatusCode::OK,
+            StatusCode::OK,
             "a block of an open copy must pass with the budget spent"
         );
     }

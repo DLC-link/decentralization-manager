@@ -7,8 +7,14 @@ use std::{
 };
 
 use canton_proto_rs::com::daml::ledger::api::v2::{GetEventsByContractIdRequest, Identifier};
-use decman_lib::catalog::interpret::{
-    self, DomainAction, ParsedConfirmation, ParsedDomainConfirmation, ProposalInfo,
+use decman_lib::{
+    catalog::{
+        interpret::{
+            self, DomainAction, ParsedConfirmation, ParsedDomainConfirmation, ProposalInfo,
+        },
+        templates::{governable_action_interface, governance_templates},
+    },
+    framework::TemplateId,
 };
 
 use crate::{
@@ -301,7 +307,7 @@ async fn fetch_governance_for_template(
     config: &NodeConfig,
     party_id: &CantonId,
     token: Option<String>,
-    template: &decman_lib::framework::TemplateId,
+    template: &TemplateId,
     confirmations_by_hash: &mut HashMap<String, (ActionType, Vec<ParsedConfirmation>)>,
     domain_confirmations: &mut HashMap<String, (String, Vec<ParsedDomainConfirmation>)>,
 ) -> Result {
@@ -435,7 +441,7 @@ async fn page_proposal_infos(
     limit: usize,
     cursor: Option<AcsCursor>,
 ) -> Result<(Vec<(String, ProposalInfo)>, Option<AcsCursor>)> {
-    let Ok(template) = decman_lib::catalog::templates::governable_action_interface(packages) else {
+    let Ok(template) = governable_action_interface(packages) else {
         return Ok((Vec::new(), None));
     };
 
@@ -489,7 +495,7 @@ async fn read_domain_confirmations(
 ) -> Result<ParsedConfirmations> {
     let mut by_hash: HashMap<String, (ActionType, Vec<ParsedConfirmation>)> = HashMap::new();
     let mut domain: HashMap<String, (String, Vec<ParsedDomainConfirmation>)> = HashMap::new();
-    for t in &decman_lib::catalog::templates::governance_templates(packages) {
+    for t in &governance_templates(packages) {
         // A template this participant lacks means "no confirmations of that
         // kind", not a failed read.
         if let Err(e) = fetch_governance_for_template(
@@ -522,7 +528,7 @@ pub async fn page_proposal_summaries(
     limit: usize,
     cursor: Option<AcsCursor>,
 ) -> Result<(Vec<ProposalSummary>, Option<AcsCursor>)> {
-    let Ok(template) = decman_lib::catalog::templates::governable_action_interface(packages) else {
+    let Ok(template) = governable_action_interface(packages) else {
         return Ok((Vec::new(), None));
     };
 

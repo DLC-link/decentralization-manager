@@ -196,7 +196,10 @@ pub(super) fn provider_configuration_template(packages: &PackageConfig) -> Optio
 
 #[cfg(test)]
 mod tests {
+    use std::net::TcpListener;
+
     use super::*;
+    use crate::config::default_package_config;
 
     #[test]
     fn credential_template_names_the_defining_package() {
@@ -204,7 +207,7 @@ mod tests {
         // `utility-credential-app-v0` only bundles that dalf as a dependency.
         // Canton resolves a `#name` filter against the defining package's
         // name, so naming the app package matches no contracts.
-        let template = credential_template(&crate::config::default_package_config())
+        let template = credential_template(&default_package_config())
             .expect("default package config sets utility_credential");
         assert_eq!(template.package_id, "#utility-credential-v0");
         assert_eq!(template.module_name, "Utility.Credential.V0.Credential");
@@ -217,9 +220,7 @@ mod tests {
 
     /// A node config whose ledger port has nothing listening on it.
     fn config_with_closed_ledger() -> anyhow::Result<NodeConfig> {
-        let port = std::net::TcpListener::bind("127.0.0.1:0")?
-            .local_addr()?
-            .port();
+        let port = TcpListener::bind("127.0.0.1:0")?.local_addr()?.port();
         let mut config = NodeConfig::default();
         config.canton.ledger_api_port = port;
         Ok(config)
@@ -232,7 +233,7 @@ mod tests {
         let config = config_with_closed_ledger()?;
         let packages = PackageConfig {
             utility_credential: None,
-            ..crate::config::default_package_config()
+            ..default_package_config()
         };
 
         let rows = fetch_by_template(
@@ -258,7 +259,7 @@ mod tests {
             &config,
             &party()?,
             None,
-            credential_template(&crate::config::default_package_config()),
+            credential_template(&default_package_config()),
             |created| Some(created.contract_id.clone()),
         )
         .await;

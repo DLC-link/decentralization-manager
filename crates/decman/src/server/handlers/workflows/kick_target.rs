@@ -94,7 +94,7 @@ pub(super) fn resolve_kick_target(
     owner_key: Option<&str>,
     hosts: &[DecPartyParticipantRow],
     owners: &[DecPartyOwnerRow],
-) -> std::result::Result<KickTarget, KickTargetError> {
+) -> Result<KickTarget, KickTargetError> {
     const REFRESH: &str = "Try refreshing /decentralized-parties first.";
     let host_of = |uid: &CantonId| {
         let uid = uid.to_string();
@@ -284,6 +284,7 @@ mod tests {
     use super::{super::test_support::pid, *};
     use crate::db::{
         MIGRATOR,
+        rows::DecPartyRow,
         schema::{Commitable, SchemaWrite},
     };
 
@@ -527,7 +528,7 @@ mod tests {
         confirmation_threshold: Option<i64>,
     ) -> Result {
         let mut tx = pool.begin_transaction().await?;
-        tx.upsert_dec_party(&crate::db::rows::DecPartyRow {
+        tx.upsert_dec_party(&DecPartyRow {
             party_id: party.to_string(),
             prefix: party.prefix.clone(),
             threshold,

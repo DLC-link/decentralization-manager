@@ -2,6 +2,8 @@
 
 use std::{
     collections::{HashMap, HashSet},
+    future::Future,
+    io,
     sync::Arc,
     time::Duration,
 };
@@ -9,12 +11,15 @@ use std::{
 use actix_cors::Cors;
 use actix_web::{
     App, HttpServer,
-    dev::{ServiceFactory, ServiceRequest},
+    dev::{Server, ServiceFactory, ServiceRequest},
     web,
 };
 use anyhow::Context;
 use sqlx::SqlitePool;
-use tokio::sync::{Mutex, RwLock, Semaphore, mpsc};
+use tokio::{
+    sync::{Mutex, RwLock, Semaphore, mpsc},
+    time::MissedTickBehavior,
+};
 use utoipa_actix_web::{AppExt, UtoipaApp};
 use utoipa_swagger_ui::SwaggerUi;
 
@@ -30,6 +35,7 @@ use crate::{
     server::{
         HealthCache, PeerJob, WorkflowRegistry, assets, audit, former_parties, governance_poller,
         handlers,
+        handlers::MAX_CONCURRENT_DISCOVERIES,
         middleware::AuthMiddleware,
         node_health,
         peer_jobs::run_peer_listener,
@@ -38,7 +44,9 @@ use crate::{
         peer_status::LastSeen,
         reward_automation,
     },
+    signing::migration::run_key_migration,
     workflow,
+    workflow::party_replication::relay::{RelaySessions, reap_forever},
 };
 
 /// Refuse to boot with insecure mode enabled on anything but devnet.
@@ -220,7 +228,7 @@ async fn build_auth(
     // HTTPS traffic goes through the same connection pool / TLS session
     // cache and inherits the same 10s timeout.
     let http_client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(10))
+        .timeout(Duration::from_secs(10))
         .build()
         .expect("reqwest client build");
 
@@ -317,7 +325,7 @@ async fn build_app_state(
     }
     let pending_invitations = Arc::new(RwLock::new(persisted_invitations));
 
-    let relay_sessions = Arc::new(crate::workflow::party_replication::relay::RelaySessions::new());
+    let relay_sessions = Arc::new(RelaySessions::new());
 
     let app_state = web::Data::new(AppState {
         db: db.clone(),
@@ -336,9 +344,7 @@ async fn build_app_state(
         // `--insecure` (or tests). See the `insecure` binding in `start_server`.
         test_mode: insecure,
         refreshing_prefixes: Arc::new(RwLock::new(HashSet::new())),
-        discovery_permits: Arc::new(Semaphore::new(
-            crate::server::handlers::MAX_CONCURRENT_DISCOVERIES,
-        )),
+        discovery_permits: Arc::new(Semaphore::new(MAX_CONCURRENT_DISCOVERIES)),
         discovery_generations: Arc::new(RwLock::new(HashMap::new())),
         discovery_completed: Arc::new(RwLock::new(HashMap::new())),
         http_client,
@@ -463,8 +469,7 @@ fn spawn_background_tasks(
         "party key migration",
         "keys not yet in DecMan's key store stay uncopied until this node restarts",
         async move {
-            crate::signing::migration::run_key_migration(key_migration_config, key_migration_db)
-                .await;
+            run_key_migration(key_migration_config, key_migration_db).await;
         },
     );
 
@@ -642,7 +647,7 @@ fn start_metrics(host: &str, api_port: u16, app_state: &web::Data<AppState>) {
             "the node-health gauges freeze at their last value",
             async move {
                 let mut ticker = tokio::time::interval(node_health::BACKGROUND_REFRESH);
-                ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+                ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
                 loop {
                     ticker.tick().await;
                     health_cache
@@ -664,7 +669,7 @@ fn spawn_relay_reaper(app_state: &web::Data<AppState>) {
         "ACS relay session reaper",
         "a wallet that abandons a transfer leaves its joiner off the synchronizer",
         async move {
-            crate::workflow::party_replication::relay::reap_forever(sessions).await;
+            reap_forever(sessions).await;
         },
     );
 }
@@ -808,7 +813,7 @@ where
 /// It ignores SIGTERM and SIGINT, so it ends only with the process. The API server
 /// handles shutdown. A stop on the signal would end the supervised task, which then
 /// logs a normal shutdown at `error`.
-pub fn metrics_server(host: &str, port: u16) -> std::io::Result<actix_web::dev::Server> {
+pub fn metrics_server(host: &str, port: u16) -> io::Result<Server> {
     Ok(
         HttpServer::new(|| App::new().route("/metrics", web::get().to(handlers::metrics)))
             // One worker: the default is one per logical CPU.
@@ -828,7 +833,7 @@ pub fn metrics_server(host: &str, port: u16) -> std::io::Result<actix_web::dev::
 /// state nobody has inspected, and restarting it would hide that.
 pub(super) fn spawn_supervised<F>(name: &'static str, consequence: &'static str, task: F)
 where
-    F: std::future::Future<Output = ()> + Send + 'static,
+    F: Future<Output = ()> + Send + 'static,
 {
     tokio::spawn(async move {
         match tokio::spawn(task).await {

@@ -6,6 +6,7 @@ use std::{sync::Arc, time::Duration};
 use actix_web::web;
 use futures::future::BoxFuture;
 use sqlx::SqlitePool;
+use tokio::task::JoinHandle;
 
 use super::runs::{mark_run_completed, mark_run_failed};
 use crate::{
@@ -218,7 +219,7 @@ pub(crate) fn spawn_coordinator_task(
     auth: Option<WorkflowAuth>,
     start: TaskStart,
     end: RunEnd,
-) -> tokio::task::JoinHandle<()> {
+) -> JoinHandle<()> {
     tokio::spawn(async move {
         let NodeHandles {
             config,
@@ -405,6 +406,8 @@ pub(crate) async fn launch_coordinator(
 
 #[cfg(test)]
 mod launch_tests {
+    use tokio::sync::oneshot;
+
     use super::{
         super::test_support::{CapturedLogs, in_progress_run, insert_run, pid, test_node},
         *,
@@ -460,7 +463,7 @@ mod launch_tests {
     async fn the_launch_marks_the_run_in_progress_first(pool: SqlitePool) -> TestResult {
         let node = test_node(pool.clone(), &pid(1)?).await?;
         let instance = registered_run(&pool, &node.data).await?;
-        let (release, released) = tokio::sync::oneshot::channel::<()>();
+        let (release, released) = oneshot::channel::<()>();
         let invites = Box::pin(async move {
             let _ = released.await;
             Err(anyhow::anyhow!("no route to the peers"))
@@ -614,6 +617,7 @@ mod tests {
     use serde::Serialize;
 
     use super::*;
+    use crate::canton_id::CantonId;
 
     fn persisted_again(request: &CoordinatorRequest) -> serde_json::Result<String> {
         fn json<T: Serialize>(config: &T) -> serde_json::Result<String> {
@@ -644,8 +648,8 @@ mod tests {
     /// the request of that kind, which writes the same JSON again.
     #[test]
     fn a_persisted_config_round_trips_through_its_request() -> anyhow::Result<()> {
-        let party = crate::canton_id::CantonId::parse(&format!("dec::1220{}", "a".repeat(64)))?;
-        let peer = crate::canton_id::CantonId::parse(&format!("p2::1220{}", "b".repeat(64)))?;
+        let party = CantonId::parse(&format!("dec::1220{}", "a".repeat(64)))?;
+        let peer = CantonId::parse(&format!("p2::1220{}", "b".repeat(64)))?;
         let configs = [
             (
                 WorkflowKind::Onboarding,

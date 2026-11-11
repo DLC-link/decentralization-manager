@@ -13,7 +13,7 @@
 use std::collections::HashMap;
 
 use anyhow::Context as _;
-use base64::Engine as _;
+use base64::{Engine as _, engine::general_purpose::STANDARD};
 use canton_common::{
     decimal::DamlDecimal,
     instrument::InstrumentId,
@@ -26,6 +26,7 @@ use canton_common::{
 use canton_proto_rs::com::daml::ledger::api::v2::{
     CreatedEvent, DisclosedContract, GetEventsByContractIdRequest, Identifier, Record, value,
 };
+use canton_registry::{accept_context, transfer_factory};
 use chrono::DateTime;
 
 use crate::{
@@ -119,7 +120,7 @@ pub async fn fetch_factory_for_propose(
     network: Network,
     args: ProposeTransferArgs<'_>,
 ) -> Result<ProposeTransferContext> {
-    let request = canton_registry::transfer_factory::Request {
+    let request = transfer_factory::Request {
         choice_arguments: ChoiceArguments {
             expected_admin: args.instrument_admin.to_string(),
             transfer: Transfer {
@@ -152,14 +153,13 @@ pub async fn fetch_factory_for_propose(
         },
         exclude_debug_fields: true,
     };
-    let response =
-        canton_registry::transfer_factory::get(canton_registry::transfer_factory::Params {
-            registry_url: network.registry_url().to_string(),
-            decentralized_party_id: args.instrument_admin.to_string(),
-            request,
-        })
-        .await
-        .map_err(|e| anyhow::anyhow!("registry transfer-factory request failed: {e}"))?;
+    let response = transfer_factory::get(transfer_factory::Params {
+        registry_url: network.registry_url().to_string(),
+        decentralized_party_id: args.instrument_admin.to_string(),
+        request,
+    })
+    .await
+    .map_err(|e| anyhow::anyhow!("registry transfer-factory request failed: {e}"))?;
 
     Ok(ProposeTransferContext {
         factory_cid: response.factory_id,
@@ -190,15 +190,15 @@ pub async fn fetch(
     let registrar =
         fetch_instruction_registrar(config, token, party_id, transfer_instruction_cid).await?;
 
-    let response = canton_registry::accept_context::get(canton_registry::accept_context::Params {
+    let response = accept_context::get(accept_context::Params {
         registry_url: network.registry_url().to_string(),
         decentralized_party_id: registrar.to_string(),
         // Upstream field is named `transfer_offer_contract_id` but the
         // registry endpoint actually keys on the TransferInstruction cid.
         // Naming mismatch is in canton-lib, not here.
         transfer_offer_contract_id: transfer_instruction_cid.to_string(),
-        request: canton_registry::accept_context::Request {
-            meta: canton_registry::accept_context::Meta {
+        request: accept_context::Request {
+            meta: accept_context::Meta {
                 values: String::new(),
             },
         },
@@ -535,7 +535,7 @@ pub fn to_proto_disclosed_contracts(
     contracts
         .iter()
         .map(|dc| {
-            let created_event_blob = base64::engine::general_purpose::STANDARD
+            let created_event_blob = STANDARD
                 .decode(&dc.created_event_blob)
                 .context("Invalid base64 in registry-provided disclosed contract blob")?;
             Ok(DisclosedContract {
@@ -550,6 +550,8 @@ pub fn to_proto_disclosed_contracts(
 
 #[cfg(test)]
 mod tests {
+    use std::fmt::Debug;
+
     use canton_proto_rs::com::daml::ledger::api::v2::{List, RecordField, Value};
 
     use super::*;
@@ -674,7 +676,7 @@ mod tests {
     /// Assert a `Result` is `Err` and its rendered message contains `needle`.
     /// Test-only: a non-matching error trips a `panic!` (an allowed assertion
     /// macro), keeping the suite free of `.unwrap_err()`.
-    fn assert_err_contains<T: std::fmt::Debug>(result: Result<T>, needle: &str) {
+    fn assert_err_contains<T: Debug>(result: Result<T>, needle: &str) {
         match result {
             Ok(v) => panic!("expected Err containing {needle:?}, got Ok({v:?})"),
             Err(e) => assert!(
@@ -778,7 +780,7 @@ mod tests {
     #[test]
     fn to_proto_disclosed_contracts_decodes_valid_blob() -> Result {
         let raw = b"hello-disclosed-blob";
-        let encoded = base64::engine::general_purpose::STANDARD.encode(raw);
+        let encoded = STANDARD.encode(raw);
         let input = vec![RegistryDisclosedContract {
             template_id: None,
             contract_id: "00contractcid".to_string(),

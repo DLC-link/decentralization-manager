@@ -2,7 +2,12 @@
 
 use std::panic::AssertUnwindSafe;
 
-use actix_web::{HttpResponse, body::MessageBody, web};
+use actix_web::{
+    HttpResponse,
+    body::MessageBody,
+    http::{StatusCode, header::HeaderMap},
+    web,
+};
 use futures::FutureExt;
 
 use crate::{
@@ -90,9 +95,9 @@ fn write_failed() -> HttpResponse {
 
 /// A write's answer as plain data, so it can leave the task the write ran in.
 struct Answer {
-    status: actix_web::http::StatusCode,
-    headers: actix_web::http::header::HeaderMap,
-    body: actix_web::web::Bytes,
+    status: StatusCode,
+    headers: HeaderMap,
+    body: web::Bytes,
 }
 
 impl Answer {
@@ -101,7 +106,7 @@ impl Answer {
         let body = body.try_into_bytes().unwrap_or_else(|_| {
             // The handlers here answer with JSON, which is never streamed.
             tracing::error!("a tenant write answered with a streamed body, which is dropped");
-            actix_web::web::Bytes::new()
+            web::Bytes::new()
         });
         Self {
             status: head.status(),
@@ -198,10 +203,14 @@ fn error_text(body: &[u8]) -> Option<String> {
 /// opened without Canton, so the tests need no participant.
 #[cfg(test)]
 mod tests {
+    use std::{sync::Arc, time::Duration};
+
     use actix_web::{App, http::StatusCode, test as actix_test};
     use base64::{Engine, engine::general_purpose::STANDARD};
+    use common::api::TenantCallAuditEntry;
     use serde_json::json;
     use sqlx::SqlitePool;
+    use tokio::sync::oneshot;
 
     use super::{
         super::{
@@ -215,7 +224,7 @@ mod tests {
         canton_id::CantonId,
         db::MIGRATOR,
         server::{
-            middleware::AuthMiddleware,
+            middleware::{AuthMiddleware, tenant_key_id},
             tenant_call_audit::{PARTY_ID_CAP, TenantCallAuditRow},
             types::TenantAddHostsExecuteRequest,
         },
@@ -247,9 +256,7 @@ mod tests {
     /// A state on `db` that checks the tenant keys `keys` against a budget of
     /// `limit` calls per minute, as a production node does.
     fn keyed_state(db: SqlitePool, keys: &[&str], limit: u32) -> web::Data<AppState> {
-        let Ok(mut state) =
-            std::sync::Arc::try_unwrap(AppState::for_test_on(None, db).into_inner())
-        else {
+        let Ok(mut state) = Arc::try_unwrap(AppState::for_test_on(None, db).into_inner()) else {
             panic!("the freshly built state has no other owner");
         };
         state.test_mode = false;
@@ -263,7 +270,7 @@ mod tests {
         web::Data::new(state)
     }
 
-    async fn audit_rows(db: &SqlitePool) -> anyhow::Result<Vec<common::api::TenantCallAuditEntry>> {
+    async fn audit_rows(db: &SqlitePool) -> anyhow::Result<Vec<TenantCallAuditEntry>> {
         Ok(tenant_call_audit::list(db, None, 100)
             .await?
             .into_iter()
@@ -305,7 +312,7 @@ mod tests {
     fn the_key() -> TenantKey {
         TenantKey {
             index: 0,
-            id: crate::server::middleware::tenant_key_id("key"),
+            id: tenant_key_id("key"),
         }
     }
 
@@ -393,7 +400,7 @@ mod tests {
         // Newest first: the reordered list put the key at index 0.
         assert_eq!(rows[0].key_index, Some(0));
         assert_eq!(rows[1].key_index, Some(1));
-        let id = crate::server::middleware::tenant_key_id("second");
+        let id = tenant_key_id("second");
         assert_eq!(rows[0].key_id.as_deref(), Some(id.as_str()));
         assert_eq!(rows[1].key_id, rows[0].key_id);
         for row in &rows {
@@ -706,7 +713,7 @@ mod tests {
         db: SqlitePool,
     ) -> anyhow::Result<()> {
         let state = keyed_state(db.clone(), &["key"], 0);
-        let (finish, finished) = tokio::sync::oneshot::channel::<()>();
+        let (finish, finished) = oneshot::channel::<()>();
         let call = audited_write(
             &state,
             Some(the_key()),
@@ -718,7 +725,7 @@ mod tests {
             },
         );
 
-        let gone = tokio::time::timeout(std::time::Duration::from_millis(50), call).await;
+        let gone = tokio::time::timeout(Duration::from_millis(50), call).await;
         assert!(
             gone.is_err(),
             "the write must still run when the caller goes"
@@ -729,10 +736,10 @@ mod tests {
             if !audit_rows(&db).await?.is_empty() {
                 break;
             }
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            tokio::time::sleep(Duration::from_millis(10)).await;
         }
         // A second row would come at once, from the same task.
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        tokio::time::sleep(Duration::from_millis(50)).await;
         let rows = audit_rows(&db).await?;
         assert_eq!(rows.len(), 1, "{rows:?}");
         assert_eq!(rows[0].http_status, Some(500));
@@ -746,7 +753,7 @@ mod tests {
         db: SqlitePool,
     ) -> anyhow::Result<()> {
         let state = keyed_state(db.clone(), &["key"], 0);
-        let (finish, finished) = tokio::sync::oneshot::channel::<()>();
+        let (finish, finished) = oneshot::channel::<()>();
         let call = audited_write(
             &state,
             Some(the_key()),
@@ -761,7 +768,7 @@ mod tests {
             },
         );
 
-        let gone = tokio::time::timeout(std::time::Duration::from_millis(50), call).await;
+        let gone = tokio::time::timeout(Duration::from_millis(50), call).await;
         assert!(
             gone.is_err(),
             "the write must still run when the caller goes"
@@ -775,7 +782,7 @@ mod tests {
             if !rows.is_empty() {
                 break;
             }
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            tokio::time::sleep(Duration::from_millis(10)).await;
         }
         assert_eq!(rows.len(), 1, "{rows:?}");
         assert_eq!(rows[0].endpoint, "/v0/tenant/add-hosts/execute");

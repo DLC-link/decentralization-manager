@@ -1,4 +1,4 @@
-use std::{collections::HashMap, future::Future};
+use std::{cmp::Reverse, collections::HashMap, future::Future};
 
 use anyhow::{Context, Result};
 use canton_proto_rs::com::daml::ledger::api::v2::{
@@ -749,7 +749,7 @@ where
         }
     }
 
-    entries.sort_by_key(|e| std::cmp::Reverse(e.offset));
+    entries.sort_by_key(|e| Reverse(e.offset));
     let dropped = trim_to_offset_groups(&mut entries, limit);
 
     Ok(AuditPage {

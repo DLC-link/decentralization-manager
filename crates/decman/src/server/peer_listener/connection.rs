@@ -1,9 +1,10 @@
 //! One inbound peer connection: every message type the listener answers.
 
-use std::{sync::Arc, time::Instant};
+use std::{net::SocketAddr, sync::Arc, time::Instant};
 
 use hyper::{Body, Response, StatusCode};
 use sqlx::SqlitePool;
+use tokio::net::TcpStream;
 use tokio_noise::handshakes::nn_psk2::Responder;
 
 use super::{
@@ -30,8 +31,8 @@ use crate::{
 
 /// Handle an incoming Noise connection (either ping or invite)
 pub(crate) async fn handle_incoming_connection(
-    socket: tokio::net::TcpStream,
-    peer_addr: std::net::SocketAddr,
+    socket: TcpStream,
+    peer_addr: SocketAddr,
     keypair: Arc<NoiseKeypair>,
     db: SqlitePool,
     self_id: CantonId,
@@ -93,7 +94,7 @@ pub(crate) async fn handle_incoming_connection(
                 if let Some(id) = request.sender.as_deref()
                     && peer_keys.contains_key(id)
                 {
-                    let now = std::time::Instant::now();
+                    let now = Instant::now();
                     let mut map = last_seen.write().await;
                     peer_status::bump(&mut map, id.to_string(), now);
                 }
@@ -692,7 +693,7 @@ mod workflow_message_tests {
     use tokio::sync::{Mutex, RwLock, mpsc};
 
     use super::*;
-    use crate::{config::NodeConfig, db::MIGRATOR};
+    use crate::{config::NodeConfig, db::MIGRATOR, server::types::RequestDarPayload};
 
     type Result<T = ()> = anyhow::Result<T>;
 
@@ -814,7 +815,7 @@ mod workflow_message_tests {
     #[sqlx::test(migrator = "MIGRATOR")]
     async fn a_refused_dar_says_why(pool: SqlitePool) -> Result {
         let request = request(pool, Some(KEY));
-        let payload = serde_json::to_vec(&crate::server::types::RequestDarPayload {
+        let payload = serde_json::to_vec(&RequestDarPayload {
             workflow_instance: "dars-1".to_string(),
             index: 0,
             filename: "app.dar".to_string(),

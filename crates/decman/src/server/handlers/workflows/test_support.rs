@@ -1,7 +1,12 @@
 //! Runs, party ids, an admin request, a test node and a log capture shared
 //! by the workflow handler tests.
 
-use std::sync::{Arc, Mutex};
+use std::{
+    io,
+    io::Write,
+    net::TcpListener,
+    sync::{Arc, Mutex},
+};
 
 use actix_web::{App, HttpMessage, dev::HttpServiceFactory, http::StatusCode, test, web};
 use sqlx::SqlitePool;
@@ -105,9 +110,7 @@ pub async fn test_node(pool: SqlitePool, self_id: &CantonId) -> anyhow::Result<T
 
 /// A port with nothing listening on it.
 pub fn closed_port() -> anyhow::Result<u16> {
-    Ok(std::net::TcpListener::bind("127.0.0.1:0")?
-        .local_addr()?
-        .port())
+    Ok(TcpListener::bind("127.0.0.1:0")?.local_addr()?.port())
 }
 
 /// A peer on a port where nothing listens. With `reachable_key` its Noise
@@ -268,16 +271,16 @@ pub async fn post_as_admin(
 #[derive(Clone, Default)]
 pub struct CapturedLogs(Arc<Mutex<Vec<u8>>>);
 
-impl std::io::Write for CapturedLogs {
-    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+impl Write for CapturedLogs {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
         self.0
             .lock()
-            .map_err(|_| std::io::Error::other("the log buffer lock is poisoned"))?
+            .map_err(|_| io::Error::other("the log buffer lock is poisoned"))?
             .extend_from_slice(buf);
         Ok(buf.len())
     }
 
-    fn flush(&mut self) -> std::io::Result<()> {
+    fn flush(&mut self) -> io::Result<()> {
         Ok(())
     }
 }

@@ -136,7 +136,7 @@ async fn peer_mesh_refusal(
 async fn start_onboarding_run(
     data: &web::Data<AppState>,
     body: &OnboardingRequest,
-) -> std::result::Result<HttpResponse, ApiError> {
+) -> Result<HttpResponse, ApiError> {
     let OnboardingPlan {
         instance_name,
         config: onboarding_config,
@@ -247,7 +247,7 @@ struct OnboardingPlan {
 
 /// Check an onboarding request's thresholds and build its run. It reads
 /// only the request.
-fn plan_onboarding(request: &OnboardingRequest) -> std::result::Result<OnboardingPlan, ApiError> {
+fn plan_onboarding(request: &OnboardingRequest) -> Result<OnboardingPlan, ApiError> {
     // Build instance + config up-front so the persisted workflow_runs row
     // can carry the same identifier as the spawned coordinator task.
     let party_id_prefix = &request.party_id_prefix;

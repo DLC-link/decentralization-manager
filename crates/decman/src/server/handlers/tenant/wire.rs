@@ -13,7 +13,7 @@ use crate::{
 /// Base64-decode a raw Ed25519 public key into its fixed 32-byte array, or the
 /// 400 response to return.
 #[allow(clippy::result_large_err)]
-pub(super) fn decode_public_key(encoded: &str) -> std::result::Result<[u8; 32], HttpResponse> {
+pub(super) fn decode_public_key(encoded: &str) -> Result<[u8; 32], HttpResponse> {
     let bytes = STANDARD.decode(encoded).map_err(|e| {
         HttpResponse::BadRequest().json(ErrorResponse {
             error: format!("public_key is not valid base64: {e}"),
@@ -31,10 +31,7 @@ pub(super) fn decode_public_key(encoded: &str) -> std::result::Result<[u8; 32], 
 /// Returns the message rather than a built response: an `HttpResponse` in the
 /// `Err` arm is an order of magnitude larger than the `Ok` value, which clippy
 /// rightly objects to for a helper called on every request.
-pub(super) fn decode_all(
-    encoded: &[String],
-    what: &str,
-) -> std::result::Result<Vec<Vec<u8>>, String> {
+pub(super) fn decode_all(encoded: &[String], what: &str) -> Result<Vec<Vec<u8>>, String> {
     encoded
         .iter()
         .map(|value| {
@@ -108,6 +105,8 @@ pub(super) async fn serial_status_after(
 
 #[cfg(test)]
 mod tests {
+    use actix_web::http::StatusCode;
+
     use super::*;
 
     #[test]
@@ -149,7 +148,7 @@ mod tests {
                 AddHostsError::UnknownParty {
                     party: "alice::1220aa".to_string(),
                 },
-                actix_web::http::StatusCode::NOT_FOUND,
+                StatusCode::NOT_FOUND,
             ),
             (
                 AddHostsError::StaleSerial {
@@ -157,15 +156,15 @@ mod tests {
                     pinned: 4,
                     found: 5,
                 },
-                actix_web::http::StatusCode::CONFLICT,
+                StatusCode::CONFLICT,
             ),
             (
                 AddHostsError::Invalid(anyhow::anyhow!("drops current host")),
-                actix_web::http::StatusCode::BAD_REQUEST,
+                StatusCode::BAD_REQUEST,
             ),
             (
                 AddHostsError::Canton(anyhow::anyhow!("AddTransactions RPC failed")),
-                actix_web::http::StatusCode::INTERNAL_SERVER_ERROR,
+                StatusCode::INTERNAL_SERVER_ERROR,
             ),
         ];
         for (error, expected) in cases {

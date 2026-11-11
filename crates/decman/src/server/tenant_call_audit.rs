@@ -6,6 +6,8 @@
 //! and its id, and never holds the key, a signature or topology bytes. The
 //! text columns are capped, because a caller chooses the party id it sends.
 
+use std::borrow::Cow;
+
 use common::api::TenantCallAuditEntry;
 use sqlx::SqlitePool;
 
@@ -107,7 +109,7 @@ impl TenantCallAuditRow {
 
 /// `text` cut to `cap` characters, with [`TRUNCATED`] at the end when it was
 /// cut.
-fn capped(text: &str, cap: usize) -> std::borrow::Cow<'_, str> {
+fn capped(text: &str, cap: usize) -> Cow<'_, str> {
     match text.char_indices().nth(cap) {
         Some((end, _)) => format!("{}{TRUNCATED}", &text[..end]).into(),
         None => text.into(),

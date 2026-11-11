@@ -1,17 +1,19 @@
 use actix_web::{HttpRequest, HttpResponse, Responder, get, http::header::RETRY_AFTER, post, web};
-use base64::Engine;
+use base64::{Engine, engine::general_purpose::STANDARD};
 use canton_proto_rs::com::daml::ledger::api::v2::admin::{
     GrantUserRightsRequest, ListUserRightsRequest, Right,
     right::{CanActAs, CanReadAs, Kind},
 };
-use keycloak::login::token_url;
+use keycloak::login::{ClientCredentialsParams, PasswordParams, token_url};
 use reqwest::StatusCode;
 use serde::Deserialize;
 
 use crate::{
-    auth::{WorkflowAuth, auth0_token_body, auth0_token_url, truncate_for_log},
+    auth::{
+        WorkflowAuth, auth0_client_credentials, auth0_token_body, auth0_token_url, truncate_for_log,
+    },
     canton_id::CantonId,
-    config::{NodeConfig, PartyCredentials},
+    config::{KeycloakConfig, NodeConfig, PartyCredentials},
     error::Result,
     server::{
         AppState,
@@ -232,9 +234,7 @@ fn extract_user_id_from_jwt(token: &str) -> Option<String> {
         payload.to_string()
     };
 
-    let decoded = base64::engine::general_purpose::STANDARD
-        .decode(&padded)
-        .ok()?;
+    let decoded = STANDARD.decode(&padded).ok()?;
     let json: serde_json::Value = serde_json::from_slice(&decoded).ok()?;
     json.get("sub").and_then(|v| v.as_str()).map(String::from)
 }
@@ -341,7 +341,7 @@ pub async fn test_auth(data: web::Data<AppState>) -> impl Responder {
 
         // Attempt fresh authentication — Auth0 path when configured, else Keycloak.
         let result = if let Some(ref auth0) = party_creds.auth0 {
-            crate::auth::auth0_client_credentials(&data.http_client, auth0)
+            auth0_client_credentials(&data.http_client, auth0)
                 .await
                 .map(|_| ())
                 .map_err(|e| e.to_string())
@@ -386,7 +386,7 @@ impl AdminTokenSource {
     /// a usable Auth0 tenant nor a Keycloak realm. Previously such a party
     /// produced a relative token URL that failed inside reqwest as an opaque
     /// "builder error".
-    fn from_party(creds: &PartyCredentials) -> std::result::Result<Self, String> {
+    fn from_party(creds: &PartyCredentials) -> Result<Self, String> {
         if let Some(auth0) = &creds.auth0 {
             let domain = auth0.domain.trim();
             let audience = auth0.audience.trim();
@@ -503,7 +503,7 @@ async fn mint_admin_token(
     source: &AdminTokenSource,
     client_id: &str,
     client_secret: &str,
-) -> std::result::Result<String, AdminMintError> {
+) -> Result<String, AdminMintError> {
     let request = http.post(token_url);
     let request = match source {
         AdminTokenSource::Auth0 { audience, .. } => {
@@ -786,14 +786,12 @@ fn right_read_as(party: &str) -> Right {
     }
 }
 
-async fn test_keycloak_auth(
-    config: &crate::config::KeycloakConfig,
-) -> std::result::Result<(), String> {
+async fn test_keycloak_auth(config: &KeycloakConfig) -> Result<(), String> {
     let url = keycloak::login::token_url(&config.url, &config.realm);
 
     // Use client_credentials if client_secret is set, otherwise password flow
     if let Some(ref client_secret) = config.client_secret {
-        keycloak::login::client_credentials(keycloak::login::ClientCredentialsParams {
+        keycloak::login::client_credentials(ClientCredentialsParams {
             url,
             client_id: config.client_id.clone(),
             client_secret: client_secret.clone(),
@@ -811,7 +809,7 @@ async fn test_keycloak_auth(
             .as_ref()
             .ok_or_else(|| "Missing password for password flow".to_string())?;
 
-        keycloak::login::password(keycloak::login::PasswordParams {
+        keycloak::login::password(PasswordParams {
             client_id: config.client_id.clone(),
             username: username.clone(),
             password: password.clone(),
@@ -841,7 +839,7 @@ mod tests {
     };
     use serde_json::{Value, json};
     use sqlx::SqlitePool;
-    use tokio::sync::{Mutex, RwLock};
+    use tokio::sync::{Mutex, RwLock, Semaphore, mpsc};
     use wiremock::{
         Mock, MockServer, ResponseTemplate,
         matchers::{body_json, body_string, header, method, path, path_regex},
@@ -855,7 +853,11 @@ mod tests {
             Auth0Config, Auth0M2MConfig, KeycloakConfig, NodeConfig, PackageConfig,
             PartyCredentials,
         },
-        server::{AppState, middleware::AuthMiddleware},
+        server::{
+            AppState, HealthCache, WorkflowRegistry, handlers::MAX_CONCURRENT_DISCOVERIES,
+            middleware::AuthMiddleware,
+        },
+        workflow::party_replication::relay::RelaySessions,
     };
 
     /// Build an `AppState` configured for handler-level tests:
@@ -880,8 +882,8 @@ mod tests {
             db,
             config,
             last_seen: Arc::new(RwLock::new(HashMap::new())),
-            peer_job_sender: tokio::sync::mpsc::unbounded_channel().0,
-            workflows: crate::server::WorkflowRegistry::new(),
+            peer_job_sender: mpsc::unbounded_channel().0,
+            workflows: WorkflowRegistry::new(),
             pending_invitations: Arc::new(RwLock::new(Vec::new())),
             auth: Arc::new(RwLock::new(Some(WorkflowAuth::Mock(Arc::new(
                 MockAuthRegistry::new(party_credentials.clone()),
@@ -892,18 +894,14 @@ mod tests {
             admin_role: admin_role.map(str::to_string),
             party_credentials,
             bootstrap_mu: Arc::new(Mutex::new(())),
-            relay_sessions: Arc::new(
-                crate::workflow::party_replication::relay::RelaySessions::new(),
-            ),
+            relay_sessions: Arc::new(RelaySessions::new()),
             test_mode,
             refreshing_prefixes: Arc::new(RwLock::new(HashSet::new())),
-            discovery_permits: Arc::new(tokio::sync::Semaphore::new(
-                crate::server::handlers::MAX_CONCURRENT_DISCOVERIES,
-            )),
+            discovery_permits: Arc::new(Semaphore::new(MAX_CONCURRENT_DISCOVERIES)),
             discovery_generations: Arc::new(RwLock::new(HashMap::new())),
             discovery_completed: Arc::new(RwLock::new(HashMap::new())),
             http_client: reqwest::Client::new(),
-            health_cache: crate::server::HealthCache::new(),
+            health_cache: HealthCache::new(),
             external_parties: Default::default(),
             tenant_rate_limiter: Default::default(),
         })

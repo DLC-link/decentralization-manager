@@ -3,7 +3,7 @@
 use std::collections::HashSet;
 
 use anyhow::Context;
-use base64::Engine;
+use base64::{Engine, engine::general_purpose::STANDARD};
 use canton_proto_rs::com::daml::ledger::api::v2::{
     CreatedEvent, DisclosedContract, SubmitAndWaitRequest,
     command_service_client::CommandServiceClient, value,
@@ -230,7 +230,7 @@ pub(super) async fn execute_confirmed_action(
             Ok(DisclosedContract {
                 template_id: None,
                 contract_id: dc.contract_id.clone(),
-                created_event_blob: base64::engine::general_purpose::STANDARD
+                created_event_blob: STANDARD
                     .decode(&dc.blob)
                     .context("Invalid base64 in disclosed contract blob")?,
                 synchronizer_id: String::new(),

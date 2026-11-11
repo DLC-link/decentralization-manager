@@ -1,5 +1,6 @@
 //! Pending and handled invitations.
 
+use common::api::ContractDeploymentIntent;
 use sqlx::SqlitePool;
 
 use super::fixtures::TEST_NS;
@@ -394,7 +395,7 @@ async fn test_contracts_pending_invitation_roundtrip(pool: SqlitePool) -> Result
         confirmation_threshold: None,
         dec_party_id: Some(CantonId::parse(&format!("dec::{TEST_NS}")).unwrap()),
         package_names: vec!["Governance Core".to_string(), "Token Custody".to_string()],
-        contract_intents: vec![common::api::ContractDeploymentIntent {
+        contract_intents: vec![ContractDeploymentIntent {
             package_id: "ab".repeat(32),
             module_name: "Governance".to_string(),
             entity_name: "Settings".to_string(),

@@ -68,7 +68,7 @@ pub async fn start_contracts(
 async fn start_contracts_run(
     data: &web::Data<AppState>,
     body: &ContractsRequest,
-) -> std::result::Result<HttpResponse, ApiError> {
+) -> Result<HttpResponse, ApiError> {
     let mut contracts_config = plan_contracts(body, now_secs())?;
 
     // Scope to the party's actual signers, not every peer this node knows
@@ -192,7 +192,7 @@ async fn start_contracts_run(
 fn plan_contracts(
     request: &ContractsRequest,
     timestamp: i64,
-) -> std::result::Result<workflow::ContractsConfig, ApiError> {
+) -> Result<workflow::ContractsConfig, ApiError> {
     // Peers sign one prepared create per contract, so an empty run would
     // invite them and then fail on every one of them at signing.
     if request.contracts.is_empty() {

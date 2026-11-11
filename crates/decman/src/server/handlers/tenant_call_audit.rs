@@ -62,6 +62,8 @@ pub async fn get_tenant_call_audit(
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use actix_web::{App, http::StatusCode, test as actix_test};
     use sqlx::SqlitePool;
 
@@ -87,8 +89,7 @@ mod tests {
 
     /// Read the audit as an admin, through the auth middleware.
     async fn read(db: &SqlitePool, query: &str) -> TenantCallAuditResponse {
-        let Ok(mut state) =
-            std::sync::Arc::try_unwrap(AppState::for_test_on(None, db.clone()).into_inner())
+        let Ok(mut state) = Arc::try_unwrap(AppState::for_test_on(None, db.clone()).into_inner())
         else {
             panic!("the freshly built state has no other owner");
         };
