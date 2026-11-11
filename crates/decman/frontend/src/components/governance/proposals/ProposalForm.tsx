@@ -56,6 +56,16 @@ import {
 } from "./tokenCustodyPayloads";
 import { TransferForm } from "./TransferForm";
 import { buildTransfer, buildAcceptTransfer } from "./transferPayloads";
+import { AmuletRulesCidField } from "./AmuletRulesCidField";
+import { UtilityOnboardingForms } from "./UtilityOnboardingForms";
+import {
+  buildSetupUtility,
+  buildCreateProviderServiceRequest,
+  buildCreateUserServiceRequest,
+  buildSetEnableResultContracts,
+  buildCreateDelegatedBatchedMarkersProxy,
+  buildRequestDevNetFeaturedAppRight,
+} from "./utilityOnboardingPayloads";
 import { PROPOSAL_MENU, type FormProposalType } from "./proposalMenu";
 import type { ProposalState } from "./useProposalState";
 import type {
@@ -123,8 +133,6 @@ export const ProposalForm = ({
     setProposalCreateAllocationFactory,
     proposalAdditionalIdentifiers,
     setProposalAdditionalIdentifiers,
-    proposalUser,
-    setProposalUser,
     proposalInstrumentConfigurationCid,
     setProposalInstrumentConfigurationCid,
     proposalClearBeneficiaries,
@@ -146,8 +154,6 @@ export const ProposalForm = ({
     setProposalRevokeDelegationCid,
     proposalRegistrarServiceCid,
     setProposalRegistrarServiceCid,
-    proposalEnableResultContracts,
-    setProposalEnableResultContracts,
     proposalHolder,
     setProposalHolder,
     proposalUserServiceCid,
@@ -205,13 +211,11 @@ export const ProposalForm = ({
     proposalExternalPartySetupCid,
     setProposalExternalPartySetupCid,
     amuletRulesCid,
-    setAmuletRulesCid,
     providerServices,
     userServices,
     credentialOffersLoading,
     ownAmulets,
     ownAmuletsLoading,
-    registrarServiceContracts,
     mintRequestContracts,
     mintRequestsLoading,
     burnRequestContracts,
@@ -226,7 +230,6 @@ export const ProposalForm = ({
     availableInstruments,
     instrumentsLoading,
     servicesLoading,
-    amuletRulesLoading,
     acceptableCredentialOffers,
     acceptablePaidCredentialOffers,
     chosenPaidOffer,
@@ -236,7 +239,6 @@ export const ProposalForm = ({
     ownInstruments,
     configurationToUpdate,
     configurationToUpdateUnreadable,
-    fetchNetworkInfo,
     fetchOpenMiningRound,
     resetProposalForm,
     beneficiaryProblem,
@@ -398,29 +400,13 @@ export const ProposalForm = ({
           proposal = buildGenericVote(state);
           break;
         case "setup_utility":
-          proposal = {
-            type: "setup_utility",
-            provider_service_cid: proposalProviderServiceCid,
-            operator: proposalOperator,
-            instrument_id_text: proposalInstrumentIdText,
-            additional_identifiers: [],
-            create_transfer_rule: proposalCreateTransferRule,
-            create_allocation_factory: proposalCreateAllocationFactory,
-          };
+          proposal = buildSetupUtility(state);
           break;
         case "create_provider_service_request":
-          proposal = {
-            type: "create_provider_service_request",
-            operator: proposalOperator,
-            provider: proposalProvider,
-          };
+          proposal = buildCreateProviderServiceRequest(state);
           break;
         case "create_user_service_request":
-          proposal = {
-            type: "create_user_service_request",
-            operator: proposalOperator,
-            user: proposalUser,
-          };
+          proposal = buildCreateUserServiceRequest(state);
           break;
         case "set_provider_app_reward_beneficiaries": {
           if (beneficiaryProblem) throw new Error(beneficiaryProblem);
@@ -476,26 +462,13 @@ export const ProposalForm = ({
           };
           break;
         case "set_enable_result_contracts":
-          proposal = {
-            type: "set_enable_result_contracts",
-            registrar_service_cid: proposalRegistrarServiceCid,
-            enable_result_contracts:
-              proposalEnableResultContracts === "clear"
-                ? undefined
-                : proposalEnableResultContracts === "true",
-          };
+          proposal = buildSetEnableResultContracts(state);
           break;
         case "create_delegated_batched_markers_proxy":
-          proposal = {
-            type: "create_delegated_batched_markers_proxy",
-            operator: proposalOperator,
-          };
+          proposal = buildCreateDelegatedBatchedMarkersProxy(state);
           break;
         case "request_dev_net_featured_app_right":
-          proposal = {
-            type: "request_dev_net_featured_app_right",
-            amulet_rules_cid: amuletRulesCid.trim(),
-          };
+          proposal = buildRequestDevNetFeaturedAppRight(state);
           break;
         case "setup_minting_delegation": {
           const expiresAtMs = new Date(proposalDelegationExpiresAt).getTime();
@@ -755,33 +728,6 @@ export const ProposalForm = ({
     }
   };
 
-  // Shared by the Request DevNet Featured App Right and Accept Paid Credential
-  // proposal forms: both pin the DSO's current AmuletRules.
-  const renderAmuletRulesCidField = () => (
-    <Box sx={{ display: "flex", gap: 1, alignItems: "center" }}>
-      <HelpTextField
-        label="Amulet Rules CID"
-        value={amuletRulesCid}
-        onChange={(e) => setAmuletRulesCid(e.target.value)}
-        fullWidth
-        size="small"
-        required
-        help="Contract id of the DSO's current AmuletRules contract, prefilled from the DSO scan API. Refresh it if the DSO has replaced the contract since this form opened."
-      />
-      <Tooltip title="Refresh">
-        <span>
-          <IconButton
-            size="small"
-            onClick={fetchNetworkInfo}
-            disabled={amuletRulesLoading}
-          >
-            {amuletRulesLoading ? <CircularProgress size={20} /> : <RefreshIcon />}
-          </IconButton>
-        </span>
-      </Tooltip>
-    </Box>
-  );
-
   return (
     <Box>
       <Collapse in>
@@ -830,127 +776,11 @@ export const ProposalForm = ({
 
           <Divider />
 
-          {proposalType === "create_provider_service_request" &&
-            (network === "testnet" || network === "mainnet") && (
-              <Alert severity="info">
-                On TestNet and MainNet, a credential from Digital Asset (DA)
-                is required before a Provider Service Request can be
-                accepted.
-              </Alert>
-            )}
+          <UtilityOnboardingForms state={state} network={network} />
 
           <TokenCustodyForms state={state} />
 
           <TransferForm state={state} />
-
-          {proposalType === "setup_utility" && (
-            <>
-              <ContractSelect
-                label="ProviderService"
-                help="ProviderService contract this party received from the operator. Required to set up the registrar."
-                value={proposalProviderServiceCid}
-                onChange={setProposalProviderServiceCid}
-                items={providerServices}
-                loading={servicesLoading}
-                loadingText="Loading services…"
-                emptyText='No ProviderService found — run "Create Provider Service Request" first'
-              />
-              <HelpTextField
-                size="small"
-                label="Operator Party"
-                value={proposalOperator}
-                onChange={(e) => setProposalOperator(e.target.value)}
-                fullWidth
-                required
-                help="Party id of the utility operator that issued the ProviderService."
-              />
-              <HelpTextField
-                size="small"
-                label="Instrument ID"
-                value={proposalInstrumentIdText}
-                onChange={(e) => setProposalInstrumentIdText(e.target.value)}
-                fullWidth
-                required
-                help={"Token name for the instrument this utility will mint and burn (e.g. \"cTM\"). The governance party is the issuer."}
-              />
-              <FormControlLabel
-                control={<Checkbox size="small" checked={proposalCreateTransferRule} onChange={(e) => setProposalCreateTransferRule(e.target.checked)} />}
-                label={
-                  <TextHelp text="Also create a TransferRule contract so holders can transfer this token without per-transfer governance.">
-                    Create TransferRule
-                  </TextHelp>
-                }
-              />
-              <FormControlLabel
-                control={<Checkbox size="small" checked={proposalCreateAllocationFactory} onChange={(e) => setProposalCreateAllocationFactory(e.target.checked)} />}
-                label={
-                  <TextHelp text="Also create an AllocationFactory contract so this token can be allocated by external apps.">
-                    Create AllocationFactory
-                  </TextHelp>
-                }
-              />
-            </>
-          )}
-
-          {proposalType === "create_provider_service_request" && (
-            <>
-              {providerServices.length > 0 && (
-                <Alert severity="warning">
-                  This party already has {providerServices.length} ProviderService
-                  contract{providerServices.length === 1 ? "" : "s"}; creating
-                  another request will fail when executed.
-                </Alert>
-              )}
-              <HelpTextField
-                size="small"
-                label="Operator Party"
-                value={proposalOperator}
-                onChange={(e) => setProposalOperator(e.target.value)}
-                fullWidth
-                required
-                help="Party id of the utility operator that will receive and sign off on this request."
-              />
-              <HelpTextField
-                size="small"
-                label="Provider Party"
-                value={proposalProvider}
-                onChange={(e) => setProposalProvider(e.target.value)}
-                fullWidth
-                required
-                help="Party id that wants to become a provider on the utility (usually this governance party)."
-              />
-            </>
-          )}
-
-          {proposalType === "create_user_service_request" && (
-            <>
-              {userServices.length > 0 && (
-                <Alert severity="warning">
-                  This party already has {userServices.length} UserService
-                  contract{userServices.length === 1 ? "" : "s"}; creating
-                  another request will fail when executed.
-                </Alert>
-              )}
-              <HelpTextField
-                size="small"
-                label="Operator Party"
-                value={proposalOperator}
-                onChange={(e) => setProposalOperator(e.target.value)}
-                fullWidth
-                required
-                help="Party id of the utility operator that will receive and sign off on this request."
-              />
-              <HelpTextField
-                size="small"
-                label="User Party"
-                value={proposalUser}
-                onChange={(e) => setProposalUser(e.target.value)}
-                fullWidth
-                required
-                help="Party id that wants to become a user of the utility (usually this governance party)."
-              />
-            </>
-          )}
 
           {proposalType === "revoke_coupon_reassignment_delegation" &&
             delegationPicker({
@@ -1286,50 +1116,6 @@ export const ProposalForm = ({
               )}
             </>
           )}
-
-          {proposalType === "set_enable_result_contracts" && (
-            <>
-              <ContractSelect
-                label="RegistrarService"
-                help="RegistrarService contract whose result-contract setting will be updated."
-                value={proposalRegistrarServiceCid}
-                onChange={setProposalRegistrarServiceCid}
-                items={registrarServiceContracts}
-                emptyText="No RegistrarService found — run SetupUtility first"
-              />
-              <FormControl size="small" fullWidth>
-                <InputLabel>
-                  <TextHelp text="Whether the registrar should emit result contracts after operations. Clear sets the value back to None.">
-                    Enable Result Contracts
-                  </TextHelp>
-                </InputLabel>
-                <Select
-                  label="Enable Result Contracts"
-                  value={proposalEnableResultContracts}
-                  onChange={(e) => setProposalEnableResultContracts(e.target.value as "true" | "false" | "clear")}
-                >
-                  <MenuItem value="true">Enable</MenuItem>
-                  <MenuItem value="false">Disable</MenuItem>
-                  <MenuItem value="clear">Clear (None)</MenuItem>
-                </Select>
-              </FormControl>
-            </>
-          )}
-
-          {proposalType === "create_delegated_batched_markers_proxy" && (
-            <HelpTextField
-              size="small"
-              label="Operator Party"
-              value={proposalOperator}
-              onChange={(e) => setProposalOperator(e.target.value)}
-              fullWidth
-              required
-              help="Party id of the utility operator that will own the delegated batched markers proxy."
-            />
-          )}
-
-          {proposalType === "request_dev_net_featured_app_right" &&
-            renderAmuletRulesCidField()}
 
           {proposalType === "setup_minting_delegation" && (
             <>
@@ -1869,7 +1655,7 @@ export const ProposalForm = ({
                   />
                 )}
               />
-              {renderAmuletRulesCidField()}
+              <AmuletRulesCidField state={state} />
               <Box sx={{ display: "flex", gap: 1, alignItems: "center" }}>
                 <HelpTextField
                   size="small"
