@@ -1,7 +1,7 @@
 //! Utility provider and user services, credential offers and credentials.
 
 use canton_common::decimal::DamlDecimal;
-use canton_proto_rs::com::daml::ledger::api::v2::{CreatedEvent, Identifier, Record, value};
+use canton_proto_rs::com::daml::ledger::api::v2::{CreatedEvent, Record, value};
 use decman_lib::framework::record::{field_int64, field_numeric, field_party, field_text};
 
 use crate::{
@@ -11,12 +11,10 @@ use crate::{
 };
 
 use super::templates::{
-    TemplateId, credential_offer_template, credential_template, provider_service_template,
+    credential_offer_template, credential_template, fetch_by_template, provider_service_template,
     user_service_template,
 };
 use crate::server::{
-    event_filters::{party_event_format, template_filter},
-    ledger_paging::fetch_active_contracts_filtered,
     record::{field_record, record_field},
     types::{
         BillingParams, Claim, CredentialInfo, CredentialOfferInfo, ProviderServiceInfo,
@@ -35,37 +33,13 @@ pub async fn get_provider_services(
     token: Option<String>,
     packages: &PackageConfig,
 ) -> Result<Vec<ProviderServiceInfo>> {
-    match provider_service_template(packages) {
-        Some(template) => {
-            fetch_provider_services_for_template(config, party_id, token, &template).await
-        }
-        None => Ok(Vec::new()),
-    }
-}
-
-/// Fetch provider services using TemplateFilter
-async fn fetch_provider_services_for_template(
-    config: &NodeConfig,
-    party_id: &CantonId,
-    token: Option<String>,
-    template: &TemplateId,
-) -> Result<Vec<ProviderServiceInfo>> {
-    let event_format = party_event_format(
+    fetch_by_template(
+        config,
         party_id,
-        vec![template_filter(
-            Identifier {
-                package_id: template.package_id.clone(),
-                module_name: template.module_name.to_string(),
-                entity_name: template.entity_name.to_string(),
-            },
-            false,
-        )],
-        true,
-    );
-
-    fetch_active_contracts_filtered(config, token, event_format, |created| {
-        extract_provider_service_info(&created)
-    })
+        token,
+        provider_service_template(packages),
+        extract_provider_service_info,
+    )
     .await
 }
 
@@ -90,37 +64,13 @@ pub async fn get_user_services(
     token: Option<String>,
     packages: &PackageConfig,
 ) -> Result<Vec<UserServiceInfo>> {
-    match user_service_template(packages) {
-        Some(template) => {
-            fetch_user_services_for_template(config, party_id, token, &template).await
-        }
-        None => Ok(Vec::new()),
-    }
-}
-
-/// Fetch user services using TemplateFilter
-async fn fetch_user_services_for_template(
-    config: &NodeConfig,
-    party_id: &CantonId,
-    token: Option<String>,
-    template: &TemplateId,
-) -> Result<Vec<UserServiceInfo>> {
-    let event_format = party_event_format(
+    fetch_by_template(
+        config,
         party_id,
-        vec![template_filter(
-            Identifier {
-                package_id: template.package_id.clone(),
-                module_name: template.module_name.to_string(),
-                entity_name: template.entity_name.to_string(),
-            },
-            false,
-        )],
-        true,
-    );
-
-    fetch_active_contracts_filtered(config, token, event_format, |created| {
-        extract_user_service_info(&created)
-    })
+        token,
+        user_service_template(packages),
+        extract_user_service_info,
+    )
     .await
 }
 
@@ -151,37 +101,13 @@ pub async fn get_credential_offers(
     token: Option<String>,
     packages: &PackageConfig,
 ) -> Result<Vec<CredentialOfferInfo>> {
-    match credential_offer_template(packages) {
-        Some(template) => {
-            fetch_credential_offers_for_template(config, party_id, token, &template).await
-        }
-        None => Ok(Vec::new()),
-    }
-}
-
-/// Fetch credential offers using TemplateFilter
-async fn fetch_credential_offers_for_template(
-    config: &NodeConfig,
-    party_id: &CantonId,
-    token: Option<String>,
-    template: &TemplateId,
-) -> Result<Vec<CredentialOfferInfo>> {
-    let event_format = party_event_format(
+    fetch_by_template(
+        config,
         party_id,
-        vec![template_filter(
-            Identifier {
-                package_id: template.package_id.clone(),
-                module_name: template.module_name.to_string(),
-                entity_name: template.entity_name.to_string(),
-            },
-            false,
-        )],
-        true,
-    );
-
-    fetch_active_contracts_filtered(config, token, event_format, |created| {
-        extract_credential_offer_info(&created)
-    })
+        token,
+        credential_offer_template(packages),
+        extract_credential_offer_info,
+    )
     .await
 }
 
@@ -256,35 +182,13 @@ pub async fn get_credentials(
     token: Option<String>,
     packages: &PackageConfig,
 ) -> Result<Vec<CredentialInfo>> {
-    match credential_template(packages) {
-        Some(template) => fetch_credentials_for_template(config, party_id, token, &template).await,
-        None => Ok(Vec::new()),
-    }
-}
-
-/// Fetch credentials using TemplateFilter
-async fn fetch_credentials_for_template(
-    config: &NodeConfig,
-    party_id: &CantonId,
-    token: Option<String>,
-    template: &TemplateId,
-) -> Result<Vec<CredentialInfo>> {
-    let event_format = party_event_format(
+    fetch_by_template(
+        config,
         party_id,
-        vec![template_filter(
-            Identifier {
-                package_id: template.package_id.clone(),
-                module_name: template.module_name.to_string(),
-                entity_name: template.entity_name.to_string(),
-            },
-            false,
-        )],
-        true,
-    );
-
-    fetch_active_contracts_filtered(config, token, event_format, |created| {
-        extract_credential_info(&created)
-    })
+        token,
+        credential_template(packages),
+        extract_credential_info,
+    )
     .await
 }
 

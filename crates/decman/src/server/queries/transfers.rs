@@ -12,9 +12,9 @@ use crate::{
     error::Result,
 };
 
-use super::templates::TemplateId;
+use super::templates::{TemplateId, fetch_by_template};
 use crate::server::{
-    event_filters::{interface_filter, party_event_format, template_filter},
+    event_filters::{interface_filter, party_event_format},
     ledger_paging::fetch_active_contracts_filtered,
     record::{field_record, record_field},
     types::{
@@ -175,7 +175,7 @@ pub async fn get_open_mint_requests(
         config,
         party_id,
         token,
-        &TemplateId {
+        TemplateId {
             package_id: pkg.clone(),
             module_name: "Utility.Registry.App.V0.Model.Mint",
             entity_name: "MintRequest",
@@ -199,7 +199,7 @@ pub async fn get_open_burn_requests(
         config,
         party_id,
         token,
-        &TemplateId {
+        TemplateId {
             package_id: pkg.clone(),
             module_name: "Utility.Registry.App.V0.Model.Burn",
             entity_name: "BurnRequest",
@@ -213,27 +213,14 @@ async fn fetch_token_requests_for_template(
     config: &NodeConfig,
     party_id: &CantonId,
     token: Option<String>,
-    template: &TemplateId,
+    template: TemplateId,
     payload_field: &str,
 ) -> Result<Vec<TokenRequestInfo>> {
-    let event_format = party_event_format(
-        party_id,
-        vec![template_filter(
-            Identifier {
-                package_id: template.package_id.clone(),
-                module_name: template.module_name.to_string(),
-                entity_name: template.entity_name.to_string(),
-            },
-            false,
-        )],
-        true,
-    );
-
-    fetch_active_contracts_filtered(config, token, event_format, |created| {
-        if is_execute_before_expired_in_payload(&created, payload_field) {
+    fetch_by_template(config, party_id, token, Some(template), |created| {
+        if is_execute_before_expired_in_payload(created, payload_field) {
             return None;
         }
-        extract_token_request_info(&created, payload_field)
+        extract_token_request_info(created, payload_field)
     })
     .await
 }
