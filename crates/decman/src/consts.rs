@@ -219,6 +219,3 @@ pub const NOISE_KEY_FILENAME: &str = "noise.key";
 
 /// SQLite database filename (inside data/)
 pub const DB_FILENAME: &str = "decpm.db";
-
-/// DARs directory name (inside data/)
-pub const DARS_DIR: &str = "dars";
