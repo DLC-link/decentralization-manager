@@ -382,9 +382,6 @@ fn verify_prepared_transaction(
     Ok(())
 }
 
-/// Decode a sequence of `varint(len)||proto` messages from a byte slice. Mirrors
-/// `utils::read_all_messages_from_file` but operates on in-memory data — used
-/// to round-trip blobs we used to read from disk.
 /// The namespace key and the Daml signing key in a `PEER_PUBLIC_KEYS` blob.
 /// The blob is two `varint(len)||SigningPublicKey` messages, written by
 /// onboarding.

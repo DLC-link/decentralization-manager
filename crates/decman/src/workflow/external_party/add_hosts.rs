@@ -120,26 +120,6 @@ pub fn instance_is_for_party(instance: &str, party_id: &str) -> bool {
         .is_some_and(|target| !target.is_empty() && !target.starts_with(':'))
 }
 
-/// A [`ReplicationTarget`] for artefact access only, rebuilt from an instance
-/// name.
-///
-/// The party and target ids inside a `ReplicationTarget` matter to Canton calls;
-/// for reading and writing this run's artefacts only the instance name and the
-/// artifact keys do. This exists so a caller holding an instance name can reach
-/// its artefacts without re-parsing a party id out of it.
-pub fn replication_target_by_instance(
-    instance_name: &str,
-    participant: &CantonId,
-) -> ReplicationTarget {
-    ReplicationTarget::new(
-        participant.clone(),
-        participant.clone(),
-        instance_name.to_string(),
-        TENANT_ADD_HOSTS_ARTIFACTS,
-        ArtifactStore::Tenant,
-    )
-}
-
 /// The replication this add-hosts implies: `party_id` moving onto `target`.
 pub fn replication_target(
     party_id: &str,

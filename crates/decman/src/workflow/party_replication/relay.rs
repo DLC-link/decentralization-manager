@@ -81,8 +81,8 @@ struct ExportEntry {
 pub enum ImportEnd {
     /// The import took its final block and finished.
     Completed,
-    /// The import ended without finishing: a restart, a discard, the reaper,
-    /// or a failure. The text says which, with the import's error.
+    /// The import ended without finishing: a restart, the reaper, or a
+    /// failure. The text says which, with the import's error.
     Abandoned(String),
 }
 
@@ -95,7 +95,6 @@ pub type OnImportEnd = Box<dyn FnOnce(ImportEnd) -> BoxFuture<'static, ()> + Sen
 
 const RESTARTED: &str = "a new copy started from block 1";
 const FAILED: &str = "the import failed";
-const DISCARDED: &str = "the copy was discarded";
 
 /// One import held open on a joining host between block requests.
 struct ImportEntry {
@@ -606,23 +605,6 @@ impl RelaySessions {
         imports.keys().any(|name| belongs(name)) || self.retiring().keys().any(|name| belongs(name))
     }
 
-    /// Drop this replication's sessions, if any.
-    ///
-    /// Used when a transfer is abandoned deliberately. The import is not
-    /// aborted — see the module docs.
-    pub async fn discard(&self, instance_name: &str) {
-        self.exports.lock().await.remove(instance_name);
-        if let Some(teardown) = self.retire_import(instance_name, DISCARDED).await {
-            match teardown.await {
-                Ok(Ok(())) => {}
-                Ok(Err(e)) => tracing::info!("the discarded ACS import ended: {e}"),
-                Err(e) => {
-                    tracing::info!("the discarded ACS import's teardown did not complete: {e}")
-                }
-            }
-        }
-    }
-
     /// Remove sessions untouched for longer than `idle_timeout`.
     ///
     /// Returns how many of each went. An import removed here is not aborted:
@@ -804,6 +786,8 @@ mod tests {
         canton_id::CantonId,
         workflow::party_replication::{ArtifactStore, ReplicationArtifacts},
     };
+
+    const DISCARDED: &str = "the copy was discarded";
 
     fn target(instance: &str) -> ReplicationTarget {
         let id = |p: &str| match CantonId::parse(&format!("{p}::1220{}", "aa".repeat(32))) {
@@ -1362,42 +1346,6 @@ mod tests {
         }
     }
 
-    /// Restarting at block 1 must retire the previous import before spawning
-    /// the next, not merely forget it.
-    #[tokio::test]
-    async fn restarting_retires_the_previous_import_first() {
-        let sessions = RelaySessions::new();
-        let target = target("run-1");
-        let (tx, rx) = mpsc::channel(BLOCK_CHANNEL_CAPACITY);
-        let taken = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let finished = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let task = fake_import(rx, taken.clone(), finished.clone());
-        sessions
-            .imports
-            .lock()
-            .await
-            .insert(target.instance_name.clone(), entry_for(tx, task));
-
-        // `discard` is the teardown path a caller reaches for directly; it
-        // shares `retire` with the restart branch.
-        sessions.discard(&target.instance_name).await;
-
-        assert!(
-            finished.load(std::sync::atomic::Ordering::SeqCst),
-            "the previous import must be fully unwound before the registry lets go of it"
-        );
-        assert!(sessions.imports.lock().await.is_empty());
-    }
-
-    /// Discarding a replication that has no sessions is the ordinary case on a
-    /// transfer that never started, so it must not panic or fail.
-    #[tokio::test]
-    async fn discarding_an_unknown_replication_is_a_no_op() {
-        let sessions = RelaySessions::new();
-        sessions.discard("never-started").await;
-        assert_eq!(sessions.reap(Duration::ZERO).await, (0, 0));
-    }
-
     /// How an import's `on_end` was called.
     type Ends = Arc<std::sync::Mutex<Vec<ImportEnd>>>;
 
@@ -1443,24 +1391,6 @@ mod tests {
             },
         );
         blocks
-    }
-
-    #[tokio::test]
-    async fn a_discarded_import_reports_that_it_was_abandoned() {
-        let sessions = RelaySessions::new();
-        let ends = Ends::default();
-        let (open, gate) = tokio::sync::oneshot::channel();
-        drop(gated_import(&sessions, &ends, gate).await);
-        drop(open);
-
-        sessions.discard("run-1").await;
-
-        let ends = ends_of(&ends);
-        assert_eq!(ends.len(), 1, "{ends:?}");
-        assert!(
-            matches!(&ends[0], ImportEnd::Abandoned(why) if why.starts_with(DISCARDED)),
-            "{ends:?}"
-        );
     }
 
     /// The import's own error says what went wrong, so it goes with the
