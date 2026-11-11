@@ -1,31 +1,5 @@
-import {
-  Fragment,
-  useCallback,
-  useEffect,
-  useRef,
-  useState,
-  type ReactNode,
-} from "react";
-import {
-  Alert,
-  Box,
-  Button,
-  Checkbox,
-  Chip,
-  CircularProgress,
-  Dialog,
-  DialogActions,
-  DialogContent,
-  DialogTitle,
-  IconButton,
-  List,
-  ListItemButton,
-  ListItemText,
-  Skeleton,
-  TextField,
-  Tooltip,
-  Typography,
-} from "@mui/material";
+import { Fragment, useCallback, useEffect, useRef, useState, type ReactNode } from "react";
+import { Alert, Box, Button, Checkbox, Chip, CircularProgress, Dialog, DialogActions, DialogContent, DialogTitle, IconButton, List, ListItemButton, ListItemText, Skeleton, TextField, Tooltip, Typography } from "@mui/material";
 import ContentCopyIcon from "@mui/icons-material/ContentCopy";
 import DownloadIcon from "@mui/icons-material/Download";
 import { API_BASE } from "../constants";
@@ -38,39 +12,10 @@ import { RowCard } from "./RowCard";
 import { columnSx } from "../styles";
 import { PaginationControls } from "./Pagination";
 import { usePagination } from "../usePagination";
-import {
-  completedProposals,
-  type CompletedProposal,
-  type ProposalOutcome,
-} from "../completedProposals";
-import {
-  AcsTransferMeter,
-  ApprovalCard,
-  ConfirmAvatars,
-  ConfirmRing,
-  FullPayload,
-  Pill,
-  StatusPill,
-  WorkflowPipeline,
-} from "./viz/ApprovalViz";
-import {
-  currentStepLabel,
-  stepsForRun,
-  workflowKindLabel,
-} from "../workflowSteps";
-import type {
-  AuditLogEntry,
-  CancelConfirmationRequest,
-  ConfirmActionRequest,
-  DisclosedContractInput,
-  DomainGovernanceAction,
-  ExecuteActionRequest,
-  GovernanceAction,
-  GovernanceType,
-  HandledInvitation,
-  PendingInvitation,
-  WorkflowRun,
-} from "../types";
+import { completedProposals, type CompletedProposal, type ProposalOutcome } from "../completedProposals";
+import { AcsTransferMeter, ApprovalCard, ConfirmAvatars, ConfirmRing, FullPayload, Pill, StatusPill, WorkflowPipeline } from "./viz/ApprovalViz";
+import { currentStepLabel, stepsForRun, workflowKindLabel } from "../workflowSteps";
+import type { AuditLogEntry, CancelConfirmationRequest, ConfirmActionRequest, DisclosedContractInput, DomainGovernanceAction, ExecuteActionRequest, GovernanceAction, GovernanceType, HandledInvitation, PendingInvitation, WorkflowRun } from "../types";
 
 export interface PartyActions {
   partyId: string;
