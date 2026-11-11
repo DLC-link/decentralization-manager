@@ -173,7 +173,7 @@ impl App {
                 let _ = self.requests.send(Request::GovAction(Box::new(request)));
                 self.overlay = Overlay::Busy("Submitting…".to_owned());
             }
-            Err(error) => self.overlay = Overlay::Message(error),
+            Err(error) => self.overlay = Overlay::Message(error.to_string()),
         }
     }
 
@@ -208,7 +208,7 @@ impl App {
                 let _ = self.requests.send(Request::DeploySubmit(Box::new(body)));
                 self.overlay = Overlay::Busy("Deploying contracts…".to_owned());
             }
-            Err(error) => self.overlay = Overlay::Message(error),
+            Err(error) => self.overlay = Overlay::Message(error.to_string()),
         }
     }
 

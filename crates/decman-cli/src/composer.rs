@@ -536,9 +536,33 @@ pub fn fields_for_proposal(proposal_type: &str, ctx: &ComposerContext) -> Vec<Co
     }
 }
 
+/// Why [`build_payload`] refused a composed form: the first invalid or
+/// missing required field. The overlay shows the message.
+#[derive(Debug, Eq, PartialEq, thiserror::Error)]
+pub enum ComposerError {
+    /// A required field is empty.
+    #[error("{label} is required")]
+    Required { label: &'static str },
+    /// A whole-number field holds something else.
+    #[error("{label} must be a whole number")]
+    NotWholeNumber { label: &'static str },
+    /// A row of a rows field has the wrong number of values.
+    #[error("{label}: each row needs {expected} comma-separated values ({columns})")]
+    RowWidth {
+        label: &'static str,
+        expected: usize,
+        columns: String,
+    },
+}
+
 /// Build the typed JSON payload for a composed form, or a human error message
 /// describing the first invalid / missing required field.
-pub fn build_payload(composer: &Composer) -> Result<Value, String> {
+///
+/// # Errors
+///
+/// Returns a [`ComposerError`] for the first field that is missing, not a
+/// whole number, or holds a row of the wrong width.
+pub fn build_payload(composer: &Composer) -> Result<Value, ComposerError> {
     let mut root = Map::new();
     root.insert(
         "type".to_owned(),
@@ -562,13 +586,13 @@ pub fn build_payload(composer: &Composer) -> Result<Value, String> {
 }
 
 /// The typed JSON value for a field, or `None` when an optional field is empty.
-fn field_value(field: &ComposerField) -> Result<Option<Value>, String> {
+fn field_value(field: &ComposerField) -> Result<Option<Value>, ComposerError> {
     let trimmed = field.value.trim();
-    let require = || -> Result<(), String> {
+    let require = || -> Result<(), ComposerError> {
         if field.optional || !trimmed.is_empty() {
             Ok(())
         } else {
-            Err(format!("{} is required", field.label))
+            Err(ComposerError::Required { label: field.label })
         }
     };
     match &field.kind {
@@ -584,7 +608,7 @@ fn field_value(field: &ComposerField) -> Result<Option<Value>, String> {
             trimmed
                 .parse::<i64>()
                 .map(|n| Some(Value::from(n)))
-                .map_err(|_| format!("{} must be a whole number", field.label))
+                .map_err(|_| ComposerError::NotWholeNumber { label: field.label })
         }
         FieldKind::Bool => Ok(Some(Value::Bool(trimmed == "true"))),
         FieldKind::Select(_) => {
@@ -619,12 +643,11 @@ fn field_value(field: &ComposerField) -> Result<Option<Value>, String> {
                 }
                 let parts: Vec<&str> = line.split(',').map(str::trim).collect();
                 if parts.len() != columns.len() {
-                    return Err(format!(
-                        "{}: each row needs {} comma-separated values ({})",
-                        field.label,
-                        columns.len(),
-                        columns.join(",")
-                    ));
+                    return Err(ComposerError::RowWidth {
+                        label: field.label,
+                        expected: columns.len(),
+                        columns: columns.join(","),
+                    });
                 }
                 let mut obj = Map::new();
                 for (column, value) in columns.iter().zip(parts) {
@@ -740,7 +763,7 @@ mod tests {
     fn build_payload_rejects_missing_required() {
         let fields = vec![text("member", "Member party id")];
         match build_payload(&composer("governance_add_member", fields)) {
-            Err(error) => assert!(error.contains("Member party id is required")),
+            Err(error) => assert!(error.to_string().contains("Member party id is required")),
             Ok(_) => panic!("expected a missing-required error"),
         }
     }
@@ -776,7 +799,7 @@ mod tests {
         let mut field = rows("claims", "Claims", vec!["subject", "property", "value"]);
         field.value = "only,two".to_owned();
         match build_payload(&composer("offer_free_credential", vec![field])) {
-            Err(error) => assert!(error.contains("each row needs 3")),
+            Err(error) => assert!(error.to_string().contains("each row needs 3")),
             Ok(_) => panic!("expected a column-count error"),
         }
     }

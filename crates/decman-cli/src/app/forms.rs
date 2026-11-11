@@ -7,24 +7,38 @@ use crate::api::{DecmanClient, PartyConfigView, PeerEntry};
 
 use crate::app::overlay::{DeployForm, IdpMode, PartyConfigForm, PcRow, PeerForm};
 
+/// Why [`validate_prefix`] refused a party id prefix. The overlay shows the
+/// message.
+#[derive(Debug, thiserror::Error)]
+pub(super) enum PrefixError {
+    #[error("Party id prefix is required.")]
+    Missing,
+    #[error("Party id prefix must start with a letter.")]
+    NoLeadingLetter,
+    #[error("Party id prefix must be 180 characters or fewer.")]
+    TooLong,
+    #[error("Party id prefix may only contain letters, digits, '-' and '_'.")]
+    InvalidChar,
+}
+
 /// Validate a decentralized-party id prefix, mirroring the web frontend's
 /// onboarding rules: starts with a letter, only `[A-Za-z0-9_-]`, ≤180 chars.
-pub(super) fn validate_prefix(prefix: &str) -> Result<(), String> {
+pub(super) fn validate_prefix(prefix: &str) -> Result<(), PrefixError> {
     match prefix.chars().next() {
-        None => return Err("Party id prefix is required.".to_owned()),
+        None => return Err(PrefixError::Missing),
         Some(c) if !c.is_ascii_alphabetic() => {
-            return Err("Party id prefix must start with a letter.".to_owned());
+            return Err(PrefixError::NoLeadingLetter);
         }
         Some(_) => {}
     }
     if prefix.chars().count() > 180 {
-        return Err("Party id prefix must be 180 characters or fewer.".to_owned());
+        return Err(PrefixError::TooLong);
     }
     if !prefix
         .chars()
         .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
     {
-        return Err("Party id prefix may only contain letters, digits, '-' and '_'.".to_owned());
+        return Err(PrefixError::InvalidChar);
     }
     Ok(())
 }
@@ -204,34 +218,50 @@ pub(super) fn pc_field_mut(form: &mut PartyConfigForm, row: Option<PcRow>) -> Op
     }
 }
 
+/// Why [`build_contracts_request`] refused the deploy form. The overlay shows
+/// the message.
+#[derive(Debug, thiserror::Error)]
+pub(super) enum DeployFormError {
+    #[error("Unknown governance-core package — vet the governance-core DAR first.")]
+    UnknownPackage,
+    #[error("No governance members resolved — peers may be unreachable.")]
+    NoMembers,
+    #[error("Threshold must be a whole number")]
+    ThresholdNotWhole,
+    #[error("Timeout must be a whole number")]
+    TimeoutNotWhole,
+    #[error("Threshold must be between 1 and {member_count}.")]
+    ThresholdOutOfRange { member_count: i64 },
+    #[error("Timeout must be a positive number of microseconds.")]
+    TimeoutNotPositive,
+}
+
 /// Build the `POST /contracts` body for a governance-core deployment, or a
 /// human error describing why it cannot be submitted.
-pub(super) fn build_contracts_request(form: &DeployForm) -> Result<Value, String> {
+pub(super) fn build_contracts_request(form: &DeployForm) -> Result<Value, DeployFormError> {
     if form.package_id.is_empty() {
-        return Err(
-            "Unknown governance-core package — vet the governance-core DAR first.".to_owned(),
-        );
+        return Err(DeployFormError::UnknownPackage);
     }
     if form.member_parties.is_empty() {
-        return Err("No governance members resolved — peers may be unreachable.".to_owned());
+        return Err(DeployFormError::NoMembers);
     }
     let threshold: i64 = form
         .threshold
         .trim()
         .parse()
-        .map_err(|_| "Threshold must be a whole number".to_owned())?;
+        .map_err(|_| DeployFormError::ThresholdNotWhole)?;
     let timeout: i64 = form
         .timeout_micros
         .trim()
         .parse()
-        .map_err(|_| "Timeout must be a whole number".to_owned())?;
+        .map_err(|_| DeployFormError::TimeoutNotWhole)?;
     // Validate ranges client-side so the error is immediate, not a chain failure.
     let member_count = i64::try_from(form.member_parties.len()).unwrap_or(i64::MAX);
     if !(1..=member_count).contains(&threshold) {
-        return Err(format!("Threshold must be between 1 and {member_count}."));
+        return Err(DeployFormError::ThresholdOutOfRange { member_count });
     }
     if timeout <= 0 {
-        return Err("Timeout must be a positive number of microseconds.".to_owned());
+        return Err(DeployFormError::TimeoutNotPositive);
     }
     Ok(json!({
         "decentralized_party_id": form.party_id,
@@ -361,7 +391,7 @@ mod tests {
         let mut form = deploy_form();
         form.package_id = String::new();
         match build_contracts_request(&form) {
-            Err(error) => assert!(error.contains("governance-core")),
+            Err(error) => assert!(error.to_string().contains("governance-core")),
             Ok(_) => panic!("expected a missing-package error"),
         }
     }
@@ -372,14 +402,14 @@ mod tests {
         let mut form = deploy_form();
         form.threshold = "3".to_owned();
         match build_contracts_request(&form) {
-            Err(error) => assert!(error.contains("between 1 and 2")),
+            Err(error) => assert!(error.to_string().contains("between 1 and 2")),
             Ok(_) => panic!("expected an out-of-range threshold error"),
         }
 
         let mut form = deploy_form();
         form.timeout_micros = "0".to_owned();
         match build_contracts_request(&form) {
-            Err(error) => assert!(error.contains("positive")),
+            Err(error) => assert!(error.to_string().contains("positive")),
             Ok(_) => panic!("expected a non-positive timeout error"),
         }
     }
