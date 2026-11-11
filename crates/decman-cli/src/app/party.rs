@@ -103,7 +103,7 @@ impl App {
         };
         let prefix = form.prefix.trim().to_owned();
         if let Err(message) = validate_prefix(&prefix) {
-            self.overlay = Overlay::Message(message);
+            self.overlay = Overlay::Message(message.to_string());
             return;
         }
         let peer_ids: Vec<String> = form
