@@ -3,7 +3,12 @@ import AddIcon from "@mui/icons-material/Add";
 import DeleteIcon from "@mui/icons-material/Delete";
 import { TextHelp, fieldHelpAdornment } from "../FieldHelp";
 import type { FieldDefinition } from "../../types";
-import { FIELD_TYPES, FIELD_TYPE_HELP, createDefaultField, commitPartyInput } from "./contractFields";
+import { FIELD_TYPES, FIELD_TYPE_HELP, createDefaultField } from "./contractFields";
+import { IntegerInput } from "./IntegerInput";
+import { PartySetInput } from "./PartySetInput";
+import { RelTimeSelect } from "./RelTimeSelect";
+import { TextValueInput } from "./TextValueInput";
+import { ThresholdInput } from "./ThresholdInput";
 
 interface FieldEditorProps {
   field: FieldDefinition;
@@ -90,118 +95,32 @@ const FieldEditor = ({
 
       case "party_set":
         return (
-          <Box
-            sx={{ display: "flex", flexDirection: "column", gap: 1, flex: 1 }}
-          >
-            <TextField
-              size="small"
-              placeholder="Paste party ID, press Enter or click away"
-              fullWidth
-              onKeyDown={(e) => {
-                if (e.key === "Enter") {
-                  commitPartyInput(
-                    e.currentTarget as HTMLInputElement,
-                    field.parties,
-                    (parties) => onChange({ ...field, parties }),
-                  );
-                  e.preventDefault();
-                }
-              }}
-              onBlur={(e) =>
-                commitPartyInput(e.target, field.parties, (parties) =>
-                  onChange({ ...field, parties }),
-                )
-              }
-              slotProps={{
-                input: {
-                  endAdornment: fieldHelpAdornment(
-                    "The set of member parties that participate in governance. Paste each full party ID and press Enter to add. You can grow or shrink the set later via governance actions.",
-                    "Help for Member Set",
-                  ),
-                },
-              }}
-            />
-            {field.parties.length > 0 && (
-              <Box sx={{ display: "flex", flexDirection: "column", gap: 0.5 }}>
-                {field.parties.map((party, idx) => (
-                  <Box
-                    key={idx}
-                    sx={{
-                      display: "flex",
-                      alignItems: "center",
-                      bgcolor: "action.hover",
-                      borderRadius: 1,
-                      px: 1,
-                      py: 0.25,
-                    }}
-                  >
-                    <Typography
-                      variant="caption"
-                      sx={{ flex: 1, fontFamily: "var(--font-mono)" }}
-                    >
-                      {party}
-                    </Typography>
-                    <IconButton
-                      size="small"
-                      onClick={() =>
-                        onChange({
-                          ...field,
-                          parties: field.parties.filter((_, i) => i !== idx),
-                        })
-                      }
-                      sx={{ p: 0.25 }}
-                    >
-                      <DeleteIcon sx={{ fontSize: 14 }} />
-                    </IconButton>
-                  </Box>
-                ))}
-              </Box>
-            )}
-          </Box>
+          <PartySetInput
+            parties={field.parties}
+            onChange={(parties) => onChange({ ...field, parties })}
+            placeholder="Paste party ID, press Enter or click away"
+            help="The set of member parties that participate in governance. Paste each full party ID and press Enter to add. You can grow or shrink the set later via governance actions."
+            helpName="Member Set"
+          />
         );
 
       case "governance_threshold":
         return (
-          <TextField
-            size="small"
-            label="Value"
-            type="number"
-            value={field.value ?? defaultThreshold}
-            onChange={(e) =>
-              onChange({
-                ...field,
-                value: parseInt(e.target.value) || defaultThreshold,
-              })
-            }
-            sx={{ width: 100 }}
-            slotProps={{
-              input: {
-                endAdornment: fieldHelpAdornment(
-                  "Minimum number of members that must approve a governance action before it executes. Defaults to a two-thirds majority.",
-                  "Help for Governance Threshold",
-                ),
-              },
-            }}
+          <ThresholdInput
+            value={field.value}
+            defaultThreshold={defaultThreshold}
+            onChange={(value) => onChange({ ...field, value })}
+            help="Minimum number of members that must approve a governance action before it executes. Defaults to a two-thirds majority."
+            helpName="Governance Threshold"
           />
         );
 
       case "rel_time":
         return (
-          <FormControl size="small" sx={{ width: 130 }}>
-            <Select
-              value={field.microseconds || 3600000000}
-              onChange={(e) =>
-                onChange({ ...field, microseconds: Number(e.target.value) })
-              }
-            >
-              <MenuItem value={180000000}>3 min</MenuItem>
-              <MenuItem value={600000000}>10 min</MenuItem>
-              <MenuItem value={1800000000}>30 min</MenuItem>
-              <MenuItem value={3600000000}>1 hour</MenuItem>
-              <MenuItem value={7200000000}>2 hours</MenuItem>
-              <MenuItem value={86400000000}>24 hours</MenuItem>
-            </Select>
-          </FormControl>
+          <RelTimeSelect
+            microseconds={field.microseconds}
+            onChange={(microseconds) => onChange({ ...field, microseconds })}
+          />
         );
 
       case "optional": {
@@ -233,212 +152,75 @@ const FieldEditor = ({
               </FormControl>
             )}
             {field.inner?.type === "rel_time" && (
-              <FormControl size="small" sx={{ width: 130 }}>
-                <Select
-                  value={
-                    (field.inner as { microseconds: number }).microseconds ||
-                    3600000000
-                  }
-                  onChange={(e) =>
-                    onChange({
-                      ...field,
-                      inner: {
-                        type: "rel_time",
-                        microseconds: Number(e.target.value),
-                      },
-                    })
-                  }
-                >
-                  <MenuItem value={180000000}>3 min</MenuItem>
-                  <MenuItem value={600000000}>10 min</MenuItem>
-                  <MenuItem value={1800000000}>30 min</MenuItem>
-                  <MenuItem value={3600000000}>1 hour</MenuItem>
-                  <MenuItem value={7200000000}>2 hours</MenuItem>
-                  <MenuItem value={86400000000}>24 hours</MenuItem>
-                </Select>
-              </FormControl>
-            )}
-            {field.inner?.type === "governance_threshold" && (
-              <TextField
-                size="small"
-                label="Value"
-                type="number"
-                value={
-                  (field.inner as { value?: number }).value ?? defaultThreshold
+              <RelTimeSelect
+                microseconds={
+                  (field.inner as { microseconds: number }).microseconds
                 }
-                onChange={(e) =>
+                onChange={(microseconds) =>
                   onChange({
                     ...field,
-                    inner: {
-                      type: "governance_threshold",
-                      value: parseInt(e.target.value) || defaultThreshold,
-                    },
+                    inner: { type: "rel_time", microseconds },
                   })
                 }
-                sx={{ width: 100 }}
-                slotProps={{
-                  input: {
-                    endAdornment: fieldHelpAdornment(
-                      "Optional governance threshold override. Minimum approvals required for an action; leave at default for a two-thirds majority.",
-                      "Help for Optional Governance Threshold",
-                    ),
-                  },
-                }}
+              />
+            )}
+            {field.inner?.type === "governance_threshold" && (
+              <ThresholdInput
+                value={(field.inner as { value?: number }).value}
+                defaultThreshold={defaultThreshold}
+                onChange={(value) =>
+                  onChange({
+                    ...field,
+                    inner: { type: "governance_threshold", value },
+                  })
+                }
+                help="Optional governance threshold override. Minimum approvals required for an action; leave at default for a two-thirds majority."
+                helpName="Optional Governance Threshold"
               />
             )}
             {field.inner?.type === "text" && (
-              <TextField
-                size="small"
-                label="Value"
+              <TextValueInput
                 value={(field.inner as { value: string }).value}
-                onChange={(e) =>
-                  onChange({
-                    ...field,
-                    inner: { type: "text", value: e.target.value },
-                  })
+                onChange={(value) =>
+                  onChange({ ...field, inner: { type: "text", value } })
                 }
-                sx={{ flex: 1 }}
-                slotProps={{
-                  input: {
-                    endAdornment: fieldHelpAdornment(
-                      "Optional text value for this contract field. Free-form string passed to the contract as-is.",
-                      "Help for Optional Text",
-                    ),
-                  },
-                }}
+                help="Optional text value for this contract field. Free-form string passed to the contract as-is."
+                helpName="Optional Text"
               />
             )}
             {field.inner?.type === "int64" && (
-              <TextField
-                size="small"
-                label="Value"
-                type="number"
+              <IntegerInput
                 value={(field.inner as { value: number }).value}
-                onChange={(e) =>
-                  onChange({
-                    ...field,
-                    inner: {
-                      type: "int64",
-                      value: parseInt(e.target.value) || 0,
-                    },
-                  })
+                onChange={(value) =>
+                  onChange({ ...field, inner: { type: "int64", value } })
                 }
-                sx={{ width: 100 }}
-                slotProps={{
-                  input: {
-                    endAdornment: fieldHelpAdornment(
-                      "Optional integer value for this contract field. Whole number passed to the contract as-is.",
-                      "Help for Optional Integer",
-                    ),
-                  },
-                }}
+                width={100}
+                help="Optional integer value for this contract field. Whole number passed to the contract as-is."
+                helpName="Optional Integer"
               />
             )}
             {field.inner?.type === "party_set" && (
-              <Box
-                sx={{
-                  display: "flex",
-                  flexDirection: "column",
-                  gap: 1,
-                  flex: 1,
-                }}
-              >
-                <TextField
-                  size="small"
-                  placeholder={
-                    label === "Disclosure Observers"
-                      ? "Paste party ID, press Enter or click away (leave empty for no observers)"
-                      : "Paste party ID, press Enter or click away (leave empty for no extra proposers)"
-                  }
-                  fullWidth
-                  slotProps={{
-                    input: {
-                      endAdornment:
-                        label === "Disclosure Observers"
-                          ? fieldHelpAdornment(
-                              "Parties that can see the rules contract without hosting the governance party. They cannot confirm or execute actions. Leave empty for none.",
-                              "Help for Disclosure Observers",
-                            )
-                          : fieldHelpAdornment(
-                              "Additional parties allowed to propose governance actions, beyond the regular members. Leave empty to keep the proposer allowlist at its default.",
-                              "Help for Additional Proposers",
-                            ),
-                    },
-                  }}
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter") {
-                      const inner = field.inner as { parties: string[] };
-                      commitPartyInput(
-                        e.currentTarget as HTMLInputElement,
-                        inner.parties,
-                        (parties) =>
-                          onChange({
-                            ...field,
-                            inner: { type: "party_set", parties },
-                          }),
-                      );
-                      e.preventDefault();
-                    }
-                  }}
-                  onBlur={(e) => {
-                    const inner = field.inner as { parties: string[] };
-                    commitPartyInput(e.target, inner.parties, (parties) =>
-                      onChange({
-                        ...field,
-                        inner: { type: "party_set", parties },
-                      }),
-                    );
-                  }}
-                />
-                {(field.inner as { parties: string[] }).parties.length > 0 && (
-                  <Box
-                    sx={{ display: "flex", flexDirection: "column", gap: 0.5 }}
-                  >
-                    {(field.inner as { parties: string[] }).parties.map(
-                      (party, idx) => (
-                        <Box
-                          key={idx}
-                          sx={{
-                            display: "flex",
-                            alignItems: "center",
-                            bgcolor: "action.hover",
-                            borderRadius: 1,
-                            px: 1,
-                            py: 0.25,
-                          }}
-                        >
-                          <Typography
-                            variant="caption"
-                            sx={{ flex: 1, fontFamily: "var(--font-mono)" }}
-                          >
-                            {party}
-                          </Typography>
-                          <IconButton
-                            size="small"
-                            onClick={() => {
-                              const inner = field.inner as {
-                                parties: string[];
-                              };
-                              onChange({
-                                ...field,
-                                inner: {
-                                  type: "party_set",
-                                  parties: inner.parties.filter(
-                                    (_, i) => i !== idx,
-                                  ),
-                                },
-                              });
-                            }}
-                            sx={{ p: 0.25 }}
-                          >
-                            <DeleteIcon sx={{ fontSize: 14 }} />
-                          </IconButton>
-                        </Box>
-                      ),
-                    )}
-                  </Box>
-                )}
-              </Box>
+              <PartySetInput
+                parties={(field.inner as { parties: string[] }).parties}
+                onChange={(parties) =>
+                  onChange({ ...field, inner: { type: "party_set", parties } })
+                }
+                placeholder={
+                  label === "Disclosure Observers"
+                    ? "Paste party ID, press Enter or click away (leave empty for no observers)"
+                    : "Paste party ID, press Enter or click away (leave empty for no extra proposers)"
+                }
+                help={
+                  label === "Disclosure Observers"
+                    ? "Parties that can see the rules contract without hosting the governance party. They cannot confirm or execute actions. Leave empty for none."
+                    : "Additional parties allowed to propose governance actions, beyond the regular members. Leave empty to keep the proposer allowlist at its default."
+                }
+                helpName={
+                  label === "Disclosure Observers"
+                    ? "Disclosure Observers"
+                    : "Additional Proposers"
+                }
+              />
             )}
           </Box>
         );
@@ -465,42 +247,22 @@ const FieldEditor = ({
 
       case "text":
         return (
-          <TextField
-            size="small"
-            label="Value"
+          <TextValueInput
             value={field.value}
-            onChange={(e) => onChange({ ...field, value: e.target.value })}
-            sx={{ flex: 1 }}
-            slotProps={{
-              input: {
-                endAdornment: fieldHelpAdornment(
-                  "Free-form text value passed to the contract as-is.",
-                  "Help for Text Value",
-                ),
-              },
-            }}
+            onChange={(value) => onChange({ ...field, value })}
+            help="Free-form text value passed to the contract as-is."
+            helpName="Text Value"
           />
         );
 
       case "int64":
         return (
-          <TextField
-            size="small"
-            label="Value"
-            type="number"
+          <IntegerInput
             value={field.value}
-            onChange={(e) =>
-              onChange({ ...field, value: parseInt(e.target.value) || 0 })
-            }
-            sx={{ width: 120 }}
-            slotProps={{
-              input: {
-                endAdornment: fieldHelpAdornment(
-                  "Whole-number value (signed 64-bit integer) passed to the contract as-is.",
-                  "Help for Integer Value",
-                ),
-              },
-            }}
+            onChange={(value) => onChange({ ...field, value })}
+            width={120}
+            help="Whole-number value (signed 64-bit integer) passed to the contract as-is."
+            helpName="Integer Value"
           />
         );
 
