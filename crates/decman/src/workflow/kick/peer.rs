@@ -3,7 +3,7 @@ use sqlx::SqlitePool;
 use crate::{
     config::NodeConfig,
     error::Result,
-    noise::client::NoiseClient,
+    noise::{MessageType, client::NoiseClient},
     workflow::storage::{WorkflowStorage, artifact_kinds},
 };
 
@@ -44,6 +44,6 @@ pub async fn send_kick_signatures_to_coordinator(
     payload.extend_from_slice(&dns);
     payload.extend_from_slice(&p2p);
 
-    client.send_kick_signatures(payload).await?;
+    client.send(MessageType::KickSignatures, payload).await?;
     Ok(())
 }

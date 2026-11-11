@@ -204,120 +204,10 @@ impl NoiseClient {
         Ok(())
     }
 
-    /// Upload keys to coordinator
-    pub async fn upload_keys(&self, keys_data: Vec<u8>) -> Result<(), NoiseError> {
-        self.send_and_verify_ack(
-            MessageType::KeysUpload,
-            keys_data,
-            "Uploading keys to coordinator",
-        )
-        .await
-    }
-
-    /// Send DNS signature to coordinator
-    pub async fn send_dns_signature(&self, signature_data: Vec<u8>) -> Result<(), NoiseError> {
-        self.send_and_verify_ack(
-            MessageType::DnsSignature,
-            signature_data,
-            "Sending DNS signature to coordinator",
-        )
-        .await
-    }
-
-    /// Send P2P signatures to coordinator
-    pub async fn send_p2p_signatures(&self, signatures_data: Vec<u8>) -> Result<(), NoiseError> {
-        self.send_and_verify_ack(
-            MessageType::P2pSignatures,
-            signatures_data,
-            "Sending P2P signatures to coordinator",
-        )
-        .await
-    }
-
-    /// Send submission signatures to coordinator
-    pub async fn send_submission_signatures(
-        &self,
-        signatures_data: Vec<u8>,
-    ) -> Result<(), NoiseError> {
-        self.send_and_verify_ack(
-            MessageType::SubmissionSignatures,
-            signatures_data,
-            "Sending submission signatures to coordinator",
-        )
-        .await
-    }
-
-    pub async fn send_kick_signatures(&self, signatures_data: Vec<u8>) -> Result<(), NoiseError> {
-        self.send_and_verify_ack(
-            MessageType::KickSignatures,
-            signatures_data,
-            "Sending kick signatures to coordinator",
-        )
-        .await
-    }
-
-    /// Send the signed change-threshold DNS + P2P pair to the coordinator.
-    pub async fn send_change_threshold_signatures(
-        &self,
-        signatures_data: Vec<u8>,
-    ) -> Result<(), NoiseError> {
-        self.send_and_verify_ack(
-            MessageType::ChangeThresholdSignatures,
-            signatures_data,
-            "Sending change-threshold signatures to coordinator",
-        )
-        .await
-    }
-
-    /// Upload the new member's `keys||participant_id` payload to the
-    /// coordinator of an add-party run.
-    pub async fn upload_add_party_keys(&self, keys_data: Vec<u8>) -> Result<(), NoiseError> {
-        self.send_and_verify_ack(
-            MessageType::AddPartyKeysUpload,
-            keys_data,
-            "Uploading add-party keys to coordinator",
-        )
-        .await
-    }
-
-    /// Send the signed add-party DNS + P2P pair to the coordinator.
-    pub async fn send_add_party_signatures(
-        &self,
-        signatures_data: Vec<u8>,
-    ) -> Result<(), NoiseError> {
-        self.send_and_verify_ack(
-            MessageType::AddPartySignatures,
-            signatures_data,
-            "Sending add-party signatures to coordinator",
-        )
-        .await
-    }
-
-    /// Send the clearing proposal AUTHORED by this (new-member) node to the
-    /// coordinator, which runs the threshold-signing round on it.
-    pub async fn send_add_party_clear_proposal(
-        &self,
-        proposal_data: Vec<u8>,
-    ) -> Result<(), NoiseError> {
-        self.send_and_verify_ack(
-            MessageType::AddPartyClearProposal,
-            proposal_data,
-            "Sending authored clearing proposal to coordinator",
-        )
-        .await
-    }
-
-    /// Send the signed onboarding-flag clearing proposal to the coordinator.
-    pub async fn send_add_party_clear_signature(
-        &self,
-        signature_data: Vec<u8>,
-    ) -> Result<(), NoiseError> {
-        self.send_and_verify_ack(
-            MessageType::AddPartyClearSignatures,
-            signature_data,
-            "Sending add-party clearing signature to coordinator",
-        )
-        .await
+    /// Send `payload` to the coordinator as a `kind` message and check that it
+    /// answers with an Ack.
+    pub async fn send(&self, kind: MessageType, payload: Vec<u8>) -> Result<(), NoiseError> {
+        self.send_and_verify_ack(kind, payload, sending(kind)).await
     }
 
     /// Tell the coordinator we are declining an outstanding invitation so it
@@ -325,12 +215,7 @@ impl NoiseClient {
     /// hanging until timeout. Payload is the JSON-encoded
     /// `DeclineInvitationPayload`.
     pub async fn send_decline_invitation(&self, payload: Vec<u8>) -> Result<(), NoiseError> {
-        self.send_and_verify_ack(
-            MessageType::DeclineInvitation,
-            payload,
-            "Sending decline-invitation to coordinator",
-        )
-        .await
+        self.send(MessageType::DeclineInvitation, payload).await
     }
 
     /// Tell the coordinator this peer gave up on the run. Payload is the
@@ -340,16 +225,6 @@ impl NoiseClient {
             MessageType::DeclineInvitation,
             payload,
             "Reporting this peer's failure to coordinator",
-        )
-        .await
-    }
-
-    /// Send status update to coordinator
-    pub async fn send_status(&self, status_data: Vec<u8>) -> Result<(), NoiseError> {
-        self.send_and_verify_ack(
-            MessageType::StatusUpdate,
-            status_data,
-            "Sending status update to coordinator",
         )
         .await
     }
@@ -572,5 +447,28 @@ impl NoiseClient {
         }
 
         Ok(resp_msg.payload[4..].to_vec())
+    }
+}
+
+/// The log line for a peer sending `kind` to the coordinator.
+fn sending(kind: MessageType) -> &'static str {
+    match kind {
+        MessageType::KeysUpload => "Uploading keys to coordinator",
+        MessageType::DnsSignature => "Sending DNS signature to coordinator",
+        MessageType::P2pSignatures => "Sending P2P signatures to coordinator",
+        MessageType::SubmissionSignatures => "Sending submission signatures to coordinator",
+        MessageType::KickSignatures => "Sending kick signatures to coordinator",
+        MessageType::ChangeThresholdSignatures => {
+            "Sending change-threshold signatures to coordinator"
+        }
+        MessageType::AddPartyKeysUpload => "Uploading add-party keys to coordinator",
+        MessageType::AddPartySignatures => "Sending add-party signatures to coordinator",
+        MessageType::AddPartyClearProposal => "Sending authored clearing proposal to coordinator",
+        MessageType::AddPartyClearSignatures => {
+            "Sending add-party clearing signature to coordinator"
+        }
+        MessageType::DeclineInvitation => "Sending decline-invitation to coordinator",
+        MessageType::StatusUpdate => "Sending status update to coordinator",
+        _ => "Sending a message to coordinator",
     }
 }

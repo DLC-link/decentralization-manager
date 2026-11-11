@@ -3,7 +3,7 @@ use sqlx::SqlitePool;
 use crate::{
     config::NodeConfig,
     error::Result,
-    noise::client::NoiseClient,
+    noise::{MessageType, client::NoiseClient},
     workflow::storage::{WorkflowStorage, artifact_kinds},
 };
 
@@ -36,6 +36,6 @@ pub async fn send_submission_signatures_to_coordinator(
             )
         })?;
 
-    client.send_submission_signatures(data).await?;
+    client.send(MessageType::SubmissionSignatures, data).await?;
     Ok(())
 }

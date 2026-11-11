@@ -4,120 +4,155 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::Result;
 
-/// Message types for the Noise protocol communication
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[repr(u16)]
-pub enum MessageType {
-    // Commands (0x0000 - 0x00FF)
-    UploadDars = 0x0001,
-    GenerateKeys = 0x0002,
-    SignDns = 0x0003,
-    SignP2p = 0x0004,
-    SignSubmissions = 0x0005,
-    StatusUpdate = 0x0006,
-    Disconnect = 0x0007,
-    GetNextCommand = 0x0008,
-    SignKick = 0x0009,
-    Ping = 0x000A,
-    RequestOwnerKeys = 0x000C,
-    ListPeers = 0x000D,
-    RequestMemberParty = 0x000E,
-    Health = 0x000F,
-    // Add-party commands live above the invite block (0x0010-0x001F) because
-    // the low command range 0x0001-0x000F is exhausted.
-    /// Command: the new member generates its namespace + Daml keys. Other
-    /// peers reply with a skip status.
-    GenerateAddPartyKeys = 0x0020,
-    /// Command: every peer signs the add-party DNS + P2P proposals.
-    SignAddParty = 0x0021,
-    /// Command: the new member imports the party's ACS snapshot. Other peers
-    /// reply with a skip status.
-    ImportAcs = 0x0022,
-    /// Command: the new member drives `ClearPartyOnboardingFlag` past
-    /// Canton's safe time. Other peers reply with a skip status.
-    ClearOnboardingFlag = 0x0023,
-    /// Command: every peer signs the onboarding-flag clearing proposal
-    /// (no-op when the payload carries the empty skip marker).
-    SignClearOnboarding = 0x0024,
-    /// Command: every party member signs the change-threshold DNS + P2P
-    /// proposals.
-    SignChangeThreshold = 0x0025,
-    /// Members authorize removal of shadowed legacy keys after topology migration.
-    RetireLegacyKeys = 0x0026,
-    /// Peer → coordinator: send me one DAR of a pending Dars invite, so the
-    /// operator can read it before accepting. Payload is a JSON
-    /// `RequestDarPayload`; the answer is the DAR's bytes, chunked when they
-    /// outgrow a frame. Only a peer the run invited is served.
-    RequestDar = 0x0027,
+/// Declare `MessageType` with its wire codes and derive `TryFrom<u16>` from
+/// the same list, so a code is written once.
+macro_rules! wire_codes {
+    (
+        $(#[$meta:meta])*
+        $vis:vis enum $name:ident {
+            $(
+                $(#[$variant_meta:meta])*
+                $variant:ident = $code:literal,
+            )+
+        }
+    ) => {
+        $(#[$meta])*
+        $vis enum $name {
+            $(
+                $(#[$variant_meta])*
+                $variant = $code,
+            )+
+        }
 
-    // Invites (0x0010 - 0x001F)
-    InviteOnboarding = 0x0010,
-    InviteKick = 0x0011,
-    InviteContracts = 0x0012,
-    InviteDars = 0x0013,
-    CancelInvite = 0x0014,
-    /// Coordinator-initiated retry: tells peers who accepted an earlier
-    /// invite from this coordinator to flip their Failed run back to
-    /// InProgress and re-spin `start_peer`.
-    RetryWorkflow = 0x0015,
-    /// Peer-initiated decline: sent to the coordinator right before a peer
-    /// removes its local pending invitation, so the coordinator's matching
-    /// in-progress run can be marked Failed instead of hanging until
-    /// timeout. Payload is a JSON `DeclineInvitationPayload`.
-    DeclineInvitation = 0x0016,
-    /// Invite to participate in adding a new member to a decentralized
-    /// party. Payload is a JSON `AddPartyInvitePayload`.
-    InviteAddParty = 0x0017,
-    /// Invite to participate in changing a decentralized party's threshold.
-    /// Payload is a JSON `ChangeThresholdInvitePayload`.
-    InviteChangeThreshold = 0x0018,
+        impl TryFrom<u16> for $name {
+            type Error = anyhow::Error;
 
-    // Responses (0x0100 - 0x01FF)
-    Ack = 0x0101,
-    Data = 0x0102,
-    Error = 0x0103,
-    Ready = 0x0104,
-    Wait = 0x0105,
-    Pong = 0x0106,
-    OwnerKeys = 0x0107,
-    PeerList = 0x0108,
-    MemberPartyResponse = 0x0109,
-    HealthResponse = 0x010A,
-    Busy = 0x010B,
+            fn try_from(value: u16) -> std::result::Result<Self, anyhow::Error> {
+                match value {
+                    $($code => Ok(Self::$variant),)+
+                    _ => Err(anyhow::anyhow!("Unknown message type: 0x{value:04x}")),
+                }
+            }
+        }
+    };
+}
 
-    // Data Transfers (0x0200 - 0x02FF)
-    KeysUpload = 0x0201,
-    DnsSignature = 0x0202,
-    P2pSignatures = 0x0203,
-    SubmissionSignatures = 0x0204,
-    KickSignatures = 0x0205,
-    /// New member → coordinator: `keys||participant_id` payload.
-    AddPartyKeysUpload = 0x0206,
-    /// Peer → coordinator: signed add-party DNS + P2P pair.
-    AddPartySignatures = 0x0207,
-    /// Peer → coordinator: signed onboarding-flag clearing proposal.
-    AddPartyClearSignatures = 0x0208,
-    /// New member → coordinator: the clearing proposal it AUTHORED. Canton
-    /// requires the onboarding participant itself to issue the flag-clear
-    /// transaction, so the new member authors it and the coordinator only
-    /// runs the signing round on it.
-    AddPartyClearProposal = 0x0209,
-    /// Peer → coordinator: signed change-threshold DNS + P2P pair.
-    ChangeThresholdSignatures = 0x020A,
+wire_codes! {
+    /// Message types for the Noise protocol communication
+    #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+    #[repr(u16)]
+    pub enum MessageType {
+        // Commands (0x0000 - 0x00FF)
+        UploadDars = 0x0001,
+        GenerateKeys = 0x0002,
+        SignDns = 0x0003,
+        SignP2p = 0x0004,
+        SignSubmissions = 0x0005,
+        StatusUpdate = 0x0006,
+        Disconnect = 0x0007,
+        GetNextCommand = 0x0008,
+        SignKick = 0x0009,
+        Ping = 0x000A,
+        RequestOwnerKeys = 0x000C,
+        ListPeers = 0x000D,
+        RequestMemberParty = 0x000E,
+        Health = 0x000F,
+        // Add-party commands live above the invite block (0x0010-0x001F) because
+        // the low command range 0x0001-0x000F is exhausted.
+        /// Command: the new member generates its namespace + Daml keys. Other
+        /// peers reply with a skip status.
+        GenerateAddPartyKeys = 0x0020,
+        /// Command: every peer signs the add-party DNS + P2P proposals.
+        SignAddParty = 0x0021,
+        /// Command: the new member imports the party's ACS snapshot. Other peers
+        /// reply with a skip status.
+        ImportAcs = 0x0022,
+        /// Command: the new member drives `ClearPartyOnboardingFlag` past
+        /// Canton's safe time. Other peers reply with a skip status.
+        ClearOnboardingFlag = 0x0023,
+        /// Command: every peer signs the onboarding-flag clearing proposal
+        /// (no-op when the payload carries the empty skip marker).
+        SignClearOnboarding = 0x0024,
+        /// Command: every party member signs the change-threshold DNS + P2P
+        /// proposals.
+        SignChangeThreshold = 0x0025,
+        /// Members authorize removal of shadowed legacy keys after topology migration.
+        RetireLegacyKeys = 0x0026,
+        /// Peer → coordinator: send me one DAR of a pending Dars invite, so the
+        /// operator can read it before accepting. Payload is a JSON
+        /// `RequestDarPayload`; the answer is the DAR's bytes, chunked when they
+        /// outgrow a frame. Only a peer the run invited is served.
+        RequestDar = 0x0027,
 
-    // Chunked Transfer (0x0300 - 0x03FF)
-    /// Command with chunked payload - payload contains: [command_type (2 bytes)] [total_size (4 bytes)] [chunk_count (4 bytes)]
-    ChunkedCommand = 0x0300,
-    /// Request chunk N - payload contains: [chunk_index (4 bytes)]
-    GetChunk = 0x0301,
-    /// Chunk data response - payload contains: [chunk_index (4 bytes)] [chunk_data (variable)]
-    Chunk = 0x0302,
-    /// Request the next block of the source's open ACS export - payload contains: [seq (8 bytes)]
-    GetNextAcsBlock = 0x0305,
-    /// ACS block response - payload contains: [seq (8 bytes)] [bytes (variable)]
-    AcsBlock = 0x0306,
-    /// Final ACS block - payload contains: [seq (8 bytes)] [total (8 bytes)] [sha256 hex]
-    AcsBlockEnd = 0x0307,
+        // Invites (0x0010 - 0x001F)
+        InviteOnboarding = 0x0010,
+        InviteKick = 0x0011,
+        InviteContracts = 0x0012,
+        InviteDars = 0x0013,
+        CancelInvite = 0x0014,
+        /// Coordinator-initiated retry: tells peers who accepted an earlier
+        /// invite from this coordinator to flip their Failed run back to
+        /// InProgress and re-spin `start_peer`.
+        RetryWorkflow = 0x0015,
+        /// Peer-initiated decline: sent to the coordinator right before a peer
+        /// removes its local pending invitation, so the coordinator's matching
+        /// in-progress run can be marked Failed instead of hanging until
+        /// timeout. Payload is a JSON `DeclineInvitationPayload`.
+        DeclineInvitation = 0x0016,
+        /// Invite to participate in adding a new member to a decentralized
+        /// party. Payload is a JSON `AddPartyInvitePayload`.
+        InviteAddParty = 0x0017,
+        /// Invite to participate in changing a decentralized party's threshold.
+        /// Payload is a JSON `ChangeThresholdInvitePayload`.
+        InviteChangeThreshold = 0x0018,
+
+        // Responses (0x0100 - 0x01FF)
+        Ack = 0x0101,
+        Data = 0x0102,
+        Error = 0x0103,
+        Ready = 0x0104,
+        Wait = 0x0105,
+        Pong = 0x0106,
+        OwnerKeys = 0x0107,
+        PeerList = 0x0108,
+        MemberPartyResponse = 0x0109,
+        HealthResponse = 0x010A,
+        Busy = 0x010B,
+
+        // Data Transfers (0x0200 - 0x02FF)
+        KeysUpload = 0x0201,
+        DnsSignature = 0x0202,
+        P2pSignatures = 0x0203,
+        SubmissionSignatures = 0x0204,
+        KickSignatures = 0x0205,
+        /// New member → coordinator: `keys||participant_id` payload.
+        AddPartyKeysUpload = 0x0206,
+        /// Peer → coordinator: signed add-party DNS + P2P pair.
+        AddPartySignatures = 0x0207,
+        /// Peer → coordinator: signed onboarding-flag clearing proposal.
+        AddPartyClearSignatures = 0x0208,
+        /// New member → coordinator: the clearing proposal it AUTHORED. Canton
+        /// requires the onboarding participant itself to issue the flag-clear
+        /// transaction, so the new member authors it and the coordinator only
+        /// runs the signing round on it.
+        AddPartyClearProposal = 0x0209,
+        /// Peer → coordinator: signed change-threshold DNS + P2P pair.
+        ChangeThresholdSignatures = 0x020A,
+
+        // Chunked Transfer (0x0300 - 0x03FF)
+        /// Command with chunked payload - payload contains: [command_type (2 bytes)] [total_size (4 bytes)] [chunk_count (4 bytes)]
+        ChunkedCommand = 0x0300,
+        /// Request chunk N - payload contains: [chunk_index (4 bytes)]
+        GetChunk = 0x0301,
+        /// Chunk data response - payload contains: [chunk_index (4 bytes)] [chunk_data (variable)]
+        Chunk = 0x0302,
+        /// Request the next block of the source's open ACS export - payload contains: [seq (8 bytes)]
+        GetNextAcsBlock = 0x0305,
+        /// ACS block response - payload contains: [seq (8 bytes)] [bytes (variable)]
+        AcsBlock = 0x0306,
+        /// Final ACS block - payload contains: [seq (8 bytes)] [total (8 bytes)] [sha256 hex]
+        AcsBlockEnd = 0x0307,
+    }
 }
 
 /// Maximum payload size sent inline in a single message before the chunked
@@ -175,74 +210,6 @@ pub fn acs_block_size() -> usize {
         .and_then(|s| s.parse::<usize>().ok())
         .unwrap_or(ACS_BLOCK_SIZE)
         .clamp(64 * 1024, MAX_ACS_BLOCK_SIZE)
-}
-
-impl TryFrom<u16> for MessageType {
-    type Error = anyhow::Error;
-
-    fn try_from(value: u16) -> std::result::Result<Self, anyhow::Error> {
-        match value {
-            0x0001 => Ok(Self::UploadDars),
-            0x0002 => Ok(Self::GenerateKeys),
-            0x0003 => Ok(Self::SignDns),
-            0x0004 => Ok(Self::SignP2p),
-            0x0005 => Ok(Self::SignSubmissions),
-            0x0006 => Ok(Self::StatusUpdate),
-            0x0007 => Ok(Self::Disconnect),
-            0x0008 => Ok(Self::GetNextCommand),
-            0x0009 => Ok(Self::SignKick),
-            0x000A => Ok(Self::Ping),
-            0x000C => Ok(Self::RequestOwnerKeys),
-            0x000D => Ok(Self::ListPeers),
-            0x000E => Ok(Self::RequestMemberParty),
-            0x000F => Ok(Self::Health),
-            0x0010 => Ok(Self::InviteOnboarding),
-            0x0011 => Ok(Self::InviteKick),
-            0x0012 => Ok(Self::InviteContracts),
-            0x0013 => Ok(Self::InviteDars),
-            0x0014 => Ok(Self::CancelInvite),
-            0x0015 => Ok(Self::RetryWorkflow),
-            0x0016 => Ok(Self::DeclineInvitation),
-            0x0017 => Ok(Self::InviteAddParty),
-            0x0020 => Ok(Self::GenerateAddPartyKeys),
-            0x0021 => Ok(Self::SignAddParty),
-            0x0022 => Ok(Self::ImportAcs),
-            0x0023 => Ok(Self::ClearOnboardingFlag),
-            0x0024 => Ok(Self::SignClearOnboarding),
-            0x0025 => Ok(Self::SignChangeThreshold),
-            0x0026 => Ok(Self::RetireLegacyKeys),
-            0x0027 => Ok(Self::RequestDar),
-            0x0018 => Ok(Self::InviteChangeThreshold),
-            0x0101 => Ok(Self::Ack),
-            0x0102 => Ok(Self::Data),
-            0x0103 => Ok(Self::Error),
-            0x0104 => Ok(Self::Ready),
-            0x0105 => Ok(Self::Wait),
-            0x0106 => Ok(Self::Pong),
-            0x0107 => Ok(Self::OwnerKeys),
-            0x0108 => Ok(Self::PeerList),
-            0x0109 => Ok(Self::MemberPartyResponse),
-            0x010A => Ok(Self::HealthResponse),
-            0x010B => Ok(Self::Busy),
-            0x0201 => Ok(Self::KeysUpload),
-            0x0202 => Ok(Self::DnsSignature),
-            0x0203 => Ok(Self::P2pSignatures),
-            0x0204 => Ok(Self::SubmissionSignatures),
-            0x0205 => Ok(Self::KickSignatures),
-            0x0206 => Ok(Self::AddPartyKeysUpload),
-            0x0207 => Ok(Self::AddPartySignatures),
-            0x0208 => Ok(Self::AddPartyClearSignatures),
-            0x0209 => Ok(Self::AddPartyClearProposal),
-            0x020A => Ok(Self::ChangeThresholdSignatures),
-            0x0300 => Ok(Self::ChunkedCommand),
-            0x0301 => Ok(Self::GetChunk),
-            0x0302 => Ok(Self::Chunk),
-            0x0305 => Ok(Self::GetNextAcsBlock),
-            0x0306 => Ok(Self::AcsBlock),
-            0x0307 => Ok(Self::AcsBlockEnd),
-            _ => Err(anyhow::anyhow!("Unknown message type: 0x{value:04x}")),
-        }
-    }
 }
 
 impl MessageType {
@@ -457,6 +424,94 @@ mod tests {
         assert_eq!(MessageType::try_from(0x0101)?, MessageType::Ack);
         assert!(MessageType::try_from(0xFFFF).is_err());
         Ok(())
+    }
+
+    /// Every wire code, pinned. Peers on other builds decode these numbers,
+    /// so none may change.
+    const WIRE_CODES: &[(MessageType, u16)] = &[
+        (MessageType::UploadDars, 0x0001),
+        (MessageType::GenerateKeys, 0x0002),
+        (MessageType::SignDns, 0x0003),
+        (MessageType::SignP2p, 0x0004),
+        (MessageType::SignSubmissions, 0x0005),
+        (MessageType::StatusUpdate, 0x0006),
+        (MessageType::Disconnect, 0x0007),
+        (MessageType::GetNextCommand, 0x0008),
+        (MessageType::SignKick, 0x0009),
+        (MessageType::Ping, 0x000A),
+        (MessageType::RequestOwnerKeys, 0x000C),
+        (MessageType::ListPeers, 0x000D),
+        (MessageType::RequestMemberParty, 0x000E),
+        (MessageType::Health, 0x000F),
+        (MessageType::GenerateAddPartyKeys, 0x0020),
+        (MessageType::SignAddParty, 0x0021),
+        (MessageType::ImportAcs, 0x0022),
+        (MessageType::ClearOnboardingFlag, 0x0023),
+        (MessageType::SignClearOnboarding, 0x0024),
+        (MessageType::SignChangeThreshold, 0x0025),
+        (MessageType::RetireLegacyKeys, 0x0026),
+        (MessageType::RequestDar, 0x0027),
+        (MessageType::InviteOnboarding, 0x0010),
+        (MessageType::InviteKick, 0x0011),
+        (MessageType::InviteContracts, 0x0012),
+        (MessageType::InviteDars, 0x0013),
+        (MessageType::CancelInvite, 0x0014),
+        (MessageType::RetryWorkflow, 0x0015),
+        (MessageType::DeclineInvitation, 0x0016),
+        (MessageType::InviteAddParty, 0x0017),
+        (MessageType::InviteChangeThreshold, 0x0018),
+        (MessageType::Ack, 0x0101),
+        (MessageType::Data, 0x0102),
+        (MessageType::Error, 0x0103),
+        (MessageType::Ready, 0x0104),
+        (MessageType::Wait, 0x0105),
+        (MessageType::Pong, 0x0106),
+        (MessageType::OwnerKeys, 0x0107),
+        (MessageType::PeerList, 0x0108),
+        (MessageType::MemberPartyResponse, 0x0109),
+        (MessageType::HealthResponse, 0x010A),
+        (MessageType::Busy, 0x010B),
+        (MessageType::KeysUpload, 0x0201),
+        (MessageType::DnsSignature, 0x0202),
+        (MessageType::P2pSignatures, 0x0203),
+        (MessageType::SubmissionSignatures, 0x0204),
+        (MessageType::KickSignatures, 0x0205),
+        (MessageType::AddPartyKeysUpload, 0x0206),
+        (MessageType::AddPartySignatures, 0x0207),
+        (MessageType::AddPartyClearSignatures, 0x0208),
+        (MessageType::AddPartyClearProposal, 0x0209),
+        (MessageType::ChangeThresholdSignatures, 0x020A),
+        (MessageType::ChunkedCommand, 0x0300),
+        (MessageType::GetChunk, 0x0301),
+        (MessageType::Chunk, 0x0302),
+        (MessageType::GetNextAcsBlock, 0x0305),
+        (MessageType::AcsBlock, 0x0306),
+        (MessageType::AcsBlockEnd, 0x0307),
+    ];
+
+    #[test]
+    fn every_message_type_decodes_from_its_own_code() -> Result {
+        for (message_type, code) in WIRE_CODES {
+            assert_eq!(message_type.to_u16(), *code, "{message_type:?}");
+            assert_eq!(MessageType::try_from(*code)?, *message_type, "0x{code:04x}");
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn every_other_code_is_refused() {
+        for value in 0..=u16::MAX {
+            if WIRE_CODES.iter().any(|(_, code)| *code == value) {
+                continue;
+            }
+            match MessageType::try_from(value) {
+                Ok(message_type) => panic!("0x{value:04x} decoded as {message_type:?}"),
+                Err(e) => assert_eq!(
+                    e.to_string(),
+                    format!("Unknown message type: 0x{value:04x}")
+                ),
+            }
+        }
     }
 
     #[test]

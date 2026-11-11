@@ -8,7 +8,7 @@ use crate::{
     canton_id::CantonId,
     config::NodeConfig,
     error::Result,
-    noise::client::NoiseClient,
+    noise::{MessageType, client::NoiseClient},
     utils,
     workflow::storage::{WorkflowStorage, artifact_kinds},
 };
@@ -29,7 +29,10 @@ pub(super) fn is_new_member(node_config: &NodeConfig, config: &add_party::AddPar
 pub(super) async fn send_skip_status(client: &NoiseClient, step: &str) {
     tracing::info!("{step}: not the new member — replying skip");
     if let Err(e) = client
-        .send_status(add_party::peer::SKIP_STATUS.to_vec())
+        .send(
+            MessageType::StatusUpdate,
+            add_party::peer::SKIP_STATUS.to_vec(),
+        )
         .await
     {
         tracing::error!("Failed to send skip status for {step}: {e}");

@@ -210,7 +210,10 @@ async fn run_peer(
                 topology::retire_legacy_keys(&node_config, &synchronizer_id, party).await?;
                 consecutive_step_failures = 0;
                 client
-                    .send_status(b"RetireLegacyKeys completed".to_vec())
+                    .send(
+                        MessageType::StatusUpdate,
+                        b"RetireLegacyKeys completed".to_vec(),
+                    )
                     .await?;
             }
             MessageType::Disconnect => {
@@ -245,7 +248,10 @@ async fn run_peer(
                     continue;
                 }
                 consecutive_step_failures = 0;
-                if let Err(e) = client.send_status(b"UploadDars completed".to_vec()).await {
+                if let Err(e) = client
+                    .send(MessageType::StatusUpdate, b"UploadDars completed".to_vec())
+                    .await
+                {
                     tracing::error!("Failed to send completion status: {e}");
                 }
             }
@@ -864,7 +870,10 @@ async fn run_peer(
                     anyhow::bail!("Aborting peer: the ACS import failed: {e:#}");
                 }
                 consecutive_step_failures = 0;
-                if let Err(e) = client.send_status(b"ImportAcs completed".to_vec()).await {
+                if let Err(e) = client
+                    .send(MessageType::StatusUpdate, b"ImportAcs completed".to_vec())
+                    .await
+                {
                     tracing::error!("Failed to send completion status: {e}");
                 }
             }
@@ -914,7 +923,9 @@ async fn run_peer(
                         {
                             Ok(Some(proposal)) => {
                                 consecutive_step_failures = 0;
-                                if let Err(e) = client.send_add_party_clear_proposal(proposal).await
+                                if let Err(e) = client
+                                    .send(MessageType::AddPartyClearProposal, proposal)
+                                    .await
                                 {
                                     tracing::error!(
                                         "Failed to send clearing proposal to coordinator: {e}"
@@ -926,7 +937,10 @@ async fn run_peer(
                                 // authoring — report as cleared.
                                 consecutive_step_failures = 0;
                                 if let Err(e) = client
-                                    .send_status(b"ClearOnboardingFlag: Cleared".to_vec())
+                                    .send(
+                                        MessageType::StatusUpdate,
+                                        b"ClearOnboardingFlag: Cleared".to_vec(),
+                                    )
                                     .await
                                 {
                                     tracing::error!("Failed to send completion status: {e}");
@@ -940,7 +954,10 @@ async fn run_peer(
                     Ok(party_replication::ClearOutcome::Cleared) => {
                         consecutive_step_failures = 0;
                         if let Err(e) = client
-                            .send_status(b"ClearOnboardingFlag: Cleared".to_vec())
+                            .send(
+                                MessageType::StatusUpdate,
+                                b"ClearOnboardingFlag: Cleared".to_vec(),
+                            )
                             .await
                         {
                             tracing::error!("Failed to send completion status: {e}");
