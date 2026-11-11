@@ -37,17 +37,17 @@ import { OnboardingDialog } from "./components/OnboardingDialog";
 import { useExternalParties } from "./useExternalParties";
 import { ExternalPartyList } from "./components/ExternalPartyList";
 import { NotificationsView } from "./components/NotificationsView";
-import type { PartyActions } from "./components/NotificationsView";
 import { useSnackbar } from "./contexts";
 import { API_BASE, ADMIN_ACCESS } from "./constants";
 import { authenticatedFetch } from "./api";
 import { useHiddenParties } from "./useHiddenParties";
 import { favoritesFirst, useFavoriteParties } from "./useFavoriteParties";
 import { useFormerParties } from "./useFormerParties";
-import { useLatestFetch } from "./hooks/useLatestFetch";
-import { fetchGovernanceAudit, useNotificationFeeds } from "./hooks/useNotificationFeeds";
+import { INITIAL_ROUTE, useAppRoute } from "./hooks/useAppRoute";
+import { useNotificationFeeds } from "./hooks/useNotificationFeeds";
+import { usePartyActions } from "./hooks/usePartyActions";
 import { useParticipantStatuses } from "./hooks/useParticipantStatuses";
-import { TAB_HASHES, buildHash, parseHash, sharedWithSlug } from "./hashRoute";
+import { buildHash, sharedWithSlug } from "./hashRoute";
 import { participantName, partiesSharedWith } from "./sharedParties";
 import { columnSx } from "./styles";
 import type {
@@ -60,25 +60,6 @@ import type {
   PartyAuthStatus,
   AuthStatusResponse,
 } from "./types";
-
-/// Proposals fetched per request. The feed grows a batch at a time rather
-/// than reading a party's whole proposal set at once.
-const ACTIONS_BATCH = 25;
-
-// Saved in index.html <script> before any modules load.
-// Strip Keycloak OAuth params that get appended to the hash during check-sso.
-const SAVED_HASH = (
-  (window as { __INITIAL_HASH__?: string }).__INITIAL_HASH__ ?? ""
-).replace(/[&?#](state|session_state|iss|code)=.*/i, "");
-const INITIAL_ROUTE = parseHash(SAVED_HASH);
-
-/**
- * The shared scope a party's history entry was opened in. A party's URL is
- * the same in every scope, so `navigate` keeps the scope in the entry's state.
- */
-function historyScope(state: unknown): string | null {
-  return (state as { sharedWith?: string | null } | null)?.sharedWith ?? null;
-}
 
 const App = () => {
   const muiTheme = useTheme();
@@ -117,25 +98,6 @@ const App = () => {
   const [onboardingDialogOpen, setOnboardingDialogOpen] = useState(false);
   const [darsDialogOpen, setDarsDialogOpen] = useState(false);
   const [uploadDarsDialogOpen, setUploadDarsDialogOpen] = useState(false);
-  const [partyActions, setPartyActions] = useState<PartyActions[]>([]);
-  const [partyActionsLoaded, setPartyActionsLoaded] = useState(false);
-  const [partyActionsFetching, setPartyActionsFetching] = useState(false);
-  // Per-party resume token from the last batch. A null value means that party
-  // has no more proposals; a missing key means we never asked.
-  const [actionCursors, setActionCursors] = useState<
-    Record<string, string | null>
-  >({});
-  const [loadingMoreActions, setLoadingMoreActions] = useState(false);
-  // True once a later batch has been pulled in. The poll replaces state
-  // wholesale, so it must not run while a queue is being read or it would
-  // discard everything scrolled and snap back to the first batch.
-  const [actionsAccumulated, setActionsAccumulated] = useState(false);
-  // `performance.now()` when the committed `partyActions` was requested.
-  // Completed compares it with when each audit row was first seen.
-  const [pendingRequestedAt, setPendingRequestedAt] = useState(
-    Number.NEGATIVE_INFINITY,
-  );
-  const beginPartyActions = useLatestFetch();
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [partyFilter, setPartyFilter] = useState(
@@ -159,10 +121,6 @@ const App = () => {
   const [configPeerId, setConfigPeerId] = useState<string | null>(
     INITIAL_ROUTE.configPeerId,
   );
-  // The party the packages tab was opened for, when the parties list does not
-  // hold it: a deep link loads the packages tab without reading any parties.
-  const [fetchedPackagesParty, setFetchedPackagesParty] =
-    useState<DecentralizedParty | null>(null);
   const [showSearchBar, setShowSearchBar] = useState(true);
   const [showHidden, setShowHidden] = useState(false);
   const { toggle: toggleHidden, isHidden } = useHiddenParties();
@@ -200,7 +158,6 @@ const App = () => {
   }, [formerParties, parties, loadedPrefix, sharedWith]);
   const lastScrollY = useRef(0);
   const savedScrollY = useRef(0);
-  const pendingSlug = useRef<string | null>(INITIAL_ROUTE.partySlug);
   const partiesLoaded = useRef(INITIAL_ROUTE.tab === 0);
   // The prefix the loaded list was read with, or null before the first read.
   const listPrefix = useRef<string | null>(null);
@@ -240,133 +197,23 @@ const App = () => {
 
   // --- Hash-based routing ---
 
-  const navigate = useCallback(
-    (tab: number, partySlug?: string | null, sharedScope: string | null = null) => {
-      setActiveTab(tab);
-      if (tab !== 0) setSelectedPartyId(null);
-      // Only a parties-tab slug keeps the shared filter: the shared list
-      // itself, or a party opened from it.
-      if (tab !== 0 || !partySlug) setSharedWith(null);
-      setPackagesPartyId(tab === 1 ? (partySlug ?? null) : null);
-      setConfigPeerId(tab === 2 ? (partySlug ?? null) : null);
-      window.history.pushState(
-        { sharedWith: sharedScope },
-        "",
-        buildHash(tab, partySlug),
-      );
-    },
-    [],
-  );
-
-  // Show the parties `participantId` also hosts. The list is read again
-  // without a prefix, because a prefix would hide some of them.
-  const enterSharedView = useCallback(
-    (participantId: string) => {
-      setSelectedPartyId(null);
-      setPartiesView("decentralized");
-      setSharedWith(participantId);
-      setPartyFilter("");
-      partiesLoaded.current = true;
-      void loadParties("");
-    },
-    [loadParties],
-  );
-
-  const showSharedParties = useCallback(
-    (participantId: string) => {
-      navigate(0, sharedWithSlug(participantId));
-      enterSharedView(participantId);
-      window.scrollTo(0, 0);
-    },
-    [navigate, enterSharedView],
-  );
-
-  // Jump to the notifications tab after a successful workflow / governance
-  // action so the user lands on the queue showing what they just produced.
-  const goToNotifications = useCallback(() => {
-    navigate(TAB_HASHES.indexOf("notifications"));
-  }, [navigate]);
-
-  const packagesParty = useMemo(() => {
-    if (!packagesPartyId) return null;
-    const listed = parties.find((p) => p.party_id === packagesPartyId);
-    if (listed) return listed;
-    return fetchedPackagesParty?.party_id === packagesPartyId
-      ? fetchedPackagesParty
-      : null;
-  }, [packagesPartyId, parties, fetchedPackagesParty]);
-
-  useEffect(() => {
-    if (!packagesPartyId || packagesParty) return;
-    let cancelled = false;
-    const prefix = packagesPartyId.split("::")[0];
-    authenticatedFetch(
-      `${API_BASE}/decentralized-parties?prefix=${encodeURIComponent(prefix)}`,
-    )
-      .then((res) => (res.ok ? res.json() : null))
-      .then((data: DecentralizedPartiesResponse | null) => {
-        if (cancelled) return;
-        const found = data?.parties.find((p) => p.party_id === packagesPartyId);
-        if (found) setFetchedPackagesParty(found);
-      })
-      .catch(() => {});
-    return () => {
-      cancelled = true;
-    };
-  }, [packagesPartyId, packagesParty]);
-
-  // Once parties are loaded, resolve pending slug → exact match opens detail.
-  // A former party is known only once its own list has loaded too.
-  useEffect(() => {
-    if (loading || !pendingSlug.current) return;
-    const slug = pendingSlug.current;
-    const hosted = parties.some((p) => p.party_id === slug);
-    if (!hosted && !formerPartiesLoaded) return;
-    pendingSlug.current = null;
-    if (hosted || formerParties.some((p) => p.party_id === slug)) {
-      setSelectedPartyId(slug);
-    }
-  }, [loading, parties, formerParties, formerPartiesLoaded]);
-
-  // Listen for back/forward browser navigation
-  useEffect(() => {
-    const onPopState = (event: PopStateEvent) => {
-      const { tab, partySlug, packagesPartyId, sharedWith, configPeerId } =
-        parseHash(window.location.hash);
-      setActiveTab(tab);
-      setPackagesPartyId(packagesPartyId);
-      setConfigPeerId(configPeerId);
-      if (tab === 0) {
-        if (sharedWith) {
-          enterSharedView(sharedWith);
-          return;
-        }
-        const exactMatch =
-          parties.some((p) => p.party_id === partySlug) ||
-          formerParties.some((p) => p.party_id === partySlug);
-        if (exactMatch) {
-          setSelectedPartyId(partySlug);
-          setSharedWith(historyScope(event.state));
-        } else {
-          setSelectedPartyId(null);
-          setSharedWith(null);
-          const prefix =
-            partySlug && !partySlug.includes("::") ? partySlug : "";
-          setPartyFilter(prefix);
-          // A shared view reads the whole list, so the loaded list can belong
-          // to another query than this entry's.
-          if (listPrefix.current !== null && listPrefix.current !== prefix) {
-            void loadParties(prefix);
-          }
-        }
-      } else {
-        setSelectedPartyId(null);
-        setSharedWith(null);
-      }
-    };
-    window.addEventListener("popstate", onPopState);
-    return () => window.removeEventListener("popstate", onPopState);
-  }, [parties, formerParties, enterSharedView, loadParties]);
+  const { navigate, showSharedParties, goToNotifications, packagesParty } = useAppRoute({
+    parties,
+    formerParties,
+    formerPartiesLoaded,
+    loading,
+    loadParties,
+    packagesPartyId,
+    setActiveTab,
+    setSelectedPartyId,
+    setSharedWith,
+    setPackagesPartyId,
+    setConfigPeerId,
+    setPartiesView,
+    setPartyFilter,
+    partiesLoadedRef: partiesLoaded,
+    listPrefixRef: listPrefix,
+  });
 
   useEffect(() => {
     if ("scrollRestoration" in history) {
@@ -578,201 +425,23 @@ const App = () => {
     refreshInvitationLists,
   } = useNotificationFeeds();
 
-  const isGovRulesTemplate = (templateId: string) =>
-    templateId === "Governance.Rules:GovernanceRules";
-
-  /** Read the first batch of every configured party's pending proposals. */
-  const fetchPartyActions = useCallback(async (): Promise<PartyActions[]> => {
-    const candidates = parties
-      .map((p) => {
-        const authStatus = authStatuses.find(
-          (a) => a.dec_party_id === p.party_id,
-        );
-        const rulesContract = p.contracts?.find((c) =>
-          isGovRulesTemplate(c.template_id),
-        );
-        if (
-          !authStatus ||
-          authStatus.status.status !== "authenticated" ||
-          !authStatus.rights?.dec_party_act_as ||
-          !rulesContract
-        ) {
-          return null;
-        }
-        const governanceType = "core_self" as const;
-        return { party: p, authStatus, rulesContract, governanceType };
-      })
-      .filter((c): c is NonNullable<typeof c> => c !== null);
-
-    const results = await Promise.all(
-      candidates.map(
-        async ({
-          party,
-          authStatus,
-          rulesContract,
-          governanceType,
-        }): Promise<PartyActions | null> => {
-          try {
-            const res = await authenticatedFetch(
-              `${API_BASE}/governance/confirmations?party_id=${encodeURIComponent(party.party_id)}&limit=${ACTIONS_BATCH}`,
-            );
-            if (!res.ok) return null;
-            const data = await res.json();
-            return {
-              partyId: party.party_id,
-              nextCursor: (data.next_cursor ?? null) as string | null,
-              // Prefer the live rules contract id from the API — confirm
-              // archives + re-creates the rules contract, so the cached
-              // `parties` snapshot can point at an archived contract id.
-              rulesContractId: data.rules_contract_id ?? rulesContract.contract_id,
-              memberPartyId: data.member_party_id ?? authStatus.member_party_id,
-              governanceType,
-              threshold: data.threshold,
-              actions: data.actions ?? [],
-              domainActions: data.domain_actions ?? [],
-            };
-          } catch {
-            return null;
-          }
-        },
-      ),
-    );
-    return results.filter((r): r is PartyActions => r !== null);
-  }, [parties, authStatuses]);
-
-  const commitPartyActions = useCallback(
-    (kept: PartyActions[], requestedAt: number) => {
-      setPartyActions(kept);
-      setPendingRequestedAt(requestedAt);
-      setActionCursors(
-        Object.fromEntries(
-          kept.map((p) => [p.partyId, p.nextCursor ?? null]),
-        ),
-      );
-      setActionsAccumulated(false);
-      setPartyActionsLoaded(true);
-      setPartyActionsFetching(false);
-    },
-    [],
-  );
-
-  const refreshPartyActions = useCallback(async () => {
-    // Newest request wins, so a slow poll cannot replace a later snapshot.
-    const isLatest = beginPartyActions();
-    setPartyActionsFetching(true);
-    const requestedAt = performance.now();
-    const kept = await fetchPartyActions();
-    if (!isLatest()) return;
-    commitPartyActions(kept, requestedAt);
-  }, [beginPartyActions, fetchPartyActions, commitPartyActions]);
-
-  /**
-   * Pull the next batch for every party that still has one and append it.
-   *
-   * Appending rather than replacing is the point: the feed grows as you scroll
-   * instead of re-reading a party's whole proposal set on every render.
-   */
-  const loadMoreActions = useCallback(async () => {
-    const pending = Object.entries(actionCursors).filter(
-      ([, cursor]) => cursor,
-    );
-    if (pending.length === 0 || loadingMoreActions) return;
-    setLoadingMoreActions(true);
-    setActionsAccumulated(true);
-    try {
-      const batches = await Promise.all(
-        pending.map(async ([partyId, cursor]) => {
-          try {
-            const res = await authenticatedFetch(
-              `${API_BASE}/governance/confirmations?party_id=${encodeURIComponent(partyId)}` +
-                `&limit=${ACTIONS_BATCH}&cursor=${encodeURIComponent(cursor as string)}`,
-            );
-            if (!res.ok) return null;
-            const data = await res.json();
-            return {
-              partyId,
-              actions: data.actions ?? [],
-              domainActions: data.domain_actions ?? [],
-              nextCursor: (data.next_cursor ?? null) as string | null,
-            };
-          } catch {
-            return null;
-          }
-        }),
-      );
-
-      setPartyActions((current) =>
-        current.map((entry) => {
-          const batch = batches.find((b) => b && b.partyId === entry.partyId);
-          if (!batch) return entry;
-          // De-dupe by cid: a re-issued cursor must not double a card.
-          const seen = new Set(
-            entry.domainActions.map((d) => d.proposal_cid),
-          );
-          return {
-            ...entry,
-            // Kept current so the feed can tell when a party's proposals are
-            // all loaded.
-            nextCursor: batch.nextCursor,
-            domainActions: [
-              ...entry.domainActions,
-              ...batch.domainActions.filter(
-                (d: { proposal_cid: string }) => !seen.has(d.proposal_cid),
-              ),
-            ],
-          };
-        }),
-      );
-
-      setActionCursors((current) => {
-        const next = { ...current };
-        for (const batch of batches) {
-          if (batch) next[batch.partyId] = batch.nextCursor;
-        }
-        return next;
-      });
-    } finally {
-      setLoadingMoreActions(false);
-    }
-  }, [actionCursors, loadingMoreActions]);
-
-  const hasMoreActions = Object.values(actionCursors).some(Boolean);
-
-  // A confirm, execute or cancel changes what is pending and what is logged.
-  // Both are read together and committed in one tick, so React renders the
-  // pair at once. Read apart, a fresh pending feed could land first and turn
-  // an execute this page just made into "You confirmed" for a moment.
-  const refreshActionsAndAudit = useCallback(async () => {
-    const actionsLatest = beginPartyActions();
-    const auditLatest = beginGovernanceAudit();
-    setPartyActionsFetching(true);
-    const requestedAt = performance.now();
-    const [kept, entries] = await Promise.all([
-      fetchPartyActions(),
-      fetchGovernanceAudit(),
-    ]);
-    if (entries !== null && auditLatest()) {
-      commitGovernanceAudit(entries);
-    }
-    if (actionsLatest()) {
-      commitPartyActions(kept, requestedAt);
-    }
-  }, [
-    beginPartyActions,
+  const {
+    partyActions,
+    partyActionsLoaded,
+    partyActionsFetching,
+    loadingMoreActions,
+    actionsAccumulated,
+    pendingRequestedAt,
+    loadMoreActions,
+    hasMoreActions,
+    refreshActionsAndAudit,
+  } = usePartyActions({
+    parties,
+    authStatuses,
+    loading,
     beginGovernanceAudit,
-    fetchPartyActions,
     commitGovernanceAudit,
-    commitPartyActions,
-  ]);
-
-  // Poll governance actions across configured parties (only after parties load)
-  useEffect(() => {
-    if (loading) return;
-    if (actionsAccumulated) return;
-    refreshPartyActions();
-    const interval = window.setInterval(refreshPartyActions, 10_000);
-    return () => clearInterval(interval);
-  }, [refreshPartyActions, loading, actionsAccumulated]);
+  });
 
   const notificationCount =
     pendingInvitations.length +
