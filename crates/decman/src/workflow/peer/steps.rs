@@ -34,80 +34,20 @@ pub(super) fn peer_step_for_command(
     command: MessageType,
 ) -> Option<(&'static str, i64, i64)> {
     match kind {
-        WorkflowKind::Onboarding => {
-            let step = match command {
-                MessageType::GenerateKeys => OnboardingStep::GenerateKeys,
-                MessageType::SignDns => OnboardingStep::SignDns,
-                MessageType::SignP2p => OnboardingStep::SignP2p,
-                MessageType::Disconnect => OnboardingStep::Complete,
-                _ => return None,
-            };
-            Some((
-                step.step_name(),
-                step.step_index(),
-                OnboardingStep::step_total(),
-            ))
-        }
-        WorkflowKind::Kick => {
-            let step = match command {
-                MessageType::SignKick => KickStep::SignProposals,
-                MessageType::RetireLegacyKeys => KickStep::RetireLegacyKeys,
-                MessageType::Disconnect => KickStep::Complete,
-                _ => return None,
-            };
-            Some((step.step_name(), step.step_index(), KickStep::step_total()))
-        }
-        WorkflowKind::Contracts => {
-            let step = match command {
-                MessageType::SignSubmissions => ContractsStep::SignSubmissions,
-                MessageType::Disconnect => ContractsStep::Complete,
-                _ => return None,
-            };
-            Some((
-                step.step_name(),
-                step.step_index(),
-                ContractsStep::step_total(),
-            ))
-        }
-        WorkflowKind::Dars => {
-            let step = match command {
-                MessageType::UploadDars => DarsStep::UploadDars,
-                MessageType::Disconnect => DarsStep::Complete,
-                _ => return None,
-            };
-            Some((step.step_name(), step.step_index(), DarsStep::step_total()))
-        }
-        WorkflowKind::AddParty => {
-            let step = match command {
-                MessageType::GenerateAddPartyKeys => AddPartyStep::GenerateNewMemberKeys,
-                MessageType::SignAddParty => AddPartyStep::SignProposals,
-                MessageType::RetireLegacyKeys => AddPartyStep::RetireLegacyKeys,
-                MessageType::ImportAcs => AddPartyStep::SyncAcs,
-                MessageType::ClearOnboardingFlag => AddPartyStep::ProposeClearOnboarding,
-                MessageType::SignClearOnboarding => AddPartyStep::SignClearOnboarding,
-                MessageType::Disconnect => AddPartyStep::Complete,
-                _ => return None,
-            };
-            Some((
-                step.step_name(),
-                step.step_index(),
-                AddPartyStep::step_total(),
-            ))
-        }
-        WorkflowKind::ChangeThreshold => {
-            let step = match command {
-                MessageType::SignChangeThreshold => ChangeThresholdStep::SignProposals,
-                MessageType::RetireLegacyKeys => ChangeThresholdStep::RetireLegacyKeys,
-                MessageType::Disconnect => ChangeThresholdStep::Complete,
-                _ => return None,
-            };
-            Some((
-                step.step_name(),
-                step.step_index(),
-                ChangeThresholdStep::step_total(),
-            ))
-        }
+        WorkflowKind::Onboarding => step_progress::<OnboardingStep>(command),
+        WorkflowKind::Kick => step_progress::<KickStep>(command),
+        WorkflowKind::Contracts => step_progress::<ContractsStep>(command),
+        WorkflowKind::Dars => step_progress::<DarsStep>(command),
+        WorkflowKind::AddParty => step_progress::<AddPartyStep>(command),
+        WorkflowKind::ChangeThreshold => step_progress::<ChangeThresholdStep>(command),
     }
+}
+
+/// `(step_name, step_index, step_total)` of the `S` step that `command`
+/// drives.
+fn step_progress<S: WorkflowStep>(command: MessageType) -> Option<(&'static str, i64, i64)> {
+    let step = S::for_command(command)?;
+    Some((step.step_name(), step.step_index(), S::step_total()))
 }
 
 /// Persist peer-side step progress for a command. Best-effort: any
@@ -289,6 +229,185 @@ mod tests {
                 assert!(total_a >= 2);
             }
             _ => panic!("onboarding commands should map to steps"),
+        }
+    }
+
+    /// The full command table, pinned: every wire code against every kind.
+    /// A peer writes the mapped step name and index to its run row.
+    #[test]
+    fn peer_step_table_is_pinned() {
+        let expected: &[(WorkflowKind, MessageType, &str, i64, i64)] = &[
+            (
+                WorkflowKind::Onboarding,
+                MessageType::GenerateKeys,
+                "GenerateKeys",
+                1,
+                8,
+            ),
+            (
+                WorkflowKind::Onboarding,
+                MessageType::SignDns,
+                "SignDns",
+                3,
+                8,
+            ),
+            (
+                WorkflowKind::Onboarding,
+                MessageType::SignP2p,
+                "SignP2p",
+                5,
+                8,
+            ),
+            (
+                WorkflowKind::Onboarding,
+                MessageType::Disconnect,
+                "Complete",
+                7,
+                8,
+            ),
+            (
+                WorkflowKind::Kick,
+                MessageType::SignKick,
+                "SignProposals",
+                3,
+                7,
+            ),
+            (
+                WorkflowKind::Kick,
+                MessageType::RetireLegacyKeys,
+                "RetireLegacyKeys",
+                5,
+                7,
+            ),
+            (
+                WorkflowKind::Kick,
+                MessageType::Disconnect,
+                "Complete",
+                6,
+                7,
+            ),
+            (
+                WorkflowKind::Contracts,
+                MessageType::SignSubmissions,
+                "SignSubmissions",
+                2,
+                5,
+            ),
+            (
+                WorkflowKind::Contracts,
+                MessageType::Disconnect,
+                "Complete",
+                4,
+                5,
+            ),
+            (
+                WorkflowKind::Dars,
+                MessageType::UploadDars,
+                "UploadDars",
+                1,
+                3,
+            ),
+            (
+                WorkflowKind::Dars,
+                MessageType::Disconnect,
+                "Complete",
+                2,
+                3,
+            ),
+            (
+                WorkflowKind::AddParty,
+                MessageType::GenerateAddPartyKeys,
+                "GenerateNewMemberKeys",
+                1,
+                14,
+            ),
+            (
+                WorkflowKind::AddParty,
+                MessageType::SignAddParty,
+                "SignProposals",
+                4,
+                14,
+            ),
+            (
+                WorkflowKind::AddParty,
+                MessageType::ImportAcs,
+                "SyncAcs",
+                6,
+                14,
+            ),
+            (
+                WorkflowKind::AddParty,
+                MessageType::ClearOnboardingFlag,
+                "ProposeClearOnboarding",
+                8,
+                14,
+            ),
+            (
+                WorkflowKind::AddParty,
+                MessageType::SignClearOnboarding,
+                "SignClearOnboarding",
+                10,
+                14,
+            ),
+            (
+                WorkflowKind::AddParty,
+                MessageType::RetireLegacyKeys,
+                "RetireLegacyKeys",
+                12,
+                14,
+            ),
+            (
+                WorkflowKind::AddParty,
+                MessageType::Disconnect,
+                "Complete",
+                13,
+                14,
+            ),
+            (
+                WorkflowKind::ChangeThreshold,
+                MessageType::SignChangeThreshold,
+                "SignProposals",
+                3,
+                7,
+            ),
+            (
+                WorkflowKind::ChangeThreshold,
+                MessageType::RetireLegacyKeys,
+                "RetireLegacyKeys",
+                5,
+                7,
+            ),
+            (
+                WorkflowKind::ChangeThreshold,
+                MessageType::Disconnect,
+                "Complete",
+                6,
+                7,
+            ),
+        ];
+        let kinds = [
+            WorkflowKind::Onboarding,
+            WorkflowKind::Kick,
+            WorkflowKind::Contracts,
+            WorkflowKind::Dars,
+            WorkflowKind::AddParty,
+            WorkflowKind::ChangeThreshold,
+        ];
+        for code in 0..=u16::MAX {
+            let Ok(command) = MessageType::try_from(code) else {
+                continue;
+            };
+            for kind in kinds {
+                let want = expected
+                    .iter()
+                    .find(|(k, c, ..)| *k == kind && *c == command)
+                    .map(|(_, _, name, index, total)| (*name, *index, *total));
+                assert_eq!(
+                    peer_step_for_command(kind, command),
+                    want,
+                    "{kind:?}/{command:?}"
+                );
+            }
         }
     }
 }

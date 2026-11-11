@@ -24,31 +24,107 @@ use crate::{
     workflow::party_replication::pipe::{ExportSession, PipeBlock},
 };
 
+/// The order and names of one workflow's steps.
+///
+/// `workflow_steps!` implements this from the enum declaration, so a step's
+/// index is its position and its name is its identifier. The database stores
+/// both, so a step must never move or be renamed.
+pub trait StepList: Sized + Copy + PartialEq + 'static {
+    /// Every step, in declaration order.
+    const STEPS: &'static [Self];
+
+    /// This step's position in [`Self::STEPS`].
+    fn position(self) -> usize;
+
+    /// This step's identifier.
+    fn ident(self) -> &'static str;
+}
+
+/// Declare a workflow's step enum and implement [`StepList`] for it.
+macro_rules! workflow_steps {
+    (
+        $(#[$meta:meta])*
+        $vis:vis enum $name:ident {
+            $(
+                $(#[$variant_meta:meta])*
+                $variant:ident,
+            )+
+        }
+    ) => {
+        $(#[$meta])*
+        $vis enum $name {
+            $(
+                $(#[$variant_meta])*
+                $variant,
+            )+
+        }
+
+        impl $crate::workflow::state::StepList for $name {
+            const STEPS: &'static [Self] = &[$(Self::$variant),+];
+
+            fn position(self) -> usize {
+                self as usize
+            }
+
+            fn ident(self) -> &'static str {
+                match self {
+                    $(Self::$variant => stringify!($variant),)+
+                }
+            }
+        }
+    };
+}
+pub(crate) use workflow_steps;
+
 /// Trait for workflow steps. Implementations are small `Copy` enums per
-/// workflow kind (Onboarding, Kick, Contracts, Dars).
+/// workflow kind (Onboarding, Kick, Contracts, Dars), declared with
+/// `workflow_steps!`.
 pub trait WorkflowStep:
-    Copy + std::fmt::Debug + PartialEq + Eq + std::hash::Hash + Send + Sync
+    StepList + Copy + std::fmt::Debug + PartialEq + Eq + std::hash::Hash + Send + Sync
 {
     fn to_command(&self) -> Option<MessageType>;
-    fn next(&self) -> Option<Self>;
     fn requires_peers(&self) -> bool;
     fn is_waiting_for_peers(&self) -> bool;
+
+    /// The step after this one, in declaration order.
+    fn next(&self) -> Option<Self> {
+        Self::STEPS.get(self.position() + 1).copied()
+    }
 
     /// Stable index of this variant (0..step_total). Used for the persisted
     /// `step_index` column on `workflow_runs` — the frontend renders progress
     /// as `step_index + 1 / step_total`.
-    fn step_index(&self) -> i64;
+    fn step_index(&self) -> i64 {
+        self.position() as i64
+    }
 
-    /// Total number of variants. Each impl is a small `const` in the impl body.
-    fn step_total() -> i64;
+    /// Total number of variants.
+    fn step_total() -> i64 {
+        Self::STEPS.len() as i64
+    }
 
     /// Stable string name for this variant. Matches the Debug-formatted name
     /// (e.g. `"SignDns"`). Used as the persisted `current_step` column.
-    fn step_name(&self) -> &'static str;
+    fn step_name(&self) -> &'static str {
+        self.ident()
+    }
 
     /// Reverse of `step_name`, used to re-hydrate `WorkflowState` from a
     /// persisted row at resume time.
-    fn try_from_step_name(name: &str) -> Option<Self>;
+    fn try_from_step_name(name: &str) -> Option<Self> {
+        Self::STEPS
+            .iter()
+            .copied()
+            .find(|step| step.ident() == name)
+    }
+
+    /// Reverse of `to_command`: the step a coordinator command drives.
+    fn for_command(command: MessageType) -> Option<Self> {
+        Self::STEPS
+            .iter()
+            .copied()
+            .find(|step| step.to_command() == Some(command))
+    }
 
     /// The workflow kind this step enum belongs to. Used to reject routed
     /// messages (e.g. invitation declines) that target a different kind.
@@ -525,14 +601,16 @@ mod tests {
     // module already imports `sqlx::SqlitePool`).
     use super::*;
 
-    /// Minimal three-step workflow used to exercise the generic state machine.
-    /// `Sign` is the only peer-gated step; `WaitPeers` is the connection-gated
-    /// waiting step.
-    #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-    enum TestStep {
-        WaitPeers,
-        Sign,
-        Done,
+    workflow_steps! {
+        /// Minimal three-step workflow used to exercise the generic state machine.
+        /// `Sign` is the only peer-gated step; `WaitPeers` is the connection-gated
+        /// waiting step.
+        #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+        enum TestStep {
+            WaitPeers,
+            Sign,
+            Done,
+        }
     }
 
     impl WorkflowStep for TestStep {
@@ -542,43 +620,11 @@ mod tests {
                 _ => None,
             }
         }
-        fn next(&self) -> Option<Self> {
-            match self {
-                TestStep::WaitPeers => Some(TestStep::Sign),
-                TestStep::Sign => Some(TestStep::Done),
-                TestStep::Done => None,
-            }
-        }
         fn requires_peers(&self) -> bool {
             matches!(self, TestStep::Sign)
         }
         fn is_waiting_for_peers(&self) -> bool {
             matches!(self, TestStep::WaitPeers)
-        }
-        fn step_index(&self) -> i64 {
-            match self {
-                TestStep::WaitPeers => 0,
-                TestStep::Sign => 1,
-                TestStep::Done => 2,
-            }
-        }
-        fn step_total() -> i64 {
-            3
-        }
-        fn step_name(&self) -> &'static str {
-            match self {
-                TestStep::WaitPeers => "WaitPeers",
-                TestStep::Sign => "Sign",
-                TestStep::Done => "Done",
-            }
-        }
-        fn try_from_step_name(name: &str) -> Option<Self> {
-            match name {
-                "WaitPeers" => Some(TestStep::WaitPeers),
-                "Sign" => Some(TestStep::Sign),
-                "Done" => Some(TestStep::Done),
-                _ => None,
-            }
         }
         fn kind() -> WorkflowKind {
             WorkflowKind::Onboarding
@@ -965,5 +1011,90 @@ mod tests {
         // A second call with the now-stale "from" must not advance again.
         state.advance_step_if(TestStep::WaitPeers).await;
         assert_eq!(state.current_step().await, TestStep::Sign);
+    }
+
+    /// The database stores each run's `current_step` name and `step_index`,
+    /// and a resumed run reads the name back. These values must never move.
+    #[test]
+    fn persisted_step_names_and_indexes_are_pinned() {
+        use crate::workflow::{
+            AddPartyStep, ChangeThresholdStep, ContractsStep, DarsStep, KickStep, OnboardingStep,
+        };
+
+        fn pinned<S: WorkflowStep>(expected: &[(S, &str)]) {
+            assert_eq!(S::step_total(), expected.len() as i64);
+            for (index, (step, name)) in expected.iter().enumerate() {
+                assert_eq!(step.step_index(), index as i64, "{step:?}");
+                assert_eq!(step.step_name(), *name, "{step:?}");
+                assert_eq!(S::try_from_step_name(name), Some(*step), "{name}");
+                let after = expected.get(index + 1).map(|(next, _)| *next);
+                assert_eq!(step.next(), after, "{step:?}");
+            }
+            assert_eq!(S::try_from_step_name("NotAStep"), None);
+            assert_eq!(S::try_from_step_name(""), None);
+        }
+
+        pinned(&[
+            (OnboardingStep::WaitingForPeers, "WaitingForPeers"),
+            (OnboardingStep::GenerateKeys, "GenerateKeys"),
+            (OnboardingStep::CreateProposals, "CreateProposals"),
+            (OnboardingStep::SignDns, "SignDns"),
+            (OnboardingStep::SubmitDns, "SubmitDns"),
+            (OnboardingStep::SignP2p, "SignP2p"),
+            (OnboardingStep::SubmitFinal, "SubmitFinal"),
+            (OnboardingStep::Complete, "Complete"),
+        ]);
+        pinned(&[
+            (KickStep::WaitingForPeers, "WaitingForPeers"),
+            (KickStep::ExportState, "ExportState"),
+            (KickStep::CreateProposals, "CreateProposals"),
+            (KickStep::SignProposals, "SignProposals"),
+            (KickStep::SubmitKick, "SubmitKick"),
+            (KickStep::RetireLegacyKeys, "RetireLegacyKeys"),
+            (KickStep::Complete, "Complete"),
+        ]);
+        pinned(&[
+            (ContractsStep::WaitingForPeers, "WaitingForPeers"),
+            (ContractsStep::PrepareSubmissions, "PrepareSubmissions"),
+            (ContractsStep::SignSubmissions, "SignSubmissions"),
+            (ContractsStep::ExecuteSubmissions, "ExecuteSubmissions"),
+            (ContractsStep::Complete, "Complete"),
+        ]);
+        pinned(&[
+            (DarsStep::WaitingForPeers, "WaitingForPeers"),
+            (DarsStep::UploadDars, "UploadDars"),
+            (DarsStep::Complete, "Complete"),
+        ]);
+        pinned(&[
+            (AddPartyStep::WaitingForPeers, "WaitingForPeers"),
+            (AddPartyStep::GenerateNewMemberKeys, "GenerateNewMemberKeys"),
+            (AddPartyStep::ExportState, "ExportState"),
+            (AddPartyStep::CreateProposals, "CreateProposals"),
+            (AddPartyStep::SignProposals, "SignProposals"),
+            (AddPartyStep::SubmitProposals, "SubmitProposals"),
+            (AddPartyStep::SyncAcs, "SyncAcs"),
+            (
+                AddPartyStep::PrepareClearOnboarding,
+                "PrepareClearOnboarding",
+            ),
+            (
+                AddPartyStep::ProposeClearOnboarding,
+                "ProposeClearOnboarding",
+            ),
+            (AddPartyStep::PrepareClearSign, "PrepareClearSign"),
+            (AddPartyStep::SignClearOnboarding, "SignClearOnboarding"),
+            (AddPartyStep::SubmitClearOnboarding, "SubmitClearOnboarding"),
+            (AddPartyStep::RetireLegacyKeys, "RetireLegacyKeys"),
+            (AddPartyStep::Complete, "Complete"),
+        ]);
+        pinned(&[
+            (ChangeThresholdStep::WaitingForPeers, "WaitingForPeers"),
+            (ChangeThresholdStep::ExportState, "ExportState"),
+            (ChangeThresholdStep::CreateProposals, "CreateProposals"),
+            (ChangeThresholdStep::SignProposals, "SignProposals"),
+            (ChangeThresholdStep::Submit, "Submit"),
+            (ChangeThresholdStep::RetireLegacyKeys, "RetireLegacyKeys"),
+            (ChangeThresholdStep::Complete, "Complete"),
+        ]);
     }
 }

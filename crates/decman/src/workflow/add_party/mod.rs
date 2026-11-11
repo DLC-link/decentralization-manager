@@ -7,8 +7,11 @@ pub use config::AddPartyConfig;
 pub use steps::{author_clear_proposal, generate_keys, sign_clear_proposal, sign_proposals};
 
 use crate::{
-    auth::WorkflowAuth, canton_id::CantonId, noise::MessageType, server::WorkflowKind,
-    workflow::state::WorkflowStep,
+    auth::WorkflowAuth,
+    canton_id::CantonId,
+    noise::MessageType,
+    server::WorkflowKind,
+    workflow::state::{WorkflowStep, workflow_steps},
 };
 
 /// Resolve a ledger-API token for `party` from the node's auth registry.
@@ -41,54 +44,56 @@ pub(crate) async fn resolve_ledger_token(
     }
 }
 
-/// Add-party workflow steps (adding a new member to an existing
-/// decentralized party).
-///
-/// Peer-gated steps come in two shapes:
-/// - **all-peer** (`SignProposals`, `SignClearOnboarding`): every invited
-///   peer (existing members + the new member) does the work;
-/// - **new-member-only** (`GenerateNewMemberKeys`, `SyncAcs`,
-///   `ProposeClearOnboarding`): only the new member acts; the other peers
-///   recognise from the config payload that the command isn't addressed to
-///   them and reply with a skip status so the all-peers-complete gate still
-///   fires.
-///
-/// `PrepareClearOnboarding` / `PrepareClearSign` exist because the generic
-/// state machine auto-advances out of a peer-gated step the moment the last
-/// peer completes — two consecutive peer-gated steps would leave the previous
-/// step's `command_payload` being served for the next command. Each Prepare
-/// step is a coordinator-only beat that swaps the payload before the next
-/// peer-gated step begins.
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub enum AddPartyStep {
-    /// Waiting for all peers (existing members + new member) to connect
-    WaitingForPeers,
-    /// New member generates its namespace + Daml keys and uploads them
-    GenerateNewMemberKeys,
-    /// Coordinator exports current DNS + P2P state and validates the add
-    ExportState,
-    /// Coordinator creates the updated DNS + P2P proposals
-    CreateProposals,
-    /// All peers sign both proposals
-    SignProposals,
-    /// Coordinator submits DNS then P2P and exports the party's ACS
-    SubmitProposals,
-    /// New member imports the ACS snapshot (skipped when empty)
-    SyncAcs,
-    /// Coordinator swaps the command payload for the clear-flag phase
-    PrepareClearOnboarding,
-    /// New member drives `ClearPartyOnboardingFlag` past Canton's safe time
-    ProposeClearOnboarding,
-    /// Coordinator creates the clearing proposal (or a skip marker)
-    PrepareClearSign,
-    /// All peers sign the clearing proposal (no-op on skip marker)
-    SignClearOnboarding,
-    /// Coordinator submits the clearing proposal and waits for the flag to drop
-    SubmitClearOnboarding,
-    /// Members retire the shadowed PartyToKeyMapping after the new topology is effective.
-    RetireLegacyKeys,
-    /// Workflow complete
-    Complete,
+workflow_steps! {
+    /// Add-party workflow steps (adding a new member to an existing
+    /// decentralized party).
+    ///
+    /// Peer-gated steps come in two shapes:
+    /// - **all-peer** (`SignProposals`, `SignClearOnboarding`): every invited
+    ///   peer (existing members + the new member) does the work;
+    /// - **new-member-only** (`GenerateNewMemberKeys`, `SyncAcs`,
+    ///   `ProposeClearOnboarding`): only the new member acts; the other peers
+    ///   recognise from the config payload that the command isn't addressed to
+    ///   them and reply with a skip status so the all-peers-complete gate still
+    ///   fires.
+    ///
+    /// `PrepareClearOnboarding` / `PrepareClearSign` exist because the generic
+    /// state machine auto-advances out of a peer-gated step the moment the last
+    /// peer completes — two consecutive peer-gated steps would leave the previous
+    /// step's `command_payload` being served for the next command. Each Prepare
+    /// step is a coordinator-only beat that swaps the payload before the next
+    /// peer-gated step begins.
+    #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+    pub enum AddPartyStep {
+        /// Waiting for all peers (existing members + new member) to connect
+        WaitingForPeers,
+        /// New member generates its namespace + Daml keys and uploads them
+        GenerateNewMemberKeys,
+        /// Coordinator exports current DNS + P2P state and validates the add
+        ExportState,
+        /// Coordinator creates the updated DNS + P2P proposals
+        CreateProposals,
+        /// All peers sign both proposals
+        SignProposals,
+        /// Coordinator submits DNS then P2P and exports the party's ACS
+        SubmitProposals,
+        /// New member imports the ACS snapshot (skipped when empty)
+        SyncAcs,
+        /// Coordinator swaps the command payload for the clear-flag phase
+        PrepareClearOnboarding,
+        /// New member drives `ClearPartyOnboardingFlag` past Canton's safe time
+        ProposeClearOnboarding,
+        /// Coordinator creates the clearing proposal (or a skip marker)
+        PrepareClearSign,
+        /// All peers sign the clearing proposal (no-op on skip marker)
+        SignClearOnboarding,
+        /// Coordinator submits the clearing proposal and waits for the flag to drop
+        SubmitClearOnboarding,
+        /// Members retire the shadowed PartyToKeyMapping after the new topology is effective.
+        RetireLegacyKeys,
+        /// Workflow complete
+        Complete,
+    }
 }
 
 impl WorkflowStep for AddPartyStep {
@@ -111,25 +116,6 @@ impl WorkflowStep for AddPartyStep {
         }
     }
 
-    fn next(&self) -> Option<Self> {
-        match self {
-            Self::WaitingForPeers => Some(Self::GenerateNewMemberKeys),
-            Self::GenerateNewMemberKeys => Some(Self::ExportState),
-            Self::ExportState => Some(Self::CreateProposals),
-            Self::CreateProposals => Some(Self::SignProposals),
-            Self::SignProposals => Some(Self::SubmitProposals),
-            Self::SubmitProposals => Some(Self::SyncAcs),
-            Self::SyncAcs => Some(Self::PrepareClearOnboarding),
-            Self::PrepareClearOnboarding => Some(Self::ProposeClearOnboarding),
-            Self::ProposeClearOnboarding => Some(Self::PrepareClearSign),
-            Self::PrepareClearSign => Some(Self::SignClearOnboarding),
-            Self::SignClearOnboarding => Some(Self::SubmitClearOnboarding),
-            Self::SubmitClearOnboarding => Some(Self::RetireLegacyKeys),
-            Self::RetireLegacyKeys => Some(Self::Complete),
-            Self::Complete => None,
-        }
-    }
-
     fn requires_peers(&self) -> bool {
         matches!(
             self,
@@ -143,68 +129,6 @@ impl WorkflowStep for AddPartyStep {
 
     fn is_waiting_for_peers(&self) -> bool {
         *self == Self::WaitingForPeers
-    }
-
-    fn step_index(&self) -> i64 {
-        match self {
-            Self::WaitingForPeers => 0,
-            Self::GenerateNewMemberKeys => 1,
-            Self::ExportState => 2,
-            Self::CreateProposals => 3,
-            Self::SignProposals => 4,
-            Self::SubmitProposals => 5,
-            Self::SyncAcs => 6,
-            Self::PrepareClearOnboarding => 7,
-            Self::ProposeClearOnboarding => 8,
-            Self::PrepareClearSign => 9,
-            Self::SignClearOnboarding => 10,
-            Self::SubmitClearOnboarding => 11,
-            Self::RetireLegacyKeys => 12,
-            Self::Complete => 13,
-        }
-    }
-
-    fn step_total() -> i64 {
-        14
-    }
-
-    fn step_name(&self) -> &'static str {
-        match self {
-            Self::WaitingForPeers => "WaitingForPeers",
-            Self::GenerateNewMemberKeys => "GenerateNewMemberKeys",
-            Self::ExportState => "ExportState",
-            Self::CreateProposals => "CreateProposals",
-            Self::SignProposals => "SignProposals",
-            Self::SubmitProposals => "SubmitProposals",
-            Self::SyncAcs => "SyncAcs",
-            Self::PrepareClearOnboarding => "PrepareClearOnboarding",
-            Self::ProposeClearOnboarding => "ProposeClearOnboarding",
-            Self::PrepareClearSign => "PrepareClearSign",
-            Self::SignClearOnboarding => "SignClearOnboarding",
-            Self::SubmitClearOnboarding => "SubmitClearOnboarding",
-            Self::RetireLegacyKeys => "RetireLegacyKeys",
-            Self::Complete => "Complete",
-        }
-    }
-
-    fn try_from_step_name(name: &str) -> Option<Self> {
-        Some(match name {
-            "WaitingForPeers" => Self::WaitingForPeers,
-            "GenerateNewMemberKeys" => Self::GenerateNewMemberKeys,
-            "ExportState" => Self::ExportState,
-            "CreateProposals" => Self::CreateProposals,
-            "SignProposals" => Self::SignProposals,
-            "SubmitProposals" => Self::SubmitProposals,
-            "SyncAcs" => Self::SyncAcs,
-            "PrepareClearOnboarding" => Self::PrepareClearOnboarding,
-            "ProposeClearOnboarding" => Self::ProposeClearOnboarding,
-            "PrepareClearSign" => Self::PrepareClearSign,
-            "SignClearOnboarding" => Self::SignClearOnboarding,
-            "SubmitClearOnboarding" => Self::SubmitClearOnboarding,
-            "RetireLegacyKeys" => Self::RetireLegacyKeys,
-            "Complete" => Self::Complete,
-            _ => return None,
-        })
     }
 
     fn kind() -> WorkflowKind {
