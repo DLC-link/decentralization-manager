@@ -5,13 +5,17 @@
 //! request bodies the web frontend sends.
 
 use anyhow::{Context, Result, bail};
+use clap::{ArgGroup, Args, Subcommand};
 use common::api::{
     CancelConfirmationRequest, CancelProposalRequest, ExpireConfirmationRequest, GovernanceType,
 };
 use reqwest::Method;
 use serde_json::{Value, json};
 
-use super::{canton_id, to_body};
+use super::args::PartyArg;
+use super::http::{get, optional, post, to_body};
+use super::parties::{canton_id, resolve_party};
+use super::{Outcome, input};
 use crate::api::{
     DecmanClient, DomainGovAction, GovAction, GovConfirmation, GovernanceConfirmations,
 };
@@ -329,6 +333,249 @@ pub fn cancel_proposal_body(
         proposal_cid: proposal_cid.to_owned(),
         confirmation_cid: mine,
     })
+}
+
+/// Names one pending governance action.
+#[derive(Debug, Args)]
+#[command(group(ArgGroup::new("target").required(true).args(["proposal", "confirmation", "action"])))]
+pub struct TargetArgs {
+    /// Contract id of an on-chain proposal.
+    #[arg(long)]
+    proposal: Option<String>,
+    /// Contract id of any confirmation on the action.
+    #[arg(long)]
+    confirmation: Option<String>,
+    /// Full action JSON of a self-governance action: inline, @file, or -.
+    #[arg(long)]
+    action: Option<String>,
+}
+
+impl TargetArgs {
+    fn target(&self) -> Result<Target> {
+        match (&self.proposal, &self.confirmation, &self.action) {
+            (Some(cid), _, _) => Ok(Target::Proposal(cid.clone())),
+            (_, Some(cid), _) => Ok(Target::Confirmation(cid.clone())),
+            (_, _, Some(action)) => Ok(Target::Action(input::read_json(action)?)),
+            _ => bail!("name the action with --proposal, --confirmation, or --action"),
+        }
+    }
+}
+
+#[derive(Debug, Subcommand)]
+pub enum GovernanceCommand {
+    /// The governance rules: members, threshold, and timeout.
+    State {
+        #[command(flatten)]
+        party: PartyArg,
+    },
+    /// Pending actions and proposals with their confirmations, one page of
+    /// proposals at a time.
+    Pending {
+        #[command(flatten)]
+        party: PartyArg,
+        /// Proposals per page. The server default is 25, its maximum 200.
+        #[arg(long)]
+        limit: Option<usize>,
+        /// The next_cursor of the previous page.
+        #[arg(long)]
+        cursor: Option<String>,
+    },
+    /// Proposals, one page at a time.
+    Proposals {
+        #[command(flatten)]
+        party: PartyArg,
+        #[arg(long)]
+        limit: Option<usize>,
+        #[arg(long)]
+        cursor: Option<String>,
+    },
+    /// The members the rules know, with their member parties.
+    KnownMembers {
+        #[command(flatten)]
+        party: PartyArg,
+    },
+    /// This node's governance audit log.
+    Audit {
+        #[command(flatten)]
+        party: PartyArg,
+        #[arg(long)]
+        limit: Option<i64>,
+    },
+    /// The governance history read from the ledger.
+    ChainAudit {
+        #[command(flatten)]
+        party: PartyArg,
+        #[arg(long)]
+        limit: Option<usize>,
+        /// Read from Canton now instead of the cache.
+        #[arg(long)]
+        refresh: bool,
+    },
+    /// Create a proposal. This node's confirmation is added to it.
+    Propose {
+        #[command(flatten)]
+        party: PartyArg,
+        /// The proposal JSON: inline, @file, or -.
+        #[arg(long)]
+        body: String,
+    },
+    /// Confirm a pending action, or start a self action with --action.
+    Confirm {
+        #[command(flatten)]
+        party: PartyArg,
+        #[command(flatten)]
+        target: TargetArgs,
+    },
+    /// Execute an action that has enough confirmations.
+    Execute {
+        #[command(flatten)]
+        party: PartyArg,
+        #[command(flatten)]
+        target: TargetArgs,
+        /// Disclosed contracts as a JSON array of {contract_id, blob}: inline,
+        /// @file, or -.
+        #[arg(long)]
+        disclosed: Option<String>,
+    },
+    /// Revoke this node's own confirmation on an action.
+    Revoke {
+        #[command(flatten)]
+        party: PartyArg,
+        #[command(flatten)]
+        target: TargetArgs,
+    },
+    /// Archive a confirmation that has expired.
+    Expire {
+        #[command(flatten)]
+        party: PartyArg,
+        /// Contract id of the expired confirmation.
+        #[arg(long)]
+        confirmation: String,
+    },
+    /// Retract a proposal this node made.
+    CancelProposal {
+        #[command(flatten)]
+        party: PartyArg,
+        /// Contract id of the proposal.
+        #[arg(long)]
+        proposal: String,
+    },
+}
+
+pub fn run_governance(client: &mut DecmanClient, command: GovernanceCommand) -> Result<Outcome> {
+    match command {
+        GovernanceCommand::State { party } => {
+            let party = resolve_party(client, &party)?;
+            get(client, "/governance/state", &[("party_id", party.id)])
+        }
+        GovernanceCommand::Pending {
+            party,
+            limit,
+            cursor,
+        } => {
+            let party = resolve_party(client, &party)?;
+            let mut query = vec![("party_id", party.id)];
+            optional(&mut query, "limit", limit.map(|limit| limit.to_string()));
+            optional(&mut query, "cursor", cursor);
+            get(client, "/governance/confirmations", &query)
+        }
+        GovernanceCommand::Proposals {
+            party,
+            limit,
+            cursor,
+        } => {
+            let party = resolve_party(client, &party)?;
+            let mut query = vec![("party_id", party.id)];
+            optional(&mut query, "limit", limit.map(|limit| limit.to_string()));
+            optional(&mut query, "cursor", cursor);
+            get(client, "/governance/proposals", &query)
+        }
+        GovernanceCommand::KnownMembers { party } => {
+            let party = resolve_party(client, &party)?;
+            get(
+                client,
+                "/governance/known-members",
+                &[("party_id", party.id)],
+            )
+        }
+        GovernanceCommand::Audit { party, limit } => {
+            let party = resolve_party(client, &party)?;
+            let mut query = vec![("party_id", party.id)];
+            optional(&mut query, "limit", limit.map(|limit| limit.to_string()));
+            get(client, "/governance/audit", &query)
+        }
+        GovernanceCommand::ChainAudit {
+            party,
+            limit,
+            refresh,
+        } => {
+            let party = resolve_party(client, &party)?;
+            let mut query = vec![("party_id", party.id)];
+            optional(&mut query, "limit", limit.map(|limit| limit.to_string()));
+            if refresh {
+                query.push(("refresh", "true".to_owned()));
+            }
+            get(client, "/governance/chain-audit", &query)
+        }
+        GovernanceCommand::Propose { party, body } => {
+            let proposal = input::read_json(&body)?;
+            let party = resolve_party(client, &party)?;
+            let rules_contract_id = rules_contract_id(&fetch(client, &party.id)?)?;
+            let body = json!({
+                "party_id": party.id,
+                "rules_contract_id": rules_contract_id,
+                "proposal": proposal,
+            });
+            post(client, "/governance/propose", Some(&body))
+        }
+        GovernanceCommand::Confirm { party, target } => {
+            let target = target.target()?;
+            let party = resolve_party(client, &party)?;
+            let pending = fetch(client, &party.id)?;
+            let rules = rules_contract_id(&pending)?;
+            let body = confirm_body(&pending, &party.id, &rules, &target)?;
+            post(client, "/governance/confirm", Some(&body))
+        }
+        GovernanceCommand::Execute {
+            party,
+            target,
+            disclosed,
+        } => {
+            let target = target.target()?;
+            let disclosed = match disclosed {
+                Some(disclosed) => input::read_json(&disclosed)?,
+                None => json!([]),
+            };
+            let party = resolve_party(client, &party)?;
+            let pending = fetch(client, &party.id)?;
+            let rules = rules_contract_id(&pending)?;
+            let body = execute_body(&pending, &party.id, &rules, &target, disclosed)?;
+            post(client, "/governance/execute", Some(&body))
+        }
+        GovernanceCommand::Revoke { party, target } => {
+            let target = target.target()?;
+            let party = resolve_party(client, &party)?;
+            let pending = fetch(client, &party.id)?;
+            let body = revoke_body(&pending, &party.id, &target)?;
+            post(client, "/governance/cancel", Some(&body))
+        }
+        GovernanceCommand::Expire {
+            party,
+            confirmation,
+        } => {
+            let party = resolve_party(client, &party)?;
+            let pending = fetch(client, &party.id)?;
+            let rules = rules_contract_id(&pending)?;
+            let body = expire_body(&pending, &party.id, &rules, &confirmation)?;
+            post(client, "/governance/expire", Some(&body))
+        }
+        GovernanceCommand::CancelProposal { party, proposal } => {
+            let party = resolve_party(client, &party)?;
+            let pending = fetch(client, &party.id)?;
+            let body = cancel_proposal_body(&pending, &party.id, &proposal)?;
+            post(client, "/governance/cancel-proposal", Some(&body))
+        }
+    }
 }
 
 #[cfg(test)]
