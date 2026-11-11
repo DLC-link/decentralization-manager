@@ -7,12 +7,7 @@ use canton_proto_rs::com::digitalasset::canton::{
     },
 };
 
-use crate::{
-    config::NodeConfig,
-    error::Result,
-    utils,
-    workflow::{external_party::steps::party_query, topology},
-};
+use crate::{config::NodeConfig, error::Result, utils, workflow::topology};
 
 /// The party's current authorized `PartyToParticipant`, with the serial it sits
 /// at. The serial is what the next write increments, and what the wallet pins so
@@ -43,7 +38,7 @@ pub async fn read_party_to_participant(
 
     let response = client
         .list_party_to_participant(tonic::Request::new(ListPartyToParticipantRequest {
-            base_query: Some(party_query(&synchronizer_id, false)),
+            base_query: Some(topology::head_state_query(&synchronizer_id)),
             filter_party: party_id.to_string(),
             filter_participant: String::new(),
         }))

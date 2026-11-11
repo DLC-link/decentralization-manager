@@ -16,7 +16,6 @@
 //! credential at all, so onboarding no longer depends on how a node's ledger users
 //! happen to be provisioned.
 
-pub(super) use super::status::party_query;
 pub use super::{
     onboarding::{
         ExternalPartyAllocatePayload, PreparedTopology, allocate_party, party_signing_key,

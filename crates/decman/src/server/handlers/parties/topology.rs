@@ -11,14 +11,16 @@ use canton_proto_rs::com::digitalasset::canton::{
     },
     protocol::v30::{DecentralizedNamespaceDefinition, PartyToParticipant},
     topology::admin::v30::{
-        BaseQuery, ListDecentralizedNamespaceDefinitionRequest, ListPartiesRequest,
-        ListPartyToParticipantRequest, StoreId, Synchronizer, base_query, store_id, synchronizer,
+        ListDecentralizedNamespaceDefinitionRequest, ListPartiesRequest,
+        ListPartyToParticipantRequest,
         topology_aggregation_service_client::TopologyAggregationServiceClient,
         topology_manager_read_service_client::TopologyManagerReadServiceClient,
     },
 };
 
-use crate::{canton_id::CantonId, config::PartyCredentials, error::Result, utils};
+use crate::{
+    canton_id::CantonId, config::PartyCredentials, error::Result, utils, workflow::topology,
+};
 
 use super::discovery::bounded_read;
 
@@ -278,19 +280,7 @@ pub(super) fn build_party_to_participant_request(
     participant_id: &str,
 ) -> ListPartyToParticipantRequest {
     ListPartyToParticipantRequest {
-        base_query: Some(BaseQuery {
-            store: Some(StoreId {
-                store: Some(store_id::Store::Synchronizer(Synchronizer {
-                    kind: Some(synchronizer::Kind::PhysicalId(synchronizer_id.to_string())),
-                })),
-            }),
-            proposals: false,
-            operation: 0,
-            time_query: Some(base_query::TimeQuery::HeadState(())),
-            filter_signed_key: String::new(),
-            protocol_version: None,
-            client_version: None,
-        }),
+        base_query: Some(topology::head_state_query(synchronizer_id)),
         filter_party: party_filter.unwrap_or_default().to_string(),
         filter_participant: participant_id.to_string(),
     }
@@ -308,19 +298,7 @@ pub(super) fn build_decentralized_namespace_request(
     namespace: &str,
 ) -> ListDecentralizedNamespaceDefinitionRequest {
     ListDecentralizedNamespaceDefinitionRequest {
-        base_query: Some(BaseQuery {
-            store: Some(StoreId {
-                store: Some(store_id::Store::Synchronizer(Synchronizer {
-                    kind: Some(synchronizer::Kind::PhysicalId(synchronizer_id.to_string())),
-                })),
-            }),
-            proposals: false,
-            operation: 0,
-            time_query: Some(base_query::TimeQuery::HeadState(())),
-            filter_signed_key: String::new(),
-            protocol_version: None,
-            client_version: None,
-        }),
+        base_query: Some(topology::head_state_query(synchronizer_id)),
         filter_namespace: namespace.to_string(),
     }
 }
@@ -551,6 +529,19 @@ mod tests {
         let request = build_decentralized_namespace_request("sync::physical", namespace);
 
         assert_eq!(request.filter_namespace, namespace);
+    }
+
+    /// Both discovery requests read the synchronizer's authorized head state,
+    /// the same query every other topology read sends.
+    #[test]
+    fn discovery_requests_read_the_synchronizer_head_state() {
+        let head_state = Some(topology::head_state_query("sync::physical"));
+
+        let party = build_party_to_participant_request("sync::physical", None, "participant::a");
+        let namespace = build_decentralized_namespace_request("sync::physical", "");
+
+        assert_eq!(party.base_query, head_state);
+        assert_eq!(namespace.base_query, head_state);
     }
 
     #[test]
