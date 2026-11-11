@@ -37,7 +37,7 @@ use crate::{
 };
 
 use super::{
-    credentials::{get_party_credentials, packages},
+    credentials::{PartySession, packages},
     metrics::{ActionOutcome, ActionStep, count_action},
 };
 
@@ -109,18 +109,12 @@ pub async fn propose_action(
         });
     }
     let party_id = &body.party_id;
-    let (token, member_party_id) = match get_party_credentials(&data, party_id).await {
-        Ok(Some(creds)) => creds,
-        Ok(None) => {
-            return HttpResponse::NotFound().json(ErrorResponse {
-                error: "No credentials configured for party".to_string(),
-            });
-        }
-        Err(e) => {
-            return HttpResponse::InternalServerError().json(ErrorResponse {
-                error: format!("Failed to fetch auth token for party: {e}"),
-            });
-        }
+    let PartySession {
+        token,
+        member_party_id,
+    } = match PartySession::load(&data, party_id).await {
+        Ok(session) => session,
+        Err(e) => return e.into_response(),
     };
 
     // Canton cannot enforce the per-decparty singleton, so the propose boundary

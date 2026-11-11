@@ -12,7 +12,7 @@ use crate::{
     canton_id::CantonId,
     config::{PackageConfig, default_package_config},
     error::Result,
-    server::AppState,
+    server::{AppState, error::ApiError},
     utils,
 };
 
@@ -118,6 +118,34 @@ pub(crate) async fn get_party_credentials(
             Ok(Some((mm.get_token(), mm.member_party_id().clone())))
         }
         None => Ok(None),
+    }
+}
+
+/// A party's ledger token and the member party it acts as.
+pub(super) struct PartySession {
+    pub(super) token: String,
+    pub(super) member_party_id: CantonId,
+}
+
+impl PartySession {
+    /// Look up `party_id`'s credentials. A party without credentials is a
+    /// 404, and a failed token fetch is a 500.
+    pub(super) async fn load(
+        data: &web::Data<AppState>,
+        party_id: &CantonId,
+    ) -> std::result::Result<Self, ApiError> {
+        match get_party_credentials(data, party_id).await {
+            Ok(Some((token, member_party_id))) => Ok(Self {
+                token,
+                member_party_id,
+            }),
+            Ok(None) => Err(ApiError::NotFound(
+                "No credentials configured for party".to_string(),
+            )),
+            Err(e) => Err(ApiError::Internal(format!(
+                "Failed to fetch auth token for party: {e}"
+            ))),
+        }
     }
 }
 

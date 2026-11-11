@@ -8,7 +8,7 @@ use crate::server::{
     types::{ActiveCouponReassignmentDelegation, ErrorResponse, RewardStatusResponse},
 };
 
-use super::credentials::{get_party_credentials, packages};
+use super::credentials::{PartySession, packages};
 
 /// Get the decparty's active CouponReassignmentDelegation contracts, newest first
 ///
@@ -36,18 +36,9 @@ pub async fn get_coupon_reassignment_delegation(
     query: web::Query<GovernanceQuery>,
 ) -> impl Responder {
     let party_id = &query.party_id;
-    let (token, _member) = match get_party_credentials(&data, party_id).await {
-        Ok(Some(creds)) => creds,
-        Ok(None) => {
-            return HttpResponse::NotFound().json(ErrorResponse {
-                error: "No credentials configured for party".to_string(),
-            });
-        }
-        Err(e) => {
-            return HttpResponse::InternalServerError().json(ErrorResponse {
-                error: format!("Failed to fetch auth token for party: {e}"),
-            });
-        }
+    let token = match PartySession::load(&data, party_id).await {
+        Ok(session) => session.token,
+        Err(e) => return e.into_response(),
     };
 
     match crate::server::reward_automation::active_delegations(
@@ -100,18 +91,12 @@ pub async fn get_reward_status(
     query: web::Query<GovernanceQuery>,
 ) -> impl Responder {
     let party_id = &query.party_id;
-    let (token, member) = match get_party_credentials(&data, party_id).await {
-        Ok(Some(creds)) => creds,
-        Ok(None) => {
-            return HttpResponse::NotFound().json(ErrorResponse {
-                error: "No credentials configured for party".to_string(),
-            });
-        }
-        Err(e) => {
-            return HttpResponse::InternalServerError().json(ErrorResponse {
-                error: format!("Failed to fetch auth token for party: {e}"),
-            });
-        }
+    let PartySession {
+        token,
+        member_party_id: member,
+    } = match PartySession::load(&data, party_id).await {
+        Ok(session) => session,
+        Err(e) => return e.into_response(),
     };
 
     match crate::server::reward_automation::reward_status(
