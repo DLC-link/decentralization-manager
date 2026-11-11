@@ -160,7 +160,13 @@ Adding a 4th custodian involves both governance and topology:
       }'
     ```
 
-3. **Cleanup on the removed node**: The removed participant keeps every
+3. **Peer list**: Kick first, then remove the peer. The kick never contacts
+   the removed participant, so it does not need that peer entry. Each member
+   that stays must remain a peer of the coordinator until the kick completes.
+   The coordinator refuses a kick that is short of signers. The refusal names
+   each member that is not a peer.
+
+4. **Cleanup on the removed node**: The removed participant keeps every
    contract it held for the party. It no longer sees the party's archives, so
    those contracts go stale on it. Its DecMan lists the party under **No
    longer hosted by this node**. The operator of the removed node purges the

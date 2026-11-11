@@ -448,6 +448,9 @@ decentralized party.
    - Multi-party signing by remaining members
    - Proposal submission
 
+Every member that stays must remain a configured peer of the coordinator until
+the kick completes.
+
 ### Adding a Participant (Add Party)
 
 1. Open the party, click **Add member** in the Participants section, and choose
