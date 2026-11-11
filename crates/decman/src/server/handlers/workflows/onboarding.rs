@@ -139,43 +139,18 @@ async fn start_onboarding_run(
     data: &web::Data<AppState>,
     body: &OnboardingRequest,
 ) -> std::result::Result<HttpResponse, ApiError> {
-    // Build instance + config up-front so the persisted workflow_runs row
-    // can carry the same identifier as the spawned coordinator task.
+    let OnboardingPlan {
+        instance_name,
+        config: onboarding_config,
+        invitees: peer_ids,
+    } = plan_onboarding(body)?;
     let party_id_prefix = body.party_id_prefix.clone();
-    let peer_ids = body.peer_ids.clone();
-    let instance_name = format!("{party_id_prefix}-creation");
     let instance = WorkflowInstance::new(
         instance_name.clone(),
         WorkflowKind::Onboarding,
         WorkflowRole::Coordinator,
     );
     let onboarding_state = &instance.http;
-
-    // If the operator set an explicit initial threshold, bound it by the owner
-    // count (invited peers + this coordinator). Omitted => the coordinator uses
-    // the default majority algorithm once the owner set is resolved.
-    let owner_count = peer_ids.len() as i32 + 1;
-    if let Some(t) = body.threshold
-        && !(1..=owner_count).contains(&t)
-    {
-        return Err(ApiError::BadRequest(format!(
-            "threshold must be between 1 and {owner_count} (invited peers + this node); got {t}"
-        )));
-    }
-    // Every owner's node also hosts the party, so the same count bounds the
-    // confirmation threshold.
-    if let Some(confirmation) = body.confirmation_threshold
-        && let Err(e) = check_confirmation_threshold(confirmation, owner_count as usize)
-    {
-        return Err(ApiError::BadRequest(e.to_string()));
-    }
-
-    let onboarding_config = workflow::OnboardingConfig::new(
-        party_id_prefix.clone(),
-        instance_name.clone(),
-        body.threshold,
-        body.confirmation_threshold,
-    );
 
     // Refuse onboarding when a party with this prefix already exists. The
     // human-readable prefix is the only piece of the party id the operator
@@ -242,77 +217,7 @@ async fn start_onboarding_run(
     // dialog; auto-saving placeholders pollutes the auth registry.
 
     // Refresh dec_party cache in background
-    let refresh: Box<dyn FnOnce() + Send> = {
-        let config = data.config.clone();
-        let db = data.db.clone();
-        let auth_lock = data.auth.clone();
-        let party_credentials = data.party_credentials.clone();
-        let discovery_gate = super::DiscoveryGate::of(data);
-        Box::new(move || {
-            let bg_config = config.clone();
-            let bg_db = db.clone();
-            let bg_auth = auth_lock.clone();
-            let bg_creds = party_credentials.clone();
-            let bg_gate = discovery_gate.clone();
-            tokio::spawn(async move {
-                let auth = bg_auth.read().await.clone();
-                let creds = bg_creds.read().await.clone();
-                // Through the shared gate: a direct discovery slips the
-                // concurrency bound and races the cache write against a
-                // request for the same prefix.
-                match super::discover_and_cache(
-                    &bg_gate,
-                    &bg_config,
-                    &bg_db,
-                    "",
-                    auth,
-                    &creds,
-                    Default::default(),
-                )
-                .await
-                {
-                    super::Discovery::Done(resp) => {
-                        resolve_owner_keys_from_peers(&bg_config, &bg_db, &resp.parties).await;
-                        // Audit: report any participants whose owner_key
-                        // is still NULL after resolve. Not fatal — Noise
-                        // resolution may run again on the next stale
-                        // refresh — but unexpected for a freshly
-                        // onboarded party.
-                        for party in &resp.parties {
-                            for p in &party.participants {
-                                let uid = p.participant_uid.to_string();
-                                match bg_db
-                                    .get_dec_party_participant_owner_key(&party.party_id, &uid)
-                                    .await
-                                {
-                                    Ok(Some(_)) => {} // resolved
-                                    Ok(None) => tracing::warn!(
-                                        party_id = %party.party_id,
-                                        participant_uid = %uid,
-                                        "Participant owner_key unresolved after onboarding"
-                                    ),
-                                    Err(e) => tracing::warn!(
-                                        party_id = %party.party_id,
-                                        participant_uid = %uid,
-                                        error = %e,
-                                        "Failed to read owner_key from cache during post-onboarding audit"
-                                    ),
-                                }
-                            }
-                        }
-                    }
-                    super::Discovery::InFlight
-                    | super::Discovery::AtCapacity
-                    | super::Discovery::Superseded => {
-                        tracing::debug!("Post-onboarding refresh skipped: already running");
-                    }
-                    super::Discovery::Failed(e) => {
-                        tracing::warn!("Failed to refresh parties after onboarding: {e}");
-                    }
-                }
-            });
-        })
-    };
+    let refresh = refresh_after_onboarding(data);
     launch_coordinator(
         data,
         &instance,
@@ -332,6 +237,130 @@ async fn start_onboarding_run(
         message: "Onboarding workflow started".to_string(),
         instance_name,
     }))
+}
+
+/// An onboarding request checked and turned into its run: the run's name,
+/// its config and the peers to invite.
+struct OnboardingPlan {
+    instance_name: String,
+    config: workflow::OnboardingConfig,
+    invitees: Vec<CantonId>,
+}
+
+/// Check an onboarding request's thresholds and build its run. It reads
+/// only the request.
+fn plan_onboarding(request: &OnboardingRequest) -> std::result::Result<OnboardingPlan, ApiError> {
+    // Build instance + config up-front so the persisted workflow_runs row
+    // can carry the same identifier as the spawned coordinator task.
+    let party_id_prefix = &request.party_id_prefix;
+    let peer_ids = &request.peer_ids;
+    let instance_name = format!("{party_id_prefix}-creation");
+
+    // If the operator set an explicit initial threshold, bound it by the owner
+    // count (invited peers + this coordinator). Omitted => the coordinator uses
+    // the default majority algorithm once the owner set is resolved.
+    let owner_count = peer_ids.len() as i32 + 1;
+    if let Some(t) = request.threshold
+        && !(1..=owner_count).contains(&t)
+    {
+        return Err(ApiError::BadRequest(format!(
+            "threshold must be between 1 and {owner_count} (invited peers + this node); got {t}"
+        )));
+    }
+    // Every owner's node also hosts the party, so the same count bounds the
+    // confirmation threshold.
+    if let Some(confirmation) = request.confirmation_threshold
+        && let Err(e) = check_confirmation_threshold(confirmation, owner_count as usize)
+    {
+        return Err(ApiError::BadRequest(e.to_string()));
+    }
+
+    let config = workflow::OnboardingConfig::new(
+        party_id_prefix.clone(),
+        instance_name.clone(),
+        request.threshold,
+        request.confirmation_threshold,
+    );
+
+    Ok(OnboardingPlan {
+        instance_name,
+        config,
+        invitees: peer_ids.clone(),
+    })
+}
+
+/// The step that refreshes the dec_party cache in the background once an
+/// onboarding run completes, and audits the owner keys it resolved.
+fn refresh_after_onboarding(data: &web::Data<AppState>) -> Box<dyn FnOnce() + Send> {
+    let config = data.config.clone();
+    let db = data.db.clone();
+    let auth_lock = data.auth.clone();
+    let party_credentials = data.party_credentials.clone();
+    let discovery_gate = super::DiscoveryGate::of(data);
+    Box::new(move || {
+        let bg_config = config.clone();
+        let bg_db = db.clone();
+        let bg_auth = auth_lock.clone();
+        let bg_creds = party_credentials.clone();
+        let bg_gate = discovery_gate.clone();
+        tokio::spawn(async move {
+            let auth = bg_auth.read().await.clone();
+            let creds = bg_creds.read().await.clone();
+            // Through the shared gate: a direct discovery slips the
+            // concurrency bound and races the cache write against a
+            // request for the same prefix.
+            match super::discover_and_cache(
+                &bg_gate,
+                &bg_config,
+                &bg_db,
+                "",
+                auth,
+                &creds,
+                Default::default(),
+            )
+            .await
+            {
+                super::Discovery::Done(resp) => {
+                    resolve_owner_keys_from_peers(&bg_config, &bg_db, &resp.parties).await;
+                    // Audit: report any participants whose owner_key
+                    // is still NULL after resolve. Not fatal — Noise
+                    // resolution may run again on the next stale
+                    // refresh — but unexpected for a freshly
+                    // onboarded party.
+                    for party in &resp.parties {
+                        for p in &party.participants {
+                            let uid = p.participant_uid.to_string();
+                            match bg_db
+                                .get_dec_party_participant_owner_key(&party.party_id, &uid)
+                                .await
+                            {
+                                Ok(Some(_)) => {} // resolved
+                                Ok(None) => tracing::warn!(
+                                    party_id = %party.party_id,
+                                    participant_uid = %uid,
+                                    "Participant owner_key unresolved after onboarding"
+                                ),
+                                Err(e) => tracing::warn!(
+                                    party_id = %party.party_id,
+                                    participant_uid = %uid,
+                                    error = %e,
+                                    "Failed to read owner_key from cache during post-onboarding audit"
+                                ),
+                            }
+                        }
+                    }
+                }
+                super::Discovery::InFlight
+                | super::Discovery::AtCapacity
+                | super::Discovery::Superseded => {
+                    tracing::debug!("Post-onboarding refresh skipped: already running");
+                }
+                super::Discovery::Failed(e) => {
+                    tracing::warn!("Failed to refresh parties after onboarding: {e}");
+                }
+            }
+        });
+    })
 }
 
 /// Get the current status of the onboarding workflow
@@ -791,6 +820,70 @@ mod start_onboarding_tests {
             StatusCode::CONFLICT,
             "A workflow with instance newparty-creation is already running",
         );
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod plan_onboarding_tests {
+    //! Calls the pure onboarding plan with the invited peers, and pins each
+    //! refusal text.
+
+    use super::super::test_support::pid;
+    use super::*;
+
+    type Result<T = ()> = anyhow::Result<T>;
+
+    fn request(threshold: Option<i32>, confirmation: Option<i32>) -> Result<OnboardingRequest> {
+        Ok(OnboardingRequest {
+            party_id_prefix: "newparty".to_string(),
+            peer_ids: vec![pid(2)?, pid(3)?],
+            threshold,
+            confirmation_threshold: confirmation,
+        })
+    }
+
+    /// Two invited peers and this node make three owners.
+    #[test]
+    fn each_refusal_keeps_its_text() -> Result {
+        let confirmation_refusal = check_confirmation_threshold(4, 3)
+            .err()
+            .ok_or_else(|| anyhow::anyhow!("4 of 3 hosts must be refused"))?
+            .to_string();
+        let cases = [
+            (
+                request(Some(0), None)?,
+                "threshold must be between 1 and 3 (invited peers + this node); got 0".to_string(),
+            ),
+            (
+                request(Some(4), None)?,
+                "threshold must be between 1 and 3 (invited peers + this node); got 4".to_string(),
+            ),
+            (request(Some(2), Some(4))?, confirmation_refusal),
+        ];
+        for (request, refusal) in cases {
+            assert_eq!(
+                plan_onboarding(&request).err(),
+                Some(ApiError::BadRequest(refusal))
+            );
+        }
+        Ok(())
+    }
+
+    /// The run is named after the prefix, carries the chosen thresholds,
+    /// and invites the listed peers in order.
+    #[test]
+    fn a_plan_names_the_run_and_invites_the_peers() -> Result {
+        let plan = plan_onboarding(&request(Some(3), Some(2))?)?;
+        assert_eq!(plan.instance_name, "newparty-creation");
+        assert_eq!(plan.config.party_id_prefix, "newparty");
+        assert_eq!(plan.config.instance_name, "newparty-creation");
+        assert_eq!(plan.config.threshold, Some(3));
+        assert_eq!(plan.config.confirmation_threshold, Some(2));
+        assert_eq!(plan.invitees, vec![pid(2)?, pid(3)?]);
+
+        let plan = plan_onboarding(&request(None, None)?)?;
+        assert_eq!(plan.config.threshold, None);
         Ok(())
     }
 }

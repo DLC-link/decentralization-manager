@@ -10,7 +10,7 @@ use sqlx::SqlitePool;
 use crate::server::handlers::parties::resolve_owner_keys_from_peers;
 use crate::{
     canton_id::CantonId,
-    config::NodeConfig,
+    config::{NodeConfig, Peer},
     db::schema::SchemaRead,
     error::Result,
     noise::{Message, MessageType},
@@ -71,28 +71,7 @@ async fn start_contracts_run(
     data: &web::Data<AppState>,
     body: &ContractsRequest,
 ) -> std::result::Result<HttpResponse, ApiError> {
-    // Peers sign one prepared create per contract, so an empty run would
-    // invite them and then fail on every one of them at signing.
-    if body.contracts.is_empty() {
-        return Err(ApiError::BadRequest(
-            "The request lists no contracts to deploy".to_string(),
-        ));
-    }
-
-    // Create contracts config from request
-    let timestamp = now_secs();
-    let instance_name = format!(
-        "{}-contracts-{timestamp}",
-        body.decentralized_party_id.prefix
-    );
-    let mut contracts_config = workflow::ContractsConfig::new(
-        body.decentralized_party_id.clone(),
-        body.participant_ids.clone(),
-        body.participant_parties.clone(),
-        body.operator_party.clone(),
-        body.contracts.clone(),
-        instance_name,
-    );
+    let mut contracts_config = plan_contracts(body, now_secs())?;
 
     // Scope to the party's actual signers, not every peer this node knows
     // about. A dec party can be a strict subset of the configured mesh (see
@@ -100,13 +79,8 @@ async fn start_contracts_run(
     // outsiders into the deployment or stall WaitingForPeers on a peer that
     // never joins. Keep only configured peers that are this party's
     // participants, minus self.
-    let participant_set: HashSet<CantonId> = body.participant_ids.iter().cloned().collect();
     let contracts_invitees: Vec<CantonId> = match data.db.get_all_peers().await {
-        Ok(peers) => peers
-            .into_iter()
-            .map(|p| p.participant_id)
-            .filter(|p| p != data.config.participant_id() && participant_set.contains(p))
-            .collect(),
+        Ok(peers) => contracts_invitees(&body.participant_ids, data.config.participant_id(), peers),
         Err(e) => {
             tracing::warn!("Failed to load peers for cancel-invite tracking: {e}");
             Vec::new()
@@ -193,48 +167,7 @@ async fn start_contracts_run(
         })
     };
     // Refresh dec_party cache to pick up new contracts
-    let refresh: Box<dyn FnOnce() + Send> = {
-        let config = data.config.clone();
-        let db = data.db.clone();
-        let auth_lock = data.auth.clone();
-        let discovery_gate = super::DiscoveryGate::of(data);
-        let party_credentials = data.party_credentials.clone();
-        Box::new(move || {
-            let bg_config = config.clone();
-            let bg_db = db.clone();
-            let bg_auth = auth_lock.clone();
-            let bg_creds = party_credentials.clone();
-            let bg_gate = discovery_gate.clone();
-            tokio::spawn(async move {
-                let auth = bg_auth.read().await.clone();
-                let creds = bg_creds.read().await.clone();
-                // Through the shared gate, as above.
-                match super::discover_and_cache(
-                    &bg_gate,
-                    &bg_config,
-                    &bg_db,
-                    "",
-                    auth,
-                    &creds,
-                    Default::default(),
-                )
-                .await
-                {
-                    super::Discovery::Done(resp) => {
-                        resolve_owner_keys_from_peers(&bg_config, &bg_db, &resp.parties).await;
-                    }
-                    super::Discovery::InFlight
-                    | super::Discovery::AtCapacity
-                    | super::Discovery::Superseded => {
-                        tracing::debug!("Post-contracts refresh skipped: already running");
-                    }
-                    super::Discovery::Failed(e) => {
-                        tracing::warn!("Failed to refresh parties after contract deployment: {e}");
-                    }
-                }
-            });
-        })
-    };
+    let refresh = refresh_after_contracts(data);
     launch_coordinator(
         data,
         &instance,
@@ -254,6 +187,95 @@ async fn start_contracts_run(
         message: "Contracts workflow started".to_string(),
         instance_name: instance_name_for_run,
     }))
+}
+
+/// Check a contracts request and build its run's config, named with
+/// `timestamp`. It reads only its inputs.
+fn plan_contracts(
+    request: &ContractsRequest,
+    timestamp: i64,
+) -> std::result::Result<workflow::ContractsConfig, ApiError> {
+    // Peers sign one prepared create per contract, so an empty run would
+    // invite them and then fail on every one of them at signing.
+    if request.contracts.is_empty() {
+        return Err(ApiError::BadRequest(
+            "The request lists no contracts to deploy".to_string(),
+        ));
+    }
+
+    // Create contracts config from request
+    let instance_name = format!(
+        "{}-contracts-{timestamp}",
+        request.decentralized_party_id.prefix
+    );
+    Ok(workflow::ContractsConfig::new(
+        request.decentralized_party_id.clone(),
+        request.participant_ids.clone(),
+        request.participant_parties.clone(),
+        request.operator_party.clone(),
+        request.contracts.clone(),
+        instance_name,
+    ))
+}
+
+/// The configured peers that are the party's participants, minus this
+/// node. It reads only its inputs.
+fn contracts_invitees(
+    participant_ids: &[CantonId],
+    self_id: &CantonId,
+    peers: Vec<Peer>,
+) -> Vec<CantonId> {
+    let participant_set: HashSet<CantonId> = participant_ids.iter().cloned().collect();
+    peers
+        .into_iter()
+        .map(|p| p.participant_id)
+        .filter(|p| p != self_id && participant_set.contains(p))
+        .collect()
+}
+
+/// The step that refreshes the dec_party cache in the background once a
+/// contracts run completes, to pick up the new contracts.
+fn refresh_after_contracts(data: &web::Data<AppState>) -> Box<dyn FnOnce() + Send> {
+    let config = data.config.clone();
+    let db = data.db.clone();
+    let auth_lock = data.auth.clone();
+    let discovery_gate = super::DiscoveryGate::of(data);
+    let party_credentials = data.party_credentials.clone();
+    Box::new(move || {
+        let bg_config = config.clone();
+        let bg_db = db.clone();
+        let bg_auth = auth_lock.clone();
+        let bg_creds = party_credentials.clone();
+        let bg_gate = discovery_gate.clone();
+        tokio::spawn(async move {
+            let auth = bg_auth.read().await.clone();
+            let creds = bg_creds.read().await.clone();
+            // Through the shared gate, as above.
+            match super::discover_and_cache(
+                &bg_gate,
+                &bg_config,
+                &bg_db,
+                "",
+                auth,
+                &creds,
+                Default::default(),
+            )
+            .await
+            {
+                super::Discovery::Done(resp) => {
+                    resolve_owner_keys_from_peers(&bg_config, &bg_db, &resp.parties).await;
+                }
+                super::Discovery::InFlight
+                | super::Discovery::AtCapacity
+                | super::Discovery::Superseded => {
+                    tracing::debug!("Post-contracts refresh skipped: already running");
+                }
+                super::Discovery::Failed(e) => {
+                    tracing::warn!("Failed to refresh parties after contract deployment: {e}");
+                }
+            }
+        });
+    })
 }
 
 /// Get the current status of the contracts workflow
@@ -555,6 +577,85 @@ mod start_contracts_tests {
             format!(
                 r#"{{"status":"inprogress","message":"Contracts workflow started","instance_name":"{instance}"}}"#
             )
+        );
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod plan_contracts_tests {
+    //! Calls the pure contracts plan and invitee filter.
+
+    use common::api::ContractDefinition;
+
+    use super::super::test_support::{peer, pid};
+    use super::*;
+
+    type Result<T = ()> = anyhow::Result<T>;
+
+    fn request(contracts: Vec<ContractDefinition>) -> Result<ContractsRequest> {
+        Ok(ContractsRequest {
+            decentralized_party_id: pid(9)?,
+            participant_ids: vec![pid(1)?, pid(2)?, pid(3)?],
+            participant_parties: vec![pid(8)?],
+            operator_party: pid(7)?,
+            contracts,
+        })
+    }
+
+    fn contract(name: &str) -> ContractDefinition {
+        ContractDefinition {
+            id: name.to_string(),
+            name: name.to_string(),
+            package_id: "pkg".to_string(),
+            module_name: "Governance.Rules".to_string(),
+            entity_name: "GovernanceRules".to_string(),
+            fields: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn a_request_without_contracts_is_refused() -> Result {
+        assert_eq!(
+            plan_contracts(&request(Vec::new())?, 1_700_000_000).err(),
+            Some(ApiError::BadRequest(
+                "The request lists no contracts to deploy".to_string()
+            ))
+        );
+        Ok(())
+    }
+
+    /// The config carries the request and a run name made of the party's
+    /// prefix and the timestamp.
+    #[test]
+    fn a_plan_names_the_run_after_the_party_and_the_time() -> Result {
+        let party = pid(9)?;
+        let config = plan_contracts(&request(vec![contract("Rules")])?, 1_700_000_000)?;
+        assert_eq!(
+            config.instance_name,
+            format!("{}-contracts-1700000000", party.prefix)
+        );
+        assert_eq!(config.decentralized_party_id, party);
+        assert_eq!(config.participant_ids, vec![pid(1)?, pid(2)?, pid(3)?]);
+        assert_eq!(config.participant_parties, vec![pid(8)?]);
+        assert_eq!(config.operator_party, pid(7)?);
+        assert_eq!(config.contracts.len(), 1);
+        assert!(config.committed_deployment.is_none());
+        Ok(())
+    }
+
+    /// Only configured peers that are the party's participants are
+    /// invited, in peer-table order, and never this node.
+    #[test]
+    fn the_invitees_are_the_participants_this_node_peers_with() -> Result {
+        let (me, p2, p3, p7) = (pid(1)?, pid(2)?, pid(3)?, pid(7)?);
+        let peers = [&p7, &p3, &me, &p2]
+            .into_iter()
+            .map(|id| peer(id, 1, false))
+            .collect();
+        assert_eq!(
+            contracts_invitees(&[me.clone(), p2.clone(), p3.clone()], &me, peers),
+            vec![p3, p2]
         );
         Ok(())
     }
