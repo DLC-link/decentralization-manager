@@ -40,49 +40,30 @@ import { NotificationsView } from "./components/NotificationsView";
 import type { PartyActions } from "./components/NotificationsView";
 import { useSnackbar } from "./contexts";
 import { API_BASE, ADMIN_ACCESS } from "./constants";
-import { authenticatedFetch, pingLatency } from "./api";
+import { authenticatedFetch } from "./api";
 import { useHiddenParties } from "./useHiddenParties";
 import { favoritesFirst, useFavoriteParties } from "./useFavoriteParties";
-import {
-  EMPTY_AUDIT_SNAPSHOT,
-  nextAuditSnapshot,
-  type AuditSnapshot,
-} from "./completedProposals";
 import { useFormerParties } from "./useFormerParties";
 import { useLatestFetch } from "./hooks/useLatestFetch";
-import { usePolling } from "./hooks/usePolling";
+import { fetchGovernanceAudit, useNotificationFeeds } from "./hooks/useNotificationFeeds";
+import { useParticipantStatuses } from "./hooks/useParticipantStatuses";
 import { TAB_HASHES, buildHash, parseHash, sharedWithSlug } from "./hashRoute";
 import { participantName, partiesSharedWith } from "./sharedParties";
-import { workflowKindLabel } from "./workflowSteps";
 import { columnSx } from "./styles";
 import type {
-  AuditLogEntry,
-  AuditLogResponse,
   DecentralizedParty,
   DecentralizedPartiesResponse,
   NodeConfig,
   NetworkConfig,
-  ParticipantStatus,
   KeyStatusResponse,
   Peer,
-  PendingInvitation,
-  HandledInvitation,
-  HandledInvitationsResponse,
   PartyAuthStatus,
   AuthStatusResponse,
-  WorkflowRun,
 } from "./types";
 
 /// Proposals fetched per request. The feed grows a batch at a time rather
 /// than reading a party's whole proposal set at once.
 const ACTIONS_BATCH = 25;
-
-/// Newest audit rows the Completed section reads, across every party. Several
-/// rows can belong to one proposal, so this bounds rows, not entries.
-const AUDIT_FEED_LIMIT = 200;
-
-/// Newest accepted and declined invitations the Completed section shows.
-const HANDLED_INVITATIONS_LIMIT = 50;
 
 // Saved in index.html <script> before any modules load.
 // Strip Keycloak OAuth params that get appended to the hash during check-sso.
@@ -97,21 +78,6 @@ const INITIAL_ROUTE = parseHash(SAVED_HASH);
  */
 function historyScope(state: unknown): string | null {
   return (state as { sharedWith?: string | null } | null)?.sharedWith ?? null;
-}
-
-/** This node's newest audit rows across every party, or null on failure. */
-async function fetchGovernanceAudit(): Promise<AuditLogEntry[] | null> {
-  try {
-    const res = await authenticatedFetch(
-      `${API_BASE}/governance/audit?limit=${AUDIT_FEED_LIMIT}`,
-    );
-    if (!res.ok) return null;
-    const data: Partial<AuditLogResponse> = await res.json();
-    return data.entries ?? [];
-  } catch {
-    // Ignore polling errors
-    return null;
-  }
 }
 
 const App = () => {
@@ -145,28 +111,12 @@ const App = () => {
   const [networkConfig, setNetworkConfig] = useState<NetworkConfig | null>(
     null,
   );
-  const [participantStatuses, setParticipantStatuses] = useState<
-    ParticipantStatus[]
-  >([]);
-  const [selfWireVersion, setSelfWireVersion] = useState<number | undefined>();
-  // Our own round-trip latency to the backend (ms). The peers table fills the
-  // peer rows from Noise health probes but never the "you" row; this fills it.
-  //
-  // `seq` advances on every measurement, so the node health card's sparkline
-  // still records a sample when the latency reads the same twice in a row.
-  const [selfLatency, setSelfLatency] = useState<{ ms?: number; seq: number }>({
-    seq: 0,
-  });
   const [keyStatus, setKeyStatus] = useState<KeyStatusResponse | null>(null);
   const [authStatuses, setAuthStatuses] = useState<PartyAuthStatus[]>([]);
   const [packageCount, setPackageCount] = useState(0);
   const [onboardingDialogOpen, setOnboardingDialogOpen] = useState(false);
   const [darsDialogOpen, setDarsDialogOpen] = useState(false);
   const [uploadDarsDialogOpen, setUploadDarsDialogOpen] = useState(false);
-  const [pendingInvitations, setPendingInvitations] = useState<
-    PendingInvitation[]
-  >([]);
-  const [invitationsLoaded, setInvitationsLoaded] = useState(false);
   const [partyActions, setPartyActions] = useState<PartyActions[]>([]);
   const [partyActionsLoaded, setPartyActionsLoaded] = useState(false);
   const [partyActionsFetching, setPartyActionsFetching] = useState(false);
@@ -180,28 +130,12 @@ const App = () => {
   // wholesale, so it must not run while a queue is being read or it would
   // discard everything scrolled and snap back to the first batch.
   const [actionsAccumulated, setActionsAccumulated] = useState(false);
-  const [workflowRuns, setWorkflowRuns] = useState<WorkflowRun[]>([]);
-  // Request counters for the feeds, so a slower earlier answer cannot
-  // overwrite a later one.
-  const beginInvitations = useLatestFetch();
-  const beginWorkflowRuns = useLatestFetch();
-  const beginGovernanceAudit = useLatestFetch();
-  const [workflowRunsLoaded, setWorkflowRunsLoaded] = useState(false);
-  const [governanceAudit, setGovernanceAudit] =
-    useState<AuditSnapshot>(EMPTY_AUDIT_SNAPSHOT);
-  const [governanceAuditLoaded, setGovernanceAuditLoaded] = useState(false);
   // `performance.now()` when the committed `partyActions` was requested.
   // Completed compares it with when each audit row was first seen.
   const [pendingRequestedAt, setPendingRequestedAt] = useState(
     Number.NEGATIVE_INFINITY,
   );
   const beginPartyActions = useLatestFetch();
-  const beginHandledInvitations = useLatestFetch();
-  const [handledInvitations, setHandledInvitations] = useState<
-    HandledInvitation[]
-  >([]);
-  const [handledInvitationsLoaded, setHandledInvitationsLoaded] =
-    useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [partyFilter, setPartyFilter] = useState(
@@ -628,156 +562,21 @@ const App = () => {
     };
   }, [sharedWith, networkConfig]);
 
-  // Poll participant statuses every 2 seconds, and on the same cadence measure
-  // our own round-trip to the backend so the "you" row of the peers table shows
-  // a latency too (peer latencies come from the status response itself).
-  const refreshStatuses = useCallback(async () => {
-    const fetchStatuses = async () => {
-      try {
-        const res = await authenticatedFetch(`${API_BASE}/participants-status`);
-        if (res.ok) {
-          const data = await res.json();
-          setParticipantStatuses(data.statuses);
-          setSelfWireVersion(data.wire_version);
-        }
-      } catch {
-        // Ignore polling errors
-      }
-    };
-
-    const measureSelfLatency = async () => {
-      // Clear on failure so the row drops a stale number during an outage,
-      // matching how an unreachable peer shows no latency.
-      const ms = await pingLatency(`${API_BASE}/healthz`);
-      setSelfLatency((prev) => ({ ms: ms ?? undefined, seq: prev.seq + 1 }));
-    };
-
-    await Promise.all([fetchStatuses(), measureSelfLatency()]);
-  }, []);
-
-  // In-flight guarded: if a cycle (the status probe in particular) runs
-  // longer than the 2s interval, the tick is skipped instead of stacking
-  // concurrent requests.
-  usePolling(refreshStatuses, 2000);
-
-  const refreshInvitations = useCallback(async () => {
-    // Newest request wins. Accepting an invitation refreshes the feed by hand
-    // while a poll is already in flight, and that older answer, landing after,
-    // would put the invitation back.
-    const isLatest = beginInvitations();
-    try {
-      const res = await authenticatedFetch(`${API_BASE}/invitations`);
-      if (!res.ok) return;
-      // Compared after the body, not before: reading it is another wait, and a
-      // manual refresh that finishes inside it would be overwritten here.
-      const data = await res.json();
-      if (!isLatest()) return;
-      setPendingInvitations(data.invitations);
-    } catch {
-      // Ignore polling errors
-    } finally {
-      setInvitationsLoaded(true);
-    }
-  }, [beginInvitations]);
-
-  // Poll pending invitations every 2 seconds, in-flight-guarded like the
-  // status probe above: a slow response must not stack concurrent requests.
-  usePolling(refreshInvitations, 2000);
-
-  const refreshWorkflowRuns = useCallback(async () => {
-    // Newest request wins, as above: cancel, dismiss and retry all refresh by
-    // hand alongside the poll.
-    const isLatest = beginWorkflowRuns();
-    try {
-      const res = await authenticatedFetch(`${API_BASE}/workflows`);
-      if (!res.ok) return;
-      const data = await res.json();
-      if (!isLatest()) return;
-      setWorkflowRuns(data.runs ?? []);
-    } catch {
-      // Ignore polling errors
-    } finally {
-      setWorkflowRunsLoaded(true);
-    }
-  }, [beginWorkflowRuns]);
-
-  // Poll workflow_runs every 2 seconds, same cadence as invitations.
-  usePolling(refreshWorkflowRuns, 2000);
-
-  const commitGovernanceAudit = useCallback((entries: AuditLogEntry[]) => {
-    const now = performance.now();
-    setGovernanceAudit((previous) => nextAuditSnapshot(previous, entries, now));
-  }, []);
-
-  const refreshGovernanceAudit = useCallback(async () => {
-    const isLatest = beginGovernanceAudit();
-    try {
-      const entries = await fetchGovernanceAudit();
-      if (entries === null || !isLatest()) return;
-      commitGovernanceAudit(entries);
-    } finally {
-      setGovernanceAuditLoaded(true);
-    }
-  }, [beginGovernanceAudit, commitGovernanceAudit]);
-
-  // Same cadence as the governance actions below: the Completed section reads
-  // the two together to tell a finished proposal from a pending one.
-  usePolling(refreshGovernanceAudit, 10_000);
-
-  const refreshHandledInvitations = useCallback(async () => {
-    const isLatest = beginHandledInvitations();
-    try {
-      const res = await authenticatedFetch(
-        `${API_BASE}/invitations/handled?limit=${HANDLED_INVITATIONS_LIMIT}`,
-      );
-      if (!res.ok) return;
-      const data: Partial<HandledInvitationsResponse> = await res.json();
-      if (!isLatest()) return;
-      setHandledInvitations(data.invitations ?? []);
-    } catch {
-      // Ignore polling errors
-    } finally {
-      setHandledInvitationsLoaded(true);
-    }
-  }, [beginHandledInvitations]);
-
-  // Slower than the pending poll: the list changes when an operator answers,
-  // and this page refreshes it by hand when its own operator does.
-  usePolling(refreshHandledInvitations, 10_000);
-
-  // An accept or decline moves the invitation from one list to the other.
-  const refreshInvitationLists = useCallback(() => {
-    void refreshInvitations();
-    void refreshHandledInvitations();
-  }, [refreshInvitations, refreshHandledInvitations]);
-
-  // Watch for workflow runs transitioning out of `inprogress` and surface a
-  // snackbar — the run card in the feed updates too, but a transient toast
-  // gives the user a top-level signal without making them go look. First
-  // observation of a run is silent so we don't fire on initial page load.
-  const prevRunStatusRef = useRef<Map<string, WorkflowRun["status"]>>(new Map());
-  useEffect(() => {
-    const prev = prevRunStatusRef.current;
-    const next = new Map<string, WorkflowRun["status"]>();
-    for (const run of workflowRuns) {
-      next.set(run.instance_name, run.status);
-      const prior = prev.get(run.instance_name);
-      if (prior === "inprogress" && run.status !== "inprogress") {
-        const label = `${workflowKindLabel(run.kind)} workflow`;
-        if (run.status === "failed") {
-          showSnackbar(
-            `${label} failed: ${run.error || "Unknown error"}`,
-            "error",
-          );
-        } else if (run.status === "completed") {
-          showSnackbar(`${label} completed`);
-        } else if (run.status === "cancelled") {
-          showSnackbar(`${label} cancelled`);
-        }
-      }
-    }
-    prevRunStatusRef.current = next;
-  }, [workflowRuns, showSnackbar]);
+  const { participantStatuses, selfWireVersion, selfLatency } = useParticipantStatuses();
+  const {
+    pendingInvitations,
+    invitationsLoaded,
+    workflowRuns,
+    workflowRunsLoaded,
+    governanceAudit,
+    governanceAuditLoaded,
+    handledInvitations,
+    handledInvitationsLoaded,
+    beginGovernanceAudit,
+    commitGovernanceAudit,
+    refreshWorkflowRuns,
+    refreshInvitationLists,
+  } = useNotificationFeeds();
 
   const isGovRulesTemplate = (templateId: string) =>
     templateId === "Governance.Rules:GovernanceRules";
