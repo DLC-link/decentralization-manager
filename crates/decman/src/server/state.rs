@@ -196,7 +196,3 @@ impl AppState {
         (state, peer_jobs)
     }
 }
-
-// The previous `ListenerControl` struct collapsed to a single `Arc<AtomicBool>`
-// (see `noise_listener_pause_flag` below). Atomic so `ListenerPauseGuard::Drop`
-// can reset it synchronously when a spawned workflow task is aborted or panics.

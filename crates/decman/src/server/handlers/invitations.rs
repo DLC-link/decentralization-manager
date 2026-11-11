@@ -569,8 +569,8 @@ async fn notify_coordinator_of_decline(data: &web::Data<AppState>, invitation: &
 }
 
 /// Look up the `Peer` record that owns the given Noise public key. The
-/// invitation carries the coordinator's pubkey but `get_peer` is keyed by
-/// participant id, so iterate the peers table.
+/// invitation carries the coordinator's pubkey, not its participant id, so
+/// search the peers table by key.
 async fn find_coordinator_peer(
     data: &web::Data<AppState>,
     coordinator_pubkey: &str,
