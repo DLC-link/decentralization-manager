@@ -138,7 +138,7 @@ impl From<NoiseError> for StepError {
 }
 
 /// The result of one command.
-pub(super) type StepResult<T = ()> = std::result::Result<T, StepError>;
+pub(super) type StepResult<T = ()> = Result<T, StepError>;
 
 /// What the loop does after a command.
 enum Next {
