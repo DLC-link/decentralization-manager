@@ -29,10 +29,7 @@ impl ProvisionProviderService {
 
 impl TemplateInfo for ProvisionProviderService {
     fn template_id(&self, pkgs: &dyn PackageResolver) -> Result<TemplateId, Error> {
-        let pkg = pkgs
-            .package_ref("governance_utility_onboarding")
-            .ok_or(Error::PackageNotConfigured("governance_utility_onboarding"))?;
-        Ok(TemplateId::new(pkg, Self::MODULE, Self::ENTITY))
+        TemplateId::for_package(pkgs, super::PACKAGE, Self::MODULE, Self::ENTITY)
     }
 }
 
@@ -60,10 +57,7 @@ impl CreateProviderServiceRequest {
 
 impl TemplateInfo for CreateProviderServiceRequest {
     fn template_id(&self, pkgs: &dyn PackageResolver) -> Result<TemplateId, Error> {
-        let pkg = pkgs
-            .package_ref("governance_utility_onboarding")
-            .ok_or(Error::PackageNotConfigured("governance_utility_onboarding"))?;
-        Ok(TemplateId::new(pkg, Self::MODULE, Self::ENTITY))
+        TemplateId::for_package(pkgs, super::PACKAGE, Self::MODULE, Self::ENTITY)
     }
 }
 
@@ -94,10 +88,7 @@ impl CreateUserServiceRequest {
 
 impl TemplateInfo for CreateUserServiceRequest {
     fn template_id(&self, pkgs: &dyn PackageResolver) -> Result<TemplateId, Error> {
-        let pkg = pkgs
-            .package_ref("governance_utility_onboarding")
-            .ok_or(Error::PackageNotConfigured("governance_utility_onboarding"))?;
-        Ok(TemplateId::new(pkg, Self::MODULE, Self::ENTITY))
+        TemplateId::for_package(pkgs, super::PACKAGE, Self::MODULE, Self::ENTITY)
     }
 }
 
@@ -129,10 +120,7 @@ impl CreateDelegatedBatchedMarkersProxy {
 
 impl TemplateInfo for CreateDelegatedBatchedMarkersProxy {
     fn template_id(&self, pkgs: &dyn PackageResolver) -> Result<TemplateId, Error> {
-        let pkg = pkgs
-            .package_ref("governance_utility_onboarding")
-            .ok_or(Error::PackageNotConfigured("governance_utility_onboarding"))?;
-        Ok(TemplateId::new(pkg, Self::MODULE, Self::ENTITY))
+        TemplateId::for_package(pkgs, super::PACKAGE, Self::MODULE, Self::ENTITY)
     }
 }
 
@@ -166,10 +154,7 @@ impl RequestDevNetFeaturedAppRight {
 
 impl TemplateInfo for RequestDevNetFeaturedAppRight {
     fn template_id(&self, pkgs: &dyn PackageResolver) -> Result<TemplateId, Error> {
-        let pkg = pkgs
-            .package_ref("governance_utility_onboarding")
-            .ok_or(Error::PackageNotConfigured("governance_utility_onboarding"))?;
-        Ok(TemplateId::new(pkg, Self::MODULE, Self::ENTITY))
+        TemplateId::for_package(pkgs, super::PACKAGE, Self::MODULE, Self::ENTITY)
     }
 }
 

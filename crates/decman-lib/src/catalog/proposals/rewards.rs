@@ -14,6 +14,9 @@ use crate::framework::{
     DamlProtoEncode, PackageResolver, TemplateId, TemplateInfo, Validate, ValidationCtx,
 };
 
+/// The package key of every payload in this module.
+const PACKAGE: &str = "governance_rewards";
+
 /// Create (or replace) the decparty's on-ledger CouponReassignmentDelegation.
 /// `prior_delegation` is the cid of the delegation being replaced (None for the first).
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -47,10 +50,7 @@ impl SetupCouponReassignmentDelegation {
 
 impl TemplateInfo for SetupCouponReassignmentDelegation {
     fn template_id(&self, pkgs: &dyn PackageResolver) -> Result<TemplateId, Error> {
-        let pkg = pkgs
-            .package_ref("governance_rewards")
-            .ok_or(Error::PackageNotConfigured("governance_rewards"))?;
-        Ok(TemplateId::new(pkg, Self::MODULE, Self::ENTITY))
+        TemplateId::for_package(pkgs, PACKAGE, Self::MODULE, Self::ENTITY)
     }
 }
 
@@ -111,10 +111,7 @@ impl RevokeCouponReassignmentDelegation {
 
 impl TemplateInfo for RevokeCouponReassignmentDelegation {
     fn template_id(&self, pkgs: &dyn PackageResolver) -> Result<TemplateId, Error> {
-        let pkg = pkgs
-            .package_ref("governance_rewards")
-            .ok_or(Error::PackageNotConfigured("governance_rewards"))?;
-        Ok(TemplateId::new(pkg, Self::MODULE, Self::ENTITY))
+        TemplateId::for_package(pkgs, PACKAGE, Self::MODULE, Self::ENTITY)
     }
 }
 
@@ -162,10 +159,7 @@ impl SetupMintingDelegation {
 
 impl TemplateInfo for SetupMintingDelegation {
     fn template_id(&self, pkgs: &dyn PackageResolver) -> Result<TemplateId, Error> {
-        let pkg = pkgs
-            .package_ref("governance_rewards")
-            .ok_or(Error::PackageNotConfigured("governance_rewards"))?;
-        Ok(TemplateId::new(pkg, Self::MODULE, Self::ENTITY))
+        TemplateId::for_package(pkgs, PACKAGE, Self::MODULE, Self::ENTITY)
     }
 }
 
@@ -218,10 +212,7 @@ impl AcceptExternalPartySetup {
 
 impl TemplateInfo for AcceptExternalPartySetup {
     fn template_id(&self, pkgs: &dyn PackageResolver) -> Result<TemplateId, Error> {
-        let pkg = pkgs
-            .package_ref("governance_rewards")
-            .ok_or(Error::PackageNotConfigured("governance_rewards"))?;
-        Ok(TemplateId::new(pkg, Self::MODULE, Self::ENTITY))
+        TemplateId::for_package(pkgs, PACKAGE, Self::MODULE, Self::ENTITY)
     }
 }
 

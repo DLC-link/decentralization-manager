@@ -21,10 +21,7 @@ impl GenericVote {
 
 impl TemplateInfo for GenericVote {
     fn template_id(&self, pkgs: &dyn PackageResolver) -> Result<TemplateId, Error> {
-        let pkg = pkgs
-            .package_ref("governance_core")
-            .ok_or(Error::PackageNotConfigured("governance_core"))?;
-        Ok(TemplateId::new(pkg, Self::MODULE, Self::ENTITY))
+        TemplateId::for_package(pkgs, "governance_core", Self::MODULE, Self::ENTITY)
     }
 }
 

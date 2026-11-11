@@ -9,8 +9,9 @@ use common::canton_id::CantonId;
 
 use super::OnboardRegistrar;
 use crate::error::Error;
+use crate::framework::encode::make_optional_bool;
 use crate::framework::encode::serialize_party_credential_requirements;
-use crate::framework::encode::{field, make_contract_id, make_list, make_optional_bool};
+use crate::framework::encode::{field, make_contract_id, make_contract_id_list, make_list};
 use crate::framework::encode::{make_optional_text, make_optional_timestamp, make_party};
 use crate::framework::encode::{make_record, make_text, serialize_instrument_identifier};
 use crate::framework::validate::validate_self_issued_requirements_have_claims;
@@ -59,10 +60,7 @@ impl ProvisionInstrument {
 
 impl TemplateInfo for ProvisionInstrument {
     fn template_id(&self, pkgs: &dyn PackageResolver) -> Result<TemplateId, Error> {
-        let pkg = pkgs
-            .package_ref("governance_utility_onboarding")
-            .ok_or(Error::PackageNotConfigured("governance_utility_onboarding"))?;
-        Ok(TemplateId::new(pkg, Self::MODULE, Self::ENTITY))
+        TemplateId::for_package(pkgs, super::PACKAGE, Self::MODULE, Self::ENTITY)
     }
 }
 
@@ -156,10 +154,7 @@ impl UpdateInstrumentConfiguration {
 
 impl TemplateInfo for UpdateInstrumentConfiguration {
     fn template_id(&self, pkgs: &dyn PackageResolver) -> Result<TemplateId, Error> {
-        let pkg = pkgs
-            .package_ref("governance_utility_onboarding")
-            .ok_or(Error::PackageNotConfigured("governance_utility_onboarding"))?;
-        Ok(TemplateId::new(pkg, Self::MODULE, Self::ENTITY))
+        TemplateId::for_package(pkgs, super::PACKAGE, Self::MODULE, Self::ENTITY)
     }
 }
 
@@ -235,10 +230,7 @@ impl OnboardInstrumentIssuers {
 
 impl TemplateInfo for OnboardInstrumentIssuers {
     fn template_id(&self, pkgs: &dyn PackageResolver) -> Result<TemplateId, Error> {
-        let pkg = pkgs
-            .package_ref("governance_utility_onboarding")
-            .ok_or(Error::PackageNotConfigured("governance_utility_onboarding"))?;
-        Ok(TemplateId::new(pkg, Self::MODULE, Self::ENTITY))
+        TemplateId::for_package(pkgs, super::PACKAGE, Self::MODULE, Self::ENTITY)
     }
 }
 
@@ -392,10 +384,7 @@ impl OffboardInstrumentIssuers {
 
 impl TemplateInfo for OffboardInstrumentIssuers {
     fn template_id(&self, pkgs: &dyn PackageResolver) -> Result<TemplateId, Error> {
-        let pkg = pkgs
-            .package_ref("governance_utility_onboarding")
-            .ok_or(Error::PackageNotConfigured("governance_utility_onboarding"))?;
-        Ok(TemplateId::new(pkg, Self::MODULE, Self::ENTITY))
+        TemplateId::for_package(pkgs, super::PACKAGE, Self::MODULE, Self::ENTITY)
     }
 }
 
@@ -411,12 +400,7 @@ impl DamlProtoEncode for OffboardInstrumentIssuers {
                             field("instrumentIssuer", make_party(&row.instrument_issuer)),
                             field(
                                 "credentialCids",
-                                make_list(
-                                    row.credential_cids
-                                        .iter()
-                                        .map(|cid| make_contract_id(cid))
-                                        .collect(),
-                                ),
+                                make_contract_id_list(&row.credential_cids),
                             ),
                         ])
                     })

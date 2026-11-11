@@ -6,6 +6,9 @@ mod registrar;
 mod services;
 mod setup;
 
+/// The package key of every payload in this module.
+const PACKAGE: &str = "governance_utility_onboarding";
+
 pub use instrument::{MintsCredentials, OffboardInstrumentIssuers, OnboardInstrumentIssuers};
 pub use instrument::{ProvisionInstrument, UpdateInstrumentConfiguration, WithCredentialIdNonce};
 pub use issuance::{AcceptBurnRequest, AcceptMintRequest, Burn, Mint};

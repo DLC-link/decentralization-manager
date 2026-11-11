@@ -32,10 +32,7 @@ impl CreateProviderConfiguration {
 
 impl TemplateInfo for CreateProviderConfiguration {
     fn template_id(&self, pkgs: &dyn PackageResolver) -> Result<TemplateId, Error> {
-        let pkg = pkgs
-            .package_ref("governance_utility_onboarding")
-            .ok_or(Error::PackageNotConfigured("governance_utility_onboarding"))?;
-        Ok(TemplateId::new(pkg, Self::MODULE, Self::ENTITY))
+        TemplateId::for_package(pkgs, super::PACKAGE, Self::MODULE, Self::ENTITY)
     }
 }
 
@@ -88,10 +85,7 @@ impl CreateRegistrarServiceRequest {
 
 impl TemplateInfo for CreateRegistrarServiceRequest {
     fn template_id(&self, pkgs: &dyn PackageResolver) -> Result<TemplateId, Error> {
-        let pkg = pkgs
-            .package_ref("governance_utility_onboarding")
-            .ok_or(Error::PackageNotConfigured("governance_utility_onboarding"))?;
-        Ok(TemplateId::new(pkg, Self::MODULE, Self::ENTITY))
+        TemplateId::for_package(pkgs, super::PACKAGE, Self::MODULE, Self::ENTITY)
     }
 }
 
@@ -131,10 +125,7 @@ impl OnboardRegistrar {
 
 impl TemplateInfo for OnboardRegistrar {
     fn template_id(&self, pkgs: &dyn PackageResolver) -> Result<TemplateId, Error> {
-        let pkg = pkgs
-            .package_ref("governance_utility_onboarding")
-            .ok_or(Error::PackageNotConfigured("governance_utility_onboarding"))?;
-        Ok(TemplateId::new(pkg, Self::MODULE, Self::ENTITY))
+        TemplateId::for_package(pkgs, super::PACKAGE, Self::MODULE, Self::ENTITY)
     }
 }
 

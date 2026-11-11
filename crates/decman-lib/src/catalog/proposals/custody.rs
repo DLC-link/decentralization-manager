@@ -17,14 +17,17 @@ use common::canton_id::CantonId;
 
 use crate::error::Error;
 use crate::framework::encode::{
-    TransferValidity, field, make_contract_id, make_empty_extra_args, make_empty_metadata,
-    make_extra_args_from_context, make_list, make_numeric, make_party, make_record, make_text,
-    serialize_instrument_id,
+    TransferValidity, field, make_contract_id, make_contract_id_list, make_empty_extra_args,
+    make_empty_metadata, make_extra_args_from_context, make_list, make_numeric, make_party,
+    make_record, make_text, serialize_instrument_id,
 };
 use crate::framework::validate::validate_positive_amount;
 use crate::framework::{
     DamlProtoEncode, PackageResolver, TemplateId, TemplateInfo, Validate, ValidationCtx,
 };
+
+/// The package key of every payload in this module.
+const PACKAGE: &str = "governance_token_custody";
 
 /// Set up a Canton Coin `TransferPreapproval` for the governance party.
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -42,10 +45,7 @@ impl SetupCcPreapproval {
 
 impl TemplateInfo for SetupCcPreapproval {
     fn template_id(&self, pkgs: &dyn PackageResolver) -> Result<TemplateId, Error> {
-        let pkg = pkgs
-            .package_ref("governance_token_custody")
-            .ok_or(Error::PackageNotConfigured("governance_token_custody"))?;
-        Ok(TemplateId::new(pkg, Self::MODULE, Self::ENTITY))
+        TemplateId::for_package(pkgs, PACKAGE, Self::MODULE, Self::ENTITY)
     }
 }
 
@@ -85,10 +85,7 @@ impl SetupTokenPreapproval {
 
 impl TemplateInfo for SetupTokenPreapproval {
     fn template_id(&self, pkgs: &dyn PackageResolver) -> Result<TemplateId, Error> {
-        let pkg = pkgs
-            .package_ref("governance_token_custody")
-            .ok_or(Error::PackageNotConfigured("governance_token_custody"))?;
-        Ok(TemplateId::new(pkg, Self::MODULE, Self::ENTITY))
+        TemplateId::for_package(pkgs, PACKAGE, Self::MODULE, Self::ENTITY)
     }
 }
 
@@ -146,10 +143,7 @@ impl Transfer {
 
 impl TemplateInfo for Transfer {
     fn template_id(&self, pkgs: &dyn PackageResolver) -> Result<TemplateId, Error> {
-        let pkg = pkgs
-            .package_ref("governance_token_custody")
-            .ok_or(Error::PackageNotConfigured("governance_token_custody"))?;
-        Ok(TemplateId::new(pkg, Self::MODULE, Self::ENTITY))
+        TemplateId::for_package(pkgs, PACKAGE, Self::MODULE, Self::ENTITY)
     }
 }
 
@@ -181,10 +175,7 @@ impl AcceptTransfer {
 
 impl TemplateInfo for AcceptTransfer {
     fn template_id(&self, pkgs: &dyn PackageResolver) -> Result<TemplateId, Error> {
-        let pkg = pkgs
-            .package_ref("governance_token_custody")
-            .ok_or(Error::PackageNotConfigured("governance_token_custody"))?;
-        Ok(TemplateId::new(pkg, Self::MODULE, Self::ENTITY))
+        TemplateId::for_package(pkgs, PACKAGE, Self::MODULE, Self::ENTITY)
     }
 }
 
@@ -227,13 +218,7 @@ impl DamlProtoEncode for TransferWithContext<'_> {
             ),
             field(
                 "inputHoldingCids",
-                make_list(
-                    self.transfer
-                        .input_holding_cids
-                        .iter()
-                        .map(|cid| make_contract_id(cid))
-                        .collect(),
-                ),
+                make_contract_id_list(&self.transfer.input_holding_cids),
             ),
             field("meta", make_empty_metadata()),
         ]);
