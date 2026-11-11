@@ -19,9 +19,7 @@ import {
   Checkbox,
   FormControlLabel,
   ListSubheader,
-  Portal,
 } from "@mui/material";
-import CheckCircleIcon from "@mui/icons-material/CheckCircle";
 import RefreshIcon from "@mui/icons-material/Refresh";
 import {
   API_BASE,
@@ -44,6 +42,7 @@ import {
 import { fieldHelpAdornment, TextHelp } from "./FieldHelp";
 import { ContractSelect } from "./governance/fields/ContractSelect";
 import { HelpTextField } from "./governance/fields/HelpTextField";
+import { SubmitButton } from "./governance/fields/SubmitButton";
 import type {
   GovernanceResponse,
   ActionType,
@@ -2451,42 +2450,14 @@ export const GovernanceSection = ({
 
               {renderActionFormFields()}
 
-              {(() => {
-                const inlineSubmitBtn = (
-                  <Button
-                    variant="contained"
-                    onClick={handleSubmitAction}
-                    disabled={formLoading || !rulesContractId}
-                    startIcon={
-                      formLoading ? (
-                        <CircularProgress size={16} />
-                      ) : (
-                        <CheckCircleIcon />
-                      )
-                    }
-                  >
-                    Submit Confirmation
-                  </Button>
-                );
-                const portalSubmitBtn = (
-                  <Button
-                    onClick={handleSubmitAction}
-                    disabled={formLoading || !rulesContractId}
-                    startIcon={
-                      formLoading ? <CircularProgress size={16} /> : undefined
-                    }
-                  >
-                    Submit Confirmation
-                  </Button>
-                );
-                return submitPortalEl ? (
-                  <Portal container={submitPortalEl}>{portalSubmitBtn}</Portal>
-                ) : (
-                  <Box sx={{ mt: 2, display: "flex", gap: 1 }}>
-                    {inlineSubmitBtn}
-                  </Box>
-                );
-              })()}
+              <SubmitButton
+                label="Submit Confirmation"
+                loading={formLoading}
+                disabled={formLoading || !rulesContractId}
+                onClick={handleSubmitAction}
+                portalEl={submitPortalEl}
+                inlineBoxSx={{ mt: 2, display: "flex", gap: 1 }}
+              />
             </Box>
           </Collapse>
         </Box>
@@ -4504,48 +4475,17 @@ export const GovernanceSection = ({
                 </>
               )}
 
-              {(() => {
-                const inlineSubmitBtn = (
-                  <Button
-                    variant="contained"
-                    onClick={handleSubmitProposal}
-                    disabled={
-                      proposalLoading ||
-                      beneficiaryProblem !== null ||
-                      blockListProblem !== null
-                    }
-                    startIcon={
-                      proposalLoading ? (
-                        <CircularProgress size={16} />
-                      ) : (
-                        <CheckCircleIcon />
-                      )
-                    }
-                  >
-                    Submit Proposal
-                  </Button>
-                );
-                const portalSubmitBtn = (
-                  <Button
-                    onClick={handleSubmitProposal}
-                    disabled={
-                      proposalLoading ||
-                      beneficiaryProblem !== null ||
-                      blockListProblem !== null
-                    }
-                    startIcon={
-                      proposalLoading ? <CircularProgress size={16} /> : undefined
-                    }
-                  >
-                    Submit Proposal
-                  </Button>
-                );
-                return submitPortalEl ? (
-                  <Portal container={submitPortalEl}>{portalSubmitBtn}</Portal>
-                ) : (
-                  inlineSubmitBtn
-                );
-              })()}
+              <SubmitButton
+                label="Submit Proposal"
+                loading={proposalLoading}
+                disabled={
+                  proposalLoading ||
+                  beneficiaryProblem !== null ||
+                  blockListProblem !== null
+                }
+                onClick={handleSubmitProposal}
+                portalEl={submitPortalEl}
+              />
             </Box>
           </Collapse>
         </Box>
