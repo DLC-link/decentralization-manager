@@ -49,6 +49,37 @@ pub fn validate_add_hosts_topology(
     current: &CurrentPartyTopology,
     bundle: &ExternalPartyAddHostsPayload,
 ) -> Result<()> {
+    check_request(current, bundle)?;
+    let next_serial = serial_after(current)?;
+
+    let this_participant = config.participant_id().to_string();
+
+    for (index, serialized) in bundle.topology_transactions.iter().enumerate() {
+        let p2p = decode_p2p_change(
+            index,
+            serialized,
+            BundleSerial::Next {
+                current: current.serial,
+                next: next_serial,
+            },
+            "adds hosts",
+        )?;
+
+        check_party_unchanged(index, current, &p2p)?;
+        check_host_set_delta(index, current, &p2p)?;
+        check_hosts_can_act(index, &p2p, &this_participant)?;
+        check_exact_mapping(index, current, &p2p)?;
+    }
+
+    Ok(())
+}
+
+/// The checks on the request as a whole: the envelope, who signed, the
+/// signature forms, and the party and serial it pins.
+fn check_request(
+    current: &CurrentPartyTopology,
+    bundle: &ExternalPartyAddHostsPayload,
+) -> Result<()> {
     check_bundle_envelope(
         "external-party add-hosts",
         &bundle.topology_transactions,
@@ -91,185 +122,204 @@ pub fn validate_add_hosts_topology(
             found = current.serial
         );
     }
-    let next_serial = serial_after(current)?;
+    Ok(())
+}
 
-    let this_participant = config.participant_id().to_string();
+/// The party, its threshold and its signing keys must stay as they are.
+fn check_party_unchanged(
+    index: usize,
+    current: &CurrentPartyTopology,
+    p2p: &PartyToParticipant,
+) -> Result<()> {
+    if p2p.party != current.mapping.party {
+        anyhow::bail!(
+            "topology transaction {index} is for party {found}, not {expected}",
+            found = p2p.party,
+            expected = current.mapping.party
+        );
+    }
+    // The threshold is a separate serial bump. Letting it move here would let a
+    // caller drop a party to threshold 1 while adding a host it controls.
+    if p2p.threshold != current.mapping.threshold {
+        anyhow::bail!(
+            "topology transaction {index} changes the confirmation threshold from {current_t} \
+             to {found}; adding hosts must leave it alone",
+            current_t = current.mapping.threshold,
+            found = p2p.threshold
+        );
+    }
+    // Adding a key would hand its holder the party. Only the key already in
+    // head state may appear.
+    if p2p.party_signing_keys != current.mapping.party_signing_keys {
+        anyhow::bail!(
+            "topology transaction {index} changes the party's signing keys; adding hosts must \
+             leave them alone"
+        );
+    }
+    Ok(())
+}
 
-    for (index, serialized) in bundle.topology_transactions.iter().enumerate() {
-        let p2p = decode_p2p_change(
-            index,
-            serialized,
-            BundleSerial::Next {
-                current: current.serial,
-                next: next_serial,
-            },
-            "adds hosts",
-        )?;
+/// The host-set rules of an add: no host twice, every current host kept
+/// exactly as it is, every new host at a valid permission with the
+/// onboarding marker, and at least one host added.
+fn check_host_set_delta(
+    index: usize,
+    current: &CurrentPartyTopology,
+    p2p: &PartyToParticipant,
+) -> Result<()> {
+    let mut seen: Vec<&str> = p2p
+        .participants
+        .iter()
+        .map(|p| p.participant_uid.as_str())
+        .collect();
+    seen.sort_unstable();
+    let count = seen.len();
+    seen.dedup();
+    if seen.len() != count {
+        anyhow::bail!("topology transaction {index} lists a hosting participant twice");
+    }
 
-        if p2p.party != current.mapping.party {
-            anyhow::bail!(
-                "topology transaction {index} is for party {found}, not {expected}",
-                found = p2p.party,
-                expected = current.mapping.party
-            );
-        }
-        // The threshold is a separate serial bump. Letting it move here would let a
-        // caller drop a party to threshold 1 while adding a host it controls.
-        if p2p.threshold != current.mapping.threshold {
-            anyhow::bail!(
-                "topology transaction {index} changes the confirmation threshold from {current_t} \
-                 to {found}; adding hosts must leave it alone",
-                current_t = current.mapping.threshold,
-                found = p2p.threshold
-            );
-        }
-        // Adding a key would hand its holder the party. Only the key already in
-        // head state may appear.
-        if p2p.party_signing_keys != current.mapping.party_signing_keys {
-            anyhow::bail!(
-                "topology transaction {index} changes the party's signing keys; adding hosts must \
-                 leave them alone"
-            );
-        }
-
-        let mut seen: Vec<&str> = p2p
+    let mut added = 0usize;
+    for participant in &p2p.participants {
+        match current
+            .mapping
             .participants
             .iter()
-            .map(|p| p.participant_uid.as_str())
-            .collect();
-        seen.sort_unstable();
-        let count = seen.len();
-        seen.dedup();
-        if seen.len() != count {
-            anyhow::bail!("topology transaction {index} lists a hosting participant twice");
-        }
-
-        let mut added = 0usize;
-        for participant in &p2p.participants {
-            match current
-                .mapping
-                .participants
-                .iter()
-                .find(|p| p.participant_uid == participant.participant_uid)
-            {
-                // A current host must survive untouched. Anything else is an
-                // eviction or a permission change wearing an add-hosts costume.
-                Some(existing) => {
-                    if participant != existing {
-                        anyhow::bail!(
-                            "topology transaction {index} alters current host {uid}; adding hosts \
-                             must leave existing hosts exactly as they are",
-                            uid = participant.participant_uid
-                        );
-                    }
-                }
-                None => {
-                    added += 1;
-                    // Confirmation always; Submission only while the party needs
-                    // one confirmation, which is Canton's constraint rather than
-                    // ours. Observation is never useful here: it confirms
-                    // nothing and cannot submit, so it would add a host that
-                    // does neither.
-                    let confirming =
-                        participant.permission == ParticipantPermission::Confirmation as i32;
-                    let submitting =
-                        participant.permission == ParticipantPermission::Submission as i32;
-                    if !(confirming || (submitting && p2p.threshold == 1)) {
-                        anyhow::bail!(
-                            "topology transaction {index} gives new host {uid} permission {perm}; \
-                             a new host must be Confirmation, or Submission while the party's \
-                             threshold is 1",
-                            uid = participant.participant_uid,
-                            perm = participant.permission
-                        );
-                    }
-                    // Without the marker the party goes live on a host that holds
-                    // none of its contracts, and that host starts confirming
-                    // transactions it cannot validate.
-                    if participant.onboarding.is_none() {
-                        anyhow::bail!(
-                            "topology transaction {index} adds host {uid} without the onboarding \
-                             marker; it would go live before its ACS import",
-                            uid = participant.participant_uid
-                        );
-                    }
-                }
-            }
-        }
-
-        // Every current host must still be there. The loop above proves each
-        // *listed* current host is unchanged, not that none went missing.
-        for existing in &current.mapping.participants {
-            if !p2p
-                .participants
-                .iter()
-                .any(|p| p.participant_uid == existing.participant_uid)
-            {
-                anyhow::bail!(
-                    "topology transaction {index} drops current host {uid}; adding hosts never \
-                     removes one",
-                    uid = existing.participant_uid
-                );
-            }
-        }
-        if added == 0 {
-            anyhow::bail!("topology transaction {index} adds no host");
-        }
-        // The invariant an add must never break: hosts still carrying the
-        // onboarding marker cannot confirm, so they do not count toward the
-        // threshold. If the unmarked hosts no longer reach it, the party stops
-        // being able to transact the moment this lands — a self-inflicted
-        // outage dressed as an expansion.
-        // Unmarked, and able to act for the party. Confirmation counts, and so
-        // does Submission — which only exists at threshold 1 and is precisely a
-        // host that can act alone. Observation counts for neither: it is listed
-        // and live but confirms nothing and cannot submit, so counting it would
-        // let an add through that leaves the party unable to transact.
-        let active = p2p
-            .participants
-            .iter()
-            .filter(|p| {
-                p.onboarding.is_none()
-                    && (p.permission == ParticipantPermission::Confirmation as i32
-                        || p.permission == ParticipantPermission::Submission as i32)
-            })
-            .count();
-        if (active as u32) < p2p.threshold {
-            anyhow::bail!(
-                "topology transaction {index} would leave {active} host(s) able to act for the \
-                 party, \
-                 below the party's threshold of {threshold}; the party could not transact",
-                threshold = p2p.threshold
-            );
-        }
-        if !p2p
-            .participants
-            .iter()
-            .any(|p| p.participant_uid == this_participant)
+            .find(|p| p.participant_uid == participant.participant_uid)
         {
-            anyhow::bail!(
-                "topology transaction {index} does not name this participant \
-                 ({this_participant}); a host only authorizes topology that hosts it"
-            );
-        }
-
-        // The checks above are field-by-field, so a field Canton adds later would
-        // ride along unexamined. This refuses anything that is not exactly the
-        // mapping they proved.
-        let expected = PartyToParticipant {
-            party: current.mapping.party.clone(),
-            threshold: current.mapping.threshold,
-            participants: p2p.participants.clone(),
-            party_signing_keys: current.mapping.party_signing_keys.clone(),
-        };
-        if p2p != expected {
-            anyhow::bail!(
-                "topology transaction {index} carries fields beyond a plain add-hosts \
-                 PartyToParticipant and will not be authorized"
-            );
+            // A current host must survive untouched. Anything else is an
+            // eviction or a permission change wearing an add-hosts costume.
+            Some(existing) => {
+                if participant != existing {
+                    anyhow::bail!(
+                        "topology transaction {index} alters current host {uid}; adding hosts \
+                         must leave existing hosts exactly as they are",
+                        uid = participant.participant_uid
+                    );
+                }
+            }
+            None => {
+                added += 1;
+                // Confirmation always; Submission only while the party needs
+                // one confirmation, which is Canton's constraint rather than
+                // ours. Observation is never useful here: it confirms
+                // nothing and cannot submit, so it would add a host that
+                // does neither.
+                let confirming =
+                    participant.permission == ParticipantPermission::Confirmation as i32;
+                let submitting = participant.permission == ParticipantPermission::Submission as i32;
+                if !(confirming || (submitting && p2p.threshold == 1)) {
+                    anyhow::bail!(
+                        "topology transaction {index} gives new host {uid} permission {perm}; \
+                         a new host must be Confirmation, or Submission while the party's \
+                         threshold is 1",
+                        uid = participant.participant_uid,
+                        perm = participant.permission
+                    );
+                }
+                // Without the marker the party goes live on a host that holds
+                // none of its contracts, and that host starts confirming
+                // transactions it cannot validate.
+                if participant.onboarding.is_none() {
+                    anyhow::bail!(
+                        "topology transaction {index} adds host {uid} without the onboarding \
+                         marker; it would go live before its ACS import",
+                        uid = participant.participant_uid
+                    );
+                }
+            }
         }
     }
 
+    // Every current host must still be there. The loop above proves each
+    // *listed* current host is unchanged, not that none went missing.
+    for existing in &current.mapping.participants {
+        if !p2p
+            .participants
+            .iter()
+            .any(|p| p.participant_uid == existing.participant_uid)
+        {
+            anyhow::bail!(
+                "topology transaction {index} drops current host {uid}; adding hosts never \
+                 removes one",
+                uid = existing.participant_uid
+            );
+        }
+    }
+    if added == 0 {
+        anyhow::bail!("topology transaction {index} adds no host");
+    }
+    Ok(())
+}
+
+/// Enough unmarked hosts must still be able to act for the party, and this
+/// participant must be one of the hosts.
+fn check_hosts_can_act(
+    index: usize,
+    p2p: &PartyToParticipant,
+    this_participant: &str,
+) -> Result<()> {
+    // The invariant an add must never break: hosts still carrying the
+    // onboarding marker cannot confirm, so they do not count toward the
+    // threshold. If the unmarked hosts no longer reach it, the party stops
+    // being able to transact the moment this lands — a self-inflicted
+    // outage dressed as an expansion.
+    // Unmarked, and able to act for the party. Confirmation counts, and so
+    // does Submission — which only exists at threshold 1 and is precisely a
+    // host that can act alone. Observation counts for neither: it is listed
+    // and live but confirms nothing and cannot submit, so counting it would
+    // let an add through that leaves the party unable to transact.
+    let active = p2p
+        .participants
+        .iter()
+        .filter(|p| {
+            p.onboarding.is_none()
+                && (p.permission == ParticipantPermission::Confirmation as i32
+                    || p.permission == ParticipantPermission::Submission as i32)
+        })
+        .count();
+    if (active as u32) < p2p.threshold {
+        anyhow::bail!(
+            "topology transaction {index} would leave {active} host(s) able to act for the \
+             party, \
+             below the party's threshold of {threshold}; the party could not transact",
+            threshold = p2p.threshold
+        );
+    }
+    if !p2p
+        .participants
+        .iter()
+        .any(|p| p.participant_uid == this_participant)
+    {
+        anyhow::bail!(
+            "topology transaction {index} does not name this participant \
+             ({this_participant}); a host only authorizes topology that hosts it"
+        );
+    }
+    Ok(())
+}
+
+/// The mapping must be exactly the one the checks above proved.
+fn check_exact_mapping(
+    index: usize,
+    current: &CurrentPartyTopology,
+    p2p: &PartyToParticipant,
+) -> Result<()> {
+    // The checks above are field-by-field, so a field Canton adds later would
+    // ride along unexamined. This refuses anything that is not exactly the
+    // mapping they proved.
+    let expected = PartyToParticipant {
+        party: current.mapping.party.clone(),
+        threshold: current.mapping.threshold,
+        participants: p2p.participants.clone(),
+        party_signing_keys: current.mapping.party_signing_keys.clone(),
+    };
+    if *p2p != expected {
+        anyhow::bail!(
+            "topology transaction {index} carries fields beyond a plain add-hosts \
+             PartyToParticipant and will not be authorized"
+        );
+    }
     Ok(())
 }
 
