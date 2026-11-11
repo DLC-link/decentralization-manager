@@ -88,8 +88,8 @@ pub async fn export_state(
         );
     }
 
-    // Save namespace definition as a length-prefixed protobuf — same byte
-    // shape as the file written by `utils::write_message_to_file`.
+    // Save namespace definition as a length-prefixed protobuf, which
+    // `utils::read_first_message_from_bytes` reads back.
     let namespace_bytes = utils::encode_length_prefixed_message(namespace_def);
     storage
         .write_artifact(

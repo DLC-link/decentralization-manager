@@ -240,9 +240,7 @@ fn created_contract_ids(transaction: &Option<Transaction>) -> Vec<String> {
         .collect()
 }
 
-/// Decode a sequence of `varint(len)||proto` messages from a byte slice. Mirrors
-/// `utils::read_all_messages_from_file` but operates on in-memory data — used
-/// to round-trip blobs we used to read from disk.
+/// Decode a sequence of `varint(len)||proto` messages from a byte slice.
 fn read_all_messages_from_bytes<M: prost::Message + Default>(data: &[u8]) -> Result<Vec<M>> {
     let mut cursor = data;
     let mut messages = Vec::new();
