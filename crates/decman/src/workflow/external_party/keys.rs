@@ -12,9 +12,9 @@ use canton_proto_rs::com::digitalasset::canton::{
     protocol::v30::PartyToParticipant,
 };
 
-use crate::utils::compute_fingerprint;
-
 pub use common::fingerprint::fingerprint_from_public_key;
+
+use crate::utils::compute_fingerprint;
 
 /// Length of an Ed25519 signature, the only form Canton takes for that key.
 const ED25519_SIGNATURE_LEN: usize = 64;

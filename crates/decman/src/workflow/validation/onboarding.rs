@@ -2,15 +2,14 @@ use std::collections::BTreeSet;
 
 use sqlx::SqlitePool;
 
-use crate::{
-    canton_id::CantonId, config::NodeConfig, error::Result,
-    workflow::onboarding::steps::proposals::create::compute_decentralized_namespace,
-};
-
 use super::{
     decode::{decode_namespace_definition, decode_party_to_participant},
     expectations::PeerExpectations,
     own_keys::WhenUnrecorded,
+};
+use crate::{
+    canton_id::CantonId, config::NodeConfig, error::Result,
+    workflow::onboarding::steps::proposals::create::compute_decentralized_namespace,
 };
 
 impl PeerExpectations {

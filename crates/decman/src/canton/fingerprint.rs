@@ -1,9 +1,9 @@
 use canton_proto_rs::com::digitalasset::canton::crypto::v30::SigningPublicKey;
 use common::fingerprint::fingerprint_from_public_key;
 
-use crate::canton_id::Fingerprint;
-
 pub use common::fingerprint::MULTIHASH_SHA256_PREFIX;
+
+use crate::canton_id::Fingerprint;
 
 /// Compute the fingerprint (hash) of a Canton `SigningPublicKey`.
 ///
@@ -60,12 +60,12 @@ pub fn compute_fingerprint(key: &SigningPublicKey) -> Fingerprint {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
     use base64::Engine;
     use canton_proto_rs::com::digitalasset::canton::crypto::v30::{
         CryptoKeyFormat, SigningKeySpec,
     };
+
+    use super::*;
 
     /// Build a `SigningPublicKey` from a base64 DER-SPKI public key, as Canton's
     /// VaultService returns it.

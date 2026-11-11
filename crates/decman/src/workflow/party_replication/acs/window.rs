@@ -12,14 +12,13 @@ use canton_proto_rs::com::digitalasset::canton::admin::{
 };
 use sqlx::SqlitePool;
 
+use super::import::DISCONNECT_FIRST_MARKER;
 use crate::{
     config::NodeConfig,
     consts::{topology_retry_delay_secs, topology_retry_max_attempts},
     error::Result,
     workflow::party_replication::ReplicationTarget,
 };
-
-use super::import::DISCONNECT_FIRST_MARKER;
 
 /// Close the window: reconnect, confirm the synchronizer is healthy, and hand
 /// it back to automatic connection when the window had put it on manual.

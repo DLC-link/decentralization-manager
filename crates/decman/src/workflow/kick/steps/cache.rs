@@ -42,13 +42,12 @@ pub async fn prune_cached_membership(
 
 #[cfg(test)]
 mod tests {
+    use super::*;
     use crate::db::{
         MIGRATOR,
         rows::{DecPartyParticipantRow, DecPartyRow},
         schema::SchemaRead,
     };
-
-    use super::*;
 
     const TEST_NS: &str = "1220aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     /// Participant uids round-trip through `CantonId::parse`, which requires a

@@ -10,8 +10,6 @@
 
 use std::{fs, path::PathBuf};
 
-use ts_rs::{Config, TS};
-
 // The wire DTOs live across `common` (api + shared types) and `decman`
 // (governance/decimal cluster + node config). Glob the `common` modules; the
 // `decman`-only types are imported by name (a glob over `server` would clash
@@ -34,6 +32,7 @@ use dec_party_manager::{
         TransferInstructionsResponse, TransferProposalDetails,
     },
 };
+use ts_rs::{Config, TS};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let tmp = std::env::temp_dir().join("decman-ts-bindings");

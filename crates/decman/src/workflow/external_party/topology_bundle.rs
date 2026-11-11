@@ -27,15 +27,14 @@ use canton_proto_rs::com::digitalasset::canton::{
     },
 };
 
+use super::{
+    add_hosts::{AddHostsError, CurrentPartyTopology, read_party_to_participant},
+    keys::PartySignatureScheme,
+};
 use crate::{
     config::NodeConfig,
     error::Result,
     workflow::{topology, topology_version},
-};
-
-use super::{
-    add_hosts::{AddHostsError, CurrentPartyTopology, read_party_to_participant},
-    keys::PartySignatureScheme,
 };
 
 /// The transactions Canton generated for one change, plus the hash the party

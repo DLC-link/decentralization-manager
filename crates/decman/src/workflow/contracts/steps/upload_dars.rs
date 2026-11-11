@@ -1,5 +1,4 @@
 use base64::{Engine, engine::general_purpose::STANDARD};
-
 use canton_proto_rs::com::digitalasset::canton::admin::participant::v30::{
     UploadDarRequest, package_service_client::PackageServiceClient,
     upload_dar_request::UploadDarData,

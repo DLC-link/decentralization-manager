@@ -3,6 +3,10 @@ use canton_proto_rs::com::digitalasset::canton::{
     topology::admin::v30::SignTransactionsRequest,
 };
 
+use super::{
+    error::AddHostsError,
+    validate::{ExternalPartyAddHostsPayload, validate_add_hosts_topology},
+};
 use crate::{
     config::NodeConfig,
     utils,
@@ -14,11 +18,6 @@ use crate::{
         topology,
         topology_version::{self},
     },
-};
-
-use super::{
-    error::AddHostsError,
-    validate::{ExternalPartyAddHostsPayload, validate_add_hosts_topology},
 };
 
 /// Whether head state is already exactly what `bundle` asked for.

@@ -1,5 +1,13 @@
 use sqlx::SqlitePool;
 
+use super::{
+    failure::{report_departure, retry_peer_step},
+    payload::{
+        decode_add_party_config, extract_party_id_from_p2p_payload, is_new_member,
+        save_prepared_submissions_from_payload, send_skip_status,
+    },
+    steps::{command_matches_kind, persist_peer_step},
+};
 use crate::{
     auth::WorkflowAuth,
     config::{NodeConfig, Peer},
@@ -9,22 +17,11 @@ use crate::{
     server::DeclineInvitationPayload,
     utils,
     workflow::{
+        add_party, change_threshold, contracts, kick, onboarding, party_replication,
         storage::{WorkflowStorage, artifact_kinds},
+        topology,
         validation::PeerExpectations,
     },
-};
-
-use crate::workflow::{
-    add_party, change_threshold, contracts, kick, onboarding, party_replication, topology,
-};
-
-use super::{
-    failure::{report_departure, retry_peer_step},
-    payload::{
-        decode_add_party_config, extract_party_id_from_p2p_payload, is_new_member,
-        save_prepared_submissions_from_payload, send_skip_status,
-    },
-    steps::{command_matches_kind, persist_peer_step},
 };
 
 /// Start node in peer mode (client)

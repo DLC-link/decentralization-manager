@@ -1,5 +1,6 @@
 use std::time::Instant;
 
+use super::NoiseServer;
 use crate::{
     canton_id::CantonId,
     noise::{
@@ -12,8 +13,6 @@ use crate::{
         state::WorkflowStep,
     },
 };
-
-use super::NoiseServer;
 
 /// How often the source logs ACS export progress, in blocks. The target is
 /// disconnected from every synchronizer for the whole transfer, so both sides

@@ -18,11 +18,10 @@ use canton_proto_rs::com::digitalasset::canton::{
     },
 };
 
+use super::bounded::bounded_read;
 use crate::{
     canton_id::CantonId, config::PartyCredentials, error::Result, utils, workflow::topology,
 };
-
-use super::bounded::bounded_read;
 
 /// Most parties `ListParties` returns for one participant.
 ///

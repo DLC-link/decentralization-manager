@@ -1,13 +1,13 @@
 pub mod config;
 pub mod coordinator;
 
-pub use config::DarsConfig;
-
 use crate::{
     noise::MessageType,
     server::WorkflowKind,
     workflow::state::{WorkflowStep, workflow_steps},
 };
+
+pub use config::DarsConfig;
 
 workflow_steps! {
     /// DARs upload workflow steps

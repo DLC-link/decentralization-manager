@@ -304,9 +304,8 @@ impl Commands {
 mod tests {
     use dec_party_manager::config::NodeConfig;
 
-    use crate::cli::{Cli, Parser};
-
     use super::*;
+    use crate::cli::{Cli, Parser};
 
     /// The audit row names a tenant key by its index, so the index must follow
     /// the configured order and must not shift when a key is repeated.

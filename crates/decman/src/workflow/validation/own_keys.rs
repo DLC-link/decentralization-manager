@@ -4,6 +4,7 @@ use canton_proto_rs::com::digitalasset::canton::{
 };
 use sqlx::SqlitePool;
 
+use super::expectations::PeerExpectations;
 use crate::{
     canton_id::Fingerprint,
     config::NodeConfig,
@@ -15,8 +16,6 @@ use crate::{
         storage::{WorkflowStorage, artifact_kinds, identity_kinds},
     },
 };
-
-use super::expectations::PeerExpectations;
 
 /// What an unrecorded local key bundle means for a check that needs it.
 ///

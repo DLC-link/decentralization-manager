@@ -5,9 +5,8 @@ use canton_proto_rs::com::digitalasset::canton::{
     topology::admin::v30::topology_manager_read_service_client::TopologyManagerReadServiceClient,
 };
 
-use crate::{config::NodeConfig, error::Result, utils, workflow::topology};
-
 use super::{build_decentralized_namespace_request, build_party_to_participant_request};
+use crate::{config::NodeConfig, error::Result, utils, workflow::topology};
 
 /// One external party this participant hosts, read from topology.
 #[derive(Clone)]

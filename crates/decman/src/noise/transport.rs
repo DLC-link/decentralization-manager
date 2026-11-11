@@ -6,12 +6,11 @@ use hyper::{Body, Request, StatusCode};
 use tokio::net::TcpStream;
 use tokio_noise::handshakes::nn_psk2::Initiator;
 
-use crate::{config::NoiseRetryConfig, error::Result};
-
 use super::{
     CHUNK_SIZE, MAX_CHUNK_COUNT, MAX_CHUNKED_TOTAL_SIZE, Message, MessageType, NoiseError,
     is_transient,
 };
+use crate::{config::NoiseRetryConfig, error::Result};
 
 /// Timeout for control-plane Noise requests (command polls, acks, small
 /// messages): covers connect + handshake + one round-trip. Kept short so a

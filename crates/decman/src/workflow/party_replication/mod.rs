@@ -254,9 +254,8 @@ impl ReplicationTarget {
 mod tests {
     use sqlx::SqlitePool;
 
-    use crate::db::MIGRATOR;
-
     use super::*;
+    use crate::db::MIGRATOR;
 
     const ARTIFACTS: ReplicationArtifacts = ReplicationArtifacts {
         export_offset: "test_export_offset",

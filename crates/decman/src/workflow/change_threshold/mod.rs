@@ -3,9 +3,6 @@ pub mod coordinator;
 pub mod peer;
 pub mod steps;
 
-pub use config::ChangeThresholdConfig;
-pub use steps::{create_proposals, export_state, sign_proposals, submit_change};
-
 use crate::{
     noise::MessageType,
     server::WorkflowKind,
@@ -15,6 +12,9 @@ use crate::{
         topology::DnsP2pArtifactKinds,
     },
 };
+
+pub use config::ChangeThresholdConfig;
+pub use steps::{create_proposals, export_state, sign_proposals, submit_change};
 
 /// The artefact kinds of a change-threshold run's DNS + P2P proposals and of each
 /// member's signed pair.

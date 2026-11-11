@@ -8,6 +8,11 @@ use canton_proto_rs::com::digitalasset::canton::admin::participant::v30::{
 use sqlx::SqlitePool;
 use tonic::transport::Channel;
 
+use super::{
+    packages::local_package_ids,
+    stream::{ImportError, ImportParams, give_up_transfer, pull_first_block, run_import},
+    window::{close_import_window, synchronizer_healthy, verify_healthy},
+};
 use crate::{
     config::NodeConfig,
     consts::acs_import_attempts_in_window,
@@ -15,12 +20,6 @@ use crate::{
     error::Result,
     utils,
     workflow::party_replication::{ReplicationTarget, pipe::PipeBlock},
-};
-
-use super::{
-    packages::local_package_ids,
-    stream::{ImportError, ImportParams, give_up_transfer, pull_first_block, run_import},
-    window::{close_import_window, synchronizer_healthy, verify_healthy},
 };
 
 /// Pause before restarting a broken transfer, so a cancelled `ImportPartyAcs`

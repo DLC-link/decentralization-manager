@@ -2,6 +2,7 @@ use std::{collections::HashSet, sync::Arc};
 
 use common::types::AcsTransferProgress;
 
+use super::NoiseServer;
 use crate::{
     canton_id::CantonId,
     noise::{Message, NoiseError},
@@ -10,8 +11,6 @@ use crate::{
         dars::DarsStep, kick::KickStep, onboarding::OnboardingStep,
     },
 };
-
-use super::NoiseServer;
 
 /// A coordinator's in-flight workflow server, type-erased over the step type so
 /// the single always-on Noise listener can route workflow-command messages to

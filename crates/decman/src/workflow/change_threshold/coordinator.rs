@@ -2,6 +2,10 @@ use std::{collections::HashSet, sync::Arc};
 
 use anyhow::Context;
 
+use super::{
+    ARTIFACTS, ChangeThresholdConfig, ChangeThresholdStep,
+    steps::{create_proposals, export_state, submit_change},
+};
 use crate::{
     config::{NetworkConfig, NodeConfig},
     error::Result,
@@ -12,11 +16,6 @@ use crate::{
         storage::{WorkflowStorage, artifact_kinds},
         topology::store_signed_pairs,
     },
-};
-
-use super::{
-    ARTIFACTS, ChangeThresholdConfig, ChangeThresholdStep,
-    steps::{create_proposals, export_state, submit_change},
 };
 
 pub async fn start_coordinator(

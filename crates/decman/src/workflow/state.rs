@@ -594,12 +594,13 @@ impl<S: WorkflowStep + 'static> WorkflowState<S> {
 
 #[cfg(test)]
 mod tests {
-    use crate::canton_id::{NAMESPACE_LENGTH, Namespace};
-    use crate::db::MIGRATOR;
-
     // `SqlitePool` and the workflow types come in via `use super::*` (the parent
     // module already imports `sqlx::SqlitePool`).
     use super::*;
+    use crate::{
+        canton_id::{NAMESPACE_LENGTH, Namespace},
+        db::MIGRATOR,
+    };
 
     workflow_steps! {
         /// Minimal three-step workflow used to exercise the generic state machine.

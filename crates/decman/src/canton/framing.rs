@@ -1,10 +1,9 @@
-use bytes::{Buf, BufMut, BytesMut};
-use prost::Message;
-
 use anyhow::Context;
+use bytes::{Buf, BufMut, BytesMut};
 use canton_proto_rs::com::digitalasset::canton::version::v1::{
     UntypedVersionedMessage, untyped_versioned_message,
 };
+use prost::Message;
 
 use crate::error::Result;
 
@@ -196,9 +195,9 @@ pub fn decode_length_prefixed(data: &[u8], expected_count: usize) -> Result<Vec<
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
     use prost_types::Timestamp;
+
+    use super::*;
 
     #[test]
     fn test_encode_decode_length_prefixed() -> Result {

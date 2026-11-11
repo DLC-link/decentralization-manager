@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use base64::{Engine, engine::general_purpose::STANDARD};
 
+use super::{DarsConfig, DarsStep};
 use crate::{
     config::{NetworkConfig, NodeConfig},
     error::Result,
@@ -10,8 +11,6 @@ use crate::{
     utils,
     workflow::contracts,
 };
-
-use super::{DarsConfig, DarsStep};
 
 pub async fn start_coordinator(
     node_config: NodeConfig,

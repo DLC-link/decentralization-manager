@@ -8,6 +8,7 @@ use anyhow::Context;
 use bytes::{Buf, BufMut, BytesMut};
 use sqlx::SqlitePool;
 
+use super::DnsP2pArtifactKinds;
 use crate::{
     canton_id::CantonId,
     config::NodeConfig,
@@ -15,8 +16,6 @@ use crate::{
     noise::{MessageType, client::NoiseClient},
     workflow::storage::WorkflowStorage,
 };
-
-use super::DnsP2pArtifactKinds;
 
 /// Send this node's signed DNS + P2P pair to the coordinator as one
 /// `message_type` message.
@@ -216,14 +215,13 @@ mod tests {
     mod storage {
         use sqlx::SqlitePool;
 
+        use super::super::*;
+        use super::frame;
         use crate::{
             canton_id::{CantonId, NAMESPACE_LENGTH, Namespace},
             db::MIGRATOR,
             workflow::{add_party, change_threshold, kick, storage::WorkflowStorage},
         };
-
-        use super::super::*;
-        use super::frame;
 
         const RUN: &str = "run-1";
 

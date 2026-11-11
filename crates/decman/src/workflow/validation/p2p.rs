@@ -2,9 +2,8 @@ use std::collections::BTreeSet;
 
 use canton_proto_rs::com::digitalasset::canton::protocol::v30::{PartyToParticipant, enums};
 
-use crate::{canton_id::CantonId, error::Result, server::WorkflowKind};
-
 use super::expectations::PeerExpectations;
+use crate::{canton_id::CantonId, error::Result, server::WorkflowKind};
 
 impl PeerExpectations {
     /// The hosting-participant set must be exactly the accepted members, and

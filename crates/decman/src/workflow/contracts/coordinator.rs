@@ -2,6 +2,10 @@ use std::sync::Arc;
 
 use anyhow::Context;
 
+use super::{
+    ContractsConfig, ContractsStep,
+    steps::{execute_submissions, prepare_submissions, sign_submissions},
+};
 use crate::{
     auth::WorkflowAuth,
     config::{NetworkConfig, NodeConfig},
@@ -13,11 +17,6 @@ use crate::{
         state::WorkflowState,
         storage::{WorkflowStorage, artifact_kinds},
     },
-};
-
-use super::{
-    ContractsConfig, ContractsStep,
-    steps::{execute_submissions, prepare_submissions, sign_submissions},
 };
 
 pub async fn start_coordinator(

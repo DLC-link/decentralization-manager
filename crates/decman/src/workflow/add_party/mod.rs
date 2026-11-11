@@ -3,9 +3,6 @@ pub mod coordinator;
 pub mod peer;
 pub mod steps;
 
-pub use config::AddPartyConfig;
-pub use steps::{author_clear_proposal, generate_keys, sign_clear_proposal, sign_proposals};
-
 use crate::{
     auth::WorkflowAuth,
     canton_id::CantonId,
@@ -17,6 +14,9 @@ use crate::{
         topology::DnsP2pArtifactKinds,
     },
 };
+
+pub use config::AddPartyConfig;
+pub use steps::{author_clear_proposal, generate_keys, sign_clear_proposal, sign_proposals};
 
 /// Resolve a ledger-API token for `party` from the node's auth registry.
 ///

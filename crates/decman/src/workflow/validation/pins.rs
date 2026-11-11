@@ -2,9 +2,8 @@ use std::collections::BTreeSet;
 
 use sha2::{Digest, Sha256};
 
-use crate::{canton_id::CantonId, error::Result};
-
 use super::{decode::decode_party_to_participant, expectations::PeerExpectations};
+use crate::{canton_id::CantonId, error::Result};
 
 impl PeerExpectations {
     /// Validate the add-party onboarding-flag clearing proposal: same party,

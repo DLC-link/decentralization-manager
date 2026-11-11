@@ -5,6 +5,12 @@ use canton_proto_rs::com::digitalasset::canton::protocol::v30::{
 };
 use sqlx::SqlitePool;
 
+use super::{
+    decode::{decode_namespace_definition, decode_party_to_participant, decode_proposal_serial},
+    expectations::PeerExpectations,
+    head::{Departing, OwnerRecords, SynchronizerHead, check_against_head},
+    own_keys::WhenUnrecorded,
+};
 use crate::{
     canton_id::{CantonId, Fingerprint},
     config::NodeConfig,
@@ -16,13 +22,6 @@ use crate::{
         onboarding::steps::proposals::create::decode_keys_payload,
         storage::{WorkflowStorage, artifact_kinds},
     },
-};
-
-use super::{
-    decode::{decode_namespace_definition, decode_party_to_participant, decode_proposal_serial},
-    expectations::PeerExpectations,
-    head::{Departing, OwnerRecords, SynchronizerHead, check_against_head},
-    own_keys::WhenUnrecorded,
 };
 
 impl PeerExpectations {

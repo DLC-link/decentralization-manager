@@ -8,6 +8,7 @@ use decman_lib::framework::{
     record::{field_party, field_timestamp},
 };
 
+use super::attempt::{Progress, UnhostEnv};
 use crate::{
     canton_id::CantonId,
     config::NodeConfig,
@@ -15,8 +16,6 @@ use crate::{
     utils,
     workflow::external_party::unhost_audit::{self},
 };
-
-use super::attempt::{Progress, UnhostEnv};
 
 /// The Splice templates are named by package so Canton matches the contracts of
 /// every vetted `splice-amulet` version, not just one package id.

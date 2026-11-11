@@ -229,11 +229,12 @@ fn p2p_matches(actual: &PartyToParticipant, expected: &PartyToParticipant) -> bo
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use canton_proto_rs::com::digitalasset::canton::{
         crypto::v30::{SigningKeysWithThreshold, SigningPublicKey},
         protocol::v30::party_to_participant::HostingParticipant,
     };
+
+    use super::*;
 
     #[test]
     fn post_kick_dns_rejects_old_authority_and_accepts_reordered_owners() {

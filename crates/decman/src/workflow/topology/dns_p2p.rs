@@ -13,6 +13,11 @@ use canton_proto_rs::com::digitalasset::canton::{
 };
 use sqlx::SqlitePool;
 
+use super::{
+    reads::signed_head_for,
+    requests::{add_transactions_request, synchronizer_store_id},
+    retry::sign_transactions_with_topology_retry,
+};
 use crate::{
     canton_id::CantonId,
     config::NodeConfig,
@@ -20,12 +25,6 @@ use crate::{
     error::Result,
     utils,
     workflow::{storage::WorkflowStorage, topology_version},
-};
-
-use super::{
-    reads::signed_head_for,
-    requests::{add_transactions_request, synchronizer_store_id},
-    retry::sign_transactions_with_topology_retry,
 };
 
 /// Where a proposal stands against the transaction the synchronizer holds for

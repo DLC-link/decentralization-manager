@@ -9,6 +9,7 @@ use futures::SinkExt;
 use sha2::{Digest, Sha256};
 use sqlx::SqlitePool;
 
+use super::import::TransferSource;
 use crate::{
     config::NodeConfig,
     consts::{ACS_BLOCK_FETCH_MAX_DELAY_SECS, acs_block_fetch_attempts},
@@ -22,8 +23,6 @@ use crate::{
         storage::{WorkflowStorage, artifact_kinds},
     },
 };
-
-use super::import::TransferSource;
 
 /// How often a moving transfer records progress for the UI, in bytes. Finer
 /// than the log cadence because a readout that only moves every 256 MiB looks

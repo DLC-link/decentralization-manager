@@ -3,21 +3,19 @@ use canton_proto_rs::com::digitalasset::canton::{
     topology::admin::v30::{AuthorizeRequest, authorize_request},
 };
 use common::api::HostPermission;
-
 use sqlx::SqlitePool;
-
-use crate::{
-    canton_id::CantonId,
-    config::NodeConfig,
-    utils,
-    workflow::{topology, topology_version::ProposalFormat},
-};
 
 use super::{
     error::AddHostsError,
     head::read_party_to_participant,
     mapping::{add_hosts_mapping, hosts_present},
     replication::capture_replication_offsets,
+};
+use crate::{
+    canton_id::CantonId,
+    config::NodeConfig,
+    utils,
+    workflow::{topology, topology_version::ProposalFormat},
 };
 
 /// Which half of Canton's "party namespace + the new participant namespace" this

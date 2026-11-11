@@ -4,6 +4,7 @@ use canton_proto_rs::com::digitalasset::canton::protocol::v30::{
     DecentralizedNamespaceDefinition, PartyToKeyMapping, PartyToParticipant,
 };
 
+use super::delta::{AllowedDelta, already_applied, check_dns_against_head, check_set_delta};
 use crate::{
     canton_id::{CantonId, Fingerprint},
     config::NodeConfig,
@@ -12,8 +13,6 @@ use crate::{
     utils,
     workflow::topology,
 };
-
-use super::delta::{AllowedDelta, already_applied, check_dns_against_head, check_set_delta};
 
 /// The party's head topology state as this node reads it.
 pub(super) trait TopologyHead {

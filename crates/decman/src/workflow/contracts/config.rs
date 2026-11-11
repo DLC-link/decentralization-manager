@@ -1,12 +1,12 @@
 use serde::{Deserialize, Serialize};
 
-use crate::{canton_id::CantonId, error::Result};
-
 /// Wire DTOs for contract / DAR deployment. Defined in `common::api` (the
 /// frontend's TypeScript is generated from them); re-exported so
 /// `crate::workflow::contracts::{ContractDefinition, DarFile, FieldDefinition}`
 /// resolve unchanged.
 pub use common::api::{ContractDefinition, DarFile, FieldDefinition};
+
+use crate::{canton_id::CantonId, error::Result};
 
 /// Configuration for contracts workflow
 #[derive(Clone, Debug, Deserialize, Serialize)]

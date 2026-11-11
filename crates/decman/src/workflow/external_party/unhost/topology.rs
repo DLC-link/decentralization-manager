@@ -12,16 +12,15 @@ use canton_proto_rs::com::digitalasset::canton::{
     },
 };
 
+use super::{
+    attempt::{Finished, Stop, read_hosted},
+    error::UnhostError,
+};
 use crate::{
     config::NodeConfig,
     consts::topology_retry_delay_secs,
     utils,
     workflow::{topology, topology_version::ProposalFormat},
-};
-
-use super::{
-    attempt::{Finished, Stop, read_hosted},
-    error::UnhostError,
 };
 
 /// How many head-state reads the topology step makes, one topology retry delay
