@@ -1,4 +1,3 @@
-use bytes::Buf;
 use sqlx::SqlitePool;
 use uuid::Uuid;
 
@@ -14,6 +13,7 @@ use canton_proto_rs::com::{
 };
 
 use crate::{
+    canton::framing::read_all_messages_from_bytes,
     config::NodeConfig,
     error::Result,
     utils,
@@ -238,27 +238,6 @@ fn created_contract_ids(transaction: &Option<Transaction>) -> Vec<String> {
             })
         })
         .collect()
-}
-
-/// Decode a sequence of `varint(len)||proto` messages from a byte slice. Mirrors
-/// `utils::read_all_messages_from_file` but operates on in-memory data — used
-/// to round-trip blobs we used to read from disk.
-fn read_all_messages_from_bytes<M: prost::Message + Default>(data: &[u8]) -> Result<Vec<M>> {
-    let mut cursor = data;
-    let mut messages = Vec::new();
-    while cursor.has_remaining() {
-        let len = prost::encoding::decode_varint(&mut cursor)? as usize;
-        if cursor.remaining() < len {
-            anyhow::bail!(
-                "Incomplete message: expected {len} bytes, but only {remaining} remaining",
-                remaining = cursor.remaining()
-            );
-        }
-        let message_bytes = &cursor[..len];
-        cursor.advance(len);
-        messages.push(M::decode(message_bytes)?);
-    }
-    Ok(messages)
 }
 
 #[cfg(test)]
