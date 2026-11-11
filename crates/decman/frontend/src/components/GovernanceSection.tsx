@@ -351,32 +351,17 @@ export const GovernanceSection = ({
   // One party id per line. The action replaces the whole set, so it starts
   // from the current observers.
   const [disclosureObserversText, setDisclosureObserversText] = useState("");
-  // New fields for additional action types
-  const [operatorParty, setOperatorParty] = useState(
-    defaultOperatorParty || "",
-  );
-  // Sync the autofetched operator party (from App.tsx) into both the action
-  // and proposal operator states once it arrives — without this, the fields
-  // stay empty whenever the fetch completes after this component has already
-  // mounted with an empty default.
+  // Sync the autofetched operator party (from App.tsx) into the proposal
+  // operator state once it arrives — without this, the fields stay empty
+  // whenever the fetch completes after this component has already mounted
+  // with an empty default.
   useEffect(() => {
     if (defaultOperatorParty) {
-      setOperatorParty(defaultOperatorParty);
       setProposalOperator(defaultOperatorParty);
     }
   }, [defaultOperatorParty]);
-  const [userServiceCid, setUserServiceCid] = useState("");
   const [amuletRulesCid, setAmuletRulesCid] = useState("");
   const [dsoPartyId, setDsoPartyId] = useState("");
-
-  // Utility onboarding fields
-  const [holderParty, setHolderParty] = useState("");
-
-  // Credential fields
-  const [credentialId, setCredentialId] = useState("");
-  const [credentialDescription, setCredentialDescription] = useState("");
-  const [credentialOfferCid, setCredentialOfferCid] = useState("");
-  const [claims, setClaims] = useState<Claim[]>([]);
 
   // Available services from ACS
   const [providerServices, setProviderServices] = useState<
@@ -572,10 +557,6 @@ export const GovernanceSection = ({
       if (userRes.ok) {
         const response: UserServicesResponse = await userRes.json();
         setUserServices(response.services);
-        // Auto-select first user service
-        if (response.services.length > 0) {
-          setUserServiceCid(response.services[0].contract_id);
-        }
       }
     } catch (e) {
       console.error("Failed to fetch services:", e);
@@ -584,17 +565,7 @@ export const GovernanceSection = ({
     }
   }, [partyId]);
 
-  // Fetch services when action type needs service selection
-  useEffect(() => {
-    if (
-      selectedActionType === "credential_offer_free" ||
-      selectedActionType === "credential_accept_free"
-    ) {
-      fetchServices();
-    }
-  }, [selectedActionType, fetchServices]);
-
-  // Also fetch services when a proposal type that creates a service-request is
+  // Fetch services when a proposal type that creates a service-request is
   // selected — used to detect when the corresponding service already exists,
   // so the form can warn that the proposal would be a no-op.
   // SetupUtility additionally needs the ProviderService list to populate its
@@ -734,13 +705,12 @@ export const GovernanceSection = ({
 
   useEffect(() => {
     if (
-      selectedActionType === "credential_accept_free" ||
       proposalType === "accept_free_credential" ||
       proposalType === "accept_paid_credential"
     ) {
       fetchCredentialOffers();
     }
-  }, [selectedActionType, proposalType, fetchCredentialOffers]);
+  }, [proposalType, fetchCredentialOffers]);
 
   // Offers this party can take via the Free direction: it is the holder and
   // the offer carries no billing params (`CredentialOffer_AcceptFree` rejects
@@ -856,15 +826,10 @@ export const GovernanceSection = ({
     if (proposalType === "accept_free_credential" && !proposalCredentialOfferCid) {
       setProposalCredentialOfferCid(offerCid);
     }
-    if (selectedActionType === "credential_accept_free" && !credentialOfferCid) {
-      setCredentialOfferCid(offerCid);
-    }
   }, [
     proposalType,
-    selectedActionType,
     acceptableCredentialOffers,
     proposalCredentialOfferCid,
-    credentialOfferCid,
   ]);
 
   // The same prefill for the Accept Paid Credential form.
@@ -1375,12 +1340,6 @@ export const GovernanceSection = ({
     }
   }, []);
 
-  useEffect(() => {
-    if (selectedActionType === "dev_net_feature_app") {
-      fetchNetworkInfo();
-    }
-  }, [selectedActionType, fetchNetworkInfo]);
-
   // Read the newest open mining round from scan for the Accept Paid
   // Credential form. Without DECPM_SCAN_URL the node answers 422, and the
   // form shows its message.
@@ -1617,28 +1576,6 @@ export const GovernanceSection = ({
           disclosure_observers: observers.length > 0 ? observers : undefined,
         };
       }
-      case "credential_offer_free":
-        return {
-          type: "credential_offer_free",
-          operator: operatorParty,
-          user_service_cid: userServiceCid,
-          holder: holderParty,
-          id: credentialId,
-          description: credentialDescription,
-          claims,
-        };
-      case "credential_accept_free":
-        return {
-          type: "credential_accept_free",
-          operator: operatorParty,
-          user_service_cid: userServiceCid,
-          credential_offer_cid: credentialOfferCid,
-        };
-      case "dev_net_feature_app":
-        return {
-          type: "dev_net_feature_app",
-          amulet_rules_cid: amuletRulesCid,
-        };
       default:
         return null;
     }
@@ -1818,7 +1755,7 @@ export const GovernanceSection = ({
   // Clear the action form fields after a successful submit so the next
   // action starts blank — keeps the form expanded and the submit button
   // visible (the new action shows up in the notification queue on its own).
-  // NOTE: operatorParty / dsoPartyId / amuletRulesCid are intentionally NOT
+  // NOTE: dsoPartyId / amuletRulesCid are intentionally NOT
   // cleared — they're autofetched (or seeded once) and should persist across
   // submissions of the same dialog session.
   const resetActionForm = () => {
@@ -1839,12 +1776,6 @@ export const GovernanceSection = ({
     setTimeoutMicroseconds(
       governanceState?.action_confirmation_timeout_microseconds ?? 3600000000,
     );
-    setUserServiceCid("");
-    setHolderParty("");
-    setCredentialId("");
-    setCredentialDescription("");
-    setCredentialOfferCid("");
-    setClaims([]);
   };
 
   const handleSubmitAction = async () => {
@@ -2719,262 +2650,6 @@ export const GovernanceSection = ({
             }}
           />
         );
-      case "credential_offer_free":
-        return (
-          <>
-            <TextField
-              label="Operator Party"
-              value={operatorParty}
-              onChange={(e) => setOperatorParty(e.target.value)}
-              size="small"
-              fullWidth
-              sx={{ mb: 2 }}
-              slotProps={{
-                input: {
-                  endAdornment: fieldHelpAdornment(
-                    "Party id of the utility operator the user service is registered with.",
-                    "Help for Operator Party",
-                  ),
-                },
-              }}
-            />
-            <Box sx={{ display: "flex", gap: 1, alignItems: "center", mb: 2 }}>
-              <FormControl fullWidth size="small">
-                <InputLabel>
-                  <TextHelp text="UserService contract that will issue the credential offer.">
-                    User Service
-                  </TextHelp>
-                </InputLabel>
-                <Select
-                  value={userServiceCid}
-                  label="User Service"
-                  onChange={(e) => setUserServiceCid(e.target.value)}
-                  MenuProps={{ disableScrollLock: true }}
-                >
-                  {servicesLoading ? (
-                    <MenuItem disabled>Loading services...</MenuItem>
-                  ) : userServices.length > 0 ? (
-                    userServices.map((svc) => (
-                      <MenuItem key={svc.contract_id} value={svc.contract_id}>
-                        {svc.contract_id}
-                      </MenuItem>
-                    ))
-                  ) : (
-                    <MenuItem disabled>No user services found</MenuItem>
-                  )}
-                </Select>
-              </FormControl>
-              <Tooltip title="Refresh">
-                <span>
-                  <IconButton
-                    size="small"
-                    onClick={fetchServices}
-                    disabled={servicesLoading}
-                  >
-                    {servicesLoading ? <CircularProgress size={20} /> : <RefreshIcon />}
-                  </IconButton>
-                </span>
-              </Tooltip>
-            </Box>
-            <TextField
-              label="Holder Party"
-              value={holderParty}
-              onChange={(e) => setHolderParty(e.target.value)}
-              size="small"
-              fullWidth
-              sx={{ mb: 2 }}
-              slotProps={{
-                input: {
-                  endAdornment: fieldHelpAdornment(
-                    "Party id that will receive the credential offer.",
-                    "Help for Holder Party",
-                  ),
-                },
-              }}
-            />
-            <TextField
-              label="Credential ID"
-              value={credentialId}
-              onChange={(e) => setCredentialId(e.target.value)}
-              size="small"
-              fullWidth
-              sx={{ mb: 2 }}
-              slotProps={{
-                input: {
-                  endAdornment: fieldHelpAdornment(
-                    "Unique identifier for this credential (free-form string).",
-                    "Help for Credential ID",
-                  ),
-                },
-              }}
-            />
-            <TextField
-              label="Credential Description"
-              value={credentialDescription}
-              onChange={(e) => setCredentialDescription(e.target.value)}
-              size="small"
-              fullWidth
-              sx={{ mb: 2 }}
-              slotProps={{
-                input: {
-                  endAdornment: fieldHelpAdornment(
-                    "Free-form human-readable description of what this credential certifies.",
-                    "Help for Credential Description",
-                  ),
-                },
-              }}
-            />
-            <Typography variant="caption" color="text.secondary">
-              <TextHelp text="Statements baked into the credential. Each row is a (subject, property, value) triple.">
-                Claims
-              </TextHelp>
-            </Typography>
-            {claims.map((claim, idx) => (
-              <Box key={idx} sx={{ display: "flex", gap: 1, mb: 1 }}>
-                <TextField
-                  label="Subject"
-                  value={claim.subject}
-                  onChange={(e) => {
-                    const updated = [...claims];
-                    updated[idx] = { ...claim, subject: e.target.value };
-                    setClaims(updated);
-                  }}
-                  size="small"
-                  sx={{ flex: 1 }}
-                  slotProps={{
-                    input: {
-                      endAdornment: fieldHelpAdornment(
-                        "What this claim is about (e.g. the holder party id).",
-                        "Help for Subject",
-                      ),
-                    },
-                  }}
-                />
-                <TextField
-                  label="Property"
-                  value={claim.property}
-                  onChange={(e) => {
-                    const updated = [...claims];
-                    updated[idx] = { ...claim, property: e.target.value };
-                    setClaims(updated);
-                  }}
-                  size="small"
-                  sx={{ flex: 1 }}
-                  slotProps={{
-                    input: {
-                      endAdornment: fieldHelpAdornment(
-                        "Attribute name being asserted (e.g. \"kyc_verified\").",
-                        "Help for Property",
-                      ),
-                    },
-                  }}
-                />
-                <TextField
-                  label="Value"
-                  value={claim.value}
-                  onChange={(e) => {
-                    const updated = [...claims];
-                    updated[idx] = { ...claim, value: e.target.value };
-                    setClaims(updated);
-                  }}
-                  size="small"
-                  sx={{ flex: 1 }}
-                  slotProps={{
-                    input: {
-                      endAdornment: fieldHelpAdornment(
-                        "Value of the property (e.g. \"true\" or a region code).",
-                        "Help for Value",
-                      ),
-                    },
-                  }}
-                />
-                <Button
-                  size="small"
-                  color="error"
-                  onClick={() => setClaims(claims.filter((_, i) => i !== idx))}
-                >
-                  Remove
-                </Button>
-              </Box>
-            ))}
-            <Button
-              size="small"
-              onClick={() =>
-                setClaims([...claims, { subject: "", property: "", value: "" }])
-              }
-            >
-              Add Claim
-            </Button>
-          </>
-        );
-      case "credential_accept_free":
-        return (
-          <>
-            <TextField
-              label="Operator Party"
-              value={operatorParty}
-              onChange={(e) => setOperatorParty(e.target.value)}
-              size="small"
-              fullWidth
-              sx={{ mb: 2 }}
-              slotProps={{
-                input: {
-                  endAdornment: fieldHelpAdornment(
-                    "Party id of the utility operator the user service is registered with.",
-                    "Help for Operator Party",
-                  ),
-                },
-              }}
-            />
-            <Box sx={{ display: "flex", gap: 1, alignItems: "center", mb: 2 }}>
-              <FormControl fullWidth size="small">
-                <InputLabel>
-                  <TextHelp text="UserService contract that will accept the credential offer on this party's behalf.">
-                    User Service
-                  </TextHelp>
-                </InputLabel>
-                <Select
-                  value={userServiceCid}
-                  label="User Service"
-                  onChange={(e) => setUserServiceCid(e.target.value)}
-                  MenuProps={{ disableScrollLock: true }}
-                >
-                  {servicesLoading ? (
-                    <MenuItem disabled>Loading services...</MenuItem>
-                  ) : userServices.length > 0 ? (
-                    userServices.map((svc) => (
-                      <MenuItem key={svc.contract_id} value={svc.contract_id}>
-                        {svc.contract_id}
-                      </MenuItem>
-                    ))
-                  ) : (
-                    <MenuItem disabled>No user services found</MenuItem>
-                  )}
-                </Select>
-              </FormControl>
-              <Tooltip title="Refresh">
-                <span>
-                  <IconButton
-                    size="small"
-                    onClick={() => {
-                      fetchServices();
-                      fetchCredentialOffers();
-                    }}
-                    disabled={servicesLoading || credentialOffersLoading}
-                  >
-                    {servicesLoading ? <CircularProgress size={20} /> : <RefreshIcon />}
-                  </IconButton>
-                </span>
-              </Tooltip>
-            </Box>
-            {renderCredentialOfferAutocomplete(
-              credentialOfferCid,
-              setCredentialOfferCid,
-            )}
-          </>
-        );
-      case "dev_net_feature_app":
-        return renderAmuletRulesCidField();
       default:
         return null;
     }
