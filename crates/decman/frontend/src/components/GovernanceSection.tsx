@@ -29,7 +29,6 @@ import RefreshIcon from "@mui/icons-material/Refresh";
 import {
   API_BASE,
   ADMIN_ACCESS,
-  TEMPLATE_ALLOCATION_FACTORY,
   TEMPLATE_AMULET,
   TEMPLATE_REGISTRAR_SERVICE,
 } from "../constants";
@@ -97,6 +96,13 @@ import type {
 } from "../types";
 
 type ActionTypeKey = ActionType["type"];
+
+// The proposal types the type menu offers. The API also accepts mint, burn
+// and provision_provider_service, but this form never builds them.
+type FormProposalType = Exclude<
+  ProposalType["type"],
+  "mint" | "burn" | "provision_provider_service"
+>;
 
 interface GovernanceSectionProps {
   partyId: string;
@@ -170,7 +176,7 @@ export const GovernanceSection = ({
   const [showProposalForm, setShowProposalForm] = useState(
     view === "proposals",
   );
-  const [proposalType, setProposalType] = useState<ProposalType["type"]>("setup_cc_preapproval");
+  const [proposalType, setProposalType] = useState<FormProposalType>("setup_cc_preapproval");
   const [proposalProvider, setProposalProvider] = useState("");
   const [proposalExpectedDso, setProposalExpectedDso] = useState("");
   const [proposalDelegate, setProposalDelegate] = useState("");
@@ -252,8 +258,6 @@ export const GovernanceSection = ({
   const [proposalRevokeDelegationCid, setProposalRevokeDelegationCid] = useState("");
   const [proposalRegistrarServiceCid, setProposalRegistrarServiceCid] = useState("");
   const [proposalEnableResultContracts, setProposalEnableResultContracts] = useState<"true" | "false" | "clear">("true");
-  const [proposalAllocationFactoryCid, setProposalAllocationFactoryCid] = useState("");
-  const [proposalRecipient, setProposalRecipient] = useState("");
   const [proposalHolder, setProposalHolder] = useState("");
   // Credential proposal state (offer / accept, free and paid)
   const [proposalUserServiceCid, setProposalUserServiceCid] = useState("");
@@ -440,11 +444,7 @@ export const GovernanceSection = ({
   });
   const [servicesLoading, setServicesLoading] = useState(false);
 
-  // Contracts fetched by template (with blobs)
-  const [allocationFactoryContracts, setAllocationFactoryContracts] = useState<ContractWithBlob[]>([]);
   const [amuletRulesLoading, setAmuletRulesLoading] = useState(false);
-
-  // Burn Mint Factory (from external API, used for processor deployment)
 
   // Update rulesContractId when prop changes
   useEffect(() => {
@@ -1057,8 +1057,6 @@ export const GovernanceSection = ({
   // Fetch instruments when a proposal type needs them
   useEffect(() => {
     if (
-      proposalType === "mint" ||
-      proposalType === "burn" ||
       proposalType === "accept_mint_request" ||
       proposalType === "accept_burn_request" ||
       proposalType === "set_provider_app_reward_beneficiaries" ||
@@ -1191,17 +1189,6 @@ export const GovernanceSection = ({
     }
   }, [selectedHoldingKey, transferHoldings, transferFactories]);
 
-  // Mint/Burn always use the decparty as the instrument admin — seed the field
-  // unconditionally so it's populated even before (or without) an Instrument
-  // selection from the dropdown. NOT applied to setup_token_preapproval or
-  // transfer because those can target foreign-issued instruments where the
-  // admin is a different party.
-  useEffect(() => {
-    if (proposalType === "mint" || proposalType === "burn") {
-      setProposalInstrumentIdAdmin(partyId);
-    }
-  }, [proposalType, partyId]);
-
   // The CreateUserServiceRequest / CreateProviderServiceRequest proposals
   // always use the dec party itself as the user / provider — the field
   // exists because the Daml choice still asks for it, but every operator
@@ -1263,12 +1250,8 @@ export const GovernanceSection = ({
     }
   }, [proposalType, fetchOwnAmulets]);
 
-  // Fetch AllocationFactory contracts when Mint/Burn proposal is selected.
-  // (set_enable_result_contracts needs RegistrarService instead.)
+  // Fetch the contract lists the selected proposal type needs.
   useEffect(() => {
-    if (proposalType === "mint" || proposalType === "burn") {
-      fetchContractsByTemplate(TEMPLATE_ALLOCATION_FACTORY).then(setAllocationFactoryContracts);
-    }
     if (proposalType === "set_enable_result_contracts") {
       fetchContractsByTemplate(TEMPLATE_REGISTRAR_SERVICE).then(setRegistrarServiceContracts);
     }
@@ -1838,7 +1821,7 @@ export const GovernanceSection = ({
   // the next one's payload. Fields prefilled from app or network state get
   // that value back rather than an empty string, because their fetches only
   // run once.
-  const resetProposalForm = (type: ProposalType["type"] = proposalType) => {
+  const resetProposalForm = (type: FormProposalType = proposalType) => {
     setProposalProvider(type === "create_provider_service_request" ? partyId : "");
     setProposalOperator(defaultOperatorParty || "");
     setProposalExpectedDso(dsoPartyId);
@@ -1852,7 +1835,7 @@ export const GovernanceSection = ({
     setProposalAmount("");
     setSelectedHoldingKey("");
     setShowTransferAdvanced(false);
-    setProposalInstrumentIdAdmin(type === "mint" || type === "burn" ? partyId : "");
+    setProposalInstrumentIdAdmin("");
     setProposalInstrumentIdId("");
     setProposalInputHoldingCids("");
     setProposalTransferExpiryHours(String(DEFAULT_TRANSFER_EXPIRY_HOURS));
@@ -1874,8 +1857,6 @@ export const GovernanceSection = ({
     setProposalRevokeDelegationCid("");
     setProposalRegistrarServiceCid("");
     setProposalEnableResultContracts("true");
-    setProposalAllocationFactoryCid("");
-    setProposalRecipient("");
     setProposalHolder("");
     setProposalUserServiceCid("");
     setProposalCredentialId("");
@@ -2041,9 +2022,6 @@ export const GovernanceSection = ({
             description: proposalDescription,
           };
           break;
-        case "provision_provider_service":
-          proposal = { type: "provision_provider_service" };
-          break;
         case "setup_utility":
           proposal = {
             type: "setup_utility",
@@ -2181,32 +2159,6 @@ export const GovernanceSection = ({
           };
           break;
         }
-        // The type menu hides Mint and Burn, so their forms have no shard
-        // picker and send no block list shards.
-        case "mint":
-          proposal = {
-            type: "mint",
-            allocation_factory_cid: proposalAllocationFactoryCid,
-            instrument_id: { admin: proposalInstrumentIdAdmin, id: proposalInstrumentIdId },
-            instrument_configuration_cid: proposalInstrumentConfigurationCid,
-            recipient: proposalRecipient,
-            amount: proposalAmount,
-            description: proposalDescription,
-            block_list_shard_cids: [],
-          };
-          break;
-        case "burn":
-          proposal = {
-            type: "burn",
-            allocation_factory_cid: proposalAllocationFactoryCid,
-            instrument_id: { admin: proposalInstrumentIdAdmin, id: proposalInstrumentIdId },
-            instrument_configuration_cid: proposalInstrumentConfigurationCid,
-            holder: proposalHolder,
-            amount: proposalAmount,
-            description: proposalDescription,
-            block_list_shard_cids: [],
-          };
-          break;
         case "accept_mint_request":
           if (acceptNeedsBlockListShards && acceptBlockListShardCids.length === 0) {
             throw new Error("Pick at least one Block List Shard");
@@ -2905,7 +2857,7 @@ export const GovernanceSection = ({
                   value={proposalType}
                   label="Proposal Type"
                   onChange={(e) => {
-                    const next = e.target.value as ProposalType["type"];
+                    const next = e.target.value as FormProposalType;
                     if (next !== proposalType) resetProposalForm(next);
                     setProposalType(next);
                   }}
@@ -2930,13 +2882,6 @@ export const GovernanceSection = ({
                   <MenuItem value="update_instrument_configuration">Update Instrument Configuration</MenuItem>
                   <MenuItem value="create_transfer_rule">Create Transfer Rule</MenuItem>
                   <MenuItem value="create_delegated_batched_markers_proxy">Create Delegated Batched Markers Proxy</MenuItem>
-                  {/*
-                  Hidden per Notion "Clean up Utility Plugin" task — keep the
-                  ProposalType variant + form field + submit handler wired so
-                  existing API consumers still work; just not surfaced in the
-                  dropdown for now.
-                  <MenuItem value="provision_provider_service">Provision Provider Service</MenuItem>
-                  */}
                   <ListSubheader sx={{ fontStyle: "italic", lineHeight: 1.5, pl: 4 }}>Actions</ListSubheader>
                   <MenuItem value="accept_mint_request">Accept Mint Request</MenuItem>
                   <MenuItem value="accept_burn_request">Accept Burn Request</MenuItem>
@@ -3471,12 +3416,6 @@ export const GovernanceSection = ({
                     />
                   )}
                 />
-              )}
-
-              {proposalType === "provision_provider_service" && (
-                <Typography variant="caption" color="text.secondary">
-                  Provisions a Utility-Registry ProviderService with operator = proposer and provider = governance party. No parameters required.
-                </Typography>
               )}
 
               {proposalType === "setup_utility" && (
@@ -4203,133 +4142,6 @@ export const GovernanceSection = ({
                     },
                   }}
                 />
-              )}
-
-              {(proposalType === "mint" || proposalType === "burn") && (
-                <>
-                  <FormControl size="small" fullWidth required>
-                    <InputLabel>
-                      <TextHelp
-                        text={
-                          proposalType === "mint"
-                            ? "Instrument being minted. The governance party is the issuer."
-                            : "Instrument being burned. The governance party is the issuer."
-                        }
-                      >
-                        Instrument
-                      </TextHelp>
-                    </InputLabel>
-                    <Select
-                      label="Instrument"
-                      value={proposalInstrumentConfigurationCid}
-                      onChange={(e) => {
-                        const cid = e.target.value;
-                        const inst = availableInstruments.find(
-                          (i) => i.contract_id === cid,
-                        );
-                        setProposalInstrumentConfigurationCid(cid);
-                        // instrument_admin is always the decparty (seeded by
-                        // the effect above) — only `id` comes from the picked
-                        // instrument.
-                        if (inst) {
-                          setProposalInstrumentIdId(inst.instrument_id);
-                        }
-                      }}
-                      MenuProps={{ disableScrollLock: true }}
-                    >
-                      {instrumentsLoading ? (
-                        <MenuItem disabled>Loading instruments…</MenuItem>
-                      ) : availableInstruments.length > 0 ? (
-                        availableInstruments.map((inst) => (
-                          <MenuItem key={inst.contract_id} value={inst.contract_id}>
-                            {inst.instrument_id} ({inst.contract_id.slice(0, 8)}…)
-                          </MenuItem>
-                        ))
-                      ) : (
-                        <MenuItem disabled>
-                          No instruments found — run SetupUtility first
-                        </MenuItem>
-                      )}
-                    </Select>
-                  </FormControl>
-                  <FormControl size="small" fullWidth required>
-                    <InputLabel>
-                      <TextHelp text="AllocationFactory contract used to allocate the new holding.">
-                        AllocationFactory
-                      </TextHelp>
-                    </InputLabel>
-                    <Select
-                      label="AllocationFactory"
-                      value={proposalAllocationFactoryCid}
-                      onChange={(e) => setProposalAllocationFactoryCid(e.target.value)}
-                      MenuProps={{ disableScrollLock: true }}
-                    >
-                      {allocationFactoryContracts.length > 0 ? (
-                        allocationFactoryContracts.map((c) => (
-                          <MenuItem key={c.contract_id} value={c.contract_id}>
-                            {c.contract_id}
-                          </MenuItem>
-                        ))
-                      ) : (
-                        <MenuItem disabled>
-                          No AllocationFactory found — run SetupUtility first
-                        </MenuItem>
-                      )}
-                    </Select>
-                  </FormControl>
-                  <TextField
-                    size="small"
-                    label={proposalType === "mint" ? "Recipient Party" : "Holder Party"}
-                    value={proposalType === "mint" ? proposalRecipient : proposalHolder}
-                    onChange={(e) => proposalType === "mint" ? setProposalRecipient(e.target.value) : setProposalHolder(e.target.value)}
-                    fullWidth
-                    required
-                    slotProps={{
-                      input: {
-                        endAdornment: fieldHelpAdornment(
-                          proposalType === "mint"
-                            ? "Party id that will receive the newly minted tokens."
-                            : "Party id whose tokens will be burned.",
-                          proposalType === "mint" ? "Help for Recipient Party" : "Help for Holder Party",
-                        ),
-                      },
-                    }}
-                  />
-                  <TextField
-                    size="small"
-                    label="Amount"
-                    value={proposalAmount}
-                    onChange={(e) => setProposalAmount(e.target.value)}
-                    fullWidth
-                    required
-                    slotProps={{
-                      input: {
-                        endAdornment: fieldHelpAdornment(
-                          proposalType === "mint"
-                            ? "How much of the selected instrument to mint."
-                            : "How much of the selected instrument to burn.",
-                          "Help for Amount",
-                        ),
-                      },
-                    }}
-                  />
-                  <TextField
-                    size="small"
-                    label="Description"
-                    value={proposalDescription}
-                    onChange={(e) => setProposalDescription(e.target.value)}
-                    fullWidth
-                    required
-                    slotProps={{
-                      input: {
-                        endAdornment: fieldHelpAdornment(
-                          "Free-form human-readable note explaining why this mint or burn is being proposed.",
-                          "Help for Description",
-                        ),
-                      },
-                    }}
-                  />
-                </>
               )}
 
               {(proposalType === "accept_mint_request" || proposalType === "accept_burn_request") && (() => {
