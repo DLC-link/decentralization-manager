@@ -321,10 +321,10 @@ impl Message {
         // rather than corrupting the stream or panicking the encoder.
         let instance_bytes: &[u8] = if instance_bytes.len() > u16::MAX as usize {
             tracing::error!(
-                "Message.instance is {} bytes (> {}); dropping the routing key to keep the \
+                "Message.instance is {len} bytes (> {max}); dropping the routing key to keep the \
                  frame decodable",
-                instance_bytes.len(),
-                u16::MAX
+                len = instance_bytes.len(),
+                max = u16::MAX
             );
             &[]
         } else {

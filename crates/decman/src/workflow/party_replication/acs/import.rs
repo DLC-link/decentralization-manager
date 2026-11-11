@@ -293,9 +293,9 @@ async fn preflight(
             verify_healthy(config).await.map_err(|e| {
                 anyhow::anyhow!(
                     "refusing to start ACS import: participant is not connected and healthy \
-                     on synchronizer '{}' and did not settle on its own — it is not \
+                     on synchronizer '{synchronizer}' and did not settle on its own — it is not \
                      reconnected from here; check it before retrying add-party: {e}",
-                    config.synchronizer()
+                    synchronizer = config.synchronizer()
                 )
             })?;
             connected = connectivity
@@ -349,8 +349,8 @@ where
         .await?;
 
     tracing::info!(
-        "Disconnecting from {} synchronizer(s) for the ACS import...",
-        connected.len()
+        "Disconnecting from {count} synchronizer(s) for the ACS import...",
+        count = connected.len()
     );
     // Disconnect + import as one fallible unit. Whatever its outcome — including
     // a `DisconnectSynchronizer` failing partway through the loop — the

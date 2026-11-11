@@ -32,7 +32,11 @@ pub(super) struct RealmAccess {
 /// our config is Keycloak-shaped today; non-Keycloak support plugs in by
 /// adding a variant and adjusting this function.
 pub(super) fn oidc_issuer_of(cfg: &KeycloakConfig) -> String {
-    format!("{}/realms/{}", cfg.url.trim_end_matches('/'), cfg.realm)
+    format!(
+        "{url}/realms/{realm}",
+        url = cfg.url.trim_end_matches('/'),
+        realm = cfg.realm
+    )
 }
 
 /// Base URL the *server* fetches OIDC metadata from (discovery, JWKS,
@@ -49,7 +53,11 @@ pub(super) fn oidc_discovery_base_of(cfg: &KeycloakConfig) -> String {
         .as_deref()
         .filter(|s| !s.is_empty())
         .unwrap_or(&cfg.url);
-    format!("{}/realms/{}", base.trim_end_matches('/'), cfg.realm)
+    format!(
+        "{base}/realms/{realm}",
+        base = base.trim_end_matches('/'),
+        realm = cfg.realm
+    )
 }
 
 /// Force `url`'s scheme + host + port to match `authority_source`, preserving
@@ -80,7 +88,10 @@ pub(super) fn rewrite_authority(url: &str, authority_source: &str) -> String {
 /// `https://{domain}/` in the JWT, but `extract_issuer` strips trailing
 /// slashes — match against the slash-less form so the comparison lines up.
 pub(super) fn auth0_issuer_of(cfg: &Auth0Config) -> String {
-    format!("https://{}", cfg.domain.trim_end_matches('/'))
+    format!(
+        "https://{domain}",
+        domain = cfg.domain.trim_end_matches('/')
+    )
 }
 
 /// Extract the `iss` claim from a JWT without verifying its signature.
@@ -102,7 +113,7 @@ pub(super) fn extract_issuer(token: &str) -> Result<String, ValidationError> {
         .or_else(|_| {
             // Some providers use standard (padded) base64.
             let padding = (4 - payload.len() % 4) % 4;
-            let padded = format!("{payload}{}", "=".repeat(padding));
+            let padded = format!("{payload}{pad}", pad = "=".repeat(padding));
             STANDARD.decode(padded)
         })
         .map_err(|_| ValidationError::MalformedToken)?;

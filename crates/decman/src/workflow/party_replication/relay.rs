@@ -801,7 +801,10 @@ mod tests {
     const DISCARDED: &str = "the copy was discarded";
 
     fn target(instance: &str) -> ReplicationTarget {
-        let id = |p: &str| match CantonId::parse(&format!("{p}::1220{}", "aa".repeat(32))) {
+        let id = |p: &str| match CantonId::parse(&format!(
+            "{p}::1220{digest}",
+            digest = "aa".repeat(32)
+        )) {
             Ok(id) => id,
             Err(e) => panic!("test id must parse: {e}"),
         };

@@ -112,8 +112,8 @@ fn encode_dars_payload(config: &DarsConfig) -> Result<Vec<u8>> {
     for dar_file in &config.dar_files {
         let data = STANDARD.decode(&dar_file.data).map_err(|e| {
             anyhow::anyhow!(
-                "Failed to decode base64 DAR data for {}: {e}",
-                dar_file.filename
+                "Failed to decode base64 DAR data for {filename}: {e}",
+                filename = dar_file.filename
             )
         })?;
         dar_files.push((dar_file.filename.clone(), data));

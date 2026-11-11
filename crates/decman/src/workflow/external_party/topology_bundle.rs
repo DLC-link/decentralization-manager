@@ -105,8 +105,7 @@ pub(super) async fn generate_p2p_change(
 ) -> Result<GeneratedChange, AddHostsError> {
     let next_serial = current_serial.checked_add(1).ok_or_else(|| {
         AddHostsError::Invalid(anyhow::anyhow!(
-            "{party_id} is at serial {s}, which cannot be advanced",
-            s = current_serial
+            "{party_id} is at serial {current_serial}, which cannot be advanced"
         ))
     })?;
 

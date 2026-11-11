@@ -68,9 +68,9 @@ fn mint_credentials(cfg: &InsecureAuthConfig) -> (String, String) {
     match mint_unsafe_token(&cfg.secret, &cfg.audience, &cfg.subject) {
         Ok(token) => {
             tracing::info!(
-                "Minted unsafe Canton HMAC token (aud={}, sub={})",
-                cfg.audience,
-                cfg.subject
+                "Minted unsafe Canton HMAC token (aud={audience}, sub={subject})",
+                audience = cfg.audience,
+                subject = cfg.subject
             );
             (token, cfg.subject.clone())
         }

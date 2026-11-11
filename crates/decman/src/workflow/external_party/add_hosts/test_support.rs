@@ -24,7 +24,7 @@ use super::{
 use crate::{canton_id::CantonId, config::NodeConfig, error::Result};
 
 pub(super) fn participant(tag: u8) -> CantonId {
-    let namespace = format!("1220{}", format!("{tag:02x}").repeat(32));
+    let namespace = format!("1220{digest}", digest = format!("{tag:02x}").repeat(32));
     match CantonId::parse(&format!("participant-{tag}::{namespace}")) {
         Ok(id) => id,
         Err(e) => panic!("test participant id must parse: {e}"),

@@ -230,7 +230,7 @@ mod tests {
     #[test]
     fn an_omitted_confirmation_threshold_rejoins_the_two() -> Result {
         let config = ChangeThresholdConfig::new(
-            CantonId::parse(&format!("xyz::1220{}", "ab".repeat(32)))?,
+            CantonId::parse(&format!("xyz::1220{digest}", digest = "ab".repeat(32)))?,
             2,
             None,
             2,

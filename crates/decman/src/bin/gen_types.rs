@@ -258,15 +258,19 @@ fn main() -> Result<(), Box<dyn Error>> {
     // ts-rs only emits types, so the shared page size is appended by hand from
     // the Rust constant — that keeps `common::api::PAGE_SIZE` the only place
     // the value is written down.
-    blocks.push(format!(
-        "export const PAGE_SIZE = {page_size};",
-        page_size = PAGE_SIZE
-    ));
+    blocks.push(format!("export const PAGE_SIZE = {PAGE_SIZE};"));
 
     let header = "// Code generated from the Rust wire DTOs by `gen-types` (ts-rs).\n\
                   // DO NOT EDIT. Regenerate with `just gen-types`.\n\n";
     let dest = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("frontend/src/types.generated.ts");
-    fs::write(&dest, format!("{header}{}\n", blocks.join("\n\n")))?;
-    eprintln!("wrote {} ({} types)", dest.display(), blocks.len());
+    fs::write(
+        &dest,
+        format!("{header}{body}\n", body = blocks.join("\n\n")),
+    )?;
+    eprintln!(
+        "wrote {dest} ({count} types)",
+        dest = dest.display(),
+        count = blocks.len()
+    );
     Ok(())
 }

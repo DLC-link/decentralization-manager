@@ -374,9 +374,8 @@ pub async fn send_noise_message_with_chunked_response(
 
     if assembled.len() != total_size {
         tracing::warn!(
-            "noise: chunked-response assembly produced {} bytes but metadata declared {}",
-            assembled.len(),
-            total_size,
+            "noise: chunked-response assembly produced {len} bytes but metadata declared {total_size}",
+            len = assembled.len()
         );
         return Err(NoiseError::InvalidMessage);
     }
@@ -803,7 +802,9 @@ mod tests {
         for round in 0..ROUNDS {
             match send_noise_message("127.0.0.1", port, &psk, b"peer", &request).await {
                 Ok(bytes) if bytes == response => {}
-                Ok(bytes) => failures.push(format!("round {round}: {} bytes", bytes.len())),
+                Ok(bytes) => {
+                    failures.push(format!("round {round}: {len} bytes", len = bytes.len()))
+                }
                 Err(e) => failures.push(format!("round {round}: {e}")),
             }
         }
@@ -811,8 +812,8 @@ mod tests {
         relay.abort();
         assert!(
             failures.is_empty(),
-            "{} of {ROUNDS} rounds failed: {failures:?}",
-            failures.len()
+            "{failed} of {ROUNDS} rounds failed: {failures:?}",
+            failed = failures.len()
         );
         Ok(())
     }
@@ -990,8 +991,10 @@ mod tests {
     async fn the_workflow_client_names_an_older_coordinator() -> Result {
         let root = tempfile::tempdir()?;
         let mut config = NodeConfig::default().with_root_dir(root.path());
-        config.node.participant_id =
-            Some(CantonId::parse(&format!("peer::1220{}", "a".repeat(64)))?);
+        config.node.participant_id = Some(CantonId::parse(&format!(
+            "peer::1220{digest}",
+            digest = "a".repeat(64)
+        ))?);
         let keys = NoiseKeypair::generate();
         tokio::fs::create_dir_all(config.data_dir()).await?;
         keys.save_to_file(config.key_file_path()).await?;
@@ -1001,7 +1004,10 @@ mod tests {
         let (port, served, server) =
             refusing_peer(psk, StatusCode::SERVICE_UNAVAILABLE, refusal_on(older)).await?;
         let coordinator = Peer {
-            participant_id: CantonId::parse(&format!("coordinator::1220{}", "b".repeat(64)))?,
+            participant_id: CantonId::parse(&format!(
+                "coordinator::1220{digest}",
+                digest = "b".repeat(64)
+            ))?,
             name: "Older coordinator".into(),
             address: "127.0.0.1".into(),
             port,

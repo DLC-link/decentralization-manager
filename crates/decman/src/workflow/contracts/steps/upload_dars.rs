@@ -25,8 +25,8 @@ pub async fn upload_dars(config: &NodeConfig, dar_files: &[DarFile]) -> Result {
         // Decode base64 data
         let dar_data = STANDARD.decode(&dar_file.data).map_err(|e| {
             anyhow::anyhow!(
-                "Failed to decode base64 DAR data for {}: {e}",
-                dar_file.filename
+                "Failed to decode base64 DAR data for {filename}: {e}",
+                filename = dar_file.filename
             )
         })?;
 

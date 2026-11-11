@@ -546,10 +546,13 @@ mod tests {
     ) -> anyhow::Result<()> {
         let mut config = NodeConfig::default();
         config.node.participant_id = Some(CantonId::parse(&format!(
-            "participant-3::1220{}",
-            "cc".repeat(32)
+            "participant-3::1220{digest}",
+            digest = "cc".repeat(32)
         ))?);
-        let other = CantonId::parse(&format!("participant-1::1220{}", "aa".repeat(32)))?;
+        let other = CantonId::parse(&format!(
+            "participant-1::1220{digest}",
+            digest = "aa".repeat(32)
+        ))?;
         let relay_sessions = Arc::new(RelaySessions::new());
         let env = UnhostEnv {
             config: &config,

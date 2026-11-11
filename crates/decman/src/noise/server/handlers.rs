@@ -204,8 +204,8 @@ impl<S: WorkflowStep + 'static> NoiseServer<S> {
         let chunk_data = &payload[start..end];
 
         tracing::debug!(
-            "Sending chunk {chunk_index} ({start}..{end}, {} bytes)",
-            chunk_data.len()
+            "Sending chunk {chunk_index} ({start}..{end}, {len} bytes)",
+            len = chunk_data.len()
         );
 
         // Build Chunk response: [chunk_index (4 bytes)] [chunk_data (variable)]
@@ -319,8 +319,8 @@ impl<S: WorkflowStep + 'static> NoiseServer<S> {
         // Only peers this run actually invited may fail it.
         if !self.peers.iter().any(|p| p.participant_id == peer_id) {
             tracing::warn!(
-                "Ignoring invitation decline from {peer_id}: not a participant of run {}",
-                self.workflow_state.instance_name()
+                "Ignoring invitation decline from {peer_id}: not a participant of run {instance_name}",
+                instance_name = self.workflow_state.instance_name()
             );
             return Message::new_empty(MessageType::Ack);
         }
@@ -345,8 +345,8 @@ impl<S: WorkflowStep + 'static> NoiseServer<S> {
         if payload.abandoned {
             let reason = payload.reason.as_deref().unwrap_or("no reason given");
             tracing::warn!(
-                "Peer {peer_id} gave up on run {}: {reason}",
-                self.workflow_state.instance_name()
+                "Peer {peer_id} gave up on run {instance_name}: {reason}",
+                instance_name = self.workflow_state.instance_name()
             );
             self.departed
                 .write()
@@ -397,8 +397,8 @@ impl<S: WorkflowStep + 'static> NoiseServer<S> {
                 send_noise_message(&peer.address, peer.port, &psk, identity_bytes, &message).await
             {
                 tracing::warn!(
-                    "Best-effort CancelInvite to {} after decline failed: {e}",
-                    peer.participant_id
+                    "Best-effort CancelInvite to {participant_id} after decline failed: {e}",
+                    participant_id = peer.participant_id
                 );
             }
         }

@@ -59,7 +59,7 @@ impl<S: WorkflowStep + 'static> NoiseServer<S> {
             if silent >= PEER_SILENCE_LIMIT {
                 unavailable.insert(
                     peer.clone(),
-                    format!("has been unreachable for {}s", silent.as_secs()),
+                    format!("has been unreachable for {secs}s", secs = silent.as_secs()),
                 );
             }
         }

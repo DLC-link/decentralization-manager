@@ -675,7 +675,10 @@ mod tests {
         let current = vec![key(1), key(2), key(3), key(4)];
         let claims = claims(&[("p1", 1), ("p3", 3)]);
         match signing_keys_after_kick(&current, "p3", &uids(&["p1", "p2"]), &claims) {
-            Ok(kept) => panic!("expected a refusal, kept {:?}", seeds(&kept)),
+            Ok(kept) => panic!(
+                "expected a refusal, kept {kept_seeds:?}",
+                kept_seeds = seeds(&kept)
+            ),
             Err(error) => assert!(
                 error.to_string().contains("p2 has not reported"),
                 "unexpected error: {error}"

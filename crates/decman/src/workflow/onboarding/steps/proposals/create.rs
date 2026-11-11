@@ -240,7 +240,7 @@ fn namespace_definition(
     // Step 7: Create DecentralizedNamespaceDefinition
     let mut owners_vec: Vec<String> = namespaces.iter().cloned().collect();
     owners_vec.sort(); // Sort for consistent ordering
-    tracing::debug!("DNS owners (sorted): {:?}", owners_vec);
+    tracing::debug!("DNS owners (sorted): {owners_vec:?}");
 
     let namespace_def = DecentralizedNamespaceDefinition {
         decentralized_namespace: decentralized_namespace.clone(),

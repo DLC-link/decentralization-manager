@@ -353,7 +353,10 @@ async fn write_private(path: &Path, contents: &[u8]) -> Result {
     let suffix: [u8; 8] = Generate::try_generate()
         .map_err(|e| anyhow::anyhow!("temporary name generation failed: {e}"))?;
     let mut temporary = path.as_os_str().to_owned();
-    temporary.push(format!(".tmp-{}", hex::encode(suffix)));
+    temporary.push(format!(
+        ".tmp-{suffix_hex}",
+        suffix_hex = hex::encode(suffix)
+    ));
     let temporary = PathBuf::from(temporary);
     let mut options = OpenOptions::new();
     options.write(true).create_new(true);
@@ -629,7 +632,7 @@ mod tests {
     fn a_key_file_holds_hex_or_base64() {
         let key = [9u8; 32];
         for contents in [
-            format!("{}\n", hex::encode(key)).into_bytes(),
+            format!("{key_hex}\n", key_hex = hex::encode(key)).into_bytes(),
             STANDARD.encode(key).into_bytes(),
         ] {
             assert_eq!(parse_key(&contents).as_deref(), Some(&key));
@@ -646,7 +649,8 @@ mod tests {
 
     #[tokio::test]
     async fn the_default_key_file_is_created_once_and_read_back() -> Result {
-        let dir = std::env::temp_dir().join(format!("decman-key-store-{}", uuid::Uuid::new_v4()));
+        let dir =
+            std::env::temp_dir().join(format!("decman-key-store-{id}", id = uuid::Uuid::new_v4()));
         tokio::fs::create_dir_all(&dir).await?;
         let path = dir.join(DEFAULT_KEY_FILENAME);
         let created = read_or_create_default(&path).await?;

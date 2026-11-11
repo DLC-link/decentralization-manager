@@ -223,7 +223,10 @@ mod tests {
         expectations.kind = WorkflowKind::Onboarding;
         expectations.prefix = Some("treasury".to_string());
 
-        let party = format!("treasury::{}", canton_id("x", 9)?.namespace.to_hex());
+        let party = format!(
+            "treasury::{namespace}",
+            namespace = canton_id("x", 9)?.namespace.to_hex()
+        );
         let payload = encode_proposal(topology_mapping::Mapping::PartyToParticipant(p2p(
             &party,
             &[a],

@@ -696,7 +696,7 @@ mod tests {
     use crate::canton_id::{NAMESPACE_LENGTH, Namespace};
 
     fn test_peer(index: u8, pub_key: &str) -> Peer {
-        let namespace = format!("1220{:0>64}", format!("{index:02x}"));
+        let namespace = format!("1220{index_hex:0>64}", index_hex = format!("{index:02x}"));
         Peer {
             participant_id: CantonId::parse(&format!("node{index}::{namespace}")).unwrap(),
             name: format!("Node {index}"),

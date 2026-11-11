@@ -125,8 +125,8 @@ pub async fn export_state(
     // A member that owns the namespace without hosting the party leaves only
     // the owner set; create_proposals keeps every host and key.
     tracing::info!(
-        "Member to kick: {kick_participant:?}, {}",
-        if hosted {
+        "Member to kick: {kick_participant:?}, {hosting}",
+        hosting = if hosted {
             "hosts the party"
         } else {
             "does not host the party"
@@ -141,8 +141,8 @@ pub async fn export_state(
     // Verify that the namespace fingerprint is in the DNS owners list
     if !namespace_def.owners.contains(kick_target_hex) {
         anyhow::bail!(
-            "Namespace fingerprint {kick_target_hex} is not in the DNS owners list. Available owners: {:?}",
-            namespace_def.owners
+            "Namespace fingerprint {kick_target_hex} is not in the DNS owners list. Available owners: {owners:?}",
+            owners = namespace_def.owners
         );
     }
 

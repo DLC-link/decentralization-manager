@@ -401,7 +401,7 @@ mod tests {
 
     fn host(tag: u8, onboarding: bool) -> HostingParticipant {
         HostingParticipant {
-            participant_uid: format!("participant-{tag}::1220{}", "aa".repeat(32)),
+            participant_uid: format!("participant-{tag}::1220{digest}", digest = "aa".repeat(32)),
             permission: ParticipantPermission::Confirmation as i32,
             onboarding: onboarding.then_some(hosting_participant::Onboarding {}),
         }

@@ -44,8 +44,8 @@ pub async fn start_peer(
     workflow_auth: Option<WorkflowAuth>,
 ) -> Result {
     tracing::info!(
-        "Initializing Noise client to connect to coordinator {}...",
-        coordinator.participant_id
+        "Initializing Noise client to connect to coordinator {participant_id}...",
+        participant_id = coordinator.participant_id
     );
 
     // The invitation the operator accepted, read back before the first

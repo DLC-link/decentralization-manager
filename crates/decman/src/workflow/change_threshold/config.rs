@@ -72,7 +72,7 @@ mod tests {
     #[test]
     fn a_config_persisted_before_the_confirmation_threshold_still_decodes() -> Result {
         let config: ChangeThresholdConfig = serde_json::from_value(serde_json::json!({
-            "decentralized_party_id": format!("xyz::1220{}", "ab".repeat(32)),
+            "decentralized_party_id": format!("xyz::1220{digest}", digest = "ab".repeat(32)),
             "new_threshold": 2,
             "previous_threshold": 3,
             "instance_name": "xyz-change-threshold-1",

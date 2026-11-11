@@ -83,8 +83,8 @@ impl NoiseClient {
         );
 
         tracing::debug!(
-            "Sending message type {:?} to coordinator at {socket_addr}",
-            message.msg_type
+            "Sending message type {msg_type:?} to coordinator at {socket_addr}",
+            msg_type = message.msg_type
         );
 
         // Create HTTP request
@@ -297,8 +297,8 @@ impl NoiseClient {
 
         if payload.len() != total_size {
             tracing::warn!(
-                "chunked-response assembly produced {} bytes but metadata declared {total_size}",
-                payload.len()
+                "chunked-response assembly produced {len} bytes but metadata declared {total_size}",
+                len = payload.len()
             );
             return Err(NoiseError::InvalidMessage);
         }

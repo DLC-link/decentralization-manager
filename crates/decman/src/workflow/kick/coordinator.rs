@@ -142,11 +142,11 @@ pub async fn start_coordinator(
                         .await
                         {
                             tracing::warn!(
-                                "Kick submitted but pruning owner key {} ({:?}) from cached \
+                                "Kick submitted but pruning owner key {fingerprint} ({participant_id:?}) from cached \
                                  membership failed: {e}. Refresh /decentralized-parties before \
                                  re-adding it.",
-                                kick_config.namespace_fingerprint,
-                                kick_config.participant_id
+                                fingerprint = kick_config.namespace_fingerprint,
+                                participant_id = kick_config.participant_id
                             );
                         }
                         workflow_state.advance_step().await;

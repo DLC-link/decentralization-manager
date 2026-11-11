@@ -217,9 +217,9 @@ impl JwtValidator {
         // explicit check keeps the invariant local.
         if header.alg != entry.alg {
             tracing::warn!(
-                "jwt header alg {:?} does not match JWK alg {:?}",
-                header.alg,
-                entry.alg
+                "jwt header alg {header_alg:?} does not match JWK alg {jwk_alg:?}",
+                header_alg = header.alg,
+                jwk_alg = entry.alg
             );
             return Err(ValidationError::InactiveToken);
         }
@@ -252,9 +252,7 @@ impl JwtValidator {
             Some(azp) if azp == expected_client_id => {}
             other => {
                 tracing::warn!(
-                    "jwt azp {:?} does not match expected client_id {}",
-                    other,
-                    expected_client_id
+                    "jwt azp {other:?} does not match expected client_id {expected_client_id}"
                 );
                 return Err(ValidationError::InactiveToken);
             }
@@ -324,7 +322,7 @@ impl JwtValidator {
         let creds = self.party_credentials.read().await;
         for party in creds.iter() {
             if let Some(ref a) = party.auth0
-                && format!("https://{}", a.domain.trim_end_matches('/')) == issuer
+                && format!("https://{domain}", domain = a.domain.trim_end_matches('/')) == issuer
             {
                 return Some(TrustedIssuer {
                     client_id: a.client_id.clone(),
@@ -604,12 +602,12 @@ mod tests {
 
     async fn setup_with_role_claim(role_claim: Option<&str>) -> (MockServer, JwtValidator, String) {
         let server = MockServer::start().await;
-        let issuer = format!("{}/realms/test", server.uri());
+        let issuer = format!("{uri}/realms/test", uri = server.uri());
 
         Mock::given(method("GET"))
             .and(path("/realms/test/.well-known/openid-configuration"))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-                "jwks_uri": format!("{}/jwks", server.uri()),
+                "jwks_uri": format!("{uri}/jwks", uri = server.uri()),
             })))
             .mount(&server)
             .await;
@@ -857,7 +855,10 @@ mod tests {
         if let Some(last) = sig_chars.last_mut() {
             *last = if *last == 'A' { 'B' } else { 'A' };
         }
-        let tampered = format!("{head}.{}", sig_chars.into_iter().collect::<String>());
+        let tampered = format!(
+            "{head}.{signature}",
+            signature = sig_chars.into_iter().collect::<String>()
+        );
         assert!(matches!(
             validator.validate(&tampered).await,
             Err(ValidationError::InactiveToken)

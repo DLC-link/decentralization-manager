@@ -344,7 +344,10 @@ mod tests {
     const OWNER_KEY: [u8; 32] = [4u8; 32];
 
     fn participant() -> CantonId {
-        match CantonId::parse(&format!("participant-1::1220{}", "aa".repeat(32))) {
+        match CantonId::parse(&format!(
+            "participant-1::1220{digest}",
+            digest = "aa".repeat(32)
+        )) {
             Ok(id) => id,
             Err(e) => panic!("test participant must parse: {e}"),
         }
@@ -381,7 +384,7 @@ mod tests {
         assert!(is_local_to(&config(), &local_party_id()));
         assert!(!is_local_to(
             &config(),
-            &format!("alice::1220{}", "bb".repeat(32))
+            &format!("alice::1220{digest}", digest = "bb".repeat(32))
         ));
         assert!(!is_local_to(&config(), "malformed"));
     }
@@ -434,7 +437,7 @@ mod tests {
     fn refuses_a_party_this_node_does_not_host() {
         let mut mapping = local_mapping();
         mapping.participants[0] = HostingParticipant {
-            participant_uid: format!("participant-9::1220{}", "cc".repeat(32)),
+            participant_uid: format!("participant-9::1220{digest}", digest = "cc".repeat(32)),
             permission: ParticipantPermission::Submission as i32,
             onboarding: Some(hosting_participant::Onboarding {}),
         };
