@@ -4,12 +4,14 @@ use std::collections::{HashMap, HashSet};
 
 use canton_proto_rs::com::digitalasset::canton::{
     crypto::admin::v30::vault_service_client::VaultServiceClient,
+    protocol::v30::{DecentralizedNamespaceDefinition, PartyToParticipant},
     topology::admin::v30::{
         topology_aggregation_service_client::TopologyAggregationServiceClient,
         topology_manager_read_service_client::TopologyManagerReadServiceClient,
     },
 };
 use sqlx::SqlitePool;
+use tonic::transport::Channel;
 
 use super::{
     discovery::PARTY_READ_CONCURRENCY, list::PartyReadOpts, owner_claims::with_cached_owner_claims,
@@ -17,7 +19,7 @@ use super::{
 use crate::{
     auth::WorkflowAuth,
     canton_id::CantonId,
-    config::{NodeConfig, PartyCredentials, default_package_config},
+    config::{NodeConfig, PackageConfig, PartyCredentials, default_package_config},
     db::schema::SchemaRead,
     error::Result,
     party_discovery::{
@@ -27,8 +29,8 @@ use crate::{
     },
     server::{
         queries::{
-            contract_templates_all, fetch_package_versions, get_contracts, get_party_metadata,
-            rules_templates,
+            TemplateId, contract_templates_all, fetch_package_versions, get_contracts,
+            get_party_metadata, rules_templates,
         },
         types::{
             DecentralizedPartiesResponse, DecentralizedParty, ParticipantInfo, ResponseSource,
@@ -51,6 +53,105 @@ pub(super) async fn fetch_decentralized_parties(
     party_credentials: &[PartyCredentials],
     opts: PartyReadOpts,
 ) -> Result<DecentralizedPartiesResponse> {
+    let exact_party_filters =
+        exact_party_filters(config, db, prefix_filter, party_credentials).await?;
+
+    let mut clients = TopologyClients::connect(config).await?;
+
+    // Its own Admin API call on a cold process-wide cache, so it carries the
+    // same deadline as the reads that follow it.
+    let synchronizer_id =
+        bounded_call("get_synchronizer_id", utils::get_synchronizer_id(config)).await?;
+    let participant_id = config.participant_id().to_string();
+
+    // Wanted twice: to discover which namespaces this node owns a key in, and
+    // to pick each party's `my_owner_key` below.
+    let namespace_key_fingerprints = my_namespace_fingerprints(&mut clients.vault).await?;
+
+    let scope = TopologyScope {
+        synchronizer_id: &synchronizer_id,
+        participant_id: &participant_id,
+    };
+    let (party_filters, discovered_definitions) = party_filters_or_discover(
+        &mut clients,
+        &scope,
+        &namespace_key_fingerprints,
+        prefix_filter,
+        exact_party_filters,
+    )
+    .await?;
+    let p2p_by_namespace =
+        read_party_mappings(&mut clients.topology, &scope, party_filters).await?;
+    let definitions = read_namespace_definitions(
+        &mut clients.topology,
+        &synchronizer_id,
+        &p2p_by_namespace,
+        discovered_definitions,
+    )
+    .await?;
+
+    // Filter to parties where this participant is a member.
+    let my_parties = pair_namespaces_with_parties(
+        definitions,
+        &p2p_by_namespace,
+        &namespace_key_fingerprints,
+        prefix_filter,
+    );
+    let (my_parties, total) = page_parties(my_parties, opts.page);
+
+    let parties = enrich_parties(config, db, auth, opts.include_contracts, my_parties).await;
+
+    Ok(DecentralizedPartiesResponse {
+        parties,
+        total,
+        source: ResponseSource::Live,
+        refreshing: false,
+    })
+}
+
+/// A party this participant hosts, paired with its decentralized namespace
+/// and this node's owner key in it.
+type HostedParty = (DecentralizedNamespaceDefinition, String, PartyToParticipant);
+
+/// The three Admin API clients the topology reads use, on one channel.
+struct TopologyClients {
+    topology: TopologyManagerReadServiceClient<Channel>,
+    aggregation: TopologyAggregationServiceClient<Channel>,
+    vault: VaultServiceClient<Channel>,
+}
+
+impl TopologyClients {
+    async fn connect(config: &NodeConfig) -> Result<Self> {
+        let channel = config.admin_channel().await?;
+
+        let topology = TopologyManagerReadServiceClient::new(channel.clone())
+            .max_decoding_message_size(utils::MAX_GRPC_MESSAGE_SIZE);
+        let aggregation = TopologyAggregationServiceClient::new(channel.clone())
+            .max_decoding_message_size(utils::MAX_GRPC_MESSAGE_SIZE);
+        let vault = VaultServiceClient::new(channel)
+            .max_decoding_message_size(utils::MAX_GRPC_MESSAGE_SIZE);
+        Ok(Self {
+            topology,
+            aggregation,
+            vault,
+        })
+    }
+}
+
+/// The synchronizer and participant every topology read names.
+struct TopologyScope<'a> {
+    synchronizer_id: &'a str,
+    participant_id: &'a str,
+}
+
+/// The exact party ids this node knows from its local sources, narrowed to
+/// `prefix_filter`.
+async fn exact_party_filters(
+    config: &NodeConfig,
+    db: &SqlitePool,
+    prefix_filter: Option<&str>,
+    party_credentials: &[PartyCredentials],
+) -> Result<Vec<String>> {
     let workflow_runs = db.get_visible_workflow_runs().await?;
     let cached_parties = db.get_dec_parties_by_prefix("").await?;
     let known_party_ids = known_party_filters(
@@ -62,65 +163,65 @@ pub(super) async fn fetch_decentralized_parties(
         cached_parties.into_iter().map(|party| party.party_id),
         None,
     );
-    let exact_party_filters: Vec<_> = known_party_ids
+    Ok(known_party_ids
         .into_iter()
         .filter(|party_id| prefix_filter.is_none_or(|prefix| party_id.starts_with(prefix)))
+        .collect())
+}
+
+/// The party filters to read mappings for, and the namespace definitions a
+/// discovery already read.
+///
+/// Prefer exact IDs from every local source. A node with no exact ID for
+/// what was asked has to discover: the decentralized namespaces it owns a
+/// key in, then the parties its own participant hosts. Both are narrow
+/// reads, unlike a participant-scoped party query, which Canton filters in
+/// memory only after loading every party on the synchronizer.
+///
+/// Keying this on the filters rather than on "knows any party at all"
+/// matters for a node that holds one party and is asked about another
+/// prefix: it has to discover instead of issuing no query and reporting
+/// nothing.
+async fn party_filters_or_discover(
+    clients: &mut TopologyClients,
+    scope: &TopologyScope<'_>,
+    namespace_key_fingerprints: &HashSet<String>,
+    prefix_filter: Option<&str>,
+    exact_party_filters: Vec<String>,
+) -> Result<(Vec<String>, Vec<DecentralizedNamespaceDefinition>)> {
+    if !exact_party_filters.is_empty() {
+        return Ok((exact_party_filters, Vec::new()));
+    }
+    let discovered_definitions = owned_decentralized_namespaces(
+        &mut clients.topology,
+        scope.synchronizer_id,
+        namespace_key_fingerprints,
+    )
+    .await?;
+
+    let owned_namespaces: HashSet<String> = discovered_definitions
+        .iter()
+        .map(|definition| definition.decentralized_namespace.clone())
         .collect();
 
-    let channel = config.admin_channel().await?;
+    let party_filters = discover_hosted_party_ids(
+        &mut clients.aggregation,
+        scope.synchronizer_id,
+        scope.participant_id,
+        prefix_filter,
+        &owned_namespaces,
+    )
+    .await?;
+    Ok((party_filters, discovered_definitions))
+}
 
-    let mut topology_client = TopologyManagerReadServiceClient::new(channel.clone())
-        .max_decoding_message_size(utils::MAX_GRPC_MESSAGE_SIZE);
-    let mut aggregation_client = TopologyAggregationServiceClient::new(channel.clone())
-        .max_decoding_message_size(utils::MAX_GRPC_MESSAGE_SIZE);
-    let mut vault_client =
-        VaultServiceClient::new(channel).max_decoding_message_size(utils::MAX_GRPC_MESSAGE_SIZE);
-
-    // Its own Admin API call on a cold process-wide cache, so it carries the
-    // same deadline as the reads that follow it.
-    let synchronizer_id =
-        bounded_call("get_synchronizer_id", utils::get_synchronizer_id(config)).await?;
-    let participant_id = config.participant_id().to_string();
-
-    // Wanted twice: to discover which namespaces this node owns a key in, and
-    // to pick each party's `my_owner_key` below.
-    let namespace_key_fingerprints = my_namespace_fingerprints(&mut vault_client).await?;
-
-    // Prefer exact IDs from every local source. A node with no exact ID for
-    // what was asked has to discover: the decentralized namespaces it owns a
-    // key in, then the parties its own participant hosts. Both are narrow
-    // reads, unlike a participant-scoped party query, which Canton filters in
-    // memory only after loading every party on the synchronizer.
-    //
-    // Keying this on the filters rather than on "knows any party at all"
-    // matters for a node that holds one party and is asked about another
-    // prefix: it has to discover instead of issuing no query and reporting
-    // nothing.
-    let mut discovered_definitions = Vec::new();
-    let party_filters: Vec<String> = if !exact_party_filters.is_empty() {
-        exact_party_filters
-    } else {
-        discovered_definitions = owned_decentralized_namespaces(
-            &mut topology_client,
-            &synchronizer_id,
-            &namespace_key_fingerprints,
-        )
-        .await?;
-
-        let owned_namespaces: HashSet<String> = discovered_definitions
-            .iter()
-            .map(|definition| definition.decentralized_namespace.clone())
-            .collect();
-
-        discover_hosted_party_ids(
-            &mut aggregation_client,
-            &synchronizer_id,
-            &participant_id,
-            prefix_filter,
-            &owned_namespaces,
-        )
-        .await?
-    };
+/// Read the party-to-participant mappings of each filter, grouped by the
+/// party's namespace.
+async fn read_party_mappings(
+    topology_client: &mut TopologyManagerReadServiceClient<Channel>,
+    scope: &TopologyScope<'_>,
+    party_filters: Vec<String>,
+) -> Result<HashMap<String, Vec<PartyToParticipant>>> {
     // Keyed to a list: a decentralized namespace is derived from its owner set
     // alone (`compute_decentralized_namespace`), so two parties with the same
     // owners share one, and a namespace-wide filter returns both.
@@ -133,9 +234,9 @@ pub(super) async fn fetch_decentralized_parties(
             "list_party_to_participant",
             topology_client.list_party_to_participant(tonic::Request::new(
                 build_party_to_participant_request(
-                    &synchronizer_id,
+                    scope.synchronizer_id,
                     Some(party_filter.as_str()),
-                    &participant_id,
+                    scope.participant_id,
                 ),
             )),
         )
@@ -158,7 +259,17 @@ pub(super) async fn fetch_decentralized_parties(
                 .push(party_mapping);
         }
     }
+    Ok(p2p_by_namespace)
+}
 
+/// The definitions of every namespace in `p2p_by_namespace`, reading only
+/// the ones a discovery did not already read.
+async fn read_namespace_definitions(
+    topology_client: &mut TopologyManagerReadServiceClient<Channel>,
+    synchronizer_id: &str,
+    p2p_by_namespace: &HashMap<String, Vec<PartyToParticipant>>,
+    discovered_definitions: Vec<DecentralizedNamespaceDefinition>,
+) -> Result<Vec<DecentralizedNamespaceDefinition>> {
     // Discovery already read these, so only the exact-ID path pays for them.
     let mut definitions = discovered_definitions;
     let already_known: HashSet<String> = definitions
@@ -176,7 +287,7 @@ pub(super) async fn fetch_decentralized_parties(
         let response = bounded_read(
             "list_decentralized_namespace_definition",
             topology_client.list_decentralized_namespace_definition(tonic::Request::new(
-                build_decentralized_namespace_request(&synchronizer_id, &namespace),
+                build_decentralized_namespace_request(synchronizer_id, &namespace),
             )),
         )
         .await?
@@ -188,23 +299,34 @@ pub(super) async fn fetch_decentralized_parties(
                 .filter_map(|result| result.item),
         );
     }
+    Ok(definitions)
+}
 
-    // Filter to parties where this participant is a member.
-    let my_parties = pair_namespaces_with_parties(
-        definitions,
-        &p2p_by_namespace,
-        &namespace_key_fingerprints,
-        prefix_filter,
-    );
-
+/// Sort the parties and cut out the requested page. Returns the page and
+/// the number of parties before paging.
+fn page_parties(
+    my_parties: Vec<HostedParty>,
+    page: Option<(usize, usize)>,
+) -> (Vec<HostedParty>, usize) {
     // Stable order, so a paged caller sees each party once across requests.
     let mut my_parties = my_parties;
     my_parties.sort_by(|a, b| a.2.party.cmp(&b.2.party));
     let total = my_parties.len();
-    if let Some((offset, limit)) = opts.page {
+    if let Some((offset, limit)) = page {
         my_parties = my_parties.into_iter().skip(offset).take(limit).collect();
     }
+    (my_parties, total)
+}
 
+/// Read each party's contracts, metadata and owner claims, at most
+/// `PARTY_READ_CONCURRENCY` at a time. A party whose read fails is left out.
+async fn enrich_parties(
+    config: &NodeConfig,
+    db: &SqlitePool,
+    auth: Option<WorkflowAuth>,
+    include_contracts: bool,
+    my_parties: Vec<HostedParty>,
+) -> Vec<DecentralizedParty> {
     // Check if we're in test mode (mock auth)
     let test_mode = matches!(auth, Some(WorkflowAuth::Mock(_)));
 
@@ -213,7 +335,7 @@ pub(super) async fn fetch_decentralized_parties(
     // per party meant one full package inventory in flight per hosted party.
     let packages = default_package_config();
     // One rules contract per party is all the parties list has a consumer for.
-    let templates = if opts.include_contracts {
+    let templates = if include_contracts {
         contract_templates_all(&packages)
     } else {
         rules_templates(&packages)
@@ -236,108 +358,138 @@ pub(super) async fn fetch_decentralized_parties(
         HashMap::new()
     };
 
+    let reads = PartyReads {
+        config,
+        db,
+        auth: &auth,
+        test_mode,
+        packages: &packages,
+        package_versions: &package_versions,
+        templates: &templates,
+    };
     // Fetch contracts and metadata for all parties, at most
     // `PARTY_READ_CONCURRENCY` at a time.
-    let parties = utils::bounded_ordered(
+    utils::bounded_ordered(
         PARTY_READ_CONCURRENCY,
-        my_parties.into_iter().map(|(item, my_owner_key, p2p)| {
-            let config = config.clone();
-            let auth = auth.clone();
-            let packages = &packages;
-            let package_versions = &package_versions;
-            let templates = templates.as_slice();
-            let party_id_str = p2p.party.clone();
-            async move {
-                let party_id = CantonId::parse(&p2p.party)?;
-                // Get token for this party from auth (real or mock).
-                // Registry uses raw string keys (`_by_str`) so we still
-                // need party_id_str for lookup.
-                let token = match &auth {
-                    Some(WorkflowAuth::Keycloak(registry)) => {
-                        match registry.get_by_str(&party_id_str) {
-                            Some(tm) => tm.get_token().await.ok(),
-                            None => None,
-                        }
-                    }
-                    Some(WorkflowAuth::Mock(mock_registry)) => {
-                        Some(mock_registry.get_by_str(&party_id_str).await.get_token())
-                    }
-                    None => None,
-                };
-
-                let token_clone = token.clone();
-                let (contracts, local_metadata) = if token.is_some() || test_mode {
-                    tokio::join!(
-                        async {
-                            get_contracts(
-                                &config,
-                                &party_id,
-                                token,
-                                packages,
-                                package_versions,
-                                templates,
-                            )
-                            .await
-                            .unwrap_or_else(|e| {
-                                tracing::warn!("Failed to get contracts for {party_id_str}: {e}");
-                                Vec::new()
-                            })
-                        },
-                        async {
-                            get_party_metadata(&config, &party_id, token_clone)
-                                .await
-                                .ok()
-                                .flatten()
-                        }
-                    )
-                } else {
-                    (Vec::new(), None)
-                };
-
-                let self_uid = config.participant_id().to_string();
-                let participants: Vec<ParticipantInfo> = p2p
-                    .participants
-                    .iter()
-                    .filter_map(|p| {
-                        let participant_uid = CantonId::parse(&p.participant_uid).ok()?;
-                        let owner_key = if participant_uid.to_string() == self_uid {
-                            Some(my_owner_key.clone())
-                        } else {
-                            None // resolved later via Noise polling of peers
-                        };
-                        Some(ParticipantInfo {
-                            participant_uid,
-                            permission: permission_from_proto(p.permission),
-                            owner_key,
-                        })
-                    })
-                    .collect();
-
-                let (participants, non_hosting_owners) =
-                    with_cached_owner_claims(db, &party_id, &item.owners, participants).await;
-
-                Ok::<_, anyhow::Error>(DecentralizedParty {
-                    party_id,
-                    threshold: item.threshold,
-                    confirmation_threshold: i32::try_from(p2p.threshold).ok(),
-                    owners: item.owners,
-                    my_owner_key: Some(my_owner_key),
-                    participants,
-                    non_hosting_owners,
-                    contracts,
-                    local_metadata,
-                })
-            }
-        }),
+        my_parties
+            .into_iter()
+            .map(|(item, my_owner_key, p2p)| reads.read_party(item, my_owner_key, p2p)),
     )
-    .await;
+    .await
+}
 
-    Ok(DecentralizedPartiesResponse {
-        parties,
-        total,
-        source: ResponseSource::Live,
-        refreshing: false,
-    })
+/// What every per-party read in [`enrich_parties`] shares.
+struct PartyReads<'a> {
+    config: &'a NodeConfig,
+    db: &'a SqlitePool,
+    auth: &'a Option<WorkflowAuth>,
+    test_mode: bool,
+    packages: &'a PackageConfig,
+    package_versions: &'a HashMap<String, String>,
+    templates: &'a [TemplateId],
+}
+
+impl PartyReads<'_> {
+    /// Read one party's contracts and metadata with its own token, and merge
+    /// in the owner claims cached for its participants.
+    async fn read_party(
+        &self,
+        item: DecentralizedNamespaceDefinition,
+        my_owner_key: String,
+        p2p: PartyToParticipant,
+    ) -> anyhow::Result<DecentralizedParty> {
+        let party_id_str = p2p.party.clone();
+        let party_id = CantonId::parse(&p2p.party)?;
+        let token = party_token(self.auth, &party_id_str).await;
+
+        let token_clone = token.clone();
+        let (contracts, local_metadata) = if token.is_some() || self.test_mode {
+            tokio::join!(
+                async {
+                    get_contracts(
+                        self.config,
+                        &party_id,
+                        token,
+                        self.packages,
+                        self.package_versions,
+                        self.templates,
+                    )
+                    .await
+                    .unwrap_or_else(|e| {
+                        tracing::warn!("Failed to get contracts for {party_id_str}: {e}");
+                        Vec::new()
+                    })
+                },
+                async {
+                    get_party_metadata(self.config, &party_id, token_clone)
+                        .await
+                        .ok()
+                        .flatten()
+                }
+            )
+        } else {
+            (Vec::new(), None)
+        };
+
+        let self_uid = self.config.participant_id().to_string();
+        let participants = participant_infos(&p2p, &self_uid, &my_owner_key);
+
+        let (participants, non_hosting_owners) =
+            with_cached_owner_claims(self.db, &party_id, &item.owners, participants).await;
+
+        Ok(DecentralizedParty {
+            party_id,
+            threshold: item.threshold,
+            confirmation_threshold: i32::try_from(p2p.threshold).ok(),
+            owners: item.owners,
+            my_owner_key: Some(my_owner_key),
+            participants,
+            non_hosting_owners,
+            contracts,
+            local_metadata,
+        })
+    }
+}
+
+/// The token this node holds for `party_id`, from auth (real or mock).
+async fn party_token(auth: &Option<WorkflowAuth>, party_id: &str) -> Option<String> {
+    // Registry uses raw string keys (`_by_str`) so we still need the party
+    // id string for lookup.
+    match auth {
+        Some(WorkflowAuth::Keycloak(registry)) => match registry.get_by_str(party_id) {
+            Some(tm) => tm.get_token().await.ok(),
+            None => None,
+        },
+        Some(WorkflowAuth::Mock(mock_registry)) => {
+            Some(mock_registry.get_by_str(party_id).await.get_token())
+        }
+        None => None,
+    }
+}
+
+/// The party's hosting participants. Only this node's own entry carries an
+/// owner key; peers' keys are resolved later via Noise polling.
+fn participant_infos(
+    p2p: &PartyToParticipant,
+    self_uid: &str,
+    my_owner_key: &str,
+) -> Vec<ParticipantInfo> {
+    p2p.participants
+        .iter()
+        .filter_map(|p| {
+            let participant_uid = CantonId::parse(&p.participant_uid).ok()?;
+            let owner_key = if participant_uid.to_string() == self_uid {
+                Some(my_owner_key.to_owned())
+            } else {
+                None // resolved later via Noise polling of peers
+            };
+            Some(ParticipantInfo {
+                participant_uid,
+                permission: permission_from_proto(p.permission),
+                owner_key,
+            })
+        })
+        .collect()
 }
 
 #[cfg(test)]

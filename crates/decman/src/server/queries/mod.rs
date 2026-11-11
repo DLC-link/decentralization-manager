@@ -30,6 +30,7 @@ pub use registry::{
     get_block_list_shards, get_instruments, get_provider_configurations,
     get_registrar_service_requests, get_registrar_services,
 };
+pub(crate) use templates::TemplateId;
 pub use templates::{contract_templates_all, rules_templates};
 pub use transfers::{
     get_open_burn_requests, get_open_mint_requests, get_open_transfer_instructions,
