@@ -1,9 +1,8 @@
 import { Fragment, useCallback, useEffect, useRef, useState, type ReactNode } from "react";
-import { Box, Button, Checkbox, CircularProgress, Dialog, DialogActions, DialogContent, DialogTitle, List, ListItemButton, ListItemText, Skeleton, TextField, Typography } from "@mui/material";
+import { Box, CircularProgress, Skeleton, Typography } from "@mui/material";
 import { columnSx } from "../styles";
 import { PaginationControls } from "./Pagination";
 import { usePagination } from "../usePagination";
-import { completedProposals } from "../completedProposals";
 import type { AuditLogEntry, HandledInvitation, PendingInvitation, WorkflowRun } from "../types";
 import type { PartyActions } from "./notifications/types";
 import { InvitationCard } from "./notifications/InvitationCard";
@@ -11,6 +10,15 @@ import { ActionCard } from "./notifications/ActionCard";
 import { DomainActionCard } from "./notifications/DomainActionCard";
 import { WorkflowRunCard } from "./notifications/WorkflowRunCard";
 import { CompletedProposalRow, HandledInvitationRow } from "./notifications/CompletedRows";
+import {
+  buildEntries,
+  filterEntries,
+  partyEntryCounts,
+  type EntryItem,
+  type Group,
+  type Kind,
+} from "./notifications/buildEntries";
+import { PartyFilterPicker } from "./notifications/PartyFilterPicker";
 
 export { type PartyActions } from "./notifications/types";
 
@@ -141,186 +149,82 @@ export const NotificationsView = ({
   const [partySearch, setPartySearch] = useState("");
   const [doneCollapsed, setDoneCollapsed] = useState(true);
 
-  // Built above the loading / empty early-returns so the pagination hook below
-  // runs on every render, loading or not.
-  // ── Categorize every feed item by what it needs from the operator ──
-  type Group = "you" | "prog" | "done";
-  type Kind = "gov" | "wf" | "inv";
-  interface Entry {
-    key: string;
-    group: Group;
-    kind: Kind;
-    ts: number;
-    node: ReactNode;
-    /** Dec party this entry belongs to. Absent for invitations and workflow
-     *  runs, which carry no party, so the party filter leaves those alone. */
-    partyId?: string;
-  }
-
-  const entries: Entry[] = [];
-
-  for (const invitation of pendingInvitations) {
-    entries.push({
-      key: `inv-${invitation.id}`,
-      group: "you",
-      kind: "inv",
-      ts: invitation.received_at,
-      node: (
-        <InvitationCard
-          invitation={invitation}
-          onAfter={onInvitationsChanged}
-          onSelectParty={onSelectParty}
-        />
-      ),
-    });
-  }
-
-  for (const party of partyActions) {
-    for (const action of party.actions) {
-      const ownConfirmed = action.confirmations.some(
-        (c) => c.confirming_party === party.memberPartyId,
-      );
-      entries.push({
-        partyId: party.partyId,
-        key: `act-${party.partyId}-${action.action_hash}`,
-        // Needs you: you can execute it, or you haven't confirmed yet.
-        // In progress: you confirmed and it's waiting on the others.
-        group: action.can_execute || !ownConfirmed ? "you" : "prog",
-        kind: "gov",
-        ts: action.last_confirmation_at ?? 0,
-        node: (
+  // The card or row each kind of entry shows.
+  const renderEntry = (item: EntryItem): ReactNode => {
+    switch (item.type) {
+      case "invitation": {
+        const { invitation } = item;
+        return (
+          <InvitationCard
+            invitation={invitation}
+            onAfter={onInvitationsChanged}
+            onSelectParty={onSelectParty}
+          />
+        );
+      }
+      case "action": {
+        const { party, action } = item;
+        return (
           <ActionCard
             party={party}
             action={action}
             onAfter={onActionsChanged}
             onSelectParty={onSelectParty}
           />
-        ),
-      });
-    }
-    for (const domainAction of party.domainActions) {
-      const ownConfirmed = domainAction.confirmations.some(
-        (c) => c.confirming_party === party.memberPartyId,
-      );
-      entries.push({
-        partyId: party.partyId,
-        key: `dom-${party.partyId}-${domainAction.proposal_cid}`,
-        // Orphaned proposals can only be expired — still your cleanup to do.
-        group:
-          domainAction.can_execute || domainAction.orphaned || !ownConfirmed
-            ? "you"
-            : "prog",
-        kind: "gov",
-        // The proposal's own create time, so a card holds its place between
-        // refreshes whether or not anyone has confirmed it. An orphaned card
-        // has no readable proposal, so fall back to its newest confirmation.
-        ts:
-          domainAction.created_at ??
-          domainAction.confirmations.reduce(
-            (max, c) => Math.max(max, c.created_at ?? 0),
-            0,
-          ),
-        node: (
+        );
+      }
+      case "domainAction": {
+        const { party, domainAction } = item;
+        return (
           <DomainActionCard
             party={party}
             domainAction={domainAction}
             onAfter={onActionsChanged}
             onSelectParty={onSelectParty}
           />
-        ),
-      });
+        );
+      }
+      case "workflowRun": {
+        const { run, terminal } = item;
+        return (
+          <WorkflowRunCard
+            run={run}
+            onAfter={onWorkflowsChanged}
+            onSelectParty={onSelectParty}
+            compact={terminal}
+          />
+        );
+      }
+      case "completedProposal": {
+        const { proposal } = item;
+        return <CompletedProposalRow proposal={proposal} />;
+      }
+      case "handledInvitation": {
+        const { handled } = item;
+        return <HandledInvitationRow handled={handled} />;
+      }
     }
-  }
-
-  for (const run of workflowRuns) {
-    const terminal =
-      run.status === "completed" ||
-      run.status === "failed" ||
-      run.status === "cancelled";
-    entries.push({
-      key: `wf-${run.instance_name}`,
-      group: terminal ? "done" : "prog",
-      kind: "wf",
-      ts: run.updated_at,
-      node: (
-        <WorkflowRunCard
-          run={run}
-          onAfter={onWorkflowsChanged}
-          onSelectParty={onSelectParty}
-          compact={terminal}
-        />
-      ),
-    });
-  }
-
-  // A proposal leaves the pending feed once it is finished, so the Completed
-  // section reads it from this node's audit log instead.
-  const timing =
-    auditFirstSeen && pendingRequestedAt !== undefined
-      ? { firstSeen: auditFirstSeen, pendingRequestedAt }
-      : undefined;
-  for (const proposal of completedProposals(
-    governanceAudit,
-    partyActions,
-    pendingLive,
-    timing,
-  )) {
-    entries.push({
-      partyId: proposal.partyId,
-      key: `done-${proposal.key}`,
-      group: "done",
-      kind: "gov",
-      ts: proposal.ts,
-      node: <CompletedProposalRow proposal={proposal} />,
-    });
-  }
-
-  // An accepted invitation keeps its own entry beside the workflow run it
-  // started: one records the operator's answer, the other the run's outcome.
-  // Like a pending invitation it carries no partyId, so the party filter
-  // leaves it alone.
-  const pendingInvitationIds = new Set(pendingInvitations.map((i) => i.id));
-  for (const handled of handledInvitations) {
-    // Sent again since it was answered; the pending card stands for it now.
-    if (pendingInvitationIds.has(handled.invitation.id)) continue;
-    entries.push({
-      key: `inv-done-${handled.invitation.id}`,
-      group: "done",
-      kind: "inv",
-      ts: handled.handled_at,
-      node: <HandledInvitationRow handled={handled} />,
-    });
-  }
-
-  entries.sort((a, b) => b.ts - a.ts);
-
-  // Party filter first: the other dimensions' counts should reflect it.
-  const byParty = entries.filter(
-    (e) =>
-      partyFilter.length === 0 ||
-      e.partyId === undefined ||
-      partyFilter.includes(e.partyId),
-  );
-
-  // Each chip's count reflects the *other* active filter dimension.
-  const byKind = byParty.filter(
-    (e) => typeFilter === "all" || e.kind === typeFilter,
-  );
-  const groupCount: Record<"all" | Group, number> = {
-    all: byKind.length,
-    you: byKind.filter((e) => e.group === "you").length,
-    prog: byKind.filter((e) => e.group === "prog").length,
-    done: byKind.filter((e) => e.group === "done").length,
   };
 
-  const grouped: Record<Group, Entry[]> = { you: [], prog: [], done: [] };
-  for (const e of byParty) {
-    if (statusFilter !== "all" && statusFilter !== e.group) continue;
-    if (typeFilter !== "all" && typeFilter !== e.kind) continue;
-    grouped[e.group].push(e);
-  }
-  const anyVisible =
-    grouped.you.length + grouped.prog.length + grouped.done.length > 0;
+  // Built above the loading / empty early-returns so the pagination hook below
+  // runs on every render, loading or not.
+  const entries = buildEntries({
+    pendingInvitations,
+    partyActions,
+    workflowRuns,
+    governanceAudit,
+    handledInvitations,
+    pendingLive,
+    auditFirstSeen,
+    pendingRequestedAt,
+  });
+
+  const { groupCount, grouped, anyVisible } = filterEntries(
+    entries,
+    partyFilter,
+    statusFilter,
+    typeFilter,
+  );
 
   // "Needs your action" and "In progress" are bounded by how much work is live;
   // only "Completed" grows without limit, so that's the section that pages.
@@ -334,161 +238,17 @@ export const NotificationsView = ({
 
   // Parties with something in the feed, newest activity first. Counted from the
   // unfiltered set so a chip's number does not change as you select.
-  const partyCounts = new Map<string, number>();
-  for (const e of entries) {
-    if (e.partyId) {
-      partyCounts.set(e.partyId, (partyCounts.get(e.partyId) ?? 0) + 1);
-    }
-  }
-  const partyOptions = [...partyCounts.entries()].sort((a, b) => b[1] - a[1]);
-
-  // At most this many rows are mounted at once. A deployment can hold tens of
-  // thousands of parties, and mounting a row each would stall the dialog.
-  const PARTY_ROWS_SHOWN = 200;
-  const searchLower = partySearch.trim().toLowerCase();
-  const matchingParties = partyOptions.filter(
-    ([partyId]) => !searchLower || partyId.toLowerCase().includes(searchLower),
-  );
-  const shownParties = matchingParties.slice(0, PARTY_ROWS_SHOWN);
-
+  const partyOptions = partyEntryCounts(entries);
   const partyPicker = (
-    <>
-      <Button
-        size="small"
-        variant="outlined"
-        onClick={() => setPartyPickerOpen(true)}
-        sx={{
-          fontFamily: "var(--font-mono)",
-          fontSize: 12,
-          textTransform: "none",
-          whiteSpace: "nowrap",
-        }}
-      >
-        {partyFilter.length === 0
-          ? "All parties"
-          : `${partyFilter.length} ${partyFilter.length === 1 ? "party" : "parties"}`}
-      </Button>
-
-      <Dialog
-        open={partyPickerOpen}
-        onClose={() => setPartyPickerOpen(false)}
-        fullWidth
-        maxWidth="sm"
-      >
-        <DialogTitle sx={{ pb: 1 }}>Filter by dec party</DialogTitle>
-        <DialogContent dividers sx={{ pt: 1 }}>
-          <TextField
-            size="small"
-            fullWidth
-            autoFocus
-            placeholder="Search parties…"
-            value={partySearch}
-            onChange={(e) => setPartySearch(e.target.value)}
-            sx={{ mb: 1 }}
-          />
-          <Box
-            sx={{
-              display: "flex",
-              gap: 1,
-              alignItems: "center",
-              mb: 1,
-              flexWrap: "wrap",
-            }}
-          >
-            <Button
-              size="small"
-              onClick={() =>
-                setPartyFilter(matchingParties.map(([partyId]) => partyId))
-              }
-              disabled={matchingParties.length === 0}
-            >
-              Select all{searchLower ? " matching" : ""}
-            </Button>
-            <Button
-              size="small"
-              onClick={() => setPartyFilter([])}
-              disabled={partyFilter.length === 0}
-            >
-              Deselect all
-            </Button>
-            <Box sx={{ flex: 1 }} />
-            <Typography variant="caption" color="text.secondary">
-              {partyFilter.length === 0
-                ? "No filter: every party shown"
-                : `${partyFilter.length} selected`}
-            </Typography>
-          </Box>
-
-          <List dense disablePadding sx={{ maxHeight: 360, overflowY: "auto" }}>
-            {shownParties.map(([partyId, count]) => {
-              const checked = partyFilter.includes(partyId);
-              return (
-                <ListItemButton
-                  key={partyId}
-                  onClick={() =>
-                    setPartyFilter((current) =>
-                      current.includes(partyId)
-                        ? current.filter((p) => p !== partyId)
-                        : [...current, partyId],
-                    )
-                  }
-                  sx={{ borderRadius: 1 }}
-                >
-                  <Checkbox
-                    edge="start"
-                    size="small"
-                    checked={checked}
-                    tabIndex={-1}
-                    disableRipple
-                  />
-                  <ListItemText
-                    primary={
-                      <Box
-                        component="span"
-                        sx={{
-                          display: "block",
-                          fontFamily: "var(--font-mono)",
-                          fontSize: 13,
-                          overflow: "hidden",
-                          textOverflow: "ellipsis",
-                          whiteSpace: "nowrap",
-                        }}
-                      >
-                        {partyId.split("::")[0]}
-                      </Box>
-                    }
-                    secondary={`${count} ${count === 1 ? "entry" : "entries"}`}
-                  />
-                </ListItemButton>
-              );
-            })}
-          </List>
-
-          {matchingParties.length > shownParties.length && (
-            <Typography
-              variant="caption"
-              color="text.secondary"
-              sx={{ display: "block", mt: 1 }}
-            >
-              Showing {shownParties.length} of {matchingParties.length}. Narrow
-              the search to reach the rest.
-            </Typography>
-          )}
-          {matchingParties.length === 0 && (
-            <Typography
-              variant="body2"
-              color="text.secondary"
-              sx={{ py: 2, textAlign: "center" }}
-            >
-              No party matches that search.
-            </Typography>
-          )}
-        </DialogContent>
-        <DialogActions>
-          <Button onClick={() => setPartyPickerOpen(false)}>Done</Button>
-        </DialogActions>
-      </Dialog>
-    </>
+    <PartyFilterPicker
+      partyOptions={partyOptions}
+      partyFilter={partyFilter}
+      setPartyFilter={setPartyFilter}
+      partyPickerOpen={partyPickerOpen}
+      setPartyPickerOpen={setPartyPickerOpen}
+      partySearch={partySearch}
+      setPartySearch={setPartySearch}
+    />
   );
 
   if (loading) {
@@ -755,7 +515,7 @@ export const NotificationsView = ({
             {!collapsed && (
               <Box sx={{ display: "flex", flexDirection: "column", gap: 1 }}>
                 {(group === "done" ? donePageItems : grouped[group]).map((e) => (
-                  <Fragment key={e.key}>{e.node}</Fragment>
+                  <Fragment key={e.key}>{renderEntry(e.item)}</Fragment>
                 ))}
               </Box>
             )}
