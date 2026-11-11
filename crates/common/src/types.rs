@@ -767,8 +767,12 @@ mod tests {
 
     #[test]
     fn permission_strings_match_serde() {
-        use Permission::*;
-        let all = [Submission, Confirmation, Observation, Unknown];
+        let all = [
+            Permission::Submission,
+            Permission::Confirmation,
+            Permission::Observation,
+            Permission::Unknown,
+        ];
         let names = ["submission", "confirmation", "observation", "unknown"];
         for (permission, name) in all.into_iter().zip(names) {
             assert_eq!(serde_name(&permission), name);
@@ -779,8 +783,13 @@ mod tests {
 
     #[test]
     fn workflow_progress_strings_match_serde() {
-        use WorkflowProgress::*;
-        let all = [Idle, InProgress, Completed, Failed, Cancelled];
+        let all = [
+            WorkflowProgress::Idle,
+            WorkflowProgress::InProgress,
+            WorkflowProgress::Completed,
+            WorkflowProgress::Failed,
+            WorkflowProgress::Cancelled,
+        ];
         let names = ["idle", "inprogress", "completed", "failed", "cancelled"];
         for (progress, name) in all.into_iter().zip(names) {
             assert_eq!(serde_name(&progress), name);
@@ -792,8 +801,14 @@ mod tests {
 
     #[test]
     fn workflow_kind_strings_round_trip() {
-        use WorkflowKind::*;
-        let all = [Onboarding, Kick, Contracts, Dars, AddParty, ChangeThreshold];
+        let all = [
+            WorkflowKind::Onboarding,
+            WorkflowKind::Kick,
+            WorkflowKind::Contracts,
+            WorkflowKind::Dars,
+            WorkflowKind::AddParty,
+            WorkflowKind::ChangeThreshold,
+        ];
         let names = [
             "Onboarding",
             "Kick",
@@ -815,8 +830,10 @@ mod tests {
 
     #[test]
     fn workflow_role_strings_round_trip() {
-        use WorkflowRole::*;
-        for (role, name) in [(Coordinator, "Coordinator"), (Peer, "Peer")] {
+        for (role, name) in [
+            (WorkflowRole::Coordinator, "Coordinator"),
+            (WorkflowRole::Peer, "Peer"),
+        ] {
             assert_eq!(serde_name(&role), name);
             assert_eq!(from_serde_name::<WorkflowRole>(name), role);
             assert_eq!(role.as_str(), name);
@@ -828,8 +845,14 @@ mod tests {
 
     #[test]
     fn invitation_type_strings_round_trip() {
-        use InvitationType::*;
-        let all = [Onboarding, Kick, Contracts, Dars, AddParty, ChangeThreshold];
+        let all = [
+            InvitationType::Onboarding,
+            InvitationType::Kick,
+            InvitationType::Contracts,
+            InvitationType::Dars,
+            InvitationType::AddParty,
+            InvitationType::ChangeThreshold,
+        ];
         let names = [
             "Onboarding",
             "Kick",
@@ -850,8 +873,10 @@ mod tests {
 
     #[test]
     fn invitation_outcome_strings_round_trip() {
-        use InvitationOutcome::*;
-        for (outcome, name) in [(Accepted, "accepted"), (Declined, "declined")] {
+        for (outcome, name) in [
+            (InvitationOutcome::Accepted, "accepted"),
+            (InvitationOutcome::Declined, "declined"),
+        ] {
             assert_eq!(serde_name(&outcome), name);
             assert_eq!(from_serde_name::<InvitationOutcome>(name), outcome);
             assert_eq!(outcome.as_str(), name);

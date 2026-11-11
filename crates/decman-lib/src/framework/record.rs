@@ -421,7 +421,7 @@ pub fn extract_reltime(value: &Value) -> Option<i64> {
 
 #[cfg(test)]
 mod tests {
-    use std::fmt::Debug;
+    use std::{error::Error as _, fmt::Debug};
 
     use canton_proto_rs::com::daml::ledger::api::v2::{List, Optional, RecordField, Value};
 
@@ -451,8 +451,6 @@ mod tests {
     /// A shape mismatch has no deeper cause and reports `None`.
     #[test]
     fn a_failed_parse_chains_its_cause() {
-        use std::error::Error as _;
-
         let rec = record(vec![("owner", Some(value::Sum::Party("nope".to_string())))]);
         let err = field_party_id(&rec, "owner").expect_err("a bad party must fail");
 
@@ -473,8 +471,6 @@ mod tests {
     /// offending value and keeps the parse error underneath.
     #[test]
     fn extract_party_id_chains_its_cause() {
-        use std::error::Error as _;
-
         let value = Value {
             sum: Some(value::Sum::Party("nope".to_string())),
         };
