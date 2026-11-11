@@ -300,3 +300,32 @@ async fn an_oversized_command_ends_the_peer_run_at_once() -> Result {
     assert_reported(&run, WorkflowKind::Dars);
     Ok(())
 }
+
+/// Issue #616: the peer's report must state the size and the limit, so the
+/// coordinator shows the cause and not a protocol fault.
+#[tokio::test]
+async fn an_oversized_upload_reports_its_size_and_the_limit() -> Result {
+    let size: u32 = 20_000_000;
+    let chunks = usize::try_from(size)?.div_ceil(crate::noise::CHUNK_SIZE);
+    let mut meta = MessageType::UploadDars.to_u16().to_be_bytes().to_vec();
+    meta.extend_from_slice(&size.to_be_bytes());
+    meta.extend_from_slice(&u32::try_from(chunks)?.to_be_bytes());
+
+    let run = run_commands(
+        WorkflowKind::Dars,
+        vec![Message::new(MessageType::ChunkedCommand, meta)],
+    )
+    .await?;
+
+    let [report] = run.reports.as_slice() else {
+        anyhow::bail!("expected one failure report, got {}", run.reports.len());
+    };
+    let reason = report.reason.as_deref().unwrap_or_default();
+    assert!(reason.contains("20000000 bytes"), "{reason}");
+    assert!(
+        reason.contains(&crate::noise::MAX_CHUNKED_TOTAL_SIZE.to_string()),
+        "{reason}"
+    );
+    assert!(!reason.contains("Invalid message format"), "{reason}");
+    Ok(())
+}

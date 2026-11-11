@@ -5614,4 +5614,95 @@ mod tests {
         assert!(data.workflows.snapshot().is_empty());
         Ok(())
     }
+
+    /// Three DARs whose `UploadDars` bundle is `bundle_len` bytes.
+    fn three_dars_of_bundle(bundle_len: usize) -> Vec<DarFile> {
+        // A 4-byte count, then two 4-byte lengths and a 5-byte name per file.
+        let data_len = bundle_len - 4 - 3 * (8 + 5);
+        vec![
+            dar("a.dar", data_len / 3),
+            dar("b.dar", data_len / 3),
+            dar("c.dar", data_len - 2 * (data_len / 3)),
+        ]
+    }
+
+    /// The bundle the peer receives, built the way the coordinator builds it.
+    fn bundle_of(files: &[DarFile]) -> anyhow::Result<Vec<u8>> {
+        let decoded = files
+            .iter()
+            .map(|file| Ok((file.filename.clone(), STANDARD.decode(&file.data)?)))
+            .collect::<anyhow::Result<Vec<_>>>()?;
+        Ok(utils::encode_files(&decoded))
+    }
+
+    /// The coordinator must refuse exactly the sets a peer would refuse. A
+    /// stricter check blocks runs that would work. A looser one lets the peer
+    /// fail after it accepts, which is the fault this check prevents.
+    #[test]
+    fn the_coordinator_refuses_exactly_what_a_peer_refuses() -> anyhow::Result<()> {
+        use crate::noise::{CHUNK_SIZE, check_chunked_metadata};
+
+        for bundle_len in [MAX_CHUNKED_TOTAL_SIZE, MAX_CHUNKED_TOTAL_SIZE + 1] {
+            let files = three_dars_of_bundle(bundle_len);
+            let bundle = bundle_of(&files)?;
+            assert_eq!(bundle.len(), bundle_len);
+            let peer = check_chunked_metadata(bundle.len(), bundle.len().div_ceil(CHUNK_SIZE));
+            let coordinator = dars_bundle_refusal(&files, MAX_CHUNKED_TOTAL_SIZE);
+            assert_eq!(
+                coordinator.is_ok(),
+                peer.is_ok(),
+                "bundle of {bundle_len} bytes: coordinator {coordinator:?}, peer {peer:?}"
+            );
+        }
+        Ok(())
+    }
+
+    /// Issue #616: many DARs, each well below the limit, that exceed it
+    /// together. The refusal states the exact size of the bundle a peer
+    /// would have received.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn many_small_dars_above_the_limit_together_are_refused(pool: SqlitePool) -> Result {
+        let files: Vec<DarFile> = (0..9)
+            .map(|n| dar(&format!("package-{n}.dar"), 2 * 1024 * 1024))
+            .collect();
+        let size = bundle_of(&files)?.len();
+        let data = state_on(pool.clone()).await?;
+        let app = actix_test::init_service(
+            App::new()
+                .app_data(web::JsonConfig::default().limit(100 * 1024 * 1024))
+                .app_data(data.clone())
+                .service(start_dars),
+        )
+        .await;
+        let request = actix_test::TestRequest::post()
+            .uri("/dars/distribute")
+            .set_json(serde_json::json!({
+                "dar_files": files,
+                "peer_ids": [pid(2)?],
+            }))
+            .to_request();
+        request.extensions_mut().insert(admin());
+
+        let response = actix_test::call_service(&app, request).await;
+
+        let status = response.status();
+        let body = actix_test::read_body(response).await;
+        let body = String::from_utf8_lossy(&body);
+        assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE, "{body}");
+        assert!(
+            body.contains(&format!("encoded bundle is {size} bytes")),
+            "{body}"
+        );
+        assert!(
+            body.contains(&format!("The limit is {MAX_CHUNKED_TOTAL_SIZE} bytes")),
+            "{body}"
+        );
+        assert!(
+            pool.get_workflow_runs_by_kind(WorkflowKind::Dars)
+                .await?
+                .is_empty()
+        );
+        assert!(data.workflows.snapshot().is_empty());
+        Ok(())
+    }
 }
