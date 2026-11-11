@@ -14,6 +14,7 @@ use sqlx::SqlitePool;
 use tokio::time;
 
 use crate::{
+    canton::framing::read_all_messages_with,
     canton_id::CantonId,
     config::NodeConfig,
     consts::{
@@ -408,25 +409,11 @@ fn ensure_owner_threshold_signed(
 }
 
 /// Decode multiple consecutive `varint(len)||proto` messages from a single
-/// payload. Mirrors `utils::read_all_messages_from_file` but operates on
-/// in-memory bytes instead of a file path.
+/// payload. Onboarding keeps its own wording for a message cut short.
 fn decode_messages_from_bytes<M: prost::Message + Default>(payload: &[u8]) -> Result<Vec<M>> {
-    let mut cursor: &[u8] = payload;
-    let mut out = Vec::new();
-    while !cursor.is_empty() {
-        let len = prost::encoding::decode_varint(&mut cursor)? as usize;
-        if cursor.len() < len {
-            anyhow::bail!(
-                "Truncated message stream: expected {len} bytes, only {remaining} remain",
-                remaining = cursor.len()
-            );
-        }
-        let (msg_bytes, rest) = cursor.split_at(len);
-        let msg = M::decode(msg_bytes)?;
-        out.push(msg);
-        cursor = rest;
-    }
-    Ok(out)
+    read_all_messages_with(payload, |len, remaining| {
+        anyhow::anyhow!("Truncated message stream: expected {len} bytes, only {remaining} remain")
+    })
 }
 
 /// Wait for P2P (PartyToParticipant) to appear in topology by polling

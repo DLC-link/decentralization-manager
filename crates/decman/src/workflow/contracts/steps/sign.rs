@@ -1,5 +1,5 @@
 use anyhow::Context;
-use bytes::{Buf, BufMut, BytesMut};
+use bytes::{BufMut, BytesMut};
 use canton_proto_rs::com::{
     daml::ledger::api::v2::interactive::PrepareSubmissionResponse,
     digitalasset::canton::{
@@ -19,6 +19,7 @@ use decman_lib::canton_hash;
 use sqlx::SqlitePool;
 
 use crate::{
+    canton::framing::read_all_messages_from_bytes,
     canton_id::CantonId,
     config::NodeConfig,
     db::crypto,
@@ -394,24 +395,6 @@ fn decode_peer_keys(bytes: &[u8], node_id: &str) -> Result<Vec<SigningPublicKey>
         );
     }
     Ok(keys)
-}
-
-fn read_all_messages_from_bytes<M: prost::Message + Default>(data: &[u8]) -> Result<Vec<M>> {
-    let mut cursor = data;
-    let mut messages = Vec::new();
-    while cursor.has_remaining() {
-        let len = prost::encoding::decode_varint(&mut cursor)? as usize;
-        if cursor.remaining() < len {
-            anyhow::bail!(
-                "Incomplete message: expected {len} bytes, but only {remaining} remaining",
-                remaining = cursor.remaining()
-            );
-        }
-        let message_bytes = &cursor[..len];
-        cursor.advance(len);
-        messages.push(M::decode(message_bytes)?);
-    }
-    Ok(messages)
 }
 
 /// Encode a slice of protobuf messages as `varint(len)||proto` × N, matching the

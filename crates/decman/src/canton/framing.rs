@@ -32,6 +32,45 @@ pub fn read_first_message_from_bytes<M: Message + Default>(data: &[u8]) -> Resul
     Ok(message)
 }
 
+/// Read every `varint(len)||proto` message in `data`, in order. Empty data
+/// gives an empty list.
+///
+/// # Errors
+///
+/// Errors if a length prefix is not a valid varint, if a message is cut
+/// short, or if a message does not decode as `M`.
+pub fn read_all_messages_from_bytes<M: Message + Default>(data: &[u8]) -> Result<Vec<M>> {
+    read_all_messages_with(data, |len, remaining| {
+        anyhow::anyhow!("Incomplete message: expected {len} bytes, but only {remaining} remaining")
+    })
+}
+
+/// [`read_all_messages_from_bytes`] with the caller's own error for a message
+/// cut short. `truncated` gets the expected length and the bytes left.
+///
+/// # Errors
+///
+/// Errors if a length prefix is not a valid varint, if a message is cut
+/// short (the error `truncated` returns), or if a message does not decode as
+/// `M`.
+pub fn read_all_messages_with<M: Message + Default>(
+    data: &[u8],
+    truncated: impl Fn(usize, usize) -> anyhow::Error,
+) -> Result<Vec<M>> {
+    let mut cursor = data;
+    let mut messages = Vec::new();
+    while cursor.has_remaining() {
+        let len = prost::encoding::decode_varint(&mut cursor)? as usize;
+        if cursor.remaining() < len {
+            return Err(truncated(len, cursor.remaining()));
+        }
+        let message_bytes = &cursor[..len];
+        cursor.advance(len);
+        messages.push(M::decode(message_bytes)?);
+    }
+    Ok(messages)
+}
+
 /// Unwrap Canton's protocol-versioning envelope.
 ///
 /// Canton wraps every protocol-versioned message in an
@@ -261,5 +300,57 @@ mod tests {
         buf.extend_from_slice(b"ab");
         let result = read_first_message_from_bytes::<Timestamp>(&buf);
         assert!(result.is_err());
+    }
+
+    fn stamp(seconds: i64) -> Timestamp {
+        Timestamp { seconds, nanos: 0 }
+    }
+
+    #[test]
+    fn read_all_messages_from_bytes_reads_every_message_in_order() -> Result {
+        let mut stream = encode_length_prefixed_message(&stamp(1));
+        stream.extend(encode_length_prefixed_message(&stamp(2)));
+        stream.extend(encode_length_prefixed_message(&stamp(3)));
+
+        let messages: Vec<Timestamp> = read_all_messages_from_bytes(&stream)?;
+
+        assert_eq!(messages, vec![stamp(1), stamp(2), stamp(3)]);
+        Ok(())
+    }
+
+    #[test]
+    fn read_all_messages_from_bytes_reads_empty_data_as_no_messages() -> Result {
+        let messages: Vec<Timestamp> = read_all_messages_from_bytes(b"")?;
+        assert!(messages.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn read_all_messages_from_bytes_rejects_a_truncated_stream() {
+        // One whole message, then a prefix that claims 10 bytes with 2 left.
+        let mut stream = encode_length_prefixed_message(&stamp(1));
+        prost::encoding::encode_varint(10, &mut stream);
+        stream.extend_from_slice(b"ab");
+
+        let err = read_all_messages_from_bytes::<Timestamp>(&stream).unwrap_err();
+
+        assert_eq!(
+            err.to_string(),
+            "Incomplete message: expected 10 bytes, but only 2 remaining"
+        );
+    }
+
+    #[test]
+    fn read_all_messages_with_returns_the_callers_truncation_error() {
+        let mut stream = Vec::new();
+        prost::encoding::encode_varint(5, &mut stream);
+        stream.extend_from_slice(b"abc");
+
+        let err = read_all_messages_with::<Timestamp>(&stream, |len, remaining| {
+            anyhow::anyhow!("cut short: {len}/{remaining}")
+        })
+        .unwrap_err();
+
+        assert_eq!(err.to_string(), "cut short: 5/3");
     }
 }
