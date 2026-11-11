@@ -1,17 +1,13 @@
-use anyhow::Context;
 use canton_proto_rs::com::digitalasset::canton::protocol::v30::{
-    PartyToParticipant, TopologyMapping,
-    enums::{ParticipantPermission, TopologyChangeOp},
-    topology_mapping,
+    PartyToParticipant, enums::ParticipantPermission,
 };
 use serde::{Deserialize, Serialize};
 
 use crate::{
     config::NodeConfig,
     error::Result,
-    workflow::{
-        external_party::keys::PartySignatureScheme,
-        topology_version::{self},
+    workflow::external_party::topology_bundle::{
+        BundleSerial, check_bundle_envelope, check_signature_forms, decode_p2p_change, serial_after,
     },
 };
 
@@ -53,17 +49,11 @@ pub fn validate_add_hosts_topology(
     current: &CurrentPartyTopology,
     bundle: &ExternalPartyAddHostsPayload,
 ) -> Result<()> {
-    if bundle.topology_transactions.is_empty() {
-        anyhow::bail!("external-party add-hosts submitted no topology transactions");
-    }
-    if bundle.signatures.len() != bundle.topology_transactions.len() {
-        anyhow::bail!(
-            "external-party add-hosts submitted {t} transaction(s) and {s} signature(s); they \
-             must be index-aligned",
-            t = bundle.topology_transactions.len(),
-            s = bundle.signatures.len()
-        );
-    }
+    check_bundle_envelope(
+        "external-party add-hosts",
+        &bundle.topology_transactions,
+        &bundle.signatures,
+    )?;
     // The party's namespace is the fingerprint half of its id, and Canton will
     // only accept a signature attributed to it. A wrong `signed_by` otherwise
     // fails inside SignTransactions and comes back as a 500, telling the wallet
@@ -85,16 +75,7 @@ pub fn validate_add_hosts_topology(
     // truncated signature passes validation and fails inside a Canton RPC
     // instead, surfacing as a 500 for what is plainly malformed input. The
     // forms depend on the party key's type, read off the mapping.
-    let scheme = PartySignatureScheme::for_party(&current.mapping, &bundle.signed_by);
-    for (index, signature) in bundle.signatures.iter().enumerate() {
-        if !scheme.accepts(signature) {
-            anyhow::bail!(
-                "signature {index} is {len} byte(s); {expected}",
-                len = signature.len(),
-                expected = scheme.expected_form()
-            );
-        }
-    }
+    check_signature_forms(&current.mapping, &bundle.signed_by, &bundle.signatures)?;
     if bundle.party_id != current.mapping.party {
         anyhow::bail!(
             "add-hosts names party {found}, but this node read {expected} from head state",
@@ -110,45 +91,20 @@ pub fn validate_add_hosts_topology(
             found = current.serial
         );
     }
-    let next_serial = current.serial.checked_add(1).with_context(|| {
-        format!(
-            "{party} is at serial {s}, which cannot be advanced",
-            party = current.mapping.party,
-            s = current.serial
-        )
-    })?;
+    let next_serial = serial_after(current)?;
 
     let this_participant = config.participant_id().to_string();
 
     for (index, serialized) in bundle.topology_transactions.iter().enumerate() {
-        let transaction = topology_version::decode_transaction(serialized).with_context(|| {
-            format!("topology transaction {index} is not a TopologyTransaction")
-        })?;
-
-        if transaction.operation != TopologyChangeOp::AddReplace as i32 {
-            anyhow::bail!(
-                "topology transaction {index} must be an ADD_REPLACE, got operation {op}",
-                op = transaction.operation
-            );
-        }
-        if transaction.serial != next_serial {
-            anyhow::bail!(
-                "topology transaction {index} has serial {serial}, which must be exactly one past \
-                 the current {current_serial}",
-                serial = transaction.serial,
-                current_serial = current.serial
-            );
-        }
-
-        let Some(TopologyMapping {
-            mapping: Some(topology_mapping::Mapping::PartyToParticipant(p2p)),
-        }) = transaction.mapping
-        else {
-            anyhow::bail!(
-                "topology transaction {index} must carry a PartyToParticipant mapping; this \
-                 endpoint adds hosts and authorizes nothing else"
-            );
-        };
+        let p2p = decode_p2p_change(
+            index,
+            serialized,
+            BundleSerial::Next {
+                current: current.serial,
+                next: next_serial,
+            },
+            "adds hosts",
+        )?;
 
         if p2p.party != current.mapping.party {
             anyhow::bail!(

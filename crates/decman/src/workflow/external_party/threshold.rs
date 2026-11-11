@@ -11,12 +11,9 @@
 //! co-signs and the party's own key is the whole authorization. The host still
 //! validates before it submits, because it is submitting to its own store.
 
-use anyhow::Context;
 use canton_proto_rs::com::digitalasset::canton::{
     protocol::v30::{
-        PartyToParticipant, TopologyMapping,
-        enums::{ParticipantPermission, TopologyChangeOp},
-        topology_mapping,
+        PartyToParticipant, TopologyMapping, enums::ParticipantPermission, topology_mapping,
     },
     topology::admin::v30::{AuthorizeRequest, authorize_request, generate_transactions_request},
 };
@@ -32,10 +29,13 @@ use crate::{
                 read_party_to_participant,
             },
             keys::PartySignatureScheme,
-            topology_bundle::{generate_p2p_change, party_signed, read_pinned, submit_signed},
+            topology_bundle::{
+                BundleSerial, check_bundle_envelope, check_signature_forms, decode_p2p_change,
+                generate_p2p_change, party_signed, read_pinned, serial_after, submit_signed,
+            },
         },
         topology,
-        topology_version::{self, ProposalFormat},
+        topology_version::ProposalFormat,
     },
 };
 
@@ -282,64 +282,24 @@ pub fn validate_threshold_topology(
     current: &CurrentPartyTopology,
     bundle: &ExternalPartyThresholdPayload,
 ) -> anyhow::Result<()> {
-    if bundle.topology_transactions.is_empty() {
-        anyhow::bail!("external-party threshold change submitted no topology transactions");
-    }
-    if bundle.signatures.len() != bundle.topology_transactions.len() {
-        anyhow::bail!(
-            "external-party threshold change submitted {t} transaction(s) and {s} signature(s); \
-             they must be index-aligned",
-            t = bundle.topology_transactions.len(),
-            s = bundle.signatures.len()
-        );
-    }
-    let scheme = PartySignatureScheme::for_party(&current.mapping, &bundle.signed_by);
-    for (index, signature) in bundle.signatures.iter().enumerate() {
-        if !scheme.accepts(signature) {
-            anyhow::bail!(
-                "signature {index} is {len} byte(s); {expected}",
-                len = signature.len(),
-                expected = scheme.expected_form()
-            );
-        }
-    }
-    let next_serial = current.serial.checked_add(1).with_context(|| {
-        format!(
-            "{party} is at serial {s}, which cannot be advanced",
-            party = current.mapping.party,
-            s = current.serial
-        )
-    })?;
+    check_bundle_envelope(
+        "external-party threshold change",
+        &bundle.topology_transactions,
+        &bundle.signatures,
+    )?;
+    check_signature_forms(&current.mapping, &bundle.signed_by, &bundle.signatures)?;
+    let next_serial = serial_after(current)?;
 
     for (index, serialized) in bundle.topology_transactions.iter().enumerate() {
-        let transaction = topology_version::decode_transaction(serialized).with_context(|| {
-            format!("topology transaction {index} is not a TopologyTransaction")
-        })?;
-
-        if transaction.operation != TopologyChangeOp::AddReplace as i32 {
-            anyhow::bail!(
-                "topology transaction {index} must be an ADD_REPLACE, got operation {op}",
-                op = transaction.operation
-            );
-        }
-        if transaction.serial != next_serial {
-            anyhow::bail!(
-                "topology transaction {index} has serial {serial}, which must be exactly one past \
-                 the current {current_serial}",
-                serial = transaction.serial,
-                current_serial = current.serial
-            );
-        }
-
-        let Some(TopologyMapping {
-            mapping: Some(topology_mapping::Mapping::PartyToParticipant(p2p)),
-        }) = transaction.mapping
-        else {
-            anyhow::bail!(
-                "topology transaction {index} must carry a PartyToParticipant mapping; this \
-                 endpoint changes a threshold and authorizes nothing else"
-            );
-        };
+        let p2p = decode_p2p_change(
+            index,
+            serialized,
+            BundleSerial::Next {
+                current: current.serial,
+                next: next_serial,
+            },
+            "changes a threshold",
+        )?;
 
         if p2p.party != current.mapping.party {
             anyhow::bail!(
