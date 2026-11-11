@@ -30,6 +30,13 @@ use crate::{
 ///
 /// `label` is a short tag included in log lines (e.g. `"DNS"`, `"P2P"`,
 /// `"kick"`) so operators can distinguish which sign path is retrying.
+///
+/// # Errors
+///
+/// Returns an error if the Admin API channel cannot be opened, or if
+/// `SignTransactions` fails with any error other than
+/// `TOPOLOGY_NO_APPROPRIATE_SIGNING_KEY_IN_STORE`. Returns an error if that
+/// error is still returned after `topology_retry_max_attempts` attempts.
 pub async fn sign_transactions_with_topology_retry(
     config: &NodeConfig,
     request: SignTransactionsRequest,
@@ -80,6 +87,13 @@ pub async fn sign_transactions_with_topology_retry(
 /// the add-party flag-clearing proposal, which is authorized right after the
 /// heaviest topology churn in the codebase (owner-set growth + activation +
 /// ACS import on the counterparty).
+///
+/// # Errors
+///
+/// Returns an error if the Admin API channel cannot be opened, or if
+/// `Authorize` fails with any error other than
+/// `TOPOLOGY_NO_APPROPRIATE_SIGNING_KEY_IN_STORE`. Returns an error if that
+/// error is still returned after `topology_retry_max_attempts` attempts.
 pub async fn authorize_with_topology_retry(
     config: &NodeConfig,
     request: AuthorizeRequest,

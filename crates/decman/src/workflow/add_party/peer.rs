@@ -90,6 +90,11 @@ pub const SKIP_STATUS: &[u8] = b"skipped (not the new member)";
 /// Send the new member's `keys||participant_id` blob to the coordinator —
 /// same two-item length-prefixed payload onboarding peers send, so the
 /// coordinator's split-and-save path is shared.
+///
+/// # Errors
+/// Returns an error if the `PEER_PUBLIC_KEYS` or `PARTICIPANT_ID` artefact
+/// cannot be read or is missing. Returns an error if the send fails or the
+/// coordinator does not answer with an Ack.
 pub async fn send_keys_to_coordinator(
     client: &NoiseClient,
     storage: &SqlitePool,
@@ -126,6 +131,11 @@ pub async fn send_keys_to_coordinator(
 /// Send this peer's signed DNS + P2P add-party proposals to the coordinator
 /// as one concatenated buffer (two `varint(len)||proto` blobs back to back),
 /// mirroring the kick signature wire format.
+///
+/// # Errors
+/// Returns an error if the `SIGNED_ADD_PARTY_DNS` or `SIGNED_ADD_PARTY_P2P`
+/// artefact cannot be read or is missing. Returns an error if the send fails or
+/// the coordinator does not answer with an Ack.
 pub async fn send_add_party_signatures_to_coordinator(
     client: &NoiseClient,
     storage: &SqlitePool,
@@ -145,6 +155,11 @@ pub async fn send_add_party_signatures_to_coordinator(
 
 /// Send this peer's signed onboarding-flag clearing proposal (a single
 /// `varint(len)||proto` blob) to the coordinator.
+///
+/// # Errors
+/// Returns an error if the `SIGNED_ADD_PARTY_CLEAR` artefact cannot be read or
+/// is missing. Returns an error if the send fails or the coordinator does not
+/// answer with an Ack.
 pub async fn send_clear_signature_to_coordinator(
     client: &NoiseClient,
     storage: &SqlitePool,

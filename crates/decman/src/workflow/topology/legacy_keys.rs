@@ -28,6 +28,16 @@ use crate::{
 /// Called only after the replacement topology has become effective. Every
 /// member reads the same live mapping and signs the same explicit next serial;
 /// Canton merges their signatures under the current namespace threshold.
+///
+/// # Errors
+///
+/// Returns an error if the Admin API channel cannot be opened, or if the
+/// `PartyToKeyMapping` or `PartyToParticipant` head read fails. Returns an
+/// error if the `PartyToParticipant` names another party, or if its inline
+/// signing keys are missing, repeat a key, or have an unusable threshold.
+/// Returns an error if the legacy serial is not positive or cannot be advanced.
+/// Returns an error if `Authorize` fails and a follow-up read still finds the
+/// legacy mapping, or if that read fails.
 pub async fn retire_legacy_keys(
     config: &NodeConfig,
     synchronizer_id: &str,
@@ -116,6 +126,13 @@ fn validate_legacy_retirement(p2p: &PartyToParticipant, legacy: &PartyToKeyMappi
 
 /// Coordinator side of the retirement round. Peers contribute while this
 /// waits; completing the workflow requires observing the removal on-chain.
+///
+/// # Errors
+///
+/// Returns an error if the synchronizer ID cannot be read, or in the cases of
+/// [`retire_legacy_keys`]. Returns an error if a `PartyToKeyMapping` read fails
+/// while waiting. Returns an error if the legacy mapping is still in force
+/// after `topology_retry_max_attempts` checks, as when too few members signed.
 pub async fn retire_legacy_keys_and_wait(config: &NodeConfig, party: &CantonId) -> Result {
     let synchronizer_id = utils::get_synchronizer_id(config).await?;
     retire_legacy_keys(config, &synchronizer_id, party).await?;

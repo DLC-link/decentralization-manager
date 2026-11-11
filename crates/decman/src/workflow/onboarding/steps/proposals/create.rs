@@ -49,6 +49,15 @@ use crate::{
 ///
 /// **Note**: If you encounter TOPOLOGY_NO_APPROPRIATE_SIGNING_KEY_IN_STORE errors,
 /// ensure the participant is properly connected to a synchronizer first.
+///
+/// # Errors
+///
+/// Returns an error if the peers' key or participant ID artefacts are missing
+/// or malformed. Returns an error if the distinct namespace keys do not match
+/// the participant count, or if a configured threshold is out of range.
+/// Returns an error if a Canton Admin API call fails, or if `Authorize`
+/// returns no transaction. Returns an error if `party_id_prefix` does not form
+/// a valid party ID, or if a database write fails.
 pub async fn create_proposals(
     config: &NodeConfig,
     storage: &SqlitePool,

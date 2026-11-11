@@ -48,6 +48,12 @@ impl<S: WorkflowStep + 'static> NoiseServer<S> {
     ///   primary key).
     /// * `initial_step` - Initial workflow step
     /// * `exclude_participants` - Optional list of participant IDs to exclude from peers (e.g., participants being kicked)
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if this node's Noise key file cannot be loaded. A failed
+    /// read of the persisted run does not fail; it falls back to the configured
+    /// peers.
     #[allow(clippy::too_many_arguments)]
     pub async fn new(
         node_config: NodeConfig,

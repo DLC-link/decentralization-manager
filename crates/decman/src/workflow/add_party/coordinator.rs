@@ -26,6 +26,17 @@ use crate::{
     },
 };
 
+/// Run the add-party workflow on this node as its coordinator, until the run
+/// completes or fails.
+///
+/// # Errors
+///
+/// Returns an error if the Noise key file cannot be read. Returns an error if a
+/// step fails, for example a Canton API call or a read or write of the run's
+/// stored artefacts. Returns an error if the add fails a check, for example the
+/// new member is already a host or has not vetted a needed package. Returns an
+/// error if the peers the run waits on give up or go silent, or if the workflow
+/// task panics.
 pub async fn start_coordinator(
     node_config: NodeConfig,
     network_config: NetworkConfig,

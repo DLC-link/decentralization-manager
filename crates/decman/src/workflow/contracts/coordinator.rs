@@ -21,6 +21,18 @@ use crate::{
     },
 };
 
+/// Run the contracts workflow on this node as its coordinator, until the run
+/// completes or fails.
+///
+/// # Errors
+///
+/// Returns an error if the Noise key file cannot be read, if no workflow auth
+/// is configured, or if the party's credentials cannot be obtained. Returns an
+/// error if a step fails, for example a Ledger API call or a read or write of
+/// the run's stored artefacts. Returns an error if a check fails, for example
+/// on the party's threshold, the prepared creates or this node's signing key.
+/// Returns an error if the peers the run waits on give up or go silent, or if
+/// the workflow task panics.
 pub async fn start_coordinator(
     node_config: NodeConfig,
     network_config: NetworkConfig,

@@ -90,6 +90,12 @@ pub trait TransactionSigner: Send + Sync {
 ///
 /// Async because the store is read, and because the KMS backend resolves AWS
 /// credentials when it is built.
+///
+/// # Errors
+///
+/// Returns an error only on the vault export path. That happens when the Admin
+/// API channel cannot be opened, or the synchronizer ID cannot be read or
+/// carries no protocol version. A failed store read is logged and does not fail.
 pub async fn select_signer(
     key: &SigningKeyContext,
     config: &NodeConfig,

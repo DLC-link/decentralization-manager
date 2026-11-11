@@ -56,6 +56,17 @@ impl<S: WorkflowStep + 'static> NoiseServer<S> {
     /// Handle a workflow-command message routed from the always-on listener.
     /// These are exactly the workflow arms of the former `handle_request`,
     /// relocated unchanged.
+    ///
+    /// # Errors
+    ///
+    /// Returns `NoiseError::InvalidMessage` if a `GetChunk` request is shorter
+    /// than 4 bytes or names a chunk past the end of the command payload.
+    /// Returns `NoiseError::InvalidMessage` if a `GetNextAcsBlock` request is
+    /// shorter than 8 bytes. Returns an error if the ACS block cannot be served.
+    /// That happens when the caller is not the replication target or no export
+    /// is open. It also happens when the sequence is out of step or the Canton
+    /// export stream fails.
+    /// Other message types never fail; an unsupported one gets an `Error` reply.
     pub async fn handle_command(
         &self,
         peer_id: CantonId,

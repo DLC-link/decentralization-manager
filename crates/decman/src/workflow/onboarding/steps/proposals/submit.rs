@@ -37,6 +37,14 @@ use crate::{
 ///
 /// This step must be run once by the coordinator after all peers have signed the DNS proposal.
 /// It aggregates all signatures and submits the fully-signed proposal to Canton.
+///
+/// # Errors
+///
+/// Returns an error if the `DNS_PROTO` or `NAMESPACE_DEF` artefact is missing
+/// or does not decode. Returns an error if a peer's `SIGNED_DNS_PROPOSAL`
+/// artefact does not decode. Returns an error if a Canton Admin API call
+/// fails, including `AddTransactions`. Returns an error if the namespace does
+/// not appear in the head state before the topology retry budget runs out.
 pub async fn submit_dns_proposals(
     config: &NodeConfig,
     storage: &SqlitePool,
@@ -172,6 +180,16 @@ async fn wait_for_dns_in_topology(
 ///
 /// This step must be run once by the coordinator after all peers have signed the P2P proposals.
 /// It aggregates all signatures and submits the fully-signed proposal to Canton.
+///
+/// # Errors
+///
+/// Returns an error if the `P2P_PROTO` or `NAMESPACE_DEF` artefact is missing
+/// or does not decode. Returns an error if a peer's `SIGNED_P2P_PROPOSAL`
+/// artefact does not hold exactly one transaction. Returns an error if a
+/// Canton Admin API call fails, including the re-sign and `AddTransactions`.
+/// Returns an error if fewer owners than the namespace threshold signed the
+/// proposal. Returns an error if the mapping does not appear in the head state
+/// within the retry budget, or appears without a `valid_from` time.
 pub async fn submit_final_proposals(
     config: &NodeConfig,
     storage: &SqlitePool,

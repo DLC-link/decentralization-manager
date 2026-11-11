@@ -41,6 +41,11 @@ impl NoiseClient {
     /// Create a new Noise client to connect to a specific coordinator.
     /// `route_instance` is the coordinator's run identifier used to route this
     /// peer's workflow commands; pass an empty string when unknown.
+    ///
+    /// # Errors
+    /// Returns an error if this node's Noise key file cannot be loaded.
+    /// Returns `NoiseError::InvalidMessage` if the coordinator's public key is
+    /// not a valid hex-encoded secp256k1 key.
     pub async fn new(
         node_config: NodeConfig,
         coordinator: Peer,
@@ -63,6 +68,10 @@ impl NoiseClient {
     }
 
     /// Send a message to the coordinator with the default control-plane timeout.
+    ///
+    /// # Errors
+    /// Returns an error in the same cases as `send_message_with_timeout`, with
+    /// `NOISE_REQUEST_TIMEOUT` as the timeout.
     pub async fn send_message(&self, message: &Message) -> Result<Bytes, NoiseError> {
         self.send_message_with_timeout(message, NOISE_REQUEST_TIMEOUT)
             .await
@@ -71,6 +80,16 @@ impl NoiseClient {
     /// Send a message to the coordinator, applying `request_timeout` to both the
     /// TCP connect and the Noise/HTTP round-trip. Used so large chunk fetches can
     /// run on a longer budget than fast control-plane polls.
+    ///
+    /// # Errors
+    /// Returns `NoiseError::InvalidUri` or `NoiseError::Http` if the
+    /// coordinator's address does not form a valid request.
+    /// Returns `TcpConnectionFailed` or `TcpConnectionTimeout` if the TCP
+    /// connect fails or exceeds `request_timeout`.
+    /// Returns a Noise, Hyper or `RequestTimeout` error if the handshake, the
+    /// request, or reading the response body fails or times out.
+    /// Returns `BadStatusCode` or `WireVersionMismatch` if the coordinator
+    /// answers with a status other than 200 OK.
     pub async fn send_message_with_timeout(
         &self,
         message: &Message,
@@ -206,6 +225,11 @@ impl NoiseClient {
 
     /// Send `payload` to the coordinator as a `kind` message and check that it
     /// answers with an Ack.
+    ///
+    /// # Errors
+    /// Returns an error if the request fails, as `send_message_with_timeout`
+    /// describes. Returns `NoiseError::InvalidMessage` if the response does not
+    /// decode or is not an Ack.
     pub async fn send(&self, kind: MessageType, payload: Vec<u8>) -> Result<(), NoiseError> {
         self.send_and_verify_ack(kind, payload, sending(kind)).await
     }
@@ -214,12 +238,22 @@ impl NoiseClient {
     /// can fail its in-progress run with a descriptive error instead of
     /// hanging until timeout. Payload is the JSON-encoded
     /// `DeclineInvitationPayload`.
+    ///
+    /// # Errors
+    /// Returns an error if the request fails, as `send_message_with_timeout`
+    /// describes. Returns `NoiseError::InvalidMessage` if the response does not
+    /// decode or is not an Ack.
     pub async fn send_decline_invitation(&self, payload: Vec<u8>) -> Result<(), NoiseError> {
         self.send(MessageType::DeclineInvitation, payload).await
     }
 
     /// Tell the coordinator this peer gave up on the run. Payload is the
     /// JSON-encoded `DeclineInvitationPayload` with `abandoned` set.
+    ///
+    /// # Errors
+    /// Returns an error if the request fails, as `send_message_with_timeout`
+    /// describes. Returns `NoiseError::InvalidMessage` if the response does not
+    /// decode or is not an Ack.
     pub async fn report_failure(&self, payload: Vec<u8>) -> Result<(), NoiseError> {
         self.send_and_verify_ack(
             MessageType::DeclineInvitation,
@@ -230,6 +264,15 @@ impl NoiseClient {
     }
 
     /// Poll coordinator for next command, returning full message with payload
+    ///
+    /// # Errors
+    /// Returns an error if the poll request fails, as `send_message_with_timeout`
+    /// describes. Returns `NoiseError::InvalidMessage` if the response does not
+    /// decode. For a chunked command, returns an error if the metadata is
+    /// malformed or over the size caps. Returns an error if the assembled size
+    /// does not match the metadata. Also returns an error if a chunk cannot be
+    /// fetched or carries the wrong index. Transient chunk failures get up to
+    /// `CHUNK_FETCH_MAX_ATTEMPTS` attempts first.
     pub async fn get_next_command_with_payload(&self) -> Result<Message, NoiseError> {
         tracing::debug!("Polling coordinator for next command");
 

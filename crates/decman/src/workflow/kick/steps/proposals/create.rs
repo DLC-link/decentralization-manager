@@ -31,6 +31,16 @@ use crate::{
 ///   — `KICK_P2P_PROPOSAL`
 /// - New namespace definition — `KICK_NEW_NAMESPACE_DEF` (used by submit)
 /// - Full party id — `KICK_PARTY_ID` (used by submit)
+///
+/// # Errors
+///
+/// Returns an error if an artefact from `export_state` is missing or does not
+/// parse, or if an artefact write fails. Returns an error if a Canton Admin API
+/// call fails, including signing the proposals, or if the namespace changed
+/// since `export_state` read it. Returns an error if the kick would remove
+/// every owner or host, or if the planned confirmation threshold no longer
+/// matches the chain. Returns an error if the remaining signing keys do not
+/// match the remaining members one to one.
 pub async fn create_proposals(
     config: &NodeConfig,
     storage: &SqlitePool,

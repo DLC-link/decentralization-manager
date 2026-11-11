@@ -10,6 +10,11 @@ use crate::error::Result;
 /// Read the first protobuf message from a byte slice
 ///
 /// This is useful when receiving message data over the network instead of from a file.
+///
+/// # Errors
+///
+/// Errors if `data` is empty or the length prefix is not a valid varint.
+/// Errors if the message is cut short or does not decode as `M`.
 pub fn read_first_message_from_bytes<M: Message + Default>(data: &[u8]) -> Result<M> {
     let mut cursor = data;
 
@@ -121,6 +126,11 @@ pub fn encode_files(files: &[(String, Vec<u8>)]) -> Vec<u8> {
 /// Decode files from a payload
 ///
 /// Returns a vector of (filename, data) pairs
+///
+/// # Errors
+///
+/// Errors if `data` is shorter than the 4-byte count, or if a length prefix
+/// or item runs past its end. Errors if a filename is not valid UTF-8.
 pub fn decode_files(data: &[u8]) -> Result<Vec<(String, Vec<u8>)>> {
     if data.len() < 4 {
         anyhow::bail!("Invalid file payload: too short for count");
@@ -159,6 +169,11 @@ pub fn encode_length_prefixed(items: &[&[u8]]) -> Vec<u8> {
 ///
 /// Each item is prefixed with a 4-byte big-endian length.
 /// Returns the requested number of items or an error if the data is malformed.
+///
+/// # Errors
+///
+/// Errors if `data` ends before one of the `expected_count` length prefixes,
+/// or before the bytes a prefix announces.
 pub fn decode_length_prefixed(data: &[u8], expected_count: usize) -> Result<Vec<Vec<u8>>> {
     let mut items = Vec::with_capacity(expected_count);
     let mut offset = 0;

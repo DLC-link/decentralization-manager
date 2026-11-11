@@ -52,6 +52,15 @@ use crate::{
 /// * `instance_name` - Workflow run instance name (key for `workflow_artifacts`)
 /// * `dec_party_id` - Decentralized party id used to look up `peer_public_keys`
 ///   in the `dec_party_identity` table (this run's local Daml signing key bundle)
+///
+/// # Errors
+///
+/// Returns an error if `intents` is empty, or if this node's Daml key cannot be
+/// found or is not in the vault. Returns an error if the prepared submissions
+/// are missing, differ in count from `intents`, or do not match their
+/// transactions or the accepted creates. Returns an error if the key store
+/// cannot be opened, if no signer can be built, or if signing fails. Returns an
+/// error if the signature artefact cannot be written.
 pub async fn sign_submissions(
     config: &NodeConfig,
     db: &SqlitePool,
@@ -513,6 +522,10 @@ async fn backfill_peer_keys_from_chain(
 /// the given dec_party_id, by joining `workflow_artifacts` to `workflow_runs`.
 /// Used as a one-shot backfill for parties whose onboarding ran before the
 /// `dec_party_identity` write hook was added.
+///
+/// # Errors
+///
+/// Returns an error if the database query fails.
 pub async fn backfill_peer_keys(
     db: &SqlitePool,
     dec_party_id: &CantonId,

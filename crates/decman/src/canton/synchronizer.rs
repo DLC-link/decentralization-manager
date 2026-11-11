@@ -77,6 +77,12 @@ pub fn forget_synchronizer_id_on_unknown_store(error: &str) {
 /// Queries the participant's synchronizer connectivity service to get the
 /// physical synchronizer ID for the configured synchronizer alias. A cached
 /// value younger than the TTL is returned without a network round trip.
+///
+/// # Errors
+///
+/// Returns an error if the cache is stale and `fetch_synchronizer_id` fails.
+/// That happens when the Admin API is unreachable, `GetSynchronizerId` fails,
+/// or Canton returns an empty ID for the configured alias.
 pub async fn get_synchronizer_id(config: &NodeConfig) -> Result<String> {
     if let Some(id) = fresh_synchronizer_id(&SYNCHRONIZER_ID_CACHE, Instant::now()) {
         return Ok(id);
@@ -93,6 +99,12 @@ pub async fn get_synchronizer_id(config: &NodeConfig) -> Result<String> {
 
 /// Get the physical synchronizer ID for an alias, over the configured Admin
 /// API channel.
+///
+/// # Errors
+///
+/// Returns an error if the Admin API channel cannot be opened or the
+/// `GetSynchronizerId` call fails. Returns an error if Canton returns an empty
+/// physical synchronizer ID for `synchronizer_alias`.
 pub async fn fetch_synchronizer_id(
     config: &NodeConfig,
     synchronizer_alias: &str,
@@ -121,6 +133,11 @@ pub async fn fetch_synchronizer_id(
 /// Example:
 /// - Input: `global-domain::122033d02b977e2b698d6a6397eb62e43f7bff34bc8fa814384c4a533d1162239df8::34-0`
 /// - Output: `global-domain::122033d02b977e2b698d6a6397eb62e43f7bff34bc8fa814384c4a533d1162239df8`
+///
+/// # Errors
+///
+/// Returns an error if `synchronizer_id` does not split on `::` into two or
+/// three parts.
 pub fn extract_synchronizer_fingerprint(synchronizer_id: &str) -> Result<String> {
     let parts: Vec<&str> = synchronizer_id.split("::").collect();
 

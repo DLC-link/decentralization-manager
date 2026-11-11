@@ -84,6 +84,16 @@ pub enum TransferSource {
 /// - a participant that can't be brought back to a healthy connected state
 ///   yields an actionable error naming the likely orphan-row corruption instead
 ///   of a cryptic retry-abort.
+///
+/// # Errors
+///
+/// Returns an error if the participant is quarantined for this party, or if it
+/// lacks a package the party's contracts need. Returns an error if a database
+/// read or write fails, or if `next_block` cannot deliver the first block.
+/// Returns an error if a Canton Admin API call fails or the participant is
+/// unhealthy before the import. Returns an error if the import still fails on
+/// its last attempt. Returns an error if the participant is not connected and
+/// healthy after the reconnect, or stays on manual connection.
 pub async fn import_party_acs<F, Fut>(
     config: &NodeConfig,
     storage: &SqlitePool,

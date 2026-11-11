@@ -246,6 +246,12 @@ async fn own_signing_key_fingerprint(
 ///
 /// Reads the identity rows this node happens to hold, then the fingerprints
 /// participants reported for themselves, then — for this node — its own key.
+///
+/// # Errors
+///
+/// Errors when the party's participant rows or identity rows cannot be read
+/// from the database. When no claim names this node, it also errors when its
+/// own identity row cannot be read or decoded, or when a vault query fails.
 pub async fn known_signing_keys_by_member(
     config: &NodeConfig,
     db: &SqlitePool,

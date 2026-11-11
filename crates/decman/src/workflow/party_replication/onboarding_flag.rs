@@ -98,6 +98,17 @@ pub async fn request_onboarding_flag_clear(
     })
 }
 
+/// Call `ClearPartyOnboardingFlag` until the flag is gone or Canton proposes
+/// the clearing transaction past its safe time.
+///
+/// # Errors
+/// Returns an error if the synchronizer ID cannot be read, or does not split
+/// on `::` into two or three parts. Returns an error if the stored
+/// pre-activation offset cannot be read or parsed, or if it is missing and
+/// cannot be derived and saved. Returns an error if the Admin API channel
+/// cannot be opened or `ClearPartyOnboardingFlag` fails. Returns an error if
+/// the safe time is still ahead after waiting more than
+/// `MAX_SAFE_TIME_WAIT_SECS` seconds.
 pub async fn clear_onboarding_flag(
     config: &NodeConfig,
     storage: &SqlitePool,
@@ -181,6 +192,11 @@ pub async fn clear_onboarding_flag(
 }
 
 /// Poll head state until the target participant's onboarding marker is gone.
+///
+/// # Errors
+/// Returns an error if a head-state read fails, for example when the party has
+/// no `PartyToParticipant` mapping. Returns an error if `new_member` still
+/// carries the marker after the last poll attempt.
 pub async fn wait_for_flag_cleared(
     config: &NodeConfig,
     synchronizer_id: &str,

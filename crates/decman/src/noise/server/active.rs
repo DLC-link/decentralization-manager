@@ -29,6 +29,12 @@ pub enum ActiveWorkflow {
 
 impl ActiveWorkflow {
     /// Route a workflow-command message to the underlying typed server.
+    ///
+    /// # Errors
+    ///
+    /// Returns the errors of [`NoiseServer::handle_command`]: a malformed
+    /// `GetChunk` or `GetNextAcsBlock` request, or an ACS export block that
+    /// cannot be served.
     pub async fn handle_command(
         &self,
         peer_id: CantonId,

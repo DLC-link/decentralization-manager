@@ -13,6 +13,11 @@ use super::NoiseError;
 use crate::error::Result;
 
 /// Parse a hex-encoded public key string into a PublicKey
+///
+/// # Errors
+///
+/// Returns `NoiseError::InvalidMessage` if `hex_str` is not valid hex or does
+/// not encode a valid secp256k1 public key.
 pub fn parse_public_key(hex_str: &str) -> Result<PublicKey, NoiseError> {
     let pub_key_bytes = hex::decode(hex_str).map_err(|_| NoiseError::InvalidMessage)?;
     let pub_key = PublicKey::from_slice(&pub_key_bytes).map_err(|_| NoiseError::InvalidMessage)?;
@@ -66,6 +71,14 @@ impl NoiseKeypair {
     }
 
     /// Load keypair from a file (expects hex-encoded secret key)
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the file cannot be read, or on unix if its
+    /// permissions cannot be read or set to 0600. Returns an error if the
+    /// content is not UTF-8 or not hex, or does not decode to exactly 32
+    /// bytes. Returns an error if those bytes are not a valid secp256k1 secret
+    /// key.
     pub async fn from_file<P: AsRef<Path>>(path: P) -> Result<Self> {
         let path = path.as_ref();
         // Tighten permissions BEFORE reading so any existing overly-permissive
@@ -106,6 +119,13 @@ impl NoiseKeypair {
     ///
     /// On unix, the file is created with mode 0600 atomically — no window
     /// in which the file is readable to other users.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the parent directory cannot be created. Returns an
+    /// error if the key file cannot be written. On unix, also returns an error
+    /// if an existing file cannot be set to 0600. It also returns one if the
+    /// new file cannot be opened or synced to disk.
     pub async fn save_to_file<P: AsRef<Path>>(&self, path: P) -> Result {
         let path = path.as_ref();
 
@@ -209,6 +229,12 @@ async fn ensure_key_file_permissions(path: &Path) -> Result {
 ///
 /// If the key file exists, loads it. Otherwise, generates a new keypair and saves it.
 /// This is the primary way to obtain a keypair for the application.
+///
+/// # Errors
+///
+/// Returns an error if an existing key file cannot be loaded, as
+/// `NoiseKeypair::from_file` describes. Returns an error if a new keypair
+/// cannot be saved, as `NoiseKeypair::save_to_file` describes.
 pub async fn load_or_generate_keypair<P: AsRef<Path>>(path: P) -> Result<NoiseKeypair> {
     let path = path.as_ref();
 

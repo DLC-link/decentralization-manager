@@ -28,6 +28,15 @@ use crate::{
 /// - New namespace definition — `CHANGE_THRESHOLD_NEW_NAMESPACE_DEF` (used by
 ///   submit to poll the topology)
 /// - Full party id — `CHANGE_THRESHOLD_PARTY_ID` (used by submit)
+///
+/// # Errors
+///
+/// Returns an error if the exported namespace artefact is missing or does not
+/// decode, or if the party ID does not parse. Returns an error if a Canton
+/// Admin API read fails, or if the head namespace differs from the exported
+/// one. Returns an error if the confirmation threshold is out of range, or if
+/// neither threshold changes. Returns an error if signing the proposals fails,
+/// or if an artefact cannot be written.
 pub async fn create_proposals(
     config: &NodeConfig,
     storage: &SqlitePool,

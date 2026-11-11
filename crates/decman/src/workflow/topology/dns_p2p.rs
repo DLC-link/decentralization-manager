@@ -146,6 +146,13 @@ pub async fn check_proposal_standing(
 ///
 /// `label` is a short workflow tag (`"kick"`, `"add-party"`,
 /// `"change-threshold"`) included in log lines and the sign-retry diagnostics.
+///
+/// # Errors
+///
+/// Errors when the synchronizer ID cannot be read, or when `proposal_data` does
+/// not hold two length-prefixed `SignedTopologyTransaction` messages. Errors
+/// when `SignTransactions` fails or does not return exactly two transactions.
+/// Errors when a signed artefact cannot be written to storage.
 pub async fn sign_dns_p2p_proposals(
     config: &NodeConfig,
     storage: &SqlitePool,
@@ -230,6 +237,13 @@ pub struct DnsP2pArtifactKinds<'a> {
 /// Callers that may resubmit — where a peer could sign twice or the
 /// coordinator's own signature could be re-added — should run
 /// [`dedupe_signatures`] on the results before submitting.
+///
+/// # Errors
+///
+/// Errors when a storage read fails, or when the coordinator's DNS or P2P
+/// proposal artefact is missing. Errors when a stored artefact does not decode
+/// as a `SignedTopologyTransaction`. Errors when the signed DNS and P2P counts
+/// differ, or when a peer signed the DNS but not the P2P.
 pub async fn aggregate_dns_p2p_signatures(
     storage: &SqlitePool,
     instance_name: &str,
@@ -346,6 +360,14 @@ pub struct DnsP2pSubmission {
 /// earlier attempt of the same submit, is not sent again.
 ///
 /// `label` is a short workflow tag included in the log lines.
+///
+/// # Errors
+///
+/// Errors when [`check_proposal_standing`] refuses either proposal, for example
+/// because the head cannot be read or another change moved its serial. Errors
+/// when the Admin API channel cannot be opened, when the DNS `AddTransactions`
+/// call fails, or when `confirm_dns` fails. Errors in the cases of
+/// [`submit_p2p`] for the P2P half.
 pub async fn submit_dns_then_p2p<DnsFut, P2pFut>(
     config: &NodeConfig,
     synchronizer_id: &str,
@@ -405,6 +427,13 @@ where
 ///
 /// The P2P serial is checked against the synchronizer again right before it
 /// is published, which narrows the window a concurrent change can use.
+///
+/// # Errors
+///
+/// Errors when [`check_proposal_standing`] refuses the P2P proposal, for
+/// example because another change moved its serial. Errors when the Admin API
+/// channel cannot be opened, when `AddTransactions` fails, or when
+/// `confirm_p2p` fails.
 pub async fn submit_p2p<P2pFut>(
     config: &NodeConfig,
     synchronizer_id: &str,

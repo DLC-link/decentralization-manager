@@ -15,6 +15,12 @@ use crate::{
 /// shipped (i.e. the contents of the combined signed proposals file), which
 /// is what the coordinator's submit step expects to decode as two protobuf
 /// messages.
+///
+/// # Errors
+///
+/// Returns an error if this node's `SIGNED_KICK_DNS` or `SIGNED_KICK_P2P`
+/// artefact is missing or cannot be read. Returns an error if the Noise send
+/// fails or the coordinator does not answer with an Ack.
 pub async fn send_kick_signatures_to_coordinator(
     client: &NoiseClient,
     storage: &SqlitePool,

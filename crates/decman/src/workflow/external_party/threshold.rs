@@ -278,6 +278,16 @@ pub async fn prepare_threshold(
 /// (a threshold change needs only the party namespace) but it does submit to its
 /// own store, and a bundle that moved the host set while claiming to move the
 /// threshold would evict hosts under cover of a routine change.
+///
+/// # Errors
+/// Returns an error if the bundle has no transactions or not one signature per
+/// transaction. Returns an error if a signature has a form the party's key
+/// cannot produce, or if the current serial cannot be advanced. Returns an
+/// error if a transaction does not decode, is not an `ADD_REPLACE` at the next
+/// serial, or carries no `PartyToParticipant`. Returns an error if a
+/// transaction names another party or leaves the threshold unchanged. It also
+/// fails if the new threshold is below 1, exceeds the number of hosts able to
+/// confirm, or comes with any other change.
 pub fn validate_threshold_topology(
     current: &CurrentPartyTopology,
     bundle: &ExternalPartyThresholdPayload,

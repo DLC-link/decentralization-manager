@@ -28,6 +28,15 @@ use crate::{
 /// already exist (owners and participants are unchanged), so the post-submit
 /// polls wait on the new threshold *value* rather than mere existence — else
 /// the check passes before the change lands.
+///
+/// # Errors
+///
+/// Returns an error if the synchronizer ID cannot be read. Returns an error if
+/// a stored proposal, peer signature, new namespace or party ID is missing or
+/// does not decode. Returns an error if a signing key the P2P adds has not
+/// signed it, or if a proposal's serial moved since it was built. Returns an
+/// error if `AddTransactions` fails, or if the new thresholds do not appear in
+/// head state within the polling budget.
 pub async fn submit_change(
     config: &NodeConfig,
     storage: &SqlitePool,

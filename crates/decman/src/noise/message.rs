@@ -343,6 +343,13 @@ impl Message {
     }
 
     /// Decode message from wire format
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `bytes` is shorter than the 9-byte header or does
+    /// not start with this build's `WIRE_VERSION`. Returns an error if the
+    /// message type is unknown or the routing instance is not valid UTF-8.
+    /// Returns an error if the instance or the payload is cut short.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self> {
         // Minimum: version (1) + type (2) + instance_len (2) + payload_len (4).
         if bytes.len() < 9 {

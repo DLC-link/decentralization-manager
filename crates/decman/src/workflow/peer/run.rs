@@ -35,6 +35,17 @@ use crate::{
 /// satisfied. The coordinator's logical instance_name (carried in
 /// OnboardingConfig/ContractsConfig/KickConfig payloads) is the coordinator's
 /// own primary key on its DB and is not used for storage on the peer side.
+///
+/// # Errors
+///
+/// Returns an error if the accepted invitation cannot be loaded, or if the
+/// Noise client cannot read this node's keypair or parse the coordinator's key.
+/// Returns an error if polling the coordinator fails three times in a row, or
+/// if it reports no active workflow for `MAX_CONSECUTIVE_NO_WORKFLOW_POLLS`
+/// polls. Returns an error after `MAX_CONSECUTIVE_STEP_FAILURES` step failures
+/// in a row, such as commands or payloads the invitation does not allow.
+/// Returns an error at once if the ACS import or the `RetireLegacyKeys` step
+/// fails.
 pub async fn start_peer(
     node_config: NodeConfig,
     coordinator: Peer,

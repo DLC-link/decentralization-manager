@@ -19,6 +19,11 @@ use crate::{
 /// Deletes the single row rather than rewriting the whole participant set. The
 /// read-modify-write shape would revert a `permission` update landed by a
 /// concurrent refresh, and there is nothing here that needs the other rows.
+///
+/// # Errors
+///
+/// Returns an error if the database transaction cannot begin or commit, or if
+/// deleting the participant row or the owner key fails.
 pub async fn prune_cached_membership(
     db: &SqlitePool,
     party_id: &CantonId,

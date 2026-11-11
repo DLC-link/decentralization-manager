@@ -31,6 +31,16 @@ use crate::{
 /// and submits the DNS mapping followed by the P2P mapping. A kicked owner's
 /// mapping already exists before submission, so both post-submit polls require
 /// the submitted serial and membership before legacy-key retirement can start.
+///
+/// # Errors
+///
+/// Returns an error if a kick artefact is missing or does not decode. Returns
+/// an error if the peers' signed DNS and P2P artefacts do not pair up. Returns
+/// an error if the P2P proposal adds a signing key that has not signed it.
+/// Returns an error if a Canton Admin API call fails, or if another change
+/// moved a serial after the proposals were built. Returns an error if the head
+/// state does not show the new DNS or P2P before the topology retry budget
+/// runs out.
 pub async fn submit_kick(config: &NodeConfig, storage: &SqlitePool, instance_name: &str) -> Result {
     tracing::info!("Submitting kick to synchronizer...");
 

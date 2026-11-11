@@ -13,6 +13,15 @@ use crate::{
     workflow::{contracts, run_workflow_with_handler, state::WorkflowState},
 };
 
+/// Run the DARs workflow on this node as its coordinator: send the DARs to the
+/// invited peers, then upload them here.
+///
+/// # Errors
+///
+/// Returns an error if the Noise key file cannot be read, or if a DAR's base64
+/// data does not decode. Returns an error if the Admin API channel cannot be
+/// opened or `UploadDar` fails on this node. Returns an error if the peers the
+/// run waits on give up or go silent, or if the workflow task panics.
 pub async fn start_coordinator(
     node_config: NodeConfig,
     network_config: NetworkConfig,

@@ -36,6 +36,13 @@ pub struct CoordinatorResult {
 }
 
 /// Start a coordinator workflow (called when this node initiates the workflow from UI)
+///
+/// # Errors
+///
+/// Returns an error if the peers cannot be read from the database, or if the
+/// config that `workflow_type` needs is `None`. Returns an error if the chosen
+/// workflow fails. Causes include an unreadable Noise keypair, a failed step
+/// such as a Canton Admin API call, and peers that give up or go silent.
 #[allow(clippy::too_many_arguments)]
 pub async fn start_coordinator(
     node_config: NodeConfig,
@@ -172,6 +179,12 @@ pub async fn start_coordinator(
 ///
 /// The run fails, naming the peers and why, once peers it still waits on have
 /// given up or gone silent and the rest cannot finish it.
+///
+/// # Errors
+///
+/// Returns an error if the peers the run still waits on give up or go silent
+/// and the rest cannot finish it. Returns an error if the workflow task returns
+/// an error, panics, or is cancelled.
 pub async fn run_workflow_with_handler(
     active: ActiveWorkflow,
     instance: Arc<WorkflowInstance>,

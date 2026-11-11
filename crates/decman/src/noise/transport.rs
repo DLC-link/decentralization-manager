@@ -46,6 +46,11 @@ pub const NOISE_HANDLER_TIMEOUT: Duration = Duration::from_secs(45);
 pub const NOISE_ACS_BLOCK_TIMEOUT: Duration = Duration::from_secs(40);
 
 /// Helper function to parse flexible URIs (with or without scheme)
+///
+/// # Errors
+///
+/// Returns `InvalidUri` if the string, with `http://` added when it has no
+/// scheme, does not parse as a URI.
 pub fn parse_flexible_uri(uri_str: &str) -> Result<Uri, InvalidUri> {
     let url = match uri_str.find("://") {
         None => format!("http://{uri_str}"),
@@ -61,6 +66,16 @@ pub fn parse_flexible_uri(uri_str: &str) -> Result<Uri, InvalidUri> {
 /// default `NOISE_REQUEST_TIMEOUT` to both the TCP connect and the
 /// Noise/HTTP request budget. New callers wanting per-attempt control should
 /// use `send_noise_message_with_retry`.
+///
+/// # Errors
+///
+/// Returns `NoiseError::InvalidUri` or `NoiseError::Http` if the peer address
+/// does not form a valid request. Returns `TcpConnectionFailed` or
+/// `TcpConnectionTimeout` if the TCP connect fails or exceeds
+/// `NOISE_REQUEST_TIMEOUT`. Returns a Noise, Hyper or `RequestTimeout` error
+/// if the handshake or the request fails or times out, or the response body
+/// cannot be read. Returns `BadStatusCode` or `WireVersionMismatch` if the
+/// peer answers with a status other than 200 OK.
 pub async fn send_noise_message(
     peer_address: &str,
     peer_port: u16,
@@ -221,6 +236,12 @@ where
 ///
 /// Every failure logs at `tracing::warn!`, and retry exhaustion logs one more
 /// `warn` line. The caller logs the returned error at the level it deserves.
+///
+/// # Errors
+///
+/// Returns a non-transient error at once, in the cases `send_noise_message`
+/// lists. Returns the last transient error once all `config.max_attempts`
+/// attempts fail. Returns an error if `config.max_attempts` is 0.
 pub async fn send_noise_message_with_retry(
     peer_address: &str,
     peer_port: u16,
@@ -275,6 +296,16 @@ fn parse_chunked_command_metadata(
 ///
 /// Each chunk fetch is a fresh Noise connection (TCP connect + handshake +
 /// 1 round-trip). Retry policy applies to each individual chunk fetch.
+///
+/// # Errors
+///
+/// Returns an error if the first request or a chunk request fails, as
+/// `send_noise_message_with_retry` describes. Returns
+/// `NoiseError::InvalidMessage` if a response does not decode, or if the
+/// chunked metadata is malformed, over the size caps, or inconsistent with its
+/// size. Also returns `NoiseError::InvalidMessage` if a chunk is not a `Chunk`
+/// message or carries the wrong index. Also returns it if the assembled size
+/// differs from the metadata.
 pub async fn send_noise_message_with_chunked_response(
     peer_address: &str,
     peer_port: u16,

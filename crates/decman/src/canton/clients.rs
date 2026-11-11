@@ -20,6 +20,12 @@ use crate::{canton_id::CantonId, config::NodeConfig, error::Result};
 /// Get participant ID from Canton
 ///
 /// Queries the participant's identity initialization service to get the unique participant ID.
+///
+/// # Errors
+///
+/// Returns an error if the Admin API channel cannot be opened or the `GetId`
+/// call fails. Returns an error if the participant returns an empty identifier
+/// or one that is not a valid Canton ID.
 pub async fn get_participant_id(config: &NodeConfig) -> Result<CantonId> {
     let mut id_client = IdentityInitializationServiceClient::new(config.admin_channel().await?);
     let response = id_client
@@ -39,6 +45,12 @@ pub async fn get_participant_id(config: &NodeConfig) -> Result<CantonId> {
 /// If the participant_id is not set, queries Canton Admin API and stores
 /// the result in memory. The ID is not persisted — it will be re-queried
 /// on every startup.
+///
+/// # Errors
+///
+/// Returns an error if the ID is not configured and `get_participant_id`
+/// fails. That happens when the Admin API is unreachable, `GetId` fails, or the
+/// returned ID does not parse.
 pub async fn resolve_participant_id(config: &mut NodeConfig) -> Result {
     if config.has_participant_id() {
         tracing::debug!(
@@ -62,6 +74,13 @@ pub const MAX_GRPC_MESSAGE_SIZE: usize = 512 * 1024 * 1024;
 /// Macro to define authenticated gRPC client creator functions
 macro_rules! define_client_creator {
     ($fn_name:ident, $client_type:ident) => {
+        /// Create a Ledger API client that sends `token` as a bearer token on
+        /// every request.
+        ///
+        /// # Errors
+        ///
+        /// Returns an error if the TLS material cannot be read or the Ledger
+        /// API cannot be reached.
         pub async fn $fn_name(
             config: &NodeConfig,
             token: Option<String>,

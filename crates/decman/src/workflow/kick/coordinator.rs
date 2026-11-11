@@ -20,6 +20,15 @@ use crate::{
     },
 };
 
+/// Run the kick workflow as the coordinator until it completes or fails.
+///
+/// # Errors
+///
+/// Returns an error if the Noise key file cannot be loaded. Returns an error
+/// if a kick step fails: a Canton Admin API call, an artefact read or write,
+/// or a proposal check. Returns an error if the peers it still waits on give
+/// up or go silent, or if the workflow task panics. A failed prune of the
+/// cached membership is only logged.
 pub async fn start_coordinator(
     node_config: NodeConfig,
     network_config: NetworkConfig,

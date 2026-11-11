@@ -94,6 +94,17 @@ async fn save_signed_proposals<S: WorkflowStep + 'static>(
     Ok(())
 }
 
+/// Run the onboarding workflow as the coordinator and return the ID of the
+/// party it creates.
+///
+/// # Errors
+///
+/// Returns an error if the Noise key file cannot be loaded. Returns an error
+/// if an onboarding step fails: a Canton Admin API call, an artefact read or
+/// write, a malformed peer payload, or a threshold check. Returns an error if
+/// the peers it still waits on give up or go silent, or if the workflow task
+/// panics. Returns an error if the `PARTY_ID` artefact is missing or does not
+/// hold a valid party ID.
 pub async fn start_coordinator(
     node_config: NodeConfig,
     network_config: NetworkConfig,

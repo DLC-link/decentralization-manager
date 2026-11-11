@@ -11,6 +11,11 @@ use crate::{config::NodeConfig, error::Result, workflow::contracts::DarFile};
 ///
 /// Takes DAR files (base64-encoded) and uploads them to the Canton participant.
 /// Used by the coordinator.
+///
+/// # Errors
+///
+/// Returns an error if the Admin API channel cannot be opened, if a DAR's
+/// base64 data does not decode, or if `UploadDar` fails.
 pub async fn upload_dars(config: &NodeConfig, dar_files: &[DarFile]) -> Result {
     if dar_files.is_empty() {
         tracing::info!("No DAR files to upload, skipping");
@@ -42,6 +47,11 @@ pub async fn upload_dars(config: &NodeConfig, dar_files: &[DarFile]) -> Result {
 ///
 /// Takes a list of (filename, data) tuples and uploads them to the Canton participant.
 /// Used by peers who receive DAR files from the coordinator.
+///
+/// # Errors
+///
+/// Returns an error if the Admin API channel cannot be opened, or if
+/// `UploadDar` fails for a file.
 pub async fn upload_dars_from_bytes(
     config: &NodeConfig,
     dar_files: Vec<(String, Vec<u8>)>,
