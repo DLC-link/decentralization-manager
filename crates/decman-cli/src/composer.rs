@@ -745,6 +745,32 @@ mod tests {
         }
     }
 
+    /// The overlay shows these messages, so each must keep its exact text.
+    #[test]
+    fn build_payload_errors_keep_their_messages() {
+        let error = |field: ComposerField| {
+            build_payload(&composer("governance_add_member", vec![field]))
+                .err()
+                .map(|e| e.to_string())
+        };
+        assert_eq!(
+            error(text("member", "Member party id")).as_deref(),
+            Some("Member party id is required")
+        );
+        let mut threshold = int_value("new_threshold", "Threshold", 3, "");
+        threshold.value = "three".to_owned();
+        assert_eq!(
+            error(threshold).as_deref(),
+            Some("Threshold must be a whole number")
+        );
+        let mut claims = rows("claims", "Claims", vec!["subject", "property", "value"]);
+        claims.value = "only,two".to_owned();
+        assert_eq!(
+            error(claims).as_deref(),
+            Some("Claims: each row needs 3 comma-separated values (subject,property,value)")
+        );
+    }
+
     #[test]
     fn build_payload_rows_wrong_column_count_errors() {
         let mut field = rows("claims", "Claims", vec!["subject", "property", "value"]);
