@@ -1,32 +1,12 @@
 import { useEffect, useRef, useState } from "react";
-import {
-  Alert,
-  Box,
-  Button,
-  Checkbox,
-  Chip,
-  CircularProgress,
-  Dialog,
-  DialogActions,
-  DialogContent,
-  DialogTitle,
-  FormControlLabel,
-  LinearProgress,
-  Typography,
-} from "@mui/material";
+import { Alert, Box, Button, Checkbox, Chip, CircularProgress, Dialog, DialogActions, DialogContent, DialogTitle, FormControlLabel, LinearProgress, Typography } from "@mui/material";
 import LinkOffIcon from "@mui/icons-material/LinkOff";
 import { authenticatedFetch } from "../api";
 import { API_BASE } from "../constants";
 import { useSnackbar } from "../contexts";
 import { legendSx } from "../styles";
 import { CopyableText } from "./CopyableText";
-import type {
-  ExternalPartyUnhostPreview,
-  ExternalPartyUnhostRequest,
-  ExternalPartyUnhostResponse,
-  UnhostAuditEntry,
-  UnhostAuditResponse,
-} from "../types";
+import type { ExternalPartyUnhostPreview, ExternalPartyUnhostRequest, ExternalPartyUnhostResponse, UnhostAuditEntry, UnhostAuditResponse } from "../types";
 
 const partyPath = (partyId: string) =>
   `${API_BASE}/external-parties/${encodeURIComponent(partyId)}`;
