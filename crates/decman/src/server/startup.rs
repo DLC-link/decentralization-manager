@@ -7,11 +7,12 @@ use std::{
 };
 
 use actix_cors::Cors;
+use actix_web::dev::{ServiceFactory, ServiceRequest};
 use actix_web::{App, HttpServer, web};
 use anyhow::Context;
 use sqlx::SqlitePool;
 use tokio::sync::{Mutex, RwLock, Semaphore, mpsc};
-use utoipa_actix_web::AppExt;
+use utoipa_actix_web::{AppExt, UtoipaApp};
 use utoipa_swagger_ui::SwaggerUi;
 
 use super::{recovery::recover_in_progress_workflows, state::AppState};
@@ -85,313 +86,23 @@ pub async fn start_server(
     )
     .await?;
 
-    let peer_status = Arc::new(RwLock::new(HashMap::new()));
     let (app_state, peer_job_receiver) =
         build_app_state(&db, &config, auth, admin_role, insecure).await;
-    let last_seen = app_state.last_seen.clone();
-    let peer_job_sender = app_state.peer_job_sender.clone();
-    let workflows = app_state.workflows.clone();
-    let pending_invitations = app_state.pending_invitations.clone();
-    let party_credentials = app_state.party_credentials.clone();
-    let auth = app_state.auth.clone();
-    let relay_sessions = app_state.relay_sessions.clone();
 
-    // A coordinator killed while it signed a party proposal leaves that
-    // proposal's temporary topology store on the participant. Sweep them
-    // before any run resumes, because a resumed run creates its own and a
-    // sweep running alongside would drop it (#448). Bounded, so a participant
-    // that is down does not hold up the boot.
-    match tokio::time::timeout(
-        Duration::from_secs(15),
-        workflow::proposal_store::drop_leftover_stores(&config),
-    )
-    .await
-    {
-        Ok(Ok(0)) => {}
-        Ok(Ok(dropped)) => tracing::info!(
-            dropped,
-            "Dropped temporary topology stores an earlier process left behind"
-        ),
-        Ok(Err(e)) => tracing::warn!(
-            error = format!("{e:#}"),
-            "Could not sweep leftover temporary topology stores"
-        ),
-        Err(_) => tracing::warn!("Timed out sweeping leftover temporary topology stores"),
-    }
+    recover_after_restart(&app_state).await?;
 
-    // A purge runs inside this process, so one still marked running was cut
-    // off by the restart and will never record its own outcome. Its row would
-    // block every later purge and workflow start, so decman does not start
-    // until the row is repaired.
-    let interrupted = db
-        .fail_interrupted_purges(former_parties::INTERRUPTED_PURGE_ERROR)
-        .await
-        .context("Could not mark the purges a restart interrupted as failed")?;
-    if !interrupted.is_empty() {
-        tracing::error!(
-            "{} purge(s) of former-party contracts were interrupted by a restart; \
-             the participant may still be disconnected from its synchronizer",
-            interrupted.len()
-        );
-    }
-    for party_id in &interrupted {
-        match CantonId::parse(party_id) {
-            Ok(party) => {
-                audit::log_purge_audit(
-                    &db,
-                    audit::PurgeAuditEvent::End(Err(
-                        former_parties::INTERRUPTED_PURGE_ERROR.to_string()
-                    )),
-                    &party,
-                    None,
-                )
-                .await;
-            }
-            Err(e) => tracing::warn!("Skipping the audit row of an interrupted purge: {e}"),
-        }
-    }
+    spawn_background_tasks(&app_state, peer_job_receiver);
 
-    // Boot-time workflow recovery. For any `workflow_runs` row that was
-    // InProgress when we shut down, re-spawn the coordinator task (which
-    // resumes at the persisted `current_step` via `WorkflowState::from_persisted`)
-    // or re-enqueue the peer job so the peer listener picks the run back up.
-    recover_in_progress_workflows(
-        db.clone(),
-        config.clone(),
-        workflows.clone(),
-        peer_job_sender.clone(),
-        app_state.auth.clone(),
-        last_seen.clone(),
-    )
-    .await;
+    register_metrics();
+    start_metrics(host, port, &app_state);
 
-    // Start heartbeat background task (pings peers, listens for invites, and
-    // routes workflow commands to the matching coordinator run).
-    let heartbeat_config = config.clone();
-    let heartbeat_db = db.clone();
-    let heartbeat_status = peer_status.clone();
-    let heartbeat_last_seen = last_seen.clone();
-    let heartbeat_triggers = WorkflowTriggers {
-        pending_invitations: pending_invitations.clone(),
-        config: config.clone(),
-        peer_chunk_cache: Arc::new(Mutex::new(HashMap::new())),
-        db: db.clone(),
-        party_credentials: party_credentials.clone(),
-        workflows: workflows.clone(),
-        peer_job_sender: peer_job_sender.clone(),
-    };
-    spawn_supervised(
-        "heartbeat",
-        "peer liveness stops updating until this node restarts",
-        async move {
-            run_heartbeat(
-                heartbeat_config,
-                heartbeat_db,
-                heartbeat_status,
-                heartbeat_last_seen,
-                heartbeat_triggers,
-            )
-            .await;
-        },
-    );
-
-    // Background task: CIP-104 Mode A reward-assignment automation. Clone the
-    // existing `web::Data<AppState>` (an Arc) so the loop shares the SAME state —
-    // live party credentials, auth, config — never a fresh AppState.
-    let reward_automation_state = app_state.clone();
-    spawn_supervised(
-        "reward automation",
-        "coupons will expire unassigned until this node restarts",
-        async move {
-            reward_automation::run_reward_automation_loop(reward_automation_state).await;
-        },
-    );
-
-    let key_migration_config = config.clone();
-    let key_migration_db = db.clone();
-    spawn_supervised(
-        "party key migration",
-        "keys not yet in DecMan's key store stay uncopied until this node restarts",
-        async move {
-            crate::signing::migration::run_key_migration(key_migration_config, key_migration_db)
-                .await;
-        },
-    );
-
-    let governance_poller_state = app_state.clone();
-    spawn_supervised(
-        "governance poller",
-        "the pending-governance gauges stop updating until this node restarts",
-        async move {
-            governance_poller::run_governance_poller(governance_poller_state).await;
-        },
-    );
-
-    // Single peer-job listener: drains the queue and spawns one
-    // `workflow::start_peer` per accepted / retried / resumed invite, so this
-    // node can be a peer in many concurrent workflows at once.
-    let peer_listener_config = config.clone();
-    let peer_listener_db = db.clone();
-    let peer_listener_auth = auth.clone();
-    spawn_supervised(
-        "peer listener",
-        "this node accepts no further peer jobs until it restarts",
-        async move {
-            run_peer_listener(
-                peer_listener_config,
-                peer_listener_db,
-                peer_listener_auth,
-                peer_job_receiver,
-            )
-            .await;
-        },
-    );
-
-    // Background task: sync decentralized parties from Canton on startup
-    let sync_config = config.clone();
-    let sync_db = db.clone();
-    let sync_auth = app_state.auth.clone();
-    let sync_party_creds = app_state.party_credentials.clone();
-    let sync_gate = handlers::DiscoveryGate::of(&app_state);
-    tokio::spawn(async move {
-        // Delay to let Canton stabilize after startup
-        tokio::time::sleep(Duration::from_secs(5)).await;
-        tracing::info!("Starting background sync of decentralized parties from Canton...");
-
-        let auth_snapshot = sync_auth.read().await.clone();
-        let creds_snapshot = sync_party_creds.read().await.clone();
-
-        // Through the same gate as the request paths: a direct call would
-        // duplicate an in-flight discovery for the empty prefix and put both
-        // results into the cache in an undefined order.
-        match handlers::discover_and_cache(
-            &sync_gate,
-            &sync_config,
-            &sync_db,
-            "",
-            auth_snapshot,
-            &creds_snapshot,
-            Default::default(),
-        )
-        .await
-        {
-            handlers::Discovery::Done(response) => {
-                tracing::info!(
-                    "Cached {} decentralized parties from Canton",
-                    response.parties.len()
-                );
-                handlers::resolve_owner_keys_from_peers(&sync_config, &sync_db, &response.parties)
-                    .await;
-            }
-            handlers::Discovery::InFlight
-            | handlers::Discovery::AtCapacity
-            | handlers::Discovery::Superseded => {
-                tracing::info!("Startup sync skipped: a discovery is already running");
-            }
-            handlers::Discovery::Failed(e) => {
-                tracing::warn!("Background Canton sync failed on startup: {e}");
-            }
-        }
-    });
-
-    reward_automation::register_metrics();
-    node_health::register_metrics();
-    handlers::register_run_metrics();
-    peer_status::register_metrics();
-    handlers::register_governance_metrics();
-    governance_poller::register_metrics();
-
-    // Separate from the API server, whose ingress forwards every path. 0 disables it.
-    let metrics_port = config.metrics_port;
-    if metrics_port == 0 {
-        tracing::info!("Metrics endpoint disabled (metrics_port = 0)");
-    } else if metrics_port == port || metrics_port == config.node.port {
-        // The metrics listener binds first, so racing it against the API or the
-        // noise server would let a signal take down governance. It yields the
-        // port instead, which is the same rule the bind-failure arm below keeps.
-        tracing::error!(
-            metrics_port,
-            api_port = port,
-            noise_port = config.node.port,
-            "metrics_port collides with another listener; this node reports no metrics"
-        );
-    } else {
-        match metrics_server(host, metrics_port) {
-            Ok(running) => {
-                tracing::info!("Serving metrics on {host}:{metrics_port}/metrics");
-                spawn_supervised(
-                    "metrics server",
-                    "every alert rule reads an empty series while this node looks healthy",
-                    async move {
-                        if let Err(e) = running.await {
-                            tracing::error!(error = %e, "the metrics server stopped");
-                        }
-                    },
-                );
-            }
-            Err(e) => tracing::error!(
-                error = %e,
-                port = metrics_port,
-                "binding the metrics port failed; this node reports no metrics"
-            ),
-        }
-
-        // Keeps the node-health gauges live while no browser is polling the
-        // Config tab, so an alert on them does not silently depend on someone
-        // having the tab open. Shares the snapshot cache with the handler, so a
-        // tick that a watching browser already paid for costs nothing.
-        let health_cache = app_state.health_cache.clone();
-        let health_config = config.clone();
-        spawn_supervised(
-            "node health refresh",
-            "the node-health gauges freeze at their last value",
-            async move {
-                let mut ticker = tokio::time::interval(node_health::BACKGROUND_REFRESH);
-                ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-                loop {
-                    ticker.tick().await;
-                    health_cache
-                        .refresh_if_older_than(&health_config, node_health::BACKGROUND_REFRESH)
-                        .await;
-                }
-            },
-        );
-    }
-
-    // A wallet-relayed transfer holds a Canton export stream open on the source
-    // and keeps the joiner off the synchronizer for the duration. A wallet that
-    // vanishes mid-transfer would leave both that way, so idle sessions are
-    // reaped — which fails the import and reconnects the participant.
-    {
-        let sessions = relay_sessions.clone();
-        spawn_supervised(
-            "ACS relay session reaper",
-            "a wallet that abandons a transfer leaves its joiner off the synchronizer",
-            async move {
-                crate::workflow::party_replication::relay::reap_forever(sessions).await;
-            },
-        );
-    }
+    spawn_relay_reaper(&app_state);
 
     tracing::info!("Starting HTTP server on {host}:{port}");
     tracing::info!("Frontend available at http://{host}:{port}/");
 
     HttpServer::new(move || {
-        // Frontend is embedded and served from this same origin, so no
-        // cross-origin access is required by default. `Cors::default()` is
-        // same-origin only — tightening the previous `Cors::permissive()`.
-        //
-        // For split-origin deployments (reverse proxy, separate dev server,
-        // etc.) the operator can set `--allowed-origin` to permit one
-        // additional origin with credentials.
-        let cors = match allowed_origin.as_deref() {
-            Some(origin) => Cors::default()
-                .allowed_origin(origin)
-                .allow_any_method()
-                .allow_any_header()
-                .supports_credentials(),
-            None => Cors::default(),
-        };
+        let cors = cors_policy(allowed_origin.as_deref());
 
         // Increase payload limit to 100MB for DAR file uploads
         let json_config = web::JsonConfig::default().limit(100 * 1024 * 1024);
@@ -400,120 +111,14 @@ pub async fn start_server(
         // Build app with utoipa-actix-web: each .service() call both registers
         // the actix route AND collects its OpenAPI path automatically.
         // No separate path list to maintain.
-        let (app, api) = App::new()
-            .into_utoipa_app()
-            .app_data(json_config)
-            .app_data(payload_config)
-            .app_data(app_state.clone())
-            .service(handlers::healthz)
-            .service(handlers::get_network_config)
-            .service(handlers::save_network_config)
-            .service(handlers::get_node_config)
-            .service(handlers::get_decentralized_parties)
-            .service(handlers::get_participants_status)
-            .service(handlers::get_node_health)
-            .service(handlers::compare_peer_packages)
-            .service(handlers::get_vetted_packages)
-            .service(handlers::get_expected_versions)
-            .service(handlers::clear_acs_import_quarantine)
-            .service(handlers::list_former_parties)
-            .service(handlers::preview_former_party_purge)
-            .service(handlers::purge_former_party)
-            .service(handlers::reconnect_after_purge)
-            .service(handlers::dismiss_former_party)
-            .service(handlers::start_kick)
-            .service(handlers::get_kick_status)
-            .service(handlers::cancel_kick)
-            .service(handlers::start_add_party)
-            .service(handlers::get_add_party_status)
-            .service(handlers::cancel_add_party)
-            .service(handlers::start_change_threshold)
-            .service(handlers::get_change_threshold_status)
-            .service(handlers::cancel_change_threshold)
-            .service(handlers::list_external_parties)
-            .service(handlers::unhost_external_party)
-            .service(handlers::preview_unhost_external_party)
-            .service(handlers::get_unhost_audit)
-            .service(handlers::get_tenant_call_audit)
-            .service(handlers::tenant_prepare)
-            .service(handlers::tenant_execute)
-            .service(handlers::tenant_add_hosts_prepare)
-            .service(handlers::tenant_add_hosts_authorize)
-            .service(handlers::tenant_add_hosts_execute)
-            .service(handlers::tenant_acs_snapshot)
-            .service(handlers::tenant_acs_import)
-            .service(handlers::tenant_threshold_prepare)
-            .service(handlers::tenant_threshold_authorize)
-            .service(handlers::tenant_threshold_execute)
-            .service(handlers::tenant_local_party_adopt_prepare)
-            .service(handlers::tenant_local_party_adopt_execute)
-            .service(handlers::tenant_party_state)
-            .service(handlers::tenant_unhost)
-            .service(handlers::tenant_status)
-            .service(handlers::start_onboarding)
-            .service(handlers::get_onboarding_status)
-            .service(handlers::cancel_onboarding)
-            .service(handlers::start_contracts)
-            .service(handlers::get_contracts_status)
-            .service(handlers::cancel_contracts)
-            .service(handlers::upload_dars_local)
-            .service(handlers::start_dars)
-            .service(handlers::start_dars_for_package)
-            .service(handlers::get_dars_status)
-            .service(handlers::cancel_dars)
-            .service(handlers::list_workflows)
-            .service(handlers::dismiss_workflow)
-            .service(handlers::retry_workflow)
-            .service(handlers::cancel_workflow_instance)
-            .service(handlers::get_key_status)
-            .service(handlers::get_invitations)
-            .service(handlers::list_handled_invitations)
-            .service(handlers::get_invitation_dar)
-            .service(handlers::accept_invitation)
-            .service(handlers::decline_invitation)
-            .service(handlers::get_auth_config)
-            .service(handlers::get_auth_status)
-            .service(handlers::test_auth)
-            .service(handlers::grant_rights)
-            .service(handlers::get_governance)
-            .service(handlers::get_governance_state)
-            .service(handlers::get_proposals_page)
-            .service(handlers::get_known_members)
-            .service(handlers::get_provider_services_handler)
-            .service(handlers::get_user_services_handler)
-            .service(handlers::get_credential_offers_handler)
-            .service(handlers::get_credentials_handler)
-            .service(handlers::get_registrar_service_requests_handler)
-            .service(handlers::get_provider_configurations_handler)
-            .service(handlers::get_block_list_shards_handler)
-            .service(handlers::get_registrar_services_handler)
-            .service(handlers::get_instruments_handler)
-            .service(handlers::get_transfer_instructions_handler)
-            .service(handlers::get_mint_requests_handler)
-            .service(handlers::get_burn_requests_handler)
-            .service(handlers::get_transfer_preapprovals_handler)
-            .service(handlers::get_transfer_factories_handler)
-            .service(handlers::get_holdings_handler)
-            .service(handlers::query_contracts_handler)
-            .service(handlers::get_packages)
-            .service(handlers::propose_action)
-            .service(handlers::confirm_action)
-            .service(handlers::execute_action)
-            .service(handlers::expire_confirmation)
-            .service(handlers::cancel_confirmation)
-            .service(handlers::cancel_proposal)
-            .service(handlers::get_governance_audit)
-            .service(handlers::get_governance_chain_audit)
-            .service(handlers::get_token_standard_contracts)
-            .service(handlers::get_coupon_reassignment_delegation)
-            .service(handlers::get_reward_status)
-            .service(handlers::get_network_info)
-            .service(handlers::get_open_mining_round)
-            .service(handlers::get_operator_info)
-            .service(handlers::get_party_config)
-            .service(handlers::save_party_config)
-            .service(handlers::discover_member_party)
-            .split_for_parts();
+        let (app, api) = api_routes(
+            App::new()
+                .into_utoipa_app()
+                .app_data(json_config)
+                .app_data(payload_config)
+                .app_data(app_state.clone()),
+        )
+        .split_for_parts();
 
         let mut app = app.wrap(AuthMiddleware).wrap(cors);
         if insecure {
@@ -740,6 +345,459 @@ async fn build_app_state(
     (app_state, peer_job_receiver)
 }
 
+/// Repair what the last shutdown left behind, then resume its workflow
+/// runs.
+async fn recover_after_restart(app_state: &web::Data<AppState>) -> Result {
+    sweep_leftover_stores(&app_state.config).await;
+    fail_interrupted_purges(&app_state.db).await?;
+
+    // Boot-time workflow recovery. For any `workflow_runs` row that was
+    // InProgress when we shut down, re-spawn the coordinator task (which
+    // resumes at the persisted `current_step` via `WorkflowState::from_persisted`)
+    // or re-enqueue the peer job so the peer listener picks the run back up.
+    recover_in_progress_workflows(
+        app_state.db.clone(),
+        app_state.config.clone(),
+        app_state.workflows.clone(),
+        app_state.peer_job_sender.clone(),
+        app_state.auth.clone(),
+        app_state.last_seen.clone(),
+    )
+    .await;
+
+    Ok(())
+}
+
+/// Drop the temporary topology stores an earlier process left behind.
+///
+/// A coordinator killed while it signed a party proposal leaves that
+/// proposal's temporary topology store on the participant. Sweep them
+/// before any run resumes, because a resumed run creates its own and a
+/// sweep running alongside would drop it (#448). Bounded, so a participant
+/// that is down does not hold up the boot.
+async fn sweep_leftover_stores(config: &NodeConfig) {
+    match tokio::time::timeout(
+        Duration::from_secs(15),
+        workflow::proposal_store::drop_leftover_stores(config),
+    )
+    .await
+    {
+        Ok(Ok(0)) => {}
+        Ok(Ok(dropped)) => tracing::info!(
+            dropped,
+            "Dropped temporary topology stores an earlier process left behind"
+        ),
+        Ok(Err(e)) => tracing::warn!(
+            error = format!("{e:#}"),
+            "Could not sweep leftover temporary topology stores"
+        ),
+        Err(_) => tracing::warn!("Timed out sweeping leftover temporary topology stores"),
+    }
+}
+
+/// Mark the purges a restart interrupted as failed, with their audit rows.
+///
+/// A purge runs inside this process, so one still marked running was cut
+/// off by the restart and will never record its own outcome. Its row would
+/// block every later purge and workflow start, so decman does not start
+/// until the row is repaired.
+async fn fail_interrupted_purges(db: &SqlitePool) -> Result {
+    let interrupted = db
+        .fail_interrupted_purges(former_parties::INTERRUPTED_PURGE_ERROR)
+        .await
+        .context("Could not mark the purges a restart interrupted as failed")?;
+    if !interrupted.is_empty() {
+        tracing::error!(
+            "{} purge(s) of former-party contracts were interrupted by a restart; \
+             the participant may still be disconnected from its synchronizer",
+            interrupted.len()
+        );
+    }
+    for party_id in &interrupted {
+        match CantonId::parse(party_id) {
+            Ok(party) => {
+                audit::log_purge_audit(
+                    db,
+                    audit::PurgeAuditEvent::End(Err(
+                        former_parties::INTERRUPTED_PURGE_ERROR.to_string()
+                    )),
+                    &party,
+                    None,
+                )
+                .await;
+            }
+            Err(e) => tracing::warn!("Skipping the audit row of an interrupted purge: {e}"),
+        }
+    }
+    Ok(())
+}
+
+/// Start the tasks that run for the life of the process, and the one-off
+/// party sync.
+fn spawn_background_tasks(
+    app_state: &web::Data<AppState>,
+    peer_job_receiver: mpsc::UnboundedReceiver<PeerJob>,
+) {
+    spawn_heartbeat(app_state);
+
+    // Background task: CIP-104 Mode A reward-assignment automation. Clone the
+    // existing `web::Data<AppState>` (an Arc) so the loop shares the SAME state —
+    // live party credentials, auth, config — never a fresh AppState.
+    let reward_automation_state = app_state.clone();
+    spawn_supervised(
+        "reward automation",
+        "coupons will expire unassigned until this node restarts",
+        async move {
+            reward_automation::run_reward_automation_loop(reward_automation_state).await;
+        },
+    );
+
+    let key_migration_config = app_state.config.clone();
+    let key_migration_db = app_state.db.clone();
+    spawn_supervised(
+        "party key migration",
+        "keys not yet in DecMan's key store stay uncopied until this node restarts",
+        async move {
+            crate::signing::migration::run_key_migration(key_migration_config, key_migration_db)
+                .await;
+        },
+    );
+
+    let governance_poller_state = app_state.clone();
+    spawn_supervised(
+        "governance poller",
+        "the pending-governance gauges stop updating until this node restarts",
+        async move {
+            governance_poller::run_governance_poller(governance_poller_state).await;
+        },
+    );
+
+    // Single peer-job listener: drains the queue and spawns one
+    // `workflow::start_peer` per accepted / retried / resumed invite, so this
+    // node can be a peer in many concurrent workflows at once.
+    let peer_listener_config = app_state.config.clone();
+    let peer_listener_db = app_state.db.clone();
+    let peer_listener_auth = app_state.auth.clone();
+    spawn_supervised(
+        "peer listener",
+        "this node accepts no further peer jobs until it restarts",
+        async move {
+            run_peer_listener(
+                peer_listener_config,
+                peer_listener_db,
+                peer_listener_auth,
+                peer_job_receiver,
+            )
+            .await;
+        },
+    );
+
+    spawn_startup_sync(app_state);
+}
+
+/// Start the heartbeat background task (pings peers, listens for invites,
+/// and routes workflow commands to the matching coordinator run).
+fn spawn_heartbeat(app_state: &web::Data<AppState>) {
+    let heartbeat_config = app_state.config.clone();
+    let heartbeat_db = app_state.db.clone();
+    let heartbeat_status = Arc::new(RwLock::new(HashMap::new()));
+    let heartbeat_last_seen = app_state.last_seen.clone();
+    let heartbeat_triggers = WorkflowTriggers {
+        pending_invitations: app_state.pending_invitations.clone(),
+        config: app_state.config.clone(),
+        peer_chunk_cache: Arc::new(Mutex::new(HashMap::new())),
+        db: app_state.db.clone(),
+        party_credentials: app_state.party_credentials.clone(),
+        workflows: app_state.workflows.clone(),
+        peer_job_sender: app_state.peer_job_sender.clone(),
+    };
+    spawn_supervised(
+        "heartbeat",
+        "peer liveness stops updating until this node restarts",
+        async move {
+            run_heartbeat(
+                heartbeat_config,
+                heartbeat_db,
+                heartbeat_status,
+                heartbeat_last_seen,
+                heartbeat_triggers,
+            )
+            .await;
+        },
+    );
+}
+
+/// Background task: sync decentralized parties from Canton on startup.
+fn spawn_startup_sync(app_state: &web::Data<AppState>) {
+    let sync_config = app_state.config.clone();
+    let sync_db = app_state.db.clone();
+    let sync_auth = app_state.auth.clone();
+    let sync_party_creds = app_state.party_credentials.clone();
+    let sync_gate = handlers::DiscoveryGate::of(app_state);
+    tokio::spawn(async move {
+        // Delay to let Canton stabilize after startup
+        tokio::time::sleep(Duration::from_secs(5)).await;
+        tracing::info!("Starting background sync of decentralized parties from Canton...");
+
+        let auth_snapshot = sync_auth.read().await.clone();
+        let creds_snapshot = sync_party_creds.read().await.clone();
+
+        // Through the same gate as the request paths: a direct call would
+        // duplicate an in-flight discovery for the empty prefix and put both
+        // results into the cache in an undefined order.
+        match handlers::discover_and_cache(
+            &sync_gate,
+            &sync_config,
+            &sync_db,
+            "",
+            auth_snapshot,
+            &creds_snapshot,
+            Default::default(),
+        )
+        .await
+        {
+            handlers::Discovery::Done(response) => {
+                tracing::info!(
+                    "Cached {} decentralized parties from Canton",
+                    response.parties.len()
+                );
+                handlers::resolve_owner_keys_from_peers(&sync_config, &sync_db, &response.parties)
+                    .await;
+            }
+            handlers::Discovery::InFlight
+            | handlers::Discovery::AtCapacity
+            | handlers::Discovery::Superseded => {
+                tracing::info!("Startup sync skipped: a discovery is already running");
+            }
+            handlers::Discovery::Failed(e) => {
+                tracing::warn!("Background Canton sync failed on startup: {e}");
+            }
+        }
+    });
+}
+
+/// Register every metric this node reports.
+fn register_metrics() {
+    reward_automation::register_metrics();
+    node_health::register_metrics();
+    handlers::register_run_metrics();
+    peer_status::register_metrics();
+    handlers::register_governance_metrics();
+    governance_poller::register_metrics();
+}
+
+/// Start the metrics server and keep the node-health gauges fresh.
+///
+/// Separate from the API server, whose ingress forwards every path. 0
+/// disables it.
+fn start_metrics(host: &str, api_port: u16, app_state: &web::Data<AppState>) {
+    let config = &app_state.config;
+    let metrics_port = config.metrics_port;
+    if metrics_port == 0 {
+        tracing::info!("Metrics endpoint disabled (metrics_port = 0)");
+    } else if metrics_port == api_port || metrics_port == config.node.port {
+        // The metrics listener binds first, so racing it against the API or the
+        // noise server would let a signal take down governance. It yields the
+        // port instead, which is the same rule the bind-failure arm below keeps.
+        tracing::error!(
+            metrics_port,
+            api_port,
+            noise_port = config.node.port,
+            "metrics_port collides with another listener; this node reports no metrics"
+        );
+    } else {
+        match metrics_server(host, metrics_port) {
+            Ok(running) => {
+                tracing::info!("Serving metrics on {host}:{metrics_port}/metrics");
+                spawn_supervised(
+                    "metrics server",
+                    "every alert rule reads an empty series while this node looks healthy",
+                    async move {
+                        if let Err(e) = running.await {
+                            tracing::error!(error = %e, "the metrics server stopped");
+                        }
+                    },
+                );
+            }
+            Err(e) => tracing::error!(
+                error = %e,
+                port = metrics_port,
+                "binding the metrics port failed; this node reports no metrics"
+            ),
+        }
+
+        // Keeps the node-health gauges live while no browser is polling the
+        // Config tab, so an alert on them does not silently depend on someone
+        // having the tab open. Shares the snapshot cache with the handler, so a
+        // tick that a watching browser already paid for costs nothing.
+        let health_cache = app_state.health_cache.clone();
+        let health_config = config.clone();
+        spawn_supervised(
+            "node health refresh",
+            "the node-health gauges freeze at their last value",
+            async move {
+                let mut ticker = tokio::time::interval(node_health::BACKGROUND_REFRESH);
+                ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+                loop {
+                    ticker.tick().await;
+                    health_cache
+                        .refresh_if_older_than(&health_config, node_health::BACKGROUND_REFRESH)
+                        .await;
+                }
+            },
+        );
+    }
+}
+
+/// A wallet-relayed transfer holds a Canton export stream open on the source
+/// and keeps the joiner off the synchronizer for the duration. A wallet that
+/// vanishes mid-transfer would leave both that way, so idle sessions are
+/// reaped — which fails the import and reconnects the participant.
+fn spawn_relay_reaper(app_state: &web::Data<AppState>) {
+    let sessions = app_state.relay_sessions.clone();
+    spawn_supervised(
+        "ACS relay session reaper",
+        "a wallet that abandons a transfer leaves its joiner off the synchronizer",
+        async move {
+            crate::workflow::party_replication::relay::reap_forever(sessions).await;
+        },
+    );
+}
+
+/// Frontend is embedded and served from this same origin, so no
+/// cross-origin access is required by default. `Cors::default()` is
+/// same-origin only — tightening the previous `Cors::permissive()`.
+///
+/// For split-origin deployments (reverse proxy, separate dev server,
+/// etc.) the operator can set `--allowed-origin` to permit one
+/// additional origin with credentials.
+fn cors_policy(allowed_origin: Option<&str>) -> Cors {
+    match allowed_origin {
+        Some(origin) => Cors::default()
+            .allowed_origin(origin)
+            .allow_any_method()
+            .allow_any_header()
+            .supports_credentials(),
+        None => Cors::default(),
+    }
+}
+
+/// Register every API route. Each `.service()` call both registers the
+/// actix route AND collects its OpenAPI path.
+fn api_routes<T>(app: UtoipaApp<T>) -> UtoipaApp<T>
+where
+    T: ServiceFactory<ServiceRequest, Config = (), Error = actix_web::Error, InitError = ()>,
+{
+    app.service(handlers::healthz)
+        .service(handlers::get_network_config)
+        .service(handlers::save_network_config)
+        .service(handlers::get_node_config)
+        .service(handlers::get_decentralized_parties)
+        .service(handlers::get_participants_status)
+        .service(handlers::get_node_health)
+        .service(handlers::compare_peer_packages)
+        .service(handlers::get_vetted_packages)
+        .service(handlers::get_expected_versions)
+        .service(handlers::clear_acs_import_quarantine)
+        .service(handlers::list_former_parties)
+        .service(handlers::preview_former_party_purge)
+        .service(handlers::purge_former_party)
+        .service(handlers::reconnect_after_purge)
+        .service(handlers::dismiss_former_party)
+        .service(handlers::start_kick)
+        .service(handlers::get_kick_status)
+        .service(handlers::cancel_kick)
+        .service(handlers::start_add_party)
+        .service(handlers::get_add_party_status)
+        .service(handlers::cancel_add_party)
+        .service(handlers::start_change_threshold)
+        .service(handlers::get_change_threshold_status)
+        .service(handlers::cancel_change_threshold)
+        .service(handlers::list_external_parties)
+        .service(handlers::unhost_external_party)
+        .service(handlers::preview_unhost_external_party)
+        .service(handlers::get_unhost_audit)
+        .service(handlers::get_tenant_call_audit)
+        .service(handlers::tenant_prepare)
+        .service(handlers::tenant_execute)
+        .service(handlers::tenant_add_hosts_prepare)
+        .service(handlers::tenant_add_hosts_authorize)
+        .service(handlers::tenant_add_hosts_execute)
+        .service(handlers::tenant_acs_snapshot)
+        .service(handlers::tenant_acs_import)
+        .service(handlers::tenant_threshold_prepare)
+        .service(handlers::tenant_threshold_authorize)
+        .service(handlers::tenant_threshold_execute)
+        .service(handlers::tenant_local_party_adopt_prepare)
+        .service(handlers::tenant_local_party_adopt_execute)
+        .service(handlers::tenant_party_state)
+        .service(handlers::tenant_unhost)
+        .service(handlers::tenant_status)
+        .service(handlers::start_onboarding)
+        .service(handlers::get_onboarding_status)
+        .service(handlers::cancel_onboarding)
+        .service(handlers::start_contracts)
+        .service(handlers::get_contracts_status)
+        .service(handlers::cancel_contracts)
+        .service(handlers::upload_dars_local)
+        .service(handlers::start_dars)
+        .service(handlers::start_dars_for_package)
+        .service(handlers::get_dars_status)
+        .service(handlers::cancel_dars)
+        .service(handlers::list_workflows)
+        .service(handlers::dismiss_workflow)
+        .service(handlers::retry_workflow)
+        .service(handlers::cancel_workflow_instance)
+        .service(handlers::get_key_status)
+        .service(handlers::get_invitations)
+        .service(handlers::list_handled_invitations)
+        .service(handlers::get_invitation_dar)
+        .service(handlers::accept_invitation)
+        .service(handlers::decline_invitation)
+        .service(handlers::get_auth_config)
+        .service(handlers::get_auth_status)
+        .service(handlers::test_auth)
+        .service(handlers::grant_rights)
+        .service(handlers::get_governance)
+        .service(handlers::get_governance_state)
+        .service(handlers::get_proposals_page)
+        .service(handlers::get_known_members)
+        .service(handlers::get_provider_services_handler)
+        .service(handlers::get_user_services_handler)
+        .service(handlers::get_credential_offers_handler)
+        .service(handlers::get_credentials_handler)
+        .service(handlers::get_registrar_service_requests_handler)
+        .service(handlers::get_provider_configurations_handler)
+        .service(handlers::get_block_list_shards_handler)
+        .service(handlers::get_registrar_services_handler)
+        .service(handlers::get_instruments_handler)
+        .service(handlers::get_transfer_instructions_handler)
+        .service(handlers::get_mint_requests_handler)
+        .service(handlers::get_burn_requests_handler)
+        .service(handlers::get_transfer_preapprovals_handler)
+        .service(handlers::get_transfer_factories_handler)
+        .service(handlers::get_holdings_handler)
+        .service(handlers::query_contracts_handler)
+        .service(handlers::get_packages)
+        .service(handlers::propose_action)
+        .service(handlers::confirm_action)
+        .service(handlers::execute_action)
+        .service(handlers::expire_confirmation)
+        .service(handlers::cancel_confirmation)
+        .service(handlers::cancel_proposal)
+        .service(handlers::get_governance_audit)
+        .service(handlers::get_governance_chain_audit)
+        .service(handlers::get_token_standard_contracts)
+        .service(handlers::get_coupon_reassignment_delegation)
+        .service(handlers::get_reward_status)
+        .service(handlers::get_network_info)
+        .service(handlers::get_open_mining_round)
+        .service(handlers::get_operator_info)
+        .service(handlers::get_party_config)
+        .service(handlers::save_party_config)
+        .service(handlers::discover_member_party)
+}
+
 /// Binds and starts the server that answers `/metrics`.
 ///
 /// It ignores SIGTERM and SIGINT, so it ends only with the process. The API server
@@ -777,7 +835,155 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::{Network, ensure_insecure_allowed};
+    use actix_web::App;
+    use utoipa::openapi::path::PathItem;
+    use utoipa_actix_web::AppExt;
+
+    use super::{Network, api_routes, ensure_insecure_allowed};
+
+    /// Each method a path answers, as `METHOD /path`.
+    fn routes_of(path: &str, item: &PathItem) -> Vec<String> {
+        [
+            ("GET", &item.get),
+            ("PUT", &item.put),
+            ("POST", &item.post),
+            ("DELETE", &item.delete),
+            ("OPTIONS", &item.options),
+            ("HEAD", &item.head),
+            ("PATCH", &item.patch),
+            ("TRACE", &item.trace),
+            ("QUERY", &item.query),
+        ]
+        .into_iter()
+        .filter(|(_, operation)| operation.is_some())
+        .map(|(method, _)| format!("{method} {path}"))
+        .collect()
+    }
+
+    /// The OpenAPI document lists every API route with its method. A change
+    /// to this list is a change to the HTTP interface.
+    #[test]
+    fn the_api_routes_are_stable() {
+        let (_, api) = api_routes(App::new().into_utoipa_app()).split_for_parts();
+        let routes: Vec<String> = api
+            .paths
+            .paths
+            .iter()
+            .flat_map(|(path, item)| routes_of(path, item))
+            .collect();
+        assert_eq!(routes, EXPECTED_ROUTES);
+    }
+
+    const EXPECTED_ROUTES: &[&str] = &[
+        "DELETE /acs-import-quarantine",
+        "POST /add-party",
+        "POST /add-party/cancel",
+        "GET /add-party/status",
+        "GET /auth-config",
+        "POST /auth/grant-rights",
+        "GET /auth/status",
+        "POST /auth/test",
+        "GET /block-list-shards",
+        "POST /change-threshold",
+        "POST /change-threshold/cancel",
+        "GET /change-threshold/status",
+        "POST /contracts",
+        "POST /contracts/cancel",
+        "GET /contracts/query",
+        "GET /contracts/status",
+        "GET /coupon-reassignment-delegation",
+        "GET /credential-offers",
+        "GET /credentials",
+        "POST /dars/cancel",
+        "POST /dars/distribute",
+        "POST /dars/distribute-package",
+        "GET /dars/distribute/status",
+        "POST /dars/upload",
+        "GET /decentralized-parties",
+        "GET /external-parties",
+        "POST /external-parties/{party_id}/unhost",
+        "GET /external-parties/{party_id}/unhost-audit",
+        "GET /external-parties/{party_id}/unhost/preview",
+        "GET /former-parties",
+        "DELETE /former-parties",
+        "POST /former-parties/purge",
+        "GET /former-parties/purge-preview",
+        "POST /former-parties/reconnect",
+        "GET /governance/audit",
+        "GET /governance/burn-requests",
+        "POST /governance/cancel",
+        "POST /governance/cancel-proposal",
+        "GET /governance/chain-audit",
+        "POST /governance/confirm",
+        "GET /governance/confirmations",
+        "POST /governance/execute",
+        "POST /governance/expire",
+        "GET /governance/known-members",
+        "GET /governance/mint-requests",
+        "GET /governance/proposals",
+        "POST /governance/propose",
+        "GET /governance/state",
+        "GET /governance/transfer-instructions",
+        "GET /healthz",
+        "GET /holdings",
+        "GET /instruments",
+        "GET /invitations",
+        "POST /invitations/accept",
+        "POST /invitations/decline",
+        "GET /invitations/handled",
+        "GET /invitations/{id}/dars/{index}",
+        "GET /keys/status",
+        "POST /kick",
+        "POST /kick/cancel",
+        "GET /kick/status",
+        "GET /network-config",
+        "POST /network-config",
+        "GET /network-info",
+        "GET /node-config",
+        "GET /node-health",
+        "POST /onboarding",
+        "POST /onboarding/cancel",
+        "GET /onboarding/status",
+        "GET /open-mining-round",
+        "GET /operator-info",
+        "GET /packages",
+        "GET /packages/compare-peers",
+        "GET /packages/expected-versions",
+        "GET /packages/vetted",
+        "GET /participants-status",
+        "PUT /party-config",
+        "POST /party-config/discover-member-party",
+        "GET /party-config/{dec_party_id}",
+        "GET /provider-configurations",
+        "GET /registrar-service-requests",
+        "GET /reward-status",
+        "GET /services/provider",
+        "GET /services/registrar",
+        "GET /services/user",
+        "GET /tenant-call-audit",
+        "POST /token-standard-contracts",
+        "GET /transfer-factories",
+        "GET /transfer-preapprovals",
+        "POST /v0/tenant/add-hosts/authorize",
+        "POST /v0/tenant/add-hosts/execute",
+        "POST /v0/tenant/add-hosts/import",
+        "POST /v0/tenant/add-hosts/prepare",
+        "POST /v0/tenant/execute",
+        "POST /v0/tenant/local-party/adopt-key/execute",
+        "POST /v0/tenant/local-party/adopt-key/prepare",
+        "POST /v0/tenant/prepare",
+        "POST /v0/tenant/threshold/authorize",
+        "POST /v0/tenant/threshold/execute",
+        "POST /v0/tenant/threshold/prepare",
+        "POST /v0/tenant/unhost",
+        "GET /v0/tenant/{party}/acs/{target}",
+        "GET /v0/tenant/{party}/state",
+        "GET /v0/tenant/{party}/status",
+        "GET /workflows",
+        "POST /workflows/{instance_name}/cancel",
+        "POST /workflows/{instance_name}/dismiss",
+        "POST /workflows/{instance_name}/retry",
+    ];
 
     #[test]
     fn insecure_allowed_on_devnet() {
