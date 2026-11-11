@@ -236,7 +236,7 @@ export const NotificationsView = ({
     total: doneTotal,
   } = usePagination(grouped.done);
 
-  // Parties with something in the feed, newest activity first. Counted from the
+  // Parties with something in the feed, most entries first. Counted from the
   // unfiltered set so a chip's number does not change as you select.
   const partyOptions = partyEntryCounts(entries);
   const partyPicker = (
