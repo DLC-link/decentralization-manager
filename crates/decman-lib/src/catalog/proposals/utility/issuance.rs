@@ -9,7 +9,9 @@ use crate::error::Error;
 use crate::framework::ValidationCtx;
 use crate::framework::encode::serialize_instrument_id;
 use crate::framework::encode::{field, make_contract_id, make_empty_metadata, make_numeric};
-use crate::framework::encode::{make_optional_list, make_party, make_record, make_text};
+use crate::framework::encode::{
+    make_optional_contract_id_list, make_party, make_record, make_text,
+};
 use crate::framework::validate::validate_positive_amount;
 use crate::framework::{DamlProtoEncode, PackageResolver, TemplateId, TemplateInfo, Validate};
 
@@ -42,10 +44,7 @@ impl Mint {
 
 impl TemplateInfo for Mint {
     fn template_id(&self, pkgs: &dyn PackageResolver) -> Result<TemplateId, Error> {
-        let pkg = pkgs
-            .package_ref("governance_utility_onboarding")
-            .ok_or(Error::PackageNotConfigured("governance_utility_onboarding"))?;
-        Ok(TemplateId::new(pkg, Self::MODULE, Self::ENTITY))
+        TemplateId::for_package(pkgs, super::PACKAGE, Self::MODULE, Self::ENTITY)
     }
 }
 
@@ -80,12 +79,7 @@ impl DamlProtoEncode for Mint {
             field("extraArgsMeta", make_empty_metadata()),
             field(
                 "blockListShardCids",
-                make_optional_list(
-                    self.block_list_shard_cids
-                        .iter()
-                        .map(|cid| make_contract_id(cid))
-                        .collect(),
-                ),
+                make_optional_contract_id_list(&self.block_list_shard_cids),
             ),
         ]))
     }
@@ -126,10 +120,7 @@ impl Burn {
 
 impl TemplateInfo for Burn {
     fn template_id(&self, pkgs: &dyn PackageResolver) -> Result<TemplateId, Error> {
-        let pkg = pkgs
-            .package_ref("governance_utility_onboarding")
-            .ok_or(Error::PackageNotConfigured("governance_utility_onboarding"))?;
-        Ok(TemplateId::new(pkg, Self::MODULE, Self::ENTITY))
+        TemplateId::for_package(pkgs, super::PACKAGE, Self::MODULE, Self::ENTITY)
     }
 }
 
@@ -164,12 +155,7 @@ impl DamlProtoEncode for Burn {
             field("extraArgsMeta", make_empty_metadata()),
             field(
                 "blockListShardCids",
-                make_optional_list(
-                    self.block_list_shard_cids
-                        .iter()
-                        .map(|cid| make_contract_id(cid))
-                        .collect(),
-                ),
+                make_optional_contract_id_list(&self.block_list_shard_cids),
             ),
         ]))
     }
@@ -210,10 +196,7 @@ impl AcceptMintRequest {
 
 impl TemplateInfo for AcceptMintRequest {
     fn template_id(&self, pkgs: &dyn PackageResolver) -> Result<TemplateId, Error> {
-        let pkg = pkgs
-            .package_ref("governance_utility_onboarding")
-            .ok_or(Error::PackageNotConfigured("governance_utility_onboarding"))?;
-        Ok(TemplateId::new(pkg, Self::MODULE, Self::ENTITY))
+        TemplateId::for_package(pkgs, super::PACKAGE, Self::MODULE, Self::ENTITY)
     }
 }
 
@@ -229,21 +212,11 @@ impl DamlProtoEncode for AcceptMintRequest {
             field("extraArgsMeta", make_empty_metadata()),
             field(
                 "issuerCredentialCids",
-                make_optional_list(
-                    self.issuer_credential_cids
-                        .iter()
-                        .map(|cid| make_contract_id(cid))
-                        .collect(),
-                ),
+                make_optional_contract_id_list(&self.issuer_credential_cids),
             ),
             field(
                 "blockListShardCids",
-                make_optional_list(
-                    self.block_list_shard_cids
-                        .iter()
-                        .map(|cid| make_contract_id(cid))
-                        .collect(),
-                ),
+                make_optional_contract_id_list(&self.block_list_shard_cids),
             ),
         ]))
     }
@@ -280,10 +253,7 @@ impl AcceptBurnRequest {
 
 impl TemplateInfo for AcceptBurnRequest {
     fn template_id(&self, pkgs: &dyn PackageResolver) -> Result<TemplateId, Error> {
-        let pkg = pkgs
-            .package_ref("governance_utility_onboarding")
-            .ok_or(Error::PackageNotConfigured("governance_utility_onboarding"))?;
-        Ok(TemplateId::new(pkg, Self::MODULE, Self::ENTITY))
+        TemplateId::for_package(pkgs, super::PACKAGE, Self::MODULE, Self::ENTITY)
     }
 }
 
@@ -299,21 +269,11 @@ impl DamlProtoEncode for AcceptBurnRequest {
             field("extraArgsMeta", make_empty_metadata()),
             field(
                 "issuerCredentialCids",
-                make_optional_list(
-                    self.issuer_credential_cids
-                        .iter()
-                        .map(|cid| make_contract_id(cid))
-                        .collect(),
-                ),
+                make_optional_contract_id_list(&self.issuer_credential_cids),
             ),
             field(
                 "blockListShardCids",
-                make_optional_list(
-                    self.block_list_shard_cids
-                        .iter()
-                        .map(|cid| make_contract_id(cid))
-                        .collect(),
-                ),
+                make_optional_contract_id_list(&self.block_list_shard_cids),
             ),
         ]))
     }

@@ -11,13 +11,16 @@ use crate::catalog::types::{
 };
 use crate::error::Error;
 use crate::framework::encode::{
-    field, make_contract_id, make_list, make_optional_numeric, make_party, make_record, make_text,
-    serialize_claim,
+    field, make_contract_id, make_contract_id_list, make_list, make_optional_numeric, make_party,
+    make_record, make_text, serialize_claim,
 };
 use crate::framework::validate::validate_positive_amount;
 use crate::framework::{
     DamlProtoEncode, PackageResolver, TemplateId, TemplateInfo, Validate, ValidationCtx,
 };
+
+/// The package key of every payload in this module.
+const PACKAGE: &str = "governance_utility_credential";
 
 /// Offer a free credential to a holder via the governance party's
 /// `UserService`. Wraps `UserService_OfferFreeCredential` from the
@@ -40,10 +43,7 @@ impl OfferFreeCredential {
 
 impl TemplateInfo for OfferFreeCredential {
     fn template_id(&self, pkgs: &dyn PackageResolver) -> Result<TemplateId, Error> {
-        let pkg = pkgs
-            .package_ref("governance_utility_credential")
-            .ok_or(Error::PackageNotConfigured("governance_utility_credential"))?;
-        Ok(TemplateId::new(pkg, Self::MODULE, Self::ENTITY))
+        TemplateId::for_package(pkgs, PACKAGE, Self::MODULE, Self::ENTITY)
     }
 }
 
@@ -89,10 +89,7 @@ impl OfferPaidCredential {
 
 impl TemplateInfo for OfferPaidCredential {
     fn template_id(&self, pkgs: &dyn PackageResolver) -> Result<TemplateId, Error> {
-        let pkg = pkgs
-            .package_ref("governance_utility_credential")
-            .ok_or(Error::PackageNotConfigured("governance_utility_credential"))?;
-        Ok(TemplateId::new(pkg, Self::MODULE, Self::ENTITY))
+        TemplateId::for_package(pkgs, PACKAGE, Self::MODULE, Self::ENTITY)
     }
 }
 
@@ -172,10 +169,7 @@ impl AcceptFreeCredential {
 
 impl TemplateInfo for AcceptFreeCredential {
     fn template_id(&self, pkgs: &dyn PackageResolver) -> Result<TemplateId, Error> {
-        let pkg = pkgs
-            .package_ref("governance_utility_credential")
-            .ok_or(Error::PackageNotConfigured("governance_utility_credential"))?;
-        Ok(TemplateId::new(pkg, Self::MODULE, Self::ENTITY))
+        TemplateId::for_package(pkgs, PACKAGE, Self::MODULE, Self::ENTITY)
     }
 }
 
@@ -221,10 +215,7 @@ impl AcceptPaidCredential {
 
 impl TemplateInfo for AcceptPaidCredential {
     fn template_id(&self, pkgs: &dyn PackageResolver) -> Result<TemplateId, Error> {
-        let pkg = pkgs
-            .package_ref("governance_utility_credential")
-            .ok_or(Error::PackageNotConfigured("governance_utility_credential"))?;
-        Ok(TemplateId::new(pkg, Self::MODULE, Self::ENTITY))
+        TemplateId::for_package(pkgs, PACKAGE, Self::MODULE, Self::ENTITY)
     }
 }
 
@@ -238,12 +229,7 @@ impl DamlProtoEncode for AcceptPaidCredential {
             ),
             field(
                 "depositAmulets",
-                make_list(
-                    self.deposit_amulet_cids
-                        .iter()
-                        .map(|cid| make_contract_id(cid))
-                        .collect(),
-                ),
+                make_contract_id_list(&self.deposit_amulet_cids),
             ),
             field(
                 "appTransferContext",

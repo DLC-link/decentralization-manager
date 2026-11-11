@@ -42,10 +42,7 @@ impl SetupUtility {
 
 impl TemplateInfo for SetupUtility {
     fn template_id(&self, pkgs: &dyn PackageResolver) -> Result<TemplateId, Error> {
-        let pkg = pkgs
-            .package_ref("governance_utility_onboarding")
-            .ok_or(Error::PackageNotConfigured("governance_utility_onboarding"))?;
-        Ok(TemplateId::new(pkg, Self::MODULE, Self::ENTITY))
+        TemplateId::for_package(pkgs, super::PACKAGE, Self::MODULE, Self::ENTITY)
     }
 }
 
@@ -103,10 +100,7 @@ impl SetProviderAppRewardBeneficiaries {
 
 impl TemplateInfo for SetProviderAppRewardBeneficiaries {
     fn template_id(&self, pkgs: &dyn PackageResolver) -> Result<TemplateId, Error> {
-        let pkg = pkgs
-            .package_ref("governance_utility_onboarding")
-            .ok_or(Error::PackageNotConfigured("governance_utility_onboarding"))?;
-        Ok(TemplateId::new(pkg, Self::MODULE, Self::ENTITY))
+        TemplateId::for_package(pkgs, super::PACKAGE, Self::MODULE, Self::ENTITY)
     }
 }
 
@@ -151,10 +145,7 @@ impl SetEnableResultContracts {
 
 impl TemplateInfo for SetEnableResultContracts {
     fn template_id(&self, pkgs: &dyn PackageResolver) -> Result<TemplateId, Error> {
-        let pkg = pkgs
-            .package_ref("governance_utility_onboarding")
-            .ok_or(Error::PackageNotConfigured("governance_utility_onboarding"))?;
-        Ok(TemplateId::new(pkg, Self::MODULE, Self::ENTITY))
+        TemplateId::for_package(pkgs, super::PACKAGE, Self::MODULE, Self::ENTITY)
     }
 }
 
@@ -191,10 +182,7 @@ impl CreateTransferRule {
 
 impl TemplateInfo for CreateTransferRule {
     fn template_id(&self, pkgs: &dyn PackageResolver) -> Result<TemplateId, Error> {
-        let pkg = pkgs
-            .package_ref("governance_utility_onboarding")
-            .ok_or(Error::PackageNotConfigured("governance_utility_onboarding"))?;
-        Ok(TemplateId::new(pkg, Self::MODULE, Self::ENTITY))
+        TemplateId::for_package(pkgs, super::PACKAGE, Self::MODULE, Self::ENTITY)
     }
 }
 

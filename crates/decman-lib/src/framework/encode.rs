@@ -53,6 +53,17 @@ pub fn make_contract_id(c: &str) -> Value {
     }
 }
 
+/// A `[ContractId]` list value from contract id strings.
+pub fn make_contract_id_list(cids: &[String]) -> Value {
+    make_list(cids.iter().map(|cid| make_contract_id(cid)).collect())
+}
+
+/// An `Optional [ContractId]` value from contract id strings: `None` when
+/// `cids` is empty (see `make_optional_list`).
+pub fn make_optional_contract_id_list(cids: &[String]) -> Value {
+    make_optional_list(cids.iter().map(|cid| make_contract_id(cid)).collect())
+}
+
 pub fn field(label: &str, value: Value) -> RecordField {
     RecordField {
         label: label.to_string(),
