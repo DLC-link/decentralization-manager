@@ -272,6 +272,59 @@ mod tests {
         assert!(validate_prefix(&"a".repeat(180)).is_ok()); // at the limit
     }
 
+    /// The overlay shows these messages, so each must keep its exact text.
+    #[test]
+    fn validate_prefix_errors_keep_their_messages() {
+        let error = |prefix: &str| validate_prefix(prefix).err().map(|e| e.to_string());
+        assert_eq!(error("").as_deref(), Some("Party id prefix is required."));
+        assert_eq!(
+            error("9abc").as_deref(),
+            Some("Party id prefix must start with a letter.")
+        );
+        assert_eq!(
+            error(&"a".repeat(181)).as_deref(),
+            Some("Party id prefix must be 180 characters or fewer.")
+        );
+        assert_eq!(
+            error("ab.cd").as_deref(),
+            Some("Party id prefix may only contain letters, digits, '-' and '_'.")
+        );
+    }
+
+    /// The overlay shows these messages, so each must keep its exact text.
+    #[test]
+    fn build_contracts_request_errors_keep_their_messages() {
+        let error = |change: fn(&mut DeployForm)| {
+            let mut form = deploy_form();
+            change(&mut form);
+            build_contracts_request(&form).err().map(|e| e.to_string())
+        };
+        assert_eq!(
+            error(|form| form.package_id = String::new()).as_deref(),
+            Some("Unknown governance-core package — vet the governance-core DAR first.")
+        );
+        assert_eq!(
+            error(|form| form.member_parties = Vec::new()).as_deref(),
+            Some("No governance members resolved — peers may be unreachable.")
+        );
+        assert_eq!(
+            error(|form| form.threshold = "two".to_owned()).as_deref(),
+            Some("Threshold must be a whole number")
+        );
+        assert_eq!(
+            error(|form| form.timeout_micros = "a day".to_owned()).as_deref(),
+            Some("Timeout must be a whole number")
+        );
+        assert_eq!(
+            error(|form| form.threshold = "3".to_owned()).as_deref(),
+            Some("Threshold must be between 1 and 2.")
+        );
+        assert_eq!(
+            error(|form| form.timeout_micros = "0".to_owned()).as_deref(),
+            Some("Timeout must be a positive number of microseconds.")
+        );
+    }
+
     fn deploy_form() -> DeployForm {
         DeployForm {
             party_id: "dec::1220".to_owned(),
