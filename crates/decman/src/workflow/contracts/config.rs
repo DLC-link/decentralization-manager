@@ -1,12 +1,13 @@
+use common::api::ContractDeploymentIntent;
 use serde::{Deserialize, Serialize};
-
-use crate::{canton_id::CantonId, error::Result};
 
 /// Wire DTOs for contract / DAR deployment. Defined in `common::api` (the
 /// frontend's TypeScript is generated from them); re-exported so
 /// `crate::workflow::contracts::{ContractDefinition, DarFile, FieldDefinition}`
 /// resolve unchanged.
 pub use common::api::{ContractDefinition, DarFile, FieldDefinition};
+
+use crate::{canton_id::CantonId, error::Result};
 
 /// Configuration for contracts workflow
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -40,7 +41,7 @@ pub struct CommittedDeployment {
     /// The party threshold that unset `GovernanceThreshold` fields resolved to
     pub governance_threshold: i64,
     /// One create commitment per contract, in contract order
-    pub intents: Vec<common::api::ContractDeploymentIntent>,
+    pub intents: Vec<ContractDeploymentIntent>,
 }
 
 impl ContractsConfig {
@@ -69,10 +70,7 @@ impl ContractsConfig {
     /// Fails for a run that an older version started without recording them.
     pub fn committed(&self) -> Result<&CommittedDeployment> {
         self.committed_deployment.as_ref().ok_or_else(|| {
-            anyhow::anyhow!(
-                "Contracts run {} has no recorded deployment commitments; start a new run",
-                self.instance_name
-            )
+            anyhow::anyhow!("Contracts run {instance_name} has no recorded deployment commitments; start a new run", instance_name = self.instance_name)
         })
     }
 }

@@ -1431,6 +1431,7 @@ dependencies = [
  "serde-big-array",
  "serde_json",
  "sha2 0.11.1",
+ "thiserror 2.0.21",
  "ts-rs",
  "utoipa",
 ]
@@ -1890,6 +1891,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
+ "thiserror 2.0.21",
  "tokio",
  "toml",
  "tracing",

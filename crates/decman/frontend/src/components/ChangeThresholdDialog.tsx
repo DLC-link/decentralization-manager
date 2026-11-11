@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect } from "react";
 import {
   Dialog,
   DialogTitle,
@@ -14,6 +14,7 @@ import {
 import { API_BASE } from "../constants";
 import { authenticatedFetch } from "../api";
 import { useSnackbar } from "../contexts";
+import { useWorkflowStatus } from "../hooks/useWorkflowStatus";
 import { fieldHelpAdornment } from "./FieldHelp";
 import type { ChangeThresholdRequest, ChangeThresholdStatusResponse } from "../types";
 
@@ -75,43 +76,15 @@ export const ChangeThresholdDialog = ({
     }
   }, [open]);
 
-  const pollStatus = useCallback(async () => {
-    try {
-      const res = await authenticatedFetch(
-        `${API_BASE}/change-threshold/status`,
-      );
-      if (res.ok) {
-        const data: ChangeThresholdStatusResponse = await res.json();
-        if (data.status === "cancelled") {
-          showSnackbar("Change-threshold workflow cancelled");
-          onClose();
-          return;
-        }
-        setStatus(data);
-        if (data.status !== "inprogress") {
-          setLoading(false);
-          if (data.status === "completed") {
-            onComplete();
-          }
-        }
-      }
-    } catch {
-      // Ignore polling errors
-    }
-  }, [onComplete, onClose, showSnackbar]);
-
-  useEffect(() => {
-    let interval: number | undefined;
-
-    if (status?.status === "inprogress") {
-      pollStatus();
-      interval = window.setInterval(pollStatus, 2000);
-    }
-
-    return () => {
-      if (interval) clearInterval(interval);
-    };
-  }, [status?.status, pollStatus]);
+  useWorkflowStatus({
+    path: `${API_BASE}/change-threshold/status`,
+    cancelledMessage: "Change-threshold workflow cancelled",
+    status,
+    setStatus,
+    setLoading,
+    onComplete: onComplete,
+    onClose,
+  });
 
   const currentConfirmation = currentConfirmationThreshold ?? currentThreshold;
   const unchanged =

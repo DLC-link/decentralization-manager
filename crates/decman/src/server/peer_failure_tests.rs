@@ -2,14 +2,33 @@
 //! parking it (#442). Drives a real coordinator, its Noise listener, and a real
 //! peer over localhost, without a Canton node.
 
-use tokio::net::TcpListener;
+use std::{
+    collections::HashMap,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
-use super::*;
+use base64::{Engine, engine::general_purpose::STANDARD};
+use sqlx::SqlitePool;
+use tokio::{
+    net::TcpListener,
+    sync::{Mutex, RwLock, mpsc},
+    task::JoinHandle,
+};
+
+use super::{
+    peer_listener::{WorkflowTriggers, handle_incoming_connection},
+    *,
+};
 use crate::{
-    config::{NetworkConfig, Peer},
+    canton_id::CantonId,
+    config::{NetworkConfig, NodeConfig, Peer},
     consts::PEER_SILENCE_LIMIT,
-    noise::server::NoiseServer,
-    workflow::{DarsConfig, DarsStep, contracts::DarFile},
+    db::schema::{Commitable, SchemaWrite},
+    error::Result,
+    noise::{NoiseKeypair, server::NoiseServer},
+    server::{handlers::CoordinatorRequest, peer_status::LastSeen},
+    workflow::{self, DarsConfig, DarsStep, contracts::DarFile},
 };
 
 const COORDINATOR_RUN: &str = "dars-coordinator-run";
@@ -85,7 +104,7 @@ async fn listen(
     db: SqlitePool,
     workflows: WorkflowRegistry,
     last_seen: LastSeen,
-) -> Result<tokio::task::JoinHandle<()>> {
+) -> Result<JoinHandle<()>> {
     let keypair = Arc::new(NoiseKeypair::from_file(coordinator.config.key_file_path()).await?);
     let self_id = coordinator.id();
     let triggers = WorkflowTriggers {
@@ -160,16 +179,9 @@ async fn a_peer_that_gives_up_fails_the_coordinator_run(db: SqlitePool) -> Resul
         instance_name: COORDINATOR_RUN.into(),
         peer_ids: vec![peer.id()],
     };
-    let coordinating = tokio::spawn(workflow::start_coordinator(
+    let coordinating = tokio::spawn(CoordinatorRequest::Dars(dars).start(
         coordinator.config.clone(),
         db.clone(),
-        WorkflowType::Dars,
-        None,
-        None,
-        None,
-        Some(dars),
-        None,
-        None,
         None,
         last_seen,
         instance,

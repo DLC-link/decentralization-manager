@@ -173,8 +173,9 @@ impl CacheInner {
 
 #[cfg(test)]
 mod tests {
+    use actix_web::{App, http::StatusCode, test::TestRequest};
+
     use super::*;
-    use actix_web::{App, http::StatusCode};
 
     const SECOND: Duration = Duration::from_secs(1);
     const TTL: Duration = Duration::from_secs(300);
@@ -343,11 +344,7 @@ mod tests {
                 .service(super::super::handlers::list_external_parties),
         )
         .await;
-        let request = || {
-            actix_web::test::TestRequest::get()
-                .uri("/external-parties")
-                .to_request()
-        };
+        let request = || TestRequest::get().uri("/external-parties").to_request();
         // Claim the first scan as a request would, so the handler sees it
         // running and does not reach for the Canton the test config lacks.
         assert!(state.external_parties.observe(Instant::now(), TTL).1);

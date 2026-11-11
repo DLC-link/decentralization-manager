@@ -1,10 +1,7 @@
-use std::time::{SystemTime, UNIX_EPOCH};
-
 use sqlx::SqlitePool;
 
-use crate::{auth::Principal, canton_id::CantonId};
-
 use super::types::GovernanceType;
+use crate::{auth::Principal, canton_id::CantonId, utils::now_secs};
 
 /// Event types for the governance audit trail
 #[derive(Clone, Copy, Debug)]
@@ -150,10 +147,7 @@ struct AuditRow<'a> {
 }
 
 async fn insert_audit_row(pool: &SqlitePool, row: AuditRow<'_>) {
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs() as i64;
+    let now = now_secs();
 
     let result = sqlx::query(
         r"

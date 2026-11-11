@@ -35,6 +35,11 @@ impl PeerRow {
         }
     }
 
+    /// Convert the stored row into a [`Peer`].
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `participant_id` is not a valid Canton id.
     pub fn into_domain(self) -> Result<Peer> {
         Ok(Peer {
             participant_id: CantonId::parse(&self.participant_id)?,
@@ -65,6 +70,12 @@ pub struct PartyCredentialsRow {
 }
 
 impl PartyCredentialsRow {
+    /// Build the stored row from `creds`, with the client ids, secrets,
+    /// username and password encrypted.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if encrypting one of those fields fails.
     pub fn from_domain(creds: &PartyCredentials) -> Result<Self> {
         let (auth0_domain, auth0_audience, auth0_client_id, auth0_client_secret) =
             match &creds.auth0 {
@@ -93,6 +104,13 @@ impl PartyCredentialsRow {
         })
     }
 
+    /// Convert the stored row into [`PartyCredentials`], decrypting the
+    /// encrypted fields.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `dec_party_id` or `member_party_id` is not a valid
+    /// Canton id, or if a decrypted field is not valid UTF-8.
     pub fn into_domain(self) -> Result<PartyCredentials> {
         let auth0 = match (
             self.auth0_domain,
@@ -527,11 +545,13 @@ impl WorkflowRunRow {
 
 #[cfg(test)]
 mod tests {
+    use std::fmt::Debug;
+
     use super::*;
 
     /// Assert a `Result` is `Err`. Test-only helper that avoids `.unwrap_err()`
     /// (forbidden by the Bitsafe standard) while keeping the call sites terse.
-    fn assert_is_err<T: std::fmt::Debug>(result: Result<T>) {
+    fn assert_is_err<T: Debug>(result: Result<T>) {
         assert!(result.is_err(), "expected Err, got {result:?}");
     }
 

@@ -17,11 +17,15 @@ use canton_proto_rs::com::daml::ledger::api::v2::{
 };
 use common::canton_id::CantonId;
 
-use crate::catalog::action::ActionType;
-use crate::error::Error;
-use crate::framework::TemplateId;
-use crate::framework::commands::commands_envelope;
-use crate::framework::encode::{field, make_contract_id, make_list, make_party, make_record};
+use crate::{
+    catalog::action::ActionType,
+    error::Error,
+    framework::{
+        TemplateId,
+        commands::commands_envelope,
+        encode::{field, make_contract_id, make_list, make_party, make_record},
+    },
+};
 
 /// One `ExerciseCommand`, wrapped as a `Command`.
 fn exercise(template: &TemplateId, contract_id: &str, choice: &str, argument: Value) -> Command {
@@ -56,6 +60,11 @@ fn confirmations_list(confirmation_cids: &[String]) -> Value {
 // ============================================================================
 
 /// `GovernanceRules_ConfirmGovernanceAction`: `{confirmer, action}`.
+///
+/// # Errors
+///
+/// Returns [`Error::Encode`] when `action` has no `GovernanceSelfAction`
+/// form (see [`ActionType::to_self_proto`]).
 pub fn build_confirm_self_action(
     rules: &TemplateId,
     rules_cid: &str,
@@ -105,6 +114,11 @@ pub fn build_confirm_proposal(
 // ============================================================================
 
 /// `GovernanceRules_ExecuteGovernanceAction`: `{executor, action, confirmations}`.
+///
+/// # Errors
+///
+/// Returns [`Error::Encode`] when `action` has no `GovernanceSelfAction`
+/// form (see [`ActionType::to_self_proto`]).
 #[allow(clippy::too_many_arguments)]
 pub fn build_execute_self_action(
     rules: &TemplateId,

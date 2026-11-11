@@ -577,14 +577,18 @@ mod tests {
     };
     use serde_json::json;
     use sqlx::SqlitePool;
-    use tokio::sync::{Mutex, RwLock};
+    use tokio::sync::{Mutex, RwLock, Semaphore, mpsc};
 
     use super::{discover_member_party, get_party_config, save_party_config};
     use crate::{
         auth::{MockAuthRegistry, MockValidator, TokenValidator, WorkflowAuth},
         canton_id::CantonId,
         config::{KeycloakConfig, NodeConfig, PartyCredentials, default_package_config},
-        server::{AppState, middleware::AuthMiddleware},
+        server::{
+            AppState, HealthCache, WorkflowRegistry, handlers::MAX_CONCURRENT_DISCOVERIES,
+            middleware::AuthMiddleware, types::PartyConfigRequest,
+        },
+        workflow::party_replication::relay::RelaySessions,
     };
 
     #[actix_web::test]
@@ -603,7 +607,7 @@ mod tests {
             "user_id": "test-user",
         });
         // Existing credential-only clients still deserialize.
-        let _: crate::server::types::PartyConfigRequest = serde_json::from_value(payload.clone())?;
+        let _: PartyConfigRequest = serde_json::from_value(payload.clone())?;
         // Even an empty map must not appear to be a supported setting.
         for packages in [json!({}), json!({"governance_core": "#custom-core"})] {
             payload["packages"] = packages;
@@ -638,10 +642,9 @@ mod tests {
         let state = Data::new(AppState {
             db,
             config: NodeConfig::default(),
-            peer_status: Arc::new(RwLock::new(HashMap::new())),
             last_seen: Arc::new(RwLock::new(HashMap::new())),
-            peer_job_sender: tokio::sync::mpsc::unbounded_channel().0,
-            workflows: crate::server::WorkflowRegistry::new(),
+            peer_job_sender: mpsc::unbounded_channel().0,
+            workflows: WorkflowRegistry::new(),
             pending_invitations: Arc::new(RwLock::new(Vec::new())),
             auth: Arc::new(RwLock::new(Some(WorkflowAuth::Mock(Arc::new(
                 MockAuthRegistry::new(party_credentials.clone()),
@@ -652,18 +655,14 @@ mod tests {
             admin_role: Some("decman-admin".to_string()),
             party_credentials,
             bootstrap_mu: Arc::new(Mutex::new(())),
-            relay_sessions: Arc::new(
-                crate::workflow::party_replication::relay::RelaySessions::new(),
-            ),
+            relay_sessions: Arc::new(RelaySessions::new()),
             test_mode: true,
             refreshing_prefixes: Arc::new(RwLock::new(HashSet::new())),
-            discovery_permits: Arc::new(tokio::sync::Semaphore::new(
-                crate::server::handlers::MAX_CONCURRENT_DISCOVERIES,
-            )),
+            discovery_permits: Arc::new(Semaphore::new(MAX_CONCURRENT_DISCOVERIES)),
             discovery_generations: Arc::new(RwLock::new(HashMap::new())),
             discovery_completed: Arc::new(RwLock::new(HashMap::new())),
             http_client: reqwest::Client::new(),
-            health_cache: crate::server::HealthCache::new(),
+            health_cache: HealthCache::new(),
             external_parties: Default::default(),
             tenant_rate_limiter: Default::default(),
         });
@@ -718,10 +717,9 @@ mod tests {
         let state = Data::new(AppState {
             db,
             config: NodeConfig::default(),
-            peer_status: Arc::new(RwLock::new(HashMap::new())),
             last_seen: Arc::new(RwLock::new(HashMap::new())),
-            peer_job_sender: tokio::sync::mpsc::unbounded_channel().0,
-            workflows: crate::server::WorkflowRegistry::new(),
+            peer_job_sender: mpsc::unbounded_channel().0,
+            workflows: WorkflowRegistry::new(),
             pending_invitations: Arc::new(RwLock::new(Vec::new())),
             auth: Arc::new(RwLock::new(Some(WorkflowAuth::Mock(Arc::new(
                 MockAuthRegistry::new(party_credentials.clone()),
@@ -732,18 +730,14 @@ mod tests {
             admin_role: Some("decman-admin".to_string()),
             party_credentials,
             bootstrap_mu: Arc::new(Mutex::new(())),
-            relay_sessions: Arc::new(
-                crate::workflow::party_replication::relay::RelaySessions::new(),
-            ),
+            relay_sessions: Arc::new(RelaySessions::new()),
             test_mode: true,
             refreshing_prefixes: Arc::new(RwLock::new(HashSet::new())),
-            discovery_permits: Arc::new(tokio::sync::Semaphore::new(
-                crate::server::handlers::MAX_CONCURRENT_DISCOVERIES,
-            )),
+            discovery_permits: Arc::new(Semaphore::new(MAX_CONCURRENT_DISCOVERIES)),
             discovery_generations: Arc::new(RwLock::new(HashMap::new())),
             discovery_completed: Arc::new(RwLock::new(HashMap::new())),
             http_client: reqwest::Client::new(),
-            health_cache: crate::server::HealthCache::new(),
+            health_cache: HealthCache::new(),
             external_parties: Default::default(),
             tenant_rate_limiter: Default::default(),
         });
@@ -798,10 +792,9 @@ mod tests {
         let state = Data::new(AppState {
             db,
             config,
-            peer_status: Arc::new(RwLock::new(HashMap::new())),
             last_seen: Arc::new(RwLock::new(HashMap::new())),
-            peer_job_sender: tokio::sync::mpsc::unbounded_channel().0,
-            workflows: crate::server::WorkflowRegistry::new(),
+            peer_job_sender: mpsc::unbounded_channel().0,
+            workflows: WorkflowRegistry::new(),
             pending_invitations: Arc::new(RwLock::new(Vec::new())),
             auth: Arc::new(RwLock::new(None)),
             token_validator: TokenValidator::Mock(Arc::new(MockValidator::new(
@@ -810,18 +803,14 @@ mod tests {
             admin_role: None,
             party_credentials,
             bootstrap_mu: Arc::new(Mutex::new(())),
-            relay_sessions: Arc::new(
-                crate::workflow::party_replication::relay::RelaySessions::new(),
-            ),
+            relay_sessions: Arc::new(RelaySessions::new()),
             test_mode: true,
             refreshing_prefixes: Arc::new(RwLock::new(HashSet::new())),
-            discovery_permits: Arc::new(tokio::sync::Semaphore::new(
-                crate::server::handlers::MAX_CONCURRENT_DISCOVERIES,
-            )),
+            discovery_permits: Arc::new(Semaphore::new(MAX_CONCURRENT_DISCOVERIES)),
             discovery_generations: Arc::new(RwLock::new(HashMap::new())),
             discovery_completed: Arc::new(RwLock::new(HashMap::new())),
             http_client: reqwest::Client::new(),
-            health_cache: crate::server::HealthCache::new(),
+            health_cache: HealthCache::new(),
             external_parties: Default::default(),
             tenant_rate_limiter: Default::default(),
         });

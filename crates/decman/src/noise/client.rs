@@ -1,7 +1,7 @@
 use std::{marker::PhantomData, sync::Arc, time::Duration};
 
 use bytes::Bytes;
-use hyper::{Body, Request};
+use hyper::{Body, Request, header::CONNECTION};
 use secp256k1::PublicKey;
 use tokio::net::TcpStream;
 use tokio_noise::handshakes::nn_psk2::Initiator;
@@ -41,6 +41,11 @@ impl NoiseClient {
     /// Create a new Noise client to connect to a specific coordinator.
     /// `route_instance` is the coordinator's run identifier used to route this
     /// peer's workflow commands; pass an empty string when unknown.
+    ///
+    /// # Errors
+    /// Returns an error if this node's Noise key file cannot be loaded.
+    /// Returns `NoiseError::InvalidMessage` if the coordinator's public key is
+    /// not a valid hex-encoded secp256k1 key.
     pub async fn new(
         node_config: NodeConfig,
         coordinator: Peer,
@@ -63,6 +68,10 @@ impl NoiseClient {
     }
 
     /// Send a message to the coordinator with the default control-plane timeout.
+    ///
+    /// # Errors
+    /// Returns an error in the same cases as `send_message_with_timeout`, with
+    /// `NOISE_REQUEST_TIMEOUT` as the timeout.
     pub async fn send_message(&self, message: &Message) -> Result<Bytes, NoiseError> {
         self.send_message_with_timeout(message, NOISE_REQUEST_TIMEOUT)
             .await
@@ -71,6 +80,16 @@ impl NoiseClient {
     /// Send a message to the coordinator, applying `request_timeout` to both the
     /// TCP connect and the Noise/HTTP round-trip. Used so large chunk fetches can
     /// run on a longer budget than fast control-plane polls.
+    ///
+    /// # Errors
+    /// Returns `NoiseError::InvalidUri` or `NoiseError::Http` if the
+    /// coordinator's address does not form a valid request.
+    /// Returns `TcpConnectionFailed` or `TcpConnectionTimeout` if the TCP
+    /// connect fails or exceeds `request_timeout`.
+    /// Returns a Noise, Hyper or `RequestTimeout` error if the handshake, the
+    /// request, or reading the response body fails or times out.
+    /// Returns `BadStatusCode` or `WireVersionMismatch` if the coordinator
+    /// answers with a status other than 200 OK.
     pub async fn send_message_with_timeout(
         &self,
         message: &Message,
@@ -83,8 +102,8 @@ impl NoiseClient {
         );
 
         tracing::debug!(
-            "Sending message type {:?} to coordinator at {socket_addr}",
-            message.msg_type
+            "Sending message type {msg_type:?} to coordinator at {socket_addr}",
+            msg_type = message.msg_type
         );
 
         // Create HTTP request
@@ -105,7 +124,7 @@ impl NoiseClient {
         let request = Request::builder()
             .uri(uri)
             .method("POST")
-            .header(hyper::header::CONNECTION, "close")
+            .header(CONNECTION, "close")
             .body(Body::from(request_body))?;
 
         // Connect with timeout
@@ -204,137 +223,37 @@ impl NoiseClient {
         Ok(())
     }
 
-    /// Upload keys to coordinator
-    pub async fn upload_keys(&self, keys_data: Vec<u8>) -> Result<(), NoiseError> {
-        self.send_and_verify_ack(
-            MessageType::KeysUpload,
-            keys_data,
-            "Uploading keys to coordinator",
-        )
-        .await
-    }
-
-    /// Send DNS signature to coordinator
-    pub async fn send_dns_signature(&self, signature_data: Vec<u8>) -> Result<(), NoiseError> {
-        self.send_and_verify_ack(
-            MessageType::DnsSignature,
-            signature_data,
-            "Sending DNS signature to coordinator",
-        )
-        .await
-    }
-
-    /// Send P2P signatures to coordinator
-    pub async fn send_p2p_signatures(&self, signatures_data: Vec<u8>) -> Result<(), NoiseError> {
-        self.send_and_verify_ack(
-            MessageType::P2pSignatures,
-            signatures_data,
-            "Sending P2P signatures to coordinator",
-        )
-        .await
-    }
-
-    /// Send submission signatures to coordinator
-    pub async fn send_submission_signatures(
-        &self,
-        signatures_data: Vec<u8>,
-    ) -> Result<(), NoiseError> {
-        self.send_and_verify_ack(
-            MessageType::SubmissionSignatures,
-            signatures_data,
-            "Sending submission signatures to coordinator",
-        )
-        .await
-    }
-
-    pub async fn send_kick_signatures(&self, signatures_data: Vec<u8>) -> Result<(), NoiseError> {
-        self.send_and_verify_ack(
-            MessageType::KickSignatures,
-            signatures_data,
-            "Sending kick signatures to coordinator",
-        )
-        .await
-    }
-
-    /// Send the signed change-threshold DNS + P2P pair to the coordinator.
-    pub async fn send_change_threshold_signatures(
-        &self,
-        signatures_data: Vec<u8>,
-    ) -> Result<(), NoiseError> {
-        self.send_and_verify_ack(
-            MessageType::ChangeThresholdSignatures,
-            signatures_data,
-            "Sending change-threshold signatures to coordinator",
-        )
-        .await
-    }
-
-    /// Upload the new member's `keys||participant_id` payload to the
-    /// coordinator of an add-party run.
-    pub async fn upload_add_party_keys(&self, keys_data: Vec<u8>) -> Result<(), NoiseError> {
-        self.send_and_verify_ack(
-            MessageType::AddPartyKeysUpload,
-            keys_data,
-            "Uploading add-party keys to coordinator",
-        )
-        .await
-    }
-
-    /// Send the signed add-party DNS + P2P pair to the coordinator.
-    pub async fn send_add_party_signatures(
-        &self,
-        signatures_data: Vec<u8>,
-    ) -> Result<(), NoiseError> {
-        self.send_and_verify_ack(
-            MessageType::AddPartySignatures,
-            signatures_data,
-            "Sending add-party signatures to coordinator",
-        )
-        .await
-    }
-
-    /// Send the clearing proposal AUTHORED by this (new-member) node to the
-    /// coordinator, which runs the threshold-signing round on it.
-    pub async fn send_add_party_clear_proposal(
-        &self,
-        proposal_data: Vec<u8>,
-    ) -> Result<(), NoiseError> {
-        self.send_and_verify_ack(
-            MessageType::AddPartyClearProposal,
-            proposal_data,
-            "Sending authored clearing proposal to coordinator",
-        )
-        .await
-    }
-
-    /// Send the signed onboarding-flag clearing proposal to the coordinator.
-    pub async fn send_add_party_clear_signature(
-        &self,
-        signature_data: Vec<u8>,
-    ) -> Result<(), NoiseError> {
-        self.send_and_verify_ack(
-            MessageType::AddPartyClearSignatures,
-            signature_data,
-            "Sending add-party clearing signature to coordinator",
-        )
-        .await
+    /// Send `payload` to the coordinator as a `kind` message and check that it
+    /// answers with an Ack.
+    ///
+    /// # Errors
+    /// Returns an error if the request fails, as `send_message_with_timeout`
+    /// describes. Returns `NoiseError::InvalidMessage` if the response does not
+    /// decode or is not an Ack.
+    pub async fn send(&self, kind: MessageType, payload: Vec<u8>) -> Result<(), NoiseError> {
+        self.send_and_verify_ack(kind, payload, sending(kind)).await
     }
 
     /// Tell the coordinator we are declining an outstanding invitation so it
     /// can fail its in-progress run with a descriptive error instead of
     /// hanging until timeout. Payload is the JSON-encoded
     /// `DeclineInvitationPayload`.
+    ///
+    /// # Errors
+    /// Returns an error if the request fails, as `send_message_with_timeout`
+    /// describes. Returns `NoiseError::InvalidMessage` if the response does not
+    /// decode or is not an Ack.
     pub async fn send_decline_invitation(&self, payload: Vec<u8>) -> Result<(), NoiseError> {
-        self.send_and_verify_ack(
-            MessageType::DeclineInvitation,
-            payload,
-            "Sending decline-invitation to coordinator",
-        )
-        .await
+        self.send(MessageType::DeclineInvitation, payload).await
     }
 
     /// Tell the coordinator this peer gave up on the run. Payload is the
     /// JSON-encoded `DeclineInvitationPayload` with `abandoned` set.
+    ///
+    /// # Errors
+    /// Returns an error if the request fails, as `send_message_with_timeout`
+    /// describes. Returns `NoiseError::InvalidMessage` if the response does not
+    /// decode or is not an Ack.
     pub async fn report_failure(&self, payload: Vec<u8>) -> Result<(), NoiseError> {
         self.send_and_verify_ack(
             MessageType::DeclineInvitation,
@@ -344,23 +263,16 @@ impl NoiseClient {
         .await
     }
 
-    /// Send status update to coordinator
-    pub async fn send_status(&self, status_data: Vec<u8>) -> Result<(), NoiseError> {
-        self.send_and_verify_ack(
-            MessageType::StatusUpdate,
-            status_data,
-            "Sending status update to coordinator",
-        )
-        .await
-    }
-
-    /// Poll coordinator for next command, returning just the command type
-    pub async fn get_next_command(&self) -> Result<MessageType, NoiseError> {
-        let msg = self.get_next_command_with_payload().await?;
-        Ok(msg.msg_type)
-    }
-
     /// Poll coordinator for next command, returning full message with payload
+    ///
+    /// # Errors
+    /// Returns an error if the poll request fails, as `send_message_with_timeout`
+    /// describes. Returns `NoiseError::InvalidMessage` if the response does not
+    /// decode. For a chunked command, returns an error if the metadata is
+    /// malformed or over the size caps. Returns an error if the assembled size
+    /// does not match the metadata. Also returns an error if a chunk cannot be
+    /// fetched or carries the wrong index. Transient chunk failures get up to
+    /// `CHUNK_FETCH_MAX_ATTEMPTS` attempts first.
     pub async fn get_next_command_with_payload(&self) -> Result<Message, NoiseError> {
         tracing::debug!("Polling coordinator for next command");
 
@@ -428,8 +340,8 @@ impl NoiseClient {
 
         if payload.len() != total_size {
             tracing::warn!(
-                "chunked-response assembly produced {} bytes but metadata declared {total_size}",
-                payload.len()
+                "chunked-response assembly produced {len} bytes but metadata declared {total_size}",
+                len = payload.len()
             );
             return Err(NoiseError::InvalidMessage);
         }
@@ -578,5 +490,28 @@ impl NoiseClient {
         }
 
         Ok(resp_msg.payload[4..].to_vec())
+    }
+}
+
+/// The log line for a peer sending `kind` to the coordinator.
+fn sending(kind: MessageType) -> &'static str {
+    match kind {
+        MessageType::KeysUpload => "Uploading keys to coordinator",
+        MessageType::DnsSignature => "Sending DNS signature to coordinator",
+        MessageType::P2pSignatures => "Sending P2P signatures to coordinator",
+        MessageType::SubmissionSignatures => "Sending submission signatures to coordinator",
+        MessageType::KickSignatures => "Sending kick signatures to coordinator",
+        MessageType::ChangeThresholdSignatures => {
+            "Sending change-threshold signatures to coordinator"
+        }
+        MessageType::AddPartyKeysUpload => "Uploading add-party keys to coordinator",
+        MessageType::AddPartySignatures => "Sending add-party signatures to coordinator",
+        MessageType::AddPartyClearProposal => "Sending authored clearing proposal to coordinator",
+        MessageType::AddPartyClearSignatures => {
+            "Sending add-party clearing signature to coordinator"
+        }
+        MessageType::DeclineInvitation => "Sending decline-invitation to coordinator",
+        MessageType::StatusUpdate => "Sending status update to coordinator",
+        _ => "Sending a message to coordinator",
     }
 }

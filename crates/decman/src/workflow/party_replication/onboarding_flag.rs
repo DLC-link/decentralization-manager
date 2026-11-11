@@ -25,10 +25,14 @@ use crate::{
     utils,
     workflow::{
         party_replication::{ReplicationTarget, offset},
-        topology::fetch_p2p_mapping,
+        topology::{PollText, Polled, fetch_p2p_mapping, poll_until},
     },
 };
 
+/// Hard cap on how long the new member waits for Canton's "earliest safe
+/// time to clear the onboarding flag" to arrive. The safe time is normally
+/// seconds away (decision timeouts); ten minutes flags a genuinely stuck
+/// synchronizer instead of hanging the workflow forever.
 const MAX_SAFE_TIME_WAIT_SECS: u64 = 600;
 
 /// Outcome of the target participant's `ClearPartyOnboardingFlag` polling.
@@ -42,15 +46,6 @@ pub enum ClearOutcome {
     Proposed,
 }
 
-/// Target-side step: drive `ClearPartyOnboardingFlag` until the flag is gone
-/// or Canton has accepted the clearing proposal past its safe time.
-///
-/// Canton refuses to clear before its computed safe time (so no in-flight
-/// transaction from the import window can be lost) — the endpoint returns
-/// `onboarded = false` with `earliest_retry_timestamp` until then. After the
-/// safe time, a call proposes the clearing topology transaction, which still
-/// needs whatever signatures the party's namespace demands — collected by the
-/// calling workflow, not here.
 /// Ask Canton to clear the flag once and return whatever it says, without
 /// waiting for its safe time.
 ///
@@ -98,6 +93,24 @@ pub async fn request_onboarding_flag_clear(
     })
 }
 
+/// Target-side step: call `ClearPartyOnboardingFlag` until the flag is gone
+/// or Canton proposes the clearing transaction past its safe time.
+///
+/// Canton refuses to clear before its computed safe time (so no in-flight
+/// transaction from the import window can be lost) — the endpoint returns
+/// `onboarded = false` with `earliest_retry_timestamp` until then. After the
+/// safe time, a call proposes the clearing topology transaction, which still
+/// needs whatever signatures the party's namespace demands — collected by the
+/// calling workflow, not here.
+///
+/// # Errors
+/// Returns an error if the synchronizer ID cannot be read, or does not split
+/// on `::` into two or three parts. Returns an error if the stored
+/// pre-activation offset cannot be read or parsed, or if it is missing and
+/// cannot be derived and saved. Returns an error if the Admin API channel
+/// cannot be opened or `ClearPartyOnboardingFlag` fails. Returns an error if
+/// the safe time is still ahead after waiting more than
+/// `MAX_SAFE_TIME_WAIT_SECS` seconds.
 pub async fn clear_onboarding_flag(
     config: &NodeConfig,
     storage: &SqlitePool,
@@ -181,32 +194,34 @@ pub async fn clear_onboarding_flag(
 }
 
 /// Poll head state until the target participant's onboarding marker is gone.
+///
+/// # Errors
+/// Returns an error if a head-state read fails, for example when the party has
+/// no `PartyToParticipant` mapping. Returns an error if `new_member` still
+/// carries the marker after the last poll attempt.
 pub async fn wait_for_flag_cleared(
     config: &NodeConfig,
     synchronizer_id: &str,
     party_id: &CantonId,
     new_member: &CantonId,
 ) -> Result {
-    let max_attempts = crate::consts::topology_retry_max_attempts();
-    let retry_delay = time::Duration::from_secs(crate::consts::topology_retry_delay_secs());
     let new_member_str = new_member.to_string();
 
-    for attempt in 1..=max_attempts {
-        let p2p = fetch_p2p_mapping(config, synchronizer_id, party_id).await?;
-        if !has_onboarding_marker(&p2p, &new_member_str) {
-            tracing::info!("Onboarding flag cleared after {attempt} attempt(s)");
-            return Ok(());
+    let text = PollText {
+        found: "Onboarding flag cleared".to_string(),
+        failed: "Onboarding flag was not cleared".to_string(),
+    };
+    poll_until!(text, || {
+        let new_member_str = &new_member_str;
+        async move {
+            let p2p = fetch_p2p_mapping(config, synchronizer_id, party_id).await?;
+            if !has_onboarding_marker(&p2p, new_member_str) {
+                return Ok(Polled::Ready(()));
+            }
+            Ok(Polled::Pending("Onboarding flag still set".to_string()))
         }
-        if attempt < max_attempts {
-            tracing::debug!(
-                "Onboarding flag still set, attempt {attempt}/{max_attempts}, \
-                 retrying in {retry_delay:?}..."
-            );
-            time::sleep(retry_delay).await;
-        }
-    }
-
-    anyhow::bail!("Onboarding flag was not cleared after {max_attempts} attempts")
+    })
+    .await
 }
 
 /// Whether `participant` carries the Onboarding marker in `p2p`.

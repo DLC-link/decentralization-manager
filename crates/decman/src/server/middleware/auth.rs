@@ -398,7 +398,15 @@ fn is_always_public(path: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use tokio::sync::{Semaphore, mpsc};
+
     use super::*;
+    use crate::{
+        server::{HealthCache, WorkflowRegistry, handlers::MAX_CONCURRENT_DISCOVERIES},
+        workflow::party_replication::relay::RelaySessions,
+    };
 
     #[test]
     fn spa_entry_is_public() {
@@ -519,28 +527,23 @@ mod tests {
         Data::new(AppState {
             db,
             config: NodeConfig::default(),
-            peer_status: Arc::new(RwLock::new(HashMap::new())),
             last_seen: Arc::new(RwLock::new(HashMap::new())),
-            peer_job_sender: tokio::sync::mpsc::unbounded_channel().0,
-            workflows: crate::server::WorkflowRegistry::new(),
+            peer_job_sender: mpsc::unbounded_channel().0,
+            workflows: WorkflowRegistry::new(),
             pending_invitations: Arc::new(RwLock::new(Vec::new())),
             auth: Arc::new(RwLock::new(None)),
             token_validator: validator,
             admin_role: Some("decman-admin".to_string()),
             party_credentials,
             bootstrap_mu: Arc::new(Mutex::new(())),
-            relay_sessions: Arc::new(
-                crate::workflow::party_replication::relay::RelaySessions::new(),
-            ),
+            relay_sessions: Arc::new(RelaySessions::new()),
             test_mode: true,
             refreshing_prefixes: Arc::new(RwLock::new(HashSet::new())),
-            discovery_permits: Arc::new(tokio::sync::Semaphore::new(
-                crate::server::handlers::MAX_CONCURRENT_DISCOVERIES,
-            )),
+            discovery_permits: Arc::new(Semaphore::new(MAX_CONCURRENT_DISCOVERIES)),
             discovery_generations: Arc::new(RwLock::new(HashMap::new())),
             discovery_completed: Arc::new(RwLock::new(HashMap::new())),
             http_client: reqwest::Client::new(),
-            health_cache: crate::server::HealthCache::new(),
+            health_cache: HealthCache::new(),
             external_parties: Default::default(),
             tenant_rate_limiter: Default::default(),
         })
@@ -669,7 +672,7 @@ mod tests {
 
     /// How often the stub write handler ran.
     #[derive(Default)]
-    struct Calls(std::sync::atomic::AtomicUsize);
+    struct Calls(AtomicUsize);
 
     /// Stands for a tenant write handler. It reads a JSON body, so a malformed
     /// body is a 400 once the request gets this far. It answers with the key
@@ -680,7 +683,7 @@ mod tests {
         calls: Data<Calls>,
         _body: web::Json<serde_json::Value>,
     ) -> impl Responder {
-        calls.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        calls.0.fetch_add(1, Ordering::SeqCst);
         let key = tenant_caller(&req).ok().flatten();
         HttpResponse::Ok().json(json!({
             "index": key.as_ref().map(|k| k.index),
@@ -774,7 +777,7 @@ mod tests {
             // A 400 would mean the body was parsed.
             assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
         }
-        assert_eq!(calls.0.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert_eq!(calls.0.load(Ordering::SeqCst), 0);
 
         let resp = test::call_service(
             &app,

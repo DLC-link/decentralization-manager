@@ -761,6 +761,202 @@ async fn add_hosts_falls_back_to_another_source_for_the_acs() {
     );
 }
 
+/// Add hosts from `current` to `joining` with the fixed party and serial the
+/// relay stubs use, and require the run itself to succeed.
+async fn add_hosts_ok(current: &[WalletHost], joining: &[WalletHost]) -> decman_wallet::AddedHosts {
+    let key = ExternalKeyPair::from_seed([4u8; 32]);
+    match decman_wallet::add_hosts(
+        current,
+        joining,
+        &key,
+        "alice::1220aa",
+        HostPermission::Confirmation,
+        4,
+    )
+    .await
+    {
+        Ok(added) => added,
+        Err(e) => panic!("the topology write must succeed: {e}"),
+    }
+}
+
+/// How many ACS export calls this stub host received.
+async fn acs_export_calls(server: &MockServer) -> usize {
+    server
+        .received_requests()
+        .await
+        .unwrap_or_default()
+        .iter()
+        .filter(|r| r.method.as_str() == "GET" && r.url.path().contains("/acs/"))
+        .count()
+}
+
+/// How many ACS import calls this stub host received.
+async fn acs_import_calls(server: &MockServer) -> usize {
+    server
+        .received_requests()
+        .await
+        .unwrap_or_default()
+        .iter()
+        .filter(|r| r.url.path() == "/v0/tenant/add-hosts/import")
+        .count()
+}
+
+/// Mount an export that fails on `server`, for every block or for one `seq`.
+async fn stub_export_failure(server: &MockServer, seq: Option<&str>) {
+    let mock =
+        Mock::given(method("GET")).and(wiremock::matchers::path_regex(r"^/v0/tenant/.+/acs/.+$"));
+    let mock = match seq {
+        Some(seq) => mock.and(wiremock::matchers::query_param("seq", seq)),
+        None => mock,
+    };
+    mock.respond_with(ResponseTemplate::new(500).set_body_json(json!({"error": "export failed"})))
+        .with_priority(1)
+        .mount(server)
+        .await;
+}
+
+/// A joiner no current host can export to is hosted but not replicated, and
+/// nothing reaches its import.
+#[tokio::test]
+async fn add_hosts_reports_a_joiner_no_source_can_export_to() {
+    let (p1, p2, p3) = (
+        MockServer::start().await,
+        MockServer::start().await,
+        MockServer::start().await,
+    );
+    for s in [&p1, &p2, &p3] {
+        stub_add_hosts_prepare(s, 5).await;
+    }
+    stub_add_hosts_execute(&p3, 5).await;
+    stub_export_failure(&p1, None).await;
+    stub_export_failure(&p2, None).await;
+    stub_import_blocks(&p3, true).await;
+
+    let added = add_hosts_ok(&[host_for(&p1, 1), host_for(&p2, 2)], &[host_for(&p3, 3)]).await;
+    assert!(!added.replicated);
+    assert!(
+        added.hosts[0].error.is_none(),
+        "the topology write succeeded"
+    );
+    assert_eq!(acs_export_calls(&p1).await, 1);
+    assert_eq!(acs_export_calls(&p2).await, 1);
+    assert_eq!(acs_import_calls(&p3).await, 0);
+}
+
+/// Once a source has served a block, the relay stays on it: a later export
+/// failure fails the joiner rather than stitching blocks from two exports.
+#[tokio::test]
+async fn add_hosts_does_not_switch_source_after_the_first_block() {
+    let (p1, p2, p3) = (
+        MockServer::start().await,
+        MockServer::start().await,
+        MockServer::start().await,
+    );
+    for s in [&p1, &p2, &p3] {
+        stub_add_hosts_prepare(s, 5).await;
+    }
+    stub_add_hosts_execute(&p3, 5).await;
+    stub_export_failure(&p1, Some("2")).await;
+    stub_acs_source(&p1).await;
+    stub_acs_source(&p2).await;
+    stub_import_blocks(&p3, true).await;
+
+    let added = add_hosts_ok(&[host_for(&p1, 1), host_for(&p2, 2)], &[host_for(&p3, 3)]).await;
+    assert!(!added.replicated);
+    assert_eq!(
+        acs_export_calls(&p1).await,
+        2,
+        "block 1, then block 2 fails"
+    );
+    assert_eq!(acs_export_calls(&p2).await, 0, "no fallback after block 1");
+    assert_eq!(acs_import_calls(&p3).await, 1);
+}
+
+/// A failed import stops that joiner's relay at the failing block.
+#[tokio::test]
+async fn add_hosts_stops_relaying_when_an_import_fails() {
+    let (p1, p2) = (MockServer::start().await, MockServer::start().await);
+    for s in [&p1, &p2] {
+        stub_add_hosts_prepare(s, 5).await;
+    }
+    stub_add_hosts_execute(&p2, 5).await;
+    stub_acs_source(&p1).await;
+    Mock::given(method("POST"))
+        .and(path("/v0/tenant/add-hosts/import"))
+        .respond_with(ResponseTemplate::new(500).set_body_json(json!({"error": "import failed"})))
+        .mount(&p2)
+        .await;
+
+    let added = add_hosts_ok(&[host_for(&p1, 1)], &[host_for(&p2, 2)]).await;
+    assert!(!added.replicated);
+    assert_eq!(acs_export_calls(&p1).await, 1, "block 2 is never asked for");
+    assert_eq!(acs_import_calls(&p2).await, 1);
+}
+
+/// A joiner whose topology write failed gets no relay, and the run still
+/// replicates to the joiners after it. A source that could not preflight the
+/// packages names the joiner.
+#[tokio::test]
+async fn add_hosts_skips_a_failed_joiner_and_lists_missing_preflight() {
+    let (p1, p2, p3) = (
+        MockServer::start().await,
+        MockServer::start().await,
+        MockServer::start().await,
+    );
+    for s in [&p1, &p2, &p3] {
+        stub_add_hosts_prepare(s, 5).await;
+    }
+    Mock::given(method("POST"))
+        .and(path("/v0/tenant/add-hosts/execute"))
+        .respond_with(ResponseTemplate::new(500).set_body_json(json!({"error": "refused"})))
+        .mount(&p2)
+        .await;
+    stub_add_hosts_execute(&p3, 5).await;
+    Mock::given(method("GET"))
+        .and(wiremock::matchers::path_regex(r"^/v0/tenant/.+/acs/.+$"))
+        .and(wiremock::matchers::query_param("seq", "1"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "party_id": "alice::1220aa",
+            "seq": 1,
+            "chunk": STANDARD.encode(b"an-acs-snapshot"),
+            "end": true,
+            "total_len": 15,
+            "sha256": "deadbeef",
+            "package_ids": ["pkg-one"],
+            "package_preflight": false,
+        })))
+        .mount(&p1)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/v0/tenant/add-hosts/import"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "party_id": "alice::1220aa",
+            "seq": 1,
+            "complete": true,
+            "imported": true,
+            "marker_cleared": true,
+        })))
+        .mount(&p3)
+        .await;
+
+    let added = add_hosts_ok(&[host_for(&p1, 1)], &[host_for(&p2, 2), host_for(&p3, 3)]).await;
+    assert!(!added.replicated, "the first joiner is not replicated");
+    assert!(added.hosts[0].error.is_some());
+    assert!(added.hosts[1].error.is_none());
+    assert_eq!(acs_import_calls(&p2).await, 0);
+    assert_eq!(acs_import_calls(&p3).await, 1);
+    assert_eq!(
+        acs_export_calls(&p1).await,
+        1,
+        "one export, for the second joiner"
+    );
+    assert_eq!(
+        added.without_package_preflight,
+        vec![p3.uri().trim_end_matches('/').to_string()]
+    );
+}
+
 /// A host that prepares different bytes must stop the run before anything is
 /// signed. This is the whole reason every host prepares.
 #[tokio::test]
@@ -850,6 +1046,133 @@ async fn raise_threshold_refuses_extra_hashes() {
         panic!("a hash without a matching transaction must be refused");
     };
     assert!(format!("{e:?}").contains("MalformedPreparation"), "{e}");
+}
+
+/// Two hosts that agree with each other can still hand back a hash with no
+/// transaction behind it. Onboarding refuses it before anything is signed.
+#[tokio::test]
+async fn onboarding_refuses_extra_hashes() {
+    let key = ExternalKeyPair::from_seed([13u8; 32]);
+    let party_id = key.party_id("alice");
+    let (p1, p2) = (MockServer::start().await, MockServer::start().await);
+    for s in [&p1, &p2] {
+        Mock::given(method("POST"))
+            .and(path("/v0/tenant/prepare"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "party_id": party_id,
+                "transaction_hashes": [
+                    STANDARD.encode(TX_HASHES[0]),
+                    STANDARD.encode(TX_HASHES[1]),
+                    STANDARD.encode(b"hash-of-something-else"),
+                ],
+                "topology_transactions": ["dHgtb25l", "dHgtdHdv"],
+            })))
+            .mount(s)
+            .await;
+        stub_onboard(s, &party_id, "completed").await;
+    }
+    let hosts = vec![host_for(&p1, 0x11), host_for(&p2, 0x22)];
+
+    let Err(e) = execute_co_validated(&hosts, &key, "alice", None).await else {
+        panic!("a hash without a matching transaction must be refused");
+    };
+    assert!(
+        matches!(&e, decman_wallet::Error::MalformedPreparation { detail, .. }
+            if detail == "3 hash(es) for 2 transaction(s)"),
+        "{e:?}"
+    );
+    assert_eq!(e.host(), p1.uri().trim_end_matches('/'));
+    for server in [&p1, &p2] {
+        assert!(onboard_bodies(server).await.is_empty());
+    }
+}
+
+/// The same hash-count check guards the add-hosts write.
+#[tokio::test]
+async fn add_hosts_refuses_extra_hashes() {
+    let (p1, p2) = (MockServer::start().await, MockServer::start().await);
+    for s in [&p1, &p2] {
+        Mock::given(method("POST"))
+            .and(path("/v0/tenant/add-hosts/prepare"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "party_id": "alice::1220aa",
+                "serial": 5,
+                "transaction_hashes": [
+                    STANDARD.encode(TX_HASHES[0]),
+                    STANDARD.encode(TX_HASHES[1]),
+                    STANDARD.encode(b"hash-of-something-else"),
+                ],
+                "topology_transactions": ["dHgtb25l", "dHgtdHdv"],
+            })))
+            .mount(s)
+            .await;
+    }
+    stub_add_hosts_execute(&p2, 5).await;
+
+    let key = ExternalKeyPair::from_seed([4u8; 32]);
+    let Err(e) = decman_wallet::add_hosts(
+        &[host_for(&p1, 1)],
+        &[host_for(&p2, 2)],
+        &key,
+        "alice::1220aa",
+        HostPermission::Confirmation,
+        4,
+    )
+    .await
+    else {
+        panic!("a hash without a matching transaction must be refused");
+    };
+    assert!(
+        matches!(&e, decman_wallet::Error::MalformedPreparation { detail, .. }
+            if detail == "3 hash(es) for 2 transaction(s)"),
+        "{e:?}"
+    );
+    assert_eq!(e.host(), p1.uri().trim_end_matches('/'));
+    assert_eq!(add_hosts_execute_calls(&p2).await, 0);
+}
+
+/// A threshold change refuses to sign when its preparers disagree, and names
+/// the dissenting host against the first one.
+#[tokio::test]
+async fn raise_threshold_refuses_when_hosts_disagree() {
+    let (p1, p2) = (MockServer::start().await, MockServer::start().await);
+    for (s, serial) in [(&p1, 6), (&p2, 7)] {
+        Mock::given(method("POST"))
+            .and(path("/v0/tenant/threshold/prepare"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "party_id": "alice::1220aa",
+                "serial": serial,
+                "transaction_hashes": TX_HASHES.map(|h| STANDARD.encode(h)),
+                "topology_transactions": ["dHgtb25l", "dHgtdHdv"],
+            })))
+            .mount(s)
+            .await;
+    }
+
+    let key = ExternalKeyPair::from_seed([4u8; 32]);
+    let Err(e) = decman_wallet::raise_threshold(
+        &[host_for(&p1, 1), host_for(&p2, 2)],
+        &key,
+        "alice::1220aa",
+        2,
+        5,
+    )
+    .await
+    else {
+        panic!("disagreeing preparers must be refused");
+    };
+    match &e {
+        decman_wallet::Error::HostDisagreement {
+            host,
+            reference,
+            detail,
+        } => {
+            assert_eq!(host, p2.uri().trim_end_matches('/'));
+            assert_eq!(reference, p1.uri().trim_end_matches('/'));
+            assert_eq!(detail, "different threshold-change bytes");
+        }
+        other => panic!("expected HostDisagreement, got {other:?}"),
+    }
 }
 
 async fn add_hosts_prepare_calls(server: &MockServer) -> usize {

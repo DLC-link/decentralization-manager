@@ -15,12 +15,13 @@
 
 use std::collections::VecDeque;
 
-use crate::{config::NodeConfig, error::Result, utils};
 use canton_proto_rs::com::daml::ledger::api::v2::{
     CreatedEvent, EventFormat, GetActiveContractsPageRequest, GetActiveContractsRequest,
     GetLedgerEndRequest, GetUpdatesPageRequest, GetUpdatesRequest, Transaction, UpdateFormat,
     get_active_contracts_response::ContractEntry, get_update_response, get_updates_response,
 };
+
+use crate::{config::NodeConfig, error::Result, utils};
 
 /// Rows pulled from Canton per round trip when collecting a full result set.
 pub(crate) const FETCH_CHUNK: i32 = 1000;

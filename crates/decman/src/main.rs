@@ -2,59 +2,10 @@ mod cli;
 
 use std::{path::PathBuf, process::ExitCode};
 
-use anyhow::Context;
-use dec_party_manager::{
-    canton_id::CantonId,
-    config::{Auth0Config, CantonTlsConfig, KeycloakConfig, NodeConfig},
-    db,
-    error::Result,
-    utils,
-};
-use tracing_subscriber::{filter::EnvFilter, prelude::*};
+use dec_party_manager::{config::NodeConfig, db, error::Result, utils};
+use tracing_subscriber::{filter::EnvFilter, fmt::MakeWriter, prelude::*, registry::LookupSpan};
 
 use cli::{Cli, Commands, Parser};
-
-/// The TLS flags for one Canton endpoint, as parsed from the CLI/env.
-struct TlsOverrides<'a> {
-    enabled: &'a Option<bool>,
-    ca_cert: &'a Option<String>,
-    client_cert: &'a Option<String>,
-    client_key: &'a Option<String>,
-    domain: &'a Option<String>,
-}
-
-/// Apply whichever TLS flags the operator set, leaving the rest at their
-/// defaults (TLS off, platform trust store, no client identity).
-fn apply_tls_overrides(tls: &mut CantonTlsConfig, overrides: TlsOverrides<'_>) {
-    if let Some(enabled) = overrides.enabled {
-        tls.enabled = *enabled;
-    }
-    if let Some(path) = overrides.ca_cert {
-        tls.ca_cert = Some(path.clone());
-    }
-    if let Some(path) = overrides.client_cert {
-        tls.client_cert = Some(path.clone());
-    }
-    if let Some(path) = overrides.client_key {
-        tls.client_key = Some(path.clone());
-    }
-    if let Some(domain) = overrides.domain {
-        tls.domain = Some(domain.clone());
-    }
-}
-
-/// Split `DECPM_TENANT_API_KEYS` into keys, in the order configured. A repeat
-/// keeps its first position, so the index an audit row records for a key
-/// always names the same key.
-fn parse_tenant_api_keys(raw: &str) -> Vec<String> {
-    let mut keys: Vec<String> = Vec::new();
-    for key in raw.split(',').map(str::trim).filter(|k| !k.is_empty()) {
-        if !keys.iter().any(|k| k == key) {
-            keys.push(key.to_string());
-        }
-    }
-    keys
-}
 
 /// Extract the --dir / -d value from raw args before clap parses,
 /// so we can load the .env file from that directory first.
@@ -90,8 +41,8 @@ fn json_logs_enabled(format: Option<&str>) -> bool {
 /// the layer applies even when stdout is not a terminal.
 fn json_layer<S, W>(writer: W) -> impl tracing_subscriber::Layer<S>
 where
-    S: tracing::Subscriber + for<'a> tracing_subscriber::registry::LookupSpan<'a>,
-    W: for<'a> tracing_subscriber::fmt::MakeWriter<'a> + 'static,
+    S: tracing::Subscriber + for<'a> LookupSpan<'a>,
+    W: for<'a> MakeWriter<'a> + 'static,
 {
     tracing_subscriber::fmt::layer()
         .json()
@@ -115,286 +66,33 @@ async fn main() -> ExitCode {
 }
 
 async fn run() -> Result {
-    // Load .env from the root directory before clap parses,
-    // so DECPM_* env vars are available for clap's env feature
-    let dir = find_dir_arg();
-    let env_path = dir.join(".env");
-    if env_path.exists() {
-        dotenvy::from_path(&env_path).ok();
-    }
-
-    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| {
-        EnvFilter::new("dec_party_manager=info,tokio_noise=error,hyper_noise=error")
-    });
-
-    if json_logs_enabled(std::env::var("DECPM_LOG_FORMAT").ok().as_deref()) {
-        tracing_subscriber::registry()
-            .with(json_layer(std::io::stdout).with_filter(filter))
-            .init();
-    } else {
-        tracing_subscriber::registry()
-            .with(tracing_subscriber::fmt::layer().with_filter(filter))
-            .init();
-    }
-
-    // A panic prints to stderr as plain text, which the pipeline leaves
-    // unparsed, so log it before the default hook prints the backtrace.
-    let default_hook = std::panic::take_hook();
-    std::panic::set_hook(Box::new(move |info| {
-        tracing::error!(panic = %info, "dec-party-manager panicked");
-        default_hook(info);
-    }));
+    load_dotenv();
+    init_logging();
 
     let args = Cli::parse();
 
     // Build config from defaults + CLI/env var overrides
     let mut config = NodeConfig::default().with_root_dir(&args.dir);
 
-    match &args.command {
-        Commands::Serve {
-            listen_address,
-            noise_port,
-            public_address,
-            canton_admin_host,
-            canton_admin_port,
-            canton_ledger_host,
-            canton_ledger_port,
-            canton_admin_tls,
-            canton_admin_tls_ca_cert,
-            canton_admin_tls_client_cert,
-            canton_admin_tls_client_key,
-            canton_admin_tls_domain,
-            canton_ledger_tls,
-            canton_ledger_tls_ca_cert,
-            canton_ledger_tls_client_cert,
-            canton_ledger_tls_client_key,
-            canton_ledger_tls_domain,
-            canton_synchronizer,
-            canton_network,
-            scan_url,
-            keycloak_url,
-            keycloak_realm,
-            keycloak_client_id,
-            keycloak_internal_url,
-            auth0_domain,
-            auth0_client_id,
-            auth0_audience,
-            auth0_scope,
-            jwt_role_claim: _,
-            timeout_handshake,
-            timeout_message,
-            timeout_retry_attempts,
-            timeout_retry_delay,
-            noise_retry_timeout_sec,
-            noise_retry_max_attempts,
-            noise_retry_backoff_ms,
-            reward_automation_interval_secs,
-            reward_expiry_read_interval_secs,
-            external_parties_ttl_secs,
-            reward_max_creates,
-            reward_min_expiry_margin_secs,
-            metrics_port,
-            db_encryption_key,
-            insecure,
-            canton_hmac_secret,
-            canton_hmac_audience,
-            canton_hmac_subject,
-            tenant_api_keys,
-            tenant_rate_limit_per_minute,
-            validator_operator_party,
-            key_store_key_file,
-            ..
-        } => {
-            if let Some(key) = db_encryption_key {
-                dec_party_manager::db::crypto::init_key(key);
-                tracing::info!("Database encryption enabled");
-                if key_store_key_file.is_none() && !dec_party_manager::db::crypto::derives_keys(key)
-                {
-                    tracing::warn!(
-                        "DECPM_DB_ENCRYPTION_KEY has fewer than {} characters, so DecMan does \
-                         not derive the key store's key from it",
-                        dec_party_manager::db::crypto::MIN_DERIVING_PASSPHRASE_CHARS
-                    );
-                }
-            }
-            if let Some(addr) = listen_address {
-                config.node.listen_address = addr.clone();
-            }
-            if let Some(p) = noise_port {
-                config.node.port = *p;
-            }
-            if let Some(addr) = public_address {
-                config.node.public_address = Some(addr.clone());
-            }
-            if let Some(host) = canton_admin_host {
-                config.canton.admin_api_host = host.clone();
-            }
-            if let Some(p) = canton_admin_port {
-                config.canton.admin_api_port = *p;
-            }
-            if let Some(host) = canton_ledger_host {
-                config.canton.ledger_api_host = host.clone();
-            }
-            if let Some(p) = canton_ledger_port {
-                config.canton.ledger_api_port = *p;
-            }
-            apply_tls_overrides(
-                &mut config.canton.admin_api_tls,
-                TlsOverrides {
-                    enabled: canton_admin_tls,
-                    ca_cert: canton_admin_tls_ca_cert,
-                    client_cert: canton_admin_tls_client_cert,
-                    client_key: canton_admin_tls_client_key,
-                    domain: canton_admin_tls_domain,
-                },
-            );
-            apply_tls_overrides(
-                &mut config.canton.ledger_api_tls,
-                TlsOverrides {
-                    enabled: canton_ledger_tls,
-                    ca_cert: canton_ledger_tls_ca_cert,
-                    client_cert: canton_ledger_tls_client_cert,
-                    client_key: canton_ledger_tls_client_key,
-                    domain: canton_ledger_tls_domain,
-                },
-            );
-            if let Some(sync) = canton_synchronizer {
-                config.canton.synchronizer = sync.clone();
-            }
-            if let Some(net) = canton_network {
-                config.canton.network = *net;
-            }
-            config.canton.scan_url = scan_url.clone();
-            // `internal_url` is deliberately not in this guard: it only
-            // supplements a real Keycloak config and is meaningless on its
-            // own, so it must not by itself materialize a config with empty
-            // url/realm/client_id. It is applied below only when one of those
-            // three has already established the config.
-            if keycloak_url.is_some() || keycloak_realm.is_some() || keycloak_client_id.is_some() {
-                let kc = config.keycloak.get_or_insert(KeycloakConfig {
-                    url: String::new(),
-                    internal_url: None,
-                    realm: String::new(),
-                    client_id: String::new(),
-                    client_secret: None,
-                    username: None,
-                    password: None,
-                });
-                if let Some(url) = keycloak_url {
-                    kc.url = url.clone();
-                }
-                if let Some(internal_url) = keycloak_internal_url {
-                    kc.internal_url = Some(internal_url.clone());
-                }
-                if let Some(realm) = keycloak_realm {
-                    kc.realm = realm.clone();
-                }
-                if let Some(client_id) = keycloak_client_id {
-                    kc.client_id = client_id.clone();
-                }
-            } else if keycloak_internal_url.is_some() {
-                tracing::warn!(
-                    "DECPM_KEYCLOAK_INTERNAL_URL is set but DECPM_KEYCLOAK_URL/REALM/CLIENT_ID \
-                     are not; no Keycloak config was created and the internal URL is ignored"
-                );
-            }
-
-            if let (Some(domain), Some(client_id)) = (auth0_domain, auth0_client_id) {
-                config.auth0 = Some(Auth0Config {
-                    domain: domain.clone(),
-                    client_id: client_id.clone(),
-                    audience: auth0_audience.clone(),
-                    scope: auth0_scope.clone(),
-                });
-            } else if auth0_scope.is_some() {
-                tracing::warn!(
-                    "DECPM_AUTH0_SCOPE is set but DECPM_AUTH0_DOMAIN/CLIENT_ID are not; no \
-                     Auth0 config was created and the scope is ignored"
-                );
-            }
-            if let Some(v) = timeout_handshake {
-                config.timeouts.handshake_timeout_secs = *v;
-            }
-            if let Some(v) = timeout_message {
-                config.timeouts.message_timeout_secs = *v;
-            }
-            if let Some(v) = timeout_retry_attempts {
-                config.timeouts.connection_retry_attempts = *v;
-            }
-            if let Some(v) = timeout_retry_delay {
-                config.timeouts.connection_retry_delay_secs = *v;
-            }
-            if let Some(v) = noise_retry_timeout_sec {
-                config.noise_retry.per_attempt_timeout_secs = *v;
-            }
-            if let Some(v) = noise_retry_max_attempts {
-                config.noise_retry.max_attempts = *v;
-            }
-            if let Some(v) = noise_retry_backoff_ms {
-                config.noise_retry.backoff_ms = *v;
-            }
-            if let Some(v) = reward_automation_interval_secs {
-                config.reward_automation_interval_secs = *v;
-            }
-            if let Some(v) = reward_expiry_read_interval_secs {
-                config.reward_expiry_read_interval_secs = *v;
-            }
-            if let Some(v) = external_parties_ttl_secs {
-                config.external_parties_ttl_secs = *v;
-            }
-            if let Some(v) = reward_max_creates {
-                config.reward_max_creates = *v;
-            }
-            if let Some(v) = reward_min_expiry_margin_secs {
-                config.reward_min_expiry_margin_secs = *v;
-            }
-            if let Some(v) = metrics_port {
-                config.metrics_port = *v;
-            }
-
-            config.tenant_api_keys = tenant_api_keys
-                .as_deref()
-                .map(parse_tenant_api_keys)
-                .unwrap_or_default();
-            if let Some(v) = tenant_rate_limit_per_minute {
-                config.tenant_rate_limit_per_minute = *v;
-            }
-            config.validator_operator_party = validator_operator_party
-                .as_deref()
-                .map(str::trim)
-                .filter(|party| !party.is_empty())
-                .map(CantonId::parse)
-                .transpose()
-                .context("DECPM_VALIDATOR_OPERATOR_PARTY is not a valid party id")?;
-            config.key_store_key_file = key_store_key_file.clone();
-
-            config.insecure = *insecure;
-            // Only ingest the unsafe HMAC settings when insecure mode is on;
-            // in a secure run they do nothing, so don't store them.
-            if *insecure {
-                if let Some(v) = canton_hmac_secret {
-                    config.insecure_auth.secret = v.clone();
-                }
-                if let Some(v) = canton_hmac_audience {
-                    config.insecure_auth.audience = v.clone();
-                }
-                if let Some(v) = canton_hmac_subject {
-                    config.insecure_auth.subject = v.clone();
-                }
-            }
-        }
-    }
+    args.command.init_db_encryption();
+    args.command.apply_to(&mut config)?;
 
     // Resolve participant_id from Canton if not configured
     utils::resolve_participant_id(&mut config).await?;
 
-    tracing::info!("Running as participant: {}", config.participant_id());
+    tracing::info!(
+        "Running as participant: {participant_id}",
+        participant_id = config.participant_id()
+    );
 
     // Initialize database
     let db_path = match &args.command {
         Commands::Serve { db, .. } => db.clone().unwrap_or_else(|| config.db_path()),
     };
-    tracing::info!("Connecting to database at {}", db_path.display());
+    tracing::info!(
+        "Connecting to database at {db_path}",
+        db_path = db_path.display()
+    );
     let pool = db::connect(&db_path).await?;
 
     tracing::info!("Running database migrations");
@@ -427,40 +125,69 @@ async fn run() -> Result {
     Ok(())
 }
 
+/// Load .env from the root directory before clap parses, so DECPM_* env vars
+/// are available for clap's env feature.
+fn load_dotenv() {
+    let dir = find_dir_arg();
+    let env_path = dir.join(".env");
+    if env_path.exists() {
+        dotenvy::from_path(&env_path).ok();
+    }
+}
+
+/// Log through `tracing`, as JSON unless `DECPM_LOG_FORMAT=text`, and log a
+/// panic before the default hook prints it.
+fn init_logging() {
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+        EnvFilter::new("dec_party_manager=info,tokio_noise=error,hyper_noise=error")
+    });
+
+    if json_logs_enabled(std::env::var("DECPM_LOG_FORMAT").ok().as_deref()) {
+        tracing_subscriber::registry()
+            .with(json_layer(std::io::stdout).with_filter(filter))
+            .init();
+    } else {
+        tracing_subscriber::registry()
+            .with(tracing_subscriber::fmt::layer().with_filter(filter))
+            .init();
+    }
+
+    // A panic prints to stderr as plain text, which the pipeline leaves
+    // unparsed, so log it before the default hook prints the backtrace.
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        tracing::error!(panic = %info, "dec-party-manager panicked");
+        default_hook(info);
+    }));
+}
+
 #[cfg(test)]
 mod tests {
-    use std::sync::{Arc, Mutex};
+    use std::{
+        io,
+        sync::{Arc, Mutex},
+    };
 
     use anyhow::anyhow;
     use tracing_subscriber::{fmt::MakeWriter, prelude::*};
 
-    use super::{json_layer, json_logs_enabled, parse_tenant_api_keys};
-
-    /// The audit row names a tenant key by its index, so the index must follow
-    /// the configured order and must not shift when a key is repeated.
-    #[test]
-    fn tenant_keys_keep_their_configured_order() {
-        assert_eq!(
-            parse_tenant_api_keys(" b , a,,b ,c"),
-            vec!["b".to_string(), "a".to_string(), "c".to_string()]
-        );
-    }
+    use super::{json_layer, json_logs_enabled};
 
     /// A writer the test reads back once the layer has written to it.
     #[derive(Clone, Default)]
     struct SharedBuffer(Arc<Mutex<Vec<u8>>>);
 
-    impl std::io::Write for SharedBuffer {
-        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+    impl io::Write for SharedBuffer {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
             let mut written = self
                 .0
                 .lock()
-                .map_err(|_| std::io::Error::other("the buffer lock is poisoned"))?;
+                .map_err(|_| io::Error::other("the buffer lock is poisoned"))?;
             written.extend_from_slice(buf);
             Ok(buf.len())
         }
 
-        fn flush(&mut self) -> std::io::Result<()> {
+        fn flush(&mut self) -> io::Result<()> {
             Ok(())
         }
     }

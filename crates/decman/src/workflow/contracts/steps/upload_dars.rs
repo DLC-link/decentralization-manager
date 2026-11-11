@@ -1,9 +1,9 @@
 use base64::{Engine, engine::general_purpose::STANDARD};
-
 use canton_proto_rs::com::digitalasset::canton::admin::participant::v30::{
     UploadDarRequest, package_service_client::PackageServiceClient,
     upload_dar_request::UploadDarData,
 };
+use tonic::transport::Channel;
 
 use crate::{config::NodeConfig, error::Result, workflow::contracts::DarFile};
 
@@ -11,6 +11,11 @@ use crate::{config::NodeConfig, error::Result, workflow::contracts::DarFile};
 ///
 /// Takes DAR files (base64-encoded) and uploads them to the Canton participant.
 /// Used by the coordinator.
+///
+/// # Errors
+///
+/// Returns an error if the Admin API channel cannot be opened, if a DAR's
+/// base64 data does not decode, or if `UploadDar` fails.
 pub async fn upload_dars(config: &NodeConfig, dar_files: &[DarFile]) -> Result {
     if dar_files.is_empty() {
         tracing::info!("No DAR files to upload, skipping");
@@ -25,8 +30,8 @@ pub async fn upload_dars(config: &NodeConfig, dar_files: &[DarFile]) -> Result {
         // Decode base64 data
         let dar_data = STANDARD.decode(&dar_file.data).map_err(|e| {
             anyhow::anyhow!(
-                "Failed to decode base64 DAR data for {}: {e}",
-                dar_file.filename
+                "Failed to decode base64 DAR data for {filename}: {e}",
+                filename = dar_file.filename
             )
         })?;
 
@@ -42,6 +47,11 @@ pub async fn upload_dars(config: &NodeConfig, dar_files: &[DarFile]) -> Result {
 ///
 /// Takes a list of (filename, data) tuples and uploads them to the Canton participant.
 /// Used by peers who receive DAR files from the coordinator.
+///
+/// # Errors
+///
+/// Returns an error if the Admin API channel cannot be opened, or if
+/// `UploadDar` fails for a file.
 pub async fn upload_dars_from_bytes(
     config: &NodeConfig,
     dar_files: Vec<(String, Vec<u8>)>,
@@ -66,7 +76,7 @@ pub async fn upload_dars_from_bytes(
 
 /// Upload a single DAR file by bytes
 async fn upload_dar_bytes(
-    client: &mut PackageServiceClient<tonic::transport::Channel>,
+    client: &mut PackageServiceClient<Channel>,
     filename: &str,
     dar_data: Vec<u8>,
 ) -> Result {

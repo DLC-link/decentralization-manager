@@ -62,21 +62,20 @@ use canton_proto_rs::com::{
         topology::admin::v30::{AuthorizeRequest, authorize_request},
     },
 };
-use serde_json::{Value, json};
-use tracing::info;
-use uuid::Uuid;
-
 use dec_party_manager::{
     canton_id::CantonId,
     config::NodeConfig,
     utils,
     workflow::{
-        external_party::add_hosts::read_party_to_participant,
+        external_party::{add_hosts::read_party_to_participant, steps},
         topology::{authorize_with_topology_retry, synchronizer_store_id},
         topology_version,
     },
 };
 use decman_wallet::ExternalKeyPair;
+use serde_json::{Value, json};
+use tracing::info;
+use uuid::Uuid;
 
 use crate::common::{
     Fixture,
@@ -314,6 +313,10 @@ fn created_count(transaction: Option<&Transaction>) -> usize {
         .unwrap_or_default()
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "A scenario phase reads top to bottom as one sequence of steps."
+)]
 pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
     info!("Phase: local_party_decentralization");
 
@@ -483,10 +486,7 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
                 Box::pin(async move {
                     let current = read_party_to_participant(&config, &party_id).await.ok()??;
                     let keys = current.mapping.party_signing_keys.as_ref()?;
-                    let wanted =
-                        dec_party_manager::workflow::external_party::steps::party_signing_key(
-                            &expected,
-                        );
+                    let wanted = steps::party_signing_key(&expected);
                     let demoted = current
                         .mapping
                         .participants

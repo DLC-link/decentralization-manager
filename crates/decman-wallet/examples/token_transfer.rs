@@ -41,7 +41,7 @@
 //!   cargo run -p decman-wallet --example token_transfer
 //! ```
 
-use std::{env, error::Error, time::Duration};
+use std::{env, error::Error, result, time::Duration};
 
 use decman_wallet::{
     ExternalKeyPair, LedgerClient, RegistryClient, TransferArgs, accept_transfer, send_transfer,
@@ -49,7 +49,7 @@ use decman_wallet::{
 use tracing_subscriber::EnvFilter;
 use zeroize::Zeroizing;
 
-type Result<T = ()> = std::result::Result<T, Box<dyn Error>>;
+type Result<T = ()> = result::Result<T, Box<dyn Error>>;
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result {
@@ -138,7 +138,7 @@ async fn accept(ledger: &LedgerClient, party: &str) -> Result {
 /// fingerprint is not the party's: that key cannot sign for it.
 fn key_for(party: &str) -> Result<ExternalKeyPair> {
     let seed = Zeroizing::new(required("DECMAN_WALLET_SEED")?);
-    let key = ExternalKeyPair::from_seed_b64(&seed)?;
+    let key = ExternalKeyPair::from_seed_b64(&seed).map_err(|e| e.to_string())?;
     let fingerprint = key.fingerprint();
     match party.rsplit_once("::") {
         Some((_, party_fingerprint)) if party_fingerprint == fingerprint => Ok(key),

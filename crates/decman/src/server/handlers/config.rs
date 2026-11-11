@@ -5,10 +5,10 @@ use actix_web::{
 };
 use prometheus::{Encoder, TextEncoder};
 use serde::Serialize;
-
 use sqlx::SqlitePool;
 
 use crate::{
+    build_info::{SEMVER, build_time, build_version},
     config::{NetworkConfig, NodeConfig, Peer},
     db::schema::{Commitable, SchemaRead, SchemaWrite},
     error::Result,
@@ -120,9 +120,9 @@ pub async fn get_node_config(data: web::Data<AppState>) -> impl Responder {
     HttpResponse::Ok().json(NodeConfigResponse {
         config: data.config.clone(),
         test_mode: data.test_mode,
-        version: crate::build_info::SEMVER,
-        build_version: crate::build_info::build_version(),
-        build_time: crate::build_info::build_time(),
+        version: SEMVER,
+        build_version: build_version(),
+        build_time: build_time(),
     })
 }
 
@@ -210,10 +210,16 @@ async fn save_peers_to_db(db: &SqlitePool, peers: &[Peer]) -> Result {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use actix_web::{App, http::StatusCode};
+    use actix_web::{
+        App,
+        http::StatusCode,
+        test::{TestRequest, call_service, init_service, read_body},
+    };
     use common::canton_id::CantonId;
     use utoipa::PartialSchema;
+
+    use super::*;
+    use crate::server::reward_automation::register_metrics;
 
     // Compressed generator point: valid hex, valid length, and on the curve.
     const VALID_KEY: &str = "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798";
@@ -270,13 +276,10 @@ mod tests {
     // evaluating nothing.
     #[actix_web::test]
     async fn metrics_endpoint_serves_the_prometheus_text_format() {
-        use actix_web::test;
+        register_metrics();
+        let app = init_service(App::new().route("/metrics", web::get().to(metrics))).await;
 
-        crate::server::reward_automation::register_metrics();
-        let app = test::init_service(App::new().route("/metrics", web::get().to(metrics))).await;
-
-        let response =
-            test::call_service(&app, test::TestRequest::get().uri("/metrics").to_request()).await;
+        let response = call_service(&app, TestRequest::get().uri("/metrics").to_request()).await;
         assert_eq!(response.status(), StatusCode::OK);
         let content_type = response
             .headers()
@@ -289,7 +292,7 @@ mod tests {
             "content type was {content_type}"
         );
 
-        let body = String::from_utf8(test::read_body(response).await.to_vec())
+        let body = String::from_utf8(read_body(response).await.to_vec())
             .unwrap_or_else(|e| panic!("body is not UTF-8: {e}"));
         assert!(
             body.contains("decman_reward_heartbeat_total"),

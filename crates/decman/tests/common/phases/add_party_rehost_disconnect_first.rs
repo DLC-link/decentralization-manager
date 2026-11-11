@@ -54,7 +54,7 @@ use canton_proto_rs::com::digitalasset::canton::{
         participant_repair_service_client::ParticipantRepairServiceClient,
         synchronizer_connectivity_service_client::SynchronizerConnectivityServiceClient,
     },
-    protocol::v30::topology_mapping,
+    protocol::v30::{PartyToParticipant, topology_mapping},
     topology::admin::v30::{
         AuthorizeRequest, ForceFlag, ListDecentralizedNamespaceDefinitionRequest,
         ListPartyToParticipantRequest, ListSynchronizerParametersStateRequest, authorize_request,
@@ -82,7 +82,9 @@ use tokio::task::JoinHandle;
 use tracing::info;
 
 use crate::common::{
-    Fixture, chaos, db,
+    Fixture,
+    auth::Refresher,
+    chaos, db,
     http::{probe_workflow_run_visible, probe_workflow_status},
     invitations::{InvitationIds, post_accept_invitation, probe_run_invitation},
     ledger_api::{
@@ -158,6 +160,10 @@ struct Watch {
     archived: Vec<(String, SystemTime)>,
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "A scenario phase reads top to bottom as one sequence of steps."
+)]
 pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
     info!("Phase: add_party_rehost_disconnect_first");
 
@@ -879,12 +885,7 @@ async fn read_hosting(
     config: &NodeConfig,
     synchronizer_id: &str,
     party_id: &str,
-) -> anyhow::Result<
-    Option<(
-        canton_proto_rs::com::digitalasset::canton::protocol::v30::PartyToParticipant,
-        Option<SystemTime>,
-    )>,
-> {
+) -> anyhow::Result<Option<(PartyToParticipant, Option<SystemTime>)>> {
     let mut client = TopologyManagerReadServiceClient::new(config.admin_channel().await?);
     let response = client
         .list_party_to_participant(tonic::Request::new(ListPartyToParticipantRequest {
@@ -1037,7 +1038,7 @@ fn spawn_sampler(
 /// their signatory, until told to stop or none are left.
 fn spawn_archiver(
     client: reqwest::Client,
-    refresher: Arc<crate::common::auth::Refresher>,
+    refresher: Arc<Refresher>,
     dso: String,
     contract_ids: Vec<String>,
     watch: Arc<Mutex<Watch>>,
@@ -1225,8 +1226,9 @@ async fn reconciliation_interval(config: &NodeConfig) -> anyhow::Result<Duration
 
 #[cfg(test)]
 mod commitment_tests {
-    use super::*;
     use canton_proto_rs::com::digitalasset::canton::admin::participant::v30::Interval;
+
+    use super::*;
 
     fn timestamp(seconds: i64, nanos: i32) -> prost_types::Timestamp {
         prost_types::Timestamp { seconds, nanos }

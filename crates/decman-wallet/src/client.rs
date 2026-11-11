@@ -5,6 +5,8 @@
 //! relays between hosts — so a wallet holds one client per host and drives them
 //! itself (see [`crate::flow`]).
 
+use std::time::Duration;
+
 use base64::{Engine, engine::general_purpose::STANDARD};
 use common::{
     api::{
@@ -13,7 +15,7 @@ use common::{
         TenantAddHostsPrepareResponse, TenantAddHostsRequest, TenantExecuteRequest,
         TenantExecuteResponse, TenantPartyStateResponse, TenantPrepareRequest,
         TenantPrepareResponse, TenantThresholdExecuteRequest, TenantThresholdRequest,
-        TenantUnhostRequest,
+        TenantUnhostRequest, WorkflowStatusResponse,
     },
     canton_id::CantonId,
     types::WorkflowProgress,
@@ -27,7 +29,7 @@ use crate::error::{Error, Result};
 /// Onboarding calls do topology work on the node, so this is generous; the
 /// wallet's own polling loop, not this timeout, decides how long to wait for a
 /// party to come up.
-const REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// What one host reports about a party's onboarding.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize)]
@@ -85,12 +87,22 @@ impl TenantClient {
 
     /// `POST /v0/tenant/prepare` — hand the node the party's public key and get
     /// back the unsigned multi-host topology plus one hash per transaction to sign.
+    ///
+    /// # Errors
+    /// [`Error::Transport`] when the request does not complete, [`Error::Api`]
+    /// when the host answers with a non-2xx status, and [`Error::Decode`] when
+    /// the body is not the expected JSON.
     pub async fn prepare(&self, req: &TenantPrepareRequest) -> Result<TenantPrepareResponse> {
         self.post("/v0/tenant/prepare", req).await
     }
 
     /// `POST /v0/tenant/execute` — submit the wallet-signed bundle to THIS host.
     /// Idempotent, so a retry after a network blip is safe.
+    ///
+    /// # Errors
+    /// [`Error::Transport`] when the request does not complete, [`Error::Api`]
+    /// when the host answers with a non-2xx status, and [`Error::Decode`] when
+    /// the body is not the expected JSON.
     pub async fn execute(&self, req: &TenantExecuteRequest) -> Result<TenantExecuteResponse> {
         self.post("/v0/tenant/execute", req).await
     }
@@ -99,9 +111,14 @@ impl TenantClient {
     ///
     /// A 404 is not an error here: it is this host reporting that it does not
     /// host the party, which is a normal answer while onboarding is in flight.
+    ///
+    /// # Errors
+    /// [`Error::Transport`] when the request does not complete, [`Error::Api`]
+    /// for a non-2xx status other than 404, and [`Error::Decode`] when the body
+    /// is not the expected JSON.
     pub async fn host_status(&self, party_id: &str) -> Result<HostStatus> {
         let path = format!("/v0/tenant/{party_id}/status");
-        match self.get::<common::api::WorkflowStatusResponse>(&path).await {
+        match self.get::<WorkflowStatusResponse>(&path).await {
             Ok(resp) if resp.status == WorkflowProgress::Completed => Ok(HostStatus::Hosted),
             Ok(_) => Ok(HostStatus::Pending),
             Err(e) if e.is_status(StatusCode::NOT_FOUND.as_u16()) => Ok(HostStatus::NotHosted),
@@ -117,12 +134,22 @@ impl TenantClient {
     /// `PartyToParticipant` write moves the serial, and clearing an onboarding
     /// marker is such a write, so a serial computed from an earlier response is
     /// stale as soon as a joiner finishes replicating.
+    ///
+    /// # Errors
+    /// [`Error::Transport`] when the request does not complete, [`Error::Api`]
+    /// when the host answers with a non-2xx status, and [`Error::Decode`] when
+    /// the body is not the expected JSON.
     pub async fn party_state(&self, party_id: &str) -> Result<TenantPartyStateResponse> {
         self.get(&format!("/v0/tenant/{party_id}/state")).await
     }
 
     /// `POST /v0/tenant/add-hosts/prepare` — the serial-N+1 topology that adds
     /// hosts to a party that already exists.
+    ///
+    /// # Errors
+    /// [`Error::Transport`] when the request does not complete, [`Error::Api`]
+    /// when the host answers with a non-2xx status, and [`Error::Decode`] when
+    /// the body is not the expected JSON.
     pub async fn add_hosts_prepare(
         &self,
         req: &TenantAddHostsRequest,
@@ -132,6 +159,11 @@ impl TenantClient {
 
     /// `POST /v0/tenant/add-hosts/execute` — submit the signed add-hosts bundle
     /// to THIS host.
+    ///
+    /// # Errors
+    /// [`Error::Transport`] when the request does not complete, [`Error::Api`]
+    /// when the host answers with a non-2xx status, and [`Error::Decode`] when
+    /// the body is not the expected JSON.
     pub async fn add_hosts_execute(
         &self,
         req: &TenantAddHostsExecuteRequest,
@@ -146,6 +178,12 @@ impl TenantClient {
     /// stream open between calls and cannot rewind it. Asking for the block just
     /// served replays it, which makes one transport retry safe; anything else is
     /// a 409 and the transfer restarts from block 1.
+    ///
+    /// # Errors
+    /// [`Error::Transport`] when the request does not complete, [`Error::Api`]
+    /// when the host answers with a non-2xx status, and [`Error::Decode`] when
+    /// the body is not the expected JSON.
+    /// A request for a block out of order is an [`Error::Api`] with status 409.
     pub async fn acs_block(
         &self,
         party_id: &str,
@@ -161,6 +199,11 @@ impl TenantClient {
 
     /// `POST /v0/tenant/add-hosts/import` — hand a joining host the snapshot and
     /// have it clear its onboarding marker.
+    ///
+    /// # Errors
+    /// [`Error::Transport`] when the request does not complete, [`Error::Api`]
+    /// when the host answers with a non-2xx status, and [`Error::Decode`] when
+    /// the body is not the expected JSON.
     pub async fn acs_import(
         &self,
         req: &TenantAcsImportRequest,
@@ -170,6 +213,11 @@ impl TenantClient {
 
     /// `POST /v0/tenant/threshold/prepare` — the serial-N+1 topology that moves
     /// the confirmation threshold.
+    ///
+    /// # Errors
+    /// [`Error::Transport`] when the request does not complete, [`Error::Api`]
+    /// when the host answers with a non-2xx status, and [`Error::Decode`] when
+    /// the body is not the expected JSON.
     pub async fn threshold_prepare(
         &self,
         req: &TenantThresholdRequest,
@@ -178,6 +226,11 @@ impl TenantClient {
     }
 
     /// `POST /v0/tenant/threshold/execute` — submit the signed threshold change.
+    ///
+    /// # Errors
+    /// [`Error::Transport`] when the request does not complete, [`Error::Api`]
+    /// when the host answers with a non-2xx status, and [`Error::Decode`] when
+    /// the body is not the expected JSON.
     pub async fn threshold_execute(
         &self,
         req: &TenantThresholdExecuteRequest,
@@ -196,6 +249,12 @@ impl TenantClient {
     /// call, which answers 200 once the host is gone. A host that would leave
     /// the party unable to meet its threshold refuses with a 400; lower the
     /// threshold first.
+    ///
+    /// # Errors
+    /// [`Error::Transport`] when the request does not complete, [`Error::Api`]
+    /// when the host answers with a non-2xx status, and [`Error::Decode`] when
+    /// the body is not the expected JSON.
+    /// A host that the party's threshold still needs refuses with a 400.
     pub async fn unhost(&self, req: &TenantUnhostRequest) -> Result<ExternalPartyUnhostResponse> {
         self.post("/v0/tenant/unhost", req).await
     }

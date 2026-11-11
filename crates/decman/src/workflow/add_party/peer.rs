@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use canton_proto_rs::com::digitalasset::canton::{
     protocol::v30::party_to_participant::HostingParticipant,
     topology::admin::v30::{
@@ -12,9 +14,10 @@ use crate::{
     config::NodeConfig,
     consts::{topology_retry_delay_secs, topology_retry_max_attempts},
     error::Result,
-    noise::client::NoiseClient,
+    noise::{MessageType, client::NoiseClient},
     utils,
     workflow::{
+        add_party::ARTIFACTS,
         storage::{WorkflowStorage, artifact_kinds},
         topology,
     },
@@ -31,13 +34,15 @@ use crate::{
 /// effect, so the proposal has to be in its store before it disconnects.
 ///
 /// # Errors
-/// Returns an error if the proposal has not arrived within the topology retry
-/// budget.
+/// Returns an error if the synchronizer ID cannot be read, if the Admin API
+/// channel cannot be opened, or if `ListPartyToParticipant` fails or returns a
+/// mapping that does not decode. Returns an error if the proposal has not
+/// arrived within the topology retry budget.
 pub async fn wait_for_hosting_proposal(config: &NodeConfig, party_id: &CantonId) -> Result {
     let synchronizer_id = utils::get_synchronizer_id(config).await?;
     let self_id = config.participant_id().to_string();
     let max_attempts = topology_retry_max_attempts();
-    let retry_delay = std::time::Duration::from_secs(topology_retry_delay_secs());
+    let retry_delay = Duration::from_secs(topology_retry_delay_secs());
     let hosts_self =
         |p: &HostingParticipant| p.participant_uid == self_id && p.onboarding.is_some();
 
@@ -87,6 +92,11 @@ pub const SKIP_STATUS: &[u8] = b"skipped (not the new member)";
 /// Send the new member's `keys||participant_id` blob to the coordinator —
 /// same two-item length-prefixed payload onboarding peers send, so the
 /// coordinator's split-and-save path is shared.
+///
+/// # Errors
+/// Returns an error if the `PEER_PUBLIC_KEYS` or `PARTICIPANT_ID` artefact
+/// cannot be read or is missing. Returns an error if the send fails or the
+/// coordinator does not answer with an Ack.
 pub async fn send_keys_to_coordinator(
     client: &NoiseClient,
     storage: &SqlitePool,
@@ -113,49 +123,45 @@ pub async fn send_keys_to_coordinator(
         .await?
         .ok_or_else(|| anyhow::anyhow!("PARTICIPANT_ID artifact missing for {self_id}"))?;
 
-    let combined_payload = crate::utils::encode_length_prefixed(&[&keys_data, &id_data]);
-    client.upload_add_party_keys(combined_payload).await?;
+    let combined_payload = utils::encode_length_prefixed(&[&keys_data, &id_data]);
+    client
+        .send(MessageType::AddPartyKeysUpload, combined_payload)
+        .await?;
     Ok(())
 }
 
 /// Send this peer's signed DNS + P2P add-party proposals to the coordinator
 /// as one concatenated buffer (two `varint(len)||proto` blobs back to back),
 /// mirroring the kick signature wire format.
+///
+/// # Errors
+/// Returns an error if the `SIGNED_ADD_PARTY_DNS` or `SIGNED_ADD_PARTY_P2P`
+/// artefact cannot be read or is missing. Returns an error if the send fails or
+/// the coordinator does not answer with an Ack.
 pub async fn send_add_party_signatures_to_coordinator(
     client: &NoiseClient,
     storage: &SqlitePool,
     instance_name: &str,
     node_config: &NodeConfig,
 ) -> Result {
-    let node_id = node_config.participant_id().to_string();
-
-    let dns = storage
-        .read_artifact(
-            instance_name,
-            artifact_kinds::SIGNED_ADD_PARTY_DNS,
-            Some(&node_id),
-        )
-        .await?
-        .ok_or_else(|| anyhow::anyhow!("SIGNED_ADD_PARTY_DNS artifact missing for {node_id}"))?;
-    let p2p = storage
-        .read_artifact(
-            instance_name,
-            artifact_kinds::SIGNED_ADD_PARTY_P2P,
-            Some(&node_id),
-        )
-        .await?
-        .ok_or_else(|| anyhow::anyhow!("SIGNED_ADD_PARTY_P2P artifact missing for {node_id}"))?;
-
-    let mut payload = Vec::with_capacity(dns.len() + p2p.len());
-    payload.extend_from_slice(&dns);
-    payload.extend_from_slice(&p2p);
-
-    client.send_add_party_signatures(payload).await?;
-    Ok(())
+    topology::send_signed_pair(
+        client,
+        storage,
+        instance_name,
+        node_config,
+        ARTIFACTS,
+        MessageType::AddPartySignatures,
+    )
+    .await
 }
 
 /// Send this peer's signed onboarding-flag clearing proposal (a single
 /// `varint(len)||proto` blob) to the coordinator.
+///
+/// # Errors
+/// Returns an error if the `SIGNED_ADD_PARTY_CLEAR` artefact cannot be read or
+/// is missing. Returns an error if the send fails or the coordinator does not
+/// answer with an Ack.
 pub async fn send_clear_signature_to_coordinator(
     client: &NoiseClient,
     storage: &SqlitePool,
@@ -173,6 +179,8 @@ pub async fn send_clear_signature_to_coordinator(
         .await?
         .ok_or_else(|| anyhow::anyhow!("SIGNED_ADD_PARTY_CLEAR artifact missing for {node_id}"))?;
 
-    client.send_add_party_clear_signature(data).await?;
+    client
+        .send(MessageType::AddPartyClearSignatures, data)
+        .await?;
     Ok(())
 }

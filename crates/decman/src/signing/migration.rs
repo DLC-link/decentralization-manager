@@ -63,8 +63,8 @@ pub async fn run_key_migration(config: NodeConfig, db: SqlitePool) {
             }
             Err(e) => {
                 tracing::warn!(
-                    "The party key migration could not run: {e:#}. Retrying in {}s",
-                    retry.as_secs()
+                    "The party key migration could not run: {e:#}. Retrying in {secs}s",
+                    secs = retry.as_secs()
                 );
                 let wait = retry;
                 retry = next_retry(retry);

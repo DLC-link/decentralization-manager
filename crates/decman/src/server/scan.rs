@@ -5,7 +5,7 @@
 //! so the execute submission must disclose them. Scan serves each contract
 //! with its created-event blob.
 
-use std::collections::HashMap;
+use std::{collections::HashMap, error::Error, fmt};
 
 use anyhow::Context as _;
 use chrono::{DateTime, Utc};
@@ -15,8 +15,8 @@ use serde::Deserialize;
 #[derive(Debug)]
 pub(crate) struct ScanNotConfigured;
 
-impl std::fmt::Display for ScanNotConfigured {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Display for ScanNotConfigured {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(
             "DECPM_SCAN_URL is not set, so this node cannot read the open mining round. \
              Set it to a Splice scan API to accept a paid credential.",
@@ -24,7 +24,7 @@ impl std::fmt::Display for ScanNotConfigured {
     }
 }
 
-impl std::error::Error for ScanNotConfigured {}
+impl Error for ScanNotConfigured {}
 
 /// A contract as scan serves it.
 #[derive(Debug, Deserialize)]

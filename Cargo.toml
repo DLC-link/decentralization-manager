@@ -111,6 +111,13 @@ decman-wallet = { path = "crates/decman-wallet" }
 keycloak = { git = "https://github.com/DLC-link/canton-lib", rev = "4e2a0f110164890d6eb87235f4d2d9ea3797a421" }
 penelope = { git = "https://github.com/DLC-link/penelope", rev = "8f36b2dfda5932c8310ec6891ff3b72d416118dc" }
 
+# Guards for the BitSafe standards. CI runs clippy with `-D warnings`, so a
+# hit fails the build. clippy.toml holds the limits.
+[workspace.lints.clippy]
+absolute_paths = "warn"
+missing_errors_doc = "warn"
+too_many_lines = "warn"
+
 [patch.crates-io]
 # hyper-noise 0.0.3, changed only to require tokio-noise 0.0.6, so the pin below reaches it.
 hyper-noise = { git = "https://github.com/DLC-link/hyper-noise", rev = "0121fa74845383534249c35e4aaea20e963ac879" }

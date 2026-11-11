@@ -10,6 +10,8 @@ use ed25519_dalek::{Signer, SigningKey};
 use rand::{Rng, rng};
 use zeroize::Zeroizing;
 
+use crate::error::{Error, Result, SeedError};
+
 /// A client-held Ed25519 keypair for an external party. The 32-byte seed is the
 /// private key; the party's Canton namespace fingerprint is derived from the
 /// public key exactly as the node derives it (via the shared library function in
@@ -39,14 +41,16 @@ impl ExternalKeyPair {
     /// Reconstruct a keypair from a base64-encoded 32-byte seed.
     ///
     /// # Errors
-    /// Returns the offending input description if it is not base64 or not 32 bytes.
-    pub fn from_seed_b64(seed: &str) -> std::result::Result<Self, String> {
+    /// [`Error::InvalidSeed`] with [`SeedError::NotBase64`] when `seed` is not
+    /// base64, and with [`SeedError::WrongLength`] when it does not decode to
+    /// 32 bytes.
+    pub fn from_seed_b64(seed: &str) -> Result<Self> {
         let bytes = STANDARD
             .decode(seed.trim())
-            .map_err(|e| format!("seed is not valid base64: {e}"))?;
+            .map_err(|e| Error::InvalidSeed(SeedError::NotBase64(e)))?;
         let seed: [u8; 32] = bytes
             .try_into()
-            .map_err(|b: Vec<u8>| format!("seed must be 32 bytes, got {len}", len = b.len()))?;
+            .map_err(|b: Vec<u8>| Error::InvalidSeed(SeedError::WrongLength(b.len())))?;
         Ok(Self::from_seed(seed))
     }
 
@@ -117,6 +121,25 @@ mod tests {
         assert!(ExternalKeyPair::from_seed_b64("not base64!!").is_err());
         assert!(ExternalKeyPair::from_seed_b64(&STANDARD.encode([1u8; 31])).is_err());
         assert!(ExternalKeyPair::from_seed_b64(&STANDARD.encode([1u8; 32])).is_ok());
+    }
+
+    /// The messages a caller shows for a bad seed, byte for byte.
+    #[test]
+    fn from_seed_b64_errors_keep_their_messages() {
+        let not_base64 = match ExternalKeyPair::from_seed_b64("not base64!!") {
+            Ok(_) => panic!("a seed with spaces must not decode"),
+            Err(e) => e.to_string(),
+        };
+        assert_eq!(
+            not_base64,
+            "seed is not valid base64: Invalid symbol 32, offset 3."
+        );
+
+        let short = match ExternalKeyPair::from_seed_b64(&STANDARD.encode([1u8; 31])) {
+            Ok(_) => panic!("a 31-byte seed must not decode"),
+            Err(e) => e.to_string(),
+        };
+        assert_eq!(short, "seed must be 32 bytes, got 31");
     }
 
     #[test]

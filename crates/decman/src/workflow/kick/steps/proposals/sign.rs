@@ -3,7 +3,7 @@ use sqlx::SqlitePool;
 use crate::{
     config::NodeConfig,
     error::Result,
-    workflow::{storage::artifact_kinds, topology},
+    workflow::{kick::ARTIFACTS, topology},
 };
 
 /// Sign kick proposals.
@@ -12,6 +12,14 @@ use crate::{
 /// proposals. `proposal_data` is the `[dns, p2p]` pair received from the
 /// coordinator. Delegates to [`topology::sign_dns_p2p_proposals`], persisting
 /// the per-peer results as `SIGNED_KICK_DNS` / `SIGNED_KICK_P2P`.
+///
+/// # Errors
+///
+/// Returns an error if the synchronizer ID cannot be read, or if
+/// `proposal_data` does not decode as a DNS and P2P pair. Returns an error if
+/// the `SignTransactions` call fails, still finds no signing key after every
+/// retry, or does not return exactly two transactions. Returns an error if
+/// writing `SIGNED_KICK_DNS` or `SIGNED_KICK_P2P` fails.
 pub async fn sign_proposals(
     config: &NodeConfig,
     storage: &SqlitePool,
@@ -24,8 +32,7 @@ pub async fn sign_proposals(
         instance_name,
         proposal_data,
         "kick",
-        artifact_kinds::SIGNED_KICK_DNS,
-        artifact_kinds::SIGNED_KICK_P2P,
+        ARTIFACTS,
     )
     .await
 }

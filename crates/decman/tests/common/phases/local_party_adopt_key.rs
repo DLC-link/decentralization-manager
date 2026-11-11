@@ -37,7 +37,7 @@
 use std::time::Duration;
 
 use anyhow::Context;
-use base64::Engine as _;
+use base64::{Engine as _, engine::general_purpose::STANDARD};
 use canton_proto_rs::com::digitalasset::canton::{
     crypto::v30::{Signature, SignatureFormat, SigningAlgorithmSpec, SigningKeysWithThreshold},
     protocol::v30::{
@@ -52,13 +52,11 @@ use canton_proto_rs::com::digitalasset::canton::{
         topology_manager_write_service_client::TopologyManagerWriteServiceClient,
     },
 };
-use tracing::info;
-
 use dec_party_manager::{
     canton_id::CantonId,
     config::NodeConfig,
     workflow::{
-        external_party::add_hosts::read_party_to_participant,
+        external_party::{add_hosts::read_party_to_participant, steps},
         topology::{
             authorize_with_topology_retry, sign_transactions_with_topology_retry,
             synchronizer_store_id,
@@ -67,6 +65,7 @@ use dec_party_manager::{
     },
 };
 use decman_wallet::ExternalKeyPair;
+use tracing::info;
 
 use crate::common::{Fixture, chaos::fresh_prefix, scenario::Scenario};
 
@@ -294,16 +293,13 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
                         //
                         // The key is built by the product's own helper, so this
                         // proves Canton accepts what DecMan would really write.
-                        let raw = base64::engine::general_purpose::STANDARD
+                        let raw = STANDARD
                             .decode(&public_key)
                             .context("wallet public key is not base64")?;
                         let raw: [u8; 32] = raw
                             .try_into()
                             .map_err(|_| anyhow::anyhow!("wallet public key must be 32 bytes"))?;
-                        let key =
-                            dec_party_manager::workflow::external_party::steps::party_signing_key(
-                                &raw,
-                            );
+                        let key = steps::party_signing_key(&raw);
                         submit_with_party_signature(
                             &config,
                             PartyToParticipant {
@@ -354,10 +350,7 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
                         // threshold. Usage is deliberately not compared: Canton
                         // normalizes it (it appends ProofOfOwnership to what we
                         // send), and the security property is the key bytes.
-                        let expected =
-                            dec_party_manager::workflow::external_party::steps::party_signing_key(
-                                &expected_public_key,
-                            );
+                        let expected = steps::party_signing_key(&expected_public_key);
                         if current.serial < 2
                             || keys.threshold != 1
                             // serial 2 is the floor: allocation is 1, adoption is

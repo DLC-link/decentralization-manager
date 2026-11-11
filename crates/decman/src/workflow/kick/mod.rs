@@ -3,30 +3,49 @@ pub mod coordinator;
 pub mod peer;
 pub mod steps;
 
+use crate::{
+    noise::MessageType,
+    server::WorkflowKind,
+    workflow::{
+        state::{WorkflowStep, workflow_steps},
+        storage::artifact_kinds,
+        topology::DnsP2pArtifactKinds,
+    },
+};
+
 pub use config::KickConfig;
 pub use steps::{
     create_proposals, export_state, prune_cached_membership, sign_proposals, submit_kick,
 };
 
-use crate::{noise::MessageType, server::WorkflowKind, workflow::state::WorkflowStep};
+/// The artefact kinds of a kick run's DNS + P2P proposals and of each
+/// member's signed pair.
+pub const ARTIFACTS: DnsP2pArtifactKinds<'static> = DnsP2pArtifactKinds {
+    dns_proposal: artifact_kinds::KICK_DNS_PROPOSAL,
+    p2p_proposal: artifact_kinds::KICK_P2P_PROPOSAL,
+    signed_dns: artifact_kinds::SIGNED_KICK_DNS,
+    signed_p2p: artifact_kinds::SIGNED_KICK_P2P,
+};
 
-/// Kick workflow steps (removing a member from decentralized party)
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub enum KickStep {
-    /// Waiting for all peers to connect
-    WaitingForPeers,
-    /// Coordinator exports current state
-    ExportState,
-    /// Coordinator creates kick proposals
-    CreateProposals,
-    /// Remaining members sign proposals
-    SignProposals,
-    /// Coordinator submits kick
-    SubmitKick,
-    /// Members retire the shadowed PartyToKeyMapping after the new topology is effective.
-    RetireLegacyKeys,
-    /// Workflow complete
-    Complete,
+workflow_steps! {
+    /// Kick workflow steps (removing a member from decentralized party)
+    #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+    pub enum KickStep {
+        /// Waiting for all peers to connect
+        WaitingForPeers,
+        /// Coordinator exports current state
+        ExportState,
+        /// Coordinator creates kick proposals
+        CreateProposals,
+        /// Remaining members sign proposals
+        SignProposals,
+        /// Coordinator submits kick
+        SubmitKick,
+        /// Members retire the shadowed PartyToKeyMapping after the new topology is effective.
+        RetireLegacyKeys,
+        /// Workflow complete
+        Complete,
+    }
 }
 
 impl WorkflowStep for KickStep {
@@ -42,65 +61,12 @@ impl WorkflowStep for KickStep {
         }
     }
 
-    fn next(&self) -> Option<Self> {
-        match self {
-            Self::WaitingForPeers => Some(Self::ExportState),
-            Self::ExportState => Some(Self::CreateProposals),
-            Self::CreateProposals => Some(Self::SignProposals),
-            Self::SignProposals => Some(Self::SubmitKick),
-            Self::SubmitKick => Some(Self::RetireLegacyKeys),
-            Self::RetireLegacyKeys => Some(Self::Complete),
-            Self::Complete => None,
-        }
-    }
-
     fn requires_peers(&self) -> bool {
         *self == Self::SignProposals
     }
 
     fn is_waiting_for_peers(&self) -> bool {
         *self == Self::WaitingForPeers
-    }
-
-    fn step_index(&self) -> i64 {
-        match self {
-            Self::WaitingForPeers => 0,
-            Self::ExportState => 1,
-            Self::CreateProposals => 2,
-            Self::SignProposals => 3,
-            Self::SubmitKick => 4,
-            Self::RetireLegacyKeys => 5,
-            Self::Complete => 6,
-        }
-    }
-
-    fn step_total() -> i64 {
-        7
-    }
-
-    fn step_name(&self) -> &'static str {
-        match self {
-            Self::WaitingForPeers => "WaitingForPeers",
-            Self::ExportState => "ExportState",
-            Self::CreateProposals => "CreateProposals",
-            Self::SignProposals => "SignProposals",
-            Self::SubmitKick => "SubmitKick",
-            Self::RetireLegacyKeys => "RetireLegacyKeys",
-            Self::Complete => "Complete",
-        }
-    }
-
-    fn try_from_step_name(name: &str) -> Option<Self> {
-        Some(match name {
-            "WaitingForPeers" => Self::WaitingForPeers,
-            "ExportState" => Self::ExportState,
-            "CreateProposals" => Self::CreateProposals,
-            "SignProposals" => Self::SignProposals,
-            "SubmitKick" => Self::SubmitKick,
-            "RetireLegacyKeys" => Self::RetireLegacyKeys,
-            "Complete" => Self::Complete,
-            _ => return None,
-        })
     }
 
     fn kind() -> WorkflowKind {

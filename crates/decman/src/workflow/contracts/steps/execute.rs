@@ -1,7 +1,3 @@
-use bytes::Buf;
-use sqlx::SqlitePool;
-use uuid::Uuid;
-
 use canton_proto_rs::com::{
     daml::ledger::api::v2::{
         Signature, Transaction, event,
@@ -12,8 +8,11 @@ use canton_proto_rs::com::{
     },
     digitalasset::canton::crypto::v30::Signature as CantonSignature,
 };
+use sqlx::SqlitePool;
+use uuid::Uuid;
 
 use crate::{
+    canton::framing::read_all_messages_from_bytes,
     config::NodeConfig,
     error::Result,
     utils,
@@ -35,6 +34,14 @@ use crate::{
 /// * `contracts_config` - Contracts workflow configuration with party ID
 /// * `token` - Authentication token for Ledger API
 /// * `user_id` - User ID for Ledger API operations
+///
+/// # Errors
+///
+/// Returns an error if the `PREPARED_SUBMISSION` or `SUBMISSION_SIGNATURES`
+/// artefacts cannot be listed, are absent, or do not decode. Returns an error
+/// if a peer's bundle does not hold one signature per submission. Returns an
+/// error if the Ledger API client cannot be created, or if
+/// `ExecuteSubmissionAndWaitForTransaction` fails for a submission.
 pub async fn execute_submissions(
     config: &NodeConfig,
     db: &SqlitePool,
@@ -238,27 +245,6 @@ fn created_contract_ids(transaction: &Option<Transaction>) -> Vec<String> {
             })
         })
         .collect()
-}
-
-/// Decode a sequence of `varint(len)||proto` messages from a byte slice. Mirrors
-/// `utils::read_all_messages_from_file` but operates on in-memory data — used
-/// to round-trip blobs we used to read from disk.
-fn read_all_messages_from_bytes<M: prost::Message + Default>(data: &[u8]) -> Result<Vec<M>> {
-    let mut cursor = data;
-    let mut messages = Vec::new();
-    while cursor.has_remaining() {
-        let len = prost::encoding::decode_varint(&mut cursor)? as usize;
-        if cursor.remaining() < len {
-            anyhow::bail!(
-                "Incomplete message: expected {len} bytes, but only {remaining} remaining",
-                remaining = cursor.remaining()
-            );
-        }
-        let message_bytes = &cursor[..len];
-        cursor.advance(len);
-        messages.push(M::decode(message_bytes)?);
-    }
-    Ok(messages)
 }
 
 #[cfg(test)]

@@ -1,8 +1,10 @@
 use canton_proto_rs::com::daml::ledger::api::v2::Value;
 use common::canton_id::CantonId;
 
-use crate::error::Error;
-use crate::framework::{PackageResolver, TemplateId};
+use crate::{
+    error::Error,
+    framework::{PackageResolver, TemplateId},
+};
 
 /// Context a payload's protocol checks may need. Time enters as a
 /// parameter so validation is deterministic and testable.
@@ -15,6 +17,12 @@ pub struct ValidationCtx<'a> {
 /// clauses. Default body accepts; no blanket impl — every payload writes
 /// its own impl, or an empty impl to accept the default.
 pub trait Validate {
+    /// Check the payload against its template's Daml constraints.
+    ///
+    /// # Errors
+    ///
+    /// An impl returns [`Error::Validation`] when the payload breaks one of
+    /// those constraints. The default body never fails.
     fn validate(&self, _ctx: &ValidationCtx) -> Result<(), Error> {
         Ok(())
     }
@@ -26,6 +34,13 @@ pub trait Validate {
 /// WITHOUT the `governanceParty` and `proposer` fields. The propose
 /// builder injects those two; they are runtime parties, not payload data.
 pub trait DamlProtoEncode {
+    /// Encode the payload as a Daml proto `Value`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Encode`] when a choice context holds a `Date`, `Time` or
+    /// `RelTime` value, or when a wrapped payload does not encode to a `Record`.
+    /// Most impls never fail.
     fn to_daml_proto(&self) -> Result<Value, Error>;
 }
 
@@ -36,6 +51,12 @@ pub trait DamlProtoEncode {
 /// (decman's own per-party config) and a bare `&str`, for an integrator
 /// whose templates all live in one package.
 pub trait TemplateInfo {
+    /// Resolve the payload's template id through `pkgs`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::PackageNotConfigured`] when `pkgs` has no ref for the
+    /// payload's package key.
     fn template_id(&self, pkgs: &dyn PackageResolver) -> Result<TemplateId, Error>;
 }
 

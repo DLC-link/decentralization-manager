@@ -7,7 +7,10 @@
 //! the next phase. The helpers below make it cheap for each individual
 //! chaos phase to focus on the part that's unique to it.
 
-use std::time::{Duration, Instant, SystemTime};
+use std::{
+    future::Future,
+    time::{Duration, Instant, SystemTime},
+};
 
 use anyhow::Context;
 use serde_json::{Value, json};
@@ -15,6 +18,7 @@ use tokio::time::sleep;
 use tracing::info;
 
 use super::{Fixture, invitations::probe_run_invitation};
+use crate::common::processes;
 
 /// Generate a stable, monotonically increasing prefix for a chaos phase. The
 /// suffix is epoch-millis so two phases never collide even when they run
@@ -178,7 +182,7 @@ pub async fn ensure_nodes_healthy(f: &mut Fixture) -> anyhow::Result<()> {
             "ensure_nodes_healthy: P{idx} unreachable (http={http_ok}, noise={noise_ok}); \
              respawning"
         );
-        crate::common::processes::restart_node(f, idx).await?;
+        processes::restart_node(f, idx).await?;
     }
     Ok(())
 }
@@ -188,7 +192,7 @@ pub async fn ensure_nodes_healthy(f: &mut Fixture) -> anyhow::Result<()> {
 pub async fn poll_until<F, Fut>(deadline: Duration, mut probe: F) -> anyhow::Result<()>
 where
     F: FnMut() -> Fut,
-    Fut: std::future::Future<Output = anyhow::Result<bool>>,
+    Fut: Future<Output = anyhow::Result<bool>>,
 {
     let start = Instant::now();
     loop {

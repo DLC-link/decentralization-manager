@@ -7,8 +7,8 @@ use crate::{
     config::{PartyCredentials, Peer},
     error::Result,
     server::{
-        HandledInvitation, InvitationOutcome, InvitationType, PendingInvitation, WorkflowKind,
-        WorkflowProgress, WorkflowRole, WorkflowRun,
+        HandledInvitation, InvitationOutcome, PendingInvitation, WorkflowKind, WorkflowProgress,
+        WorkflowRole, WorkflowRun,
     },
 };
 
@@ -17,12 +17,6 @@ use crate::{
 pub trait SchemaRead {
     /// Get all peers
     async fn get_all_peers(&self) -> Result<Vec<Peer>>;
-
-    /// Get a peer by participant ID
-    async fn get_peer(&self, participant_id: &str) -> Result<Option<Peer>>;
-
-    /// Get the number of peers
-    async fn get_peer_count(&self) -> Result<i64>;
 
     /// Get all party credentials
     async fn get_all_party_credentials(&self) -> Result<Vec<PartyCredentials>>;
@@ -74,12 +68,6 @@ pub trait SchemaRead {
         party_id: &CantonId,
         participant_uid: &str,
     ) -> Result<Option<String>>;
-
-    /// Get contracts for a decentralized party
-    async fn get_dec_party_contracts(
-        &self,
-        party_id: &CantonId,
-    ) -> Result<Vec<DecPartyContractRow>>;
 
     /// Get all owners for parties matching a prefix (bulk query)
     async fn get_all_dec_party_owners(&self, prefix: &str) -> Result<Vec<DecPartyOwnerRow>>;
@@ -144,10 +132,6 @@ pub trait SchemaRead {
     /// every InProgress run plus any terminal run the user hasn't dismissed
     /// yet. Newest-updated first.
     async fn get_visible_workflow_runs(&self) -> Result<Vec<WorkflowRun>>;
-
-    /// Get every workflow run of a given kind (any role, any status),
-    /// newest-created first. Used to list e.g. external-party onboardings.
-    async fn get_workflow_runs_by_kind(&self, kind: WorkflowKind) -> Result<Vec<WorkflowRun>>;
 
     /// Read a single artefact for a workflow run. `peer` may be None for
     /// shared artefacts (proposals, namespace defs).
@@ -350,15 +334,6 @@ pub trait Commitable {
     /// Handled invitations are history and stay.
     async fn delete_pending_invitations_by_coordinator(
         &mut self,
-        coordinator_pubkey: &str,
-    ) -> Result;
-
-    /// Delete every pending invitation of one type from one coordinator —
-    /// used to replace a superseded invite when a fresh one arrives.
-    /// Handled invitations are history and stay.
-    async fn delete_pending_invitations_by_type_and_coordinator(
-        &mut self,
-        invitation_type: InvitationType,
         coordinator_pubkey: &str,
     ) -> Result;
 

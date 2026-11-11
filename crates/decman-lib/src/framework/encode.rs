@@ -4,12 +4,12 @@
 //! `extraArgs`/choice-context builders, and `TransferValidity`. Integrators
 //! implementing `DamlProtoEncode` are built from these.
 
+use std::{collections::BTreeSet, fmt::Display};
+
 use canton_common::{
     decimal::DamlDecimal,
     transfer_factory::{Context as ChoiceContext, ContextValue},
 };
-use std::collections::BTreeSet;
-
 use canton_proto_rs::com::daml::ledger::api::v2::{
     GenMap, List, Optional, Record, RecordField, TextMap, Value, Variant, gen_map, text_map, value,
 };
@@ -17,7 +17,7 @@ use common::api::{Claim, InstrumentId, InstrumentIdentifier, PartyCredentialRequ
 
 use crate::error::Error;
 
-pub fn make_party(p: impl std::fmt::Display) -> Value {
+pub fn make_party(p: impl Display) -> Value {
     Value {
         sum: Some(value::Sum::Party(p.to_string())),
     }
@@ -51,6 +51,17 @@ pub fn make_contract_id(c: &str) -> Value {
     Value {
         sum: Some(value::Sum::ContractId(c.to_string())),
     }
+}
+
+/// A `[ContractId]` list value from contract id strings.
+pub fn make_contract_id_list(cids: &[String]) -> Value {
+    make_list(cids.iter().map(|cid| make_contract_id(cid)).collect())
+}
+
+/// An `Optional [ContractId]` value from contract id strings: `None` when
+/// `cids` is empty (see `make_optional_list`).
+pub fn make_optional_contract_id_list(cids: &[String]) -> Value {
+    make_optional_list(cids.iter().map(|cid| make_contract_id(cid)).collect())
 }
 
 pub fn field(label: &str, value: Value) -> RecordField {
@@ -115,16 +126,15 @@ pub fn make_empty_extra_args() -> Value {
     make_extra_args(make_empty_text_map())
 }
 
-/// Fallback timestamps for serializing a `Transfer` record when no explicit
-/// validity window is supplied (tests only — the propose handler always passes
-/// a real, bounded window). `0` is epoch and `i64::MAX / 1000` is the maximum
+/// Fallback `executeBefore` for serializing a `Transfer` record when no
+/// explicit validity window is supplied (tests only — the propose handler
+/// always passes a real, bounded window). `i64::MAX / 1000` is the maximum
 /// Daml `Time` value.
 ///
-/// These were the *production* values once, but an effectively-infinite
+/// This was the *production* value once, but an effectively-infinite
 /// `executeBefore` meant a two-step transfer offer the receiver never accepted
 /// locked the sender's holdings forever. Production now bounds the window via
 /// [`TransferValidity`]; see [`TRANSFER_VALIDITY_WINDOW_MICROS`].
-pub const TRANSFER_REQUESTED_AT_MICROS: i64 = 0;
 pub const TRANSFER_EXECUTE_BEFORE_MICROS: i64 = i64::MAX / 1000;
 
 /// How long a `Transfer` proposal (and, for two-step transfers, the resulting
@@ -181,6 +191,11 @@ pub fn make_extra_args(context_values: Value) -> Value {
 
 /// Serialize a `Splice.Api.Token.MetadataV1.AnyValue` constructor as a Daml
 /// `Variant` Value suitable for the Ledger API.
+///
+/// # Errors
+///
+/// Returns [`Error::Encode`] for a `Date`, `Time` or `RelTime` value, also
+/// when one sits inside a `List` or `Map`.
 pub fn make_any_value(v: &ContextValue) -> Result<Value, Error> {
     let (ctor, inner) = match v {
         ContextValue::Text(s) => ("AV_Text", make_text(s)),
@@ -214,6 +229,11 @@ pub fn make_any_value(v: &ContextValue) -> Result<Value, Error> {
 
 /// Build the `extraArgs` record with the choice-context values populated from
 /// a registry response (e.g. `registry::accept_context::get`).
+///
+/// # Errors
+///
+/// Returns [`Error::Encode`] when a context value, or a value nested in it,
+/// is a `Date`, `Time` or `RelTime` (see [`make_any_value`]).
 pub fn make_extra_args_from_context(ctx: &ChoiceContext) -> Result<Value, Error> {
     let mut entries: Vec<(String, Value)> = ctx
         .values
@@ -233,7 +253,7 @@ pub fn serialize_instrument_id(id: &InstrumentId) -> Value {
 
 /// A Daml `Set Party`: a record whose `map` field maps each party to `Unit`.
 /// Duplicates collapse and the parties come out sorted, as Daml holds them.
-pub fn make_party_set(parties: &[impl std::fmt::Display]) -> Value {
+pub fn make_party_set(parties: &[impl Display]) -> Value {
     let unique: BTreeSet<String> = parties.iter().map(ToString::to_string).collect();
     let entries = unique
         .into_iter()
@@ -252,7 +272,7 @@ pub fn make_party_set(parties: &[impl std::fmt::Display]) -> Value {
     )])
 }
 
-pub fn make_optional_party_set(opt: Option<&[impl std::fmt::Display]>) -> Value {
+pub fn make_optional_party_set(opt: Option<&[impl Display]>) -> Value {
     Value {
         sum: Some(value::Sum::Optional(Box::new(Optional {
             value: opt.map(|parties| Box::new(make_party_set(parties))),

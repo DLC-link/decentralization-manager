@@ -5,11 +5,18 @@
 //! `catalog::proposals`) — this module covers only the ids decman needs
 //! independent of any specific proposal payload.
 
-use crate::error::Error;
-use crate::framework::{PackageResolver, TemplateId};
+use crate::{
+    error::Error,
+    framework::{PackageResolver, TemplateId},
+};
 
 /// The `GovernanceRules` template — governance-core's governance-state
 /// contract.
+///
+/// # Errors
+///
+/// Returns [`Error::PackageNotConfigured`] when `pkgs` has no `governance_core`
+/// ref.
 pub fn governance_rules_template(pkgs: &dyn PackageResolver) -> Result<TemplateId, Error> {
     let pkg = pkgs
         .package_ref("governance_core")
@@ -19,6 +26,11 @@ pub fn governance_rules_template(pkgs: &dyn PackageResolver) -> Result<TemplateI
 
 /// The `GovernanceSelfConfirmation` template — governance-core's
 /// self-management confirmations, each carrying its own inline action.
+///
+/// # Errors
+///
+/// Returns [`Error::PackageNotConfigured`] when `pkgs` has no `governance_core`
+/// ref.
 pub fn self_confirmation_template(pkgs: &dyn PackageResolver) -> Result<TemplateId, Error> {
     let pkg = pkgs
         .package_ref("governance_core")
@@ -32,6 +44,11 @@ pub fn self_confirmation_template(pkgs: &dyn PackageResolver) -> Result<Template
 
 /// The `GovernanceConfirmation` template — governance-core's domain-action
 /// confirmations.
+///
+/// # Errors
+///
+/// Returns [`Error::PackageNotConfigured`] when `pkgs` has no `governance_core`
+/// ref.
 pub fn domain_confirmation_template(pkgs: &dyn PackageResolver) -> Result<TemplateId, Error> {
     let pkg = pkgs
         .package_ref("governance_core")
@@ -44,6 +61,11 @@ pub fn domain_confirmation_template(pkgs: &dyn PackageResolver) -> Result<Templa
 }
 
 /// The `GovernableAction` interface every catalog proposal implements.
+///
+/// # Errors
+///
+/// Returns [`Error::PackageNotConfigured`] when `pkgs` has no `governance_action`
+/// ref.
 pub fn governable_action_interface(pkgs: &dyn PackageResolver) -> Result<TemplateId, Error> {
     let pkg = pkgs
         .package_ref("governance_action")
@@ -95,31 +117,39 @@ pub fn governance_state_templates(packages: &dyn PackageResolver) -> Vec<Templat
 #[cfg(test)]
 mod tests {
     use canton_common::decimal::DamlDecimal;
-    use common::api::{InstrumentId, PackageConfig};
-    use common::canton_id::CantonId;
+    use common::{
+        api::{InstrumentId, PackageConfig},
+        canton_id::CantonId,
+    };
 
     use super::*;
-    use crate::catalog::proposals::core::GenericVote;
-    use crate::catalog::proposals::credential::{
-        AcceptFreeCredential, AcceptPaidCredential, OfferFreeCredential, OfferPaidCredential,
+    use crate::{
+        catalog::{
+            proposals::{
+                core::GenericVote,
+                credential::{
+                    AcceptFreeCredential, AcceptPaidCredential, OfferFreeCredential,
+                    OfferPaidCredential,
+                },
+                custody::{AcceptTransfer, SetupCcPreapproval, SetupTokenPreapproval, Transfer},
+                rewards::{
+                    AcceptExternalPartySetup, RevokeCouponReassignmentDelegation,
+                    SetupCouponReassignmentDelegation, SetupMintingDelegation,
+                },
+                utility::{
+                    AcceptBurnRequest, AcceptMintRequest, Burn, CreateDelegatedBatchedMarkersProxy,
+                    CreateProviderConfiguration, CreateProviderServiceRequest,
+                    CreateRegistrarServiceRequest, CreateTransferRule, CreateUserServiceRequest,
+                    Mint, OffboardInstrumentIssuers, OnboardInstrumentIssuers, OnboardRegistrar,
+                    ProvisionInstrument, ProvisionProviderService, RequestDevNetFeaturedAppRight,
+                    SetEnableResultContracts, SetProviderAppRewardBeneficiaries, SetupUtility,
+                    UpdateInstrumentConfiguration,
+                },
+            },
+            types::{AppTransferContextInput, BillingParams},
+        },
+        framework::TemplateInfo,
     };
-    use crate::catalog::proposals::custody::{
-        AcceptTransfer, SetupCcPreapproval, SetupTokenPreapproval, Transfer,
-    };
-    use crate::catalog::proposals::rewards::{
-        AcceptExternalPartySetup, RevokeCouponReassignmentDelegation,
-        SetupCouponReassignmentDelegation, SetupMintingDelegation,
-    };
-    use crate::catalog::proposals::utility::{
-        AcceptBurnRequest, AcceptMintRequest, Burn, CreateDelegatedBatchedMarkersProxy,
-        CreateProviderConfiguration, CreateProviderServiceRequest, CreateRegistrarServiceRequest,
-        CreateTransferRule, CreateUserServiceRequest, Mint, OffboardInstrumentIssuers,
-        OnboardInstrumentIssuers, OnboardRegistrar, ProvisionInstrument, ProvisionProviderService,
-        RequestDevNetFeaturedAppRight, SetEnableResultContracts, SetProviderAppRewardBeneficiaries,
-        SetupUtility, UpdateInstrumentConfiguration,
-    };
-    use crate::catalog::types::{AppTransferContextInput, BillingParams};
-    use crate::framework::TemplateInfo;
 
     /// Any valid `CantonId` — the exact value is irrelevant to a
     /// `template_id` assertion.
@@ -203,6 +233,10 @@ mod tests {
     /// `MODULE`/`ENTITY` consts, so a typo in either const still fails this
     /// test.
     #[test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "The test lists one expected template id per payload struct."
+    )]
     fn template_id_assertions_per_payload_struct() {
         let pkgs = decman_default_packages();
         let cases: Vec<(String, &str)> = vec![

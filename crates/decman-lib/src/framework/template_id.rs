@@ -2,6 +2,8 @@ use std::fmt;
 
 use canton_proto_rs::com::daml::ledger::api::v2::Identifier;
 
+use crate::{error::Error, framework::PackageResolver};
+
 /// A Daml template or interface id under a `#package-name` reference.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TemplateId {
@@ -21,6 +23,24 @@ impl TemplateId {
             module: module.into(),
             entity: entity.into(),
         }
+    }
+
+    /// Resolve `package_key` through `pkgs` and build the template id.
+    ///
+    /// # Errors
+    ///
+    /// `Error::PackageNotConfigured(package_key)` when `pkgs` has no ref for
+    /// the key.
+    pub fn for_package(
+        pkgs: &dyn PackageResolver,
+        package_key: &'static str,
+        module: &str,
+        entity: &str,
+    ) -> Result<Self, Error> {
+        let pkg = pkgs
+            .package_ref(package_key)
+            .ok_or(Error::PackageNotConfigured(package_key))?;
+        Ok(Self::new(pkg, module, entity))
     }
 
     /// Whether an event's `Identifier` names this template. Compares module
@@ -49,6 +69,8 @@ impl fmt::Display for TemplateId {
 
 #[cfg(test)]
 mod tests {
+    use common::api::PackageConfig;
+
     use super::*;
 
     #[test]
@@ -76,6 +98,31 @@ mod tests {
             ..echoed.clone()
         };
         assert!(!t.matches(&other));
+    }
+
+    #[test]
+    fn for_package_resolves_the_package_key() {
+        let packages = PackageConfig {
+            governance_core: Some("#governance-core-v1".into()),
+            ..PackageConfig::default()
+        };
+        let t = TemplateId::for_package(&packages, "governance_core", "Governance.Rules", "R")
+            .expect("configured");
+        assert_eq!(
+            t,
+            TemplateId::new("#governance-core-v1", "Governance.Rules", "R")
+        );
+    }
+
+    #[test]
+    fn for_package_names_a_missing_package_key() {
+        let err =
+            TemplateId::for_package(&PackageConfig::default(), "governance_rewards", "M", "E")
+                .expect_err("not configured");
+        assert!(matches!(
+            err,
+            Error::PackageNotConfigured("governance_rewards")
+        ));
     }
 
     #[test]

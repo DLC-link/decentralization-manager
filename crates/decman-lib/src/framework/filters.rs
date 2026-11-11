@@ -5,7 +5,7 @@
 //! is left with only the part specific to it: which templates it wants and what
 //! it pulls out of the events.
 
-use std::collections::HashMap;
+use std::{collections::HashMap, fmt::Display};
 
 use canton_proto_rs::com::daml::ledger::api::v2::{
     CumulativeFilter, EventFormat, Filters, Identifier, InterfaceFilter, TemplateFilter,
@@ -17,7 +17,7 @@ use canton_proto_rs::com::daml::ledger::api::v2::{
 /// `verbose` asks Canton for field labels in the returned records; readers that
 /// look values up by label need it, ones that only read a contract id do not.
 pub fn party_event_format(
-    party_id: impl std::fmt::Display,
+    party_id: impl Display,
     cumulative: Vec<CumulativeFilter>,
     verbose: bool,
 ) -> EventFormat {

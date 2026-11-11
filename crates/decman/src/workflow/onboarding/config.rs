@@ -41,24 +41,24 @@ impl OnboardingConfig {
 
     /// Get the namespace key name derived from party_id_prefix
     pub fn namespace_key_name(&self) -> String {
-        format!("{}-namespace", self.party_id_prefix)
+        format!("{prefix}-namespace", prefix = self.party_id_prefix)
     }
 
     /// Get the Daml key name derived from party_id_prefix
     pub fn daml_key_name(&self) -> String {
-        format!("{}-daml-transactions", self.party_id_prefix)
+        format!("{prefix}-daml-transactions", prefix = self.party_id_prefix)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::error::Result;
 
     /// A run persisted before the confirmation threshold existed resumes
     /// with both thresholds equal, as it was started.
     #[test]
-    fn a_config_persisted_before_the_confirmation_threshold_still_decodes() -> crate::error::Result
-    {
+    fn a_config_persisted_before_the_confirmation_threshold_still_decodes() -> Result {
         let config: OnboardingConfig = serde_json::from_str(
             r#"{"party_id_prefix":"xyz","instance_name":"xyz-creation","threshold":2,"_p":null}"#,
         )?;

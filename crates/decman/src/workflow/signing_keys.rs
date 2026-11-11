@@ -5,7 +5,7 @@
 //! gets no `NamespaceDelegation`, so nothing on-chain says whose key is
 //! whose. Only the node that generated a key can say it is theirs.
 //!
-//! Three sources are therefore combined to attribute the keys of a party:
+//! Four sources are therefore combined to attribute the keys of a party:
 //!
 //! 1. `dec_party_identity` — every peer's key bundle on the node that
 //!    coordinated onboarding, the new member's on the node that ran
@@ -246,6 +246,12 @@ async fn own_signing_key_fingerprint(
 ///
 /// Reads the identity rows this node happens to hold, then the fingerprints
 /// participants reported for themselves, then — for this node — its own key.
+///
+/// # Errors
+///
+/// Errors when the party's participant rows or identity rows cannot be read
+/// from the database. When no claim names this node, it also errors when its
+/// own identity row cannot be read or decoded, or when a vault query fails.
 pub async fn known_signing_keys_by_member(
     config: &NodeConfig,
     db: &SqlitePool,
@@ -675,7 +681,10 @@ mod tests {
         let current = vec![key(1), key(2), key(3), key(4)];
         let claims = claims(&[("p1", 1), ("p3", 3)]);
         match signing_keys_after_kick(&current, "p3", &uids(&["p1", "p2"]), &claims) {
-            Ok(kept) => panic!("expected a refusal, kept {:?}", seeds(&kept)),
+            Ok(kept) => panic!(
+                "expected a refusal, kept {kept_seeds:?}",
+                kept_seeds = seeds(&kept)
+            ),
             Err(error) => assert!(
                 error.to_string().contains("p2 has not reported"),
                 "unexpected error: {error}"

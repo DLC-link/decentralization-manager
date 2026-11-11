@@ -165,10 +165,11 @@ T8.2  Peers stay active during a workflow
     heartbeat itself.
 
 T8.3  Stop a peer, observe <=30s detection latency
-  - peer_status is currently stored in AppState but not exposed via HTTP.
+  - peer_status is a map the ping loop keeps for itself. It is not stored in
+    AppState and not exposed via HTTP.
   - To time the flip you would need either (a) a temporary debug endpoint that
-    returns AppState.peer_status, or (b) RUST_LOG=trace inspection of the ping
-    loop's per-tick outcomes.
+    returns the ping loop's peer_status map, or (b) RUST_LOG=trace inspection of
+    the ping loop's per-tick outcomes.
   - Out of scope for this smoke script. If you want this verified before merge,
     say so and we can add a debug endpoint in a follow-up commit.
 

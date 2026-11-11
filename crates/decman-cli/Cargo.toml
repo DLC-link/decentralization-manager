@@ -14,6 +14,7 @@ reqwest = { version = "0.12.9", features = ["blocking", "json"] }
 rfd = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+thiserror = { workspace = true }
 toml = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
@@ -22,3 +23,6 @@ tracing-subscriber = { workspace = true }
 tempfile = { workspace = true }
 tokio = { workspace = true }
 wiremock = { workspace = true }
+
+[lints]
+workspace = true

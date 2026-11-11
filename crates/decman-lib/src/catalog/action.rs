@@ -10,21 +10,24 @@
 //! form does not carry returns `Error::Encode` from its encoder rather than
 //! panicking.
 
-use canton_proto_rs::com::daml::ledger::api::v2::{Value, value};
-use common::api::Claim;
-use common::canton_id::CantonId;
+use canton_proto_rs::com::daml::ledger::api::v2::{Record, Value, Variant, value};
+use common::{api::Claim, canton_id::CantonId};
 
-use crate::catalog::types::{deserialize_claim, deserialize_reltime};
-use crate::error::Error;
-use crate::framework::encode::{
-    field, make_contract_id, make_int64, make_optional_party_set, make_party, make_record,
-    make_variant, serialize_reltime,
+use crate::{
+    catalog::types::{deserialize_claim, deserialize_reltime},
+    error::Error,
+    framework::{
+        encode::{
+            field, make_contract_id, make_int64, make_optional_party_set, make_party, make_record,
+            make_variant, serialize_reltime,
+        },
+        record::{
+            extract_contract_id, extract_int64, extract_list, extract_party_id, extract_party_set,
+            extract_record, extract_text, get_field,
+        },
+        validate::{validate_threshold, validate_timeout},
+    },
 };
-use crate::framework::record::{
-    extract_contract_id, extract_int64, extract_list, extract_party_id, extract_party_set,
-    extract_record, extract_text, get_field,
-};
-use crate::framework::validate::{validate_threshold, validate_timeout};
 
 /// Structured action types for decentralized-party governance
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -108,6 +111,12 @@ impl ActionType {
     ///
     /// Maps the self-management `ActionType` variants to the governance-core
     /// `GovernanceSelfAction` enum (different field names).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Encode`] for an action that has no
+    /// `GovernanceSelfAction` form, that is one for which
+    /// [`ActionType::is_governance_self_action`] is false.
     pub fn to_self_proto(&self) -> Result<Value, Error> {
         match self {
             ActionType::GovernanceAddMember {
@@ -194,15 +203,15 @@ impl ActionType {
     /// - GovernanceAction(Governance_AddMemberAndSetThreshold {...})
     /// - UtilityOnboardingAction(UtilityOnboarding_CreateProviderServiceRequest {...})
     /// - DevNetFeatureAppAction({...}) - direct record
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Decode`] when `value` or its nested action is not a
+    /// variant or has no inner value, when a constructor is unknown, or when a
+    /// field is missing or has the wrong type.
     pub fn from_cbtc_proto(value: &Value) -> Result<Self, Error> {
-        let variant = match &value.sum {
-            Some(value::Sum::Variant(v)) => v,
-            _ => {
-                return Err(Error::decode(
-                    "Expected Variant value for action".to_string(),
-                ));
-            }
-        };
+        let variant = as_variant(value)
+            .ok_or_else(|| Error::decode("Expected Variant value for action".to_string()))?;
 
         let inner = variant
             .value
@@ -210,159 +219,9 @@ impl ActionType {
             .ok_or_else(|| Error::decode("Variant has no inner value"))?;
 
         match variant.constructor.as_str() {
-            // Governance Actions - nested variant structure
-            "GovernanceAction" => {
-                let inner_variant = match &inner.sum {
-                    Some(value::Sum::Variant(v)) => v,
-                    _ => {
-                        return Err(Error::decode(
-                            "Expected nested Variant for GovernanceAction".to_string(),
-                        ));
-                    }
-                };
-                let inner_value = inner_variant
-                    .value
-                    .as_ref()
-                    .ok_or_else(|| Error::decode("GovernanceAction inner variant has no value"))?;
-                let record = extract_record(inner_value)?;
-
-                match inner_variant.constructor.as_str() {
-                    "Governance_AddMemberAndSetThreshold" => Ok(ActionType::GovernanceAddMember {
-                        member: extract_party_id(get_field(record, "member")?)?,
-                        new_threshold: extract_int64(get_field(record, "newThreshold")?)?,
-                    }),
-                    "Governance_RemoveMemberAndSetThreshold" => {
-                        Ok(ActionType::GovernanceRemoveMember {
-                            member: extract_party_id(get_field(record, "member")?)?,
-                            new_threshold: extract_int64(get_field(record, "newThreshold")?)?,
-                        })
-                    }
-                    "Governance_SetThreshold" => Ok(ActionType::GovernanceSetThreshold {
-                        new_threshold: extract_int64(get_field(record, "newThreshold")?)?,
-                    }),
-                    "Governance_SetActionConfirmationTimeout" => {
-                        let reltime = get_field(record, "newActionConfirmationTimeout")?;
-                        let microseconds = deserialize_reltime(reltime)?;
-                        Ok(ActionType::GovernanceSetTimeout {
-                            new_timeout_microseconds: microseconds,
-                        })
-                    }
-                    other => Err(Error::decode(format!(
-                        "Unknown GovernanceAction constructor: {other}"
-                    ))),
-                }
-            }
-
-            // Utility Onboarding Actions - nested variant structure
-            "UtilityOnboardingAction" => {
-                let inner_variant = match &inner.sum {
-                    Some(value::Sum::Variant(v)) => v,
-                    _ => {
-                        return Err(Error::decode(
-                            "Expected nested Variant for UtilityOnboardingAction".to_string(),
-                        ));
-                    }
-                };
-                let inner_value = inner_variant.value.as_ref().ok_or_else(|| {
-                    Error::decode("UtilityOnboardingAction inner variant has no value")
-                })?;
-                let record = extract_record(inner_value)?;
-
-                match inner_variant.constructor.as_str() {
-                    "UtilityOnboarding_CreateProviderServiceRequest" => {
-                        Ok(ActionType::UtilityCreateProviderRequest {
-                            operator: extract_party_id(get_field(record, "operator")?)?,
-                        })
-                    }
-                    "UtilityOnboarding_CreateUserServiceRequest" => {
-                        Ok(ActionType::UtilityCreateUserRequest {
-                            operator: extract_party_id(get_field(record, "operator")?)?,
-                        })
-                    }
-                    "UtilityOnboarding_SetupUtility" => Ok(ActionType::UtilitySetup {
-                        operator: extract_party_id(get_field(record, "operator")?)?,
-                        provider_service_cid: extract_contract_id(get_field(
-                            record,
-                            "providerServiceCid",
-                        )?)?,
-                        user_service_cid: extract_contract_id(get_field(
-                            record,
-                            "userServiceCid",
-                        )?)?,
-                    }),
-                    "UtilityOnboarding_AcceptHolderServiceRequest" => {
-                        Ok(ActionType::UtilityAcceptHolderServiceRequest {
-                            operator: extract_party_id(get_field(record, "operator")?)?,
-                            provider_service_cid: extract_contract_id(get_field(
-                                record,
-                                "providerServiceCid",
-                            )?)?,
-                            holder_service_request_cid: extract_contract_id(get_field(
-                                record,
-                                "holderServiceRequestCid",
-                            )?)?,
-                            holder: extract_party_id(get_field(record, "holder")?)?,
-                        })
-                    }
-                    other => Err(Error::decode(format!(
-                        "Unknown UtilityOnboardingAction constructor: {other}"
-                    ))),
-                }
-            }
-
-            // Credential Actions - nested variant structure
-            "CredentialAction" => {
-                let inner_variant = match &inner.sum {
-                    Some(value::Sum::Variant(v)) => v,
-                    _ => {
-                        return Err(Error::decode(
-                            "Expected nested Variant for CredentialAction".to_string(),
-                        ));
-                    }
-                };
-                let inner_value = inner_variant
-                    .value
-                    .as_ref()
-                    .ok_or_else(|| Error::decode("CredentialAction inner variant has no value"))?;
-                let record = extract_record(inner_value)?;
-
-                match inner_variant.constructor.as_str() {
-                    "Credential_OfferFreeCredential" => {
-                        let claims_list = extract_list(get_field(record, "claims")?)?;
-                        let claims = claims_list
-                            .elements
-                            .iter()
-                            .map(deserialize_claim)
-                            .collect::<Result<Vec<_>, Error>>()?;
-
-                        Ok(ActionType::CredentialOfferFree {
-                            operator: extract_party_id(get_field(record, "operator")?)?,
-                            user_service_cid: extract_contract_id(get_field(
-                                record,
-                                "userServiceCid",
-                            )?)?,
-                            holder: extract_party_id(get_field(record, "holder")?)?,
-                            id: extract_text(get_field(record, "id")?)?,
-                            description: extract_text(get_field(record, "description")?)?,
-                            claims,
-                        })
-                    }
-                    "Credential_AcceptFreeCredential" => Ok(ActionType::CredentialAcceptFree {
-                        operator: extract_party_id(get_field(record, "operator")?)?,
-                        user_service_cid: extract_contract_id(get_field(
-                            record,
-                            "userServiceCid",
-                        )?)?,
-                        credential_offer_cid: extract_contract_id(get_field(
-                            record,
-                            "credentialOfferCid",
-                        )?)?,
-                    }),
-                    other => Err(Error::decode(format!(
-                        "Unknown CredentialAction constructor: {other}"
-                    ))),
-                }
-            }
+            "GovernanceAction" => decode_governance_action(inner),
+            "UtilityOnboardingAction" => decode_utility_onboarding_action(inner),
+            "CredentialAction" => decode_credential_action(inner),
 
             // DevNet
             "DevNetFeatureAppAction" => {
@@ -379,15 +238,16 @@ impl ActionType {
     }
 
     /// Deserialize a `GovernanceSelfAction` Daml variant to an `ActionType`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Decode`] when `value` is not a variant, has no inner
+    /// value or no inner record, when the constructor is unknown, or when a
+    /// field is missing or has the wrong type.
     pub fn from_self_proto(value: &Value) -> Result<Self, Error> {
-        let variant = match &value.sum {
-            Some(value::Sum::Variant(v)) => v,
-            _ => {
-                return Err(Error::decode(
-                    "Expected Variant value for GovernanceSelfAction".to_string(),
-                ));
-            }
-        };
+        let variant = as_variant(value).ok_or_else(|| {
+            Error::decode("Expected Variant value for GovernanceSelfAction".to_string())
+        })?;
 
         let inner = variant
             .value
@@ -485,6 +345,11 @@ impl ActionType {
     /// timeouts) before they reach Canton's Daml checks. Canton rejects bad
     /// values too, but here we surface a clear 400 rather than a generic
     /// submission error after the proposal contract is already on the wire.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Validation`] when a threshold is below 1, when a timeout
+    /// is below 10 seconds, or when a cancel action has a blank `proposal_cid`.
     pub fn validate(&self) -> Result<(), Error> {
         match self {
             ActionType::GovernanceAddMember { new_threshold, .. }
@@ -504,6 +369,123 @@ impl ActionType {
             }
             _ => Ok(()),
         }
+    }
+}
+
+/// The variant a Daml `Value` holds, if it holds one.
+fn as_variant(value: &Value) -> Option<&Variant> {
+    match &value.sum {
+        Some(value::Sum::Variant(v)) => Some(v),
+        _ => None,
+    }
+}
+
+/// The constructor and field record of the action variant nested inside a
+/// CBTC action `family` such as `GovernanceAction`.
+fn nested_action<'a>(inner: &'a Value, family: &str) -> Result<(&'a str, &'a Record), Error> {
+    let variant = as_variant(inner)
+        .ok_or_else(|| Error::decode(format!("Expected nested Variant for {family}")))?;
+    let value = variant
+        .value
+        .as_ref()
+        .ok_or_else(|| Error::decode(format!("{family} inner variant has no value")))?;
+    Ok((variant.constructor.as_str(), extract_record(value)?))
+}
+
+/// Decode a CBTC `GovernanceAction`: member and threshold management.
+fn decode_governance_action(inner: &Value) -> Result<ActionType, Error> {
+    let (constructor, record) = nested_action(inner, "GovernanceAction")?;
+    match constructor {
+        "Governance_AddMemberAndSetThreshold" => Ok(ActionType::GovernanceAddMember {
+            member: extract_party_id(get_field(record, "member")?)?,
+            new_threshold: extract_int64(get_field(record, "newThreshold")?)?,
+        }),
+        "Governance_RemoveMemberAndSetThreshold" => Ok(ActionType::GovernanceRemoveMember {
+            member: extract_party_id(get_field(record, "member")?)?,
+            new_threshold: extract_int64(get_field(record, "newThreshold")?)?,
+        }),
+        "Governance_SetThreshold" => Ok(ActionType::GovernanceSetThreshold {
+            new_threshold: extract_int64(get_field(record, "newThreshold")?)?,
+        }),
+        "Governance_SetActionConfirmationTimeout" => {
+            let reltime = get_field(record, "newActionConfirmationTimeout")?;
+            let microseconds = deserialize_reltime(reltime)?;
+            Ok(ActionType::GovernanceSetTimeout {
+                new_timeout_microseconds: microseconds,
+            })
+        }
+        other => Err(Error::decode(format!(
+            "Unknown GovernanceAction constructor: {other}"
+        ))),
+    }
+}
+
+/// Decode a CBTC `UtilityOnboardingAction`.
+fn decode_utility_onboarding_action(inner: &Value) -> Result<ActionType, Error> {
+    let (constructor, record) = nested_action(inner, "UtilityOnboardingAction")?;
+    match constructor {
+        "UtilityOnboarding_CreateProviderServiceRequest" => {
+            Ok(ActionType::UtilityCreateProviderRequest {
+                operator: extract_party_id(get_field(record, "operator")?)?,
+            })
+        }
+        "UtilityOnboarding_CreateUserServiceRequest" => Ok(ActionType::UtilityCreateUserRequest {
+            operator: extract_party_id(get_field(record, "operator")?)?,
+        }),
+        "UtilityOnboarding_SetupUtility" => Ok(ActionType::UtilitySetup {
+            operator: extract_party_id(get_field(record, "operator")?)?,
+            provider_service_cid: extract_contract_id(get_field(record, "providerServiceCid")?)?,
+            user_service_cid: extract_contract_id(get_field(record, "userServiceCid")?)?,
+        }),
+        "UtilityOnboarding_AcceptHolderServiceRequest" => {
+            Ok(ActionType::UtilityAcceptHolderServiceRequest {
+                operator: extract_party_id(get_field(record, "operator")?)?,
+                provider_service_cid: extract_contract_id(get_field(
+                    record,
+                    "providerServiceCid",
+                )?)?,
+                holder_service_request_cid: extract_contract_id(get_field(
+                    record,
+                    "holderServiceRequestCid",
+                )?)?,
+                holder: extract_party_id(get_field(record, "holder")?)?,
+            })
+        }
+        other => Err(Error::decode(format!(
+            "Unknown UtilityOnboardingAction constructor: {other}"
+        ))),
+    }
+}
+
+/// Decode a CBTC `CredentialAction`.
+fn decode_credential_action(inner: &Value) -> Result<ActionType, Error> {
+    let (constructor, record) = nested_action(inner, "CredentialAction")?;
+    match constructor {
+        "Credential_OfferFreeCredential" => {
+            let claims_list = extract_list(get_field(record, "claims")?)?;
+            let claims = claims_list
+                .elements
+                .iter()
+                .map(deserialize_claim)
+                .collect::<Result<Vec<_>, Error>>()?;
+
+            Ok(ActionType::CredentialOfferFree {
+                operator: extract_party_id(get_field(record, "operator")?)?,
+                user_service_cid: extract_contract_id(get_field(record, "userServiceCid")?)?,
+                holder: extract_party_id(get_field(record, "holder")?)?,
+                id: extract_text(get_field(record, "id")?)?,
+                description: extract_text(get_field(record, "description")?)?,
+                claims,
+            })
+        }
+        "Credential_AcceptFreeCredential" => Ok(ActionType::CredentialAcceptFree {
+            operator: extract_party_id(get_field(record, "operator")?)?,
+            user_service_cid: extract_contract_id(get_field(record, "userServiceCid")?)?,
+            credential_offer_cid: extract_contract_id(get_field(record, "credentialOfferCid")?)?,
+        }),
+        other => Err(Error::decode(format!(
+            "Unknown CredentialAction constructor: {other}"
+        ))),
     }
 }
 
@@ -944,6 +926,78 @@ mod tests {
             operator: cid("op"),
         };
         assert!(matches!(utility.to_self_proto(), Err(Error::Encode(_))));
+    }
+
+    /// A variant that carries no value at all.
+    fn empty_variant(constructor: &str) -> Value {
+        Value {
+            sum: Some(value::Sum::Variant(Box::new(Variant {
+                variant_id: None,
+                constructor: constructor.into(),
+                value: None,
+            }))),
+        }
+    }
+
+    /// The message of a decode error, or a panic for anything else.
+    fn decode_message(result: Result<ActionType, Error>) -> String {
+        match result {
+            Err(Error::Decode { message, .. }) => message,
+            other => panic!("expected a decode error, got {other:?}"),
+        }
+    }
+
+    /// Each malformed shape fails with its own message, at each level of the
+    /// CBTC form and in the self form.
+    #[test]
+    fn malformed_values_name_what_is_wrong() {
+        let not_a_variant = make_text("x");
+        let cbtc = |value: &Value| decode_message(ActionType::from_cbtc_proto(value));
+        assert_eq!(cbtc(&not_a_variant), "Expected Variant value for action");
+        assert_eq!(
+            cbtc(&empty_variant("GovernanceAction")),
+            "Variant has no inner value"
+        );
+        for family in [
+            "GovernanceAction",
+            "UtilityOnboardingAction",
+            "CredentialAction",
+        ] {
+            assert_eq!(
+                cbtc(&make_variant(family, make_text("x"))),
+                format!("Expected nested Variant for {family}")
+            );
+            assert_eq!(
+                cbtc(&make_variant(family, empty_variant("X"))),
+                format!("{family} inner variant has no value")
+            );
+            assert_eq!(
+                cbtc(&cbtc_nested(family, "Bogus", vec![])),
+                format!("Unknown {family} constructor: Bogus")
+            );
+        }
+        assert_eq!(
+            cbtc(&make_variant("Bogus", make_record(vec![]))),
+            "Unknown action constructor: Bogus"
+        );
+
+        let own = |value: &Value| decode_message(ActionType::from_self_proto(value));
+        assert_eq!(
+            own(&not_a_variant),
+            "Expected Variant value for GovernanceSelfAction"
+        );
+        assert_eq!(
+            own(&empty_variant("SelfAction_SetThreshold")),
+            "GovernanceSelfAction variant has no inner value"
+        );
+        assert_eq!(
+            own(&make_variant("SelfAction_SetThreshold", make_text("x"))),
+            "Expected GovernanceSelfAction record"
+        );
+        assert_eq!(
+            own(&make_variant("Bogus", make_record(vec![]))),
+            "Unknown GovernanceSelfAction constructor: Bogus"
+        );
     }
 
     #[test]

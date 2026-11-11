@@ -26,6 +26,14 @@ use crate::{
 /// extra: the participant's current ledger offset is captured BEFORE the
 /// party gets activated here, because `ClearPartyOnboardingFlag` later needs
 /// a `begin_offset_exclusive` that precedes the activation.
+///
+/// # Errors
+///
+/// Returns an error if the Admin API channel cannot be opened, or if a vault
+/// call to list or generate a signing key fails. Returns an error if the
+/// namespace delegation proposal is refused, or if `GetId` fails or returns an
+/// invalid ID. Returns an error if an artefact cannot be stored, or if the
+/// pre-activation offset cannot be captured or stored.
 pub async fn generate_keys(
     config: &NodeConfig,
     storage: &SqlitePool,

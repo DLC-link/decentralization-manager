@@ -16,8 +16,9 @@ use std::{
     time::{Duration, SystemTime},
 };
 
-use jsonwebtoken::{Algorithm, DecodingKey, Validation, decode, decode_header};
+use jsonwebtoken::{Algorithm, DecodingKey, Validation, decode, decode_header, errors};
 use serde::Deserialize;
+use thiserror::Error;
 use tokio::sync::RwLock;
 
 use super::common::{
@@ -217,9 +218,9 @@ impl JwtValidator {
         // explicit check keeps the invariant local.
         if header.alg != entry.alg {
             tracing::warn!(
-                "jwt header alg {:?} does not match JWK alg {:?}",
-                header.alg,
-                entry.alg
+                "jwt header alg {header_alg:?} does not match JWK alg {jwk_alg:?}",
+                header_alg = header.alg,
+                jwk_alg = entry.alg
             );
             return Err(ValidationError::InactiveToken);
         }
@@ -252,9 +253,7 @@ impl JwtValidator {
             Some(azp) if azp == expected_client_id => {}
             other => {
                 tracing::warn!(
-                    "jwt azp {:?} does not match expected client_id {}",
-                    other,
-                    expected_client_id
+                    "jwt azp {other:?} does not match expected client_id {expected_client_id}"
                 );
                 return Err(ValidationError::InactiveToken);
             }
@@ -324,7 +323,7 @@ impl JwtValidator {
         let creds = self.party_credentials.read().await;
         for party in creds.iter() {
             if let Some(ref a) = party.auth0
-                && format!("https://{}", a.domain.trim_end_matches('/')) == issuer
+                && format!("https://{domain}", domain = a.domain.trim_end_matches('/')) == issuer
             {
                 return Some(TrustedIssuer {
                     client_id: a.client_id.clone(),
@@ -457,6 +456,33 @@ impl JwtValidator {
     }
 }
 
+/// Why one JWK from a JWKS cannot verify tokens. The JWKS loader logs the
+/// message and skips the key.
+#[derive(Debug, Error, PartialEq, Eq)]
+enum JwkError {
+    /// The JWK names an algorithm outside the asymmetric allowlist.
+    #[error("disallowed JWK alg: {0}")]
+    DisallowedAlg(String),
+    /// The JWK has no `alg`, and no `kty` that has a default algorithm.
+    #[error("JWK has no alg and no resolvable kty default")]
+    NoAlgorithm,
+    /// The JWK has no `kty`.
+    #[error("missing kty")]
+    MissingKty,
+    /// The JWK lacks one of the key components its `kty` needs.
+    #[error("{kty} JWK missing {component}")]
+    MissingComponent {
+        kty: &'static str,
+        component: &'static str,
+    },
+    /// The JWK's `kty` is neither RSA nor EC.
+    #[error("unsupported kty: {0}")]
+    UnsupportedKty(String),
+    /// The key components do not form a valid key.
+    #[error(transparent)]
+    InvalidKey(errors::Error),
+}
+
 /// Determine which `Algorithm` to verify with for a given JWK.
 ///
 /// Prefers the JWK's own `alg` field when present; falls back to a
@@ -467,10 +493,11 @@ impl JwtValidator {
 ///
 /// # Errors
 ///
-/// Returns an error string if the JWK declares a disallowed `alg`
-/// (symmetric, `none`, or otherwise unrecognised), or if both `alg` and
-/// a recognisable `kty` default are missing.
-fn resolve_algorithm(jwk: &Jwk) -> Result<Algorithm, String> {
+/// Returns [`JwkError::DisallowedAlg`] if the JWK declares a disallowed
+/// `alg` (symmetric, `none`, or otherwise unrecognised), or
+/// [`JwkError::NoAlgorithm`] if both `alg` and a recognisable `kty` default
+/// are missing.
+fn resolve_algorithm(jwk: &Jwk) -> Result<Algorithm, JwkError> {
     if let Some(alg_str) = jwk.alg.as_deref() {
         return match alg_str {
             "RS256" => Ok(Algorithm::RS256),
@@ -482,13 +509,13 @@ fn resolve_algorithm(jwk: &Jwk) -> Result<Algorithm, String> {
             "PS384" => Ok(Algorithm::PS384),
             "PS512" => Ok(Algorithm::PS512),
             "EdDSA" => Ok(Algorithm::EdDSA),
-            other => Err(format!("disallowed JWK alg: {other}")),
+            other => Err(JwkError::DisallowedAlg(other.to_string())),
         };
     }
     match jwk.kty.as_deref() {
         Some("RSA") => Ok(Algorithm::RS256),
         Some("EC") => Ok(Algorithm::ES256),
-        _ => Err("JWK has no alg and no resolvable kty default".to_string()),
+        _ => Err(JwkError::NoAlgorithm),
     }
 }
 
@@ -497,23 +524,31 @@ fn resolve_algorithm(jwk: &Jwk) -> Result<Algorithm, String> {
 /// `DecodingKey::from_jwk` because the latter's strict deserializer rejects
 /// some valid Keycloak entries (e.g. those whose `alg` field carries a
 /// value the crate's `AlgorithmParameters` untagged enum cannot resolve).
-fn decoding_key_from_jwk(jwk: &Jwk) -> Result<DecodingKey, String> {
-    let kty = jwk.kty.as_deref().ok_or("missing kty")?;
+///
+/// # Errors
+///
+/// Returns [`JwkError::MissingKty`] without a `kty`,
+/// [`JwkError::MissingComponent`] when an RSA key lacks `n` or `e` or an EC
+/// key lacks `x` or `y`, [`JwkError::UnsupportedKty`] for any other `kty`,
+/// and [`JwkError::InvalidKey`] when jsonwebtoken rejects the components.
+fn decoding_key_from_jwk(jwk: &Jwk) -> Result<DecodingKey, JwkError> {
+    let missing = |kty, component| JwkError::MissingComponent { kty, component };
+    let kty = jwk.kty.as_deref().ok_or(JwkError::MissingKty)?;
     match kty {
         "RSA" => {
-            let n = jwk.n.as_deref().ok_or("RSA JWK missing n")?;
-            let e = jwk.e.as_deref().ok_or("RSA JWK missing e")?;
-            DecodingKey::from_rsa_components(n, e).map_err(|err| err.to_string())
+            let n = jwk.n.as_deref().ok_or(missing("RSA", "n"))?;
+            let e = jwk.e.as_deref().ok_or(missing("RSA", "e"))?;
+            DecodingKey::from_rsa_components(n, e).map_err(JwkError::InvalidKey)
         }
         "EC" => {
-            let x = jwk.x.as_deref().ok_or("EC JWK missing x")?;
-            let y = jwk.y.as_deref().ok_or("EC JWK missing y")?;
+            let x = jwk.x.as_deref().ok_or(missing("EC", "x"))?;
+            let y = jwk.y.as_deref().ok_or(missing("EC", "y"))?;
             // `crv` is informational here; jsonwebtoken's EC validator pulls
             // the curve from the algorithm specified in the token's header.
             let _ = jwk.crv.as_deref();
-            DecodingKey::from_ec_components(x, y).map_err(|err| err.to_string())
+            DecodingKey::from_ec_components(x, y).map_err(JwkError::InvalidKey)
         }
-        other => Err(format!("unsupported kty: {other}")),
+        other => Err(JwkError::UnsupportedKty(other.to_string())),
     }
 }
 
@@ -560,7 +595,10 @@ mod tests {
         // Symmetric and `none` would let an attacker forge tokens against
         // a key fetched from a public JWKS — never honour them.
         for bad in ["HS256", "HS384", "HS512", "none", "NoNe"] {
-            assert!(resolve_algorithm(&jwk(Some(bad), Some("RSA"))).is_err());
+            assert_eq!(
+                resolve_algorithm(&jwk(Some(bad), Some("RSA"))),
+                Err(JwkError::DisallowedAlg(bad.to_string()))
+            );
         }
     }
 
@@ -574,7 +612,89 @@ mod tests {
             resolve_algorithm(&jwk(None, Some("EC"))).unwrap(),
             Algorithm::ES256
         );
-        assert!(resolve_algorithm(&jwk(None, None)).is_err());
+        assert_eq!(
+            resolve_algorithm(&jwk(None, None)),
+            Err(JwkError::NoAlgorithm)
+        );
+    }
+
+    /// The JWKS loader logs these texts when it skips a key. They are the
+    /// strings the two helpers returned before they had an error type.
+    #[test]
+    fn resolve_algorithm_errors_keep_their_messages() {
+        let disallowed = resolve_algorithm(&jwk(Some("HS256"), Some("RSA")));
+        let unresolved = resolve_algorithm(&jwk(None, Some("oct")));
+
+        assert_eq!(
+            disallowed.map_err(|e| e.to_string()),
+            Err("disallowed JWK alg: HS256".to_string())
+        );
+        assert_eq!(
+            unresolved.map_err(|e| e.to_string()),
+            Err("JWK has no alg and no resolvable kty default".to_string())
+        );
+    }
+
+    #[test]
+    fn decoding_key_from_jwk_names_what_is_missing() {
+        let rsa_without_e = Jwk {
+            n: Some(TEST_JWK_N.to_string()),
+            ..jwk(None, Some("RSA"))
+        };
+        let ec_without_y = Jwk {
+            x: Some("x".to_string()),
+            ..jwk(None, Some("EC"))
+        };
+        let missing = |kty, component| JwkError::MissingComponent { kty, component };
+        let cases = [
+            (jwk(None, None), JwkError::MissingKty, "missing kty"),
+            (
+                jwk(None, Some("RSA")),
+                missing("RSA", "n"),
+                "RSA JWK missing n",
+            ),
+            (rsa_without_e, missing("RSA", "e"), "RSA JWK missing e"),
+            (
+                jwk(None, Some("EC")),
+                missing("EC", "x"),
+                "EC JWK missing x",
+            ),
+            (ec_without_y, missing("EC", "y"), "EC JWK missing y"),
+            (
+                jwk(None, Some("oct")),
+                JwkError::UnsupportedKty("oct".to_string()),
+                "unsupported kty: oct",
+            ),
+        ];
+
+        for (key, expected, message) in cases {
+            let Err(error) = decoding_key_from_jwk(&key) else {
+                panic!("expected {expected:?}, got a key");
+            };
+            assert_eq!(error, expected);
+            assert_eq!(error.to_string(), message);
+        }
+    }
+
+    /// A component jsonwebtoken cannot decode reports jsonwebtoken's own
+    /// message, unchanged.
+    #[test]
+    fn decoding_key_from_jwk_passes_on_the_key_error() {
+        let bad_modulus = Jwk {
+            n: Some("not base64!".to_string()),
+            e: Some(TEST_JWK_E.to_string()),
+            ..jwk(None, Some("RSA"))
+        };
+        let Err(source) = DecodingKey::from_rsa_components("not base64!", TEST_JWK_E) else {
+            panic!("jsonwebtoken accepted a modulus that is not base64");
+        };
+
+        let Err(error) = decoding_key_from_jwk(&bad_modulus) else {
+            panic!("expected InvalidKey, got a key");
+        };
+
+        assert_eq!(error.to_string(), source.to_string());
+        assert_eq!(error, JwkError::InvalidKey(source));
     }
 
     // ---- End-to-end `validate()` coverage ----
@@ -604,12 +724,12 @@ mod tests {
 
     async fn setup_with_role_claim(role_claim: Option<&str>) -> (MockServer, JwtValidator, String) {
         let server = MockServer::start().await;
-        let issuer = format!("{}/realms/test", server.uri());
+        let issuer = format!("{uri}/realms/test", uri = server.uri());
 
         Mock::given(method("GET"))
             .and(path("/realms/test/.well-known/openid-configuration"))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-                "jwks_uri": format!("{}/jwks", server.uri()),
+                "jwks_uri": format!("{uri}/jwks", uri = server.uri()),
             })))
             .mount(&server)
             .await;
@@ -641,7 +761,7 @@ mod tests {
             Some(inbound),
             None,
             role_claim.map(str::to_string),
-            std::sync::Arc::new(tokio::sync::RwLock::new(Vec::new())),
+            Arc::new(RwLock::new(Vec::new())),
             reqwest::Client::new(),
         );
         (server, validator, issuer)
@@ -818,7 +938,7 @@ mod tests {
             Some(inbound),
             None,
             None,
-            std::sync::Arc::new(tokio::sync::RwLock::new(Vec::new())),
+            Arc::new(RwLock::new(Vec::new())),
             reqwest::Client::new(),
         );
 
@@ -857,7 +977,10 @@ mod tests {
         if let Some(last) = sig_chars.last_mut() {
             *last = if *last == 'A' { 'B' } else { 'A' };
         }
-        let tampered = format!("{head}.{}", sig_chars.into_iter().collect::<String>());
+        let tampered = format!(
+            "{head}.{signature}",
+            signature = sig_chars.into_iter().collect::<String>()
+        );
         assert!(matches!(
             validator.validate(&tampered).await,
             Err(ValidationError::InactiveToken)
@@ -978,7 +1101,7 @@ mod tests {
             Some(keycloak.clone()),
             Some(auth0.clone()),
             None,
-            std::sync::Arc::new(tokio::sync::RwLock::new(Vec::new())),
+            Arc::new(RwLock::new(Vec::new())),
             reqwest::Client::new(),
         );
 

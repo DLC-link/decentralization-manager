@@ -1,0 +1,888 @@
+//! The onboarding workflow: start, status, invites and the peer mesh check.
+
+use std::collections::{HashMap, HashSet};
+
+use actix_web::{HttpRequest, HttpResponse, Responder, get, post, web};
+use sqlx::SqlitePool;
+
+use super::{
+    invites::{InviteLabels, Recipients, invite_log, send_invites},
+    launch::{CoordinatorRequest, RunEnd, StatusOrder, launch_coordinator, run_log},
+    preflight::{find_party_with_prefix, format_incompatible_peers, preflight_incompatible_peers},
+    runs::{kind_status, register_and_persist},
+};
+use crate::{
+    canton_id::{CantonId, validate_party_id_prefix},
+    config::{NetworkConfig, NodeConfig},
+    db::schema::SchemaRead,
+    error::Result,
+    noise::{Message, MessageType, NoiseKeypair, parse_public_key, send_noise_message},
+    server::{
+        AppState,
+        error::ApiError,
+        handlers::parties::resolve_owner_keys_from_peers,
+        middleware::require_admin,
+        types::{
+            ErrorResponse, MissingEdgeKind, MissingPeerEdge, OnboardingInvitePayload,
+            OnboardingMeshErrorResponse, OnboardingRequest, OnboardingResponse, OnboardingStatus,
+            WorkflowInstance, WorkflowKind, WorkflowResponse, WorkflowRole, WorkflowStatusResponse,
+        },
+    },
+    workflow::{self, OnboardingStep, thresholds::check_confirmation_threshold},
+};
+
+// ============================================================================
+// Onboarding Workflow
+// ============================================================================
+
+/// Start an onboarding workflow to create a new decentralized party
+#[utoipa::path(
+    tag = "Workflows",
+    request_body = OnboardingRequest,
+    responses(
+        (status = 202, description = "Onboarding workflow started", body = WorkflowResponse),
+        (status = 400, description = "Invalid party prefix, threshold or confirmation threshold", body = ErrorResponse),
+        (status = 401, description = "Unauthorized", body = ErrorResponse),
+        (status = 403, description = "Forbidden: admin role required", body = ErrorResponse),
+        (status = 409, description = "Workflow already in progress", body = ErrorResponse),
+        (status = 422, description = "Selected peers are not mutually meshed", body = OnboardingMeshErrorResponse)
+    )
+)]
+#[post("/onboarding")]
+pub async fn start_onboarding(
+    http_req: HttpRequest,
+    data: web::Data<AppState>,
+    body: web::Json<OnboardingRequest>,
+) -> impl Responder {
+    if let Err(resp) = require_admin(&http_req, data.admin_role.as_deref()) {
+        return resp;
+    }
+
+    // Reject an invalid party prefix up-front: it becomes the identifier part
+    // of the Canton party id (`<prefix>::<namespace>`), and a bad character
+    // would otherwise fail deep in the workflow as an opaque Canton proto
+    // deserialization error ~90s later. Fail fast with a clear 400 instead.
+    if let Err(e) = validate_party_id_prefix(&body.party_id_prefix) {
+        return ApiError::BadRequest(e.to_string()).into_response();
+    }
+
+    // Pre-flight: every selected peer must have every other selected peer in
+    // its network config, otherwise the coordinator workflow will hang waiting
+    // for peer connections that can never be established.
+    if let Some(refusal) = peer_mesh_refusal(&data, &body.peer_ids).await {
+        return refusal;
+    }
+
+    start_onboarding_run(&data, &body)
+        .await
+        .unwrap_or_else(ApiError::into_response)
+}
+
+/// The answer that refuses an onboarding whose peers are not fully meshed,
+/// or `None` when the mesh is complete. The 422 carries the missing edges as
+/// well as the text, so it keeps its own body type.
+async fn peer_mesh_refusal(
+    data: &web::Data<AppState>,
+    peer_ids: &[CantonId],
+) -> Option<HttpResponse> {
+    match verify_peer_mesh(&data.config, &data.db, peer_ids).await {
+        Ok(missing) if !missing.is_empty() => {
+            // Tag each edge with its failure mode in the human-readable
+            // summary; the structured `missing_edges` array carries the same
+            // info via `kind` for the frontend to render targeted hints.
+            let edge_summary = missing
+                .iter()
+                .map(|e| match e.kind {
+                    MissingEdgeKind::UnreachableFromCoordinator => format!(
+                        "[unreachable from coordinator] {from} → {to}",
+                        from = e.from,
+                        to = e.to
+                    ),
+                    MissingEdgeKind::MeshHole => {
+                        format!("[mesh hole] {from} → {to}", from = e.from, to = e.to)
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join("; ");
+            tracing::warn!(
+                "Onboarding rejected: {n} missing peer mesh edge(s): {edge_summary}",
+                n = missing.len()
+            );
+            Some(
+                HttpResponse::UnprocessableEntity().json(OnboardingMeshErrorResponse {
+                    error: format!(
+                        "Could not verify a full peer mesh. Two failure modes are folded together: \
+                         `unreachable from coordinator` (the coordinator cannot query that peer — \
+                         it's missing from network config, has no/invalid public key, didn't \
+                         answer, or replied with an unparsable peer list — fix the coordinator's \
+                         view of `to`, or `to` itself), and `mesh hole` (peer `from` is reachable \
+                         but does not have peer `to` in its peer list — add `to` to `from`'s \
+                         network config). Edges: {edge_summary}"
+                    ),
+                    missing_edges: missing,
+                }),
+            )
+        }
+        Ok(_) => None,
+        Err(e) => {
+            tracing::error!("Failed to run mesh pre-flight: {e:#}");
+            Some(ApiError::Internal("Failed to verify peer mesh".into()).into_response())
+        }
+    }
+}
+
+/// Check the rest of an onboarding request, then register the run and start
+/// it.
+async fn start_onboarding_run(
+    data: &web::Data<AppState>,
+    body: &OnboardingRequest,
+) -> Result<HttpResponse, ApiError> {
+    let OnboardingPlan {
+        instance_name,
+        config: onboarding_config,
+        invitees: peer_ids,
+    } = plan_onboarding(body)?;
+    let party_id_prefix = body.party_id_prefix.clone();
+    let instance = WorkflowInstance::new(
+        instance_name.clone(),
+        WorkflowKind::Onboarding,
+        WorkflowRole::Coordinator,
+    );
+    let onboarding_state = &instance.http;
+
+    // Refuse onboarding when a party with this prefix already exists. The
+    // human-readable prefix is the only piece of the party id the operator
+    // chooses; allowing duplicates makes the parties list ambiguous and —
+    // when the participant set also matches — the workflow silently
+    // converges onto the existing party (Canton's DNS hash is deterministic
+    // from owners + threshold). Surface a clear 409 upfront instead.
+    match find_party_with_prefix(&data.db, &party_id_prefix).await {
+        Ok(Some(existing_party_id)) => {
+            return Err(ApiError::Conflict(format!(
+                "A decentralized party with the prefix '{party_id_prefix}' already exists \
+                     ({existing_party_id}). Choose a different prefix."
+            )));
+        }
+        Ok(None) => {}
+        Err(e) => {
+            tracing::warn!("Failed to check for duplicate-prefix party: {e:#}");
+        }
+    }
+
+    // Refuse to invite any peer that can't speak the concurrent-workflows wire
+    // format — NO invites are sent if even one invitee fails the version gate.
+    let incompatible = preflight_incompatible_peers(&data.config, &data.db, &peer_ids).await;
+    if !incompatible.is_empty() {
+        return Err(ApiError::Conflict(format_incompatible_peers(&incompatible)));
+    }
+
+    // Onboarding's instance_name is deterministic (`{prefix}-creation`), so a
+    // racing same-prefix request is realistic — register_and_persist's registry
+    // insert rejects it before the upsert can clobber the in-flight run's row.
+    register_and_persist(
+        data,
+        &instance,
+        OnboardingStep::WaitingForPeers,
+        &onboarding_config,
+        &peer_ids,
+        None,
+    )
+    .await?;
+
+    *onboarding_state.invited_peers.write().await = peer_ids.clone();
+
+    // Send invites to selected peers before starting coordinator workflow
+    let invites = {
+        let config = data.config.clone();
+        let db = data.db.clone();
+        let threshold = onboarding_config.threshold;
+        let confirmation_threshold = onboarding_config.confirmation_threshold;
+        let instance_name = instance_name.clone();
+        Box::pin(async move {
+            send_onboarding_invites(
+                &config,
+                &db,
+                &peer_ids,
+                &party_id_prefix,
+                threshold,
+                confirmation_threshold,
+                &instance_name,
+            )
+            .await
+        })
+    };
+    // Operator configures party credentials via the Party Configuration
+    // dialog; auto-saving placeholders pollutes the auth registry.
+
+    // Refresh dec_party cache in background
+    let refresh = refresh_after_onboarding(data);
+    launch_coordinator(
+        data,
+        &instance,
+        CoordinatorRequest::Onboarding(onboarding_config),
+        None,
+        invites,
+        RunEnd {
+            order: StatusOrder::MemoryFirst,
+            log: run_log!(),
+            after_success: Some(refresh),
+        },
+    )
+    .await;
+
+    Ok(HttpResponse::Accepted().json(OnboardingResponse {
+        status: OnboardingStatus::InProgress,
+        message: "Onboarding workflow started".to_string(),
+        instance_name,
+    }))
+}
+
+/// An onboarding request checked and turned into its run: the run's name,
+/// its config and the peers to invite.
+struct OnboardingPlan {
+    instance_name: String,
+    config: workflow::OnboardingConfig,
+    invitees: Vec<CantonId>,
+}
+
+/// Check an onboarding request's thresholds and build its run. It reads
+/// only the request.
+fn plan_onboarding(request: &OnboardingRequest) -> Result<OnboardingPlan, ApiError> {
+    // Build instance + config up-front so the persisted workflow_runs row
+    // can carry the same identifier as the spawned coordinator task.
+    let party_id_prefix = &request.party_id_prefix;
+    let peer_ids = &request.peer_ids;
+    let instance_name = format!("{party_id_prefix}-creation");
+
+    // If the operator set an explicit initial threshold, bound it by the owner
+    // count (invited peers + this coordinator). Omitted => the coordinator uses
+    // the default majority algorithm once the owner set is resolved.
+    let owner_count = peer_ids.len() as i32 + 1;
+    if let Some(t) = request.threshold
+        && !(1..=owner_count).contains(&t)
+    {
+        return Err(ApiError::BadRequest(format!(
+            "threshold must be between 1 and {owner_count} (invited peers + this node); got {t}"
+        )));
+    }
+    // Every owner's node also hosts the party, so the same count bounds the
+    // confirmation threshold.
+    if let Some(confirmation) = request.confirmation_threshold
+        && let Err(e) = check_confirmation_threshold(confirmation, owner_count as usize)
+    {
+        return Err(ApiError::BadRequest(e.to_string()));
+    }
+
+    let config = workflow::OnboardingConfig::new(
+        party_id_prefix.clone(),
+        instance_name.clone(),
+        request.threshold,
+        request.confirmation_threshold,
+    );
+
+    Ok(OnboardingPlan {
+        instance_name,
+        config,
+        invitees: peer_ids.clone(),
+    })
+}
+
+/// The step that refreshes the dec_party cache in the background once an
+/// onboarding run completes, and audits the owner keys it resolved.
+fn refresh_after_onboarding(data: &web::Data<AppState>) -> Box<dyn FnOnce() + Send> {
+    let config = data.config.clone();
+    let db = data.db.clone();
+    let auth_lock = data.auth.clone();
+    let party_credentials = data.party_credentials.clone();
+    let discovery_gate = super::DiscoveryGate::of(data);
+    Box::new(move || {
+        let bg_config = config.clone();
+        let bg_db = db.clone();
+        let bg_auth = auth_lock.clone();
+        let bg_creds = party_credentials.clone();
+        let bg_gate = discovery_gate.clone();
+        tokio::spawn(async move {
+            let auth = bg_auth.read().await.clone();
+            let creds = bg_creds.read().await.clone();
+            // Through the shared gate: a direct discovery slips the
+            // concurrency bound and races the cache write against a
+            // request for the same prefix.
+            match super::discover_and_cache(
+                &bg_gate,
+                &bg_config,
+                &bg_db,
+                "",
+                auth,
+                &creds,
+                Default::default(),
+            )
+            .await
+            {
+                super::Discovery::Done(resp) => {
+                    resolve_owner_keys_from_peers(&bg_config, &bg_db, &resp.parties).await;
+                    // Audit: report any participants whose owner_key
+                    // is still NULL after resolve. Not fatal — Noise
+                    // resolution may run again on the next stale
+                    // refresh — but unexpected for a freshly
+                    // onboarded party.
+                    for party in &resp.parties {
+                        for p in &party.participants {
+                            let uid = p.participant_uid.to_string();
+                            match bg_db
+                                .get_dec_party_participant_owner_key(&party.party_id, &uid)
+                                .await
+                            {
+                                Ok(Some(_)) => {} // resolved
+                                Ok(None) => tracing::warn!(
+                                    party_id = %party.party_id,
+                                    participant_uid = %uid,
+                                    "Participant owner_key unresolved after onboarding"
+                                ),
+                                Err(e) => tracing::warn!(
+                                    party_id = %party.party_id,
+                                    participant_uid = %uid,
+                                    error = %e,
+                                    "Failed to read owner_key from cache during post-onboarding audit"
+                                ),
+                            }
+                        }
+                    }
+                }
+                super::Discovery::InFlight
+                | super::Discovery::AtCapacity
+                | super::Discovery::Superseded => {
+                    tracing::debug!("Post-onboarding refresh skipped: already running");
+                }
+                super::Discovery::Failed(e) => {
+                    tracing::warn!("Failed to refresh parties after onboarding: {e}");
+                }
+            }
+        });
+    })
+}
+
+/// Get the current status of the onboarding workflow
+#[utoipa::path(
+    tag = "Workflows",
+    responses(
+        (status = 200, description = "Onboarding workflow status", body = WorkflowStatusResponse)
+    )
+)]
+#[get("/onboarding/status")]
+pub async fn get_onboarding_status(data: web::Data<AppState>) -> impl Responder {
+    HttpResponse::Ok().json(kind_status(&data, WorkflowKind::Onboarding).await)
+}
+
+/// Interpret a peer's reply to a workflow invite.
+///
+/// Current peers accept invites unconditionally (workflows are multi-instance
+/// now — see the invite arm in `server::mod`), so a current peer always replies
+/// `Ack`, and a pre-`Ack` build is refused by the version gate before it can
+/// reach an invite. The `Busy` arm is therefore a defensive safety net no
+/// current-version peer triggers: were a peer ever to report `Busy`, treating it
+/// as a hard error makes the coordinator fail fast (the spawning task marks the
+/// run Failed with a clear reason) instead of waiting on a peer that will never
+/// join. Any other non-`Ack` reply, or an unparseable one, is logged but
+/// tolerated.
+pub(super) fn interpret_invite_reply(peer_id: &CantonId, kind: &str, response: &[u8]) -> Result {
+    match Message::from_bytes(response) {
+        Ok(msg) if msg.msg_type == MessageType::Ack => {
+            tracing::info!("Peer {peer_id} acknowledged {kind} invite");
+            Ok(())
+        }
+        Ok(msg) if msg.msg_type == MessageType::Busy => {
+            anyhow::bail!(
+                "Peer {peer_id} is already participating in another workflow; \
+                 aborting {kind} before it starts"
+            )
+        }
+        Ok(msg) => {
+            tracing::warn!(
+                "Peer {peer_id} responded with {msg_type:?} instead of Ack to {kind} invite",
+                msg_type = msg.msg_type
+            );
+            Ok(())
+        }
+        Err(_) => {
+            tracing::warn!("Peer {peer_id} sent an unparseable {kind} invite reply");
+            Ok(())
+        }
+    }
+}
+
+/// The onboarding invite. It shows the threshold the coordinator will
+/// actually use: the operator's choice, or the same majority default it
+/// falls back to (owners = invited peers + this coordinator).
+pub(super) fn onboarding_invite(
+    peer_ids: &[CantonId],
+    party_id_prefix: &str,
+    threshold: Option<i32>,
+    confirmation_threshold: Option<i32>,
+    instance_name: &str,
+) -> Result<Message> {
+    let owners = peer_ids.len() + 1;
+    let effective_threshold = threshold.unwrap_or_else(|| owners.div_ceil(2).max(1) as i32);
+
+    let payload = OnboardingInvitePayload {
+        prefix: party_id_prefix.to_string(),
+        participants: peer_ids.to_vec(),
+        threshold: Some(effective_threshold),
+        confirmation_threshold,
+        workflow_instance: Some(instance_name.to_string()),
+    };
+    let payload_bytes = serde_json::to_vec(&payload)?;
+    Ok(Message::new(MessageType::InviteOnboarding, payload_bytes))
+}
+
+/// Send onboarding invites to selected peers using Noise protocol
+async fn send_onboarding_invites(
+    config: &NodeConfig,
+    db: &SqlitePool,
+    peer_ids: &[CantonId],
+    party_id_prefix: &str,
+    threshold: Option<i32>,
+    confirmation_threshold: Option<i32>,
+    instance_name: &str,
+) -> Result {
+    send_invites(
+        config,
+        db,
+        Recipients::Listed(peer_ids),
+        InviteLabels {
+            kind: "onboarding",
+            skip: "",
+            failed: "",
+        },
+        invite_log!(),
+        || {
+            onboarding_invite(
+                peer_ids,
+                party_id_prefix,
+                threshold,
+                confirmation_threshold,
+                instance_name,
+            )
+        },
+    )
+    .await
+}
+
+/// Pre-flight check: query each selected peer for its known peer list and
+/// verify every pair within `peer_ids` knows each other. Returns the list of
+/// missing directed edges (`from` does not have `to` configured). Empty Vec
+/// on success.
+///
+/// Coordinator → peer reachability is implicitly verified: if a peer can
+/// answer our Noise call, it already has us in its peer list. We only check
+/// peer ↔ peer mesh — that's the case the user can't see otherwise.
+async fn verify_peer_mesh(
+    config: &NodeConfig,
+    db: &SqlitePool,
+    peer_ids: &[CantonId],
+) -> Result<Vec<MissingPeerEdge>> {
+    let network_config = NetworkConfig::from_peers(db.get_all_peers().await?);
+    let keypair = NoiseKeypair::from_file(&config.key_file_path()).await?;
+    let request = Message::new_empty(MessageType::ListPeers);
+    let identity = config.participant_id().to_string();
+
+    let mut missing_edges = Vec::new();
+    let mut peer_views: HashMap<String, HashSet<String>> = HashMap::new();
+
+    for peer_id in peer_ids {
+        let peer = match network_config
+            .peers
+            .iter()
+            .find(|p| &p.participant_id == peer_id)
+        {
+            Some(p) => p,
+            None => {
+                // Coordinator doesn't know this peer — won't be able to invite them.
+                missing_edges.push(MissingPeerEdge {
+                    from: identity.clone(),
+                    to: peer_id.to_string(),
+                    kind: MissingEdgeKind::UnreachableFromCoordinator,
+                });
+                continue;
+            }
+        };
+
+        if peer.public_key.is_empty() {
+            tracing::warn!("Peer {peer_id} has no public key configured — cannot mesh-check");
+            missing_edges.push(MissingPeerEdge {
+                from: identity.clone(),
+                to: peer_id.to_string(),
+                kind: MissingEdgeKind::UnreachableFromCoordinator,
+            });
+            continue;
+        }
+
+        let peer_pub_key = match parse_public_key(&peer.public_key) {
+            Ok(pk) => pk,
+            Err(e) => {
+                tracing::warn!("Peer {peer_id} has invalid public key: {e}");
+                missing_edges.push(MissingPeerEdge {
+                    from: identity.clone(),
+                    to: peer_id.to_string(),
+                    kind: MissingEdgeKind::UnreachableFromCoordinator,
+                });
+                continue;
+            }
+        };
+
+        let psk = keypair.derive_psk(&peer_pub_key);
+
+        let response = match send_noise_message(
+            &peer.address,
+            peer.port,
+            &psk,
+            identity.as_bytes(),
+            &request,
+        )
+        .await
+        {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::warn!("Failed to query peers from {peer_id}: {e}");
+                missing_edges.push(MissingPeerEdge {
+                    from: identity.clone(),
+                    to: peer_id.to_string(),
+                    kind: MissingEdgeKind::UnreachableFromCoordinator,
+                });
+                continue;
+            }
+        };
+
+        let msg = match Message::from_bytes(&response) {
+            Ok(m) => m,
+            Err(e) => {
+                tracing::warn!("Malformed response from {peer_id}: {e}");
+                missing_edges.push(MissingPeerEdge {
+                    from: identity.clone(),
+                    to: peer_id.to_string(),
+                    kind: MissingEdgeKind::UnreachableFromCoordinator,
+                });
+                continue;
+            }
+        };
+
+        if msg.msg_type != MessageType::PeerList {
+            tracing::warn!(
+                "Peer {peer_id} responded with {msg_type:?} instead of PeerList",
+                msg_type = msg.msg_type
+            );
+            missing_edges.push(MissingPeerEdge {
+                from: identity.clone(),
+                to: peer_id.to_string(),
+                kind: MissingEdgeKind::UnreachableFromCoordinator,
+            });
+            continue;
+        }
+
+        let view: HashSet<String> = match serde_json::from_slice(&msg.payload) {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::warn!("Could not parse peer list from {peer_id}: {e}");
+                missing_edges.push(MissingPeerEdge {
+                    from: identity.clone(),
+                    to: peer_id.to_string(),
+                    kind: MissingEdgeKind::UnreachableFromCoordinator,
+                });
+                continue;
+            }
+        };
+        peer_views.insert(peer_id.to_string(), view);
+    }
+
+    // For every directed pair within selected peers, check that A's peer view
+    // includes B. Missing means A and B aren't mutually connected.
+    for a in peer_ids {
+        let Some(a_view) = peer_views.get(&a.to_string()) else {
+            // Already recorded a coordinator→A reachability problem above.
+            continue;
+        };
+        for b in peer_ids {
+            if a == b {
+                continue;
+            }
+            if !a_view.contains(&b.to_string()) {
+                missing_edges.push(MissingPeerEdge {
+                    from: a.to_string(),
+                    to: b.to_string(),
+                    kind: MissingEdgeKind::MeshHole,
+                });
+            }
+        }
+    }
+
+    Ok(missing_edges)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn invite_reply_aborts_on_busy_only() -> anyhow::Result<()> {
+        let peer = CantonId::parse(
+            "participant::12200ad4539c269a7b13af6806fb2ee326e7c0d7233fa6144004c416502a2c73fb0b",
+        )?;
+
+        // Ack is the happy path.
+        let ack = Message::new_empty(MessageType::Ack).to_bytes();
+        assert!(interpret_invite_reply(&peer, "onboarding", &ack).is_ok());
+
+        // Busy is a defensive net no current-version peer triggers (peers Ack
+        // unconditionally and pre-Ack builds are version-gated out); were it ever
+        // sent, it still aborts so the coordinator fails fast instead of waiting.
+        let busy = Message::new(MessageType::Busy, b"Onboarding".to_vec()).to_bytes();
+        assert!(interpret_invite_reply(&peer, "onboarding", &busy).is_err());
+
+        // Any other (parseable) reply is tolerated — older peers may not Ack.
+        let other = Message::new_empty(MessageType::Wait).to_bytes();
+        assert!(interpret_invite_reply(&peer, "onboarding", &other).is_ok());
+
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod start_onboarding_tests {
+    //! Pins every answer `POST /onboarding` gives before it starts a run:
+    //! the status code and the exact JSON body.
+
+    use actix_web::http::StatusCode;
+    use common::api::OnboardingMeshErrorResponse;
+    use serde_json::json;
+
+    use super::{
+        super::test_support::{
+            Answer, TestNode, break_table, cache_party, pid, post_as, post_as_admin, test_node,
+        },
+        *,
+    };
+    use crate::db::MIGRATOR;
+
+    type Result<T = ()> = anyhow::Result<T>;
+
+    async fn node(pool: SqlitePool) -> Result<TestNode> {
+        test_node(pool, &pid(1)?).await
+    }
+
+    async fn post(node: &TestNode, request: serde_json::Value) -> Answer {
+        post_as_admin(&node.data, start_onboarding, "/onboarding", request).await
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn an_anonymous_caller_is_unauthorized(pool: SqlitePool) -> Result {
+        let node = node(pool).await?;
+        let request = json!({ "party_id_prefix": "newparty", "peer_ids": [] });
+        post_as(&node.data, start_onboarding, "/onboarding", request, None)
+            .await
+            .assert_error(StatusCode::UNAUTHORIZED, "authentication required");
+        Ok(())
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_bad_prefix_is_a_bad_request(pool: SqlitePool) -> Result {
+        let node = node(pool).await?;
+        let request = json!({ "party_id_prefix": "1party", "peer_ids": [] });
+        post(&node, request).await.assert_error(
+            StatusCode::BAD_REQUEST,
+            "Party prefix must start with a letter (a-z, A-Z)",
+        );
+        Ok(())
+    }
+
+    /// The mesh refusal carries the edges as well as the text, so it keeps
+    /// its own body type.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn an_unknown_peer_fails_the_mesh_check(pool: SqlitePool) -> Result {
+        let node = node(pool).await?;
+        let (me, p5) = (pid(1)?, pid(5)?);
+        let request = json!({ "party_id_prefix": "newparty", "peer_ids": [p5.to_string()] });
+        let answer = post(&node, request).await;
+        assert_eq!(
+            answer.status,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "{}",
+            answer.body
+        );
+        assert_eq!(answer.content_type.as_deref(), Some("application/json"));
+        let expected = OnboardingMeshErrorResponse {
+            error: format!(
+                "Could not verify a full peer mesh. Two failure modes are folded together: \
+                 `unreachable from coordinator` (the coordinator cannot query that peer — \
+                 it's missing from network config, has no/invalid public key, didn't \
+                 answer, or replied with an unparsable peer list — fix the coordinator's \
+                 view of `to`, or `to` itself), and `mesh hole` (peer `from` is reachable \
+                 but does not have peer `to` in its peer list — add `to` to `from`'s \
+                 network config). Edges: [unreachable from coordinator] {me} → {p5}"
+            ),
+            missing_edges: vec![MissingPeerEdge {
+                from: me.to_string(),
+                to: p5.to_string(),
+                kind: MissingEdgeKind::UnreachableFromCoordinator,
+            }],
+        };
+        assert_eq!(answer.body, serde_json::to_string(&expected)?);
+        Ok(())
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_failed_mesh_check_answers_500(pool: SqlitePool) -> Result {
+        let node = node(pool.clone()).await?;
+        break_table(&pool, "peers").await?;
+        let request = json!({ "party_id_prefix": "newparty", "peer_ids": [] });
+        post(&node, request).await.assert_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Failed to verify peer mesh",
+        );
+        Ok(())
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_threshold_out_of_range_is_a_bad_request(pool: SqlitePool) -> Result {
+        let node = node(pool).await?;
+        let request = json!({ "party_id_prefix": "newparty", "peer_ids": [], "threshold": 2 });
+        post(&node, request).await.assert_error(
+            StatusCode::BAD_REQUEST,
+            "threshold must be between 1 and 1 (invited peers + this node); got 2",
+        );
+        Ok(())
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_confirmation_threshold_out_of_range_is_a_bad_request(pool: SqlitePool) -> Result {
+        let node = node(pool).await?;
+        let request = json!({
+            "party_id_prefix": "newparty",
+            "peer_ids": [],
+            "confirmation_threshold": 2,
+        });
+        post(&node, request).await.assert_error(
+            StatusCode::BAD_REQUEST,
+            "confirmation_threshold must be between 1 and 1 (the hosting participants); got 2",
+        );
+        Ok(())
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_taken_prefix_is_a_conflict(pool: SqlitePool) -> Result {
+        let (me, party) = (pid(1)?, pid(9)?);
+        cache_party(&pool, &party, 1, &[(&me, Some("k1"))], &[("k1", Some(&me))]).await?;
+        let node = node(pool).await?;
+        let request = json!({ "party_id_prefix": "validator-9", "peer_ids": [] });
+        post(&node, request).await.assert_error(
+            StatusCode::CONFLICT,
+            &format!(
+                "A decentralized party with the prefix 'validator-9' already exists \
+                 ({party}). Choose a different prefix."
+            ),
+        );
+        Ok(())
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_failed_run_write_is_a_conflict_and_leaves_no_run(pool: SqlitePool) -> Result {
+        let node = node(pool.clone()).await?;
+        break_table(&pool, "workflow_runs").await?;
+        let request = json!({ "party_id_prefix": "newparty", "peer_ids": [] });
+        let answer = post(&node, request).await;
+        assert_eq!(answer.status, StatusCode::CONFLICT, "{}", answer.body);
+        assert_eq!(answer.content_type.as_deref(), Some("application/json"));
+        let body = answer.json()?;
+        let error = body["error"].as_str().unwrap_or_default();
+        assert!(
+            error.starts_with("Failed to start onboarding workflow: ")
+                && error.contains("workflow_runs"),
+            "{error}"
+        );
+        assert_eq!(body.as_object().map(|o| o.len()), Some(1), "{body}");
+        assert!(node.data.workflows.snapshot().is_empty());
+        Ok(())
+    }
+
+    /// A second request for the same prefix finds the first run registered.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_valid_onboarding_is_accepted_once(pool: SqlitePool) -> Result {
+        let node = node(pool).await?;
+        let request = json!({ "party_id_prefix": "newparty", "peer_ids": [] });
+
+        let answer = post(&node, request.clone()).await;
+        assert_eq!(answer.status, StatusCode::ACCEPTED, "{}", answer.body);
+        assert_eq!(answer.content_type.as_deref(), Some("application/json"));
+        assert_eq!(
+            answer.body,
+            r#"{"status":"inprogress","message":"Onboarding workflow started","instance_name":"newparty-creation"}"#
+        );
+
+        post(&node, request).await.assert_error(
+            StatusCode::CONFLICT,
+            "A workflow with instance newparty-creation is already running",
+        );
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod plan_onboarding_tests {
+    //! Calls the pure onboarding plan with the invited peers, and pins each
+    //! refusal text.
+
+    use super::{super::test_support::pid, *};
+
+    type Result<T = ()> = anyhow::Result<T>;
+
+    fn request(threshold: Option<i32>, confirmation: Option<i32>) -> Result<OnboardingRequest> {
+        Ok(OnboardingRequest {
+            party_id_prefix: "newparty".to_string(),
+            peer_ids: vec![pid(2)?, pid(3)?],
+            threshold,
+            confirmation_threshold: confirmation,
+        })
+    }
+
+    /// Two invited peers and this node make three owners.
+    #[test]
+    fn each_refusal_keeps_its_text() -> Result {
+        let confirmation_refusal = check_confirmation_threshold(4, 3)
+            .err()
+            .ok_or_else(|| anyhow::anyhow!("4 of 3 hosts must be refused"))?
+            .to_string();
+        let cases = [
+            (
+                request(Some(0), None)?,
+                "threshold must be between 1 and 3 (invited peers + this node); got 0".to_string(),
+            ),
+            (
+                request(Some(4), None)?,
+                "threshold must be between 1 and 3 (invited peers + this node); got 4".to_string(),
+            ),
+            (request(Some(2), Some(4))?, confirmation_refusal),
+        ];
+        for (request, refusal) in cases {
+            assert_eq!(
+                plan_onboarding(&request).err(),
+                Some(ApiError::BadRequest(refusal))
+            );
+        }
+        Ok(())
+    }
+
+    /// The run is named after the prefix, carries the chosen thresholds,
+    /// and invites the listed peers in order.
+    #[test]
+    fn a_plan_names_the_run_and_invites_the_peers() -> Result {
+        let plan = plan_onboarding(&request(Some(3), Some(2))?)?;
+        assert_eq!(plan.instance_name, "newparty-creation");
+        assert_eq!(plan.config.party_id_prefix, "newparty");
+        assert_eq!(plan.config.instance_name, "newparty-creation");
+        assert_eq!(plan.config.threshold, Some(3));
+        assert_eq!(plan.config.confirmation_threshold, Some(2));
+        assert_eq!(plan.invitees, vec![pid(2)?, pid(3)?]);
+
+        let plan = plan_onboarding(&request(None, None)?)?;
+        assert_eq!(plan.config.threshold, None);
+        Ok(())
+    }
+}

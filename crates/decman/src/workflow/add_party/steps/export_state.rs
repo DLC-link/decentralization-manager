@@ -27,8 +27,18 @@ use crate::{
 /// Validates:
 /// - the namespace and P2P mapping exist on the synchronizer
 /// - the new participant is not already in the mapping
-/// - `1 <= new_threshold <= current_owners + 1`
-/// - the new member holds every package the party's contracts need
+/// - `1 <= new_threshold <= current_owners`
+/// - the new member has vetted every package the party's contracts need
+///
+/// # Errors
+///
+/// Returns an error if the synchronizer ID cannot be read, or if the namespace
+/// definition or the party's `PartyToParticipant` mapping cannot be fetched.
+/// Returns an error if the new member already hosts the party, or if
+/// `new_threshold` is below 1 or above the current owner count. Returns an
+/// error if the party's package IDs or the new member's vetted packages cannot
+/// be read, or if one is not vetted. Returns an error if the namespace artefact
+/// cannot be stored, or if the export offset cannot be captured or stored.
 pub async fn export_state(
     config: &NodeConfig,
     storage: &SqlitePool,

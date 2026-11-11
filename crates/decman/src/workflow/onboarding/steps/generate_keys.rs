@@ -21,6 +21,7 @@ use canton_proto_rs::com::digitalasset::canton::{
 };
 use prost::Message;
 use sqlx::SqlitePool;
+use tonic::transport::Channel;
 
 use crate::{
     canton_id::Fingerprint,
@@ -44,6 +45,14 @@ use crate::{
 ///
 /// This function generates signing keys and exports them,
 /// and proposes a namespace delegation for the generated namespace key.
+///
+/// # Errors
+///
+/// Returns an error if the Admin API channel cannot be opened or `ListMyKeys`
+/// fails. Returns an error if `GenerateSigningKey` fails or returns no public
+/// key. Returns an error if `ListNamespaceDelegation` or the `Authorize` call
+/// for the namespace delegation fails. Returns an error if the participant ID
+/// cannot be read, or if an artefact write fails.
 pub async fn generate_keys(
     config: &NodeConfig,
     storage: &SqlitePool,
@@ -138,7 +147,7 @@ pub async fn generate_keys(
 /// `pub(crate)` so the add-party workflow's new-member key generation reuses
 /// the exact same idempotent path instead of duplicating it.
 pub(crate) async fn get_or_create_signing_key(
-    vault_client: &mut VaultServiceClient<tonic::transport::Channel>,
+    vault_client: &mut VaultServiceClient<Channel>,
     name: &str,
     usage: SigningKeyUsage,
 ) -> Result<(SigningPublicKey, bool)> {
@@ -189,10 +198,8 @@ pub(crate) async fn get_or_create_signing_key(
 }
 
 /// Encode the namespace + Daml signing keys as two consecutive
-/// `varint(len)||proto` messages — matches the on-disk format
-/// `utils::write_messages_to_file(&[ns, daml], path)` produced, so the
-/// coordinator's `read_all_messages_from_file` (now `read_all_messages` over
-/// bytes) reads them back identically.
+/// `varint(len)||proto` messages, which the coordinator's
+/// `decode_keys_payload` reads back.
 pub(crate) fn encode_keys_payload(
     namespace_key: &SigningPublicKey,
     daml_key: &SigningPublicKey,

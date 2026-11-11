@@ -4,6 +4,8 @@ mod former_parties;
 mod governance;
 mod invitations;
 mod keys;
+mod packages;
+mod participants;
 mod parties;
 mod party_config;
 mod tenant;
@@ -24,6 +26,8 @@ pub(crate) use former_parties::{
     dismiss_former_party, list_former_parties, preview_former_party_purge, purge_former_party,
     reconnect_after_purge,
 };
+// Server startup forces the governance action counter through this.
+pub(crate) use governance::register_metrics as register_governance_metrics;
 pub(crate) use governance::{
     cancel_confirmation, cancel_proposal, confirm_action, execute_action, expire_confirmation,
     get_coupon_reassignment_delegation, get_governance, get_governance_audit,
@@ -34,18 +38,16 @@ pub(crate) use governance::{
 // governance-poller modules, re-exported here so they are reachable through the
 // private `governance` submodule.
 pub(crate) use governance::{get_party_credentials, packages};
-// Server startup forces the governance action counter through this.
-pub(crate) use governance::register_metrics as register_governance_metrics;
 pub(crate) use invitations::{
     accept_invitation, decline_invitation, get_invitation_dar, get_invitations,
     list_handled_invitations,
 };
 pub(crate) use keys::get_key_status;
+pub(crate) use packages::{compare_peer_packages, get_expected_versions, get_vetted_packages};
+pub(crate) use participants::{clear_acs_import_quarantine, get_participants_status};
 pub(crate) use parties::{
-    Discovery, DiscoveryGate, MAX_CONCURRENT_DISCOVERIES, clear_acs_import_quarantine,
-    compare_peer_packages, discover_and_cache, get_decentralized_parties, get_expected_versions,
-    get_participants_status, get_vetted_packages, refresh_party_for_kick,
-    resolve_owner_keys_from_peers,
+    Discovery, DiscoveryGate, MAX_CONCURRENT_DISCOVERIES, discover_and_cache,
+    get_decentralized_parties, refresh_party_for_kick, resolve_owner_keys_from_peers,
 };
 pub(crate) use party_config::{discover_member_party, get_party_config, save_party_config};
 pub(crate) use tenant::{
@@ -67,11 +69,11 @@ pub(crate) use token_standard::{
 };
 pub(crate) use unhost::{get_unhost_audit, preview_unhost_external_party, unhost_external_party};
 pub(crate) use workflows::{
-    cancel_add_party, cancel_change_threshold, cancel_contracts, cancel_dars, cancel_kick,
-    cancel_onboarding, cancel_workflow_instance, dismiss_workflow, get_add_party_status,
-    get_change_threshold_status, get_contracts_status, get_dars_status, get_kick_status,
-    get_onboarding_status, list_external_parties, list_workflows, mark_run_completed,
-    mark_run_failed, register_run_metrics, retry_workflow, start_add_party, start_change_threshold,
-    start_contracts, start_dars, start_dars_for_package, start_kick, start_onboarding,
-    upload_dars_local,
+    CoordinatorRequest, NodeHandles, RunEnd, RunLog, StatusOrder, TaskStart, cancel_add_party,
+    cancel_change_threshold, cancel_contracts, cancel_dars, cancel_kick, cancel_onboarding,
+    cancel_workflow_instance, dismiss_workflow, get_add_party_status, get_change_threshold_status,
+    get_contracts_status, get_dars_status, get_kick_status, get_onboarding_status,
+    list_external_parties, list_workflows, mark_run_failed, register_run_metrics, retry_workflow,
+    run_log, spawn_coordinator_task, start_add_party, start_change_threshold, start_contracts,
+    start_dars, start_dars_for_package, start_kick, start_onboarding, upload_dars_local,
 };

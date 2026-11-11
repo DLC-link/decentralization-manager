@@ -1,132 +1,38 @@
 import { useEffect, useMemo, useState, useCallback, useRef } from "react";
-import {
-  Badge,
-  Chip,
-  Container,
-  Box,
-  Alert,
-  Fab,
-  TextField,
-  InputAdornment,
-  IconButton,
-  LinearProgress,
-  Tabs,
-  Tab,
-  Divider,
-  Tooltip,
-  useMediaQuery,
-  useTheme,
-} from "@mui/material";
-import FilterListIcon from "@mui/icons-material/FilterList";
-import SearchIcon from "@mui/icons-material/Search";
-import AddIcon from "@mui/icons-material/Add";
-import VisibilityIcon from "@mui/icons-material/Visibility";
-import VisibilityOffIcon from "@mui/icons-material/VisibilityOff";
-import { Header } from "./components/Header";
-import { Sidebar, SIDEBAR_WIDTH, SIDEBAR_WIDTH_COLLAPSED } from "./components/Sidebar";
-import { PartyList } from "./components/PartyList";
-import { PartyDetail } from "./components/PartyDetail";
-import { FormerPartyDetail } from "./components/FormerPartyDetail";
-import { NodeHealthCard } from "./components/NodeHealthCard";
-import { NetworkConfigAccordion } from "./components/NetworkConfigAccordion";
+import { Container, Box, Alert, useMediaQuery, useTheme } from "@mui/material";
 import { useNodeHealth } from "./useNodeHealth";
 import { PackagesPanel } from "./components/PackagesPanel";
-import { LoadingSkeleton, ConfigTabSkeleton } from "./components/LoadingSkeleton";
+import { LoadingSkeleton } from "./components/LoadingSkeleton";
+import { AppFrame } from "./components/AppFrame";
 import { DarsDialog } from "./components/DarsDialog";
+import { PartiesTab } from "./components/PartiesTab";
+import { ConfigurationTab } from "./components/ConfigurationTab";
+import type { PartyFilterControls } from "./components/partyFilterControls";
 import { OnboardingDialog } from "./components/OnboardingDialog";
 import { useExternalParties } from "./useExternalParties";
-import { ExternalPartyList } from "./components/ExternalPartyList";
 import { NotificationsView } from "./components/NotificationsView";
-import type { PartyActions } from "./components/NotificationsView";
 import { useSnackbar } from "./contexts";
-import { API_BASE, ADMIN_ACCESS } from "./constants";
-import { authenticatedFetch, pingLatency } from "./api";
+import { API_BASE } from "./constants";
+import { authenticatedFetch } from "./api";
 import { useHiddenParties } from "./useHiddenParties";
 import { favoritesFirst, useFavoriteParties } from "./useFavoriteParties";
-import {
-  EMPTY_AUDIT_SNAPSHOT,
-  nextAuditSnapshot,
-  type AuditSnapshot,
-} from "./completedProposals";
 import { useFormerParties } from "./useFormerParties";
-import { TAB_HASHES, buildHash, parseHash, sharedWithSlug } from "./hashRoute";
-import { participantName, partiesSharedWith } from "./sharedParties";
-import { workflowKindLabel } from "./workflowSteps";
-import { columnSx } from "./styles";
+import { INITIAL_ROUTE, useAppRoute } from "./hooks/useAppRoute";
+import { useNotificationFeeds } from "./hooks/useNotificationFeeds";
+import { usePartyActions } from "./hooks/usePartyActions";
+import { useParticipantStatuses } from "./hooks/useParticipantStatuses";
+import { buildHash, sharedWithSlug } from "./hashRoute";
+import { partiesSharedWith } from "./sharedParties";
 import type {
-  AuditLogEntry,
-  AuditLogResponse,
   DecentralizedParty,
   DecentralizedPartiesResponse,
   NodeConfig,
   NetworkConfig,
-  ParticipantStatus,
   KeyStatusResponse,
   Peer,
-  PendingInvitation,
-  HandledInvitation,
-  HandledInvitationsResponse,
   PartyAuthStatus,
   AuthStatusResponse,
-  WorkflowRun,
 } from "./types";
-
-/// Proposals fetched per request. The feed grows a batch at a time rather
-/// than reading a party's whole proposal set at once.
-const ACTIONS_BATCH = 25;
-
-/// Newest audit rows the Completed section reads, across every party. Several
-/// rows can belong to one proposal, so this bounds rows, not entries.
-const AUDIT_FEED_LIMIT = 200;
-
-/// Newest accepted and declined invitations the Completed section shows.
-const HANDLED_INVITATIONS_LIMIT = 50;
-
-// Saved in index.html <script> before any modules load.
-// Strip Keycloak OAuth params that get appended to the hash during check-sso.
-const SAVED_HASH = (
-  (window as { __INITIAL_HASH__?: string }).__INITIAL_HASH__ ?? ""
-).replace(/[&?#](state|session_state|iss|code)=.*/i, "");
-const INITIAL_ROUTE = parseHash(SAVED_HASH);
-
-/**
- * The shared scope a party's history entry was opened in. A party's URL is
- * the same in every scope, so `navigate` keeps the scope in the entry's state.
- */
-function historyScope(state: unknown): string | null {
-  return (state as { sharedWith?: string | null } | null)?.sharedWith ?? null;
-}
-
-/** This node's newest audit rows across every party, or null on failure. */
-async function fetchGovernanceAudit(): Promise<AuditLogEntry[] | null> {
-  try {
-    const res = await authenticatedFetch(
-      `${API_BASE}/governance/audit?limit=${AUDIT_FEED_LIMIT}`,
-    );
-    if (!res.ok) return null;
-    const data: Partial<AuditLogResponse> = await res.json();
-    return data.entries ?? [];
-  } catch {
-    // Ignore polling errors
-    return null;
-  }
-}
-
-/**
- * Wrap a refresh so a tick is skipped while the previous one is still running.
- * Without it a response slower than the interval stacks requests until the
- * browser's connection pool is full and nothing else on the page loads.
- */
-function pollGuard(refresh: () => Promise<void>): () => void {
-  let inFlight = false;
-  return () => {
-    if (inFlight) return;
-    inFlight = true;
-    void refresh().finally(() => {
-      inFlight = false;
-    });
-  };
-}
 
 const App = () => {
   const muiTheme = useTheme();
@@ -137,7 +43,6 @@ const App = () => {
   useEffect(() => {
     localStorage.setItem("sidebar-collapsed", String(sidebarCollapsed));
   }, [sidebarCollapsed]);
-  const sidebarWidth = sidebarCollapsed ? SIDEBAR_WIDTH_COLLAPSED : SIDEBAR_WIDTH;
   const [activeTab, setActiveTab] = useState(INITIAL_ROUTE.tab);
   const [parties, setParties] = useState<DecentralizedParty[]>([]);
   // The prefix `parties` was last loaded with, so the former parties can be
@@ -159,63 +64,12 @@ const App = () => {
   const [networkConfig, setNetworkConfig] = useState<NetworkConfig | null>(
     null,
   );
-  const [participantStatuses, setParticipantStatuses] = useState<
-    ParticipantStatus[]
-  >([]);
-  const [selfWireVersion, setSelfWireVersion] = useState<number | undefined>();
-  // Our own round-trip latency to the backend (ms). The peers table fills the
-  // peer rows from Noise health probes but never the "you" row; this fills it.
-  //
-  // `seq` advances on every measurement, so the node health card's sparkline
-  // still records a sample when the latency reads the same twice in a row.
-  const [selfLatency, setSelfLatency] = useState<{ ms?: number; seq: number }>({
-    seq: 0,
-  });
   const [keyStatus, setKeyStatus] = useState<KeyStatusResponse | null>(null);
   const [authStatuses, setAuthStatuses] = useState<PartyAuthStatus[]>([]);
   const [packageCount, setPackageCount] = useState(0);
   const [onboardingDialogOpen, setOnboardingDialogOpen] = useState(false);
   const [darsDialogOpen, setDarsDialogOpen] = useState(false);
   const [uploadDarsDialogOpen, setUploadDarsDialogOpen] = useState(false);
-  const [pendingInvitations, setPendingInvitations] = useState<
-    PendingInvitation[]
-  >([]);
-  const [invitationsLoaded, setInvitationsLoaded] = useState(false);
-  const [partyActions, setPartyActions] = useState<PartyActions[]>([]);
-  const [partyActionsLoaded, setPartyActionsLoaded] = useState(false);
-  const [partyActionsFetching, setPartyActionsFetching] = useState(false);
-  // Per-party resume token from the last batch. A null value means that party
-  // has no more proposals; a missing key means we never asked.
-  const [actionCursors, setActionCursors] = useState<
-    Record<string, string | null>
-  >({});
-  const [loadingMoreActions, setLoadingMoreActions] = useState(false);
-  // True once a later batch has been pulled in. The poll replaces state
-  // wholesale, so it must not run while a queue is being read or it would
-  // discard everything scrolled and snap back to the first batch.
-  const [actionsAccumulated, setActionsAccumulated] = useState(false);
-  const [workflowRuns, setWorkflowRuns] = useState<WorkflowRun[]>([]);
-  // Request counters for the feeds, so a slower earlier answer cannot
-  // overwrite a later one.
-  const invitationsSeq = useRef(0);
-  const workflowRunsSeq = useRef(0);
-  const governanceAuditSeq = useRef(0);
-  const [workflowRunsLoaded, setWorkflowRunsLoaded] = useState(false);
-  const [governanceAudit, setGovernanceAudit] =
-    useState<AuditSnapshot>(EMPTY_AUDIT_SNAPSHOT);
-  const [governanceAuditLoaded, setGovernanceAuditLoaded] = useState(false);
-  // `performance.now()` when the committed `partyActions` was requested.
-  // Completed compares it with when each audit row was first seen.
-  const [pendingRequestedAt, setPendingRequestedAt] = useState(
-    Number.NEGATIVE_INFINITY,
-  );
-  const partyActionsSeq = useRef(0);
-  const handledInvitationsSeq = useRef(0);
-  const [handledInvitations, setHandledInvitations] = useState<
-    HandledInvitation[]
-  >([]);
-  const [handledInvitationsLoaded, setHandledInvitationsLoaded] =
-    useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [partyFilter, setPartyFilter] = useState(
@@ -239,10 +93,6 @@ const App = () => {
   const [configPeerId, setConfigPeerId] = useState<string | null>(
     INITIAL_ROUTE.configPeerId,
   );
-  // The party the packages tab was opened for, when the parties list does not
-  // hold it: a deep link loads the packages tab without reading any parties.
-  const [fetchedPackagesParty, setFetchedPackagesParty] =
-    useState<DecentralizedParty | null>(null);
   const [showSearchBar, setShowSearchBar] = useState(true);
   const [showHidden, setShowHidden] = useState(false);
   const { toggle: toggleHidden, isHidden } = useHiddenParties();
@@ -280,7 +130,6 @@ const App = () => {
   }, [formerParties, parties, loadedPrefix, sharedWith]);
   const lastScrollY = useRef(0);
   const savedScrollY = useRef(0);
-  const pendingSlug = useRef<string | null>(INITIAL_ROUTE.partySlug);
   const partiesLoaded = useRef(INITIAL_ROUTE.tab === 0);
   // The prefix the loaded list was read with, or null before the first read.
   const listPrefix = useRef<string | null>(null);
@@ -320,133 +169,23 @@ const App = () => {
 
   // --- Hash-based routing ---
 
-  const navigate = useCallback(
-    (tab: number, partySlug?: string | null, sharedScope: string | null = null) => {
-      setActiveTab(tab);
-      if (tab !== 0) setSelectedPartyId(null);
-      // Only a parties-tab slug keeps the shared filter: the shared list
-      // itself, or a party opened from it.
-      if (tab !== 0 || !partySlug) setSharedWith(null);
-      setPackagesPartyId(tab === 1 ? (partySlug ?? null) : null);
-      setConfigPeerId(tab === 2 ? (partySlug ?? null) : null);
-      window.history.pushState(
-        { sharedWith: sharedScope },
-        "",
-        buildHash(tab, partySlug),
-      );
-    },
-    [],
-  );
-
-  // Show the parties `participantId` also hosts. The list is read again
-  // without a prefix, because a prefix would hide some of them.
-  const enterSharedView = useCallback(
-    (participantId: string) => {
-      setSelectedPartyId(null);
-      setPartiesView("decentralized");
-      setSharedWith(participantId);
-      setPartyFilter("");
-      partiesLoaded.current = true;
-      void loadParties("");
-    },
-    [loadParties],
-  );
-
-  const showSharedParties = useCallback(
-    (participantId: string) => {
-      navigate(0, sharedWithSlug(participantId));
-      enterSharedView(participantId);
-      window.scrollTo(0, 0);
-    },
-    [navigate, enterSharedView],
-  );
-
-  // Jump to the notifications tab after a successful workflow / governance
-  // action so the user lands on the queue showing what they just produced.
-  const goToNotifications = useCallback(() => {
-    navigate(TAB_HASHES.indexOf("notifications"));
-  }, [navigate]);
-
-  const packagesParty = useMemo(() => {
-    if (!packagesPartyId) return null;
-    const listed = parties.find((p) => p.party_id === packagesPartyId);
-    if (listed) return listed;
-    return fetchedPackagesParty?.party_id === packagesPartyId
-      ? fetchedPackagesParty
-      : null;
-  }, [packagesPartyId, parties, fetchedPackagesParty]);
-
-  useEffect(() => {
-    if (!packagesPartyId || packagesParty) return;
-    let cancelled = false;
-    const prefix = packagesPartyId.split("::")[0];
-    authenticatedFetch(
-      `${API_BASE}/decentralized-parties?prefix=${encodeURIComponent(prefix)}`,
-    )
-      .then((res) => (res.ok ? res.json() : null))
-      .then((data: DecentralizedPartiesResponse | null) => {
-        if (cancelled) return;
-        const found = data?.parties.find((p) => p.party_id === packagesPartyId);
-        if (found) setFetchedPackagesParty(found);
-      })
-      .catch(() => {});
-    return () => {
-      cancelled = true;
-    };
-  }, [packagesPartyId, packagesParty]);
-
-  // Once parties are loaded, resolve pending slug → exact match opens detail.
-  // A former party is known only once its own list has loaded too.
-  useEffect(() => {
-    if (loading || !pendingSlug.current) return;
-    const slug = pendingSlug.current;
-    const hosted = parties.some((p) => p.party_id === slug);
-    if (!hosted && !formerPartiesLoaded) return;
-    pendingSlug.current = null;
-    if (hosted || formerParties.some((p) => p.party_id === slug)) {
-      setSelectedPartyId(slug);
-    }
-  }, [loading, parties, formerParties, formerPartiesLoaded]);
-
-  // Listen for back/forward browser navigation
-  useEffect(() => {
-    const onPopState = (event: PopStateEvent) => {
-      const { tab, partySlug, packagesPartyId, sharedWith, configPeerId } =
-        parseHash(window.location.hash);
-      setActiveTab(tab);
-      setPackagesPartyId(packagesPartyId);
-      setConfigPeerId(configPeerId);
-      if (tab === 0) {
-        if (sharedWith) {
-          enterSharedView(sharedWith);
-          return;
-        }
-        const exactMatch =
-          parties.some((p) => p.party_id === partySlug) ||
-          formerParties.some((p) => p.party_id === partySlug);
-        if (exactMatch) {
-          setSelectedPartyId(partySlug);
-          setSharedWith(historyScope(event.state));
-        } else {
-          setSelectedPartyId(null);
-          setSharedWith(null);
-          const prefix =
-            partySlug && !partySlug.includes("::") ? partySlug : "";
-          setPartyFilter(prefix);
-          // A shared view reads the whole list, so the loaded list can belong
-          // to another query than this entry's.
-          if (listPrefix.current !== null && listPrefix.current !== prefix) {
-            void loadParties(prefix);
-          }
-        }
-      } else {
-        setSelectedPartyId(null);
-        setSharedWith(null);
-      }
-    };
-    window.addEventListener("popstate", onPopState);
-    return () => window.removeEventListener("popstate", onPopState);
-  }, [parties, formerParties, enterSharedView, loadParties]);
+  const { navigate, showSharedParties, goToNotifications, packagesParty } = useAppRoute({
+    parties,
+    formerParties,
+    formerPartiesLoaded,
+    loading,
+    loadParties,
+    packagesPartyId,
+    setActiveTab,
+    setSelectedPartyId,
+    setSharedWith,
+    setPackagesPartyId,
+    setConfigPeerId,
+    setPartiesView,
+    setPartyFilter,
+    partiesLoadedRef: partiesLoaded,
+    listPrefixRef: listPrefix,
+  });
 
   useEffect(() => {
     if ("scrollRestoration" in history) {
@@ -642,378 +381,39 @@ const App = () => {
     };
   }, [sharedWith, networkConfig]);
 
-  // Poll participant statuses every 2 seconds, and on the same cadence measure
-  // our own round-trip to the backend so the "you" row of the peers table shows
-  // a latency too (peer latencies come from the status response itself).
-  useEffect(() => {
-    const fetchStatuses = async () => {
-      try {
-        const res = await authenticatedFetch(`${API_BASE}/participants-status`);
-        if (res.ok) {
-          const data = await res.json();
-          setParticipantStatuses(data.statuses);
-          setSelfWireVersion(data.wire_version);
-        }
-      } catch {
-        // Ignore polling errors
-      }
-    };
+  const { participantStatuses, selfWireVersion, selfLatency } = useParticipantStatuses();
+  const {
+    pendingInvitations,
+    invitationsLoaded,
+    workflowRuns,
+    workflowRunsLoaded,
+    governanceAudit,
+    governanceAuditLoaded,
+    handledInvitations,
+    handledInvitationsLoaded,
+    beginGovernanceAudit,
+    commitGovernanceAudit,
+    refreshWorkflowRuns,
+    refreshInvitationLists,
+  } = useNotificationFeeds();
 
-    const measureSelfLatency = async () => {
-      // Clear on failure so the row drops a stale number during an outage,
-      // matching how an unreachable peer shows no latency.
-      const ms = await pingLatency(`${API_BASE}/healthz`);
-      setSelfLatency((prev) => ({ ms: ms ?? undefined, seq: prev.seq + 1 }));
-    };
-
-    // In-flight guard: if a cycle (the status probe in particular) runs longer
-    // than the 2s interval, skip the tick instead of stacking concurrent
-    // requests.
-    let inFlight = false;
-    const poll = async () => {
-      if (inFlight) return;
-      inFlight = true;
-      try {
-        await Promise.all([fetchStatuses(), measureSelfLatency()]);
-      } finally {
-        inFlight = false;
-      }
-    };
-
-    poll();
-    const interval = window.setInterval(poll, 2000);
-
-    return () => clearInterval(interval);
-  }, []);
-
-  const refreshInvitations = useCallback(async () => {
-    // Newest request wins. Accepting an invitation refreshes the feed by hand
-    // while a poll is already in flight, and that older answer, landing after,
-    // would put the invitation back.
-    const seq = ++invitationsSeq.current;
-    try {
-      const res = await authenticatedFetch(`${API_BASE}/invitations`);
-      if (!res.ok) return;
-      // Compared after the body, not before: reading it is another wait, and a
-      // manual refresh that finishes inside it would be overwritten here.
-      const data = await res.json();
-      if (seq !== invitationsSeq.current) return;
-      setPendingInvitations(data.invitations);
-    } catch {
-      // Ignore polling errors
-    } finally {
-      setInvitationsLoaded(true);
-    }
-  }, []);
-
-  // Poll pending invitations every 2 seconds, in-flight-guarded like the
-  // status probe above: a slow response must not stack concurrent requests.
-  useEffect(() => {
-    const poll = pollGuard(refreshInvitations);
-    poll();
-    const interval = window.setInterval(poll, 2000);
-    return () => clearInterval(interval);
-  }, [refreshInvitations]);
-
-  const refreshWorkflowRuns = useCallback(async () => {
-    // Newest request wins, as above: cancel, dismiss and retry all refresh by
-    // hand alongside the poll.
-    const seq = ++workflowRunsSeq.current;
-    try {
-      const res = await authenticatedFetch(`${API_BASE}/workflows`);
-      if (!res.ok) return;
-      const data = await res.json();
-      if (seq !== workflowRunsSeq.current) return;
-      setWorkflowRuns(data.runs ?? []);
-    } catch {
-      // Ignore polling errors
-    } finally {
-      setWorkflowRunsLoaded(true);
-    }
-  }, []);
-
-  // Poll workflow_runs every 2 seconds, same cadence as invitations.
-  useEffect(() => {
-    const poll = pollGuard(refreshWorkflowRuns);
-    poll();
-    const interval = window.setInterval(poll, 2000);
-    return () => clearInterval(interval);
-  }, [refreshWorkflowRuns]);
-
-  const commitGovernanceAudit = useCallback((entries: AuditLogEntry[]) => {
-    const now = performance.now();
-    setGovernanceAudit((previous) => nextAuditSnapshot(previous, entries, now));
-  }, []);
-
-  const refreshGovernanceAudit = useCallback(async () => {
-    const seq = ++governanceAuditSeq.current;
-    try {
-      const entries = await fetchGovernanceAudit();
-      if (entries === null || seq !== governanceAuditSeq.current) return;
-      commitGovernanceAudit(entries);
-    } finally {
-      setGovernanceAuditLoaded(true);
-    }
-  }, [commitGovernanceAudit]);
-
-  // Same cadence as the governance actions below: the Completed section reads
-  // the two together to tell a finished proposal from a pending one.
-  useEffect(() => {
-    const poll = pollGuard(refreshGovernanceAudit);
-    poll();
-    const interval = window.setInterval(poll, 10_000);
-    return () => clearInterval(interval);
-  }, [refreshGovernanceAudit]);
-
-  const refreshHandledInvitations = useCallback(async () => {
-    const seq = ++handledInvitationsSeq.current;
-    try {
-      const res = await authenticatedFetch(
-        `${API_BASE}/invitations/handled?limit=${HANDLED_INVITATIONS_LIMIT}`,
-      );
-      if (!res.ok) return;
-      const data: Partial<HandledInvitationsResponse> = await res.json();
-      if (seq !== handledInvitationsSeq.current) return;
-      setHandledInvitations(data.invitations ?? []);
-    } catch {
-      // Ignore polling errors
-    } finally {
-      setHandledInvitationsLoaded(true);
-    }
-  }, []);
-
-  // Slower than the pending poll: the list changes when an operator answers,
-  // and this page refreshes it by hand when its own operator does.
-  useEffect(() => {
-    const poll = pollGuard(refreshHandledInvitations);
-    poll();
-    const interval = window.setInterval(poll, 10_000);
-    return () => clearInterval(interval);
-  }, [refreshHandledInvitations]);
-
-  // An accept or decline moves the invitation from one list to the other.
-  const refreshInvitationLists = useCallback(() => {
-    void refreshInvitations();
-    void refreshHandledInvitations();
-  }, [refreshInvitations, refreshHandledInvitations]);
-
-  // Watch for workflow runs transitioning out of `inprogress` and surface a
-  // snackbar — the run card in the feed updates too, but a transient toast
-  // gives the user a top-level signal without making them go look. First
-  // observation of a run is silent so we don't fire on initial page load.
-  const prevRunStatusRef = useRef<Map<string, WorkflowRun["status"]>>(new Map());
-  useEffect(() => {
-    const prev = prevRunStatusRef.current;
-    const next = new Map<string, WorkflowRun["status"]>();
-    for (const run of workflowRuns) {
-      next.set(run.instance_name, run.status);
-      const prior = prev.get(run.instance_name);
-      if (prior === "inprogress" && run.status !== "inprogress") {
-        const label = `${workflowKindLabel(run.kind)} workflow`;
-        if (run.status === "failed") {
-          showSnackbar(
-            `${label} failed: ${run.error || "Unknown error"}`,
-            "error",
-          );
-        } else if (run.status === "completed") {
-          showSnackbar(`${label} completed`);
-        } else if (run.status === "cancelled") {
-          showSnackbar(`${label} cancelled`);
-        }
-      }
-    }
-    prevRunStatusRef.current = next;
-  }, [workflowRuns, showSnackbar]);
-
-  const isGovRulesTemplate = (templateId: string) =>
-    templateId === "Governance.Rules:GovernanceRules";
-
-  /** Read the first batch of every configured party's pending proposals. */
-  const fetchPartyActions = useCallback(async (): Promise<PartyActions[]> => {
-    const candidates = parties
-      .map((p) => {
-        const authStatus = authStatuses.find(
-          (a) => a.dec_party_id === p.party_id,
-        );
-        const rulesContract = p.contracts?.find((c) =>
-          isGovRulesTemplate(c.template_id),
-        );
-        if (
-          !authStatus ||
-          authStatus.status.status !== "authenticated" ||
-          !authStatus.rights?.dec_party_act_as ||
-          !rulesContract
-        ) {
-          return null;
-        }
-        const governanceType = "core_self" as const;
-        return { party: p, authStatus, rulesContract, governanceType };
-      })
-      .filter((c): c is NonNullable<typeof c> => c !== null);
-
-    const results = await Promise.all(
-      candidates.map(
-        async ({
-          party,
-          authStatus,
-          rulesContract,
-          governanceType,
-        }): Promise<PartyActions | null> => {
-          try {
-            const res = await authenticatedFetch(
-              `${API_BASE}/governance/confirmations?party_id=${encodeURIComponent(party.party_id)}&limit=${ACTIONS_BATCH}`,
-            );
-            if (!res.ok) return null;
-            const data = await res.json();
-            return {
-              partyId: party.party_id,
-              nextCursor: (data.next_cursor ?? null) as string | null,
-              // Prefer the live rules contract id from the API — confirm
-              // archives + re-creates the rules contract, so the cached
-              // `parties` snapshot can point at an archived contract id.
-              rulesContractId: data.rules_contract_id ?? rulesContract.contract_id,
-              memberPartyId: data.member_party_id ?? authStatus.member_party_id,
-              governanceType,
-              threshold: data.threshold,
-              actions: data.actions ?? [],
-              domainActions: data.domain_actions ?? [],
-            };
-          } catch {
-            return null;
-          }
-        },
-      ),
-    );
-    return results.filter((r): r is PartyActions => r !== null);
-  }, [parties, authStatuses]);
-
-  const commitPartyActions = useCallback(
-    (kept: PartyActions[], requestedAt: number) => {
-      setPartyActions(kept);
-      setPendingRequestedAt(requestedAt);
-      setActionCursors(
-        Object.fromEntries(
-          kept.map((p) => [p.partyId, p.nextCursor ?? null]),
-        ),
-      );
-      setActionsAccumulated(false);
-      setPartyActionsLoaded(true);
-      setPartyActionsFetching(false);
-    },
-    [],
-  );
-
-  const refreshPartyActions = useCallback(async () => {
-    // Newest request wins, so a slow poll cannot replace a later snapshot.
-    const seq = ++partyActionsSeq.current;
-    setPartyActionsFetching(true);
-    const requestedAt = performance.now();
-    const kept = await fetchPartyActions();
-    if (seq !== partyActionsSeq.current) return;
-    commitPartyActions(kept, requestedAt);
-  }, [fetchPartyActions, commitPartyActions]);
-
-  /**
-   * Pull the next batch for every party that still has one and append it.
-   *
-   * Appending rather than replacing is the point: the feed grows as you scroll
-   * instead of re-reading a party's whole proposal set on every render.
-   */
-  const loadMoreActions = useCallback(async () => {
-    const pending = Object.entries(actionCursors).filter(
-      ([, cursor]) => cursor,
-    );
-    if (pending.length === 0 || loadingMoreActions) return;
-    setLoadingMoreActions(true);
-    setActionsAccumulated(true);
-    try {
-      const batches = await Promise.all(
-        pending.map(async ([partyId, cursor]) => {
-          try {
-            const res = await authenticatedFetch(
-              `${API_BASE}/governance/confirmations?party_id=${encodeURIComponent(partyId)}` +
-                `&limit=${ACTIONS_BATCH}&cursor=${encodeURIComponent(cursor as string)}`,
-            );
-            if (!res.ok) return null;
-            const data = await res.json();
-            return {
-              partyId,
-              actions: data.actions ?? [],
-              domainActions: data.domain_actions ?? [],
-              nextCursor: (data.next_cursor ?? null) as string | null,
-            };
-          } catch {
-            return null;
-          }
-        }),
-      );
-
-      setPartyActions((current) =>
-        current.map((entry) => {
-          const batch = batches.find((b) => b && b.partyId === entry.partyId);
-          if (!batch) return entry;
-          // De-dupe by cid: a re-issued cursor must not double a card.
-          const seen = new Set(
-            entry.domainActions.map((d) => d.proposal_cid),
-          );
-          return {
-            ...entry,
-            // Kept current so the feed can tell when a party's proposals are
-            // all loaded.
-            nextCursor: batch.nextCursor,
-            domainActions: [
-              ...entry.domainActions,
-              ...batch.domainActions.filter(
-                (d: { proposal_cid: string }) => !seen.has(d.proposal_cid),
-              ),
-            ],
-          };
-        }),
-      );
-
-      setActionCursors((current) => {
-        const next = { ...current };
-        for (const batch of batches) {
-          if (batch) next[batch.partyId] = batch.nextCursor;
-        }
-        return next;
-      });
-    } finally {
-      setLoadingMoreActions(false);
-    }
-  }, [actionCursors, loadingMoreActions]);
-
-  const hasMoreActions = Object.values(actionCursors).some(Boolean);
-
-  // A confirm, execute or cancel changes what is pending and what is logged.
-  // Both are read together and committed in one tick, so React renders the
-  // pair at once. Read apart, a fresh pending feed could land first and turn
-  // an execute this page just made into "You confirmed" for a moment.
-  const refreshActionsAndAudit = useCallback(async () => {
-    const actionsSeq = ++partyActionsSeq.current;
-    const auditSeq = ++governanceAuditSeq.current;
-    setPartyActionsFetching(true);
-    const requestedAt = performance.now();
-    const [kept, entries] = await Promise.all([
-      fetchPartyActions(),
-      fetchGovernanceAudit(),
-    ]);
-    if (entries !== null && auditSeq === governanceAuditSeq.current) {
-      commitGovernanceAudit(entries);
-    }
-    if (actionsSeq === partyActionsSeq.current) {
-      commitPartyActions(kept, requestedAt);
-    }
-  }, [fetchPartyActions, commitGovernanceAudit, commitPartyActions]);
-
-  // Poll governance actions across configured parties (only after parties load)
-  useEffect(() => {
-    if (loading) return;
-    if (actionsAccumulated) return;
-    refreshPartyActions();
-    const interval = window.setInterval(refreshPartyActions, 10_000);
-    return () => clearInterval(interval);
-  }, [refreshPartyActions, loading, actionsAccumulated]);
+  const {
+    partyActions,
+    partyActionsLoaded,
+    partyActionsFetching,
+    loadingMoreActions,
+    actionsAccumulated,
+    pendingRequestedAt,
+    loadMoreActions,
+    hasMoreActions,
+    refreshActionsAndAudit,
+  } = usePartyActions({
+    parties,
+    authStatuses,
+    loading,
+    beginGovernanceAudit,
+    commitGovernanceAudit,
+  });
 
   const notificationCount =
     pendingInvitations.length +
@@ -1034,233 +434,40 @@ const App = () => {
   // then needs its search bar and FAB back.
   const showingDetail = Boolean(selectedParty || selectedFormerParty);
 
+  const filterControls: PartyFilterControls = {
+    partyFilter,
+    setPartyFilter,
+    refreshParties,
+    refreshingParties,
+    showHidden,
+    setShowHidden,
+    hiddenCount,
+  };
+
   const backToList = () => {
     setSelectedPartyId(null);
     navigate(0, sharedWith ? sharedWithSlug(sharedWith) : partyFilter || null);
     window.scrollTo(0, savedScrollY.current);
   };
 
-  const buildInfo = nodeConfig
-    ? {
-        version: nodeConfig.version,
-        buildVersion: nodeConfig.build_version,
-        buildTime: nodeConfig.build_time,
-      }
-    : undefined;
-
   return (
-    <Box
-      sx={{
-        minHeight: "100vh",
-        backgroundColor: (theme) => theme.palette.background.default,
-      }}
+    <AppFrame
+      isLargeScreen={isLargeScreen}
+      activeTab={activeTab}
+      navigate={navigate}
+      parties={parties}
+      packageCount={packageCount}
+      notificationCount={notificationCount}
+      nodeConfig={nodeConfig}
+      sidebarCollapsed={sidebarCollapsed}
+      setSidebarCollapsed={setSidebarCollapsed}
+      loading={loading}
+      error={error}
+      setError={setError}
+      showingDetail={showingDetail}
+      showSearchBar={showSearchBar}
+      filter={filterControls}
     >
-      {isLargeScreen ? (
-        <Sidebar
-          activeTab={activeTab}
-          onTabChange={(tab) => navigate(tab)}
-          partyCount={parties.length}
-          packageCount={packageCount}
-          notificationCount={notificationCount}
-          buildInfo={buildInfo}
-          collapsed={sidebarCollapsed}
-          onToggleCollapsed={() => setSidebarCollapsed((c) => !c)}
-          network={nodeConfig?.canton.network}
-        />
-      ) : (
-        <Header buildInfo={buildInfo} />
-      )}
-
-      {isLargeScreen && activeTab === 0 && !showingDetail && !error && (
-        <Box
-          sx={{
-            position: "fixed",
-            top: 16,
-            left: `${sidebarWidth}px`,
-            right: 0,
-            zIndex: 1050,
-            display: "flex",
-            justifyContent: "center",
-            opacity: showSearchBar ? 1 : 0,
-            transform: showSearchBar
-              ? "translateY(0)"
-              : "translateY(-20px)",
-            transition: "left 0.15s ease-out, opacity 0.3s ease, transform 0.3s ease",
-            pointerEvents: showSearchBar ? "auto" : "none",
-          }}
-        >
-          <Box
-            sx={{
-              display: "flex",
-              alignItems: "center",
-              gap: 1,
-              backdropFilter: "blur(16px)",
-              backgroundColor: (theme) =>
-                theme.palette.mode === "light"
-                  ? "rgba(255, 255, 255, 0.85)"
-                  : "rgba(42, 42, 42, 0.85)",
-              borderRadius: 100,
-              pl: 0.5,
-              pr: 0.5,
-              py: 0.5,
-              boxShadow: (theme) =>
-                theme.palette.mode === "light"
-                  ? "0 2px 12px rgba(0,0,0,0.08)"
-                  : "0 2px 12px rgba(0,0,0,0.3)",
-              border: (theme) =>
-                `1px solid ${theme.palette.mode === "light" ? "rgba(0,0,0,0.08)" : "rgba(255,255,255,0.08)"}`,
-            }}
-          >
-            <TextField
-              size="small"
-              placeholder="Filter by full prefix (e.g. cbtc-network)"
-              value={partyFilter}
-              onChange={(e) => setPartyFilter(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === "Enter") {
-                  refreshParties(true);
-                }
-              }}
-              disabled={refreshingParties}
-              slotProps={{
-                input: {
-                  startAdornment: (
-                    <InputAdornment position="start">
-                      <FilterListIcon fontSize="small" color="action" />
-                    </InputAdornment>
-                  ),
-                },
-              }}
-              sx={{
-                width: 380,
-                "& .MuiOutlinedInput-root": {
-                  borderRadius: 100,
-                },
-                "& .MuiOutlinedInput-notchedOutline": {
-                  border: "none",
-                },
-              }}
-            />
-            <Tooltip
-              title={
-                showHidden
-                  ? `Hide ${hiddenCount} hidden ${hiddenCount === 1 ? "party" : "parties"}`
-                  : hiddenCount > 0
-                    ? `Show ${hiddenCount} hidden ${hiddenCount === 1 ? "party" : "parties"}`
-                    : "No hidden parties"
-              }
-            >
-              <span>
-                <IconButton
-                  onClick={() => setShowHidden((v) => !v)}
-                  disabled={hiddenCount === 0 && !showHidden}
-                  color={showHidden ? "primary" : "default"}
-                >
-                  {showHidden ? <VisibilityIcon /> : <VisibilityOffIcon />}
-                </IconButton>
-              </span>
-            </Tooltip>
-            <IconButton
-              onClick={() => refreshParties(true)}
-              disabled={refreshingParties}
-              color="primary"
-              sx={{
-                backgroundColor: "primary.main",
-                color: "white",
-                "&:hover": {
-                  backgroundColor: "primary.dark",
-                },
-                "&.Mui-disabled": {
-                  backgroundColor: "action.disabledBackground",
-                  color: "action.disabled",
-                },
-              }}
-            >
-              <SearchIcon />
-            </IconButton>
-          </Box>
-        </Box>
-      )}
-
-      <Box
-        sx={{
-          ...(isLargeScreen && { ml: `${sidebarWidth}px`, transition: "margin-left 0.15s ease-out" }),
-          ...(activeTab === 1 && {
-            height: "100vh",
-            overflow: "hidden",
-            display: "flex",
-            flexDirection: "column",
-          }),
-          // The parties list and the approvals feed both end in a footer bar
-          // that should sit at the bottom of the view even when a short page
-          // doesn't fill it — so the region is at least a screen tall and the
-          // list flexes into the leftover.
-          ...((activeTab === 0 || activeTab === 3) && {
-            minHeight: "100vh",
-            display: "flex",
-            flexDirection: "column",
-          }),
-        }}
-      >
-      {loading && (
-        <Box sx={{ pt: isLargeScreen ? 4 : 16 }}>
-          {isLargeScreen && <Box sx={{ height: 48 }} />}
-          <LoadingSkeleton />
-        </Box>
-      )}
-
-      {!loading && error && (
-        <Container maxWidth="md" sx={{ pt: isLargeScreen ? 4 : 16 }}>
-          <Alert severity="error" onClose={() => setError(null)}>
-            {error}
-          </Alert>
-        </Container>
-      )}
-
-      {!isLargeScreen && !loading && !error && (
-        <Box sx={{ pt: 16, px: 2 }}>
-          <Tabs
-            value={activeTab}
-            onChange={(_e, v) => navigate(v)}
-            sx={{
-              mb: 1,
-              borderBottom: 1,
-              borderColor: "divider",
-              overflow: "visible",
-              "& .MuiTabs-scroller": { overflow: "visible !important" },
-              "& .MuiTab-root": { overflow: "visible" },
-            }}
-          >
-            <Tab
-              label={
-                <Badge badgeContent={parties.length} color="primary" sx={{ pr: parties.length ? 2.5 : 0 }}>
-                  Parties
-                </Badge>
-              }
-            />
-            <Tab
-              label={
-                <Badge badgeContent={packageCount} color="primary" sx={{ pr: packageCount ? 2.5 : 0 }}>
-                  Packages
-                </Badge>
-              }
-            />
-            <Tab label="Configuration" />
-            <Tab
-              label={
-                <Badge
-                  badgeContent={notificationCount}
-                  color={activeTab === 3 ? "primary" : "error"}
-                  sx={{ pr: notificationCount ? 2.5 : 0 }}
-                >
-                  Approvals
-                </Badge>
-              }
-            />
-          </Tabs>
-        </Box>
-      )}
-
       <Container
         maxWidth="md"
         sx={{
@@ -1327,176 +534,39 @@ const App = () => {
 
       {/* Tab 0: Parties — edge-to-edge */}
       {activeTab === 0 && !loading && !error && (
-        // Passes the region's leftover height down to the list, so its footer
-        // bar can sit at the bottom of the view on a short page.
-        <Box
-          sx={{
-            pt: isLargeScreen ? 4 : 0,
-            flex: 1,
-            display: "flex",
-            flexDirection: "column",
-          }}
-        >
-          {selectedParty ? (
-            <PartyDetail
-              party={selectedParty}
-              onBack={backToList}
-              onRefresh={() => refreshParties(true)}
-              onNavigateToNotifications={goToNotifications}
-              selfParticipantId={nodeConfig?.node.participant_id}
-              authStatus={authStatuses.find(
-                (a) => a.dec_party_id === selectedPartyId,
-              )}
-              onAuthRefresh={refreshAuthStatus}
-              operatorParty={operatorParty}
-              network={nodeConfig?.canton.network}
-              onCheckDars={() => navigate(1, selectedPartyId)}
-              onOpenPeerConfig={(participantId) => navigate(2, participantId)}
-              onShowSharedParties={showSharedParties}
-            />
-          ) : selectedFormerParty ? (
-            <FormerPartyDetail
-              party={selectedFormerParty}
-              onBack={backToList}
-              onChanged={() => void reloadFormerParties()}
-              onPurgeStarted={() => markPurging(selectedFormerParty.party_id)}
-            />
-          ) : (
-            <>
-              {isLargeScreen ? (
-                <Box sx={{ height: 48 }} />
-              ) : (
-                <Box sx={{ mt: 2, mb: 2, px: 2 }}>
-                  <Box
-                    sx={{
-                      display: "flex",
-                      alignItems: "flex-start",
-                      gap: 1,
-                    }}
-                  >
-                    <TextField
-                      size="small"
-                      placeholder="Filter by full prefix (e.g. cbtc-network)"
-                      value={partyFilter}
-                      onChange={(e) => setPartyFilter(e.target.value)}
-                      onKeyDown={(e) => {
-                        if (e.key === "Enter") {
-                          refreshParties(true);
-                        }
-                      }}
-                      disabled={refreshingParties}
-                      slotProps={{
-                        input: {
-                          startAdornment: (
-                            <InputAdornment position="start">
-                              <FilterListIcon fontSize="small" color="action" />
-                            </InputAdornment>
-                          ),
-                        },
-                      }}
-                      sx={{ width: 300 }}
-                    />
-                    <Tooltip
-                      title={
-                        showHidden
-                          ? `Hide ${hiddenCount} hidden ${hiddenCount === 1 ? "party" : "parties"}`
-                          : hiddenCount > 0
-                            ? `Show ${hiddenCount} hidden ${hiddenCount === 1 ? "party" : "parties"}`
-                            : "No hidden parties"
-                      }
-                    >
-                      <span>
-                        <IconButton
-                          onClick={() => setShowHidden((v) => !v)}
-                          disabled={hiddenCount === 0 && !showHidden}
-                          color={showHidden ? "primary" : "default"}
-                          sx={{ mt: "1px" }}
-                        >
-                          {showHidden ? <VisibilityIcon /> : <VisibilityOffIcon />}
-                        </IconButton>
-                      </span>
-                    </Tooltip>
-                    <IconButton
-                      onClick={() => refreshParties(true)}
-                      disabled={refreshingParties}
-                      color="primary"
-                      sx={{ mt: "1px" }}
-                    >
-                      <SearchIcon />
-                    </IconButton>
-                  </Box>
-                  {refreshingParties && (
-                    <LinearProgress sx={{ mt: 1, borderRadius: 1 }} />
-                  )}
-                </Box>
-              )}
-
-              <Tabs
-                value={partiesView}
-                onChange={(_e, v) => setPartiesView(v)}
-                sx={{ ...columnSx, mb: 1 }}
-              >
-                <Tab value="decentralized" label="Decentralized Parties" />
-                <Tab value="external" label="External Parties" />
-              </Tabs>
-
-              {partiesView === "decentralized" && sharedWith && (
-                <Box sx={{ ...columnSx, mb: 1 }}>
-                  <Tooltip title={sharedWith} describeChild>
-                    <Chip
-                      size="small"
-                      label={`Shared with ${participantName(sharedWith, networkConfig?.peers)}`}
-                      onDelete={() => {
-                        // `navigate` keeps the filter for a prefix slug.
-                        setSharedWith(null);
-                        navigate(0, partyFilter || null);
-                      }}
-                      data-testid="shared-scope-chip"
-                    />
-                  </Tooltip>
-                </Box>
-              )}
-
-              {partiesView === "decentralized" ? (
-                <PartyList
-                  parties={visibleParties}
-                  authStatuses={authStatuses}
-                  onSelectParty={(id) => {
-                    savedScrollY.current = window.scrollY;
-                    setSelectedPartyId(id);
-                    navigate(0, id, sharedWith);
-                    window.scrollTo(0, 0);
-                  }}
-                  isHidden={isHidden}
-                  onToggleHidden={toggleHidden}
-                  isFavorite={isFavorite}
-                  onToggleFavorite={toggleFavorite}
-                  formerParties={visibleFormerParties}
-                />
-              ) : (
-                <ExternalPartyList {...externalParties} />
-              )}
-            </>
-          )}
-
-          {ADMIN_ACCESS && !showingDetail && partiesView === "decentralized" && (
-            <Tooltip title="Create Party" arrow>
-              <Fab
-                color="primary"
-                aria-label="Create Party"
-                onClick={() => setOnboardingDialogOpen(true)}
-                sx={{
-                  position: "fixed",
-                  bottom: 24,
-                  right: 24,
-                  zIndex: 1101,
-                }}
-              >
-                <AddIcon />
-              </Fab>
-            </Tooltip>
-          )}
-        </Box>
+        <PartiesTab
+          filter={filterControls}
+          isLargeScreen={isLargeScreen}
+          selectedParty={selectedParty}
+          selectedFormerParty={selectedFormerParty}
+          selectedPartyId={selectedPartyId}
+          setSelectedPartyId={setSelectedPartyId}
+          showingDetail={showingDetail}
+          backToList={backToList}
+          navigate={navigate}
+          goToNotifications={goToNotifications}
+          showSharedParties={showSharedParties}
+          reloadFormerParties={reloadFormerParties}
+          markPurging={markPurging}
+          nodeConfig={nodeConfig}
+          networkConfig={networkConfig}
+          authStatuses={authStatuses}
+          refreshAuthStatus={refreshAuthStatus}
+          operatorParty={operatorParty}
+          partiesView={partiesView}
+          setPartiesView={setPartiesView}
+          sharedWith={sharedWith}
+          setSharedWith={setSharedWith}
+          visibleParties={visibleParties}
+          visibleFormerParties={visibleFormerParties}
+          externalParties={externalParties}
+          isHidden={isHidden}
+          toggleHidden={toggleHidden}
+          isFavorite={isFavorite}
+          toggleFavorite={toggleFavorite}
+          savedScrollYRef={savedScrollY}
+          setOnboardingDialogOpen={setOnboardingDialogOpen}
+        />
       )}
 
       {/* Tab 1: Package Management — edge-to-edge */}
@@ -1522,41 +592,19 @@ const App = () => {
 
       {/* Tab 2: Configuration — edge-to-edge */}
       {activeTab === 2 && !loading && !error && (
-        <Box sx={{ pt: isLargeScreen ? 4 : 0 }}>
-          {nodeConfig ? (
-            <>
-              <Box sx={{ px: "var(--content-pad)", py: 2 }}>
-                <NodeHealthCard
-                  config={nodeConfig}
-                  health={nodeHealth}
-                  selfLatency={selfLatency}
-                />
-              </Box>
-              <Divider />
-              {networkConfig ? (
-                <NetworkConfigAccordion
-                  config={networkConfig}
-                  nodeConfig={nodeConfig ?? undefined}
-                  keyStatus={keyStatus ?? undefined}
-                  participantStatuses={participantStatuses}
-                  selfWireVersion={selfWireVersion}
-                  selfLatencyMs={selfLatency.ms}
-                  onSave={savePeers}
-                  focusParticipantId={configPeerId}
-                  onShowSharedParties={showSharedParties}
-                />
-              ) : (
-                <Box sx={{ p: 3 }}>
-                  <ConfigTabSkeleton />
-                </Box>
-              )}
-            </>
-          ) : (
-            <Box sx={{ p: 3 }}>
-              <ConfigTabSkeleton />
-            </Box>
-          )}
-        </Box>
+        <ConfigurationTab
+          isLargeScreen={isLargeScreen}
+          nodeConfig={nodeConfig}
+          nodeHealth={nodeHealth}
+          selfLatency={selfLatency}
+          networkConfig={networkConfig}
+          keyStatus={keyStatus}
+          participantStatuses={participantStatuses}
+          selfWireVersion={selfWireVersion}
+          savePeers={savePeers}
+          configPeerId={configPeerId}
+          showSharedParties={showSharedParties}
+        />
       )}
 
       {/* Tab 3: Notifications */}
@@ -1601,8 +649,7 @@ const App = () => {
           />
         </Box>
       )}
-      </Box>
-    </Box>
+    </AppFrame>
   );
 };
 

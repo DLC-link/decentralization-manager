@@ -24,9 +24,11 @@ pub mod onboarding_flag;
 pub mod pipe;
 pub mod relay;
 
+use std::time::{SystemTime, UNIX_EPOCH};
+
 use sqlx::SqlitePool;
 
-use crate::{canton_id::CantonId, error::Result, workflow::storage::WorkflowStorage};
+use crate::{canton_id::CantonId, error::Result, utils, workflow::storage::WorkflowStorage};
 
 pub use acs::{
     TransferSource, check_vetted_packages_held, collect_party_package_ids, import_party_acs,
@@ -38,8 +40,8 @@ pub use acs::{
 /// Progress timestamps only, so a clock that misbehaves costs a wrong elapsed
 /// readout and nothing else.
 pub fn now_ms() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
         .map(|d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX))
         .unwrap_or(0)
 }
@@ -167,10 +169,7 @@ impl ReplicationTarget {
             }
             ArtifactStore::Tenant => {
                 let scope = scope.unwrap_or_default();
-                let now = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|d| d.as_secs() as i64)
-                    .unwrap_or_default();
+                let now = utils::now_secs();
                 let result = sqlx::query(
                     "INSERT INTO tenant_replication_artifacts \
                      (instance_name, artifact_kind, attestor_id, payload, created_at) \
@@ -207,10 +206,7 @@ impl ReplicationTarget {
             }
             ArtifactStore::Tenant => {
                 let scope = scope.unwrap_or_default();
-                let now = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|d| d.as_secs() as i64)
-                    .unwrap_or_default();
+                let now = utils::now_secs();
                 sqlx::query(
                     "INSERT INTO tenant_replication_artifacts \
                      (instance_name, artifact_kind, attestor_id, payload, created_at) \
@@ -254,9 +250,8 @@ impl ReplicationTarget {
 mod tests {
     use sqlx::SqlitePool;
 
-    use crate::db::MIGRATOR;
-
     use super::*;
+    use crate::db::MIGRATOR;
 
     const ARTIFACTS: ReplicationArtifacts = ReplicationArtifacts {
         export_offset: "test_export_offset",
@@ -265,7 +260,7 @@ mod tests {
     };
 
     fn canton_id(prefix: &str, tag: u8) -> CantonId {
-        let namespace = format!("1220{}", format!("{tag:02x}").repeat(32));
+        let namespace = format!("1220{digest}", digest = format!("{tag:02x}").repeat(32));
         match CantonId::parse(&format!("{prefix}::{namespace}")) {
             Ok(id) => id,
             Err(e) => panic!("test id must parse: {e}"),

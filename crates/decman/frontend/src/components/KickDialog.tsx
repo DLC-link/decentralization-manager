@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect } from "react";
 import {
   Dialog,
   DialogTitle,
@@ -14,6 +14,7 @@ import {
 import { API_BASE } from "../constants";
 import { authenticatedFetch } from "../api";
 import { useSnackbar } from "../contexts";
+import { useWorkflowStatus } from "../hooks/useWorkflowStatus";
 import { fieldHelpAdornment } from "./FieldHelp";
 import { kickThresholdBound } from "../kickThreshold";
 import type {
@@ -123,42 +124,15 @@ export const KickDialog = ({
     }
   }, [open]);
 
-  const pollStatus = useCallback(async () => {
-    try {
-      const res = await authenticatedFetch(`${API_BASE}/kick/status`);
-      if (res.ok) {
-        const data: KickStatusResponse = await res.json();
-        if (data.status === "cancelled") {
-          showSnackbar("Kick workflow cancelled");
-          onClose();
-          return;
-        }
-        setStatus(data);
-        if (data.status !== "inprogress") {
-          setLoading(false);
-          if (data.status === "completed") {
-            onKickComplete();
-          }
-        }
-      }
-    } catch {
-      // Ignore polling errors
-    }
-  }, [onKickComplete, onClose, showSnackbar]);
-
-  useEffect(() => {
-    let interval: number | undefined;
-
-    if (status?.status === "inprogress") {
-      // Poll immediately, then every 2 seconds
-      pollStatus();
-      interval = window.setInterval(pollStatus, 2000);
-    }
-
-    return () => {
-      if (interval) clearInterval(interval);
-    };
-  }, [status?.status, pollStatus]);
+  useWorkflowStatus({
+    path: `${API_BASE}/kick/status`,
+    cancelledMessage: "Kick workflow cancelled",
+    status,
+    setStatus,
+    setLoading,
+    onComplete: onKickComplete,
+    onClose,
+  });
 
   const handleKick = async () => {
     setLoading(true);

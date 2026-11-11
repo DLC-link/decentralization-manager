@@ -1,23 +1,29 @@
 //! `governance-utility-credential` proposal payloads.
 
+use std::collections::HashSet;
+
 use canton_common::decimal::DamlDecimal;
 use canton_proto_rs::com::daml::ledger::api::v2::Value;
-use common::api::Claim;
-use common::canton_id::CantonId;
+use common::{api::Claim, canton_id::CantonId};
 
-use crate::catalog::types::{
-    AppTransferContextInput, BillingParams, serialize_app_transfer_context,
-    serialize_billing_params,
+use crate::{
+    catalog::types::{
+        AppTransferContextInput, BillingParams, serialize_app_transfer_context,
+        serialize_billing_params,
+    },
+    error::Error,
+    framework::{
+        DamlProtoEncode, PackageResolver, TemplateId, TemplateInfo, Validate, ValidationCtx,
+        encode::{
+            field, make_contract_id, make_contract_id_list, make_list, make_optional_numeric,
+            make_party, make_record, make_text, serialize_claim,
+        },
+        validate::validate_positive_amount,
+    },
 };
-use crate::error::Error;
-use crate::framework::encode::{
-    field, make_contract_id, make_list, make_optional_numeric, make_party, make_record, make_text,
-    serialize_claim,
-};
-use crate::framework::validate::validate_positive_amount;
-use crate::framework::{
-    DamlProtoEncode, PackageResolver, TemplateId, TemplateInfo, Validate, ValidationCtx,
-};
+
+/// The package key of every payload in this module.
+const PACKAGE: &str = "governance_utility_credential";
 
 /// Offer a free credential to a holder via the governance party's
 /// `UserService`. Wraps `UserService_OfferFreeCredential` from the
@@ -40,10 +46,7 @@ impl OfferFreeCredential {
 
 impl TemplateInfo for OfferFreeCredential {
     fn template_id(&self, pkgs: &dyn PackageResolver) -> Result<TemplateId, Error> {
-        let pkg = pkgs
-            .package_ref("governance_utility_credential")
-            .ok_or(Error::PackageNotConfigured("governance_utility_credential"))?;
-        Ok(TemplateId::new(pkg, Self::MODULE, Self::ENTITY))
+        TemplateId::for_package(pkgs, PACKAGE, Self::MODULE, Self::ENTITY)
     }
 }
 
@@ -89,10 +92,7 @@ impl OfferPaidCredential {
 
 impl TemplateInfo for OfferPaidCredential {
     fn template_id(&self, pkgs: &dyn PackageResolver) -> Result<TemplateId, Error> {
-        let pkg = pkgs
-            .package_ref("governance_utility_credential")
-            .ok_or(Error::PackageNotConfigured("governance_utility_credential"))?;
-        Ok(TemplateId::new(pkg, Self::MODULE, Self::ENTITY))
+        TemplateId::for_package(pkgs, PACKAGE, Self::MODULE, Self::ENTITY)
     }
 }
 
@@ -172,10 +172,7 @@ impl AcceptFreeCredential {
 
 impl TemplateInfo for AcceptFreeCredential {
     fn template_id(&self, pkgs: &dyn PackageResolver) -> Result<TemplateId, Error> {
-        let pkg = pkgs
-            .package_ref("governance_utility_credential")
-            .ok_or(Error::PackageNotConfigured("governance_utility_credential"))?;
-        Ok(TemplateId::new(pkg, Self::MODULE, Self::ENTITY))
+        TemplateId::for_package(pkgs, PACKAGE, Self::MODULE, Self::ENTITY)
     }
 }
 
@@ -221,10 +218,7 @@ impl AcceptPaidCredential {
 
 impl TemplateInfo for AcceptPaidCredential {
     fn template_id(&self, pkgs: &dyn PackageResolver) -> Result<TemplateId, Error> {
-        let pkg = pkgs
-            .package_ref("governance_utility_credential")
-            .ok_or(Error::PackageNotConfigured("governance_utility_credential"))?;
-        Ok(TemplateId::new(pkg, Self::MODULE, Self::ENTITY))
+        TemplateId::for_package(pkgs, PACKAGE, Self::MODULE, Self::ENTITY)
     }
 }
 
@@ -238,12 +232,7 @@ impl DamlProtoEncode for AcceptPaidCredential {
             ),
             field(
                 "depositAmulets",
-                make_list(
-                    self.deposit_amulet_cids
-                        .iter()
-                        .map(|cid| make_contract_id(cid))
-                        .collect(),
-                ),
+                make_contract_id_list(&self.deposit_amulet_cids),
             ),
             field(
                 "appTransferContext",
@@ -270,7 +259,7 @@ impl Validate for AcceptPaidCredential {
                 "deposit_amulet_cids must name at least one Amulet".to_string(),
             ));
         }
-        let mut seen = std::collections::HashSet::new();
+        let mut seen = HashSet::new();
         for cid in &self.deposit_amulet_cids {
             if !seen.insert(cid) {
                 return Err(Error::Validation(format!(
@@ -285,6 +274,7 @@ impl Validate for AcceptPaidCredential {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::catalog::proposals::SNAPSHOT_PATH;
 
     /// Any valid `CantonId` — the exact value is irrelevant to these
     /// encode-shape snapshots.
@@ -487,7 +477,7 @@ mod tests {
     #[test]
     fn encode_snapshots() {
         let mut settings = insta::Settings::clone_current();
-        settings.set_snapshot_path(crate::catalog::proposals::SNAPSHOT_PATH);
+        settings.set_snapshot_path(SNAPSHOT_PATH);
         let _guard = settings.bind_to_scope();
 
         insta::assert_debug_snapshot!(

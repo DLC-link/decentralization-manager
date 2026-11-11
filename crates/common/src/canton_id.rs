@@ -1,7 +1,12 @@
-use std::{fmt, marker::PhantomData};
+use std::{fmt, marker::PhantomData, str::FromStr};
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, de};
 use serde_big_array::BigArray;
+#[cfg(feature = "openapi")]
+use utoipa::openapi::{
+    ObjectBuilder, RefOr,
+    schema::{Schema, Type},
+};
 
 use crate::{error::Result, fingerprint::MULTIHASH_SHA256_PREFIX};
 
@@ -23,6 +28,11 @@ impl Namespace {
     }
 
     /// Parse a Namespace from a hex string
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when `hex_str` is not valid hex, or when it does not
+    /// decode to exactly [`NAMESPACE_LENGTH`] bytes.
     pub fn from_hex(hex_str: &str) -> Result<Self> {
         let bytes = hex::decode(hex_str)?;
         if bytes.len() != NAMESPACE_LENGTH {
@@ -109,7 +119,7 @@ impl TryFrom<String> for Fingerprint {
     }
 }
 
-impl std::str::FromStr for Fingerprint {
+impl FromStr for Fingerprint {
     type Err = anyhow::Error;
 
     fn from_str(s: &str) -> Result<Self> {
@@ -157,7 +167,7 @@ pub struct CantonId {
 }
 
 impl serde::Serialize for CantonId {
-    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: serde::Serializer,
     {
@@ -166,12 +176,12 @@ impl serde::Serialize for CantonId {
 }
 
 impl<'de> serde::Deserialize<'de> for CantonId {
-    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: serde::Deserializer<'de>,
     {
         let s = String::deserialize(deserializer)?;
-        Self::parse(&s).map_err(serde::de::Error::custom)
+        Self::parse(&s).map_err(de::Error::custom)
     }
 }
 
@@ -204,6 +214,11 @@ impl CantonId {
     ///
     /// Expected format: `prefix::hex_encoded_namespace`
     /// Example: `participant::1220c4010d6883f367...`
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when `s` does not split on `::` into exactly two parts,
+    /// or when the second part is not a valid [`Namespace`] hex string.
     pub fn parse(s: &str) -> Result<Self> {
         let parts: Vec<&str> = s.split("::").collect();
         if parts.len() != 2 {
@@ -221,6 +236,11 @@ impl CantonId {
     }
 
     /// Parse a Canton ID from file content (strips "PAR::" prefix if present)
+    ///
+    /// # Errors
+    ///
+    /// Returns the errors of [`Self::parse`] for the trimmed content without
+    /// its `PAR::` prefix.
     pub fn parse_from_file(content: &str) -> Result<Self> {
         let trimmed = content.trim();
         let id_str = match trimmed.strip_prefix("PAR::") {
@@ -249,9 +269,9 @@ impl fmt::Display for CantonId {
 
 #[cfg(feature = "openapi")]
 impl utoipa::PartialSchema for CantonId {
-    fn schema() -> utoipa::openapi::RefOr<utoipa::openapi::schema::Schema> {
-        utoipa::openapi::ObjectBuilder::new()
-            .schema_type(utoipa::openapi::schema::Type::String)
+    fn schema() -> RefOr<Schema> {
+        ObjectBuilder::new()
+            .schema_type(Type::String)
             .description(Some("Canton ID in format 'prefix::hex_namespace'"))
             .examples([Some(serde_json::json!(
                 "participant::1220c4010d6883f367c7f45d55b2449501620130f9b21e96379f17dea455ac7a5892"
@@ -263,7 +283,7 @@ impl utoipa::PartialSchema for CantonId {
 #[cfg(feature = "openapi")]
 impl utoipa::ToSchema for CantonId {}
 
-impl std::str::FromStr for CantonId {
+impl FromStr for CantonId {
     type Err = anyhow::Error;
 
     fn from_str(s: &str) -> Result<Self> {
@@ -275,6 +295,29 @@ impl std::str::FromStr for CantonId {
 /// the identifier part of a Canton party id (`<prefix>::<namespace>`), which
 /// Canton caps at 185 characters (`LfPartyId` / `String185`); we keep a margin.
 pub const MAX_PARTY_ID_PREFIX_LEN: usize = 180;
+
+/// Why [`validate_party_id_prefix`] refused a prefix. Each message names
+/// the rule the prefix breaks.
+#[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
+pub enum PartyPrefixError {
+    /// The prefix is empty.
+    #[error("Party prefix must not be empty")]
+    Empty,
+    /// The prefix has more than [`MAX_PARTY_ID_PREFIX_LEN`] characters. The
+    /// value is its character count.
+    #[error("Party prefix must be at most {MAX_PARTY_ID_PREFIX_LEN} characters (got {0})")]
+    TooLong(usize),
+    /// The first character is not an ASCII letter.
+    #[error("Party prefix must start with a letter (a-z, A-Z)")]
+    NoLeadingLetter,
+    /// The prefix holds a character outside ASCII letters, digits, `-` and
+    /// `_`. The value is the first such character.
+    #[error(
+        "Party prefix contains invalid character {0:?}; only ASCII letters, \
+         digits, '-' and '_' are allowed"
+    )]
+    InvalidChar(char),
+}
 
 /// Validate a decentralized-party prefix before it is used to build a Canton
 /// party id (`<prefix>::<namespace>`).
@@ -295,17 +338,15 @@ pub const MAX_PARTY_ID_PREFIX_LEN: usize = 180;
 ///
 /// # Errors
 ///
-/// Returns a human-readable message describing the first rule violated.
-pub fn validate_party_id_prefix(prefix: &str) -> Result<(), String> {
+/// Returns a [`PartyPrefixError`] for the first rule the prefix breaks.
+pub fn validate_party_id_prefix(prefix: &str) -> Result<(), PartyPrefixError> {
     if prefix.is_empty() {
-        return Err("Party prefix must not be empty".to_string());
+        return Err(PartyPrefixError::Empty);
     }
 
     let len = prefix.chars().count();
     if len > MAX_PARTY_ID_PREFIX_LEN {
-        return Err(format!(
-            "Party prefix must be at most {MAX_PARTY_ID_PREFIX_LEN} characters (got {len})"
-        ));
+        return Err(PartyPrefixError::TooLong(len));
     }
 
     if !prefix
@@ -313,17 +354,14 @@ pub fn validate_party_id_prefix(prefix: &str) -> Result<(), String> {
         .next()
         .is_some_and(|c| c.is_ascii_alphabetic())
     {
-        return Err("Party prefix must start with a letter (a-z, A-Z)".to_string());
+        return Err(PartyPrefixError::NoLeadingLetter);
     }
 
     if let Some(bad) = prefix
         .chars()
         .find(|c| !(c.is_ascii_alphanumeric() || *c == '-' || *c == '_'))
     {
-        return Err(format!(
-            "Party prefix contains invalid character {bad:?}; only ASCII letters, \
-             digits, '-' and '_' are allowed"
-        ));
+        return Err(PartyPrefixError::InvalidChar(bad));
     }
 
     Ok(())
@@ -431,6 +469,46 @@ mod tests {
                 "expected {bad:?} to be rejected"
             );
         }
+    }
+
+    /// The text of the error `validate_party_id_prefix` gives `prefix`.
+    fn prefix_error(prefix: &str) -> Option<String> {
+        validate_party_id_prefix(prefix)
+            .err()
+            .map(|e| e.to_string())
+    }
+
+    /// The server puts these messages into its 400 bodies, so each must keep
+    /// its exact text.
+    #[test]
+    fn party_prefix_errors_keep_their_messages() {
+        assert_eq!(
+            prefix_error("").as_deref(),
+            Some("Party prefix must not be empty")
+        );
+        assert_eq!(
+            prefix_error(&"a".repeat(MAX_PARTY_ID_PREFIX_LEN + 1)).as_deref(),
+            Some("Party prefix must be at most 180 characters (got 181)")
+        );
+        assert_eq!(
+            prefix_error("1abc").as_deref(),
+            Some("Party prefix must start with a letter (a-z, A-Z)")
+        );
+        assert_eq!(
+            prefix_error("a.b").as_deref(),
+            Some(
+                "Party prefix contains invalid character '.'; only ASCII letters, digits, \
+                 '-' and '_' are allowed"
+            )
+        );
+        assert_eq!(
+            prefix_error("caf\u{e9}").as_deref(),
+            Some(
+                "Party prefix contains invalid character '\u{e9}'; only ASCII letters, \
+                 digits, '-' and '_' are allowed"
+            )
+        );
+        assert_eq!(prefix_error("a-b_1"), None);
     }
 
     #[test]

@@ -37,9 +37,10 @@ pub fn fingerprint_from_public_key(public_key: &[u8]) -> Fingerprint {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::error::Result;
 
     #[test]
-    fn fingerprint_has_multihash_shape() -> crate::error::Result {
+    fn fingerprint_has_multihash_shape() -> Result {
         let fp = fingerprint_from_public_key(&[1u8; 32]);
         assert_eq!(fp.as_str().parse::<Fingerprint>()?, fp);
         Ok(())

@@ -27,28 +27,30 @@ pub enum GovernanceLifecycleEvent {
 /// Map an exercised choice name onto its lifecycle event. Returns `None`
 /// for a choice outside the governance protocol.
 pub fn classify_choice(choice: &str) -> Option<GovernanceLifecycleEvent> {
-    use GovernanceLifecycleEvent::*;
     Some(match choice {
-        "GovernanceRules_ConfirmAction" | "GovernanceRules_ConfirmGovernanceAction" => Confirmed,
+        "GovernanceRules_ConfirmAction" | "GovernanceRules_ConfirmGovernanceAction" => {
+            GovernanceLifecycleEvent::Confirmed
+        }
         "GovernanceRules_ExecuteConfirmedAction"
         | "GovernanceRules_ExecuteGovernanceAction"
-        | "GovernableAction_Execute" => Executed,
+        | "GovernableAction_Execute" => GovernanceLifecycleEvent::Executed,
         "GovernanceRules_ExpireConfirmation"
         | "GovernanceRules_ExpireGovernanceSelfConfirmation"
         | "GovernanceConfirmation_Expire"
-        | "GovernanceSelfConfirmation_Expire" => Expired,
+        | "GovernanceSelfConfirmation_Expire" => GovernanceLifecycleEvent::Expired,
         "GovernanceConfirmation_Cancel" | "GovernanceSelfConfirmation_Cancel" => {
-            ConfirmationCancelled
+            GovernanceLifecycleEvent::ConfirmationCancelled
         }
-        "GovernableAction_ProposerCancel" | "GovernableAction_Cancel" => ProposalCancelled,
+        "GovernableAction_ProposerCancel" | "GovernableAction_Cancel" => {
+            GovernanceLifecycleEvent::ProposalCancelled
+        }
         _ => return None,
     })
 }
 
 #[cfg(test)]
 mod tests {
-    use super::GovernanceLifecycleEvent::*;
-    use super::*;
+    use super::{GovernanceLifecycleEvent::*, *};
 
     /// Every choice name the builders in `catalog::commands` exercise, with
     /// its expected event. The builder table test in `commands.rs` pins the

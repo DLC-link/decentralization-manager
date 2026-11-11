@@ -1,10 +1,13 @@
-use canton_proto_rs::com::daml::ledger::api::v2::{
-    Command, CreateCommand, GenMap, Identifier, Optional, Record, RecordField, Value, command,
-    gen_map, interactive::PrepareSubmissionRequest, value,
+use canton_proto_rs::com::{
+    daml::ledger::api::v2::{
+        Command, CreateCommand, GenMap, Identifier, Optional, Record, RecordField, Value, command,
+        gen_map, interactive::PrepareSubmissionRequest, value,
+    },
+    digitalasset::canton::admin::participant::v30::{
+        ListPackagesRequest, PackageDescription, package_service_client::PackageServiceClient,
+    },
 };
-use canton_proto_rs::com::digitalasset::canton::admin::participant::v30::{
-    ListPackagesRequest, PackageDescription, package_service_client::PackageServiceClient,
-};
+use common::api::ContractDeploymentIntent;
 use decman_lib::canton_hash;
 use sqlx::SqlitePool;
 
@@ -13,6 +16,7 @@ use crate::{
     config::NodeConfig,
     db::schema::SchemaRead,
     error::Result,
+    server::compare_versions,
     utils,
     workflow::{
         contracts::{CommittedDeployment, ContractDefinition, ContractsConfig, FieldDefinition},
@@ -22,6 +26,12 @@ use crate::{
 
 /// Resolve package-name selectors once, before an invitation commits to a create.
 /// Persisting the result prevents later package uploads changing the approved deployment.
+///
+/// # Errors
+/// Returns an error if a contract uses a `#name` selector and `ListPackages`
+/// fails. Returns an error if a package ID is not 64 hex characters, or if no
+/// installed package has the selected name. Returns an error if the newest
+/// version of that name has more than one package ID.
 pub async fn resolve_package_ids(
     config: &NodeConfig,
     contracts: &mut [ContractDefinition],
@@ -53,7 +63,7 @@ fn resolve_package_id(reference: &str, packages: &[PackageDescription]) -> Resul
         return Ok(reference.to_ascii_lowercase());
     };
     let mut matches: Vec<_> = packages.iter().filter(|p| p.name == name).collect();
-    matches.sort_by(|a, b| crate::server::compare_versions(&b.version, &a.version));
+    matches.sort_by(|a, b| compare_versions(&b.version, &a.version));
     let selected = matches
         .first()
         .ok_or_else(|| anyhow::anyhow!("Package {reference} is not installed"))?;
@@ -86,6 +96,13 @@ fn resolve_package_id(reference: &str, packages: &[PackageDescription]) -> Resul
 /// * `contracts_config` - Contracts workflow configuration with party ID
 /// * `token` - Authentication token for Ledger API
 /// * `user_id` - User ID for Ledger API operations
+///
+/// # Errors
+/// Returns an error if the run has no recorded deployment commitments, or if
+/// the party is missing from the cache. Returns an error if too few participant
+/// parties are given, or if the party's threshold changed since the run
+/// started. Returns an error if the Ledger API client cannot be created, if
+/// `PrepareSubmission` fails, or if a prepared submission cannot be stored.
 pub async fn prepare_submissions(
     config: &NodeConfig,
     db: &SqlitePool,
@@ -162,9 +179,7 @@ pub async fn prepare_submissions(
             .into_inner();
 
         // Persist as `varint(len)||proto` so reads via
-        // `utils::read_first_message_from_bytes` round-trip cleanly. This is
-        // the exact byte shape `utils::write_messages_to_file(&[m], path)`
-        // would have written for a single message.
+        // `utils::read_first_message_from_bytes` round-trip cleanly.
         let payload = utils::encode_length_prefixed_message(&prepared_submission);
         let ordinal = format!("{idx:04}");
         tracing::debug!(
@@ -281,7 +296,7 @@ pub async fn commit_deployment(
                         .collect::<Result<Vec<_>>>()?,
                 })),
             };
-            Ok(common::api::ContractDeploymentIntent {
+            Ok(ContractDeploymentIntent {
                 package_id: contract.package_id.clone(),
                 module_name: contract.module_name.clone(),
                 entity_name: contract.entity_name.clone(),

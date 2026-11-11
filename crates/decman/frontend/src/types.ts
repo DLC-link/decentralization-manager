@@ -15,10 +15,8 @@ export * from "./types.generated";
 import type {
   AuthConfigResponse,
   ContractDefinition as GeneratedContractDefinition,
-  DisclosedContractInput,
   HoldingInfo,
   NodeConfigResponse,
-  WorkflowProgress,
   WorkflowStatusResponse,
 } from "./types.generated";
 
@@ -32,14 +30,10 @@ export interface ContractDefinition extends GeneratedContractDefinition {
 // Name-bridge aliases: components import these names; the generator emits the
 // right-hand names (the Rust type names).
 export type AuthConfig = AuthConfigResponse;
-export type DisclosedContract = DisclosedContractInput;
 export type Holding = HoldingInfo;
 export type NodeConfig = NodeConfigResponse;
-export type KickStatus = WorkflowProgress;
-export type OnboardingStatus = WorkflowProgress;
 export type KickStatusResponse = WorkflowStatusResponse;
 export type OnboardingStatusResponse = WorkflowStatusResponse;
 export type ContractsStatusResponse = WorkflowStatusResponse;
 export type DarsStatusResponse = WorkflowStatusResponse;
-export type AddPartyStatusResponse = WorkflowStatusResponse;
 export type ChangeThresholdStatusResponse = WorkflowStatusResponse;

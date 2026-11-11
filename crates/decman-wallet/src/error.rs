@@ -1,6 +1,10 @@
 //! Errors surfaced by the tenant, ledger and registry clients.
 
+use std::result;
+
 use thiserror::Error;
+
+use crate::text;
 
 /// Anything that can go wrong talking to a DecMan host's tenant API.
 ///
@@ -165,6 +169,12 @@ pub enum Error {
     )]
     InvalidContractId { contract_id: String },
 
+    /// The base64 seed given to
+    /// [`ExternalKeyPair::from_seed_b64`](crate::ExternalKeyPair::from_seed_b64)
+    /// cannot become a key. Nothing was sent anywhere.
+    #[error(transparent)]
+    InvalidSeed(SeedError),
+
     /// The signed execute left the wallet, but its answer did not arrive,
     /// could not be read, or had a status that leaves the outcome open. The
     /// participant may have committed the transaction. Check the ledger
@@ -199,13 +209,25 @@ pub enum Error {
     },
 }
 
+/// Why a base64 seed cannot become a key.
+#[derive(Debug, Error)]
+pub enum SeedError {
+    /// The text is not base64.
+    #[error("seed is not valid base64: {0}")]
+    NotBase64(#[source] base64::DecodeError),
+
+    /// The text decodes to a length other than 32 bytes.
+    #[error("seed must be 32 bytes, got {0}")]
+    WrongLength(usize),
+}
+
 /// Why the wallet refused to sign a prepared transaction.
 #[derive(Debug, Error)]
 pub enum Refusal {
     /// The wallet could not recompute the hash, so it cannot know what the
     /// hash commits to. An unknown hashing scheme lands here. The reason can
     /// quote the host's text, so the message bounds it.
-    #[error("its hash cannot be recomputed: {}", crate::text::bounded(.0))]
+    #[error("its hash cannot be recomputed: {}", text::bounded(.0))]
     Unverifiable(String),
 
     /// The hash that came with the transaction is not the transaction's hash.
@@ -222,7 +244,7 @@ pub enum Refusal {
 
     /// The root exercise differs from what the wallet asked for. The host
     /// chose `found`, so the message bounds it.
-    #[error("its {field} is {}, not {expected}", crate::text::bounded(.found))]
+    #[error("its {field} is {}, not {expected}", text::bounded(.found))]
     Mismatch {
         field: &'static str,
         expected: String,
@@ -249,13 +271,14 @@ impl Error {
             | Self::HostDisagreement { host, .. }
             | Self::TransactionRefused { host, .. } => host,
             // Not about any one host: a signing failure is local, a missing
-            // host set has nobody to name, and an empty wallet or a bad
-            // contract id is the wallet's own state.
+            // host set has nobody to name, and an empty wallet, a bad
+            // contract id or a bad seed is the wallet's own state.
             Self::NotEnoughHosts(_)
             | Self::Signing { .. }
             | Self::NoHosts { .. }
             | Self::NoHoldings { .. }
-            | Self::InvalidContractId { .. } => "",
+            | Self::InvalidContractId { .. }
+            | Self::InvalidSeed(_) => "",
         }
     }
 
@@ -265,4 +288,4 @@ impl Error {
     }
 }
 
-pub type Result<T> = std::result::Result<T, Error>;
+pub type Result<T> = result::Result<T, Error>;

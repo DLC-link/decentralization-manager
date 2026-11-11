@@ -3,7 +3,7 @@ use sqlx::SqlitePool;
 use crate::{
     config::NodeConfig,
     error::Result,
-    noise::client::NoiseClient,
+    noise::{MessageType, client::NoiseClient},
     workflow::storage::{WorkflowStorage, artifact_kinds},
 };
 
@@ -15,6 +15,12 @@ use crate::{
 /// what the previous file-based implementation read from
 /// `submission-signatures-{node_id}.bin`, so the coordinator's `execute_submissions`
 /// step decodes them unchanged.
+///
+/// # Errors
+///
+/// Returns an error if the `SUBMISSION_SIGNATURES` artefact cannot be read or
+/// is missing. Returns an error if the send fails or the coordinator does not
+/// answer with an Ack.
 pub async fn send_submission_signatures_to_coordinator(
     client: &NoiseClient,
     storage: &SqlitePool,
@@ -36,6 +42,6 @@ pub async fn send_submission_signatures_to_coordinator(
             )
         })?;
 
-    client.send_submission_signatures(data).await?;
+    client.send(MessageType::SubmissionSignatures, data).await?;
     Ok(())
 }

@@ -1,18 +1,27 @@
 use std::sync::Arc;
 
 use base64::{Engine, engine::general_purpose::STANDARD};
+use tokio::time::Duration;
 
+use super::{DarsConfig, DarsStep};
 use crate::{
     config::{NetworkConfig, NodeConfig},
     error::Result,
     noise::server::{ActiveWorkflow, NoiseServer},
     server::{WorkflowInstance, peer_status::LastSeen},
     utils,
-    workflow::contracts,
+    workflow::{CoordinatorSteps, StepFlow, contracts, run_coordinator, state::WorkflowState},
 };
 
-use super::{DarsConfig, DarsStep};
-
+/// Run the DARs workflow on this node as its coordinator: send the DARs to the
+/// invited peers, then upload them here.
+///
+/// # Errors
+///
+/// Returns an error if the Noise key file cannot be read, or if a DAR's base64
+/// data does not decode. Returns an error if the Admin API channel cannot be
+/// opened or `UploadDar` fails on this node. Returns an error if the peers the
+/// run waits on give up or go silent, or if the workflow task panics.
 pub async fn start_coordinator(
     node_config: NodeConfig,
     network_config: NetworkConfig,
@@ -41,46 +50,52 @@ pub async fn start_coordinator(
         last_seen,
     )
     .await?;
-    let server = Arc::new(server);
 
     tracing::info!("Noise server initialized, listening for connections");
 
-    let workflow_state = server.get_workflow_state();
-    let node_config_clone = node_config.clone();
-    let workflow_handle =
-        tokio::spawn(async move { run_workflow(workflow_state, node_config_clone, config).await });
-
-    crate::workflow::run_workflow_with_handler(
-        ActiveWorkflow::Dars(server),
-        instance,
-        workflow_handle,
-    )
-    .await
+    let steps = DarsSteps::start(server.get_workflow_state(), node_config.clone(), config);
+    run_coordinator(server, ActiveWorkflow::Dars, instance, steps).await
 }
 
-async fn run_workflow(
-    workflow_state: Arc<crate::workflow::state::WorkflowState<DarsStep>>,
+/// The DARs coordinator's work at each step.
+struct DarsSteps {
     node_config: NodeConfig,
     config: DarsConfig,
-) -> Result {
-    // Encode DAR files to send to peers with UploadDars command
-    let dar_payload = encode_dars_payload(&config)?;
-    workflow_state.set_command_payload(dar_payload).await;
+}
 
-    loop {
-        let current_step = workflow_state.current_step().await;
+impl DarsSteps {
+    /// Seed the first command with the encoded DARs.
+    async fn start(
+        workflow_state: Arc<WorkflowState<DarsStep>>,
+        node_config: NodeConfig,
+        config: DarsConfig,
+    ) -> Result<Self> {
+        // Encode DAR files to send to peers with UploadDars command
+        let dar_payload = encode_dars_payload(&config)?;
+        workflow_state.set_command_payload(dar_payload).await;
 
+        Ok(Self {
+            node_config,
+            config,
+        })
+    }
+}
+
+impl CoordinatorSteps<DarsStep> for DarsSteps {
+    async fn run_step(
+        &mut self,
+        _workflow_state: &WorkflowState<DarsStep>,
+        current_step: DarsStep,
+    ) -> Result<StepFlow> {
         match current_step {
-            DarsStep::WaitingForPeers => {
-                tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
-            }
+            DarsStep::WaitingForPeers => Ok(StepFlow::Idle),
             DarsStep::UploadDars => {
                 // While peers are downloading, this node ONLY serves chunks
                 // (handled by the Noise listener). The coordinator's own DAR
                 // upload is deferred to `Complete` so its CPU/IO doesn't
                 // contend with — and stall — the chunk transfer to peers on
                 // CPU-limited nodes.
-                tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+                Ok(StepFlow::Idle)
             }
             DarsStep::Complete => {
                 // All peers have finished downloading (the step only advances
@@ -89,15 +104,12 @@ async fn run_workflow(
                 // now. (Reached once, then we break — re-runs only on a resume,
                 // where re-uploading is idempotent.)
                 tracing::info!("Coordinator executing: Upload DARs");
-                contracts::upload_dars(&node_config, &config.dar_files).await?;
+                contracts::upload_dars(&self.node_config, &self.config.dar_files).await?;
                 tracing::info!("DARs upload workflow complete!");
-                tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
-                break;
+                Ok(StepFlow::Finish(Duration::from_secs(5)))
             }
         }
     }
-
-    Ok(())
 }
 
 /// Encode DAR files from config for transmission to peers
@@ -117,8 +129,8 @@ fn encode_dars_payload(config: &DarsConfig) -> Result<Vec<u8>> {
     for dar_file in &config.dar_files {
         let data = STANDARD.decode(&dar_file.data).map_err(|e| {
             anyhow::anyhow!(
-                "Failed to decode base64 DAR data for {}: {e}",
-                dar_file.filename
+                "Failed to decode base64 DAR data for {filename}: {e}",
+                filename = dar_file.filename
             )
         })?;
         dar_files.push((dar_file.filename.clone(), data));

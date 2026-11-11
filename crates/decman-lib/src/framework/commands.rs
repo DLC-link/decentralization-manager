@@ -7,9 +7,13 @@ use canton_proto_rs::com::daml::ledger::api::v2::{
 };
 use common::canton_id::CantonId;
 
-use crate::error::Error;
-use crate::framework::encode::{field, make_party};
-use crate::framework::{DamlProtoEncode, PackageResolver, TemplateInfo};
+use crate::{
+    error::Error,
+    framework::{
+        DamlProtoEncode, PackageResolver, TemplateInfo,
+        encode::{field, make_party},
+    },
+};
 
 /// The one `Commands` envelope every governance submission uses.
 /// `member` acts (`act_as`); the decentralized party reads (`read_as`).
@@ -42,6 +46,12 @@ pub fn commands_envelope(
 
 /// The create-arguments record for a proposal: the payload's own fields,
 /// with `governanceParty` and `proposer` injected first.
+///
+/// # Errors
+///
+/// Returns the payload's own encode error. Returns [`Error::Encode`] when
+/// the payload does not encode to a `Record`, or when that record already
+/// holds a `governanceParty` or `proposer` field.
 pub fn proposal_create_arguments(
     payload: &(impl DamlProtoEncode + ?Sized),
     governance_party: &CantonId,
@@ -82,6 +92,12 @@ pub fn proposal_create_arguments(
 /// `&dyn GrpcPayload` rather than re-matching 30 variants — can submit
 /// through the same entry point as a concrete struct. `dyn GrpcPayload`
 /// implements its supertraits automatically, so nothing else is needed.
+///
+/// # Errors
+///
+/// Returns [`Error::PackageNotConfigured`] when `packages` cannot resolve the
+/// payload's template. Otherwise returns the errors of
+/// [`proposal_create_arguments`].
 pub fn build_propose(
     payload: &(impl TemplateInfo + DamlProtoEncode + ?Sized),
     governance_party: &CantonId,
@@ -124,8 +140,10 @@ mod tests {
     use common::api::PackageConfig;
 
     use super::*;
-    use crate::framework::encode::{make_record, make_text};
-    use crate::framework::traits::tests::FakeProposal;
+    use crate::framework::{
+        encode::{make_record, make_text},
+        traits::tests::FakeProposal,
+    };
 
     fn cid(prefix: &str) -> CantonId {
         CantonId::parse(&format!(

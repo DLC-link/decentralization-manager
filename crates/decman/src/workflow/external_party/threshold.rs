@@ -11,18 +11,11 @@
 //! co-signs and the party's own key is the whole authorization. The host still
 //! validates before it submits, because it is submitting to its own store.
 
-use anyhow::Context;
 use canton_proto_rs::com::digitalasset::canton::{
     protocol::v30::{
-        PartyToParticipant, SignedTopologyTransaction, TopologyMapping,
-        enums::{ParticipantPermission, TopologyChangeOp},
-        topology_mapping,
+        PartyToParticipant, TopologyMapping, enums::ParticipantPermission, topology_mapping,
     },
-    topology::admin::v30::{
-        AddTransactionsRequest, AuthorizeRequest, GenerateTransactionsRequest, authorize_request,
-        generate_transactions_request,
-        topology_manager_write_service_client::TopologyManagerWriteServiceClient,
-    },
+    topology::admin::v30::{AuthorizeRequest, authorize_request, generate_transactions_request},
 };
 use serde::{Deserialize, Serialize};
 
@@ -36,9 +29,13 @@ use crate::{
                 read_party_to_participant,
             },
             keys::PartySignatureScheme,
+            topology_bundle::{
+                BundleSerial, check_bundle_envelope, check_signature_forms, decode_p2p_change,
+                generate_p2p_change, party_signed, read_pinned, serial_after, submit_signed,
+            },
         },
         topology,
-        topology_version::{self, ProposalFormat},
+        topology_version::ProposalFormat,
     },
 };
 
@@ -141,7 +138,7 @@ pub async fn authorize_threshold(
     party_id: &str,
     new_threshold: u32,
     base_serial: u32,
-) -> std::result::Result<u32, AddHostsError> {
+) -> Result<u32, AddHostsError> {
     let Some(current) = read_party_to_participant(config, party_id)
         .await
         .map_err(AddHostsError::Canton)?
@@ -238,74 +235,26 @@ pub async fn prepare_threshold(
     party_id: &str,
     new_threshold: u32,
     base_serial: u32,
-) -> std::result::Result<PreparedThreshold, AddHostsError> {
+) -> Result<PreparedThreshold, AddHostsError> {
     let synchronizer_id = utils::get_synchronizer_id(config)
         .await
         .map_err(AddHostsError::Canton)?;
 
-    let Some(current) = read_party_to_participant(config, party_id)
-        .await
-        .map_err(AddHostsError::Canton)?
-    else {
-        return Err(AddHostsError::UnknownParty {
-            party: party_id.to_string(),
-        });
-    };
-    if current.serial != base_serial {
-        return Err(AddHostsError::StaleSerial {
-            party: party_id.to_string(),
-            pinned: base_serial,
-            found: current.serial,
-        });
-    }
+    let current = read_pinned(config, party_id, base_serial).await?;
 
     let mapping =
         threshold_mapping(&current.mapping, new_threshold).map_err(AddHostsError::Invalid)?;
-    let next_serial = current.serial.checked_add(1).ok_or_else(|| {
-        AddHostsError::Invalid(anyhow::anyhow!(
-            "{party_id} is at serial {s}, which cannot be advanced",
-            s = current.serial
-        ))
-    })?;
-
-    let mut client = TopologyManagerWriteServiceClient::new(
-        config
-            .admin_channel()
-            .await
-            .map_err(AddHostsError::Canton)?,
-    );
-    let response = client
-        .generate_transactions(tonic::Request::new(GenerateTransactionsRequest {
-            proposals: vec![generate_transactions_request::Proposal {
-                operation: TopologyChangeOp::AddReplace as i32,
-                serial: next_serial,
-                mapping: Some(generate_transactions_request::proposal::Mapping::V30(
-                    TopologyMapping {
-                        mapping: Some(topology_mapping::Mapping::PartyToParticipant(mapping)),
-                    },
-                )),
-                store: Some(topology::synchronizer_store_id(&synchronizer_id)),
-            }],
-            base_request: None,
-        }))
-        .await
-        .map_err(|e| {
-            AddHostsError::Canton(anyhow::Error::new(e).context("GenerateTransactions RPC failed"))
-        })?
-        .into_inner();
-
-    if response.generated_transactions.is_empty() {
-        return Err(AddHostsError::Canton(anyhow::anyhow!(
-            "GenerateTransactions returned no transactions for {party_id}"
-        )));
-    }
-
-    let mut transaction_hashes = Vec::with_capacity(response.generated_transactions.len());
-    let mut topology_transactions = Vec::with_capacity(response.generated_transactions.len());
-    for tx in response.generated_transactions {
-        transaction_hashes.push(tx.transaction_hash);
-        topology_transactions.push(tx.serialized_transaction);
-    }
+    let generated = generate_p2p_change(
+        config,
+        party_id,
+        current.serial,
+        &synchronizer_id,
+        generate_transactions_request::proposal::Mapping::V30(TopologyMapping {
+            mapping: Some(topology_mapping::Mapping::PartyToParticipant(mapping)),
+        }),
+    )
+    .await?;
+    let next_serial = generated.serial;
 
     tracing::info!(
         %party_id,
@@ -318,8 +267,8 @@ pub async fn prepare_threshold(
     Ok(PreparedThreshold {
         party_id: party_id.to_string(),
         serial: next_serial,
-        transaction_hashes,
-        topology_transactions,
+        transaction_hashes: generated.transaction_hashes,
+        topology_transactions: generated.topology_transactions,
     })
 }
 
@@ -329,68 +278,38 @@ pub async fn prepare_threshold(
 /// (a threshold change needs only the party namespace) but it does submit to its
 /// own store, and a bundle that moved the host set while claiming to move the
 /// threshold would evict hosts under cover of a routine change.
+///
+/// # Errors
+/// Returns an error if the bundle has no transactions or not one signature per
+/// transaction. Returns an error if a signature has a form the party's key
+/// cannot produce, or if the current serial cannot be advanced. Returns an
+/// error if a transaction does not decode, is not an `ADD_REPLACE` at the next
+/// serial, or carries no `PartyToParticipant`. Returns an error if a
+/// transaction names another party or leaves the threshold unchanged. It also
+/// fails if the new threshold is below 1, exceeds the number of hosts able to
+/// confirm, or comes with any other change.
 pub fn validate_threshold_topology(
     current: &CurrentPartyTopology,
     bundle: &ExternalPartyThresholdPayload,
 ) -> anyhow::Result<()> {
-    if bundle.topology_transactions.is_empty() {
-        anyhow::bail!("external-party threshold change submitted no topology transactions");
-    }
-    if bundle.signatures.len() != bundle.topology_transactions.len() {
-        anyhow::bail!(
-            "external-party threshold change submitted {t} transaction(s) and {s} signature(s); \
-             they must be index-aligned",
-            t = bundle.topology_transactions.len(),
-            s = bundle.signatures.len()
-        );
-    }
-    let scheme = PartySignatureScheme::for_party(&current.mapping, &bundle.signed_by);
-    for (index, signature) in bundle.signatures.iter().enumerate() {
-        if !scheme.accepts(signature) {
-            anyhow::bail!(
-                "signature {index} is {len} byte(s); {expected}",
-                len = signature.len(),
-                expected = scheme.expected_form()
-            );
-        }
-    }
-    let next_serial = current.serial.checked_add(1).with_context(|| {
-        format!(
-            "{party} is at serial {s}, which cannot be advanced",
-            party = current.mapping.party,
-            s = current.serial
-        )
-    })?;
+    check_bundle_envelope(
+        "external-party threshold change",
+        &bundle.topology_transactions,
+        &bundle.signatures,
+    )?;
+    check_signature_forms(&current.mapping, &bundle.signed_by, &bundle.signatures)?;
+    let next_serial = serial_after(current)?;
 
     for (index, serialized) in bundle.topology_transactions.iter().enumerate() {
-        let transaction = topology_version::decode_transaction(serialized).with_context(|| {
-            format!("topology transaction {index} is not a TopologyTransaction")
-        })?;
-
-        if transaction.operation != TopologyChangeOp::AddReplace as i32 {
-            anyhow::bail!(
-                "topology transaction {index} must be an ADD_REPLACE, got operation {op}",
-                op = transaction.operation
-            );
-        }
-        if transaction.serial != next_serial {
-            anyhow::bail!(
-                "topology transaction {index} has serial {serial}, which must be exactly one past \
-                 the current {current_serial}",
-                serial = transaction.serial,
-                current_serial = current.serial
-            );
-        }
-
-        let Some(TopologyMapping {
-            mapping: Some(topology_mapping::Mapping::PartyToParticipant(p2p)),
-        }) = transaction.mapping
-        else {
-            anyhow::bail!(
-                "topology transaction {index} must carry a PartyToParticipant mapping; this \
-                 endpoint changes a threshold and authorizes nothing else"
-            );
-        };
+        let p2p = decode_p2p_change(
+            index,
+            serialized,
+            BundleSerial::Next {
+                current: current.serial,
+                next: next_serial,
+            },
+            "changes a threshold",
+        )?;
 
         if p2p.party != current.mapping.party {
             anyhow::bail!(
@@ -435,22 +354,8 @@ pub fn validate_threshold_topology(
 pub async fn submit_threshold(
     config: &NodeConfig,
     bundle: &ExternalPartyThresholdPayload,
-) -> std::result::Result<u32, AddHostsError> {
-    let Some(current) = read_party_to_participant(config, &bundle.party_id)
-        .await
-        .map_err(AddHostsError::Canton)?
-    else {
-        return Err(AddHostsError::UnknownParty {
-            party: bundle.party_id.clone(),
-        });
-    };
-    if bundle.base_serial != current.serial {
-        return Err(AddHostsError::StaleSerial {
-            party: bundle.party_id.clone(),
-            pinned: bundle.base_serial,
-            found: current.serial,
-        });
-    }
+) -> Result<u32, AddHostsError> {
+    let current = read_pinned(config, &bundle.party_id, bundle.base_serial).await?;
     validate_threshold_topology(&current, bundle).map_err(AddHostsError::Invalid)?;
 
     let synchronizer_id = utils::get_synchronizer_id(config)
@@ -459,20 +364,15 @@ pub async fn submit_threshold(
     let store = topology::synchronizer_store_id(&synchronizer_id);
 
     let scheme = PartySignatureScheme::for_party(&current.mapping, &bundle.signed_by);
-    let signed: Vec<SignedTopologyTransaction> = bundle
-        .topology_transactions
-        .iter()
-        .zip(&bundle.signatures)
-        .map(|(transaction, signature)| SignedTopologyTransaction {
-            transaction: transaction.clone(),
-            signatures: vec![scheme.canton_signature(signature, &bundle.signed_by)],
-            // A threshold change needs the party namespace alone, so the
-            // party's signature is the complete authorization — no host has to
-            // add one, and this is not a proposal awaiting others.
-            proposal: false,
-            multi_transaction_signatures: vec![],
-        })
-        .collect();
+    let signed = party_signed(
+        &bundle.topology_transactions,
+        &bundle.signatures,
+        // A threshold change needs the party namespace alone, so the
+        // party's signature is the complete authorization — no host has to
+        // add one, and this is not a proposal awaiting others.
+        false,
+        |signature| scheme.canton_signature(signature, &bundle.signed_by),
+    );
 
     // Submitted as-is. Unlike an add, this host does NOT co-sign: Canton's rules
     // want the party namespace alone for a threshold change, and for an external
@@ -482,26 +382,14 @@ pub async fn submit_threshold(
     // line: "Only the wallet signs."
     let co_signed = signed;
 
-    let mut client = TopologyManagerWriteServiceClient::new(
-        config
-            .admin_channel()
-            .await
-            .map_err(AddHostsError::Canton)?,
-    );
-    client
-        .add_transactions(tonic::Request::new(AddTransactionsRequest {
-            transactions: co_signed,
-            force_changes: vec![],
-            store: Some(store),
-            wait_to_become_effective: None,
-        }))
-        .await
-        .map_err(|e| {
-            AddHostsError::Canton(
-                anyhow::Error::new(e)
-                    .context("AddTransactions RPC failed for external-party threshold change"),
-            )
-        })?;
+    submit_signed(
+        config,
+        co_signed,
+        vec![],
+        store,
+        "external-party threshold change",
+    )
+    .await?;
 
     tracing::info!(
         party_id = %bundle.party_id,
@@ -523,7 +411,7 @@ mod tests {
 
     fn host(tag: u8, onboarding: bool) -> HostingParticipant {
         HostingParticipant {
-            participant_uid: format!("participant-{tag}::1220{}", "aa".repeat(32)),
+            participant_uid: format!("participant-{tag}::1220{digest}", digest = "aa".repeat(32)),
             permission: ParticipantPermission::Confirmation as i32,
             onboarding: onboarding.then_some(hosting_participant::Onboarding {}),
         }

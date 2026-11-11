@@ -21,7 +21,10 @@
 //! later. DecMan then still reads those rows with the derived key, and it
 //! re-encrypts each one under the file's key when it first reads it.
 
-use std::path::{Path, PathBuf};
+use std::{
+    io,
+    path::{Path, PathBuf},
+};
 
 use aes_gcm::{
     Aes256Gcm, KeyInit,
@@ -32,11 +35,13 @@ use base64::{Engine, engine::general_purpose::STANDARD};
 use canton_proto_rs::com::digitalasset::canton::crypto::v30::{Signature, SigningPublicKey};
 use ed25519_dalek::SigningKey;
 use sqlx::SqlitePool;
+use tokio::{fs::OpenOptions, io::AsyncWriteExt};
 use zeroize::Zeroizing;
 
 use crate::{
     canton_id::{CantonId, Fingerprint},
     config::NodeConfig,
+    db::crypto,
     error::Result,
     signing::{
         PreparedTransactionHash, SigningError, SigningKeyContext, TransactionSigner,
@@ -88,7 +93,7 @@ impl KeyStore {
     /// Errors when a configured key file is missing or unreadable, or when a
     /// key file does not hold a 32-byte key.
     pub async fn open(config: &NodeConfig, db: SqlitePool) -> Result<Option<Self>> {
-        let derived = crate::db::crypto::derive_key(DERIVED_KEY_LABEL);
+        let derived = crypto::derive_key(DERIVED_KEY_LABEL);
         let (key, derived) = if let Some(path) = &config.key_store_key_file {
             (read_key_file(path).await?, derived)
         } else if let Some(key) = derived {
@@ -326,8 +331,7 @@ async fn read_or_create_default(path: &PathBuf) -> Result<Zeroizing<[u8; 32]>> {
     let encoded = Zeroizing::new(STANDARD.encode(key.as_slice()));
     if let Err(e) = write_private(path, encoded.as_bytes()).await {
         // Another process created the file first, so use its key.
-        if e.downcast_ref::<std::io::Error>().map(std::io::Error::kind)
-            == Some(std::io::ErrorKind::AlreadyExists)
+        if e.downcast_ref::<io::Error>().map(io::Error::kind) == Some(io::ErrorKind::AlreadyExists)
         {
             return read_key_file(path).await;
         }
@@ -346,13 +350,15 @@ async fn read_or_create_default(path: &PathBuf) -> Result<Zeroizing<[u8; 32]>> {
 /// partial key. Fails if `path` exists, so two processes never write
 /// different keys.
 async fn write_private(path: &Path, contents: &[u8]) -> Result {
-    use tokio::io::AsyncWriteExt;
     let suffix: [u8; 8] = Generate::try_generate()
         .map_err(|e| anyhow::anyhow!("temporary name generation failed: {e}"))?;
     let mut temporary = path.as_os_str().to_owned();
-    temporary.push(format!(".tmp-{}", hex::encode(suffix)));
+    temporary.push(format!(
+        ".tmp-{suffix_hex}",
+        suffix_hex = hex::encode(suffix)
+    ));
     let temporary = PathBuf::from(temporary);
-    let mut options = tokio::fs::OpenOptions::new();
+    let mut options = OpenOptions::new();
     options.write(true).create_new(true);
     #[cfg(unix)]
     options.mode(0o600);
@@ -394,9 +400,13 @@ impl TransactionSigner for StoredKeySigner {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
+
     use canton_proto_rs::com::digitalasset::canton::crypto::v30::{
         CryptoKeyFormat, SigningKeySpec,
     };
+    use ed25519_dalek::{Signature as DalekSignature, Verifier};
 
     use super::*;
     use crate::{
@@ -595,8 +605,6 @@ mod tests {
 
     #[tokio::test]
     async fn the_stored_key_signer_signs_with_the_stored_seed() -> Result {
-        use ed25519_dalek::{Signature as DalekSignature, Verifier};
-
         let seed = [7u8; 32];
         let public = public_key(&seed);
         let key = SigningKeyContext {
@@ -624,7 +632,7 @@ mod tests {
     fn a_key_file_holds_hex_or_base64() {
         let key = [9u8; 32];
         for contents in [
-            format!("{}\n", hex::encode(key)).into_bytes(),
+            format!("{key_hex}\n", key_hex = hex::encode(key)).into_bytes(),
             STANDARD.encode(key).into_bytes(),
         ] {
             assert_eq!(parse_key(&contents).as_deref(), Some(&key));
@@ -641,7 +649,8 @@ mod tests {
 
     #[tokio::test]
     async fn the_default_key_file_is_created_once_and_read_back() -> Result {
-        let dir = std::env::temp_dir().join(format!("decman-key-store-{}", uuid::Uuid::new_v4()));
+        let dir =
+            std::env::temp_dir().join(format!("decman-key-store-{id}", id = uuid::Uuid::new_v4()));
         tokio::fs::create_dir_all(&dir).await?;
         let path = dir.join(DEFAULT_KEY_FILENAME);
         let created = read_or_create_default(&path).await?;
@@ -655,7 +664,6 @@ mod tests {
         assert_eq!(names, [DEFAULT_KEY_FILENAME]);
         #[cfg(unix)]
         {
-            use std::os::unix::fs::PermissionsExt;
             let mode = tokio::fs::metadata(&path).await?.permissions().mode();
             assert_eq!(mode & 0o777, 0o600);
         }

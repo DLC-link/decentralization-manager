@@ -38,12 +38,14 @@
 use std::time::Duration;
 
 use anyhow::Context;
-use common::api::{
-    CredentialsResponse, DecentralizedPartiesResponse, GovernanceStateResponse,
-    InstrumentsResponse, ProviderConfigurationsResponse, RegistrarServiceRequestsResponse,
-    RegistrarServicesResponse,
+use common::{
+    api::{
+        CredentialsResponse, DecentralizedPartiesResponse, GovernanceStateResponse,
+        InstrumentsResponse, ProviderConfigurationsResponse, RegistrarServiceRequestsResponse,
+        RegistrarServicesResponse,
+    },
+    types::InvitationType,
 };
-use common::types::InvitationType;
 use serde_json::{Value, json};
 use tracing::info;
 
@@ -264,6 +266,10 @@ async fn create_registrar_decparty(f: &mut Fixture) -> anyhow::Result<()> {
     .await
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "A scenario phase reads top to bottom as one sequence of steps."
+)]
 pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
     info!("Phase: dual_governance_onboarding");
 

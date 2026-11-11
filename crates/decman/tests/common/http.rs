@@ -304,6 +304,8 @@ pub async fn probe_workflow_run_visible(
 
 #[cfg(test)]
 mod tests {
+    use std::net::TcpListener;
+
     use serde::Deserialize;
     use wiremock::{
         Mock, MockServer, ResponseTemplate,
@@ -481,7 +483,7 @@ mod tests {
     #[tokio::test]
     async fn transport_failure_keeps_polling() {
         let (f, _server) = fixture_with_jwt("test-jwt").await;
-        let Ok(reserved) = std::net::TcpListener::bind("127.0.0.1:0") else {
+        let Ok(reserved) = TcpListener::bind("127.0.0.1:0") else {
             panic!("could not reserve a loopback port");
         };
         let Ok(addr) = reserved.local_addr() else {

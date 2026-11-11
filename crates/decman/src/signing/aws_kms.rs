@@ -223,6 +223,7 @@ fn validate_key_id(key_id: &str) -> anyhow::Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use aws_sdk_kms::config::Region;
     use common::fingerprint::fingerprint_from_public_key;
     use p256::{
         ecdsa::{Signature as P256Signature, SigningKey, signature::Signer},
@@ -308,7 +309,7 @@ mod tests {
         // No credentials or endpoint: reaching the SDK would fail differently.
         let config = aws_sdk_kms::Config::builder()
             .behavior_version_latest()
-            .region(aws_sdk_kms::config::Region::new("us-east-1"))
+            .region(Region::new("us-east-1"))
             .build();
         let signer = AwsKmsSigner {
             client: aws_sdk_kms::Client::from_conf(config),

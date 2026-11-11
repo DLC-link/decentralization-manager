@@ -9,22 +9,28 @@
 //! the call site rather than defaulting to an empty one that only fails much
 //! later, on-ledger, at execute.
 
-use canton_common::decimal::DamlDecimal;
-use canton_common::transfer_factory::Context as ChoiceContext;
+use canton_common::{decimal::DamlDecimal, transfer_factory::Context as ChoiceContext};
 use canton_proto_rs::com::daml::ledger::api::v2::{Optional, Value, value};
-use common::api::{InstrumentAllowance, InstrumentId};
-use common::canton_id::CantonId;
+use common::{
+    api::{InstrumentAllowance, InstrumentId},
+    canton_id::CantonId,
+};
 
-use crate::error::Error;
-use crate::framework::encode::{
-    TransferValidity, field, make_contract_id, make_empty_extra_args, make_empty_metadata,
-    make_extra_args_from_context, make_list, make_numeric, make_party, make_record, make_text,
-    serialize_instrument_id,
+use crate::{
+    error::Error,
+    framework::{
+        DamlProtoEncode, PackageResolver, TemplateId, TemplateInfo, Validate, ValidationCtx,
+        encode::{
+            TransferValidity, field, make_contract_id, make_contract_id_list,
+            make_empty_extra_args, make_empty_metadata, make_extra_args_from_context, make_list,
+            make_numeric, make_party, make_record, make_text, serialize_instrument_id,
+        },
+        validate::validate_positive_amount,
+    },
 };
-use crate::framework::validate::validate_positive_amount;
-use crate::framework::{
-    DamlProtoEncode, PackageResolver, TemplateId, TemplateInfo, Validate, ValidationCtx,
-};
+
+/// The package key of every payload in this module.
+const PACKAGE: &str = "governance_token_custody";
 
 /// Set up a Canton Coin `TransferPreapproval` for the governance party.
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -42,10 +48,7 @@ impl SetupCcPreapproval {
 
 impl TemplateInfo for SetupCcPreapproval {
     fn template_id(&self, pkgs: &dyn PackageResolver) -> Result<TemplateId, Error> {
-        let pkg = pkgs
-            .package_ref("governance_token_custody")
-            .ok_or(Error::PackageNotConfigured("governance_token_custody"))?;
-        Ok(TemplateId::new(pkg, Self::MODULE, Self::ENTITY))
+        TemplateId::for_package(pkgs, PACKAGE, Self::MODULE, Self::ENTITY)
     }
 }
 
@@ -85,10 +88,7 @@ impl SetupTokenPreapproval {
 
 impl TemplateInfo for SetupTokenPreapproval {
     fn template_id(&self, pkgs: &dyn PackageResolver) -> Result<TemplateId, Error> {
-        let pkg = pkgs
-            .package_ref("governance_token_custody")
-            .ok_or(Error::PackageNotConfigured("governance_token_custody"))?;
-        Ok(TemplateId::new(pkg, Self::MODULE, Self::ENTITY))
+        TemplateId::for_package(pkgs, PACKAGE, Self::MODULE, Self::ENTITY)
     }
 }
 
@@ -146,10 +146,7 @@ impl Transfer {
 
 impl TemplateInfo for Transfer {
     fn template_id(&self, pkgs: &dyn PackageResolver) -> Result<TemplateId, Error> {
-        let pkg = pkgs
-            .package_ref("governance_token_custody")
-            .ok_or(Error::PackageNotConfigured("governance_token_custody"))?;
-        Ok(TemplateId::new(pkg, Self::MODULE, Self::ENTITY))
+        TemplateId::for_package(pkgs, PACKAGE, Self::MODULE, Self::ENTITY)
     }
 }
 
@@ -181,10 +178,7 @@ impl AcceptTransfer {
 
 impl TemplateInfo for AcceptTransfer {
     fn template_id(&self, pkgs: &dyn PackageResolver) -> Result<TemplateId, Error> {
-        let pkg = pkgs
-            .package_ref("governance_token_custody")
-            .ok_or(Error::PackageNotConfigured("governance_token_custody"))?;
-        Ok(TemplateId::new(pkg, Self::MODULE, Self::ENTITY))
+        TemplateId::for_package(pkgs, PACKAGE, Self::MODULE, Self::ENTITY)
     }
 }
 
@@ -227,13 +221,7 @@ impl DamlProtoEncode for TransferWithContext<'_> {
             ),
             field(
                 "inputHoldingCids",
-                make_list(
-                    self.transfer
-                        .input_holding_cids
-                        .iter()
-                        .map(|cid| make_contract_id(cid))
-                        .collect(),
-                ),
+                make_contract_id_list(&self.transfer.input_holding_cids),
             ),
             field("meta", make_empty_metadata()),
         ]);
@@ -309,7 +297,12 @@ mod tests {
     use canton_proto_rs::com::daml::ledger::api::v2::Record;
 
     use super::*;
-    use crate::framework::encode::{TRANSFER_EXECUTE_BEFORE_MICROS, TRANSFER_REQUESTED_AT_MICROS};
+    use crate::{
+        catalog::proposals::SNAPSHOT_PATH, framework::encode::TRANSFER_EXECUTE_BEFORE_MICROS,
+    };
+
+    /// Fallback `requestedAt` for a `Transfer` record in these tests: epoch.
+    const TRANSFER_REQUESTED_AT_MICROS: i64 = 0;
 
     /// Any valid `CantonId` — the exact value is irrelevant to these
     /// encode-shape assertions/snapshots.
@@ -525,7 +518,7 @@ mod tests {
     #[test]
     fn encode_snapshots() {
         let mut settings = insta::Settings::clone_current();
-        settings.set_snapshot_path(crate::catalog::proposals::SNAPSHOT_PATH);
+        settings.set_snapshot_path(SNAPSHOT_PATH);
         let _guard = settings.bind_to_scope();
 
         insta::assert_debug_snapshot!(

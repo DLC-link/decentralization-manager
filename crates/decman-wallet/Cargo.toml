@@ -32,3 +32,6 @@ decman-lib = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt", "time"] }
 tracing-subscriber = { workspace = true }
 wiremock = { workspace = true }
+
+[lints]
+workspace = true

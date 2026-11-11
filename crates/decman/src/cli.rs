@@ -1,15 +1,14 @@
-use std::path::PathBuf;
+mod apply;
+
+use std::{num::ParseIntError, path::PathBuf};
 
 use clap::Subcommand;
+use dec_party_manager::config::Network;
 
 pub use clap::Parser;
 
-use dec_party_manager::config::Network;
-
-fn parse_positive_usize(s: &str) -> std::result::Result<usize, String> {
-    let v: usize = s
-        .parse()
-        .map_err(|e: std::num::ParseIntError| e.to_string())?;
+fn parse_positive_usize(s: &str) -> Result<usize, String> {
+    let v: usize = s.parse().map_err(|e: ParseIntError| e.to_string())?;
     if v == 0 {
         Err("must be >= 1".into())
     } else {

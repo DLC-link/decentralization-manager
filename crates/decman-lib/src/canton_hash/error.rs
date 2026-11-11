@@ -1,5 +1,7 @@
 //! The one error type the hash module returns, and the macros that build it.
 
+use std::result;
+
 use thiserror::Error;
 
 /// Why a prepared transaction could not be hashed, or did not verify.
@@ -16,7 +18,7 @@ impl HashError {
     }
 }
 
-pub type Result<T = (), E = HashError> = std::result::Result<T, E>;
+pub type Result<T = (), E = HashError> = result::Result<T, E>;
 
 /// Build a [`HashError`] from a format string.
 macro_rules! hash_error {

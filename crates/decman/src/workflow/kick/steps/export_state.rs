@@ -22,6 +22,16 @@ use crate::{
 /// - Kick target (`KICK_TARGET_NAMESPACE` — the namespace fingerprint to remove)
 /// - Kick participant ID (`KICK_TARGET_PARTICIPANT`), when the run names one
 /// - New threshold after kick (`KICK_NEW_THRESHOLD`)
+///
+/// # Errors
+///
+/// Returns an error if the synchronizer ID cannot be read, the Admin API
+/// channel cannot be opened, or `ListDecentralizedNamespaceDefinition` or
+/// `ListPartyToParticipant` fails. Returns an error if the namespace is
+/// missing from the topology or has fewer than two owners. Returns an error if
+/// `kick_config.namespace_fingerprint` is not one of its owners. Returns an
+/// error if the party has no readable `PartyToParticipant` mapping, or if an
+/// artefact write fails.
 pub async fn export_state(
     config: &NodeConfig,
     storage: &SqlitePool,
@@ -76,8 +86,8 @@ pub async fn export_state(
         );
     }
 
-    // Save namespace definition as a length-prefixed protobuf — same byte
-    // shape as the file written by `utils::write_message_to_file`.
+    // Save namespace definition as a length-prefixed protobuf, which
+    // `utils::read_first_message_from_bytes` reads back.
     let namespace_bytes = utils::encode_length_prefixed_message(namespace_def);
     storage
         .write_artifact(
@@ -125,8 +135,8 @@ pub async fn export_state(
     // A member that owns the namespace without hosting the party leaves only
     // the owner set; create_proposals keeps every host and key.
     tracing::info!(
-        "Member to kick: {kick_participant:?}, {}",
-        if hosted {
+        "Member to kick: {kick_participant:?}, {hosting}",
+        hosting = if hosted {
             "hosts the party"
         } else {
             "does not host the party"
@@ -141,8 +151,8 @@ pub async fn export_state(
     // Verify that the namespace fingerprint is in the DNS owners list
     if !namespace_def.owners.contains(kick_target_hex) {
         anyhow::bail!(
-            "Namespace fingerprint {kick_target_hex} is not in the DNS owners list. Available owners: {:?}",
-            namespace_def.owners
+            "Namespace fingerprint {kick_target_hex} is not in the DNS owners list. Available owners: {owners:?}",
+            owners = namespace_def.owners
         );
     }
 

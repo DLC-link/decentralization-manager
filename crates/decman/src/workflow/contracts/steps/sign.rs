@@ -1,7 +1,10 @@
 use anyhow::Context;
-use bytes::{Buf, BufMut, BytesMut};
+use bytes::{BufMut, BytesMut};
 use canton_proto_rs::com::{
-    daml::ledger::api::v2::interactive::PrepareSubmissionResponse,
+    daml::ledger::api::v2::interactive::{
+        PrepareSubmissionResponse, daml_transaction::node::VersionedNode,
+        transaction::v1::node::NodeType,
+    },
     digitalasset::canton::{
         crypto::{
             admin::v30::{
@@ -15,10 +18,12 @@ use canton_proto_rs::com::{
         },
     },
 };
+use common::api::ContractDeploymentIntent;
 use decman_lib::canton_hash;
 use sqlx::SqlitePool;
 
 use crate::{
+    canton::framing::read_all_messages_from_bytes,
     canton_id::CantonId,
     config::NodeConfig,
     db::crypto,
@@ -47,12 +52,21 @@ use crate::{
 /// * `instance_name` - Workflow run instance name (key for `workflow_artifacts`)
 /// * `dec_party_id` - Decentralized party id used to look up `peer_public_keys`
 ///   in the `dec_party_identity` table (this run's local Daml signing key bundle)
+///
+/// # Errors
+///
+/// Returns an error if `intents` is empty, or if this node's Daml key cannot be
+/// found or is not in the vault. Returns an error if the prepared submissions
+/// are missing, differ in count from `intents`, or do not match their
+/// transactions or the accepted creates. Returns an error if the key store
+/// cannot be opened, if no signer can be built, or if signing fails. Returns an
+/// error if the signature artefact cannot be written.
 pub async fn sign_submissions(
     config: &NodeConfig,
     db: &SqlitePool,
     instance_name: &str,
     dec_party_id: &CantonId,
-    intents: &[common::api::ContractDeploymentIntent],
+    intents: &[ContractDeploymentIntent],
 ) -> Result {
     tracing::info!("Signing submissions...");
     anyhow::ensure!(
@@ -297,11 +311,8 @@ pub async fn own_daml_key(
 
 fn verify_deployment_intent(
     prepared: &PrepareSubmissionResponse,
-    intent: &common::api::ContractDeploymentIntent,
+    intent: &ContractDeploymentIntent,
 ) -> Result {
-    use canton_proto_rs::com::daml::ledger::api::v2::interactive::{
-        daml_transaction::node::VersionedNode, transaction::v1::node::NodeType,
-    };
     let transaction = prepared
         .prepared_transaction
         .as_ref()
@@ -382,9 +393,6 @@ fn verify_prepared_transaction(
     Ok(())
 }
 
-/// Decode a sequence of `varint(len)||proto` messages from a byte slice. Mirrors
-/// `utils::read_all_messages_from_file` but operates on in-memory data — used
-/// to round-trip blobs we used to read from disk.
 /// The namespace key and the Daml signing key in a `PEER_PUBLIC_KEYS` blob.
 /// The blob is two `varint(len)||SigningPublicKey` messages, written by
 /// onboarding.
@@ -399,27 +407,8 @@ fn decode_peer_keys(bytes: &[u8], node_id: &str) -> Result<Vec<SigningPublicKey>
     Ok(keys)
 }
 
-fn read_all_messages_from_bytes<M: prost::Message + Default>(data: &[u8]) -> Result<Vec<M>> {
-    let mut cursor = data;
-    let mut messages = Vec::new();
-    while cursor.has_remaining() {
-        let len = prost::encoding::decode_varint(&mut cursor)? as usize;
-        if cursor.remaining() < len {
-            anyhow::bail!(
-                "Incomplete message: expected {len} bytes, but only {remaining} remaining",
-                remaining = cursor.remaining()
-            );
-        }
-        let message_bytes = &cursor[..len];
-        cursor.advance(len);
-        messages.push(M::decode(message_bytes)?);
-    }
-    Ok(messages)
-}
-
-/// Encode a slice of protobuf messages as `varint(len)||proto` × N, matching the
-/// byte layout produced by `utils::write_messages_to_file`. Round-trips with
-/// `utils::read_all_messages_from_file` / `read_all_messages_from_bytes`.
+/// Encode a slice of protobuf messages as `varint(len)||proto` × N. Round-trips
+/// with `read_all_messages_from_bytes`.
 fn encode_messages_length_prefixed<M: prost::Message>(messages: &[M]) -> Vec<u8> {
     let mut buffer = BytesMut::new();
     for message in messages {
@@ -529,10 +518,14 @@ async fn backfill_peer_keys_from_chain(
 }
 
 /// Find this node's `PEER_PUBLIC_KEYS` blob from the most recent completed
-/// Onboarding (or Kick — same kind of identity payload) coordinator run for
-/// the given dec_party_id, by joining `workflow_artifacts` to `workflow_runs`.
+/// Onboarding run for the given dec_party_id, by joining `workflow_artifacts`
+/// to `workflow_runs`.
 /// Used as a one-shot backfill for parties whose onboarding ran before the
 /// `dec_party_identity` write hook was added.
+///
+/// # Errors
+///
+/// Returns an error if the database query fails.
 pub async fn backfill_peer_keys(
     db: &SqlitePool,
     dec_party_id: &CantonId,
@@ -561,15 +554,18 @@ pub async fn backfill_peer_keys(
 
 #[cfg(test)]
 mod deployment_intent_tests {
-    use super::*;
     use canton_proto_rs::com::daml::ledger::api::v2::{
-        Identifier, Record, RecordField, Value,
+        GenMap, Identifier, Optional, Record, RecordField, Value,
+        gen_map::Entry,
         interactive::{
             DamlTransaction, PreparedTransaction, daml_transaction,
             transaction::v1::{self, node::NodeType},
         },
         value,
     };
+    use common::api::ContractDeploymentIntent;
+
+    use super::*;
 
     fn argument(text: &str) -> Value {
         Value {
@@ -588,11 +584,9 @@ mod deployment_intent_tests {
     #[test]
     fn argument_commitments_match_lf_trailing_none_normalization() -> Result {
         let optional = |inner: Option<Value>| Value {
-            sum: Some(value::Sum::Optional(Box::new(
-                canton_proto_rs::com::daml::ledger::api::v2::Optional {
-                    value: inner.map(Box::new),
-                },
-            ))),
+            sum: Some(value::Sum::Optional(Box::new(Optional {
+                value: inner.map(Box::new),
+            }))),
         };
         let record = |values: Vec<Value>| Value {
             sum: Some(value::Sum::Record(Record {
@@ -635,7 +629,7 @@ mod deployment_intent_tests {
 
     #[test]
     fn only_the_accepted_create_can_be_signed() -> Result {
-        let intent = common::api::ContractDeploymentIntent {
+        let intent = ContractDeploymentIntent {
             package_id: "a".repeat(64),
             module_name: "Governance".into(),
             entity_name: "Rules".into(),
@@ -720,19 +714,15 @@ mod deployment_intent_tests {
         );
         let entries: Vec<_> = ["alice", "bob"]
             .into_iter()
-            .map(
-                |party| canton_proto_rs::com::daml::ledger::api::v2::gen_map::Entry {
-                    key: Some(Value {
-                        sum: Some(value::Sum::Party(party.into())),
-                    }),
-                    value: Some(enriched.clone()),
-                },
-            )
+            .map(|party| Entry {
+                key: Some(Value {
+                    sum: Some(value::Sum::Party(party.into())),
+                }),
+                value: Some(enriched.clone()),
+            })
             .collect();
         let map = |entries| Value {
-            sum: Some(value::Sum::GenMap(
-                canton_proto_rs::com::daml::ledger::api::v2::GenMap { entries },
-            )),
+            sum: Some(value::Sum::GenMap(GenMap { entries })),
         };
         assert_eq!(
             canton_hash::hash_value(&map(entries.clone()))?,
