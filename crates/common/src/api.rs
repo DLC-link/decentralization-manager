@@ -1320,16 +1320,6 @@ pub struct RightsStatus {
     pub dec_party_read_as: bool,
 }
 
-impl RightsStatus {
-    /// Check if all required rights are present
-    pub fn is_valid(&self) -> bool {
-        self.member_party_act_as
-            && self.member_party_read_as
-            && self.dec_party_act_as
-            && self.dec_party_read_as
-    }
-}
-
 /// Authentication status for a single party
 #[derive(Clone, Debug, Serialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]

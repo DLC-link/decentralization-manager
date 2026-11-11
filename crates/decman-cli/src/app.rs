@@ -24,6 +24,7 @@ use crate::api::{
     FeedItem, GovAction, GovConfirmation, GovState, GovernanceConfirmations, Holding, KeyStatus,
     KnownMember, NetworkInfo, PartyAuthStatus, PartyConfigView, PeerEntry, PeerView, party_name,
 };
+use crate::auth::now_secs;
 use crate::composer::{
     self, Composer, ComposerContext, ComposerSubmit, FieldKind, PickerOption, PickerSource,
     SelectOption, TypeOption,
@@ -1365,16 +1366,6 @@ fn party_governance_type(party: &DecentralizedParty) -> Option<&'static str> {
             None
         }
     })
-}
-
-/// Current unix time in seconds (0 if the clock is before the epoch).
-fn now_secs() -> i64 {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .ok()
-        .and_then(|d| i64::try_from(d.as_secs()).ok())
-        .unwrap_or(0)
 }
 
 /// The select option value one step forward / back from `current`.
