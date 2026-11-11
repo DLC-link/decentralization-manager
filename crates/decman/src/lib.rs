@@ -6,6 +6,7 @@
 
 pub mod auth;
 pub mod build_info;
+pub mod canton;
 pub mod config;
 pub mod consts;
 pub mod db;
