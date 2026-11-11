@@ -20,10 +20,10 @@ use crate::{
     error::Result,
     utils,
     workflow::{
-        add_party::AddPartyConfig,
+        add_party::{ARTIFACTS, AddPartyConfig},
         onboarding::steps::proposals::create::decode_keys_payload,
-        proposal_store,
-        signing_keys::{adopt_legacy_signing_keys, own_namespace_key},
+        proposal_store::{self, SignedPartyChange},
+        signing_keys::own_namespace_key,
         storage::{WorkflowStorage, artifact_kinds, identity_kinds},
         thresholds::{PartyThresholds, ensure_carried_from},
         topology,
@@ -60,14 +60,12 @@ pub async fn create_proposals(
 ) -> Result {
     tracing::info!("Creating add-party proposals...");
 
-    let namespace_bytes = storage
-        .read_artifact(instance_name, artifact_kinds::ADD_PARTY_NAMESPACE_DEF, None)
-        .await?
-        .ok_or_else(|| {
-            anyhow::anyhow!("ADD_PARTY_NAMESPACE_DEF artifact missing — did ExportState run?")
-        })?;
-    let current_namespace_def: DecentralizedNamespaceDefinition =
-        utils::read_first_message_from_bytes(&namespace_bytes)?;
+    let current_namespace_def = proposal_store::read_exported_namespace(
+        storage,
+        instance_name,
+        artifact_kinds::ADD_PARTY_NAMESPACE_DEF,
+    )
+    .await?;
 
     let new_member_id = add_party_config.new_participant_id.to_string();
     let keys_payload = storage
@@ -129,46 +127,20 @@ pub async fn create_proposals(
     .await?;
 
     let thresholds = add_party_config.thresholds();
-    let new_threshold = thresholds.namespace;
-    let new_namespace_def = if rehost {
-        if new_threshold != current_namespace_def.threshold {
-            anyhow::bail!(
-                "Re-hosting {new_member_id} leaves the namespace as it is, so its threshold \
-                 stays {current}; got new_threshold {new_threshold}. Change it afterwards with \
-                 change-threshold",
-                current = current_namespace_def.threshold
-            );
-        }
-        tracing::info!(
-            "{new_member_id} already owns namespace {ns}; hosting it again without touching \
-             the namespace",
-            ns = current_namespace_def.decentralized_namespace
-        );
-        current_namespace_def.clone()
-    } else {
-        let mut new_owners = current_namespace_def.owners.clone();
-        new_owners.push(new_namespace_fingerprint.to_string());
-        new_owners.sort();
-        DecentralizedNamespaceDefinition {
-            decentralized_namespace: current_namespace_def.decentralized_namespace.clone(),
-            threshold: new_threshold,
-            owners: new_owners,
-        }
-    };
+    let new_namespace_def = add_namespace(
+        &current_namespace_def,
+        rehost,
+        &new_member_id,
+        &new_namespace_fingerprint.to_string(),
+        thresholds.namespace,
+    )?;
 
     tracing::info!(
         "Current P2P mapping has {count} participant(s)",
         count = current_p2p.participants.len()
     );
 
-    let mut new_participants = current_p2p.participants.clone();
-    new_participants.push(HostingParticipant {
-        participant_uid: new_member_id.clone(),
-        permission: enums::ParticipantPermission::Confirmation as i32,
-        // The Onboarding marker keeps the party suspended on the new member
-        // until the ACS import lands and the flag-clearing round removes it.
-        onboarding: Some(hosting_participant::Onboarding {}),
-    });
+    let new_participants = add_host(&current_p2p.participants, &new_member_id);
     ensure_carried_from(
         PartyThresholds::new(
             current_namespace_def.threshold,
@@ -187,28 +159,14 @@ pub async fn create_proposals(
     // parties holding exactly that: one inline key, the joiner's, and the rest
     // still in the legacy mapping. Adopting only on an empty set left those
     // parties unable to change membership at all.
-    let current_signing_keys = current_p2p
-        .party_signing_keys
-        .map(|sk| sk.keys)
-        .unwrap_or_default();
-    let mut signing_keys = if current_signing_keys.len() < current_p2p.participants.len() {
-        let members: Vec<String> = current_p2p
-            .participants
-            .iter()
-            .map(|p| p.participant_uid.clone())
-            .collect();
-        adopt_legacy_signing_keys(
-            config,
-            storage,
-            &synchronizer_id,
-            party_id,
-            &members,
-            &current_signing_keys,
-        )
-        .await?
-    } else {
-        current_signing_keys
-    };
+    let mut signing_keys = proposal_store::hosts_signing_keys(
+        config,
+        storage,
+        &synchronizer_id,
+        party_id,
+        &current_p2p,
+    )
+    .await?;
 
     // Merge the new member's Daml key into the party signing keys, deduped by
     // fingerprint so a retried run can't double-add it.
@@ -287,30 +245,19 @@ pub async fn create_proposals(
         )))
         .await?;
 
-    storage
-        .write_artifact(
-            instance_name,
-            artifact_kinds::ADD_PARTY_DNS_PROPOSAL,
-            None,
-            &utils::encode_length_prefixed_message(&dns_transaction),
-        )
-        .await?;
-    storage
-        .write_artifact(
-            instance_name,
-            artifact_kinds::ADD_PARTY_P2P_PROPOSAL,
-            None,
-            &utils::encode_length_prefixed_message(&p2p_transaction),
-        )
-        .await?;
-    storage
-        .write_artifact(
-            instance_name,
-            artifact_kinds::ADD_PARTY_NEW_NAMESPACE_DEF,
-            None,
-            &utils::encode_length_prefixed_message(&new_namespace_def),
-        )
-        .await?;
+    proposal_store::save_party_proposals(
+        storage,
+        instance_name,
+        ARTIFACTS,
+        artifact_kinds::ADD_PARTY_NEW_NAMESPACE_DEF,
+        &SignedPartyChange {
+            dns: dns_transaction,
+            p2p: p2p_transaction,
+            new_namespace_def,
+        },
+        None,
+    )
+    .await?;
     if rehost {
         storage
             .write_artifact(instance_name, artifact_kinds::ADD_PARTY_REHOST, None, b"1")
@@ -319,6 +266,57 @@ pub async fn create_proposals(
 
     tracing::info!("Add-party proposals created and saved successfully");
     Ok(())
+}
+
+/// The namespace after the add. A re-host leaves it as it is, and so must the
+/// requested threshold. Otherwise the new member's namespace joins the owners
+/// at `new_threshold`, and the namespace hash stays the same.
+fn add_namespace(
+    current: &DecentralizedNamespaceDefinition,
+    rehost: bool,
+    new_member_id: &str,
+    new_namespace_fingerprint: &str,
+    new_threshold: i32,
+) -> Result<DecentralizedNamespaceDefinition> {
+    if rehost {
+        if new_threshold != current.threshold {
+            anyhow::bail!(
+                "Re-hosting {new_member_id} leaves the namespace as it is, so its threshold \
+                 stays {current}; got new_threshold {new_threshold}. Change it afterwards with \
+                 change-threshold",
+                current = current.threshold
+            );
+        }
+        tracing::info!(
+            "{new_member_id} already owns namespace {ns}; hosting it again without touching \
+             the namespace",
+            ns = current.decentralized_namespace
+        );
+        Ok(current.clone())
+    } else {
+        let mut new_owners = current.owners.clone();
+        new_owners.push(new_namespace_fingerprint.to_string());
+        new_owners.sort();
+        Ok(DecentralizedNamespaceDefinition {
+            decentralized_namespace: current.decentralized_namespace.clone(),
+            threshold: new_threshold,
+            owners: new_owners,
+        })
+    }
+}
+
+/// The current hosts plus `new_member_id` at Confirmation, with the
+/// Onboarding marker.
+fn add_host(current: &[HostingParticipant], new_member_id: &str) -> Vec<HostingParticipant> {
+    let mut new_participants = current.to_vec();
+    new_participants.push(HostingParticipant {
+        participant_uid: new_member_id.to_string(),
+        permission: enums::ParticipantPermission::Confirmation as i32,
+        // The Onboarding marker keeps the party suspended on the new member
+        // until the ACS import lands and the flag-clearing round removes it.
+        onboarding: Some(hosting_participant::Onboarding {}),
+    });
+    new_participants
 }
 
 /// Whether the member being added already owns the party's namespace because
@@ -606,6 +604,60 @@ mod tests {
 
     /// The P2P proposal is published before submit only because it adds the
     /// new member, whose own signature Canton then requires.
+    fn owned_by(owners: &[&str], threshold: i32) -> DecentralizedNamespaceDefinition {
+        DecentralizedNamespaceDefinition {
+            decentralized_namespace: "1220ns".to_string(),
+            threshold,
+            owners: owners.iter().map(ToString::to_string).collect(),
+        }
+    }
+
+    #[test]
+    fn an_add_puts_the_new_namespace_among_the_sorted_owners() -> Result {
+        let added = add_namespace(&owned_by(&["c", "a"], 1), false, "p3", "b", 2)?;
+
+        assert_eq!(added.decentralized_namespace, "1220ns");
+        assert_eq!(added.threshold, 2);
+        assert_eq!(
+            added.owners,
+            vec!["a".to_string(), "b".to_string(), "c".to_string()]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn a_rehost_leaves_the_namespace_as_it_is() -> Result {
+        let current = owned_by(&["a", "b"], 2);
+        assert_eq!(add_namespace(&current, true, "p2", "b", 2)?, current);
+        Ok(())
+    }
+
+    #[test]
+    fn a_rehost_refuses_a_new_threshold() {
+        let Err(e) = add_namespace(&owned_by(&["a", "b"], 2), true, "p2", "b", 1) else {
+            panic!("a re-host cannot move the threshold");
+        };
+        assert_refused(e, "threshold stays 2; got new_threshold 1");
+    }
+
+    #[test]
+    fn the_new_host_joins_at_confirmation_with_the_onboarding_marker() {
+        let current = hosting(&["p1"]).participants;
+
+        let hosts = add_host(&current, "p2");
+
+        assert_eq!(hosts.len(), 2);
+        assert_eq!(hosts[0], current[0]);
+        assert_eq!(
+            hosts[1],
+            HostingParticipant {
+                participant_uid: "p2".to_string(),
+                permission: enums::ParticipantPermission::Confirmation as i32,
+                onboarding: Some(hosting_participant::Onboarding {}),
+            }
+        );
+    }
+
     #[test]
     fn only_a_proposal_that_adds_the_new_member_counts_as_adding_a_host() {
         let current = hosting(&["p1::ns", "p2::ns"]);

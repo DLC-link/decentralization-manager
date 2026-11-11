@@ -34,10 +34,14 @@
 //! crash drops what its earlier attempt left. [`drop_leftover_stores`] sweeps
 //! the rest at boot.
 
+mod change;
 mod route;
 mod seed;
 mod sign;
 mod store;
 
+pub use change::{
+    SignedPartyChange, hosts_signing_keys, read_exported_namespace, save_party_proposals,
+};
 pub use sign::{PartyHead, SignedProposals, fetch_party_head, sign_party_proposals};
 pub use store::{STORE_PREFIX, drop_leftover_stores};

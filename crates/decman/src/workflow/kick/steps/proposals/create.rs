@@ -1,5 +1,5 @@
 use canton_proto_rs::com::digitalasset::canton::protocol::v30::{
-    DecentralizedNamespaceDefinition, PartyToParticipant,
+    DecentralizedNamespaceDefinition, PartyToParticipant, party_to_participant::HostingParticipant,
 };
 use sqlx::SqlitePool;
 
@@ -9,8 +9,8 @@ use crate::{
     error::Result,
     utils,
     workflow::{
-        kick::KickConfig,
-        proposal_store,
+        kick::{ARTIFACTS, KickConfig},
+        proposal_store::{self, SignedPartyChange},
         signing_keys::{
             adopt_legacy_signing_keys, known_signing_keys_by_member, signing_keys_after_kick,
         },
@@ -41,14 +41,12 @@ pub async fn create_proposals(
 
     // Read current namespace definition (length-prefixed protobuf, written by
     // export_state).
-    let namespace_bytes = storage
-        .read_artifact(instance_name, artifact_kinds::KICK_NAMESPACE_DEF, None)
-        .await?
-        .ok_or_else(|| {
-            anyhow::anyhow!("KICK_NAMESPACE_DEF artifact missing — did ExportState run?")
-        })?;
-    let current_namespace_def: DecentralizedNamespaceDefinition =
-        utils::read_first_message_from_bytes(&namespace_bytes)?;
+    let current_namespace_def = proposal_store::read_exported_namespace(
+        storage,
+        instance_name,
+        artifact_kinds::KICK_NAMESPACE_DEF,
+    )
+    .await?;
 
     tracing::info!(
         "Current namespace: {namespace}, threshold: {threshold}, owners: {owners_count}",
@@ -77,26 +75,7 @@ pub async fn create_proposals(
     let thresholds = PartyThresholds::new(new_threshold, kick_config.confirmation_threshold);
     tracing::info!("New thresholds: {thresholds:?}");
 
-    // Create new owner set without kicked member
-    let new_owners: Vec<String> = current_namespace_def
-        .owners
-        .iter()
-        .filter(|owner| *owner != &kick_target)
-        .cloned()
-        .collect();
-
-    if new_owners.is_empty() {
-        anyhow::bail!("Cannot remove all owners from decentralized namespace");
-    }
-
-    tracing::info!("New owners count: {count}", count = new_owners.len());
-
-    // Create new namespace definition (keeping the same namespace hash)
-    let new_namespace_def = DecentralizedNamespaceDefinition {
-        decentralized_namespace: current_namespace_def.decentralized_namespace.clone(),
-        threshold: new_threshold,
-        owners: new_owners,
-    };
+    let new_namespace_def = kick_namespace(&current_namespace_def, &kick_target, new_threshold)?;
 
     // Get party ID using prefix from decentralized party ID (provided via UI)
     let party_id_str = format!(
@@ -140,11 +119,7 @@ pub async fn create_proposals(
         current_namespace_def.threshold,
         Some(i32::try_from(current_p2p.threshold)?),
     );
-    let new_participants: Vec<_> = current_p2p
-        .participants
-        .into_iter()
-        .filter(|p| Some(&p.participant_uid) != kicked_host.as_ref())
-        .collect();
+    let new_participants = kick_hosts(current_p2p.participants, kicked_host.as_deref());
 
     tracing::info!(
         "New P2P mapping will have {count} participant(s)",
@@ -245,41 +220,20 @@ pub async fn create_proposals(
         }
     };
 
-    // Persist proposals + supporting data to workflow storage. Each protobuf
-    // is written with the same `varint(len)||proto` framing the original file
-    // path used (so `read_first_message_from_bytes` works unchanged).
-    let dns_bytes = utils::encode_length_prefixed_message(&dns_transaction);
-    storage
-        .write_artifact(
-            instance_name,
-            artifact_kinds::KICK_DNS_PROPOSAL,
-            None,
-            &dns_bytes,
-        )
-        .await?;
-    tracing::info!("Saved DNS kick proposal to storage");
-
-    let p2p_bytes = utils::encode_length_prefixed_message(&p2p_transaction);
-    storage
-        .write_artifact(
-            instance_name,
-            artifact_kinds::KICK_P2P_PROPOSAL,
-            None,
-            &p2p_bytes,
-        )
-        .await?;
-    tracing::info!("Saved P2P kick proposal to storage");
-
-    let new_namespace_bytes = utils::encode_length_prefixed_message(&new_namespace_def);
-    storage
-        .write_artifact(
-            instance_name,
-            artifact_kinds::KICK_NEW_NAMESPACE_DEF,
-            None,
-            &new_namespace_bytes,
-        )
-        .await?;
-    tracing::info!("Saved new namespace definition to storage");
+    // Persist proposals + supporting data to workflow storage.
+    proposal_store::save_party_proposals(
+        storage,
+        instance_name,
+        ARTIFACTS,
+        artifact_kinds::KICK_NEW_NAMESPACE_DEF,
+        &SignedPartyChange {
+            dns: dns_transaction,
+            p2p: p2p_transaction,
+            new_namespace_def,
+        },
+        Some("kick"),
+    )
+    .await?;
 
     // Save party ID — plaintext, mirrors the previous file write that
     // included a trailing newline (submit trims it).
@@ -294,6 +248,46 @@ pub async fn create_proposals(
 
     tracing::info!("Kick proposals created and saved successfully");
     Ok(())
+}
+
+/// The namespace without `kick_target`, at `new_threshold`. The namespace hash
+/// stays the same.
+fn kick_namespace(
+    current: &DecentralizedNamespaceDefinition,
+    kick_target: &str,
+    new_threshold: i32,
+) -> Result<DecentralizedNamespaceDefinition> {
+    // Create new owner set without kicked member
+    let new_owners: Vec<String> = current
+        .owners
+        .iter()
+        .filter(|owner| *owner != kick_target)
+        .cloned()
+        .collect();
+
+    if new_owners.is_empty() {
+        anyhow::bail!("Cannot remove all owners from decentralized namespace");
+    }
+
+    tracing::info!("New owners count: {count}", count = new_owners.len());
+
+    // Create new namespace definition (keeping the same namespace hash)
+    Ok(DecentralizedNamespaceDefinition {
+        decentralized_namespace: current.decentralized_namespace.clone(),
+        threshold: new_threshold,
+        owners: new_owners,
+    })
+}
+
+/// The hosts without `kicked_host`.
+fn kick_hosts(
+    participants: Vec<HostingParticipant>,
+    kicked_host: Option<&str>,
+) -> Vec<HostingParticipant> {
+    participants
+        .into_iter()
+        .filter(|p| Some(p.participant_uid.as_str()) != kicked_host)
+        .collect()
 }
 
 /// The mapping to propose, or `None` when it equals the one in force.
@@ -339,6 +333,55 @@ mod tests {
     #[test]
     fn an_unchanged_mapping_is_not_proposed() {
         assert_eq!(changed_mapping(&mapping(1, 1), mapping(1, 1)), None);
+    }
+
+    fn namespace(owners: &[&str]) -> DecentralizedNamespaceDefinition {
+        DecentralizedNamespaceDefinition {
+            decentralized_namespace: "1220ns".to_string(),
+            threshold: 2,
+            owners: owners.iter().map(ToString::to_string).collect(),
+        }
+    }
+
+    fn host(uid: &str) -> HostingParticipant {
+        HostingParticipant {
+            participant_uid: uid.to_string(),
+            permission: 2,
+            onboarding: None,
+        }
+    }
+
+    #[test]
+    fn a_kick_drops_the_target_from_the_owners_and_moves_the_threshold() -> Result {
+        let kicked = kick_namespace(&namespace(&["a", "b", "c"]), "b", 1)?;
+
+        assert_eq!(kicked.decentralized_namespace, "1220ns");
+        assert_eq!(kicked.threshold, 1);
+        assert_eq!(kicked.owners, vec!["a".to_string(), "c".to_string()]);
+        Ok(())
+    }
+
+    #[test]
+    fn a_kick_cannot_remove_the_last_owner() {
+        let Err(e) = kick_namespace(&namespace(&["a"]), "a", 1) else {
+            panic!("the last owner must stay");
+        };
+        assert_eq!(
+            e.to_string(),
+            "Cannot remove all owners from decentralized namespace"
+        );
+    }
+
+    #[test]
+    fn a_kick_drops_only_the_kicked_host() {
+        let hosts = vec![host("p1"), host("p2"), host("p3")];
+
+        assert_eq!(
+            kick_hosts(hosts.clone(), Some("p2")),
+            vec![host("p1"), host("p3")]
+        );
+        // An owner that hosts nothing keeps every host.
+        assert_eq!(kick_hosts(hosts.clone(), None), hosts);
     }
 
     #[test]
