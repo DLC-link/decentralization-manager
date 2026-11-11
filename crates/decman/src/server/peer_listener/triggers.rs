@@ -398,3 +398,278 @@ impl WorkflowTriggers {
         }
     }
 }
+
+#[cfg(test)]
+mod record_invitation_tests {
+    //! Pins the pending invitation each invite kind records: every field the
+    //! card shows, in memory and in the database.
+
+    use std::collections::HashMap;
+
+    use serde_json::{Value, json};
+    use tokio::sync::Mutex;
+
+    use super::*;
+    use crate::db::MIGRATOR;
+
+    type Result<T = ()> = anyhow::Result<T>;
+
+    const PUBKEY: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
+    fn cid(prefix: &str) -> String {
+        format!("{prefix}::1220{}", "a".repeat(64))
+    }
+
+    fn triggers(db: SqlitePool) -> WorkflowTriggers {
+        WorkflowTriggers {
+            pending_invitations: Arc::new(RwLock::new(Vec::new())),
+            config: NodeConfig::default(),
+            peer_chunk_cache: Arc::new(Mutex::new(HashMap::new())),
+            db,
+            party_credentials: Arc::new(RwLock::new(Vec::new())),
+            workflows: WorkflowRegistry::new(),
+            peer_job_sender: mpsc::unbounded_channel().0,
+        }
+    }
+
+    fn payload<T: serde::de::DeserializeOwned>(value: Value) -> Result<T> {
+        Ok(serde_json::from_value(value)?)
+    }
+
+    /// Record `meta` as an invitation of `invitation_type`, and return the
+    /// recorded invitation as JSON without its receive time. Assert the
+    /// database row reads back the same.
+    async fn record(
+        db: &SqlitePool,
+        invitation_type: InvitationType,
+        meta: InvitationMeta,
+    ) -> Result<Value> {
+        let triggers = triggers(db.clone());
+        triggers
+            .record_invitation(invitation_type, PUBKEY, meta)
+            .await;
+        let recorded = triggers
+            .pending_invitations
+            .read()
+            .await
+            .last()
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("nothing was recorded"))?;
+        let stored = db
+            .get_all_pending_invitations()
+            .await?
+            .into_iter()
+            .find(|i| i.id == recorded.id)
+            .ok_or_else(|| anyhow::anyhow!("nothing was stored"))?;
+        let mut recorded = serde_json::to_value(recorded)?;
+        let mut stored = serde_json::to_value(stored)?;
+        for invitation in [&mut recorded, &mut stored] {
+            invitation
+                .as_object_mut()
+                .map(|fields| fields.remove("received_at"));
+        }
+        assert_eq!(stored, recorded);
+        Ok(recorded)
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn each_kind_records_its_fields(db: SqlitePool) -> Result {
+        let instance = "run-1";
+        let base = |kind: &str, id: &str| {
+            json!({
+                "id": id,
+                "invitation_type": kind,
+                "coordinator_pubkey": PUBKEY,
+                "coordinator_name": null,
+            })
+        };
+        let with = |mut base: Value, fields: Value| {
+            if let (Some(base), Some(fields)) = (base.as_object_mut(), fields.as_object()) {
+                base.extend(fields.clone());
+            }
+            base
+        };
+
+        let onboarding = record(
+            &db,
+            InvitationType::Onboarding,
+            InvitationMeta::Onboarding(payload(json!({
+                "prefix": "newparty",
+                "participants": [cid("p1")],
+                "threshold": 2,
+                "confirmation_threshold": 1,
+                "workflow_instance": instance,
+            }))?),
+        )
+        .await?;
+        assert_eq!(
+            onboarding,
+            with(
+                base("Onboarding", "onboarding-0123456789abcdef-run-1"),
+                json!({
+                    "prefix": "newparty",
+                    "participants": [cid("p1")],
+                    "new_threshold": 2,
+                    "confirmation_threshold": 1,
+                    "workflow_instance": instance,
+                })
+            )
+        );
+
+        let dars = record(
+            &db,
+            InvitationType::Dars,
+            InvitationMeta::Dars(payload(json!({
+                "dar_filenames": ["app.dar"],
+                "dar_hashes": ["hash"],
+                "participants": [cid("p1")],
+                "workflow_instance": instance,
+            }))?),
+        )
+        .await?;
+        assert_eq!(
+            dars,
+            with(
+                base("Dars", "dars-0123456789abcdef-run-1"),
+                json!({
+                    "dar_filenames": ["app.dar"],
+                    "dar_hashes": ["hash"],
+                    "participants": [cid("p1")],
+                    "workflow_instance": instance,
+                })
+            )
+        );
+
+        let kick = record(
+            &db,
+            InvitationType::Kick,
+            InvitationMeta::Kick(payload(json!({
+                "dec_party_id": cid("dec"),
+                "kicked_participant": cid("p2"),
+                "kicked_owner_key": "k2",
+                "new_threshold": 1,
+                "previous_threshold": 2,
+                "confirmation_threshold": 1,
+                "participants": [cid("p1")],
+                "workflow_instance": instance,
+            }))?),
+        )
+        .await?;
+        assert_eq!(
+            kick,
+            with(
+                base("Kick", "kick-0123456789abcdef-run-1"),
+                json!({
+                    "participants": [cid("p1")],
+                    "kicked_participant": cid("p2"),
+                    "kicked_owner_key": "k2",
+                    "new_threshold": 1,
+                    "previous_threshold": 2,
+                    "confirmation_threshold": 1,
+                    "dec_party_id": cid("dec"),
+                    "workflow_instance": instance,
+                })
+            )
+        );
+
+        let contracts = record(
+            &db,
+            InvitationType::Contracts,
+            InvitationMeta::Contracts(payload(json!({
+                "dec_party_id": cid("dec"),
+                "participants": [cid("p1")],
+                "package_names": ["Governance Core"],
+                "contract_intents": [{
+                    "package_id": "pkg",
+                    "module_name": "Governance.Rules",
+                    "entity_name": "GovernanceRules",
+                    "argument_hash": "hash",
+                }],
+                "workflow_instance": instance,
+            }))?),
+        )
+        .await?;
+        assert_eq!(
+            contracts,
+            with(
+                base("Contracts", "contracts-0123456789abcdef-run-1"),
+                json!({
+                    "participants": [cid("p1")],
+                    "dec_party_id": cid("dec"),
+                    "package_names": ["Governance Core"],
+                    "contract_intents": [{
+                        "package_id": "pkg",
+                        "module_name": "Governance.Rules",
+                        "entity_name": "GovernanceRules",
+                        "argument_hash": "hash",
+                    }],
+                    "workflow_instance": instance,
+                })
+            )
+        );
+
+        let add_party = record(
+            &db,
+            InvitationType::AddParty,
+            InvitationMeta::AddParty(payload(json!({
+                "dec_party_id": cid("dec"),
+                "new_participant": cid("p4"),
+                "new_threshold": 2,
+                "previous_threshold": 1,
+                "confirmation_threshold": 2,
+                "participants": [cid("p1")],
+                "workflow_instance": instance,
+            }))?),
+        )
+        .await?;
+        assert_eq!(
+            add_party,
+            with(
+                base("AddParty", "addparty-0123456789abcdef-run-1"),
+                json!({
+                    "participants": [cid("p1")],
+                    "new_threshold": 2,
+                    "previous_threshold": 1,
+                    "confirmation_threshold": 2,
+                    "dec_party_id": cid("dec"),
+                    "new_participant": cid("p4"),
+                    "workflow_instance": instance,
+                })
+            )
+        );
+
+        let change_threshold = record(
+            &db,
+            InvitationType::ChangeThreshold,
+            InvitationMeta::ChangeThreshold(payload(json!({
+                "dec_party_id": cid("dec"),
+                "new_threshold": 3,
+                "previous_threshold": 2,
+                "confirmation_threshold": 2,
+                "participants": [cid("p1")],
+                "workflow_instance": instance,
+            }))?),
+        )
+        .await?;
+        assert_eq!(
+            change_threshold,
+            with(
+                base("ChangeThreshold", "changethreshold-0123456789abcdef-run-1"),
+                json!({
+                    "participants": [cid("p1")],
+                    "new_threshold": 3,
+                    "previous_threshold": 2,
+                    "confirmation_threshold": 2,
+                    "dec_party_id": cid("dec"),
+                    "workflow_instance": instance,
+                })
+            )
+        );
+
+        // An invite whose payload did not decode records only its kind, under
+        // the legacy id.
+        let bare = record(&db, InvitationType::Kick, InvitationMeta::None).await?;
+        assert_eq!(bare, base("Kick", "kick-0123456789abcdef"));
+        Ok(())
+    }
+}
