@@ -1,29 +1,5 @@
 import { useState, useEffect, useCallback, useMemo } from "react";
-import {
-  Autocomplete,
-  Dialog,
-  DialogTitle,
-  DialogContent,
-  DialogActions,
-  Button,
-  Typography,
-  CircularProgress,
-  Alert,
-  Box,
-  TextField,
-  Accordion,
-  AccordionSummary,
-  AccordionDetails,
-  IconButton,
-  Select,
-  MenuItem,
-  FormControl,
-  Divider,
-  Card,
-  CardActionArea,
-  CardContent,
-  Tooltip,
-} from "@mui/material";
+import { Autocomplete, Dialog, DialogTitle, DialogContent, DialogActions, Button, Typography, CircularProgress, Alert, Box, TextField, Accordion, AccordionSummary, AccordionDetails, IconButton, Select, MenuItem, FormControl, Divider, Card, CardActionArea, CardContent, Tooltip } from "@mui/material";
 import ExpandMoreIcon from "@mui/icons-material/ExpandMore";
 import AddIcon from "@mui/icons-material/Add";
 import DeleteIcon from "@mui/icons-material/Delete";
@@ -36,15 +12,7 @@ import { API_BASE } from "../constants";
 import { authenticatedFetch } from "../api";
 import { useSnackbar } from "../contexts";
 import { TextHelp, fieldHelpAdornment } from "./FieldHelp";
-import type {
-  ContractsStatusResponse,
-  ContractsRequest,
-  ContractDefinition,
-  ContractInfo,
-  FieldDefinition,
-  PackageConfig,
-  VettedPackageInfo,
-} from "../types";
+import type { ContractsStatusResponse, ContractsRequest, ContractDefinition, ContractInfo, FieldDefinition, PackageConfig, VettedPackageInfo } from "../types";
 
 interface ContractsDialogProps {
   open: boolean;
