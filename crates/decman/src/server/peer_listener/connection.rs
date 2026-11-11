@@ -79,10 +79,15 @@ pub(crate) async fn handle_incoming_connection(
                 .as_deref()
                 .and_then(|id| peer_keys.get(id))
                 .map(|pk| hex::encode(pk.serialize()));
+            let request = PeerRequest {
+                sender: peer_id_str,
+                sender_key: peer_pubkey_hex,
+                triggers,
+            };
 
             async move {
                 // Bump last_seen for known peers.
-                if let Some(id) = peer_id_str.as_deref()
+                if let Some(id) = request.sender.as_deref()
                     && peer_keys.contains_key(id)
                 {
                     let now = std::time::Instant::now();
@@ -111,7 +116,7 @@ pub(crate) async fn handle_incoming_connection(
                     Err(e) => {
                         tracing::warn!(
                             "Denied Noise request from {sender}: {e}",
-                            sender = peer_id_str.as_deref().unwrap_or("<unidentified peer>")
+                            sender = request.sender.as_deref().unwrap_or("<unidentified peer>")
                         );
                         // Answer WITH the reason rather than an empty body.
                         // An empty 503 here is indistinguishable at the
@@ -137,150 +142,18 @@ pub(crate) async fn handle_incoming_connection(
                             // liveness plus this node's in-flight workflow (if
                             // any) so peers don't infer "offline" from a busy node.
                             let resp = health::build_health_response(
-                                &triggers.db,
-                                &triggers.config.participant_id().to_string(),
+                                &request.triggers.db,
+                                &request.triggers.config.participant_id().to_string(),
                             )
                             .await;
                             let msg = Message::new(MessageType::HealthResponse, resp.to_payload());
                             return Ok(reply(msg));
                         }
                         MessageType::RequestDar => {
-                            tracing::debug!("Received RequestDar request");
-                            let sender = peer_id_str.as_deref();
-                            let dar = match dar_for_invited_peer(
-                                &triggers.db,
-                                sender,
-                                &msg.payload,
-                            )
-                            .await
-                            {
-                                Ok(bytes) => bytes,
-                                Err(e) => {
-                                    // Refusals are the interesting case here: a
-                                    // peer asking for a DAR of a run it was not
-                                    // invited to is worth seeing in the log.
-                                    tracing::warn!(
-                                        "Refused a DAR to {}: {e:#}",
-                                        sender.unwrap_or("<unidentified peer>")
-                                    );
-                                    let response_msg = Message::new(
-                                        MessageType::Error,
-                                        format!("{e:#}").into_bytes(),
-                                    );
-                                    return Ok(reply(response_msg));
-                                }
-                            };
-                            return Ok(peer_payload_response(
-                                dar,
-                                peer_pubkey_hex.as_deref(),
-                                &triggers.peer_chunk_cache,
-                                "Requested DAR",
-                            )
-                            .await);
+                            return Ok(serve_dar(&request, &msg).await);
                         }
                         MessageType::GetChunk => {
-                            // GetChunk serves BOTH the chunked RequestDar transfer and a
-                            // workflow's chunked command. The routing key disambiguates:
-                            // workflow chunk requests are ALWAYS stamped with their
-                            // coordinator run's instance (NoiseClient stamps every command),
-                            // so a keyed GetChunk routes to exactly that run — and an
-                            // EMPTY key means a RequestDar transfer and goes straight to
-                            // the chunk cache below. No sole-active fallback here: with
-                            // concurrent workflows a node is routinely mid-run while a peer
-                            // reads a DAR, and falling back would feed the RequestDar
-                            // transfer INTO a live workflow's chunk server.
-                            if !msg.instance.is_empty() {
-                                return Ok(
-                                    match route_to_run(&triggers.workflows, peer_id_str.as_deref(), msg)
-                                        .await
-                                    {
-                                        Some(resp) => reply(resp),
-                                        // The named run is gone (cancelled/finished) —
-                                        // 503 so the peer's bounded retry gives up.
-                                        // Says so in the body, so the requester
-                                        // reports the cause rather than an empty reply.
-                                        None => unavailable(
-                                            b"no such workflow run on this peer: it was \
-                                              cancelled or already finished"
-                                                .to_vec(),
-                                        ),
-                                    },
-                                );
-                            }
-                            if msg.payload.len() < 4 {
-                                tracing::warn!("Received GetChunk request with payload < 4 bytes");
-                                return Ok(empty_reply(StatusCode::BAD_REQUEST));
-                            }
-                            let chunk_index = u32::from_be_bytes([
-                                msg.payload[0],
-                                msg.payload[1],
-                                msg.payload[2],
-                                msg.payload[3],
-                            ]) as usize;
-
-                            let Some(ref pk) = peer_pubkey_hex else {
-                                tracing::warn!(
-                                    "Received GetChunk request without identifiable peer pubkey"
-                                );
-                                return Ok(empty_reply(StatusCode::BAD_REQUEST));
-                            };
-
-                            let chunk_bytes = {
-                                let mut cache = triggers.peer_chunk_cache.lock().await;
-
-                                // Pre-check expiry without holding a borrow into the entry,
-                                // so we can `remove` the expired entry without borrowck pain.
-                                let entry_state = cache
-                                    .get(pk)
-                                    .map(|(_, t)| t.elapsed() >= PEER_CHUNK_CACHE_TTL);
-                                match entry_state {
-                                    None => {
-                                        tracing::warn!(
-                                            "GetChunk request from {pk} for chunk {chunk_index} \
-                                             but no cached payload"
-                                        );
-                                        return Ok(empty_reply(StatusCode::NOT_FOUND));
-                                    }
-                                    Some(true) => {
-                                        // Expired — drop the stale entry now so it doesn't
-                                        // linger until the next RequestDar-driven `retain`.
-                                        cache.remove(pk);
-                                        tracing::warn!(
-                                            "GetChunk for {pk} chunk {chunk_index}: cache entry \
-                                             expired (removed)"
-                                        );
-                                        return Ok(empty_reply(StatusCode::NOT_FOUND));
-                                    }
-                                    Some(false) => {}
-                                }
-
-                                let (payload, t) = cache.get_mut(pk).expect("checked above");
-                                let start = chunk_index * CHUNK_SIZE;
-                                if start >= payload.len() {
-                                    tracing::warn!(
-                                        "GetChunk for {pk} chunk {chunk_index}: out of range \
-                                         (start={start}, payload_len={})",
-                                        payload.len(),
-                                    );
-                                    return Ok(empty_reply(StatusCode::BAD_REQUEST));
-                                }
-                                let end = (start + CHUNK_SIZE).min(payload.len());
-                                let bytes = payload[start..end].to_vec();
-                                // Extend TTL on successful read so a slow peer
-                                // mid-reassembly can't have entries evicted out from
-                                // under it just because the original 30s window from
-                                // insertion ran out.
-                                *t = Instant::now();
-                                bytes
-                            };
-
-                            // Build Chunk response: [chunk_index:4][chunk_data]
-                            let mut response_payload = Vec::with_capacity(4 + chunk_bytes.len());
-                            response_payload.extend_from_slice(&(chunk_index as u32).to_be_bytes());
-                            response_payload.extend_from_slice(&chunk_bytes);
-
-                            let response_msg = Message::new(MessageType::Chunk, response_payload);
-                            return Ok(reply(response_msg));
+                            return Ok(serve_chunk(&request, msg).await);
                         }
                         MessageType::RequestOwnerKeys => {
                             tracing::debug!("Received RequestOwnerKeys request");
@@ -293,7 +166,7 @@ pub(crate) async fn handle_incoming_connection(
                             let requested_party_ids: Vec<String> =
                                 serde_json::from_slice(&msg.payload).unwrap_or_default();
                             let payload =
-                                match list_my_owner_keys(&triggers.config, &requested_party_ids)
+                                match list_my_owner_keys(&request.triggers.config, &requested_party_ids)
                                     .await
                                 {
                                     Ok(data) => data,
@@ -307,7 +180,7 @@ pub(crate) async fn handle_incoming_connection(
                         }
                         MessageType::ListPeers => {
                             tracing::debug!("Received ListPeers request");
-                            let payload = match triggers.db.get_all_peers().await {
+                            let payload = match request.triggers.db.get_all_peers().await {
                                 Ok(peers) => {
                                     let ids: Vec<String> = peers
                                         .into_iter()
@@ -328,7 +201,7 @@ pub(crate) async fn handle_incoming_connection(
                                 std::str::from_utf8(&msg.payload).unwrap_or("").to_string();
                             tracing::debug!("Received RequestMemberParty for {dec_party_id}",);
                             let payload = {
-                                let creds = triggers.party_credentials.read().await;
+                                let creds = request.triggers.party_credentials.read().await;
                                 creds
                                     .iter()
                                     .find(|c| c.dec_party_id.to_string() == dec_party_id)
@@ -353,30 +226,7 @@ pub(crate) async fn handle_incoming_connection(
                         | MessageType::ChangeThresholdSignatures
                         | MessageType::StatusUpdate
                         | MessageType::DeclineInvitation => {
-                            // Route workflow-command traffic to the coordinator
-                            // run identified by `msg.instance` (the peer stamps
-                            // its coordinator's run name). The registry lock is
-                            // held only long enough to clone the handle out —
-                            // never across the await.
-                            return Ok(
-                                match route_to_run(&triggers.workflows, peer_id_str.as_deref(), msg)
-                                    .await
-                                {
-                                    Some(resp) => reply(resp),
-                                    // No matching coordinator run on this node. The peer is
-                                    // resuming a run whose coordinator workflow is gone
-                                    // (cancelled, dismissed, never resumed), or its routing
-                                    // key matched nothing. Replying Wait would make it poll
-                                    // forever, leaving its run InProgress and the node
-                                    // perpetually "busy" to invite/pre-flight checks. Return
-                                    // a non-success status so the peer's bounded retry (3
-                                    // strikes) gives up and finalizes the run. A coordinator
-                                    // merely busy on a slow step keeps its registry entry and
-                                    // still returns Wait via handle_command above, so this
-                                    // fires only when no matching run exists.
-                                    None => empty_reply(StatusCode::SERVICE_UNAVAILABLE),
-                                },
-                            );
+                            return Ok(route_command(&request, msg).await);
                         }
                         MessageType::InviteOnboarding
                         | MessageType::InviteKick
@@ -489,8 +339,8 @@ pub(crate) async fn handle_incoming_connection(
                                     }
                                 }
                             };
-                            if let Some(ref pubkey) = peer_pubkey_hex {
-                                triggers
+                            if let Some(ref pubkey) = request.sender_key {
+                                request.triggers
                                     .record_invitation(invitation_type, pubkey, meta)
                                     .await;
                             }
@@ -506,9 +356,9 @@ pub(crate) async fn handle_incoming_connection(
                                  invites + cancelling matching in-flight peer runs from sender",
                                 msg.instance
                             );
-                            if let Some(ref pubkey) = peer_pubkey_hex {
-                                triggers.drop_invitations_from(pubkey, &msg.instance).await;
-                                triggers.cancel_peer_runs_from(pubkey, &msg.instance).await;
+                            if let Some(ref pubkey) = request.sender_key {
+                                request.triggers.drop_invitations_from(pubkey, &msg.instance).await;
+                                request.triggers.cancel_peer_runs_from(pubkey, &msg.instance).await;
                             }
                             return Ok(ack());
                         }
@@ -521,8 +371,8 @@ pub(crate) async fn handle_incoming_connection(
                                  Failed peer runs from sender",
                                 msg.instance
                             );
-                            if let Some(ref pubkey) = peer_pubkey_hex {
-                                triggers.retry_peer_runs_from(pubkey, &msg.instance).await;
+                            if let Some(ref pubkey) = request.sender_key {
+                                request.triggers.retry_peer_runs_from(pubkey, &msg.instance).await;
                             }
                             return Ok(ack());
                         }
@@ -550,6 +400,166 @@ pub(crate) async fn handle_incoming_connection(
         Err(e) => {
             tracing::debug!("Noise connection from {peer_addr} failed: {e}");
         }
+    }
+}
+
+/// Who sent a peer message, and the node state its answer reads.
+struct PeerRequest {
+    /// The sender's participant id, when its identity is valid UTF-8.
+    sender: Option<String>,
+    /// The sender's Noise public key (hex), when the sender is a known peer.
+    sender_key: Option<String>,
+    triggers: WorkflowTriggers,
+}
+
+/// Serve a DAR of a Dars run to a peer that run invited: inline, or cached
+/// for a chunked transfer.
+async fn serve_dar(request: &PeerRequest, msg: &Message) -> Response<Body> {
+    tracing::debug!("Received RequestDar request");
+    let sender = request.sender.as_deref();
+    let dar = match dar_for_invited_peer(&request.triggers.db, sender, &msg.payload).await {
+        Ok(bytes) => bytes,
+        Err(e) => {
+            // Refusals are the interesting case here: a
+            // peer asking for a DAR of a run it was not
+            // invited to is worth seeing in the log.
+            tracing::warn!(
+                "Refused a DAR to {}: {e:#}",
+                sender.unwrap_or("<unidentified peer>")
+            );
+            let response_msg = Message::new(MessageType::Error, format!("{e:#}").into_bytes());
+            return reply(response_msg);
+        }
+    };
+    peer_payload_response(
+        dar,
+        request.sender_key.as_deref(),
+        &request.triggers.peer_chunk_cache,
+        "Requested DAR",
+    )
+    .await
+}
+
+/// Serve one chunk: of a coordinator run's chunked command when
+/// `msg.instance` names the run, otherwise of the chunked DAR cached for
+/// this peer.
+async fn serve_chunk(request: &PeerRequest, msg: Message) -> Response<Body> {
+    // GetChunk serves BOTH the chunked RequestDar transfer and a
+    // workflow's chunked command. The routing key disambiguates:
+    // workflow chunk requests are ALWAYS stamped with their
+    // coordinator run's instance (NoiseClient stamps every command),
+    // so a keyed GetChunk routes to exactly that run — and an
+    // EMPTY key means a RequestDar transfer and goes straight to
+    // the chunk cache below. No sole-active fallback here: with
+    // concurrent workflows a node is routinely mid-run while a peer
+    // reads a DAR, and falling back would feed the RequestDar
+    // transfer INTO a live workflow's chunk server.
+    if !msg.instance.is_empty() {
+        return match route_to_run(&request.triggers.workflows, request.sender.as_deref(), msg).await
+        {
+            Some(resp) => reply(resp),
+            // The named run is gone (cancelled/finished) —
+            // 503 so the peer's bounded retry gives up.
+            // Says so in the body, so the requester
+            // reports the cause rather than an empty reply.
+            None => unavailable(
+                b"no such workflow run on this peer: it was \
+                  cancelled or already finished"
+                    .to_vec(),
+            ),
+        };
+    }
+    if msg.payload.len() < 4 {
+        tracing::warn!("Received GetChunk request with payload < 4 bytes");
+        return empty_reply(StatusCode::BAD_REQUEST);
+    }
+    let chunk_index = u32::from_be_bytes([
+        msg.payload[0],
+        msg.payload[1],
+        msg.payload[2],
+        msg.payload[3],
+    ]) as usize;
+
+    let Some(ref pk) = request.sender_key else {
+        tracing::warn!("Received GetChunk request without identifiable peer pubkey");
+        return empty_reply(StatusCode::BAD_REQUEST);
+    };
+
+    let chunk_bytes = {
+        let mut cache = request.triggers.peer_chunk_cache.lock().await;
+
+        // Pre-check expiry without holding a borrow into the entry,
+        // so we can `remove` the expired entry without borrowck pain.
+        let entry_state = cache
+            .get(pk)
+            .map(|(_, t)| t.elapsed() >= PEER_CHUNK_CACHE_TTL);
+        match entry_state {
+            None => {
+                tracing::warn!(
+                    "GetChunk request from {pk} for chunk {chunk_index} \
+                     but no cached payload"
+                );
+                return empty_reply(StatusCode::NOT_FOUND);
+            }
+            Some(true) => {
+                // Expired — drop the stale entry now so it doesn't
+                // linger until the next RequestDar-driven `retain`.
+                cache.remove(pk);
+                tracing::warn!(
+                    "GetChunk for {pk} chunk {chunk_index}: cache entry \
+                     expired (removed)"
+                );
+                return empty_reply(StatusCode::NOT_FOUND);
+            }
+            Some(false) => {}
+        }
+
+        let (payload, t) = cache.get_mut(pk).expect("checked above");
+        let start = chunk_index * CHUNK_SIZE;
+        if start >= payload.len() {
+            tracing::warn!(
+                "GetChunk for {pk} chunk {chunk_index}: out of range \
+                 (start={start}, payload_len={})",
+                payload.len(),
+            );
+            return empty_reply(StatusCode::BAD_REQUEST);
+        }
+        let end = (start + CHUNK_SIZE).min(payload.len());
+        let bytes = payload[start..end].to_vec();
+        // Extend TTL on successful read so a slow peer
+        // mid-reassembly can't have entries evicted out from
+        // under it just because the original 30s window from
+        // insertion ran out.
+        *t = Instant::now();
+        bytes
+    };
+
+    // Build Chunk response: [chunk_index:4][chunk_data]
+    let mut response_payload = Vec::with_capacity(4 + chunk_bytes.len());
+    response_payload.extend_from_slice(&(chunk_index as u32).to_be_bytes());
+    response_payload.extend_from_slice(&chunk_bytes);
+
+    let response_msg = Message::new(MessageType::Chunk, response_payload);
+    reply(response_msg)
+}
+
+/// Route workflow-command traffic to the coordinator run identified by
+/// `msg.instance` (the peer stamps its coordinator's run name).
+async fn route_command(request: &PeerRequest, msg: Message) -> Response<Body> {
+    match route_to_run(&request.triggers.workflows, request.sender.as_deref(), msg).await {
+        Some(resp) => reply(resp),
+        // No matching coordinator run on this node. The peer is
+        // resuming a run whose coordinator workflow is gone
+        // (cancelled, dismissed, never resumed), or its routing
+        // key matched nothing. Replying Wait would make it poll
+        // forever, leaving its run InProgress and the node
+        // perpetually "busy" to invite/pre-flight checks. Return
+        // a non-success status so the peer's bounded retry (3
+        // strikes) gives up and finalizes the run. A coordinator
+        // merely busy on a slow step keeps its registry entry and
+        // still returns Wait via handle_command above, so this
+        // fires only when no matching run exists.
+        None => empty_reply(StatusCode::SERVICE_UNAVAILABLE),
     }
 }
 
@@ -667,5 +677,159 @@ mod reply_tests {
                 .await
                 .is_none()
         );
+    }
+}
+
+#[cfg(test)]
+mod workflow_message_tests {
+    //! Calls each workflow-traffic message function directly.
+
+    use std::{collections::HashMap, sync::Arc, time::Duration};
+
+    use hyper::body::to_bytes;
+    use tokio::sync::{Mutex, RwLock, mpsc};
+
+    use super::*;
+    use crate::{config::NodeConfig, db::MIGRATOR};
+
+    type Result<T = ()> = anyhow::Result<T>;
+
+    const KEY: &str = "02abcdef";
+
+    fn request(db: SqlitePool, sender_key: Option<&str>) -> PeerRequest {
+        PeerRequest {
+            sender: Some(format!("validator-2::1220{}", "b".repeat(64))),
+            sender_key: sender_key.map(str::to_string),
+            triggers: WorkflowTriggers {
+                pending_invitations: Arc::new(RwLock::new(Vec::new())),
+                config: NodeConfig::default(),
+                peer_chunk_cache: Arc::new(Mutex::new(HashMap::new())),
+                db,
+                party_credentials: Arc::new(RwLock::new(Vec::new())),
+                workflows: WorkflowRegistry::new(),
+                peer_job_sender: mpsc::unbounded_channel().0,
+            },
+        }
+    }
+
+    async fn parts(response: Response<Body>) -> Result<(StatusCode, Vec<u8>)> {
+        let status = response.status();
+        Ok((status, to_bytes(response.into_body()).await?.to_vec()))
+    }
+
+    fn get_chunk(index: u32) -> Message {
+        Message::new(MessageType::GetChunk, index.to_be_bytes().to_vec())
+    }
+
+    /// Cache `payload` for the sender, read `age` ago.
+    async fn cache(request: &PeerRequest, payload: &[u8], age: Duration) {
+        request
+            .triggers
+            .peer_chunk_cache
+            .lock()
+            .await
+            .insert(KEY.to_string(), (payload.to_vec(), Instant::now() - age));
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_command_for_an_unknown_run_is_a_bare_503(pool: SqlitePool) -> Result {
+        let msg = Message::new(MessageType::GetNextCommand, Vec::new()).with_instance("gone");
+        assert_eq!(
+            parts(route_command(&request(pool, Some(KEY)), msg).await).await?,
+            (StatusCode::SERVICE_UNAVAILABLE, Vec::new())
+        );
+        Ok(())
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_chunk_of_an_unknown_run_says_the_run_is_gone(pool: SqlitePool) -> Result {
+        let msg = get_chunk(0).with_instance("gone");
+        let expected = Message::new(
+            MessageType::Error,
+            b"no such workflow run on this peer: it was cancelled or already finished".to_vec(),
+        );
+        assert_eq!(
+            parts(serve_chunk(&request(pool, Some(KEY)), msg).await).await?,
+            (StatusCode::SERVICE_UNAVAILABLE, expected.to_bytes())
+        );
+        Ok(())
+    }
+
+    /// The chunk cache answers each bad request with a bare status, and a
+    /// good one with the chunk and its index.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn the_chunk_cache_answers(pool: SqlitePool) -> Result {
+        let short = Message::new(MessageType::GetChunk, vec![0, 0]);
+        let request_with_key = request(pool.clone(), Some(KEY));
+        assert_eq!(
+            parts(serve_chunk(&request_with_key, short).await).await?,
+            (StatusCode::BAD_REQUEST, Vec::new())
+        );
+        assert_eq!(
+            parts(serve_chunk(&request(pool, None), get_chunk(0)).await).await?,
+            (StatusCode::BAD_REQUEST, Vec::new())
+        );
+        assert_eq!(
+            parts(serve_chunk(&request_with_key, get_chunk(0)).await).await?,
+            (StatusCode::NOT_FOUND, Vec::new())
+        );
+
+        let payload = vec![7u8; CHUNK_SIZE + 3];
+        cache(&request_with_key, &payload, Duration::ZERO).await;
+        let mut expected = 1u32.to_be_bytes().to_vec();
+        expected.extend_from_slice(&[7, 7, 7]);
+        assert_eq!(
+            parts(serve_chunk(&request_with_key, get_chunk(1)).await).await?,
+            (
+                StatusCode::OK,
+                Message::new(MessageType::Chunk, expected).to_bytes()
+            )
+        );
+        assert_eq!(
+            parts(serve_chunk(&request_with_key, get_chunk(2)).await).await?,
+            (StatusCode::BAD_REQUEST, Vec::new())
+        );
+
+        cache(&request_with_key, &payload, PEER_CHUNK_CACHE_TTL).await;
+        assert_eq!(
+            parts(serve_chunk(&request_with_key, get_chunk(0)).await).await?,
+            (StatusCode::NOT_FOUND, Vec::new())
+        );
+        assert!(
+            request_with_key
+                .triggers
+                .peer_chunk_cache
+                .lock()
+                .await
+                .is_empty(),
+            "an expired entry is removed"
+        );
+        Ok(())
+    }
+
+    /// A DAR request for a run that does not exist answers 200 with the
+    /// refusal in an `Error` message.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_refused_dar_says_why(pool: SqlitePool) -> Result {
+        let request = request(pool, Some(KEY));
+        let payload = serde_json::to_vec(&crate::server::types::RequestDarPayload {
+            workflow_instance: "dars-1".to_string(),
+            index: 0,
+            filename: "app.dar".to_string(),
+        })?;
+        let msg = Message::new(MessageType::RequestDar, payload.clone());
+        let refusal =
+            dar_for_invited_peer(&request.triggers.db, request.sender.as_deref(), &payload)
+                .await
+                .err()
+                .ok_or_else(|| anyhow::anyhow!("there is no run to serve"))?;
+        assert_eq!(
+            parts(serve_dar(&request, &msg).await).await?,
+            (
+                StatusCode::OK,
+                Message::new(MessageType::Error, format!("{refusal:#}").into_bytes()).to_bytes()
+            )
+        );
+        Ok(())
     }
 }
