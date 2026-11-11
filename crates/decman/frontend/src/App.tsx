@@ -1,44 +1,36 @@
 import { useEffect, useMemo, useState, useCallback, useRef } from "react";
 import {
   Badge,
-  Chip,
   Container,
   Box,
   Alert,
-  Fab,
   TextField,
   InputAdornment,
   IconButton,
-  LinearProgress,
   Tabs,
   Tab,
-  Divider,
   Tooltip,
   useMediaQuery,
   useTheme,
 } from "@mui/material";
 import FilterListIcon from "@mui/icons-material/FilterList";
 import SearchIcon from "@mui/icons-material/Search";
-import AddIcon from "@mui/icons-material/Add";
 import VisibilityIcon from "@mui/icons-material/Visibility";
 import VisibilityOffIcon from "@mui/icons-material/VisibilityOff";
 import { Header } from "./components/Header";
 import { Sidebar, SIDEBAR_WIDTH, SIDEBAR_WIDTH_COLLAPSED } from "./components/Sidebar";
-import { PartyList } from "./components/PartyList";
-import { PartyDetail } from "./components/PartyDetail";
-import { FormerPartyDetail } from "./components/FormerPartyDetail";
-import { NodeHealthCard } from "./components/NodeHealthCard";
-import { NetworkConfigAccordion } from "./components/NetworkConfigAccordion";
 import { useNodeHealth } from "./useNodeHealth";
 import { PackagesPanel } from "./components/PackagesPanel";
-import { LoadingSkeleton, ConfigTabSkeleton } from "./components/LoadingSkeleton";
+import { LoadingSkeleton } from "./components/LoadingSkeleton";
 import { DarsDialog } from "./components/DarsDialog";
+import { PartiesTab } from "./components/PartiesTab";
+import { ConfigurationTab } from "./components/ConfigurationTab";
+import type { PartyFilterControls } from "./components/partyFilterControls";
 import { OnboardingDialog } from "./components/OnboardingDialog";
 import { useExternalParties } from "./useExternalParties";
-import { ExternalPartyList } from "./components/ExternalPartyList";
 import { NotificationsView } from "./components/NotificationsView";
 import { useSnackbar } from "./contexts";
-import { API_BASE, ADMIN_ACCESS } from "./constants";
+import { API_BASE } from "./constants";
 import { authenticatedFetch } from "./api";
 import { useHiddenParties } from "./useHiddenParties";
 import { favoritesFirst, useFavoriteParties } from "./useFavoriteParties";
@@ -48,8 +40,7 @@ import { useNotificationFeeds } from "./hooks/useNotificationFeeds";
 import { usePartyActions } from "./hooks/usePartyActions";
 import { useParticipantStatuses } from "./hooks/useParticipantStatuses";
 import { buildHash, sharedWithSlug } from "./hashRoute";
-import { participantName, partiesSharedWith } from "./sharedParties";
-import { columnSx } from "./styles";
+import { partiesSharedWith } from "./sharedParties";
 import type {
   DecentralizedParty,
   DecentralizedPartiesResponse,
@@ -462,6 +453,16 @@ const App = () => {
   // then needs its search bar and FAB back.
   const showingDetail = Boolean(selectedParty || selectedFormerParty);
 
+  const filterControls: PartyFilterControls = {
+    partyFilter,
+    setPartyFilter,
+    refreshParties,
+    refreshingParties,
+    showHidden,
+    setShowHidden,
+    hiddenCount,
+  };
+
   const backToList = () => {
     setSelectedPartyId(null);
     navigate(0, sharedWith ? sharedWithSlug(sharedWith) : partyFilter || null);
@@ -755,176 +756,39 @@ const App = () => {
 
       {/* Tab 0: Parties — edge-to-edge */}
       {activeTab === 0 && !loading && !error && (
-        // Passes the region's leftover height down to the list, so its footer
-        // bar can sit at the bottom of the view on a short page.
-        <Box
-          sx={{
-            pt: isLargeScreen ? 4 : 0,
-            flex: 1,
-            display: "flex",
-            flexDirection: "column",
-          }}
-        >
-          {selectedParty ? (
-            <PartyDetail
-              party={selectedParty}
-              onBack={backToList}
-              onRefresh={() => refreshParties(true)}
-              onNavigateToNotifications={goToNotifications}
-              selfParticipantId={nodeConfig?.node.participant_id}
-              authStatus={authStatuses.find(
-                (a) => a.dec_party_id === selectedPartyId,
-              )}
-              onAuthRefresh={refreshAuthStatus}
-              operatorParty={operatorParty}
-              network={nodeConfig?.canton.network}
-              onCheckDars={() => navigate(1, selectedPartyId)}
-              onOpenPeerConfig={(participantId) => navigate(2, participantId)}
-              onShowSharedParties={showSharedParties}
-            />
-          ) : selectedFormerParty ? (
-            <FormerPartyDetail
-              party={selectedFormerParty}
-              onBack={backToList}
-              onChanged={() => void reloadFormerParties()}
-              onPurgeStarted={() => markPurging(selectedFormerParty.party_id)}
-            />
-          ) : (
-            <>
-              {isLargeScreen ? (
-                <Box sx={{ height: 48 }} />
-              ) : (
-                <Box sx={{ mt: 2, mb: 2, px: 2 }}>
-                  <Box
-                    sx={{
-                      display: "flex",
-                      alignItems: "flex-start",
-                      gap: 1,
-                    }}
-                  >
-                    <TextField
-                      size="small"
-                      placeholder="Filter by full prefix (e.g. cbtc-network)"
-                      value={partyFilter}
-                      onChange={(e) => setPartyFilter(e.target.value)}
-                      onKeyDown={(e) => {
-                        if (e.key === "Enter") {
-                          refreshParties(true);
-                        }
-                      }}
-                      disabled={refreshingParties}
-                      slotProps={{
-                        input: {
-                          startAdornment: (
-                            <InputAdornment position="start">
-                              <FilterListIcon fontSize="small" color="action" />
-                            </InputAdornment>
-                          ),
-                        },
-                      }}
-                      sx={{ width: 300 }}
-                    />
-                    <Tooltip
-                      title={
-                        showHidden
-                          ? `Hide ${hiddenCount} hidden ${hiddenCount === 1 ? "party" : "parties"}`
-                          : hiddenCount > 0
-                            ? `Show ${hiddenCount} hidden ${hiddenCount === 1 ? "party" : "parties"}`
-                            : "No hidden parties"
-                      }
-                    >
-                      <span>
-                        <IconButton
-                          onClick={() => setShowHidden((v) => !v)}
-                          disabled={hiddenCount === 0 && !showHidden}
-                          color={showHidden ? "primary" : "default"}
-                          sx={{ mt: "1px" }}
-                        >
-                          {showHidden ? <VisibilityIcon /> : <VisibilityOffIcon />}
-                        </IconButton>
-                      </span>
-                    </Tooltip>
-                    <IconButton
-                      onClick={() => refreshParties(true)}
-                      disabled={refreshingParties}
-                      color="primary"
-                      sx={{ mt: "1px" }}
-                    >
-                      <SearchIcon />
-                    </IconButton>
-                  </Box>
-                  {refreshingParties && (
-                    <LinearProgress sx={{ mt: 1, borderRadius: 1 }} />
-                  )}
-                </Box>
-              )}
-
-              <Tabs
-                value={partiesView}
-                onChange={(_e, v) => setPartiesView(v)}
-                sx={{ ...columnSx, mb: 1 }}
-              >
-                <Tab value="decentralized" label="Decentralized Parties" />
-                <Tab value="external" label="External Parties" />
-              </Tabs>
-
-              {partiesView === "decentralized" && sharedWith && (
-                <Box sx={{ ...columnSx, mb: 1 }}>
-                  <Tooltip title={sharedWith} describeChild>
-                    <Chip
-                      size="small"
-                      label={`Shared with ${participantName(sharedWith, networkConfig?.peers)}`}
-                      onDelete={() => {
-                        // `navigate` keeps the filter for a prefix slug.
-                        setSharedWith(null);
-                        navigate(0, partyFilter || null);
-                      }}
-                      data-testid="shared-scope-chip"
-                    />
-                  </Tooltip>
-                </Box>
-              )}
-
-              {partiesView === "decentralized" ? (
-                <PartyList
-                  parties={visibleParties}
-                  authStatuses={authStatuses}
-                  onSelectParty={(id) => {
-                    savedScrollY.current = window.scrollY;
-                    setSelectedPartyId(id);
-                    navigate(0, id, sharedWith);
-                    window.scrollTo(0, 0);
-                  }}
-                  isHidden={isHidden}
-                  onToggleHidden={toggleHidden}
-                  isFavorite={isFavorite}
-                  onToggleFavorite={toggleFavorite}
-                  formerParties={visibleFormerParties}
-                />
-              ) : (
-                <ExternalPartyList {...externalParties} />
-              )}
-            </>
-          )}
-
-          {ADMIN_ACCESS && !showingDetail && partiesView === "decentralized" && (
-            <Tooltip title="Create Party" arrow>
-              <Fab
-                color="primary"
-                aria-label="Create Party"
-                onClick={() => setOnboardingDialogOpen(true)}
-                sx={{
-                  position: "fixed",
-                  bottom: 24,
-                  right: 24,
-                  zIndex: 1101,
-                }}
-              >
-                <AddIcon />
-              </Fab>
-            </Tooltip>
-          )}
-        </Box>
+        <PartiesTab
+          filter={filterControls}
+          isLargeScreen={isLargeScreen}
+          selectedParty={selectedParty}
+          selectedFormerParty={selectedFormerParty}
+          selectedPartyId={selectedPartyId}
+          setSelectedPartyId={setSelectedPartyId}
+          showingDetail={showingDetail}
+          backToList={backToList}
+          navigate={navigate}
+          goToNotifications={goToNotifications}
+          showSharedParties={showSharedParties}
+          reloadFormerParties={reloadFormerParties}
+          markPurging={markPurging}
+          nodeConfig={nodeConfig}
+          networkConfig={networkConfig}
+          authStatuses={authStatuses}
+          refreshAuthStatus={refreshAuthStatus}
+          operatorParty={operatorParty}
+          partiesView={partiesView}
+          setPartiesView={setPartiesView}
+          sharedWith={sharedWith}
+          setSharedWith={setSharedWith}
+          visibleParties={visibleParties}
+          visibleFormerParties={visibleFormerParties}
+          externalParties={externalParties}
+          isHidden={isHidden}
+          toggleHidden={toggleHidden}
+          isFavorite={isFavorite}
+          toggleFavorite={toggleFavorite}
+          savedScrollYRef={savedScrollY}
+          setOnboardingDialogOpen={setOnboardingDialogOpen}
+        />
       )}
 
       {/* Tab 1: Package Management — edge-to-edge */}
@@ -950,41 +814,19 @@ const App = () => {
 
       {/* Tab 2: Configuration — edge-to-edge */}
       {activeTab === 2 && !loading && !error && (
-        <Box sx={{ pt: isLargeScreen ? 4 : 0 }}>
-          {nodeConfig ? (
-            <>
-              <Box sx={{ px: "var(--content-pad)", py: 2 }}>
-                <NodeHealthCard
-                  config={nodeConfig}
-                  health={nodeHealth}
-                  selfLatency={selfLatency}
-                />
-              </Box>
-              <Divider />
-              {networkConfig ? (
-                <NetworkConfigAccordion
-                  config={networkConfig}
-                  nodeConfig={nodeConfig ?? undefined}
-                  keyStatus={keyStatus ?? undefined}
-                  participantStatuses={participantStatuses}
-                  selfWireVersion={selfWireVersion}
-                  selfLatencyMs={selfLatency.ms}
-                  onSave={savePeers}
-                  focusParticipantId={configPeerId}
-                  onShowSharedParties={showSharedParties}
-                />
-              ) : (
-                <Box sx={{ p: 3 }}>
-                  <ConfigTabSkeleton />
-                </Box>
-              )}
-            </>
-          ) : (
-            <Box sx={{ p: 3 }}>
-              <ConfigTabSkeleton />
-            </Box>
-          )}
-        </Box>
+        <ConfigurationTab
+          isLargeScreen={isLargeScreen}
+          nodeConfig={nodeConfig}
+          nodeHealth={nodeHealth}
+          selfLatency={selfLatency}
+          networkConfig={networkConfig}
+          keyStatus={keyStatus}
+          participantStatuses={participantStatuses}
+          selfWireVersion={selfWireVersion}
+          savePeers={savePeers}
+          configPeerId={configPeerId}
+          showSharedParties={showSharedParties}
+        />
       )}
 
       {/* Tab 3: Notifications */}
