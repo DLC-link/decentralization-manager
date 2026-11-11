@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useMemo } from "react";
+import { useState, useEffect, useMemo } from "react";
 import { Dialog, DialogTitle, DialogContent, DialogActions, Button, Typography, CircularProgress, Alert, Box, TextField, IconButton, Divider } from "@mui/material";
 import AddIcon from "@mui/icons-material/Add";
 import DeleteIcon from "@mui/icons-material/Delete";
@@ -6,6 +6,7 @@ import ArrowBackIcon from "@mui/icons-material/ArrowBack";
 import { API_BASE } from "../../constants";
 import { authenticatedFetch } from "../../api";
 import { useSnackbar } from "../../contexts";
+import { useWorkflowStatus } from "../../hooks/useWorkflowStatus";
 import { fieldHelpAdornment } from "../FieldHelp";
 import type { ContractsStatusResponse, ContractsRequest, ContractDefinition, ContractInfo, PackageConfig, VettedPackageInfo } from "../../types";
 import { createEmptyContract, commitPartyInput } from "./contractFields";
@@ -185,41 +186,15 @@ export const ContractsDialog = ({
     };
   }, [contractType, partyId, packages]);
 
-  const pollStatus = useCallback(async () => {
-    try {
-      const res = await authenticatedFetch(`${API_BASE}/contracts/status`);
-      if (res.ok) {
-        const data: ContractsStatusResponse = await res.json();
-        if (data.status === "cancelled") {
-          showSnackbar("Contracts workflow cancelled");
-          onClose();
-          return;
-        }
-        setStatus(data);
-        if (data.status !== "inprogress") {
-          setLoading(false);
-          if (data.status === "completed") {
-            onComplete();
-          }
-        }
-      }
-    } catch {
-      // Ignore polling errors
-    }
-  }, [onComplete, onClose, showSnackbar]);
-
-  useEffect(() => {
-    let interval: number | undefined;
-
-    if (status?.status === "inprogress") {
-      pollStatus();
-      interval = window.setInterval(pollStatus, 2000);
-    }
-
-    return () => {
-      if (interval) clearInterval(interval);
-    };
-  }, [status?.status, pollStatus]);
+  useWorkflowStatus({
+    path: `${API_BASE}/contracts/status`,
+    cancelledMessage: "Contracts workflow cancelled",
+    status,
+    setStatus,
+    setLoading,
+    onComplete: onComplete,
+    onClose,
+  });
 
   const handleAddContract = () => {
     setContracts([...contracts, createEmptyContract()]);
