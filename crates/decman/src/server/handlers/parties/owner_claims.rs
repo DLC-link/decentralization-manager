@@ -3,8 +3,8 @@
 use std::collections::{HashMap, HashSet};
 
 use canton_proto_rs::com::digitalasset::canton::topology::admin::v30::{
-    BaseQuery, ListNamespaceDelegationRequest, StoreId, Synchronizer, base_query,
-    list_namespace_delegation_response::result::Item as NsDelegationItem, store_id, synchronizer,
+    ListNamespaceDelegationRequest,
+    list_namespace_delegation_response::result::Item as NsDelegationItem,
     topology_manager_read_service_client::TopologyManagerReadServiceClient,
 };
 use sqlx::SqlitePool;
@@ -19,6 +19,7 @@ use crate::{
     error::Result,
     server::types::{DecentralizedParty, NonHostingOwner, ParticipantInfo},
     utils,
+    workflow::topology,
 };
 
 /// Fills in owner keys that this node lacks from public Canton topology. For
@@ -41,20 +42,6 @@ pub(super) async fn supplement_owner_keys_from_topology(
         .max_decoding_message_size(utils::MAX_GRPC_MESSAGE_SIZE);
     let synchronizer_id = utils::get_synchronizer_id(config).await?;
 
-    let base_query = || BaseQuery {
-        store: Some(StoreId {
-            store: Some(store_id::Store::Synchronizer(Synchronizer {
-                kind: Some(synchronizer::Kind::PhysicalId(synchronizer_id.clone())),
-            })),
-        }),
-        proposals: false,
-        operation: 0,
-        time_query: Some(base_query::TimeQuery::HeadState(())),
-        filter_signed_key: String::new(),
-        protocol_version: None,
-        client_version: None,
-    };
-
     // Cache per-namespace fingerprints so a participant who appears in many
     // parties is only queried once.
     let mut delegated_fingerprints: HashMap<String, HashSet<String>> = HashMap::new();
@@ -65,7 +52,7 @@ pub(super) async fn supplement_owner_keys_from_topology(
         let mut fingerprints: HashSet<String> = HashSet::new();
         match topology_client
             .list_namespace_delegation(tonic::Request::new(ListNamespaceDelegationRequest {
-                base_query: Some(base_query()),
+                base_query: Some(topology::head_state_query(&synchronizer_id)),
                 filter_namespace: namespace.to_string(),
                 filter_target_key_fingerprint: String::new(),
             }))

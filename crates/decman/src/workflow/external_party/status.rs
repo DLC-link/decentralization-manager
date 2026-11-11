@@ -2,29 +2,11 @@ use canton_proto_rs::com::digitalasset::canton::{
     protocol::v30::enums::ParticipantPermission,
     topology::admin::v30::{
         BaseQuery, ListDecentralizedNamespaceDefinitionRequest, ListPartyToParticipantRequest,
-        StoreId, Synchronizer, base_query, store_id, synchronizer,
         topology_manager_read_service_client::TopologyManagerReadServiceClient,
     },
 };
 
 use crate::{config::NodeConfig, error::Result, utils, workflow::topology};
-
-/// A head-state (or proposal) topology query against the synchronizer store.
-pub(super) fn party_query(synchronizer_id: &str, proposals: bool) -> BaseQuery {
-    BaseQuery {
-        store: Some(StoreId {
-            store: Some(store_id::Store::Synchronizer(Synchronizer {
-                kind: Some(synchronizer::Kind::PhysicalId(synchronizer_id.to_string())),
-            })),
-        }),
-        proposals,
-        operation: 0,
-        time_query: Some(base_query::TimeQuery::HeadState(())),
-        filter_signed_key: String::new(),
-        protocol_version: None,
-        client_version: None,
-    }
-}
 
 /// Whether this participant hosts an external party yet, from its own topology.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -65,7 +47,10 @@ pub async fn host_onboarding_status(
     for proposals in [false, true] {
         let response = client
             .list_party_to_participant(tonic::Request::new(ListPartyToParticipantRequest {
-                base_query: Some(party_query(&synchronizer_id, proposals)),
+                base_query: Some(BaseQuery {
+                    proposals,
+                    ..topology::head_state_query(&synchronizer_id)
+                }),
                 filter_party: party_id.to_string(),
                 filter_participant: self_uid.clone(),
             }))
@@ -159,7 +144,7 @@ pub async fn list_hosted_external_parties(config: &NodeConfig) -> Result<Vec<Hos
     let decentralized: std::collections::HashSet<String> = client
         .list_decentralized_namespace_definition(tonic::Request::new(
             ListDecentralizedNamespaceDefinitionRequest {
-                base_query: Some(party_query(&synchronizer_id, false)),
+                base_query: Some(topology::head_state_query(&synchronizer_id)),
                 filter_namespace: String::new(),
             },
         ))
@@ -172,7 +157,7 @@ pub async fn list_hosted_external_parties(config: &NodeConfig) -> Result<Vec<Hos
 
     let p2p = client
         .list_party_to_participant(tonic::Request::new(ListPartyToParticipantRequest {
-            base_query: Some(party_query(&synchronizer_id, false)),
+            base_query: Some(topology::head_state_query(&synchronizer_id)),
             filter_party: String::new(),
             filter_participant: self_uid.clone(),
         }))
