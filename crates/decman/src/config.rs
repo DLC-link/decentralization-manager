@@ -6,7 +6,7 @@ use tonic::transport::{Certificate, Channel, ClientTlsConfig, Endpoint, Identity
 
 use crate::{
     canton_id::CantonId,
-    consts::{DARS_DIR, DATA_DIR, DB_FILENAME, NOISE_KEY_FILENAME},
+    consts::{DATA_DIR, DB_FILENAME, NOISE_KEY_FILENAME},
     error::Result,
 };
 
@@ -632,11 +632,6 @@ impl NodeConfig {
     /// Get the path to the noise key file
     pub fn key_file_path(&self) -> PathBuf {
         self.data_dir().join(NOISE_KEY_FILENAME)
-    }
-
-    /// Get the dars directory
-    pub fn dars_dir(&self) -> PathBuf {
-        self.data_dir().join(DARS_DIR)
     }
 
     /// Get the path to the SQLite database file

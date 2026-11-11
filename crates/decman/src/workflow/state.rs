@@ -293,12 +293,6 @@ impl<S: WorkflowStep + 'static> WorkflowState<S> {
         *self.acs_export.lock().await = None;
     }
 
-    /// Clear the command payload
-    pub async fn clear_command_payload(&self) {
-        let mut cmd_payload = self.command_payload.write().await;
-        cmd_payload.clear();
-    }
-
     pub async fn current_step(&self) -> S {
         *self.current_step.read().await
     }
