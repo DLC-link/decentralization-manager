@@ -10,6 +10,11 @@ use crate::framework::{PackageResolver, TemplateId};
 
 /// The `GovernanceRules` template — governance-core's governance-state
 /// contract.
+///
+/// # Errors
+///
+/// Returns [`Error::PackageNotConfigured`] when `pkgs` has no `governance_core`
+/// ref.
 pub fn governance_rules_template(pkgs: &dyn PackageResolver) -> Result<TemplateId, Error> {
     let pkg = pkgs
         .package_ref("governance_core")
@@ -19,6 +24,11 @@ pub fn governance_rules_template(pkgs: &dyn PackageResolver) -> Result<TemplateI
 
 /// The `GovernanceSelfConfirmation` template — governance-core's
 /// self-management confirmations, each carrying its own inline action.
+///
+/// # Errors
+///
+/// Returns [`Error::PackageNotConfigured`] when `pkgs` has no `governance_core`
+/// ref.
 pub fn self_confirmation_template(pkgs: &dyn PackageResolver) -> Result<TemplateId, Error> {
     let pkg = pkgs
         .package_ref("governance_core")
@@ -32,6 +42,11 @@ pub fn self_confirmation_template(pkgs: &dyn PackageResolver) -> Result<Template
 
 /// The `GovernanceConfirmation` template — governance-core's domain-action
 /// confirmations.
+///
+/// # Errors
+///
+/// Returns [`Error::PackageNotConfigured`] when `pkgs` has no `governance_core`
+/// ref.
 pub fn domain_confirmation_template(pkgs: &dyn PackageResolver) -> Result<TemplateId, Error> {
     let pkg = pkgs
         .package_ref("governance_core")
@@ -44,6 +59,11 @@ pub fn domain_confirmation_template(pkgs: &dyn PackageResolver) -> Result<Templa
 }
 
 /// The `GovernableAction` interface every catalog proposal implements.
+///
+/// # Errors
+///
+/// Returns [`Error::PackageNotConfigured`] when `pkgs` has no `governance_action`
+/// ref.
 pub fn governable_action_interface(pkgs: &dyn PackageResolver) -> Result<TemplateId, Error> {
     let pkg = pkgs
         .package_ref("governance_action")

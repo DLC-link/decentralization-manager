@@ -56,6 +56,11 @@ fn confirmations_list(confirmation_cids: &[String]) -> Value {
 // ============================================================================
 
 /// `GovernanceRules_ConfirmGovernanceAction`: `{confirmer, action}`.
+///
+/// # Errors
+///
+/// Returns [`Error::Encode`] when `action` has no `GovernanceSelfAction`
+/// form (see [`ActionType::to_self_proto`]).
 pub fn build_confirm_self_action(
     rules: &TemplateId,
     rules_cid: &str,
@@ -105,6 +110,11 @@ pub fn build_confirm_proposal(
 // ============================================================================
 
 /// `GovernanceRules_ExecuteGovernanceAction`: `{executor, action, confirmations}`.
+///
+/// # Errors
+///
+/// Returns [`Error::Encode`] when `action` has no `GovernanceSelfAction`
+/// form (see [`ActionType::to_self_proto`]).
 #[allow(clippy::too_many_arguments)]
 pub fn build_execute_self_action(
     rules: &TemplateId,

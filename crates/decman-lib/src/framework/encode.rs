@@ -191,6 +191,11 @@ pub fn make_extra_args(context_values: Value) -> Value {
 
 /// Serialize a `Splice.Api.Token.MetadataV1.AnyValue` constructor as a Daml
 /// `Variant` Value suitable for the Ledger API.
+///
+/// # Errors
+///
+/// Returns [`Error::Encode`] for a `Date`, `Time` or `RelTime` value, also
+/// when one sits inside a `List` or `Map`.
 pub fn make_any_value(v: &ContextValue) -> Result<Value, Error> {
     let (ctor, inner) = match v {
         ContextValue::Text(s) => ("AV_Text", make_text(s)),
@@ -224,6 +229,11 @@ pub fn make_any_value(v: &ContextValue) -> Result<Value, Error> {
 
 /// Build the `extraArgs` record with the choice-context values populated from
 /// a registry response (e.g. `registry::accept_context::get`).
+///
+/// # Errors
+///
+/// Returns [`Error::Encode`] when a context value, or a value nested in it,
+/// is a `Date`, `Time` or `RelTime` (see [`make_any_value`]).
 pub fn make_extra_args_from_context(ctx: &ChoiceContext) -> Result<Value, Error> {
     let mut entries: Vec<(String, Value)> = ctx
         .values

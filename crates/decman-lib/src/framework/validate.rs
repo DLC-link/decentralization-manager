@@ -15,6 +15,11 @@ use common::canton_id::CantonId;
 use crate::catalog::types::{AppRewardBeneficiary, RewardBeneficiary};
 use crate::error::Error;
 
+/// Check a new governance threshold before it is proposed.
+///
+/// # Errors
+///
+/// Returns [`Error::Validation`] when `new_threshold` is below 1.
 pub fn validate_threshold(new_threshold: i64) -> Result<(), Error> {
     if new_threshold < 1 {
         return Err(Error::Validation(format!(
@@ -31,6 +36,12 @@ pub fn validate_threshold(new_threshold: i64) -> Result<(), Error> {
 /// execution, so it must fail here instead.
 pub const MIN_TIMEOUT_MICROSECONDS: i64 = 10_000_000;
 
+/// Check a new `actionConfirmationTimeout` before it is proposed.
+///
+/// # Errors
+///
+/// Returns [`Error::Validation`] when `microseconds` is below
+/// [`MIN_TIMEOUT_MICROSECONDS`] (10 seconds).
 pub fn validate_timeout(microseconds: i64) -> Result<(), Error> {
     if microseconds < MIN_TIMEOUT_MICROSECONDS {
         return Err(Error::Validation(format!(
@@ -41,6 +52,12 @@ pub fn validate_timeout(microseconds: i64) -> Result<(), Error> {
     Ok(())
 }
 
+/// Check that an issuer list names each issuer once.
+///
+/// # Errors
+///
+/// Returns [`Error::Validation`] for the first issuer that appears twice. The
+/// message names `field` and that issuer.
 pub fn validate_unique_issuers(issuers: &[CantonId], field: &str) -> Result<(), Error> {
     let mut seen = HashSet::new();
     for issuer in issuers {
@@ -58,6 +75,12 @@ pub fn validate_unique_issuers(issuers: &[CantonId], field: &str) -> Result<(), 
 /// refuses a claimless self-issued credential, because it attests for nobody.
 /// Requirements from other issuers are out of scope: those credentials arrive
 /// out of band.
+///
+/// # Errors
+///
+/// Returns [`Error::Validation`] for the first requirement that
+/// `governance_party` issues with no required claims. The message names
+/// `field`.
 pub fn validate_self_issued_requirements_have_claims(
     requirements: &[PartyCredentialRequirement],
     governance_party: &CantonId,
@@ -79,6 +102,11 @@ pub fn validate_self_issued_requirements_have_claims(
 /// mint or burn offer checks the block list again, and the holder must send
 /// the shards there. Nobody has checked what wallet and cbtc-lib transfers
 /// send (#566).
+///
+/// # Errors
+///
+/// Returns [`Error::Validation`] when `use_block_list` is `Some(true)`.
+/// `None` and `Some(false)` pass.
 pub fn validate_block_list_supported(use_block_list: Option<bool>) -> Result<(), Error> {
     if use_block_list == Some(true) {
         return Err(Error::Validation(
@@ -95,6 +123,11 @@ pub fn validate_block_list_supported(use_block_list: Option<bool>) -> Result<(),
 /// The on-ledger `executeImpl` asserts the same thing, but only at execute
 /// time — after a full propose/confirm round has been spent on a value that
 /// could never have worked.
+///
+/// # Errors
+///
+/// Returns [`Error::Validation`] when `micros` is zero or negative, or when it
+/// is not later than `now_micros`. The message names `field`.
 pub fn validate_future_micros(micros: i64, now_micros: i64, field: &str) -> Result<(), Error> {
     if micros <= 0 {
         return Err(Error::Validation(format!(
@@ -114,6 +147,12 @@ pub fn validate_future_micros(micros: i64, now_micros: i64, field: &str) -> Resu
 /// start before it ends, and execution refuses one that has already ended.
 /// Checking the end against `now_micros` here surfaces that as a 400 before
 /// any vote. Either bound may be absent.
+///
+/// # Errors
+///
+/// Returns [`Error::Validation`] when the start is zero or negative, when the
+/// end is zero, negative or not later than `now_micros`, or when the start is
+/// not before the end.
 pub fn validate_credential_validity(
     valid_from_micros: Option<i64>,
     valid_until_micros: Option<i64>,
@@ -139,6 +178,12 @@ pub fn validate_credential_validity(
     Ok(())
 }
 
+/// Check that an amount is strictly positive.
+///
+/// # Errors
+///
+/// Returns [`Error::Validation`] when `amount` is zero or negative. The
+/// message names `field`.
 pub fn validate_positive_amount(amount: &DamlDecimal, field: &str) -> Result<(), Error> {
     // `DamlDecimal` itself doesn't implement `PartialOrd`; compare via the
     // inner `rust_decimal::Decimal` returned by `value()` against the zero
@@ -163,6 +208,13 @@ pub fn validate_positive_amount(amount: &DamlDecimal, field: &str) -> Result<(),
 ///
 /// The length limit is one lower than `validate_reward_beneficiaries`: this
 /// template needs `length < 20`, the coupon one allows 20.
+///
+/// # Errors
+///
+/// Returns [`Error::Validation`] when the list is empty, when it has 20 or
+/// more entries, when a weight is outside (0.0, 1.0], when a beneficiary
+/// appears twice, or when the weights do not sum to exactly 1.0. The first
+/// failed check is the one reported.
 pub fn validate_beneficiary_weights(beneficiaries: &[AppRewardBeneficiary]) -> Result<(), Error> {
     if beneficiaries.is_empty() {
         return Err(Error::Validation(
@@ -214,6 +266,13 @@ pub fn validate_beneficiary_weights(beneficiaries: &[AppRewardBeneficiary]) -> R
 ///
 /// `DamlDecimal` addition is exact (no float rounding), so an exact `==`
 /// against `1.0` is sufficient here — no epsilon tolerance is needed.
+///
+/// # Errors
+///
+/// Returns [`Error::Validation`] when the list is empty, when it has more
+/// than 20 entries, when a percentage is outside (0.0, 1.0], when a
+/// beneficiary appears twice, or when the percentages do not sum to exactly
+/// 1.0. The first failed check is the one reported.
 pub fn validate_reward_beneficiaries(beneficiaries: &[RewardBeneficiary]) -> Result<(), Error> {
     if beneficiaries.is_empty() {
         return Err(Error::Validation(

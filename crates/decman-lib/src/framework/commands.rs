@@ -42,6 +42,12 @@ pub fn commands_envelope(
 
 /// The create-arguments record for a proposal: the payload's own fields,
 /// with `governanceParty` and `proposer` injected first.
+///
+/// # Errors
+///
+/// Returns the payload's own encode error. Returns [`Error::Encode`] when
+/// the payload does not encode to a `Record`, or when that record already
+/// holds a `governanceParty` or `proposer` field.
 pub fn proposal_create_arguments(
     payload: &(impl DamlProtoEncode + ?Sized),
     governance_party: &CantonId,
@@ -82,6 +88,12 @@ pub fn proposal_create_arguments(
 /// `&dyn GrpcPayload` rather than re-matching 30 variants — can submit
 /// through the same entry point as a concrete struct. `dyn GrpcPayload`
 /// implements its supertraits automatically, so nothing else is needed.
+///
+/// # Errors
+///
+/// Returns [`Error::PackageNotConfigured`] when `packages` cannot resolve the
+/// payload's template. Otherwise returns the errors of
+/// [`proposal_create_arguments`].
 pub fn build_propose(
     payload: &(impl TemplateInfo + DamlProtoEncode + ?Sized),
     governance_party: &CantonId,
