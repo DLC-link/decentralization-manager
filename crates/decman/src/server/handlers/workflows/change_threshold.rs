@@ -97,44 +97,7 @@ async fn start_change_threshold_run(
         .filter_map(|r| CantonId::parse(&r.participant_uid).ok())
         .collect();
 
-    if party_member_ids.is_empty() {
-        return Err(ApiError::Conflict(format!(
-            "No cached membership for {decentralized_party_id}. Try refreshing \
-                 /decentralized-parties first."
-        )));
-    }
-    if !party_member_ids.contains(data.config.participant_id()) {
-        return Err(ApiError::BadRequest(format!(
-            "This node is not a member of {decentralized_party_id}; only an existing \
-                 member can coordinate a threshold change"
-        )));
-    }
-    // Need at least one other member to reach a signing quorum — a solo-owner
-    // party has a fixed threshold of 1 and nothing to change.
-    if party_member_ids.len() < 2 {
-        return Err(ApiError::BadRequest(format!(
-            "Cannot change threshold: {decentralized_party_id} has only {n} member(s)",
-            n = party_member_ids.len()
-        )));
-    }
-
-    // Bound the new threshold by the member count. The deeper validation
-    // against the live DNS owner set (and the "already current" check) happens
-    // in ExportState.
-    let member_count = party_member_ids.len() as i32;
-    if body.new_threshold < 1 || body.new_threshold > member_count {
-        return Err(ApiError::BadRequest(format!(
-            "new_threshold must be between 1 and {member_count} (party member count); got {got}",
-            got = body.new_threshold,
-        )));
-    }
-    // Every member hosts the party, so the member count bounds the
-    // confirmation threshold too.
-    if let Some(confirmation) = body.confirmation_threshold
-        && let Err(e) = check_confirmation_threshold(confirmation, party_member_ids.len())
-    {
-        return Err(ApiError::BadRequest(e.to_string()));
-    }
+    check_change_threshold(body, data.config.participant_id(), &party_member_ids)?;
 
     // Invitees: every member except self — they all sign.
     let invitees: Vec<CantonId> = data
@@ -229,6 +192,56 @@ async fn start_change_threshold_run(
         message: "Change-threshold workflow started".to_string(),
         instance_name,
     }))
+}
+
+/// Check a threshold change against the party's cached members. It reads
+/// only its inputs.
+fn check_change_threshold(
+    request: &ChangeThresholdRequest,
+    self_id: &CantonId,
+    party_member_ids: &HashSet<CantonId>,
+) -> std::result::Result<(), ApiError> {
+    let decentralized_party_id = &request.decentralized_party_id;
+    if party_member_ids.is_empty() {
+        return Err(ApiError::Conflict(format!(
+            "No cached membership for {decentralized_party_id}. Try refreshing \
+                 /decentralized-parties first."
+        )));
+    }
+    if !party_member_ids.contains(self_id) {
+        return Err(ApiError::BadRequest(format!(
+            "This node is not a member of {decentralized_party_id}; only an existing \
+                 member can coordinate a threshold change"
+        )));
+    }
+    // Need at least one other member to reach a signing quorum — a solo-owner
+    // party has a fixed threshold of 1 and nothing to change.
+    if party_member_ids.len() < 2 {
+        return Err(ApiError::BadRequest(format!(
+            "Cannot change threshold: {decentralized_party_id} has only {n} member(s)",
+            n = party_member_ids.len()
+        )));
+    }
+
+    // Bound the new threshold by the member count. The deeper validation
+    // against the live DNS owner set (and the "already current" check) happens
+    // in ExportState.
+    let member_count = party_member_ids.len() as i32;
+    if request.new_threshold < 1 || request.new_threshold > member_count {
+        return Err(ApiError::BadRequest(format!(
+            "new_threshold must be between 1 and {member_count} (party member count); got {got}",
+            got = request.new_threshold,
+        )));
+    }
+    // Every member hosts the party, so the member count bounds the
+    // confirmation threshold too.
+    if let Some(confirmation) = request.confirmation_threshold
+        && let Err(e) = check_confirmation_threshold(confirmation, party_member_ids.len())
+    {
+        return Err(ApiError::BadRequest(e.to_string()));
+    }
+
+    Ok(())
 }
 
 /// Get the current status of the change-threshold workflow
@@ -592,6 +605,89 @@ mod start_change_threshold_tests {
             format!(
                 r#"{{"status":"inprogress","message":"Change-threshold workflow started","instance_name":"{instance}"}}"#
             )
+        );
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod check_change_threshold_tests {
+    //! Calls the pure threshold-change checks with members, and pins each
+    //! refusal text.
+
+    use super::super::test_support::pid;
+    use super::*;
+
+    type Result<T = ()> = anyhow::Result<T>;
+
+    fn request(new_threshold: i32, confirmation: Option<i32>) -> Result<ChangeThresholdRequest> {
+        Ok(ChangeThresholdRequest {
+            decentralized_party_id: pid(9)?,
+            new_threshold,
+            confirmation_threshold: confirmation,
+            previous_threshold: 0,
+        })
+    }
+
+    fn ids(ids: &[&CantonId]) -> HashSet<CantonId> {
+        ids.iter().map(|id| (*id).clone()).collect()
+    }
+
+    /// This node is `pid(1)`.
+    #[test]
+    fn each_refusal_keeps_its_text() -> Result {
+        let (me, p2, p3, party) = (pid(1)?, pid(2)?, pid(3)?, pid(9)?);
+        let three = ids(&[&me, &p2, &p3]);
+        let confirmation_refusal = check_confirmation_threshold(4, 3)
+            .err()
+            .ok_or_else(|| anyhow::anyhow!("4 of 3 hosts must be refused"))?
+            .to_string();
+        let cases = [
+            (
+                ids(&[]),
+                request(1, None)?,
+                ApiError::Conflict(format!(
+                    "No cached membership for {party}. Try refreshing /decentralized-parties \
+                     first."
+                )),
+            ),
+            (
+                ids(&[&p2, &p3]),
+                request(1, None)?,
+                ApiError::BadRequest(format!(
+                    "This node is not a member of {party}; only an existing member can \
+                     coordinate a threshold change"
+                )),
+            ),
+            (
+                ids(&[&me]),
+                request(1, None)?,
+                ApiError::BadRequest(format!(
+                    "Cannot change threshold: {party} has only 1 member(s)"
+                )),
+            ),
+            (
+                three.clone(),
+                request(0, None)?,
+                ApiError::BadRequest(
+                    "new_threshold must be between 1 and 3 (party member count); got 0".to_string(),
+                ),
+            ),
+            (
+                three.clone(),
+                request(2, Some(4))?,
+                ApiError::BadRequest(confirmation_refusal),
+            ),
+        ];
+        for (members, request, refusal) in cases {
+            assert_eq!(
+                check_change_threshold(&request, &me, &members),
+                Err(refusal)
+            );
+        }
+        assert_eq!(
+            check_change_threshold(&request(3, Some(2))?, &me, &three),
+            Ok(())
         );
         Ok(())
     }

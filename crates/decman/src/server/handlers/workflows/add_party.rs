@@ -9,7 +9,7 @@ use sqlx::SqlitePool;
 
 use crate::{
     canton_id::CantonId,
-    config::NodeConfig,
+    config::{NodeConfig, Peer},
     db::schema::SchemaRead,
     error::Result,
     noise::{Message, MessageType},
@@ -93,13 +93,7 @@ async fn start_add_party_run(
         ApiError::Internal("Failed to load peers".to_string())
     })?;
 
-    // The new member must be a configured, known peer — invites travel over
-    // Noise, so a participant this node can't reach can't join.
-    if !peers.iter().any(|p| p.participant_id == new_participant_id) {
-        return Err(ApiError::BadRequest(format!(
-            "Participant {new_participant_id} is not a configured peer of this node"
-        )));
-    }
+    refuse_unknown_peer(&peers, &new_participant_id)?;
 
     // Scope the existing-member set to the party's cached membership (same
     // rationale as start_kick — the party can be a strict subset of the
@@ -115,44 +109,7 @@ async fn start_add_party_run(
         .iter()
         .filter_map(|r| CantonId::parse(&r.participant_uid).ok())
         .collect();
-    if party_member_ids.is_empty() {
-        return Err(ApiError::Conflict(format!(
-            "No cached membership for {decentralized_party_id}. Try refreshing \
-                 /decentralized-parties first."
-        )));
-    }
-    if party_member_ids.contains(&new_participant_id) {
-        return Err(ApiError::Conflict(format!(
-            "Participant {new_participant_id} is already a member of \
-                 {decentralized_party_id}"
-        )));
-    }
-    if !party_member_ids.contains(data.config.participant_id()) {
-        return Err(ApiError::BadRequest(format!(
-            "This node is not a member of {decentralized_party_id}; only an existing \
-                 member can coordinate adding one"
-        )));
-    }
-
-    // Bound the new threshold by the members that can actually sign, which
-    // excludes the one being added. It carries Canton's onboarding marker until
-    // its ACS import completes, so it confirms nothing — and a P2P add at
-    // threshold = the post-add member count is the known full-threshold bug:
-    // the write never becomes effective, and the run stalls with no signal
-    // saying why.
-    //
-    // Raising the threshold to include the new member is a second step, after
-    // its marker clears, via the change-threshold workflow. The deeper
-    // validation against the live DNS owner set happens in ExportState.
-    let signing_member_count = party_member_ids.len() as i32;
-    if body.new_threshold < 1 || body.new_threshold > signing_member_count {
-        return Err(ApiError::BadRequest(format!(
-            "new_threshold must be between 1 and {signing_member_count} (the members that \
-                 can sign; the member being added cannot until its ACS import completes); got \
-                 {got}. To include it, run change-threshold once its onboarding marker clears",
-            got = body.new_threshold,
-        )));
-    }
+    let invitees = plan_add_party(body, data.config.participant_id(), &party_member_ids, peers)?;
 
     let confirmation_threshold = cached_confirmation_threshold(
         &data.db,
@@ -164,14 +121,6 @@ async fn start_add_party_run(
         tracing::error!("Failed to read the cached thresholds for add-party: {e}");
         ApiError::Internal("Failed to read the party's cached thresholds".to_string())
     })?;
-
-    // Invitees: every existing member except self, plus the new member.
-    let mut invitees: Vec<CantonId> = peers
-        .into_iter()
-        .map(|p| p.participant_id)
-        .filter(|p| party_member_ids.contains(p) && p != data.config.participant_id())
-        .collect();
-    invitees.push(new_participant_id.clone());
 
     let timestamp = now_secs();
     let instance_name = format!("{}-add-party-{timestamp}", decentralized_party_id.prefix);
@@ -256,6 +205,84 @@ async fn start_add_party_run(
         message: "Add-party workflow started".to_string(),
         instance_name,
     }))
+}
+
+/// Refuse a new member that is not a configured peer. The new member must
+/// be a configured, known peer — invites travel over Noise, so a
+/// participant this node can't reach can't join.
+fn refuse_unknown_peer(
+    peers: &[Peer],
+    new_participant_id: &CantonId,
+) -> std::result::Result<(), ApiError> {
+    if !peers
+        .iter()
+        .any(|p| p.participant_id == *new_participant_id)
+    {
+        return Err(ApiError::BadRequest(format!(
+            "Participant {new_participant_id} is not a configured peer of this node"
+        )));
+    }
+    Ok(())
+}
+
+/// Check an add-party request against the party's cached members, and work
+/// out whom to invite. It reads only its inputs.
+fn plan_add_party(
+    request: &AddPartyRequest,
+    self_id: &CantonId,
+    party_member_ids: &HashSet<CantonId>,
+    peers: Vec<Peer>,
+) -> std::result::Result<Vec<CantonId>, ApiError> {
+    let decentralized_party_id = &request.decentralized_party_id;
+    let new_participant_id = &request.new_participant_id;
+    if party_member_ids.is_empty() {
+        return Err(ApiError::Conflict(format!(
+            "No cached membership for {decentralized_party_id}. Try refreshing \
+                 /decentralized-parties first."
+        )));
+    }
+    if party_member_ids.contains(new_participant_id) {
+        return Err(ApiError::Conflict(format!(
+            "Participant {new_participant_id} is already a member of \
+                 {decentralized_party_id}"
+        )));
+    }
+    if !party_member_ids.contains(self_id) {
+        return Err(ApiError::BadRequest(format!(
+            "This node is not a member of {decentralized_party_id}; only an existing \
+                 member can coordinate adding one"
+        )));
+    }
+
+    // Bound the new threshold by the members that can actually sign, which
+    // excludes the one being added. It carries Canton's onboarding marker until
+    // its ACS import completes, so it confirms nothing — and a P2P add at
+    // threshold = the post-add member count is the known full-threshold bug:
+    // the write never becomes effective, and the run stalls with no signal
+    // saying why.
+    //
+    // Raising the threshold to include the new member is a second step, after
+    // its marker clears, via the change-threshold workflow. The deeper
+    // validation against the live DNS owner set happens in ExportState.
+    let signing_member_count = party_member_ids.len() as i32;
+    if request.new_threshold < 1 || request.new_threshold > signing_member_count {
+        return Err(ApiError::BadRequest(format!(
+            "new_threshold must be between 1 and {signing_member_count} (the members that \
+                 can sign; the member being added cannot until its ACS import completes); got \
+                 {got}. To include it, run change-threshold once its onboarding marker clears",
+            got = request.new_threshold,
+        )));
+    }
+
+    // Invitees: every existing member except self, plus the new member.
+    let mut invitees: Vec<CantonId> = peers
+        .into_iter()
+        .map(|p| p.participant_id)
+        .filter(|p| party_member_ids.contains(p) && p != self_id)
+        .collect();
+    invitees.push(new_participant_id.clone());
+
+    Ok(invitees)
 }
 
 /// Get the current status of the add-party workflow
@@ -578,6 +605,113 @@ mod start_add_party_tests {
                 r#"{{"status":"inprogress","message":"Add-party workflow started","instance_name":"{instance}"}}"#
             )
         );
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod plan_add_party_tests {
+    //! Calls the pure add-party checks with members and peers, and pins each
+    //! refusal text.
+
+    use super::super::test_support::{peer, pid};
+    use super::*;
+
+    type Result<T = ()> = anyhow::Result<T>;
+
+    fn request(new_participant: &CantonId, new_threshold: i32) -> Result<AddPartyRequest> {
+        Ok(AddPartyRequest {
+            decentralized_party_id: pid(9)?,
+            new_participant_id: new_participant.clone(),
+            new_threshold,
+            previous_threshold: 0,
+        })
+    }
+
+    fn ids(ids: &[&CantonId]) -> HashSet<CantonId> {
+        ids.iter().map(|id| (*id).clone()).collect()
+    }
+
+    fn peers(ids: &[&CantonId]) -> Vec<Peer> {
+        ids.iter().map(|id| peer(id, 1, false)).collect()
+    }
+
+    #[test]
+    fn a_new_member_must_be_a_peer() -> Result {
+        let (p2, p4) = (pid(2)?, pid(4)?);
+        assert_eq!(
+            refuse_unknown_peer(&peers(&[&p2]), &p4),
+            Err(ApiError::BadRequest(format!(
+                "Participant {p4} is not a configured peer of this node"
+            )))
+        );
+        assert_eq!(refuse_unknown_peer(&peers(&[&p2, &p4]), &p4), Ok(()));
+        Ok(())
+    }
+
+    /// This node is `pid(1)`; `pid(4)` joins.
+    #[test]
+    fn each_refusal_keeps_its_text() -> Result {
+        let (me, p2, p3, p4, party) = (pid(1)?, pid(2)?, pid(3)?, pid(4)?, pid(9)?);
+        let cases = [
+            (
+                ids(&[]),
+                1,
+                ApiError::Conflict(format!(
+                    "No cached membership for {party}. Try refreshing /decentralized-parties \
+                     first."
+                )),
+            ),
+            (
+                ids(&[&me, &p2, &p4]),
+                1,
+                ApiError::Conflict(format!("Participant {p4} is already a member of {party}")),
+            ),
+            (
+                ids(&[&p2, &p3]),
+                1,
+                ApiError::BadRequest(format!(
+                    "This node is not a member of {party}; only an existing member can \
+                     coordinate adding one"
+                )),
+            ),
+            (
+                ids(&[&me, &p2, &p3]),
+                4,
+                ApiError::BadRequest(
+                    "new_threshold must be between 1 and 3 (the members that can sign; the \
+                     member being added cannot until its ACS import completes); got 4. To \
+                     include it, run change-threshold once its onboarding marker clears"
+                        .to_string(),
+                ),
+            ),
+        ];
+        for (members, threshold, refusal) in cases {
+            assert_eq!(
+                plan_add_party(
+                    &request(&p4, threshold)?,
+                    &me,
+                    &members,
+                    peers(&[&p2, &p3, &p4])
+                ),
+                Err(refusal)
+            );
+        }
+        Ok(())
+    }
+
+    /// The invite goes to the members this node peers with, never to a peer
+    /// outside the party, and last to the new member.
+    #[test]
+    fn a_plan_invites_the_members_and_the_new_one() -> Result {
+        let (me, p2, p3, p4, p7) = (pid(1)?, pid(2)?, pid(3)?, pid(4)?, pid(7)?);
+        let invitees = plan_add_party(
+            &request(&p4, 3)?,
+            &me,
+            &ids(&[&me, &p2, &p3]),
+            peers(&[&p7, &p3, &p4, &p2]),
+        )?;
+        assert_eq!(invitees, vec![p3, p2, p4]);
         Ok(())
     }
 }
