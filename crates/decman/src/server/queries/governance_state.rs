@@ -1,7 +1,7 @@
 //! GovernanceRules state reads and contract package lookups.
 
 use canton_proto_rs::com::daml::ledger::api::v2::{GetEventsByContractIdRequest, Identifier};
-use decman_lib::catalog::interpret::{self};
+use decman_lib::catalog::interpret;
 
 use crate::{
     canton_id::CantonId,
