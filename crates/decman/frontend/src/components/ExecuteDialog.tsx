@@ -1,4 +1,4 @@
-import { useState, useMemo } from "react";
+import { useState } from "react";
 import {
   Dialog,
   DialogTitle,
@@ -72,12 +72,10 @@ interface ExecuteDialogProps {
   /// Optional dismiss callback — when provided, the inline error Alert
   /// gets an X button that calls this to clear the message.
   onErrorDismiss?: () => void;
-  blobMap?: Record<string, string>;
 }
 
 interface ExecuteFormProps {
   action: GovernanceAction;
-  fullBlobMap: Record<string, string>;
   loading: boolean;
   error: string | null;
   onErrorDismiss?: () => void;
@@ -89,7 +87,6 @@ interface ExecuteFormProps {
 // state is initialized lazily from the action prop instead of via an effect.
 const ExecuteForm = ({
   action,
-  fullBlobMap,
   loading,
   error,
   onErrorDismiss,
@@ -101,7 +98,7 @@ const ExecuteForm = ({
   >(() =>
     getRequiredContractIds(action.action).map((cid) => ({
       contract_id: cid,
-      blob: fullBlobMap[cid] || "",
+      blob: "",
     })),
   );
 
@@ -300,17 +297,13 @@ export const ExecuteDialog = ({
   loading,
   error,
   onErrorDismiss,
-  blobMap = {},
 }: ExecuteDialogProps) => {
-  const fullBlobMap = useMemo(() => ({ ...blobMap }), [blobMap]);
-
   return (
     <Dialog open={open} onClose={onClose} maxWidth="md" fullWidth>
       {action && (
         <ExecuteForm
           key={action.action_hash}
           action={action}
-          fullBlobMap={fullBlobMap}
           loading={loading}
           error={error}
           onErrorDismiss={onErrorDismiss}
