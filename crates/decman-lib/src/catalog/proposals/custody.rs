@@ -309,7 +309,10 @@ mod tests {
     use canton_proto_rs::com::daml::ledger::api::v2::Record;
 
     use super::*;
-    use crate::framework::encode::{TRANSFER_EXECUTE_BEFORE_MICROS, TRANSFER_REQUESTED_AT_MICROS};
+    use crate::framework::encode::TRANSFER_EXECUTE_BEFORE_MICROS;
+
+    /// Fallback `requestedAt` for a `Transfer` record in these tests: epoch.
+    const TRANSFER_REQUESTED_AT_MICROS: i64 = 0;
 
     /// Any valid `CantonId` — the exact value is irrelevant to these
     /// encode-shape assertions/snapshots.
