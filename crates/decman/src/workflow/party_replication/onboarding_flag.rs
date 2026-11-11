@@ -25,7 +25,7 @@ use crate::{
     utils,
     workflow::{
         party_replication::{ReplicationTarget, offset},
-        topology::fetch_p2p_mapping,
+        topology::{PollText, Polled, fetch_p2p_mapping, poll_until},
     },
 };
 
@@ -187,26 +187,23 @@ pub async fn wait_for_flag_cleared(
     party_id: &CantonId,
     new_member: &CantonId,
 ) -> Result {
-    let max_attempts = crate::consts::topology_retry_max_attempts();
-    let retry_delay = time::Duration::from_secs(crate::consts::topology_retry_delay_secs());
     let new_member_str = new_member.to_string();
 
-    for attempt in 1..=max_attempts {
-        let p2p = fetch_p2p_mapping(config, synchronizer_id, party_id).await?;
-        if !has_onboarding_marker(&p2p, &new_member_str) {
-            tracing::info!("Onboarding flag cleared after {attempt} attempt(s)");
-            return Ok(());
+    let text = PollText {
+        found: "Onboarding flag cleared".to_string(),
+        failed: "Onboarding flag was not cleared".to_string(),
+    };
+    poll_until(text, || {
+        let new_member_str = &new_member_str;
+        async move {
+            let p2p = fetch_p2p_mapping(config, synchronizer_id, party_id).await?;
+            if !has_onboarding_marker(&p2p, new_member_str) {
+                return Ok(Polled::Ready(()));
+            }
+            Ok(Polled::Pending("Onboarding flag still set".to_string()))
         }
-        if attempt < max_attempts {
-            tracing::debug!(
-                "Onboarding flag still set, attempt {attempt}/{max_attempts}, \
-                 retrying in {retry_delay:?}..."
-            );
-            time::sleep(retry_delay).await;
-        }
-    }
-
-    anyhow::bail!("Onboarding flag was not cleared after {max_attempts} attempts")
+    })
+    .await
 }
 
 /// Whether `participant` carries the Onboarding marker in `p2p`.

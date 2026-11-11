@@ -17,16 +17,15 @@ use crate::{
     canton::framing::read_all_messages_with,
     canton_id::CantonId,
     config::NodeConfig,
-    consts::{
-        topology_propagation_delay_secs, topology_retry_delay_secs, topology_retry_max_attempts,
-    },
+    consts::topology_propagation_delay_secs,
     error::Result,
     utils,
     workflow::{
         onboarding::OnboardingConfig,
         storage::{WorkflowStorage, artifact_kinds},
         topology::{
-            dedupe_signatures, sign_transactions_with_topology_retry, synchronizer_store_id,
+            self, PollText, Polled, dedupe_signatures, sign_transactions_with_topology_retry,
+            synchronizer_store_id,
         },
     },
 };
@@ -123,49 +122,44 @@ async fn wait_for_dns_in_topology(
     synchronizer_id: &str,
     namespace: &str,
 ) -> Result {
-    let mut topology_read_client =
-        TopologyManagerReadServiceClient::new(config.admin_channel().await?);
+    let topology_read_client = TopologyManagerReadServiceClient::new(config.admin_channel().await?);
 
-    let max_attempts = topology_retry_max_attempts();
-    let retry_delay = time::Duration::from_secs(topology_retry_delay_secs());
-
-    for attempt in 1..=max_attempts {
-        let request = tonic::Request::new(ListDecentralizedNamespaceDefinitionRequest {
-            base_query: Some(BaseQuery {
-                store: Some(StoreId {
-                    store: Some(store_id::Store::Synchronizer(Synchronizer {
-                        kind: Some(synchronizer::Kind::PhysicalId(synchronizer_id.to_string())),
-                    })),
+    let text = PollText {
+        found: "DNS found in topology".to_string(),
+        failed: "DNS did not appear in topology".to_string(),
+    };
+    topology::poll_until(text, || {
+        let mut topology_read_client = topology_read_client.clone();
+        async move {
+            let request = tonic::Request::new(ListDecentralizedNamespaceDefinitionRequest {
+                base_query: Some(BaseQuery {
+                    store: Some(StoreId {
+                        store: Some(store_id::Store::Synchronizer(Synchronizer {
+                            kind: Some(synchronizer::Kind::PhysicalId(synchronizer_id.to_string())),
+                        })),
+                    }),
+                    proposals: false,
+                    operation: 0,
+                    time_query: Some(base_query::TimeQuery::HeadState(())),
+                    filter_signed_key: String::new(),
+                    protocol_version: None,
+                    client_version: None,
                 }),
-                proposals: false,
-                operation: 0,
-                time_query: Some(base_query::TimeQuery::HeadState(())),
-                filter_signed_key: String::new(),
-                protocol_version: None,
-                client_version: None,
-            }),
-            filter_namespace: namespace.to_string(),
-        });
+                filter_namespace: namespace.to_string(),
+            });
 
-        let response = topology_read_client
-            .list_decentralized_namespace_definition(request)
-            .await?
-            .into_inner();
+            let response = topology_read_client
+                .list_decentralized_namespace_definition(request)
+                .await?
+                .into_inner();
 
-        if !response.results.is_empty() {
-            tracing::info!("DNS found in topology after {attempt} attempt(s)");
-            return Ok(());
+            if !response.results.is_empty() {
+                return Ok(Polled::Ready(()));
+            }
+            Ok(Polled::Pending("DNS not yet in topology".to_string()))
         }
-
-        if attempt < max_attempts {
-            tracing::debug!(
-                "DNS not yet in topology, attempt {attempt}/{max_attempts}, retrying in {retry_delay:?}..."
-            );
-            time::sleep(retry_delay).await;
-        }
-    }
-
-    anyhow::bail!("DNS did not appear in topology after {max_attempts} attempts")
+    })
+    .await
 }
 
 /// Aggregate and submit P2P proposals
@@ -424,64 +418,61 @@ async fn wait_for_p2p_in_topology(
     party_id: &CantonId,
 ) -> Result<prost_types::Timestamp> {
     let party_id_str = party_id.to_string();
-    let mut topology_read_client =
-        TopologyManagerReadServiceClient::new(config.admin_channel().await?);
+    let topology_read_client = TopologyManagerReadServiceClient::new(config.admin_channel().await?);
 
-    let max_attempts = topology_retry_max_attempts();
-    let retry_delay = time::Duration::from_secs(topology_retry_delay_secs());
-
-    for attempt in 1..=max_attempts {
-        let request = tonic::Request::new(ListPartyToParticipantRequest {
-            base_query: Some(BaseQuery {
-                store: Some(StoreId {
-                    store: Some(store_id::Store::Synchronizer(Synchronizer {
-                        kind: Some(synchronizer::Kind::PhysicalId(synchronizer_id.to_string())),
-                    })),
+    let text = PollText {
+        found: "P2P found in topology".to_string(),
+        failed: "P2P did not appear in topology".to_string(),
+    };
+    let context = topology::poll_until(text, || {
+        let mut topology_read_client = topology_read_client.clone();
+        let party_id_str = &party_id_str;
+        async move {
+            let request = tonic::Request::new(ListPartyToParticipantRequest {
+                base_query: Some(BaseQuery {
+                    store: Some(StoreId {
+                        store: Some(store_id::Store::Synchronizer(Synchronizer {
+                            kind: Some(synchronizer::Kind::PhysicalId(synchronizer_id.to_string())),
+                        })),
+                    }),
+                    proposals: false,
+                    operation: 0,
+                    time_query: Some(base_query::TimeQuery::HeadState(())),
+                    filter_signed_key: String::new(),
+                    protocol_version: None,
+                    client_version: None,
                 }),
-                proposals: false,
-                operation: 0,
-                time_query: Some(base_query::TimeQuery::HeadState(())),
-                filter_signed_key: String::new(),
-                protocol_version: None,
-                client_version: None,
-            }),
-            filter_party: party_id_str.clone(),
-            filter_participant: String::new(),
-        });
+                filter_party: party_id_str.clone(),
+                filter_participant: String::new(),
+            });
 
-        let response = topology_read_client
-            .list_party_to_participant(request)
-            .await?
-            .into_inner();
+            let response = topology_read_client
+                .list_party_to_participant(request)
+                .await?
+                .into_inner();
 
-        if let Some(result) = response.results.first() {
-            tracing::info!("P2P found in topology after {attempt} attempt(s)");
-
-            if let Some(context) = &result.context {
-                if let Some(valid_from) = &context.valid_from {
-                    tracing::debug!(
-                        "P2P mapping effective time: {seconds}.{nanos:09}s",
-                        seconds = valid_from.seconds,
-                        nanos = valid_from.nanos
-                    );
-                    return Ok(*valid_from);
-                } else {
-                    anyhow::bail!("P2P mapping found but has no valid_from timestamp");
-                }
-            } else {
-                anyhow::bail!("P2P mapping found but has no context");
+            if let Some(result) = response.results.into_iter().next() {
+                return Ok(Polled::Ready(result.context));
             }
+            Ok(Polled::Pending("P2P not yet in topology".to_string()))
         }
+    })
+    .await?;
 
-        if attempt < max_attempts {
+    if let Some(context) = &context {
+        if let Some(valid_from) = &context.valid_from {
             tracing::debug!(
-                "P2P not yet in topology, attempt {attempt}/{max_attempts}, retrying in {retry_delay:?}..."
+                "P2P mapping effective time: {seconds}.{nanos:09}s",
+                seconds = valid_from.seconds,
+                nanos = valid_from.nanos
             );
-            time::sleep(retry_delay).await;
+            Ok(*valid_from)
+        } else {
+            anyhow::bail!("P2P mapping found but has no valid_from timestamp");
         }
+    } else {
+        anyhow::bail!("P2P mapping found but has no context");
     }
-
-    anyhow::bail!("P2P did not appear in topology after {max_attempts} attempts")
 }
 
 #[cfg(test)]
