@@ -262,3 +262,235 @@ mod get_party_credentials_tests {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod credential_answer_tests {
+    //! Pins the 404 and 500 answers of every endpoint that looks up a
+    //! party's credentials: the status code and the exact JSON body.
+
+    use std::sync::Arc;
+
+    use actix_web::{
+        App, HttpMessage, dev::HttpServiceFactory, http::StatusCode, test as actix_test,
+    };
+    use serde_json::json;
+    use wiremock::{
+        Mock, MockServer, ResponseTemplate,
+        matchers::{method, path_regex},
+    };
+
+    use super::*;
+    use crate::{
+        auth::{AuthRegistry, Principal, WorkflowAuth},
+        config::{KeycloakConfig, PartyCredentials},
+        server::{
+            handlers::governance::{
+                cancel_confirmation, cancel_proposal, confirm_action, execute_action,
+                expire_confirmation, get_coupon_reassignment_delegation, get_reward_status,
+                propose_action,
+            },
+            types::ErrorResponse,
+        },
+    };
+
+    fn party_id() -> Result<CantonId> {
+        CantonId::parse(&format!("p::{}", "0".repeat(68)))
+    }
+
+    /// A state whose Keycloak accepts the party once, at startup, and fails
+    /// every later token request.
+    async fn state_with_a_failing_token(server: &MockServer) -> Result<web::Data<AppState>> {
+        Mock::given(method("POST"))
+            .and(path_regex(r".*/token$"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(json!({"access_token": "t", "expires_in": 0})),
+            )
+            .up_to_n_times(1)
+            .mount(server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path_regex(r".*/token$"))
+            .respond_with(ResponseTemplate::new(500).set_body_json(json!({"error": "down"})))
+            .mount(server)
+            .await;
+        let id = party_id()?;
+        let credentials = PartyCredentials {
+            dec_party_id: id.clone(),
+            member_party_id: id,
+            user_id: "user".to_string(),
+            keycloak: KeycloakConfig {
+                url: server.uri(),
+                realm: "test-realm".to_string(),
+                client_id: "decman".to_string(),
+                client_secret: Some("secret".to_string()),
+                ..KeycloakConfig::default()
+            },
+            auth0: None,
+            packages: PackageConfig::default(),
+        };
+        let registry = AuthRegistry::new(&[credentials]).await?;
+        AppState::for_test(Some(WorkflowAuth::Keycloak(Arc::new(registry)))).await
+    }
+
+    /// Call `service` as an admin, with `body` when it is a POST.
+    async fn call(
+        data: &web::Data<AppState>,
+        service: impl HttpServiceFactory + 'static,
+        uri: &str,
+        body: Option<serde_json::Value>,
+    ) -> Result<(StatusCode, Option<String>, String)> {
+        let app =
+            actix_test::init_service(App::new().app_data(data.clone()).service(service)).await;
+        let request = match body {
+            Some(body) => actix_test::TestRequest::post().uri(uri).set_json(body),
+            None => actix_test::TestRequest::get().uri(uri),
+        }
+        .to_request();
+        request.extensions_mut().insert(Principal {
+            sub: "admin".to_string(),
+            issuer: "test".to_string(),
+            roles: Vec::new(),
+            email: None,
+        });
+        let response = actix_test::call_service(&app, request).await;
+        let status = response.status();
+        let content_type = response
+            .headers()
+            .get("content-type")
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_string);
+        let body = actix_test::read_body(response).await;
+        Ok((status, content_type, String::from_utf8(body.to_vec())?))
+    }
+
+    /// Ask every credentialed endpoint for `party`, and assert each answers
+    /// `status` with exactly `error`.
+    async fn assert_every_endpoint_answers(
+        data: &web::Data<AppState>,
+        status: StatusCode,
+        error: &str,
+    ) -> Result<()> {
+        let party = party_id()?.to_string();
+        let expected = serde_json::to_string(&ErrorResponse {
+            error: error.to_string(),
+        })?;
+        let domain_action = json!({ "type": "governance_set_threshold", "new_threshold": 0 });
+        let answers = [
+            call(
+                data,
+                confirm_action,
+                "/governance/confirm",
+                Some(json!({
+                    "party_id": party,
+                    "rules_contract_id": "00rules",
+                    "action": domain_action,
+                    "governance_type": "core_domain",
+                    "proposal_cid": "00proposal",
+                })),
+            )
+            .await?,
+            call(
+                data,
+                execute_action,
+                "/governance/execute",
+                Some(json!({
+                    "party_id": party,
+                    "rules_contract_id": "00rules",
+                    "action": domain_action,
+                    "confirmation_cids": ["00confirmation"],
+                    "governance_type": "core_domain",
+                    "proposal_cid": "00proposal",
+                })),
+            )
+            .await?,
+            call(
+                data,
+                expire_confirmation,
+                "/governance/expire",
+                Some(json!({
+                    "party_id": party,
+                    "rules_contract_id": "00rules",
+                    "confirmation_cid": "00confirmation",
+                })),
+            )
+            .await?,
+            call(
+                data,
+                cancel_confirmation,
+                "/governance/cancel",
+                Some(json!({ "party_id": party, "confirmation_cid": "00confirmation" })),
+            )
+            .await?,
+            call(
+                data,
+                cancel_proposal,
+                "/governance/cancel-proposal",
+                Some(json!({ "party_id": party, "proposal_cid": "00proposal" })),
+            )
+            .await?,
+            call(
+                data,
+                propose_action,
+                "/governance/propose",
+                Some(json!({
+                    "party_id": party,
+                    "rules_contract_id": "00rules",
+                    "proposal": { "type": "generic_vote", "description": "a vote" },
+                })),
+            )
+            .await?,
+            call(
+                data,
+                get_coupon_reassignment_delegation,
+                &format!("/coupon-reassignment-delegation?party_id={party}"),
+                None,
+            )
+            .await?,
+            call(
+                data,
+                get_reward_status,
+                &format!("/reward-status?party_id={party}"),
+                None,
+            )
+            .await?,
+        ];
+        for (index, (answer_status, content_type, body)) in answers.into_iter().enumerate() {
+            assert_eq!(answer_status, status, "endpoint {index}: {body}");
+            assert_eq!(
+                content_type.as_deref(),
+                Some("application/json"),
+                "endpoint {index}"
+            );
+            assert_eq!(body, expected, "endpoint {index}");
+        }
+        Ok(())
+    }
+
+    #[actix_web::test]
+    async fn a_party_without_credentials_is_a_404_everywhere() -> Result<()> {
+        let data = AppState::for_test(None).await?;
+        assert_every_endpoint_answers(
+            &data,
+            StatusCode::NOT_FOUND,
+            "No credentials configured for party",
+        )
+        .await
+    }
+
+    #[actix_web::test]
+    async fn a_failed_token_fetch_is_a_500_everywhere() -> Result<()> {
+        let server = MockServer::start().await;
+        let data = state_with_a_failing_token(&server).await?;
+        let error = get_party_credentials(&data, &party_id()?)
+            .await
+            .err()
+            .ok_or_else(|| anyhow::anyhow!("the token fetch must fail"))?;
+        assert_every_endpoint_answers(
+            &data,
+            StatusCode::INTERNAL_SERVER_ERROR,
+            &format!("Failed to fetch auth token for party: {error}"),
+        )
+        .await
+    }
+}
