@@ -18,10 +18,9 @@ use std::time::Duration;
 
 use anyhow::Context;
 use base64::{Engine, engine::general_purpose::STANDARD};
+use decman_wallet::ExternalKeyPair;
 use serde_json::{Value, json};
 use tracing::info;
-
-use decman_wallet::ExternalKeyPair;
 
 use crate::common::{
     Fixture, chaos::fresh_prefix, http::probe_workflow_status, scenario::Scenario,

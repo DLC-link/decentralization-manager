@@ -7,7 +7,10 @@
 //! is read-only except the `inject_*` helpers, which chaos phases use to
 //! fabricate state while the owning process is down.
 
-use std::path::{Path, PathBuf};
+use std::{
+    path::{Path, PathBuf},
+    time::Duration,
+};
 
 use anyhow::Context;
 use sqlx::{SqlitePool, sqlite::SqliteConnectOptions};
@@ -43,7 +46,7 @@ async fn open_rw(path: &Path) -> anyhow::Result<SqlitePool> {
         .create_if_missing(false)
         // Tolerate brief contention if the owning process happens to write
         // (`inject_inprogress_coordinator_run` runs against a live node).
-        .busy_timeout(std::time::Duration::from_secs(10));
+        .busy_timeout(Duration::from_secs(10));
     SqlitePool::connect_with(opts)
         .await
         .with_context(|| format!("opening sqlite (rw) at {}", path.display()))
@@ -493,7 +496,7 @@ pub async fn dec_party_cache_has_participant(
 pub async fn backdate_dec_party_cache(
     db_path: &Path,
     prefix: &str,
-    by: std::time::Duration,
+    by: Duration,
 ) -> anyhow::Result<u64> {
     let pool = open_rw(db_path).await?;
     let secs = i64::try_from(by.as_secs()).context("backdate offset overflows i64")?;

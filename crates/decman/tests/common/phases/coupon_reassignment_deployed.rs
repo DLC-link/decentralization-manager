@@ -29,7 +29,7 @@ use common::api::ActiveCouponReassignmentDelegation;
 use tracing::{info, warn};
 
 use crate::common::{
-    Fixture, TestTarget,
+    Fixture, MemberCreds, TestTarget,
     phases::{
         coupon_reassignment::{REASSIGN_TIMEOUT, decparty_metric},
         deploy_gov_core::update_party_config,
@@ -143,7 +143,7 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
     let decparty = read_input(DECPARTY_VAR)?;
     let pqs = Pqs::connect(&read_input(PQS_URL_VAR)?).await?;
 
-    let member = |creds: &Option<crate::common::MemberCreds>, n: u8| {
+    let member = |creds: &Option<MemberCreds>, n: u8| {
         creds
             .as_ref()
             .map(|c| c.party_id.clone())
@@ -408,8 +408,7 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use common::api::CouponReassignmentDelegationSummary;
-    use common::canton_id::CantonId;
+    use common::{api::CouponReassignmentDelegationSummary, canton_id::CantonId};
 
     use super::*;
     use crate::common::pqs::Share;

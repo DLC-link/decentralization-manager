@@ -5,7 +5,7 @@
 //! it, and assert /onboarding/status reaches Completed and P2's row is the
 //! same one (created_at unchanged, exactly one row).
 
-use std::time::Duration;
+use std::{path::Path, time::Duration};
 
 use crate::common::{Fixture, chaos, db, invitations::post_accept_invitation, processes};
 
@@ -70,7 +70,7 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
 /// returning its synthesized `instance_name`. Used by chaos phases that
 /// can't use the generic `chaos::poll_until` helper because the value they
 /// want to capture is not `Copy`.
-async fn wait_for_peer_instance(db_path: &std::path::Path) -> anyhow::Result<String> {
+async fn wait_for_peer_instance(db_path: &Path) -> anyhow::Result<String> {
     use std::time::Instant;
     let start = Instant::now();
     let deadline = Duration::from_secs(60);

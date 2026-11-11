@@ -1,4 +1,4 @@
-use std::{path::Path, process::Command, time::SystemTime};
+use std::{fs::File, path::Path, process::Command, time::SystemTime};
 
 fn main() {
     // The frontend's TypeScript wire types are generated from the Rust DTOs by
@@ -56,7 +56,7 @@ fn build_frontend() {
         assert!(status.success(), "npm install failed");
         // npm leaves the record untouched when nothing changed, which would
         // repeat the install on every build.
-        if let Ok(file) = std::fs::File::options().write(true).open(&installed) {
+        if let Ok(file) = File::options().write(true).open(&installed) {
             file.set_modified(SystemTime::now()).ok();
         }
     }

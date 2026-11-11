@@ -26,19 +26,18 @@ use canton_proto_rs::com::digitalasset::canton::{
     },
     topology::admin::v30::{AuthorizeRequest, authorize_request},
 };
-use serde_json::{Value, json};
-use tracing::info;
-
 use dec_party_manager::{
     canton_id::CantonId,
     config::NodeConfig,
     workflow::{
-        external_party::add_hosts::read_party_to_participant,
+        external_party::{add_hosts::read_party_to_participant, steps},
         topology::{authorize_with_topology_retry, synchronizer_store_id},
         topology_version,
     },
 };
 use decman_wallet::ExternalKeyPair;
+use serde_json::{Value, json};
+use tracing::info;
 
 use crate::common::{Fixture, chaos::fresh_prefix, scenario::Scenario};
 
@@ -222,10 +221,7 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
                         // that the party answers to the wallet's key and only
                         // that one. Usage is not compared: Canton normalizes it
                         // by appending ProofOfOwnership.
-                        let expected =
-                            dec_party_manager::workflow::external_party::steps::party_signing_key(
-                                &expected_public_key,
-                            );
+                        let expected = steps::party_signing_key(&expected_public_key);
                         // Confirmation, not Submission: the host stops submitting
                         // for a party that signs for itself, and Canton refuses
                         // the mapping otherwise.

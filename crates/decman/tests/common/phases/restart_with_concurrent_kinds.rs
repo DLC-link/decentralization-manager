@@ -10,7 +10,11 @@
 //! restart, accept on both kinds, and assert both reach Completed by polling
 //! the persisted rows (post-restart in-memory state can lag).
 
-use std::{path::Path, time::Duration};
+use std::{
+    collections::HashSet,
+    path::Path,
+    time::{Duration, Instant},
+};
 
 use anyhow::Context;
 use base64::{Engine, engine::general_purpose::STANDARD as B64};
@@ -37,7 +41,7 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
         status: Option<String>,
     }
     let cancel_deadline = Duration::from_secs(120);
-    let cancel_started = std::time::Instant::now();
+    let cancel_started = Instant::now();
     loop {
         let in_progress = match f
             .get_json::<DarsStatus>(f.p1.http, "/dars/distribute/status")
@@ -103,12 +107,12 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
             f_imm.get_json(f_imm.p2.http, "/invitations").await?;
         let inv_p3: PendingInvitationsResponse =
             f_imm.get_json(f_imm.p3.http, "/invitations").await?;
-        let kinds_p2: std::collections::HashSet<_> = inv_p2
+        let kinds_p2: HashSet<_> = inv_p2
             .invitations
             .iter()
             .map(|i| &i.invitation_type)
             .collect();
-        let kinds_p3: std::collections::HashSet<_> = inv_p3
+        let kinds_p3: HashSet<_> = inv_p3
             .invitations
             .iter()
             .map(|i| &i.invitation_type)

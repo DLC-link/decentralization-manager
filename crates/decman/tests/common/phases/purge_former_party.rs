@@ -49,6 +49,7 @@ use super::add_party_rehost_disconnect_first::{admin_config, connection_state, h
 use crate::common::{
     Fixture, db,
     ledger_api::{P1_JSON_API, P3_JSON_API, SeedCoupon, reward_coupon_create_command},
+    probe::Class,
     processes,
     scenario::Scenario,
 };
@@ -146,7 +147,7 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
                     Ok(runs) => {
                         f.probe_diag.record(
                             "P3 in-progress runs",
-                            crate::common::probe::Class::Transient,
+                            Class::Transient,
                             format!("{runs:?}"),
                         );
                         None
