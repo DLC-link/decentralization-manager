@@ -852,6 +852,133 @@ async fn raise_threshold_refuses_extra_hashes() {
     assert!(format!("{e:?}").contains("MalformedPreparation"), "{e}");
 }
 
+/// Two hosts that agree with each other can still hand back a hash with no
+/// transaction behind it. Onboarding refuses it before anything is signed.
+#[tokio::test]
+async fn onboarding_refuses_extra_hashes() {
+    let key = ExternalKeyPair::from_seed([13u8; 32]);
+    let party_id = key.party_id("alice");
+    let (p1, p2) = (MockServer::start().await, MockServer::start().await);
+    for s in [&p1, &p2] {
+        Mock::given(method("POST"))
+            .and(path("/v0/tenant/prepare"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "party_id": party_id,
+                "transaction_hashes": [
+                    STANDARD.encode(TX_HASHES[0]),
+                    STANDARD.encode(TX_HASHES[1]),
+                    STANDARD.encode(b"hash-of-something-else"),
+                ],
+                "topology_transactions": ["dHgtb25l", "dHgtdHdv"],
+            })))
+            .mount(s)
+            .await;
+        stub_onboard(s, &party_id, "completed").await;
+    }
+    let hosts = vec![host_for(&p1, 0x11), host_for(&p2, 0x22)];
+
+    let Err(e) = execute_co_validated(&hosts, &key, "alice", None).await else {
+        panic!("a hash without a matching transaction must be refused");
+    };
+    assert!(
+        matches!(&e, decman_wallet::Error::MalformedPreparation { detail, .. }
+            if detail == "3 hash(es) for 2 transaction(s)"),
+        "{e:?}"
+    );
+    assert_eq!(e.host(), p1.uri().trim_end_matches('/'));
+    for server in [&p1, &p2] {
+        assert!(onboard_bodies(server).await.is_empty());
+    }
+}
+
+/// The same hash-count check guards the add-hosts write.
+#[tokio::test]
+async fn add_hosts_refuses_extra_hashes() {
+    let (p1, p2) = (MockServer::start().await, MockServer::start().await);
+    for s in [&p1, &p2] {
+        Mock::given(method("POST"))
+            .and(path("/v0/tenant/add-hosts/prepare"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "party_id": "alice::1220aa",
+                "serial": 5,
+                "transaction_hashes": [
+                    STANDARD.encode(TX_HASHES[0]),
+                    STANDARD.encode(TX_HASHES[1]),
+                    STANDARD.encode(b"hash-of-something-else"),
+                ],
+                "topology_transactions": ["dHgtb25l", "dHgtdHdv"],
+            })))
+            .mount(s)
+            .await;
+    }
+    stub_add_hosts_execute(&p2, 5).await;
+
+    let key = ExternalKeyPair::from_seed([4u8; 32]);
+    let Err(e) = decman_wallet::add_hosts(
+        &[host_for(&p1, 1)],
+        &[host_for(&p2, 2)],
+        &key,
+        "alice::1220aa",
+        HostPermission::Confirmation,
+        4,
+    )
+    .await
+    else {
+        panic!("a hash without a matching transaction must be refused");
+    };
+    assert!(
+        matches!(&e, decman_wallet::Error::MalformedPreparation { detail, .. }
+            if detail == "3 hash(es) for 2 transaction(s)"),
+        "{e:?}"
+    );
+    assert_eq!(e.host(), p1.uri().trim_end_matches('/'));
+    assert_eq!(add_hosts_execute_calls(&p2).await, 0);
+}
+
+/// A threshold change refuses to sign when its preparers disagree, and names
+/// the dissenting host against the first one.
+#[tokio::test]
+async fn raise_threshold_refuses_when_hosts_disagree() {
+    let (p1, p2) = (MockServer::start().await, MockServer::start().await);
+    for (s, serial) in [(&p1, 6), (&p2, 7)] {
+        Mock::given(method("POST"))
+            .and(path("/v0/tenant/threshold/prepare"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "party_id": "alice::1220aa",
+                "serial": serial,
+                "transaction_hashes": TX_HASHES.map(|h| STANDARD.encode(h)),
+                "topology_transactions": ["dHgtb25l", "dHgtdHdv"],
+            })))
+            .mount(s)
+            .await;
+    }
+
+    let key = ExternalKeyPair::from_seed([4u8; 32]);
+    let Err(e) = decman_wallet::raise_threshold(
+        &[host_for(&p1, 1), host_for(&p2, 2)],
+        &key,
+        "alice::1220aa",
+        2,
+        5,
+    )
+    .await
+    else {
+        panic!("disagreeing preparers must be refused");
+    };
+    match &e {
+        decman_wallet::Error::HostDisagreement {
+            host,
+            reference,
+            detail,
+        } => {
+            assert_eq!(host, p2.uri().trim_end_matches('/'));
+            assert_eq!(reference, p1.uri().trim_end_matches('/'));
+            assert_eq!(detail, "different threshold-change bytes");
+        }
+        other => panic!("expected HostDisagreement, got {other:?}"),
+    }
+}
+
 async fn add_hosts_prepare_calls(server: &MockServer) -> usize {
     server
         .received_requests()

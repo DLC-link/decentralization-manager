@@ -7,6 +7,7 @@ use common::api::{HostPermission, TenantAcsImportRequest, TenantAddHostsRequest}
 use serde::Serialize;
 
 use super::host::progress_to_status;
+use super::sign::{require_agreement, sign_prepared};
 use super::{HostReport, WalletHost};
 use crate::client::HostStatus;
 use crate::error::{Error, Result};
@@ -140,8 +141,8 @@ pub async fn add_hosts(
             role: "host",
         });
     };
-    for (host, other) in others {
-        let disagreement = if other.topology_transactions != prepared.topology_transactions {
+    require_agreement(preparer, prepared, others, |other, prepared| {
+        if other.topology_transactions != prepared.topology_transactions {
             Some("different topology transactions".to_string())
         } else if other.transaction_hashes != prepared.transaction_hashes {
             Some("same transactions but different hashes to sign".to_string())
@@ -153,31 +154,16 @@ pub async fn add_hosts(
             ))
         } else {
             None
-        };
-        if let Some(detail) = disagreement {
-            return Err(Error::HostDisagreement {
-                host: host.client.base_url().to_string(),
-                reference: preparer.client.base_url().to_string(),
-                detail,
-            });
         }
-    }
+    })?;
 
-    if prepared.transaction_hashes.len() != prepared.topology_transactions.len() {
-        return Err(Error::MalformedPreparation {
-            host: preparer.client.base_url().to_string(),
-            detail: format!(
-                "{hashes} hash(es) for {txs} transaction(s)",
-                hashes = prepared.transaction_hashes.len(),
-                txs = prepared.topology_transactions.len()
-            ),
-        });
-    }
-    let mut signatures = Vec::with_capacity(prepared.transaction_hashes.len());
-    for encoded in &prepared.transaction_hashes {
-        let hash = preparer.client.decode_b64("transaction_hash", encoded)?;
-        signatures.push(key.sign_b64_async(&hash).await?);
-    }
+    let signatures = sign_prepared(
+        preparer,
+        &prepared.transaction_hashes,
+        &prepared.topology_transactions,
+        key,
+    )
+    .await?;
 
     let execute_request = TenantAddHostsExecuteRequest {
         party_id: party_id.to_string(),
