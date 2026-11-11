@@ -49,6 +49,8 @@ import {
   type AuditSnapshot,
 } from "./completedProposals";
 import { useFormerParties } from "./useFormerParties";
+import { useLatestFetch } from "./hooks/useLatestFetch";
+import { usePolling } from "./hooks/usePolling";
 import { TAB_HASHES, buildHash, parseHash, sharedWithSlug } from "./hashRoute";
 import { participantName, partiesSharedWith } from "./sharedParties";
 import { workflowKindLabel } from "./workflowSteps";
@@ -110,22 +112,6 @@ async function fetchGovernanceAudit(): Promise<AuditLogEntry[] | null> {
     // Ignore polling errors
     return null;
   }
-}
-
-/**
- * Wrap a refresh so a tick is skipped while the previous one is still running.
- * Without it a response slower than the interval stacks requests until the
- * browser's connection pool is full and nothing else on the page loads.
- */
-function pollGuard(refresh: () => Promise<void>): () => void {
-  let inFlight = false;
-  return () => {
-    if (inFlight) return;
-    inFlight = true;
-    void refresh().finally(() => {
-      inFlight = false;
-    });
-  };
 }
 
 const App = () => {
@@ -197,9 +183,9 @@ const App = () => {
   const [workflowRuns, setWorkflowRuns] = useState<WorkflowRun[]>([]);
   // Request counters for the feeds, so a slower earlier answer cannot
   // overwrite a later one.
-  const invitationsSeq = useRef(0);
-  const workflowRunsSeq = useRef(0);
-  const governanceAuditSeq = useRef(0);
+  const beginInvitations = useLatestFetch();
+  const beginWorkflowRuns = useLatestFetch();
+  const beginGovernanceAudit = useLatestFetch();
   const [workflowRunsLoaded, setWorkflowRunsLoaded] = useState(false);
   const [governanceAudit, setGovernanceAudit] =
     useState<AuditSnapshot>(EMPTY_AUDIT_SNAPSHOT);
@@ -209,8 +195,8 @@ const App = () => {
   const [pendingRequestedAt, setPendingRequestedAt] = useState(
     Number.NEGATIVE_INFINITY,
   );
-  const partyActionsSeq = useRef(0);
-  const handledInvitationsSeq = useRef(0);
+  const beginPartyActions = useLatestFetch();
+  const beginHandledInvitations = useLatestFetch();
   const [handledInvitations, setHandledInvitations] = useState<
     HandledInvitation[]
   >([]);
@@ -645,7 +631,7 @@ const App = () => {
   // Poll participant statuses every 2 seconds, and on the same cadence measure
   // our own round-trip to the backend so the "you" row of the peers table shows
   // a latency too (peer latencies come from the status response itself).
-  useEffect(() => {
+  const refreshStatuses = useCallback(async () => {
     const fetchStatuses = async () => {
       try {
         const res = await authenticatedFetch(`${API_BASE}/participants-status`);
@@ -666,79 +652,57 @@ const App = () => {
       setSelfLatency((prev) => ({ ms: ms ?? undefined, seq: prev.seq + 1 }));
     };
 
-    // In-flight guard: if a cycle (the status probe in particular) runs longer
-    // than the 2s interval, skip the tick instead of stacking concurrent
-    // requests.
-    let inFlight = false;
-    const poll = async () => {
-      if (inFlight) return;
-      inFlight = true;
-      try {
-        await Promise.all([fetchStatuses(), measureSelfLatency()]);
-      } finally {
-        inFlight = false;
-      }
-    };
-
-    poll();
-    const interval = window.setInterval(poll, 2000);
-
-    return () => clearInterval(interval);
+    await Promise.all([fetchStatuses(), measureSelfLatency()]);
   }, []);
+
+  // In-flight guarded: if a cycle (the status probe in particular) runs
+  // longer than the 2s interval, the tick is skipped instead of stacking
+  // concurrent requests.
+  usePolling(refreshStatuses, 2000);
 
   const refreshInvitations = useCallback(async () => {
     // Newest request wins. Accepting an invitation refreshes the feed by hand
     // while a poll is already in flight, and that older answer, landing after,
     // would put the invitation back.
-    const seq = ++invitationsSeq.current;
+    const isLatest = beginInvitations();
     try {
       const res = await authenticatedFetch(`${API_BASE}/invitations`);
       if (!res.ok) return;
       // Compared after the body, not before: reading it is another wait, and a
       // manual refresh that finishes inside it would be overwritten here.
       const data = await res.json();
-      if (seq !== invitationsSeq.current) return;
+      if (!isLatest()) return;
       setPendingInvitations(data.invitations);
     } catch {
       // Ignore polling errors
     } finally {
       setInvitationsLoaded(true);
     }
-  }, []);
+  }, [beginInvitations]);
 
   // Poll pending invitations every 2 seconds, in-flight-guarded like the
   // status probe above: a slow response must not stack concurrent requests.
-  useEffect(() => {
-    const poll = pollGuard(refreshInvitations);
-    poll();
-    const interval = window.setInterval(poll, 2000);
-    return () => clearInterval(interval);
-  }, [refreshInvitations]);
+  usePolling(refreshInvitations, 2000);
 
   const refreshWorkflowRuns = useCallback(async () => {
     // Newest request wins, as above: cancel, dismiss and retry all refresh by
     // hand alongside the poll.
-    const seq = ++workflowRunsSeq.current;
+    const isLatest = beginWorkflowRuns();
     try {
       const res = await authenticatedFetch(`${API_BASE}/workflows`);
       if (!res.ok) return;
       const data = await res.json();
-      if (seq !== workflowRunsSeq.current) return;
+      if (!isLatest()) return;
       setWorkflowRuns(data.runs ?? []);
     } catch {
       // Ignore polling errors
     } finally {
       setWorkflowRunsLoaded(true);
     }
-  }, []);
+  }, [beginWorkflowRuns]);
 
   // Poll workflow_runs every 2 seconds, same cadence as invitations.
-  useEffect(() => {
-    const poll = pollGuard(refreshWorkflowRuns);
-    poll();
-    const interval = window.setInterval(poll, 2000);
-    return () => clearInterval(interval);
-  }, [refreshWorkflowRuns]);
+  usePolling(refreshWorkflowRuns, 2000);
 
   const commitGovernanceAudit = useCallback((entries: AuditLogEntry[]) => {
     const now = performance.now();
@@ -746,50 +710,40 @@ const App = () => {
   }, []);
 
   const refreshGovernanceAudit = useCallback(async () => {
-    const seq = ++governanceAuditSeq.current;
+    const isLatest = beginGovernanceAudit();
     try {
       const entries = await fetchGovernanceAudit();
-      if (entries === null || seq !== governanceAuditSeq.current) return;
+      if (entries === null || !isLatest()) return;
       commitGovernanceAudit(entries);
     } finally {
       setGovernanceAuditLoaded(true);
     }
-  }, [commitGovernanceAudit]);
+  }, [beginGovernanceAudit, commitGovernanceAudit]);
 
   // Same cadence as the governance actions below: the Completed section reads
   // the two together to tell a finished proposal from a pending one.
-  useEffect(() => {
-    const poll = pollGuard(refreshGovernanceAudit);
-    poll();
-    const interval = window.setInterval(poll, 10_000);
-    return () => clearInterval(interval);
-  }, [refreshGovernanceAudit]);
+  usePolling(refreshGovernanceAudit, 10_000);
 
   const refreshHandledInvitations = useCallback(async () => {
-    const seq = ++handledInvitationsSeq.current;
+    const isLatest = beginHandledInvitations();
     try {
       const res = await authenticatedFetch(
         `${API_BASE}/invitations/handled?limit=${HANDLED_INVITATIONS_LIMIT}`,
       );
       if (!res.ok) return;
       const data: Partial<HandledInvitationsResponse> = await res.json();
-      if (seq !== handledInvitationsSeq.current) return;
+      if (!isLatest()) return;
       setHandledInvitations(data.invitations ?? []);
     } catch {
       // Ignore polling errors
     } finally {
       setHandledInvitationsLoaded(true);
     }
-  }, []);
+  }, [beginHandledInvitations]);
 
   // Slower than the pending poll: the list changes when an operator answers,
   // and this page refreshes it by hand when its own operator does.
-  useEffect(() => {
-    const poll = pollGuard(refreshHandledInvitations);
-    poll();
-    const interval = window.setInterval(poll, 10_000);
-    return () => clearInterval(interval);
-  }, [refreshHandledInvitations]);
+  usePolling(refreshHandledInvitations, 10_000);
 
   // An accept or decline moves the invitation from one list to the other.
   const refreshInvitationLists = useCallback(() => {
@@ -905,13 +859,13 @@ const App = () => {
 
   const refreshPartyActions = useCallback(async () => {
     // Newest request wins, so a slow poll cannot replace a later snapshot.
-    const seq = ++partyActionsSeq.current;
+    const isLatest = beginPartyActions();
     setPartyActionsFetching(true);
     const requestedAt = performance.now();
     const kept = await fetchPartyActions();
-    if (seq !== partyActionsSeq.current) return;
+    if (!isLatest()) return;
     commitPartyActions(kept, requestedAt);
-  }, [fetchPartyActions, commitPartyActions]);
+  }, [beginPartyActions, fetchPartyActions, commitPartyActions]);
 
   /**
    * Pull the next batch for every party that still has one and append it.
@@ -990,21 +944,27 @@ const App = () => {
   // pair at once. Read apart, a fresh pending feed could land first and turn
   // an execute this page just made into "You confirmed" for a moment.
   const refreshActionsAndAudit = useCallback(async () => {
-    const actionsSeq = ++partyActionsSeq.current;
-    const auditSeq = ++governanceAuditSeq.current;
+    const actionsLatest = beginPartyActions();
+    const auditLatest = beginGovernanceAudit();
     setPartyActionsFetching(true);
     const requestedAt = performance.now();
     const [kept, entries] = await Promise.all([
       fetchPartyActions(),
       fetchGovernanceAudit(),
     ]);
-    if (entries !== null && auditSeq === governanceAuditSeq.current) {
+    if (entries !== null && auditLatest()) {
       commitGovernanceAudit(entries);
     }
-    if (actionsSeq === partyActionsSeq.current) {
+    if (actionsLatest()) {
       commitPartyActions(kept, requestedAt);
     }
-  }, [fetchPartyActions, commitGovernanceAudit, commitPartyActions]);
+  }, [
+    beginPartyActions,
+    beginGovernanceAudit,
+    fetchPartyActions,
+    commitGovernanceAudit,
+    commitPartyActions,
+  ]);
 
   // Poll governance actions across configured parties (only after parties load)
   useEffect(() => {
