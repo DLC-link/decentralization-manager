@@ -56,7 +56,9 @@ data GovernanceSelfAction
 -- | A confirmation for a governance self-management action.
 -- Uses value equality on GovernanceSelfAction for matching (closed enum, safe to compare).
 -- Signed and checked like `GovernanceConfirmation`: the governance party
--- alone signs, and the confirmer is a plain field.
+-- alone signs, and the confirmer is a plain field. So an additional
+-- proposer that does not host the governance party cannot see or cancel
+-- the confirmation it seeds.
 template GovernanceSelfConfirmation
   with
     governanceParty : Party
