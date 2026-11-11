@@ -56,7 +56,6 @@ export const GovernanceActionsDialog = ({
           <GovernanceSection
             partyId={partyId}
             rulesContractId={rulesContractId}
-            governanceContractIds={[rulesContractId]}
             defaultOperatorParty={defaultOperatorParty}
             network={network}
             governanceType={governanceType}

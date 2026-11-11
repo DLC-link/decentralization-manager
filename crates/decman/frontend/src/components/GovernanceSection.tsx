@@ -21,14 +21,10 @@ import {
   ListSubheader,
   Portal,
 } from "@mui/material";
-import ExpandMoreIcon from "@mui/icons-material/ExpandMore";
-import ExpandLessIcon from "@mui/icons-material/ExpandLess";
 import CheckCircleIcon from "@mui/icons-material/CheckCircle";
-import AddIcon from "@mui/icons-material/Add";
 import RefreshIcon from "@mui/icons-material/Refresh";
 import {
   API_BASE,
-  ADMIN_ACCESS,
   TEMPLATE_AMULET,
   TEMPLATE_REGISTRAR_SERVICE,
 } from "../constants";
@@ -107,7 +103,6 @@ type FormProposalType = Exclude<
 interface GovernanceSectionProps {
   partyId: string;
   rulesContractId?: string;
-  governanceContractIds?: string[];
   defaultOperatorParty?: string;
   network?: Network;
   governanceType?: "core_self" | "core_domain";
@@ -120,10 +115,9 @@ interface GovernanceSectionProps {
   /// fires after `onAfterAction` so refreshes still run.
   onProposalCreated?: () => void;
   /// Which half of the section to render:
-  /// - "actions"   = governance-action confirmations + new-action form (default)
+  /// - "actions"   = governance-action confirmations + new-action form
   /// - "proposals" = domain-proposal list + new-proposal form (core_self only)
-  /// - undefined   = both (legacy, used when rendered inline on the party page)
-  view?: "actions" | "proposals";
+  view: "actions" | "proposals";
   /// When provided, the inline Submit Confirmation / Submit Proposal button
   /// is rendered into this DOM node (via `Portal`) instead of inline at the
   /// bottom of the form. Used by `GovernanceActionsDialog` to lift the
@@ -155,7 +149,6 @@ const requiredClaimsText = (claims: { property: string; value: string }[]) =>
 export const GovernanceSection = ({
   partyId,
   rulesContractId: initialRulesContractId,
-  governanceContractIds = [],
   defaultOperatorParty,
   network,
   governanceType = "core_self",
@@ -164,18 +157,12 @@ export const GovernanceSection = ({
   view,
   submitPortalEl,
 }: GovernanceSectionProps) => {
-  const showActionsHalf = view !== "proposals";
-  const showProposalsHalf = view !== "actions";
-  const [expanded, setExpanded] = useState(true);
+  const showActionsHalf = view === "actions";
+  const showProposalsHalf = view === "proposals";
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [data, setData] = useState<GovernanceResponse | null>(null);
   // Domain proposal state
-  // Auto-expand the form when this section is rendered in proposals-only mode
-  // (header "New Proposal" button); otherwise start collapsed.
-  const [showProposalForm, setShowProposalForm] = useState(
-    view === "proposals",
-  );
   const [proposalType, setProposalType] = useState<FormProposalType>("setup_cc_preapproval");
   const [proposalProvider, setProposalProvider] = useState("");
   const [proposalExpectedDso, setProposalExpectedDso] = useState("");
@@ -324,11 +311,6 @@ export const GovernanceSection = ({
   );
 
   // Action form state
-  // Auto-expand the action form when the section is rendered in actions-only
-  // mode (pencil icon → modal); otherwise start collapsed.
-  const [showNewActionForm, setShowNewActionForm] = useState(
-    view === "actions",
-  );
   const [selectedActionType, setSelectedActionType] = useState<ActionTypeKey>(
     governanceType === "core_self"
       ? "governance_add_member"
@@ -2628,34 +2610,7 @@ export const GovernanceSection = ({
 
       {showActionsHalf && (
       <>
-      {view !== "actions" && (
-        <Box
-          sx={{
-            display: "flex",
-            alignItems: "center",
-            cursor: "pointer",
-            mb: 1,
-          }}
-          onClick={() => setExpanded(!expanded)}
-        >
-          <IconButton size="small">
-            {expanded ? <ExpandLessIcon /> : <ExpandMoreIcon />}
-          </IconButton>
-          <Typography variant="subtitle2">
-            Governance Actions
-            {data && data.actions.length > 0 && (
-              <Chip
-                label={data.actions.length}
-                size="small"
-                sx={{ ml: 1 }}
-                color="primary"
-              />
-            )}
-          </Typography>
-        </Box>
-      )}
-
-      <Collapse in={expanded}>
+      <Collapse in>
         {(data?.gov_core_out_of_date || governanceState?.out_of_date) && (
           <Alert severity="warning" sx={{ mb: 2 }}>
             The governance core contract is out of date
@@ -2667,65 +2622,10 @@ export const GovernanceSection = ({
           </Alert>
         )}
 
-        {view !== "actions" && (
-        <Box sx={{ mb: 2 }}>
-          <Autocomplete
-            freeSolo
-            options={governanceContractIds}
-            value={rulesContractId}
-            onChange={(_e, value) => setRulesContractId(value || "")}
-            onInputChange={(_e, value) => setRulesContractId(value)}
-            disabled={!ADMIN_ACCESS}
-            size="small"
-            renderInput={(params) => (
-              <TextField
-                {...params}
-                label={
-                  <TextHelp text="Contract id of the GovernanceRules contract that all new actions will target. Defaults to this party's active rules.">
-                    Governance Contract ID
-                  </TextHelp>
-                }
-                placeholder="Enter or select contract ID"
-              />
-            )}
-          />
-        </Box>
-        )}
-
         {/* New Action Form */}
         <Box sx={{ mb: 2 }}>
-          {view !== "actions" && (
-            <Button
-              size="small"
-              variant="outlined"
-              startIcon={showNewActionForm ? <ExpandLessIcon /> : <AddIcon />}
-              onClick={() => setShowNewActionForm(!showNewActionForm)}
-              disabled={!ADMIN_ACCESS || !rulesContractId}
-            >
-              {showNewActionForm ? "Hide Form" : "New Governance Action"}
-            </Button>
-          )}
-
-          <Collapse in={showNewActionForm}>
-            <Box
-              sx={
-                view === "actions"
-                  ? {}
-                  : {
-                      mt: 2,
-                      p: 2,
-                      border: "1px solid",
-                      borderColor: "divider",
-                      borderRadius: 1,
-                    }
-              }
-            >
-              {view !== "actions" && (
-                <Typography variant="subtitle2" sx={{ mb: 2 }}>
-                  Create New Governance Action
-                </Typography>
-              )}
-
+          <Collapse in>
+            <Box>
               <FormControl fullWidth size="small" sx={{ mb: 2 }}>
                 <InputLabel>
                   <TextHelp text="What kind of governance action to create. The fields below adapt to the selected type.">
@@ -2795,14 +2695,6 @@ export const GovernanceSection = ({
                 ) : (
                   <Box sx={{ mt: 2, display: "flex", gap: 1 }}>
                     {inlineSubmitBtn}
-                    {view !== "actions" && (
-                      <Button
-                        variant="outlined"
-                        onClick={() => setShowNewActionForm(false)}
-                      >
-                        Cancel
-                      </Button>
-                    )}
                   </Box>
                 );
               })()}
@@ -2816,36 +2708,9 @@ export const GovernanceSection = ({
 
       {/* Proposals — only for governance-core */}
       {showProposalsHalf && governanceType === "core_self" && data && (
-        <Box sx={view === "proposals" ? {} : { mt: 2, mx: -2 }}>
-          {view !== "proposals" && (
-            <Box sx={{ display: "flex", justifyContent: "space-between", alignItems: "center", mb: 1, px: 2 }}>
-              <Typography variant="subtitle2">
-                Proposals
-                {(data.domain_actions?.length ?? 0) > 0 && (
-                  <Chip label={data.domain_actions!.length} size="small" sx={{ ml: 1 }} color="secondary" />
-                )}
-              </Typography>
-              <Button
-                size="small"
-                variant="outlined"
-                onClick={() => {
-                  if (!showProposalForm && !dsoPartyId) fetchNetworkInfo();
-                  setShowProposalForm(!showProposalForm);
-                }}
-              >
-                {showProposalForm ? "Cancel" : "New Proposal"}
-              </Button>
-            </Box>
-          )}
-
-          <Collapse in={showProposalForm}>
-            <Box
-              sx={
-                view === "proposals"
-                  ? { display: "flex", flexDirection: "column", gap: 1.5 }
-                  : { display: "flex", flexDirection: "column", gap: 1.5, mb: 2, p: 2, mx: 2, border: 1, borderColor: "divider", borderRadius: 2 }
-              }
-            >
+        <Box>
+          <Collapse in>
+            <Box sx={{ display: "flex", flexDirection: "column", gap: 1.5 }}>
               <FormControl size="small" fullWidth>
                 <InputLabel>
                   <TextHelp text="What kind of proposal to create. The form fields below adapt to the selected type.">
