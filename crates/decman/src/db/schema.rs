@@ -1,6 +1,6 @@
 use super::rows::{
     ChainAuditCacheRow, DecPartyContractRow, DecPartyOwnerRow, DecPartyParticipantRow, DecPartyRow,
-    FormerDecPartyRow, GovernanceAuditRow, OwnerKeyRefusal,
+    DecPartyTopologyVersion, FormerDecPartyRow, GovernanceAuditRow, OwnerKeyRefusal,
 };
 use crate::{
     canton_id::{CantonId, Fingerprint},
@@ -270,17 +270,24 @@ pub trait Commitable {
     /// Upsert a decentralized party
     async fn upsert_dec_party(&mut self, row: &DecPartyRow) -> Result;
 
-    /// Apply a completed kick's confirmed thresholds while the cache still
-    /// describes its old namespace and contains the removed owner's key.
-    /// A refresh that already removed the member or changed the threshold wins.
+    /// Claim a cached topology version only when neither component moves
+    /// backwards. Call before writing a discovery's rows in this transaction.
+    async fn advance_dec_party_topology_version(
+        &mut self,
+        party_id: &CantonId,
+        version: DecPartyTopologyVersion,
+    ) -> Result<bool>;
+
+    /// Apply a completed kick's confirmed thresholds unless discovery already
+    /// cached a later DNS or P2P mapping. Existing unversioned rows initialize
+    /// from the confirmed snapshot atomically.
     async fn update_dec_party_thresholds_after_kick(
         &mut self,
         party_id: &CantonId,
-        owner_key: &str,
-        previous_threshold: i64,
+        confirmed_version: DecPartyTopologyVersion,
         namespace_threshold: i64,
         confirmation_threshold: Option<i64>,
-    ) -> Result;
+    ) -> Result<bool>;
 
     /// Replace all owners for a decentralized party. An owner that stays
     /// keeps the participant that claimed it.

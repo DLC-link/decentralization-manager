@@ -143,6 +143,14 @@ pub struct DecPartyRow {
     pub confirmation_threshold: Option<i64>,
 }
 
+/// Independent versions of the namespace and hosting mappings behind a
+/// cached party. Kept off the API DTOs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, sqlx::FromRow)]
+pub struct DecPartyTopologyVersion {
+    pub namespace_serial: i64,
+    pub p2p_serial: i64,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, sqlx::FromRow)]
 pub struct DecPartyOwnerRow {
     pub dec_party_id: String,

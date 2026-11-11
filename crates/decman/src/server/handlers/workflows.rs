@@ -5361,7 +5361,10 @@ mod tests {
             &party,
             Some(&pid(4)?),
             "k4",
-            3,
+            crate::db::rows::DecPartyTopologyVersion {
+                namespace_serial: 2,
+                p2p_serial: 2,
+            },
             PartyThresholds::new(2, None),
         )
         .await?;

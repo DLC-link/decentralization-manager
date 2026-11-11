@@ -17,6 +17,7 @@ use crate::{
     canton_id::CantonId,
     config::NodeConfig,
     consts::{topology_retry_delay_secs, topology_retry_max_attempts},
+    db::rows::DecPartyTopologyVersion,
     error::Result,
     utils,
     workflow::{
@@ -36,7 +37,7 @@ pub async fn submit_kick(
     config: &NodeConfig,
     storage: &SqlitePool,
     instance_name: &str,
-) -> Result<(i32, PartyThresholds)> {
+) -> Result<(DecPartyTopologyVersion, PartyThresholds)> {
     tracing::info!("Submitting kick to synchronizer...");
 
     let synchronizer_id = utils::get_synchronizer_id(config).await?;
@@ -127,7 +128,13 @@ pub async fn submit_kick(
     .await?;
 
     tracing::info!("Kick submitted and confirmed successfully");
-    Ok((current_namespace_def.threshold, confirmed_thresholds))
+    Ok((
+        DecPartyTopologyVersion {
+            namespace_serial: i64::from(dns_tx.serial),
+            p2p_serial: i64::from(p2p_tx.serial),
+        },
+        confirmed_thresholds,
+    ))
 }
 
 /// A resumed run may predate the quorum checks. Reject a signature shortage

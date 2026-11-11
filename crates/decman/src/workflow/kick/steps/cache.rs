@@ -2,7 +2,10 @@ use sqlx::SqlitePool;
 
 use crate::{
     canton_id::CantonId,
-    db::schema::{Commitable, SchemaWrite},
+    db::{
+        rows::DecPartyTopologyVersion,
+        schema::{Commitable, SchemaWrite},
+    },
     error::Result,
     workflow::thresholds::PartyThresholds,
 };
@@ -25,19 +28,23 @@ pub async fn prune_cached_membership(
     party_id: &CantonId,
     kicked: Option<&CantonId>,
     owner_key: &str,
-    previous_threshold: i32,
+    confirmed_version: DecPartyTopologyVersion,
     confirmed_thresholds: PartyThresholds,
 ) -> Result {
     let mut tx = db.begin_transaction().await?;
-    tx.update_dec_party_thresholds_after_kick(
-        party_id,
-        owner_key,
-        i64::from(previous_threshold),
-        i64::from(confirmed_thresholds.namespace),
-        (confirmed_thresholds.confirmation != confirmed_thresholds.namespace)
-            .then_some(i64::from(confirmed_thresholds.confirmation)),
-    )
-    .await?;
+    let updated = tx
+        .update_dec_party_thresholds_after_kick(
+            party_id,
+            confirmed_version,
+            i64::from(confirmed_thresholds.namespace),
+            (confirmed_thresholds.confirmation != confirmed_thresholds.namespace)
+                .then_some(i64::from(confirmed_thresholds.confirmation)),
+        )
+        .await?;
+    if !updated {
+        tracing::info!("Leaving a newer cached topology snapshot of {party_id} unchanged");
+        return Commitable::commit(tx).await;
+    }
     if let Some(kicked) = kicked {
         tx.delete_dec_party_participant(party_id, &kicked.to_string())
             .await?;
@@ -71,6 +78,33 @@ mod tests {
         "node2::12202222222222222222222222222222222222222222222222222222222222222222";
     const NODE9: &str =
         "node9::12209999999999999999999999999999999999999999999999999999999999999999";
+
+    fn completed_version() -> DecPartyTopologyVersion {
+        DecPartyTopologyVersion {
+            namespace_serial: 2,
+            p2p_serial: 2,
+        }
+    }
+
+    async fn record_version(
+        pool: &SqlitePool,
+        party: &CantonId,
+        namespace_serial: i64,
+        p2p_serial: i64,
+    ) -> Result {
+        let mut tx = pool.begin_transaction().await?;
+        assert!(
+            tx.advance_dec_party_topology_version(
+                party,
+                DecPartyTopologyVersion {
+                    namespace_serial,
+                    p2p_serial
+                },
+            )
+            .await?
+        );
+        Commitable::commit(tx).await
+    }
 
     async fn seed(pool: &SqlitePool, uids: &[&str]) -> Result<CantonId> {
         let party_id_str = format!("net-a::{TEST_NS}");
@@ -117,7 +151,7 @@ mod tests {
             &party_id,
             Some(&kicked),
             "owner-2",
-            2,
+            completed_version(),
             PartyThresholds::new(2, None),
         )
         .await?;
@@ -139,7 +173,7 @@ mod tests {
             &party_id,
             None,
             "owner-3",
-            2,
+            completed_version(),
             PartyThresholds::new(2, None),
         )
         .await?;
@@ -169,7 +203,7 @@ mod tests {
             &party_id,
             Some(&never_a_member),
             "owner-9",
-            2,
+            completed_version(),
             PartyThresholds::new(2, None),
         )
         .await?;
@@ -206,7 +240,7 @@ mod tests {
             &party_id,
             Some(&CantonId::parse(NODE2)?),
             "owner-2",
-            2,
+            completed_version(),
             PartyThresholds::new(2, None),
         )
         .await?;
@@ -231,7 +265,7 @@ mod tests {
             &party,
             Some(&CantonId::parse(NODE2)?),
             "owner-2",
-            3,
+            completed_version(),
             PartyThresholds::new(2, Some(1)),
         )
         .await?;
@@ -255,13 +289,14 @@ mod tests {
         .bind(party.to_string())
         .execute(&pool)
         .await?;
+        record_version(&pool, &party, 3, 3).await?;
 
         prune_cached_membership(
             &pool,
             &party,
             Some(&CantonId::parse(NODE2)?),
             "owner-2",
-            2,
+            completed_version(),
             PartyThresholds::new(1, None),
         )
         .await?;
@@ -282,7 +317,7 @@ mod tests {
             &party,
             Some(&kicked),
             "owner-2",
-            2,
+            completed_version(),
             PartyThresholds::new(1, None),
         )
         .await?;
@@ -292,13 +327,14 @@ mod tests {
             .bind(party.to_string())
             .execute(&pool)
             .await?;
+        record_version(&pool, &party, 3, 3).await?;
 
         prune_cached_membership(
             &pool,
             &party,
             Some(&kicked),
             "owner-2",
-            2,
+            completed_version(),
             PartyThresholds::new(1, None),
         )
         .await?;
@@ -325,7 +361,7 @@ mod tests {
             &party,
             Some(&CantonId::parse(NODE2)?),
             "owner-2",
-            2,
+            completed_version(),
             PartyThresholds::new(1, None),
         )
         .await;
@@ -335,6 +371,148 @@ mod tests {
         assert_eq!(cached[0].threshold, 2);
         assert_eq!(pool.get_dec_party_participants(&party).await?.len(), 2);
         assert_eq!(pool.get_dec_party_owners(&party).await?.len(), 3);
+        Ok(())
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn completion_repairs_a_host_kick_snapshot_between_dns_and_p2p(
+        pool: SqlitePool,
+    ) -> Result {
+        let party = seed(&pool, &[NODE1, NODE2, NODE9]).await?;
+        sqlx::query(
+            "UPDATE dec_party SET threshold = 2, confirmation_threshold = 3 WHERE party_id = ?",
+        )
+        .bind(party.to_string())
+        .execute(&pool)
+        .await?;
+        sqlx::query("DELETE FROM dec_party_owner WHERE dec_party_id = ? AND owner_key = 'owner-2'")
+            .bind(party.to_string())
+            .execute(&pool)
+            .await?;
+        record_version(&pool, &party, 2, 1).await?;
+
+        prune_cached_membership(
+            &pool,
+            &party,
+            Some(&CantonId::parse(NODE2)?),
+            "owner-2",
+            completed_version(),
+            PartyThresholds::new(2, None),
+        )
+        .await?;
+
+        let cached = pool.get_dec_parties_by_prefix(&party.prefix).await?;
+        assert_eq!(cached[0].threshold, 2);
+        assert_eq!(cached[0].confirmation_threshold, None);
+        assert_eq!(pool.get_dec_party_participants(&party).await?.len(), 2);
+        Ok(())
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn completion_repairs_an_owner_only_snapshot_without_a_removed_host(
+        pool: SqlitePool,
+    ) -> Result {
+        let party = seed(&pool, &[NODE1, NODE2, NODE9]).await?;
+        sqlx::query(
+            "UPDATE dec_party SET threshold = 2, confirmation_threshold = 3 WHERE party_id = ?",
+        )
+        .bind(party.to_string())
+        .execute(&pool)
+        .await?;
+        sqlx::query("DELETE FROM dec_party_owner WHERE dec_party_id = ? AND owner_key = 'owner-4'")
+            .bind(party.to_string())
+            .execute(&pool)
+            .await?;
+        record_version(&pool, &party, 2, 1).await?;
+
+        prune_cached_membership(
+            &pool,
+            &party,
+            None,
+            "owner-4",
+            completed_version(),
+            PartyThresholds::new(2, None),
+        )
+        .await?;
+
+        let cached = pool.get_dec_parties_by_prefix(&party.prefix).await?;
+        assert_eq!(cached[0].threshold, 2);
+        assert_eq!(cached[0].confirmation_threshold, None);
+        assert_eq!(pool.get_dec_party_participants(&party).await?.len(), 3);
+        Ok(())
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_newer_confirmation_change_with_the_same_namespace_wins(pool: SqlitePool) -> Result {
+        let party = seed(&pool, &[NODE1, NODE2, NODE9]).await?;
+        sqlx::query(
+            "UPDATE dec_party SET threshold = 2, confirmation_threshold = 3 WHERE party_id = ?",
+        )
+        .bind(party.to_string())
+        .execute(&pool)
+        .await?;
+        record_version(&pool, &party, 2, 3).await?;
+
+        prune_cached_membership(
+            &pool,
+            &party,
+            None,
+            "owner-4",
+            completed_version(),
+            PartyThresholds::new(2, None),
+        )
+        .await?;
+
+        let cached = pool.get_dec_parties_by_prefix(&party.prefix).await?;
+        assert_eq!(cached[0].threshold, 2);
+        assert_eq!(cached[0].confirmation_threshold, Some(3));
+        // A later topology snapshot also protects membership from old retries.
+        assert_eq!(pool.get_dec_party_owners(&party).await?.len(), 4);
+        Ok(())
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn upgrading_an_existing_cache_keeps_attribution_and_initializes_versions(
+        pool: SqlitePool,
+    ) -> Result {
+        // Recreate the upgrade path with real cached rows predating metadata.
+        sqlx::query("DROP TABLE dec_party_topology_version")
+            .execute(&pool)
+            .await?;
+        let party = seed(&pool, &[NODE1, NODE2]).await?;
+        sqlx::query("UPDATE dec_party_participant SET owner_key = 'owner-1', signing_key = 'known-key' WHERE participant_uid = ?")
+            .bind(NODE1).execute(&pool).await?;
+        sqlx::raw_sql(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/migrations/000033_dec_party_topology_version.up.sql"
+        )))
+        .execute(&pool)
+        .await?;
+        let before: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM dec_party_topology_version")
+            .fetch_one(&pool)
+            .await?;
+        assert_eq!(before, 0);
+
+        prune_cached_membership(
+            &pool,
+            &party,
+            Some(&CantonId::parse(NODE2)?),
+            "owner-2",
+            completed_version(),
+            PartyThresholds::new(1, None),
+        )
+        .await?;
+
+        let cached = pool.get_dec_parties_by_prefix(&party.prefix).await?;
+        assert_eq!(cached[0].threshold, 1);
+        let surviving = pool.get_dec_party_participants(&party).await?;
+        assert_eq!(surviving.len(), 1);
+        assert_eq!(surviving[0].owner_key.as_deref(), Some("owner-1"));
+        assert_eq!(surviving[0].signing_key.as_deref(), Some("known-key"));
+        let version: DecPartyTopologyVersion = sqlx::query_as(
+            "SELECT namespace_serial, p2p_serial FROM dec_party_topology_version WHERE party_id = ?",
+        ).bind(party.to_string()).fetch_one(&pool).await?;
+        assert_eq!(version, completed_version());
         Ok(())
     }
 }
