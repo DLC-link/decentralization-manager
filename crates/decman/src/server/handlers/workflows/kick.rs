@@ -1,6 +1,6 @@
 //! The kick workflow: start, status and invites.
 
-use std::{collections::HashSet, time::Duration};
+use std::collections::HashSet;
 
 use actix_web::{HttpRequest, HttpResponse, Responder, get, post, web};
 
@@ -19,7 +19,7 @@ use crate::{
         error::ApiError,
         middleware::require_admin,
         types::{
-            ErrorResponse, KickInvitePayload, KickRequest, KickResponse, KickStatus, WorkflowGuard,
+            ErrorResponse, KickInvitePayload, KickRequest, KickResponse, KickStatus,
             WorkflowInstance, WorkflowKind, WorkflowResponse, WorkflowRole, WorkflowStatusResponse,
         },
     },
@@ -31,14 +31,14 @@ use super::{
         cached_confirmation_threshold, cached_namespace_threshold, kick_threshold_bound,
         party_member_count, resolve_kick_target,
     },
-    launch::CoordinatorRequest,
+    launch::{CoordinatorRequest, StatusOrder, launch_coordinator},
     onboarding::interpret_invite_reply,
     preflight::{
         find_inprogress_run_for_party, format_incompatible_peers,
         format_peers_lacking_owner_only_kick, incompatible_versions, lacking_feature,
         probe_invitee_health,
     },
-    runs::{kind_status, mark_run_completed, mark_run_failed, now_secs, register_and_persist},
+    runs::{kind_status, now_secs, register_and_persist},
 };
 
 /// Start a kick workflow to remove a participant from a decentralized party
@@ -330,82 +330,25 @@ async fn start_kick_run(
     let invitees_for_invites = invitees.clone();
     *kick_state.invited_peers.write().await = invitees;
 
-    // Spawn the kick workflow in the background
-    let config = data.config.clone();
-    let db = data.db.clone();
-    let kick_state_clone = instance.http.clone();
-    let instance_for_coord = instance.clone();
-    let kind = instance.kind;
-    let workflows = data.workflows.clone();
-    let last_seen = data.last_seen.clone();
-    let instance_for_task = instance_name.clone();
-
-    // See start_dars below for the rationale: abort_handle, status, and error
-    // are flipped under simultaneously-held locks so a concurrent /kick/cancel
-    // can never observe "status=InProgress + abort_handle=None" and bail.
-    let mut abort_guard = kick_state.abort_handle.lock().await;
-    let mut status_guard = kick_state.status.write().await;
-    let mut error_guard = kick_state.error.write().await;
-
-    let join_handle = tokio::spawn(async move {
-        // Removes this run from the registry on return (success/failure/abort).
-        let _workflow_guard = WorkflowGuard::new(workflows, instance_for_task.clone());
-
-        // Send kick invites to the surviving party members before starting workflow
-        let invite_result =
-            send_kick_invites(&config, &db, &kick_config, &invitees_for_invites).await;
-        if let Err(e) = invite_result {
-            tracing::error!("Failed to send kick invites: {e}");
-            let msg = format!("Failed to send invites: {e}");
-            {
-                let mut status = kick_state_clone.status.write().await;
-                let mut error = kick_state_clone.error.write().await;
-                *status = KickStatus::Failed;
-                *error = Some(msg.clone());
-            }
-            mark_run_failed(&db, kind, &instance_for_task, &msg).await;
-            return;
-        }
-
-        // Give peers time to start their peer workflows
-        tokio::time::sleep(Duration::from_secs(2)).await;
-
-        let result = CoordinatorRequest::Kick(kick_config)
-            .start(config, db.clone(), None, last_seen, instance_for_coord)
-            .await;
-
-        // Update in-memory state in tight scopes — never hold the RwLock
-        // across a DB await. /kick/status acquires a read lock to serve
-        // every poll; if a writer holds the lock during the DB write, every
-        // concurrent read blocks for that duration on a slow runner.
-        match result {
-            Ok(_) => {
-                {
-                    let mut status = kick_state_clone.status.write().await;
-                    *status = KickStatus::Completed;
-                }
-                tracing::info!("Kick workflow completed successfully");
-                mark_run_completed(&db, kind, &instance_for_task).await;
-            }
-            Err(e) => {
-                let msg = format!("{e}");
-                {
-                    let mut status = kick_state_clone.status.write().await;
-                    let mut error = kick_state_clone.error.write().await;
-                    *status = KickStatus::Failed;
-                    *error = Some(msg.clone());
-                }
-                tracing::error!("Kick workflow failed: {e}");
-                mark_run_failed(&db, kind, &instance_for_task, &msg).await;
-            }
-        }
-    });
-    *abort_guard = Some(join_handle.abort_handle());
-    *status_guard = KickStatus::InProgress;
-    *error_guard = None;
-    drop(error_guard);
-    drop(status_guard);
-    drop(abort_guard);
+    // Send kick invites to the surviving party members before starting workflow
+    let invites = {
+        let config = data.config.clone();
+        let db = data.db.clone();
+        let kick_config = kick_config.clone();
+        Box::pin(async move {
+            send_kick_invites(&config, &db, &kick_config, &invitees_for_invites).await
+        })
+    };
+    launch_coordinator(
+        data,
+        &instance,
+        CoordinatorRequest::Kick(kick_config),
+        None,
+        invites,
+        StatusOrder::MemoryFirst,
+        None,
+    )
+    .await;
 
     Ok(HttpResponse::Accepted().json(KickResponse {
         status: KickStatus::InProgress,

@@ -5,10 +5,10 @@ use std::sync::Arc;
 use sqlx::SqlitePool;
 use tokio::sync::{RwLock, mpsc};
 
-use crate::server::types::{WorkflowKind, WorkflowProgress, WorkflowRole, WorkflowRun};
+use crate::server::types::{WorkflowProgress, WorkflowRole, WorkflowRun};
 use crate::server::{
-    PeerJob, WorkflowGuard, WorkflowInstance, WorkflowRegistry, handlers,
-    handlers::CoordinatorRequest,
+    PeerJob, WorkflowInstance, WorkflowRegistry, handlers,
+    handlers::{CoordinatorRequest, NodeHandles, StatusOrder, TaskStart, spawn_coordinator_task},
 };
 use crate::{
     auth::WorkflowAuth,
@@ -148,62 +148,21 @@ pub(crate) async fn respawn_coordinator(
     }
 
     let auth_snapshot = auth.read().await.clone();
-    let handle = spawn_coordinator_run(
-        db,
-        config,
-        kind,
+    let handle = spawn_coordinator_task(
+        NodeHandles {
+            config,
+            db,
+            workflows,
+            last_seen,
+        },
         instance.clone(),
-        workflows,
         request,
         auth_snapshot,
-        last_seen,
+        TaskStart::Resume,
+        StatusOrder::MemoryFirst,
+        None,
     );
     *instance.http.abort_handle.lock().await = Some(handle.abort_handle());
-}
-
-/// Spawn the coordinator workflow task for `instance`: drive `start_coordinator`
-/// to completion, reflect the terminal status onto the instance's HTTP state and
-/// the persisted row, and remove the instance from the registry on return
-/// (success, failure, or abort) via a [`WorkflowGuard`].
-#[allow(clippy::too_many_arguments)]
-fn spawn_coordinator_run(
-    db: SqlitePool,
-    config: NodeConfig,
-    kind: WorkflowKind,
-    instance: Arc<WorkflowInstance>,
-    workflows: WorkflowRegistry,
-    request: CoordinatorRequest,
-    auth: Option<WorkflowAuth>,
-    last_seen: LastSeen,
-) -> tokio::task::JoinHandle<()> {
-    tokio::spawn(async move {
-        let instance_name = instance.instance_name.clone();
-        // Removes the registry entry on return — including panic/abort — so a
-        // finished run stops being routed to.
-        let _guard = WorkflowGuard::new(workflows, instance_name.clone());
-        let result = request
-            .start(config, db.clone(), auth, last_seen, instance.clone())
-            .await;
-
-        match result {
-            Ok(_) => {
-                *instance.http.status.write().await = WorkflowProgress::Completed;
-                tracing::info!("{kind:?} workflow {instance_name} completed");
-                handlers::mark_run_completed(&db, kind, &instance_name).await;
-            }
-            Err(e) => {
-                let msg = format!("{e}");
-                {
-                    let mut status = instance.http.status.write().await;
-                    let mut error = instance.http.error.write().await;
-                    *status = WorkflowProgress::Failed;
-                    *error = Some(msg.clone());
-                }
-                tracing::error!("{kind:?} workflow {instance_name} failed: {e:#}");
-                handlers::mark_run_failed(&db, kind, &instance_name, &msg).await;
-            }
-        }
-    })
 }
 
 /// Re-enqueue a peer-side run as a [`PeerJob`] so the peer listener re-spins

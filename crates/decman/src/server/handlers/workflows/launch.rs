@@ -1,8 +1,10 @@
 //! Starting a coordinator run: the request that names its workflow and
-//! carries that workflow's config.
+//! carries that workflow's config, and the task that drives it.
 
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 
+use actix_web::web;
+use futures::future::BoxFuture;
 use sqlx::SqlitePool;
 
 use crate::{
@@ -10,14 +12,19 @@ use crate::{
     config::NodeConfig,
     error::Result,
     server::{
+        AppState,
         peer_status::LastSeen,
-        types::{WorkflowInstance, WorkflowKind},
+        types::{
+            WorkflowGuard, WorkflowInstance, WorkflowKind, WorkflowProgress, WorkflowRegistry,
+        },
     },
     workflow::{
         self, AddPartyConfig, ChangeThresholdConfig, ContractsConfig, CoordinatorResult,
         DarsConfig, KickConfig, OnboardingConfig, WorkflowType,
     },
 };
+
+use super::runs::{mark_run_completed, mark_run_failed};
 
 /// The workflow a coordinator run drives, with its config. Each variant
 /// holds the config of its kind, so a start cannot pass the wrong one.
@@ -117,6 +124,342 @@ impl CoordinatorRequest {
             instance,
         )
         .await
+    }
+}
+
+/// The order in which a coordinator task writes a run's end status: the
+/// in-memory status, the log line and the run row. Each caller keeps the
+/// order it had before the launch was shared.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum StatusOrder {
+    /// In memory, then the log line, then the run row. Kick, onboarding and
+    /// a resumed run.
+    MemoryFirst,
+}
+
+/// How a coordinator task begins.
+pub(crate) enum TaskStart {
+    /// A new run: send its invites, then give the peers two seconds to start
+    /// their own runs.
+    Invite(BoxFuture<'static, Result>),
+    /// A run resumed after a restart: no invites, and the log lines name the
+    /// run.
+    Resume,
+}
+
+/// What a coordinator task uses of the node.
+pub(crate) struct NodeHandles {
+    pub(crate) config: NodeConfig,
+    pub(crate) db: SqlitePool,
+    pub(crate) workflows: WorkflowRegistry,
+    pub(crate) last_seen: LastSeen,
+}
+
+impl NodeHandles {
+    fn of(data: &web::Data<AppState>) -> Self {
+        Self {
+            config: data.config.clone(),
+            db: data.db.clone(),
+            workflows: data.workflows.clone(),
+            last_seen: data.last_seen.clone(),
+        }
+    }
+}
+
+/// The name a new run's log lines give its workflow.
+fn workflow_title(kind: WorkflowKind) -> &'static str {
+    match kind {
+        WorkflowKind::Onboarding => "Onboarding",
+        WorkflowKind::Kick => "Kick",
+        WorkflowKind::Contracts => "Contracts",
+        WorkflowKind::Dars => "DARs distribution",
+        WorkflowKind::AddParty => "Add-party",
+        WorkflowKind::ChangeThreshold => "Change-threshold",
+    }
+}
+
+/// The name a failed invite's log line gives the invites.
+fn invite_label(kind: WorkflowKind) -> &'static str {
+    match kind {
+        WorkflowKind::Onboarding => "onboarding",
+        WorkflowKind::Kick => "kick",
+        WorkflowKind::Contracts => "contracts",
+        WorkflowKind::Dars => "DARs",
+        WorkflowKind::AddParty => "add-party",
+        WorkflowKind::ChangeThreshold => "change-threshold",
+    }
+}
+
+/// Spawn the task that drives `instance`'s coordinator run: optionally send
+/// the invites, run `request`, and write the end status in `order`. The
+/// run leaves the registry when the task ends, however it ends.
+/// `after_success` runs last, once a run that completed has written its
+/// status.
+pub(crate) fn spawn_coordinator_task(
+    node: NodeHandles,
+    instance: Arc<WorkflowInstance>,
+    request: CoordinatorRequest,
+    auth: Option<WorkflowAuth>,
+    start: TaskStart,
+    order: StatusOrder,
+    after_success: Option<Box<dyn FnOnce() + Send>>,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let NodeHandles {
+            config,
+            db,
+            workflows,
+            last_seen,
+        } = node;
+        let instance_name = instance.instance_name.clone();
+        let kind = instance.kind;
+        let state = instance.http.clone();
+        // Removes this run from the registry on return (success/failure/abort).
+        let _workflow_guard = WorkflowGuard::new(workflows, instance_name.clone());
+
+        let resumed = match start {
+            TaskStart::Invite(invites) => {
+                // Send the invites before starting the coordinator workflow
+                if let Err(e) = invites.await {
+                    tracing::error!("Failed to send {} invites: {e}", invite_label(kind));
+                    let msg = format!("Failed to send invites: {e}");
+                    match order {
+                        StatusOrder::MemoryFirst => {
+                            {
+                                let mut status = state.status.write().await;
+                                let mut error = state.error.write().await;
+                                *status = WorkflowProgress::Failed;
+                                *error = Some(msg.clone());
+                            }
+                            mark_run_failed(&db, kind, &instance_name, &msg).await;
+                        }
+                    }
+                    return;
+                }
+
+                // Give peers time to start their peer workflows
+                tokio::time::sleep(Duration::from_secs(2)).await;
+                false
+            }
+            TaskStart::Resume => true,
+        };
+
+        let result = request
+            .start(config, db.clone(), auth, last_seen, instance.clone())
+            .await;
+
+        // Update in-memory state in tight scopes — never hold the RwLock
+        // across a DB await. The status endpoints take a read lock to serve
+        // every poll; a writer holding it during the DB write would block
+        // each concurrent read for that long on a slow runner.
+        match result {
+            Ok(_) => {
+                let log_completed = || {
+                    if resumed {
+                        tracing::info!("{kind:?} workflow {instance_name} completed");
+                    } else {
+                        tracing::info!("{} workflow completed successfully", workflow_title(kind));
+                    }
+                };
+                match order {
+                    StatusOrder::MemoryFirst => {
+                        *state.status.write().await = WorkflowProgress::Completed;
+                        log_completed();
+                        mark_run_completed(&db, kind, &instance_name).await;
+                    }
+                }
+                if let Some(after_success) = after_success {
+                    after_success();
+                }
+            }
+            Err(e) => {
+                let msg = format!("{e}");
+                let log_failed = || {
+                    if resumed {
+                        tracing::error!("{kind:?} workflow {instance_name} failed: {e:#}");
+                    } else {
+                        tracing::error!("{} workflow failed: {e}", workflow_title(kind));
+                    }
+                };
+                let write_failed = || async {
+                    let mut status = state.status.write().await;
+                    let mut error = state.error.write().await;
+                    *status = WorkflowProgress::Failed;
+                    *error = Some(msg.clone());
+                };
+                match order {
+                    StatusOrder::MemoryFirst => {
+                        write_failed().await;
+                        log_failed();
+                        mark_run_failed(&db, kind, &instance_name, &msg).await;
+                    }
+                }
+            }
+        }
+    })
+}
+
+/// Start a new coordinator run from a start handler: spawn its task and
+/// mark it in progress.
+///
+/// The abort handle, status and error locks are taken BEFORE the spawn and
+/// flipped together. Held across the spawn, a concurrent cancel either runs
+/// entirely before (status not InProgress, so 409 "no workflow in
+/// progress") or entirely after (status InProgress and an abort handle, so
+/// the cancel proceeds). Without this, a cancel landing between the status
+/// flip and the abort handle would see "InProgress + None" and bail with a
+/// spurious "still initializing" 409, which leaves the status pinned to
+/// InProgress. Holding the status lock across the spawn also blocks the
+/// task's terminal status write until the InProgress flip lands, so a
+/// fast-failing task cannot publish its end before the start does.
+pub(crate) async fn launch_coordinator(
+    data: &web::Data<AppState>,
+    instance: &Arc<WorkflowInstance>,
+    request: CoordinatorRequest,
+    auth: Option<WorkflowAuth>,
+    invites: BoxFuture<'static, Result>,
+    order: StatusOrder,
+    after_success: Option<Box<dyn FnOnce() + Send>>,
+) {
+    let node = NodeHandles::of(data);
+    let state = &instance.http;
+    let mut abort_guard = state.abort_handle.lock().await;
+    let mut status_guard = state.status.write().await;
+    let mut error_guard = state.error.write().await;
+
+    let join_handle = spawn_coordinator_task(
+        node,
+        instance.clone(),
+        request,
+        auth,
+        TaskStart::Invite(invites),
+        order,
+        after_success,
+    );
+    *abort_guard = Some(join_handle.abort_handle());
+    *status_guard = WorkflowProgress::InProgress;
+    *error_guard = None;
+    drop(error_guard);
+    drop(status_guard);
+    drop(abort_guard);
+}
+
+#[cfg(test)]
+mod launch_tests {
+    use crate::{
+        db::{MIGRATOR, schema::SchemaRead},
+        server::types::WorkflowRole,
+    };
+
+    use super::super::test_support::{in_progress_run, insert_run, pid, test_node};
+    use super::*;
+
+    type TestResult = anyhow::Result<()>;
+
+    const RUN: &str = "dars-distribute-1";
+
+    /// A DARs run that this node registered and persisted, as a start
+    /// handler leaves it before the launch.
+    async fn registered_run(
+        pool: &SqlitePool,
+        data: &web::Data<AppState>,
+    ) -> anyhow::Result<Arc<WorkflowInstance>> {
+        let mut run = in_progress_run(RUN, &pid(9)?);
+        run.kind = WorkflowKind::Dars;
+        insert_run(pool, &run).await?;
+        let instance = WorkflowInstance::new(
+            RUN.to_string(),
+            WorkflowKind::Dars,
+            WorkflowRole::Coordinator,
+        );
+        assert!(data.workflows.insert(instance.clone()));
+        Ok(instance)
+    }
+
+    fn request() -> CoordinatorRequest {
+        CoordinatorRequest::Dars(DarsConfig {
+            dar_files: Vec::new(),
+            instance_name: RUN.to_string(),
+            peer_ids: Vec::new(),
+        })
+    }
+
+    async fn task_ended(data: &web::Data<AppState>) -> TestResult {
+        for _ in 0..200 {
+            if data.workflows.get(RUN).is_none() {
+                return Ok(());
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        anyhow::bail!("the task did not end")
+    }
+
+    /// The launch returns with the run in progress and abortable, before the
+    /// task can write its end; the task's end then replaces it.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn the_launch_marks_the_run_in_progress_first(pool: SqlitePool) -> TestResult {
+        let node = test_node(pool.clone(), &pid(1)?).await?;
+        let instance = registered_run(&pool, &node.data).await?;
+        let (release, released) = tokio::sync::oneshot::channel::<()>();
+        let invites = Box::pin(async move {
+            let _ = released.await;
+            Err(anyhow::anyhow!("no route to the peers"))
+        });
+
+        launch_coordinator(
+            &node.data,
+            &instance,
+            request(),
+            None,
+            invites,
+            StatusOrder::MemoryFirst,
+            None,
+        )
+        .await;
+
+        assert_eq!(
+            *instance.http.status.read().await,
+            WorkflowProgress::InProgress
+        );
+        assert_eq!(*instance.http.error.read().await, None);
+        assert!(instance.http.abort_handle.lock().await.is_some());
+        assert!(node.data.workflows.get(RUN).is_some());
+
+        let _ = release.send(());
+        task_ended(&node.data).await?;
+        assert_eq!(*instance.http.status.read().await, WorkflowProgress::Failed);
+        Ok(())
+    }
+
+    /// A failed invite fails the run in memory and in its row with the same
+    /// text, and the run leaves the registry.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_failed_invite_fails_the_run(pool: SqlitePool) -> TestResult {
+        let node = test_node(pool.clone(), &pid(1)?).await?;
+        let instance = registered_run(&pool, &node.data).await?;
+
+        launch_coordinator(
+            &node.data,
+            &instance,
+            request(),
+            None,
+            Box::pin(async { Err(anyhow::anyhow!("no route to the peers")) }),
+            StatusOrder::MemoryFirst,
+            None,
+        )
+        .await;
+        task_ended(&node.data).await?;
+
+        let message = "Failed to send invites: no route to the peers";
+        assert_eq!(*instance.http.status.read().await, WorkflowProgress::Failed);
+        assert_eq!(instance.http.error.read().await.as_deref(), Some(message));
+        let row = pool
+            .get_workflow_run(RUN)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("the run row is gone"))?;
+        assert_eq!(row.status, WorkflowProgress::Failed);
+        assert_eq!(row.error.as_deref(), Some(message));
+        Ok(())
     }
 }
 
