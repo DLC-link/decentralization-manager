@@ -52,8 +52,10 @@ pub async fn tenant_prepare(
     if let Err(resp) = tenant_caller(&http_req) {
         return resp;
     }
-    if let Err(msg) = validate_party_id_prefix(&body.party_hint) {
-        return HttpResponse::BadRequest().json(ErrorResponse { error: msg });
+    if let Err(e) = validate_party_id_prefix(&body.party_hint) {
+        return HttpResponse::BadRequest().json(ErrorResponse {
+            error: e.to_string(),
+        });
     }
     if body.hosting_peers.is_empty() {
         return HttpResponse::BadRequest().json(ErrorResponse {
@@ -142,8 +144,10 @@ pub async fn tenant_execute(
 }
 
 async fn tenant_execute_on_this_host(data: &AppState, body: &TenantExecuteRequest) -> HttpResponse {
-    if let Err(msg) = validate_party_id_prefix(&body.party_hint) {
-        return HttpResponse::BadRequest().json(ErrorResponse { error: msg });
+    if let Err(e) = validate_party_id_prefix(&body.party_hint) {
+        return HttpResponse::BadRequest().json(ErrorResponse {
+            error: e.to_string(),
+        });
     }
 
     // The party id is built from the client-supplied `signed_by`, so it must be
