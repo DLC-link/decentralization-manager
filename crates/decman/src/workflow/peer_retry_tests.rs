@@ -274,3 +274,29 @@ async fn control_messages_preserve_failures_but_completed_steps_reset_them() -> 
     );
     Ok(())
 }
+
+/// A coordinator payload above this node's limit never fits, so the peer stops
+/// at the first poll and tells the coordinator why.
+#[tokio::test]
+async fn an_oversized_command_ends_the_peer_run_at_once() -> Result {
+    let mut meta = MessageType::UploadDars.to_u16().to_be_bytes().to_vec();
+    meta.extend_from_slice(&u32::try_from(crate::noise::MAX_CHUNKED_TOTAL_SIZE + 1)?.to_be_bytes());
+    meta.extend_from_slice(&u32::try_from(crate::noise::MAX_CHUNK_COUNT + 1)?.to_be_bytes());
+    let oversized = Message::new(MessageType::ChunkedCommand, meta);
+
+    let run = run_commands(WorkflowKind::Dars, vec![oversized]).await?;
+
+    let error = run
+        .result
+        .as_ref()
+        .err()
+        .ok_or_else(|| anyhow::anyhow!("the oversized command did not end the run"))?;
+    assert!(
+        format!("{error:#}").contains("payload is too large for this node"),
+        "{error:#}"
+    );
+    assert_eq!(run.polls.len(), 1, "the peer retried an oversized payload");
+    assert_eq!(run.completions, 0);
+    assert_reported(&run, WorkflowKind::Dars);
+    Ok(())
+}

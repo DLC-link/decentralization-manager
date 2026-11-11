@@ -186,8 +186,9 @@ pub const CHUNK_SIZE: usize = 1024 * 1024;
 
 /// Hard ceiling on the assembled size of a chunked response. Bounds peer-supplied
 /// `total_size` so a malicious or buggy peer can't ask the client to allocate
-/// arbitrary memory. A DAR that a peer reads before it accepts is the largest
-/// payload served this way; the server refuses one above this cap.
+/// arbitrary memory. The `UploadDars` bundle is the largest payload served this
+/// way: every DAR of one distribution run, encoded by `utils::encode_files`. The
+/// coordinator refuses a run whose bundle exceeds this cap.
 pub const MAX_CHUNKED_TOTAL_SIZE: usize = 16 * 1024 * 1024;
 
 /// Hard ceiling on the chunk count for a chunked response. Equal to
@@ -558,6 +559,10 @@ pub enum NoiseError {
     #[error("Invalid message format")]
     InvalidMessage,
 
+    /// A chunked payload larger than `MAX_CHUNKED_TOTAL_SIZE`.
+    #[error("Payload too large: {size} bytes exceeds the limit of {limit} bytes")]
+    PayloadTooLarge { size: usize, limit: usize },
+
     #[error("General error: {0}")]
     Anyhow(#[from] anyhow::Error),
 }
@@ -924,6 +929,7 @@ pub(crate) fn is_transient(err: &NoiseError) -> bool {
         | NoiseError::WireVersionMismatch { .. }
         | NoiseError::DecryptionError
         | NoiseError::InvalidMessage
+        | NoiseError::PayloadTooLarge { .. }
         | NoiseError::JsonSerialization(_)
         | NoiseError::Http(_)
         | NoiseError::InvalidUri(_)
@@ -1056,6 +1062,27 @@ fn parse_chunked_command_metadata(
     Ok((command_type, total_size, chunk_count))
 }
 
+/// Check the size and chunk count a peer announces for a chunked payload.
+///
+/// A size above `MAX_CHUNKED_TOTAL_SIZE` is `PayloadTooLarge`, so the error
+/// names the cause. A chunk count above `MAX_CHUNK_COUNT`, or one that does not
+/// match the size, is `InvalidMessage`.
+pub(crate) fn check_chunked_metadata(
+    total_size: usize,
+    chunk_count: usize,
+) -> Result<(), NoiseError> {
+    if total_size > MAX_CHUNKED_TOTAL_SIZE {
+        return Err(NoiseError::PayloadTooLarge {
+            size: total_size,
+            limit: MAX_CHUNKED_TOTAL_SIZE,
+        });
+    }
+    if chunk_count > MAX_CHUNK_COUNT || chunk_count != total_size.div_ceil(CHUNK_SIZE) {
+        return Err(NoiseError::InvalidMessage);
+    }
+    Ok(())
+}
+
 /// Send a message that may receive a chunked response.
 ///
 /// First call goes through `send_noise_message_with_retry`. If the response
@@ -1094,27 +1121,15 @@ pub async fn send_noise_message_with_chunked_response(
 
     // Bound peer-supplied metadata before we allocate or loop. A malicious or
     // buggy peer could otherwise advertise multi-GB sizes and trigger an OOM.
-    if total_size > MAX_CHUNKED_TOTAL_SIZE || chunk_count > MAX_CHUNK_COUNT {
+    if let Err(e) = check_chunked_metadata(total_size, chunk_count) {
         tracing::warn!(
             peer = format!("{peer_address}:{peer_port}"),
             total_size,
             chunk_count,
-            "noise: chunked-response metadata exceeds configured caps",
+            expected_chunks = total_size.div_ceil(CHUNK_SIZE),
+            "noise: refused chunked-response metadata: {e}",
         );
-        return Err(NoiseError::InvalidMessage);
-    }
-    // chunk_count must agree with total_size and CHUNK_SIZE; reject mismatch
-    // (e.g. total=10 but chunk_count=1000).
-    let expected_chunks = total_size.div_ceil(CHUNK_SIZE);
-    if chunk_count != expected_chunks {
-        tracing::warn!(
-            peer = format!("{peer_address}:{peer_port}"),
-            total_size,
-            chunk_count,
-            expected_chunks,
-            "noise: chunked-response chunk_count inconsistent with total_size",
-        );
-        return Err(NoiseError::InvalidMessage);
+        return Err(e);
     }
 
     tracing::debug!(
@@ -1729,6 +1744,61 @@ mod tests {
         .await;
         assert!(matches!(result, Err(NoiseError::InvalidMessage)));
         assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn payload_too_large_is_not_retried() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let calls_clone = calls.clone();
+        let result = retry_loop("test-peer", &test_retry_config(), move || {
+            let calls = calls_clone.clone();
+            async move {
+                calls.fetch_add(1, Ordering::SeqCst);
+                Err::<Bytes, _>(NoiseError::PayloadTooLarge { size: 2, limit: 1 })
+            }
+        })
+        .await;
+        assert!(matches!(result, Err(NoiseError::PayloadTooLarge { .. })));
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn an_oversized_chunked_total_is_payload_too_large() {
+        let result = check_chunked_metadata(MAX_CHUNKED_TOTAL_SIZE + 1, MAX_CHUNK_COUNT + 1);
+        assert!(
+            matches!(
+                result,
+                Err(NoiseError::PayloadTooLarge { size, limit })
+                    if size == MAX_CHUNKED_TOTAL_SIZE + 1 && limit == MAX_CHUNKED_TOTAL_SIZE
+            ),
+            "{result:?}"
+        );
+    }
+
+    #[test]
+    fn a_total_at_the_limit_passes() {
+        assert!(check_chunked_metadata(MAX_CHUNKED_TOTAL_SIZE, MAX_CHUNK_COUNT).is_ok());
+    }
+
+    #[test]
+    fn an_inconsistent_chunk_count_stays_invalid_message() {
+        let result = check_chunked_metadata(10, 1000);
+        assert!(
+            matches!(result, Err(NoiseError::InvalidMessage)),
+            "{result:?}"
+        );
+    }
+
+    #[test]
+    fn payload_too_large_states_size_and_limit() {
+        let error = NoiseError::PayloadTooLarge {
+            size: 20_000_000,
+            limit: 16_777_216,
+        };
+        assert_eq!(
+            error.to_string(),
+            "Payload too large: 20000000 bytes exceeds the limit of 16777216 bytes"
+        );
     }
 
     #[tokio::test]
