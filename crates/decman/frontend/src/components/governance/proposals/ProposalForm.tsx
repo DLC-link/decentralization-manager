@@ -49,6 +49,12 @@ import {
   splitRemainderRow,
   validateDelegationSplit,
 } from "../rewardSplit";
+import { TokenCustodyForms } from "./TokenCustodyForms";
+import {
+  buildSetupCcPreapproval,
+  buildSetupTokenPreapproval,
+  buildGenericVote,
+} from "./tokenCustodyPayloads";
 import { PROPOSAL_MENU, type FormProposalType } from "./proposalMenu";
 import {
   DEFAULT_TRANSFER_EXPIRY_HOURS,
@@ -114,10 +120,6 @@ export const ProposalForm = ({
     setProposalCredentialValidUntil,
     proposalOperator,
     setProposalOperator,
-    proposalInstrumentAdmin,
-    setProposalInstrumentAdmin,
-    proposalInstrumentAllowances,
-    setProposalInstrumentAllowances,
     proposalTransferFactoryCid,
     proposalExpectedAdmin,
     proposalReceiver,
@@ -255,7 +257,6 @@ export const ProposalForm = ({
     setSelectedHoldingKey,
     showTransferAdvanced,
     setShowTransferAdvanced,
-    preapprovalCounts,
     servicesLoading,
     amuletRulesLoading,
     acceptableCredentialOffers,
@@ -414,22 +415,10 @@ export const ProposalForm = ({
       let proposal: ProposalType;
       switch (proposalType) {
         case "setup_cc_preapproval":
-          proposal = {
-            type: "setup_cc_preapproval",
-            provider: proposalProvider,
-            expected_dso: proposalExpectedDso,
-          };
+          proposal = buildSetupCcPreapproval(state);
           break;
         case "setup_token_preapproval":
-          proposal = {
-            type: "setup_token_preapproval",
-            operator: proposalOperator,
-            instrument_admin: proposalInstrumentAdmin,
-            // Strip the local-only `uid` field and drop empty rows.
-            instrument_allowances: proposalInstrumentAllowances
-              .filter((a) => a.id.trim() !== "")
-              .map(({ id }) => ({ id })),
-          };
+          proposal = buildSetupTokenPreapproval(state);
           break;
         case "transfer": {
           // Send the override only when it's a valid positive integer that
@@ -463,10 +452,7 @@ export const ProposalForm = ({
           };
           break;
         case "generic_vote":
-          proposal = {
-            type: "generic_vote",
-            description: proposalDescription,
-          };
+          proposal = buildGenericVote(state);
           break;
         case "setup_utility":
           proposal = {
@@ -910,127 +896,7 @@ export const ProposalForm = ({
               </Alert>
             )}
 
-          {proposalType === "generic_vote" && (
-            <HelpTextField
-              size="small"
-              label="Vote Description"
-              value={proposalDescription}
-              onChange={(e) => setProposalDescription(e.target.value)}
-              fullWidth
-              required
-              multiline
-              minRows={2}
-              maxRows={6}
-              helperText="Describe what the governance members are voting on"
-              help="Free-form human-readable note describing what governance members are voting on."
-            />
-          )}
-
-          {proposalType === "setup_cc_preapproval" && (
-            <>
-              {preapprovalCounts.cc > 0 && (
-                <Alert severity="warning">
-                  This party already has a Canton Coin TransferPreapproval;
-                  issuing another would create a duplicate and burn fees again.
-                </Alert>
-              )}
-              <HelpTextField
-                size="small"
-                label="Provider Party"
-                value={proposalProvider}
-                onChange={(e) => setProposalProvider(e.target.value)}
-                fullWidth
-                required
-                help="Party id of the app provider that will receive the TransferPreapproval (usually the Splice app provider)."
-              />
-              <HelpTextField
-                size="small"
-                label="Expected DSO Party"
-                value={proposalExpectedDso}
-                onChange={(e) => setProposalExpectedDso(e.target.value)}
-                fullWidth
-                required
-                help="Party id of the Splice DSO; the proposal verifies the AmuletRules contract belongs to this DSO."
-              />
-            </>
-          )}
-
-          {proposalType === "setup_token_preapproval" && (
-            <>
-              {preapprovalCounts.token > 0 && (
-                <Alert severity="warning">
-                  This party already has {preapprovalCounts.token} token
-                  TransferPreapproval{preapprovalCounts.token === 1 ? "" : "s"};
-                  issuing another for the same instrument would likely be redundant.
-                </Alert>
-              )}
-              <HelpTextField
-                size="small"
-                label="Operator Party"
-                value={proposalOperator}
-                onChange={(e) => setProposalOperator(e.target.value)}
-                fullWidth
-                required
-                help="Party id of the utility operator that runs the token registrar."
-              />
-              <HelpTextField
-                size="small"
-                label="Instrument Admin"
-                value={proposalInstrumentAdmin}
-                onChange={(e) => setProposalInstrumentAdmin(e.target.value)}
-                fullWidth
-                required
-                help="Issuer party of the token whose TransferPreapproval is being set up."
-              />
-              <Typography variant="caption" sx={{ display: "block" }} color="text.secondary">
-                <TextHelp text="Optional per-instrument allowance ids that limit which tokens this preapproval covers. Leave empty to cover all.">
-                  Instrument Allowances (optional)
-                </TextHelp>
-              </Typography>
-              {proposalInstrumentAllowances.map((a) => (
-                <Box key={a.uid} sx={{ display: "flex", gap: 1, mb: 1 }}>
-                  <HelpTextField
-                    label="Allowance ID"
-                    value={a.id}
-                    onChange={(e) =>
-                      setProposalInstrumentAllowances((prev) =>
-                        prev.map((row) =>
-                          row.uid === a.uid
-                            ? { ...row, id: e.target.value }
-                            : row,
-                        ),
-                      )
-                    }
-                    size="small"
-                    sx={{ flex: 1 }}
-                    help="Identifier of an allowed instrument under this preapproval."
-                  />
-                  <Button
-                    size="small"
-                    color="error"
-                    onClick={() =>
-                      setProposalInstrumentAllowances((prev) =>
-                        prev.filter((row) => row.uid !== a.uid),
-                      )
-                    }
-                  >
-                    Remove
-                  </Button>
-                </Box>
-              ))}
-              <Button
-                size="small"
-                onClick={() =>
-                  setProposalInstrumentAllowances((prev) => [
-                    ...prev,
-                    { uid: crypto.randomUUID(), id: "" },
-                  ])
-                }
-              >
-                Add Allowance
-              </Button>
-            </>
-          )}
+          <TokenCustodyForms state={state} />
 
           {proposalType === "transfer" && (
             <>
