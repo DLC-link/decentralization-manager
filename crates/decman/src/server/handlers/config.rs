@@ -209,7 +209,11 @@ async fn save_peers_to_db(db: &SqlitePool, peers: &[Peer]) -> Result {
 
 #[cfg(test)]
 mod tests {
-    use actix_web::{App, http::StatusCode};
+    use actix_web::{
+        App,
+        http::StatusCode,
+        test::{TestRequest, call_service, init_service, read_body},
+    };
     use common::canton_id::CantonId;
     use utoipa::PartialSchema;
 
@@ -270,13 +274,10 @@ mod tests {
     // evaluating nothing.
     #[actix_web::test]
     async fn metrics_endpoint_serves_the_prometheus_text_format() {
-        use actix_web::test;
-
         crate::server::reward_automation::register_metrics();
-        let app = test::init_service(App::new().route("/metrics", web::get().to(metrics))).await;
+        let app = init_service(App::new().route("/metrics", web::get().to(metrics))).await;
 
-        let response =
-            test::call_service(&app, test::TestRequest::get().uri("/metrics").to_request()).await;
+        let response = call_service(&app, TestRequest::get().uri("/metrics").to_request()).await;
         assert_eq!(response.status(), StatusCode::OK);
         let content_type = response
             .headers()
@@ -289,7 +290,7 @@ mod tests {
             "content type was {content_type}"
         );
 
-        let body = String::from_utf8(test::read_body(response).await.to_vec())
+        let body = String::from_utf8(read_body(response).await.to_vec())
             .unwrap_or_else(|e| panic!("body is not UTF-8: {e}"));
         assert!(
             body.contains("decman_reward_heartbeat_total"),

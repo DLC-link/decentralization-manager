@@ -3,7 +3,7 @@
 use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use sqlx::SqlitePool;
-use tokio::sync::RwLock;
+use tokio::{net::TcpListener, sync::RwLock};
 
 use super::{
     connection::handle_incoming_connection, ping::run_peer_ping_loop, triggers::WorkflowTriggers,
@@ -24,8 +24,6 @@ pub(crate) async fn run_heartbeat(
     last_seen: LastSeen,
     triggers: WorkflowTriggers,
 ) {
-    use tokio::net::TcpListener;
-
     let listen_addr = format!(
         "{addr}:{port}",
         addr = config.node.listen_address,

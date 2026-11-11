@@ -1,7 +1,8 @@
 //! Governance confirmation queue and proposal paging.
 
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{HashMap, HashSet, hash_map::DefaultHasher},
+    hash::{Hash, Hasher},
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -579,11 +580,6 @@ pub async fn page_proposal_summaries(
 
 /// Compute a deterministic hash of an action for grouping confirmations
 fn compute_action_hash(action: &ActionType) -> String {
-    use std::{
-        collections::hash_map::DefaultHasher,
-        hash::{Hash, Hasher},
-    };
-
     // Serialize to JSON for deterministic representation
     let json = serde_json::to_string(action).unwrap_or_default();
 

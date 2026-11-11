@@ -188,8 +188,6 @@ pub(super) async fn find_party_with_prefix(
     db: &SqlitePool,
     prefix: &str,
 ) -> Result<Option<String>> {
-    use crate::db::schema::SchemaRead;
-
     let parties = db.get_dec_parties_by_prefix(prefix).await?;
     Ok(parties.into_iter().next().map(|p| p.party_id))
 }

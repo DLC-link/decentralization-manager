@@ -223,12 +223,10 @@ async fn request_owner_keys(
     current_participant_id: &str,
     request_payload: Vec<u8>,
 ) -> std::result::Result<Vec<serde_json::Value>, OwnerKeysFailure> {
-    use OwnerKeysFailureKind as Kind;
-
     let peer_uid = peer.participant_id.to_string();
     let peer_pub_key = parse_public_key(&peer.public_key).map_err(|e| {
         OwnerKeysFailure::new(
-            Kind::BadPublicKey,
+            OwnerKeysFailureKind::BadPublicKey,
             format!("Failed to parse public key for {peer_uid}: {e}"),
         )
     })?;
@@ -261,7 +259,7 @@ async fn request_owner_keys(
         }
         Err(_) => {
             return Err(OwnerKeysFailure::new(
-                Kind::TimedOut,
+                OwnerKeysFailureKind::TimedOut,
                 format!(
                     "RequestOwnerKeys timed out after 10s — {hint}",
                     hint = peer_failure_hint(&NoiseError::RequestTimeout)
@@ -280,7 +278,7 @@ async fn request_owner_keys(
     // proxy that terminated the request and returned an empty 200.
     if response.is_empty() {
         return Err(OwnerKeysFailure::new(
-            Kind::EmptyReply,
+            OwnerKeysFailureKind::EmptyReply,
             format!(
                 "RequestOwnerKeys got an empty reply — {hint}",
                 hint = peer_failure_hint(&NoiseError::InvalidMessage)
@@ -297,7 +295,7 @@ async fn request_owner_keys(
             // arm catches a peer that reports the error in the body while
             // still answering 200. Either way, prefer its words to a guess.
             return Err(OwnerKeysFailure::new(
-                Kind::Refused,
+                OwnerKeysFailureKind::Refused,
                 format!(
                     "RequestOwnerKeys refused by the peer: {reason}",
                     reason = String::from_utf8_lossy(&m.payload)
@@ -306,7 +304,7 @@ async fn request_owner_keys(
         }
         Ok(m) => {
             return Err(OwnerKeysFailure::new(
-                Kind::UnexpectedReply,
+                OwnerKeysFailureKind::UnexpectedReply,
                 format!(
                     "RequestOwnerKeys got an unexpected response type {:?} — the peer may be on \
                      a different wire format",
@@ -316,7 +314,7 @@ async fn request_owner_keys(
         }
         Err(e) => {
             return Err(OwnerKeysFailure::new(
-                Kind::UnparsableReply,
+                OwnerKeysFailureKind::UnparsableReply,
                 format!(
                     "RequestOwnerKeys reply did not parse: {e} — {hint}",
                     hint = peer_failure_hint(&NoiseError::InvalidMessage)
@@ -327,7 +325,7 @@ async fn request_owner_keys(
 
     serde_json::from_slice(&response_msg.payload).map_err(|e| {
         OwnerKeysFailure::new(
-            Kind::BadPayload,
+            OwnerKeysFailureKind::BadPayload,
             format!("Failed to deserialize owner keys from {peer_uid}: {e}"),
         )
     })
@@ -337,26 +335,24 @@ async fn request_owner_keys(
 /// of cause, such as a peer that comes back but denies the request, warns
 /// again.
 fn request_failure_kind(err: &NoiseError) -> OwnerKeysFailureKind {
-    use OwnerKeysFailureKind as Kind;
-
     match err {
         NoiseError::TcpConnectionTimeout(_) | NoiseError::TcpConnectionFailed(_) => {
-            Kind::Unreachable
+            OwnerKeysFailureKind::Unreachable
         }
-        NoiseError::RequestTimeout => Kind::TimedOut,
+        NoiseError::RequestTimeout => OwnerKeysFailureKind::TimedOut,
         NoiseError::Noise(_) | NoiseError::HandshakeFailed | NoiseError::DecryptionError => {
-            Kind::HandshakeFailed
+            OwnerKeysFailureKind::HandshakeFailed
         }
-        NoiseError::WireVersionMismatch { .. } => Kind::WireVersionMismatch,
-        NoiseError::BadStatusCode(..) => Kind::Denied,
-        NoiseError::InvalidMessage => Kind::UnparsableReply,
-        NoiseError::JsonSerialization(_) => Kind::BadPayload,
-        NoiseError::Io(_) | NoiseError::Hyper(_) => Kind::ConnectionBroken,
+        NoiseError::WireVersionMismatch { .. } => OwnerKeysFailureKind::WireVersionMismatch,
+        NoiseError::BadStatusCode(..) => OwnerKeysFailureKind::Denied,
+        NoiseError::InvalidMessage => OwnerKeysFailureKind::UnparsableReply,
+        NoiseError::JsonSerialization(_) => OwnerKeysFailureKind::BadPayload,
+        NoiseError::Io(_) | NoiseError::Hyper(_) => OwnerKeysFailureKind::ConnectionBroken,
         NoiseError::Http(_)
         | NoiseError::InvalidUri(_)
         | NoiseError::UriParsingError(_)
         | NoiseError::UnknownPeer(_)
-        | NoiseError::Anyhow(_) => Kind::BadPeerConfig,
+        | NoiseError::Anyhow(_) => OwnerKeysFailureKind::BadPeerConfig,
     }
 }
 
@@ -428,14 +424,15 @@ fn forget_removed_peers(peers: &[Peer]) {
 mod tests {
     use http::StatusCode;
 
-    use super::*;
+    use super::{
+        OwnerKeysFailureKind::{Refused, TimedOut},
+        *,
+    };
 
     /// The parties view asks every peer again about once a minute. A peer
     /// that keeps failing must warn once, not on every refresh (#332).
     #[test]
     fn a_failing_peer_warns_once_until_it_recovers() {
-        use OwnerKeysFailureKind::{Refused, TimedOut};
-
         let mut failures = HashMap::new();
         let mut next = |now| record_owner_keys_outcome(&mut failures, "p2", now);
 

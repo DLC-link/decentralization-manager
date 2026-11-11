@@ -5,6 +5,7 @@ use aes_gcm::{
     aead::{Aead, Generate},
 };
 use anyhow::Context;
+use sha2::{Digest, Sha256};
 use zeroize::Zeroizing;
 
 use crate::error::Result;
@@ -23,8 +24,6 @@ static DERIVING_KEY: OnceLock<[u8; 32]> = OnceLock::new();
 /// Initialize the encryption key from a passphrase.
 /// Derives a 32-byte key using SHA-256.
 pub fn init_key(passphrase: &str) {
-    use sha2::{Digest, Sha256};
-
     let key: [u8; 32] = Sha256::digest(passphrase.as_bytes()).into();
     ENCRYPTION_KEY
         .set(key)
@@ -54,8 +53,6 @@ pub fn derive_key(label: &str) -> Option<Zeroizing<[u8; 32]>> {
 }
 
 fn derive_key_from(base: &[u8; 32], label: &str) -> Zeroizing<[u8; 32]> {
-    use sha2::{Digest, Sha256};
-
     // The NUL ends the label, so one label is never a prefix of another's input.
     let mut hasher = Sha256::new();
     hasher.update(label.as_bytes());
