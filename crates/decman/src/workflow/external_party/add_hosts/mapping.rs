@@ -203,10 +203,6 @@ mod tests {
         assert!(e.to_string().contains("threshold to be 1"), "{e}");
     }
 
-    /// The bug this guards: a signature is submitted to Canton labelled as
-    /// concatenated Ed25519, which is always 64 bytes. Base64 accepts any
-    /// length, so a truncated or empty one used to pass validation and fail
-    /// inside a Canton RPC, surfacing as a 500 for plainly malformed input.
     /// A driver's retry after the second node completed the add must read as
     /// success, not as a conflict, or a lost response leaves it unable to learn
     /// the change is live.

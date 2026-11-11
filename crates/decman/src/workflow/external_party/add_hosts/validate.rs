@@ -702,6 +702,10 @@ mod tests {
         assert!(e.to_string().contains("namespace"), "{e}");
     }
 
+    /// The bug this guards: a signature is submitted to Canton labelled as
+    /// concatenated Ed25519, which is always 64 bytes. Base64 accepts any
+    /// length, so a truncated or empty one used to pass validation and fail
+    /// inside a Canton RPC, surfacing as a 500 for plainly malformed input.
     #[test]
     fn rejects_a_signature_that_is_not_64_bytes() {
         for len in [0usize, 1, 63, 65, 128] {
