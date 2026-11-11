@@ -16,9 +16,12 @@ use decman_lib::catalog::templates::governance_rules_template;
 use decman_lib::framework::commands::{build_propose, first_created_contract_id};
 use decman_lib::framework::encode::TransferValidity;
 
+use sqlx::SqlitePool;
+use tonic::transport::Channel;
+
 use crate::{
     canton_id::CantonId,
-    config::PackageConfig,
+    config::{NodeConfig, PackageConfig},
     error::Result,
     server::{
         AppState,
@@ -111,23 +114,17 @@ pub async fn propose_action(
         });
     }
     let party_id = &body.party_id;
-    let PartySession {
-        token,
-        member_party_id,
-    } = match PartySession::load(&data, party_id).await {
+    let session = match PartySession::load(&data, party_id).await {
         Ok(session) => session,
         Err(e) => return e.into_response(),
     };
 
-    if let Err(e) = refuse_second_delegation(&data, &body.proposal, party_id, &token).await {
+    if let Err(e) = refuse_second_delegation(&data, &body.proposal, party_id, &session.token).await
+    {
         return e.into_response();
     }
 
-    let audit_pool = data.db.clone();
-    let audit_summary = crate::server::audit::proposal_summary(&body.proposal);
-    let audit_details = serde_json::to_string(&*body).unwrap_or_default();
-    let audit_party_id = party_id.clone();
-    let audit_member = member_party_id.clone();
+    let audit = ProposeAudit::new(&data, &body, &session.member_party_id);
 
     let packages = packages();
 
@@ -137,7 +134,7 @@ pub async fn propose_action(
     let transfer_choice_context = match resolve_transfer_context(
         &data,
         party_id,
-        &token,
+        &session.token,
         &mut resolved_proposal,
         transfer_validity,
     )
@@ -150,7 +147,7 @@ pub async fn propose_action(
     let commands = match build_propose_commands(
         &resolved_proposal,
         party_id,
-        &member_party_id,
+        &session.member_party_id,
         &packages,
         transfer_choice_context.as_ref(),
         transfer_validity,
@@ -159,161 +156,35 @@ pub async fn propose_action(
         Err(e) => return e.into_response(),
     };
 
-    let channel = match data.config.ledger_channel().await {
-        Ok(channel) => channel,
-        Err(e) => {
-            count_action(ActionStep::Propose, ActionOutcome::Error);
-            return HttpResponse::InternalServerError().json(ErrorResponse {
-                error: format!("Failed to connect to ledger API: {e:#}"),
-            });
-        }
+    let mut client = match command_client(&data.config).await {
+        Ok(client) => client,
+        Err(e) => return e.into_response(),
     };
 
-    let mut client =
-        CommandServiceClient::new(channel).max_decoding_message_size(utils::MAX_GRPC_MESSAGE_SIZE);
-
     // Step 1: Create the proposal and get the contract ID back
-    let mut create_req = tonic::Request::new(SubmitAndWaitForTransactionRequest {
-        commands: Some(commands),
-        transaction_format: None,
-    });
-    create_req
-        .metadata_mut()
-        .insert("authorization", format!("Bearer {token}").parse().unwrap());
-
-    let proposal_cid = match client.submit_and_wait_for_transaction(create_req).await {
-        Ok(response) => {
-            // Extract created contract ID from the transaction events
-            match response
-                .into_inner()
-                .transaction
-                .as_ref()
-                .and_then(first_created_contract_id)
-            {
-                Some(cid) => cid,
-                None => {
-                    count_action(ActionStep::Propose, ActionOutcome::Error);
-                    return HttpResponse::InternalServerError().json(ErrorResponse {
-                        error: "Proposal created but could not extract contract ID".to_string(),
-                    });
-                }
-            }
-        }
-        Err(e) => {
-            tracing::error!("Failed to create proposal: {e}");
-            count_action(ActionStep::Propose, ActionOutcome::Error);
-            spawn_audit_log(
-                audit_pool,
-                AuditParams {
-                    event_type: AuditEvent::Propose,
-                    party_id: audit_party_id,
-                    member_party_id: audit_member,
-                    governance_type: GovernanceType::CoreDomain,
-                    action_summary: audit_summary,
-                    details: audit_details,
-                    status: "failed",
-                    error_message: Some(format!("Failed to create proposal: {e}")),
-                },
-            );
-            return HttpResponse::InternalServerError().json(ErrorResponse {
-                error: format!("Failed to create proposal: {e}"),
-            });
-        }
+    let proposal_cid = match create_proposal(&mut client, commands, &session.token, &audit).await {
+        Ok(proposal_cid) => proposal_cid,
+        Err(e) => return e.into_response(),
     };
 
     tracing::info!("Proposal created with CID: {proposal_cid}");
 
     // Step 2: Immediately confirm the proposal as the proposer
-    //
-    // Reachable independently of the Step 1 checks: those only verify the
-    // package the proposal type itself needs, so a rewards / token-custody /
-    // utility proposal reaches here on a node with no governance_core. The
-    // proposal is already on the ledger by this point, so the body has to say
-    // so — the caller must not retry into a second proposal.
-    let mut rules = match governance_rules_template(&packages) {
-        Ok(rules) => rules,
-        Err(_) => {
-            count_action(ActionStep::Propose, ActionOutcome::Error);
-            return HttpResponse::ServiceUnavailable().json(ErrorResponse {
-                error: format!(
-                    "Proposal {proposal_cid} was created but could not be confirmed: \
-                     governance_core package not configured. Configure it and confirm \
-                     the existing proposal; do not re-propose."
-                ),
-            });
-        }
-    };
-
-    // The rules contract may be an out-of-date fallback living under an older
-    // governance-core package — exercise it under its actual package ref.
-    rules.package_ref = resolve_contract_package_ref(
+    match confirm_as_proposer(
         &data.config,
-        party_id,
-        Some(token.clone()),
-        &body.rules_contract_id,
-        &rules.package_ref,
-    )
-    .await;
-
-    let confirm_commands = build_confirm_proposal(
-        &rules,
-        &body.rules_contract_id,
-        &member_party_id,
-        party_id,
+        &mut client,
+        &packages,
+        &body,
+        &session,
         &proposal_cid,
-        uuid::Uuid::new_v4().to_string(),
-    );
-
-    let mut confirm_req = tonic::Request::new(SubmitAndWaitRequest {
-        commands: Some(confirm_commands),
-    });
-    confirm_req
-        .metadata_mut()
-        .insert("authorization", format!("Bearer {token}").parse().unwrap());
-
-    match client.submit_and_wait(confirm_req).await {
-        Ok(_) => {
-            tracing::info!("Proposal {proposal_cid} confirmed by proposer");
-            count_action(ActionStep::Propose, ActionOutcome::Ok);
-            spawn_audit_log(
-                audit_pool,
-                AuditParams {
-                    event_type: AuditEvent::Propose,
-                    party_id: audit_party_id,
-                    member_party_id: audit_member,
-                    governance_type: GovernanceType::CoreDomain,
-                    action_summary: audit_summary,
-                    details: with_proposal_cid(&audit_details, &proposal_cid),
-                    status: "success",
-                    error_message: None,
-                },
-            );
-            HttpResponse::Ok().json(MessageResponse {
-                message: "Proposal created and confirmed".to_string(),
-            })
-        }
-        Err(e) => {
-            tracing::error!("Proposal created but confirmation failed: {e}");
-            count_action(ActionStep::Propose, ActionOutcome::Error);
-            spawn_audit_log(
-                audit_pool,
-                AuditParams {
-                    event_type: AuditEvent::Propose,
-                    party_id: audit_party_id,
-                    member_party_id: audit_member,
-                    governance_type: GovernanceType::CoreDomain,
-                    action_summary: audit_summary,
-                    details: with_proposal_cid(&audit_details, &proposal_cid),
-                    status: "failed",
-                    error_message: Some(format!("Proposal created but confirmation failed: {e}")),
-                },
-            );
-            HttpResponse::InternalServerError().json(ErrorResponse {
-                error: format!(
-                    "Proposal created (CID: {proposal_cid}) but confirmation failed: {e}"
-                ),
-            })
-        }
+        &audit,
+    )
+    .await
+    {
+        Ok(()) => HttpResponse::Ok().json(MessageResponse {
+            message: "Proposal created and confirmed".to_string(),
+        }),
+        Err(e) => e.into_response(),
     }
 }
 
@@ -594,6 +465,194 @@ fn build_propose_commands(
     }
 }
 
+/// The audit row of one propose. A propose writes at most one row: when the
+/// create fails, or once the confirm has answered.
+struct ProposeAudit {
+    pool: SqlitePool,
+    party_id: CantonId,
+    member_party_id: CantonId,
+    summary: String,
+    details: String,
+}
+
+impl ProposeAudit {
+    fn new(data: &AppState, request: &ProposeActionRequest, member_party_id: &CantonId) -> Self {
+        Self {
+            pool: data.db.clone(),
+            summary: crate::server::audit::proposal_summary(&request.proposal),
+            details: serde_json::to_string(request).unwrap_or_default(),
+            party_id: request.party_id.clone(),
+            member_party_id: member_party_id.clone(),
+        }
+    }
+
+    /// Write the row with `status`. Once the proposal exists, its
+    /// `proposal_cid` joins the details.
+    fn write(&self, proposal_cid: Option<&str>, status: &'static str, error: Option<String>) {
+        let details = match proposal_cid {
+            Some(proposal_cid) => with_proposal_cid(&self.details, proposal_cid),
+            None => self.details.clone(),
+        };
+        spawn_audit_log(
+            self.pool.clone(),
+            AuditParams {
+                event_type: AuditEvent::Propose,
+                party_id: self.party_id.clone(),
+                member_party_id: self.member_party_id.clone(),
+                governance_type: GovernanceType::CoreDomain,
+                action_summary: self.summary.clone(),
+                details,
+                status,
+                error_message: error,
+            },
+        );
+    }
+}
+
+/// A command client on the ledger API.
+async fn command_client(config: &NodeConfig) -> Result<CommandServiceClient<Channel>, ApiError> {
+    let channel = match config.ledger_channel().await {
+        Ok(channel) => channel,
+        Err(e) => {
+            count_action(ActionStep::Propose, ActionOutcome::Error);
+            return Err(ApiError::Internal(format!(
+                "Failed to connect to ledger API: {e:#}"
+            )));
+        }
+    };
+
+    Ok(CommandServiceClient::new(channel).max_decoding_message_size(utils::MAX_GRPC_MESSAGE_SIZE))
+}
+
+/// Create the proposal on the ledger and return its contract id. A failed
+/// submit writes the propose's audit row.
+async fn create_proposal(
+    client: &mut CommandServiceClient<Channel>,
+    commands: Commands,
+    token: &str,
+    audit: &ProposeAudit,
+) -> Result<String, ApiError> {
+    let mut create_req = tonic::Request::new(SubmitAndWaitForTransactionRequest {
+        commands: Some(commands),
+        transaction_format: None,
+    });
+    create_req
+        .metadata_mut()
+        .insert("authorization", format!("Bearer {token}").parse().unwrap());
+
+    match client.submit_and_wait_for_transaction(create_req).await {
+        Ok(response) => {
+            // Extract created contract ID from the transaction events
+            match response
+                .into_inner()
+                .transaction
+                .as_ref()
+                .and_then(first_created_contract_id)
+            {
+                Some(cid) => Ok(cid),
+                None => {
+                    count_action(ActionStep::Propose, ActionOutcome::Error);
+                    Err(ApiError::Internal(
+                        "Proposal created but could not extract contract ID".to_string(),
+                    ))
+                }
+            }
+        }
+        Err(e) => {
+            tracing::error!("Failed to create proposal: {e}");
+            count_action(ActionStep::Propose, ActionOutcome::Error);
+            audit.write(
+                None,
+                "failed",
+                Some(format!("Failed to create proposal: {e}")),
+            );
+            Err(ApiError::Internal(format!(
+                "Failed to create proposal: {e}"
+            )))
+        }
+    }
+}
+
+/// Confirm the created proposal `proposal_cid` as the proposer, and write
+/// the propose's audit row with the outcome.
+///
+/// Reachable independently of the Step 1 checks: those only verify the
+/// package the proposal type itself needs, so a rewards / token-custody /
+/// utility proposal reaches here on a node with no governance_core. The
+/// proposal is already on the ledger by this point, so the body has to say
+/// so — the caller must not retry into a second proposal.
+async fn confirm_as_proposer(
+    config: &NodeConfig,
+    client: &mut CommandServiceClient<Channel>,
+    packages: &PackageConfig,
+    request: &ProposeActionRequest,
+    session: &PartySession,
+    proposal_cid: &str,
+    audit: &ProposeAudit,
+) -> Result<(), ApiError> {
+    let party_id = &request.party_id;
+    let token = &session.token;
+    let mut rules = match governance_rules_template(packages) {
+        Ok(rules) => rules,
+        Err(_) => {
+            count_action(ActionStep::Propose, ActionOutcome::Error);
+            return Err(ApiError::ServiceUnavailable(format!(
+                "Proposal {proposal_cid} was created but could not be confirmed: \
+                 governance_core package not configured. Configure it and confirm \
+                 the existing proposal; do not re-propose."
+            )));
+        }
+    };
+
+    // The rules contract may be an out-of-date fallback living under an older
+    // governance-core package — exercise it under its actual package ref.
+    rules.package_ref = resolve_contract_package_ref(
+        config,
+        party_id,
+        Some(token.clone()),
+        &request.rules_contract_id,
+        &rules.package_ref,
+    )
+    .await;
+
+    let confirm_commands = build_confirm_proposal(
+        &rules,
+        &request.rules_contract_id,
+        &session.member_party_id,
+        party_id,
+        proposal_cid,
+        uuid::Uuid::new_v4().to_string(),
+    );
+
+    let mut confirm_req = tonic::Request::new(SubmitAndWaitRequest {
+        commands: Some(confirm_commands),
+    });
+    confirm_req
+        .metadata_mut()
+        .insert("authorization", format!("Bearer {token}").parse().unwrap());
+
+    match client.submit_and_wait(confirm_req).await {
+        Ok(_) => {
+            tracing::info!("Proposal {proposal_cid} confirmed by proposer");
+            count_action(ActionStep::Propose, ActionOutcome::Ok);
+            audit.write(Some(proposal_cid), "success", None);
+            Ok(())
+        }
+        Err(e) => {
+            tracing::error!("Proposal created but confirmation failed: {e}");
+            count_action(ActionStep::Propose, ActionOutcome::Error);
+            audit.write(
+                Some(proposal_cid),
+                "failed",
+                Some(format!("Proposal created but confirmation failed: {e}")),
+            );
+            Err(ApiError::Internal(format!(
+                "Proposal created (CID: {proposal_cid}) but confirmation failed: {e}"
+            )))
+        }
+    }
+}
+
 /// Reject an inline action the `core_self` path cannot carry, before any
 /// ledger work happens.
 ///
@@ -749,6 +808,157 @@ mod propose_step_tests {
             .map_err(|error| anyhow::anyhow!("{error:?}"))?;
         assert_eq!(commands.commands.len(), 1);
         assert!(!commands.command_id.is_empty());
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod confirm_tests {
+    use std::time::Duration;
+
+    use decman_lib::catalog::proposals::core::GenericVote;
+
+    use super::*;
+    use crate::db::{MIGRATOR, rows::GovernanceAuditRow, schema::SchemaRead};
+
+    type TestResult = anyhow::Result<()>;
+
+    const PROPOSAL: &str = "00proposal";
+
+    fn party(prefix: &str) -> anyhow::Result<CantonId> {
+        CantonId::parse(&format!("{prefix}::{}", "0".repeat(68)))
+    }
+
+    fn closed_port() -> anyhow::Result<u16> {
+        Ok(std::net::TcpListener::bind("127.0.0.1:0")?
+            .local_addr()?
+            .port())
+    }
+
+    /// A propose on a node whose ledger API has nothing listening, with the
+    /// client the handler would confirm through.
+    struct Propose {
+        data: web::Data<AppState>,
+        request: ProposeActionRequest,
+        session: PartySession,
+        client: CommandServiceClient<Channel>,
+    }
+
+    fn propose(pool: SqlitePool) -> anyhow::Result<Propose> {
+        let port = closed_port()?;
+        let mut data = AppState::for_test_on(None, pool).into_inner();
+        let node = std::sync::Arc::get_mut(&mut data)
+            .ok_or_else(|| anyhow::anyhow!("a fresh test state has one owner"))?;
+        node.config.canton.ledger_api_port = port;
+        let channel = Channel::from_shared(format!("http://127.0.0.1:{port}"))?.connect_lazy();
+        Ok(Propose {
+            data: web::Data::from(data),
+            request: ProposeActionRequest {
+                party_id: party("dec")?,
+                rules_contract_id: "00rules".to_string(),
+                proposal: ProposalType::GenericVote(GenericVote {
+                    description: "a vote".into(),
+                }),
+            },
+            session: PartySession {
+                token: "token".to_string(),
+                member_party_id: party("member")?,
+            },
+            client: CommandServiceClient::new(channel),
+        })
+    }
+
+    async fn audit_rows(pool: &SqlitePool) -> anyhow::Result<Vec<GovernanceAuditRow>> {
+        pool.get_governance_audit(&party("dec")?, 50, 0).await
+    }
+
+    /// Without governance_core the created proposal cannot be confirmed. The
+    /// answer says it exists, so the caller does not propose it again, and
+    /// no audit row is written.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_node_without_governance_core_says_the_proposal_exists(
+        pool: SqlitePool,
+    ) -> TestResult {
+        let mut p = propose(pool.clone())?;
+        let audit = ProposeAudit::new(&p.data, &p.request, &p.session.member_party_id);
+
+        let answer = confirm_as_proposer(
+            &p.data.config,
+            &mut p.client,
+            &PackageConfig::default(),
+            &p.request,
+            &p.session,
+            PROPOSAL,
+            &audit,
+        )
+        .await;
+
+        assert_eq!(
+            answer,
+            Err(ApiError::ServiceUnavailable(format!(
+                "Proposal {PROPOSAL} was created but could not be confirmed: governance_core \
+                 package not configured. Configure it and confirm the existing proposal; do \
+                 not re-propose."
+            )))
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(audit_rows(&pool).await?.is_empty());
+        Ok(())
+    }
+
+    /// A refused confirm answers 500 with the created proposal's id, and the
+    /// failed audit row names the proposal.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_failed_confirm_names_the_created_proposal(pool: SqlitePool) -> TestResult {
+        let mut p = propose(pool.clone())?;
+        let audit = ProposeAudit::new(&p.data, &p.request, &p.session.member_party_id);
+
+        let answer = confirm_as_proposer(
+            &p.data.config,
+            &mut p.client,
+            &packages(),
+            &p.request,
+            &p.session,
+            PROPOSAL,
+            &audit,
+        )
+        .await;
+
+        let Err(ApiError::Internal(text)) = answer else {
+            anyhow::bail!("a closed ledger must refuse the confirm: {answer:?}");
+        };
+        assert!(
+            text.starts_with(&format!(
+                "Proposal created (CID: {PROPOSAL}) but confirmation failed: "
+            )),
+            "{text}"
+        );
+
+        let mut rows = Vec::new();
+        for _ in 0..100 {
+            rows = audit_rows(&pool).await?;
+            if !rows.is_empty() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        let [row] = rows.as_slice() else {
+            anyhow::bail!("one audit row must be written: {rows:?}");
+        };
+        assert_eq!(row.event_type, "propose");
+        assert_eq!(row.governance_type, "core_domain");
+        assert_eq!(row.member_party_id, party("member")?.to_string());
+        assert_eq!(row.action_summary, "generic_vote");
+        assert_eq!(
+            row.details,
+            with_proposal_cid(&serde_json::to_string(&p.request)?, PROPOSAL)
+        );
+        assert_eq!(row.status, "failed");
+        let error = row.error_message.as_deref().unwrap_or_default();
+        assert!(
+            error.starts_with("Proposal created but confirmation failed: "),
+            "{error}"
+        );
         Ok(())
     }
 }
