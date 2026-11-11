@@ -9,10 +9,10 @@ use sqlx::SqlitePool;
 
 use crate::{
     canton_id::CantonId,
-    config::{NetworkConfig, NodeConfig},
+    config::NodeConfig,
     db::schema::SchemaRead,
     error::Result,
-    noise::{Message, MessageType, NoiseKeypair, parse_public_key, send_noise_message},
+    noise::{Message, MessageType},
     server::{
         AppState,
         error::ApiError,
@@ -28,9 +28,9 @@ use crate::{
 
 use super::{
     cancel::cancel_workflow_state,
+    invites::{InviteLabels, Recipients, send_invites},
     kick_target::cached_confirmation_threshold,
     launch::{CoordinatorRequest, StatusOrder, launch_coordinator},
-    onboarding::interpret_invite_reply,
     preflight::{
         find_inprogress_run_for_party, format_incompatible_peers, preflight_incompatible_peers,
     },
@@ -282,22 +282,15 @@ pub async fn cancel_add_party(http_req: HttpRequest, data: web::Data<AppState>) 
     cancel_workflow_state(&data, "Add-party", WorkflowKind::AddParty).await
 }
 
-/// Send add-party invites over Noise to the existing members and the new
-/// member (`invitees` carries both).
-async fn send_add_party_invites(
-    config: &NodeConfig,
-    db: &SqlitePool,
+/// The add-party invite. Its card shows the full post-add member set: the
+/// invitees and this node, `self_id`.
+pub(super) fn add_party_invite(
+    self_id: &CantonId,
     add_party_config: &workflow::AddPartyConfig,
     invitees: &[CantonId],
-) -> Result {
-    let network_config = NetworkConfig::from_peers(db.get_all_peers().await?);
-    let keypair = NoiseKeypair::from_file(&config.key_file_path()).await?;
-
-    let current_participant_id = config.participant_id();
-    let invitee_set: HashSet<&CantonId> = invitees.iter().collect();
-    // The card shows the full post-add member set: invitees + this node.
+) -> Result<Message> {
     let mut participants = invitees.to_vec();
-    participants.push(current_participant_id.clone());
+    participants.push(self_id.clone());
     let payload = AddPartyInvitePayload {
         dec_party_id: add_party_config.decentralized_party_id.clone(),
         new_participant: add_party_config.new_participant_id.clone(),
@@ -308,65 +301,29 @@ async fn send_add_party_invites(
         workflow_instance: Some(add_party_config.instance_name.clone()),
     };
     let payload_bytes = serde_json::to_vec(&payload).context("encode AddPartyInvitePayload")?;
-    let invite_message = Message::new(MessageType::InviteAddParty, payload_bytes);
+    Ok(Message::new(MessageType::InviteAddParty, payload_bytes))
+}
 
-    for peer in &network_config.peers {
-        if !invitee_set.contains(&peer.participant_id)
-            || peer.participant_id == *current_participant_id
-        {
-            continue;
-        }
-
-        if peer.public_key.is_empty() {
-            tracing::warn!(
-                "Skipping add-party invite to {} - no public key configured",
-                peer.participant_id
-            );
-            continue;
-        }
-        let peer_pub_key = match parse_public_key(&peer.public_key) {
-            Ok(pk) => pk,
-            Err(e) => {
-                tracing::warn!(
-                    "Skipping add-party invite to {} - invalid public key: {e}",
-                    peer.participant_id
-                );
-                continue;
-            }
-        };
-
-        let psk = keypair.derive_psk(&peer_pub_key);
-        let identity = config.participant_id().to_string();
-
-        tracing::info!(
-            "Sending add-party invite to {} at {}:{}",
-            peer.participant_id,
-            peer.address,
-            peer.port
-        );
-
-        match send_noise_message(
-            &peer.address,
-            peer.port,
-            &psk,
-            identity.as_bytes(),
-            &invite_message,
-        )
-        .await
-        {
-            Ok(response) => {
-                interpret_invite_reply(&peer.participant_id, "add-party", &response)?;
-            }
-            Err(e) => {
-                tracing::error!(
-                    "Failed to send add-party invite to {}: {e}",
-                    peer.participant_id
-                );
-            }
-        }
-    }
-
-    Ok(())
+/// Send add-party invites over Noise to the existing members and the new
+/// member (`invitees` carries both).
+async fn send_add_party_invites(
+    config: &NodeConfig,
+    db: &SqlitePool,
+    add_party_config: &workflow::AddPartyConfig,
+    invitees: &[CantonId],
+) -> Result {
+    send_invites(
+        config,
+        db,
+        Recipients::Members(invitees),
+        InviteLabels {
+            kind: "add-party",
+            skip: "add-party ",
+            failed: "add-party ",
+        },
+        || add_party_invite(config.participant_id(), add_party_config, invitees),
+    )
+    .await
 }
 
 #[cfg(test)]

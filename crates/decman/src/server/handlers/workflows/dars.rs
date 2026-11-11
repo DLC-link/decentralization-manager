@@ -7,10 +7,9 @@ use sqlx::SqlitePool;
 
 use crate::{
     canton_id::CantonId,
-    config::{NetworkConfig, NodeConfig},
-    db::schema::SchemaRead,
+    config::NodeConfig,
     error::Result,
-    noise::{Message, MessageType, NoiseKeypair, parse_public_key, send_noise_message},
+    noise::{Message, MessageType},
     server::{
         AppState,
         error::ApiError,
@@ -26,8 +25,8 @@ use crate::{
 };
 
 use super::{
+    invites::{InviteLabels, Recipients, send_invites},
     launch::{CoordinatorRequest, StatusOrder, launch_coordinator},
-    onboarding::interpret_invite_reply,
     preflight::{format_incompatible_peers, preflight_incompatible_peers},
     runs::{kind_status, now_secs, register_and_persist},
 };
@@ -285,6 +284,24 @@ pub async fn get_dars_status(data: web::Data<AppState>) -> impl Responder {
     HttpResponse::Ok().json(kind_status(&data, WorkflowKind::Dars).await)
 }
 
+/// The DARs invite. It carries the member set, so the peer card shows the
+/// same participant list the coordinator shows.
+pub(super) fn dars_invite(
+    peer_ids: &[CantonId],
+    dar_filenames: &[String],
+    dar_hashes: &[String],
+    instance_name: &str,
+) -> Result<Message> {
+    let payload = DarsInvitePayload {
+        dar_filenames: dar_filenames.to_vec(),
+        dar_hashes: dar_hashes.to_vec(),
+        participants: peer_ids.to_vec(),
+        workflow_instance: Some(instance_name.to_string()),
+    };
+    let payload_bytes = serde_json::to_vec(&payload)?;
+    Ok(Message::new(MessageType::InviteDars, payload_bytes))
+}
+
 /// Send DARs invites to selected peers using Noise protocol
 async fn send_dars_invites(
     config: &NodeConfig,
@@ -294,74 +311,18 @@ async fn send_dars_invites(
     dar_hashes: &[String],
     instance_name: &str,
 ) -> Result {
-    let network_config = NetworkConfig::from_peers(db.get_all_peers().await?);
-    let keypair = NoiseKeypair::from_file(&config.key_file_path()).await?;
-
-    let payload = DarsInvitePayload {
-        dar_filenames: dar_filenames.to_vec(),
-        dar_hashes: dar_hashes.to_vec(),
-        // Carry the member set so the peer card shows the same participant
-        // list the coordinator shows.
-        participants: peer_ids.to_vec(),
-        workflow_instance: Some(instance_name.to_string()),
-    };
-    let payload_bytes = serde_json::to_vec(&payload)?;
-    let invite_message = Message::new(MessageType::InviteDars, payload_bytes);
-
-    for peer_id in peer_ids {
-        let peer = match network_config
-            .peers
-            .iter()
-            .find(|p| &p.participant_id == peer_id)
-        {
-            Some(p) => p,
-            None => {
-                tracing::warn!("Skipping invite to {peer_id} - peer not found in network config");
-                continue;
-            }
-        };
-
-        if peer.public_key.is_empty() {
-            tracing::warn!("Skipping invite to {peer_id} - no public key configured");
-            continue;
-        }
-
-        let peer_pub_key = match parse_public_key(&peer.public_key) {
-            Ok(pk) => pk,
-            Err(e) => {
-                tracing::warn!("Skipping invite to {peer_id} - invalid public key: {e}");
-                continue;
-            }
-        };
-
-        let psk = keypair.derive_psk(&peer_pub_key);
-        let identity = config.participant_id().to_string();
-
-        tracing::info!(
-            "Sending DARs invite to {peer_id} at {addr}:{port}",
-            addr = peer.address,
-            port = peer.port
-        );
-
-        match send_noise_message(
-            &peer.address,
-            peer.port,
-            &psk,
-            identity.as_bytes(),
-            &invite_message,
-        )
-        .await
-        {
-            Ok(response) => {
-                interpret_invite_reply(peer_id, "DARs", &response)?;
-            }
-            Err(e) => {
-                tracing::error!("Failed to send DARs invite to {peer_id}: {e}");
-            }
-        }
-    }
-
-    Ok(())
+    send_invites(
+        config,
+        db,
+        Recipients::Listed(peer_ids),
+        InviteLabels {
+            kind: "DARs",
+            skip: "",
+            failed: "DARs ",
+        },
+        || dars_invite(peer_ids, dar_filenames, dar_hashes, instance_name),
+    )
+    .await
 }
 
 #[cfg(test)]

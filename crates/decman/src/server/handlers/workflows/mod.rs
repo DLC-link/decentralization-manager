@@ -5,6 +5,7 @@ mod cancel;
 mod change_threshold;
 mod contracts;
 mod dars;
+mod invites;
 mod kick;
 mod kick_target;
 mod launch;

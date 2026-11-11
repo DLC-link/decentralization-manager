@@ -10,10 +10,10 @@ use sqlx::SqlitePool;
 use crate::server::handlers::parties::resolve_owner_keys_from_peers;
 use crate::{
     canton_id::CantonId,
-    config::{NetworkConfig, NodeConfig},
+    config::NodeConfig,
     db::schema::SchemaRead,
     error::Result,
-    noise::{Message, MessageType, NoiseKeypair, parse_public_key, send_noise_message},
+    noise::{Message, MessageType},
     server::{
         AppState,
         error::ApiError,
@@ -27,8 +27,8 @@ use crate::{
 };
 
 use super::{
+    invites::{InviteLabels, Recipients, send_invites},
     launch::{CoordinatorRequest, StatusOrder, launch_coordinator},
-    onboarding::interpret_invite_reply,
     preflight::{
         find_inprogress_run_for_party, format_incompatible_peers, preflight_incompatible_peers,
     },
@@ -265,22 +265,15 @@ pub async fn get_contracts_status(data: web::Data<AppState>) -> impl Responder {
     HttpResponse::Ok().json(kind_status(&data, WorkflowKind::Contracts).await)
 }
 
-/// Send contracts invites to this party's members (`invitees`) over Noise.
-async fn send_contracts_invites(
-    config: &NodeConfig,
-    db: &SqlitePool,
+/// The contracts invite. It carries the dec party, the member set and the
+/// package names, so the peer card renders the same rich summary the
+/// coordinator shows (mirrors the Kick invite).
+pub(super) fn contracts_invite(
     contracts_config: &workflow::ContractsConfig,
     invitees: &[CantonId],
-) -> Result {
-    let network_config = NetworkConfig::from_peers(db.get_all_peers().await?);
-    let keypair = NoiseKeypair::from_file(&config.key_file_path()).await?;
-
-    let current_participant_id = config.participant_id();
-    let invitee_set: HashSet<&CantonId> = invitees.iter().collect();
-    // Carry the dec party, member set, and package names so the peer card
-    // renders the same rich summary the coordinator shows (mirrors the Kick
-    // invite). Skip empty names, then sort+dedup — `dedup` only removes
-    // adjacent duplicates, and multiple contracts can share a package name.
+) -> Result<Message> {
+    // Skip empty names, then sort+dedup — `dedup` only removes adjacent
+    // duplicates, and multiple contracts can share a package name.
     let mut package_names: Vec<String> = contracts_config
         .contracts
         .iter()
@@ -297,71 +290,29 @@ async fn send_contracts_invites(
         workflow_instance: Some(contracts_config.instance_name.clone()),
     };
     let payload_bytes = serde_json::to_vec(&payload).context("encode ContractsInvitePayload")?;
-    let invite_message = Message::new(MessageType::InviteContracts, payload_bytes);
+    Ok(Message::new(MessageType::InviteContracts, payload_bytes))
+}
 
-    for peer in &network_config.peers {
-        if peer.participant_id == *current_participant_id {
-            continue;
-        }
-
-        // Only this party's members (see start_contracts) — never every
-        // configured peer.
-        if !invitee_set.contains(&peer.participant_id) {
-            continue;
-        }
-
-        if peer.public_key.is_empty() {
-            tracing::warn!(
-                "Skipping invite to {} - no public key configured",
-                peer.participant_id
-            );
-            continue;
-        }
-
-        let peer_pub_key = match parse_public_key(&peer.public_key) {
-            Ok(pk) => pk,
-            Err(e) => {
-                tracing::warn!(
-                    "Skipping invite to {} - invalid public key: {e}",
-                    peer.participant_id
-                );
-                continue;
-            }
-        };
-
-        let psk = keypair.derive_psk(&peer_pub_key);
-        // Use participant_id as identity (must match what server expects in peer_keys lookup)
-        let identity = config.participant_id().to_string();
-
-        tracing::info!(
-            "Sending contracts invite to {} at {}:{}",
-            peer.participant_id,
-            peer.address,
-            peer.port
-        );
-
-        match send_noise_message(
-            &peer.address,
-            peer.port,
-            &psk,
-            identity.as_bytes(),
-            &invite_message,
-        )
-        .await
-        {
-            Ok(response) => {
-                interpret_invite_reply(&peer.participant_id, "contracts", &response)?;
-            }
-            Err(e) => {
-                tracing::error!(
-                    "Failed to send contracts invite to {}: {e}",
-                    peer.participant_id
-                );
-            }
-        }
-    }
-
-    Ok(())
+/// Send contracts invites to this party's members (`invitees`) over Noise —
+/// never to every configured peer (see start_contracts).
+async fn send_contracts_invites(
+    config: &NodeConfig,
+    db: &SqlitePool,
+    contracts_config: &workflow::ContractsConfig,
+    invitees: &[CantonId],
+) -> Result {
+    send_invites(
+        config,
+        db,
+        Recipients::Members(invitees),
+        InviteLabels {
+            kind: "contracts",
+            skip: "",
+            failed: "contracts ",
+        },
+        || contracts_invite(contracts_config, invitees),
+    )
+    .await
 }
 
 #[cfg(test)]

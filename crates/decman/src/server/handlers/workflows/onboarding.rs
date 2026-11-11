@@ -27,6 +27,7 @@ use crate::{
 };
 
 use super::{
+    invites::{InviteLabels, Recipients, send_invites},
     launch::{CoordinatorRequest, StatusOrder, launch_coordinator},
     preflight::{find_party_with_prefix, format_incompatible_peers, preflight_incompatible_peers},
     runs::{kind_status, register_and_persist},
@@ -379,22 +380,16 @@ pub(super) fn interpret_invite_reply(peer_id: &CantonId, kind: &str, response: &
     }
 }
 
-/// Send onboarding invites to selected peers using Noise protocol
-async fn send_onboarding_invites(
-    config: &NodeConfig,
-    db: &SqlitePool,
+/// The onboarding invite. It shows the threshold the coordinator will
+/// actually use: the operator's choice, or the same majority default it
+/// falls back to (owners = invited peers + this coordinator).
+pub(super) fn onboarding_invite(
     peer_ids: &[CantonId],
     party_id_prefix: &str,
     threshold: Option<i32>,
     confirmation_threshold: Option<i32>,
     instance_name: &str,
-) -> Result {
-    let network_config = NetworkConfig::from_peers(db.get_all_peers().await?);
-    let keypair = NoiseKeypair::from_file(&config.key_file_path()).await?;
-
-    // Show the threshold the coordinator will actually use: the operator's
-    // choice, or the same majority default it falls back to (owners = invited
-    // peers + this coordinator).
+) -> Result<Message> {
     let owners = peer_ids.len() + 1;
     let effective_threshold = threshold.unwrap_or_else(|| owners.div_ceil(2).max(1) as i32);
 
@@ -406,63 +401,39 @@ async fn send_onboarding_invites(
         workflow_instance: Some(instance_name.to_string()),
     };
     let payload_bytes = serde_json::to_vec(&payload)?;
-    let invite_message = Message::new(MessageType::InviteOnboarding, payload_bytes);
+    Ok(Message::new(MessageType::InviteOnboarding, payload_bytes))
+}
 
-    for peer_id in peer_ids {
-        let peer = match network_config
-            .peers
-            .iter()
-            .find(|p| &p.participant_id == peer_id)
-        {
-            Some(p) => p,
-            None => {
-                tracing::warn!("Skipping invite to {peer_id} - peer not found in network config");
-                continue;
-            }
-        };
-
-        if peer.public_key.is_empty() {
-            tracing::warn!("Skipping invite to {peer_id} - no public key configured");
-            continue;
-        }
-
-        let peer_pub_key = match parse_public_key(&peer.public_key) {
-            Ok(pk) => pk,
-            Err(e) => {
-                tracing::warn!("Skipping invite to {peer_id} - invalid public key: {e}");
-                continue;
-            }
-        };
-
-        let psk = keypair.derive_psk(&peer_pub_key);
-        // Use participant_id as identity (must match what server expects in peer_keys lookup)
-        let identity = config.participant_id().to_string();
-
-        tracing::info!(
-            "Sending onboarding invite to {peer_id} at {addr}:{port}",
-            addr = peer.address,
-            port = peer.port
-        );
-
-        match send_noise_message(
-            &peer.address,
-            peer.port,
-            &psk,
-            identity.as_bytes(),
-            &invite_message,
-        )
-        .await
-        {
-            Ok(response) => {
-                interpret_invite_reply(peer_id, "onboarding", &response)?;
-            }
-            Err(e) => {
-                tracing::error!("Failed to send invite to {peer_id}: {e}");
-            }
-        }
-    }
-
-    Ok(())
+/// Send onboarding invites to selected peers using Noise protocol
+async fn send_onboarding_invites(
+    config: &NodeConfig,
+    db: &SqlitePool,
+    peer_ids: &[CantonId],
+    party_id_prefix: &str,
+    threshold: Option<i32>,
+    confirmation_threshold: Option<i32>,
+    instance_name: &str,
+) -> Result {
+    send_invites(
+        config,
+        db,
+        Recipients::Listed(peer_ids),
+        InviteLabels {
+            kind: "onboarding",
+            skip: "",
+            failed: "",
+        },
+        || {
+            onboarding_invite(
+                peer_ids,
+                party_id_prefix,
+                threshold,
+                confirmation_threshold,
+                instance_name,
+            )
+        },
+    )
+    .await
 }
 
 /// Pre-flight check: query each selected peer for its known peer list and

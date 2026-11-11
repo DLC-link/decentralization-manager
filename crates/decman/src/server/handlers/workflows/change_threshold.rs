@@ -9,10 +9,10 @@ use sqlx::SqlitePool;
 
 use crate::{
     canton_id::CantonId,
-    config::{NetworkConfig, NodeConfig},
+    config::NodeConfig,
     db::schema::SchemaRead,
     error::Result,
-    noise::{Message, MessageType, NoiseKeypair, parse_public_key, send_noise_message},
+    noise::{Message, MessageType},
     server::{
         AppState,
         error::ApiError,
@@ -28,8 +28,8 @@ use crate::{
 
 use super::{
     cancel::cancel_workflow_state,
+    invites::{InviteLabels, Recipients, send_invites},
     launch::{CoordinatorRequest, StatusOrder, launch_coordinator},
-    onboarding::interpret_invite_reply,
     preflight::{
         find_inprogress_run_for_party, format_incompatible_peers, preflight_incompatible_peers,
     },
@@ -258,21 +258,15 @@ pub async fn cancel_change_threshold(
     cancel_workflow_state(&data, "Change-threshold", WorkflowKind::ChangeThreshold).await
 }
 
-/// Send change-threshold invites over Noise to every existing member.
-async fn send_change_threshold_invites(
-    config: &NodeConfig,
-    db: &SqlitePool,
+/// The change-threshold invite. Its card shows the full member set: the
+/// invitees and this node, `self_id`.
+pub(super) fn change_threshold_invite(
+    self_id: &CantonId,
     change_config: &workflow::ChangeThresholdConfig,
     invitees: &[CantonId],
-) -> Result {
-    let network_config = NetworkConfig::from_peers(db.get_all_peers().await?);
-    let keypair = NoiseKeypair::from_file(&config.key_file_path()).await?;
-
-    let current_participant_id = config.participant_id();
-    let invitee_set: HashSet<&CantonId> = invitees.iter().collect();
-    // The card shows the full member set: invitees + this node.
+) -> Result<Message> {
     let mut participants = invitees.to_vec();
-    participants.push(current_participant_id.clone());
+    participants.push(self_id.clone());
     let payload = ChangeThresholdInvitePayload {
         dec_party_id: change_config.decentralized_party_id.clone(),
         new_threshold: change_config.new_threshold,
@@ -283,65 +277,31 @@ async fn send_change_threshold_invites(
     };
     let payload_bytes =
         serde_json::to_vec(&payload).context("encode ChangeThresholdInvitePayload")?;
-    let invite_message = Message::new(MessageType::InviteChangeThreshold, payload_bytes);
+    Ok(Message::new(
+        MessageType::InviteChangeThreshold,
+        payload_bytes,
+    ))
+}
 
-    for peer in &network_config.peers {
-        if !invitee_set.contains(&peer.participant_id)
-            || peer.participant_id == *current_participant_id
-        {
-            continue;
-        }
-
-        if peer.public_key.is_empty() {
-            tracing::warn!(
-                "Skipping change-threshold invite to {} - no public key configured",
-                peer.participant_id
-            );
-            continue;
-        }
-        let peer_pub_key = match parse_public_key(&peer.public_key) {
-            Ok(pk) => pk,
-            Err(e) => {
-                tracing::warn!(
-                    "Skipping change-threshold invite to {} - invalid public key: {e}",
-                    peer.participant_id
-                );
-                continue;
-            }
-        };
-
-        let psk = keypair.derive_psk(&peer_pub_key);
-        let identity = config.participant_id().to_string();
-
-        tracing::info!(
-            "Sending change-threshold invite to {} at {}:{}",
-            peer.participant_id,
-            peer.address,
-            peer.port
-        );
-
-        match send_noise_message(
-            &peer.address,
-            peer.port,
-            &psk,
-            identity.as_bytes(),
-            &invite_message,
-        )
-        .await
-        {
-            Ok(response) => {
-                interpret_invite_reply(&peer.participant_id, "change-threshold", &response)?;
-            }
-            Err(e) => {
-                tracing::error!(
-                    "Failed to send change-threshold invite to {}: {e}",
-                    peer.participant_id
-                );
-            }
-        }
-    }
-
-    Ok(())
+/// Send change-threshold invites over Noise to every existing member.
+async fn send_change_threshold_invites(
+    config: &NodeConfig,
+    db: &SqlitePool,
+    change_config: &workflow::ChangeThresholdConfig,
+    invitees: &[CantonId],
+) -> Result {
+    send_invites(
+        config,
+        db,
+        Recipients::Members(invitees),
+        InviteLabels {
+            kind: "change-threshold",
+            skip: "change-threshold ",
+            failed: "change-threshold ",
+        },
+        || change_threshold_invite(config.participant_id(), change_config, invitees),
+    )
+    .await
 }
 
 // ============================================================================

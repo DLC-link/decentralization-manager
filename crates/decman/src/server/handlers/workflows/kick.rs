@@ -9,11 +9,11 @@ use sqlx::SqlitePool;
 
 use crate::{
     canton_id::CantonId,
-    config::{NetworkConfig, NodeConfig},
+    config::NodeConfig,
     consts::OWNER_ONLY_KICK,
     db::schema::SchemaRead,
     error::Result,
-    noise::{Message, MessageType, NoiseKeypair, parse_public_key, send_noise_message},
+    noise::{Message, MessageType},
     server::{
         AppState,
         error::ApiError,
@@ -27,12 +27,12 @@ use crate::{
 };
 
 use super::{
+    invites::{InviteLabels, Recipients, send_invites},
     kick_target::{
         cached_confirmation_threshold, cached_namespace_threshold, kick_threshold_bound,
         party_member_count, resolve_kick_target,
     },
     launch::{CoordinatorRequest, StatusOrder, launch_coordinator},
-    onboarding::interpret_invite_reply,
     preflight::{
         find_inprogress_run_for_party, format_incompatible_peers,
         format_peers_lacking_owner_only_kick, incompatible_versions, lacking_feature,
@@ -369,22 +369,14 @@ pub async fn get_kick_status(data: web::Data<AppState>) -> impl Responder {
     HttpResponse::Ok().json(kind_status(&data, WorkflowKind::Kick).await)
 }
 
-/// Send kick invites to all peers using Noise protocol (excluding the peer being kicked)
-async fn send_kick_invites(
-    config: &NodeConfig,
-    db: &SqlitePool,
+/// The kick invite for the surviving party members.
+pub(super) fn kick_invite(
     kick_config: &workflow::KickConfig,
     invitees: &[CantonId],
-) -> Result {
-    let network_config = NetworkConfig::from_peers(db.get_all_peers().await?);
-    let keypair = NoiseKeypair::from_file(&config.key_file_path()).await?;
-
-    let current_participant_id = config.participant_id();
-    let kicked_participant = kick_config.participant_id.as_ref();
-    let invitee_set: HashSet<&CantonId> = invitees.iter().collect();
+) -> Result<Message> {
     let payload = KickInvitePayload {
         dec_party_id: kick_config.decentralized_party_id.clone(),
-        kicked_participant: kicked_participant.cloned(),
+        kicked_participant: kick_config.participant_id.clone(),
         kicked_owner_key: Some(kick_config.namespace_fingerprint.clone()),
         new_threshold: kick_config.new_threshold,
         previous_threshold: kick_config.previous_threshold,
@@ -393,92 +385,40 @@ async fn send_kick_invites(
         workflow_instance: Some(kick_config.instance_name.clone()),
     };
     let payload_bytes = serde_json::to_vec(&payload).context("encode KickInvitePayload")?;
-    let invite_message = Message::new(MessageType::InviteKick, payload_bytes);
+    Ok(Message::new(MessageType::InviteKick, payload_bytes))
+}
 
-    tracing::info!(
-        "Kick invites: self={current_participant_id}, kicked={kicked_participant:?}, \
-         owner key={}",
-        kick_config.namespace_fingerprint
-    );
-
-    for peer in &network_config.peers {
-        tracing::debug!(
-            "Checking peer {}: self_match={}, kicked_match={}",
-            peer.participant_id,
-            peer.participant_id == *current_participant_id,
-            Some(&peer.participant_id) == kicked_participant
-        );
-
-        // Only invite this run's surviving party members (see start_kick). The
-        // self/kicked skips below are now subsumed by this but kept for clarity.
-        if !invitee_set.contains(&peer.participant_id) {
-            continue;
-        }
-
-        // Skip self
-        if peer.participant_id == *current_participant_id {
-            tracing::debug!("Skipping {} - this is self", peer.participant_id);
-            continue;
-        }
-
-        // Skip the peer being kicked (they won't participate in the kick workflow)
-        if Some(&peer.participant_id) == kicked_participant {
+/// Send kick invites to all peers using Noise protocol (excluding the peer being kicked)
+async fn send_kick_invites(
+    config: &NodeConfig,
+    db: &SqlitePool,
+    kick_config: &workflow::KickConfig,
+    invitees: &[CantonId],
+) -> Result {
+    let kicked_participant = kick_config.participant_id.as_ref();
+    send_invites(
+        config,
+        db,
+        Recipients::KickSurvivors {
+            invitees,
+            kicked: kicked_participant,
+        },
+        InviteLabels {
+            kind: "kick",
+            skip: "",
+            failed: "kick ",
+        },
+        || {
+            let invite_message = kick_invite(kick_config, invitees)?;
             tracing::info!(
-                "Skipping invite to {} - they are being kicked",
-                peer.participant_id
+                "Kick invites: self={}, kicked={kicked_participant:?}, owner key={}",
+                config.participant_id(),
+                kick_config.namespace_fingerprint
             );
-            continue;
-        }
-
-        if peer.public_key.is_empty() {
-            tracing::warn!(
-                "Skipping invite to {} - no public key configured",
-                peer.participant_id
-            );
-            continue;
-        }
-
-        let peer_pub_key = match parse_public_key(&peer.public_key) {
-            Ok(pk) => pk,
-            Err(e) => {
-                tracing::warn!(
-                    "Skipping invite to {} - invalid public key: {e}",
-                    peer.participant_id
-                );
-                continue;
-            }
-        };
-
-        let psk = keypair.derive_psk(&peer_pub_key);
-        // Use participant_id as identity (must match what server expects in peer_keys lookup)
-        let identity = config.participant_id().to_string();
-
-        tracing::info!(
-            "Sending kick invite to {} at {}:{}",
-            peer.participant_id,
-            peer.address,
-            peer.port
-        );
-
-        match send_noise_message(
-            &peer.address,
-            peer.port,
-            &psk,
-            identity.as_bytes(),
-            &invite_message,
-        )
-        .await
-        {
-            Ok(response) => {
-                interpret_invite_reply(&peer.participant_id, "kick", &response)?;
-            }
-            Err(e) => {
-                tracing::error!("Failed to send kick invite to {}: {e}", peer.participant_id);
-            }
-        }
-    }
-
-    Ok(())
+            Ok(invite_message)
+        },
+    )
+    .await
 }
 
 #[cfg(test)]
