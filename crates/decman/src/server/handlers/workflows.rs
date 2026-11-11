@@ -8,6 +8,7 @@ use actix_web::{HttpRequest, HttpResponse, Responder, get, post, web};
 
 use anyhow::Context;
 use base64::{Engine, engine::general_purpose::STANDARD};
+use canton_proto_rs::com::digitalasset::canton::protocol::v30::PartyToParticipant;
 use prometheus::IntCounterVec;
 use sqlx::SqlitePool;
 
@@ -49,8 +50,8 @@ use crate::{
         self, AddPartyStep, ChangeThresholdStep, ContractsStep, DarsStep, KickStep, OnboardingStep,
         contracts::DarFile,
         signing_keys::{
-            known_signing_keys_by_member, members_requiring_key_adoption,
-            requires_signing_key_adoption,
+            ensure_kick_key_claims, ensure_survivor_keys_preserved, known_signing_keys_by_member,
+            members_requiring_key_adoption, requires_signing_key_adoption,
         },
         state::WorkflowStep,
         storage::WorkflowStorage,
@@ -462,34 +463,67 @@ async fn kick_key_adoption_refusal(
     db: &SqlitePool,
     party: &CantonId,
     not_peers: &[CantonId],
+    removed: &str,
+    kicked: Option<&CantonId>,
 ) -> Result<Option<String>> {
     if not_peers.is_empty() {
         return Ok(None);
     }
     let synchronizer_id = utils::get_synchronizer_id(config).await?;
     let mapping = topology::fetch_p2p_mapping(config, &synchronizer_id, party).await?;
-    if !requires_signing_key_adoption(&mapping) {
-        return Ok(None);
-    }
+    kick_key_adoption_refusal_for_mapping(config, db, party, not_peers, removed, kicked, &mapping)
+        .await
+}
+
+async fn kick_key_adoption_refusal_for_mapping(
+    config: &NodeConfig,
+    db: &SqlitePool,
+    party: &CantonId,
+    not_peers: &[CantonId],
+    removed: &str,
+    kicked: Option<&CantonId>,
+    mapping: &PartyToParticipant,
+) -> Result<Option<String>> {
     let inline = mapping
         .party_signing_keys
         .as_ref()
         .map_or(&[][..], |keys| keys.keys.as_slice());
-    let members: Vec<String> = not_peers.iter().map(ToString::to_string).collect();
-    let required = if inline.is_empty() {
-        members_requiring_key_adoption(&mapping, &members, &Default::default())?
-    } else {
-        let claims = known_signing_keys_by_member(config, db, party, inline).await?;
-        members_requiring_key_adoption(&mapping, &members, &claims)?
-    };
-    Ok((!required.is_empty()).then(|| {
+    let kicked = kicked.map(ToString::to_string);
+    let survivors: Vec<String> = mapping
+        .participants
+        .iter()
+        .filter(|host| Some(&host.participant_uid) != kicked.as_ref())
+        .map(|host| host.participant_uid.clone())
+        .collect();
+    let members: Vec<String> = not_peers
+        .iter()
+        .map(ToString::to_string)
+        .filter(|member| survivors.contains(member))
+        .collect();
+    // With no inline keys every missing survivor must sign adoption. No
+    // attribution lookup can make that kick safe to start without them.
+    if inline.is_empty() {
+        return Ok(kick_missing_adopters(&members));
+    }
+    let claims = known_signing_keys_by_member(config, db, party, inline).await?;
+    ensure_kick_key_claims(Some(removed), &survivors, &claims, &members)?;
+    if !requires_signing_key_adoption(mapping) {
+        ensure_survivor_keys_preserved(inline, &survivors, &claims)?;
+        return Ok(None);
+    }
+    let required = members_requiring_key_adoption(mapping, &members, &claims)?;
+    Ok(kick_missing_adopters(&required))
+}
+
+fn kick_missing_adopters(required: &[String]) -> Option<String> {
+    (!required.is_empty()).then(|| {
         format!(
             "Cannot kick: these surviving members must sign because their party signing keys \
              must move inline, but they are not configured peers: {}. Add them as peers, \
              then retry",
             required.join(", ")
         )
-    }))
+    })
 }
 
 /// The member a kick removes.
@@ -725,7 +759,7 @@ async fn cached_confirmation_threshold(
         (status = 400, description = "Bad request", body = ErrorResponse),
         (status = 409, description = "Workflow already in progress, or owner key not yet resolved for the target participant", body = ErrorResponse),
         (status = 500, description = "Internal server error", body = ErrorResponse),
-        (status = 503, description = "Cannot verify whether a surviving member must sign a legacy key adoption; refresh and retry", body = ErrorResponse)
+        (status = 503, description = "Cannot verify a surviving member's signing key ownership or adoption; refresh and retry", body = ErrorResponse)
     )
 )]
 #[post("/kick")]
@@ -991,11 +1025,17 @@ pub async fn start_kick(
         });
     }
 
+    let removed = kick_config.participant_id.as_ref().map_or_else(
+        || kick_config.namespace_fingerprint.clone(),
+        ToString::to_string,
+    );
     match kick_key_adoption_refusal(
         &data.config,
         &data.db,
         &decentralized_party_id,
         &signers.not_peers,
+        &removed,
+        kick_config.participant_id.as_ref(),
     )
     .await
     {
@@ -1007,7 +1047,7 @@ pub async fn start_kick(
             );
             return HttpResponse::ServiceUnavailable().json(ErrorResponse {
                 error: format!(
-                    "Cannot verify whether surviving members must sign a key adoption: {e:#}. \
+                    "Cannot verify surviving signing key ownership or adoption: {e:#}. \
                      Refresh /decentralized-parties and retry"
                 ),
             });
@@ -4657,6 +4697,10 @@ async fn send_contracts_invites(
 #[cfg(test)]
 mod tests {
     use actix_web::{App, HttpMessage, http::StatusCode, test as actix_test};
+    use canton_proto_rs::com::digitalasset::canton::{
+        crypto::v30::{SigningKeyUsage, SigningKeysWithThreshold, SigningPublicKey},
+        protocol::v30::{enums::ParticipantPermission, party_to_participant::HostingParticipant},
+    };
 
     use super::super::invitations::insert_peer_run;
     use super::*;
@@ -4664,7 +4708,10 @@ mod tests {
         auth::Principal,
         db::MIGRATOR,
         server::{AppState, PendingInvitation},
-        workflow::{kick::prune_cached_membership, validation::PeerExpectations},
+        workflow::{
+            kick::prune_cached_membership, signing_keys::signing_keys_after_kick,
+            validation::PeerExpectations,
+        },
     };
 
     /// A minimal coordinator run row for `party`, in progress.
@@ -5491,7 +5538,7 @@ mod tests {
 
         assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
         assert!(
-            body.contains("Cannot verify whether surviving members must sign a key adoption"),
+            body.contains("Cannot verify surviving signing key ownership or adoption"),
             "{body}"
         );
         assert!(body.contains("retry"), "{body}");
@@ -5510,7 +5557,166 @@ mod tests {
         let mut config = NodeConfig::default();
         config.canton.admin_api_host = "[".to_string();
         assert_eq!(
-            kick_key_adoption_refusal(&config, &pool, &pid(48)?, &[]).await?,
+            kick_key_adoption_refusal(&config, &pool, &pid(48)?, &[], "unused", None).await?,
+            None
+        );
+        Ok(())
+    }
+
+    fn kick_public_key(tag: u8) -> SigningPublicKey {
+        SigningPublicKey {
+            public_key: vec![tag; 32],
+            usage: vec![SigningKeyUsage::Protocol as i32],
+            ..Default::default()
+        }
+    }
+
+    async fn fully_inline_kick_keys(
+        pool: &SqlitePool,
+    ) -> Result<(NodeConfig, CantonId, PartyToParticipant)> {
+        let party = pid(49)?;
+        cache_kick_party(pool, &party, 2, &[1, 2, 3, 4], &[], &[2]).await?;
+        for tag in 1..=4 {
+            sqlx::query("UPDATE dec_party_participant SET signing_key = ? WHERE dec_party_id = ? AND participant_uid = ?")
+                .bind(utils::compute_fingerprint(&kick_public_key(tag)).to_string())
+                .bind(party.to_string()).bind(pid(tag)?.to_string()).execute(pool).await?;
+        }
+        let mut config = NodeConfig::default();
+        config.node.participant_id = Some(pid(1)?);
+        config.canton.admin_api_host = "[".to_string();
+        let mapping = PartyToParticipant {
+            party: party.to_string(),
+            threshold: 2,
+            participants: (1..=4)
+                .map(|tag| -> Result<HostingParticipant> {
+                    Ok(HostingParticipant {
+                        participant_uid: pid(tag)?.to_string(),
+                        permission: ParticipantPermission::Confirmation as i32,
+                        ..Default::default()
+                    })
+                })
+                .collect::<Result<Vec<_>>>()?,
+            party_signing_keys: Some(SigningKeysWithThreshold {
+                keys: (1..=4).map(kick_public_key).collect(),
+                threshold: 2,
+            }),
+        };
+        Ok((config, party, mapping))
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn fully_inline_preflight_refuses_conflicting_target_and_non_peer_key_claims(
+        pool: SqlitePool,
+    ) -> Result {
+        let (config, party, mapping) = fully_inline_kick_keys(&pool).await?;
+        sqlx::query("UPDATE dec_party_participant SET signing_key = ? WHERE participant_uid = ?")
+            .bind(utils::compute_fingerprint(&kick_public_key(3)).to_string())
+            .bind(pid(4)?.to_string())
+            .execute(&pool)
+            .await?;
+
+        let error = kick_key_adoption_refusal_for_mapping(
+            &config,
+            &pool,
+            &party,
+            &[pid(3)?],
+            &pid(4)?.to_string(),
+            Some(&pid(4)?),
+            &mapping,
+        )
+        .await
+        .expect_err("the fully-inline fast path must check conflicting ownership")
+        .to_string();
+
+        assert!(error.contains(&pid(3)?.to_string()), "{error}");
+        assert!(error.contains(&pid(4)?.to_string()), "{error}");
+        assert!(error.contains("both claim"), "{error}");
+        assert!(error.contains("Refresh"), "{error}");
+        let keys = &mapping
+            .party_signing_keys
+            .as_ref()
+            .context("inline keys")?
+            .keys;
+        let attributed = known_signing_keys_by_member(&config, &pool, &party, keys).await?;
+        assert!(
+            signing_keys_after_kick(
+                keys,
+                &pid(4)?.to_string(),
+                &[
+                    pid(1)?.to_string(),
+                    pid(2)?.to_string(),
+                    pid(3)?.to_string()
+                ],
+                &attributed,
+            )
+            .is_err()
+        );
+        Ok(())
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_non_peer_needs_a_unique_known_key_even_on_a_fully_inline_party(
+        pool: SqlitePool,
+    ) -> Result {
+        let (config, party, mut mapping) = fully_inline_kick_keys(&pool).await?;
+        sqlx::query(
+            "UPDATE dec_party_participant SET signing_key = NULL WHERE participant_uid = ?",
+        )
+        .bind(pid(3)?.to_string())
+        .execute(&pool)
+        .await?;
+        let error = kick_key_adoption_refusal_for_mapping(
+            &config,
+            &pool,
+            &party,
+            &[pid(3)?],
+            &pid(4)?.to_string(),
+            Some(&pid(4)?),
+            &mapping,
+        )
+        .await
+        .expect_err("unknown non-peer ownership must request a refresh")
+        .to_string();
+        assert!(error.contains(&pid(3)?.to_string()), "{error}");
+        assert!(error.contains("has not reported"), "{error}");
+        assert!(
+            error.contains("Refresh") && error.contains("peer"),
+            "{error}"
+        );
+        sqlx::query("UPDATE dec_party_participant SET signing_key = ? WHERE participant_uid = ?")
+            .bind(utils::compute_fingerprint(&kick_public_key(3)).to_string())
+            .bind(pid(3)?.to_string())
+            .execute(&pool)
+            .await?;
+        assert_eq!(
+            kick_key_adoption_refusal_for_mapping(
+                &config,
+                &pool,
+                &party,
+                &[pid(3)?],
+                &pid(4)?.to_string(),
+                Some(&pid(4)?),
+                &mapping,
+            )
+            .await?,
+            None
+        );
+        // A reachable p2 needs adoption, but non-peer p3 is already inline.
+        mapping.party_signing_keys = Some(SigningKeysWithThreshold {
+            keys: vec![kick_public_key(1), kick_public_key(3)],
+            threshold: 2,
+        });
+        assert_eq!(
+            kick_key_adoption_refusal_for_mapping(
+                &config,
+                &pool,
+                &party,
+                &[pid(3)?],
+                &pid(4)?.to_string(),
+                Some(&pid(4)?),
+                &mapping,
+            )
+            .await?,
             None
         );
         Ok(())

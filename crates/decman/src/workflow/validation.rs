@@ -39,7 +39,10 @@ use crate::{
         onboarding::steps::proposals::create::{
             compute_decentralized_namespace, decode_keys_payload,
         },
-        signing_keys::{own_namespace_key, vault_holds},
+        signing_keys::{
+            ensure_kick_key_claims, ensure_survivor_keys_preserved, own_namespace_key,
+            recorded_signing_keys_by_member, vault_holds,
+        },
         storage::{WorkflowStorage, artifact_kinds, identity_kinds},
         topology, topology_version,
     },
@@ -402,10 +405,10 @@ impl PeerExpectations {
         self.check_p2p_membership(&mapping)?;
         self.check_onboarding_markers(&mapping)?;
         self.check_p2p_thresholds(&mapping)?;
-        // Kick rebuilds the key set to take the departing member's key out
-        // (#428), and it has to work out which key that is from local records.
-        // Get it wrong and a remaining member's key goes instead: the counts
-        // still match, so only the member whose key vanished can catch it.
+        if self.kind == WorkflowKind::Kick {
+            self.check_surviving_daml_keys(storage, &mapping).await?;
+        }
+        // Every signer also verifies its own key against its identity or vault.
         self.check_own_daml_key(
             config,
             storage,
@@ -440,6 +443,33 @@ impl PeerExpectations {
             kind = self.kind
         );
         Ok(())
+    }
+
+    /// Defend known survivors even when they do not contribute a signature.
+    /// This reads only local records; unknown legacy records remain subject to
+    /// each signer's existing identity/vault check.
+    async fn check_surviving_daml_keys(
+        &self,
+        storage: &SqlitePool,
+        mapping: &PartyToParticipant,
+    ) -> Result {
+        let party = self
+            .dec_party_id
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("accepted kick names no party"))?;
+        let keys = mapping
+            .party_signing_keys
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("P2P proposal carries no party signing keys"))?;
+        let survivors: Vec<String> = self.members.iter().map(ToString::to_string).collect();
+        let removed = self
+            .kicked_participant
+            .as_ref()
+            .map(ToString::to_string)
+            .or_else(|| self.kicked_owner_key.clone());
+        let claims = recorded_signing_keys_by_member(storage, party).await?;
+        ensure_kick_key_claims(removed.as_deref(), &survivors, &claims, &[])?;
+        ensure_survivor_keys_preserved(&keys.keys, &survivors, &claims)
     }
 
     /// The checks on a party DNS proposal that need no topology read: the
@@ -1855,6 +1885,58 @@ mod tests {
             assert!(error.contains("host set does not match"), "{error}");
         }
         Ok(())
+    }
+
+    #[sqlx::test(migrator = "crate::db::MIGRATOR")]
+    async fn a_peer_defends_a_known_absent_survivors_key_as_well_as_its_own(
+        pool: SqlitePool,
+    ) -> Result {
+        let party = canton_id("party", 9)?;
+        let hosts: Vec<CantonId> = (1..=4)
+            .map(|tag| canton_id(&format!("p{tag}"), tag))
+            .collect::<Result<_>>()?;
+        let all_keys = signing_keys(4, 2).keys;
+        sqlx::query(
+            "INSERT INTO dec_party (party_id, prefix, threshold, updated_at) VALUES (?, ?, 2, 0)",
+        )
+        .bind(party.to_string())
+        .bind(&party.prefix)
+        .execute(&pool)
+        .await?;
+        for (host, key) in hosts.iter().zip(&all_keys) {
+            sqlx::query("INSERT INTO dec_party_participant (dec_party_id, participant_uid, permission, signing_key) VALUES (?, ?, 'confirmation', ?)")
+                .bind(party.to_string()).bind(host.to_string())
+                .bind(utils::compute_fingerprint(key).to_string()).execute(&pool).await?;
+        }
+        let mut accepted = expectations(hosts[..3].to_vec(), hosts[1].clone());
+        accepted.kind = WorkflowKind::Kick;
+        accepted.dec_party_id = Some(party.clone());
+        accepted.kicked_participant = Some(hosts[3].clone());
+        let mut proposal = p2p(&party.to_string(), &hosts[..3], 2);
+        // The signer p2 keeps its own key, while absent p3 loses authority.
+        proposal.party_signing_keys = Some(SigningKeysWithThreshold {
+            keys: vec![
+                all_keys[0].clone(),
+                all_keys[1].clone(),
+                all_keys[3].clone(),
+            ],
+            threshold: 2,
+        });
+        let error = accepted
+            .check_surviving_daml_keys(&pool, &proposal)
+            .await
+            .expect_err("quorum signers must defend a known absent survivor too")
+            .to_string();
+        assert!(error.contains(&hosts[2].to_string()), "{error}");
+        assert!(
+            error.contains(&utils::compute_fingerprint(&all_keys[2]).to_string()),
+            "{error}"
+        );
+        proposal.party_signing_keys = Some(SigningKeysWithThreshold {
+            keys: all_keys[..3].to_vec(),
+            threshold: 2,
+        });
+        accepted.check_surviving_daml_keys(&pool, &proposal).await
     }
 
     #[test]
