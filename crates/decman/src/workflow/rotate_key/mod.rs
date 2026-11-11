@@ -5,7 +5,14 @@ pub mod steps;
 
 pub use config::RotateKeyConfig;
 
-use crate::{noise::MessageType, server::WorkflowKind, workflow::state::WorkflowStep};
+use crate::{
+    noise::MessageType,
+    server::WorkflowKind,
+    workflow::{state::WorkflowStep, topology::RETIRED_LEGACY_KEYS_STATUS},
+};
+
+/// The status a member sends once it has recorded the coordinator's new key.
+pub const RECORDED_KEY_STATUS: &[u8] = b"RecordRotatedKey completed";
 
 /// Rotate-key workflow steps.
 ///
@@ -116,6 +123,18 @@ impl WorkflowStep for RotateKeyStep {
     fn kind() -> WorkflowKind {
         WorkflowKind::RotateKey
     }
+
+    /// A status counts only for the step whose command asked for it. A
+    /// member's late reply to RetireLegacyKeys would otherwise complete
+    /// RecordKey, and that member would never record the new key. A member
+    /// completes SignProposal with its upload, never with a status.
+    fn accepts_status(&self, status: &[u8]) -> bool {
+        match self {
+            Self::RetireLegacyKeys => status == RETIRED_LEGACY_KEYS_STATUS,
+            Self::RecordKey => status == RECORDED_KEY_STATUS,
+            _ => false,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -132,6 +151,24 @@ mod tests {
         RotateKeyStep::RecordKey,
         RotateKeyStep::Complete,
     ];
+
+    #[test]
+    fn each_step_counts_only_its_own_status() {
+        assert!(RotateKeyStep::RetireLegacyKeys.accepts_status(RETIRED_LEGACY_KEYS_STATUS));
+        assert!(RotateKeyStep::RecordKey.accepts_status(RECORDED_KEY_STATUS));
+
+        assert!(!RotateKeyStep::RecordKey.accepts_status(RETIRED_LEGACY_KEYS_STATUS));
+        assert!(!RotateKeyStep::RetireLegacyKeys.accepts_status(RECORDED_KEY_STATUS));
+        for step in ALL {
+            if !matches!(
+                step,
+                RotateKeyStep::RetireLegacyKeys | RotateKeyStep::RecordKey
+            ) {
+                assert!(!step.accepts_status(RETIRED_LEGACY_KEYS_STATUS), "{step:?}");
+                assert!(!step.accepts_status(RECORDED_KEY_STATUS), "{step:?}");
+            }
+        }
+    }
 
     #[test]
     fn steps_advance_in_order_to_completion() {

@@ -454,6 +454,9 @@ pub async fn fetch_party_to_key_mapping(
     }))
 }
 
+/// The status a member sends once it has signed the legacy mapping's removal.
+pub const RETIRED_LEGACY_KEYS_STATUS: &[u8] = b"RetireLegacyKeys completed";
+
 /// Contribute this member's namespace signature to retiring the legacy mapping.
 /// Called only after the replacement topology has become effective. Every
 /// member reads the same live mapping and signs the same explicit next serial;

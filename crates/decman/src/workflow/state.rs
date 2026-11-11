@@ -21,7 +21,10 @@ use crate::{
     error::Result,
     noise::MessageType,
     server::WorkflowKind,
-    workflow::party_replication::pipe::{ExportSession, PipeBlock},
+    workflow::{
+        party_replication::pipe::{ExportSession, PipeBlock},
+        storage::WorkflowStorage,
+    },
 };
 
 /// Trait for workflow steps. Implementations are small `Copy` enums per
@@ -53,6 +56,12 @@ pub trait WorkflowStep:
     /// The workflow kind this step enum belongs to. Used to reject routed
     /// messages (e.g. invitation declines) that target a different kind.
     fn kind() -> WorkflowKind;
+
+    /// Whether a peer's status update completes this step for that peer. A
+    /// step that names its status ignores a late status of an earlier step.
+    fn accepts_status(&self, _status: &[u8]) -> bool {
+        true
+    }
 }
 
 /// Generic workflow state tracker. Reads/writes the matching `workflow_runs`
@@ -409,31 +418,73 @@ impl<S: WorkflowStep + 'static> WorkflowState<S> {
     }
 
     pub async fn peer_completed(&self, peer_id: CantonId) {
+        self.peer_completed_if(peer_id, |_| true).await;
+    }
+
+    /// Count `peer_id` complete for the current step when `accepts` holds for
+    /// that step, and return whether it counted. The step cannot advance
+    /// while this runs, so a completion meant for one step never counts for
+    /// the next.
+    pub async fn peer_completed_if(
+        &self,
+        peer_id: CantonId,
+        accepts: impl FnOnce(S) -> bool,
+    ) -> bool {
         if !self.expected_peers.contains(&peer_id) {
             tracing::warn!(
                 "ignoring step completion from unexpected peer {peer_id} (not in expected set for {})",
                 self.instance_name
             );
-            return;
+            return false;
         }
 
         {
+            // An advance takes the step lock before the completed set. Take
+            // them in the same order, or the two can deadlock.
+            let current = self.current_step.read().await;
+            if !accepts(*current) {
+                return false;
+            }
             let mut completed = self.completed_peers.write().await;
             completed.insert(peer_id.clone());
-            let current = *self.current_step.read().await;
             let completed_vec: Vec<CantonId> = completed.iter().cloned().collect();
             tracing::info!(
                 "Peer completed step {current:?}: {peer_id} ({}/{})",
                 completed_vec.len(),
-                self.expected_peers.len()
+                self.expected_peers.len(),
+                current = *current
             );
             // Persist the new completed-peers set. Failures here are logged but
             // don't abort the workflow — on a future restart the recovery path
             // re-issues the command, which steps are designed to no-op when the
             // artefact already exists.
-            self.persist_step_progress(current, completed_vec).await;
+            self.persist_step_progress(*current, completed_vec).await;
         }
         self.maybe_advance().await;
+        true
+    }
+
+    /// Store a peer's upload as an artifact of this run, under the peer's id.
+    /// A peer that this run does not expect stores nothing.
+    pub async fn write_peer_artifact(
+        &self,
+        artifact_kind: &str,
+        peer_id: &CantonId,
+        data: &[u8],
+    ) -> Result {
+        anyhow::ensure!(
+            self.expected_peers.contains(peer_id),
+            "{peer_id} is not a peer of run {}",
+            self.instance_name
+        );
+        self.db
+            .write_artifact(
+                &self.instance_name,
+                artifact_kind,
+                Some(&peer_id.to_string()),
+                data,
+            )
+            .await
     }
 
     /// Unconditional advance, used by the coordinator loop which drives its own

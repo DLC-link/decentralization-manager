@@ -452,7 +452,7 @@ async fn run_peer(
                 topology::retire_legacy_keys(&node_config, &synchronizer_id, party).await?;
                 consecutive_step_failures = 0;
                 client
-                    .send_status(b"RetireLegacyKeys completed".to_vec())
+                    .send_status(topology::RETIRED_LEGACY_KEYS_STATUS.to_vec())
                     .await?;
             }
             MessageType::Disconnect => {
@@ -1011,7 +1011,7 @@ async fn run_peer(
                 }
                 consecutive_step_failures = 0;
                 client
-                    .send_status(b"RecordRotatedKey completed".to_vec())
+                    .send_status(rotate_key::RECORDED_KEY_STATUS.to_vec())
                     .await?;
             }
             MessageType::GenerateAddPartyKeys => {
