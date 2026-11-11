@@ -1,0 +1,3 @@
+# Limits for the clippy lints in [workspace.lints.clippy]. A path of more than
+# three segments must be imported with `use`.
+absolute-paths-max-segments = 3
