@@ -3,6 +3,7 @@
 use common::api::{TenantExecuteRequest, TenantPrepareRequest};
 
 use super::host::progress_to_status;
+use super::sign::{require_agreement, sign_prepared};
 use super::{HostReport, OnboardedParty, WalletHost};
 use crate::error::{Error, Result};
 use crate::signer::Signer;
@@ -93,8 +94,8 @@ pub async fn execute_co_validated(
     // Byte-identical or nothing. The node sorts the hosting set precisely so every
     // host serializes the same mapping; any difference here is a host that built
     // something else.
-    for (host, other) in others {
-        let disagreement = if other.party_id != prepared.party_id {
+    require_agreement(preparer, prepared, others, |other, prepared| {
+        if other.party_id != prepared.party_id {
             Some(format!(
                 "party id {found} vs {expected}",
                 found = other.party_id,
@@ -106,33 +107,18 @@ pub async fn execute_co_validated(
             Some("same transactions but different hashes to sign".to_string())
         } else {
             None
-        };
-        if let Some(detail) = disagreement {
-            return Err(Error::HostDisagreement {
-                host: host.client.base_url().to_string(),
-                reference: preparer.client.base_url().to_string(),
-                detail,
-            });
         }
-    }
+    })?;
 
     // One signature per transaction, over the hash Canton computed for it. Signing
     // Canton's hashes directly means nothing here re-derives a Canton hash.
-    if prepared.transaction_hashes.len() != prepared.topology_transactions.len() {
-        return Err(Error::MalformedPreparation {
-            host: preparer.client.base_url().to_string(),
-            detail: format!(
-                "{hashes} hash(es) for {txs} transaction(s)",
-                hashes = prepared.transaction_hashes.len(),
-                txs = prepared.topology_transactions.len()
-            ),
-        });
-    }
-    let mut signatures = Vec::with_capacity(prepared.transaction_hashes.len());
-    for encoded in &prepared.transaction_hashes {
-        let hash = preparer.client.decode_b64("transaction_hash", encoded)?;
-        signatures.push(key.sign_b64_async(&hash).await?);
-    }
+    let signatures = sign_prepared(
+        preparer,
+        &prepared.transaction_hashes,
+        &prepared.topology_transactions,
+        key,
+    )
+    .await?;
 
     let execute_request = TenantExecuteRequest {
         party_hint: party_hint.to_string(),

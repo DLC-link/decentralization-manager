@@ -3,6 +3,7 @@
 use common::api::{TenantThresholdExecuteRequest, TenantThresholdRequest};
 
 use super::host::progress_to_status;
+use super::sign::{require_agreement, sign_prepared};
 use super::{HostReport, WalletHost};
 use crate::error::{Error, Result};
 use crate::signer::Signer;
@@ -54,38 +55,24 @@ pub async fn raise_threshold(
             role: "host",
         });
     };
-    for (host, other) in others {
-        if other.topology_transactions != prepared.topology_transactions
+    require_agreement(preparer, prepared, others, |other, prepared| {
+        (other.topology_transactions != prepared.topology_transactions
             || other.transaction_hashes != prepared.transaction_hashes
-            || other.serial != prepared.serial
-        {
-            return Err(Error::HostDisagreement {
-                host: host.client.base_url().to_string(),
-                reference: preparer.client.base_url().to_string(),
-                detail: "different threshold-change bytes".to_string(),
-            });
-        }
-    }
+            || other.serial != prepared.serial)
+            .then(|| "different threshold-change bytes".to_string())
+    })?;
 
     // One hash per transaction, checked before signing anything. Without this a
     // preparer can append the hash of a different topology and get it signed:
     // the extra signature travels with the bundle and authorizes a mapping the
     // wallet never saw.
-    if prepared.transaction_hashes.len() != prepared.topology_transactions.len() {
-        return Err(Error::MalformedPreparation {
-            host: preparer.client.base_url().to_string(),
-            detail: format!(
-                "{hashes} hash(es) for {txs} transaction(s)",
-                hashes = prepared.transaction_hashes.len(),
-                txs = prepared.topology_transactions.len()
-            ),
-        });
-    }
-    let mut signatures = Vec::with_capacity(prepared.transaction_hashes.len());
-    for encoded in &prepared.transaction_hashes {
-        let hash = preparer.client.decode_b64("transaction_hash", encoded)?;
-        signatures.push(key.sign_b64_async(&hash).await?);
-    }
+    let signatures = sign_prepared(
+        preparer,
+        &prepared.transaction_hashes,
+        &prepared.topology_transactions,
+        key,
+    )
+    .await?;
 
     let execute_request = TenantThresholdExecuteRequest {
         party_id: party_id.to_string(),

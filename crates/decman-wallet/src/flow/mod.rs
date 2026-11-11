@@ -9,6 +9,7 @@
 mod add_hosts;
 mod host;
 mod onboard;
+mod sign;
 mod threshold;
 
 pub use add_hosts::{AddedHosts, add_hosts};
