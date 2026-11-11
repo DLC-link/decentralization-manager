@@ -161,6 +161,12 @@ impl ProposalType {
     /// re-validate an already-stored proposal would reject it for nothing but
     /// having aged, so a new call site needs to split the time-dependent arms
     /// out first.
+    ///
+    /// # Errors
+    ///
+    /// Returns the payload's validation error as text when a field is invalid
+    /// for `governance_party`, or when a time that must lie in the future has
+    /// passed.
     pub fn validate(&self, governance_party: &CantonId) -> Result<(), String> {
         let ctx = decman_lib::framework::ValidationCtx {
             governance_party,

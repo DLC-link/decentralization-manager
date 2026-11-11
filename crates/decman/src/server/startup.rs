@@ -67,6 +67,14 @@ fn ensure_insecure_allowed(insecure: bool, network: Network) -> Result {
 }
 
 /// Start the HTTP server and a heartbeat system for peer status tracking
+///
+/// # Errors
+///
+/// Returns an error if insecure mode is on for a network other than devnet,
+/// if the auth registry cannot start for the stored party credentials, or
+/// if the purges a restart interrupted cannot be marked as failed. It also
+/// returns an error if the server cannot bind to `host:port` or stops with an
+/// I/O error.
 pub async fn start_server(
     host: &str,
     port: u16,
@@ -813,6 +821,10 @@ where
 /// It ignores SIGTERM and SIGINT, so it ends only with the process. The API server
 /// handles shutdown. A stop on the signal would end the supervised task, which then
 /// logs a normal shutdown at `error`.
+///
+/// # Errors
+///
+/// Returns an error if the server cannot bind to `host:port`.
 pub fn metrics_server(host: &str, port: u16) -> io::Result<Server> {
     Ok(
         HttpServer::new(|| App::new().route("/metrics", web::get().to(handlers::metrics)))
