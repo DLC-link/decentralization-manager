@@ -134,8 +134,9 @@ pub mod artifact_kinds {
     /// the snapshot block by block straight into Canton's import.
     ///
     /// Persisted because the coordinator only holds it in memory. A resumed run
-    /// does not arrive with an *empty* payload — `run_workflow` seeds one with
-    /// the bare config before its loop starts — it arrives with the wrong one,
+    /// does not arrive with an *empty* payload — the add-party coordinator
+    /// seeds one with the bare config before its first step — it arrives with
+    /// the wrong one,
     /// which the target decodes as a two-item command and rejects. So the
     /// restore compares against what is currently served rather than testing
     /// for absence.

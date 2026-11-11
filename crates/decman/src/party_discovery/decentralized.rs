@@ -272,8 +272,9 @@ pub(crate) fn pair_namespaces_with_parties(
 /// `filter_party` is the only scalable filter here. Canton splits it on `::`
 /// and compiles both halves into the store query, while `filter_participant`
 /// and `filter_signed_key` are applied in memory after every party has been
-/// loaded. So every caller must pass a party filter: an exact id, or
-/// [`namespace_party_filter`] for a whole namespace.
+/// loaded. So pass an exact party id where one is known. A namespace-only
+/// filter matches nothing (see [`discover_hosted_party_ids`]), and `None`
+/// sends no party filter at all.
 pub(crate) fn build_party_to_participant_request(
     synchronizer_id: &str,
     party_filter: Option<&str>,

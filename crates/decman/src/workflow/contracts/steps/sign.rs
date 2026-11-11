@@ -518,8 +518,8 @@ async fn backfill_peer_keys_from_chain(
 }
 
 /// Find this node's `PEER_PUBLIC_KEYS` blob from the most recent completed
-/// Onboarding (or Kick — same kind of identity payload) coordinator run for
-/// the given dec_party_id, by joining `workflow_artifacts` to `workflow_runs`.
+/// Onboarding run for the given dec_party_id, by joining `workflow_artifacts`
+/// to `workflow_runs`.
 /// Used as a one-shot backfill for parties whose onboarding ran before the
 /// `dec_party_identity` write hook was added.
 ///

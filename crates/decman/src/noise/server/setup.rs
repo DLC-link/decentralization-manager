@@ -47,7 +47,11 @@ impl<S: WorkflowStep + 'static> NoiseServer<S> {
     /// * `instance_name` - Identifier for the persisted run (matches the row's
     ///   primary key).
     /// * `initial_step` - Initial workflow step
-    /// * `exclude_participants` - Optional list of participant IDs to exclude from peers (e.g., participants being kicked)
+    /// * `exclude_participants` - Participant IDs to leave out of the expected
+    ///   peers (e.g., the participant being kicked). Used only when the run
+    ///   has no saved `workflow_runs` row; a saved row's invitees win.
+    /// * `last_seen` - When each peer last sent authenticated traffic, shared
+    ///   with the listener. The server counts out a peer silent for too long.
     ///
     /// # Errors
     ///

@@ -38,14 +38,15 @@ use crate::{
 /// This step:
 /// 1. Loads all peer key payloads from `workflow_artifacts`
 /// 2. Loads all participant ID payloads from `workflow_artifacts`
-/// 3. Creates two topology proposals:
-///    - Decentralized Namespace Definition (DNS)
-///    - Party-to-Participant mapping (P2P) with embedded signing keys (Canton 3.4+)
-/// 4. Saves proposals to `workflow_artifacts`
-/// 5. Once the dec_party_id is known, copies every peer's
+/// 3. Once the dec_party_id is known from the namespace, records it on the
+///    run and as the `PARTY_ID` artefact, and copies every peer's
 ///    `PEER_PUBLIC_KEYS` + `PARTICIPANT_ID` artefact into
 ///    `dec_party_identity` so the rows survive the workflow run's dismissal
 ///    (read by `contracts::sign_submissions`, future kicks, etc.).
+/// 4. Creates two topology proposals:
+///    - Decentralized Namespace Definition (DNS)
+///    - Party-to-Participant mapping (P2P) with embedded signing keys (Canton 3.4+)
+/// 5. Saves proposals to `workflow_artifacts`
 ///
 /// **Note**: If you encounter TOPOLOGY_NO_APPROPRIATE_SIGNING_KEY_IN_STORE errors,
 /// ensure the participant is properly connected to a synchronizer first.

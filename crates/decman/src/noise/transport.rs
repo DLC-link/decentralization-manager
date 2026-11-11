@@ -230,9 +230,9 @@ where
 /// Up to `config.max_attempts` attempts, each governed by
 /// `config.per_attempt_timeout()`, with `config.backoff()` between attempts.
 /// Discriminating retry: only transient `NoiseError` variants (TCP connect
-/// timeouts, refused connections, request timeouts, IO/Hyper failures) are
-/// retried. Deterministic errors (handshake failure, bad status, decode
-/// errors, configuration mistakes) return immediately.
+/// timeouts, refused connections, request timeouts, IO/Hyper failures, and a
+/// 5xx status) are retried. Deterministic errors (handshake failure, any other
+/// bad status, decode errors, configuration mistakes) return immediately.
 ///
 /// Every failure logs at `tracing::warn!`, and retry exhaustion logs one more
 /// `warn` line. The caller logs the returned error at the level it deserves.

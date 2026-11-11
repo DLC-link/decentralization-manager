@@ -350,8 +350,9 @@ pub struct DnsP2pSubmission {
 ///
 /// The submission order (DNS before P2P) and the trailing propagation delay
 /// are identical across the topology workflows; only the post-submit
-/// head-state checks differ — kick polls for mere existence, change-threshold
-/// for the new threshold value, add-party for owner / participant membership —
+/// head-state checks differ — kick polls for the submitted serial with the
+/// proposed owners, hosts and keys, change-threshold for the new threshold
+/// value, add-party for owner / participant membership —
 /// so each caller supplies those as `confirm_dns` / `confirm_p2p`.
 ///
 /// Each proposal carries the serial the coordinator pinned when it built it.

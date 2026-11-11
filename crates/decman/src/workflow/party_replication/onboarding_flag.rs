@@ -29,6 +29,10 @@ use crate::{
     },
 };
 
+/// Hard cap on how long the new member waits for Canton's "earliest safe
+/// time to clear the onboarding flag" to arrive. The safe time is normally
+/// seconds away (decision timeouts); ten minutes flags a genuinely stuck
+/// synchronizer instead of hanging the workflow forever.
 const MAX_SAFE_TIME_WAIT_SECS: u64 = 600;
 
 /// Outcome of the target participant's `ClearPartyOnboardingFlag` polling.
@@ -42,15 +46,6 @@ pub enum ClearOutcome {
     Proposed,
 }
 
-/// Target-side step: drive `ClearPartyOnboardingFlag` until the flag is gone
-/// or Canton has accepted the clearing proposal past its safe time.
-///
-/// Canton refuses to clear before its computed safe time (so no in-flight
-/// transaction from the import window can be lost) — the endpoint returns
-/// `onboarded = false` with `earliest_retry_timestamp` until then. After the
-/// safe time, a call proposes the clearing topology transaction, which still
-/// needs whatever signatures the party's namespace demands — collected by the
-/// calling workflow, not here.
 /// Ask Canton to clear the flag once and return whatever it says, without
 /// waiting for its safe time.
 ///
@@ -98,8 +93,15 @@ pub async fn request_onboarding_flag_clear(
     })
 }
 
-/// Call `ClearPartyOnboardingFlag` until the flag is gone or Canton proposes
-/// the clearing transaction past its safe time.
+/// Target-side step: call `ClearPartyOnboardingFlag` until the flag is gone
+/// or Canton proposes the clearing transaction past its safe time.
+///
+/// Canton refuses to clear before its computed safe time (so no in-flight
+/// transaction from the import window can be lost) — the endpoint returns
+/// `onboarded = false` with `earliest_retry_timestamp` until then. After the
+/// safe time, a call proposes the clearing topology transaction, which still
+/// needs whatever signatures the party's namespace demands — collected by the
+/// calling workflow, not here.
 ///
 /// # Errors
 /// Returns an error if the synchronizer ID cannot be read, or does not split

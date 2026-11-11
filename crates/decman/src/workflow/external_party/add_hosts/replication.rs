@@ -87,7 +87,7 @@ pub fn replication_target(
 /// entry points costs nothing.
 ///
 /// # Errors
-/// [`AddHostsError::Invalid`] for a host that is not a valid replication target,
+/// [`AddHostsError::Invalid`] if `party_id` does not parse as a party id,
 /// [`AddHostsError::Canton`] if the offset read fails.
 pub(super) async fn capture_replication_offsets(
     config: &NodeConfig,

@@ -34,8 +34,10 @@ use crate::{
 /// effect, so the proposal has to be in its store before it disconnects.
 ///
 /// # Errors
-/// Returns an error if the proposal has not arrived within the topology retry
-/// budget.
+/// Returns an error if the synchronizer ID cannot be read, if the Admin API
+/// channel cannot be opened, or if `ListPartyToParticipant` fails or returns a
+/// mapping that does not decode. Returns an error if the proposal has not
+/// arrived within the topology retry budget.
 pub async fn wait_for_hosting_proposal(config: &NodeConfig, party_id: &CantonId) -> Result {
     let synchronizer_id = utils::get_synchronizer_id(config).await?;
     let self_id = config.participant_id().to_string();

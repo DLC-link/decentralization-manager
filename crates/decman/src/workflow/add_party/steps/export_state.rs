@@ -27,8 +27,8 @@ use crate::{
 /// Validates:
 /// - the namespace and P2P mapping exist on the synchronizer
 /// - the new participant is not already in the mapping
-/// - `1 <= new_threshold <= current_owners + 1`
-/// - the new member holds every package the party's contracts need
+/// - `1 <= new_threshold <= current_owners`
+/// - the new member has vetted every package the party's contracts need
 ///
 /// # Errors
 ///
