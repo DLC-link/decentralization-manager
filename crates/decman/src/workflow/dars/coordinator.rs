@@ -5,7 +5,10 @@ use base64::{Engine, engine::general_purpose::STANDARD};
 use crate::{
     config::{NetworkConfig, NodeConfig},
     error::Result,
-    noise::server::{ActiveWorkflow, NoiseServer},
+    noise::{
+        MAX_CHUNKED_TOTAL_SIZE, NoiseError,
+        server::{ActiveWorkflow, NoiseServer},
+    },
     server::{WorkflowInstance, peer_status::LastSeen},
     utils,
     workflow::contracts,
@@ -101,6 +104,11 @@ async fn run_workflow(
 }
 
 /// Encode DAR files from config for transmission to peers
+///
+/// # Errors
+///
+/// `NoiseError::PayloadTooLarge` when the bundle exceeds what a peer accepts.
+/// The start handler refuses such a set, so this catches a resumed run.
 fn encode_dars_payload(config: &DarsConfig) -> Result<Vec<u8>> {
     if config.dar_files.is_empty() {
         tracing::info!("No DAR files to distribute to peers");
@@ -127,5 +135,58 @@ fn encode_dars_payload(config: &DarsConfig) -> Result<Vec<u8>> {
     // Sort for consistent ordering
     dar_files.sort_by(|a, b| a.0.cmp(&b.0));
 
-    Ok(utils::encode_files(&dar_files))
+    let payload = utils::encode_files(&dar_files);
+    if payload.len() > MAX_CHUNKED_TOTAL_SIZE {
+        return Err(NoiseError::PayloadTooLarge {
+            size: payload.len(),
+            limit: MAX_CHUNKED_TOTAL_SIZE,
+        }
+        .into());
+    }
+    Ok(payload)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::workflow::contracts::DarFile;
+
+    /// A one-file run whose bundle is `bundle_len` bytes long.
+    fn run_with_bundle_of(bundle_len: usize) -> DarsConfig {
+        let filename = "big.dar".to_string();
+        // The bundle frames one file with a 4-byte count and two 4-byte lengths.
+        let data = vec![0u8; bundle_len - 12 - filename.len()];
+        DarsConfig {
+            dar_files: vec![DarFile {
+                filename,
+                data: STANDARD.encode(data),
+            }],
+            instance_name: "dars-distribute-1".to_string(),
+            peer_ids: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn an_oversized_bundle_fails_on_the_coordinator() -> Result {
+        let Err(error) = encode_dars_payload(&run_with_bundle_of(MAX_CHUNKED_TOTAL_SIZE + 1))
+        else {
+            anyhow::bail!("a bundle one byte over the limit must fail");
+        };
+        assert!(
+            matches!(
+                error.downcast_ref::<NoiseError>(),
+                Some(NoiseError::PayloadTooLarge { size, limit })
+                    if *size == MAX_CHUNKED_TOTAL_SIZE + 1 && *limit == MAX_CHUNKED_TOTAL_SIZE
+            ),
+            "{error:#}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn a_bundle_at_the_limit_is_encoded() -> Result {
+        let payload = encode_dars_payload(&run_with_bundle_of(MAX_CHUNKED_TOTAL_SIZE))?;
+        assert_eq!(payload.len(), MAX_CHUNKED_TOTAL_SIZE);
+        Ok(())
+    }
 }

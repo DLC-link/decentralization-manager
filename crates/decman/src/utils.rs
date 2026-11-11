@@ -583,6 +583,15 @@ pub fn encode_files(files: &[(String, Vec<u8>)]) -> Vec<u8> {
     payload
 }
 
+/// The length of the payload [`encode_files`] builds, from each file's
+/// filename length and data length.
+pub fn encoded_files_len(files: impl IntoIterator<Item = (usize, usize)>) -> usize {
+    4 + files
+        .into_iter()
+        .map(|(name_len, data_len)| 8 + name_len + data_len)
+        .sum::<usize>()
+}
+
 /// Decode files from a payload
 ///
 /// Returns a vector of (filename, data) pairs
@@ -1059,6 +1068,18 @@ mod tests {
         let decoded = decode_files(&encoded)?;
         assert_eq!(decoded, files);
         Ok(())
+    }
+
+    #[test]
+    fn encoded_files_len_matches_encode_files() {
+        let files = vec![
+            ("a.dar".to_string(), vec![7u8; 300]),
+            (String::new(), b"no name".to_vec()),
+            ("empty.dar".to_string(), Vec::new()),
+        ];
+        let lengths = files.iter().map(|(name, data)| (name.len(), data.len()));
+        assert_eq!(encoded_files_len(lengths), encode_files(&files).len());
+        assert_eq!(encoded_files_len([]), encode_files(&[]).len());
     }
 
     #[test]
