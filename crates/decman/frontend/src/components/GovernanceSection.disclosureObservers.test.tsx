@@ -46,7 +46,7 @@ beforeEach(() => {
 const renderForm = () =>
   render(
     <SnackbarProvider>
-      <GovernanceSection partyId={self} rulesContractId="rules-1" governanceType="core_self" view="actions" />
+      <GovernanceSection partyId={self} rulesContractId="rules-1" view="actions" />
     </SnackbarProvider>,
   );
 
