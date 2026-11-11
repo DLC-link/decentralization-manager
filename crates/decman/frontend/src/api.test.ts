@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { authenticatedFetch } from "./api";
+import { ApiError, authenticatedFetch, getJson, postJson } from "./api";
 import {
   getToken,
   refreshAccessToken,
@@ -178,5 +178,127 @@ describe("authenticatedFetch", () => {
     expect(res.status).toBe(401);
     expect(fetchMock).toHaveBeenCalledTimes(1);
     expect(reload).not.toHaveBeenCalled();
+  });
+});
+
+const jsonAnswer = (body: unknown, status = 200) =>
+  new Response(JSON.stringify(body), { status });
+
+describe("getJson", () => {
+  it("returns the body of an ok answer", async () => {
+    setToken("token");
+    const fetchMock = vi.fn().mockResolvedValue(jsonAnswer({ holdings: [1] }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(getJson("/holdings", "Failed")).resolves.toEqual({
+      holdings: [1],
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [path, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(path).toBe("/holdings");
+    expect(init.method).toBeUndefined();
+    expect(init.body).toBeUndefined();
+    expect(bearerOf(fetchMock.mock.calls[0])).toBe("Bearer token");
+  });
+
+  it("throws the server's error message for a failed answer", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(jsonAnswer({ error: "no such party" }, 404)),
+    );
+
+    const pending = getJson("/holdings", "Failed");
+
+    await expect(pending).rejects.toBeInstanceOf(ApiError);
+    await expect(pending).rejects.toMatchObject({
+      message: "no such party",
+      status: 404,
+    });
+  });
+
+  it("throws the fallback when the error body has no message", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(jsonAnswer({}, 500)));
+
+    const pending = getJson("/holdings", "Failed");
+
+    await expect(pending).rejects.toBeInstanceOf(ApiError);
+    await expect(pending).rejects.toMatchObject({
+      message: "Failed",
+      status: 500,
+    });
+  });
+
+  it("throws the fallback when the error body is not JSON", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(new Response("<html>", { status: 502 })),
+    );
+
+    const pending = getJson("/holdings", "Failed");
+
+    await expect(pending).rejects.toBeInstanceOf(ApiError);
+    await expect(pending).rejects.toMatchObject({
+      message: "Failed",
+      status: 502,
+    });
+  });
+
+  it("throws a parse error for an ok answer that is not JSON", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(new Response("<html>", { status: 200 })),
+    );
+
+    await expect(getJson("/holdings", "Failed")).rejects.toBeInstanceOf(
+      SyntaxError,
+    );
+  });
+});
+
+describe("postJson", () => {
+  it("posts the body as JSON and returns the answer", async () => {
+    setToken("token");
+    const fetchMock = vi.fn().mockResolvedValue(jsonAnswer({ user_id: "u1" }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(
+      postJson("/party-config/discover-member-party", { a: "b" }, "Failed"),
+    ).resolves.toEqual({ user_id: "u1" });
+    const [path, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(path).toBe("/party-config/discover-member-party");
+    expect(init.method).toBe("POST");
+    expect(init.body).toBe('{"a":"b"}');
+    const headers = new Headers(init.headers);
+    expect(headers.get("Content-Type")).toBe("application/json");
+    expect(headers.get("Authorization")).toBe("Bearer token");
+  });
+
+  it("throws the server's error message for a failed answer", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(jsonAnswer({ error: "bad secret" }, 400)),
+    );
+
+    const pending = postJson("/x", {}, "Discovery failed");
+
+    await expect(pending).rejects.toBeInstanceOf(ApiError);
+    await expect(pending).rejects.toMatchObject({
+      message: "bad secret",
+      status: 400,
+    });
+  });
+
+  it("throws the fallback when the error body is not JSON", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(new Response("", { status: 500 })),
+    );
+
+    const pending = postJson("/x", {}, "Discovery failed");
+
+    await expect(pending).rejects.toBeInstanceOf(ApiError);
+    await expect(pending).rejects.toMatchObject({
+      message: "Discovery failed",
+    });
   });
 });
