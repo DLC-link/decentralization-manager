@@ -138,7 +138,7 @@ async fn accept(ledger: &LedgerClient, party: &str) -> Result {
 /// fingerprint is not the party's: that key cannot sign for it.
 fn key_for(party: &str) -> Result<ExternalKeyPair> {
     let seed = Zeroizing::new(required("DECMAN_WALLET_SEED")?);
-    let key = ExternalKeyPair::from_seed_b64(&seed)?;
+    let key = ExternalKeyPair::from_seed_b64(&seed).map_err(|e| e.to_string())?;
     let fingerprint = key.fingerprint();
     match party.rsplit_once("::") {
         Some((_, party_fingerprint)) if party_fingerprint == fingerprint => Ok(key),
