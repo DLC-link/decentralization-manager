@@ -28,3 +28,6 @@ utoipa = { workspace = true, optional = true }
 anyhow = { workspace = true }
 insta = { workspace = true }
 prost-types = { workspace = true }
+
+[lints]
+workspace = true
