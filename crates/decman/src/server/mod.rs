@@ -126,7 +126,6 @@ type PeerChunkCache = Arc<Mutex<HashMap<String, ChunkCacheEntry>>>;
 pub struct AppState {
     pub db: SqlitePool,
     pub config: NodeConfig,
-    pub peer_status: Arc<RwLock<HashMap<String, bool>>>,
     pub last_seen: LastSeen,
     /// Single peer-job queue. `accept_invitation` (and the `RetryWorkflow`
     /// listener arm) enqueue a [`PeerJob`] carrying the run's `kind`,
@@ -261,7 +260,6 @@ impl AppState {
         let state = Self {
             db,
             config: NodeConfig::default(),
-            peer_status: Arc::new(RwLock::new(HashMap::new())),
             last_seen: Arc::new(RwLock::new(HashMap::new())),
             peer_job_sender,
             workflows: WorkflowRegistry::new(),
@@ -1142,7 +1140,6 @@ pub async fn start_server(
     let app_state = web::Data::new(AppState {
         db: db.clone(),
         config: config.clone(),
-        peer_status: peer_status.clone(),
         last_seen: last_seen.clone(),
         peer_job_sender: peer_job_sender.clone(),
         pending_invitations: pending_invitations.clone(),
