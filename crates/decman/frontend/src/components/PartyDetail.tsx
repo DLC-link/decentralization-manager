@@ -1,24 +1,5 @@
-import {
-  useState,
-  useRef,
-  useEffect,
-  useCallback,
-  type ReactNode,
-} from "react";
-import {
-  Box,
-  Button,
-  Chip,
-  Collapse,
-  IconButton,
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableRow,
-  Tooltip,
-  Typography,
-} from "@mui/material";
+import { useState, useRef, useEffect, useCallback, type ReactNode, type RefObject } from "react";
+import { Box, Button, Chip, Collapse, IconButton, Table, TableBody, TableCell, TableHead, TableRow, Tooltip, Typography } from "@mui/material";
 import ArrowBackIcon from "@mui/icons-material/ArrowBack";
 import EditIcon from "@mui/icons-material/Edit";
 import TuneIcon from "@mui/icons-material/Tune";
@@ -51,15 +32,7 @@ import { formatMicroseconds } from "../governanceFormat";
 import { getGovernanceMembership } from "../governanceMembership";
 import { usePeers, useSharedPartyCounts } from "../usePeerLinks";
 import { HostingParticipant } from "./HostingParticipant";
-import type {
-  DecentralizedParty,
-  GovernanceState,
-  GovernanceStateResponse,
-  Network,
-  NonHostingOwner,
-  PartyAuthStatus,
-  RewardStatusResponse,
-} from "../types";
+import type { ContractInfo, DecentralizedParty, GovernanceState, GovernanceStateResponse, Network, NonHostingOwner, PartyAuthStatus, Peer, RewardStatusResponse } from "../types";
 
 const GOVERNANCE_STATE_POLL_MS = 10_000;
 // Slower than the governance poll: a delegation changes only by a vote, and
@@ -147,6 +120,265 @@ const CollapsibleSection = ({
     </Box>
     <Collapse in={expanded}>{children}</Collapse>
   </Box>
+);
+
+interface PartyParticipantsTableProps {
+  party: DecentralizedParty;
+  nonHostingOwners: NonHostingOwner[];
+  selfParticipantId?: string;
+  peers: Peer[] | null;
+  sharedCounts: Map<string, number> | null;
+  onOpenPeerConfig?: (participantId: string) => void;
+  onShowSharedParties?: (participantId: string) => void;
+  handleKickClick: (participantUid: string) => void;
+  handleKickOwnerClick: (owner: NonHostingOwner) => void;
+}
+
+/** The Participants section body: hosting participants, then owners that do not host. */
+const PartyParticipantsTable = ({
+  party,
+  nonHostingOwners,
+  selfParticipantId,
+  peers,
+  sharedCounts,
+  onOpenPeerConfig,
+  onShowSharedParties,
+  handleKickClick,
+  handleKickOwnerClick,
+}: PartyParticipantsTableProps) => (
+  <Box sx={{ overflowX: "auto", ...cardTableSx }}>
+    <Table size="small">
+      <TableHead>
+        <TableRow>
+          <TableCell sx={{ py: 1 }}>Participant</TableCell>
+          <TableCell sx={{ py: 1 }}>Permission</TableCell>
+          <TableCell sx={{ py: 1 }} align="right">
+            Actions
+          </TableCell>
+        </TableRow>
+      </TableHead>
+      <TableBody>
+        {party.participants.map((p, idx) => (
+          <TableRow
+            key={p.participant_uid}
+            sx={zebraRow(idx)}
+            data-testid="participant-row"
+            data-participant-uid={p.participant_uid}
+          >
+            <TableCell sx={{ py: 1 }}>
+              <HostingParticipant
+                participantId={p.participant_uid}
+                isSelf={p.participant_uid === selfParticipantId}
+                peers={peers}
+                sharedCount={sharedCounts?.get(p.participant_uid) ?? null}
+                onOpenPeerConfig={onOpenPeerConfig}
+                onShowSharedParties={onShowSharedParties}
+              />
+            </TableCell>
+            <TableCell sx={{ py: 1 }}>
+              <Chip
+                label={p.permission}
+                size="small"
+                color={
+                  p.permission === "submission" ? "success" : "default"
+                }
+              />
+            </TableCell>
+            <TableCell sx={{ py: 1 }} align="right">
+              <Tooltip
+                title={
+                  p.participant_uid === selfParticipantId
+                    ? "Cannot kick yourself"
+                    : "Kick participant"
+                }
+              >
+                <span>
+                  <IconButton
+                    size="small"
+                    color="error"
+                    aria-label={
+                      p.participant_uid === selfParticipantId
+                        ? "Cannot kick yourself"
+                        : "Kick participant"
+                    }
+                    onClick={() => handleKickClick(p.participant_uid)}
+                    disabled={
+                      !ADMIN_ACCESS ||
+                      p.participant_uid === selfParticipantId
+                    }
+                  >
+                    <PersonRemoveIcon fontSize="small" />
+                  </IconButton>
+                </span>
+              </Tooltip>
+            </TableCell>
+          </TableRow>
+        ))}
+        {nonHostingOwners.map((owner, idx) => (
+          <TableRow
+            key={owner.owner_key}
+            sx={zebraRow(party.participants.length + idx)}
+            data-testid="owner-only-row"
+            data-owner-key={owner.owner_key}
+          >
+            <TableCell sx={{ py: 1 }}>
+              {owner.participant_uid ? (
+                <HostingParticipant
+                  participantId={owner.participant_uid}
+                  isSelf={false}
+                  peers={peers}
+                  sharedCount={
+                    sharedCounts?.get(owner.participant_uid) ?? null
+                  }
+                  onOpenPeerConfig={onOpenPeerConfig}
+                  onShowSharedParties={onShowSharedParties}
+                />
+              ) : (
+                <Box>
+                  <Typography variant="body2" sx={{ fontWeight: 500 }}>
+                    Unclaimed owner key
+                  </Typography>
+                  <CopyableText
+                    text={owner.owner_key}
+                    truncate={{ start: 10, end: 8 }}
+                    variant="caption"
+                  />
+                </Box>
+              )}
+            </TableCell>
+            <TableCell sx={{ py: 1 }}>
+              <Tooltip title="Owns the party's namespace key but does not host the party">
+                <Chip label="Owner only" size="small" variant="outlined" />
+              </Tooltip>
+            </TableCell>
+            <TableCell sx={{ py: 1 }} align="right">
+              <Tooltip title="Kick owner">
+                <span>
+                  <IconButton
+                    size="small"
+                    color="error"
+                    aria-label="Kick owner"
+                    onClick={() => handleKickOwnerClick(owner)}
+                    disabled={!ADMIN_ACCESS}
+                  >
+                    <PersonRemoveIcon fontSize="small" />
+                  </IconButton>
+                </span>
+              </Tooltip>
+            </TableCell>
+          </TableRow>
+        ))}
+      </TableBody>
+    </Table>
+  </Box>
+);
+
+interface PartyContractsTableProps {
+  canScrollUp: boolean;
+  canScrollDown: boolean;
+  contractsScrollRef: RefObject<HTMLDivElement | null>;
+  contractsPaging: ReturnType<typeof usePagination<ContractInfo>>;
+}
+
+/** The Contracts section body: a scrolling, paged table of the party's contracts. */
+const PartyContractsTable = ({
+  canScrollUp,
+  canScrollDown,
+  contractsScrollRef,
+  contractsPaging,
+}: PartyContractsTableProps) => (
+  <>
+    <Box sx={{ position: "relative" }}>
+      <Box
+        sx={{
+          position: "absolute",
+          top: 0,
+          left: 0,
+          right: 0,
+          height: 16,
+          background:
+            "linear-gradient(to bottom, rgba(0,0,0,0.08), transparent)",
+          pointerEvents: "none",
+          opacity: canScrollUp ? 1 : 0,
+          transition: "opacity 0.2s",
+          zIndex: 1,
+        }}
+      />
+      <Box
+        ref={contractsScrollRef}
+        sx={{
+          maxHeight: 180,
+          overflowY: "auto",
+          overflowX: "auto",
+          ...cardTableSx,
+        }}
+      >
+        <Table size="small">
+          <TableHead>
+            <TableRow>
+              <TableCell sx={{ py: 1 }}>Package</TableCell>
+              <TableCell sx={{ py: 1 }}>Version</TableCell>
+              <TableCell sx={{ py: 1 }}>Template</TableCell>
+              <TableCell sx={{ py: 1 }}>Created</TableCell>
+              <TableCell sx={{ py: 1 }}>Contract ID</TableCell>
+            </TableRow>
+          </TableHead>
+          <TableBody>
+            {contractsPaging.pageItems.map((c, idx) => (
+              <TableRow key={c.contract_id} sx={zebraRow(idx)}>
+                <TableCell sx={{ py: 1 }}>
+                  {c.package_name || "—"}
+                </TableCell>
+                <TableCell sx={{ py: 1 }}>
+                  {c.package_version || "—"}
+                </TableCell>
+                <TableCell sx={{ py: 1 }}>{c.template_id}</TableCell>
+                <TableCell sx={{ py: 1 }}>
+                  {c.created_at
+                    ? new Date(c.created_at).toLocaleString(undefined, {
+                        year: "numeric",
+                        month: "short",
+                        day: "2-digit",
+                        hour: "2-digit",
+                        minute: "2-digit",
+                      })
+                    : "—"}
+                </TableCell>
+                <TableCell sx={{ py: 1 }}>
+                  <CopyableText
+                    text={c.contract_id}
+                    truncate={{ start: 12, end: 12 }}
+                    variant="caption"
+                  />
+                </TableCell>
+              </TableRow>
+            ))}
+          </TableBody>
+        </Table>
+      </Box>
+      <Box
+        sx={{
+          position: "absolute",
+          bottom: 0,
+          left: 0,
+          right: 0,
+          height: 16,
+          background:
+            "linear-gradient(to top, rgba(0,0,0,0.08), transparent)",
+          pointerEvents: "none",
+          opacity: canScrollDown ? 1 : 0,
+          transition: "opacity 0.2s",
+          zIndex: 1,
+        }}
+      />
+    </Box>
+    <PaginationControls
+      page={contractsPaging.page}
+      pageCount={contractsPaging.pageCount}
+      total={contractsPaging.total}
+      onChange={contractsPaging.setPage}
+    />
+  </>
 );
 
 interface PartyDetailProps {
@@ -629,131 +861,17 @@ export const PartyDetail = ({
           </>
         }
       >
-        <Box sx={{ overflowX: "auto", ...cardTableSx }}>
-          <Table size="small">
-            <TableHead>
-              <TableRow>
-                <TableCell sx={{ py: 1 }}>Participant</TableCell>
-                <TableCell sx={{ py: 1 }}>Permission</TableCell>
-                <TableCell sx={{ py: 1 }} align="right">
-                  Actions
-                </TableCell>
-              </TableRow>
-            </TableHead>
-            <TableBody>
-              {party.participants.map((p, idx) => (
-                <TableRow
-                  key={p.participant_uid}
-                  sx={zebraRow(idx)}
-                  data-testid="participant-row"
-                  data-participant-uid={p.participant_uid}
-                >
-                  <TableCell sx={{ py: 1 }}>
-                    <HostingParticipant
-                      participantId={p.participant_uid}
-                      isSelf={p.participant_uid === selfParticipantId}
-                      peers={peers}
-                      sharedCount={sharedCounts?.get(p.participant_uid) ?? null}
-                      onOpenPeerConfig={onOpenPeerConfig}
-                      onShowSharedParties={onShowSharedParties}
-                    />
-                  </TableCell>
-                  <TableCell sx={{ py: 1 }}>
-                    <Chip
-                      label={p.permission}
-                      size="small"
-                      color={
-                        p.permission === "submission" ? "success" : "default"
-                      }
-                    />
-                  </TableCell>
-                  <TableCell sx={{ py: 1 }} align="right">
-                    <Tooltip
-                      title={
-                        p.participant_uid === selfParticipantId
-                          ? "Cannot kick yourself"
-                          : "Kick participant"
-                      }
-                    >
-                      <span>
-                        <IconButton
-                          size="small"
-                          color="error"
-                          aria-label={
-                            p.participant_uid === selfParticipantId
-                              ? "Cannot kick yourself"
-                              : "Kick participant"
-                          }
-                          onClick={() => handleKickClick(p.participant_uid)}
-                          disabled={
-                            !ADMIN_ACCESS ||
-                            p.participant_uid === selfParticipantId
-                          }
-                        >
-                          <PersonRemoveIcon fontSize="small" />
-                        </IconButton>
-                      </span>
-                    </Tooltip>
-                  </TableCell>
-                </TableRow>
-              ))}
-              {nonHostingOwners.map((owner, idx) => (
-                <TableRow
-                  key={owner.owner_key}
-                  sx={zebraRow(party.participants.length + idx)}
-                  data-testid="owner-only-row"
-                  data-owner-key={owner.owner_key}
-                >
-                  <TableCell sx={{ py: 1 }}>
-                    {owner.participant_uid ? (
-                      <HostingParticipant
-                        participantId={owner.participant_uid}
-                        isSelf={false}
-                        peers={peers}
-                        sharedCount={
-                          sharedCounts?.get(owner.participant_uid) ?? null
-                        }
-                        onOpenPeerConfig={onOpenPeerConfig}
-                        onShowSharedParties={onShowSharedParties}
-                      />
-                    ) : (
-                      <Box>
-                        <Typography variant="body2" sx={{ fontWeight: 500 }}>
-                          Unclaimed owner key
-                        </Typography>
-                        <CopyableText
-                          text={owner.owner_key}
-                          truncate={{ start: 10, end: 8 }}
-                          variant="caption"
-                        />
-                      </Box>
-                    )}
-                  </TableCell>
-                  <TableCell sx={{ py: 1 }}>
-                    <Tooltip title="Owns the party's namespace key but does not host the party">
-                      <Chip label="Owner only" size="small" variant="outlined" />
-                    </Tooltip>
-                  </TableCell>
-                  <TableCell sx={{ py: 1 }} align="right">
-                    <Tooltip title="Kick owner">
-                      <span>
-                        <IconButton
-                          size="small"
-                          color="error"
-                          aria-label="Kick owner"
-                          onClick={() => handleKickOwnerClick(owner)}
-                          disabled={!ADMIN_ACCESS}
-                        >
-                          <PersonRemoveIcon fontSize="small" />
-                        </IconButton>
-                      </span>
-                    </Tooltip>
-                  </TableCell>
-                </TableRow>
-              ))}
-            </TableBody>
-          </Table>
-        </Box>
+        <PartyParticipantsTable
+          party={party}
+          nonHostingOwners={nonHostingOwners}
+          selfParticipantId={selfParticipantId}
+          peers={peers}
+          sharedCounts={sharedCounts}
+          onOpenPeerConfig={onOpenPeerConfig}
+          onShowSharedParties={onShowSharedParties}
+          handleKickClick={handleKickClick}
+          handleKickOwnerClick={handleKickOwnerClick}
+        />
       </CollapsibleSection>
 
       {/* Contracts */}
@@ -767,95 +885,11 @@ export const PartyDetail = ({
             <Chip label={party.contracts.length} size="small" sx={{ ml: 1 }} />
           }
         >
-          <Box sx={{ position: "relative" }}>
-            <Box
-              sx={{
-                position: "absolute",
-                top: 0,
-                left: 0,
-                right: 0,
-                height: 16,
-                background:
-                  "linear-gradient(to bottom, rgba(0,0,0,0.08), transparent)",
-                pointerEvents: "none",
-                opacity: canScrollUp ? 1 : 0,
-                transition: "opacity 0.2s",
-                zIndex: 1,
-              }}
-            />
-            <Box
-              ref={contractsScrollRef}
-              sx={{
-                maxHeight: 180,
-                overflowY: "auto",
-                overflowX: "auto",
-                ...cardTableSx,
-              }}
-            >
-              <Table size="small">
-                <TableHead>
-                  <TableRow>
-                    <TableCell sx={{ py: 1 }}>Package</TableCell>
-                    <TableCell sx={{ py: 1 }}>Version</TableCell>
-                    <TableCell sx={{ py: 1 }}>Template</TableCell>
-                    <TableCell sx={{ py: 1 }}>Created</TableCell>
-                    <TableCell sx={{ py: 1 }}>Contract ID</TableCell>
-                  </TableRow>
-                </TableHead>
-                <TableBody>
-                  {contractsPaging.pageItems.map((c, idx) => (
-                    <TableRow key={c.contract_id} sx={zebraRow(idx)}>
-                      <TableCell sx={{ py: 1 }}>
-                        {c.package_name || "—"}
-                      </TableCell>
-                      <TableCell sx={{ py: 1 }}>
-                        {c.package_version || "—"}
-                      </TableCell>
-                      <TableCell sx={{ py: 1 }}>{c.template_id}</TableCell>
-                      <TableCell sx={{ py: 1 }}>
-                        {c.created_at
-                          ? new Date(c.created_at).toLocaleString(undefined, {
-                              year: "numeric",
-                              month: "short",
-                              day: "2-digit",
-                              hour: "2-digit",
-                              minute: "2-digit",
-                            })
-                          : "—"}
-                      </TableCell>
-                      <TableCell sx={{ py: 1 }}>
-                        <CopyableText
-                          text={c.contract_id}
-                          truncate={{ start: 12, end: 12 }}
-                          variant="caption"
-                        />
-                      </TableCell>
-                    </TableRow>
-                  ))}
-                </TableBody>
-              </Table>
-            </Box>
-            <Box
-              sx={{
-                position: "absolute",
-                bottom: 0,
-                left: 0,
-                right: 0,
-                height: 16,
-                background:
-                  "linear-gradient(to top, rgba(0,0,0,0.08), transparent)",
-                pointerEvents: "none",
-                opacity: canScrollDown ? 1 : 0,
-                transition: "opacity 0.2s",
-                zIndex: 1,
-              }}
-            />
-          </Box>
-          <PaginationControls
-            page={contractsPaging.page}
-            pageCount={contractsPaging.pageCount}
-            total={contractsPaging.total}
-            onChange={contractsPaging.setPage}
+          <PartyContractsTable
+            canScrollUp={canScrollUp}
+            canScrollDown={canScrollDown}
+            contractsScrollRef={contractsScrollRef}
+            contractsPaging={contractsPaging}
           />
         </CollapsibleSection>
       )}
