@@ -17,7 +17,7 @@ use crate::server::types::{
     AddPartyInvitePayload, ChangeThresholdInvitePayload, ContractsInvitePayload, DarsInvitePayload,
     InvitationType, KickInvitePayload, OnboardingInvitePayload,
 };
-use crate::server::{health, peer_status};
+use crate::server::{WorkflowRegistry, health, peer_status};
 use crate::{
     canton_id::CantonId,
     db::schema::SchemaRead,
@@ -119,15 +119,7 @@ pub(crate) async fn handle_incoming_connection(
                         // the operator on the other side saw only "message too
                         // short" (#332). Status stays 503, so an older
                         // requester behaves exactly as before.
-                        let mut resp = Response::new(Body::from(
-                            Message::new(
-                                MessageType::Error,
-                                format!("request rejected: {e}").into_bytes(),
-                            )
-                            .to_bytes(),
-                        ));
-                        *resp.status_mut() = StatusCode::SERVICE_UNAVAILABLE;
-                        return Ok(resp);
+                        return Ok(unavailable(format!("request rejected: {e}").into_bytes()));
                     }
                 };
 
@@ -138,10 +130,7 @@ pub(crate) async fn handle_incoming_connection(
                         MessageType::Ping => {
                             tracing::debug!("Received ping, responding with pong");
                             let pong = Message::new(MessageType::Pong, our_pubkey.into_bytes());
-                            return Ok(Response::builder()
-                                .status(StatusCode::OK)
-                                .body(Body::from(pong.to_bytes()))
-                                .unwrap());
+                            return Ok(reply(pong));
                         }
                         MessageType::Health => {
                             // Always answer health — even mid-workflow. Reports
@@ -153,9 +142,7 @@ pub(crate) async fn handle_incoming_connection(
                             )
                             .await;
                             let msg = Message::new(MessageType::HealthResponse, resp.to_payload());
-                            // `Response::new` defaults to 200 OK and is infallible,
-                            // so there is no builder error to unwrap.
-                            return Ok(Response::new(Body::from(msg.to_bytes())));
+                            return Ok(reply(msg));
                         }
                         MessageType::RequestDar => {
                             tracing::debug!("Received RequestDar request");
@@ -180,9 +167,7 @@ pub(crate) async fn handle_incoming_connection(
                                         MessageType::Error,
                                         format!("{e:#}").into_bytes(),
                                     );
-                                    return Ok(Response::new(Body::from(
-                                        response_msg.to_bytes(),
-                                    )));
+                                    return Ok(reply(response_msg));
                                 }
                             };
                             return Ok(peer_payload_response(
@@ -205,45 +190,26 @@ pub(crate) async fn handle_incoming_connection(
                             // reads a DAR, and falling back would feed the RequestDar
                             // transfer INTO a live workflow's chunk server.
                             if !msg.instance.is_empty() {
-                                let active = triggers.workflows.route(&msg.instance);
-                                let peer =
-                                    peer_id_str.as_deref().and_then(|s| CantonId::parse(s).ok());
-                                let resp = match (active, peer) {
-                                    (Some(wf), Some(pid)) => {
-                                        wf.handle_command(pid, msg).await.unwrap_or_else(|e| {
-                                            Message::new(
-                                                MessageType::Error,
-                                                format!("{e}").into_bytes(),
-                                            )
-                                        })
-                                    }
-                                    (None, _) => {
+                                return Ok(
+                                    match route_to_run(&triggers.workflows, peer_id_str.as_deref(), msg)
+                                        .await
+                                    {
+                                        Some(resp) => reply(resp),
                                         // The named run is gone (cancelled/finished) —
                                         // 503 so the peer's bounded retry gives up.
                                         // Says so in the body, so the requester
                                         // reports the cause rather than an empty reply.
-                                        let mut resp = Response::new(Body::from(
-                                            Message::new(
-                                                MessageType::Error,
-                                                b"no such workflow run on this peer: it was \
-                                                  cancelled or already finished"
-                                                    .to_vec(),
-                                            )
-                                            .to_bytes(),
-                                        ));
-                                        *resp.status_mut() = StatusCode::SERVICE_UNAVAILABLE;
-                                        return Ok(resp);
-                                    }
-                                    (Some(_), None) => Message::new_empty(MessageType::Wait),
-                                };
-                                return Ok(Response::new(Body::from(resp.to_bytes())));
+                                        None => unavailable(
+                                            b"no such workflow run on this peer: it was \
+                                              cancelled or already finished"
+                                                .to_vec(),
+                                        ),
+                                    },
+                                );
                             }
                             if msg.payload.len() < 4 {
                                 tracing::warn!("Received GetChunk request with payload < 4 bytes");
-                                return Ok(Response::builder()
-                                    .status(StatusCode::BAD_REQUEST)
-                                    .body(Body::empty())
-                                    .unwrap());
+                                return Ok(empty_reply(StatusCode::BAD_REQUEST));
                             }
                             let chunk_index = u32::from_be_bytes([
                                 msg.payload[0],
@@ -256,10 +222,7 @@ pub(crate) async fn handle_incoming_connection(
                                 tracing::warn!(
                                     "Received GetChunk request without identifiable peer pubkey"
                                 );
-                                return Ok(Response::builder()
-                                    .status(StatusCode::BAD_REQUEST)
-                                    .body(Body::empty())
-                                    .unwrap());
+                                return Ok(empty_reply(StatusCode::BAD_REQUEST));
                             };
 
                             let chunk_bytes = {
@@ -276,10 +239,7 @@ pub(crate) async fn handle_incoming_connection(
                                             "GetChunk request from {pk} for chunk {chunk_index} \
                                              but no cached payload"
                                         );
-                                        return Ok(Response::builder()
-                                            .status(StatusCode::NOT_FOUND)
-                                            .body(Body::empty())
-                                            .unwrap());
+                                        return Ok(empty_reply(StatusCode::NOT_FOUND));
                                     }
                                     Some(true) => {
                                         // Expired — drop the stale entry now so it doesn't
@@ -289,10 +249,7 @@ pub(crate) async fn handle_incoming_connection(
                                             "GetChunk for {pk} chunk {chunk_index}: cache entry \
                                              expired (removed)"
                                         );
-                                        return Ok(Response::builder()
-                                            .status(StatusCode::NOT_FOUND)
-                                            .body(Body::empty())
-                                            .unwrap());
+                                        return Ok(empty_reply(StatusCode::NOT_FOUND));
                                     }
                                     Some(false) => {}
                                 }
@@ -305,10 +262,7 @@ pub(crate) async fn handle_incoming_connection(
                                          (start={start}, payload_len={})",
                                         payload.len(),
                                     );
-                                    return Ok(Response::builder()
-                                        .status(StatusCode::BAD_REQUEST)
-                                        .body(Body::empty())
-                                        .unwrap());
+                                    return Ok(empty_reply(StatusCode::BAD_REQUEST));
                                 }
                                 let end = (start + CHUNK_SIZE).min(payload.len());
                                 let bytes = payload[start..end].to_vec();
@@ -326,10 +280,7 @@ pub(crate) async fn handle_incoming_connection(
                             response_payload.extend_from_slice(&chunk_bytes);
 
                             let response_msg = Message::new(MessageType::Chunk, response_payload);
-                            return Ok(Response::builder()
-                                .status(StatusCode::OK)
-                                .body(Body::from(response_msg.to_bytes()))
-                                .unwrap());
+                            return Ok(reply(response_msg));
                         }
                         MessageType::RequestOwnerKeys => {
                             tracing::debug!("Received RequestOwnerKeys request");
@@ -352,10 +303,7 @@ pub(crate) async fn handle_incoming_connection(
                                     }
                                 };
                             let response_msg = Message::new(MessageType::OwnerKeys, payload);
-                            return Ok(Response::builder()
-                                .status(StatusCode::OK)
-                                .body(Body::from(response_msg.to_bytes()))
-                                .unwrap());
+                            return Ok(reply(response_msg));
                         }
                         MessageType::ListPeers => {
                             tracing::debug!("Received ListPeers request");
@@ -373,10 +321,7 @@ pub(crate) async fn handle_incoming_connection(
                                 }
                             };
                             let response_msg = Message::new(MessageType::PeerList, payload);
-                            return Ok(Response::builder()
-                                .status(StatusCode::OK)
-                                .body(Body::from(response_msg.to_bytes()))
-                                .unwrap());
+                            return Ok(reply(response_msg));
                         }
                         MessageType::RequestMemberParty => {
                             let dec_party_id =
@@ -392,10 +337,7 @@ pub(crate) async fn handle_incoming_connection(
                             };
                             let response_msg =
                                 Message::new(MessageType::MemberPartyResponse, payload);
-                            return Ok(Response::builder()
-                                .status(StatusCode::OK)
-                                .body(Body::from(response_msg.to_bytes()))
-                                .unwrap());
+                            return Ok(reply(response_msg));
                         }
                         MessageType::GetNextCommand
                         | MessageType::GetNextAcsBlock
@@ -416,18 +358,11 @@ pub(crate) async fn handle_incoming_connection(
                             // its coordinator's run name). The registry lock is
                             // held only long enough to clone the handle out —
                             // never across the await.
-                            let active = triggers.workflows.route(&msg.instance);
-                            let peer = peer_id_str.as_deref().and_then(|s| CantonId::parse(s).ok());
-                            let resp = match (active, peer) {
-                                (Some(wf), Some(pid)) => {
-                                    wf.handle_command(pid, msg).await.unwrap_or_else(|e| {
-                                        Message::new(
-                                            MessageType::Error,
-                                            format!("{e}").into_bytes(),
-                                        )
-                                    })
-                                }
-                                (None, _) => {
+                            return Ok(
+                                match route_to_run(&triggers.workflows, peer_id_str.as_deref(), msg)
+                                    .await
+                                {
+                                    Some(resp) => reply(resp),
                                     // No matching coordinator run on this node. The peer is
                                     // resuming a run whose coordinator workflow is gone
                                     // (cancelled, dismissed, never resumed), or its routing
@@ -439,13 +374,9 @@ pub(crate) async fn handle_incoming_connection(
                                     // merely busy on a slow step keeps its registry entry and
                                     // still returns Wait via handle_command above, so this
                                     // fires only when no matching run exists.
-                                    let mut resp = Response::new(Body::empty());
-                                    *resp.status_mut() = StatusCode::SERVICE_UNAVAILABLE;
-                                    return Ok(resp);
-                                }
-                                (Some(_), None) => Message::new_empty(MessageType::Wait),
-                            };
-                            return Ok(Response::new(Body::from(resp.to_bytes())));
+                                    None => empty_reply(StatusCode::SERVICE_UNAVAILABLE),
+                                },
+                            );
                         }
                         MessageType::InviteOnboarding
                         | MessageType::InviteKick
@@ -564,11 +495,7 @@ pub(crate) async fn handle_incoming_connection(
                                     .await;
                             }
 
-                            let ack = Message::new_empty(MessageType::Ack);
-                            return Ok(Response::builder()
-                                .status(StatusCode::OK)
-                                .body(Body::from(ack.to_bytes()))
-                                .unwrap());
+                            return Ok(ack());
                         }
                         MessageType::CancelInvite => {
                             // `msg.instance` scopes the cancel to one coordinator
@@ -583,11 +510,7 @@ pub(crate) async fn handle_incoming_connection(
                                 triggers.drop_invitations_from(pubkey, &msg.instance).await;
                                 triggers.cancel_peer_runs_from(pubkey, &msg.instance).await;
                             }
-                            let ack = Message::new_empty(MessageType::Ack);
-                            return Ok(Response::builder()
-                                .status(StatusCode::OK)
-                                .body(Body::from(ack.to_bytes()))
-                                .unwrap());
+                            return Ok(ack());
                         }
                         MessageType::RetryWorkflow => {
                             // `msg.instance` scopes the retry to one coordinator
@@ -601,11 +524,7 @@ pub(crate) async fn handle_incoming_connection(
                             if let Some(ref pubkey) = peer_pubkey_hex {
                                 triggers.retry_peer_runs_from(pubkey, &msg.instance).await;
                             }
-                            let ack = Message::new_empty(MessageType::Ack);
-                            return Ok(Response::builder()
-                                .status(StatusCode::OK)
-                                .body(Body::from(ack.to_bytes()))
-                                .unwrap());
+                            return Ok(ack());
                         }
                         _ => {
                             tracing::debug!("Ignoring message type {:?}", msg.msg_type);
@@ -631,5 +550,122 @@ pub(crate) async fn handle_incoming_connection(
         Err(e) => {
             tracing::debug!("Noise connection from {peer_addr} failed: {e}");
         }
+    }
+}
+
+/// A reply that carries `message`, with status 200.
+fn reply(message: Message) -> Response<Body> {
+    Response::new(Body::from(message.to_bytes()))
+}
+
+/// A reply with `status` and no body.
+fn empty_reply(status: StatusCode) -> Response<Body> {
+    let mut response = Response::new(Body::empty());
+    *response.status_mut() = status;
+    response
+}
+
+/// A 503 whose body is an `Error` message with `text`. An empty 503 is
+/// indistinguishable at the requester from a proxy with no healthy
+/// backend, so the text says why.
+fn unavailable(text: Vec<u8>) -> Response<Body> {
+    let mut response = reply(Message::new(MessageType::Error, text));
+    *response.status_mut() = StatusCode::SERVICE_UNAVAILABLE;
+    response
+}
+
+/// The acknowledgement of a message that needs no other answer.
+fn ack() -> Response<Body> {
+    reply(Message::new_empty(MessageType::Ack))
+}
+
+/// Route a workflow message to the coordinator run that `msg.instance`
+/// names, and return that run's answer. `None` when no such run exists on
+/// this node. A sender whose id does not parse is told to wait. The
+/// registry lock is held only long enough to clone the handle out — never
+/// across the await.
+async fn route_to_run(
+    workflows: &WorkflowRegistry,
+    sender: Option<&str>,
+    msg: Message,
+) -> Option<Message> {
+    let active = workflows.route(&msg.instance);
+    let peer = sender.and_then(|s| CantonId::parse(s).ok());
+    match (active, peer) {
+        (Some(wf), Some(pid)) => Some(
+            wf.handle_command(pid, msg)
+                .await
+                .unwrap_or_else(|e| Message::new(MessageType::Error, format!("{e}").into_bytes())),
+        ),
+        (None, _) => None,
+        (Some(_), None) => Some(Message::new_empty(MessageType::Wait)),
+    }
+}
+
+#[cfg(test)]
+mod reply_tests {
+    use hyper::body::to_bytes;
+
+    use super::*;
+
+    async fn parts(response: Response<Body>) -> anyhow::Result<(StatusCode, Vec<u8>)> {
+        let status = response.status();
+        Ok((status, to_bytes(response.into_body()).await?.to_vec()))
+    }
+
+    /// Each reply kind keeps the status and the bytes the arms built by
+    /// hand.
+    #[tokio::test]
+    async fn each_reply_kind_keeps_its_status_and_bytes() -> anyhow::Result<()> {
+        let pong = Message::new(MessageType::Pong, b"key".to_vec());
+        assert_eq!(
+            parts(reply(pong.clone())).await?,
+            (StatusCode::OK, pong.to_bytes())
+        );
+        for status in [
+            StatusCode::BAD_REQUEST,
+            StatusCode::NOT_FOUND,
+            StatusCode::SERVICE_UNAVAILABLE,
+        ] {
+            assert_eq!(parts(empty_reply(status)).await?, (status, Vec::new()));
+        }
+        assert_eq!(
+            parts(unavailable(b"gone".to_vec())).await?,
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Message::new(MessageType::Error, b"gone".to_vec()).to_bytes()
+            )
+        );
+        assert_eq!(
+            parts(ack()).await?,
+            (
+                StatusCode::OK,
+                Message::new_empty(MessageType::Ack).to_bytes()
+            )
+        );
+        for response in [
+            reply(pong.clone()),
+            empty_reply(StatusCode::NOT_FOUND),
+            unavailable(Vec::new()),
+            ack(),
+        ] {
+            assert_eq!(response.version(), hyper::Version::HTTP_11);
+            assert!(response.headers().is_empty());
+        }
+        Ok(())
+    }
+
+    /// A message for a run this node does not have gets no answer from a
+    /// run, whoever sends it.
+    #[tokio::test]
+    async fn a_message_for_an_unknown_run_is_not_routed() {
+        let workflows = WorkflowRegistry::new();
+        let msg = Message::new(MessageType::GetNextCommand, Vec::new()).with_instance("gone");
+        assert!(route_to_run(&workflows, None, msg.clone()).await.is_none());
+        assert!(
+            route_to_run(&workflows, Some("not a canton id"), msg)
+                .await
+                .is_none()
+        );
     }
 }
