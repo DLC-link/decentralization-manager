@@ -125,6 +125,7 @@ jobs:
 
   integration-test:
     name: Integration Tests (Splice ${{ matrix.splice }})
+    needs: [daml]
     runs-on: ubuntu-very-big
     timeout-minutes: 45
     # MainNet runs Splice 0.9 until its upgrade, and DevNet and TestNet run
@@ -160,6 +161,11 @@ jobs:
       # builds the decman binary → build.rs → frontend, needing this file).
       - name: Generate frontend TypeScript bindings
         run: DECMAN_SKIP_FRONTEND=1 cargo run -p decman --features typegen --bin gen-types
+      - name: Download governance v2 liveness fixture
+        uses: actions/download-artifact@v8
+        with:
+          name: governance-core-v2-ci
+          path: daml/governance-core-v2/.daml/dist
       - name: Run integration tests
         run: ./integration-tests/run.sh
         env:
@@ -237,6 +243,13 @@ jobs:
           ~/.dpm/bin/dpm install 3.5.1
       - name: Build
         run: ~/.dpm/bin/dpm build --all
+      - name: Upload governance v2 liveness fixture
+        uses: actions/upload-artifact@v7
+        with:
+          name: governance-core-v2-ci
+          path: daml/governance-core-v2/.daml/dist/governance-core-v2-0.1.0.dar
+          include-hidden-files: true
+          if-no-files-found: error
       # No reviewer can read a DAR by eye, so a stale or hand-edited binary in
       # releases/v1/ would otherwise pass review and ship. `dpm build` is
       # byte-reproducible for a pinned SDK, so a plain `cmp` is the check.

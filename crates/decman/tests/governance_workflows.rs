@@ -259,6 +259,9 @@ async fn governance_workflows_e2e() -> anyhow::Result<()> {
     // the registrar party that dual_governance_onboarding creates there.
     if matches!(f.target, common::TestTarget::Localnet) {
         phases::purge_former_party::run(&mut f).await?;
+        // This phase disconnects a Canton participant and uses its own party,
+        // so it runs last and only against the disposable localnet.
+        phases::governance_v2_offline_confirmer::run(&mut f).await?;
     }
     Ok(())
 }
