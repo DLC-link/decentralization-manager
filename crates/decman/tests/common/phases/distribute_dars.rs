@@ -1,8 +1,12 @@
-use std::{path::Path, time::Duration};
+use std::{collections::BTreeSet, path::Path, time::Duration};
 
 use anyhow::Context;
 use base64::{Engine, engine::general_purpose::STANDARD as B64};
-use common::types::{InvitationType, WorkflowKind, WorkflowProgress, WorkflowRole};
+use common::{
+    api::PendingInvitationsResponse,
+    types::{InvitationType, WorkflowKind, WorkflowProgress, WorkflowRole},
+};
+use dec_party_manager::noise::MAX_CHUNKED_TOTAL_SIZE;
 use serde_json::{Value, json};
 use tracing::info;
 
@@ -121,8 +125,61 @@ async fn all_dars_present(f: &Fixture) -> bool {
     true
 }
 
+/// The ids of the Dars invitations pending on `port`.
+async fn pending_dars_invitations(f: &Fixture, port: u16) -> anyhow::Result<BTreeSet<String>> {
+    let pending: PendingInvitationsResponse = f
+        .get_json(port, "/invitations")
+        .await
+        .context("GET /invitations")?;
+    Ok(pending
+        .invitations
+        .into_iter()
+        .filter(|i| i.invitation_type == InvitationType::Dars)
+        .map(|i| i.id)
+        .collect())
+}
+
+/// A DAR set above the size a peer accepts is refused before any invitation.
+/// One DAR as large as the limit is enough, because the framing counts too.
+async fn refuse_an_oversized_set(f: &mut Fixture) -> anyhow::Result<()> {
+    Scenario::new("refuse a DAR set above the limit")
+        .when("P1 posts one DAR as large as the limit", |f, _| {
+            Box::pin(async move {
+                let before = pending_dars_invitations(f, f.p2.http).await?;
+                let req = json!({
+                    "dar_files": [{
+                        "filename": "oversized.dar",
+                        "data": B64.encode(vec![0u8; MAX_CHUNKED_TOTAL_SIZE]),
+                    }],
+                    "peer_ids": [&f.p2.participant_id],
+                });
+                let (status, body) = f
+                    .post_expect_status(f.p1.http, "/dars/distribute", &req)
+                    .await?;
+                anyhow::ensure!(
+                    status.as_u16() == 413,
+                    "expected 413 for an oversized DAR set, got {status}: {body}"
+                );
+                anyhow::ensure!(
+                    body.contains("too large for one run")
+                        && body.contains(&format!("The limit is {MAX_CHUNKED_TOTAL_SIZE} bytes")),
+                    "the refusal should state the size and the limit: {body}"
+                );
+                let after = pending_dars_invitations(f, f.p2.http).await?;
+                anyhow::ensure!(
+                    after == before,
+                    "a refused run must not invite P2: before {before:?}, after {after:?}"
+                );
+                Ok(())
+            })
+        })
+        .run(f)
+        .await
+}
+
 pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
     info!("Phase: distribute_dars");
+    refuse_an_oversized_set(f).await?;
     if all_dars_present(f).await {
         info!("All expected DARs already present on all participants; skipping distribute_dars");
         return Ok(());
