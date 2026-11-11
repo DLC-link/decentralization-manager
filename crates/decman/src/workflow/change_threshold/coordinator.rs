@@ -10,12 +10,12 @@ use crate::{
     utils,
     workflow::{
         storage::{WorkflowStorage, artifact_kinds},
-        topology::split_signed_kick_pair,
+        topology::store_signed_pairs,
     },
 };
 
 use super::{
-    ChangeThresholdConfig, ChangeThresholdStep,
+    ARTIFACTS, ChangeThresholdConfig, ChangeThresholdStep,
     steps::{create_proposals, export_state, submit_change},
 };
 
@@ -125,30 +125,14 @@ pub async fn start_coordinator(
                         // kind and join by peer id. The kick splitter is
                         // format-agnostic and shared for this.
                         let peer_data = workflow_state.get_all_peer_data().await;
-                        for (peer_id, combined) in &peer_data {
-                            let (dns_blob, p2p_blob) = split_signed_kick_pair(combined)
-                                .with_context(|| {
-                                    format!(
-                                        "Failed to split signed change-threshold pair from \
-                                         peer {peer_id}"
-                                    )
-                                })?;
-                            let peer_key = peer_id.to_string();
-                            db.write_artifact(
-                                &instance_name,
-                                artifact_kinds::SIGNED_CHANGE_THRESHOLD_DNS,
-                                Some(&peer_key),
-                                &dns_blob,
-                            )
-                            .await?;
-                            db.write_artifact(
-                                &instance_name,
-                                artifact_kinds::SIGNED_CHANGE_THRESHOLD_P2P,
-                                Some(&peer_key),
-                                &p2p_blob,
-                            )
-                            .await?;
-                        }
+                        store_signed_pairs(
+                            &db,
+                            &instance_name,
+                            &peer_data,
+                            ARTIFACTS,
+                            "change-threshold",
+                        )
+                        .await?;
                         workflow_state.clear_peer_data().await;
 
                         submit_change(&node_config, &db, &instance_name, &change_config).await?;

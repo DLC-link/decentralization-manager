@@ -7,6 +7,7 @@ use crate::{
     error::Result,
     utils,
     workflow::{
+        add_party::ARTIFACTS,
         add_party::AddPartyConfig,
         storage::{WorkflowStorage, artifact_kinds},
         topology::{self, PollText, Polled},
@@ -31,17 +32,8 @@ pub async fn submit_proposals(
 
     let synchronizer_id = utils::get_synchronizer_id(config).await?;
 
-    let (mut dns_transaction, mut p2p_transaction) = topology::aggregate_dns_p2p_signatures(
-        storage,
-        instance_name,
-        topology::DnsP2pArtifactKinds {
-            dns_proposal: artifact_kinds::ADD_PARTY_DNS_PROPOSAL,
-            p2p_proposal: artifact_kinds::ADD_PARTY_P2P_PROPOSAL,
-            signed_dns: artifact_kinds::SIGNED_ADD_PARTY_DNS,
-            signed_p2p: artifact_kinds::SIGNED_ADD_PARTY_P2P,
-        },
-    )
-    .await?;
+    let (mut dns_transaction, mut p2p_transaction) =
+        topology::aggregate_dns_p2p_signatures(storage, instance_name, ARTIFACTS).await?;
 
     // Dedupe by signing fingerprint: the coordinator's own signature is
     // already on the original proposals, and a retried peer may have signed

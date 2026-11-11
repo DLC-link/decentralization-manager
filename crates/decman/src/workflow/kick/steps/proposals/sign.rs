@@ -3,7 +3,7 @@ use sqlx::SqlitePool;
 use crate::{
     config::NodeConfig,
     error::Result,
-    workflow::{storage::artifact_kinds, topology},
+    workflow::{kick::ARTIFACTS, topology},
 };
 
 /// Sign kick proposals.
@@ -24,8 +24,7 @@ pub async fn sign_proposals(
         instance_name,
         proposal_data,
         "kick",
-        artifact_kinds::SIGNED_KICK_DNS,
-        artifact_kinds::SIGNED_KICK_P2P,
+        ARTIFACTS,
     )
     .await
 }

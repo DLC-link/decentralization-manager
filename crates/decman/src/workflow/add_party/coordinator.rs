@@ -16,12 +16,12 @@ use crate::{
         },
         state::WorkflowState,
         storage::{WorkflowStorage, artifact_kinds, identity_kinds},
-        topology::split_signed_kick_pair,
+        topology::store_signed_pairs,
     },
 };
 
 use super::{
-    AddPartyConfig, AddPartyStep, resolve_ledger_token,
+    ARTIFACTS, AddPartyConfig, AddPartyStep, resolve_ledger_token,
     steps::{create_proposals, export_state, submit_clear_proposal, submit_proposals},
 };
 
@@ -476,28 +476,7 @@ async fn save_signature_pairs(
             .await?;
         }
     }
-    for (peer_id, combined) in &peer_data {
-        let (dns_blob, p2p_blob) = split_signed_kick_pair(combined).with_context(|| {
-            format!("Failed to split signed add-party pair from peer {peer_id}")
-        })?;
-        let peer_key = peer_id.to_string();
-        storage
-            .write_artifact(
-                instance_name,
-                artifact_kinds::SIGNED_ADD_PARTY_DNS,
-                Some(&peer_key),
-                &dns_blob,
-            )
-            .await?;
-        storage
-            .write_artifact(
-                instance_name,
-                artifact_kinds::SIGNED_ADD_PARTY_P2P,
-                Some(&peer_key),
-                &p2p_blob,
-            )
-            .await?;
-    }
+    store_signed_pairs(storage, instance_name, &peer_data, ARTIFACTS, "add-party").await?;
     workflow_state.clear_peer_data().await;
     Ok(())
 }

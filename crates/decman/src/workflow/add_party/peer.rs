@@ -15,6 +15,7 @@ use crate::{
     noise::{MessageType, client::NoiseClient},
     utils,
     workflow::{
+        add_party::ARTIFACTS,
         storage::{WorkflowStorage, artifact_kinds},
         topology,
     },
@@ -129,33 +130,15 @@ pub async fn send_add_party_signatures_to_coordinator(
     instance_name: &str,
     node_config: &NodeConfig,
 ) -> Result {
-    let node_id = node_config.participant_id().to_string();
-
-    let dns = storage
-        .read_artifact(
-            instance_name,
-            artifact_kinds::SIGNED_ADD_PARTY_DNS,
-            Some(&node_id),
-        )
-        .await?
-        .ok_or_else(|| anyhow::anyhow!("SIGNED_ADD_PARTY_DNS artifact missing for {node_id}"))?;
-    let p2p = storage
-        .read_artifact(
-            instance_name,
-            artifact_kinds::SIGNED_ADD_PARTY_P2P,
-            Some(&node_id),
-        )
-        .await?
-        .ok_or_else(|| anyhow::anyhow!("SIGNED_ADD_PARTY_P2P artifact missing for {node_id}"))?;
-
-    let mut payload = Vec::with_capacity(dns.len() + p2p.len());
-    payload.extend_from_slice(&dns);
-    payload.extend_from_slice(&p2p);
-
-    client
-        .send(MessageType::AddPartySignatures, payload)
-        .await?;
-    Ok(())
+    topology::send_signed_pair(
+        client,
+        storage,
+        instance_name,
+        node_config,
+        ARTIFACTS,
+        MessageType::AddPartySignatures,
+    )
+    .await
 }
 
 /// Send this peer's signed onboarding-flag clearing proposal (a single

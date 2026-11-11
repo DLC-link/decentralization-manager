@@ -3,7 +3,7 @@ use sqlx::SqlitePool;
 use crate::{
     config::NodeConfig,
     error::Result,
-    workflow::{storage::artifact_kinds, topology},
+    workflow::{change_threshold::ARTIFACTS, topology},
 };
 
 /// Sign the change-threshold proposals.
@@ -24,8 +24,7 @@ pub async fn sign_proposals(
         instance_name,
         proposal_data,
         "change-threshold",
-        artifact_kinds::SIGNED_CHANGE_THRESHOLD_DNS,
-        artifact_kinds::SIGNED_CHANGE_THRESHOLD_P2P,
+        ARTIFACTS,
     )
     .await
 }

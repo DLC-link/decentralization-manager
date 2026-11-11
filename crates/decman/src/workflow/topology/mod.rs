@@ -36,4 +36,4 @@ pub use requests::{
     p2p_v30, synchronizer_store_id,
 };
 pub use retry::{authorize_with_topology_retry, sign_transactions_with_topology_retry};
-pub(crate) use signed_pair::split_signed_kick_pair;
+pub use signed_pair::{send_signed_pair, store_signed_pairs};

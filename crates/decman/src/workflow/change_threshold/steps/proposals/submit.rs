@@ -13,6 +13,7 @@ use crate::{
     error::Result,
     utils,
     workflow::{
+        change_threshold::ARTIFACTS,
         change_threshold::ChangeThresholdConfig,
         storage::{WorkflowStorage, artifact_kinds},
         thresholds::PartyThresholds,
@@ -38,17 +39,8 @@ pub async fn submit_change(
     let synchronizer_id = utils::get_synchronizer_id(config).await?;
     tracing::debug!("Using synchronizer ID: {synchronizer_id}");
 
-    let (mut dns_transaction, mut p2p_transaction) = topology::aggregate_dns_p2p_signatures(
-        storage,
-        instance_name,
-        topology::DnsP2pArtifactKinds {
-            dns_proposal: artifact_kinds::CHANGE_THRESHOLD_DNS_PROPOSAL,
-            p2p_proposal: artifact_kinds::CHANGE_THRESHOLD_P2P_PROPOSAL,
-            signed_dns: artifact_kinds::SIGNED_CHANGE_THRESHOLD_DNS,
-            signed_p2p: artifact_kinds::SIGNED_CHANGE_THRESHOLD_P2P,
-        },
-    )
-    .await?;
+    let (mut dns_transaction, mut p2p_transaction) =
+        topology::aggregate_dns_p2p_signatures(storage, instance_name, ARTIFACTS).await?;
 
     // Read the new namespace definition (for the target threshold) + party id
     // needed by the post-submit topology polls.

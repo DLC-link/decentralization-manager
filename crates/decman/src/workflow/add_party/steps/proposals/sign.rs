@@ -3,7 +3,7 @@ use sqlx::SqlitePool;
 use crate::{
     config::NodeConfig,
     error::Result,
-    workflow::{storage::artifact_kinds, topology},
+    workflow::{add_party::ARTIFACTS, topology},
 };
 
 /// All-peer step: sign both add-party proposals.
@@ -29,8 +29,7 @@ pub async fn sign_proposals(
         instance_name,
         proposal_data,
         "add-party",
-        artifact_kinds::SIGNED_ADD_PARTY_DNS,
-        artifact_kinds::SIGNED_ADD_PARTY_P2P,
+        ARTIFACTS,
     )
     .await
 }
