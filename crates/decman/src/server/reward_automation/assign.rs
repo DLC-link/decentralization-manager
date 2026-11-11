@@ -3,7 +3,9 @@
 
 //! The delegation-model assigner: the Delegation_Assign submit and the sweep.
 
-use std::{future::Future, io::ErrorKind};
+use std::future::Future;
+#[cfg(feature = "test-mode")]
+use std::io::ErrorKind;
 
 use anyhow::Context;
 use canton_proto_rs::com::daml::ledger::api::v2::{
