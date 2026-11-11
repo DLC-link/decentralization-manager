@@ -906,7 +906,7 @@ pub async fn start_kick(
 
     // Fixed before the InProgress flip so a concurrent /kick/cancel cannot
     // observe InProgress while we're still preparing.
-    let invitees = signers.invitees;
+    let invitees = signers.invitees.clone();
 
     // Compute instance name + config up-front so the persisted workflow_runs row
     // can carry the same identifier the coordinator task will use.
@@ -983,7 +983,6 @@ pub async fn start_kick(
         return resp;
     }
 
-    let invitees_for_invites = invitees.clone();
     *kick_state.invited_peers.write().await = invitees;
 
     // Spawn the kick workflow in the background
@@ -1008,8 +1007,7 @@ pub async fn start_kick(
         let _workflow_guard = WorkflowGuard::new(workflows, instance_for_task.clone());
 
         // Send kick invites to the surviving party members before starting workflow
-        let invite_result =
-            send_kick_invites(&config, &db, &kick_config, &invitees_for_invites).await;
+        let invite_result = send_kick_invites(&config, &db, &kick_config, &signers).await;
         if let Err(e) = invite_result {
             tracing::error!("Failed to send kick invites: {e}");
             let msg = format!("Failed to send invites: {e}");
@@ -1153,29 +1151,48 @@ async fn kind_status(data: &web::Data<AppState>, kind: WorkflowKind) -> Workflow
     }
 }
 
-/// Send kick invites to all peers using Noise protocol (excluding the peer being kicked)
+/// Pin the complete surviving host set in the accepted invitation. Members
+/// that are not peers remain on the topology even though they cannot sign.
+fn kick_invite_payload(
+    kick_config: &workflow::KickConfig,
+    signers: &KickSigners,
+    coordinator: &CantonId,
+) -> KickInvitePayload {
+    let mut participants: Vec<CantonId> = signers
+        .invitees
+        .iter()
+        .chain(&signers.not_peers)
+        .cloned()
+        .collect();
+    participants.push(coordinator.clone());
+    participants.sort();
+    participants.dedup();
+    KickInvitePayload {
+        dec_party_id: kick_config.decentralized_party_id.clone(),
+        kicked_participant: kick_config.participant_id.clone(),
+        kicked_owner_key: Some(kick_config.namespace_fingerprint.clone()),
+        new_threshold: kick_config.new_threshold,
+        previous_threshold: kick_config.previous_threshold,
+        confirmation_threshold: kick_config.confirmation_threshold,
+        participants,
+        workflow_instance: Some(kick_config.instance_name.clone()),
+    }
+}
+
+/// Send kick invites only to the reachable members selected for this run.
 async fn send_kick_invites(
     config: &NodeConfig,
     db: &SqlitePool,
     kick_config: &workflow::KickConfig,
-    invitees: &[CantonId],
+    signers: &KickSigners,
 ) -> Result {
     let network_config = NetworkConfig::from_peers(db.get_all_peers().await?);
     let keypair = NoiseKeypair::from_file(&config.key_file_path()).await?;
 
     let current_participant_id = config.participant_id();
     let kicked_participant = kick_config.participant_id.as_ref();
-    let invitee_set: HashSet<&CantonId> = invitees.iter().collect();
-    let payload = KickInvitePayload {
-        dec_party_id: kick_config.decentralized_party_id.clone(),
-        kicked_participant: kicked_participant.cloned(),
-        kicked_owner_key: Some(kick_config.namespace_fingerprint.clone()),
-        new_threshold: kick_config.new_threshold,
-        previous_threshold: kick_config.previous_threshold,
-        confirmation_threshold: kick_config.confirmation_threshold,
-        participants: invitees.to_vec(),
-        workflow_instance: Some(kick_config.instance_name.clone()),
-    };
+    let invitee_set: HashSet<&CantonId> = signers.invitees.iter().collect();
+    let payload = kick_invite_payload(kick_config, signers, current_participant_id);
     let payload_bytes = serde_json::to_vec(&payload).context("encode KickInvitePayload")?;
     let invite_message = Message::new(MessageType::InviteKick, payload_bytes);
 
@@ -4575,9 +4592,13 @@ async fn send_contracts_invites(
 mod tests {
     use actix_web::{App, HttpMessage, http::StatusCode, test as actix_test};
 
+    use super::super::invitations::insert_peer_run;
     use super::*;
     use crate::{
-        auth::Principal, db::MIGRATOR, server::AppState, workflow::kick::prune_cached_membership,
+        auth::Principal,
+        db::MIGRATOR,
+        server::{AppState, PendingInvitation},
+        workflow::{kick::prune_cached_membership, validation::PeerExpectations},
     };
 
     /// A minimal coordinator run row for `party`, in progress.
@@ -5292,6 +5313,83 @@ mod tests {
         // in-flight guard. A stale cached threshold of 3 refuses it first.
         assert_eq!(status, StatusCode::CONFLICT, "{body}");
         assert!(body.contains("already has a"), "{body}");
+        Ok(())
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_quorum_kick_advertises_non_peers_without_waiting_for_them(
+        pool: SqlitePool,
+    ) -> Result {
+        let party = pid(46)?;
+        cache_party(&pool, &party, 2, None).await?;
+        let signers = kick_signers(
+            &ids(&[1, 2, 3, 4])?,
+            &ids(&[2, 5])?,
+            &pid(1)?,
+            Some(&pid(4)?),
+        );
+        assert_eq!(signers.invitees, vec![pid(2)?]);
+        assert_eq!(signers.not_peers, vec![pid(3)?]);
+        let config = workflow::KickConfig::new(
+            party.clone(),
+            Some(pid(4)?),
+            "k4".to_string(),
+            2,
+            None,
+            2,
+            "quorum-kick".to_string(),
+        );
+        let payload = kick_invite_payload(&config, &signers, &pid(1)?);
+        // Exercise the existing wire schema; no new capability is needed.
+        let payload: KickInvitePayload = serde_json::from_slice(&serde_json::to_vec(&payload)?)?;
+        assert_eq!(
+            payload.participants.iter().cloned().collect::<HashSet<_>>(),
+            ids(&[1, 2, 3])?
+        );
+
+        insert_coordinator_run(
+            &pool,
+            &config.instance_name,
+            WorkflowKind::Kick,
+            KickStep::WaitingForPeers,
+            &config,
+            &signers.invitees,
+            Some(party),
+        )
+        .await?;
+        let run = pool
+            .get_workflow_run(&config.instance_name)
+            .await?
+            .context("coordinator run missing")?;
+        assert_eq!(run.expected_peers, vec![pid(2)?]);
+        let state = workflow::WorkflowState::new(
+            pool.clone(),
+            run.instance_name,
+            KickStep::WaitingForPeers,
+            run.expected_peers,
+            Some(1),
+        );
+        state.peer_connected(pid(2)?).await;
+        assert_eq!(state.current_step().await, KickStep::ExportState);
+
+        let mut received = serde_json::to_value(payload)?;
+        received["id"] = "kick-invite".into();
+        received["invitation_type"] = "Kick".into();
+        received["coordinator_pubkey"] = "a1".repeat(32).into();
+        received["received_at"] = 1000.into();
+        let invitation: PendingInvitation = serde_json::from_value(received)?;
+        let peer_instance = insert_peer_run(&pool, &invitation)
+            .await
+            .context("accepted peer run missing")?;
+        let mut node = NodeConfig::default();
+        node.node.participant_id = Some(pid(2)?);
+        let accepted = PeerExpectations::load(&pool, &peer_instance, &node, &pid(1)?).await?;
+        assert_eq!(
+            accepted.members.into_iter().collect::<HashSet<_>>(),
+            ids(&[1, 2, 3])?
+        );
+        assert_eq!(accepted.kicked_participant, Some(pid(4)?));
+        assert_eq!(accepted.threshold, Some(2));
         Ok(())
     }
 

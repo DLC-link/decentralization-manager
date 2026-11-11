@@ -69,10 +69,9 @@ pub struct PeerExpectations {
     /// other kind are refused outright.
     pub kind: WorkflowKind,
     pub contract_intents: Vec<common::api::ContractDeploymentIntent>,
-    /// The full member set: the participants named in the invitation plus the
-    /// coordinator itself (onboarding and kick invitations list only the
-    /// invitees; add-party and change-threshold already include the
-    /// coordinator, so the union is the same set either way).
+    /// The full member set accepted in the invitation, plus the coordinator.
+    /// Topology invitations include surviving hosts that are not invited to
+    /// sign; onboarding lists its invitees without the coordinator.
     pub members: BTreeSet<CantonId>,
     /// The dec party the run targets. Absent for onboarding, where the party
     /// does not exist yet.
@@ -1796,6 +1795,65 @@ mod tests {
                 .check_p2p_membership(&p2p("dec::x", &[a, b, mallory], 2))
                 .is_err()
         );
+        Ok(())
+    }
+
+    #[sqlx::test(migrator = "crate::db::MIGRATOR")]
+    async fn accepted_kick_keeps_non_peer_hosts_and_still_checks_exact_membership(
+        pool: SqlitePool,
+    ) -> Result {
+        let (coordinator, peer, non_peer, kicked, outsider) = (
+            canton_id("p1", 1)?,
+            canton_id("p2", 2)?,
+            canton_id("p3", 3)?,
+            canton_id("p4", 4)?,
+            canton_id("p5", 5)?,
+        );
+        let party = canton_id("party", 9)?;
+        let config = serde_json::json!({
+            "participants": [&coordinator, &peer, &non_peer],
+            "participant_id": kicked,
+            "namespace_fingerprint": "owner-4",
+            "new_threshold": 2,
+        });
+        sqlx::query(
+            "INSERT INTO workflow_runs \
+             (instance_name, kind, role, status, current_step, step_index, step_total, \
+              config_json, expected_peers_json, completed_peers_json, dec_party_id, created_at, updated_at) \
+             VALUES ('accepted-quorum-kick', 'Kick', 'Peer', 'inprogress', 'Active', 0, 7, \
+                     ?, '[]', '[]', ?, 0, 0)",
+        )
+        .bind(config.to_string())
+        .bind(party.to_string())
+        .execute(&pool)
+        .await?;
+        let mut node = NodeConfig::default();
+        node.node.participant_id = Some(peer.clone());
+        let accepted =
+            PeerExpectations::load(&pool, "accepted-quorum-kick", &node, &coordinator).await?;
+        assert_eq!(accepted.kind, WorkflowKind::Kick);
+        accepted.check_p2p_membership(&p2p(
+            &party.to_string(),
+            &[coordinator.clone(), peer.clone(), non_peer.clone()],
+            2,
+        ))?;
+
+        for hosts in [
+            vec![coordinator.clone(), peer.clone()],
+            vec![
+                coordinator.clone(),
+                peer.clone(),
+                non_peer.clone(),
+                outsider,
+            ],
+            vec![coordinator, peer, non_peer, kicked],
+        ] {
+            let error = accepted
+                .check_p2p_membership(&p2p(&party.to_string(), &hosts, 2))
+                .expect_err("an omitted or extra host must still be refused")
+                .to_string();
+            assert!(error.contains("host set does not match"), "{error}");
+        }
         Ok(())
     }
 
