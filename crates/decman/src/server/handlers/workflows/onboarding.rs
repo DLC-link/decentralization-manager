@@ -27,8 +27,8 @@ use crate::{
 };
 
 use super::{
-    invites::{InviteLabels, Recipients, send_invites},
-    launch::{CoordinatorRequest, StatusOrder, launch_coordinator},
+    invites::{InviteLabels, Recipients, invite_log, send_invites},
+    launch::{CoordinatorRequest, RunEnd, StatusOrder, launch_coordinator, run_log},
     preflight::{find_party_with_prefix, format_incompatible_peers, preflight_incompatible_peers},
     runs::{kind_status, register_and_persist},
 };
@@ -319,8 +319,11 @@ async fn start_onboarding_run(
         CoordinatorRequest::Onboarding(onboarding_config),
         None,
         invites,
-        StatusOrder::MemoryFirst,
-        Some(refresh),
+        RunEnd {
+            order: StatusOrder::MemoryFirst,
+            log: run_log!(),
+            after_success: Some(refresh),
+        },
     )
     .await;
 
@@ -423,6 +426,7 @@ async fn send_onboarding_invites(
             skip: "",
             failed: "",
         },
+        invite_log!(),
         || {
             onboarding_invite(
                 peer_ids,

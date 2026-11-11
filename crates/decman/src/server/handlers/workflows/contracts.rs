@@ -27,8 +27,8 @@ use crate::{
 };
 
 use super::{
-    invites::{InviteLabels, Recipients, send_invites},
-    launch::{CoordinatorRequest, StatusOrder, launch_coordinator},
+    invites::{InviteLabels, Recipients, invite_log, send_invites},
+    launch::{CoordinatorRequest, RunEnd, StatusOrder, launch_coordinator, run_log},
     preflight::{
         find_inprogress_run_for_party, format_incompatible_peers, preflight_incompatible_peers,
     },
@@ -241,8 +241,11 @@ async fn start_contracts_run(
         CoordinatorRequest::Contracts(contracts_config),
         workflow_auth,
         invites,
-        StatusOrder::RowFirst,
-        Some(refresh),
+        RunEnd {
+            order: StatusOrder::RowFirst,
+            log: run_log!(),
+            after_success: Some(refresh),
+        },
     )
     .await;
 
@@ -310,6 +313,7 @@ async fn send_contracts_invites(
             skip: "",
             failed: "contracts ",
         },
+        invite_log!(),
         || contracts_invite(contracts_config, invitees),
     )
     .await

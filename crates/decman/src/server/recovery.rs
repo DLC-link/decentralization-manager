@@ -8,7 +8,10 @@ use tokio::sync::{RwLock, mpsc};
 use crate::server::types::{WorkflowProgress, WorkflowRole, WorkflowRun};
 use crate::server::{
     PeerJob, WorkflowInstance, WorkflowRegistry, handlers,
-    handlers::{CoordinatorRequest, NodeHandles, StatusOrder, TaskStart, spawn_coordinator_task},
+    handlers::{
+        CoordinatorRequest, NodeHandles, RunEnd, StatusOrder, TaskStart, run_log,
+        spawn_coordinator_task,
+    },
 };
 use crate::{
     auth::WorkflowAuth,
@@ -159,8 +162,11 @@ pub(crate) async fn respawn_coordinator(
         request,
         auth_snapshot,
         TaskStart::Resume,
-        StatusOrder::MemoryFirst,
-        None,
+        RunEnd {
+            order: StatusOrder::MemoryFirst,
+            log: run_log!(),
+            after_success: None,
+        },
     );
     *instance.http.abort_handle.lock().await = Some(handle.abort_handle());
 }

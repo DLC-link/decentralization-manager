@@ -1,7 +1,7 @@
-//! Runs, party ids, an admin request and a test node shared by the workflow
-//! handler tests.
+//! Runs, party ids, an admin request, a test node and a log capture shared
+//! by the workflow handler tests.
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use actix_web::{App, HttpMessage, dev::HttpServiceFactory, http::StatusCode, test, web};
 use sqlx::SqlitePool;
@@ -262,4 +262,49 @@ pub async fn post_as_admin(
     body: serde_json::Value,
 ) -> Answer {
     post_as(data, service, uri, body, Some(admin())).await
+}
+
+/// The log lines written while [`CapturedLogs::subscriber`] is the thread's
+/// default subscriber. Each line reads `LEVEL target: message`.
+#[derive(Clone, Default)]
+pub struct CapturedLogs(Arc<Mutex<Vec<u8>>>);
+
+impl std::io::Write for CapturedLogs {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0
+            .lock()
+            .map_err(|_| std::io::Error::other("the log buffer lock is poisoned"))?
+            .extend_from_slice(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl CapturedLogs {
+    /// A subscriber that writes every level into this capture, without
+    /// timestamps or colours.
+    pub fn subscriber(&self) -> impl tracing::Subscriber + Send + Sync + 'static {
+        let logs = self.clone();
+        tracing_subscriber::fmt()
+            .with_writer(move || logs.clone())
+            .with_ansi(false)
+            .without_time()
+            .with_max_level(tracing::Level::TRACE)
+            .finish()
+    }
+
+    /// The captured lines, oldest first.
+    pub fn lines(&self) -> anyhow::Result<Vec<String>> {
+        let bytes = self
+            .0
+            .lock()
+            .map_err(|_| anyhow::anyhow!("the log buffer lock is poisoned"))?;
+        Ok(String::from_utf8_lossy(&bytes)
+            .lines()
+            .map(str::to_string)
+            .collect())
+    }
 }

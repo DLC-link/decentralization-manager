@@ -143,6 +143,77 @@ pub(crate) enum StatusOrder {
     RowFirstHoldingLocksOnInviteFailure,
 }
 
+/// One log line of a coordinator task. The task hands each line to the
+/// function that [`run_log!`] builds where the run starts, so the line
+/// keeps that module as its tracing target.
+pub(crate) enum RunLog<'a> {
+    /// A new run could not send its invites; `label` names them.
+    InvitesFailed {
+        label: &'static str,
+        error: &'a anyhow::Error,
+    },
+    /// A new run completed; `title` names its workflow.
+    Completed { title: &'static str },
+    /// A new run failed.
+    Failed {
+        title: &'static str,
+        error: &'a anyhow::Error,
+    },
+    /// A resumed run completed.
+    ResumedCompleted {
+        kind: WorkflowKind,
+        instance_name: &'a str,
+    },
+    /// A resumed run failed.
+    ResumedFailed {
+        kind: WorkflowKind,
+        instance_name: &'a str,
+        error: &'a anyhow::Error,
+    },
+}
+
+/// Build the function that writes a coordinator task's [`RunLog`] lines.
+/// The function expands where the macro is called, so each line has the
+/// calling module as its tracing target.
+macro_rules! run_log {
+    () => {
+        |line: $crate::server::handlers::RunLog<'_>| {
+            use $crate::server::handlers::RunLog;
+            match line {
+                RunLog::InvitesFailed { label, error } => {
+                    ::tracing::error!("Failed to send {label} invites: {error}")
+                }
+                RunLog::Completed { title } => {
+                    ::tracing::info!("{title} workflow completed successfully")
+                }
+                RunLog::Failed { title, error } => {
+                    ::tracing::error!("{title} workflow failed: {error}")
+                }
+                RunLog::ResumedCompleted {
+                    kind,
+                    instance_name,
+                } => ::tracing::info!("{kind:?} workflow {instance_name} completed"),
+                RunLog::ResumedFailed {
+                    kind,
+                    instance_name,
+                    error,
+                } => ::tracing::error!("{kind:?} workflow {instance_name} failed: {error:#}"),
+            }
+        }
+    };
+}
+pub(crate) use run_log;
+
+/// How a coordinator task ends its run.
+pub(crate) struct RunEnd {
+    /// The order of the end status writes.
+    pub(crate) order: StatusOrder,
+    /// Writes the task's log lines. Build it with [`run_log!`].
+    pub(crate) log: fn(RunLog<'_>),
+    /// Runs last, once a run that completed has written its status.
+    pub(crate) after_success: Option<Box<dyn FnOnce() + Send>>,
+}
+
 /// How a coordinator task begins.
 pub(crate) enum TaskStart {
     /// A new run: send its invites, then give the peers two seconds to start
@@ -197,18 +268,15 @@ fn invite_label(kind: WorkflowKind) -> &'static str {
 }
 
 /// Spawn the task that drives `instance`'s coordinator run: optionally send
-/// the invites, run `request`, and write the end status in `order`. The
-/// run leaves the registry when the task ends, however it ends.
-/// `after_success` runs last, once a run that completed has written its
-/// status.
+/// the invites, run `request`, and end the run as `end` says. The run
+/// leaves the registry when the task ends, however it ends.
 pub(crate) fn spawn_coordinator_task(
     node: NodeHandles,
     instance: Arc<WorkflowInstance>,
     request: CoordinatorRequest,
     auth: Option<WorkflowAuth>,
     start: TaskStart,
-    order: StatusOrder,
-    after_success: Option<Box<dyn FnOnce() + Send>>,
+    end: RunEnd,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let NodeHandles {
@@ -217,6 +285,11 @@ pub(crate) fn spawn_coordinator_task(
             workflows,
             last_seen,
         } = node;
+        let RunEnd {
+            order,
+            log,
+            after_success,
+        } = end;
         let instance_name = instance.instance_name.clone();
         let kind = instance.kind;
         let state = instance.http.clone();
@@ -227,7 +300,10 @@ pub(crate) fn spawn_coordinator_task(
             TaskStart::Invite(invites) => {
                 // Send the invites before starting the coordinator workflow
                 if let Err(e) = invites.await {
-                    tracing::error!("Failed to send {} invites: {e}", invite_label(kind));
+                    log(RunLog::InvitesFailed {
+                        label: invite_label(kind),
+                        error: &e,
+                    });
                     let msg = format!("Failed to send invites: {e}");
                     match order {
                         StatusOrder::RowFirstHoldingLocksOnInviteFailure => {
@@ -277,11 +353,16 @@ pub(crate) fn spawn_coordinator_task(
         match result {
             Ok(_) => {
                 let log_completed = || {
-                    if resumed {
-                        tracing::info!("{kind:?} workflow {instance_name} completed");
+                    log(if resumed {
+                        RunLog::ResumedCompleted {
+                            kind,
+                            instance_name: &instance_name,
+                        }
                     } else {
-                        tracing::info!("{} workflow completed successfully", workflow_title(kind));
-                    }
+                        RunLog::Completed {
+                            title: workflow_title(kind),
+                        }
+                    });
                 };
                 match order {
                     StatusOrder::MemoryFirst => {
@@ -302,11 +383,18 @@ pub(crate) fn spawn_coordinator_task(
             Err(e) => {
                 let msg = format!("{e}");
                 let log_failed = || {
-                    if resumed {
-                        tracing::error!("{kind:?} workflow {instance_name} failed: {e:#}");
+                    log(if resumed {
+                        RunLog::ResumedFailed {
+                            kind,
+                            instance_name: &instance_name,
+                            error: &e,
+                        }
                     } else {
-                        tracing::error!("{} workflow failed: {e}", workflow_title(kind));
-                    }
+                        RunLog::Failed {
+                            title: workflow_title(kind),
+                            error: &e,
+                        }
+                    });
                 };
                 let write_failed = || async {
                     let mut status = state.status.write().await;
@@ -350,8 +438,7 @@ pub(crate) async fn launch_coordinator(
     request: CoordinatorRequest,
     auth: Option<WorkflowAuth>,
     invites: BoxFuture<'static, Result>,
-    order: StatusOrder,
-    after_success: Option<Box<dyn FnOnce() + Send>>,
+    end: RunEnd,
 ) {
     let node = NodeHandles::of(data);
     let state = &instance.http;
@@ -365,8 +452,7 @@ pub(crate) async fn launch_coordinator(
         request,
         auth,
         TaskStart::Invite(invites),
-        order,
-        after_success,
+        end,
     );
     *abort_guard = Some(join_handle.abort_handle());
     *status_guard = WorkflowProgress::InProgress;
@@ -383,7 +469,7 @@ mod launch_tests {
         server::types::WorkflowRole,
     };
 
-    use super::super::test_support::{in_progress_run, insert_run, pid, test_node};
+    use super::super::test_support::{CapturedLogs, in_progress_run, insert_run, pid, test_node};
     use super::*;
 
     type TestResult = anyhow::Result<()>;
@@ -444,8 +530,11 @@ mod launch_tests {
             request(),
             None,
             invites,
-            StatusOrder::MemoryFirst,
-            None,
+            RunEnd {
+                order: StatusOrder::MemoryFirst,
+                log: run_log!(),
+                after_success: None,
+            },
         )
         .await;
 
@@ -476,8 +565,11 @@ mod launch_tests {
             request(),
             None,
             Box::pin(async { Err(anyhow::anyhow!("no route to the peers")) }),
-            StatusOrder::MemoryFirst,
-            None,
+            RunEnd {
+                order: StatusOrder::MemoryFirst,
+                log: run_log!(),
+                after_success: None,
+            },
         )
         .await;
         task_ended(&node.data).await?;
@@ -491,6 +583,86 @@ mod launch_tests {
             .ok_or_else(|| anyhow::anyhow!("the run row is gone"))?;
         assert_eq!(row.status, WorkflowProgress::Failed);
         assert_eq!(row.error.as_deref(), Some(message));
+        Ok(())
+    }
+
+    /// The task writes its log lines through the `run_log!` of the module
+    /// that launched the run, so each line has that module as its target.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn the_run_logs_under_the_launching_module(pool: SqlitePool) -> TestResult {
+        let logs = CapturedLogs::default();
+        let _default = tracing::subscriber::set_default(logs.subscriber());
+        let node = test_node(pool.clone(), &pid(1)?).await?;
+        let instance = registered_run(&pool, &node.data).await?;
+
+        launch_coordinator(
+            &node.data,
+            &instance,
+            request(),
+            None,
+            Box::pin(async { Err(anyhow::anyhow!("no route to the peers")) }),
+            RunEnd {
+                order: StatusOrder::RowFirstHoldingLocksOnInviteFailure,
+                log: run_log!(),
+                after_success: None,
+            },
+        )
+        .await;
+        task_ended(&node.data).await?;
+
+        let expected = format!(
+            "ERROR {}: Failed to send DARs invites: no route to the peers",
+            module_path!()
+        );
+        let lines = logs.lines()?;
+        assert!(lines.contains(&expected), "{lines:#?}");
+        Ok(())
+    }
+
+    /// Each line of a new run and of a resumed run reads as it did before
+    /// the task was shared.
+    #[test]
+    fn each_run_line_keeps_its_text() -> TestResult {
+        let logs = CapturedLogs::default();
+        let log: fn(RunLog<'_>) = run_log!();
+        let error = anyhow::anyhow!("ledger down").context("submit failed");
+        tracing::subscriber::with_default(logs.subscriber(), || {
+            log(RunLog::InvitesFailed {
+                label: invite_label(WorkflowKind::Kick),
+                error: &error,
+            });
+            log(RunLog::Completed {
+                title: workflow_title(WorkflowKind::AddParty),
+            });
+            log(RunLog::Failed {
+                title: workflow_title(WorkflowKind::Dars),
+                error: &error,
+            });
+            log(RunLog::ResumedCompleted {
+                kind: WorkflowKind::ChangeThreshold,
+                instance_name: "dec-change-threshold-1",
+            });
+            log(RunLog::ResumedFailed {
+                kind: WorkflowKind::Onboarding,
+                instance_name: "newparty-creation",
+                error: &error,
+            });
+        });
+
+        let here = module_path!();
+        assert_eq!(
+            logs.lines()?,
+            [
+                format!("ERROR {here}: Failed to send kick invites: submit failed"),
+                format!(" INFO {here}: Add-party workflow completed successfully"),
+                format!("ERROR {here}: DARs distribution workflow failed: submit failed"),
+                format!(" INFO {here}: ChangeThreshold workflow dec-change-threshold-1 completed"),
+                format!(
+                    "ERROR {here}: Onboarding workflow newparty-creation failed: \
+                     submit failed: ledger down"
+                ),
+            ]
+        );
         Ok(())
     }
 }

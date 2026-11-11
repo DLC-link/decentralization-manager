@@ -28,9 +28,9 @@ use crate::{
 
 use super::{
     cancel::cancel_workflow_state,
-    invites::{InviteLabels, Recipients, send_invites},
+    invites::{InviteLabels, Recipients, invite_log, send_invites},
     kick_target::cached_confirmation_threshold,
-    launch::{CoordinatorRequest, StatusOrder, launch_coordinator},
+    launch::{CoordinatorRequest, RunEnd, StatusOrder, launch_coordinator, run_log},
     preflight::{
         find_inprogress_run_for_party, format_incompatible_peers, preflight_incompatible_peers,
     },
@@ -243,8 +243,11 @@ async fn start_add_party_run(
         CoordinatorRequest::AddParty(add_party_config),
         workflow_auth,
         invites,
-        StatusOrder::RowFirst,
-        None,
+        RunEnd {
+            order: StatusOrder::RowFirst,
+            log: run_log!(),
+            after_success: None,
+        },
     )
     .await;
 
@@ -321,6 +324,7 @@ async fn send_add_party_invites(
             skip: "add-party ",
             failed: "add-party ",
         },
+        invite_log!(),
         || add_party_invite(config.participant_id(), add_party_config, invitees),
     )
     .await

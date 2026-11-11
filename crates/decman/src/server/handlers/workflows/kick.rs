@@ -27,12 +27,12 @@ use crate::{
 };
 
 use super::{
-    invites::{InviteLabels, Recipients, send_invites},
+    invites::{InviteLabels, Recipients, invite_log, send_invites},
     kick_target::{
         cached_confirmation_threshold, cached_namespace_threshold, kick_threshold_bound,
         party_member_count, resolve_kick_target,
     },
-    launch::{CoordinatorRequest, StatusOrder, launch_coordinator},
+    launch::{CoordinatorRequest, RunEnd, StatusOrder, launch_coordinator, run_log},
     preflight::{
         find_inprogress_run_for_party, format_incompatible_peers,
         format_peers_lacking_owner_only_kick, incompatible_versions, lacking_feature,
@@ -345,8 +345,11 @@ async fn start_kick_run(
         CoordinatorRequest::Kick(kick_config),
         None,
         invites,
-        StatusOrder::MemoryFirst,
-        None,
+        RunEnd {
+            order: StatusOrder::MemoryFirst,
+            log: run_log!(),
+            after_success: None,
+        },
     )
     .await;
 
@@ -408,6 +411,7 @@ async fn send_kick_invites(
             skip: "",
             failed: "kick ",
         },
+        invite_log!(),
         || {
             let invite_message = kick_invite(kick_config, invitees)?;
             tracing::info!(

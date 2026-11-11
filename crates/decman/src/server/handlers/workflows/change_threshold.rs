@@ -28,8 +28,8 @@ use crate::{
 
 use super::{
     cancel::cancel_workflow_state,
-    invites::{InviteLabels, Recipients, send_invites},
-    launch::{CoordinatorRequest, StatusOrder, launch_coordinator},
+    invites::{InviteLabels, Recipients, invite_log, send_invites},
+    launch::{CoordinatorRequest, RunEnd, StatusOrder, launch_coordinator, run_log},
     preflight::{
         find_inprogress_run_for_party, format_incompatible_peers, preflight_incompatible_peers,
     },
@@ -216,8 +216,11 @@ async fn start_change_threshold_run(
         CoordinatorRequest::ChangeThreshold(change_config),
         None,
         invites,
-        StatusOrder::RowFirst,
-        None,
+        RunEnd {
+            order: StatusOrder::RowFirst,
+            log: run_log!(),
+            after_success: None,
+        },
     )
     .await;
 
@@ -299,6 +302,7 @@ async fn send_change_threshold_invites(
             skip: "change-threshold ",
             failed: "change-threshold ",
         },
+        invite_log!(),
         || change_threshold_invite(config.participant_id(), change_config, invitees),
     )
     .await

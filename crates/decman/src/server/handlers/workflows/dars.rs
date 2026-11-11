@@ -25,8 +25,8 @@ use crate::{
 };
 
 use super::{
-    invites::{InviteLabels, Recipients, send_invites},
-    launch::{CoordinatorRequest, StatusOrder, launch_coordinator},
+    invites::{InviteLabels, Recipients, invite_log, send_invites},
+    launch::{CoordinatorRequest, RunEnd, StatusOrder, launch_coordinator, run_log},
     preflight::{format_incompatible_peers, preflight_incompatible_peers},
     runs::{kind_status, now_secs, register_and_persist},
 };
@@ -260,8 +260,11 @@ async fn launch_dars(
         CoordinatorRequest::Dars(dars_config),
         None,
         invites,
-        StatusOrder::RowFirstHoldingLocksOnInviteFailure,
-        None,
+        RunEnd {
+            order: StatusOrder::RowFirstHoldingLocksOnInviteFailure,
+            log: run_log!(),
+            after_success: None,
+        },
     )
     .await;
 
@@ -320,6 +323,7 @@ async fn send_dars_invites(
             skip: "",
             failed: "DARs ",
         },
+        invite_log!(),
         || dars_invite(peer_ids, dar_filenames, dar_hashes, instance_name),
     )
     .await

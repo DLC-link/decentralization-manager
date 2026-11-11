@@ -28,7 +28,8 @@ pub use contracts::{get_contracts_status, start_contracts};
 pub use dars::{get_dars_status, start_dars, start_dars_for_package, upload_dars_local};
 pub use kick::{get_kick_status, start_kick};
 pub(crate) use launch::{
-    CoordinatorRequest, NodeHandles, StatusOrder, TaskStart, spawn_coordinator_task,
+    CoordinatorRequest, NodeHandles, RunEnd, RunLog, StatusOrder, TaskStart, run_log,
+    spawn_coordinator_task,
 };
 pub use listing::{dismiss_workflow, list_external_parties, list_workflows, retry_workflow};
 pub use onboarding::{get_onboarding_status, start_onboarding};
