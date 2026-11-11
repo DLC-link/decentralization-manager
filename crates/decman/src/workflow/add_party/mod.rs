@@ -152,6 +152,7 @@ impl WorkflowStep for AddPartyStep {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::utils;
 
     /// A resumed coordinator seeds `command_payload` with the bare config
     /// before its loop starts, so "is the payload missing?" is the wrong
@@ -165,8 +166,6 @@ mod tests {
     /// the two apart.
     #[test]
     fn a_bare_config_payload_is_not_a_valid_sync_acs_command() -> anyhow::Result<()> {
-        use crate::utils;
-
         let config = serde_json::to_vec(&serde_json::json!({
             "decentralized_party_id": "p::1220aa",
             "new_participant_id": "q::1220bb",

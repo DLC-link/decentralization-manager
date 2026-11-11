@@ -32,6 +32,7 @@ use base64::{Engine, engine::general_purpose::STANDARD};
 use canton_proto_rs::com::digitalasset::canton::crypto::v30::{Signature, SigningPublicKey};
 use ed25519_dalek::SigningKey;
 use sqlx::SqlitePool;
+use tokio::io::AsyncWriteExt;
 use zeroize::Zeroizing;
 
 use crate::{
@@ -346,7 +347,6 @@ async fn read_or_create_default(path: &PathBuf) -> Result<Zeroizing<[u8; 32]>> {
 /// partial key. Fails if `path` exists, so two processes never write
 /// different keys.
 async fn write_private(path: &Path, contents: &[u8]) -> Result {
-    use tokio::io::AsyncWriteExt;
     let suffix: [u8; 8] = Generate::try_generate()
         .map_err(|e| anyhow::anyhow!("temporary name generation failed: {e}"))?;
     let mut temporary = path.as_os_str().to_owned();
@@ -394,9 +394,13 @@ impl TransactionSigner for StoredKeySigner {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
+
     use canton_proto_rs::com::digitalasset::canton::crypto::v30::{
         CryptoKeyFormat, SigningKeySpec,
     };
+    use ed25519_dalek::{Signature as DalekSignature, Verifier};
 
     use super::*;
     use crate::{
@@ -595,8 +599,6 @@ mod tests {
 
     #[tokio::test]
     async fn the_stored_key_signer_signs_with_the_stored_seed() -> Result {
-        use ed25519_dalek::{Signature as DalekSignature, Verifier};
-
         let seed = [7u8; 32];
         let public = public_key(&seed);
         let key = SigningKeyContext {
@@ -655,7 +657,6 @@ mod tests {
         assert_eq!(names, [DEFAULT_KEY_FILENAME]);
         #[cfg(unix)]
         {
-            use std::os::unix::fs::PermissionsExt;
             let mode = tokio::fs::metadata(&path).await?.permissions().mode();
             assert_eq!(mode & 0o777, 0o600);
         }

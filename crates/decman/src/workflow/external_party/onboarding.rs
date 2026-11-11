@@ -537,6 +537,7 @@ pub async fn allocate_party(
 
 #[cfg(test)]
 mod tests {
+    use base64::{Engine as _, engine::general_purpose::STANDARD};
     use canton_proto_rs::com::digitalasset::canton::{
         protocol::v30::TopologyTransaction,
         version::v1::{UntypedVersionedMessage, untyped_versioned_message},
@@ -724,8 +725,6 @@ mod tests {
 
     #[test]
     fn accepts_a_transaction_canton_really_produced() {
-        use base64::{Engine as _, engine::general_purpose::STANDARD};
-
         let Ok(transaction) = STANDARD.decode(REAL_TRANSACTION_B64) else {
             panic!("the captured fixture must be valid base64");
         };

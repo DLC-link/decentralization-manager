@@ -1,6 +1,7 @@
 use canton_proto_rs::com::digitalasset::canton::protocol::v30::{
     DecentralizedNamespaceDefinition, PartyToParticipant, SignedTopologyTransaction,
-    TopologyTransaction, enums, topology_mapping,
+    TopologyTransaction, enums,
+    topology_mapping::{self, Mapping},
 };
 
 use crate::{error::Result, utils, workflow::topology_version};
@@ -64,7 +65,6 @@ pub(super) fn decode_party_to_participant(payload: &[u8]) -> Result<PartyToParti
 /// A short name for a mapping the peer refuses to sign, so the error says what
 /// arrived without dumping the whole protobuf.
 pub(super) fn mapping_name(mapping: &topology_mapping::Mapping) -> &'static str {
-    use topology_mapping::Mapping;
     match mapping {
         Mapping::NamespaceDelegation(_) => "NamespaceDelegation",
         Mapping::DecentralizedNamespaceDefinition(_) => "DecentralizedNamespaceDefinition",

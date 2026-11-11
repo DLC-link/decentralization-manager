@@ -1,7 +1,10 @@
 use anyhow::Context;
 use bytes::{BufMut, BytesMut};
 use canton_proto_rs::com::{
-    daml::ledger::api::v2::interactive::PrepareSubmissionResponse,
+    daml::ledger::api::v2::interactive::{
+        PrepareSubmissionResponse, daml_transaction::node::VersionedNode,
+        transaction::v1::node::NodeType,
+    },
     digitalasset::canton::{
         crypto::{
             admin::v30::{
@@ -300,9 +303,6 @@ fn verify_deployment_intent(
     prepared: &PrepareSubmissionResponse,
     intent: &common::api::ContractDeploymentIntent,
 ) -> Result {
-    use canton_proto_rs::com::daml::ledger::api::v2::interactive::{
-        daml_transaction::node::VersionedNode, transaction::v1::node::NodeType,
-    };
     let transaction = prepared
         .prepared_transaction
         .as_ref()

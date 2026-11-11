@@ -8,6 +8,7 @@ use common::types::{AcsTransferDirection, AcsTransferProgress};
 use futures::SinkExt;
 use sha2::{Digest, Sha256};
 use sqlx::SqlitePool;
+use tonic::Code;
 
 use super::import::TransferSource;
 use crate::{
@@ -108,7 +109,6 @@ impl From<anyhow::Error> for ImportError {
 /// Sort Canton's answer to the whole stream: a status that says "not now" is
 /// retried inside the window, anything that judges the content is final.
 fn import_rpc_error(status: tonic::Status, fed: u64) -> ImportError {
-    use tonic::Code;
     let cause = anyhow::Error::from(status).context("ImportPartyAcs did not complete");
     match cause
         .downcast_ref::<tonic::Status>()

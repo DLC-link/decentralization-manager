@@ -1,5 +1,10 @@
-use canton_proto_rs::com::digitalasset::canton::crypto::v30::SigningPublicKey;
+use std::borrow::Cow;
+
+use canton_proto_rs::com::digitalasset::canton::crypto::v30::{
+    CryptoKeyFormat, SigningKeySpec, SigningPublicKey,
+};
 use common::fingerprint::fingerprint_from_public_key;
+use x509_parser::prelude::{FromDer, SubjectPublicKeyInfo};
 
 pub use common::fingerprint::MULTIHASH_SHA256_PREFIX;
 
@@ -28,13 +33,6 @@ use crate::canton_id::Fingerprint;
 /// The fingerprint serves as the namespace identifier and unique key
 /// identifier in Canton.
 pub fn compute_fingerprint(key: &SigningPublicKey) -> Fingerprint {
-    use std::borrow::Cow;
-
-    use canton_proto_rs::com::digitalasset::canton::crypto::v30::{
-        CryptoKeyFormat, SigningKeySpec,
-    };
-    use x509_parser::prelude::*;
-
     let is_ed25519_spki = key.format == CryptoKeyFormat::DerX509SubjectPublicKeyInfo as i32
         && key.key_spec == SigningKeySpec::EcCurve25519 as i32;
 

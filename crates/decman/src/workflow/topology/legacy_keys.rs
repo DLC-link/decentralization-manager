@@ -1,9 +1,11 @@
 use std::{collections::HashSet, time::Duration};
 
 use canton_proto_rs::com::digitalasset::canton::{
-    protocol::v30::{PartyToKeyMapping, PartyToParticipant, enums, topology_mapping},
+    protocol::v30::{
+        PartyToKeyMapping, PartyToParticipant, TopologyMapping, enums, topology_mapping,
+    },
     topology::admin::v30::{
-        AuthorizeRequest, ListPartyToKeyMappingRequest,
+        AuthorizeRequest, ListPartyToKeyMappingRequest, authorize_request,
         list_party_to_key_mapping_response::result::Item as PartyToKeyItem,
         topology_manager_read_service_client::TopologyManagerReadServiceClient,
     },
@@ -71,9 +73,6 @@ fn legacy_retirement_request(
     serial: i32,
     mapping: PartyToKeyMapping,
 ) -> Result<AuthorizeRequest> {
-    use canton_proto_rs::com::digitalasset::canton::{
-        protocol::v30::TopologyMapping, topology::admin::v30::authorize_request,
-    };
     anyhow::ensure!(serial > 0, "Legacy mapping has an invalid serial");
     Ok(AuthorizeRequest {
         r#type: Some(authorize_request::Type::Proposal(
@@ -136,12 +135,15 @@ pub async fn retire_legacy_keys_and_wait(config: &NodeConfig, party: &CantonId) 
 
 #[cfg(test)]
 mod tests {
+    use canton_proto_rs::com::digitalasset::canton::crypto::v30::{
+        SigningKeysWithThreshold, SigningPublicKey,
+    };
+
     use super::*;
 
     #[test]
     #[allow(deprecated)]
     fn legacy_retirement_removes_the_exact_mapping_at_the_next_serial() -> Result {
-        use canton_proto_rs::com::digitalasset::canton::topology::admin::v30::authorize_request;
         let mapping = PartyToKeyMapping {
             party: "party".into(),
             ..Default::default()
@@ -173,9 +175,6 @@ mod tests {
 
     #[test]
     fn legacy_retirement_requires_usable_inline_keys() -> Result {
-        use canton_proto_rs::com::digitalasset::canton::crypto::v30::{
-            SigningKeysWithThreshold, SigningPublicKey,
-        };
         let legacy = PartyToKeyMapping {
             party: "party".into(),
             ..Default::default()

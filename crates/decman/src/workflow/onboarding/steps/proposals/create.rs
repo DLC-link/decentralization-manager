@@ -12,6 +12,7 @@ use canton_proto_rs::com::digitalasset::canton::{
     },
 };
 use prost::Message;
+use sha2::{Digest, Sha256};
 use sqlx::SqlitePool;
 
 use crate::{
@@ -497,8 +498,6 @@ pub(crate) fn decode_keys_payload(payload: &[u8]) -> Result<Vec<SigningPublicKey
 ///
 /// The decentralized namespace is returned in multihash format with "1220" prefix
 pub(crate) fn compute_decentralized_namespace(namespaces: &HashSet<String>) -> String {
-    use sha2::{Digest, Sha256};
-
     // HashPurpose.DecentralizedNamespaceNamespace = 37
     const PURPOSE_DECENTRALIZED_NAMESPACE: i32 = 37;
 

@@ -445,16 +445,15 @@ where
 
 #[cfg(test)]
 mod tests {
-    use canton_proto_rs::com::digitalasset::canton::protocol::v30::{
-        DecentralizedNamespaceDefinition, enums,
+    use canton_proto_rs::com::digitalasset::canton::{
+        crypto::v30::Signature,
+        protocol::v30::{DecentralizedNamespaceDefinition, TopologyMapping, enums},
     };
 
     use super::*;
 
     #[test]
     fn dedupe_signatures_keeps_first_per_fingerprint() {
-        use canton_proto_rs::com::digitalasset::canton::crypto::v30::Signature;
-
         let sig = |signed_by: &str| Signature {
             signed_by: signed_by.to_string(),
             ..Default::default()
@@ -477,7 +476,6 @@ mod tests {
     }
 
     fn namespace_change(serial: u32, threshold: i32) -> TopologyTransaction {
-        use canton_proto_rs::com::digitalasset::canton::protocol::v30::TopologyMapping;
         TopologyTransaction {
             operation: enums::TopologyChangeOp::AddReplace as i32,
             serial,

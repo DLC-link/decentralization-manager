@@ -395,6 +395,8 @@ mod tests {
     };
 
     use bytes::Bytes;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tracing_subscriber::layer::SubscriberExt;
 
     use super::*;
     use crate::{
@@ -506,8 +508,6 @@ mod tests {
     /// devnet, so a decman-wide error alert would fire all day (#362).
     #[tokio::test]
     async fn retry_exhaustion_logs_no_error() -> anyhow::Result<()> {
-        use tracing_subscriber::layer::SubscriberExt;
-
         let levels = Arc::new(std::sync::Mutex::new(Vec::new()));
         let subscriber = tracing_subscriber::registry().with(Levels(levels.clone()));
         let _guard = tracing::subscriber::set_default(subscriber);
@@ -718,7 +718,6 @@ mod tests {
         mut client: TcpStream,
         server: std::net::SocketAddr,
     ) -> std::io::Result<()> {
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
         let mut server = TcpStream::connect(server).await?;
         let (mut client_read, mut client_write) = client.split();
         let (mut server_read, mut server_write) = server.split();
