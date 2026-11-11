@@ -21,7 +21,10 @@
 //! later. DecMan then still reads those rows with the derived key, and it
 //! re-encrypts each one under the file's key when it first reads it.
 
-use std::path::{Path, PathBuf};
+use std::{
+    io,
+    path::{Path, PathBuf},
+};
 
 use aes_gcm::{
     Aes256Gcm, KeyInit,
@@ -32,12 +35,13 @@ use base64::{Engine, engine::general_purpose::STANDARD};
 use canton_proto_rs::com::digitalasset::canton::crypto::v30::{Signature, SigningPublicKey};
 use ed25519_dalek::SigningKey;
 use sqlx::SqlitePool;
-use tokio::io::AsyncWriteExt;
+use tokio::{fs::OpenOptions, io::AsyncWriteExt};
 use zeroize::Zeroizing;
 
 use crate::{
     canton_id::{CantonId, Fingerprint},
     config::NodeConfig,
+    db::crypto,
     error::Result,
     signing::{
         PreparedTransactionHash, SigningError, SigningKeyContext, TransactionSigner,
@@ -89,7 +93,7 @@ impl KeyStore {
     /// Errors when a configured key file is missing or unreadable, or when a
     /// key file does not hold a 32-byte key.
     pub async fn open(config: &NodeConfig, db: SqlitePool) -> Result<Option<Self>> {
-        let derived = crate::db::crypto::derive_key(DERIVED_KEY_LABEL);
+        let derived = crypto::derive_key(DERIVED_KEY_LABEL);
         let (key, derived) = if let Some(path) = &config.key_store_key_file {
             (read_key_file(path).await?, derived)
         } else if let Some(key) = derived {
@@ -327,8 +331,7 @@ async fn read_or_create_default(path: &PathBuf) -> Result<Zeroizing<[u8; 32]>> {
     let encoded = Zeroizing::new(STANDARD.encode(key.as_slice()));
     if let Err(e) = write_private(path, encoded.as_bytes()).await {
         // Another process created the file first, so use its key.
-        if e.downcast_ref::<std::io::Error>().map(std::io::Error::kind)
-            == Some(std::io::ErrorKind::AlreadyExists)
+        if e.downcast_ref::<io::Error>().map(io::Error::kind) == Some(io::ErrorKind::AlreadyExists)
         {
             return read_key_file(path).await;
         }
@@ -352,7 +355,7 @@ async fn write_private(path: &Path, contents: &[u8]) -> Result {
     let mut temporary = path.as_os_str().to_owned();
     temporary.push(format!(".tmp-{}", hex::encode(suffix)));
     let temporary = PathBuf::from(temporary);
-    let mut options = tokio::fs::OpenOptions::new();
+    let mut options = OpenOptions::new();
     options.write(true).create_new(true);
     #[cfg(unix)]
     options.mode(0o600);

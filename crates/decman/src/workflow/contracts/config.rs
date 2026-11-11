@@ -1,3 +1,4 @@
+use common::api::ContractDeploymentIntent;
 use serde::{Deserialize, Serialize};
 
 /// Wire DTOs for contract / DAR deployment. Defined in `common::api` (the
@@ -40,7 +41,7 @@ pub struct CommittedDeployment {
     /// The party threshold that unset `GovernanceThreshold` fields resolved to
     pub governance_threshold: i64,
     /// One create commitment per contract, in contract order
-    pub intents: Vec<common::api::ContractDeploymentIntent>,
+    pub intents: Vec<ContractDeploymentIntent>,
 }
 
 impl ContractsConfig {

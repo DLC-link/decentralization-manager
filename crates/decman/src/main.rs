@@ -3,7 +3,7 @@ mod cli;
 use std::{path::PathBuf, process::ExitCode};
 
 use dec_party_manager::{config::NodeConfig, db, error::Result, utils};
-use tracing_subscriber::{filter::EnvFilter, prelude::*};
+use tracing_subscriber::{filter::EnvFilter, fmt::MakeWriter, prelude::*, registry::LookupSpan};
 
 use cli::{Cli, Commands, Parser};
 
@@ -41,8 +41,8 @@ fn json_logs_enabled(format: Option<&str>) -> bool {
 /// the layer applies even when stdout is not a terminal.
 fn json_layer<S, W>(writer: W) -> impl tracing_subscriber::Layer<S>
 where
-    S: tracing::Subscriber + for<'a> tracing_subscriber::registry::LookupSpan<'a>,
-    W: for<'a> tracing_subscriber::fmt::MakeWriter<'a> + 'static,
+    S: tracing::Subscriber + for<'a> LookupSpan<'a>,
+    W: for<'a> MakeWriter<'a> + 'static,
 {
     tracing_subscriber::fmt::layer()
         .json()
@@ -157,7 +157,10 @@ fn init_logging() {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::{Arc, Mutex};
+    use std::{
+        io,
+        sync::{Arc, Mutex},
+    };
 
     use anyhow::anyhow;
     use tracing_subscriber::{fmt::MakeWriter, prelude::*};
@@ -168,17 +171,17 @@ mod tests {
     #[derive(Clone, Default)]
     struct SharedBuffer(Arc<Mutex<Vec<u8>>>);
 
-    impl std::io::Write for SharedBuffer {
-        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+    impl io::Write for SharedBuffer {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
             let mut written = self
                 .0
                 .lock()
-                .map_err(|_| std::io::Error::other("the buffer lock is poisoned"))?;
+                .map_err(|_| io::Error::other("the buffer lock is poisoned"))?;
             written.extend_from_slice(buf);
             Ok(buf.len())
         }
 
-        fn flush(&mut self) -> std::io::Result<()> {
+        fn flush(&mut self) -> io::Result<()> {
             Ok(())
         }
     }

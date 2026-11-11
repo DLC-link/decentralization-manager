@@ -92,7 +92,7 @@ pub(super) async fn capture_replication_offsets(
     new_hosts: &[CantonId],
     base_serial: u32,
     ledger_token: Option<&str>,
-) -> std::result::Result<(), AddHostsError> {
+) -> Result<(), AddHostsError> {
     for host in new_hosts {
         let target =
             replication_target(party_id, host, base_serial).map_err(AddHostsError::Invalid)?;

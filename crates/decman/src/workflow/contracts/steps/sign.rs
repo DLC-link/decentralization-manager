@@ -18,6 +18,7 @@ use canton_proto_rs::com::{
         },
     },
 };
+use common::api::ContractDeploymentIntent;
 use decman_lib::canton_hash;
 use sqlx::SqlitePool;
 
@@ -56,7 +57,7 @@ pub async fn sign_submissions(
     db: &SqlitePool,
     instance_name: &str,
     dec_party_id: &CantonId,
-    intents: &[common::api::ContractDeploymentIntent],
+    intents: &[ContractDeploymentIntent],
 ) -> Result {
     tracing::info!("Signing submissions...");
     anyhow::ensure!(
@@ -301,7 +302,7 @@ pub async fn own_daml_key(
 
 fn verify_deployment_intent(
     prepared: &PrepareSubmissionResponse,
-    intent: &common::api::ContractDeploymentIntent,
+    intent: &ContractDeploymentIntent,
 ) -> Result {
     let transaction = prepared
         .prepared_transaction
@@ -541,13 +542,15 @@ pub async fn backfill_peer_keys(
 #[cfg(test)]
 mod deployment_intent_tests {
     use canton_proto_rs::com::daml::ledger::api::v2::{
-        Identifier, Record, RecordField, Value,
+        GenMap, Identifier, Optional, Record, RecordField, Value,
+        gen_map::Entry,
         interactive::{
             DamlTransaction, PreparedTransaction, daml_transaction,
             transaction::v1::{self, node::NodeType},
         },
         value,
     };
+    use common::api::ContractDeploymentIntent;
 
     use super::*;
 
@@ -568,11 +571,9 @@ mod deployment_intent_tests {
     #[test]
     fn argument_commitments_match_lf_trailing_none_normalization() -> Result {
         let optional = |inner: Option<Value>| Value {
-            sum: Some(value::Sum::Optional(Box::new(
-                canton_proto_rs::com::daml::ledger::api::v2::Optional {
-                    value: inner.map(Box::new),
-                },
-            ))),
+            sum: Some(value::Sum::Optional(Box::new(Optional {
+                value: inner.map(Box::new),
+            }))),
         };
         let record = |values: Vec<Value>| Value {
             sum: Some(value::Sum::Record(Record {
@@ -615,7 +616,7 @@ mod deployment_intent_tests {
 
     #[test]
     fn only_the_accepted_create_can_be_signed() -> Result {
-        let intent = common::api::ContractDeploymentIntent {
+        let intent = ContractDeploymentIntent {
             package_id: "a".repeat(64),
             module_name: "Governance".into(),
             entity_name: "Rules".into(),
@@ -700,19 +701,15 @@ mod deployment_intent_tests {
         );
         let entries: Vec<_> = ["alice", "bob"]
             .into_iter()
-            .map(
-                |party| canton_proto_rs::com::daml::ledger::api::v2::gen_map::Entry {
-                    key: Some(Value {
-                        sum: Some(value::Sum::Party(party.into())),
-                    }),
-                    value: Some(enriched.clone()),
-                },
-            )
+            .map(|party| Entry {
+                key: Some(Value {
+                    sum: Some(value::Sum::Party(party.into())),
+                }),
+                value: Some(enriched.clone()),
+            })
             .collect();
         let map = |entries| Value {
-            sum: Some(value::Sum::GenMap(
-                canton_proto_rs::com::daml::ledger::api::v2::GenMap { entries },
-            )),
+            sum: Some(value::Sum::GenMap(GenMap { entries })),
         };
         assert_eq!(
             canton_hash::hash_value(&map(entries.clone()))?,

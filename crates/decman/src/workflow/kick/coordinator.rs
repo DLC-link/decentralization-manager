@@ -1,6 +1,7 @@
 use std::{collections::HashSet, sync::Arc};
 
 use anyhow::Context;
+use tokio::time::Duration;
 
 use super::{
     ARTIFACTS, KickConfig, KickStep,
@@ -13,8 +14,9 @@ use crate::{
     server::{WorkflowInstance, peer_status::LastSeen},
     utils,
     workflow::{
+        run_workflow_with_handler,
         storage::{WorkflowStorage, artifact_kinds},
-        topology::store_signed_pairs,
+        topology::{retire_legacy_keys_and_wait, store_signed_pairs},
     },
 };
 
@@ -65,7 +67,7 @@ pub async fn start_coordinator(
 
                 match current_step {
                     KickStep::WaitingForPeers => {
-                        tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+                        tokio::time::sleep(Duration::from_secs(1)).await;
                     }
                     KickStep::ExportState => {
                         if !coordinator_completed_steps.contains(&KickStep::ExportState) {
@@ -74,7 +76,7 @@ pub async fn start_coordinator(
                             coordinator_completed_steps.insert(KickStep::ExportState);
                             workflow_state.advance_step().await;
                         }
-                        tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+                        tokio::time::sleep(Duration::from_secs(1)).await;
                     }
                     KickStep::CreateProposals => {
                         tracing::info!("Coordinator executing: Create proposals");
@@ -109,7 +111,7 @@ pub async fn start_coordinator(
                         workflow_state.advance_step().await;
                     }
                     KickStep::SignProposals => {
-                        tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+                        tokio::time::sleep(Duration::from_secs(1)).await;
                     }
                     KickStep::SubmitKick => {
                         tracing::info!("Coordinator executing: Submit kick");
@@ -150,7 +152,7 @@ pub async fn start_coordinator(
                         workflow_state.advance_step().await;
                     }
                     KickStep::RetireLegacyKeys => {
-                        crate::workflow::topology::retire_legacy_keys_and_wait(
+                        retire_legacy_keys_and_wait(
                             &node_config,
                             &kick_config.decentralized_party_id,
                         )
@@ -160,7 +162,7 @@ pub async fn start_coordinator(
                     KickStep::Complete => {
                         tracing::info!("Kick workflow complete!");
                         tracing::debug!("Waiting for peers to receive Disconnect command...");
-                        tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+                        tokio::time::sleep(Duration::from_secs(2)).await;
                         break;
                     }
                 }
@@ -170,10 +172,5 @@ pub async fn start_coordinator(
         })
     };
 
-    crate::workflow::run_workflow_with_handler(
-        ActiveWorkflow::Kick(server),
-        instance,
-        coordinator_workflow,
-    )
-    .await
+    run_workflow_with_handler(ActiveWorkflow::Kick(server), instance, coordinator_workflow).await
 }

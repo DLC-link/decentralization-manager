@@ -1,3 +1,5 @@
+use std::future::Future;
+
 use futures::StreamExt;
 
 pub use crate::canton::{
@@ -50,7 +52,7 @@ pub fn version_at_least(v: &str, min: &str) -> bool {
 /// misconfigured bound.
 pub async fn bounded_ordered<T, F>(limit: usize, tasks: impl Iterator<Item = F>) -> Vec<T>
 where
-    F: std::future::Future<Output = anyhow::Result<T>>,
+    F: Future<Output = anyhow::Result<T>>,
 {
     futures::stream::iter(tasks)
         .buffered(limit.max(1))

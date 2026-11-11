@@ -331,7 +331,10 @@ mod tests {
     use common::api::HostPermission;
 
     use super::*;
-    use crate::workflow::external_party::add_hosts::{mapping::add_hosts_mapping, test_support::*};
+    use crate::{
+        utils,
+        workflow::external_party::add_hosts::{mapping::add_hosts_mapping, test_support::*},
+    };
 
     // ------------------------------------------------------------------
     // The validator
@@ -734,7 +737,7 @@ mod tests {
             ],
             ..Default::default()
         };
-        let fingerprint = crate::utils::compute_fingerprint(&key);
+        let fingerprint = utils::compute_fingerprint(&key);
         let party = format!("alice::{fingerprint}");
         let current = CurrentPartyTopology {
             serial: 4,

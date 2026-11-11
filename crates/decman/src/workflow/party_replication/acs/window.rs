@@ -11,6 +11,7 @@ use canton_proto_rs::com::digitalasset::canton::admin::{
     sequencer::v30::SequencerConnectionValidation,
 };
 use sqlx::SqlitePool;
+use tonic::transport::Channel;
 
 use super::import::DISCONNECT_FIRST_MARKER;
 use crate::{
@@ -141,7 +142,7 @@ pub(crate) async fn manual_connect_enabled(config: &NodeConfig) -> Result<bool> 
 }
 
 async fn registered_connection(
-    connectivity: &mut SynchronizerConnectivityServiceClient<tonic::transport::Channel>,
+    connectivity: &mut SynchronizerConnectivityServiceClient<Channel>,
     alias: &str,
 ) -> Result<SynchronizerConnectionConfig> {
     connectivity

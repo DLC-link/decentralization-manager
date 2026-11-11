@@ -8,7 +8,7 @@
 //!
 //! Run via `just gen-types` (`cargo run -p decman --features typegen --bin gen-types`).
 
-use std::{fs, path::PathBuf};
+use std::{error::Error, fs, path::PathBuf};
 
 // The wire DTOs live across `common` (api + shared types) and `decman`
 // (governance/decimal cluster + node config). Glob the `common` modules; the
@@ -34,7 +34,7 @@ use dec_party_manager::{
 };
 use ts_rs::{Config, TS};
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
+fn main() -> Result<(), Box<dyn Error>> {
     let tmp = std::env::temp_dir().join("decman-ts-bindings");
     let _ = fs::remove_dir_all(&tmp);
     fs::create_dir_all(&tmp)?;
@@ -260,7 +260,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // the value is written down.
     blocks.push(format!(
         "export const PAGE_SIZE = {page_size};",
-        page_size = common::api::PAGE_SIZE
+        page_size = PAGE_SIZE
     ));
 
     let header = "// Code generated from the Rust wire DTOs by `gen-types` (ts-rs).\n\

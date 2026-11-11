@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use anyhow::Context;
+use tokio::time::Duration;
 
 use super::{
     ContractsConfig, ContractsStep,
@@ -10,10 +11,11 @@ use crate::{
     auth::WorkflowAuth,
     config::{NetworkConfig, NodeConfig},
     error::Result,
-    noise::server::{ActiveWorkflow, NoiseServer},
+    noise::server::{ActiveWorkflow, NoiseServer, lookup_party_threshold},
     server::{WorkflowInstance, peer_status::LastSeen},
     utils,
     workflow::{
+        run_workflow_with_handler,
         state::WorkflowState,
         storage::{WorkflowStorage, artifact_kinds},
     },
@@ -58,12 +60,7 @@ pub async fn start_coordinator(
         .await
     });
 
-    crate::workflow::run_workflow_with_handler(
-        ActiveWorkflow::Contracts(server),
-        instance,
-        workflow_handle,
-    )
-    .await
+    run_workflow_with_handler(ActiveWorkflow::Contracts(server), instance, workflow_handle).await
 }
 
 async fn run_workflow(
@@ -81,8 +78,7 @@ async fn run_workflow(
     // SignSubmissions) would otherwise wait for a peer that may never connect;
     // the coordinator advances them itself below. Any other threshold (or an
     // unresolved one) falls back to the normal peer wait.
-    let coordinator_only =
-        crate::noise::server::lookup_party_threshold(&db, &dec_party_id).await == Some(1);
+    let coordinator_only = lookup_party_threshold(&db, &dec_party_id).await == Some(1);
 
     // Auth handle for the decentralized party. We deliberately fetch a fresh
     // token at each ledger-touching step rather than caching one snapshot up
@@ -103,7 +99,7 @@ async fn run_workflow(
                         .advance_step_if(ContractsStep::WaitingForPeers)
                         .await;
                 }
-                tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+                tokio::time::sleep(Duration::from_secs(1)).await;
             }
             ContractsStep::PrepareSubmissions => {
                 tracing::info!("Coordinator executing: Prepare submissions");
@@ -142,7 +138,7 @@ async fn run_workflow(
                         .advance_step_if(ContractsStep::SignSubmissions)
                         .await;
                 }
-                tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+                tokio::time::sleep(Duration::from_secs(1)).await;
             }
             ContractsStep::ExecuteSubmissions => {
                 tracing::info!("Coordinator executing: Execute submissions");
@@ -178,7 +174,7 @@ async fn run_workflow(
             }
             ContractsStep::Complete => {
                 tracing::info!("Contracts workflow complete!");
-                tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+                tokio::time::sleep(Duration::from_secs(5)).await;
                 break;
             }
         }

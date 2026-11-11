@@ -138,7 +138,7 @@ pub async fn authorize_threshold(
     party_id: &str,
     new_threshold: u32,
     base_serial: u32,
-) -> std::result::Result<u32, AddHostsError> {
+) -> Result<u32, AddHostsError> {
     let Some(current) = read_party_to_participant(config, party_id)
         .await
         .map_err(AddHostsError::Canton)?
@@ -235,7 +235,7 @@ pub async fn prepare_threshold(
     party_id: &str,
     new_threshold: u32,
     base_serial: u32,
-) -> std::result::Result<PreparedThreshold, AddHostsError> {
+) -> Result<PreparedThreshold, AddHostsError> {
     let synchronizer_id = utils::get_synchronizer_id(config)
         .await
         .map_err(AddHostsError::Canton)?;
@@ -344,7 +344,7 @@ pub fn validate_threshold_topology(
 pub async fn submit_threshold(
     config: &NodeConfig,
     bundle: &ExternalPartyThresholdPayload,
-) -> std::result::Result<u32, AddHostsError> {
+) -> Result<u32, AddHostsError> {
     let current = read_pinned(config, &bundle.party_id, bundle.base_serial).await?;
     validate_threshold_topology(&current, bundle).map_err(AddHostsError::Invalid)?;
 

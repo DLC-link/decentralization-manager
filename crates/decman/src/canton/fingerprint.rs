@@ -58,7 +58,7 @@ pub fn compute_fingerprint(key: &SigningPublicKey) -> Fingerprint {
 
 #[cfg(test)]
 mod tests {
-    use base64::Engine;
+    use base64::{Engine, engine::general_purpose::STANDARD};
     use canton_proto_rs::com::digitalasset::canton::crypto::v30::{
         CryptoKeyFormat, SigningKeySpec,
     };
@@ -70,9 +70,7 @@ mod tests {
     fn spki_key(der_b64: &str, key_spec: SigningKeySpec) -> SigningPublicKey {
         SigningPublicKey {
             format: CryptoKeyFormat::DerX509SubjectPublicKeyInfo as i32,
-            public_key: base64::engine::general_purpose::STANDARD
-                .decode(der_b64)
-                .unwrap(),
+            public_key: STANDARD.decode(der_b64).unwrap(),
             key_spec: key_spec as i32,
             usage: vec![],
             // deprecated scheme field

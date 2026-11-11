@@ -3,7 +3,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
+use jsonwebtoken::{Algorithm, EncodingKey, Header, encode, errors};
 use serde::Serialize;
 use tokio::sync::RwLock;
 
@@ -42,11 +42,7 @@ struct UnsafeClaims<'a> {
 /// # Errors
 ///
 /// Returns a `jsonwebtoken` error if token encoding fails.
-fn mint_unsafe_token(
-    secret: &str,
-    audience: &str,
-    subject: &str,
-) -> Result<String, jsonwebtoken::errors::Error> {
+fn mint_unsafe_token(secret: &str, audience: &str, subject: &str) -> Result<String, errors::Error> {
     let iat = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())

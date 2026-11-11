@@ -21,6 +21,7 @@ use canton_proto_rs::com::digitalasset::canton::{
 };
 use prost::Message;
 use sqlx::SqlitePool;
+use tonic::transport::Channel;
 
 use crate::{
     canton_id::Fingerprint,
@@ -138,7 +139,7 @@ pub async fn generate_keys(
 /// `pub(crate)` so the add-party workflow's new-member key generation reuses
 /// the exact same idempotent path instead of duplicating it.
 pub(crate) async fn get_or_create_signing_key(
-    vault_client: &mut VaultServiceClient<tonic::transport::Channel>,
+    vault_client: &mut VaultServiceClient<Channel>,
     name: &str,
     usage: SigningKeyUsage,
 ) -> Result<(SigningPublicKey, bool)> {

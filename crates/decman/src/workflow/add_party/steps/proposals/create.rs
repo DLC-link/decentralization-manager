@@ -15,6 +15,7 @@ use canton_proto_rs::com::digitalasset::canton::{
 use sqlx::SqlitePool;
 
 use crate::{
+    canton_id::CantonId,
     config::NodeConfig,
     db::schema::SchemaRead,
     error::Result,
@@ -338,7 +339,7 @@ fn add_host(current: &[HostingParticipant], new_member_id: &str) -> Vec<HostingP
 /// is the only source for that one member.
 async fn is_former_host(
     storage: &SqlitePool,
-    party_id: &crate::canton_id::CantonId,
+    party_id: &CantonId,
     new_member_id: &str,
     current_members: &[String],
     own: (&str, Option<&str>),
@@ -449,7 +450,7 @@ fn adds_host(
 /// accounted for without knowing its namespace.
 async fn recorded_namespace_keys(
     storage: &SqlitePool,
-    party_id: &crate::canton_id::CantonId,
+    party_id: &CantonId,
 ) -> Result<BTreeMap<String, String>> {
     let mut recorded = BTreeMap::new();
     for (member, payload) in storage

@@ -4,6 +4,7 @@ use anyhow::Context;
 use dec_party_manager::{
     canton_id::CantonId,
     config::{Auth0Config, CantonTlsConfig, KeycloakConfig, NodeConfig},
+    db::crypto::{self, MIN_DERIVING_PASSPHRASE_CHARS},
     error::Result,
 };
 
@@ -61,13 +62,13 @@ impl Commands {
             ..
         } = self;
         if let Some(key) = db_encryption_key {
-            dec_party_manager::db::crypto::init_key(key);
+            crypto::init_key(key);
             tracing::info!("Database encryption enabled");
-            if key_store_key_file.is_none() && !dec_party_manager::db::crypto::derives_keys(key) {
+            if key_store_key_file.is_none() && !crypto::derives_keys(key) {
                 tracing::warn!(
                     "DECPM_DB_ENCRYPTION_KEY has fewer than {} characters, so DecMan does \
                      not derive the key store's key from it",
-                    dec_party_manager::db::crypto::MIN_DERIVING_PASSPHRASE_CHARS
+                    MIN_DERIVING_PASSPHRASE_CHARS
                 );
             }
         }
@@ -302,6 +303,8 @@ impl Commands {
 
 #[cfg(test)]
 mod tests {
+    use std::path::Path;
+
     use dec_party_manager::config::NodeConfig;
 
     use super::*;
@@ -466,7 +469,7 @@ mod tests {
         assert_eq!(config.tenant_rate_limit_per_minute, 23);
         assert_eq!(
             config.key_store_key_file.as_deref(),
-            Some(std::path::Path::new("/keys/store.key"))
+            Some(Path::new("/keys/store.key"))
         );
         assert!(config.insecure);
         assert_eq!(config.insecure_auth.secret, "hmac-secret");

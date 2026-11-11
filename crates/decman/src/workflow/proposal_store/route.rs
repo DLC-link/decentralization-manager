@@ -1,3 +1,5 @@
+use tonic::transport;
+
 use crate::error::Result;
 
 /// What the replay into a temporary store came to.
@@ -59,7 +61,7 @@ pub(super) fn rebuild_outcome(result: &Result<usize>) -> RebuildOutcome {
 /// from Canton refusing what it was asked.
 pub(super) fn is_unreachable(error: &anyhow::Error) -> bool {
     error.chain().any(|cause| {
-        cause.downcast_ref::<tonic::transport::Error>().is_some()
+        cause.downcast_ref::<transport::Error>().is_some()
             || cause
                 .downcast_ref::<tonic::Status>()
                 .is_some_and(|status| is_transport_code(status.code()))

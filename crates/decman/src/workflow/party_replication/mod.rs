@@ -24,6 +24,8 @@ pub mod onboarding_flag;
 pub mod pipe;
 pub mod relay;
 
+use std::time::{SystemTime, UNIX_EPOCH};
+
 use sqlx::SqlitePool;
 
 use crate::{canton_id::CantonId, error::Result, workflow::storage::WorkflowStorage};
@@ -38,8 +40,8 @@ pub use acs::{
 /// Progress timestamps only, so a clock that misbehaves costs a wrong elapsed
 /// readout and nothing else.
 pub fn now_ms() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
         .map(|d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX))
         .unwrap_or(0)
 }
@@ -167,8 +169,8 @@ impl ReplicationTarget {
             }
             ArtifactStore::Tenant => {
                 let scope = scope.unwrap_or_default();
-                let now = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
+                let now = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
                     .map(|d| d.as_secs() as i64)
                     .unwrap_or_default();
                 let result = sqlx::query(
@@ -207,8 +209,8 @@ impl ReplicationTarget {
             }
             ArtifactStore::Tenant => {
                 let scope = scope.unwrap_or_default();
-                let now = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
+                let now = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
                     .map(|d| d.as_secs() as i64)
                     .unwrap_or_default();
                 sqlx::query(

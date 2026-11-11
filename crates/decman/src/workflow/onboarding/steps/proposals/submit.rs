@@ -1,4 +1,7 @@
-use std::collections::HashSet;
+use std::{
+    collections::HashSet,
+    time::{Duration, SystemTime, UNIX_EPOCH},
+};
 
 use canton_proto_rs::com::digitalasset::canton::{
     protocol::v30::{DecentralizedNamespaceDefinition, SignedTopologyTransaction},
@@ -274,10 +277,10 @@ pub async fn submit_final_proposals(
 
     tracing::info!("P2P proposal submitted and confirmed in topology successfully");
 
-    let now = std::time::SystemTime::now();
-    let effective_system_time = std::time::UNIX_EPOCH
-        + std::time::Duration::from_secs(effective_time.seconds as u64)
-        + std::time::Duration::from_nanos(effective_time.nanos as u64);
+    let now = SystemTime::now();
+    let effective_system_time = UNIX_EPOCH
+        + Duration::from_secs(effective_time.seconds as u64)
+        + Duration::from_nanos(effective_time.nanos as u64);
 
     if let Ok(wait_duration) = effective_system_time.duration_since(now) {
         tracing::info!(

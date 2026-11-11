@@ -1,3 +1,5 @@
+use std::time::{SystemTime, UNIX_EPOCH};
+
 use sqlx::SqlitePool;
 
 use crate::{
@@ -61,8 +63,8 @@ pub(super) async fn persist_peer_step(
     let Some((step_name, step_index, _step_total)) = peer_step_for_command(kind, command) else {
         return;
     };
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0);
     let mut tx = match db.begin_transaction().await {

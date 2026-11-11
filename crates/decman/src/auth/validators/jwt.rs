@@ -641,7 +641,7 @@ mod tests {
             Some(inbound),
             None,
             role_claim.map(str::to_string),
-            std::sync::Arc::new(tokio::sync::RwLock::new(Vec::new())),
+            Arc::new(RwLock::new(Vec::new())),
             reqwest::Client::new(),
         );
         (server, validator, issuer)
@@ -818,7 +818,7 @@ mod tests {
             Some(inbound),
             None,
             None,
-            std::sync::Arc::new(tokio::sync::RwLock::new(Vec::new())),
+            Arc::new(RwLock::new(Vec::new())),
             reqwest::Client::new(),
         );
 
@@ -978,7 +978,7 @@ mod tests {
             Some(keycloak.clone()),
             Some(auth0.clone()),
             None,
-            std::sync::Arc::new(tokio::sync::RwLock::new(Vec::new())),
+            Arc::new(RwLock::new(Vec::new())),
             reqwest::Client::new(),
         );
 

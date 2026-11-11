@@ -56,7 +56,7 @@ pub(super) struct GeneratedChange {
 pub(super) async fn read_current(
     config: &NodeConfig,
     party_id: &str,
-) -> std::result::Result<CurrentPartyTopology, AddHostsError> {
+) -> Result<CurrentPartyTopology, AddHostsError> {
     let Some(current) = read_party_to_participant(config, party_id)
         .await
         .map_err(AddHostsError::Canton)?
@@ -78,7 +78,7 @@ pub(super) async fn read_pinned(
     config: &NodeConfig,
     party_id: &str,
     base_serial: u32,
-) -> std::result::Result<CurrentPartyTopology, AddHostsError> {
+) -> Result<CurrentPartyTopology, AddHostsError> {
     let current = read_current(config, party_id).await?;
     if current.serial != base_serial {
         return Err(AddHostsError::StaleSerial {
@@ -102,7 +102,7 @@ pub(super) async fn generate_p2p_change(
     current_serial: u32,
     synchronizer_id: &str,
     mapping: generate_transactions_request::proposal::Mapping,
-) -> std::result::Result<GeneratedChange, AddHostsError> {
+) -> Result<GeneratedChange, AddHostsError> {
     let next_serial = current_serial.checked_add(1).ok_or_else(|| {
         AddHostsError::Invalid(anyhow::anyhow!(
             "{party_id} is at serial {s}, which cannot be advanced",
@@ -184,7 +184,7 @@ pub(super) async fn submit_signed(
     force_changes: Vec<i32>,
     store: StoreId,
     what: &str,
-) -> std::result::Result<(), AddHostsError> {
+) -> Result<(), AddHostsError> {
     let mut client = TopologyManagerWriteServiceClient::new(
         config
             .admin_channel()
@@ -349,6 +349,8 @@ pub(super) fn decode_p2p_change(
 
 #[cfg(test)]
 mod tests {
+    use std::fmt::Debug;
+
     use canton_proto_rs::com::digitalasset::canton::{
         protocol::v30::{NamespaceDelegation, TopologyTransaction},
         version::v1::{UntypedVersionedMessage, untyped_versioned_message},
@@ -402,7 +404,7 @@ mod tests {
         next: 5,
     };
 
-    fn error_text(result: Result<impl std::fmt::Debug>) -> String {
+    fn error_text(result: Result<impl Debug>) -> String {
         match result {
             Ok(value) => panic!("expected an error, got {value:?}"),
             Err(e) => e.to_string(),

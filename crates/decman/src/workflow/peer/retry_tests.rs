@@ -2,8 +2,11 @@
 
 use std::{
     collections::VecDeque,
-    sync::{Arc, Mutex},
-    time::Duration,
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicUsize, Ordering},
+    },
+    time::{Duration, Instant},
 };
 
 use hyper::{Body, Response};
@@ -15,6 +18,7 @@ use crate::{
     canton_id::CantonId,
     config::{NodeConfig, Peer},
     consts::MAX_CONSECUTIVE_STEP_FAILURES,
+    db::{MIGRATOR, connect},
     error::Result,
     noise::{Message, MessageType, NoiseKeypair},
     server::{DeclineInvitationPayload, WorkflowKind},
@@ -24,7 +28,7 @@ use crate::{
 /// What the scripted coordinator saw of one peer run.
 struct PeerRun {
     result: Result,
-    polls: Vec<std::time::Instant>,
+    polls: Vec<Instant>,
     completions: usize,
     /// Failure reports the peer sent after giving up.
     reports: Vec<DeclineInvitationPayload>,
@@ -38,8 +42,8 @@ async fn run_commands(kind: WorkflowKind, commands: Vec<Message>) -> Result<Peer
     let root = tempfile::tempdir()?;
     let mut node = NodeConfig::default().with_root_dir(root.path());
     node.node.participant_id = Some(CantonId::parse(&format!("peer::1220{}", "a".repeat(64)))?);
-    let db = crate::db::connect(&node.db_path()).await?;
-    crate::db::MIGRATOR.run(&db).await?;
+    let db = connect(&node.db_path()).await?;
+    MIGRATOR.run(&db).await?;
     let keys = NoiseKeypair::generate();
     tokio::fs::create_dir_all(node.data_dir()).await?;
     keys.save_to_file(node.key_file_path()).await?;
@@ -68,7 +72,7 @@ async fn run_commands(kind: WorkflowKind, commands: Vec<Message>) -> Result<Peer
     .await?;
 
     let polls = Arc::new(Mutex::new(Vec::new()));
-    let completions = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let completions = Arc::new(AtomicUsize::new(0));
     let reports = Arc::new(Mutex::new(Vec::new()));
     let commands = Arc::new(Mutex::new(VecDeque::from(commands)));
     let server_polls = polls.clone();
@@ -102,14 +106,14 @@ async fn run_commands(kind: WorkflowKind, commands: Vec<Message>) -> Result<Peer
                             polls
                                 .lock()
                                 .map_err(|_| anyhow::anyhow!("poll lock poisoned"))?
-                                .push(std::time::Instant::now());
+                                .push(Instant::now());
                             commands
                                 .lock()
                                 .map_err(|_| anyhow::anyhow!("command lock poisoned"))?
                                 .pop_front()
                                 .unwrap_or_else(|| Message::new_empty(MessageType::Disconnect))
                         } else {
-                            completions.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            completions.fetch_add(1, Ordering::Relaxed);
                             Message::new_empty(MessageType::Wait)
                         };
                         Ok::<_, anyhow::Error>(Response::new(Body::from(reply.to_bytes())))
@@ -160,7 +164,7 @@ async fn run_commands(kind: WorkflowKind, commands: Vec<Message>) -> Result<Peer
     Ok(PeerRun {
         result: outcome?,
         polls,
-        completions: completions.load(std::sync::atomic::Ordering::Relaxed),
+        completions: completions.load(Ordering::Relaxed),
         reports,
     })
 }

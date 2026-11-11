@@ -1,4 +1,5 @@
 use sqlx::SqlitePool;
+use tokio::time::Duration;
 
 use super::{
     failure::{report_departure, retry_peer_step},
@@ -139,7 +140,7 @@ async fn run_peer(
                         "Poll {consecutive_no_workflow}/{MAX_CONSECUTIVE_NO_WORKFLOW_POLLS}: \
                          coordinator has no active workflow yet, retrying"
                     );
-                    tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+                    tokio::time::sleep(Duration::from_secs(5)).await;
                     continue;
                 }
 
@@ -164,7 +165,7 @@ async fn run_peer(
                     );
                 }
 
-                tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+                tokio::time::sleep(Duration::from_secs(5)).await;
                 continue;
             }
         };
@@ -195,8 +196,7 @@ async fn run_peer(
             MessageType::Wait => {
                 tracing::trace!("Received command: Wait");
                 // Coordinator says to wait, poll again after delay
-                tokio::time::sleep(tokio::time::Duration::from_millis(peer_wait_poll_delay_ms()))
-                    .await;
+                tokio::time::sleep(Duration::from_millis(peer_wait_poll_delay_ms())).await;
             }
             MessageType::RetireLegacyKeys => {
                 // The target comes from the accepted invitation, never this command's payload.

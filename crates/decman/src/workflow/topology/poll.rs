@@ -139,6 +139,7 @@ mod tests {
         sync::{Arc, Mutex},
     };
 
+    use tokio::time::Instant;
     use tracing::{
         Event, Level, Subscriber,
         field::{Field, Visit},
@@ -270,7 +271,7 @@ mod tests {
     #[tokio::test]
     async fn sleeps_the_delay_between_two_attempts() {
         let delay = Duration::from_millis(50);
-        let started = tokio::time::Instant::now();
+        let started = Instant::now();
         let _ = poll_until_with(2, delay, poll_log!(), text(), || async {
             Ok(Polled::<()>::Pending("not yet".to_string()))
         })

@@ -6,6 +6,7 @@ pub mod validator;
 
 use std::{
     collections::HashMap,
+    result,
     sync::Arc,
     time::{Duration, SystemTime},
 };
@@ -49,7 +50,7 @@ pub enum AuthError {
     TimedOut(Duration),
 }
 
-type Result<T> = std::result::Result<T, AuthError>;
+type Result<T> = result::Result<T, AuthError>;
 
 /// How long one call to the IdP may take before it fails.
 ///
@@ -518,12 +519,17 @@ impl WorkflowAuth {
 #[cfg(test)]
 mod tests {
     use std::{
+        io,
         sync::{Arc, Mutex},
         time::{Duration, Instant, SystemTime},
     };
 
     use anyhow::anyhow;
-    use common::canton_id::{NAMESPACE_LENGTH, Namespace};
+    use common::{
+        api::PackageConfig,
+        canton_id::{NAMESPACE_LENGTH, Namespace},
+    };
+    use tokio::sync::RwLock;
     use tracing_subscriber::fmt::MakeWriter;
     use wiremock::{
         Mock, MockServer, ResponseTemplate,
@@ -539,17 +545,17 @@ mod tests {
     #[derive(Clone, Default)]
     struct SharedBuffer(Arc<Mutex<Vec<u8>>>);
 
-    impl std::io::Write for SharedBuffer {
-        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+    impl io::Write for SharedBuffer {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
             let mut written = self
                 .0
                 .lock()
-                .map_err(|_| std::io::Error::other("the buffer lock is poisoned"))?;
+                .map_err(|_| io::Error::other("the buffer lock is poisoned"))?;
             written.extend_from_slice(buf);
             Ok(buf.len())
         }
 
-        fn flush(&mut self) -> std::io::Result<()> {
+        fn flush(&mut self) -> io::Result<()> {
             Ok(())
         }
     }
@@ -588,7 +594,7 @@ mod tests {
                 ..KeycloakConfig::default()
             },
             auth0: None,
-            packages: common::api::PackageConfig::default(),
+            packages: PackageConfig::default(),
         }
     }
 
@@ -743,7 +749,7 @@ mod tests {
             }),
             user_id: party.user_id,
             member_party_id: party.member_party_id,
-            state: tokio::sync::RwLock::new(TokenState {
+            state: RwLock::new(TokenState {
                 access_token: "expired".to_string(),
                 refresh_token: "refresh".to_string(),
                 expires_at: SystemTime::UNIX_EPOCH,

@@ -2,6 +2,7 @@ use std::{collections::HashSet, sync::Arc};
 
 use anyhow::Context;
 use sqlx::SqlitePool;
+use tokio::time::Duration;
 
 use super::{
     ARTIFACTS, AddPartyConfig, AddPartyStep, resolve_ledger_token,
@@ -18,9 +19,10 @@ use crate::{
         party_replication::{
             collect_party_package_ids, open_export_session, wait_for_flag_cleared,
         },
+        run_workflow_with_handler,
         state::WorkflowState,
         storage::{WorkflowStorage, artifact_kinds, identity_kinds},
-        topology::store_signed_pairs,
+        topology::{retire_legacy_keys_and_wait, store_signed_pairs},
     },
 };
 
@@ -62,12 +64,7 @@ pub async fn start_coordinator(
         .await
     });
 
-    crate::workflow::run_workflow_with_handler(
-        ActiveWorkflow::AddParty(server),
-        instance,
-        workflow_handle,
-    )
-    .await
+    run_workflow_with_handler(ActiveWorkflow::AddParty(server), instance, workflow_handle).await
 }
 
 async fn run_workflow(
@@ -99,7 +96,7 @@ async fn run_workflow(
             | AddPartyStep::SignClearOnboarding => {
                 // Peer-gated (or connection-gated) — the listener advances the
                 // state as peers report in; the coordinator just idles.
-                tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+                tokio::time::sleep(Duration::from_secs(1)).await;
             }
             AddPartyStep::SyncAcs => {
                 // Peer-gated like the arm above, but two things a resumed
@@ -141,7 +138,7 @@ async fn run_workflow(
                         .set_acs_export(add_party_config.new_participant_id.clone(), session)
                         .await;
                 }
-                tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+                tokio::time::sleep(Duration::from_secs(1)).await;
             }
             AddPartyStep::ExportState => {
                 tracing::info!("Coordinator executing: Export state");
@@ -305,17 +302,14 @@ async fn run_workflow(
                 workflow_state.advance_step().await;
             }
             AddPartyStep::RetireLegacyKeys => {
-                crate::workflow::topology::retire_legacy_keys_and_wait(
-                    &node_config,
-                    &add_party_config.decentralized_party_id,
-                )
-                .await?;
+                retire_legacy_keys_and_wait(&node_config, &add_party_config.decentralized_party_id)
+                    .await?;
                 workflow_state.advance_step().await;
             }
             AddPartyStep::Complete => {
                 tracing::info!("Add-party workflow complete!");
                 tracing::debug!("Waiting for peers to receive Disconnect command...");
-                tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+                tokio::time::sleep(Duration::from_secs(2)).await;
                 break;
             }
         }
@@ -425,7 +419,7 @@ async fn require_complete_or_uploaded(
 
     let missing: Vec<String> = completed
         .iter()
-        .map(std::string::ToString::to_string)
+        .map(ToString::to_string)
         .filter(|peer| !persisted.contains(peer))
         .collect();
 

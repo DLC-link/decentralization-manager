@@ -17,6 +17,7 @@ use canton_proto_rs::com::digitalasset::canton::{
         topology_manager_read_service_client::TopologyManagerReadServiceClient,
     },
 };
+use tonic::transport::Channel;
 
 use super::bounded::bounded_read;
 use crate::{
@@ -43,7 +44,7 @@ const MAX_HOSTED_PARTIES: i32 = 5_000;
 /// participant filter, which is the question discovery actually asks, and
 /// answers with full party IDs the exact-filter path can use.
 pub(crate) async fn discover_hosted_party_ids(
-    aggregation_client: &mut TopologyAggregationServiceClient<tonic::transport::Channel>,
+    aggregation_client: &mut TopologyAggregationServiceClient<Channel>,
     synchronizer_id: &str,
     participant_id: &str,
     prefix_filter: Option<&str>,
@@ -159,7 +160,7 @@ fn parties_in_namespaces(
 
 /// This node's namespace signing-key fingerprints, from the local vault.
 pub(crate) async fn my_namespace_fingerprints(
-    vault_client: &mut VaultServiceClient<tonic::transport::Channel>,
+    vault_client: &mut VaultServiceClient<Channel>,
 ) -> Result<HashSet<String>> {
     let response = bounded_read(
         "list_my_keys",
@@ -194,7 +195,7 @@ pub(crate) async fn my_namespace_fingerprints(
 /// party is only selectable by an in-memory participant filter, while a
 /// namespace is a store-level predicate.
 pub(crate) async fn owned_decentralized_namespaces(
-    topology_client: &mut TopologyManagerReadServiceClient<tonic::transport::Channel>,
+    topology_client: &mut TopologyManagerReadServiceClient<Channel>,
     synchronizer_id: &str,
     my_fingerprints: &HashSet<String>,
 ) -> Result<Vec<DecentralizedNamespaceDefinition>> {

@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 /// Maximum number of retry attempts for topology propagation checks.
 /// Default value; the actual budget is read via [`topology_retry_max_attempts`].
 pub const TOPOLOGY_RETRY_MAX_ATTEMPTS: usize = 30;
@@ -158,7 +160,7 @@ pub const MAX_CONSECUTIVE_NO_WORKFLOW_POLLS: usize = 4;
 /// the ~9-minute ACS block re-ask budget ([`ACS_BLOCK_FETCH_ATTEMPTS`]), so the
 /// coordinator never gives up on a peer that has not yet given up on it. It
 /// also outlasts a pod restart, after which a peer resumes its run.
-pub const PEER_SILENCE_LIMIT: std::time::Duration = std::time::Duration::from_secs(600);
+pub const PEER_SILENCE_LIMIT: Duration = Duration::from_secs(600);
 
 /// Delay before a peer re-polls the coordinator after a `Wait` reply, in
 /// milliseconds.

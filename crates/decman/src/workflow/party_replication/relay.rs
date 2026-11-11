@@ -33,7 +33,7 @@
 
 use std::{
     collections::{HashMap, HashSet},
-    sync::{Arc, PoisonError},
+    sync::{Arc, Mutex as StdMutex, MutexGuard as StdMutexGuard, PoisonError},
     time::Duration,
 };
 
@@ -41,6 +41,7 @@ use futures::future::BoxFuture;
 use sqlx::SqlitePool;
 use tokio::{
     sync::{Mutex, mpsc},
+    task::JoinHandle,
     time::Instant,
 };
 
@@ -104,7 +105,7 @@ struct ImportEntry {
     blocks: mpsc::Sender<PipeBlock>,
     /// Resolves when `import_party_acs` returns, so the POST carrying the final
     /// block can report what happened.
-    task: tokio::task::JoinHandle<Result<()>>,
+    task: JoinHandle<Result<()>>,
     /// The next sequence number this session will accept.
     expected_seq: u64,
     last_touched: Instant,
@@ -122,15 +123,15 @@ pub struct RelaySessions {
     /// A hold is taken while both maps are locked, and a new session checks it
     /// while its own map is locked. That shared lock is what keeps a relay and
     /// a hold from each missing the other.
-    held: std::sync::Mutex<HashSet<String>>,
+    held: StdMutex<HashSet<String>>,
     /// Imports out of the map but still tearing down: the task is finishing,
     /// or reconnecting the participant. A hold must wait for them as well.
     /// Counted per instance, so two teardowns of one transfer each keep their
     /// own mark. Shared with the teardown task that owns each mark.
-    retiring: Arc<std::sync::Mutex<HashMap<String, usize>>>,
+    retiring: Arc<StdMutex<HashMap<String, usize>>>,
     /// Exports between admission and registration, while their Canton stream
     /// opens. Reserved under the exports lock, so a hold sees them too.
-    opening: std::sync::Mutex<HashMap<String, usize>>,
+    opening: StdMutex<HashMap<String, usize>>,
 }
 
 /// Reserves an opening export until it is dropped: after registration, on a
@@ -156,7 +157,7 @@ impl Drop for Opening<'_> {
 /// so the mark lasts exactly as long as the import does, whatever happens to
 /// the caller that started the teardown, and a panic still clears it.
 struct Retiring {
-    marks: Arc<std::sync::Mutex<HashMap<String, usize>>>,
+    marks: Arc<StdMutex<HashMap<String, usize>>>,
     instance_name: String,
 }
 
@@ -225,16 +226,16 @@ impl RelaySessions {
         Self::default()
     }
 
-    fn held(&self) -> std::sync::MutexGuard<'_, HashSet<String>> {
+    fn held(&self) -> StdMutexGuard<'_, HashSet<String>> {
         // Nothing panics while holding the lock, so a poisoned set is intact.
         self.held.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    fn retiring(&self) -> std::sync::MutexGuard<'_, HashMap<String, usize>> {
+    fn retiring(&self) -> StdMutexGuard<'_, HashMap<String, usize>> {
         self.retiring.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    fn opening(&self) -> std::sync::MutexGuard<'_, HashMap<String, usize>> {
+    fn opening(&self) -> StdMutexGuard<'_, HashMap<String, usize>> {
         self.opening.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
@@ -247,7 +248,7 @@ impl RelaySessions {
         instance_name: &str,
         entry: ImportEntry,
         why: &'static str,
-    ) -> tokio::task::JoinHandle<Result<()>> {
+    ) -> JoinHandle<Result<()>> {
         *self
             .retiring()
             .entry(instance_name.to_string())
@@ -271,7 +272,7 @@ impl RelaySessions {
         &self,
         instance_name: &str,
         why: &'static str,
-    ) -> Option<tokio::task::JoinHandle<Result<()>>> {
+    ) -> Option<JoinHandle<Result<()>>> {
         let mut imports = self.imports.lock().await;
         let entry = imports.remove(instance_name)?;
         Some(self.spawn_retirement(instance_name, entry, why))
@@ -312,7 +313,7 @@ impl RelaySessions {
         self: &Arc<Self>,
         party_id: &str,
         belongs: impl Fn(&str) -> bool,
-    ) -> std::result::Result<PartyHold, HoldRefused> {
+    ) -> Result<PartyHold, HoldRefused> {
         let exports = self.exports.lock().await;
         let imports = self.imports.lock().await;
         if exports.keys().any(|name| belongs(name))
@@ -732,7 +733,7 @@ fn spawn_import(
     target: ReplicationTarget,
     required_package_ids: Vec<String>,
     rx: mpsc::Receiver<PipeBlock>,
-) -> tokio::task::JoinHandle<Result<()>> {
+) -> JoinHandle<Result<()>> {
     tokio::spawn(async move {
         let rx = Arc::new(Mutex::new(rx));
         import_party_acs(
@@ -781,10 +782,20 @@ pub async fn reap_forever(sessions: Arc<RelaySessions>) {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::{
+        Mutex as StdMutex,
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+    };
+
+    use tokio::{
+        sync::oneshot::{self, Receiver, Sender},
+        task::JoinHandle,
+    };
+
     use super::*;
     use crate::{
         canton_id::CantonId,
-        workflow::party_replication::{ArtifactStore, ReplicationArtifacts},
+        workflow::party_replication::{ArtifactStore, ReplicationArtifacts, pipe::PipeTrailer},
     };
 
     const DISCARDED: &str = "the copy was discarded";
@@ -928,7 +939,7 @@ mod tests {
     #[tokio::test]
     async fn an_import_still_retiring_blocks_a_hold() -> anyhow::Result<()> {
         let sessions = Arc::new(RelaySessions::new());
-        let (release, released) = tokio::sync::oneshot::channel::<()>();
+        let (release, released) = oneshot::channel::<()>();
         let (blocks, _rx) = mpsc::channel(BLOCK_CHANNEL_CAPACITY);
         sessions.imports.lock().await.insert(
             "run-1".to_string(),
@@ -976,7 +987,7 @@ mod tests {
     async fn a_cancelled_teardown_still_blocks_a_hold_until_the_import_ends() -> anyhow::Result<()>
     {
         let sessions = Arc::new(RelaySessions::new());
-        let (release, released) = tokio::sync::oneshot::channel::<()>();
+        let (release, released) = oneshot::channel::<()>();
         let (blocks, _rx) = mpsc::channel(BLOCK_CHANNEL_CAPACITY);
         sessions.imports.lock().await.insert(
             "run-1".to_string(),
@@ -1021,8 +1032,8 @@ mod tests {
 
     /// An import entry for `run-1` whose task ends when the returned sender
     /// fires.
-    async fn blocked_import(sessions: &RelaySessions) -> tokio::sync::oneshot::Sender<()> {
-        let (release, released) = tokio::sync::oneshot::channel::<()>();
+    async fn blocked_import(sessions: &RelaySessions) -> Sender<()> {
+        let (release, released) = oneshot::channel::<()>();
         let (blocks, _rx) = mpsc::channel(BLOCK_CHANNEL_CAPACITY);
         sessions.imports.lock().await.insert(
             "run-1".to_string(),
@@ -1141,7 +1152,7 @@ mod tests {
     #[tokio::test]
     async fn an_opening_export_blocks_a_hold() -> anyhow::Result<()> {
         let sessions = Arc::new(RelaySessions::new());
-        let (release, released) = tokio::sync::oneshot::channel::<()>();
+        let (release, released) = oneshot::channel::<()>();
         let serving = {
             let sessions = Arc::clone(&sessions);
             tokio::spawn(async move {
@@ -1254,25 +1265,22 @@ mod tests {
     /// on the way out. `finished` flips only after that work.
     fn fake_import(
         mut rx: mpsc::Receiver<PipeBlock>,
-        taken: Arc<std::sync::atomic::AtomicUsize>,
-        finished: Arc<std::sync::atomic::AtomicBool>,
-    ) -> tokio::task::JoinHandle<Result<()>> {
+        taken: Arc<AtomicUsize>,
+        finished: Arc<AtomicBool>,
+    ) -> JoinHandle<Result<()>> {
         tokio::spawn(async move {
             while rx.recv().await.is_some() {
-                taken.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                taken.fetch_add(1, Ordering::SeqCst);
             }
             // Stands for reconnect-and-verify: the window during which the old
             // import is still touching the participant.
             tokio::time::sleep(Duration::from_millis(50)).await;
-            finished.store(true, std::sync::atomic::Ordering::SeqCst);
+            finished.store(true, Ordering::SeqCst);
             Ok(())
         })
     }
 
-    fn entry_for(
-        tx: mpsc::Sender<PipeBlock>,
-        task: tokio::task::JoinHandle<Result<()>>,
-    ) -> ImportEntry {
+    fn entry_for(tx: mpsc::Sender<PipeBlock>, task: JoinHandle<Result<()>>) -> ImportEntry {
         ImportEntry {
             blocks: tx,
             task,
@@ -1291,8 +1299,8 @@ mod tests {
     #[tokio::test]
     async fn retiring_an_import_waits_for_it_to_finish_unwinding() {
         let (tx, rx) = mpsc::channel(BLOCK_CHANNEL_CAPACITY);
-        let taken = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let finished = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let taken = Arc::new(AtomicUsize::new(0));
+        let finished = Arc::new(AtomicBool::new(false));
         let task = fake_import(rx, taken.clone(), finished.clone());
 
         if tx
@@ -1310,11 +1318,11 @@ mod tests {
             panic!("retiring a healthy import must not fail: {e}");
         }
         assert!(
-            finished.load(std::sync::atomic::Ordering::SeqCst),
+            finished.load(Ordering::SeqCst),
             "retire returned before the import finished unwinding, so a new import \
              could disconnect the participant underneath it"
         );
-        assert_eq!(taken.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(taken.load(Ordering::SeqCst), 1);
     }
 
     /// The channel is the whole backpressure mechanism: at capacity one, the
@@ -1347,7 +1355,7 @@ mod tests {
     }
 
     /// How an import's `on_end` was called.
-    type Ends = Arc<std::sync::Mutex<Vec<ImportEnd>>>;
+    type Ends = Arc<StdMutex<Vec<ImportEnd>>>;
 
     fn recording(ends: &Ends) -> OnImportEnd {
         let ends = Arc::clone(ends);
@@ -1370,7 +1378,7 @@ mod tests {
     async fn gated_import(
         sessions: &RelaySessions,
         ends: &Ends,
-        gate: tokio::sync::oneshot::Receiver<()>,
+        gate: Receiver<()>,
     ) -> mpsc::Sender<PipeBlock> {
         let (blocks, mut rx) = mpsc::channel::<PipeBlock>(BLOCK_CHANNEL_CAPACITY);
         let task = tokio::spawn(async move {
@@ -1399,7 +1407,7 @@ mod tests {
     async fn a_reaped_import_reports_why_with_its_error() {
         let sessions = RelaySessions::new();
         let ends = Ends::default();
-        let (open, gate) = tokio::sync::oneshot::channel();
+        let (open, gate) = oneshot::channel();
         drop(gated_import(&sessions, &ends, gate).await);
         drop(open);
 
@@ -1423,7 +1431,7 @@ mod tests {
             .await;
         let end = PipeBlock::End {
             seq: 2,
-            trailer: crate::workflow::party_replication::pipe::PipeTrailer {
+            trailer: PipeTrailer {
                 total_len: 0,
                 sha256: String::new(),
             },
@@ -1452,7 +1460,7 @@ mod tests {
     async fn a_cancelled_finish_still_reports_the_end_once() {
         let sessions = Arc::new(RelaySessions::new());
         let ends = Ends::default();
-        let (open, gate) = tokio::sync::oneshot::channel::<()>();
+        let (open, gate) = oneshot::channel::<()>();
         let (blocks, mut rx) = mpsc::channel::<PipeBlock>(BLOCK_CHANNEL_CAPACITY);
         let task = tokio::spawn(async move {
             let _ = gate.await;
@@ -1501,7 +1509,7 @@ mod tests {
     async fn a_final_block_cancelled_before_the_import_takes_it_is_abandoned() {
         let sessions = RelaySessions::new();
         let ends = Ends::default();
-        let (open, gate) = tokio::sync::oneshot::channel();
+        let (open, gate) = oneshot::channel();
         let blocks = gated_import(&sessions, &ends, gate).await;
         // The import is not taking blocks yet, so this one fills the channel.
         if blocks
@@ -1519,7 +1527,7 @@ mod tests {
         }
         let end = PipeBlock::End {
             seq: 3,
-            trailer: crate::workflow::party_replication::pipe::PipeTrailer {
+            trailer: PipeTrailer {
                 total_len: 4,
                 sha256: String::new(),
             },

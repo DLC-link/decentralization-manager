@@ -1,3 +1,7 @@
+use std::time::Duration;
+
+use tokio::time::Instant;
+
 use crate::{
     consts::{MAX_CONSECUTIVE_STEP_FAILURES, PEER_SILENCE_LIMIT},
     error::Result,
@@ -22,7 +26,7 @@ pub(super) async fn report_departure(client: NoiseClient, report: DeclineInvitat
             return;
         }
     };
-    let deadline = tokio::time::Instant::now() + PEER_SILENCE_LIMIT;
+    let deadline = Instant::now() + PEER_SILENCE_LIMIT;
     loop {
         match client.report_failure(payload.clone()).await {
             Ok(()) => return,
@@ -30,10 +34,7 @@ pub(super) async fn report_departure(client: NoiseClient, report: DeclineInvitat
                 tracing::info!("Coordinator no longer runs this workflow; nothing to report");
                 return;
             }
-            Err(e)
-                if is_transient(&e)
-                    && tokio::time::Instant::now() + FAILURE_REPORT_BACKOFF < deadline =>
-            {
+            Err(e) if is_transient(&e) && Instant::now() + FAILURE_REPORT_BACKOFF < deadline => {
                 tracing::warn!("Could not report this peer's failure to the coordinator: {e}");
                 tokio::time::sleep(FAILURE_REPORT_BACKOFF).await;
             }
@@ -46,7 +47,7 @@ pub(super) async fn report_departure(client: NoiseClient, report: DeclineInvitat
 }
 
 /// Pause between attempts to report a peer's failure.
-pub(super) const FAILURE_REPORT_BACKOFF: std::time::Duration = std::time::Duration::from_secs(10);
+pub(super) const FAILURE_REPORT_BACKOFF: Duration = Duration::from_secs(10);
 
 /// Apply one retry budget to decoding, authorization, and execution failures.
 /// Control messages do not reset it; only completing (or legitimately skipping)
@@ -71,6 +72,6 @@ pub(super) async fn retry_peer_step(
              ({command:?}): {reason}"
         );
     }
-    tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+    tokio::time::sleep(Duration::from_secs(2)).await;
     Ok(())
 }

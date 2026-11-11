@@ -52,7 +52,7 @@ pub async fn prepare_add_hosts(
     permission: HostPermission,
     base_serial: u32,
     ledger_token: Option<&str>,
-) -> std::result::Result<PreparedAddHosts, AddHostsError> {
+) -> Result<PreparedAddHosts, AddHostsError> {
     let synchronizer_id = utils::get_synchronizer_id(config)
         .await
         .map_err(AddHostsError::Canton)?;

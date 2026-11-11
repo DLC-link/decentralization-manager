@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use sqlx::SqlitePool;
+use tokio::task::JoinHandle;
 
 use crate::{
     auth::WorkflowAuth,
@@ -174,7 +175,7 @@ pub async fn start_coordinator(
 pub async fn run_workflow_with_handler(
     active: ActiveWorkflow,
     instance: Arc<WorkflowInstance>,
-    mut workflow_handle: tokio::task::JoinHandle<Result>,
+    mut workflow_handle: JoinHandle<Result>,
 ) -> Result {
     instance.set_active(active.clone());
     let outcome = tokio::select! {

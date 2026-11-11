@@ -4,6 +4,8 @@
 //! on the target, which is why the capture is once-only and why finding the
 //! offset is three tiers deep rather than one call.
 
+use std::time::SystemTime;
+
 use canton_proto_rs::com::{
     daml::ledger::api::v2::GetLedgerEndRequest,
     digitalasset::canton::{
@@ -109,7 +111,7 @@ pub async fn current_ledger_offset(config: &NodeConfig, ledger_token: Option<&st
     let mut client = PartyManagementServiceClient::new(config.admin_channel().await?);
 
     for force in [false, true] {
-        let now = std::time::SystemTime::now();
+        let now = SystemTime::now();
         let request = tonic::Request::new(GetHighestOffsetByTimestampRequest {
             synchronizer_id: synchronizer_id.clone(),
             timestamp: Some(prost_types::Timestamp::from(now)),

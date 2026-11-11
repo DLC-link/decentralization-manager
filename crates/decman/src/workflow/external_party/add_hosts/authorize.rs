@@ -102,7 +102,7 @@ pub async fn authorize_add_hosts(
     permission: HostPermission,
     base_serial: u32,
     ledger_token: Option<&str>,
-) -> std::result::Result<u32, AddHostsError> {
+) -> Result<u32, AddHostsError> {
     let Some(current) = read_party_to_participant(config, party_id)
         .await
         .map_err(AddHostsError::Canton)?

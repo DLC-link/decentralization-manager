@@ -1,3 +1,5 @@
+use std::error::Error as StdError;
+
 use thiserror::Error;
 
 /// Errors a signing backend can return.
@@ -14,7 +16,7 @@ pub enum SigningError {
     /// missing `kms:Sign` permission for decman's role on the party key, or
     /// unreachable KMS endpoint.
     #[error("KMS signing failed: {0}")]
-    Kms(#[source] Box<dyn std::error::Error + Send + Sync>),
+    Kms(#[source] Box<dyn StdError + Send + Sync>),
     /// Any other signing failure.
     #[error(transparent)]
     Other(#[from] anyhow::Error),

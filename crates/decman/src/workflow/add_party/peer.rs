@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use canton_proto_rs::com::digitalasset::canton::{
     protocol::v30::party_to_participant::HostingParticipant,
     topology::admin::v30::{
@@ -38,7 +40,7 @@ pub async fn wait_for_hosting_proposal(config: &NodeConfig, party_id: &CantonId)
     let synchronizer_id = utils::get_synchronizer_id(config).await?;
     let self_id = config.participant_id().to_string();
     let max_attempts = topology_retry_max_attempts();
-    let retry_delay = std::time::Duration::from_secs(topology_retry_delay_secs());
+    let retry_delay = Duration::from_secs(topology_retry_delay_secs());
     let hosts_self =
         |p: &HostingParticipant| p.participant_uid == self_id && p.onboarding.is_some();
 
@@ -114,7 +116,7 @@ pub async fn send_keys_to_coordinator(
         .await?
         .ok_or_else(|| anyhow::anyhow!("PARTICIPANT_ID artifact missing for {self_id}"))?;
 
-    let combined_payload = crate::utils::encode_length_prefixed(&[&keys_data, &id_data]);
+    let combined_payload = utils::encode_length_prefixed(&[&keys_data, &id_data]);
     client
         .send(MessageType::AddPartyKeysUpload, combined_payload)
         .await?;

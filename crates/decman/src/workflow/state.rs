@@ -7,8 +7,11 @@
 
 use std::{
     collections::{HashMap, HashSet},
+    fmt::Debug,
+    hash::Hash,
     marker::PhantomData,
     sync::Arc,
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 use common::types::{AcsTransferDirection, AcsTransferProgress};
@@ -20,7 +23,7 @@ use crate::{
     db::schema::{Commitable, SchemaWrite},
     error::Result,
     noise::MessageType,
-    server::WorkflowKind,
+    server::{WorkflowKind, mark_run_failed},
     workflow::party_replication::pipe::{ExportSession, PipeBlock},
 };
 
@@ -79,9 +82,7 @@ pub(crate) use workflow_steps;
 /// Trait for workflow steps. Implementations are small `Copy` enums per
 /// workflow kind (Onboarding, Kick, Contracts, Dars), declared with
 /// `workflow_steps!`.
-pub trait WorkflowStep:
-    StepList + Copy + std::fmt::Debug + PartialEq + Eq + std::hash::Hash + Send + Sync
-{
+pub trait WorkflowStep: StepList + Copy + Debug + PartialEq + Eq + Hash + Send + Sync {
     fn to_command(&self) -> Option<MessageType>;
     fn requires_peers(&self) -> bool;
     fn is_waiting_for_peers(&self) -> bool;
@@ -547,13 +548,12 @@ impl<S: WorkflowStep + 'static> WorkflowState<S> {
     /// Mark the run as Failed with an error message. Used when a workflow
     /// step returns an error.
     pub async fn mark_failed(&self, error: impl Into<String>) {
-        crate::server::mark_run_failed(&self.db, S::kind(), &self.instance_name, &error.into())
-            .await;
+        mark_run_failed(&self.db, S::kind(), &self.instance_name, &error.into()).await;
     }
 
     async fn persist_step_progress(&self, step: S, completed: Vec<CantonId>) {
-        let updated_at = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
+        let updated_at = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
             .map(|d| d.as_secs() as i64)
             .unwrap_or(0);
 

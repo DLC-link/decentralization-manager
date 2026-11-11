@@ -1,6 +1,9 @@
 mod channel;
 
-use std::path::{Path, PathBuf};
+use std::{
+    path::{Path, PathBuf},
+    time::Duration,
+};
 
 use serde::{Deserialize, Serialize};
 use tonic::transport::Channel;
@@ -216,12 +219,12 @@ impl Default for NoiseRetryConfig {
 }
 
 impl NoiseRetryConfig {
-    pub fn per_attempt_timeout(&self) -> std::time::Duration {
-        std::time::Duration::from_secs(self.per_attempt_timeout_secs)
+    pub fn per_attempt_timeout(&self) -> Duration {
+        Duration::from_secs(self.per_attempt_timeout_secs)
     }
 
-    pub fn backoff(&self) -> std::time::Duration {
-        std::time::Duration::from_millis(self.backoff_ms)
+    pub fn backoff(&self) -> Duration {
+        Duration::from_millis(self.backoff_ms)
     }
 }
 

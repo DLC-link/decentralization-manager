@@ -1,9 +1,10 @@
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
-use std::path::Path;
+use std::{fs::Permissions, path::Path};
 
 use anyhow::Context;
 use secp256k1::{PublicKey, Secp256k1, SecretKey, ecdh::SharedSecret};
+use tokio::fs::OpenOptions;
 #[cfg(unix)]
 use tokio::io::AsyncWriteExt;
 use zeroize::Zeroizing;
@@ -124,13 +125,13 @@ impl NoiseKeypair {
             // Tighten to 0600 first so the truncate-and-write below cannot
             // leave the new key bytes briefly readable to other users.
             if path.exists() {
-                tokio::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+                tokio::fs::set_permissions(path, Permissions::from_mode(0o600))
                     .await
                     .with_context(|| {
                         format!("Failed to chmod existing key file '{}'", path.display())
                     })?;
             }
-            let mut file = tokio::fs::OpenOptions::new()
+            let mut file = OpenOptions::new()
                 .write(true)
                 .create(true)
                 .truncate(true)
@@ -220,12 +221,14 @@ pub async fn load_or_generate_keypair<P: AsRef<Path>>(path: P) -> Result<NoiseKe
 
 #[cfg(test)]
 mod tests {
+    use std::{fmt::Debug, fs::Permissions};
+
     use super::*;
 
     // Compile-time guard: the secret-bearing types must not expose Debug,
     // Clone, or Copy. Removing any of these breaks the security invariant.
-    static_assertions::assert_not_impl_any!(NoiseKeypair: std::fmt::Debug, Clone, Copy);
-    static_assertions::assert_not_impl_any!(NoiseSecretKey: std::fmt::Debug, Clone, Copy);
+    static_assertions::assert_not_impl_any!(NoiseKeypair: Debug, Clone, Copy);
+    static_assertions::assert_not_impl_any!(NoiseSecretKey: Debug, Clone, Copy);
 
     #[cfg(unix)]
     #[tokio::test]
@@ -249,7 +252,7 @@ mod tests {
 
         // Pre-create the file with 0644 permissions and stale contents
         tokio::fs::write(&path, b"stale-key-material").await?;
-        tokio::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).await?;
+        tokio::fs::set_permissions(&path, Permissions::from_mode(0o644)).await?;
         assert_eq!(
             tokio::fs::metadata(&path).await?.permissions().mode() & 0o777,
             0o644,
@@ -274,7 +277,7 @@ mod tests {
         // Seed a valid key file, then loosen perms to 0644
         let initial = NoiseKeypair::generate();
         initial.save_to_file(&path).await?;
-        tokio::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).await?;
+        tokio::fs::set_permissions(&path, Permissions::from_mode(0o644)).await?;
         assert_eq!(
             tokio::fs::metadata(&path).await?.permissions().mode() & 0o777,
             0o644,

@@ -62,7 +62,7 @@ fn submitted_mapping_matches(
 pub async fn submit_add_hosts(
     config: &NodeConfig,
     bundle: &ExternalPartyAddHostsPayload,
-) -> std::result::Result<u32, AddHostsError> {
+) -> Result<u32, AddHostsError> {
     let current = read_current(config, &bundle.party_id).await?;
     // Split out from the rest of validation: a pin that has moved is a race the
     // caller resolves by re-reading, not malformed input.

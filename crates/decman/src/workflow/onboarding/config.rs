@@ -53,12 +53,12 @@ impl OnboardingConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::error::Result;
 
     /// A run persisted before the confirmation threshold existed resumes
     /// with both thresholds equal, as it was started.
     #[test]
-    fn a_config_persisted_before_the_confirmation_threshold_still_decodes() -> crate::error::Result
-    {
+    fn a_config_persisted_before_the_confirmation_threshold_still_decodes() -> Result {
         let config: OnboardingConfig = serde_json::from_str(
             r#"{"party_id_prefix":"xyz","instance_name":"xyz-creation","threshold":2,"_p":null}"#,
         )?;

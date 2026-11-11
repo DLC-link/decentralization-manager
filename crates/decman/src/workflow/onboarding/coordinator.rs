@@ -2,6 +2,7 @@ use std::{collections::HashSet, sync::Arc};
 
 use anyhow::Context;
 use sqlx::SqlitePool;
+use tokio::time::Duration;
 
 use super::{
     OnboardingConfig, OnboardingStep,
@@ -15,7 +16,8 @@ use crate::{
     server::{WorkflowInstance, peer_status::LastSeen},
     utils,
     workflow::{
-        state::WorkflowState,
+        run_workflow_with_handler,
+        state::{WorkflowState, WorkflowStep},
         storage::{WorkflowStorage, artifact_kinds},
     },
 };
@@ -24,7 +26,7 @@ use crate::{
 /// `workflow_artifacts` as two separate per-peer rows
 /// (`PEER_PUBLIC_KEYS`, `PARTICIPANT_ID`). Mirrors how kick's coordinator
 /// splits per-peer data.
-async fn save_keys_and_ids<S: crate::workflow::state::WorkflowStep + 'static>(
+async fn save_keys_and_ids<S: WorkflowStep + 'static>(
     workflow_state: &WorkflowState<S>,
     storage: &SqlitePool,
     instance_name: &str,
@@ -73,7 +75,7 @@ async fn save_keys_and_ids<S: crate::workflow::state::WorkflowStep + 'static>(
 /// what the peer's sign step persisted locally (single
 /// `varint(len)||proto`), so the submit step can reconstruct the original
 /// SignedTopologyTransaction(s) via `read_first_message_from_bytes`.
-async fn save_signed_proposals<S: crate::workflow::state::WorkflowStep + 'static>(
+async fn save_signed_proposals<S: WorkflowStep + 'static>(
     workflow_state: &WorkflowState<S>,
     storage: &SqlitePool,
     instance_name: &str,
@@ -130,7 +132,7 @@ pub async fn start_coordinator(
         .await
     });
 
-    crate::workflow::run_workflow_with_handler(
+    run_workflow_with_handler(
         ActiveWorkflow::Onboarding(server),
         instance,
         workflow_handle,
@@ -180,7 +182,7 @@ async fn ensure_coordinator_keys(
     generate_keys(node_config, db, instance_name, onboarding_config).await?;
     completed.insert(OnboardingStep::GenerateKeys);
     tracing::info!("Waiting 3 seconds for Canton to process namespace delegations...");
-    tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
+    tokio::time::sleep(Duration::from_secs(3)).await;
     Ok(())
 }
 
@@ -203,7 +205,7 @@ async fn run_workflow(
 
         match current_step {
             OnboardingStep::WaitingForPeers => {
-                tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+                tokio::time::sleep(Duration::from_secs(1)).await;
             }
             OnboardingStep::GenerateKeys => {
                 ensure_coordinator_keys(
@@ -214,7 +216,7 @@ async fn run_workflow(
                     &onboarding_config,
                 )
                 .await?;
-                tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+                tokio::time::sleep(Duration::from_secs(1)).await;
             }
             OnboardingStep::CreateProposals => {
                 // The GenerateKeys arm above is skipped entirely if peers advance
@@ -246,7 +248,7 @@ async fn run_workflow(
                 workflow_state.advance_step().await;
             }
             OnboardingStep::SignDns => {
-                tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+                tokio::time::sleep(Duration::from_secs(1)).await;
             }
             OnboardingStep::SubmitDns => {
                 tracing::info!("Coordinator executing: Submit DNS proposals");
@@ -271,7 +273,7 @@ async fn run_workflow(
                 workflow_state.advance_step().await;
             }
             OnboardingStep::SignP2p => {
-                tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+                tokio::time::sleep(Duration::from_secs(1)).await;
             }
             OnboardingStep::SubmitFinal => {
                 tracing::info!("Coordinator executing: Submit final proposals");
@@ -288,7 +290,7 @@ async fn run_workflow(
             }
             OnboardingStep::Complete => {
                 tracing::info!("Onboarding workflow complete!");
-                tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+                tokio::time::sleep(Duration::from_secs(5)).await;
                 break;
             }
         }
