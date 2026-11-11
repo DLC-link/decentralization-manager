@@ -6,6 +6,7 @@ use canton_proto_rs::com::digitalasset::canton::admin::participant::v30::{
     synchronizer_connectivity_service_client::SynchronizerConnectivityServiceClient,
 };
 use sqlx::SqlitePool;
+use tonic::transport::Channel;
 
 use crate::{
     config::NodeConfig,
@@ -96,6 +97,54 @@ where
     F: FnMut(u64) -> Fut,
     Fut: Future<Output = Result<PipeBlock>>,
 {
+    let window = read_window_marker(storage, target).await?;
+    refuse_if_quarantined(storage, target).await?;
+
+    // Pull the first block before touching the participant. It costs one
+    // block of memory and answers the only question that decides whether a
+    // disconnect is warranted at all: whether the party has any contracts.
+    let first = next_block(1).await?;
+    if let PipeBlock::End { trailer, .. } = &first
+        && trailer.total_len == 0
+    {
+        tracing::info!("ACS snapshot is empty — nothing to import");
+        // A window opened before the authorization is closed all the same: the
+        // participant is off the synchronizer and on manual connection.
+        if window.opened_before_authorization {
+            close_import_window(config, true).await?;
+        }
+        return Ok(());
+    }
+
+    check_packages_present(config, required_package_ids).await?;
+    let plan = preflight(config, target, window).await?;
+    run_in_disconnect_window(
+        config,
+        storage,
+        target,
+        plan,
+        source,
+        first,
+        &mut next_block,
+    )
+    .await
+}
+
+/// What the disconnect-window marker says on entry.
+#[derive(Clone, Copy)]
+struct WindowMarker {
+    /// A prior attempt of this run entered the window.
+    disconnect_window_opened: bool,
+    /// The window was opened before the party was authorized onto this
+    /// participant.
+    opened_before_authorization: bool,
+}
+
+/// Read the disconnect-window marker of `target`.
+async fn read_window_marker(
+    storage: &SqlitePool,
+    target: &ReplicationTarget,
+) -> Result<WindowMarker> {
     // The marker is durable (never cleared), so its presence means the
     // disconnect window was entered on a prior attempt of this run — the
     // participant may have been left disconnected (DecMan died mid-window) or
@@ -115,7 +164,15 @@ where
              found disconnected stays disconnected and the import continues in its window"
         );
     }
+    Ok(WindowMarker {
+        disconnect_window_opened,
+        opened_before_authorization,
+    })
+}
 
+/// Refuse to import into a participant that a previous attempt fed part of the
+/// ACS to.
+async fn refuse_if_quarantined(storage: &SqlitePool, target: &ReplicationTarget) -> Result {
     // A previous attempt fed part of the ACS to Canton before failing. Canton
     // offers no way to ask how much landed, and importing the whole snapshot on
     // top of it is not something the proto sanctions, so refuse rather than
@@ -136,23 +193,12 @@ where
             party = target.party_id
         );
     }
+    Ok(())
+}
 
-    // Pull the first block before touching the participant. It costs one
-    // block of memory and answers the only question that decides whether a
-    // disconnect is warranted at all: whether the party has any contracts.
-    let first = next_block(1).await?;
-    if let PipeBlock::End { trailer, .. } = &first
-        && trailer.total_len == 0
-    {
-        tracing::info!("ACS snapshot is empty — nothing to import");
-        // A window opened before the authorization is closed all the same: the
-        // participant is off the synchronizer and on manual connection.
-        if opened_before_authorization {
-            close_import_window(config, true).await?;
-        }
-        return Ok(());
-    }
-
+/// Refuse to open the window when this participant lacks a package the
+/// party's contracts need.
+async fn check_packages_present(config: &NodeConfig, required_package_ids: &[String]) -> Result {
     // Package preflight: refuse to open the disconnect window if this participant
     // is missing any package the party's contracts need. The offline import
     // re-validates every contract (ContractImportMode::Validation) and fails on a
@@ -175,7 +221,31 @@ where
             );
         }
     }
+    Ok(())
+}
 
+/// What the preflight settled before the window opens.
+struct ImportPlan {
+    /// The disconnect-window marker found on entry.
+    window: WindowMarker,
+    /// The logical synchronizer id the contracts sit on.
+    synchronizer_id: String,
+    /// The party being imported.
+    party_id: String,
+    /// The admin client that disconnects the synchronizers.
+    connectivity: SynchronizerConnectivityServiceClient<Channel>,
+    /// The synchronizers to disconnect from.
+    connected: Vec<list_connected_synchronizers_response::Result>,
+}
+
+/// Resolve the ids the import names, list the connected synchronizers, and
+/// check the participant's connection before the window opens.
+async fn preflight(
+    config: &NodeConfig,
+    target: &ReplicationTarget,
+    window: WindowMarker,
+) -> Result<ImportPlan> {
+    let disconnect_window_opened = window.disconnect_window_opened;
     // Logical synchronizer id (see `current_ledger_offset` for the physical-id
     // pitfall) plus the party being imported.
     let synchronizer_id =
@@ -239,6 +309,39 @@ where
         }
     }
 
+    Ok(ImportPlan {
+        window,
+        synchronizer_id,
+        party_id,
+        connectivity,
+        connected,
+    })
+}
+
+/// Open the window, disconnect, import, and reconnect once. The reconnect
+/// runs whatever the import's outcome.
+async fn run_in_disconnect_window<F, Fut>(
+    config: &NodeConfig,
+    storage: &SqlitePool,
+    target: &ReplicationTarget,
+    plan: ImportPlan,
+    source: TransferSource,
+    first: PipeBlock,
+    next_block: &mut F,
+) -> Result
+where
+    F: FnMut(u64) -> Fut,
+    Fut: Future<Output = Result<PipeBlock>>,
+{
+    let ImportPlan {
+        window,
+        synchronizer_id,
+        party_id,
+        mut connectivity,
+        connected,
+    } = plan;
+    let opened_before_authorization = window.opened_before_authorization;
+
     // Open the crash-safety window BEFORE disconnecting so a crash between here
     // and a verified reconnect is detected on the next attempt. A window the
     // new member opened before the authorization keeps its own marker.
@@ -262,50 +365,12 @@ where
                 }))
                 .await?;
         }
-        let attempts = match source {
-            TransferSource::Coordinator => acs_import_attempts_in_window(),
-            TransferSource::Relay => 1,
+        let params = ImportParams {
+            synchronizer_id: &synchronizer_id,
+            party_id: &party_id,
+            source,
         };
-        let mut first = first;
-        // Bytes that reached Canton over every attempt so far, not just the
-        // last one: the quarantine is about what may sit on the participant.
-        let mut any_fed = 0u64;
-        let mut attempt = 1;
-        loop {
-            let params = ImportParams {
-                synchronizer_id: &synchronizer_id,
-                party_id: &party_id,
-                source,
-            };
-            let (fed, cause) =
-                match run_import(config, storage, target, params, first, &mut next_block).await {
-                    Ok(()) => return Ok(()),
-                    Err(ImportError::Fatal { fed, cause }) => {
-                        return Err(
-                            give_up_transfer(storage, target, any_fed.max(fed), cause).await
-                        );
-                    }
-                    Err(ImportError::Transfer { fed, cause }) => (fed, cause),
-                };
-            any_fed = any_fed.max(fed);
-            if attempt >= attempts {
-                return Err(give_up_transfer(storage, target, any_fed, cause).await);
-            }
-            tracing::warn!(
-                "ACS transfer attempt {attempt}/{attempts} broke after {fed} bytes: {cause}; \
-                 restarting it from block 1 without reconnecting"
-            );
-            tokio::time::sleep(IMPORT_RETRY_DELAY).await;
-            first = match pull_first_block(&mut next_block).await {
-                Ok(block) => block,
-                Err(restart_err) => {
-                    return Err(give_up_transfer(storage, target, any_fed, cause)
-                        .await
-                        .context(format!("the transfer could not restart: {restart_err}")));
-                }
-            };
-            attempt += 1;
-        }
+        import_with_restarts(config, storage, target, params, first, next_block).await
     }
     .await;
 
@@ -331,6 +396,59 @@ where
     tracing::info!("ACS snapshot imported successfully");
 
     Ok(())
+}
+
+/// Import the ACS, restarting a broken transfer from block 1 inside the open
+/// window, up to the attempt budget of `params.source`.
+async fn import_with_restarts<F, Fut>(
+    config: &NodeConfig,
+    storage: &SqlitePool,
+    target: &ReplicationTarget,
+    params: ImportParams<'_>,
+    first: PipeBlock,
+    next_block: &mut F,
+) -> Result
+where
+    F: FnMut(u64) -> Fut,
+    Fut: Future<Output = Result<PipeBlock>>,
+{
+    let attempts = match params.source {
+        TransferSource::Coordinator => acs_import_attempts_in_window(),
+        TransferSource::Relay => 1,
+    };
+    let mut first = first;
+    // Bytes that reached Canton over every attempt so far, not just the
+    // last one: the quarantine is about what may sit on the participant.
+    let mut any_fed = 0u64;
+    let mut attempt = 1;
+    loop {
+        let (fed, cause) =
+            match run_import(config, storage, target, params, first, next_block).await {
+                Ok(()) => return Ok(()),
+                Err(ImportError::Fatal { fed, cause }) => {
+                    return Err(give_up_transfer(storage, target, any_fed.max(fed), cause).await);
+                }
+                Err(ImportError::Transfer { fed, cause }) => (fed, cause),
+            };
+        any_fed = any_fed.max(fed);
+        if attempt >= attempts {
+            return Err(give_up_transfer(storage, target, any_fed, cause).await);
+        }
+        tracing::warn!(
+            "ACS transfer attempt {attempt}/{attempts} broke after {fed} bytes: {cause}; \
+             restarting it from block 1 without reconnecting"
+        );
+        tokio::time::sleep(IMPORT_RETRY_DELAY).await;
+        first = match pull_first_block(next_block).await {
+            Ok(block) => block,
+            Err(restart_err) => {
+                return Err(give_up_transfer(storage, target, any_fed, cause)
+                    .await
+                    .context(format!("the transfer could not restart: {restart_err}")));
+            }
+        };
+        attempt += 1;
+    }
 }
 
 /// True iff `alias` appears in the connected list at all, healthy or not.
