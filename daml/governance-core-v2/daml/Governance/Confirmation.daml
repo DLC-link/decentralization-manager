@@ -12,6 +12,11 @@ import Governance.Action (GovernableAction)
 -- | A confirmation that a governance member has approved an action proposal.
 -- Confirmations are matched to proposals by ContractId (globally unique).
 -- The actionLabel is stored for human readability and UI display only.
+--
+-- The governance party is the only signatory and the confirmer is a plain
+-- field, so the governance party can expire or consume a confirmation
+-- without the confirmer's participant (#615). The confirmer authorizes the
+-- create as the controller of `GovernanceRules_ConfirmAction`.
 template GovernanceConfirmation
   with
     governanceParty : Party
@@ -26,7 +31,7 @@ template GovernanceConfirmation
       -- ^ When this confirmation becomes invalid.
   where
     ensure actionLabel /= ""
-    signatory confirmer, governanceParty
+    signatory governanceParty
 
     -- | Consume this confirmation during action execution.
     -- Returns the confirmation data for validation.

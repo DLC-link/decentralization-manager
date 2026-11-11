@@ -72,7 +72,8 @@ testConfirmerCanCancel = script do
       confirmer = parties.member1
       actionProposalCid = proposalIfaceCid
 
-  submit parties.member1 $ exerciseCmd confResult.confirmationCid GovernanceConfirmation_Cancel
+  submit (memberContext parties.member1 parties.governanceParty) $
+    exerciseCmd confResult.confirmationCid GovernanceConfirmation_Cancel
 
   confs <- query @GovernanceConfirmation parties.governanceParty
   confs === []

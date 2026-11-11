@@ -55,6 +55,8 @@ data GovernanceSelfAction
 
 -- | A confirmation for a governance self-management action.
 -- Uses value equality on GovernanceSelfAction for matching (closed enum, safe to compare).
+-- Signed like `GovernanceConfirmation`: the governance party alone, with the
+-- confirmer as a plain field.
 template GovernanceSelfConfirmation
   with
     governanceParty : Party
@@ -66,7 +68,7 @@ template GovernanceSelfConfirmation
     expiresAt : Time
       -- ^ When this confirmation becomes invalid.
   where
-    signatory confirmer, governanceParty
+    signatory governanceParty
 
     -- | Consume this confirmation during action execution.
     choice GovernanceSelfConfirmation_Consume : GovernanceSelfConfirmation
