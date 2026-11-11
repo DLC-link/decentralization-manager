@@ -1542,53 +1542,49 @@ pub async fn expire_confirmation(
         }
     };
 
-    let audit_pool = data.db.clone();
     let audit_details = serde_json::to_string(&*body).unwrap_or_default();
-    let audit_party_id = party_id.clone();
-    let audit_member = member_party_id.clone();
-    let audit_gov_type = body.governance_type;
+    let body = body.into_inner();
 
-    let packages = packages();
-
-    let result =
-        execute_expire_confirmation(&data.config, &body, &token, &member_party_id, &packages).await;
-    count_action(ActionStep::Expire, ActionOutcome::of(&result));
-    match result {
-        Ok(()) => {
-            spawn_audit_log(
-                audit_pool,
-                AuditParams {
-                    event_type: AuditEvent::Expire,
-                    party_id: audit_party_id,
-                    member_party_id: audit_member,
-                    governance_type: audit_gov_type,
-                    action_summary: "expire_confirmation".to_string(),
-                    details: audit_details,
-                    status: "success",
-                    error_message: None,
-                },
-            );
-            HttpResponse::Ok().json(MessageResponse {
-                message: "Confirmation expired successfully".to_string(),
-            })
-        }
-        Err(e) => {
-            let (status, error) = submission_failure("Failed to expire confirmation", &e);
+    // A proxy can hang up before the mediator decides, and the server then
+    // drops this handler. The submission runs on its own task, so it still
+    // ends and its audit row still records the cause.
+    let submission = tokio::spawn(async move {
+        let result =
+            execute_expire_confirmation(&data.config, &body, &token, &member_party_id, &packages())
+                .await;
+        count_action(ActionStep::Expire, ActionOutcome::of(&result));
+        let failure = result
+            .err()
+            .map(|e| submission_failure("Failed to expire confirmation", &e));
+        if let Some((_, error)) = &failure {
             tracing::error!("{error}");
-            spawn_audit_log(
-                audit_pool,
-                AuditParams {
-                    event_type: AuditEvent::Expire,
-                    party_id: audit_party_id,
-                    member_party_id: audit_member,
-                    governance_type: audit_gov_type,
-                    action_summary: "expire_confirmation".to_string(),
-                    details: audit_details,
-                    status: "failed",
-                    error_message: Some(error.clone()),
-                },
-            );
-            HttpResponse::build(status).json(ErrorResponse { error })
+        }
+        let status = failure.as_ref().map_or("success", |_| "failed");
+        spawn_audit_log(
+            data.db.clone(),
+            AuditParams {
+                event_type: AuditEvent::Expire,
+                party_id: body.party_id,
+                member_party_id,
+                governance_type: body.governance_type,
+                action_summary: "expire_confirmation".to_string(),
+                details: audit_details,
+                status,
+                error_message: failure.as_ref().map(|(_, error)| error.clone()),
+            },
+        );
+        failure
+    });
+    match submission.await {
+        Ok(None) => HttpResponse::Ok().json(MessageResponse {
+            message: "Confirmation expired successfully".to_string(),
+        }),
+        Ok(Some((status, error))) => HttpResponse::build(status).json(ErrorResponse { error }),
+        Err(e) => {
+            tracing::error!("The expire task ended without an outcome: {e}");
+            HttpResponse::InternalServerError().json(ErrorResponse {
+                error: format!("Failed to expire confirmation: {e}"),
+            })
         }
     }
 }
@@ -1631,53 +1627,48 @@ pub async fn cancel_confirmation(
         }
     };
 
-    let audit_pool = data.db.clone();
     let audit_details = serde_json::to_string(&*body).unwrap_or_default();
-    let audit_party_id = party_id.clone();
-    let audit_member = member_party_id.clone();
-    let audit_gov_type = body.governance_type;
+    let body = body.into_inner();
 
-    let packages = packages();
-
-    let result =
-        execute_cancel_confirmation(&data.config, &body, &token, &member_party_id, &packages).await;
-    count_action(ActionStep::CancelConfirmation, ActionOutcome::of(&result));
-    match result {
-        Ok(()) => {
-            spawn_audit_log(
-                audit_pool,
-                AuditParams {
-                    event_type: AuditEvent::Cancel,
-                    party_id: audit_party_id,
-                    member_party_id: audit_member,
-                    governance_type: audit_gov_type,
-                    action_summary: "cancel_confirmation".to_string(),
-                    details: audit_details,
-                    status: "success",
-                    error_message: None,
-                },
-            );
-            HttpResponse::Ok().json(MessageResponse {
-                message: "Confirmation cancelled successfully".to_string(),
-            })
-        }
-        Err(e) => {
-            let (status, error) = submission_failure("Failed to cancel confirmation", &e);
+    // Runs on its own task for the same reason as the expire handler: a
+    // dropped handler must not cut the submission or its audit row short.
+    let submission = tokio::spawn(async move {
+        let result =
+            execute_cancel_confirmation(&data.config, &body, &token, &member_party_id, &packages())
+                .await;
+        count_action(ActionStep::CancelConfirmation, ActionOutcome::of(&result));
+        let failure = result
+            .err()
+            .map(|e| submission_failure("Failed to cancel confirmation", &e));
+        if let Some((_, error)) = &failure {
             tracing::error!("{error}");
-            spawn_audit_log(
-                audit_pool,
-                AuditParams {
-                    event_type: AuditEvent::Cancel,
-                    party_id: audit_party_id,
-                    member_party_id: audit_member,
-                    governance_type: audit_gov_type,
-                    action_summary: "cancel_confirmation".to_string(),
-                    details: audit_details,
-                    status: "failed",
-                    error_message: Some(error.clone()),
-                },
-            );
-            HttpResponse::build(status).json(ErrorResponse { error })
+        }
+        let status = failure.as_ref().map_or("success", |_| "failed");
+        spawn_audit_log(
+            data.db.clone(),
+            AuditParams {
+                event_type: AuditEvent::Cancel,
+                party_id: body.party_id,
+                member_party_id,
+                governance_type: body.governance_type,
+                action_summary: "cancel_confirmation".to_string(),
+                details: audit_details,
+                status,
+                error_message: failure.as_ref().map(|(_, error)| error.clone()),
+            },
+        );
+        failure
+    });
+    match submission.await {
+        Ok(None) => HttpResponse::Ok().json(MessageResponse {
+            message: "Confirmation cancelled successfully".to_string(),
+        }),
+        Ok(Some((status, error))) => HttpResponse::build(status).json(ErrorResponse { error }),
+        Err(e) => {
+            tracing::error!("The cancel task ended without an outcome: {e}");
+            HttpResponse::InternalServerError().json(ErrorResponse {
+                error: format!("Failed to cancel confirmation: {e}"),
+            })
         }
     }
 }
@@ -3507,6 +3498,16 @@ mod mediator_timeout_tests {
             }))
     }
 
+    fn cancel() -> actix_test::TestRequest {
+        actix_test::TestRequest::post()
+            .uri("/governance/cancel")
+            .insert_header((AUTHORIZATION, "Bearer any-token"))
+            .set_json(serde_json::json!({
+                "party_id": party(),
+                "confirmation_cid": "00c0ffee",
+            }))
+    }
+
     /// The `(status, error_message)` of the audit row of `event`, once the
     /// detached write lands.
     async fn audit_row(pool: &SqlitePool, event: AuditEvent) -> Result<(String, Option<String>)> {
@@ -3557,6 +3558,46 @@ mod mediator_timeout_tests {
         let (status, message) = audit_row(&pool, AuditEvent::Expire).await?;
         assert_eq!(status, "failed");
         assert_eq!(message.as_deref(), Some(error));
+        Ok(())
+    }
+
+    /// A proxy that hangs up makes the server drop the handler. The expire and
+    /// the cancel still end, and the audit row names the unresponsive party.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_dropped_request_still_writes_the_audit_row(pool: SqlitePool) -> Result {
+        let _serial = super::action_metrics_tests::SERIAL.lock().await;
+        for (request, event) in [
+            (expire(), AuditEvent::Expire),
+            (cancel(), AuditEvent::Cancel),
+        ] {
+            let ledger = RejectingLedger::new();
+            let app = actix_test::init_service(
+                App::new()
+                    .app_data(state(pool.clone(), ledger.serve()?).await?)
+                    .wrap(AuthMiddleware)
+                    .service(expire_confirmation)
+                    .service(cancel_confirmation),
+            )
+            .await;
+
+            // Dropping the request future is what the server does to a
+            // handler whose client hung up.
+            tokio::select! {
+                _ = actix_test::call_service(&app, request.to_request()) => {
+                    anyhow::bail!("{event:?} answered before the ledger did");
+                }
+                () = ledger.submitted.notified() => {}
+            }
+            ledger.release.notify_one();
+
+            let (status, message) = audit_row(&pool, event).await?;
+            assert_eq!(status, "failed", "{event:?}");
+            let message = message.unwrap_or_default();
+            assert!(
+                message.contains(&format!("Unresponsive: {OFFLINE_MEMBER}.")),
+                "{event:?}: {message}"
+            );
+        }
         Ok(())
     }
 }
