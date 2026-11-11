@@ -27,7 +27,7 @@ use crate::{
         AuthRegistry, JwtValidator, MockAuthRegistry, MockValidator, TokenValidator, WorkflowAuth,
     },
     canton_id::CantonId,
-    config::{Network, NodeConfig},
+    config::{Network, NodeConfig, PartyCredentials},
     db::schema::{SchemaRead, SchemaWrite},
     error::Result,
     server::middleware::AuthMiddleware,
@@ -74,150 +74,27 @@ pub async fn start_server(
     // permissive wildcard token".
     let insecure = config.insecure || cfg!(any(test, feature = "test-mode"));
 
-    if insecure {
-        tracing::warn!(
-            "INSECURE MODE ENABLED: inbound auth accepts ANY token and Canton auth uses an \
-             unsafe HMAC token. Authentication is effectively disabled — never use in production."
-        );
-    } else {
-        tracing::info!("Running with real JWT validation.");
-    }
+    log_auth_policy(insecure, admin_role.as_deref());
 
-    // Make the admin-role policy explicit at boot so a single-user deployment
-    // doesn't quietly lose authorization on multi-user upgrade. With
-    // `admin_role = None` (the default since the gating became opt-in),
-    // every authenticated caller passes `require_admin`.
-    match admin_role.as_deref() {
-        Some(role) if !role.is_empty() => {
-            tracing::info!("Admin gate active: requests must carry role '{role}'");
-        }
-        _ => {
-            tracing::warn!(
-                "DECPM_ADMIN_ROLE not set: every authenticated caller is treated as admin. \
-                 Set DECPM_ADMIN_ROLE=<role> to require a specific Keycloak role on \
-                 PUT /party-config, POST /kick, POST /auth/grant-rights, and other \
-                 admin-gated endpoints."
-            );
-        }
-    }
-
-    let db_party_creds = db.get_all_party_credentials().await.unwrap_or_else(|e| {
-        tracing::warn!("Failed to load party credentials from DB: {e}");
-        Vec::new()
-    });
-    let party_credentials = Arc::new(RwLock::new(db_party_creds.clone()));
-
-    // Initialize outbound auth (the token DecMan presents to Canton) based on mode
-    let auth = if insecure {
-        Some(WorkflowAuth::Mock(Arc::new(MockAuthRegistry::with_config(
-            party_credentials.clone(),
-            &config.insecure_auth,
-        ))))
-    } else if db_party_creds.is_empty() {
-        tracing::info!("No party credentials configured, auth disabled");
-        None
-    } else {
-        tracing::info!(
-            "Initializing auth registry for {} parties",
-            db_party_creds.len()
-        );
-        Some(WorkflowAuth::Keycloak(Arc::new(
-            AuthRegistry::new(&db_party_creds).await?,
-        )))
-    };
-
-    let auth = Arc::new(RwLock::new(auth));
-
-    // Inbound token validator. Production verifies JWT signatures locally
-    // against the JWKS of any trusted issuer derived from the top-level
-    // Single process-wide `reqwest::Client`. Shared by `AppState.http_client`
-    // (proxy-style handlers) and the JWT/OIDC validators so all outbound
-    // HTTPS traffic goes through the same connection pool / TLS session
-    // cache and inherits the same 10s timeout.
-    let http_client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(10))
-        .build()
-        .expect("reqwest client build");
-
-    // keycloak config plus any `party_credentials` rows. The permissive
-    // `MockValidator` is selected only in insecure mode; production verifies
-    // real JWTs.
-    let token_validator = if insecure {
-        TokenValidator::Mock(Arc::new(MockValidator::new(
-            admin_role.clone().unwrap_or_default(),
-        )))
-    } else {
-        let no_top_level_config = !config.has_top_level_idp();
-        let no_party_creds = party_credentials.read().await.is_empty();
-        if no_top_level_config && no_party_creds {
-            tracing::warn!(
-                "No top-level IdP config (--keycloak-url/realm/client-id or \
-                 DECPM_AUTH0_DOMAIN/CLIENT_ID) and no party credentials yet. Inbound \
-                 auth will reject every request except the first-run PUT /party-config \
-                 bootstrap. Configure the IdP and provision a party to make the node \
-                 usable."
-            );
-        } else if no_top_level_config {
-            tracing::info!(
-                "No top-level IdP config; trusting only issuers from \
-                 party_credentials ({} configured).",
-                party_credentials.read().await.len()
-            );
-        }
-        TokenValidator::Jwt(Arc::new(JwtValidator::new(
-            config.keycloak.clone(),
-            config.auth0.clone(),
-            jwt_role_claim,
-            party_credentials.clone(),
-            http_client.clone(),
-        )))
-    };
+    let auth = build_auth(
+        &db,
+        &config,
+        insecure,
+        admin_role.as_deref(),
+        jwt_role_claim,
+    )
+    .await?;
 
     let peer_status = Arc::new(RwLock::new(HashMap::new()));
-    let last_seen: LastSeen = Arc::new(RwLock::new(HashMap::new()));
-    let (peer_job_sender, peer_job_receiver) = mpsc::unbounded_channel::<PeerJob>();
-    let workflows = WorkflowRegistry::new();
-    let persisted_invitations = db.get_all_pending_invitations().await.unwrap_or_else(|e| {
-        tracing::warn!("Failed to load persisted pending invitations: {e}");
-        Vec::new()
-    });
-    if !persisted_invitations.is_empty() {
-        tracing::info!(
-            "Loaded {} persisted pending invitation(s) from DB",
-            persisted_invitations.len()
-        );
-    }
-    let pending_invitations = Arc::new(RwLock::new(persisted_invitations));
-
-    let relay_sessions = Arc::new(crate::workflow::party_replication::relay::RelaySessions::new());
-
-    let app_state = web::Data::new(AppState {
-        db: db.clone(),
-        config: config.clone(),
-        last_seen: last_seen.clone(),
-        peer_job_sender: peer_job_sender.clone(),
-        pending_invitations: pending_invitations.clone(),
-        auth: auth.clone(),
-        token_validator,
-        admin_role,
-        party_credentials: party_credentials.clone(),
-        bootstrap_mu: Arc::new(Mutex::new(())),
-        relay_sessions: relay_sessions.clone(),
-        workflows: workflows.clone(),
-        // "test_mode" here means the permissive/wildcard-token mode; driven by
-        // `--insecure` (or tests). See the `insecure` binding above.
-        test_mode: insecure,
-        refreshing_prefixes: Arc::new(RwLock::new(HashSet::new())),
-        discovery_permits: Arc::new(Semaphore::new(
-            crate::server::handlers::MAX_CONCURRENT_DISCOVERIES,
-        )),
-        discovery_generations: Arc::new(RwLock::new(HashMap::new())),
-        discovery_completed: Arc::new(RwLock::new(HashMap::new())),
-        http_client,
-        health_cache: HealthCache::new(),
-        external_parties: Default::default(),
-        tenant_rate_limiter: Default::default(),
-    });
+    let (app_state, peer_job_receiver) =
+        build_app_state(&db, &config, auth, admin_role, insecure).await;
+    let last_seen = app_state.last_seen.clone();
+    let peer_job_sender = app_state.peer_job_sender.clone();
+    let workflows = app_state.workflows.clone();
+    let pending_invitations = app_state.pending_invitations.clone();
+    let party_credentials = app_state.party_credentials.clone();
+    let auth = app_state.auth.clone();
+    let relay_sessions = app_state.relay_sessions.clone();
 
     // A coordinator killed while it signed a party proposal leaves that
     // proposal's temporary topology store on the participant. Sweep them
@@ -650,6 +527,217 @@ pub async fn start_server(
     .await?;
 
     Ok(())
+}
+
+/// Log the auth policy this node boots with: insecure or real JWT
+/// validation, and whether an admin role gates the admin endpoints.
+fn log_auth_policy(insecure: bool, admin_role: Option<&str>) {
+    if insecure {
+        tracing::warn!(
+            "INSECURE MODE ENABLED: inbound auth accepts ANY token and Canton auth uses an \
+             unsafe HMAC token. Authentication is effectively disabled — never use in production."
+        );
+    } else {
+        tracing::info!("Running with real JWT validation.");
+    }
+
+    // Make the admin-role policy explicit at boot so a single-user deployment
+    // doesn't quietly lose authorization on multi-user upgrade. With
+    // `admin_role = None` (the default since the gating became opt-in),
+    // every authenticated caller passes `require_admin`.
+    match admin_role {
+        Some(role) if !role.is_empty() => {
+            tracing::info!("Admin gate active: requests must carry role '{role}'");
+        }
+        _ => {
+            tracing::warn!(
+                "DECPM_ADMIN_ROLE not set: every authenticated caller is treated as admin. \
+                 Set DECPM_ADMIN_ROLE=<role> to require a specific Keycloak role on \
+                 PUT /party-config, POST /kick, POST /auth/grant-rights, and other \
+                 admin-gated endpoints."
+            );
+        }
+    }
+}
+
+/// The node's auth: the stored party credentials, the outbound auth decman
+/// presents to Canton, the inbound token validator, and the HTTP client
+/// they share.
+struct NodeAuth {
+    party_credentials: Arc<RwLock<Vec<PartyCredentials>>>,
+    auth: Arc<RwLock<Option<WorkflowAuth>>>,
+    token_validator: TokenValidator,
+    http_client: reqwest::Client,
+}
+
+/// Load the stored party credentials and build the node's auth from them.
+async fn build_auth(
+    db: &SqlitePool,
+    config: &NodeConfig,
+    insecure: bool,
+    admin_role: Option<&str>,
+    jwt_role_claim: Option<String>,
+) -> Result<NodeAuth> {
+    let db_party_creds = db.get_all_party_credentials().await.unwrap_or_else(|e| {
+        tracing::warn!("Failed to load party credentials from DB: {e}");
+        Vec::new()
+    });
+    let party_credentials = Arc::new(RwLock::new(db_party_creds.clone()));
+
+    // Initialize outbound auth (the token DecMan presents to Canton) based on mode
+    let auth = if insecure {
+        Some(WorkflowAuth::Mock(Arc::new(MockAuthRegistry::with_config(
+            party_credentials.clone(),
+            &config.insecure_auth,
+        ))))
+    } else if db_party_creds.is_empty() {
+        tracing::info!("No party credentials configured, auth disabled");
+        None
+    } else {
+        tracing::info!(
+            "Initializing auth registry for {} parties",
+            db_party_creds.len()
+        );
+        Some(WorkflowAuth::Keycloak(Arc::new(
+            AuthRegistry::new(&db_party_creds).await?,
+        )))
+    };
+
+    let auth = Arc::new(RwLock::new(auth));
+
+    // Single process-wide `reqwest::Client`. Shared by `AppState.http_client`
+    // (proxy-style handlers) and the JWT/OIDC validators so all outbound
+    // HTTPS traffic goes through the same connection pool / TLS session
+    // cache and inherits the same 10s timeout.
+    let http_client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .expect("reqwest client build");
+
+    let token_validator = build_token_validator(
+        config,
+        insecure,
+        admin_role,
+        jwt_role_claim,
+        &party_credentials,
+        &http_client,
+    )
+    .await;
+
+    Ok(NodeAuth {
+        party_credentials,
+        auth,
+        token_validator,
+        http_client,
+    })
+}
+
+/// Inbound token validator. Production verifies JWT signatures locally
+/// against the JWKS of any trusted issuer derived from the top-level
+/// keycloak config plus any `party_credentials` rows. The permissive
+/// `MockValidator` is selected only in insecure mode; production verifies
+/// real JWTs.
+async fn build_token_validator(
+    config: &NodeConfig,
+    insecure: bool,
+    admin_role: Option<&str>,
+    jwt_role_claim: Option<String>,
+    party_credentials: &Arc<RwLock<Vec<PartyCredentials>>>,
+    http_client: &reqwest::Client,
+) -> TokenValidator {
+    if insecure {
+        TokenValidator::Mock(Arc::new(MockValidator::new(
+            admin_role.unwrap_or_default().to_string(),
+        )))
+    } else {
+        let no_top_level_config = !config.has_top_level_idp();
+        let no_party_creds = party_credentials.read().await.is_empty();
+        if no_top_level_config && no_party_creds {
+            tracing::warn!(
+                "No top-level IdP config (--keycloak-url/realm/client-id or \
+                 DECPM_AUTH0_DOMAIN/CLIENT_ID) and no party credentials yet. Inbound \
+                 auth will reject every request except the first-run PUT /party-config \
+                 bootstrap. Configure the IdP and provision a party to make the node \
+                 usable."
+            );
+        } else if no_top_level_config {
+            tracing::info!(
+                "No top-level IdP config; trusting only issuers from \
+                 party_credentials ({} configured).",
+                party_credentials.read().await.len()
+            );
+        }
+        TokenValidator::Jwt(Arc::new(JwtValidator::new(
+            config.keycloak.clone(),
+            config.auth0.clone(),
+            jwt_role_claim,
+            party_credentials.clone(),
+            http_client.clone(),
+        )))
+    }
+}
+
+/// The state every handler shares, and the receiving end of the peer-job
+/// queue. Loads the invitations still pending from before the restart.
+async fn build_app_state(
+    db: &SqlitePool,
+    config: &NodeConfig,
+    auth: NodeAuth,
+    admin_role: Option<String>,
+    insecure: bool,
+) -> (web::Data<AppState>, mpsc::UnboundedReceiver<PeerJob>) {
+    let NodeAuth {
+        party_credentials,
+        auth,
+        token_validator,
+        http_client,
+    } = auth;
+    let last_seen: LastSeen = Arc::new(RwLock::new(HashMap::new()));
+    let (peer_job_sender, peer_job_receiver) = mpsc::unbounded_channel::<PeerJob>();
+    let workflows = WorkflowRegistry::new();
+    let persisted_invitations = db.get_all_pending_invitations().await.unwrap_or_else(|e| {
+        tracing::warn!("Failed to load persisted pending invitations: {e}");
+        Vec::new()
+    });
+    if !persisted_invitations.is_empty() {
+        tracing::info!(
+            "Loaded {} persisted pending invitation(s) from DB",
+            persisted_invitations.len()
+        );
+    }
+    let pending_invitations = Arc::new(RwLock::new(persisted_invitations));
+
+    let relay_sessions = Arc::new(crate::workflow::party_replication::relay::RelaySessions::new());
+
+    let app_state = web::Data::new(AppState {
+        db: db.clone(),
+        config: config.clone(),
+        last_seen: last_seen.clone(),
+        peer_job_sender: peer_job_sender.clone(),
+        pending_invitations: pending_invitations.clone(),
+        auth: auth.clone(),
+        token_validator,
+        admin_role,
+        party_credentials: party_credentials.clone(),
+        bootstrap_mu: Arc::new(Mutex::new(())),
+        relay_sessions: relay_sessions.clone(),
+        workflows: workflows.clone(),
+        // "test_mode" here means the permissive/wildcard-token mode; driven by
+        // `--insecure` (or tests). See the `insecure` binding in `start_server`.
+        test_mode: insecure,
+        refreshing_prefixes: Arc::new(RwLock::new(HashSet::new())),
+        discovery_permits: Arc::new(Semaphore::new(
+            crate::server::handlers::MAX_CONCURRENT_DISCOVERIES,
+        )),
+        discovery_generations: Arc::new(RwLock::new(HashMap::new())),
+        discovery_completed: Arc::new(RwLock::new(HashMap::new())),
+        http_client,
+        health_cache: HealthCache::new(),
+        external_parties: Default::default(),
+        tenant_rate_limiter: Default::default(),
+    });
+
+    (app_state, peer_job_receiver)
 }
 
 /// Binds and starts the server that answers `/metrics`.
