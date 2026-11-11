@@ -27,6 +27,7 @@ pub(crate) mod tenant_call_audit;
 mod tenant_rate_limit;
 mod transfer_context;
 mod types;
+mod workflow_registry;
 
 #[cfg(test)]
 mod peer_failure_tests;
