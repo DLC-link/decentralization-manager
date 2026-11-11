@@ -475,3 +475,247 @@ mod tests {
         assert!(validate_confirmation_threshold(Some(4), 3).is_err());
     }
 }
+
+#[cfg(test)]
+mod start_change_threshold_tests {
+    //! Pins every answer `POST /change-threshold` gives before it starts a
+    //! run: the status code and the exact JSON error body.
+
+    use actix_web::http::StatusCode;
+    use serde_json::json;
+
+    use super::super::{
+        preflight::{format_incompatible_peers, preflight_incompatible_peers},
+        test_support::{
+            Answer, TestNode, break_table, cache_party, closed_port, in_progress_run, insert_peers,
+            insert_run, peer, pid, post_as, post_as_admin, test_node,
+        },
+    };
+    use super::*;
+    use crate::db::MIGRATOR;
+
+    type Result<T = ()> = anyhow::Result<T>;
+
+    /// This node is `pid(1)` and hosts the party `pid(9)` with `pid(2)` and
+    /// `pid(3)`, its peers, without a usable Noise key unless
+    /// `reachable_keys`.
+    async fn three_host_party(pool: SqlitePool, reachable_keys: bool) -> Result<TestNode> {
+        let (p1, p2, p3) = (pid(1)?, pid(2)?, pid(3)?);
+        cache_party(
+            &pool,
+            &pid(9)?,
+            2,
+            &[(&p1, Some("k1")), (&p2, Some("k2")), (&p3, Some("k3"))],
+            &[("k1", Some(&p1)), ("k2", Some(&p2)), ("k3", Some(&p3))],
+        )
+        .await?;
+        let port = closed_port()?;
+        insert_peers(
+            &pool,
+            &[
+                peer(&p2, port, reachable_keys),
+                peer(&p3, port, reachable_keys),
+            ],
+        )
+        .await?;
+        test_node(pool, &p1).await
+    }
+
+    fn change(new_threshold: i32, confirmation: Option<i32>) -> Result<serde_json::Value> {
+        Ok(json!({
+            "decentralized_party_id": pid(9)?.to_string(),
+            "new_threshold": new_threshold,
+            "confirmation_threshold": confirmation,
+        }))
+    }
+
+    async fn post(node: &TestNode, request: serde_json::Value) -> Answer {
+        post_as_admin(
+            &node.data,
+            start_change_threshold,
+            "/change-threshold",
+            request,
+        )
+        .await
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn an_anonymous_caller_is_unauthorized(pool: SqlitePool) -> Result {
+        let node = three_host_party(pool, false).await?;
+        post_as(
+            &node.data,
+            start_change_threshold,
+            "/change-threshold",
+            change(2, None)?,
+            None,
+        )
+        .await
+        .assert_error(StatusCode::UNAUTHORIZED, "authentication required");
+        Ok(())
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_failed_member_read_answers_500(pool: SqlitePool) -> Result {
+        let node = three_host_party(pool.clone(), false).await?;
+        break_table(&pool, "dec_party_participant").await?;
+        post(&node, change(2, None)?).await.assert_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Failed to load decentralized party members",
+        );
+        Ok(())
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_party_without_cached_members_is_a_conflict(pool: SqlitePool) -> Result {
+        let node = test_node(pool, &pid(1)?).await?;
+        let party = pid(9)?;
+        post(&node, change(2, None)?).await.assert_error(
+            StatusCode::CONFLICT,
+            &format!(
+                "No cached membership for {party}. Try refreshing /decentralized-parties first."
+            ),
+        );
+        Ok(())
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn only_a_member_coordinates(pool: SqlitePool) -> Result {
+        let (p2, p3) = (pid(2)?, pid(3)?);
+        cache_party(
+            &pool,
+            &pid(9)?,
+            1,
+            &[(&p2, Some("k2")), (&p3, Some("k3"))],
+            &[("k2", Some(&p2)), ("k3", Some(&p3))],
+        )
+        .await?;
+        let node = test_node(pool, &pid(1)?).await?;
+        let party = pid(9)?;
+        post(&node, change(1, None)?).await.assert_error(
+            StatusCode::BAD_REQUEST,
+            &format!(
+                "This node is not a member of {party}; only an existing member can \
+                 coordinate a threshold change"
+            ),
+        );
+        Ok(())
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_lone_member_has_nothing_to_change(pool: SqlitePool) -> Result {
+        let p1 = pid(1)?;
+        cache_party(
+            &pool,
+            &pid(9)?,
+            1,
+            &[(&p1, Some("k1"))],
+            &[("k1", Some(&p1))],
+        )
+        .await?;
+        let node = test_node(pool, &p1).await?;
+        let party = pid(9)?;
+        post(&node, change(1, None)?).await.assert_error(
+            StatusCode::BAD_REQUEST,
+            &format!("Cannot change threshold: {party} has only 1 member(s)"),
+        );
+        Ok(())
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_threshold_out_of_range_is_a_bad_request(pool: SqlitePool) -> Result {
+        let node = three_host_party(pool, false).await?;
+        post(&node, change(4, None)?).await.assert_error(
+            StatusCode::BAD_REQUEST,
+            "new_threshold must be between 1 and 3 (party member count); got 4",
+        );
+        Ok(())
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_confirmation_threshold_out_of_range_is_a_bad_request(pool: SqlitePool) -> Result {
+        let node = three_host_party(pool, false).await?;
+        post(&node, change(2, Some(4))?).await.assert_error(
+            StatusCode::BAD_REQUEST,
+            "confirmation_threshold must be between 1 and 3 (the hosting participants); got 4",
+        );
+        Ok(())
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_failed_peer_read_answers_500(pool: SqlitePool) -> Result {
+        let node = three_host_party(pool.clone(), false).await?;
+        break_table(&pool, "peers").await?;
+        post(&node, change(2, None)?)
+            .await
+            .assert_error(StatusCode::INTERNAL_SERVER_ERROR, "Failed to load peers");
+        Ok(())
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_party_with_a_run_in_flight_is_a_conflict(pool: SqlitePool) -> Result {
+        let party = pid(9)?;
+        let node = three_host_party(pool.clone(), false).await?;
+        insert_run(&pool, &in_progress_run("busy-run", &party)).await?;
+        post(&node, change(2, None)?).await.assert_error(
+            StatusCode::CONFLICT,
+            &format!(
+                "Party {party} already has a Contracts workflow in flight (run busy-run); \
+                 wait for it to finish or cancel it first"
+            ),
+        );
+        Ok(())
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn an_unverifiable_invitee_is_a_conflict(pool: SqlitePool) -> Result {
+        let node = three_host_party(pool.clone(), true).await?;
+        let incompatible =
+            preflight_incompatible_peers(&node.data.config, &pool, &[pid(2)?, pid(3)?]).await;
+        assert_eq!(incompatible.len(), 2, "{incompatible:?}");
+        post(&node, change(2, None)?).await.assert_error(
+            StatusCode::CONFLICT,
+            &format_incompatible_peers(&incompatible),
+        );
+        Ok(())
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_failed_run_write_is_a_conflict_and_leaves_no_run(pool: SqlitePool) -> Result {
+        let node = three_host_party(pool.clone(), false).await?;
+        break_table(&pool, "workflow_runs").await?;
+        let answer = post(&node, change(2, None)?).await;
+        assert_eq!(answer.status, StatusCode::CONFLICT, "{}", answer.body);
+        assert_eq!(answer.content_type.as_deref(), Some("application/json"));
+        let body = answer.json()?;
+        let error = body["error"].as_str().unwrap_or_default();
+        assert!(
+            error.starts_with("Failed to start change-threshold workflow: ")
+                && error.contains("workflow_runs"),
+            "{error}"
+        );
+        assert_eq!(body.as_object().map(|o| o.len()), Some(1), "{body}");
+        assert!(node.data.workflows.snapshot().is_empty());
+        Ok(())
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_valid_change_is_accepted(pool: SqlitePool) -> Result {
+        let node = three_host_party(pool, false).await?;
+        let answer = post(&node, change(2, None)?).await;
+        assert_eq!(answer.status, StatusCode::ACCEPTED, "{}", answer.body);
+        assert_eq!(answer.content_type.as_deref(), Some("application/json"));
+        let body = answer.json()?;
+        let instance = body["instance_name"].as_str().unwrap_or_default();
+        assert!(
+            instance.starts_with("validator-9-change-threshold-"),
+            "{body}"
+        );
+        assert_eq!(
+            answer.body,
+            format!(
+                r#"{{"status":"inprogress","message":"Change-threshold workflow started","instance_name":"{instance}"}}"#
+            )
+        );
+        Ok(())
+    }
+}
