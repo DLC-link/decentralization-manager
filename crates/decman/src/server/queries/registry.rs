@@ -1,6 +1,6 @@
 //! Utility registry: registrar services, provider configurations, block lists, instruments.
 
-use canton_proto_rs::com::daml::ledger::api::v2::{CreatedEvent, Identifier, Record, value};
+use canton_proto_rs::com::daml::ledger::api::v2::{CreatedEvent, Record, value};
 use common::api::{
     InstrumentConfigurationFields, InstrumentIdentifier, PartyCredentialRequirement, RequiredClaim,
 };
@@ -13,12 +13,10 @@ use crate::{
 };
 
 use super::templates::{
-    TemplateId, provider_configuration_template, registrar_service_request_template,
-    registrar_service_template,
+    TemplateId, fetch_by_template, provider_configuration_template,
+    registrar_service_request_template, registrar_service_template,
 };
 use crate::server::{
-    event_filters::{party_event_format, template_filter},
-    ledger_paging::fetch_active_contracts_filtered,
     record::{field_record, record_field},
     types::{
         BlockListShardInfo, InstrumentInfo, ProviderConfigurationInfo, RegistrarServiceInfo,
@@ -37,37 +35,13 @@ pub async fn get_registrar_services(
     token: Option<String>,
     packages: &PackageConfig,
 ) -> Result<Vec<RegistrarServiceInfo>> {
-    match registrar_service_template(packages) {
-        Some(template) => {
-            fetch_registrar_services_for_template(config, party_id, token, &template).await
-        }
-        None => Ok(Vec::new()),
-    }
-}
-
-/// Fetch registrar services using TemplateFilter
-async fn fetch_registrar_services_for_template(
-    config: &NodeConfig,
-    party_id: &CantonId,
-    token: Option<String>,
-    template: &TemplateId,
-) -> Result<Vec<RegistrarServiceInfo>> {
-    let event_format = party_event_format(
+    fetch_by_template(
+        config,
         party_id,
-        vec![template_filter(
-            Identifier {
-                package_id: template.package_id.clone(),
-                module_name: template.module_name.to_string(),
-                entity_name: template.entity_name.to_string(),
-            },
-            false,
-        )],
-        true,
-    );
-
-    fetch_active_contracts_filtered(config, token, event_format, |created| {
-        extract_registrar_service_info(&created)
-    })
+        token,
+        registrar_service_template(packages),
+        extract_registrar_service_info,
+    )
     .await
 }
 
@@ -98,37 +72,13 @@ pub async fn get_registrar_service_requests(
     token: Option<String>,
     packages: &PackageConfig,
 ) -> Result<Vec<RegistrarServiceRequestInfo>> {
-    match registrar_service_request_template(packages) {
-        Some(template) => {
-            fetch_registrar_service_requests_for_template(config, party_id, token, &template).await
-        }
-        None => Ok(Vec::new()),
-    }
-}
-
-/// Fetch registrar service requests using TemplateFilter
-async fn fetch_registrar_service_requests_for_template(
-    config: &NodeConfig,
-    party_id: &CantonId,
-    token: Option<String>,
-    template: &TemplateId,
-) -> Result<Vec<RegistrarServiceRequestInfo>> {
-    let event_format = party_event_format(
+    fetch_by_template(
+        config,
         party_id,
-        vec![template_filter(
-            Identifier {
-                package_id: template.package_id.clone(),
-                module_name: template.module_name.to_string(),
-                entity_name: template.entity_name.to_string(),
-            },
-            false,
-        )],
-        true,
-    );
-
-    fetch_active_contracts_filtered(config, token, event_format, |created| {
-        extract_registrar_service_request_info(&created)
-    })
+        token,
+        registrar_service_request_template(packages),
+        extract_registrar_service_request_info,
+    )
     .await
 }
 
@@ -181,37 +131,13 @@ pub async fn get_provider_configurations(
     token: Option<String>,
     packages: &PackageConfig,
 ) -> Result<Vec<ProviderConfigurationInfo>> {
-    match provider_configuration_template(packages) {
-        Some(template) => {
-            fetch_provider_configurations_for_template(config, party_id, token, &template).await
-        }
-        None => Ok(Vec::new()),
-    }
-}
-
-/// Fetch provider configurations using TemplateFilter
-async fn fetch_provider_configurations_for_template(
-    config: &NodeConfig,
-    party_id: &CantonId,
-    token: Option<String>,
-    template: &TemplateId,
-) -> Result<Vec<ProviderConfigurationInfo>> {
-    let event_format = party_event_format(
+    fetch_by_template(
+        config,
         party_id,
-        vec![template_filter(
-            Identifier {
-                package_id: template.package_id.clone(),
-                module_name: template.module_name.to_string(),
-                entity_name: template.entity_name.to_string(),
-            },
-            false,
-        )],
-        true,
-    );
-
-    fetch_active_contracts_filtered(config, token, event_format, |created| {
-        extract_provider_configuration_info(&created)
-    })
+        token,
+        provider_configuration_template(packages),
+        extract_provider_configuration_info,
+    )
     .await
 }
 
@@ -255,23 +181,13 @@ pub async fn get_block_list_shards(
     party_id: &CantonId,
     token: Option<String>,
 ) -> Result<Vec<BlockListShardInfo>> {
-    let template = block_list_shard_template();
-    let event_format = party_event_format(
+    fetch_by_template(
+        config,
         party_id,
-        vec![template_filter(
-            Identifier {
-                package_id: template.package_id.clone(),
-                module_name: template.module_name.to_string(),
-                entity_name: template.entity_name.to_string(),
-            },
-            false,
-        )],
-        true,
-    );
-
-    fetch_active_contracts_filtered(config, token, event_format, |created| {
-        extract_block_list_shard_info(&created)
-    })
+        token,
+        Some(block_list_shard_template()),
+        extract_block_list_shard_info,
+    )
     .await
 }
 
@@ -311,37 +227,13 @@ pub async fn get_instruments(
     party_id: &CantonId,
     token: Option<String>,
 ) -> Result<Vec<InstrumentInfo>> {
-    fetch_instruments_for_template(
+    fetch_by_template(
         config,
         party_id,
         token,
-        &instrument_configuration_template(),
+        Some(instrument_configuration_template()),
+        extract_instrument_info,
     )
-    .await
-}
-
-async fn fetch_instruments_for_template(
-    config: &NodeConfig,
-    party_id: &CantonId,
-    token: Option<String>,
-    template: &TemplateId,
-) -> Result<Vec<InstrumentInfo>> {
-    let event_format = party_event_format(
-        party_id,
-        vec![template_filter(
-            Identifier {
-                package_id: template.package_id.clone(),
-                module_name: template.module_name.to_string(),
-                entity_name: template.entity_name.to_string(),
-            },
-            false,
-        )],
-        true,
-    );
-
-    fetch_active_contracts_filtered(config, token, event_format, |created| {
-        extract_instrument_info(&created)
-    })
     .await
 }
 

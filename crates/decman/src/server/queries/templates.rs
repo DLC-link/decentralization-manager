@@ -1,12 +1,52 @@
-//! Template ids the contract queries filter on.
+//! Template ids the contract queries filter on, and the fetch of one
+//! template's active contracts.
 
-use crate::config::PackageConfig;
+use canton_proto_rs::com::daml::ledger::api::v2::{CreatedEvent, Identifier};
+
+use crate::{
+    canton_id::CantonId,
+    config::{NodeConfig, PackageConfig},
+    error::Result,
+    server::{
+        event_filters::{party_event_format, template_filter},
+        ledger_paging::fetch_active_contracts_filtered,
+    },
+};
 
 /// Template identifier for Daml contracts
 pub struct TemplateId {
     pub(super) package_id: String,
     pub(super) module_name: &'static str,
     pub(super) entity_name: &'static str,
+}
+
+/// Fetch the active contracts of `template` visible to `party_id`, keeping
+/// each one `extract` reads. A `None` template means its package is not
+/// configured, so the list is empty and the ledger is not asked.
+pub(super) async fn fetch_by_template<T>(
+    config: &NodeConfig,
+    party_id: &CantonId,
+    token: Option<String>,
+    template: Option<TemplateId>,
+    mut extract: impl FnMut(&CreatedEvent) -> Option<T>,
+) -> Result<Vec<T>> {
+    let Some(template) = template else {
+        return Ok(Vec::new());
+    };
+    let event_format = party_event_format(
+        party_id,
+        vec![template_filter(
+            Identifier {
+                package_id: template.package_id.clone(),
+                module_name: template.module_name.to_string(),
+                entity_name: template.entity_name.to_string(),
+            },
+            false,
+        )],
+        true,
+    );
+
+    fetch_active_contracts_filtered(config, token, event_format, |created| extract(&created)).await
 }
 
 /// Contract template identifiers for the contracts list
@@ -169,5 +209,61 @@ mod tests {
         assert_eq!(template.package_id, "#utility-credential-v0");
         assert_eq!(template.module_name, "Utility.Credential.V0.Credential");
         assert_eq!(template.entity_name, "Credential");
+    }
+
+    fn party() -> anyhow::Result<CantonId> {
+        CantonId::parse(&format!("party::1220{}", "a".repeat(64)))
+    }
+
+    /// A node config whose ledger port has nothing listening on it.
+    fn config_with_closed_ledger() -> anyhow::Result<NodeConfig> {
+        let port = std::net::TcpListener::bind("127.0.0.1:0")?
+            .local_addr()?
+            .port();
+        let mut config = NodeConfig::default();
+        config.canton.ledger_api_port = port;
+        Ok(config)
+    }
+
+    /// A list whose package is not configured is empty, and the ledger is
+    /// never asked: here it would refuse the connection.
+    #[tokio::test]
+    async fn an_unconfigured_template_lists_nothing() -> anyhow::Result<()> {
+        let config = config_with_closed_ledger()?;
+        let packages = PackageConfig {
+            utility_credential: None,
+            ..crate::config::default_package_config()
+        };
+
+        let rows = fetch_by_template(
+            &config,
+            &party()?,
+            None,
+            credential_template(&packages),
+            |created| Some(created.contract_id.clone()),
+        )
+        .await?;
+
+        assert!(rows.is_empty());
+        Ok(())
+    }
+
+    /// A configured template asks the ledger, and a ledger error reaches the
+    /// caller.
+    #[tokio::test]
+    async fn a_configured_template_reports_a_ledger_error() -> anyhow::Result<()> {
+        let config = config_with_closed_ledger()?;
+
+        let rows = fetch_by_template(
+            &config,
+            &party()?,
+            None,
+            credential_template(&crate::config::default_package_config()),
+            |created| Some(created.contract_id.clone()),
+        )
+        .await;
+
+        assert!(rows.is_err(), "a refused connection must be an error");
+        Ok(())
     }
 }
