@@ -14,7 +14,7 @@ use crate::{
     config::{NodeConfig, Peer},
     consts::{MAX_CONSECUTIVE_NO_WORKFLOW_POLLS, peer_wait_poll_delay_ms},
     error::Result,
-    noise::{MessageType, NoiseError, client::NoiseClient},
+    noise::{Message, MessageType, NoiseError, client::NoiseClient},
     server::DeclineInvitationPayload,
     utils,
     workflow::{
@@ -110,19 +110,115 @@ async fn run_peer(
     expectations: PeerExpectations,
     workflow_auth: Option<WorkflowAuth>,
 ) -> Result {
-    let peer_kind = expectations.kind;
+    PeerRun {
+        node_config,
+        client,
+        db,
+        instance_name,
+        expectations,
+        workflow_auth,
+        consecutive_errors: 0,
+        consecutive_no_workflow: 0,
+        consecutive_step_failures: 0,
+    }
+    .run()
+    .await
+}
 
-    // Command polling loop
-    let mut consecutive_errors = 0;
-    let mut consecutive_no_workflow = 0;
-    let mut consecutive_step_failures = 0;
-    loop {
-        // Poll coordinator for next command (with payload for commands that need data)
-        let message = match client.get_next_command_with_payload().await {
+/// Why a command did not complete.
+enum StepError {
+    /// The step failed, and the coordinator may send the command again. The
+    /// failure counts against the run's retry budget.
+    Retry(String),
+    /// The run cannot go on.
+    Abort(anyhow::Error),
+}
+
+impl From<anyhow::Error> for StepError {
+    fn from(e: anyhow::Error) -> Self {
+        Self::Abort(e)
+    }
+}
+
+impl From<NoiseError> for StepError {
+    fn from(e: NoiseError) -> Self {
+        Self::Abort(e.into())
+    }
+}
+
+/// What the loop does after a command.
+enum Next {
+    /// Poll the coordinator for the next command.
+    Poll,
+    /// The coordinator disconnected this peer: the run is over.
+    Disconnect,
+}
+
+/// One peer run: what its commands need, and the counters that decide when
+/// it gives up.
+struct PeerRun {
+    node_config: NodeConfig,
+    client: NoiseClient,
+    db: SqlitePool,
+    instance_name: String,
+    expectations: PeerExpectations,
+    workflow_auth: Option<WorkflowAuth>,
+    /// Polls in a row that did not reach the coordinator.
+    consecutive_errors: i32,
+    /// Polls in a row that the coordinator answered with no active workflow.
+    consecutive_no_workflow: usize,
+    /// Steps in a row that failed, whatever the cause.
+    consecutive_step_failures: usize,
+}
+
+impl PeerRun {
+    async fn run(mut self) -> Result {
+        let peer_kind = self.expectations.kind;
+
+        // Command polling loop
+        loop {
+            // Poll coordinator for next command (with payload for commands that need data)
+            let Some(message) = self.next_command().await? else {
+                continue;
+            };
+            let command = message.msg_type;
+            let payload = message.payload;
+
+            // Only commands that belong to the accepted workflow kind are
+            // executed. A Contracts invitation must not become a licence to sign
+            // a kick's topology transactions.
+            let outcome = if command_matches_kind(peer_kind, command) {
+                persist_peer_step(&self.db, &self.instance_name, peer_kind, command).await;
+                self.run_command(command, &payload).await
+            } else {
+                Err(StepError::Retry(format!(
+                    "Refusing {command:?}: the accepted invitation is for a {peer_kind:?} workflow"
+                )))
+            };
+
+            // Keep every failure path on the same counter and backoff policy.
+            match outcome {
+                Ok(Next::Poll) => {}
+                Ok(Next::Disconnect) => break,
+                Err(StepError::Retry(reason)) => {
+                    retry_peer_step(&mut self.consecutive_step_failures, command, reason).await?;
+                }
+                Err(StepError::Abort(e)) => return Err(e),
+            }
+        }
+
+        tracing::info!("Peer shutting down");
+        Ok(())
+    }
+
+    /// Poll the coordinator once. `None` means the poll failed and has
+    /// already waited before the next one.
+    async fn next_command(&mut self) -> Result<Option<Message>> {
+        match self.client.get_next_command_with_payload().await {
             Ok(msg) => {
-                consecutive_errors = 0; // Reset error count on success
-                consecutive_no_workflow = 0;
-                msg
+                self.consecutive_errors = 0; // Reset error count on success
+                self.consecutive_no_workflow = 0;
+                Ok(Some(msg))
             }
             Err(e) => {
                 // A 503 means the coordinator is reachable but has no active
@@ -135,9 +231,9 @@ async fn run_peer(
                 // a dead coordinator forever. The counter resets on any real
                 // reply above, so a slow resume rides through.
                 if matches!(&e, NoiseError::BadStatusCode(code, _) if code.as_u16() == 503) {
-                    consecutive_errors = 0;
-                    consecutive_no_workflow += 1;
-                    if consecutive_no_workflow >= MAX_CONSECUTIVE_NO_WORKFLOW_POLLS {
+                    self.consecutive_errors = 0;
+                    self.consecutive_no_workflow += 1;
+                    if self.consecutive_no_workflow >= MAX_CONSECUTIVE_NO_WORKFLOW_POLLS {
                         tracing::error!(
                             "Coordinator reported no active workflow for \
                              {MAX_CONSECUTIVE_NO_WORKFLOW_POLLS} polls; the workflow was \
@@ -149,13 +245,14 @@ async fn run_peer(
                     }
                     tracing::warn!(
                         "Poll {consecutive_no_workflow}/{MAX_CONSECUTIVE_NO_WORKFLOW_POLLS}: \
-                         coordinator has no active workflow yet, retrying"
+                         coordinator has no active workflow yet, retrying",
+                        consecutive_no_workflow = self.consecutive_no_workflow
                     );
                     tokio::time::sleep(Duration::from_secs(5)).await;
-                    continue;
+                    return Ok(None);
                 }
 
-                consecutive_errors += 1;
+                self.consecutive_errors += 1;
 
                 // Per-attempt failures are WARN, not ERROR — the loop's design
                 // is to tolerate transient blips (e.g. coordinator restarting
@@ -163,11 +260,14 @@ async fn run_peer(
                 // bail is logged at ERROR. This keeps test logs readable when
                 // a known restart cycle produces one or two retries that
                 // succeed on the next attempt.
-                tracing::warn!("Attempt {consecutive_errors}/3: failed to get next command: {e}");
+                tracing::warn!(
+                    "Attempt {consecutive_errors}/3: failed to get next command: {e}",
+                    consecutive_errors = self.consecutive_errors
+                );
 
                 // If we get multiple connection refused errors in a row,
                 // the coordinator has likely shut down or there's a persistent error
-                if consecutive_errors >= 3 {
+                if self.consecutive_errors >= 3 {
                     tracing::error!(
                         "Failed to communicate with coordinator after 3 attempts. Aborting."
                     );
@@ -177,32 +277,17 @@ async fn run_peer(
                 }
 
                 tokio::time::sleep(Duration::from_secs(5)).await;
-                continue;
+                Ok(None)
             }
-        };
-
-        let command = message.msg_type;
-        let payload = message.payload;
-
-        // Keep every failure path on the same counter and backoff policy.
-        macro_rules! fail_step {
-            ($($reason:tt)*) => {
-                retry_peer_step(&mut consecutive_step_failures, command, format!($($reason)*)).await?
-            };
         }
+    }
 
-        // Only commands that belong to the accepted workflow kind are
-        // executed. A Contracts invitation must not become a licence to sign
-        // a kick's topology transactions.
-        if !command_matches_kind(peer_kind, command) {
-            fail_step!(
-                "Refusing {command:?}: the accepted invitation is for a {peer_kind:?} workflow"
-            );
-            continue;
-        }
-
-        persist_peer_step(&db, &instance_name, peer_kind, command).await;
-
+    /// Execute one command of the accepted workflow kind.
+    async fn run_command(
+        &mut self,
+        command: MessageType,
+        payload: &[u8],
+    ) -> std::result::Result<Next, StepError> {
         match command {
             MessageType::Wait => {
                 tracing::trace!("Received command: Wait");
@@ -211,13 +296,13 @@ async fn run_peer(
             }
             MessageType::RetireLegacyKeys => {
                 // The target comes from the accepted invitation, never this command's payload.
-                let party = expectations.dec_party_id.as_ref().ok_or_else(|| {
+                let party = self.expectations.dec_party_id.as_ref().ok_or_else(|| {
                     anyhow::anyhow!("No accepted party for legacy key retirement")
                 })?;
-                let synchronizer_id = utils::get_synchronizer_id(&node_config).await?;
-                topology::retire_legacy_keys(&node_config, &synchronizer_id, party).await?;
-                consecutive_step_failures = 0;
-                client
+                let synchronizer_id = utils::get_synchronizer_id(&self.node_config).await?;
+                topology::retire_legacy_keys(&self.node_config, &synchronizer_id, party).await?;
+                self.consecutive_step_failures = 0;
+                self.client
                     .send(
                         MessageType::StatusUpdate,
                         b"RetireLegacyKeys completed".to_vec(),
@@ -226,7 +311,7 @@ async fn run_peer(
             }
             MessageType::Disconnect => {
                 tracing::info!("Received disconnect command, shutting down");
-                break;
+                return Ok(Next::Disconnect);
             }
             MessageType::UploadDars => {
                 tracing::info!("Executing: Upload DARs");
@@ -235,28 +320,32 @@ async fn run_peer(
                 let dar_files = if payload.is_empty() {
                     Vec::new()
                 } else {
-                    match utils::decode_files(&payload) {
+                    match utils::decode_files(payload) {
                         Ok(files) => files,
                         Err(e) => {
-                            fail_step!("Failed to decode DARs from coordinator: {e}");
-                            continue;
+                            return Err(StepError::Retry(format!(
+                                "Failed to decode DARs from coordinator: {e}"
+                            )));
                         }
                     }
                 };
 
                 // Vetting a DAR makes this participant willing to execute its
                 // code, so the files must be the ones the operator accepted.
-                if let Err(e) = expectations.check_dars(&dar_files) {
-                    fail_step!("Refusing the coordinator's DARs: {e}");
-                    continue;
+                if let Err(e) = self.expectations.check_dars(&dar_files) {
+                    return Err(StepError::Retry(format!(
+                        "Refusing the coordinator's DARs: {e}"
+                    )));
                 }
 
-                if let Err(e) = contracts::upload_dars_from_bytes(&node_config, dar_files).await {
-                    fail_step!("Step execution failed: {e}");
-                    continue;
+                if let Err(e) =
+                    contracts::upload_dars_from_bytes(&self.node_config, dar_files).await
+                {
+                    return Err(StepError::Retry(format!("Step execution failed: {e}")));
                 }
-                consecutive_step_failures = 0;
-                if let Err(e) = client
+                self.consecutive_step_failures = 0;
+                if let Err(e) = self
+                    .client
                     .send(MessageType::StatusUpdate, b"UploadDars completed".to_vec())
                     .await
                 {
@@ -270,36 +359,42 @@ async fn run_peer(
                 // config's `instance_name` is the coordinator's view and is
                 // intentionally unused here).
                 let onboarding_config: onboarding::OnboardingConfig =
-                    match serde_json::from_slice(&payload) {
+                    match serde_json::from_slice(payload) {
                         Ok(config) => config,
                         Err(e) => {
-                            fail_step!("Failed to deserialize onboarding config: {e}");
-                            continue;
+                            return Err(StepError::Retry(format!(
+                                "Failed to deserialize onboarding config: {e}"
+                            )));
                         }
                     };
 
                 // The prefix names the vault keys this step creates or reuses,
                 // so it is pinned before any key material is touched.
-                if let Err(e) =
-                    expectations.check_onboarding_config(&onboarding_config.party_id_prefix)
+                if let Err(e) = self
+                    .expectations
+                    .check_onboarding_config(&onboarding_config.party_id_prefix)
                 {
-                    fail_step!("Refusing the coordinator's onboarding config: {e}");
-                    continue;
+                    return Err(StepError::Retry(format!(
+                        "Refusing the coordinator's onboarding config: {e}"
+                    )));
                 }
 
-                if let Err(e) =
-                    onboarding::generate_keys(&node_config, &db, &instance_name, &onboarding_config)
-                        .await
+                if let Err(e) = onboarding::generate_keys(
+                    &self.node_config,
+                    &self.db,
+                    &self.instance_name,
+                    &onboarding_config,
+                )
+                .await
                 {
-                    fail_step!("Step execution failed: {e}");
-                    continue;
+                    return Err(StepError::Retry(format!("Step execution failed: {e}")));
                 }
-                consecutive_step_failures = 0;
+                self.consecutive_step_failures = 0;
                 if let Err(e) = onboarding::peer::send_keys_to_coordinator(
-                    &client,
-                    &db,
-                    &instance_name,
-                    &node_config,
+                    &self.client,
+                    &self.db,
+                    &self.instance_name,
+                    &self.node_config,
                 )
                 .await
                 {
@@ -309,11 +404,13 @@ async fn run_peer(
             MessageType::SignDns => {
                 tracing::info!("Executing: Sign DNS proposal");
                 if payload.is_empty() {
-                    fail_step!("No DNS proposal payload received from coordinator");
-                    continue;
+                    return Err(StepError::Retry(
+                        "No DNS proposal payload received from coordinator".to_string(),
+                    ));
                 }
-                match expectations
-                    .check_onboarding_dns(&node_config, &db, &instance_name, &payload)
+                match self
+                    .expectations
+                    .check_onboarding_dns(&self.node_config, &self.db, &self.instance_name, payload)
                     .await
                 {
                     // Remember the namespace we authorized so the P2P
@@ -323,40 +420,44 @@ async fn run_peer(
                         // next step. Signing DNS without recording it would
                         // leave that cross-check silently disabled, so a write
                         // failure fails the step instead.
-                        if let Err(e) = db
+                        if let Err(e) = self
+                            .db
                             .write_artifact(
-                                &instance_name,
+                                &self.instance_name,
                                 artifact_kinds::ACCEPTED_DNS_NAMESPACE,
                                 None,
                                 namespace.as_bytes(),
                             )
                             .await
                         {
-                            fail_step!(
+                            return Err(StepError::Retry(format!(
                                 "Refusing to sign DNS: the accepted namespace could not be \
                                  recorded, so the P2P cross-check would be lost: {e}"
-                            );
-                            continue;
+                            )));
                         }
                     }
                     Err(e) => {
-                        fail_step!("Refusing the coordinator's DNS proposal: {e}");
-                        continue;
+                        return Err(StepError::Retry(format!(
+                            "Refusing the coordinator's DNS proposal: {e}"
+                        )));
                     }
                 }
-                if let Err(e) =
-                    onboarding::sign_dns_proposals(&node_config, &db, &instance_name, &payload)
-                        .await
+                if let Err(e) = onboarding::sign_dns_proposals(
+                    &self.node_config,
+                    &self.db,
+                    &self.instance_name,
+                    payload,
+                )
+                .await
                 {
-                    fail_step!("Step execution failed: {e}");
-                    continue;
+                    return Err(StepError::Retry(format!("Step execution failed: {e}")));
                 }
-                consecutive_step_failures = 0;
+                self.consecutive_step_failures = 0;
                 if let Err(e) = onboarding::peer::send_dns_signature_to_coordinator(
-                    &client,
-                    &db,
-                    &instance_name,
-                    &node_config,
+                    &self.client,
+                    &self.db,
+                    &self.instance_name,
+                    &self.node_config,
                 )
                 .await
                 {
@@ -366,8 +467,9 @@ async fn run_peer(
             MessageType::SignP2p => {
                 tracing::info!("Executing: Sign P2P proposals");
                 if payload.is_empty() {
-                    fail_step!("No P2P proposal payload received from coordinator");
-                    continue;
+                    return Err(StepError::Retry(
+                        "No P2P proposal payload received from coordinator".to_string(),
+                    ));
                 }
                 // Absent means the DNS step ran on a build that did not record
                 // the namespace yet — the mixed-version case, which degrades to
@@ -375,8 +477,13 @@ async fn run_peer(
                 // A read error is different: it hides whether a namespace was
                 // recorded at all, so it fails the step rather than skipping
                 // the cross-check.
-                let signed_namespace = match db
-                    .read_artifact(&instance_name, artifact_kinds::ACCEPTED_DNS_NAMESPACE, None)
+                let signed_namespace = match self
+                    .db
+                    .read_artifact(
+                        &self.instance_name,
+                        artifact_kinds::ACCEPTED_DNS_NAMESPACE,
+                        None,
+                    )
                     .await
                 {
                     // Nothing recorded is the mixed-version case. Bytes that
@@ -387,47 +494,50 @@ async fn run_peer(
                     Ok(Some(bytes)) => match String::from_utf8(bytes) {
                         Ok(namespace) => Some(namespace),
                         Err(e) => {
-                            fail_step!(
+                            return Err(StepError::Retry(format!(
                                 "Refusing to sign P2P: the recorded DNS namespace is not \
                                  readable, so the cross-check cannot be applied: {e}"
-                            );
-                            continue;
+                            )));
                         }
                     },
                     Err(e) => {
-                        fail_step!(
+                        return Err(StepError::Retry(format!(
                             "Refusing to sign P2P: cannot read the DNS namespace this run \
                              accepted, so the cross-check cannot be applied: {e}"
-                        );
-                        continue;
+                        )));
                     }
                 };
-                if let Err(e) = expectations
+                if let Err(e) = self
+                    .expectations
                     .check_onboarding_p2p(
-                        &node_config,
-                        &db,
-                        &instance_name,
-                        &payload,
+                        &self.node_config,
+                        &self.db,
+                        &self.instance_name,
+                        payload,
                         signed_namespace.as_deref(),
                     )
                     .await
                 {
-                    fail_step!("Refusing the coordinator's P2P proposal: {e}");
-                    continue;
+                    return Err(StepError::Retry(format!(
+                        "Refusing the coordinator's P2P proposal: {e}"
+                    )));
                 }
-                if let Err(e) =
-                    onboarding::sign_p2p_proposals(&node_config, &db, &instance_name, &payload)
-                        .await
+                if let Err(e) = onboarding::sign_p2p_proposals(
+                    &self.node_config,
+                    &self.db,
+                    &self.instance_name,
+                    payload,
+                )
+                .await
                 {
-                    fail_step!("Step execution failed: {e}");
-                    continue;
+                    return Err(StepError::Retry(format!("Step execution failed: {e}")));
                 }
-                consecutive_step_failures = 0;
+                self.consecutive_step_failures = 0;
                 if let Err(e) = onboarding::peer::send_p2p_signatures_to_coordinator(
-                    &client,
-                    &db,
-                    &instance_name,
-                    &node_config,
+                    &self.client,
+                    &self.db,
+                    &self.instance_name,
+                    &self.node_config,
                 )
                 .await
                 {
@@ -441,17 +551,21 @@ async fn run_peer(
                 // coordinator, so we can persist this peer's keys +
                 // participant id under the dec_party_identity table for use
                 // by post-onboarding workflows on this node.
-                match extract_party_id_from_p2p_payload(&payload) {
+                match extract_party_id_from_p2p_payload(payload) {
                     Ok(dec_party_id) => {
-                        if let Err(e) = db.write_run_party_id(&instance_name, &dec_party_id).await {
+                        if let Err(e) = self
+                            .db
+                            .write_run_party_id(&self.instance_name, &dec_party_id)
+                            .await
+                        {
                             tracing::error!(
                                 "Failed to persist party id {dec_party_id} on peer run: {e}"
                             );
                         }
                         if let Err(e) = onboarding::peer::copy_self_identity_for_party(
-                            &db,
-                            &instance_name,
-                            &node_config,
+                            &self.db,
+                            &self.instance_name,
+                            &self.node_config,
                             &dec_party_id,
                         )
                         .await
@@ -468,16 +582,18 @@ async fn run_peer(
                 tracing::info!("Executing: Sign submissions");
 
                 if payload.is_empty() {
-                    fail_step!("No submissions payload received from coordinator");
-                    continue;
+                    return Err(StepError::Retry(
+                        "No submissions payload received from coordinator".to_string(),
+                    ));
                 }
 
                 // Decode config and files from payload: [config_json, files_payload]
-                let items = match utils::decode_length_prefixed(&payload, 2) {
+                let items = match utils::decode_length_prefixed(payload, 2) {
                     Ok(items) => items,
                     Err(e) => {
-                        fail_step!("Failed to decode SignSubmissions payload: {e}");
-                        continue;
+                        return Err(StepError::Retry(format!(
+                            "Failed to decode SignSubmissions payload: {e}"
+                        )));
                     }
                 };
 
@@ -485,45 +601,48 @@ async fn run_peer(
                     match serde_json::from_slice(&items[0]) {
                         Ok(config) => config,
                         Err(e) => {
-                            fail_step!("Failed to deserialize contracts config: {e}");
-                            continue;
+                            return Err(StepError::Retry(format!(
+                                "Failed to deserialize contracts config: {e}"
+                            )));
                         }
                     };
 
                 let dec_party_id = contracts_config.decentralized_party_id.clone();
-                if let Err(e) = expectations.check_dec_party(&dec_party_id) {
-                    fail_step!("Refusing the coordinator's contracts config: {e}");
-                    continue;
+                if let Err(e) = self.expectations.check_dec_party(&dec_party_id) {
+                    return Err(StepError::Retry(format!(
+                        "Refusing the coordinator's contracts config: {e}"
+                    )));
                 }
 
                 // Persist the prepared submissions sent by the coordinator into
                 // this peer's workflow_artifacts so sign_submissions can
                 // read them back via list_artifacts.
                 if let Err(e) =
-                    save_prepared_submissions_from_payload(&items[1], &db, &instance_name).await
+                    save_prepared_submissions_from_payload(&items[1], &self.db, &self.instance_name)
+                        .await
                 {
-                    fail_step!("Failed to save prepared submissions from coordinator: {e}");
-                    continue;
+                    return Err(StepError::Retry(format!(
+                        "Failed to save prepared submissions from coordinator: {e}"
+                    )));
                 }
 
                 if let Err(e) = contracts::sign_submissions(
-                    &node_config,
-                    &db,
-                    &instance_name,
+                    &self.node_config,
+                    &self.db,
+                    &self.instance_name,
                     &dec_party_id,
-                    &expectations.contract_intents,
+                    &self.expectations.contract_intents,
                 )
                 .await
                 {
-                    fail_step!("Step execution failed: {e:#}");
-                    continue;
+                    return Err(StepError::Retry(format!("Step execution failed: {e:#}")));
                 }
-                consecutive_step_failures = 0;
+                self.consecutive_step_failures = 0;
                 if let Err(e) = contracts::peer::send_submission_signatures_to_coordinator(
-                    &client,
-                    &db,
-                    &instance_name,
-                    &node_config,
+                    &self.client,
+                    &self.db,
+                    &self.instance_name,
+                    &self.node_config,
                 )
                 .await
                 {
@@ -533,47 +652,62 @@ async fn run_peer(
             MessageType::SignKick => {
                 tracing::info!("Executing: Sign kick proposals");
                 if payload.is_empty() {
-                    fail_step!("No kick proposals payload received from coordinator");
-                    continue;
+                    return Err(StepError::Retry(
+                        "No kick proposals payload received from coordinator".to_string(),
+                    ));
                 }
 
-                let items = match utils::decode_length_prefixed(&payload, 3) {
+                let items = match utils::decode_length_prefixed(payload, 3) {
                     Ok(items) => items,
                     Err(e) => {
-                        fail_step!("Failed to decode SignKick payload: {e}");
-                        continue;
+                        return Err(StepError::Retry(format!(
+                            "Failed to decode SignKick payload: {e}"
+                        )));
                     }
                 };
 
                 let _kick_config: kick::KickConfig = match serde_json::from_slice(&items[0]) {
                     Ok(config) => config,
                     Err(e) => {
-                        fail_step!("Failed to deserialize kick config: {e}");
-                        continue;
+                        return Err(StepError::Retry(format!(
+                            "Failed to deserialize kick config: {e}"
+                        )));
                     }
                 };
 
-                if let Err(e) = expectations
-                    .check_party_proposals(&node_config, &db, &instance_name, &items[1], &items[2])
+                if let Err(e) = self
+                    .expectations
+                    .check_party_proposals(
+                        &self.node_config,
+                        &self.db,
+                        &self.instance_name,
+                        &items[1],
+                        &items[2],
+                    )
                     .await
                 {
-                    fail_step!("Refusing the coordinator's kick proposals: {e}");
-                    continue;
+                    return Err(StepError::Retry(format!(
+                        "Refusing the coordinator's kick proposals: {e}"
+                    )));
                 }
 
                 let kick_data = utils::encode_length_prefixed(&[&items[1], &items[2]]);
-                if let Err(e) =
-                    kick::sign_proposals(&node_config, &db, &instance_name, &kick_data).await
+                if let Err(e) = kick::sign_proposals(
+                    &self.node_config,
+                    &self.db,
+                    &self.instance_name,
+                    &kick_data,
+                )
+                .await
                 {
-                    fail_step!("Step execution failed: {e}");
-                    continue;
+                    return Err(StepError::Retry(format!("Step execution failed: {e}")));
                 }
-                consecutive_step_failures = 0;
+                self.consecutive_step_failures = 0;
                 if let Err(e) = kick::peer::send_kick_signatures_to_coordinator(
-                    &client,
-                    &db,
-                    &instance_name,
-                    &node_config,
+                    &self.client,
+                    &self.db,
+                    &self.instance_name,
+                    &self.node_config,
                 )
                 .await
                 {
@@ -583,15 +717,18 @@ async fn run_peer(
             MessageType::SignChangeThreshold => {
                 tracing::info!("Executing: Sign change-threshold proposals");
                 if payload.is_empty() {
-                    fail_step!("No change-threshold proposals payload received from coordinator");
-                    continue;
+                    return Err(StepError::Retry(
+                        "No change-threshold proposals payload received from coordinator"
+                            .to_string(),
+                    ));
                 }
 
-                let items = match utils::decode_length_prefixed(&payload, 3) {
+                let items = match utils::decode_length_prefixed(payload, 3) {
                     Ok(items) => items,
                     Err(e) => {
-                        fail_step!("Failed to decode SignChangeThreshold payload: {e}");
-                        continue;
+                        return Err(StepError::Retry(format!(
+                            "Failed to decode SignChangeThreshold payload: {e}"
+                        )));
                     }
                 };
 
@@ -599,38 +736,46 @@ async fn run_peer(
                     match serde_json::from_slice(&items[0]) {
                         Ok(config) => config,
                         Err(e) => {
-                            fail_step!("Failed to deserialize change-threshold config: {e}");
-                            continue;
+                            return Err(StepError::Retry(format!(
+                                "Failed to deserialize change-threshold config: {e}"
+                            )));
                         }
                     };
 
-                if let Err(e) = expectations
-                    .check_party_proposals(&node_config, &db, &instance_name, &items[1], &items[2])
+                if let Err(e) = self
+                    .expectations
+                    .check_party_proposals(
+                        &self.node_config,
+                        &self.db,
+                        &self.instance_name,
+                        &items[1],
+                        &items[2],
+                    )
                     .await
                 {
-                    fail_step!("Refusing the coordinator's change-threshold proposals: {e}");
-                    continue;
+                    return Err(StepError::Retry(format!(
+                        "Refusing the coordinator's change-threshold proposals: {e}"
+                    )));
                 }
 
                 let proposal_data = utils::encode_length_prefixed(&[&items[1], &items[2]]);
                 if let Err(e) = change_threshold::sign_proposals(
-                    &node_config,
-                    &db,
-                    &instance_name,
+                    &self.node_config,
+                    &self.db,
+                    &self.instance_name,
                     &proposal_data,
                 )
                 .await
                 {
-                    fail_step!("Step execution failed: {e}");
-                    continue;
+                    return Err(StepError::Retry(format!("Step execution failed: {e}")));
                 }
-                consecutive_step_failures = 0;
+                self.consecutive_step_failures = 0;
                 if let Err(e) =
                     change_threshold::peer::send_change_threshold_signatures_to_coordinator(
-                        &client,
-                        &db,
-                        &instance_name,
-                        &node_config,
+                        &self.client,
+                        &self.db,
+                        &self.instance_name,
+                        &self.node_config,
                     )
                     .await
                 {
@@ -641,11 +786,12 @@ async fn run_peer(
             }
             MessageType::GenerateAddPartyKeys => {
                 tracing::info!("Executing: Generate add-party keys");
-                let add_party_config = match decode_add_party_config(&payload) {
+                let add_party_config = match decode_add_party_config(payload) {
                     Ok(config) => config,
                     Err(e) => {
-                        fail_step!("Failed to deserialize add-party config: {e:#}");
-                        continue;
+                        return Err(StepError::Retry(format!(
+                            "Failed to deserialize add-party config: {e:#}"
+                        )));
                     }
                 };
                 // Both the party and the new member are pinned before
@@ -653,44 +799,46 @@ async fn run_peer(
                 // node's role: naming this peer there would otherwise make it
                 // take the new member's part in a run it joined as an existing
                 // member.
-                if let Err(e) = expectations
+                if let Err(e) = self
+                    .expectations
                     .check_dec_party(&add_party_config.decentralized_party_id)
                     .and_then(|()| {
-                        expectations.check_new_participant(&add_party_config.new_participant_id)
+                        self.expectations
+                            .check_new_participant(&add_party_config.new_participant_id)
                     })
                 {
-                    fail_step!("Refusing the coordinator's add-party config: {e}");
-                    continue;
+                    return Err(StepError::Retry(format!(
+                        "Refusing the coordinator's add-party config: {e}"
+                    )));
                 }
-                if !is_new_member(&node_config, &add_party_config) {
-                    consecutive_step_failures = 0;
-                    send_skip_status(&client, "GenerateAddPartyKeys").await;
-                    continue;
+                if !is_new_member(&self.node_config, &add_party_config) {
+                    self.consecutive_step_failures = 0;
+                    send_skip_status(&self.client, "GenerateAddPartyKeys").await;
+                    return Ok(Next::Poll);
                 }
 
                 let ledger_token = add_party::resolve_ledger_token(
-                    &workflow_auth,
+                    &self.workflow_auth,
                     &add_party_config.decentralized_party_id,
                 )
                 .await;
                 if let Err(e) = add_party::generate_keys(
-                    &node_config,
-                    &db,
-                    &instance_name,
+                    &self.node_config,
+                    &self.db,
+                    &self.instance_name,
                     &add_party_config,
                     ledger_token.as_deref(),
                 )
                 .await
                 {
-                    fail_step!("Step execution failed: {e}");
-                    continue;
+                    return Err(StepError::Retry(format!("Step execution failed: {e}")));
                 }
-                consecutive_step_failures = 0;
+                self.consecutive_step_failures = 0;
                 if let Err(e) = add_party::peer::send_keys_to_coordinator(
-                    &client,
-                    &db,
-                    &instance_name,
-                    &node_config,
+                    &self.client,
+                    &self.db,
+                    &self.instance_name,
+                    &self.node_config,
                 )
                 .await
                 {
@@ -700,33 +848,38 @@ async fn run_peer(
             MessageType::SignAddParty => {
                 tracing::info!("Executing: Sign add-party proposals");
                 if payload.is_empty() {
-                    fail_step!("No add-party proposals payload received from coordinator");
-                    continue;
+                    return Err(StepError::Retry(
+                        "No add-party proposals payload received from coordinator".to_string(),
+                    ));
                 }
 
-                let items = match utils::decode_length_prefixed(&payload, 3) {
+                let items = match utils::decode_length_prefixed(payload, 3) {
                     Ok(items) => items,
                     Err(e) => {
-                        fail_step!("Failed to decode SignAddParty payload: {e}");
-                        continue;
+                        return Err(StepError::Retry(format!(
+                            "Failed to decode SignAddParty payload: {e}"
+                        )));
                     }
                 };
                 let add_party_config = match decode_add_party_config(&items[0]) {
                     Ok(config) => config,
                     Err(e) => {
-                        fail_step!("Failed to deserialize add-party config: {e:#}");
-                        continue;
+                        return Err(StepError::Retry(format!(
+                            "Failed to deserialize add-party config: {e:#}"
+                        )));
                     }
                 };
 
                 let add_party_check = async {
-                    expectations.check_dec_party(&add_party_config.decentralized_party_id)?;
-                    expectations.check_new_participant(&add_party_config.new_participant_id)?;
-                    expectations
+                    self.expectations
+                        .check_dec_party(&add_party_config.decentralized_party_id)?;
+                    self.expectations
+                        .check_new_participant(&add_party_config.new_participant_id)?;
+                    self.expectations
                         .check_party_proposals(
-                            &node_config,
-                            &db,
-                            &instance_name,
+                            &self.node_config,
+                            &self.db,
+                            &self.instance_name,
                             &items[1],
                             &items[2],
                         )
@@ -734,25 +887,30 @@ async fn run_peer(
                 }
                 .await;
                 if let Err(e) = add_party_check {
-                    fail_step!("Refusing the coordinator's add-party proposals: {e}");
-                    continue;
+                    return Err(StepError::Retry(format!(
+                        "Refusing the coordinator's add-party proposals: {e}"
+                    )));
                 }
 
-                if is_new_member(&node_config, &add_party_config)
+                if is_new_member(&self.node_config, &add_party_config)
                     && let Err(e) =
-                        party_replication::check_vetted_packages_held(&node_config).await
+                        party_replication::check_vetted_packages_held(&self.node_config).await
                 {
-                    fail_step!("Refusing to sign as the new member: {e:#}");
-                    continue;
+                    return Err(StepError::Retry(format!(
+                        "Refusing to sign as the new member: {e:#}"
+                    )));
                 }
 
                 let proposal_data = utils::encode_length_prefixed(&[&items[1], &items[2]]);
-                if let Err(e) =
-                    add_party::sign_proposals(&node_config, &db, &instance_name, &proposal_data)
-                        .await
+                if let Err(e) = add_party::sign_proposals(
+                    &self.node_config,
+                    &self.db,
+                    &self.instance_name,
+                    &proposal_data,
+                )
+                .await
                 {
-                    fail_step!("Step execution failed: {e}");
-                    continue;
+                    return Err(StepError::Retry(format!("Step execution failed: {e}")));
                 }
                 // The new member leaves the synchronizer before its signature can
                 // let the coordinator authorize the mapping. From the moment the
@@ -760,31 +918,32 @@ async fn run_peer(
                 // must not journal any of it until the ACS import has landed.
                 // Its own store has to hold the proposal first: disconnected, it
                 // will not see the mapping take effect, and the import checks for it.
-                if is_new_member(&node_config, &add_party_config)
+                if is_new_member(&self.node_config, &add_party_config)
                     && let Err(e) = async {
                         add_party::peer::wait_for_hosting_proposal(
-                            &node_config,
+                            &self.node_config,
                             &add_party_config.decentralized_party_id,
                         )
                         .await?;
                         party_replication::open_import_window(
-                            &node_config,
-                            &db,
-                            &add_party_config.replication_target(&instance_name),
+                            &self.node_config,
+                            &self.db,
+                            &add_party_config.replication_target(&self.instance_name),
                         )
                         .await
                     }
                     .await
                 {
-                    fail_step!("Failed to open the ACS import window: {e:#}");
-                    continue;
+                    return Err(StepError::Retry(format!(
+                        "Failed to open the ACS import window: {e:#}"
+                    )));
                 }
-                consecutive_step_failures = 0;
+                self.consecutive_step_failures = 0;
                 if let Err(e) = add_party::peer::send_add_party_signatures_to_coordinator(
-                    &client,
-                    &db,
-                    &instance_name,
-                    &node_config,
+                    &self.client,
+                    &self.db,
+                    &self.instance_name,
+                    &self.node_config,
                 )
                 .await
                 {
@@ -795,11 +954,11 @@ async fn run_peer(
                 // where onboarding peers persist their identity — the party
                 // id is authoritative from the config, and the keys were
                 // written by GenerateAddPartyKeys.
-                if is_new_member(&node_config, &add_party_config)
+                if is_new_member(&self.node_config, &add_party_config)
                     && let Err(e) = onboarding::peer::copy_self_identity_for_party(
-                        &db,
-                        &instance_name,
-                        &node_config,
+                        &self.db,
+                        &self.instance_name,
+                        &self.node_config,
                         &add_party_config.decentralized_party_id,
                     )
                     .await
@@ -815,18 +974,20 @@ async fn run_peer(
                 // [config, package_ids]. The snapshot is not in the payload: it
                 // is pulled block by block straight into Canton's import, so
                 // nothing proportional to the ACS is buffered or stored.
-                let items = match utils::decode_length_prefixed(&payload, 2) {
+                let items = match utils::decode_length_prefixed(payload, 2) {
                     Ok(items) => items,
                     Err(e) => {
-                        fail_step!("Failed to decode ImportAcs payload: {e}");
-                        continue;
+                        return Err(StepError::Retry(format!(
+                            "Failed to decode ImportAcs payload: {e}"
+                        )));
                     }
                 };
                 let add_party_config = match decode_add_party_config(&items[0]) {
                     Ok(config) => config,
                     Err(e) => {
-                        fail_step!("Failed to deserialize add-party config: {e:#}");
-                        continue;
+                        return Err(StepError::Retry(format!(
+                            "Failed to deserialize add-party config: {e:#}"
+                        )));
                     }
                 };
                 // Both the party and the new member are pinned before
@@ -834,19 +995,22 @@ async fn run_peer(
                 // node's role: naming this peer there would otherwise make it
                 // take the new member's part in a run it joined as an existing
                 // member.
-                if let Err(e) = expectations
+                if let Err(e) = self
+                    .expectations
                     .check_dec_party(&add_party_config.decentralized_party_id)
                     .and_then(|()| {
-                        expectations.check_new_participant(&add_party_config.new_participant_id)
+                        self.expectations
+                            .check_new_participant(&add_party_config.new_participant_id)
                     })
                 {
-                    fail_step!("Refusing the coordinator's ACS import: {e}");
-                    continue;
+                    return Err(StepError::Retry(format!(
+                        "Refusing the coordinator's ACS import: {e}"
+                    )));
                 }
-                if !is_new_member(&node_config, &add_party_config) {
-                    consecutive_step_failures = 0;
-                    send_skip_status(&client, "ImportAcs").await;
-                    continue;
+                if !is_new_member(&self.node_config, &add_party_config) {
+                    self.consecutive_step_failures = 0;
+                    send_skip_status(&self.client, "ImportAcs").await;
+                    return Ok(Next::Poll);
                 }
                 // Newline-joined package ids the party's contracts need; the
                 // import preflight checks this participant has them all before
@@ -858,13 +1022,13 @@ async fn run_peer(
                     .collect();
 
                 let step_result = party_replication::import_party_acs(
-                    &node_config,
-                    &db,
-                    &add_party_config.replication_target(&instance_name),
+                    &self.node_config,
+                    &self.db,
+                    &add_party_config.replication_target(&self.instance_name),
                     &required_package_ids,
                     party_replication::TransferSource::Coordinator,
                     |seq| {
-                        let client = &client;
+                        let client = &self.client;
                         async move { client.request_next_acs_block(seq).await.map_err(Into::into) }
                     },
                 )
@@ -875,10 +1039,13 @@ async fn run_peer(
                 // between attempts, which replays the ACS journal — so a failure
                 // that reaches this point ends the peer.
                 if let Err(e) = step_result {
-                    anyhow::bail!("Aborting peer: the ACS import failed: {e:#}");
+                    return Err(StepError::Abort(anyhow::anyhow!(
+                        "Aborting peer: the ACS import failed: {e:#}"
+                    )));
                 }
-                consecutive_step_failures = 0;
-                if let Err(e) = client
+                self.consecutive_step_failures = 0;
+                if let Err(e) = self
+                    .client
                     .send(MessageType::StatusUpdate, b"ImportAcs completed".to_vec())
                     .await
                 {
@@ -887,11 +1054,12 @@ async fn run_peer(
             }
             MessageType::ClearOnboardingFlag => {
                 tracing::info!("Executing: Clear onboarding flag");
-                let add_party_config = match decode_add_party_config(&payload) {
+                let add_party_config = match decode_add_party_config(payload) {
                     Ok(config) => config,
                     Err(e) => {
-                        fail_step!("Failed to deserialize add-party config: {e:#}");
-                        continue;
+                        return Err(StepError::Retry(format!(
+                            "Failed to deserialize add-party config: {e:#}"
+                        )));
                     }
                 };
                 // Both the party and the new member are pinned before
@@ -899,25 +1067,28 @@ async fn run_peer(
                 // node's role: naming this peer there would otherwise make it
                 // take the new member's part in a run it joined as an existing
                 // member.
-                if let Err(e) = expectations
+                if let Err(e) = self
+                    .expectations
                     .check_dec_party(&add_party_config.decentralized_party_id)
                     .and_then(|()| {
-                        expectations.check_new_participant(&add_party_config.new_participant_id)
+                        self.expectations
+                            .check_new_participant(&add_party_config.new_participant_id)
                     })
                 {
-                    fail_step!("Refusing the coordinator's clearing request: {e}");
-                    continue;
+                    return Err(StepError::Retry(format!(
+                        "Refusing the coordinator's clearing request: {e}"
+                    )));
                 }
-                if !is_new_member(&node_config, &add_party_config) {
-                    consecutive_step_failures = 0;
-                    send_skip_status(&client, "ClearOnboardingFlag").await;
-                    continue;
+                if !is_new_member(&self.node_config, &add_party_config) {
+                    self.consecutive_step_failures = 0;
+                    send_skip_status(&self.client, "ClearOnboardingFlag").await;
+                    return Ok(Next::Poll);
                 }
 
                 match party_replication::clear_onboarding_flag(
-                    &node_config,
-                    &db,
-                    &add_party_config.replication_target(&instance_name),
+                    &self.node_config,
+                    &self.db,
+                    &add_party_config.replication_target(&self.instance_name),
                 )
                 .await
                 {
@@ -926,12 +1097,13 @@ async fn run_peer(
                         // the flag-clear transaction — author it here and ship
                         // it to the coordinator for the threshold-signing
                         // round (the coordinator lacks an appropriate key).
-                        match add_party::author_clear_proposal(&node_config, &add_party_config)
+                        match add_party::author_clear_proposal(&self.node_config, &add_party_config)
                             .await
                         {
                             Ok(Some(proposal)) => {
-                                consecutive_step_failures = 0;
-                                if let Err(e) = client
+                                self.consecutive_step_failures = 0;
+                                if let Err(e) = self
+                                    .client
                                     .send(MessageType::AddPartyClearProposal, proposal)
                                     .await
                                 {
@@ -943,8 +1115,9 @@ async fn run_peer(
                             Ok(None) => {
                                 // Flag dropped between the poll and the
                                 // authoring — report as cleared.
-                                consecutive_step_failures = 0;
-                                if let Err(e) = client
+                                self.consecutive_step_failures = 0;
+                                if let Err(e) = self
+                                    .client
                                     .send(
                                         MessageType::StatusUpdate,
                                         b"ClearOnboardingFlag: Cleared".to_vec(),
@@ -955,13 +1128,16 @@ async fn run_peer(
                                 }
                             }
                             Err(e) => {
-                                fail_step!("Step execution failed: {e}");
+                                return Err(StepError::Retry(format!(
+                                    "Step execution failed: {e}"
+                                )));
                             }
                         }
                     }
                     Ok(party_replication::ClearOutcome::Cleared) => {
-                        consecutive_step_failures = 0;
-                        if let Err(e) = client
+                        self.consecutive_step_failures = 0;
+                        if let Err(e) = self
+                            .client
                             .send(
                                 MessageType::StatusUpdate,
                                 b"ClearOnboardingFlag: Cleared".to_vec(),
@@ -972,45 +1148,50 @@ async fn run_peer(
                         }
                     }
                     Err(e) => {
-                        fail_step!("Step execution failed: {e}");
+                        return Err(StepError::Retry(format!("Step execution failed: {e}")));
                     }
                 }
             }
             MessageType::SignClearOnboarding => {
                 tracing::info!("Executing: Sign onboarding-flag clearing proposal");
-                let items = match utils::decode_length_prefixed(&payload, 2) {
+                let items = match utils::decode_length_prefixed(payload, 2) {
                     Ok(items) => items,
                     Err(e) => {
-                        fail_step!("Failed to decode SignClearOnboarding payload: {e}");
-                        continue;
+                        return Err(StepError::Retry(format!(
+                            "Failed to decode SignClearOnboarding payload: {e}"
+                        )));
                     }
                 };
                 if items[1].is_empty() {
                     // Skip marker: the flag already cleared without a
                     // signing round (e.g. a single-owner-threshold party).
-                    consecutive_step_failures = 0;
-                    send_skip_status(&client, "SignClearOnboarding").await;
-                    continue;
+                    self.consecutive_step_failures = 0;
+                    send_skip_status(&self.client, "SignClearOnboarding").await;
+                    return Ok(Next::Poll);
                 }
 
-                if let Err(e) = expectations.check_clear_onboarding(&items[1]) {
-                    fail_step!("Refusing the coordinator's clearing proposal: {e}");
-                    continue;
+                if let Err(e) = self.expectations.check_clear_onboarding(&items[1]) {
+                    return Err(StepError::Retry(format!(
+                        "Refusing the coordinator's clearing proposal: {e}"
+                    )));
                 }
 
-                if let Err(e) =
-                    add_party::sign_clear_proposal(&node_config, &db, &instance_name, &items[1])
-                        .await
+                if let Err(e) = add_party::sign_clear_proposal(
+                    &self.node_config,
+                    &self.db,
+                    &self.instance_name,
+                    &items[1],
+                )
+                .await
                 {
-                    fail_step!("Step execution failed: {e}");
-                    continue;
+                    return Err(StepError::Retry(format!("Step execution failed: {e}")));
                 }
-                consecutive_step_failures = 0;
+                self.consecutive_step_failures = 0;
                 if let Err(e) = add_party::peer::send_clear_signature_to_coordinator(
-                    &client,
-                    &db,
-                    &instance_name,
-                    &node_config,
+                    &self.client,
+                    &self.db,
+                    &self.instance_name,
+                    &self.node_config,
                 )
                 .await
                 {
@@ -1021,8 +1202,6 @@ async fn run_peer(
                 tracing::warn!("Unexpected message type: {command:?}");
             }
         }
+        Ok(Next::Poll)
     }
-
-    tracing::info!("Peer shutting down");
-    Ok(())
 }
