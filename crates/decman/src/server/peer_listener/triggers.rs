@@ -6,6 +6,9 @@ use sqlx::SqlitePool;
 use tokio::sync::{RwLock, mpsc};
 
 use crate::server::state::PeerChunkCache;
+use common::api::ContractDeploymentIntent;
+
+use crate::canton_id::CantonId;
 use crate::server::types::{
     AddPartyInvitePayload, ChangeThresholdInvitePayload, ContractsInvitePayload, DarsInvitePayload,
     InvitationType, KickInvitePayload, OnboardingInvitePayload, PendingInvitation,
@@ -53,6 +56,87 @@ pub(super) enum InvitationMeta {
     ChangeThreshold(ChangeThresholdInvitePayload),
 }
 
+/// The fields of a pending invitation that its invite payload fills in.
+/// What a kind does not carry stays empty.
+#[derive(Default)]
+struct InvitationFields {
+    prefix: Option<String>,
+    participants: Vec<CantonId>,
+    dar_filenames: Vec<String>,
+    dar_hashes: Vec<String>,
+    kicked_participant: Option<CantonId>,
+    kicked_owner_key: Option<String>,
+    new_participant: Option<CantonId>,
+    new_threshold: Option<i32>,
+    previous_threshold: Option<i32>,
+    confirmation_threshold: Option<i32>,
+    dec_party_id: Option<CantonId>,
+    package_names: Vec<String>,
+    contract_intents: Vec<ContractDeploymentIntent>,
+    workflow_instance: Option<String>,
+}
+
+impl From<InvitationMeta> for InvitationFields {
+    fn from(meta: InvitationMeta) -> Self {
+        match meta {
+            InvitationMeta::None => Self::default(),
+            InvitationMeta::Onboarding(p) => Self {
+                prefix: Some(p.prefix),
+                participants: p.participants,
+                new_threshold: p.threshold,
+                confirmation_threshold: p.confirmation_threshold,
+                workflow_instance: p.workflow_instance,
+                ..Self::default()
+            },
+            InvitationMeta::Dars(p) => Self {
+                dar_filenames: p.dar_filenames,
+                dar_hashes: p.dar_hashes,
+                participants: p.participants,
+                workflow_instance: p.workflow_instance,
+                ..Self::default()
+            },
+            InvitationMeta::Kick(p) => Self {
+                kicked_participant: p.kicked_participant,
+                kicked_owner_key: p.kicked_owner_key,
+                new_threshold: Some(p.new_threshold),
+                previous_threshold: Some(p.previous_threshold),
+                confirmation_threshold: p.confirmation_threshold,
+                dec_party_id: Some(p.dec_party_id),
+                participants: p.participants,
+                workflow_instance: p.workflow_instance,
+                ..Self::default()
+            },
+            InvitationMeta::Contracts(p) => Self {
+                dec_party_id: Some(p.dec_party_id),
+                participants: p.participants,
+                package_names: p.package_names,
+                contract_intents: p.contract_intents,
+                workflow_instance: p.workflow_instance,
+                ..Self::default()
+            },
+            InvitationMeta::AddParty(p) => Self {
+                new_participant: Some(p.new_participant),
+                new_threshold: Some(p.new_threshold),
+                previous_threshold: Some(p.previous_threshold),
+                confirmation_threshold: p.confirmation_threshold,
+                dec_party_id: Some(p.dec_party_id),
+                participants: p.participants,
+                workflow_instance: p.workflow_instance,
+                ..Self::default()
+            },
+            InvitationMeta::ChangeThreshold(p) => Self {
+                new_threshold: Some(p.new_threshold),
+                previous_threshold: Some(p.previous_threshold),
+                confirmation_threshold: p.confirmation_threshold,
+                dec_party_id: Some(p.dec_party_id),
+                participants: p.participants,
+                workflow_instance: p.workflow_instance,
+                ..Self::default()
+            },
+        }
+    }
+}
+
 impl WorkflowTriggers {
     pub(super) async fn record_invitation(
         &self,
@@ -60,70 +144,22 @@ impl WorkflowTriggers {
         coordinator_pubkey: &str,
         meta: InvitationMeta,
     ) {
-        let mut prefix = None;
-        let mut participants = Vec::new();
-        let mut dar_filenames = Vec::new();
-        let mut dar_hashes = Vec::new();
-        let mut kicked_participant = None;
-        let mut kicked_owner_key = None;
-        let mut new_participant = None;
-        let mut new_threshold = None;
-        let mut previous_threshold = None;
-        let mut confirmation_threshold = None;
-        let mut dec_party_id = None;
-        let mut package_names = Vec::new();
-        let mut contract_intents = Vec::new();
-        let mut workflow_instance = None;
-        match meta {
-            InvitationMeta::None => {}
-            InvitationMeta::Onboarding(p) => {
-                prefix = Some(p.prefix);
-                participants = p.participants;
-                new_threshold = p.threshold;
-                confirmation_threshold = p.confirmation_threshold;
-                workflow_instance = p.workflow_instance;
-            }
-            InvitationMeta::Dars(p) => {
-                dar_filenames = p.dar_filenames;
-                dar_hashes = p.dar_hashes;
-                participants = p.participants;
-                workflow_instance = p.workflow_instance;
-            }
-            InvitationMeta::Kick(p) => {
-                kicked_participant = p.kicked_participant;
-                kicked_owner_key = p.kicked_owner_key;
-                new_threshold = Some(p.new_threshold);
-                previous_threshold = Some(p.previous_threshold);
-                confirmation_threshold = p.confirmation_threshold;
-                dec_party_id = Some(p.dec_party_id);
-                participants = p.participants;
-                workflow_instance = p.workflow_instance;
-            }
-            InvitationMeta::Contracts(p) => {
-                dec_party_id = Some(p.dec_party_id);
-                participants = p.participants;
-                package_names = p.package_names;
-                contract_intents = p.contract_intents;
-                workflow_instance = p.workflow_instance;
-            }
-            InvitationMeta::AddParty(p) => {
-                new_participant = Some(p.new_participant);
-                new_threshold = Some(p.new_threshold);
-                previous_threshold = Some(p.previous_threshold);
-                confirmation_threshold = p.confirmation_threshold;
-                dec_party_id = Some(p.dec_party_id);
-                participants = p.participants;
-                workflow_instance = p.workflow_instance;
-            }
-            InvitationMeta::ChangeThreshold(p) => {
-                new_threshold = Some(p.new_threshold);
-                previous_threshold = Some(p.previous_threshold);
-                confirmation_threshold = p.confirmation_threshold;
-                dec_party_id = Some(p.dec_party_id);
-                participants = p.participants;
-                workflow_instance = p.workflow_instance;
-            }
-        }
+        let InvitationFields {
+            prefix,
+            participants,
+            dar_filenames,
+            dar_hashes,
+            kicked_participant,
+            kicked_owner_key,
+            new_participant,
+            new_threshold,
+            previous_threshold,
+            confirmation_threshold,
+            dec_party_id,
+            package_names,
+            contract_intents,
+            workflow_instance,
+        } = meta.into();
         // Key the id on the coordinator's run instance when available so a
         // NEW run's invite never silently morphs an older card in place — an
         // accept/decline racing the replacement then misses (404) instead of
