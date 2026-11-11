@@ -2,13 +2,12 @@
 
 use canton_proto_rs::com::digitalasset::canton::{
     protocol::v30::enums::ParticipantPermission,
-    topology::admin::v30::{
-        ListDecentralizedNamespaceDefinitionRequest, ListPartyToParticipantRequest,
-        topology_manager_read_service_client::TopologyManagerReadServiceClient,
-    },
+    topology::admin::v30::topology_manager_read_service_client::TopologyManagerReadServiceClient,
 };
 
 use crate::{config::NodeConfig, error::Result, utils, workflow::topology};
+
+use super::{build_decentralized_namespace_request, build_party_to_participant_request};
 
 /// One external party this participant hosts, read from topology.
 #[derive(Clone)]
@@ -70,10 +69,7 @@ pub async fn list_hosted_external_parties(config: &NodeConfig) -> Result<Vec<Hos
 
     let decentralized: std::collections::HashSet<String> = client
         .list_decentralized_namespace_definition(tonic::Request::new(
-            ListDecentralizedNamespaceDefinitionRequest {
-                base_query: Some(topology::head_state_query(&synchronizer_id)),
-                filter_namespace: String::new(),
-            },
+            build_decentralized_namespace_request(&synchronizer_id, ""),
         ))
         .await?
         .into_inner()
@@ -83,11 +79,11 @@ pub async fn list_hosted_external_parties(config: &NodeConfig) -> Result<Vec<Hos
         .collect();
 
     let p2p = client
-        .list_party_to_participant(tonic::Request::new(ListPartyToParticipantRequest {
-            base_query: Some(topology::head_state_query(&synchronizer_id)),
-            filter_party: String::new(),
-            filter_participant: self_uid.clone(),
-        }))
+        .list_party_to_participant(tonic::Request::new(build_party_to_participant_request(
+            &synchronizer_id,
+            None,
+            &self_uid,
+        )))
         .await?
         .into_inner();
 
