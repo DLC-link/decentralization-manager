@@ -22,7 +22,7 @@ use crate::{
     canton_id::CantonId, config::PartyCredentials, error::Result, utils, workflow::topology,
 };
 
-use super::discovery::bounded_read;
+use super::bounded::bounded_read;
 
 /// Most parties `ListParties` returns for one participant.
 ///
@@ -43,7 +43,7 @@ const MAX_HOSTED_PARTIES: i32 = 5_000;
 /// matches nothing however the store reads it. `ListParties` takes a
 /// participant filter, which is the question discovery actually asks, and
 /// answers with full party IDs the exact-filter path can use.
-pub(super) async fn discover_hosted_party_ids(
+pub(crate) async fn discover_hosted_party_ids(
     aggregation_client: &mut TopologyAggregationServiceClient<tonic::transport::Channel>,
     synchronizer_id: &str,
     participant_id: &str,
@@ -159,7 +159,7 @@ fn parties_in_namespaces(
 }
 
 /// This node's namespace signing-key fingerprints, from the local vault.
-pub(super) async fn my_namespace_fingerprints(
+pub(crate) async fn my_namespace_fingerprints(
     vault_client: &mut VaultServiceClient<tonic::transport::Channel>,
 ) -> Result<HashSet<String>> {
     let response = bounded_read(
@@ -194,7 +194,7 @@ pub(super) async fn my_namespace_fingerprints(
 /// parties. It goes through the namespaces rather than the parties because a
 /// party is only selectable by an in-memory participant filter, while a
 /// namespace is a store-level predicate.
-pub(super) async fn owned_decentralized_namespaces(
+pub(crate) async fn owned_decentralized_namespaces(
     topology_client: &mut TopologyManagerReadServiceClient<tonic::transport::Channel>,
     synchronizer_id: &str,
     my_fingerprints: &HashSet<String>,
@@ -232,7 +232,7 @@ pub(super) async fn owned_decentralized_namespaces(
 /// same owners share one and a namespace-scoped query returns both. Keeping one
 /// party per namespace silently dropped the other, and left a prefix query
 /// answering empty depending on which of them arrived last.
-pub(super) fn pair_namespaces_with_parties(
+pub(crate) fn pair_namespaces_with_parties(
     namespace_definitions: Vec<DecentralizedNamespaceDefinition>,
     parties_by_namespace: &HashMap<String, Vec<PartyToParticipant>>,
     my_fingerprints: &HashSet<String>,
@@ -274,7 +274,7 @@ pub(super) fn pair_namespaces_with_parties(
 /// and `filter_signed_key` are applied in memory after every party has been
 /// loaded. So every caller must pass a party filter: an exact id, or
 /// [`namespace_party_filter`] for a whole namespace.
-pub(super) fn build_party_to_participant_request(
+pub(crate) fn build_party_to_participant_request(
     synchronizer_id: &str,
     party_filter: Option<&str>,
     participant_id: &str,
@@ -293,7 +293,7 @@ pub(super) fn build_party_to_participant_request(
 /// reads one small slice of the topology store rather than all of it: a
 /// synchronizer holds a handful of decentralized namespaces against a
 /// `PartyToParticipant` mapping for every party on it.
-pub(super) fn build_decentralized_namespace_request(
+pub(crate) fn build_decentralized_namespace_request(
     synchronizer_id: &str,
     namespace: &str,
 ) -> ListDecentralizedNamespaceDefinitionRequest {
@@ -314,7 +314,7 @@ pub(super) fn build_decentralized_namespace_request(
 /// The validator operator party's credential is skipped. It exists for the
 /// Splice cleanup of an unhost, the party is not decentralized, and as the only
 /// exact filter it would stop the discovery of the parties this node hosts.
-pub(super) fn known_party_filters(
+pub(crate) fn known_party_filters(
     party_credentials: &[PartyCredentials],
     validator_operator_party: Option<&CantonId>,
     workflow_party_ids: impl IntoIterator<Item = String>,

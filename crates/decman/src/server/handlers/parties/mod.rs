@@ -8,7 +8,6 @@ mod owner_claims;
 mod owner_keys;
 #[cfg(test)]
 mod test_support;
-mod topology;
 
 pub(crate) use discovery::{
     Discovery, DiscoveryGate, MAX_CONCURRENT_DISCOVERIES, discover_and_cache,

@@ -17,6 +17,11 @@ use crate::{
     config::{NodeConfig, PartyCredentials, default_package_config},
     db::schema::SchemaRead,
     error::Result,
+    party_discovery::{
+        bounded_call, bounded_read, build_decentralized_namespace_request,
+        build_party_to_participant_request, discover_hosted_party_ids, known_party_filters,
+        my_namespace_fingerprints, owned_decentralized_namespaces, pair_namespaces_with_parties,
+    },
     server::{
         queries::{
             contract_templates_all, fetch_package_versions, get_contracts, get_party_metadata,
@@ -32,14 +37,7 @@ use crate::{
 };
 
 use super::{
-    discovery::{PARTY_READ_CONCURRENCY, bounded_call, bounded_read},
-    list::PartyReadOpts,
-    owner_claims::with_cached_owner_claims,
-    topology::{
-        build_decentralized_namespace_request, build_party_to_participant_request,
-        discover_hosted_party_ids, known_party_filters, my_namespace_fingerprints,
-        owned_decentralized_namespaces, pair_namespaces_with_parties,
-    },
+    discovery::PARTY_READ_CONCURRENCY, list::PartyReadOpts, owner_claims::with_cached_owner_claims,
 };
 
 /// Fetch decentralized parties from Canton topology and ledger APIs.

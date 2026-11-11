@@ -11,6 +11,7 @@ use crate::{
     canton_id::CantonId,
     config::NodeConfig,
     error::Result,
+    party_discovery::my_namespace_fingerprints,
     server::{
         AppState,
         types::{DecentralizedPartiesResponse, DecentralizedParty, ErrorResponse, ResponseSource},
@@ -25,7 +26,6 @@ use super::{
         discovery_completed_since, is_within_ttl, now_secs,
     },
     owner_keys::resolve_owner_keys_from_peers,
-    topology::my_namespace_fingerprints,
 };
 
 /// Query parameters for decentralized parties endpoint
