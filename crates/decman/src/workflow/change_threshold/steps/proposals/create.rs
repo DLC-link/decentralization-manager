@@ -9,9 +9,8 @@ use crate::{
     error::Result,
     utils,
     workflow::{
-        change_threshold::ChangeThresholdConfig,
-        proposal_store,
-        signing_keys::adopt_legacy_signing_keys,
+        change_threshold::{ARTIFACTS, ChangeThresholdConfig},
+        proposal_store::{self, SignedPartyChange},
         storage::{WorkflowStorage, artifact_kinds},
         thresholds::{PartyThresholds, check_confirmation_threshold},
         topology,
@@ -39,20 +38,12 @@ pub async fn create_proposals(
 
     // Read current namespace definition (length-prefixed protobuf, written by
     // export_state).
-    let namespace_bytes = storage
-        .read_artifact(
-            instance_name,
-            artifact_kinds::CHANGE_THRESHOLD_NAMESPACE_DEF,
-            None,
-        )
-        .await?
-        .ok_or_else(|| {
-            anyhow::anyhow!(
-                "CHANGE_THRESHOLD_NAMESPACE_DEF artifact missing — did ExportState run?"
-            )
-        })?;
-    let current_namespace_def: DecentralizedNamespaceDefinition =
-        utils::read_first_message_from_bytes(&namespace_bytes)?;
+    let current_namespace_def = proposal_store::read_exported_namespace(
+        storage,
+        instance_name,
+        artifact_kinds::CHANGE_THRESHOLD_NAMESPACE_DEF,
+    )
+    .await?;
 
     let thresholds = change_config.thresholds();
     tracing::info!(
@@ -107,32 +98,19 @@ pub async fn create_proposals(
     // authorize a transaction for it. The signing one follows the namespace
     // threshold, so re-issuing the signing keys verbatim changed only half of
     // it (#428).
-    let current_signing_keys = current_p2p
-        .party_signing_keys
-        .map(|sk| sk.keys)
-        .unwrap_or_default();
-    let signing_keys = if current_signing_keys.len() < current_p2p.participants.len() {
-        // A party onboarded before Canton 3.4 keeps its keys in a deprecated
-        // PartyToKeyMapping, which carries a threshold of its own, and a
-        // pre-1.10.0 add leaves a party holding some inline and the rest there.
-        // Moving the members' keys inline puts both thresholds in one place.
-        let members: Vec<String> = current_p2p
-            .participants
-            .iter()
-            .map(|p| p.participant_uid.clone())
-            .collect();
-        adopt_legacy_signing_keys(
-            config,
-            storage,
-            &synchronizer_id,
-            &party_id,
-            &members,
-            &current_signing_keys,
-        )
-        .await?
-    } else {
-        current_signing_keys
-    };
+    //
+    // A party onboarded before Canton 3.4 keeps its keys in a deprecated
+    // PartyToKeyMapping, which carries a threshold of its own, and a
+    // pre-1.10.0 add leaves a party holding some inline and the rest there.
+    // Moving the members' keys inline puts both thresholds in one place.
+    let signing_keys = proposal_store::hosts_signing_keys(
+        config,
+        storage,
+        &synchronizer_id,
+        &party_id,
+        &current_p2p,
+    )
+    .await?;
 
     let new_p2p = thresholds.party_to_participant(
         party_id_str.clone(),
@@ -161,41 +139,20 @@ pub async fn create_proposals(
         .p2p
         .ok_or_else(|| anyhow::anyhow!("No P2P change-threshold proposal was signed"))?;
 
-    // Persist proposals + supporting data. Each protobuf is written with the
-    // same `varint(len)||proto` framing the file path used, so
-    // `read_first_message_from_bytes` works unchanged.
-    let dns_bytes = utils::encode_length_prefixed_message(&dns_transaction);
-    storage
-        .write_artifact(
-            instance_name,
-            artifact_kinds::CHANGE_THRESHOLD_DNS_PROPOSAL,
-            None,
-            &dns_bytes,
-        )
-        .await?;
-    tracing::info!("Saved DNS change-threshold proposal to storage");
-
-    let p2p_bytes = utils::encode_length_prefixed_message(&p2p_transaction);
-    storage
-        .write_artifact(
-            instance_name,
-            artifact_kinds::CHANGE_THRESHOLD_P2P_PROPOSAL,
-            None,
-            &p2p_bytes,
-        )
-        .await?;
-    tracing::info!("Saved P2P change-threshold proposal to storage");
-
-    let new_namespace_bytes = utils::encode_length_prefixed_message(&new_namespace_def);
-    storage
-        .write_artifact(
-            instance_name,
-            artifact_kinds::CHANGE_THRESHOLD_NEW_NAMESPACE_DEF,
-            None,
-            &new_namespace_bytes,
-        )
-        .await?;
-    tracing::info!("Saved new namespace definition to storage");
+    // Persist proposals + supporting data.
+    proposal_store::save_party_proposals(
+        storage,
+        instance_name,
+        ARTIFACTS,
+        artifact_kinds::CHANGE_THRESHOLD_NEW_NAMESPACE_DEF,
+        &SignedPartyChange {
+            dns: dns_transaction,
+            p2p: p2p_transaction,
+            new_namespace_def,
+        },
+        Some("change-threshold"),
+    )
+    .await?;
 
     // Save party ID — plaintext with a trailing newline (submit trims it).
     storage

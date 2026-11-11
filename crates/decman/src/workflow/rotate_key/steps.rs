@@ -23,7 +23,7 @@ use crate::{
             RotateKeyConfig,
             config::{require_complete_inline_keys, signing_threshold_in_force},
         },
-        signing_keys::{adopt_legacy_signing_keys, own_namespace_key},
+        signing_keys::own_namespace_key,
         storage::{WorkflowStorage, artifact_kinds, identity_kinds},
         topology,
     },
@@ -134,24 +134,9 @@ pub async fn create_proposal(
         );
     }
 
-    let members: Vec<String> = head
-        .p2p
-        .participants
-        .iter()
-        .map(|p| p.participant_uid.clone())
-        .collect();
-    let inline = head
-        .p2p
-        .party_signing_keys
-        .clone()
-        .map(|keys| keys.keys)
-        .unwrap_or_default();
-    let current = if inline.len() < members.len() {
-        adopt_legacy_signing_keys(config, storage, &synchronizer_id, party, &members, &inline)
-            .await?
-    } else {
-        inline
-    };
+    let current =
+        proposal_store::hosts_signing_keys(config, storage, &synchronizer_id, party, &head.p2p)
+            .await?;
     let keys = swap_key(&current, &rotate.rotated_key, new_key.clone())?;
 
     let p2p = rotate.thresholds().party_to_participant(
