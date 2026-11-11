@@ -365,13 +365,11 @@ export const GovernanceSection = ({
       setProposalOperator(defaultOperatorParty);
     }
   }, [defaultOperatorParty]);
-  const [providerServiceCid, setProviderServiceCid] = useState("");
   const [userServiceCid, setUserServiceCid] = useState("");
   const [amuletRulesCid, setAmuletRulesCid] = useState("");
   const [dsoPartyId, setDsoPartyId] = useState("");
 
   // Utility onboarding fields
-  const [holderServiceRequestCid, setHolderServiceRequestCid] = useState("");
   const [holderParty, setHolderParty] = useState("");
 
   // Credential fields
@@ -569,10 +567,6 @@ export const GovernanceSection = ({
       if (providerRes.ok) {
         const response: ProviderServicesResponse = await providerRes.json();
         setProviderServices(response.services);
-        // Auto-select first provider service
-        if (response.services.length > 0) {
-          setProviderServiceCid(response.services[0].contract_id);
-        }
       }
 
       if (userRes.ok) {
@@ -593,8 +587,6 @@ export const GovernanceSection = ({
   // Fetch services when action type needs service selection
   useEffect(() => {
     if (
-      selectedActionType === "utility_setup" ||
-      selectedActionType === "utility_accept_holder_service_request" ||
       selectedActionType === "credential_offer_free" ||
       selectedActionType === "credential_accept_free"
     ) {
@@ -1625,28 +1617,6 @@ export const GovernanceSection = ({
           disclosure_observers: observers.length > 0 ? observers : undefined,
         };
       }
-      case "utility_create_provider_request":
-        return {
-          type: "utility_create_provider_request",
-          operator: operatorParty,
-        };
-      case "utility_create_user_request":
-        return { type: "utility_create_user_request", operator: operatorParty };
-      case "utility_setup":
-        return {
-          type: "utility_setup",
-          operator: operatorParty,
-          provider_service_cid: providerServiceCid,
-          user_service_cid: userServiceCid,
-        };
-      case "utility_accept_holder_service_request":
-        return {
-          type: "utility_accept_holder_service_request",
-          operator: operatorParty,
-          provider_service_cid: providerServiceCid,
-          holder_service_request_cid: holderServiceRequestCid,
-          holder: holderParty,
-        };
       case "credential_offer_free":
         return {
           type: "credential_offer_free",
@@ -1869,9 +1839,7 @@ export const GovernanceSection = ({
     setTimeoutMicroseconds(
       governanceState?.action_confirmation_timeout_microseconds ?? 3600000000,
     );
-    setProviderServiceCid("");
     setUserServiceCid("");
-    setHolderServiceRequestCid("");
     setHolderParty("");
     setCredentialId("");
     setCredentialDescription("");
@@ -2750,212 +2718,6 @@ export const GovernanceSection = ({
               },
             }}
           />
-        );
-      case "utility_create_provider_request":
-      case "utility_create_user_request":
-        return (
-          <TextField
-            label="Operator Party"
-            value={operatorParty}
-            onChange={(e) => setOperatorParty(e.target.value)}
-            size="small"
-            fullWidth
-            slotProps={{
-              input: {
-                endAdornment: fieldHelpAdornment(
-                  "Party id of the utility operator that will sign off on this onboarding request.",
-                  "Help for Operator Party",
-                ),
-              },
-            }}
-          />
-        );
-      case "utility_setup":
-        return (
-          <>
-            <TextField
-              label="Operator Party"
-              value={operatorParty}
-              onChange={(e) => setOperatorParty(e.target.value)}
-              size="small"
-              fullWidth
-              sx={{ mb: 2 }}
-              slotProps={{
-                input: {
-                  endAdornment: fieldHelpAdornment(
-                    "Party id of the utility operator setting up the registrar service.",
-                    "Help for Operator Party",
-                  ),
-                },
-              }}
-            />
-            <Box sx={{ display: "flex", gap: 1, alignItems: "center", mb: 2 }}>
-              <FormControl fullWidth size="small">
-                <InputLabel>
-                  <TextHelp text="ProviderService contract this party already has from the operator.">
-                    Provider Service
-                  </TextHelp>
-                </InputLabel>
-                <Select
-                  value={providerServiceCid}
-                  label="Provider Service"
-                  onChange={(e) => setProviderServiceCid(e.target.value)}
-                  MenuProps={{ disableScrollLock: true }}
-                >
-                  {servicesLoading ? (
-                    <MenuItem disabled>Loading services...</MenuItem>
-                  ) : providerServices.length > 0 ? (
-                    providerServices.map((svc) => (
-                      <MenuItem key={svc.contract_id} value={svc.contract_id}>
-                        {svc.contract_id}
-                      </MenuItem>
-                    ))
-                  ) : (
-                    <MenuItem disabled>No provider services found</MenuItem>
-                  )}
-                </Select>
-              </FormControl>
-              <Tooltip title="Refresh">
-                <span>
-                  <IconButton
-                    size="small"
-                    onClick={fetchServices}
-                    disabled={servicesLoading}
-                  >
-                    {servicesLoading ? <CircularProgress size={20} /> : <RefreshIcon />}
-                  </IconButton>
-                </span>
-              </Tooltip>
-            </Box>
-            <Box sx={{ display: "flex", gap: 1, alignItems: "center" }}>
-              <FormControl fullWidth size="small">
-                <InputLabel>
-                  <TextHelp text="UserService contract this party already has from the operator.">
-                    User Service
-                  </TextHelp>
-                </InputLabel>
-                <Select
-                  value={userServiceCid}
-                  label="User Service"
-                  onChange={(e) => setUserServiceCid(e.target.value)}
-                  MenuProps={{ disableScrollLock: true }}
-                >
-                  {servicesLoading ? (
-                    <MenuItem disabled>Loading services...</MenuItem>
-                  ) : userServices.length > 0 ? (
-                    userServices.map((svc) => (
-                      <MenuItem key={svc.contract_id} value={svc.contract_id}>
-                        {svc.contract_id}
-                      </MenuItem>
-                    ))
-                  ) : (
-                    <MenuItem disabled>No user services found</MenuItem>
-                  )}
-                </Select>
-              </FormControl>
-              <Tooltip title="Refresh">
-                <span>
-                  <IconButton
-                    size="small"
-                    onClick={fetchServices}
-                    disabled={servicesLoading}
-                  >
-                    {servicesLoading ? <CircularProgress size={20} /> : <RefreshIcon />}
-                  </IconButton>
-                </span>
-              </Tooltip>
-            </Box>
-          </>
-        );
-      case "utility_accept_holder_service_request":
-        return (
-          <>
-            <TextField
-              label="Operator Party"
-              value={operatorParty}
-              onChange={(e) => setOperatorParty(e.target.value)}
-              size="small"
-              fullWidth
-              sx={{ mb: 2 }}
-              slotProps={{
-                input: {
-                  endAdornment: fieldHelpAdornment(
-                    "Party id of the utility operator that issued the ProviderService.",
-                    "Help for Operator Party",
-                  ),
-                },
-              }}
-            />
-            <Box sx={{ display: "flex", gap: 1, alignItems: "center", mb: 2 }}>
-              <FormControl fullWidth size="small">
-                <InputLabel>
-                  <TextHelp text="ProviderService contract this party will exercise to accept the holder's request.">
-                    Provider Service
-                  </TextHelp>
-                </InputLabel>
-                <Select
-                  value={providerServiceCid}
-                  label="Provider Service"
-                  onChange={(e) => setProviderServiceCid(e.target.value)}
-                  MenuProps={{ disableScrollLock: true }}
-                >
-                  {servicesLoading ? (
-                    <MenuItem disabled>Loading services...</MenuItem>
-                  ) : providerServices.length > 0 ? (
-                    providerServices.map((svc) => (
-                      <MenuItem key={svc.contract_id} value={svc.contract_id}>
-                        {svc.contract_id}
-                      </MenuItem>
-                    ))
-                  ) : (
-                    <MenuItem disabled>No provider services found</MenuItem>
-                  )}
-                </Select>
-              </FormControl>
-              <Tooltip title="Refresh">
-                <span>
-                  <IconButton
-                    size="small"
-                    onClick={fetchServices}
-                    disabled={servicesLoading}
-                  >
-                    {servicesLoading ? <CircularProgress size={20} /> : <RefreshIcon />}
-                  </IconButton>
-                </span>
-              </Tooltip>
-            </Box>
-            <TextField
-              label="Holder Service Request Contract ID"
-              value={holderServiceRequestCid}
-              onChange={(e) => setHolderServiceRequestCid(e.target.value)}
-              size="small"
-              fullWidth
-              sx={{ mb: 2 }}
-              slotProps={{
-                input: {
-                  endAdornment: fieldHelpAdornment(
-                    "Contract id of the pending HolderServiceRequest that this proposal will accept.",
-                    "Help for Holder Service Request Contract ID",
-                  ),
-                },
-              }}
-            />
-            <TextField
-              label="Holder Party"
-              value={holderParty}
-              onChange={(e) => setHolderParty(e.target.value)}
-              size="small"
-              fullWidth
-              slotProps={{
-                input: {
-                  endAdornment: fieldHelpAdornment(
-                    "Party id of the holder whose service request is being accepted.",
-                    "Help for Holder Party",
-                  ),
-                },
-              }}
-            />
-          </>
         );
       case "credential_offer_free":
         return (
