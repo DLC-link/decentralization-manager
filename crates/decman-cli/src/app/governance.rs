@@ -5,7 +5,7 @@ use serde_json::{Value, json};
 
 use common::types::DecentralizedParty;
 
-use crate::api::party_name;
+use crate::api::{GovConfirmation, party_name};
 use crate::auth::now_secs;
 use crate::composer::{self, Composer, ComposerContext, ComposerSubmit, FieldKind, PickerSource};
 
@@ -32,6 +32,44 @@ fn party_governance_type(party: &DecentralizedParty) -> Option<&'static str> {
             None
         }
     })
+}
+
+/// What the governance actions send for one approvals item. An off-chain
+/// (`core_self`) item carries its own action. An on-chain (`core_domain`)
+/// item sends the placeholder action and its proposal cid.
+struct GovTarget<'a> {
+    action: Value,
+    governance_type: &'static str,
+    proposal_cid: Option<String>,
+    confirmations: &'a [GovConfirmation],
+    executable_confirmation_cids: Option<&'a [String]>,
+    can_execute: bool,
+}
+
+impl GovView {
+    /// What the governance actions send for the selected item, or `None`
+    /// when nothing is selected.
+    fn selected_target(&self) -> Option<GovTarget<'_>> {
+        let target = match self.items.get(self.selected)? {
+            GovItem::OffChain(action) => GovTarget {
+                action: action.action.clone(),
+                governance_type: "core_self",
+                proposal_cid: None,
+                confirmations: &action.confirmations,
+                executable_confirmation_cids: action.executable_confirmation_cids.as_deref(),
+                can_execute: action.can_execute,
+            },
+            GovItem::Domain(domain) => GovTarget {
+                action: placeholder_action(),
+                governance_type: "core_domain",
+                proposal_cid: Some(domain.proposal_cid.clone()),
+                confirmations: &domain.confirmations,
+                executable_confirmation_cids: domain.executable_confirmation_cids.as_deref(),
+                can_execute: domain.can_execute,
+            },
+        };
+        Some(target)
+    }
 }
 
 impl App {
@@ -206,26 +244,25 @@ impl App {
         }
     }
 
+    /// The open approvals view and what its selected item carries, or `None`
+    /// when no approvals view is open or it has no items.
+    fn gov_selection(&self) -> Option<(&GovView, GovTarget<'_>)> {
+        let Overlay::Governance(view) = &self.overlay else {
+            return None;
+        };
+        Some((view, view.selected_target()?))
+    }
+
     /// Add this node's confirmation to the selected governance action.
     pub(super) fn gov_confirm(&mut self) {
         let request = {
-            let Overlay::Governance(view) = &self.overlay else {
+            let Some((view, target)) = self.gov_selection() else {
                 return;
             };
-            let Some(item) = view.items.get(view.selected) else {
-                return;
-            };
-            let op = match item {
-                GovItem::OffChain(action) => GovOp::Confirm {
-                    action: action.action.clone(),
-                    governance_type: "core_self".to_owned(),
-                    proposal_cid: None,
-                },
-                GovItem::Domain(domain) => GovOp::Confirm {
-                    action: placeholder_action(),
-                    governance_type: "core_domain".to_owned(),
-                    proposal_cid: Some(domain.proposal_cid.clone()),
-                },
+            let op = GovOp::Confirm {
+                action: target.action,
+                governance_type: target.governance_type.to_owned(),
+                proposal_cid: target.proposal_cid,
             };
             Self::gov_request(view, op)
         };
@@ -236,39 +273,19 @@ impl App {
     /// Execute the selected governance action once its threshold is met.
     pub(super) fn gov_execute(&mut self) {
         let (can_execute, request) = {
-            let Overlay::Governance(view) = &self.overlay else {
+            let Some((view, target)) = self.gov_selection() else {
                 return;
             };
-            let Some(item) = view.items.get(view.selected) else {
-                return;
-            };
-            let (can_execute, op) = match item {
-                GovItem::OffChain(action) => (
-                    action.can_execute,
-                    GovOp::Execute {
-                        action: action.action.clone(),
-                        confirmation_cids: confirmation_cids(
-                            action.executable_confirmation_cids.as_deref(),
-                            &action.confirmations,
-                        ),
-                        governance_type: "core_self".to_owned(),
-                        proposal_cid: None,
-                    },
+            let op = GovOp::Execute {
+                action: target.action,
+                confirmation_cids: confirmation_cids(
+                    target.executable_confirmation_cids,
+                    target.confirmations,
                 ),
-                GovItem::Domain(domain) => (
-                    domain.can_execute,
-                    GovOp::Execute {
-                        action: placeholder_action(),
-                        confirmation_cids: confirmation_cids(
-                            domain.executable_confirmation_cids.as_deref(),
-                            &domain.confirmations,
-                        ),
-                        governance_type: "core_domain".to_owned(),
-                        proposal_cid: Some(domain.proposal_cid.clone()),
-                    },
-                ),
+                governance_type: target.governance_type.to_owned(),
+                proposal_cid: target.proposal_cid,
             };
-            (can_execute, Self::gov_request(view, op))
+            (target.can_execute, Self::gov_request(view, op))
         };
         if !can_execute {
             self.overlay =
@@ -282,17 +299,11 @@ impl App {
     /// Revoke this node's own confirmation on the selected governance action.
     pub(super) fn gov_revoke(&mut self) {
         let request = {
-            let Overlay::Governance(view) = &self.overlay else {
+            let Some((view, target)) = self.gov_selection() else {
                 return;
             };
-            let Some(item) = view.items.get(view.selected) else {
-                return;
-            };
-            let (confirmations, governance_type) = match item {
-                GovItem::OffChain(action) => (&action.confirmations, "core_self".to_owned()),
-                GovItem::Domain(domain) => (&domain.confirmations, "core_domain".to_owned()),
-            };
-            confirmations
+            target
+                .confirmations
                 .iter()
                 .find(|confirmation| confirmation.confirming_party == view.member_party_id)
                 .map(|mine| {
@@ -300,7 +311,7 @@ impl App {
                         view,
                         GovOp::Cancel {
                             confirmation_cid: mine.contract_id.clone(),
-                            governance_type,
+                            governance_type: target.governance_type.to_owned(),
                         },
                     )
                 })
@@ -320,17 +331,11 @@ impl App {
     pub(super) fn gov_expire(&mut self) {
         let now = now_secs();
         let request = {
-            let Overlay::Governance(view) = &self.overlay else {
+            let Some((view, target)) = self.gov_selection() else {
                 return;
             };
-            let Some(item) = view.items.get(view.selected) else {
-                return;
-            };
-            let (confirmations, governance_type) = match item {
-                GovItem::OffChain(action) => (&action.confirmations, "core_self".to_owned()),
-                GovItem::Domain(domain) => (&domain.confirmations, "core_domain".to_owned()),
-            };
-            confirmations
+            target
+                .confirmations
                 .iter()
                 .find(|confirmation| confirmation.expires_at > 0 && confirmation.expires_at <= now)
                 .map(|stale| {
@@ -338,7 +343,7 @@ impl App {
                         view,
                         GovOp::Expire {
                             confirmation_cid: stale.contract_id.clone(),
-                            governance_type,
+                            governance_type: target.governance_type.to_owned(),
                         },
                     )
                 })
@@ -362,6 +367,304 @@ impl App {
                 .requests
                 .send(Request::ChainAudit(party.party_id.to_string()));
             self.overlay = Overlay::Busy("Loading on-chain audit…".to_owned());
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::mpsc::{self, Receiver};
+
+    use super::*;
+    use crate::api::{DomainGovAction, GovAction};
+
+    fn confirmation(contract_id: &str, party: &str, expires_at: i64) -> GovConfirmation {
+        GovConfirmation {
+            contract_id: contract_id.to_owned(),
+            confirming_party: party.to_owned(),
+            expires_at,
+        }
+    }
+
+    fn off_chain_action() -> Value {
+        json!({ "type": "governance_set_threshold", "new_threshold": 3 })
+    }
+
+    /// An off-chain item: this node confirmed with `00c1`, which has expired.
+    fn off_chain(can_execute: bool) -> GovItem {
+        GovItem::OffChain(GovAction {
+            action: off_chain_action(),
+            confirmations: vec![
+                confirmation("00c1", "me::1220", 1),
+                confirmation("00c2", "other::1220", 0),
+            ],
+            executable_confirmation_cids: Some(vec!["00c1".to_owned()]),
+            confirmation_count: 2,
+            can_execute,
+        })
+    }
+
+    /// An on-chain item: this node confirmed with `00d2`; `00d1` has expired.
+    fn domain(can_execute: bool) -> GovItem {
+        GovItem::Domain(DomainGovAction {
+            proposal_cid: "00prop".to_owned(),
+            action_label: "Mint".to_owned(),
+            description: None,
+            confirmations: vec![
+                confirmation("00d1", "other::1220", 1),
+                confirmation("00d2", "me::1220", 0),
+            ],
+            executable_confirmation_cids: None,
+            confirmation_count: 2,
+            can_execute,
+            orphaned: false,
+        })
+    }
+
+    fn app_with(items: Vec<GovItem>) -> (App, Receiver<Request>) {
+        let (requests, request_rx) = mpsc::channel();
+        let (_updates_tx, updates) = mpsc::channel();
+        let mut app = App::new(requests, updates, false);
+        app.overlay = Overlay::Governance(Box::new(GovView {
+            party_name: "treasury".to_owned(),
+            party_id: "dec::1220".to_owned(),
+            rules_contract_id: "00rules".to_owned(),
+            member_party_id: "me::1220".to_owned(),
+            threshold: 2,
+            items,
+            selected: 0,
+        }));
+        (app, request_rx)
+    }
+
+    /// The governance op the app sent, after checking the view's context.
+    fn sent_op(requests: &Receiver<Request>) -> GovOp {
+        let Ok(Request::GovAction(request)) = requests.try_recv() else {
+            panic!("expected a governance request");
+        };
+        let GovActionRequest {
+            op,
+            party_id,
+            party_name,
+            rules_contract_id,
+        } = *request;
+        assert_eq!(
+            (
+                party_id.as_str(),
+                party_name.as_str(),
+                rules_contract_id.as_str()
+            ),
+            ("dec::1220", "treasury", "00rules")
+        );
+        op
+    }
+
+    fn assert_overlay(app: &App, busy: bool, text: &str) {
+        match &app.overlay {
+            Overlay::Busy(shown) if busy => assert_eq!(shown, text),
+            Overlay::Message(shown) if !busy => assert_eq!(shown, text),
+            _ => panic!("expected {text}"),
+        }
+    }
+
+    #[test]
+    fn selected_target_reads_both_item_kinds() {
+        let (app, _requests) = app_with(vec![off_chain(true), domain(false)]);
+        let Overlay::Governance(mut view) = app.overlay else {
+            panic!("the approvals view is open");
+        };
+        let Some(target) = view.selected_target() else {
+            panic!("item 0 is selected");
+        };
+        assert_eq!(target.action, off_chain_action());
+        assert_eq!(target.governance_type, "core_self");
+        assert_eq!(target.proposal_cid, None);
+        assert_eq!(target.confirmations[0].contract_id, "00c1");
+        assert_eq!(
+            target.executable_confirmation_cids,
+            Some(&["00c1".to_owned()][..])
+        );
+        assert!(target.can_execute);
+
+        view.selected = 1;
+        let Some(target) = view.selected_target() else {
+            panic!("item 1 is selected");
+        };
+        assert_eq!(target.action, placeholder_action());
+        assert_eq!(target.governance_type, "core_domain");
+        assert_eq!(target.proposal_cid.as_deref(), Some("00prop"));
+        assert_eq!(target.confirmations[0].contract_id, "00d1");
+        assert_eq!(target.executable_confirmation_cids, None);
+        assert!(!target.can_execute);
+
+        view.selected = 2;
+        assert!(view.selected_target().is_none());
+    }
+
+    #[test]
+    fn confirm_sends_the_items_action_or_the_proposal() {
+        let (mut app, requests) = app_with(vec![off_chain(false)]);
+        app.gov_confirm();
+        let GovOp::Confirm {
+            action,
+            governance_type,
+            proposal_cid,
+        } = sent_op(&requests)
+        else {
+            panic!("expected a confirm");
+        };
+        assert_eq!(action, off_chain_action());
+        assert_eq!(governance_type, "core_self");
+        assert_eq!(proposal_cid, None);
+        assert_overlay(&app, true, "Confirming action…");
+
+        let (mut app, requests) = app_with(vec![domain(false)]);
+        app.gov_confirm();
+        let GovOp::Confirm {
+            action,
+            governance_type,
+            proposal_cid,
+        } = sent_op(&requests)
+        else {
+            panic!("expected a confirm");
+        };
+        assert_eq!(action, placeholder_action());
+        assert_eq!(governance_type, "core_domain");
+        assert_eq!(proposal_cid.as_deref(), Some("00prop"));
+    }
+
+    #[test]
+    fn execute_sends_the_executable_confirmations() {
+        let (mut app, requests) = app_with(vec![off_chain(true)]);
+        app.gov_execute();
+        let GovOp::Execute {
+            action,
+            confirmation_cids,
+            governance_type,
+            proposal_cid,
+        } = sent_op(&requests)
+        else {
+            panic!("expected an execute");
+        };
+        assert_eq!(action, off_chain_action());
+        assert_eq!(confirmation_cids, vec!["00c1"]);
+        assert_eq!(governance_type, "core_self");
+        assert_eq!(proposal_cid, None);
+        assert_overlay(&app, true, "Executing action…");
+
+        // Without the server's executable subset, every confirmation goes.
+        let (mut app, requests) = app_with(vec![domain(true)]);
+        app.gov_execute();
+        let GovOp::Execute {
+            action,
+            confirmation_cids,
+            governance_type,
+            proposal_cid,
+        } = sent_op(&requests)
+        else {
+            panic!("expected an execute");
+        };
+        assert_eq!(action, placeholder_action());
+        assert_eq!(confirmation_cids, vec!["00d1", "00d2"]);
+        assert_eq!(governance_type, "core_domain");
+        assert_eq!(proposal_cid.as_deref(), Some("00prop"));
+    }
+
+    #[test]
+    fn execute_waits_for_enough_confirmations() {
+        for item in [off_chain(false), domain(false)] {
+            let (mut app, requests) = app_with(vec![item]);
+            app.gov_execute();
+            assert!(requests.try_recv().is_err());
+            assert_overlay(
+                &app,
+                false,
+                "Not enough confirmations to execute this action yet.",
+            );
+        }
+    }
+
+    #[test]
+    fn revoke_cancels_this_nodes_own_confirmation() {
+        for (item, cid, kind) in [
+            (off_chain(false), "00c1", "core_self"),
+            (domain(false), "00d2", "core_domain"),
+        ] {
+            let (mut app, requests) = app_with(vec![item]);
+            app.gov_revoke();
+            let GovOp::Cancel {
+                confirmation_cid,
+                governance_type,
+            } = sent_op(&requests)
+            else {
+                panic!("expected a cancel");
+            };
+            assert_eq!(
+                (confirmation_cid.as_str(), governance_type.as_str()),
+                (cid, kind)
+            );
+            assert_overlay(&app, true, "Revoking confirmation…");
+        }
+
+        let (mut app, requests) = app_with(vec![off_chain(false)]);
+        if let Overlay::Governance(view) = &mut app.overlay {
+            view.member_party_id = "nobody::1220".to_owned();
+        }
+        app.gov_revoke();
+        assert!(requests.try_recv().is_err());
+        assert_overlay(&app, false, "You have no confirmation to revoke.");
+    }
+
+    #[test]
+    fn expire_targets_the_first_stale_confirmation() {
+        for (item, cid, kind) in [
+            (off_chain(false), "00c1", "core_self"),
+            (domain(false), "00d1", "core_domain"),
+        ] {
+            let (mut app, requests) = app_with(vec![item]);
+            app.gov_expire();
+            let GovOp::Expire {
+                confirmation_cid,
+                governance_type,
+            } = sent_op(&requests)
+            else {
+                panic!("expected an expire");
+            };
+            assert_eq!(
+                (confirmation_cid.as_str(), governance_type.as_str()),
+                (cid, kind)
+            );
+            assert_overlay(&app, true, "Expiring confirmation…");
+        }
+
+        let mut fresh = off_chain(false);
+        if let GovItem::OffChain(action) = &mut fresh {
+            action.confirmations[0].expires_at = i64::MAX;
+        }
+        let (mut app, requests) = app_with(vec![fresh]);
+        app.gov_expire();
+        assert!(requests.try_recv().is_err());
+        assert_overlay(&app, false, "No expired confirmations on this action.");
+    }
+
+    #[test]
+    fn gov_actions_need_a_selected_item() {
+        let actions: [fn(&mut App); 4] = [
+            App::gov_confirm,
+            App::gov_execute,
+            App::gov_revoke,
+            App::gov_expire,
+        ];
+        for action in actions {
+            let (mut app, requests) = app_with(Vec::new());
+            action(&mut app);
+            assert!(requests.try_recv().is_err());
+            assert!(matches!(app.overlay, Overlay::Governance(_)));
+
+            app.overlay = Overlay::None;
+            action(&mut app);
+            assert!(requests.try_recv().is_err());
+            assert!(matches!(app.overlay, Overlay::None));
         }
     }
 }

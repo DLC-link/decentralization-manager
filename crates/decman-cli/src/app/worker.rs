@@ -176,60 +176,40 @@ pub fn spawn_workers(
 
 /// Run a single request against the client, mapping errors to display strings.
 fn handle_request(client: &mut DecmanClient, request: Request) -> Update {
-    let err = |error: anyhow::Error| format!("{error:#}");
     match request {
-        Request::Parties => Update::Parties(client.fetch_parties().map_err(err)),
-        Request::Dars => Update::Dars(client.fetch_dars().map_err(err)),
-        Request::Feed => Update::Feed(client.fetch_feed().map_err(err)),
-        Request::Compare => Update::Compare(client.compare_packages().map_err(err)),
-        Request::Accept(id) => Update::Action(
-            client
-                .accept_invitation(&id)
-                .map(|()| "Invitation accepted".to_owned())
-                .map_err(err),
-        ),
-        Request::Decline(id) => Update::Action(
-            client
-                .decline_invitation(&id)
-                .map(|()| "Invitation declined".to_owned())
-                .map_err(err),
-        ),
-        Request::Dismiss(name) => Update::Action(
-            client
-                .dismiss_workflow(&name)
-                .map(|()| "Workflow dismissed".to_owned())
-                .map_err(err),
-        ),
-        Request::Upload { filename, data } => Update::Action(
-            client
-                .upload_dar(&filename, &data)
-                .map(|()| format!("Uploaded {filename}"))
-                .map_err(err),
+        Request::Parties => Update::Parties(client.fetch_parties().map_err(error_text)),
+        Request::Dars => Update::Dars(client.fetch_dars().map_err(error_text)),
+        Request::Feed => Update::Feed(client.fetch_feed().map_err(error_text)),
+        Request::Compare => Update::Compare(client.compare_packages().map_err(error_text)),
+        Request::Accept(id) => action(client.accept_invitation(&id), "Invitation accepted"),
+        Request::Decline(id) => action(client.decline_invitation(&id), "Invitation declined"),
+        Request::Dismiss(name) => action(client.dismiss_workflow(&name), "Workflow dismissed"),
+        Request::Upload { filename, data } => action(
+            client.upload_dar(&filename, &data),
+            format!("Uploaded {filename}"),
         ),
         Request::Distribute {
             filename,
             data,
             peer_ids,
-        } => Update::Action(
-            client
-                .distribute_dar(&filename, &data, &peer_ids)
-                .map(|()| "Distribution started".to_owned())
-                .map_err(err),
+        } => action(
+            client.distribute_dar(&filename, &data, &peer_ids),
+            "Distribution started",
         ),
         Request::Detail(party_id) => Update::Detail(DetailData {
-            holdings: client.fetch_holdings(&party_id).map_err(err),
-            audit: client.fetch_audit(&party_id).map_err(err),
-            gov_state: client.fetch_governance_state(&party_id).map_err(err),
+            holdings: client.fetch_holdings(&party_id).map_err(error_text),
+            audit: client.fetch_audit(&party_id).map_err(error_text),
+            gov_state: client.fetch_governance_state(&party_id).map_err(error_text),
         }),
         Request::ChainAudit(party_id) => {
-            Update::ChainAudit(client.fetch_chain_audit(&party_id).map_err(err))
+            Update::ChainAudit(client.fetch_chain_audit(&party_id).map_err(error_text))
         }
-        Request::AuthStatus => Update::AuthStatus(client.fetch_auth_status().map_err(err)),
+        Request::AuthStatus => Update::AuthStatus(client.fetch_auth_status().map_err(error_text)),
         Request::TestAuth => Update::AuthStatus(
             client
                 .test_auth()
                 .and_then(|()| client.fetch_auth_status())
-                .map_err(err),
+                .map_err(error_text),
         ),
         Request::GrantRights {
             dec_party_id,
@@ -239,7 +219,7 @@ fn handle_request(client: &mut DecmanClient, request: Request) -> Update {
             client
                 .grant_rights(&dec_party_id, &client_id, &client_secret)
                 .and_then(|()| client.fetch_auth_status())
-                .map_err(err),
+                .map_err(error_text),
         ),
         Request::Governance {
             party_id,
@@ -247,21 +227,9 @@ fn handle_request(client: &mut DecmanClient, request: Request) -> Update {
         } => Update::Governance(
             build_gov_view(client, &party_id, &party_name)
                 .map(Box::new)
-                .map_err(err),
+                .map_err(error_text),
         ),
-        Request::GovAction(request) => {
-            let GovActionRequest {
-                op,
-                party_id,
-                party_name,
-                rules_contract_id,
-            } = *request;
-            let result = perform_gov_op(client, &party_id, &rules_contract_id, &op)
-                .and_then(|()| build_gov_view(client, &party_id, &party_name))
-                .map(Box::new)
-                .map_err(err);
-            Update::Governance(result)
-        }
+        Request::GovAction(request) => gov_action(client, *request),
         Request::OperatorInfo => match client.fetch_operator_info() {
             Ok(party_id) => Update::OperatorInfo(party_id),
             // Operator info is best-effort prefill; swallow errors silently.
@@ -273,108 +241,118 @@ fn handle_request(client: &mut DecmanClient, request: Request) -> Update {
         } => Update::DeployContext(
             build_deploy_context(client, &party_id, &party_name)
                 .map(Box::new)
-                .map_err(err),
+                .map_err(error_text),
         ),
-        Request::DeploySubmit(body) => Update::Action(
-            client
-                .deploy_contracts(*body)
-                .map(|()| "Contracts workflow started".to_owned())
-                .map_err(err),
-        ),
-        Request::NetworkPeers => Update::NetworkPeers(client.fetch_network_peers().map_err(err)),
-        Request::SaveNetwork(body) => Update::Action(
-            client
-                .save_network_peers(*body)
-                .map(|()| "Network configuration saved".to_owned())
-                .map_err(err),
+        Request::DeploySubmit(body) => {
+            action(client.deploy_contracts(*body), "Contracts workflow started")
+        }
+        Request::NetworkPeers => {
+            Update::NetworkPeers(client.fetch_network_peers().map_err(error_text))
+        }
+        Request::SaveNetwork(body) => action(
+            client.save_network_peers(*body),
+            "Network configuration saved",
         ),
         Request::PartyConfig(dec_party_id) => Update::PartyConfig(
             build_party_config_form(client, &dec_party_id)
                 .map(Box::new)
-                .map_err(err),
+                .map_err(error_text),
         ),
-        Request::SavePartyConfig(body) => Update::Action(
-            client
-                .save_party_config(*body)
-                .map(|()| "Party configuration saved".to_owned())
-                .map_err(err),
-        ),
+        Request::SavePartyConfig(body) => {
+            action(client.save_party_config(*body), "Party configuration saved")
+        }
         Request::Discover(body) => {
-            Update::Discovered(client.discover_member_party(*body).map_err(err))
+            Update::Discovered(client.discover_member_party(*body).map_err(error_text))
         }
         Request::NodeInfo => Update::NodeInfo(Box::new(NodeInfoData {
-            key: client.fetch_key_status().map_err(err),
-            network: client.fetch_network_info().map_err(err),
+            key: client.fetch_key_status().map_err(error_text),
+            network: client.fetch_network_info().map_err(error_text),
         })),
-        Request::PickerOptions { party_id, sources } => {
-            let mut options = Vec::with_capacity(sources.len());
-            for source in sources {
-                let result = client.fetch_picker_options(source, &party_id).map_err(err);
-                options.push((source, result));
-            }
-            Update::PickerOptions(options)
-        }
-        Request::Onboard { prefix, peer_ids } => Update::Action(
-            client
-                .start_onboarding(&prefix, &peer_ids)
-                .map(|()| format!("Onboarding started for {prefix}"))
-                .map_err(err),
+        Request::PickerOptions { party_id, sources } => picker_options(client, &party_id, sources),
+        Request::Onboard { prefix, peer_ids } => action(
+            client.start_onboarding(&prefix, &peer_ids),
+            format!("Onboarding started for {prefix}"),
         ),
         Request::Kick {
             party_id,
             participant_id,
             new_threshold,
             previous_threshold,
-        } => Update::Action(
-            client
-                .kick_participant(
-                    &party_id,
-                    &participant_id,
-                    new_threshold,
-                    previous_threshold,
-                )
-                .map(|()| "Kick started".to_owned())
-                .map_err(err),
+        } => action(
+            client.kick_participant(
+                &party_id,
+                &participant_id,
+                new_threshold,
+                previous_threshold,
+            ),
+            "Kick started",
         ),
         Request::AddParty {
             party_id,
             participant_id,
             new_threshold,
             previous_threshold,
-        } => Update::Action(
-            client
-                .start_add_party(
-                    &party_id,
-                    &participant_id,
-                    new_threshold,
-                    previous_threshold,
-                )
-                .map(|()| "Add-party started".to_owned())
-                .map_err(err),
+        } => action(
+            client.start_add_party(
+                &party_id,
+                &participant_id,
+                new_threshold,
+                previous_threshold,
+            ),
+            "Add-party started",
         ),
         Request::ChangeThreshold {
             party_id,
             new_threshold,
             previous_threshold,
-        } => Update::Action(
-            client
-                .start_change_threshold(&party_id, new_threshold, previous_threshold)
-                .map(|()| "Change-threshold started".to_owned())
-                .map_err(err),
+        } => action(
+            client.start_change_threshold(&party_id, new_threshold, previous_threshold),
+            "Change-threshold started",
         ),
-        Request::CancelWorkflow(kind) => Update::Action(
-            client
-                .cancel_workflow(kind)
-                .map(|()| "Workflow cancelled".to_owned())
-                .map_err(err),
-        ),
-        Request::RetryWorkflow(name) => Update::Action(
-            client
-                .retry_workflow(&name)
-                .map(|()| "Workflow retry started".to_owned())
-                .map_err(err),
-        ),
+        Request::CancelWorkflow(kind) => action(client.cancel_workflow(kind), "Workflow cancelled"),
+        Request::RetryWorkflow(name) => {
+            action(client.retry_workflow(&name), "Workflow retry started")
+        }
     }
+}
+
+/// An error as the UI shows it: the message and its whole cause chain.
+fn error_text(error: anyhow::Error) -> String {
+    format!("{error:#}")
+}
+
+/// The update for a finished write: `message` on success, the error chain
+/// on failure.
+fn action(result: Result<()>, message: impl Into<String>) -> Update {
+    Update::Action(result.map(|()| message.into()).map_err(error_text))
+}
+
+/// Perform one governance mutation, then rebuild the approvals view so it
+/// shows the new state.
+fn gov_action(client: &mut DecmanClient, request: GovActionRequest) -> Update {
+    let GovActionRequest {
+        op,
+        party_id,
+        party_name,
+        rules_contract_id,
+    } = request;
+    let result = perform_gov_op(client, &party_id, &rules_contract_id, &op)
+        .and_then(|()| build_gov_view(client, &party_id, &party_name))
+        .map(Box::new)
+        .map_err(error_text);
+    Update::Governance(result)
+}
+
+/// Fetch the options of each picker source, one call per source, in order.
+fn picker_options(client: &mut DecmanClient, party_id: &str, sources: Vec<PickerSource>) -> Update {
+    let mut options = Vec::with_capacity(sources.len());
+    for source in sources {
+        let result = client
+            .fetch_picker_options(source, party_id)
+            .map_err(error_text);
+        options.push((source, result));
+    }
+    Update::PickerOptions(options)
 }
 
 /// Fetch the pending governance confirmations for a party and assemble the

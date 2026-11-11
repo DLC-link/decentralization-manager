@@ -9,8 +9,8 @@ use ratatui::widgets::TableState;
 
 use common::types::{DecentralizedParty, VettedPackageInfo};
 
-use crate::api::{FeedItem, PeerView};
-use crate::composer::FieldKind;
+use crate::api::{DiscoverResult, FeedItem, PeerView};
+use crate::composer::{FieldKind, PickerOption, PickerSource};
 use crate::ui;
 
 use crate::app::login::Outcome;
@@ -221,181 +221,478 @@ impl App {
     /// Apply every pending background update to the cache and overlay.
     fn drain_updates(&mut self) {
         while let Ok(update) = self.updates.try_recv() {
-            match update {
-                Update::Parties(Ok(parties)) => {
-                    self.parties = parties;
-                    let len = filter_parties(&self.parties, &self.parties_query).len();
-                    clamp_selection(&mut self.parties_table, len);
-                    self.parties_status = Status::Loaded;
+            self.apply_update(update);
+        }
+    }
+
+    /// Apply one background update to the cache and overlay.
+    fn apply_update(&mut self, update: Update) {
+        match update {
+            Update::Parties(Ok(parties)) => {
+                self.parties = parties;
+                let len = filter_parties(&self.parties, &self.parties_query).len();
+                clamp_selection(&mut self.parties_table, len);
+                self.parties_status = Status::Loaded;
+            }
+            Update::Parties(Err(error)) => self.parties_status = Status::Error(error),
+            Update::Dars(Ok(dars)) => {
+                self.dars = dars;
+                let len = filter_dars(&self.dars, &self.dars_query).len();
+                clamp_selection(&mut self.dars_table, len);
+                self.dars_status = Status::Loaded;
+            }
+            Update::Dars(Err(error)) => self.dars_status = Status::Error(error),
+            Update::Feed(Ok(feed)) => {
+                self.feed = feed;
+                clamp_selection(&mut self.feed_table, self.feed.len());
+                self.feed_status = Status::Loaded;
+            }
+            // Keep the last feed on a transient poll error; only surface it
+            // when there is nothing to show (mirrors the peer-poll behavior).
+            Update::Feed(Err(error)) if self.feed.is_empty() => {
+                self.feed_status = Status::Error(error);
+            }
+            Update::Feed(Err(_)) => {}
+            Update::Peers(Ok(peers)) => {
+                self.peers = peers;
+                clamp_selection(&mut self.peers_table, self.peers.len());
+                self.peers_status = Status::Loaded;
+            }
+            Update::Peers(Err(error)) if self.peers.is_empty() => {
+                self.peers_status = Status::Error(error);
+            }
+            Update::Peers(Err(_)) => {}
+            Update::Compare(result) => self.show_result(result, |comparison| Overlay::Compare {
+                comparison,
+                scroll: 0,
+            }),
+            Update::Action(Ok(message)) => {
+                if matches!(self.overlay, Overlay::Busy(_)) {
+                    self.overlay = Overlay::Message(message);
                 }
-                Update::Parties(Err(error)) => self.parties_status = Status::Error(error),
-                Update::Dars(Ok(dars)) => {
-                    self.dars = dars;
-                    let len = filter_dars(&self.dars, &self.dars_query).len();
-                    clamp_selection(&mut self.dars_table, len);
-                    self.dars_status = Status::Loaded;
+                // Refresh the tabs an action can affect.
+                let _ = self.requests.send(Request::Feed);
+                let _ = self.requests.send(Request::Dars);
+            }
+            Update::Action(Err(error)) => {
+                if matches!(self.overlay, Overlay::Busy(_)) {
+                    self.overlay = Overlay::Message(format!("Failed: {error}"));
                 }
-                Update::Dars(Err(error)) => self.dars_status = Status::Error(error),
-                Update::Feed(Ok(feed)) => {
-                    self.feed = feed;
-                    clamp_selection(&mut self.feed_table, self.feed.len());
-                    self.feed_status = Status::Loaded;
+            }
+            Update::ChainAudit(result) => {
+                self.show_result(result, |entries| Overlay::ChainAudit { entries, scroll: 0 });
+            }
+            Update::AuthStatus(result) => {
+                if matches!(
+                    self.overlay,
+                    Overlay::Busy(_) | Overlay::Auth { .. } | Overlay::GrantRights(_)
+                ) {
+                    self.overlay = result_overlay(result, |parties| Overlay::Auth {
+                        parties,
+                        selected: 0,
+                    });
                 }
-                // Keep the last feed on a transient poll error; only surface it
-                // when there is nothing to show (mirrors the peer-poll behavior).
-                Update::Feed(Err(error)) if self.feed.is_empty() => {
-                    self.feed_status = Status::Error(error);
+            }
+            Update::Governance(result) => {
+                if matches!(self.overlay, Overlay::Busy(_) | Overlay::Governance(_)) {
+                    self.overlay = result_overlay(result, Overlay::Governance);
                 }
-                Update::Feed(Err(_)) => {}
-                Update::Peers(Ok(peers)) => {
-                    self.peers = peers;
-                    clamp_selection(&mut self.peers_table, self.peers.len());
-                    self.peers_status = Status::Loaded;
+            }
+            Update::OperatorInfo(party_id) => self.operator_party = party_id,
+            Update::DeployContext(result) => self.show_result(result, Overlay::Deploy),
+            Update::NetworkPeers(result) => self.show_result(result, |peers| {
+                Overlay::NetworkEdit(Box::new(NetworkEditState {
+                    peers,
+                    selected: 0,
+                    adding: None,
+                }))
+            }),
+            Update::PartyConfig(result) => self.show_result(result, Overlay::PartyConfig),
+            Update::Discovered(result) => self.apply_discovered(result),
+            Update::NodeInfo(data) => {
+                if matches!(self.overlay, Overlay::Busy(_)) {
+                    self.overlay = Overlay::NodeInfo(data);
                 }
-                Update::Peers(Err(error)) if self.peers.is_empty() => {
-                    self.peers_status = Status::Error(error);
+            }
+            Update::PickerOptions(results) => self.apply_picker_options(results),
+            // Ignore late detail results after the view was closed.
+            Update::Detail(data) if self.detail.is_some() => {
+                self.detail_data = Some(data);
+                if self.audit_len() > 0 && self.audit_table.selected().is_none() {
+                    self.audit_table.select(Some(0));
                 }
-                Update::Peers(Err(_)) => {}
-                Update::Compare(result) => {
-                    if matches!(self.overlay, Overlay::Busy(_)) {
-                        self.overlay = match result {
-                            Ok(comparison) => Overlay::Compare {
-                                comparison,
-                                scroll: 0,
-                            },
-                            Err(error) => Overlay::Message(error),
-                        };
-                    }
-                }
-                Update::Action(Ok(message)) => {
-                    if matches!(self.overlay, Overlay::Busy(_)) {
-                        self.overlay = Overlay::Message(message);
-                    }
-                    // Refresh the tabs an action can affect.
-                    let _ = self.requests.send(Request::Feed);
-                    let _ = self.requests.send(Request::Dars);
-                }
-                Update::Action(Err(error)) => {
-                    if matches!(self.overlay, Overlay::Busy(_)) {
-                        self.overlay = Overlay::Message(format!("Failed: {error}"));
-                    }
-                }
-                Update::ChainAudit(result) => {
-                    if matches!(self.overlay, Overlay::Busy(_)) {
-                        self.overlay = match result {
-                            Ok(entries) => Overlay::ChainAudit { entries, scroll: 0 },
-                            Err(error) => Overlay::Message(error),
-                        };
-                    }
-                }
-                Update::AuthStatus(result) => {
-                    if matches!(
-                        self.overlay,
-                        Overlay::Busy(_) | Overlay::Auth { .. } | Overlay::GrantRights(_)
-                    ) {
-                        self.overlay = match result {
-                            Ok(parties) => Overlay::Auth {
-                                parties,
-                                selected: 0,
-                            },
-                            Err(error) => Overlay::Message(error),
-                        };
-                    }
-                }
-                Update::Governance(result) => {
-                    if matches!(self.overlay, Overlay::Busy(_) | Overlay::Governance(_)) {
-                        self.overlay = match result {
-                            Ok(view) => Overlay::Governance(view),
-                            Err(error) => Overlay::Message(error),
-                        };
-                    }
-                }
-                Update::OperatorInfo(party_id) => self.operator_party = party_id,
-                Update::DeployContext(result) => {
-                    if matches!(self.overlay, Overlay::Busy(_)) {
-                        self.overlay = match result {
-                            Ok(form) => Overlay::Deploy(form),
-                            Err(error) => Overlay::Message(error),
-                        };
-                    }
-                }
-                Update::NetworkPeers(result) => {
-                    if matches!(self.overlay, Overlay::Busy(_)) {
-                        self.overlay = match result {
-                            Ok(peers) => Overlay::NetworkEdit(Box::new(NetworkEditState {
-                                peers,
-                                selected: 0,
-                                adding: None,
-                            })),
-                            Err(error) => Overlay::Message(error),
-                        };
-                    }
-                }
-                Update::PartyConfig(result) => {
-                    if matches!(self.overlay, Overlay::Busy(_)) {
-                        self.overlay = match result {
-                            Ok(form) => Overlay::PartyConfig(form),
-                            Err(error) => Overlay::Message(error),
-                        };
-                    }
-                }
-                Update::Discovered(result) => {
-                    if let Overlay::PartyConfig(form) = &mut self.overlay {
-                        match result {
-                            Ok(discovered) => {
-                                form.user_id = discovered.user_id;
-                                match discovered.primary_party {
-                                    Some(party) => {
-                                        form.member_party_id = party;
-                                        form.status = "Discovered member party.".to_owned();
-                                    }
-                                    None => {
-                                        form.status =
-                                            "Authenticated, but no primary party assigned."
-                                                .to_owned();
-                                    }
-                                }
-                            }
-                            Err(error) => form.status = format!("Discover failed: {error}"),
+            }
+            Update::Detail(_) => {}
+        }
+    }
+
+    /// Replace a Busy overlay with `result`. A result that arrives after the
+    /// operator closed the overlay is dropped.
+    fn show_result<T>(
+        &mut self,
+        result: Result<T, String>,
+        into_overlay: impl FnOnce(T) -> Overlay,
+    ) {
+        if matches!(self.overlay, Overlay::Busy(_)) {
+            self.overlay = result_overlay(result, into_overlay);
+        }
+    }
+
+    /// Fill the open party-config form with a discover result.
+    fn apply_discovered(&mut self, result: Result<DiscoverResult, String>) {
+        if let Overlay::PartyConfig(form) = &mut self.overlay {
+            match result {
+                Ok(discovered) => {
+                    form.user_id = discovered.user_id;
+                    match discovered.primary_party {
+                        Some(party) => {
+                            form.member_party_id = party;
+                            form.status = "Discovered member party.".to_owned();
+                        }
+                        None => {
+                            form.status =
+                                "Authenticated, but no primary party assigned.".to_owned();
                         }
                     }
                 }
-                Update::NodeInfo(data) => {
-                    if matches!(self.overlay, Overlay::Busy(_)) {
-                        self.overlay = Overlay::NodeInfo(data);
-                    }
-                }
-                // Fill in the open composer's picker fields. A failed fetch is
-                // treated as an empty list: the field is marked loaded and
-                // falls back to free-text cid entry.
-                Update::PickerOptions(results) => {
-                    if let Overlay::Composer(composer) = &mut self.overlay {
-                        for (source, result) in results {
-                            let loaded_options = result.unwrap_or_default();
-                            for field in &mut composer.fields {
-                                if let FieldKind::Picker {
-                                    source: field_source,
-                                    options,
-                                    loaded,
-                                } = &mut field.kind
-                                    && *field_source == source
-                                {
-                                    *options = loaded_options.clone();
-                                    *loaded = true;
-                                }
-                            }
-                        }
-                    }
-                }
-                // Ignore late detail results after the view was closed.
-                Update::Detail(data) if self.detail.is_some() => {
-                    self.detail_data = Some(data);
-                    if self.audit_len() > 0 && self.audit_table.selected().is_none() {
-                        self.audit_table.select(Some(0));
-                    }
-                }
-                Update::Detail(_) => {}
+                Err(error) => form.status = format!("Discover failed: {error}"),
             }
         }
+    }
+
+    /// Fill in the open composer's picker fields. A failed fetch is treated
+    /// as an empty list: the field is marked loaded and falls back to
+    /// free-text cid entry.
+    fn apply_picker_options(
+        &mut self,
+        results: Vec<(PickerSource, Result<Vec<PickerOption>, String>)>,
+    ) {
+        if let Overlay::Composer(composer) = &mut self.overlay {
+            for (source, result) in results {
+                let loaded_options = result.unwrap_or_default();
+                for field in &mut composer.fields {
+                    if let FieldKind::Picker {
+                        source: field_source,
+                        options,
+                        loaded,
+                    } = &mut field.kind
+                        && *field_source == source
+                    {
+                        *options = loaded_options.clone();
+                        *loaded = true;
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// The overlay that shows `result`: `into_overlay` for a value, the error as
+/// a message otherwise.
+fn result_overlay<T>(
+    result: Result<T, String>,
+    into_overlay: impl FnOnce(T) -> Overlay,
+) -> Overlay {
+    match result {
+        Ok(value) => into_overlay(value),
+        Err(error) => Overlay::Message(error),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::mpsc::{self, Receiver};
+
+    use common::types::PeerPackageComparison;
+
+    use super::*;
+    use crate::app::overlay::PartyConfigForm;
+    use crate::app::overlay::{DeployForm, GovView, GrantForm, IdpMode, NodeInfoData};
+    use crate::composer::{Composer, ComposerField, ComposerSubmit};
+
+    /// Deliver `update` to an app that shows `overlay`. Returns the app and
+    /// the requests it sent.
+    fn apply(overlay: Overlay, update: Update) -> (App, Receiver<Request>) {
+        let (requests, request_rx) = mpsc::channel();
+        let (update_tx, updates) = mpsc::channel();
+        let mut app = App::new(requests, updates, false);
+        app.overlay = overlay;
+        if update_tx.send(update).is_err() {
+            panic!("the app holds the update receiver");
+        }
+        app.drain_updates();
+        (app, request_rx)
+    }
+
+    fn busy() -> Overlay {
+        Overlay::Busy("Working…".to_owned())
+    }
+
+    fn message(app: &App) -> Option<&str> {
+        match &app.overlay {
+            Overlay::Message(text) => Some(text),
+            _ => None,
+        }
+    }
+
+    fn gov_view() -> GovView {
+        GovView {
+            party_name: "treasury".to_owned(),
+            party_id: "dec::1220".to_owned(),
+            rules_contract_id: "00rules".to_owned(),
+            member_party_id: "me::1220".to_owned(),
+            threshold: 2,
+            items: Vec::new(),
+            selected: 0,
+        }
+    }
+
+    fn party_config_form() -> PartyConfigForm {
+        PartyConfigForm {
+            dec_party_id: "dec::1220".to_owned(),
+            party_name: "dec".to_owned(),
+            mode: IdpMode::Keycloak,
+            member_party_id: String::new(),
+            user_id: String::new(),
+            kc_url: String::new(),
+            kc_realm: String::new(),
+            kc_client_id: String::new(),
+            kc_secret: String::new(),
+            kc_has_secret: false,
+            auth0_domain: String::new(),
+            auth0_audience: String::new(),
+            auth0_client_id: String::new(),
+            auth0_secret: String::new(),
+            auth0_has_secret: false,
+            cursor: 0,
+            status: String::new(),
+        }
+    }
+
+    #[test]
+    fn a_busy_overlay_shows_the_result_it_waited_for() {
+        let comparison = PeerPackageComparison {
+            local_packages: Vec::new(),
+            peers: Vec::new(),
+        };
+        let (app, _) = apply(busy(), Update::Compare(Ok(comparison)));
+        assert!(matches!(app.overlay, Overlay::Compare { scroll: 0, .. }));
+        let (app, _) = apply(busy(), Update::ChainAudit(Ok(Vec::new())));
+        assert!(matches!(
+            &app.overlay,
+            Overlay::ChainAudit { entries, scroll: 0 } if entries.is_empty()
+        ));
+        let (app, _) = apply(busy(), Update::NetworkPeers(Ok(Vec::new())));
+        assert!(matches!(
+            &app.overlay,
+            Overlay::NetworkEdit(state)
+                if state.peers.is_empty() && state.selected == 0 && state.adding.is_none()
+        ));
+        let (app, _) = apply(
+            busy(),
+            Update::PartyConfig(Ok(Box::new(party_config_form()))),
+        );
+        assert!(matches!(&app.overlay, Overlay::PartyConfig(form) if form.party_name == "dec"));
+        let (app, _) = apply(busy(), Update::Governance(Ok(Box::new(gov_view()))));
+        assert!(matches!(&app.overlay, Overlay::Governance(view) if view.threshold == 2));
+        let deploy = DeployForm {
+            party_id: "dec::1220".to_owned(),
+            party_name: "dec".to_owned(),
+            package_id: String::new(),
+            operator_party: String::new(),
+            participant_ids: Vec::new(),
+            member_parties: Vec::new(),
+            threshold: "2".to_owned(),
+            timeout_micros: "1".to_owned(),
+            cursor: 0,
+        };
+        let (app, _) = apply(busy(), Update::DeployContext(Ok(Box::new(deploy))));
+        assert!(matches!(&app.overlay, Overlay::Deploy(form) if form.threshold == "2"));
+        let node_info = NodeInfoData {
+            key: Err("no key".to_owned()),
+            network: Err("no network".to_owned()),
+        };
+        let (app, _) = apply(busy(), Update::NodeInfo(Box::new(node_info)));
+        assert!(matches!(app.overlay, Overlay::NodeInfo(_)));
+
+        for update in [
+            Update::Compare(Err("failed".to_owned())),
+            Update::ChainAudit(Err("failed".to_owned())),
+            Update::NetworkPeers(Err("failed".to_owned())),
+            Update::DeployContext(Err("failed".to_owned())),
+            Update::PartyConfig(Err("failed".to_owned())),
+            Update::AuthStatus(Err("failed".to_owned())),
+            Update::Governance(Err("failed".to_owned())),
+        ] {
+            let (app, _) = apply(busy(), update);
+            assert_eq!(message(&app), Some("failed"));
+        }
+    }
+
+    #[test]
+    fn a_result_after_the_overlay_closed_is_dropped() {
+        for update in [
+            Update::Compare(Err("late".to_owned())),
+            Update::ChainAudit(Ok(Vec::new())),
+            Update::NetworkPeers(Err("late".to_owned())),
+            Update::DeployContext(Err("late".to_owned())),
+            Update::PartyConfig(Err("late".to_owned())),
+            Update::AuthStatus(Err("late".to_owned())),
+            Update::Governance(Err("late".to_owned())),
+            Update::Action(Err("late".to_owned())),
+            Update::Discovered(Err("late".to_owned())),
+            Update::PickerOptions(Vec::new()),
+        ] {
+            let (app, _) = apply(Overlay::None, update);
+            assert!(matches!(app.overlay, Overlay::None));
+        }
+        // A form the operator opened since is not replaced either.
+        let (app, _) = apply(
+            Overlay::Message("kept".to_owned()),
+            Update::Compare(Err("late".to_owned())),
+        );
+        assert_eq!(message(&app), Some("kept"));
+    }
+
+    #[test]
+    fn auth_and_governance_results_replace_their_own_overlay() {
+        let auth = Overlay::Auth {
+            parties: Vec::new(),
+            selected: 3,
+        };
+        let (app, _) = apply(auth, Update::AuthStatus(Ok(Vec::new())));
+        assert!(matches!(app.overlay, Overlay::Auth { selected: 0, .. }));
+        let grant = GrantForm {
+            dec_party_id: "dec::1220".to_owned(),
+            party_name: "dec".to_owned(),
+            client_id: String::new(),
+            client_secret: String::new(),
+            cursor: 0,
+        };
+        let (app, _) = apply(
+            Overlay::GrantRights(Box::new(grant)),
+            Update::AuthStatus(Err("denied".to_owned())),
+        );
+        assert_eq!(message(&app), Some("denied"));
+        let (app, _) = apply(
+            Overlay::Governance(Box::new(gov_view())),
+            Update::Governance(Err("gone".to_owned())),
+        );
+        assert_eq!(message(&app), Some("gone"));
+    }
+
+    #[test]
+    fn an_action_result_shows_and_refreshes_the_tabs() {
+        let (app, requests) = apply(busy(), Update::Action(Ok("Kick started".to_owned())));
+        assert_eq!(message(&app), Some("Kick started"));
+        assert!(matches!(requests.try_recv(), Ok(Request::Feed)));
+        assert!(matches!(requests.try_recv(), Ok(Request::Dars)));
+        assert!(requests.try_recv().is_err());
+
+        // The tabs refresh even when the operator closed the overlay.
+        let (app, requests) = apply(Overlay::None, Update::Action(Ok("done".to_owned())));
+        assert!(matches!(app.overlay, Overlay::None));
+        assert!(matches!(requests.try_recv(), Ok(Request::Feed)));
+        assert!(matches!(requests.try_recv(), Ok(Request::Dars)));
+
+        let (app, requests) = apply(busy(), Update::Action(Err("refused".to_owned())));
+        assert_eq!(message(&app), Some("Failed: refused"));
+        assert!(requests.try_recv().is_err());
+    }
+
+    #[test]
+    fn discovered_fills_the_open_party_config_form() {
+        let status_after = |result| {
+            let (app, _) = apply(
+                Overlay::PartyConfig(Box::new(party_config_form())),
+                Update::Discovered(result),
+            );
+            match app.overlay {
+                Overlay::PartyConfig(form) => (form.user_id, form.member_party_id, form.status),
+                _ => panic!("the party config form stays open"),
+            }
+        };
+        let found = status_after(Ok(DiscoverResult {
+            user_id: "user-1".to_owned(),
+            primary_party: Some("member::1220".to_owned()),
+        }));
+        assert_eq!(
+            found,
+            (
+                "user-1".to_owned(),
+                "member::1220".to_owned(),
+                "Discovered member party.".to_owned()
+            )
+        );
+        let no_party = status_after(Ok(DiscoverResult {
+            user_id: "user-2".to_owned(),
+            primary_party: None,
+        }));
+        assert_eq!(
+            no_party,
+            (
+                "user-2".to_owned(),
+                String::new(),
+                "Authenticated, but no primary party assigned.".to_owned()
+            )
+        );
+        let failed = status_after(Err("bad secret".to_owned()));
+        assert_eq!(failed.2, "Discover failed: bad secret");
+    }
+
+    #[test]
+    fn picker_options_fill_the_matching_composer_fields() {
+        let picker = |key, source| ComposerField {
+            key,
+            label: key,
+            kind: FieldKind::Picker {
+                source,
+                options: Vec::new(),
+                loaded: false,
+            },
+            value: String::new(),
+            optional: false,
+            help: "",
+        };
+        let composer = Composer {
+            title: "Mint".to_owned(),
+            action_type: "mint",
+            submit: ComposerSubmit::Propose,
+            party_id: "dec::1220".to_owned(),
+            party_name: "dec".to_owned(),
+            rules_contract_id: "00rules".to_owned(),
+            fields: vec![
+                picker("instrument", PickerSource::Instruments),
+                picker("service", PickerSource::UserServices),
+                picker("offer", PickerSource::CredentialOffers),
+            ],
+            cursor: 0,
+        };
+        let option = PickerOption {
+            value: "00cid".to_owned(),
+            label: "one".to_owned(),
+        };
+        let (app, _) = apply(
+            Overlay::Composer(Box::new(composer)),
+            Update::PickerOptions(vec![
+                (PickerSource::Instruments, Ok(vec![option])),
+                (PickerSource::UserServices, Err("down".to_owned())),
+            ]),
+        );
+        let Overlay::Composer(composer) = &app.overlay else {
+            panic!("the composer stays open");
+        };
+        let state: Vec<(usize, bool)> = composer
+            .fields
+            .iter()
+            .map(|field| match &field.kind {
+                FieldKind::Picker {
+                    options, loaded, ..
+                } => (options.len(), *loaded),
+                _ => panic!("every field is a picker"),
+            })
+            .collect();
+        // A failed fetch still marks its fields loaded, with no options.
+        assert_eq!(state, vec![(1, true), (0, true), (0, false)]);
     }
 }
