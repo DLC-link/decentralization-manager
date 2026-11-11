@@ -1,10 +1,4 @@
-use canton_proto_rs::com::digitalasset::canton::{
-    protocol::v30::{enums::TopologyChangeOp, topology_mapping},
-    topology::admin::v30::{
-        GenerateTransactionsRequest, generate_transactions_request,
-        topology_manager_write_service_client::TopologyManagerWriteServiceClient,
-    },
-};
+use canton_proto_rs::com::digitalasset::canton::protocol::v30::topology_mapping;
 use common::api::HostPermission;
 
 use sqlx::SqlitePool;
@@ -13,12 +7,14 @@ use crate::{
     canton_id::CantonId,
     config::NodeConfig,
     utils,
-    workflow::{topology, topology_version::ProposalFormat},
+    workflow::{
+        external_party::topology_bundle::{generate_p2p_change, read_pinned},
+        topology_version::ProposalFormat,
+    },
 };
 
 use super::{
-    error::AddHostsError, head::read_party_to_participant, mapping::add_hosts_mapping,
-    replication::capture_replication_offsets,
+    error::AddHostsError, mapping::add_hosts_mapping, replication::capture_replication_offsets,
 };
 
 /// The unsigned add-hosts topology, plus the hash the party must sign for each
@@ -63,21 +59,7 @@ pub async fn prepare_add_hosts(
         .await
         .map_err(AddHostsError::Canton)?;
 
-    let Some(current) = read_party_to_participant(config, party_id)
-        .await
-        .map_err(AddHostsError::Canton)?
-    else {
-        return Err(AddHostsError::UnknownParty {
-            party: party_id.to_string(),
-        });
-    };
-    if current.serial != base_serial {
-        return Err(AddHostsError::StaleSerial {
-            party: party_id.to_string(),
-            pinned: base_serial,
-            found: current.serial,
-        });
-    }
+    let current = read_pinned(config, party_id, base_serial).await?;
 
     let mapping = add_hosts_mapping(&current.mapping, new_hosts, permission)
         .map_err(AddHostsError::Invalid)?;
@@ -91,43 +73,16 @@ pub async fn prepare_add_hosts(
         ledger_token,
     )
     .await?;
-    let next_serial = current.serial.checked_add(1).ok_or_else(|| {
-        AddHostsError::Invalid(anyhow::anyhow!(
-            "{party_id} is at serial {s}, which cannot be advanced",
-            s = current.serial
-        ))
-    })?;
-
-    let mut client = TopologyManagerWriteServiceClient::new(
-        config
-            .admin_channel()
-            .await
-            .map_err(AddHostsError::Canton)?,
-    );
-    let response = client
-        .generate_transactions(tonic::Request::new(GenerateTransactionsRequest {
-            proposals: vec![generate_transactions_request::Proposal {
-                operation: TopologyChangeOp::AddReplace as i32,
-                serial: next_serial,
-                mapping: Some(
-                    ProposalFormat::for_synchronizer(&synchronizer_id)
-                        .generated_mapping(topology_mapping::Mapping::PartyToParticipant(mapping)),
-                ),
-                store: Some(topology::synchronizer_store_id(&synchronizer_id)),
-            }],
-            base_request: None,
-        }))
-        .await
-        .map_err(|e| {
-            AddHostsError::Canton(anyhow::Error::new(e).context("GenerateTransactions RPC failed"))
-        })?
-        .into_inner();
-
-    if response.generated_transactions.is_empty() {
-        return Err(AddHostsError::Canton(anyhow::anyhow!(
-            "GenerateTransactions returned no transactions for {party_id}"
-        )));
-    }
+    let generated = generate_p2p_change(
+        config,
+        party_id,
+        current.serial,
+        &synchronizer_id,
+        ProposalFormat::for_synchronizer(&synchronizer_id)
+            .generated_mapping(topology_mapping::Mapping::PartyToParticipant(mapping)),
+    )
+    .await?;
+    let next_serial = generated.serial;
 
     tracing::info!(
         %party_id,
@@ -137,17 +92,10 @@ pub async fn prepare_add_hosts(
         "external-party: generated add-hosts topology"
     );
 
-    let mut transaction_hashes = Vec::with_capacity(response.generated_transactions.len());
-    let mut topology_transactions = Vec::with_capacity(response.generated_transactions.len());
-    for tx in response.generated_transactions {
-        transaction_hashes.push(tx.transaction_hash);
-        topology_transactions.push(tx.serialized_transaction);
-    }
-
     Ok(PreparedAddHosts {
         party_id: party_id.to_string(),
         serial: next_serial,
-        transaction_hashes,
-        topology_transactions,
+        transaction_hashes: generated.transaction_hashes,
+        topology_transactions: generated.topology_transactions,
     })
 }
