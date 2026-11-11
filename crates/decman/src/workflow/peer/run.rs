@@ -293,596 +293,615 @@ impl PeerRun {
                 // Coordinator says to wait, poll again after delay
                 tokio::time::sleep(Duration::from_millis(peer_wait_poll_delay_ms())).await;
             }
-            MessageType::RetireLegacyKeys => {
-                // The target comes from the accepted invitation, never this command's payload.
-                let party = self.expectations.dec_party_id.as_ref().ok_or_else(|| {
-                    anyhow::anyhow!("No accepted party for legacy key retirement")
-                })?;
-                let synchronizer_id = utils::get_synchronizer_id(&self.node_config).await?;
-                topology::retire_legacy_keys(&self.node_config, &synchronizer_id, party).await?;
-                self.consecutive_step_failures = 0;
-                self.client
-                    .send(
-                        MessageType::StatusUpdate,
-                        b"RetireLegacyKeys completed".to_vec(),
-                    )
-                    .await?;
-            }
+            MessageType::RetireLegacyKeys => self.retire_legacy_keys().await?,
             MessageType::Disconnect => {
                 tracing::info!("Received disconnect command, shutting down");
                 return Ok(Next::Disconnect);
             }
-            MessageType::UploadDars => {
-                tracing::info!("Executing: Upload DARs");
-
-                // Decode DAR files from payload and upload directly
-                let dar_files = if payload.is_empty() {
-                    Vec::new()
-                } else {
-                    match utils::decode_files(payload) {
-                        Ok(files) => files,
-                        Err(e) => {
-                            return Err(StepError::Retry(format!(
-                                "Failed to decode DARs from coordinator: {e}"
-                            )));
-                        }
-                    }
-                };
-
-                // Vetting a DAR makes this participant willing to execute its
-                // code, so the files must be the ones the operator accepted.
-                if let Err(e) = self.expectations.check_dars(&dar_files) {
-                    return Err(StepError::Retry(format!(
-                        "Refusing the coordinator's DARs: {e}"
-                    )));
-                }
-
-                if let Err(e) =
-                    contracts::upload_dars_from_bytes(&self.node_config, dar_files).await
-                {
-                    return Err(StepError::Retry(format!("Step execution failed: {e}")));
-                }
-                self.consecutive_step_failures = 0;
-                if let Err(e) = self
-                    .client
-                    .send(MessageType::StatusUpdate, b"UploadDars completed".to_vec())
-                    .await
-                {
-                    tracing::error!("Failed to send completion status: {e}");
-                }
-            }
-            MessageType::GenerateKeys => {
-                tracing::info!("Executing: Generate keys");
-                // Deserialize onboarding config from payload (we still need
-                // the prefix for namespace_key_name / daml_key_name; the
-                // config's `instance_name` is the coordinator's view and is
-                // intentionally unused here).
-                let onboarding_config: onboarding::OnboardingConfig =
-                    match serde_json::from_slice(payload) {
-                        Ok(config) => config,
-                        Err(e) => {
-                            return Err(StepError::Retry(format!(
-                                "Failed to deserialize onboarding config: {e}"
-                            )));
-                        }
-                    };
-
-                // The prefix names the vault keys this step creates or reuses,
-                // so it is pinned before any key material is touched.
-                if let Err(e) = self
-                    .expectations
-                    .check_onboarding_config(&onboarding_config.party_id_prefix)
-                {
-                    return Err(StepError::Retry(format!(
-                        "Refusing the coordinator's onboarding config: {e}"
-                    )));
-                }
-
-                if let Err(e) = onboarding::generate_keys(
-                    &self.node_config,
-                    &self.db,
-                    &self.instance_name,
-                    &onboarding_config,
-                )
-                .await
-                {
-                    return Err(StepError::Retry(format!("Step execution failed: {e}")));
-                }
-                self.consecutive_step_failures = 0;
-                if let Err(e) = onboarding::peer::send_keys_to_coordinator(
-                    &self.client,
-                    &self.db,
-                    &self.instance_name,
-                    &self.node_config,
-                )
-                .await
-                {
-                    tracing::error!("Failed to send keys to coordinator: {e}");
-                }
-            }
-            MessageType::SignDns => {
-                tracing::info!("Executing: Sign DNS proposal");
-                if payload.is_empty() {
-                    return Err(StepError::Retry(
-                        "No DNS proposal payload received from coordinator".to_string(),
-                    ));
-                }
-                match self
-                    .expectations
-                    .check_onboarding_dns(&self.node_config, &self.db, &self.instance_name, payload)
-                    .await
-                {
-                    // Remember the namespace we authorized so the P2P
-                    // proposal that follows can be pinned to the same party.
-                    Ok(namespace) => {
-                        // The P2P proposal is pinned to this namespace in the
-                        // next step. Signing DNS without recording it would
-                        // leave that cross-check silently disabled, so a write
-                        // failure fails the step instead.
-                        if let Err(e) = self
-                            .db
-                            .write_artifact(
-                                &self.instance_name,
-                                artifact_kinds::ACCEPTED_DNS_NAMESPACE,
-                                None,
-                                namespace.as_bytes(),
-                            )
-                            .await
-                        {
-                            return Err(StepError::Retry(format!(
-                                "Refusing to sign DNS: the accepted namespace could not be \
-                                 recorded, so the P2P cross-check would be lost: {e}"
-                            )));
-                        }
-                    }
-                    Err(e) => {
-                        return Err(StepError::Retry(format!(
-                            "Refusing the coordinator's DNS proposal: {e}"
-                        )));
-                    }
-                }
-                if let Err(e) = onboarding::sign_dns_proposals(
-                    &self.node_config,
-                    &self.db,
-                    &self.instance_name,
-                    payload,
-                )
-                .await
-                {
-                    return Err(StepError::Retry(format!("Step execution failed: {e}")));
-                }
-                self.consecutive_step_failures = 0;
-                if let Err(e) = onboarding::peer::send_dns_signature_to_coordinator(
-                    &self.client,
-                    &self.db,
-                    &self.instance_name,
-                    &self.node_config,
-                )
-                .await
-                {
-                    tracing::error!("Failed to send DNS signature to coordinator: {e}");
-                }
-            }
-            MessageType::SignP2p => {
-                tracing::info!("Executing: Sign P2P proposals");
-                if payload.is_empty() {
-                    return Err(StepError::Retry(
-                        "No P2P proposal payload received from coordinator".to_string(),
-                    ));
-                }
-                // Absent means the DNS step ran on a build that did not record
-                // the namespace yet — the mixed-version case, which degrades to
-                // the prefix check with a warning inside check_onboarding_p2p.
-                // A read error is different: it hides whether a namespace was
-                // recorded at all, so it fails the step rather than skipping
-                // the cross-check.
-                let signed_namespace = match self
-                    .db
-                    .read_artifact(
-                        &self.instance_name,
-                        artifact_kinds::ACCEPTED_DNS_NAMESPACE,
-                        None,
-                    )
-                    .await
-                {
-                    // Nothing recorded is the mixed-version case. Bytes that
-                    // are not valid UTF-8 are not: something WAS recorded and
-                    // cannot be read back, so treating it as absent would drop
-                    // the cross-check on corrupt state.
-                    Ok(None) => None,
-                    Ok(Some(bytes)) => match String::from_utf8(bytes) {
-                        Ok(namespace) => Some(namespace),
-                        Err(e) => {
-                            return Err(StepError::Retry(format!(
-                                "Refusing to sign P2P: the recorded DNS namespace is not \
-                                 readable, so the cross-check cannot be applied: {e}"
-                            )));
-                        }
-                    },
-                    Err(e) => {
-                        return Err(StepError::Retry(format!(
-                            "Refusing to sign P2P: cannot read the DNS namespace this run \
-                             accepted, so the cross-check cannot be applied: {e}"
-                        )));
-                    }
-                };
-                if let Err(e) = self
-                    .expectations
-                    .check_onboarding_p2p(
-                        &self.node_config,
-                        &self.db,
-                        &self.instance_name,
-                        payload,
-                        signed_namespace.as_deref(),
-                    )
-                    .await
-                {
-                    return Err(StepError::Retry(format!(
-                        "Refusing the coordinator's P2P proposal: {e}"
-                    )));
-                }
-                if let Err(e) = onboarding::sign_p2p_proposals(
-                    &self.node_config,
-                    &self.db,
-                    &self.instance_name,
-                    payload,
-                )
-                .await
-                {
-                    return Err(StepError::Retry(format!("Step execution failed: {e}")));
-                }
-                self.consecutive_step_failures = 0;
-                if let Err(e) = onboarding::peer::send_p2p_signatures_to_coordinator(
-                    &self.client,
-                    &self.db,
-                    &self.instance_name,
-                    &self.node_config,
-                )
-                .await
-                {
-                    tracing::error!("Failed to send P2P signatures to coordinator: {e}");
-                }
-
-                // Identity hook (peer side): the SignP2p payload is a
-                // SignedTopologyTransaction whose PartyToParticipant mapping
-                // carries the resolved dec_party_id in its `party` field. By
-                // now the namespace has been signed and submitted by the
-                // coordinator, so we can persist this peer's keys +
-                // participant id under the dec_party_identity table for use
-                // by post-onboarding workflows on this node.
-                match extract_party_id_from_p2p_payload(payload) {
-                    Ok(dec_party_id) => {
-                        if let Err(e) = self
-                            .db
-                            .write_run_party_id(&self.instance_name, &dec_party_id)
-                            .await
-                        {
-                            tracing::error!(
-                                "Failed to persist party id {dec_party_id} on peer run: {e}"
-                            );
-                        }
-                        if let Err(e) = onboarding::peer::copy_self_identity_for_party(
-                            &self.db,
-                            &self.instance_name,
-                            &self.node_config,
-                            &dec_party_id,
-                        )
-                        .await
-                        {
-                            tracing::error!("Failed to copy self identity for {dec_party_id}: {e}");
-                        }
-                    }
-                    Err(e) => {
-                        tracing::error!("Failed to extract dec_party_id from P2P payload: {e}");
-                    }
-                }
-            }
-            MessageType::SignSubmissions => {
-                tracing::info!("Executing: Sign submissions");
-
-                if payload.is_empty() {
-                    return Err(StepError::Retry(
-                        "No submissions payload received from coordinator".to_string(),
-                    ));
-                }
-
-                // Decode config and files from payload: [config_json, files_payload]
-                let items = match utils::decode_length_prefixed(payload, 2) {
-                    Ok(items) => items,
-                    Err(e) => {
-                        return Err(StepError::Retry(format!(
-                            "Failed to decode SignSubmissions payload: {e}"
-                        )));
-                    }
-                };
-
-                let contracts_config: contracts::ContractsConfig =
-                    match serde_json::from_slice(&items[0]) {
-                        Ok(config) => config,
-                        Err(e) => {
-                            return Err(StepError::Retry(format!(
-                                "Failed to deserialize contracts config: {e}"
-                            )));
-                        }
-                    };
-
-                let dec_party_id = contracts_config.decentralized_party_id.clone();
-                if let Err(e) = self.expectations.check_dec_party(&dec_party_id) {
-                    return Err(StepError::Retry(format!(
-                        "Refusing the coordinator's contracts config: {e}"
-                    )));
-                }
-
-                // Persist the prepared submissions sent by the coordinator into
-                // this peer's workflow_artifacts so sign_submissions can
-                // read them back via list_artifacts.
-                if let Err(e) =
-                    save_prepared_submissions_from_payload(&items[1], &self.db, &self.instance_name)
-                        .await
-                {
-                    return Err(StepError::Retry(format!(
-                        "Failed to save prepared submissions from coordinator: {e}"
-                    )));
-                }
-
-                if let Err(e) = contracts::sign_submissions(
-                    &self.node_config,
-                    &self.db,
-                    &self.instance_name,
-                    &dec_party_id,
-                    &self.expectations.contract_intents,
-                )
-                .await
-                {
-                    return Err(StepError::Retry(format!("Step execution failed: {e:#}")));
-                }
-                self.consecutive_step_failures = 0;
-                if let Err(e) = contracts::peer::send_submission_signatures_to_coordinator(
-                    &self.client,
-                    &self.db,
-                    &self.instance_name,
-                    &self.node_config,
-                )
-                .await
-                {
-                    tracing::error!("Failed to send submission signatures to coordinator: {e}");
-                }
-            }
+            MessageType::UploadDars => self.upload_dars(payload).await?,
+            MessageType::GenerateKeys => self.generate_keys(payload).await?,
+            MessageType::SignDns => self.sign_dns(payload).await?,
+            MessageType::SignP2p => self.sign_p2p(payload).await?,
+            MessageType::SignSubmissions => self.sign_submissions(payload).await?,
             MessageType::SignKick => self.sign_membership(Membership::Kick, payload).await?,
             MessageType::SignChangeThreshold => {
                 self.sign_membership(Membership::ChangeThreshold, payload)
                     .await?
             }
-            MessageType::GenerateAddPartyKeys => {
-                tracing::info!("Executing: Generate add-party keys");
-                let add_party_config = match decode_add_party_config(payload) {
-                    Ok(config) => config,
-                    Err(e) => {
-                        return Err(StepError::Retry(format!(
-                            "Failed to deserialize add-party config: {e:#}"
-                        )));
-                    }
-                };
-                // Both the party and the new member are pinned before
-                // `is_new_member` reads `new_participant_id` to decide this
-                // node's role: naming this peer there would otherwise make it
-                // take the new member's part in a run it joined as an existing
-                // member.
-                if let Err(e) = self
-                    .expectations
-                    .check_dec_party(&add_party_config.decentralized_party_id)
-                    .and_then(|()| {
-                        self.expectations
-                            .check_new_participant(&add_party_config.new_participant_id)
-                    })
-                {
-                    return Err(StepError::Retry(format!(
-                        "Refusing the coordinator's add-party config: {e}"
-                    )));
-                }
-                if !is_new_member(&self.node_config, &add_party_config) {
-                    self.consecutive_step_failures = 0;
-                    send_skip_status(&self.client, "GenerateAddPartyKeys").await;
-                    return Ok(Next::Poll);
-                }
-
-                let ledger_token = add_party::resolve_ledger_token(
-                    &self.workflow_auth,
-                    &add_party_config.decentralized_party_id,
-                )
-                .await;
-                if let Err(e) = add_party::generate_keys(
-                    &self.node_config,
-                    &self.db,
-                    &self.instance_name,
-                    &add_party_config,
-                    ledger_token.as_deref(),
-                )
-                .await
-                {
-                    return Err(StepError::Retry(format!("Step execution failed: {e}")));
-                }
-                self.consecutive_step_failures = 0;
-                if let Err(e) = add_party::peer::send_keys_to_coordinator(
-                    &self.client,
-                    &self.db,
-                    &self.instance_name,
-                    &self.node_config,
-                )
-                .await
-                {
-                    tracing::error!("Failed to send add-party keys to coordinator: {e}");
-                }
-            }
+            MessageType::GenerateAddPartyKeys => self.generate_add_party_keys(payload).await?,
             MessageType::SignAddParty => {
                 self.sign_membership(Membership::AddParty, payload).await?
             }
-            MessageType::ImportAcs => {
-                tracing::info!("Executing: Import party ACS");
-                // [config, package_ids]. The snapshot is not in the payload: it
-                // is pulled block by block straight into Canton's import, so
-                // nothing proportional to the ACS is buffered or stored.
-                let items = match utils::decode_length_prefixed(payload, 2) {
-                    Ok(items) => items,
-                    Err(e) => {
-                        return Err(StepError::Retry(format!(
-                            "Failed to decode ImportAcs payload: {e}"
-                        )));
-                    }
-                };
-                let add_party_config = match decode_add_party_config(&items[0]) {
-                    Ok(config) => config,
-                    Err(e) => {
-                        return Err(StepError::Retry(format!(
-                            "Failed to deserialize add-party config: {e:#}"
-                        )));
-                    }
-                };
-                // Both the party and the new member are pinned before
-                // `is_new_member` reads `new_participant_id` to decide this
-                // node's role: naming this peer there would otherwise make it
-                // take the new member's part in a run it joined as an existing
-                // member.
-                if let Err(e) = self
-                    .expectations
-                    .check_dec_party(&add_party_config.decentralized_party_id)
-                    .and_then(|()| {
-                        self.expectations
-                            .check_new_participant(&add_party_config.new_participant_id)
-                    })
-                {
+            MessageType::ImportAcs => self.import_acs(payload).await?,
+            MessageType::ClearOnboardingFlag => self.clear_onboarding_flag(payload).await?,
+            MessageType::SignClearOnboarding => self.sign_clear_onboarding(payload).await?,
+            _ => {
+                tracing::warn!("Unexpected message type: {command:?}");
+            }
+        }
+        Ok(Next::Poll)
+    }
+
+    /// RetireLegacyKeys: retire the legacy keys of the accepted party.
+    async fn retire_legacy_keys(&mut self) -> StepResult {
+        // The target comes from the accepted invitation, never this command's payload.
+        let party = self
+            .expectations
+            .dec_party_id
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("No accepted party for legacy key retirement"))?;
+        let synchronizer_id = utils::get_synchronizer_id(&self.node_config).await?;
+        topology::retire_legacy_keys(&self.node_config, &synchronizer_id, party).await?;
+        self.consecutive_step_failures = 0;
+        self.client
+            .send(
+                MessageType::StatusUpdate,
+                b"RetireLegacyKeys completed".to_vec(),
+            )
+            .await?;
+        Ok(())
+    }
+
+    /// UploadDars: upload the coordinator's DARs once they match the invitation.
+    async fn upload_dars(&mut self, payload: &[u8]) -> StepResult {
+        tracing::info!("Executing: Upload DARs");
+
+        // Decode DAR files from payload and upload directly
+        let dar_files = if payload.is_empty() {
+            Vec::new()
+        } else {
+            match utils::decode_files(payload) {
+                Ok(files) => files,
+                Err(e) => {
                     return Err(StepError::Retry(format!(
-                        "Refusing the coordinator's ACS import: {e}"
+                        "Failed to decode DARs from coordinator: {e}"
                     )));
-                }
-                if !is_new_member(&self.node_config, &add_party_config) {
-                    self.consecutive_step_failures = 0;
-                    send_skip_status(&self.client, "ImportAcs").await;
-                    return Ok(Next::Poll);
-                }
-                // Newline-joined package ids the party's contracts need; the
-                // import preflight checks this participant has them all before
-                // it disconnects anything.
-                let required_package_ids: Vec<String> = String::from_utf8_lossy(&items[1])
-                    .lines()
-                    .filter(|l| !l.is_empty())
-                    .map(str::to_string)
-                    .collect();
-
-                let step_result = party_replication::import_party_acs(
-                    &self.node_config,
-                    &self.db,
-                    &add_party_config.replication_target(&self.instance_name),
-                    &required_package_ids,
-                    party_replication::TransferSource::Coordinator,
-                    |seq| {
-                        let client = &self.client;
-                        async move { client.request_next_acs_block(seq).await.map_err(Into::into) }
-                    },
-                )
-                .await;
-
-                // The import owns its retries and runs them inside one disconnect
-                // window. Retrying the step here would reconnect the participant
-                // between attempts, which replays the ACS journal — so a failure
-                // that reaches this point ends the peer.
-                if let Err(e) = step_result {
-                    return Err(StepError::Abort(anyhow::anyhow!(
-                        "Aborting peer: the ACS import failed: {e:#}"
-                    )));
-                }
-                self.consecutive_step_failures = 0;
-                if let Err(e) = self
-                    .client
-                    .send(MessageType::StatusUpdate, b"ImportAcs completed".to_vec())
-                    .await
-                {
-                    tracing::error!("Failed to send completion status: {e}");
                 }
             }
-            MessageType::ClearOnboardingFlag => {
-                tracing::info!("Executing: Clear onboarding flag");
-                let add_party_config = match decode_add_party_config(payload) {
-                    Ok(config) => config,
-                    Err(e) => {
-                        return Err(StepError::Retry(format!(
-                            "Failed to deserialize add-party config: {e:#}"
-                        )));
-                    }
-                };
-                // Both the party and the new member are pinned before
-                // `is_new_member` reads `new_participant_id` to decide this
-                // node's role: naming this peer there would otherwise make it
-                // take the new member's part in a run it joined as an existing
-                // member.
+        };
+
+        // Vetting a DAR makes this participant willing to execute its
+        // code, so the files must be the ones the operator accepted.
+        if let Err(e) = self.expectations.check_dars(&dar_files) {
+            return Err(StepError::Retry(format!(
+                "Refusing the coordinator's DARs: {e}"
+            )));
+        }
+
+        if let Err(e) = contracts::upload_dars_from_bytes(&self.node_config, dar_files).await {
+            return Err(StepError::Retry(format!("Step execution failed: {e}")));
+        }
+        self.consecutive_step_failures = 0;
+        if let Err(e) = self
+            .client
+            .send(MessageType::StatusUpdate, b"UploadDars completed".to_vec())
+            .await
+        {
+            tracing::error!("Failed to send completion status: {e}");
+        }
+        Ok(())
+    }
+
+    /// GenerateKeys: create this node's onboarding keys and send them to the
+    /// coordinator.
+    async fn generate_keys(&mut self, payload: &[u8]) -> StepResult {
+        tracing::info!("Executing: Generate keys");
+        // Deserialize onboarding config from payload (we still need
+        // the prefix for namespace_key_name / daml_key_name; the
+        // config's `instance_name` is the coordinator's view and is
+        // intentionally unused here).
+        let onboarding_config: onboarding::OnboardingConfig = match serde_json::from_slice(payload)
+        {
+            Ok(config) => config,
+            Err(e) => {
+                return Err(StepError::Retry(format!(
+                    "Failed to deserialize onboarding config: {e}"
+                )));
+            }
+        };
+
+        // The prefix names the vault keys this step creates or reuses,
+        // so it is pinned before any key material is touched.
+        if let Err(e) = self
+            .expectations
+            .check_onboarding_config(&onboarding_config.party_id_prefix)
+        {
+            return Err(StepError::Retry(format!(
+                "Refusing the coordinator's onboarding config: {e}"
+            )));
+        }
+
+        if let Err(e) = onboarding::generate_keys(
+            &self.node_config,
+            &self.db,
+            &self.instance_name,
+            &onboarding_config,
+        )
+        .await
+        {
+            return Err(StepError::Retry(format!("Step execution failed: {e}")));
+        }
+        self.consecutive_step_failures = 0;
+        if let Err(e) = onboarding::peer::send_keys_to_coordinator(
+            &self.client,
+            &self.db,
+            &self.instance_name,
+            &self.node_config,
+        )
+        .await
+        {
+            tracing::error!("Failed to send keys to coordinator: {e}");
+        }
+        Ok(())
+    }
+
+    /// SignDns: check, record and sign the onboarding DNS proposal.
+    async fn sign_dns(&mut self, payload: &[u8]) -> StepResult {
+        tracing::info!("Executing: Sign DNS proposal");
+        if payload.is_empty() {
+            return Err(StepError::Retry(
+                "No DNS proposal payload received from coordinator".to_string(),
+            ));
+        }
+        match self
+            .expectations
+            .check_onboarding_dns(&self.node_config, &self.db, &self.instance_name, payload)
+            .await
+        {
+            // Remember the namespace we authorized so the P2P
+            // proposal that follows can be pinned to the same party.
+            Ok(namespace) => {
+                // The P2P proposal is pinned to this namespace in the
+                // next step. Signing DNS without recording it would
+                // leave that cross-check silently disabled, so a write
+                // failure fails the step instead.
                 if let Err(e) = self
-                    .expectations
-                    .check_dec_party(&add_party_config.decentralized_party_id)
-                    .and_then(|()| {
-                        self.expectations
-                            .check_new_participant(&add_party_config.new_participant_id)
-                    })
+                    .db
+                    .write_artifact(
+                        &self.instance_name,
+                        artifact_kinds::ACCEPTED_DNS_NAMESPACE,
+                        None,
+                        namespace.as_bytes(),
+                    )
+                    .await
                 {
                     return Err(StepError::Retry(format!(
-                        "Refusing the coordinator's clearing request: {e}"
+                        "Refusing to sign DNS: the accepted namespace could not be \
+                         recorded, so the P2P cross-check would be lost: {e}"
                     )));
                 }
-                if !is_new_member(&self.node_config, &add_party_config) {
-                    self.consecutive_step_failures = 0;
-                    send_skip_status(&self.client, "ClearOnboardingFlag").await;
-                    return Ok(Next::Poll);
-                }
+            }
+            Err(e) => {
+                return Err(StepError::Retry(format!(
+                    "Refusing the coordinator's DNS proposal: {e}"
+                )));
+            }
+        }
+        if let Err(e) = onboarding::sign_dns_proposals(
+            &self.node_config,
+            &self.db,
+            &self.instance_name,
+            payload,
+        )
+        .await
+        {
+            return Err(StepError::Retry(format!("Step execution failed: {e}")));
+        }
+        self.consecutive_step_failures = 0;
+        if let Err(e) = onboarding::peer::send_dns_signature_to_coordinator(
+            &self.client,
+            &self.db,
+            &self.instance_name,
+            &self.node_config,
+        )
+        .await
+        {
+            tracing::error!("Failed to send DNS signature to coordinator: {e}");
+        }
+        Ok(())
+    }
 
-                match party_replication::clear_onboarding_flag(
-                    &self.node_config,
+    /// SignP2p: check and sign the onboarding P2P proposal, then keep this
+    /// node's identity for the new party.
+    async fn sign_p2p(&mut self, payload: &[u8]) -> StepResult {
+        tracing::info!("Executing: Sign P2P proposals");
+        if payload.is_empty() {
+            return Err(StepError::Retry(
+                "No P2P proposal payload received from coordinator".to_string(),
+            ));
+        }
+        // Absent means the DNS step ran on a build that did not record
+        // the namespace yet — the mixed-version case, which degrades to
+        // the prefix check with a warning inside check_onboarding_p2p.
+        // A read error is different: it hides whether a namespace was
+        // recorded at all, so it fails the step rather than skipping
+        // the cross-check.
+        let signed_namespace = match self
+            .db
+            .read_artifact(
+                &self.instance_name,
+                artifact_kinds::ACCEPTED_DNS_NAMESPACE,
+                None,
+            )
+            .await
+        {
+            // Nothing recorded is the mixed-version case. Bytes that
+            // are not valid UTF-8 are not: something WAS recorded and
+            // cannot be read back, so treating it as absent would drop
+            // the cross-check on corrupt state.
+            Ok(None) => None,
+            Ok(Some(bytes)) => match String::from_utf8(bytes) {
+                Ok(namespace) => Some(namespace),
+                Err(e) => {
+                    return Err(StepError::Retry(format!(
+                        "Refusing to sign P2P: the recorded DNS namespace is not \
+                         readable, so the cross-check cannot be applied: {e}"
+                    )));
+                }
+            },
+            Err(e) => {
+                return Err(StepError::Retry(format!(
+                    "Refusing to sign P2P: cannot read the DNS namespace this run \
+                     accepted, so the cross-check cannot be applied: {e}"
+                )));
+            }
+        };
+        if let Err(e) = self
+            .expectations
+            .check_onboarding_p2p(
+                &self.node_config,
+                &self.db,
+                &self.instance_name,
+                payload,
+                signed_namespace.as_deref(),
+            )
+            .await
+        {
+            return Err(StepError::Retry(format!(
+                "Refusing the coordinator's P2P proposal: {e}"
+            )));
+        }
+        if let Err(e) = onboarding::sign_p2p_proposals(
+            &self.node_config,
+            &self.db,
+            &self.instance_name,
+            payload,
+        )
+        .await
+        {
+            return Err(StepError::Retry(format!("Step execution failed: {e}")));
+        }
+        self.consecutive_step_failures = 0;
+        if let Err(e) = onboarding::peer::send_p2p_signatures_to_coordinator(
+            &self.client,
+            &self.db,
+            &self.instance_name,
+            &self.node_config,
+        )
+        .await
+        {
+            tracing::error!("Failed to send P2P signatures to coordinator: {e}");
+        }
+
+        // Identity hook (peer side): the SignP2p payload is a
+        // SignedTopologyTransaction whose PartyToParticipant mapping
+        // carries the resolved dec_party_id in its `party` field. By
+        // now the namespace has been signed and submitted by the
+        // coordinator, so we can persist this peer's keys +
+        // participant id under the dec_party_identity table for use
+        // by post-onboarding workflows on this node.
+        match extract_party_id_from_p2p_payload(payload) {
+            Ok(dec_party_id) => {
+                if let Err(e) = self
+                    .db
+                    .write_run_party_id(&self.instance_name, &dec_party_id)
+                    .await
+                {
+                    tracing::error!("Failed to persist party id {dec_party_id} on peer run: {e}");
+                }
+                if let Err(e) = onboarding::peer::copy_self_identity_for_party(
                     &self.db,
-                    &add_party_config.replication_target(&self.instance_name),
+                    &self.instance_name,
+                    &self.node_config,
+                    &dec_party_id,
                 )
                 .await
                 {
-                    Ok(party_replication::ClearOutcome::Proposed) => {
-                        // Canton requires the ONBOARDING PARTICIPANT to issue
-                        // the flag-clear transaction — author it here and ship
-                        // it to the coordinator for the threshold-signing
-                        // round (the coordinator lacks an appropriate key).
-                        match add_party::author_clear_proposal(&self.node_config, &add_party_config)
+                    tracing::error!("Failed to copy self identity for {dec_party_id}: {e}");
+                }
+            }
+            Err(e) => {
+                tracing::error!("Failed to extract dec_party_id from P2P payload: {e}");
+            }
+        }
+        Ok(())
+    }
+
+    /// SignSubmissions: check and sign the contracts the coordinator prepared.
+    async fn sign_submissions(&mut self, payload: &[u8]) -> StepResult {
+        tracing::info!("Executing: Sign submissions");
+
+        if payload.is_empty() {
+            return Err(StepError::Retry(
+                "No submissions payload received from coordinator".to_string(),
+            ));
+        }
+
+        // Decode config and files from payload: [config_json, files_payload]
+        let items = match utils::decode_length_prefixed(payload, 2) {
+            Ok(items) => items,
+            Err(e) => {
+                return Err(StepError::Retry(format!(
+                    "Failed to decode SignSubmissions payload: {e}"
+                )));
+            }
+        };
+
+        let contracts_config: contracts::ContractsConfig = match serde_json::from_slice(&items[0]) {
+            Ok(config) => config,
+            Err(e) => {
+                return Err(StepError::Retry(format!(
+                    "Failed to deserialize contracts config: {e}"
+                )));
+            }
+        };
+
+        let dec_party_id = contracts_config.decentralized_party_id.clone();
+        if let Err(e) = self.expectations.check_dec_party(&dec_party_id) {
+            return Err(StepError::Retry(format!(
+                "Refusing the coordinator's contracts config: {e}"
+            )));
+        }
+
+        // Persist the prepared submissions sent by the coordinator into
+        // this peer's workflow_artifacts so sign_submissions can
+        // read them back via list_artifacts.
+        if let Err(e) =
+            save_prepared_submissions_from_payload(&items[1], &self.db, &self.instance_name).await
+        {
+            return Err(StepError::Retry(format!(
+                "Failed to save prepared submissions from coordinator: {e}"
+            )));
+        }
+
+        if let Err(e) = contracts::sign_submissions(
+            &self.node_config,
+            &self.db,
+            &self.instance_name,
+            &dec_party_id,
+            &self.expectations.contract_intents,
+        )
+        .await
+        {
+            return Err(StepError::Retry(format!("Step execution failed: {e:#}")));
+        }
+        self.consecutive_step_failures = 0;
+        if let Err(e) = contracts::peer::send_submission_signatures_to_coordinator(
+            &self.client,
+            &self.db,
+            &self.instance_name,
+            &self.node_config,
+        )
+        .await
+        {
+            tracing::error!("Failed to send submission signatures to coordinator: {e}");
+        }
+        Ok(())
+    }
+
+    /// GenerateAddPartyKeys: the new member creates its keys; every other
+    /// member replies skip.
+    async fn generate_add_party_keys(&mut self, payload: &[u8]) -> StepResult {
+        tracing::info!("Executing: Generate add-party keys");
+        let add_party_config = match decode_add_party_config(payload) {
+            Ok(config) => config,
+            Err(e) => {
+                return Err(StepError::Retry(format!(
+                    "Failed to deserialize add-party config: {e:#}"
+                )));
+            }
+        };
+        // Both the party and the new member are pinned before
+        // `is_new_member` reads `new_participant_id` to decide this
+        // node's role: naming this peer there would otherwise make it
+        // take the new member's part in a run it joined as an existing
+        // member.
+        if let Err(e) = self
+            .expectations
+            .check_dec_party(&add_party_config.decentralized_party_id)
+            .and_then(|()| {
+                self.expectations
+                    .check_new_participant(&add_party_config.new_participant_id)
+            })
+        {
+            return Err(StepError::Retry(format!(
+                "Refusing the coordinator's add-party config: {e}"
+            )));
+        }
+        if !is_new_member(&self.node_config, &add_party_config) {
+            self.consecutive_step_failures = 0;
+            send_skip_status(&self.client, "GenerateAddPartyKeys").await;
+            return Ok(());
+        }
+
+        let ledger_token = add_party::resolve_ledger_token(
+            &self.workflow_auth,
+            &add_party_config.decentralized_party_id,
+        )
+        .await;
+        if let Err(e) = add_party::generate_keys(
+            &self.node_config,
+            &self.db,
+            &self.instance_name,
+            &add_party_config,
+            ledger_token.as_deref(),
+        )
+        .await
+        {
+            return Err(StepError::Retry(format!("Step execution failed: {e}")));
+        }
+        self.consecutive_step_failures = 0;
+        if let Err(e) = add_party::peer::send_keys_to_coordinator(
+            &self.client,
+            &self.db,
+            &self.instance_name,
+            &self.node_config,
+        )
+        .await
+        {
+            tracing::error!("Failed to send add-party keys to coordinator: {e}");
+        }
+        Ok(())
+    }
+
+    /// ImportAcs: the new member imports the party's ACS; every other member
+    /// replies skip.
+    async fn import_acs(&mut self, payload: &[u8]) -> StepResult {
+        tracing::info!("Executing: Import party ACS");
+        // [config, package_ids]. The snapshot is not in the payload: it
+        // is pulled block by block straight into Canton's import, so
+        // nothing proportional to the ACS is buffered or stored.
+        let items = match utils::decode_length_prefixed(payload, 2) {
+            Ok(items) => items,
+            Err(e) => {
+                return Err(StepError::Retry(format!(
+                    "Failed to decode ImportAcs payload: {e}"
+                )));
+            }
+        };
+        let add_party_config = match decode_add_party_config(&items[0]) {
+            Ok(config) => config,
+            Err(e) => {
+                return Err(StepError::Retry(format!(
+                    "Failed to deserialize add-party config: {e:#}"
+                )));
+            }
+        };
+        // Both the party and the new member are pinned before
+        // `is_new_member` reads `new_participant_id` to decide this
+        // node's role: naming this peer there would otherwise make it
+        // take the new member's part in a run it joined as an existing
+        // member.
+        if let Err(e) = self
+            .expectations
+            .check_dec_party(&add_party_config.decentralized_party_id)
+            .and_then(|()| {
+                self.expectations
+                    .check_new_participant(&add_party_config.new_participant_id)
+            })
+        {
+            return Err(StepError::Retry(format!(
+                "Refusing the coordinator's ACS import: {e}"
+            )));
+        }
+        if !is_new_member(&self.node_config, &add_party_config) {
+            self.consecutive_step_failures = 0;
+            send_skip_status(&self.client, "ImportAcs").await;
+            return Ok(());
+        }
+        // Newline-joined package ids the party's contracts need; the
+        // import preflight checks this participant has them all before
+        // it disconnects anything.
+        let required_package_ids: Vec<String> = String::from_utf8_lossy(&items[1])
+            .lines()
+            .filter(|l| !l.is_empty())
+            .map(str::to_string)
+            .collect();
+
+        let step_result = party_replication::import_party_acs(
+            &self.node_config,
+            &self.db,
+            &add_party_config.replication_target(&self.instance_name),
+            &required_package_ids,
+            party_replication::TransferSource::Coordinator,
+            |seq| {
+                let client = &self.client;
+                async move { client.request_next_acs_block(seq).await.map_err(Into::into) }
+            },
+        )
+        .await;
+
+        // The import owns its retries and runs them inside one disconnect
+        // window. Retrying the step here would reconnect the participant
+        // between attempts, which replays the ACS journal — so a failure
+        // that reaches this point ends the peer.
+        if let Err(e) = step_result {
+            return Err(StepError::Abort(anyhow::anyhow!(
+                "Aborting peer: the ACS import failed: {e:#}"
+            )));
+        }
+        self.consecutive_step_failures = 0;
+        if let Err(e) = self
+            .client
+            .send(MessageType::StatusUpdate, b"ImportAcs completed".to_vec())
+            .await
+        {
+            tracing::error!("Failed to send completion status: {e}");
+        }
+        Ok(())
+    }
+
+    /// ClearOnboardingFlag: the new member clears its onboarding flag, or
+    /// authors the clearing proposal; every other member replies skip.
+    async fn clear_onboarding_flag(&mut self, payload: &[u8]) -> StepResult {
+        tracing::info!("Executing: Clear onboarding flag");
+        let add_party_config = match decode_add_party_config(payload) {
+            Ok(config) => config,
+            Err(e) => {
+                return Err(StepError::Retry(format!(
+                    "Failed to deserialize add-party config: {e:#}"
+                )));
+            }
+        };
+        // Both the party and the new member are pinned before
+        // `is_new_member` reads `new_participant_id` to decide this
+        // node's role: naming this peer there would otherwise make it
+        // take the new member's part in a run it joined as an existing
+        // member.
+        if let Err(e) = self
+            .expectations
+            .check_dec_party(&add_party_config.decentralized_party_id)
+            .and_then(|()| {
+                self.expectations
+                    .check_new_participant(&add_party_config.new_participant_id)
+            })
+        {
+            return Err(StepError::Retry(format!(
+                "Refusing the coordinator's clearing request: {e}"
+            )));
+        }
+        if !is_new_member(&self.node_config, &add_party_config) {
+            self.consecutive_step_failures = 0;
+            send_skip_status(&self.client, "ClearOnboardingFlag").await;
+            return Ok(());
+        }
+
+        match party_replication::clear_onboarding_flag(
+            &self.node_config,
+            &self.db,
+            &add_party_config.replication_target(&self.instance_name),
+        )
+        .await
+        {
+            Ok(party_replication::ClearOutcome::Proposed) => {
+                // Canton requires the ONBOARDING PARTICIPANT to issue
+                // the flag-clear transaction — author it here and ship
+                // it to the coordinator for the threshold-signing
+                // round (the coordinator lacks an appropriate key).
+                match add_party::author_clear_proposal(&self.node_config, &add_party_config).await {
+                    Ok(Some(proposal)) => {
+                        self.consecutive_step_failures = 0;
+                        if let Err(e) = self
+                            .client
+                            .send(MessageType::AddPartyClearProposal, proposal)
                             .await
                         {
-                            Ok(Some(proposal)) => {
-                                self.consecutive_step_failures = 0;
-                                if let Err(e) = self
-                                    .client
-                                    .send(MessageType::AddPartyClearProposal, proposal)
-                                    .await
-                                {
-                                    tracing::error!(
-                                        "Failed to send clearing proposal to coordinator: {e}"
-                                    );
-                                }
-                            }
-                            Ok(None) => {
-                                // Flag dropped between the poll and the
-                                // authoring — report as cleared.
-                                self.consecutive_step_failures = 0;
-                                if let Err(e) = self
-                                    .client
-                                    .send(
-                                        MessageType::StatusUpdate,
-                                        b"ClearOnboardingFlag: Cleared".to_vec(),
-                                    )
-                                    .await
-                                {
-                                    tracing::error!("Failed to send completion status: {e}");
-                                }
-                            }
-                            Err(e) => {
-                                return Err(StepError::Retry(format!(
-                                    "Step execution failed: {e}"
-                                )));
-                            }
+                            tracing::error!("Failed to send clearing proposal to coordinator: {e}");
                         }
                     }
-                    Ok(party_replication::ClearOutcome::Cleared) => {
+                    Ok(None) => {
+                        // Flag dropped between the poll and the
+                        // authoring — report as cleared.
                         self.consecutive_step_failures = 0;
                         if let Err(e) = self
                             .client
@@ -900,57 +919,73 @@ impl PeerRun {
                     }
                 }
             }
-            MessageType::SignClearOnboarding => {
-                tracing::info!("Executing: Sign onboarding-flag clearing proposal");
-                let items = match utils::decode_length_prefixed(payload, 2) {
-                    Ok(items) => items,
-                    Err(e) => {
-                        return Err(StepError::Retry(format!(
-                            "Failed to decode SignClearOnboarding payload: {e}"
-                        )));
-                    }
-                };
-                if items[1].is_empty() {
-                    // Skip marker: the flag already cleared without a
-                    // signing round (e.g. a single-owner-threshold party).
-                    self.consecutive_step_failures = 0;
-                    send_skip_status(&self.client, "SignClearOnboarding").await;
-                    return Ok(Next::Poll);
-                }
-
-                if let Err(e) = self.expectations.check_clear_onboarding(&items[1]) {
-                    return Err(StepError::Retry(format!(
-                        "Refusing the coordinator's clearing proposal: {e}"
-                    )));
-                }
-
-                if let Err(e) = add_party::sign_clear_proposal(
-                    &self.node_config,
-                    &self.db,
-                    &self.instance_name,
-                    &items[1],
-                )
-                .await
-                {
-                    return Err(StepError::Retry(format!("Step execution failed: {e}")));
-                }
+            Ok(party_replication::ClearOutcome::Cleared) => {
                 self.consecutive_step_failures = 0;
-                if let Err(e) = add_party::peer::send_clear_signature_to_coordinator(
-                    &self.client,
-                    &self.db,
-                    &self.instance_name,
-                    &self.node_config,
-                )
-                .await
+                if let Err(e) = self
+                    .client
+                    .send(
+                        MessageType::StatusUpdate,
+                        b"ClearOnboardingFlag: Cleared".to_vec(),
+                    )
+                    .await
                 {
-                    tracing::error!("Failed to send clearing signature to coordinator: {e}");
+                    tracing::error!("Failed to send completion status: {e}");
                 }
             }
-            _ => {
-                tracing::warn!("Unexpected message type: {command:?}");
+            Err(e) => {
+                return Err(StepError::Retry(format!("Step execution failed: {e}")));
             }
         }
-        Ok(Next::Poll)
+        Ok(())
+    }
+
+    /// SignClearOnboarding: check and sign the new member's clearing proposal.
+    async fn sign_clear_onboarding(&mut self, payload: &[u8]) -> StepResult {
+        tracing::info!("Executing: Sign onboarding-flag clearing proposal");
+        let items = match utils::decode_length_prefixed(payload, 2) {
+            Ok(items) => items,
+            Err(e) => {
+                return Err(StepError::Retry(format!(
+                    "Failed to decode SignClearOnboarding payload: {e}"
+                )));
+            }
+        };
+        if items[1].is_empty() {
+            // Skip marker: the flag already cleared without a
+            // signing round (e.g. a single-owner-threshold party).
+            self.consecutive_step_failures = 0;
+            send_skip_status(&self.client, "SignClearOnboarding").await;
+            return Ok(());
+        }
+
+        if let Err(e) = self.expectations.check_clear_onboarding(&items[1]) {
+            return Err(StepError::Retry(format!(
+                "Refusing the coordinator's clearing proposal: {e}"
+            )));
+        }
+
+        if let Err(e) = add_party::sign_clear_proposal(
+            &self.node_config,
+            &self.db,
+            &self.instance_name,
+            &items[1],
+        )
+        .await
+        {
+            return Err(StepError::Retry(format!("Step execution failed: {e}")));
+        }
+        self.consecutive_step_failures = 0;
+        if let Err(e) = add_party::peer::send_clear_signature_to_coordinator(
+            &self.client,
+            &self.db,
+            &self.instance_name,
+            &self.node_config,
+        )
+        .await
+        {
+            tracing::error!("Failed to send clearing signature to coordinator: {e}");
+        }
+        Ok(())
     }
 
     /// Sign the DNS + P2P proposal pair of a membership change: the
