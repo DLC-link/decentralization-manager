@@ -291,3 +291,72 @@ pub async fn tenant_status(
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    //! Pins the 400 that a bad party hint gets: the status and the exact
+    //! JSON body.
+
+    use actix_web::{
+        App,
+        http::StatusCode,
+        test::{TestRequest, call_service, init_service, read_body},
+    };
+    use serde_json::json;
+    use sqlx::SqlitePool;
+
+    use super::*;
+    use crate::{db::MIGRATOR, server::middleware::AuthMiddleware};
+
+    const BAD_HINT_BODY: &str = r#"{"error":"Party prefix must start with a letter (a-z, A-Z)"}"#;
+
+    /// Post `request` to `uri` on a test-mode node, which checks no tenant
+    /// key, and return the status and body.
+    async fn post(
+        pool: SqlitePool,
+        uri: &str,
+        request: serde_json::Value,
+    ) -> anyhow::Result<(StatusCode, String)> {
+        let app = init_service(
+            App::new()
+                .app_data(AppState::for_test_on(None, pool))
+                .wrap(AuthMiddleware)
+                .service(tenant_prepare)
+                .service(tenant_execute),
+        )
+        .await;
+        let request = TestRequest::post().uri(uri).set_json(request).to_request();
+        let response = call_service(&app, request).await;
+        let status = response.status();
+        let body = String::from_utf8(read_body(response).await.to_vec())?;
+        Ok((status, body))
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn prepare_refuses_a_bad_party_hint(pool: SqlitePool) -> anyhow::Result<()> {
+        let request = json!({
+            "party_hint": "1party",
+            "public_key": STANDARD.encode([7u8; 32]),
+            "hosting_peers": [],
+        });
+        let (status, body) = post(pool, "/v0/tenant/prepare", request).await?;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body, BAD_HINT_BODY);
+        Ok(())
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn execute_refuses_a_bad_party_hint(pool: SqlitePool) -> anyhow::Result<()> {
+        let request = json!({
+            "party_hint": "1party",
+            "public_key": STANDARD.encode([7u8; 32]),
+            "topology_transactions": [],
+            "signatures": [],
+            "signed_by": "1220ab",
+        });
+        let (status, body) = post(pool, "/v0/tenant/execute", request).await?;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body, BAD_HINT_BODY);
+        Ok(())
+    }
+}
