@@ -308,6 +308,8 @@ jobs:
         run: ~/.dpm/bin/dpm upgrade-check --both */.daml/dist/*.dar ../releases/v1/*.dar
       - name: Test governance-core
         run: cd governance-core-test && ~/.dpm/bin/dpm test
+      - name: Test governance-core-v2
+        run: cd governance-core-v2-test && ~/.dpm/bin/dpm test
       - name: Test governance-token-custody
         run: cd governance-token-custody-test && ~/.dpm/bin/dpm test
       - name: Test governance-utility-onboarding
