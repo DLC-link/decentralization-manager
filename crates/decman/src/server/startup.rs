@@ -1,4 +1,5 @@
-//! Server startup: auth, state, background tasks and routes, and the metrics server.
+//! Server startup: auth, state, background tasks, and the metrics server.
+//! The API route list lives in [`super::routes`].
 
 use std::{
     collections::{HashMap, HashSet},
