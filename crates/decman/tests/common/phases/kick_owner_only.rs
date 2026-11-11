@@ -145,6 +145,10 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
     kick_owner_only(f, Shape::NoLeftoverKey).await
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "A scenario phase reads top to bottom as one sequence of steps."
+)]
 async fn kick_owner_only(f: &mut Fixture, shape: Shape) -> anyhow::Result<()> {
     let prefix = fresh_prefix(match shape {
         Shape::LeftoverKey => "owner-only",

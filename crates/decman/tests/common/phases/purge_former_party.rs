@@ -74,6 +74,10 @@ struct Ctx {
     expected_purge: HashSet<String>,
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "A scenario phase reads top to bottom as one sequence of steps."
+)]
 pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
     info!("Phase: purge_former_party");
 

@@ -58,6 +58,10 @@ fn requirement(issuer: &CantonId, claims: &[(&str, &str)]) -> PartyCredentialReq
 }
 
 #[test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "The test pins one snapshot per payload, so it grows with the payload list."
+)]
 fn encode_snapshots() {
     let mut settings = insta::Settings::clone_current();
     settings.set_snapshot_path(SNAPSHOT_PATH);

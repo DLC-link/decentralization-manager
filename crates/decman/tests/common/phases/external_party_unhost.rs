@@ -143,6 +143,10 @@ async fn leave(
     anyhow::bail!("{name}'s unhost never took effect in {UNHOST_ATTEMPTS} calls")
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "A scenario phase reads top to bottom as one sequence of steps."
+)]
 pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
     info!("Phase: external_party_unhost");
 

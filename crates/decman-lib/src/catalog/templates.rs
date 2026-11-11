@@ -233,6 +233,10 @@ mod tests {
     /// `MODULE`/`ENTITY` consts, so a typo in either const still fails this
     /// test.
     #[test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "The test lists one expected template id per payload struct."
+    )]
     fn template_id_assertions_per_payload_struct() {
         let pkgs = decman_default_packages();
         let cases: Vec<(String, &str)> = vec![
