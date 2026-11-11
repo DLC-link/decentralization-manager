@@ -2,8 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::canton_id::CantonId;
-use crate::types::DecentralizedParty;
+use crate::{canton_id::CantonId, types::DecentralizedParty};
 
 /// Where the response data came from
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize)]

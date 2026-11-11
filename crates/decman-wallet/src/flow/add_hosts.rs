@@ -2,18 +2,23 @@
 
 use std::time::Duration;
 
-use common::api::TenantAcsBlockResponse;
-use common::api::TenantAddHostsExecuteRequest;
-use common::api::{HostPermission, TenantAcsImportRequest, TenantAddHostsRequest};
+use common::api::{
+    HostPermission, TenantAcsBlockResponse, TenantAcsImportRequest, TenantAddHostsExecuteRequest,
+    TenantAddHostsRequest,
+};
 use serde::Serialize;
 use tokio::time::Instant;
 
-use super::host::progress_to_status;
-use super::sign::{require_agreement, sign_prepared};
-use super::{HostReport, WalletHost};
-use crate::client::HostStatus;
-use crate::error::{Error, Result};
-use crate::signer::Signer;
+use super::{
+    HostReport, WalletHost,
+    host::progress_to_status,
+    sign::{require_agreement, sign_prepared},
+};
+use crate::{
+    client::HostStatus,
+    error::{Error, Result},
+    signer::Signer,
+};
 
 /// How long to wait for a joiner's onboarding marker to clear, and how often to
 /// ask. Clearing is a topology write, so it takes a synchronizer round trip and

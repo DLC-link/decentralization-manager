@@ -2,11 +2,15 @@
 
 use common::api::{TenantThresholdExecuteRequest, TenantThresholdRequest};
 
-use super::host::progress_to_status;
-use super::sign::{require_agreement, sign_prepared};
-use super::{HostReport, WalletHost};
-use crate::error::{Error, Result};
-use crate::signer::Signer;
+use super::{
+    HostReport, WalletHost,
+    host::progress_to_status,
+    sign::{require_agreement, sign_prepared},
+};
+use crate::{
+    error::{Error, Result},
+    signer::Signer,
+};
 
 /// Move a party's confirmation threshold.
 ///

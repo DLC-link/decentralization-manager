@@ -5,15 +5,17 @@ use std::collections::HashSet;
 use canton_proto_rs::com::daml::ledger::api::v2::{Value, value};
 use common::canton_id::CantonId;
 
-use crate::catalog::types::{RewardBeneficiary, serialize_reward_beneficiary};
-use crate::error::Error;
-use crate::framework::encode::{
-    field, make_contract_id, make_int64, make_list, make_optional_contract_id, make_party,
-    make_record, make_text,
-};
-use crate::framework::validate::{validate_future_micros, validate_reward_beneficiaries};
-use crate::framework::{
-    DamlProtoEncode, PackageResolver, TemplateId, TemplateInfo, Validate, ValidationCtx,
+use crate::{
+    catalog::types::{RewardBeneficiary, serialize_reward_beneficiary},
+    error::Error,
+    framework::{
+        DamlProtoEncode, PackageResolver, TemplateId, TemplateInfo, Validate, ValidationCtx,
+        encode::{
+            field, make_contract_id, make_int64, make_list, make_optional_contract_id, make_party,
+            make_record, make_text,
+        },
+        validate::{validate_future_micros, validate_reward_beneficiaries},
+    },
 };
 
 /// The package key of every payload in this module.

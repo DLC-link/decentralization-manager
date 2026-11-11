@@ -3,11 +3,13 @@
 use canton_proto_rs::com::daml::ledger::api::v2::CreatedEvent;
 use common::canton_id::CantonId;
 
-use crate::catalog::action::ActionType;
-use crate::framework::record::record_value;
-use crate::framework::record::{extract_optional_party_set, extract_optional_reltime};
-use crate::framework::record::{extract_party_set, extract_reltime, field_contract_id};
-use crate::framework::record::{field_int64, field_party, field_text, field_timestamp};
+use crate::{
+    catalog::action::ActionType,
+    framework::record::{
+        extract_optional_party_set, extract_optional_reltime, extract_party_set, extract_reltime,
+        field_contract_id, field_int64, field_party, field_text, field_timestamp, record_value,
+    },
+};
 
 /// A parsed CBTC-governance or governance-core self-action confirmation.
 #[derive(Clone, Debug, PartialEq)]
@@ -218,10 +220,13 @@ mod tests {
     use canton_proto_rs::com::daml::ledger::api::v2::{GenMap, Optional, Value, gen_map, value};
 
     use super::*;
-    use crate::catalog::interpret::fixtures::{ALICE, BOB, GOV, cid, created_event, record_of};
-    use crate::framework::encode::{field, make_contract_id, make_int64, make_variant};
-    use crate::framework::encode::{make_optional_party_set, make_party, make_party_set};
-    use crate::framework::encode::{make_record, make_text};
+    use crate::{
+        catalog::interpret::fixtures::{ALICE, BOB, GOV, cid, created_event, record_of},
+        framework::encode::{
+            field, make_contract_id, make_int64, make_optional_party_set, make_party,
+            make_party_set, make_record, make_text, make_variant,
+        },
+    };
 
     /// A `Governance_SetThreshold` action in the CBTC
     /// `ActionRequiringConfirmation` shape. Hand-built because

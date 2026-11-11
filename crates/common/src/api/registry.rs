@@ -288,8 +288,9 @@ mod tests {
     use anyhow::Result;
 
     use super::*;
-    use crate::api::fixtures::party;
-    use crate::api::{ActiveCouponReassignmentDelegation, CouponReassignmentDelegationSummary};
+    use crate::api::{
+        ActiveCouponReassignmentDelegation, CouponReassignmentDelegationSummary, fixtures::party,
+    };
 
     /// The `CantonId` fields cross the wire as `prefix::namespace` strings and
     /// must parse back into the same id.

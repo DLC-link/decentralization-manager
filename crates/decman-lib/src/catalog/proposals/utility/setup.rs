@@ -2,17 +2,20 @@
 //! beneficiaries, result contracts and the transfer rule.
 
 use canton_proto_rs::com::daml::ledger::api::v2::Value;
-use common::api::InstrumentIdentifier;
-use common::canton_id::CantonId;
+use common::{api::InstrumentIdentifier, canton_id::CantonId};
 
-use crate::catalog::types::{AppRewardBeneficiary, make_optional_beneficiaries};
-use crate::error::Error;
-use crate::framework::ValidationCtx;
-use crate::framework::encode::serialize_instrument_identifier;
-use crate::framework::encode::{field, make_bool, make_contract_id, make_list, make_optional_bool};
-use crate::framework::encode::{make_party, make_record, make_text};
-use crate::framework::validate::{validate_beneficiary_weights, validate_block_list_supported};
-use crate::framework::{DamlProtoEncode, PackageResolver, TemplateId, TemplateInfo, Validate};
+use crate::{
+    catalog::types::{AppRewardBeneficiary, make_optional_beneficiaries},
+    error::Error,
+    framework::{
+        DamlProtoEncode, PackageResolver, TemplateId, TemplateInfo, Validate, ValidationCtx,
+        encode::{
+            field, make_bool, make_contract_id, make_list, make_optional_bool, make_party,
+            make_record, make_text, serialize_instrument_identifier,
+        },
+        validate::{validate_beneficiary_weights, validate_block_list_supported},
+    },
+};
 
 /// Run the full Utility-Registry onboarding in one vote. Flags control
 /// whether a `TransferRule` / `AllocationFactory` are created during the

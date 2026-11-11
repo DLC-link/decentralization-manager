@@ -17,11 +17,15 @@ use canton_proto_rs::com::daml::ledger::api::v2::{
 };
 use common::canton_id::CantonId;
 
-use crate::catalog::action::ActionType;
-use crate::error::Error;
-use crate::framework::TemplateId;
-use crate::framework::commands::commands_envelope;
-use crate::framework::encode::{field, make_contract_id, make_list, make_party, make_record};
+use crate::{
+    catalog::action::ActionType,
+    error::Error,
+    framework::{
+        TemplateId,
+        commands::commands_envelope,
+        encode::{field, make_contract_id, make_list, make_party, make_record},
+    },
+};
 
 /// One `ExerciseCommand`, wrapped as a `Command`.
 fn exercise(template: &TemplateId, contract_id: &str, choice: &str, argument: Value) -> Command {

@@ -100,8 +100,6 @@ pub mod catalog;
 pub mod error;
 pub mod framework;
 
-pub use error::Error;
-
 // These crates appear in the public signatures. The re-exports let an
 // integrator name their types without a direct dependency pinned to the
 // same git revision. `common` is the decman server's own crate, so the
@@ -116,3 +114,5 @@ pub use common::{
     },
     canton_id::CantonId,
 };
+
+pub use error::Error;

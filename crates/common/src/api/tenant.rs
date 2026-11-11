@@ -10,8 +10,10 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::canton_id::CantonId;
-use crate::types::{Permission, WorkflowProgress};
+use crate::{
+    canton_id::CantonId,
+    types::{Permission, WorkflowProgress},
+};
 
 /// One external party this participant hosts, read from its own topology state
 /// (an authorized `PartyToParticipant` mapping that names this participant with

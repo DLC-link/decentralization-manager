@@ -1,7 +1,8 @@
 //! Ledger API fixtures shared by the interpret tests.
 
-use canton_proto_rs::com::daml::ledger::api::v2::{CreatedEvent, Identifier, InterfaceView};
-use canton_proto_rs::com::daml::ledger::api::v2::{Record, RecordField};
+use canton_proto_rs::com::daml::ledger::api::v2::{
+    CreatedEvent, Identifier, InterfaceView, Record, RecordField,
+};
 use common::canton_id::CantonId;
 use prost_types::Timestamp;
 

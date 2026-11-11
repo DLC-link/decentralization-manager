@@ -5,10 +5,12 @@ use canton_common::decimal::DamlDecimal;
 use canton_proto_rs::com::daml::ledger::api::v2::{CreatedEvent, Identifier, Record};
 use common::canton_id::CantonId;
 
-use crate::catalog::types::TransferProposalDetails;
-use crate::catalog::types::{AcceptTransferDetails, ServiceRequestDetails};
-use crate::framework::record::{field_contract_id, field_numeric, field_party, field_record};
-use crate::framework::record::{field_text, record_has_field};
+use crate::{
+    catalog::types::{AcceptTransferDetails, ServiceRequestDetails, TransferProposalDetails},
+    framework::record::{
+        field_contract_id, field_numeric, field_party, field_record, field_text, record_has_field,
+    },
+};
 
 /// Longest proposal description retained by [`extract_proposal_info`].
 ///
@@ -294,10 +296,13 @@ pub fn extract_service_request_details(record: &Record) -> Option<ServiceRequest
 mod tests {
 
     use super::*;
-    use crate::catalog::interpret::fixtures::governable_action_interface_view;
-    use crate::catalog::interpret::fixtures::{ALICE, BOB, GOV, cid, proposal_created_event};
-    use crate::catalog::interpret::fixtures::{created_event, record_of};
-    use crate::framework::encode::{field, make_int64, make_party, make_text};
+    use crate::{
+        catalog::interpret::fixtures::{
+            ALICE, BOB, GOV, cid, created_event, governable_action_interface_view,
+            proposal_created_event, record_of,
+        },
+        framework::encode::{field, make_int64, make_party, make_text},
+    };
 
     #[test]
     fn interface_view_proposal_parses_label_description_and_proposer() {

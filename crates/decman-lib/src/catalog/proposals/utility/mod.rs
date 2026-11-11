@@ -9,15 +9,19 @@ mod setup;
 /// The package key of every payload in this module.
 const PACKAGE: &str = "governance_utility_onboarding";
 
-pub use instrument::{MintsCredentials, OffboardInstrumentIssuers, OnboardInstrumentIssuers};
-pub use instrument::{ProvisionInstrument, UpdateInstrumentConfiguration, WithCredentialIdNonce};
+pub use instrument::{
+    MintsCredentials, OffboardInstrumentIssuers, OnboardInstrumentIssuers, ProvisionInstrument,
+    UpdateInstrumentConfiguration, WithCredentialIdNonce,
+};
 pub use issuance::{AcceptBurnRequest, AcceptMintRequest, Burn, Mint};
 pub use registrar::{CreateProviderConfiguration, CreateRegistrarServiceRequest, OnboardRegistrar};
-pub use services::RequestDevNetFeaturedAppRight;
-pub use services::{CreateDelegatedBatchedMarkersProxy, CreateProviderServiceRequest};
-pub use services::{CreateUserServiceRequest, ProvisionProviderService};
-pub use setup::SetupUtility;
-pub use setup::{CreateTransferRule, SetEnableResultContracts, SetProviderAppRewardBeneficiaries};
+pub use services::{
+    CreateDelegatedBatchedMarkersProxy, CreateProviderServiceRequest, CreateUserServiceRequest,
+    ProvisionProviderService, RequestDevNetFeaturedAppRight,
+};
+pub use setup::{
+    CreateTransferRule, SetEnableResultContracts, SetProviderAppRewardBeneficiaries, SetupUtility,
+};
 
 #[cfg(test)]
 mod tests;

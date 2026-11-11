@@ -5,8 +5,10 @@
 //! `catalog::proposals`) — this module covers only the ids decman needs
 //! independent of any specific proposal payload.
 
-use crate::error::Error;
-use crate::framework::{PackageResolver, TemplateId};
+use crate::{
+    error::Error,
+    framework::{PackageResolver, TemplateId},
+};
 
 /// The `GovernanceRules` template — governance-core's governance-state
 /// contract.
@@ -115,31 +117,39 @@ pub fn governance_state_templates(packages: &dyn PackageResolver) -> Vec<Templat
 #[cfg(test)]
 mod tests {
     use canton_common::decimal::DamlDecimal;
-    use common::api::{InstrumentId, PackageConfig};
-    use common::canton_id::CantonId;
+    use common::{
+        api::{InstrumentId, PackageConfig},
+        canton_id::CantonId,
+    };
 
     use super::*;
-    use crate::catalog::proposals::core::GenericVote;
-    use crate::catalog::proposals::credential::{
-        AcceptFreeCredential, AcceptPaidCredential, OfferFreeCredential, OfferPaidCredential,
+    use crate::{
+        catalog::{
+            proposals::{
+                core::GenericVote,
+                credential::{
+                    AcceptFreeCredential, AcceptPaidCredential, OfferFreeCredential,
+                    OfferPaidCredential,
+                },
+                custody::{AcceptTransfer, SetupCcPreapproval, SetupTokenPreapproval, Transfer},
+                rewards::{
+                    AcceptExternalPartySetup, RevokeCouponReassignmentDelegation,
+                    SetupCouponReassignmentDelegation, SetupMintingDelegation,
+                },
+                utility::{
+                    AcceptBurnRequest, AcceptMintRequest, Burn, CreateDelegatedBatchedMarkersProxy,
+                    CreateProviderConfiguration, CreateProviderServiceRequest,
+                    CreateRegistrarServiceRequest, CreateTransferRule, CreateUserServiceRequest,
+                    Mint, OffboardInstrumentIssuers, OnboardInstrumentIssuers, OnboardRegistrar,
+                    ProvisionInstrument, ProvisionProviderService, RequestDevNetFeaturedAppRight,
+                    SetEnableResultContracts, SetProviderAppRewardBeneficiaries, SetupUtility,
+                    UpdateInstrumentConfiguration,
+                },
+            },
+            types::{AppTransferContextInput, BillingParams},
+        },
+        framework::TemplateInfo,
     };
-    use crate::catalog::proposals::custody::{
-        AcceptTransfer, SetupCcPreapproval, SetupTokenPreapproval, Transfer,
-    };
-    use crate::catalog::proposals::rewards::{
-        AcceptExternalPartySetup, RevokeCouponReassignmentDelegation,
-        SetupCouponReassignmentDelegation, SetupMintingDelegation,
-    };
-    use crate::catalog::proposals::utility::{
-        AcceptBurnRequest, AcceptMintRequest, Burn, CreateDelegatedBatchedMarkersProxy,
-        CreateProviderConfiguration, CreateProviderServiceRequest, CreateRegistrarServiceRequest,
-        CreateTransferRule, CreateUserServiceRequest, Mint, OffboardInstrumentIssuers,
-        OnboardInstrumentIssuers, OnboardRegistrar, ProvisionInstrument, ProvisionProviderService,
-        RequestDevNetFeaturedAppRight, SetEnableResultContracts, SetProviderAppRewardBeneficiaries,
-        SetupUtility, UpdateInstrumentConfiguration,
-    };
-    use crate::catalog::types::{AppTransferContextInput, BillingParams};
-    use crate::framework::TemplateInfo;
 
     /// Any valid `CantonId` — the exact value is irrelevant to a
     /// `template_id` assertion.

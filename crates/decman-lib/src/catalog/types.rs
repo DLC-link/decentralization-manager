@@ -13,15 +13,18 @@
 
 use canton_common::decimal::DamlDecimal;
 use canton_proto_rs::com::daml::ledger::api::v2::{Optional, Value, value};
-use common::api::Claim;
-use common::canton_id::CantonId;
+use common::{api::Claim, canton_id::CantonId};
 
-use crate::error::Error;
-use crate::framework::encode::{
-    field, make_contract_id, make_int64, make_list, make_numeric, make_optional_contract_id,
-    make_optional_numeric, make_party, make_record,
+use crate::{
+    error::Error,
+    framework::{
+        encode::{
+            field, make_contract_id, make_int64, make_list, make_numeric,
+            make_optional_contract_id, make_optional_numeric, make_party, make_record,
+        },
+        record::{extract_int64, extract_record, extract_text, get_field},
+    },
 };
-use crate::framework::record::{extract_int64, extract_record, extract_text, get_field};
 
 /// Featured App Right beneficiary
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]

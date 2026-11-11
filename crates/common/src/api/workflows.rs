@@ -4,8 +4,10 @@
 use serde::{Deserialize, Serialize};
 
 use super::{ContractDefinition, DarFile};
-use crate::canton_id::CantonId;
-use crate::types::{WorkflowProgress, WorkflowRun};
+use crate::{
+    canton_id::CantonId,
+    types::{WorkflowProgress, WorkflowRun},
+};
 
 /// Request to kick a participant from a decentralized party.
 /// `deny_unknown_fields` rejects pre-fix requests carrying

@@ -2,9 +2,13 @@
 
 use canton_proto_rs::com::daml::ledger::api::v2::Value;
 
-use crate::error::Error;
-use crate::framework::encode::{field, make_record, make_text};
-use crate::framework::{DamlProtoEncode, PackageResolver, TemplateId, TemplateInfo, Validate};
+use crate::{
+    error::Error,
+    framework::{
+        DamlProtoEncode, PackageResolver, TemplateId, TemplateInfo, Validate,
+        encode::{field, make_record, make_text},
+    },
+};
 
 /// Generic text-based vote (no on-chain effect beyond recording the result).
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]

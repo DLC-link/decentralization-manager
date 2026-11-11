@@ -4,21 +4,28 @@
 use std::collections::HashSet;
 
 use canton_proto_rs::com::daml::ledger::api::v2::{RecordField, Value, value};
-use common::api::{InstrumentIdentifier, InstrumentIssuerCredentials, PartyCredentialRequirement};
-use common::canton_id::CantonId;
+use common::{
+    api::{InstrumentIdentifier, InstrumentIssuerCredentials, PartyCredentialRequirement},
+    canton_id::CantonId,
+};
 
 use super::OnboardRegistrar;
-use crate::error::Error;
-use crate::framework::encode::make_optional_bool;
-use crate::framework::encode::serialize_party_credential_requirements;
-use crate::framework::encode::{field, make_contract_id, make_contract_id_list, make_list};
-use crate::framework::encode::{make_optional_text, make_optional_timestamp, make_party};
-use crate::framework::encode::{make_record, make_text, serialize_instrument_identifier};
-use crate::framework::validate::validate_self_issued_requirements_have_claims;
-use crate::framework::validate::validate_unique_issuers;
-use crate::framework::validate::{validate_block_list_supported, validate_credential_validity};
-use crate::framework::{DamlProtoEncode, GrpcPayload, PackageResolver, TemplateId, TemplateInfo};
-use crate::framework::{Validate, ValidationCtx};
+use crate::{
+    error::Error,
+    framework::{
+        DamlProtoEncode, GrpcPayload, PackageResolver, TemplateId, TemplateInfo, Validate,
+        ValidationCtx,
+        encode::{
+            field, make_contract_id, make_contract_id_list, make_list, make_optional_bool,
+            make_optional_text, make_optional_timestamp, make_party, make_record, make_text,
+            serialize_instrument_identifier, serialize_party_credential_requirements,
+        },
+        validate::{
+            validate_block_list_supported, validate_credential_validity,
+            validate_self_issued_requirements_have_claims, validate_unique_issuers,
+        },
+    },
+};
 
 /// Create an `InstrumentConfiguration` on the registrar decparty and
 /// credential the initial instrument issuers against its issuer

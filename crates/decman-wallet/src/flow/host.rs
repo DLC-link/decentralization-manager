@@ -1,11 +1,12 @@
 //! The hosts a wallet drives and what each one reports.
 
-use common::canton_id::CantonId;
-use common::types::WorkflowProgress;
+use common::{canton_id::CantonId, types::WorkflowProgress};
 use serde::Serialize;
 
-use crate::client::{HostStatus, TenantClient};
-use crate::error::Error;
+use crate::{
+    client::{HostStatus, TenantClient},
+    error::Error,
+};
 
 /// One participant that will host the party, and the DecMan instance in front of
 /// it. A wallet configures these once — they are the hosting set it chose.

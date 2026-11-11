@@ -9,21 +9,24 @@
 //! the call site rather than defaulting to an empty one that only fails much
 //! later, on-ledger, at execute.
 
-use canton_common::decimal::DamlDecimal;
-use canton_common::transfer_factory::Context as ChoiceContext;
+use canton_common::{decimal::DamlDecimal, transfer_factory::Context as ChoiceContext};
 use canton_proto_rs::com::daml::ledger::api::v2::{Optional, Value, value};
-use common::api::{InstrumentAllowance, InstrumentId};
-use common::canton_id::CantonId;
-
-use crate::error::Error;
-use crate::framework::encode::{
-    TransferValidity, field, make_contract_id, make_contract_id_list, make_empty_extra_args,
-    make_empty_metadata, make_extra_args_from_context, make_list, make_numeric, make_party,
-    make_record, make_text, serialize_instrument_id,
+use common::{
+    api::{InstrumentAllowance, InstrumentId},
+    canton_id::CantonId,
 };
-use crate::framework::validate::validate_positive_amount;
-use crate::framework::{
-    DamlProtoEncode, PackageResolver, TemplateId, TemplateInfo, Validate, ValidationCtx,
+
+use crate::{
+    error::Error,
+    framework::{
+        DamlProtoEncode, PackageResolver, TemplateId, TemplateInfo, Validate, ValidationCtx,
+        encode::{
+            TransferValidity, field, make_contract_id, make_contract_id_list,
+            make_empty_extra_args, make_empty_metadata, make_extra_args_from_context, make_list,
+            make_numeric, make_party, make_record, make_text, serialize_instrument_id,
+        },
+        validate::validate_positive_amount,
+    },
 };
 
 /// The package key of every payload in this module.
@@ -294,8 +297,9 @@ mod tests {
     use canton_proto_rs::com::daml::ledger::api::v2::Record;
 
     use super::*;
-    use crate::catalog::proposals::SNAPSHOT_PATH;
-    use crate::framework::encode::TRANSFER_EXECUTE_BEFORE_MICROS;
+    use crate::{
+        catalog::proposals::SNAPSHOT_PATH, framework::encode::TRANSFER_EXECUTE_BEFORE_MICROS,
+    };
 
     /// Fallback `requestedAt` for a `Transfer` record in these tests: epoch.
     const TRANSFER_REQUESTED_AT_MICROS: i64 = 0;

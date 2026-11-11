@@ -1,15 +1,18 @@
 //! Confirmation dedupe, expiry and threshold rules, and the assembly of
 //! domain-action cards.
 
-use std::cmp::Reverse;
-use std::collections::{HashMap, HashSet};
+use std::{
+    cmp::Reverse,
+    collections::{HashMap, HashSet},
+};
 
 use canton_proto_rs::com::daml::ledger::api::v2::{Identifier, Record};
 use common::canton_id::CantonId;
 
 use super::{ParsedDomainConfirmation, ProposalInfo};
-use crate::catalog::types::TransferProposalDetails;
-use crate::catalog::types::{AcceptTransferDetails, ServiceRequestDetails};
+use crate::catalog::types::{
+    AcceptTransferDetails, ServiceRequestDetails, TransferProposalDetails,
+};
 
 /// Newest-first, one confirmation per confirming party. Sorts a
 /// (`created_at` descending, i.e. `Reverse`) copy of `items` and keeps only
@@ -201,11 +204,16 @@ mod tests {
     use canton_proto_rs::com::daml::ledger::api::v2::Identifier;
 
     use super::*;
-    use crate::catalog::interpret::extract_proposal_info;
-    use crate::catalog::interpret::fixtures::governable_action_interface_view;
-    use crate::catalog::interpret::fixtures::record_of;
-    use crate::catalog::interpret::fixtures::{ALICE, BOB, GOV, cid, proposal_created_event};
-    use crate::framework::encode::{field, make_party, make_text};
+    use crate::{
+        catalog::interpret::{
+            extract_proposal_info,
+            fixtures::{
+                ALICE, BOB, GOV, cid, governable_action_interface_view, proposal_created_event,
+                record_of,
+            },
+        },
+        framework::encode::{field, make_party, make_text},
+    };
 
     // -- dedupe_newest_per_party / live_count / assemble_domain_actions --
 
