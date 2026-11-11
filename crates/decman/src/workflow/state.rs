@@ -56,6 +56,12 @@ pub trait WorkflowStep:
     /// The workflow kind this step enum belongs to. Used to reject routed
     /// messages (e.g. invitation declines) that target a different kind.
     fn kind() -> WorkflowKind;
+
+    /// Whether a peer's status update completes this step for that peer. A
+    /// step that names its status ignores a late status of an earlier step.
+    fn accepts_status(&self, _status: &[u8]) -> bool {
+        true
+    }
 }
 
 /// Generic workflow state tracker. Reads/writes the matching `workflow_runs`

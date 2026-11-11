@@ -3,6 +3,7 @@ use std::{collections::HashSet, sync::Arc};
 use anyhow::Context;
 
 use crate::{
+    canton_id::CantonId,
     config::{NetworkConfig, NodeConfig},
     error::Result,
     noise::server::{ActiveWorkflow, NoiseServer},
@@ -91,17 +92,12 @@ pub async fn start_coordinator(
                     }
                     RotateKeyStep::Submit => {
                         tracing::info!("Coordinator executing: Submit rotate-key");
-                        for (peer_id, signed) in workflow_state.get_all_peer_data().await {
-                            db.write_artifact(
-                                &instance_name,
-                                artifact_kinds::SIGNED_ROTATE_KEY_P2P,
-                                Some(&peer_id.to_string()),
-                                &signed,
-                            )
-                            .await?;
-                        }
-                        workflow_state.clear_peer_data().await;
-
+                        require_every_signature(
+                            &db,
+                            &instance_name,
+                            workflow_state.expected_peers(),
+                        )
+                        .await?;
                         submit_rotation(&node_config, &db, &instance_name, &rotate_config).await?;
                         workflow_state.advance_step().await;
                     }
@@ -136,6 +132,35 @@ pub async fn start_coordinator(
     .await
 }
 
+/// Fail unless every peer's signature is on record. The Noise server stores
+/// each upload before it counts the peer complete, so a gap means the run lost
+/// state some other way. Canton would refuse the submission without it.
+async fn require_every_signature(
+    db: &sqlx::SqlitePool,
+    instance_name: &str,
+    peers: &HashSet<CantonId>,
+) -> Result {
+    let recorded: HashSet<String> = db
+        .list_artifacts(instance_name, artifact_kinds::SIGNED_ROTATE_KEY_P2P)
+        .await?
+        .into_iter()
+        .map(|(peer, _)| peer)
+        .collect();
+    let mut missing: Vec<String> = peers
+        .iter()
+        .map(ToString::to_string)
+        .filter(|peer| !recorded.contains(peer))
+        .collect();
+    if missing.is_empty() {
+        return Ok(());
+    }
+    missing.sort();
+    anyhow::bail!(
+        "No rotate-key signature on record from {}. Start a new rotation.",
+        missing.join(", ")
+    )
+}
+
 /// The `SignRotateKey` payload: the run's config and the coordinator's signed
 /// proposal.
 async fn sign_payload(
@@ -157,4 +182,60 @@ async fn record_payload(db: &sqlx::SqlitePool, instance_name: &str) -> Result<Ve
     db.read_artifact(instance_name, artifact_kinds::ROTATE_KEY_NEW_KEY, None)
         .await?
         .ok_or_else(|| anyhow::anyhow!("ROTATE_KEY_NEW_KEY artifact missing"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::canton_id::{NAMESPACE_LENGTH, Namespace};
+
+    const RUN: &str = "rotate-key-run";
+
+    fn peer(n: u8) -> CantonId {
+        CantonId::new(format!("p{n}"), Namespace::new([n; NAMESPACE_LENGTH]))
+    }
+
+    async fn insert_run(db: &sqlx::SqlitePool) -> Result {
+        sqlx::query(
+            "INSERT INTO workflow_runs
+             (instance_name, kind, role, status, current_step, step_index, step_total,
+              config_json, expected_peers_json, completed_peers_json, created_at, updated_at)
+             VALUES (?, ?, ?, 'inprogress', 'Submit', 4, 8, '{}', '[]', '[]', 0, 0)",
+        )
+        .bind(RUN)
+        .bind(common::types::WorkflowKind::RotateKey.as_str())
+        .bind(common::types::WorkflowRole::Coordinator.as_str())
+        .execute(db)
+        .await?;
+        Ok(())
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn submit_needs_a_signature_from_every_peer(db: sqlx::SqlitePool) -> Result {
+        insert_run(&db).await?;
+        db.write_artifact(
+            RUN,
+            artifact_kinds::SIGNED_ROTATE_KEY_P2P,
+            Some(&peer(1).to_string()),
+            b"signed by p1",
+        )
+        .await?;
+        let peers: HashSet<CantonId> = [peer(1), peer(2)].into();
+
+        let error = require_every_signature(&db, RUN, &peers)
+            .await
+            .expect_err("a run without p2's signature must not submit")
+            .to_string();
+        assert!(error.contains(&peer(2).to_string()), "{error}");
+        assert!(!error.contains(&peer(1).to_string()), "{error}");
+
+        db.write_artifact(
+            RUN,
+            artifact_kinds::SIGNED_ROTATE_KEY_P2P,
+            Some(&peer(2).to_string()),
+            b"signed by p2",
+        )
+        .await?;
+        require_every_signature(&db, RUN, &peers).await
+    }
 }
