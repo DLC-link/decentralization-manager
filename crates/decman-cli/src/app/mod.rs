@@ -1,6 +1,7 @@
 //! The terminal UI controller: the login loop, the background workers, the
 //! App state, input handling and the actions behind each key.
 
+mod composer_keys;
 mod forms;
 mod governance;
 mod input;
