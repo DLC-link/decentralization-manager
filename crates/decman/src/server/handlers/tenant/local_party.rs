@@ -10,11 +10,10 @@ use crate::{
         tenant_call_audit::TenantEndpoint,
         types::{
             ErrorResponse, LocalPartyAdoptExecuteRequest, LocalPartyAdoptRequest,
-            TenantAddHostsExecuteResponse, TenantAddHostsPrepareResponse, WorkflowProgress,
+            TenantAddHostsExecuteResponse, TenantAddHostsPrepareResponse,
         },
     },
     workflow::external_party::{
-        add_hosts::read_party_to_participant,
         keys::fingerprint_from_public_key,
         local_party::{LocalPartyAdoptionPayload, prepare_adoption, submit_adoption},
     },
@@ -22,7 +21,7 @@ use crate::{
 
 use super::{
     audit::audited_write,
-    wire::{add_hosts_error_response, decode_all, decode_public_key},
+    wire::{add_hosts_error_response, decode_all, decode_public_key, serial_status_after},
 };
 
 // ============================================================================
@@ -160,17 +159,13 @@ async fn tenant_local_party_adopt_execute_on_this_host(
         Err(e) => return add_hosts_error_response("local-party adopt execute", e),
     };
 
-    let (status, serial) = match read_party_to_participant(&data.config, &body.party_id).await {
-        Ok(Some(current)) if current.serial > base_serial => {
-            (WorkflowProgress::Completed, current.serial)
-        }
-        Ok(Some(current)) => (WorkflowProgress::InProgress, current.serial),
-        Ok(None) => (WorkflowProgress::InProgress, base_serial),
-        Err(e) => {
-            tracing::warn!("local-party adopt: post-submit status read failed: {e:#}");
-            (WorkflowProgress::InProgress, base_serial)
-        }
-    };
+    let (status, serial) = serial_status_after(
+        &data.config,
+        &body.party_id,
+        base_serial,
+        "local-party adopt",
+    )
+    .await;
 
     HttpResponse::Accepted().json(TenantAddHostsExecuteResponse {
         status,

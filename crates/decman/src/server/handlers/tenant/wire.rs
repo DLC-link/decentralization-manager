@@ -1,9 +1,14 @@
-//! Request decoding and error responses shared by the tenant flows.
+//! Request decoding, error responses and the post-submit serial read shared
+//! by the tenant flows.
 
 use actix_web::HttpResponse;
 use base64::{Engine, engine::general_purpose::STANDARD};
 
-use crate::{server::types::ErrorResponse, workflow::external_party::add_hosts::AddHostsError};
+use crate::{
+    config::NodeConfig,
+    server::types::{ErrorResponse, WorkflowProgress},
+    workflow::external_party::add_hosts::{AddHostsError, read_party_to_participant},
+};
 
 /// Base64-decode a raw Ed25519 public key into its fixed 32-byte array, or the
 /// 400 response to return.
@@ -78,6 +83,29 @@ pub(super) fn add_hosts_error_response(stage: &str, error: AddHostsError) -> Htt
     }
 }
 
+/// This node's view of a topology change submitted at `base_serial`:
+/// Completed once the party's serial has moved past it, otherwise in
+/// progress at the serial this node reads. A failed read is logged under
+/// `label` and reads as in progress at the base serial.
+pub(super) async fn serial_status_after(
+    config: &NodeConfig,
+    party_id: &str,
+    base_serial: u32,
+    label: &str,
+) -> (WorkflowProgress, u32) {
+    match read_party_to_participant(config, party_id).await {
+        Ok(Some(current)) if current.serial > base_serial => {
+            (WorkflowProgress::Completed, current.serial)
+        }
+        Ok(Some(current)) => (WorkflowProgress::InProgress, current.serial),
+        Ok(None) => (WorkflowProgress::InProgress, base_serial),
+        Err(e) => {
+            tracing::warn!("{label}: post-submit status read failed: {e:#}");
+            (WorkflowProgress::InProgress, base_serial)
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -148,6 +176,18 @@ mod tests {
                 "wrong status for {label}"
             );
         }
+    }
+
+    /// A post-submit read that fails leaves the change in progress at the
+    /// serial it was pinned to, so the wallet polls again.
+    #[tokio::test]
+    async fn a_failed_serial_read_reads_as_in_progress_at_the_base_serial() {
+        let mut config = NodeConfig::default();
+        config.canton.admin_api_port = 1;
+
+        let read = serial_status_after(&config, "alice::1220aa", 4, "test").await;
+
+        assert_eq!(read, (WorkflowProgress::InProgress, 4));
     }
 
     /// A stale-pin error must name both serials, or the wallet cannot tell what

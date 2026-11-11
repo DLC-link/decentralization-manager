@@ -11,7 +11,7 @@ use crate::{
         types::{
             ErrorResponse, ExternalPartyUnhostResponse, TenantAddHostsExecuteResponse,
             TenantAddHostsPrepareResponse, TenantPartyStateResponse, TenantThresholdExecuteRequest,
-            TenantThresholdRequest, TenantUnhostRequest, WorkflowProgress,
+            TenantThresholdRequest, TenantUnhostRequest,
         },
     },
     workflow::external_party::{
@@ -28,7 +28,7 @@ use crate::server::handlers::unhost::run_unhost;
 
 use super::{
     audit::{audited_write, tenant_requester},
-    wire::{add_hosts_error_response, decode_all},
+    wire::{add_hosts_error_response, decode_all, serial_status_after},
 };
 
 // ============================================================================
@@ -149,17 +149,13 @@ async fn tenant_threshold_authorize_on_this_host(
 
     // One signature is all Canton wants here, so the change should be live
     // already; the read only reports what this node now sees.
-    let (status, serial) = match read_party_to_participant(&data.config, &body.party_id).await {
-        Ok(Some(current)) if current.serial > base_serial => {
-            (WorkflowProgress::Completed, current.serial)
-        }
-        Ok(Some(current)) => (WorkflowProgress::InProgress, current.serial),
-        Ok(None) => (WorkflowProgress::InProgress, base_serial),
-        Err(e) => {
-            tracing::warn!("tenant threshold authorize: post-submit status read failed: {e:#}");
-            (WorkflowProgress::InProgress, base_serial)
-        }
-    };
+    let (status, serial) = serial_status_after(
+        &data.config,
+        &body.party_id,
+        base_serial,
+        "tenant threshold authorize",
+    )
+    .await;
 
     HttpResponse::Accepted().json(TenantAddHostsExecuteResponse {
         status,
@@ -234,17 +230,13 @@ async fn tenant_threshold_execute_on_this_host(
         Err(e) => return add_hosts_error_response("threshold execute", e),
     };
 
-    let (status, serial) = match read_party_to_participant(&data.config, &body.party_id).await {
-        Ok(Some(current)) if current.serial > base_serial => {
-            (WorkflowProgress::Completed, current.serial)
-        }
-        Ok(Some(current)) => (WorkflowProgress::InProgress, current.serial),
-        Ok(None) => (WorkflowProgress::InProgress, base_serial),
-        Err(e) => {
-            tracing::warn!("tenant threshold execute: post-submit status read failed: {e:#}");
-            (WorkflowProgress::InProgress, base_serial)
-        }
-    };
+    let (status, serial) = serial_status_after(
+        &data.config,
+        &body.party_id,
+        base_serial,
+        "tenant threshold execute",
+    )
+    .await;
 
     HttpResponse::Accepted().json(TenantAddHostsExecuteResponse {
         status,

@@ -10,18 +10,17 @@ use crate::{
         tenant_call_audit::TenantEndpoint,
         types::{
             ErrorResponse, TenantAddHostsExecuteRequest, TenantAddHostsExecuteResponse,
-            TenantAddHostsPrepareResponse, TenantAddHostsRequest, WorkflowProgress,
+            TenantAddHostsPrepareResponse, TenantAddHostsRequest,
         },
     },
     workflow::external_party::add_hosts::{
-        ExternalPartyAddHostsPayload, authorize_add_hosts, prepare_add_hosts,
-        read_party_to_participant, submit_add_hosts,
+        ExternalPartyAddHostsPayload, authorize_add_hosts, prepare_add_hosts, submit_add_hosts,
     },
 };
 
 use super::{
     audit::audited_write,
-    wire::{add_hosts_error_response, decode_all},
+    wire::{add_hosts_error_response, decode_all, serial_status_after},
 };
 
 // ============================================================================
@@ -172,17 +171,13 @@ async fn tenant_add_hosts_authorize_on_this_host(
 
     // The serial advances only once the last node has authorized; until then
     // this node's read still returns the base serial.
-    let (status, serial) = match read_party_to_participant(&data.config, &body.party_id).await {
-        Ok(Some(current)) if current.serial > base_serial => {
-            (WorkflowProgress::Completed, current.serial)
-        }
-        Ok(Some(current)) => (WorkflowProgress::InProgress, current.serial),
-        Ok(None) => (WorkflowProgress::InProgress, base_serial),
-        Err(e) => {
-            tracing::warn!("tenant add-hosts authorize: post-submit status read failed: {e:#}");
-            (WorkflowProgress::InProgress, base_serial)
-        }
-    };
+    let (status, serial) = serial_status_after(
+        &data.config,
+        &body.party_id,
+        base_serial,
+        "tenant add-hosts authorize",
+    )
+    .await;
 
     HttpResponse::Accepted().json(TenantAddHostsExecuteResponse {
         status,
@@ -272,17 +267,13 @@ pub(super) async fn tenant_add_hosts_execute_on_this_host(
 
     // Report this host's view. The serial advances only once the change is
     // authorized; while it is still a proposal the read returns the base serial.
-    let (status, serial) = match read_party_to_participant(&data.config, &body.party_id).await {
-        Ok(Some(current)) if current.serial > base_serial => {
-            (WorkflowProgress::Completed, current.serial)
-        }
-        Ok(Some(current)) => (WorkflowProgress::InProgress, current.serial),
-        Ok(None) => (WorkflowProgress::InProgress, base_serial),
-        Err(e) => {
-            tracing::warn!("tenant add-hosts execute: post-submit status read failed: {e:#}");
-            (WorkflowProgress::InProgress, base_serial)
-        }
-    };
+    let (status, serial) = serial_status_after(
+        &data.config,
+        &body.party_id,
+        base_serial,
+        "tenant add-hosts execute",
+    )
+    .await;
 
     HttpResponse::Accepted().json(TenantAddHostsExecuteResponse {
         status,
