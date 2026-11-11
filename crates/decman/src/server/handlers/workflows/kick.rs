@@ -31,6 +31,7 @@ use super::{
         cached_confirmation_threshold, cached_namespace_threshold, kick_threshold_bound,
         party_member_count, resolve_kick_target,
     },
+    launch::CoordinatorRequest,
     onboarding::interpret_invite_reply,
     preflight::{
         find_inprogress_run_for_party, format_incompatible_peers,
@@ -369,21 +370,9 @@ async fn start_kick_run(
         // Give peers time to start their peer workflows
         tokio::time::sleep(Duration::from_secs(2)).await;
 
-        let result = workflow::start_coordinator(
-            config,
-            db.clone(),
-            workflow::WorkflowType::Kick,
-            None, // No onboarding config
-            Some(kick_config),
-            None, // No contracts config
-            None, // No dars config
-            None, // No add-party config
-            None, // No change-threshold config
-            None, // No auth registry for kick
-            last_seen,
-            instance_for_coord,
-        )
-        .await;
+        let result = CoordinatorRequest::Kick(kick_config)
+            .start(config, db.clone(), None, last_seen, instance_for_coord)
+            .await;
 
         // Update in-memory state in tight scopes — never hold the RwLock
         // across a DB await. /kick/status acquires a read lock to serve

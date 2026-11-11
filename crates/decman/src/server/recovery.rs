@@ -6,14 +6,16 @@ use sqlx::SqlitePool;
 use tokio::sync::{RwLock, mpsc};
 
 use crate::server::types::{WorkflowKind, WorkflowProgress, WorkflowRole, WorkflowRun};
-use crate::server::{PeerJob, WorkflowGuard, WorkflowInstance, WorkflowRegistry, handlers};
+use crate::server::{
+    PeerJob, WorkflowGuard, WorkflowInstance, WorkflowRegistry, handlers,
+    handlers::CoordinatorRequest,
+};
 use crate::{
     auth::WorkflowAuth,
     config::NodeConfig,
     db::schema::{Commitable, SchemaRead, SchemaWrite},
     error::Result,
     server::peer_status::LastSeen,
-    workflow::{self, WorkflowType},
 };
 
 /// On boot, re-spawn any InProgress workflow runs that were interrupted by the
@@ -97,40 +99,18 @@ pub(crate) async fn respawn_coordinator(
         run.expected_peers.len()
     );
 
-    // Parse the persisted config for this kind into the matching typed option.
-    let mut onboarding_config = None;
-    let mut kick_config = None;
-    let mut contracts_config = None;
-    let mut dars_config = None;
-    let mut add_party_config = None;
-    let mut change_threshold_config = None;
-    let parsed = match kind {
-        WorkflowKind::Onboarding => {
-            serde_json::from_str::<workflow::OnboardingConfig>(&run.config_json)
-                .map(|c| onboarding_config = Some(c))
-        }
-        WorkflowKind::Kick => serde_json::from_str::<workflow::KickConfig>(&run.config_json)
-            .map(|c| kick_config = Some(c)),
-        WorkflowKind::Contracts => {
-            serde_json::from_str::<workflow::ContractsConfig>(&run.config_json)
-                .map(|c| contracts_config = Some(c))
-        }
-        WorkflowKind::Dars => serde_json::from_str::<workflow::DarsConfig>(&run.config_json)
-            .map(|c| dars_config = Some(c)),
-        WorkflowKind::AddParty => {
-            serde_json::from_str::<workflow::AddPartyConfig>(&run.config_json)
-                .map(|c| add_party_config = Some(c))
-        }
-        WorkflowKind::ChangeThreshold => {
-            serde_json::from_str::<workflow::ChangeThresholdConfig>(&run.config_json)
-                .map(|c| change_threshold_config = Some(c))
+    // Parse the persisted config for this kind into its request.
+    let request = match CoordinatorRequest::from_persisted(kind, &run.config_json) {
+        Ok(request) => request,
+        Err(e) => {
+            tracing::warn!(
+                "respawn_coordinator: bad {kind:?} config_json for {instance_name}: {e}"
+            );
+            handlers::mark_run_failed(&db, kind, &instance_name, "Resume failed: invalid config")
+                .await;
+            return;
         }
     };
-    if let Err(e) = parsed {
-        tracing::warn!("respawn_coordinator: bad {kind:?} config_json for {instance_name}: {e}");
-        handlers::mark_run_failed(&db, kind, &instance_name, "Resume failed: invalid config").await;
-        return;
-    }
 
     // Recovery-window guard: this row was loaded as InProgress, but between then
     // and registering the in-memory instance a per-kind cancel could have hit
@@ -174,12 +154,7 @@ pub(crate) async fn respawn_coordinator(
         kind,
         instance.clone(),
         workflows,
-        onboarding_config,
-        kick_config,
-        contracts_config,
-        dars_config,
-        add_party_config,
-        change_threshold_config,
+        request,
         auth_snapshot,
         last_seen,
     );
@@ -197,43 +172,18 @@ fn spawn_coordinator_run(
     kind: WorkflowKind,
     instance: Arc<WorkflowInstance>,
     workflows: WorkflowRegistry,
-    onboarding_config: Option<workflow::OnboardingConfig>,
-    kick_config: Option<workflow::KickConfig>,
-    contracts_config: Option<workflow::ContractsConfig>,
-    dars_config: Option<workflow::DarsConfig>,
-    add_party_config: Option<workflow::AddPartyConfig>,
-    change_threshold_config: Option<workflow::ChangeThresholdConfig>,
+    request: CoordinatorRequest,
     auth: Option<WorkflowAuth>,
     last_seen: LastSeen,
 ) -> tokio::task::JoinHandle<()> {
-    let workflow_type = match kind {
-        WorkflowKind::Onboarding => WorkflowType::Onboarding,
-        WorkflowKind::Kick => WorkflowType::Kick,
-        WorkflowKind::Contracts => WorkflowType::Contracts,
-        WorkflowKind::Dars => WorkflowType::Dars,
-        WorkflowKind::AddParty => WorkflowType::AddParty,
-        WorkflowKind::ChangeThreshold => WorkflowType::ChangeThreshold,
-    };
     tokio::spawn(async move {
         let instance_name = instance.instance_name.clone();
         // Removes the registry entry on return — including panic/abort — so a
         // finished run stops being routed to.
         let _guard = WorkflowGuard::new(workflows, instance_name.clone());
-        let result = workflow::start_coordinator(
-            config,
-            db.clone(),
-            workflow_type,
-            onboarding_config,
-            kick_config,
-            contracts_config,
-            dars_config,
-            add_party_config,
-            change_threshold_config,
-            auth,
-            last_seen,
-            instance.clone(),
-        )
-        .await;
+        let result = request
+            .start(config, db.clone(), auth, last_seen, instance.clone())
+            .await;
 
         match result {
             Ok(_) => {

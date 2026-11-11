@@ -7,6 +7,7 @@ mod contracts;
 mod dars;
 mod kick;
 mod kick_target;
+mod launch;
 mod listing;
 mod onboarding;
 mod preflight;
@@ -25,6 +26,7 @@ pub use change_threshold::{
 pub use contracts::{get_contracts_status, start_contracts};
 pub use dars::{get_dars_status, start_dars, start_dars_for_package, upload_dars_local};
 pub use kick::{get_kick_status, start_kick};
+pub(crate) use launch::CoordinatorRequest;
 pub use listing::{dismiss_workflow, list_external_parties, list_workflows, retry_workflow};
 pub use onboarding::{get_onboarding_status, start_onboarding};
 pub(crate) use runs::{mark_run_completed, mark_run_failed, register_run_metrics};

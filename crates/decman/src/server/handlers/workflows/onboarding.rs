@@ -31,6 +31,7 @@ use crate::{
 };
 
 use super::{
+    launch::CoordinatorRequest,
     preflight::{find_party_with_prefix, format_incompatible_peers, preflight_incompatible_peers},
     runs::{kind_status, mark_run_completed, mark_run_failed, register_and_persist},
 };
@@ -269,21 +270,15 @@ async fn start_onboarding_run(
         // Give peers time to start their peer workflows
         tokio::time::sleep(Duration::from_secs(2)).await;
 
-        let result = workflow::start_coordinator(
-            config.clone(),
-            db.clone(),
-            workflow::WorkflowType::Onboarding,
-            Some(onboarding_config),
-            None, // No kick config
-            None, // No contracts config
-            None, // No dars config
-            None, // No add-party config
-            None, // No change-threshold config
-            None, // No auth registry for onboarding
-            last_seen,
-            instance_for_coord,
-        )
-        .await;
+        let result = CoordinatorRequest::Onboarding(onboarding_config)
+            .start(
+                config.clone(),
+                db.clone(),
+                None,
+                last_seen,
+                instance_for_coord,
+            )
+            .await;
 
         // Update in-memory state in tight scopes — never hold the RwLock
         // across a DB await. /onboarding/status acquires a read lock to

@@ -26,8 +26,9 @@ use crate::{
     db::schema::{Commitable, SchemaWrite},
     error::Result,
     noise::{NoiseKeypair, server::NoiseServer},
+    server::handlers::CoordinatorRequest,
     server::peer_status::LastSeen,
-    workflow::{self, DarsConfig, DarsStep, WorkflowType, contracts::DarFile},
+    workflow::{self, DarsConfig, DarsStep, contracts::DarFile},
 };
 
 const COORDINATOR_RUN: &str = "dars-coordinator-run";
@@ -178,16 +179,9 @@ async fn a_peer_that_gives_up_fails_the_coordinator_run(db: SqlitePool) -> Resul
         instance_name: COORDINATOR_RUN.into(),
         peer_ids: vec![peer.id()],
     };
-    let coordinating = tokio::spawn(workflow::start_coordinator(
+    let coordinating = tokio::spawn(CoordinatorRequest::Dars(dars).start(
         coordinator.config.clone(),
         db.clone(),
-        WorkflowType::Dars,
-        None,
-        None,
-        None,
-        Some(dars),
-        None,
-        None,
         None,
         last_seen,
         instance,

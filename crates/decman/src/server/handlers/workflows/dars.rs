@@ -28,6 +28,7 @@ use crate::{
 };
 
 use super::{
+    launch::CoordinatorRequest,
     onboarding::interpret_invite_reply,
     preflight::{format_incompatible_peers, preflight_incompatible_peers},
     runs::{kind_status, mark_run_completed, mark_run_failed, now_secs, register_and_persist},
@@ -296,21 +297,9 @@ async fn launch_dars(
         // Give peers time to start their peer workflows
         tokio::time::sleep(Duration::from_secs(2)).await;
 
-        let result = workflow::start_coordinator(
-            config,
-            db.clone(),
-            workflow::WorkflowType::Dars,
-            None, // No onboarding config
-            None, // No kick config
-            None, // No contracts config
-            Some(dars_config),
-            None, // No add-party config
-            None, // No change-threshold config
-            None, // No auth
-            last_seen,
-            instance_for_coord,
-        )
-        .await;
+        let result = CoordinatorRequest::Dars(dars_config)
+            .start(config, db.clone(), None, last_seen, instance_for_coord)
+            .await;
 
         // Update in-memory state in tight scopes — never hold the RwLock
         // across a DB await (see kick/onboarding/contracts handlers above).
