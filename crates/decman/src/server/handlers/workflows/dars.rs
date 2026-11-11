@@ -1,7 +1,5 @@
 //! Local DAR upload and the DAR distribution workflow.
 
-use std::time::Duration;
-
 use actix_web::{HttpRequest, HttpResponse, Responder, get, post, web};
 
 use base64::{Engine, engine::general_purpose::STANDARD};
@@ -20,18 +18,18 @@ use crate::{
         package_inventory::fetch_dar_for_package,
         types::{
             DarsInvitePayload, DarsRequest, DistributePackageRequest, ErrorResponse,
-            SuccessResponse, WorkflowGuard, WorkflowInstance, WorkflowKind, WorkflowProgress,
-            WorkflowResponse, WorkflowRole, WorkflowStatusResponse,
+            SuccessResponse, WorkflowInstance, WorkflowKind, WorkflowProgress, WorkflowResponse,
+            WorkflowRole, WorkflowStatusResponse,
         },
     },
     workflow::{self, DarsStep, contracts::DarFile},
 };
 
 use super::{
-    launch::CoordinatorRequest,
+    launch::{CoordinatorRequest, StatusOrder, launch_coordinator},
     onboarding::interpret_invite_reply,
     preflight::{format_incompatible_peers, preflight_incompatible_peers},
-    runs::{kind_status, mark_run_completed, mark_run_failed, now_secs, register_and_persist},
+    runs::{kind_status, now_secs, register_and_persist},
 };
 
 // ============================================================================
@@ -211,139 +209,62 @@ async fn launch_dars(
     )
     .await?;
 
-    let config = data.config.clone();
-    let db = data.db.clone();
-    let dars_state_clone = instance.http.clone();
-    let instance_for_coord = instance.clone();
-    let kind = instance.kind;
-    let workflows = data.workflows.clone();
-    let last_seen = data.last_seen.clone();
     *dars_state.invited_peers.write().await = peer_ids.clone();
-    let instance_for_task = instance_name.clone();
 
-    // Acquire abort_handle, status, and error locks BEFORE spawning, then
-    // flip all three together. Held simultaneously around the spawn so a
-    // concurrent /dars/cancel either runs entirely before us (status !=
-    // InProgress → 409 "no workflow in progress") or entirely after us
-    // (status InProgress AND abort_handle Some → cancel proceeds). Without
-    // this, a cancel arriving between the status flip and the abort_handle
-    // assignment would observe "InProgress + None" and bail with the
-    // spurious "still initializing" 409 — which leaves dars_state pinned
-    // to InProgress and breaks the next /dars/distribute with a stale
-    // 409. Holding `status.write()` across the spawn also blocks the
-    // spawned task's terminal status write until our InProgress flip
-    // lands, so a fast-failing task can't publish its terminal status
-    // before we publish InProgress.
-    let mut abort_guard = dars_state.abort_handle.lock().await;
-    let mut status_guard = dars_state.status.write().await;
-    let mut error_guard = dars_state.error.write().await;
-
-    let join_handle = tokio::spawn(async move {
-        let _workflow_guard = WorkflowGuard::new(workflows, instance_for_task.clone());
-
-        // Send invites to selected peers before starting coordinator workflow
-        let dar_filenames: Vec<String> = dars_config
-            .dar_files
-            .iter()
-            .map(|f| f.filename.clone())
-            .collect();
-        // Pin the content, not just the name: the invitation the operator sees
-        // carries the hash of the exact bytes the peers will be asked to upload
-        // and vet. An empty hash list is the wire signal for "coordinator
-        // predates the field", which makes peers fall back to checking
-        // filenames only — so a DAR we cannot decode has to fail the run rather
-        // than quietly downgrade every peer's check.
-        let dar_hashes: std::result::Result<Vec<String>, _> = dars_config
-            .dar_files
-            .iter()
-            .map(|f| {
-                STANDARD
-                    .decode(&f.data)
-                    .map(|bytes| workflow::validation::hash_dar(&bytes))
-            })
-            .collect();
-        let invite_result = match dar_hashes {
-            Ok(dar_hashes) => {
-                send_dars_invites(
-                    &config,
-                    &db,
-                    &peer_ids,
-                    &dar_filenames,
-                    &dar_hashes,
-                    &dars_config.instance_name,
-                )
-                .await
-            }
-            Err(e) => Err(anyhow::anyhow!(
-                "Could not hash the DARs for the invitation: {e}"
-            )),
-        };
-        if let Err(e) = invite_result {
-            tracing::error!("Failed to send DARs invites: {e}");
-            let mut status = dars_state_clone.status.write().await;
-            let mut error = dars_state_clone.error.write().await;
-            *status = WorkflowProgress::Failed;
-            *error = Some(format!("Failed to send invites: {e}"));
-            mark_run_failed(
-                &db,
-                kind,
-                &instance_for_task,
-                &format!("Failed to send invites: {e}"),
-            )
-            .await;
-            return;
-        }
-
-        // Give peers time to start their peer workflows
-        tokio::time::sleep(Duration::from_secs(2)).await;
-
-        let result = CoordinatorRequest::Dars(dars_config)
-            .start(config, db.clone(), None, last_seen, instance_for_coord)
-            .await;
-
-        // Update in-memory state in tight scopes — never hold the RwLock
-        // across a DB await (see kick/onboarding/contracts handlers above).
-        match result {
-            Ok(_) => {
-                // The run row is marked terminal BEFORE the in-memory status
-                // flips. The two are read by different callers — `/…/status`
-                // reads this lock, while the "already has a workflow in flight"
-                // guard scans the run rows — so flipping memory first opens a
-                // window where the API reports a run finished and refuses the
-                // next workflow for that party in the same breath. Doing the
-                // durable write first can only report a finished run as still
-                // running for an instant, which costs a poll rather than a
-                // rejected request.
-                mark_run_completed(&db, kind, &instance_for_task).await;
-                {
-                    let mut status = dars_state_clone.status.write().await;
-                    *status = WorkflowProgress::Completed;
+    // Send invites to selected peers before starting coordinator workflow
+    let invites = {
+        let config = data.config.clone();
+        let db = data.db.clone();
+        let dars_config = dars_config.clone();
+        Box::pin(async move {
+            let dar_filenames: Vec<String> = dars_config
+                .dar_files
+                .iter()
+                .map(|f| f.filename.clone())
+                .collect();
+            // Pin the content, not just the name: the invitation the operator sees
+            // carries the hash of the exact bytes the peers will be asked to upload
+            // and vet. An empty hash list is the wire signal for "coordinator
+            // predates the field", which makes peers fall back to checking
+            // filenames only — so a DAR we cannot decode has to fail the run rather
+            // than quietly downgrade every peer's check.
+            let dar_hashes: std::result::Result<Vec<String>, _> = dars_config
+                .dar_files
+                .iter()
+                .map(|f| {
+                    STANDARD
+                        .decode(&f.data)
+                        .map(|bytes| workflow::validation::hash_dar(&bytes))
+                })
+                .collect();
+            match dar_hashes {
+                Ok(dar_hashes) => {
+                    send_dars_invites(
+                        &config,
+                        &db,
+                        &peer_ids,
+                        &dar_filenames,
+                        &dar_hashes,
+                        &dars_config.instance_name,
+                    )
+                    .await
                 }
-                tracing::info!("DARs distribution workflow completed successfully");
+                Err(e) => Err(anyhow::anyhow!(
+                    "Could not hash the DARs for the invitation: {e}"
+                )),
             }
-            Err(e) => {
-                let msg = format!("{e}");
-                // Durable row first, in-memory status second — same ordering as the
-                // success path above, and for the same reason: a caller that reads
-                // Failed from `/…/status` and retries must not be refused by the
-                // in-flight guard, which scans the run rows.
-                mark_run_failed(&db, kind, &instance_for_task, &msg).await;
-                {
-                    let mut status = dars_state_clone.status.write().await;
-                    let mut error = dars_state_clone.error.write().await;
-                    *status = WorkflowProgress::Failed;
-                    *error = Some(msg.clone());
-                }
-                tracing::error!("DARs distribution workflow failed: {e}");
-            }
-        }
-    });
-    *abort_guard = Some(join_handle.abort_handle());
-    *status_guard = WorkflowProgress::InProgress;
-    *error_guard = None;
-    drop(error_guard);
-    drop(status_guard);
-    drop(abort_guard);
+        })
+    };
+    launch_coordinator(
+        data,
+        &instance,
+        CoordinatorRequest::Dars(dars_config),
+        None,
+        invites,
+        StatusOrder::RowFirstHoldingLocksOnInviteFailure,
+        None,
+    )
+    .await;
 
     Ok(HttpResponse::Accepted().json(WorkflowResponse {
         status: WorkflowProgress::InProgress,

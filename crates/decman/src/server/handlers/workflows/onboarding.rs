@@ -1,9 +1,6 @@
 //! The onboarding workflow: start, status, invites and the peer mesh check.
 
-use std::{
-    collections::{HashMap, HashSet},
-    time::Duration,
-};
+use std::collections::{HashMap, HashSet};
 
 use actix_web::{HttpRequest, HttpResponse, Responder, get, post, web};
 
@@ -23,17 +20,16 @@ use crate::{
         types::{
             ErrorResponse, MissingEdgeKind, MissingPeerEdge, OnboardingInvitePayload,
             OnboardingMeshErrorResponse, OnboardingRequest, OnboardingResponse, OnboardingStatus,
-            WorkflowGuard, WorkflowInstance, WorkflowKind, WorkflowResponse, WorkflowRole,
-            WorkflowStatusResponse,
+            WorkflowInstance, WorkflowKind, WorkflowResponse, WorkflowRole, WorkflowStatusResponse,
         },
     },
     workflow::{self, OnboardingStep, thresholds::check_confirmation_threshold},
 };
 
 use super::{
-    launch::CoordinatorRequest,
+    launch::{CoordinatorRequest, StatusOrder, launch_coordinator},
     preflight::{find_party_with_prefix, format_incompatible_peers, preflight_incompatible_peers},
-    runs::{kind_status, mark_run_completed, mark_run_failed, register_and_persist},
+    runs::{kind_status, register_and_persist},
 };
 
 // ============================================================================
@@ -219,165 +215,113 @@ async fn start_onboarding_run(
     )
     .await?;
 
-    let config = data.config.clone();
-    let db = data.db.clone();
-    let onboarding_state_clone = instance.http.clone();
-    let instance_for_coord = instance.clone();
-    let kind = instance.kind;
-    let workflows = data.workflows.clone();
     *onboarding_state.invited_peers.write().await = peer_ids.clone();
-    let party_credentials = data.party_credentials.clone();
-    let auth_lock = data.auth.clone();
-    let discovery_gate = super::DiscoveryGate::of(data);
-    let last_seen = data.last_seen.clone();
-    let instance_for_task = instance_name.clone();
 
-    // See start_dars below for the rationale: abort_handle, status, and error
-    // are flipped under simultaneously-held locks so a concurrent
-    // /onboarding/cancel can never observe "status=InProgress + abort_handle=None"
-    // and bail.
-    let mut abort_guard = onboarding_state.abort_handle.lock().await;
-    let mut status_guard = onboarding_state.status.write().await;
-    let mut error_guard = onboarding_state.error.write().await;
-
-    let join_handle = tokio::spawn(async move {
-        let _workflow_guard = WorkflowGuard::new(workflows, instance_for_task.clone());
-
-        // Send invites to selected peers before starting coordinator workflow
-        let invite_result = send_onboarding_invites(
-            &config,
-            &db,
-            &peer_ids,
-            &party_id_prefix,
-            onboarding_config.threshold,
-            onboarding_config.confirmation_threshold,
-            &instance_for_task,
-        )
-        .await;
-        if let Err(e) = invite_result {
-            tracing::error!("Failed to send onboarding invites: {e}");
-            let msg = format!("Failed to send invites: {e}");
-            {
-                let mut status = onboarding_state_clone.status.write().await;
-                let mut error = onboarding_state_clone.error.write().await;
-                *status = OnboardingStatus::Failed;
-                *error = Some(msg.clone());
-            }
-            mark_run_failed(&db, kind, &instance_for_task, &msg).await;
-            return;
-        }
-
-        // Give peers time to start their peer workflows
-        tokio::time::sleep(Duration::from_secs(2)).await;
-
-        let result = CoordinatorRequest::Onboarding(onboarding_config)
-            .start(
-                config.clone(),
-                db.clone(),
-                None,
-                last_seen,
-                instance_for_coord,
+    // Send invites to selected peers before starting coordinator workflow
+    let invites = {
+        let config = data.config.clone();
+        let db = data.db.clone();
+        let threshold = onboarding_config.threshold;
+        let confirmation_threshold = onboarding_config.confirmation_threshold;
+        let instance_name = instance_name.clone();
+        Box::pin(async move {
+            send_onboarding_invites(
+                &config,
+                &db,
+                &peer_ids,
+                &party_id_prefix,
+                threshold,
+                confirmation_threshold,
+                &instance_name,
             )
-            .await;
+            .await
+        })
+    };
+    // Operator configures party credentials via the Party Configuration
+    // dialog; auto-saving placeholders pollutes the auth registry.
 
-        // Update in-memory state in tight scopes — never hold the RwLock
-        // across a DB await. /onboarding/status acquires a read lock to
-        // serve every poll; if a writer holds the lock during the DB write,
-        // every concurrent read blocks for that duration on a slow runner.
-        match result {
-            Ok(_) => {
+    // Refresh dec_party cache in background
+    let refresh: Box<dyn FnOnce() + Send> = {
+        let config = data.config.clone();
+        let db = data.db.clone();
+        let auth_lock = data.auth.clone();
+        let party_credentials = data.party_credentials.clone();
+        let discovery_gate = super::DiscoveryGate::of(data);
+        Box::new(move || {
+            let bg_config = config.clone();
+            let bg_db = db.clone();
+            let bg_auth = auth_lock.clone();
+            let bg_creds = party_credentials.clone();
+            let bg_gate = discovery_gate.clone();
+            tokio::spawn(async move {
+                let auth = bg_auth.read().await.clone();
+                let creds = bg_creds.read().await.clone();
+                // Through the shared gate: a direct discovery slips the
+                // concurrency bound and races the cache write against a
+                // request for the same prefix.
+                match super::discover_and_cache(
+                    &bg_gate,
+                    &bg_config,
+                    &bg_db,
+                    "",
+                    auth,
+                    &creds,
+                    Default::default(),
+                )
+                .await
                 {
-                    let mut status = onboarding_state_clone.status.write().await;
-                    *status = OnboardingStatus::Completed;
-                }
-                tracing::info!("Onboarding workflow completed successfully");
-                mark_run_completed(&db, kind, &instance_for_task).await;
-                // Operator configures party credentials via the Party Configuration
-                // dialog; auto-saving placeholders pollutes the auth registry.
-
-                // Refresh dec_party cache in background
-                let bg_config = config.clone();
-                let bg_db = db.clone();
-                let bg_auth = auth_lock.clone();
-                let bg_creds = party_credentials.clone();
-                let bg_gate = discovery_gate.clone();
-                tokio::spawn(async move {
-                    let auth = bg_auth.read().await.clone();
-                    let creds = bg_creds.read().await.clone();
-                    // Through the shared gate: a direct discovery slips the
-                    // concurrency bound and races the cache write against a
-                    // request for the same prefix.
-                    match super::discover_and_cache(
-                        &bg_gate,
-                        &bg_config,
-                        &bg_db,
-                        "",
-                        auth,
-                        &creds,
-                        Default::default(),
-                    )
-                    .await
-                    {
-                        super::Discovery::Done(resp) => {
-                            resolve_owner_keys_from_peers(&bg_config, &bg_db, &resp.parties).await;
-                            // Audit: report any participants whose owner_key
-                            // is still NULL after resolve. Not fatal — Noise
-                            // resolution may run again on the next stale
-                            // refresh — but unexpected for a freshly
-                            // onboarded party.
-                            for party in &resp.parties {
-                                for p in &party.participants {
-                                    let uid = p.participant_uid.to_string();
-                                    match bg_db
-                                        .get_dec_party_participant_owner_key(&party.party_id, &uid)
-                                        .await
-                                    {
-                                        Ok(Some(_)) => {} // resolved
-                                        Ok(None) => tracing::warn!(
-                                            party_id = %party.party_id,
-                                            participant_uid = %uid,
-                                            "Participant owner_key unresolved after onboarding"
-                                        ),
-                                        Err(e) => tracing::warn!(
-                                            party_id = %party.party_id,
-                                            participant_uid = %uid,
-                                            error = %e,
-                                            "Failed to read owner_key from cache during post-onboarding audit"
-                                        ),
-                                    }
+                    super::Discovery::Done(resp) => {
+                        resolve_owner_keys_from_peers(&bg_config, &bg_db, &resp.parties).await;
+                        // Audit: report any participants whose owner_key
+                        // is still NULL after resolve. Not fatal — Noise
+                        // resolution may run again on the next stale
+                        // refresh — but unexpected for a freshly
+                        // onboarded party.
+                        for party in &resp.parties {
+                            for p in &party.participants {
+                                let uid = p.participant_uid.to_string();
+                                match bg_db
+                                    .get_dec_party_participant_owner_key(&party.party_id, &uid)
+                                    .await
+                                {
+                                    Ok(Some(_)) => {} // resolved
+                                    Ok(None) => tracing::warn!(
+                                        party_id = %party.party_id,
+                                        participant_uid = %uid,
+                                        "Participant owner_key unresolved after onboarding"
+                                    ),
+                                    Err(e) => tracing::warn!(
+                                        party_id = %party.party_id,
+                                        participant_uid = %uid,
+                                        error = %e,
+                                        "Failed to read owner_key from cache during post-onboarding audit"
+                                    ),
                                 }
                             }
                         }
-                        super::Discovery::InFlight
-                        | super::Discovery::AtCapacity
-                        | super::Discovery::Superseded => {
-                            tracing::debug!("Post-onboarding refresh skipped: already running");
-                        }
-                        super::Discovery::Failed(e) => {
-                            tracing::warn!("Failed to refresh parties after onboarding: {e}");
-                        }
                     }
-                });
-            }
-            Err(e) => {
-                let msg = format!("{e}");
-                {
-                    let mut status = onboarding_state_clone.status.write().await;
-                    let mut error = onboarding_state_clone.error.write().await;
-                    *status = OnboardingStatus::Failed;
-                    *error = Some(msg.clone());
+                    super::Discovery::InFlight
+                    | super::Discovery::AtCapacity
+                    | super::Discovery::Superseded => {
+                        tracing::debug!("Post-onboarding refresh skipped: already running");
+                    }
+                    super::Discovery::Failed(e) => {
+                        tracing::warn!("Failed to refresh parties after onboarding: {e}");
+                    }
                 }
-                tracing::error!("Onboarding workflow failed: {e}");
-                mark_run_failed(&db, kind, &instance_for_task, &msg).await;
-            }
-        }
-    });
-    *abort_guard = Some(join_handle.abort_handle());
-    *status_guard = OnboardingStatus::InProgress;
-    *error_guard = None;
-    drop(error_guard);
-    drop(status_guard);
-    drop(abort_guard);
+            });
+        })
+    };
+    launch_coordinator(
+        data,
+        &instance,
+        CoordinatorRequest::Onboarding(onboarding_config),
+        None,
+        invites,
+        StatusOrder::MemoryFirst,
+        Some(refresh),
+    )
+    .await;
 
     Ok(HttpResponse::Accepted().json(OnboardingResponse {
         status: OnboardingStatus::InProgress,

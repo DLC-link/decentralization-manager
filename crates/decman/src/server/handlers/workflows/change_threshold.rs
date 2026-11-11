@@ -1,6 +1,6 @@
 //! The change-threshold workflow, and the confirmation threshold check it shares with external parties.
 
-use std::{collections::HashSet, time::Duration};
+use std::collections::HashSet;
 
 use actix_web::{HttpRequest, HttpResponse, Responder, get, post, web};
 
@@ -19,8 +19,8 @@ use crate::{
         middleware::require_admin,
         types::{
             ChangeThresholdInvitePayload, ChangeThresholdRequest, ErrorResponse, MessageResponse,
-            WorkflowGuard, WorkflowInstance, WorkflowKind, WorkflowProgress, WorkflowResponse,
-            WorkflowRole, WorkflowStatusResponse,
+            WorkflowInstance, WorkflowKind, WorkflowProgress, WorkflowResponse, WorkflowRole,
+            WorkflowStatusResponse,
         },
     },
     workflow::{self, ChangeThresholdStep, thresholds::check_confirmation_threshold},
@@ -28,12 +28,12 @@ use crate::{
 
 use super::{
     cancel::cancel_workflow_state,
-    launch::CoordinatorRequest,
+    launch::{CoordinatorRequest, StatusOrder, launch_coordinator},
     onboarding::interpret_invite_reply,
     preflight::{
         find_inprogress_run_for_party, format_incompatible_peers, preflight_incompatible_peers,
     },
-    runs::{kind_status, mark_run_completed, mark_run_failed, now_secs, register_and_persist},
+    runs::{kind_status, now_secs, register_and_persist},
 };
 
 // ============================================================================
@@ -202,88 +202,24 @@ async fn start_change_threshold_run(
     let invitees_for_invites = invitees.clone();
     *change_state.invited_peers.write().await = invitees;
 
-    let config = data.config.clone();
-    let db = data.db.clone();
-    let change_state_clone = instance.http.clone();
-    let instance_for_coord = instance.clone();
-    let kind = instance.kind;
-    let workflows = data.workflows.clone();
-    let last_seen = data.last_seen.clone();
-    let instance_for_task = instance_name.clone();
-
-    // abort_handle/status/error are flipped under simultaneously-held locks —
-    // see start_dars for the cancel-race rationale.
-    let mut abort_guard = change_state.abort_handle.lock().await;
-    let mut status_guard = change_state.status.write().await;
-    let mut error_guard = change_state.error.write().await;
-
-    let join_handle = tokio::spawn(async move {
-        let _workflow_guard = WorkflowGuard::new(workflows, instance_for_task.clone());
-
-        let invite_result =
-            send_change_threshold_invites(&config, &db, &change_config, &invitees_for_invites)
-                .await;
-        if let Err(e) = invite_result {
-            tracing::error!("Failed to send change-threshold invites: {e}");
-            let msg = format!("Failed to send invites: {e}");
-            {
-                let mut status = change_state_clone.status.write().await;
-                let mut error = change_state_clone.error.write().await;
-                *status = WorkflowProgress::Failed;
-                *error = Some(msg.clone());
-            }
-            mark_run_failed(&db, kind, &instance_for_task, &msg).await;
-            return;
-        }
-
-        // Give peers time to start their peer workflows
-        tokio::time::sleep(Duration::from_secs(2)).await;
-
-        let result = CoordinatorRequest::ChangeThreshold(change_config)
-            .start(config, db.clone(), None, last_seen, instance_for_coord)
-            .await;
-
-        match result {
-            Ok(_) => {
-                // The run row is marked terminal BEFORE the in-memory status
-                // flips. The two are read by different callers — `/…/status`
-                // reads this lock, while the "already has a workflow in flight"
-                // guard scans the run rows — so flipping memory first opens a
-                // window where the API reports a run finished and refuses the
-                // next workflow for that party in the same breath. Doing the
-                // durable write first can only report a finished run as still
-                // running for an instant, which costs a poll rather than a
-                // rejected request.
-                mark_run_completed(&db, kind, &instance_for_task).await;
-                {
-                    let mut status = change_state_clone.status.write().await;
-                    *status = WorkflowProgress::Completed;
-                }
-                tracing::info!("Change-threshold workflow completed successfully");
-            }
-            Err(e) => {
-                let msg = format!("{e}");
-                // Durable row first, in-memory status second — same ordering as the
-                // success path above, and for the same reason: a caller that reads
-                // Failed from `/…/status` and retries must not be refused by the
-                // in-flight guard, which scans the run rows.
-                mark_run_failed(&db, kind, &instance_for_task, &msg).await;
-                {
-                    let mut status = change_state_clone.status.write().await;
-                    let mut error = change_state_clone.error.write().await;
-                    *status = WorkflowProgress::Failed;
-                    *error = Some(msg.clone());
-                }
-                tracing::error!("Change-threshold workflow failed: {e}");
-            }
-        }
-    });
-    *abort_guard = Some(join_handle.abort_handle());
-    *status_guard = WorkflowProgress::InProgress;
-    *error_guard = None;
-    drop(error_guard);
-    drop(status_guard);
-    drop(abort_guard);
+    let invites = {
+        let config = data.config.clone();
+        let db = data.db.clone();
+        let change_config = change_config.clone();
+        Box::pin(async move {
+            send_change_threshold_invites(&config, &db, &change_config, &invitees_for_invites).await
+        })
+    };
+    launch_coordinator(
+        data,
+        &instance,
+        CoordinatorRequest::ChangeThreshold(change_config),
+        None,
+        invites,
+        StatusOrder::RowFirst,
+        None,
+    )
+    .await;
 
     Ok(HttpResponse::Accepted().json(WorkflowResponse {
         status: WorkflowProgress::InProgress,

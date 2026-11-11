@@ -1,6 +1,6 @@
 //! The contracts workflow: start, status and invites.
 
-use std::{collections::HashSet, time::Duration};
+use std::collections::HashSet;
 
 use actix_web::{HttpRequest, HttpResponse, Responder, get, post, web};
 
@@ -19,21 +19,20 @@ use crate::{
         error::ApiError,
         middleware::require_admin,
         types::{
-            ContractsInvitePayload, ContractsRequest, ErrorResponse, WorkflowGuard,
-            WorkflowInstance, WorkflowKind, WorkflowProgress, WorkflowResponse, WorkflowRole,
-            WorkflowStatusResponse,
+            ContractsInvitePayload, ContractsRequest, ErrorResponse, WorkflowInstance,
+            WorkflowKind, WorkflowProgress, WorkflowResponse, WorkflowRole, WorkflowStatusResponse,
         },
     },
     workflow::{self, ContractsStep},
 };
 
 use super::{
-    launch::CoordinatorRequest,
+    launch::{CoordinatorRequest, StatusOrder, launch_coordinator},
     onboarding::interpret_invite_reply,
     preflight::{
         find_inprogress_run_for_party, format_incompatible_peers, preflight_incompatible_peers,
     },
-    runs::{kind_status, mark_run_completed, mark_run_failed, now_secs, register_and_persist},
+    runs::{kind_status, now_secs, register_and_persist},
 };
 
 // ============================================================================
@@ -174,148 +173,78 @@ async fn start_contracts_run(
     )
     .await?;
 
-    let config = data.config.clone();
-    let db = data.db.clone();
     let workflow_auth = data.auth.read().await.clone();
-    let auth_lock = data.auth.clone();
-    let discovery_gate = super::DiscoveryGate::of(data);
-    let contracts_state_clone = instance.http.clone();
-    let instance_for_coord = instance.clone();
-    let kind = instance.kind;
-    let workflows = data.workflows.clone();
-    let party_credentials = data.party_credentials.clone();
-    let last_seen = data.last_seen.clone();
     let contracts_invitees_for_invites = contracts_invitees.clone();
     *contracts_state.invited_peers.write().await = contracts_invitees;
-    let instance_for_task = instance_name_for_run.clone();
 
-    // See start_dars below for the rationale: abort_handle, status, and error
-    // are flipped under simultaneously-held locks so a concurrent
-    // /contracts/cancel can never observe "status=InProgress + abort_handle=None"
-    // and bail.
-    let mut abort_guard = contracts_state.abort_handle.lock().await;
-    let mut status_guard = contracts_state.status.write().await;
-    let mut error_guard = contracts_state.error.write().await;
-
-    let join_handle = tokio::spawn(async move {
-        let _workflow_guard = WorkflowGuard::new(workflows, instance_for_task.clone());
-
-        // Send invites to this party's members before starting coordinator workflow
-        let invite_result = send_contracts_invites(
-            &config,
-            &db,
-            &contracts_config,
-            &contracts_invitees_for_invites,
-        )
-        .await;
-        if let Err(e) = invite_result {
-            tracing::error!("Failed to send contracts invites: {e}");
-            let msg = format!("Failed to send invites: {e}");
-            {
-                let mut status = contracts_state_clone.status.write().await;
-                let mut error = contracts_state_clone.error.write().await;
-                *status = WorkflowProgress::Failed;
-                *error = Some(msg.clone());
-            }
-            mark_run_failed(&db, kind, &instance_for_task, &msg).await;
-            return;
-        }
-
-        // Give peers time to start their peer workflows
-        tokio::time::sleep(Duration::from_secs(2)).await;
-
-        let result = CoordinatorRequest::Contracts(contracts_config.clone())
-            .start(
-                config.clone(),
-                db.clone(),
-                workflow_auth,
-                last_seen,
-                instance_for_coord,
+    // Send invites to this party's members before starting coordinator workflow
+    let invites = {
+        let config = data.config.clone();
+        let db = data.db.clone();
+        let contracts_config = contracts_config.clone();
+        Box::pin(async move {
+            send_contracts_invites(
+                &config,
+                &db,
+                &contracts_config,
+                &contracts_invitees_for_invites,
             )
-            .await;
-
-        // Update in-memory state in tight scopes — never hold the RwLock
-        // across a DB await. /contracts/status acquires a read lock to
-        // serve every poll; if a writer holds the lock during the DB write,
-        // every concurrent read blocks for that duration on a slow runner.
-        match result {
-            Ok(_) => {
-                // The run row is marked terminal BEFORE the in-memory status
-                // flips. The two are read by different callers — `/…/status`
-                // reads this lock, while the "already has a workflow in flight"
-                // guard scans the run rows — so flipping memory first opens a
-                // window where the API reports a run finished and refuses the
-                // next workflow for that party in the same breath. Doing the
-                // durable write first can only report a finished run as still
-                // running for an instant, which costs a poll rather than a
-                // rejected request.
-                mark_run_completed(&db, kind, &instance_for_task).await;
+            .await
+        })
+    };
+    // Refresh dec_party cache to pick up new contracts
+    let refresh: Box<dyn FnOnce() + Send> = {
+        let config = data.config.clone();
+        let db = data.db.clone();
+        let auth_lock = data.auth.clone();
+        let discovery_gate = super::DiscoveryGate::of(data);
+        let party_credentials = data.party_credentials.clone();
+        Box::new(move || {
+            let bg_config = config.clone();
+            let bg_db = db.clone();
+            let bg_auth = auth_lock.clone();
+            let bg_creds = party_credentials.clone();
+            let bg_gate = discovery_gate.clone();
+            tokio::spawn(async move {
+                let auth = bg_auth.read().await.clone();
+                let creds = bg_creds.read().await.clone();
+                // Through the shared gate, as above.
+                match super::discover_and_cache(
+                    &bg_gate,
+                    &bg_config,
+                    &bg_db,
+                    "",
+                    auth,
+                    &creds,
+                    Default::default(),
+                )
+                .await
                 {
-                    let mut status = contracts_state_clone.status.write().await;
-                    *status = WorkflowProgress::Completed;
-                }
-                tracing::info!("Contracts workflow completed successfully");
-
-                // Refresh dec_party cache to pick up new contracts
-                let bg_config = config.clone();
-                let bg_db = db.clone();
-                let bg_auth = auth_lock.clone();
-                let bg_creds = party_credentials.clone();
-                let bg_gate = discovery_gate.clone();
-                tokio::spawn(async move {
-                    let auth = bg_auth.read().await.clone();
-                    let creds = bg_creds.read().await.clone();
-                    // Through the shared gate, as above.
-                    match super::discover_and_cache(
-                        &bg_gate,
-                        &bg_config,
-                        &bg_db,
-                        "",
-                        auth,
-                        &creds,
-                        Default::default(),
-                    )
-                    .await
-                    {
-                        super::Discovery::Done(resp) => {
-                            resolve_owner_keys_from_peers(&bg_config, &bg_db, &resp.parties).await;
-                        }
-                        super::Discovery::InFlight
-                        | super::Discovery::AtCapacity
-                        | super::Discovery::Superseded => {
-                            tracing::debug!("Post-contracts refresh skipped: already running");
-                        }
-                        super::Discovery::Failed(e) => {
-                            tracing::warn!(
-                                "Failed to refresh parties after contract deployment: {e}"
-                            );
-                        }
+                    super::Discovery::Done(resp) => {
+                        resolve_owner_keys_from_peers(&bg_config, &bg_db, &resp.parties).await;
                     }
-                });
-            }
-            Err(e) => {
-                let msg = format!("{e}");
-                // Durable row first, in-memory status second — same ordering as the
-                // success path above, and for the same reason: a caller that reads
-                // Failed from `/…/status` and retries must not be refused by the
-                // in-flight guard, which scans the run rows.
-                mark_run_failed(&db, kind, &instance_for_task, &msg).await;
-                {
-                    let mut status = contracts_state_clone.status.write().await;
-                    let mut error = contracts_state_clone.error.write().await;
-                    *status = WorkflowProgress::Failed;
-                    *error = Some(msg.clone());
+                    super::Discovery::InFlight
+                    | super::Discovery::AtCapacity
+                    | super::Discovery::Superseded => {
+                        tracing::debug!("Post-contracts refresh skipped: already running");
+                    }
+                    super::Discovery::Failed(e) => {
+                        tracing::warn!("Failed to refresh parties after contract deployment: {e}");
+                    }
                 }
-                tracing::error!("Contracts workflow failed: {e}");
-            }
-        }
-    });
-    *abort_guard = Some(join_handle.abort_handle());
-    *status_guard = WorkflowProgress::InProgress;
-    *error_guard = None;
-    drop(error_guard);
-    drop(status_guard);
-    drop(abort_guard);
+            });
+        })
+    };
+    launch_coordinator(
+        data,
+        &instance,
+        CoordinatorRequest::Contracts(contracts_config),
+        workflow_auth,
+        invites,
+        StatusOrder::RowFirst,
+        Some(refresh),
+    )
+    .await;
 
     Ok(HttpResponse::Accepted().json(WorkflowResponse {
         status: WorkflowProgress::InProgress,

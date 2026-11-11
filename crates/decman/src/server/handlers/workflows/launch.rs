@@ -135,6 +135,12 @@ pub(crate) enum StatusOrder {
     /// In memory, then the log line, then the run row. Kick, onboarding and
     /// a resumed run.
     MemoryFirst,
+    /// The run row, then in memory, then the log line. Contracts, add-party
+    /// and change-threshold.
+    RowFirst,
+    /// As [`RowFirst`](Self::RowFirst), except that a failed invite holds
+    /// the status locks while it writes the run row. DARs.
+    RowFirstHoldingLocksOnInviteFailure,
 }
 
 /// How a coordinator task begins.
@@ -224,7 +230,14 @@ pub(crate) fn spawn_coordinator_task(
                     tracing::error!("Failed to send {} invites: {e}", invite_label(kind));
                     let msg = format!("Failed to send invites: {e}");
                     match order {
-                        StatusOrder::MemoryFirst => {
+                        StatusOrder::RowFirstHoldingLocksOnInviteFailure => {
+                            let mut status = state.status.write().await;
+                            let mut error = state.error.write().await;
+                            *status = WorkflowProgress::Failed;
+                            *error = Some(msg.clone());
+                            mark_run_failed(&db, kind, &instance_name, &msg).await;
+                        }
+                        StatusOrder::MemoryFirst | StatusOrder::RowFirst => {
                             {
                                 let mut status = state.status.write().await;
                                 let mut error = state.error.write().await;
@@ -252,6 +265,15 @@ pub(crate) fn spawn_coordinator_task(
         // across a DB await. The status endpoints take a read lock to serve
         // every poll; a writer holding it during the DB write would block
         // each concurrent read for that long on a slow runner.
+        //
+        // With `RowFirst` the run row is marked terminal BEFORE the in-memory
+        // status flips. The two are read by different callers — `/…/status`
+        // reads this lock, while the "already has a workflow in flight" guard
+        // scans the run rows — so flipping memory first opens a window where
+        // the API reports a run finished and refuses the next workflow for
+        // that party in the same breath. Doing the durable write first can
+        // only report a finished run as still running for an instant, which
+        // costs a poll rather than a rejected request.
         match result {
             Ok(_) => {
                 let log_completed = || {
@@ -266,6 +288,11 @@ pub(crate) fn spawn_coordinator_task(
                         *state.status.write().await = WorkflowProgress::Completed;
                         log_completed();
                         mark_run_completed(&db, kind, &instance_name).await;
+                    }
+                    StatusOrder::RowFirst | StatusOrder::RowFirstHoldingLocksOnInviteFailure => {
+                        mark_run_completed(&db, kind, &instance_name).await;
+                        *state.status.write().await = WorkflowProgress::Completed;
+                        log_completed();
                     }
                 }
                 if let Some(after_success) = after_success {
@@ -292,6 +319,11 @@ pub(crate) fn spawn_coordinator_task(
                         write_failed().await;
                         log_failed();
                         mark_run_failed(&db, kind, &instance_name, &msg).await;
+                    }
+                    StatusOrder::RowFirst | StatusOrder::RowFirstHoldingLocksOnInviteFailure => {
+                        mark_run_failed(&db, kind, &instance_name, &msg).await;
+                        write_failed().await;
+                        log_failed();
                     }
                 }
             }
