@@ -11,6 +11,69 @@ use serde::{Deserialize, Serialize};
 
 use crate::canton_id::CantonId;
 
+/// Implements `as_str` for a fieldless enum from a variant-to-name table, and
+/// the traits listed after the table over the same names: `Display` writes
+/// `as_str`, and `FromStr(prefix)` parses each name back and rejects any other
+/// string with `"{prefix}: {input}"`. Each name must equal the variant's serde
+/// name; the tests at the end of this file check that.
+macro_rules! string_enum {
+    (@traits $ty:ident { $($variant:ident => $name:literal,)+ }) => {};
+    (@traits $ty:ident { $($variant:ident => $name:literal,)+ } Display; $($rest:tt)*) => {
+        impl std::fmt::Display for $ty {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str(self.as_str())
+            }
+        }
+        string_enum!(@traits $ty { $($variant => $name,)+ } $($rest)*);
+    };
+    (
+        @traits $ty:ident { $($variant:ident => $name:literal,)+ }
+        FromStr($prefix:literal); $($rest:tt)*
+    ) => {
+        impl std::str::FromStr for $ty {
+            type Err = anyhow::Error;
+
+            fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+                match s {
+                    $($name => Ok(Self::$variant),)+
+                    other => Err(anyhow::anyhow!("{}: {other}", $prefix)),
+                }
+            }
+        }
+        string_enum!(@traits $ty { $($variant => $name,)+ } $($rest)*);
+    };
+    (
+        $(#[$doc:meta])*
+        $ty:ident::as_str(self) { $($variant:ident => $name:literal,)+ }
+        $($rest:tt)*
+    ) => {
+        impl $ty {
+            $(#[$doc])*
+            pub fn as_str(self) -> &'static str {
+                match self {
+                    $(Self::$variant => $name,)+
+                }
+            }
+        }
+        string_enum!(@traits $ty { $($variant => $name,)+ } $($rest)*);
+    };
+    (
+        $(#[$doc:meta])*
+        $ty:ident::as_str(&self) { $($variant:ident => $name:literal,)+ }
+        $($rest:tt)*
+    ) => {
+        impl $ty {
+            $(#[$doc])*
+            pub fn as_str(&self) -> &'static str {
+                match self {
+                    $(Self::$variant => $name,)+
+                }
+            }
+        }
+        string_enum!(@traits $ty { $($variant => $name,)+ } $($rest)*);
+    };
+}
+
 /// Participant permission level
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
@@ -23,22 +86,15 @@ pub enum Permission {
     Unknown,
 }
 
-impl Permission {
+string_enum! {
     /// Lowercase label, matching the serde wire representation.
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::Submission => "submission",
-            Self::Confirmation => "confirmation",
-            Self::Observation => "observation",
-            Self::Unknown => "unknown",
-        }
+    Permission::as_str(&self) {
+        Submission => "submission",
+        Confirmation => "confirmation",
+        Observation => "observation",
+        Unknown => "unknown",
     }
-}
-
-impl std::fmt::Display for Permission {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.as_str())
-    }
+    Display;
 }
 
 /// Participant in a decentralized party
@@ -287,23 +343,16 @@ pub enum WorkflowProgress {
     Cancelled,
 }
 
-impl WorkflowProgress {
+string_enum! {
     /// Lowercase label, matching the serde wire representation.
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Idle => "idle",
-            Self::InProgress => "inprogress",
-            Self::Completed => "completed",
-            Self::Failed => "failed",
-            Self::Cancelled => "cancelled",
-        }
+    WorkflowProgress::as_str(self) {
+        Idle => "idle",
+        InProgress => "inprogress",
+        Completed => "completed",
+        Failed => "failed",
+        Cancelled => "cancelled",
     }
-}
-
-impl std::fmt::Display for WorkflowProgress {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.as_str())
-    }
+    Display;
 }
 
 /// Which workflow this run belongs to. Mirrors InvitationType, but lives on
@@ -321,38 +370,17 @@ pub enum WorkflowKind {
     ChangeThreshold,
 }
 
-impl WorkflowKind {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Onboarding => "Onboarding",
-            Self::Kick => "Kick",
-            Self::Contracts => "Contracts",
-            Self::Dars => "Dars",
-            Self::AddParty => "AddParty",
-            Self::ChangeThreshold => "ChangeThreshold",
-        }
+string_enum! {
+    WorkflowKind::as_str(self) {
+        Onboarding => "Onboarding",
+        Kick => "Kick",
+        Contracts => "Contracts",
+        Dars => "Dars",
+        AddParty => "AddParty",
+        ChangeThreshold => "ChangeThreshold",
     }
-}
-
-impl std::fmt::Display for WorkflowKind {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
-
-impl std::str::FromStr for WorkflowKind {
-    type Err = anyhow::Error;
-    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
-        match s {
-            "Onboarding" => Ok(Self::Onboarding),
-            "Kick" => Ok(Self::Kick),
-            "Contracts" => Ok(Self::Contracts),
-            "Dars" => Ok(Self::Dars),
-            "AddParty" => Ok(Self::AddParty),
-            "ChangeThreshold" => Ok(Self::ChangeThreshold),
-            other => Err(anyhow::anyhow!("unknown workflow kind: {other}")),
-        }
-    }
+    Display;
+    FromStr("unknown workflow kind");
 }
 
 impl From<InvitationType> for WorkflowKind {
@@ -379,30 +407,13 @@ pub enum WorkflowRole {
     Peer,
 }
 
-impl WorkflowRole {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Coordinator => "Coordinator",
-            Self::Peer => "Peer",
-        }
+string_enum! {
+    WorkflowRole::as_str(self) {
+        Coordinator => "Coordinator",
+        Peer => "Peer",
     }
-}
-
-impl std::fmt::Display for WorkflowRole {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
-
-impl std::str::FromStr for WorkflowRole {
-    type Err = anyhow::Error;
-    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
-        match s {
-            "Coordinator" => Ok(Self::Coordinator),
-            "Peer" => Ok(Self::Peer),
-            other => Err(anyhow::anyhow!("unknown workflow role: {other}")),
-        }
-    }
+    Display;
+    FromStr("unknown workflow role");
 }
 
 /// `current_step` of the first step of every workflow kind, where the
@@ -560,40 +571,18 @@ pub enum InvitationType {
     ChangeThreshold,
 }
 
-impl InvitationType {
+string_enum! {
     /// Stable string label used for DB storage. Matches the PascalCase serde repr.
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Onboarding => "Onboarding",
-            Self::Kick => "Kick",
-            Self::Contracts => "Contracts",
-            Self::Dars => "Dars",
-            Self::AddParty => "AddParty",
-            Self::ChangeThreshold => "ChangeThreshold",
-        }
+    InvitationType::as_str(self) {
+        Onboarding => "Onboarding",
+        Kick => "Kick",
+        Contracts => "Contracts",
+        Dars => "Dars",
+        AddParty => "AddParty",
+        ChangeThreshold => "ChangeThreshold",
     }
-}
-
-impl std::fmt::Display for InvitationType {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
-
-impl std::str::FromStr for InvitationType {
-    type Err = anyhow::Error;
-
-    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
-        match s {
-            "Onboarding" => Ok(Self::Onboarding),
-            "Kick" => Ok(Self::Kick),
-            "Contracts" => Ok(Self::Contracts),
-            "Dars" => Ok(Self::Dars),
-            "AddParty" => Ok(Self::AddParty),
-            "ChangeThreshold" => Ok(Self::ChangeThreshold),
-            other => Err(anyhow::anyhow!("unknown invitation type: {other}")),
-        }
-    }
+    Display;
+    FromStr("unknown invitation type");
 }
 
 /// A pending invitation from a coordinator
@@ -665,26 +654,13 @@ pub enum InvitationOutcome {
     Declined,
 }
 
-impl InvitationOutcome {
+string_enum! {
     /// Stable string label used for DB storage. Matches the lowercase serde repr.
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Accepted => "accepted",
-            Self::Declined => "declined",
-        }
+    InvitationOutcome::as_str(self) {
+        Accepted => "accepted",
+        Declined => "declined",
     }
-}
-
-impl std::str::FromStr for InvitationOutcome {
-    type Err = anyhow::Error;
-
-    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
-        match s {
-            "accepted" => Ok(Self::Accepted),
-            "declined" => Ok(Self::Declined),
-            other => Err(anyhow::anyhow!("unknown invitation outcome: {other}")),
-        }
-    }
+    FromStr("unknown invitation outcome");
 }
 
 /// An invitation the operator accepted or declined, kept so the notification
@@ -755,4 +731,133 @@ pub struct WorkflowInfo {
     pub step: String,
     pub step_index: i64,
     pub step_total: i64,
+}
+
+#[cfg(test)]
+mod tests {
+    use std::str::FromStr;
+
+    use super::*;
+
+    /// The serde name of `value`. Every string conversion must equal it.
+    fn serde_name<T: Serialize>(value: &T) -> String {
+        match serde_json::to_value(value) {
+            Ok(serde_json::Value::String(name)) => name,
+            other => panic!("expected a string, got {other:?}"),
+        }
+    }
+
+    /// `value` read back from its serde name.
+    fn from_serde_name<T: serde::de::DeserializeOwned>(name: &str) -> T {
+        match serde_json::from_value(serde_json::Value::String(name.to_string())) {
+            Ok(value) => value,
+            Err(e) => panic!("{name} must deserialize: {e}"),
+        }
+    }
+
+    /// `T::from_str(input)` must fail with exactly `message`.
+    fn assert_parse_error<T: FromStr<Err = anyhow::Error> + std::fmt::Debug>(
+        input: &str,
+        message: &str,
+    ) {
+        match T::from_str(input) {
+            Ok(value) => panic!("{input} must not parse, got {value:?}"),
+            Err(e) => assert_eq!(e.to_string(), message),
+        }
+    }
+
+    #[test]
+    fn permission_strings_match_serde() {
+        use Permission::*;
+        let all = [Submission, Confirmation, Observation, Unknown];
+        let names = ["submission", "confirmation", "observation", "unknown"];
+        for (permission, name) in all.into_iter().zip(names) {
+            assert_eq!(serde_name(&permission), name);
+            assert_eq!(permission.as_str(), name);
+            assert_eq!(permission.to_string(), name);
+        }
+    }
+
+    #[test]
+    fn workflow_progress_strings_match_serde() {
+        use WorkflowProgress::*;
+        let all = [Idle, InProgress, Completed, Failed, Cancelled];
+        let names = ["idle", "inprogress", "completed", "failed", "cancelled"];
+        for (progress, name) in all.into_iter().zip(names) {
+            assert_eq!(serde_name(&progress), name);
+            assert_eq!(from_serde_name::<WorkflowProgress>(name), progress);
+            assert_eq!(progress.as_str(), name);
+            assert_eq!(progress.to_string(), name);
+        }
+    }
+
+    #[test]
+    fn workflow_kind_strings_round_trip() {
+        use WorkflowKind::*;
+        let all = [Onboarding, Kick, Contracts, Dars, AddParty, ChangeThreshold];
+        let names = [
+            "Onboarding",
+            "Kick",
+            "Contracts",
+            "Dars",
+            "AddParty",
+            "ChangeThreshold",
+        ];
+        for (kind, name) in all.into_iter().zip(names) {
+            assert_eq!(serde_name(&kind), name);
+            assert_eq!(from_serde_name::<WorkflowKind>(name), kind);
+            assert_eq!(kind.as_str(), name);
+            assert_eq!(kind.to_string(), name);
+            assert_eq!(WorkflowKind::from_str(name).ok(), Some(kind));
+        }
+        assert_parse_error::<WorkflowKind>("onboarding", "unknown workflow kind: onboarding");
+        assert_parse_error::<WorkflowKind>("", "unknown workflow kind: ");
+    }
+
+    #[test]
+    fn workflow_role_strings_round_trip() {
+        use WorkflowRole::*;
+        for (role, name) in [(Coordinator, "Coordinator"), (Peer, "Peer")] {
+            assert_eq!(serde_name(&role), name);
+            assert_eq!(from_serde_name::<WorkflowRole>(name), role);
+            assert_eq!(role.as_str(), name);
+            assert_eq!(role.to_string(), name);
+            assert_eq!(WorkflowRole::from_str(name).ok(), Some(role));
+        }
+        assert_parse_error::<WorkflowRole>("peer", "unknown workflow role: peer");
+    }
+
+    #[test]
+    fn invitation_type_strings_round_trip() {
+        use InvitationType::*;
+        let all = [Onboarding, Kick, Contracts, Dars, AddParty, ChangeThreshold];
+        let names = [
+            "Onboarding",
+            "Kick",
+            "Contracts",
+            "Dars",
+            "AddParty",
+            "ChangeThreshold",
+        ];
+        for (kind, name) in all.into_iter().zip(names) {
+            assert_eq!(serde_name(&kind), name);
+            assert_eq!(from_serde_name::<InvitationType>(name), kind);
+            assert_eq!(kind.as_str(), name);
+            assert_eq!(kind.to_string(), name);
+            assert_eq!(InvitationType::from_str(name).ok(), Some(kind));
+        }
+        assert_parse_error::<InvitationType>("kick", "unknown invitation type: kick");
+    }
+
+    #[test]
+    fn invitation_outcome_strings_round_trip() {
+        use InvitationOutcome::*;
+        for (outcome, name) in [(Accepted, "accepted"), (Declined, "declined")] {
+            assert_eq!(serde_name(&outcome), name);
+            assert_eq!(from_serde_name::<InvitationOutcome>(name), outcome);
+            assert_eq!(outcome.as_str(), name);
+            assert_eq!(InvitationOutcome::from_str(name).ok(), Some(outcome));
+        }
+        assert_parse_error::<InvitationOutcome>("Accepted", "unknown invitation outcome: Accepted");
+    }
 }
