@@ -9,9 +9,12 @@ use sqlx::SqlitePool;
 
 use crate::{
     canton_id::CantonId,
-    config::NodeConfig,
+    config::{NodeConfig, Peer},
     consts::OWNER_ONLY_KICK,
-    db::schema::SchemaRead,
+    db::{
+        rows::{DecPartyOwnerRow, DecPartyParticipantRow},
+        schema::SchemaRead,
+    },
     error::Result,
     noise::{Message, MessageType},
     server::{
@@ -29,8 +32,8 @@ use crate::{
 use super::{
     invites::{InviteLabels, Recipients, invite_log, send_invites},
     kick_target::{
-        cached_confirmation_threshold, cached_namespace_threshold, kick_threshold_bound,
-        party_member_count, resolve_kick_target,
+        KickTarget, cached_confirmation_threshold, cached_namespace_threshold,
+        kick_threshold_bound, party_member_count, resolve_kick_target,
     },
     launch::{CoordinatorRequest, RunEnd, StatusOrder, launch_coordinator, run_log},
     preflight::{
@@ -107,19 +110,7 @@ async fn start_kick_run(
             ApiError::Internal("Failed to load decentralized party owners".to_string())
         })?;
 
-    // The server works out the owner key from the cache rather than taking
-    // it from the client, so an empty prefill becomes a clear error.
-    let target = resolve_kick_target(
-        body.participant_id.as_ref(),
-        body.owner_key.as_deref(),
-        &member_rows,
-        &owner_rows,
-    )?;
-    if target.participant.as_ref() == Some(&self_id) {
-        return Err(ApiError::BadRequest("Cannot kick yourself".to_string()));
-    }
-    // The participant that leaves the hosting mapping, if the member hosts.
-    let kicked_host = target.participant.clone().filter(|_| target.hosts);
+    let target = kick_target(body, &self_id, &member_rows, &owner_rows)?;
 
     // Load peers once: we use the count to bound `new_threshold` per the
     // audit finding, then filter into `invitees`. A DB error here is fatal
@@ -129,95 +120,28 @@ async fn start_kick_run(
         ApiError::Internal("Failed to load peers".to_string())
     })?;
 
-    // Scope the kick to this dec party's actual members, not every peer this
-    // node has configured. A party can be a strict subset of the configured
-    // mesh (see start_onboarding), and basing the signer set / threshold bound
-    // / invites on the full mesh would invite outsiders and stall
-    // WaitingForPeers on peers that were never part of the party. Fall back to
-    // the full peer set only if no cached row yields a usable id — membership
-    // not cached yet, or every `participant_uid` in a legacy/invalid format —
-    // since scoping to an empty member set would reject the kick with a
-    // misleading "need at least 2 party members" error.
-    let party_member_ids: HashSet<CantonId> = {
-        let parsed: HashSet<CantonId> = member_rows
-            .iter()
-            .filter_map(|r| CantonId::parse(&r.participant_uid).ok())
-            .collect();
-        if parsed.is_empty() {
-            tracing::warn!(
-                "No usable cached participants for {decentralized_party_id} \
-                 ({count} rows); falling back to all configured peers for \
-                 kick scoping",
-                count = member_rows.len()
-            );
-            peers.iter().map(|p| p.participant_id.clone()).collect()
-        } else {
-            parsed
-        }
-    };
-    let peers: Vec<_> = peers
-        .into_iter()
-        .filter(|p| party_member_ids.contains(&p.participant_id))
-        .collect();
-
-    // Preconditions for a kick: there must be at least one peer left
-    // after the kick (so the surviving signer set is non-empty), and a host
-    // being kicked must be a known peer. Without these checks
-    // the `post_kick_member_count` below could go negative and produce
-    // a "between 1 and -1" error that obscures the real problem.
-    let co_signers = peers
-        .iter()
-        .filter(|p| Some(&p.participant_id) != kicked_host.as_ref())
-        .count();
-    if co_signers < 1 {
-        return Err(ApiError::BadRequest(format!(
-            "Cannot kick: need at least one other hosting member besides this node \
-                 to co-sign, have {co_signers}"
-        )));
+    let scope = kick_scope(&member_rows, &peers);
+    if scope.fell_back {
+        tracing::warn!(
+            "No usable cached participants for {decentralized_party_id} \
+             ({count} rows); falling back to all configured peers for \
+             kick scoping",
+            count = member_rows.len()
+        );
     }
-    if let Some(host) = &kicked_host
-        && !peers.iter().any(|p| p.participant_id == *host)
-    {
-        return Err(ApiError::BadRequest(format!(
-            "Cannot kick {host}: not a member of this decentralized party"
-        )));
-    }
-
-    // Validate `new_threshold` before persisting anything. Negative or zero
-    // values corrupt topology submission: DNS `authorize()` accepts a bare
-    // i32 while the subsequent P2P proposal converts via `try_into()` to
-    // u32 and fails partway, leaving the DNS write committed with no
-    // rollback. The upper bound is the post-kick member count — there
-    // must be at least as many remaining signers as the threshold needs.
-    //
-    // Counted from the party's OWN member set, not from `peers`. `peers` is
-    // scoped to invitees and so excludes this node, which is itself a member —
-    // it signs the proposals. Bounding by it undercounts by one, and a party
-    // whose threshold already equals its member count then has no acceptable
-    // value at all: the peers reject anything below the current threshold, and
-    // this check rejects anything at or above it. The add-party and
-    // change-threshold bounds below already count the party set.
-    //
-    // The party's signing threshold follows the namespace one and counts the
-    // hosts' keys, so the hosts left after the kick bound it as well as the
-    // owners left. An owner that hosts nothing leaves every host in place.
-    let member_count = party_member_count(&party_member_ids, &self_id);
-    let post_kick_member_count = member_count - usize::from(target.hosts);
-    let max_threshold = kick_threshold_bound(target.hosts, member_count, owner_rows.len());
-    if body.new_threshold < 1 || body.new_threshold > max_threshold {
-        let reason = if target.hosts {
-            format!("party member count {member_count}, minus the participant being kicked")
-        } else {
-            format!(
-                "the party keeps its {member_count} hosts and {owners} owners",
-                owners = owner_rows.len().saturating_sub(1)
-            )
-        };
-        return Err(ApiError::BadRequest(format!(
-            "new_threshold must be between 1 and {max_threshold} ({reason}); got {got}",
-            got = body.new_threshold,
-        )));
-    }
+    let KickPlan {
+        target,
+        member_count,
+        post_kick_member_count,
+        invitees,
+    } = plan_kick(
+        body,
+        &self_id,
+        target,
+        &scope.party_member_ids,
+        owner_rows.len(),
+        peers,
+    )?;
 
     // Only the hosts sign. An owner that hosts nothing cannot be asked, so
     // the namespace threshold in force must be reachable without it.
@@ -249,15 +173,6 @@ async fn start_kick_run(
                 tracing::error!("Failed to read the cached thresholds for kick: {e}");
                 ApiError::Internal("Failed to read the party's cached thresholds".to_string())
             })?;
-
-    // Compute peers we're going to invite — every peer except self + the kicked participant.
-    // Done before the InProgress flip so a concurrent /kick/cancel cannot observe
-    // InProgress while we're still preparing.
-    let invitees: Vec<CantonId> = peers
-        .into_iter()
-        .map(|p| p.participant_id)
-        .filter(|p| *p != self_id && Some(p) != kicked_host.as_ref())
-        .collect();
 
     // Compute instance name + config up-front so the persisted workflow_runs row
     // can carry the same identifier the coordinator task will use.
@@ -358,6 +273,168 @@ async fn start_kick_run(
         message: "Kick workflow started".to_string(),
         instance_name,
     }))
+}
+
+/// The member a kick request names, from the cached membership.
+///
+/// The server works out the owner key from the cache rather than taking
+/// it from the client, so an empty prefill becomes a clear error.
+fn kick_target(
+    request: &KickRequest,
+    self_id: &CantonId,
+    member_rows: &[DecPartyParticipantRow],
+    owner_rows: &[DecPartyOwnerRow],
+) -> std::result::Result<KickTarget, ApiError> {
+    let target = resolve_kick_target(
+        request.participant_id.as_ref(),
+        request.owner_key.as_deref(),
+        member_rows,
+        owner_rows,
+    )?;
+    if target.participant.as_ref() == Some(self_id) {
+        return Err(ApiError::BadRequest("Cannot kick yourself".to_string()));
+    }
+    Ok(target)
+}
+
+/// The members a kick is scoped to.
+struct KickScope {
+    party_member_ids: HashSet<CantonId>,
+    /// No cached row gave a usable id, so the scope is every configured
+    /// peer.
+    fell_back: bool,
+}
+
+/// Scope the kick to this dec party's actual members, not every peer this
+/// node has configured. A party can be a strict subset of the configured
+/// mesh (see start_onboarding), and basing the signer set / threshold bound
+/// / invites on the full mesh would invite outsiders and stall
+/// WaitingForPeers on peers that were never part of the party. Fall back to
+/// the full peer set only if no cached row yields a usable id — membership
+/// not cached yet, or every `participant_uid` in a legacy/invalid format —
+/// since scoping to an empty member set would reject the kick with a
+/// misleading "need at least 2 party members" error.
+fn kick_scope(member_rows: &[DecPartyParticipantRow], peers: &[Peer]) -> KickScope {
+    let parsed: HashSet<CantonId> = member_rows
+        .iter()
+        .filter_map(|r| CantonId::parse(&r.participant_uid).ok())
+        .collect();
+    if parsed.is_empty() {
+        KickScope {
+            party_member_ids: peers.iter().map(|p| p.participant_id.clone()).collect(),
+            fell_back: true,
+        }
+    } else {
+        KickScope {
+            party_member_ids: parsed,
+            fell_back: false,
+        }
+    }
+}
+
+/// A kick request checked against the party's members and the peers.
+struct KickPlan {
+    target: KickTarget,
+    /// The party's members, counting this node.
+    member_count: usize,
+    /// The members left once a kicked host leaves.
+    post_kick_member_count: usize,
+    /// The peers to invite.
+    invitees: Vec<CantonId>,
+}
+
+/// Check a kick of `target` against the party's members, its owner count
+/// and this node's peers, and work out whom to invite. It reads only its
+/// inputs.
+fn plan_kick(
+    request: &KickRequest,
+    self_id: &CantonId,
+    target: KickTarget,
+    party_member_ids: &HashSet<CantonId>,
+    owner_count: usize,
+    peers: Vec<Peer>,
+) -> std::result::Result<KickPlan, ApiError> {
+    // The participant that leaves the hosting mapping, if the member hosts.
+    let kicked_host = target.participant.clone().filter(|_| target.hosts);
+    let peers: Vec<_> = peers
+        .into_iter()
+        .filter(|p| party_member_ids.contains(&p.participant_id))
+        .collect();
+
+    // Preconditions for a kick: there must be at least one peer left
+    // after the kick (so the surviving signer set is non-empty), and a host
+    // being kicked must be a known peer. Without these checks
+    // the `post_kick_member_count` below could go negative and produce
+    // a "between 1 and -1" error that obscures the real problem.
+    let co_signers = peers
+        .iter()
+        .filter(|p| Some(&p.participant_id) != kicked_host.as_ref())
+        .count();
+    if co_signers < 1 {
+        return Err(ApiError::BadRequest(format!(
+            "Cannot kick: need at least one other hosting member besides this node \
+                 to co-sign, have {co_signers}"
+        )));
+    }
+    if let Some(host) = &kicked_host
+        && !peers.iter().any(|p| p.participant_id == *host)
+    {
+        return Err(ApiError::BadRequest(format!(
+            "Cannot kick {host}: not a member of this decentralized party"
+        )));
+    }
+
+    // Validate `new_threshold` before persisting anything. Negative or zero
+    // values corrupt topology submission: DNS `authorize()` accepts a bare
+    // i32 while the subsequent P2P proposal converts via `try_into()` to
+    // u32 and fails partway, leaving the DNS write committed with no
+    // rollback. The upper bound is the post-kick member count — there
+    // must be at least as many remaining signers as the threshold needs.
+    //
+    // Counted from the party's OWN member set, not from `peers`. `peers` is
+    // scoped to invitees and so excludes this node, which is itself a member —
+    // it signs the proposals. Bounding by it undercounts by one, and a party
+    // whose threshold already equals its member count then has no acceptable
+    // value at all: the peers reject anything below the current threshold, and
+    // this check rejects anything at or above it. The add-party and
+    // change-threshold bounds below already count the party set.
+    //
+    // The party's signing threshold follows the namespace one and counts the
+    // hosts' keys, so the hosts left after the kick bound it as well as the
+    // owners left. An owner that hosts nothing leaves every host in place.
+    let member_count = party_member_count(party_member_ids, self_id);
+    let post_kick_member_count = member_count - usize::from(target.hosts);
+    let max_threshold = kick_threshold_bound(target.hosts, member_count, owner_count);
+    if request.new_threshold < 1 || request.new_threshold > max_threshold {
+        let reason = if target.hosts {
+            format!("party member count {member_count}, minus the participant being kicked")
+        } else {
+            format!(
+                "the party keeps its {member_count} hosts and {owners} owners",
+                owners = owner_count.saturating_sub(1)
+            )
+        };
+        return Err(ApiError::BadRequest(format!(
+            "new_threshold must be between 1 and {max_threshold} ({reason}); got {got}",
+            got = request.new_threshold,
+        )));
+    }
+
+    // Compute peers we're going to invite — every peer except self + the kicked participant.
+    // Done before the InProgress flip so a concurrent /kick/cancel cannot observe
+    // InProgress while we're still preparing.
+    let invitees: Vec<CantonId> = peers
+        .into_iter()
+        .map(|p| p.participant_id)
+        .filter(|p| p != self_id && Some(p) != kicked_host.as_ref())
+        .collect();
+
+    Ok(KickPlan {
+        target,
+        member_count,
+        post_kick_member_count,
+        invitees,
+    })
 }
 
 /// Get the current status of the kick workflow
@@ -771,6 +848,194 @@ mod start_kick_tests {
                 r#"{{"status":"inprogress","message":"Kick workflow started","instance_name":"{instance}"}}"#
             )
         );
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod plan_kick_tests {
+    //! Calls the pure kick checks with members, owners and peers, and pins
+    //! each refusal text.
+
+    use super::super::test_support::{peer, pid};
+    use super::*;
+
+    type Result<T = ()> = anyhow::Result<T>;
+
+    fn request(new_threshold: i32) -> Result<KickRequest> {
+        Ok(KickRequest {
+            decentralized_party_id: pid(9)?,
+            participant_id: None,
+            owner_key: None,
+            new_threshold,
+            previous_threshold: 0,
+        })
+    }
+
+    fn host(participant: &CantonId) -> KickTarget {
+        KickTarget {
+            owner_key: "k2".to_string(),
+            participant: Some(participant.clone()),
+            hosts: true,
+        }
+    }
+
+    fn owner_only() -> KickTarget {
+        KickTarget {
+            owner_key: "k4".to_string(),
+            participant: None,
+            hosts: false,
+        }
+    }
+
+    fn ids(ids: &[&CantonId]) -> HashSet<CantonId> {
+        ids.iter().map(|id| (*id).clone()).collect()
+    }
+
+    fn peers(ids: &[&CantonId]) -> Vec<Peer> {
+        ids.iter().map(|id| peer(id, 1, false)).collect()
+    }
+
+    fn member_row(uid: &str) -> DecPartyParticipantRow {
+        DecPartyParticipantRow {
+            dec_party_id: "dec".to_string(),
+            participant_uid: uid.to_string(),
+            permission: "confirmation".to_string(),
+            owner_key: None,
+            signing_key: None,
+        }
+    }
+
+    /// This node is `pid(1)`; the party is this node, `pid(2)` and `pid(3)`.
+    #[test]
+    fn each_refusal_keeps_its_text() -> Result {
+        let (me, p2, p3, p5) = (pid(1)?, pid(2)?, pid(3)?, pid(5)?);
+        let party = ids(&[&me, &p2, &p3]);
+        let cases = [
+            (
+                host(&p2),
+                3,
+                peers(&[&p2]),
+                1,
+                "Cannot kick: need at least one other hosting member besides this node to \
+                 co-sign, have 0"
+                    .to_string(),
+            ),
+            (
+                host(&p5),
+                3,
+                peers(&[&p2, &p3]),
+                1,
+                format!("Cannot kick {p5}: not a member of this decentralized party"),
+            ),
+            (
+                host(&p2),
+                3,
+                peers(&[&p2, &p3]),
+                0,
+                "new_threshold must be between 1 and 2 (party member count 3, minus the \
+                 participant being kicked); got 0"
+                    .to_string(),
+            ),
+            (
+                host(&p2),
+                3,
+                peers(&[&p2, &p3]),
+                3,
+                "new_threshold must be between 1 and 2 (party member count 3, minus the \
+                 participant being kicked); got 3"
+                    .to_string(),
+            ),
+            (
+                owner_only(),
+                4,
+                peers(&[&p2, &p3]),
+                4,
+                "new_threshold must be between 1 and 3 (the party keeps its 3 hosts and 3 \
+                 owners); got 4"
+                    .to_string(),
+            ),
+        ];
+        for (target, owners, peers, threshold, error) in cases {
+            let refusal = plan_kick(&request(threshold)?, &me, target, &party, owners, peers)
+                .err()
+                .ok_or_else(|| anyhow::anyhow!("the kick must be refused: {error}"))?;
+            assert_eq!(refusal, ApiError::BadRequest(error));
+        }
+        Ok(())
+    }
+
+    /// A plan invites the party's peers but the kicked host, and never a
+    /// peer outside the party.
+    #[test]
+    fn a_plan_invites_the_members_left() -> Result {
+        let (me, p2, p3, p7) = (pid(1)?, pid(2)?, pid(3)?, pid(7)?);
+        let party = ids(&[&me, &p2, &p3]);
+
+        let plan = plan_kick(
+            &request(2)?,
+            &me,
+            host(&p2),
+            &party,
+            3,
+            peers(&[&p2, &p3, &p7]),
+        )?;
+        assert_eq!(plan.invitees, vec![p3.clone()]);
+        assert_eq!((plan.member_count, plan.post_kick_member_count), (3, 2));
+        assert_eq!(plan.target, host(&p2));
+
+        let plan = plan_kick(
+            &request(3)?,
+            &me,
+            owner_only(),
+            &party,
+            4,
+            peers(&[&p2, &p3, &p7]),
+        )?;
+        assert_eq!(plan.invitees, vec![p2, p3]);
+        assert_eq!((plan.member_count, plan.post_kick_member_count), (3, 3));
+        Ok(())
+    }
+
+    /// A naming of this node through its owner key is refused like a
+    /// naming by participant.
+    #[test]
+    fn a_target_that_is_this_node_is_refused() -> Result {
+        let me = pid(1)?;
+        let members = [DecPartyParticipantRow {
+            owner_key: Some("k1".to_string()),
+            ..member_row(&me.to_string())
+        }];
+        let owners = [DecPartyOwnerRow {
+            dec_party_id: "dec".to_string(),
+            owner_key: "k1".to_string(),
+            participant_uid: Some(me.to_string()),
+        }];
+        let request = KickRequest {
+            owner_key: Some("k1".to_string()),
+            ..request(1)?
+        };
+        assert_eq!(
+            kick_target(&request, &me, &members, &owners).err(),
+            Some(ApiError::BadRequest("Cannot kick yourself".to_string()))
+        );
+        Ok(())
+    }
+
+    /// The cached rows scope the kick. With no usable row, every configured
+    /// peer does, and the handler logs that.
+    #[test]
+    fn the_scope_falls_back_to_the_peers() -> Result {
+        let (p2, p3) = (pid(2)?, pid(3)?);
+        let configured = peers(&[&p2, &p3]);
+
+        let scope = kick_scope(&[member_row(&p2.to_string())], &configured);
+        assert_eq!(scope.party_member_ids, ids(&[&p2]));
+        assert!(!scope.fell_back);
+
+        let scope = kick_scope(&[member_row("not-a-canton-id")], &configured);
+        assert_eq!(scope.party_member_ids, ids(&[&p2, &p3]));
+        assert!(scope.fell_back);
         Ok(())
     }
 }
