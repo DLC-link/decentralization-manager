@@ -13,7 +13,10 @@ import { columnSx } from "../styles";
 import { PaginationControls } from "./Pagination";
 import { usePagination } from "../usePagination";
 import { completedProposals, type CompletedProposal, type ProposalOutcome } from "../completedProposals";
-import { AcsTransferMeter, ApprovalCard, ConfirmAvatars, ConfirmRing, FullPayload, Pill, StatusPill, WorkflowPipeline } from "./viz/ApprovalViz";
+import { ApprovalCard, Pill, StatusPill } from "./viz/ApprovalCard";
+import { ConfirmAvatars, ConfirmRing } from "./viz/ConfirmRing";
+import { FullPayload } from "./viz/FullPayload";
+import { AcsTransferMeter, WorkflowPipeline } from "./viz/WorkflowPipeline";
 import { currentStepLabel, stepsForRun, workflowKindLabel } from "../workflowSteps";
 import type { AuditLogEntry, CancelConfirmationRequest, ConfirmActionRequest, DisclosedContractInput, DomainGovernanceAction, ExecuteActionRequest, GovernanceAction, GovernanceType, HandledInvitation, PendingInvitation, WorkflowRun } from "../types";
 

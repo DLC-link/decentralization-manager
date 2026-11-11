@@ -1,7 +1,7 @@
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it } from "vitest";
 
-import { WorkflowPipeline } from "./ApprovalViz";
+import { WorkflowPipeline } from "./WorkflowPipeline";
 import { WORKFLOW_STEPS } from "../../workflowSteps";
 
 // The project runs vitest without `globals`, so RTL's automatic cleanup is off
