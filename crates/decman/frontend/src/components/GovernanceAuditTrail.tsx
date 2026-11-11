@@ -23,7 +23,7 @@ import ExpandLessIcon from "@mui/icons-material/ExpandLess";
 import ContentCopyIcon from "@mui/icons-material/ContentCopy";
 import { JSONTree } from "react-json-tree";
 import { API_BASE, PAGE_SIZE } from "../constants";
-import { authenticatedFetch } from "../api";
+import { getJson } from "../api";
 import { cardTableSx, zebraRow } from "../styles";
 import { CopyableText } from "./CopyableText";
 import { CursorPagination } from "./Pagination";
@@ -303,45 +303,35 @@ export const GovernanceAuditTrail = ({
 
         if (target === "local") {
           params.set("offset", String(pageIndex * CHAIN_LIMIT));
-          const res = await authenticatedFetch(
+          const response = await getJson<AuditLogResponse>(
             `${API_BASE}/governance/audit?${params}`,
+            "Failed to fetch audit trail",
           );
-          if (res.ok) {
-            const response: AuditLogResponse = await res.json();
-            // The local log pages by offset and reports no total, so a page
-            // that comes back exactly full cannot say whether another follows.
-            // An empty page past the first is that answer arriving late: it is
-            // the end of the log, so stay on the page we are on rather than
-            // replacing the table with the empty state.
-            if (response.entries.length === 0 && pageIndex > 0) {
-              setLocalHasNext(false);
-              return false;
-            }
-            setRows(response.entries.map(localRow));
-            setLocalHasNext(response.entries.length >= CHAIN_LIMIT);
-            return true;
+          // The local log pages by offset and reports no total, so a page
+          // that comes back exactly full cannot say whether another follows.
+          // An empty page past the first is that answer arriving late: it is
+          // the end of the log, so stay on the page we are on rather than
+          // replacing the table with the empty state.
+          if (response.entries.length === 0 && pageIndex > 0) {
+            setLocalHasNext(false);
+            return false;
           }
-          const errData = await res.json().catch(() => ({}));
-          setError(errData.error || "Failed to fetch audit trail");
-          return false;
+          setRows(response.entries.map(localRow));
+          setLocalHasNext(response.entries.length >= CHAIN_LIMIT);
+          return true;
         }
 
         params.set("scope", target);
         if (refresh) params.set("refresh", "true");
         if (before !== undefined) params.set("before_offset", String(before));
 
-        const res = await authenticatedFetch(
+        const response = await getJson<ChainAuditResponse>(
           `${API_BASE}/governance/chain-audit?${params}`,
+          "Failed to fetch audit trail",
         );
-        if (res.ok) {
-          const response: ChainAuditResponse = await res.json();
-          setRows(response.entries.map(chainRow));
-          setNextCursor(response.next_before_offset ?? null);
-          return true;
-        }
-        const errData = await res.json().catch(() => ({}));
-        setError(errData.error || "Failed to fetch audit trail");
-        return false;
+        setRows(response.entries.map(chainRow));
+        setNextCursor(response.next_before_offset ?? null);
+        return true;
       } catch (e) {
         setError(
           e instanceof Error ? e.message : "Failed to fetch audit trail",

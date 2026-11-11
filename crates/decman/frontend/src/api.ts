@@ -49,6 +49,55 @@ export async function authenticatedFetch(
   return response;
 }
 
+/** A failed HTTP answer, with the message the UI shows for it. */
+export class ApiError extends Error {
+  readonly status: number;
+
+  constructor(status: number, message: string) {
+    super(message);
+    this.name = "ApiError";
+    this.status = status;
+  }
+}
+
+/**
+ * Throw an ApiError for an answer that is not ok. Its message is the `error`
+ * field of the JSON body, or `fallback` when the body has none or is not JSON.
+ */
+async function throwUnlessOk(res: Response, fallback: string): Promise<void> {
+  if (res.ok) return;
+  const data = await res.json().catch(() => ({}));
+  throw new ApiError(res.status, data.error || fallback);
+}
+
+/**
+ * GET `path` and return its JSON body. A failed answer throws an ApiError
+ * (see `throwUnlessOk`); an ok answer that is not JSON throws a SyntaxError.
+ */
+export async function getJson<T>(path: string, fallback: string): Promise<T> {
+  const res = await authenticatedFetch(path);
+  await throwUnlessOk(res, fallback);
+  return res.json();
+}
+
+/**
+ * POST `body` as JSON to `path` and return the JSON answer. Errors as in
+ * `getJson`.
+ */
+export async function postJson<T>(
+  path: string,
+  body: unknown,
+  fallback: string,
+): Promise<T> {
+  const res = await authenticatedFetch(path, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  await throwUnlessOk(res, fallback);
+  return res.json();
+}
+
 /**
  * Measure round-trip latency to a backend endpoint by timing GET requests.
  * Pings `samples` times and returns the smallest result in ms — the minimum

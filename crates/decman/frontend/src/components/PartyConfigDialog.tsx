@@ -17,7 +17,7 @@ import {
   // ToggleButton,
 } from "@mui/material";
 import { API_BASE } from "../constants";
-import { authenticatedFetch } from "../api";
+import { authenticatedFetch, postJson } from "../api";
 import { fieldHelpAdornment /*, FieldHelp */ } from "./FieldHelp";
 import type {
   AuthConfig,
@@ -212,24 +212,15 @@ export const PartyConfigDialog = ({
           body.keycloak_password = keycloakPassword;
         }
       }
-      const res = await authenticatedFetch(
-        `${API_BASE}/party-config/discover-member-party`,
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(body),
-        },
-      );
-      if (!res.ok) {
-        const data = await res.json().catch(() => ({}));
-        setError(data.error || "Discovery failed");
-        return;
-      }
-      const data: {
+      const data = await postJson<{
         user_id: string;
         primary_party?: string;
         description?: string;
-      } = await res.json();
+      }>(
+        `${API_BASE}/party-config/discover-member-party`,
+        body,
+        "Discovery failed",
+      );
       if (data.user_id) setUserId(data.user_id);
       if (data.primary_party) {
         setMemberPartyId(data.primary_party);

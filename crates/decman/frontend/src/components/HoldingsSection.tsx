@@ -16,7 +16,7 @@ import RefreshIcon from "@mui/icons-material/Refresh";
 import { CopyableText } from "./CopyableText";
 import { TextHelp } from "./FieldHelp";
 import { API_BASE } from "../constants";
-import { authenticatedFetch } from "../api";
+import { getJson } from "../api";
 import { cardTableSx, zebraRow } from "../styles";
 import { PaginationControls } from "./Pagination";
 import { usePagination } from "../usePagination";
@@ -50,16 +50,11 @@ export const HoldingsSection = ({
     setError(null);
     try {
       const params = new URLSearchParams({ party_id: partyId });
-      const res = await authenticatedFetch(
+      const data = await getJson<HoldingsResponse>(
         `${API_BASE}/holdings?${params}`,
+        "Failed to fetch holdings",
       );
-      if (res.ok) {
-        const data: HoldingsResponse = await res.json();
-        setHoldings(data.holdings);
-      } else {
-        const errData = await res.json().catch(() => ({}));
-        setError(errData.error || "Failed to fetch holdings");
-      }
+      setHoldings(data.holdings);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to fetch holdings");
     } finally {
