@@ -1,5 +1,7 @@
 //! `governance-rewards` proposal payloads.
 
+use std::collections::HashSet;
+
 use canton_proto_rs::com::daml::ledger::api::v2::{Value, value};
 use common::canton_id::CantonId;
 
@@ -84,7 +86,7 @@ impl Validate for SetupCouponReassignmentDelegation {
         if self.assigners.is_empty() {
             return Err(Error::Validation("assigners must not be empty".to_string()));
         }
-        let mut seen = std::collections::HashSet::new();
+        let mut seen = HashSet::new();
         for a in &self.assigners {
             if !seen.insert(a) {
                 return Err(Error::Validation(format!(
@@ -245,6 +247,7 @@ impl Validate for AcceptExternalPartySetup {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::catalog::proposals::SNAPSHOT_PATH;
 
     /// Any valid `CantonId` — the exact value is irrelevant to these
     /// encode-shape snapshots.
@@ -372,7 +375,7 @@ mod tests {
     #[test]
     fn encode_snapshots() {
         let mut settings = insta::Settings::clone_current();
-        settings.set_snapshot_path(crate::catalog::proposals::SNAPSHOT_PATH);
+        settings.set_snapshot_path(SNAPSHOT_PATH);
         let _guard = settings.bind_to_scope();
 
         insta::assert_debug_snapshot!(

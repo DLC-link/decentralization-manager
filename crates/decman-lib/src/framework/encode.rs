@@ -8,7 +8,7 @@ use canton_common::{
     decimal::DamlDecimal,
     transfer_factory::{Context as ChoiceContext, ContextValue},
 };
-use std::collections::BTreeSet;
+use std::{collections::BTreeSet, fmt::Display};
 
 use canton_proto_rs::com::daml::ledger::api::v2::{
     GenMap, List, Optional, Record, RecordField, TextMap, Value, Variant, gen_map, text_map, value,
@@ -17,7 +17,7 @@ use common::api::{Claim, InstrumentId, InstrumentIdentifier, PartyCredentialRequ
 
 use crate::error::Error;
 
-pub fn make_party(p: impl std::fmt::Display) -> Value {
+pub fn make_party(p: impl Display) -> Value {
     Value {
         sum: Some(value::Sum::Party(p.to_string())),
     }
@@ -253,7 +253,7 @@ pub fn serialize_instrument_id(id: &InstrumentId) -> Value {
 
 /// A Daml `Set Party`: a record whose `map` field maps each party to `Unit`.
 /// Duplicates collapse and the parties come out sorted, as Daml holds them.
-pub fn make_party_set(parties: &[impl std::fmt::Display]) -> Value {
+pub fn make_party_set(parties: &[impl Display]) -> Value {
     let unique: BTreeSet<String> = parties.iter().map(ToString::to_string).collect();
     let entries = unique
         .into_iter()
@@ -272,7 +272,7 @@ pub fn make_party_set(parties: &[impl std::fmt::Display]) -> Value {
     )])
 }
 
-pub fn make_optional_party_set(opt: Option<&[impl std::fmt::Display]>) -> Value {
+pub fn make_optional_party_set(opt: Option<&[impl Display]>) -> Value {
     Value {
         sum: Some(value::Sum::Optional(Box::new(Optional {
             value: opt.map(|parties| Box::new(make_party_set(parties))),

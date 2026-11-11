@@ -5,6 +5,8 @@
 //! relays between hosts — so a wallet holds one client per host and drives them
 //! itself (see [`crate::flow`]).
 
+use std::time::Duration;
+
 use base64::{Engine, engine::general_purpose::STANDARD};
 use common::{
     api::{
@@ -13,7 +15,7 @@ use common::{
         TenantAddHostsPrepareResponse, TenantAddHostsRequest, TenantExecuteRequest,
         TenantExecuteResponse, TenantPartyStateResponse, TenantPrepareRequest,
         TenantPrepareResponse, TenantThresholdExecuteRequest, TenantThresholdRequest,
-        TenantUnhostRequest,
+        TenantUnhostRequest, WorkflowStatusResponse,
     },
     canton_id::CantonId,
     types::WorkflowProgress,
@@ -27,7 +29,7 @@ use crate::error::{Error, Result};
 /// Onboarding calls do topology work on the node, so this is generous; the
 /// wallet's own polling loop, not this timeout, decides how long to wait for a
 /// party to come up.
-const REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// What one host reports about a party's onboarding.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize)]
@@ -116,7 +118,7 @@ impl TenantClient {
     /// is not the expected JSON.
     pub async fn host_status(&self, party_id: &str) -> Result<HostStatus> {
         let path = format!("/v0/tenant/{party_id}/status");
-        match self.get::<common::api::WorkflowStatusResponse>(&path).await {
+        match self.get::<WorkflowStatusResponse>(&path).await {
             Ok(resp) if resp.status == WorkflowProgress::Completed => Ok(HostStatus::Hosted),
             Ok(_) => Ok(HostStatus::Pending),
             Err(e) if e.is_status(StatusCode::NOT_FOUND.as_u16()) => Ok(HostStatus::NotHosted),

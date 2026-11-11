@@ -295,7 +295,11 @@ fn readable_part(body: String) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::io::{Read, Write};
+    use std::{
+        fmt::Debug,
+        io::{Read, Write},
+        net::TcpListener,
+    };
 
     use serde_json::json;
     use wiremock::{
@@ -370,7 +374,7 @@ mod tests {
         }
     }
 
-    fn assert_too_large<T: std::fmt::Debug>(result: Result<T>, wanted_path: &str) {
+    fn assert_too_large<T: Debug>(result: Result<T>, wanted_path: &str) {
         match result {
             Err(Error::ResponseTooLarge { path, limit, .. }) => {
                 assert_eq!(path, wanted_path);
@@ -432,7 +436,7 @@ mod tests {
     /// A server that answers once with a chunked body of `chunks` times 256
     /// bytes, without a Content-Length.
     fn chunked_server(chunks: usize) -> String {
-        let listener = match std::net::TcpListener::bind("127.0.0.1:0") {
+        let listener = match TcpListener::bind("127.0.0.1:0") {
             Ok(listener) => listener,
             Err(e) => panic!("the test server must bind: {e}"),
         };

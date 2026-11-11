@@ -1,6 +1,10 @@
 //! Errors surfaced by the tenant, ledger and registry clients.
 
+use std::result;
+
 use thiserror::Error;
+
+use crate::text;
 
 /// Anything that can go wrong talking to a DecMan host's tenant API.
 ///
@@ -205,7 +209,7 @@ pub enum Refusal {
     /// The wallet could not recompute the hash, so it cannot know what the
     /// hash commits to. An unknown hashing scheme lands here. The reason can
     /// quote the host's text, so the message bounds it.
-    #[error("its hash cannot be recomputed: {}", crate::text::bounded(.0))]
+    #[error("its hash cannot be recomputed: {}", text::bounded(.0))]
     Unverifiable(String),
 
     /// The hash that came with the transaction is not the transaction's hash.
@@ -222,7 +226,7 @@ pub enum Refusal {
 
     /// The root exercise differs from what the wallet asked for. The host
     /// chose `found`, so the message bounds it.
-    #[error("its {field} is {}, not {expected}", crate::text::bounded(.found))]
+    #[error("its {field} is {}, not {expected}", text::bounded(.found))]
     Mismatch {
         field: &'static str,
         expected: String,
@@ -265,4 +269,4 @@ impl Error {
     }
 }
 
-pub type Result<T> = std::result::Result<T, Error>;
+pub type Result<T> = result::Result<T, Error>;

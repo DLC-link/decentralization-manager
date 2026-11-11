@@ -39,11 +39,12 @@ impl Validate for GenericVote {}
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::catalog::proposals::SNAPSHOT_PATH;
 
     #[test]
     fn encode_snapshots() {
         let mut settings = insta::Settings::clone_current();
-        settings.set_snapshot_path(crate::catalog::proposals::SNAPSHOT_PATH);
+        settings.set_snapshot_path(SNAPSHOT_PATH);
         let _guard = settings.bind_to_scope();
 
         insta::assert_debug_snapshot!(

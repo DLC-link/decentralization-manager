@@ -421,6 +421,8 @@ pub fn extract_reltime(value: &Value) -> Option<i64> {
 
 #[cfg(test)]
 mod tests {
+    use std::fmt::Debug;
+
     use canton_proto_rs::com::daml::ledger::api::v2::{List, Optional, RecordField, Value};
 
     use super::*;
@@ -497,7 +499,7 @@ mod tests {
     /// Assert a `Result` is `Err` and its rendered message contains `needle`.
     /// Test-only: a non-matching error trips a `panic!` (an allowed assertion
     /// macro), keeping the suite free of `.unwrap_err()` / `.expect_err()`.
-    fn assert_err_contains<T: std::fmt::Debug>(result: Result<T, Error>, needle: &str) {
+    fn assert_err_contains<T: Debug>(result: Result<T, Error>, needle: &str) {
         match result {
             Ok(v) => panic!("expected Err containing {needle:?}, got Ok({v:?})"),
             Err(e) => assert!(

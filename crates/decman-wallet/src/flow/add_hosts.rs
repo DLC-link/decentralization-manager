@@ -6,6 +6,7 @@ use common::api::TenantAcsBlockResponse;
 use common::api::TenantAddHostsExecuteRequest;
 use common::api::{HostPermission, TenantAcsImportRequest, TenantAddHostsRequest};
 use serde::Serialize;
+use tokio::time::Instant;
 
 use super::host::progress_to_status;
 use super::sign::{require_agreement, sign_prepared};
@@ -27,7 +28,7 @@ const MARKER_CLEAR_POLL: Duration = Duration::from_secs(3);
 /// clearing transaction on its own schedule. `Hosted` is reported only once the
 /// marker is gone, so this is the wallet's read of "the party is usable there".
 async fn wait_for_marker_clear(host: &WalletHost, party_id: &str) -> bool {
-    let deadline = tokio::time::Instant::now() + MARKER_CLEAR_TIMEOUT;
+    let deadline = Instant::now() + MARKER_CLEAR_TIMEOUT;
     loop {
         match host.client.host_status(party_id).await {
             Ok(HostStatus::Hosted) => return true,
@@ -37,7 +38,7 @@ async fn wait_for_marker_clear(host: &WalletHost, party_id: &str) -> bool {
                 "reading the onboarding status failed: {e}"
             ),
         }
-        if tokio::time::Instant::now() + MARKER_CLEAR_POLL >= deadline {
+        if Instant::now() + MARKER_CLEAR_POLL >= deadline {
             tracing::warn!(
                 host = host.client.base_url(),
                 "the onboarding marker is still set; the party is hosted here and not yet usable"

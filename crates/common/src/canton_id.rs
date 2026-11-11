@@ -1,7 +1,12 @@
-use std::{fmt, marker::PhantomData};
+use std::{fmt, marker::PhantomData, str::FromStr};
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, de};
 use serde_big_array::BigArray;
+#[cfg(feature = "openapi")]
+use utoipa::openapi::{
+    ObjectBuilder, RefOr,
+    schema::{Schema, Type},
+};
 
 use crate::{error::Result, fingerprint::MULTIHASH_SHA256_PREFIX};
 
@@ -114,7 +119,7 @@ impl TryFrom<String> for Fingerprint {
     }
 }
 
-impl std::str::FromStr for Fingerprint {
+impl FromStr for Fingerprint {
     type Err = anyhow::Error;
 
     fn from_str(s: &str) -> Result<Self> {
@@ -162,7 +167,7 @@ pub struct CantonId {
 }
 
 impl serde::Serialize for CantonId {
-    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: serde::Serializer,
     {
@@ -171,12 +176,12 @@ impl serde::Serialize for CantonId {
 }
 
 impl<'de> serde::Deserialize<'de> for CantonId {
-    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: serde::Deserializer<'de>,
     {
         let s = String::deserialize(deserializer)?;
-        Self::parse(&s).map_err(serde::de::Error::custom)
+        Self::parse(&s).map_err(de::Error::custom)
     }
 }
 
@@ -264,9 +269,9 @@ impl fmt::Display for CantonId {
 
 #[cfg(feature = "openapi")]
 impl utoipa::PartialSchema for CantonId {
-    fn schema() -> utoipa::openapi::RefOr<utoipa::openapi::schema::Schema> {
-        utoipa::openapi::ObjectBuilder::new()
-            .schema_type(utoipa::openapi::schema::Type::String)
+    fn schema() -> RefOr<Schema> {
+        ObjectBuilder::new()
+            .schema_type(Type::String)
             .description(Some("Canton ID in format 'prefix::hex_namespace'"))
             .examples([Some(serde_json::json!(
                 "participant::1220c4010d6883f367c7f45d55b2449501620130f9b21e96379f17dea455ac7a5892"
@@ -278,7 +283,7 @@ impl utoipa::PartialSchema for CantonId {
 #[cfg(feature = "openapi")]
 impl utoipa::ToSchema for CantonId {}
 
-impl std::str::FromStr for CantonId {
+impl FromStr for CantonId {
     type Err = anyhow::Error;
 
     fn from_str(s: &str) -> Result<Self> {

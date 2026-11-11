@@ -1,5 +1,7 @@
 //! `governance-utility-credential` proposal payloads.
 
+use std::collections::HashSet;
+
 use canton_common::decimal::DamlDecimal;
 use canton_proto_rs::com::daml::ledger::api::v2::Value;
 use common::api::Claim;
@@ -256,7 +258,7 @@ impl Validate for AcceptPaidCredential {
                 "deposit_amulet_cids must name at least one Amulet".to_string(),
             ));
         }
-        let mut seen = std::collections::HashSet::new();
+        let mut seen = HashSet::new();
         for cid in &self.deposit_amulet_cids {
             if !seen.insert(cid) {
                 return Err(Error::Validation(format!(
@@ -271,6 +273,7 @@ impl Validate for AcceptPaidCredential {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::catalog::proposals::SNAPSHOT_PATH;
 
     /// Any valid `CantonId` — the exact value is irrelevant to these
     /// encode-shape snapshots.
@@ -473,7 +476,7 @@ mod tests {
     #[test]
     fn encode_snapshots() {
         let mut settings = insta::Settings::clone_current();
-        settings.set_snapshot_path(crate::catalog::proposals::SNAPSHOT_PATH);
+        settings.set_snapshot_path(SNAPSHOT_PATH);
         let _guard = settings.bind_to_scope();
 
         insta::assert_debug_snapshot!(
