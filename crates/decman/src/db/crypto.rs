@@ -106,6 +106,11 @@ fn decrypt_str_with_key(key: &[u8; 32], stored: &str) -> Result<String> {
 
 /// Encrypt a plaintext string. Returns base64-encoded `nonce || ciphertext`.
 /// If encryption is not enabled, returns the plaintext unchanged.
+///
+/// # Errors
+///
+/// Returns an error if the nonce cannot be generated or AES-GCM encryption
+/// fails. It never fails when encryption is off.
 pub fn encrypt(plaintext: &str) -> Result<String> {
     match ENCRYPTION_KEY.get() {
         Some(key) => encrypt_str_with_key(key, plaintext),
@@ -117,6 +122,10 @@ pub fn encrypt(plaintext: &str) -> Result<String> {
 /// If encryption is not enabled, returns the input unchanged.
 /// If decryption fails (e.g. plaintext from before encryption was enabled),
 /// returns the input unchanged for backward compatibility.
+///
+/// # Errors
+///
+/// Returns an error if a value decrypts but is not valid UTF-8.
 pub fn decrypt(stored: &str) -> Result<String> {
     match ENCRYPTION_KEY.get() {
         Some(key) => decrypt_str_with_key(key, stored),
@@ -125,6 +134,10 @@ pub fn decrypt(stored: &str) -> Result<String> {
 }
 
 /// Encrypt an optional field
+///
+/// # Errors
+///
+/// Returns an error if [`encrypt`] fails on a `Some` value.
 pub fn encrypt_opt(value: &Option<String>) -> Result<Option<String>> {
     match value {
         Some(v) => Ok(Some(encrypt(v)?)),
@@ -133,6 +146,10 @@ pub fn encrypt_opt(value: &Option<String>) -> Result<Option<String>> {
 }
 
 /// Decrypt an optional field
+///
+/// # Errors
+///
+/// Returns an error if [`decrypt`] fails on a `Some` value.
 pub fn decrypt_opt(value: Option<String>) -> Result<Option<String>> {
     match value {
         Some(v) => Ok(Some(decrypt(&v)?)),
