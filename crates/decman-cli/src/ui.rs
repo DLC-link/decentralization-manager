@@ -3539,7 +3539,6 @@ mod tests {
         let view = GovView {
             party_name: "cbtc-network".to_owned(),
             party_id: "dec::1220".to_owned(),
-            governance_type: "core_self".to_owned(),
             rules_contract_id: "00rules".to_owned(),
             member_party_id: "member::1220".to_owned(),
             threshold: 2,
@@ -3585,10 +3584,9 @@ mod tests {
             kind: ComposerKind::Action,
             party_id: "dec::1".to_owned(),
             party_name: "dec".to_owned(),
-            governance_type: "core_self".to_owned(),
             rules_contract_id: "00r".to_owned(),
             default_threshold: 2,
-            options: crate::composer::action_types("core_self"),
+            options: crate::composer::action_types(),
             selected: 0,
         };
         let overlay = Overlay::ComposerPick(Box::new(pick));
@@ -3612,7 +3610,6 @@ mod tests {
             submit: ComposerSubmit::Confirm,
             party_id: "dec::1".to_owned(),
             party_name: "dec".to_owned(),
-            governance_type: "core_self".to_owned(),
             rules_contract_id: "00r".to_owned(),
             fields: crate::composer::fields_for_action("governance_set_threshold", &ctx),
             cursor: 0,
