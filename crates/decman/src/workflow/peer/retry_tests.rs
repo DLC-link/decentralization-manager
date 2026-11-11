@@ -1,13 +1,25 @@
 //! Drive the real peer loop with scripted Noise commands, without a Canton node.
 
-use std::{collections::VecDeque, sync::Mutex, time::Duration};
+use std::{
+    collections::VecDeque,
+    sync::{Arc, Mutex},
+    time::Duration,
+};
 
 use hyper::{Body, Response};
 use tokio::net::TcpListener;
 use tokio_noise::handshakes::nn_psk2::Responder;
 
-use super::*;
-use crate::noise::{Message, NoiseKeypair};
+use super::start_peer;
+use crate::{
+    canton_id::CantonId,
+    config::{NodeConfig, Peer},
+    consts::MAX_CONSECUTIVE_STEP_FAILURES,
+    error::Result,
+    noise::{Message, MessageType, NoiseKeypair},
+    server::{DeclineInvitationPayload, WorkflowKind},
+    utils,
+};
 
 /// What the scripted coordinator saw of one peer run.
 struct PeerRun {
