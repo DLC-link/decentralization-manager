@@ -112,132 +112,167 @@ fn validate_onboarding_topology(
             BundleSerial::Onboarding,
             "onboards external parties",
         )?;
+        check_party(index, bundle, &p2p)?;
+        check_hosts(index, &p2p, &this_participant)?;
+        let key = check_signing_key(index, &p2p, &expected_key)?;
+        check_exact_mapping(index, bundle, &p2p, key)?;
+    }
 
-        if p2p.party != bundle.party_id {
+    Ok(())
+}
+
+/// The mapping must be for the party derived from the submitted public key.
+fn check_party(
+    index: usize,
+    bundle: &ExternalPartyAllocatePayload,
+    p2p: &PartyToParticipant,
+) -> Result<()> {
+    if p2p.party != bundle.party_id {
+        anyhow::bail!(
+            "topology transaction {index} is for party {found}, not {expected} (the party \
+             derived from the submitted public key)",
+            found = p2p.party,
+            expected = bundle.party_id
+        );
+    }
+    Ok(())
+}
+
+/// Every host at Confirmation without onboarding details, none twice, this
+/// participant among them, and a threshold below the host count.
+fn check_hosts(index: usize, p2p: &PartyToParticipant, this_participant: &str) -> Result<()> {
+    let mut uids = Vec::with_capacity(p2p.participants.len());
+    for participant in &p2p.participants {
+        // Submission permission would let the party submit through this node
+        // directly. External parties sign their own submissions and never need
+        // it, so anything but Confirmation is refused.
+        if participant.permission != ParticipantPermission::Confirmation as i32 {
             anyhow::bail!(
-                "topology transaction {index} is for party {found}, not {expected} (the party \
-                 derived from the submitted public key)",
-                found = p2p.party,
-                expected = bundle.party_id
+                "topology transaction {index} gives {uid} permission {perm}; every hosting \
+                 participant must be Confirmation",
+                uid = participant.participant_uid,
+                perm = participant.permission
             );
         }
-
-        let mut uids = Vec::with_capacity(p2p.participants.len());
-        for participant in &p2p.participants {
-            // Submission permission would let the party submit through this node
-            // directly. External parties sign their own submissions and never need
-            // it, so anything but Confirmation is refused.
-            if participant.permission != ParticipantPermission::Confirmation as i32 {
-                anyhow::bail!(
-                    "topology transaction {index} gives {uid} permission {perm}; every hosting \
-                     participant must be Confirmation",
-                    uid = participant.participant_uid,
-                    perm = participant.permission
-                );
-            }
-            if participant.onboarding.is_some() {
-                anyhow::bail!(
-                    "topology transaction {index} carries onboarding details for {uid}, which \
-                     this endpoint does not submit",
-                    uid = participant.participant_uid
-                );
-            }
-            uids.push(participant.participant_uid.clone());
-        }
-
-        let mut sorted = uids.clone();
-        sorted.sort();
-        sorted.dedup();
-        if sorted.len() != uids.len() {
-            anyhow::bail!("topology transaction {index} lists a hosting participant twice");
-        }
-        if !uids.contains(&this_participant) {
+        if participant.onboarding.is_some() {
             anyhow::bail!(
-                "topology transaction {index} does not name this participant \
-                 ({this_participant}); a host only authorizes topology that hosts it"
+                "topology transaction {index} carries onboarding details for {uid}, which \
+                 this endpoint does not submit",
+                uid = participant.participant_uid
             );
         }
+        uids.push(participant.participant_uid.clone());
+    }
 
-        // Same rule the request path enforces: at least one confirmation, and never
-        // all of them, so a host can still exit later.
-        let max_threshold = uids.len().saturating_sub(1) as u32;
-        if p2p.threshold < 1 || p2p.threshold > max_threshold {
-            anyhow::bail!(
-                "topology transaction {index} has confirmation threshold {t}, which must be \
-                 between 1 and {max_threshold} (one less than the {n} hosting participants)",
-                t = p2p.threshold,
-                n = uids.len()
-            );
-        }
+    let mut sorted = uids.clone();
+    sorted.sort();
+    sorted.dedup();
+    if sorted.len() != uids.len() {
+        anyhow::bail!("topology transaction {index} lists a hosting participant twice");
+    }
+    if !uids.iter().any(|uid| uid == this_participant) {
+        anyhow::bail!(
+            "topology transaction {index} does not name this participant \
+             ({this_participant}); a host only authorizes topology that hosts it"
+        );
+    }
 
-        // The party must be authorized by the key whose fingerprint *is* its
-        // namespace, and by nothing else. An extra key here would let its holder
-        // transact as the party.
-        let Some(keys) = &p2p.party_signing_keys else {
-            anyhow::bail!("topology transaction {index} carries no party signing keys");
-        };
-        if keys.keys.len() != 1 || keys.threshold != 1 {
-            anyhow::bail!(
-                "topology transaction {index} must carry exactly one party signing key at \
-                 threshold 1, got {n} key(s) at threshold {t}",
-                n = keys.keys.len(),
-                t = keys.threshold
-            );
-        }
-        let key = &keys.keys[0];
-        if key.format != expected_key.format
-            || key.public_key != expected_key.public_key
-            || key.key_spec != expected_key.key_spec
-        {
-            anyhow::bail!(
-                "topology transaction {index} does not carry the submitted public key as the \
-                 party's only signing key"
-            );
-        }
-        // Usage is checked as a floor, not an exact match, because Canton rewrites
-        // it: `GenerateTransactions` was handed `[Namespace, Protocol]` and returned
-        // `[Namespace, Protocol, ProofOfOwnership]`, so demanding equality here
-        // would reject this node's own generated topology. Being lax costs nothing —
-        // the security property is that the key *material* is the wallet's and is
-        // the only key, which is checked above. Usage flags on that one key grant
-        // nobody else anything.
-        //
-        // The floor still matters: without `Protocol` the party could never
-        // authorize a transaction, and without `Namespace` it could not authorize
-        // its own topology.
-        for required in [SigningKeyUsage::Namespace, SigningKeyUsage::Protocol] {
-            if !key.usage.contains(&(required as i32)) {
-                anyhow::bail!(
-                    "topology transaction {index} declares usage {usage:?} on the party's signing \
-                     key, which is missing {required:?}",
-                    usage = key.usage
-                );
-            }
-        }
+    // Same rule the request path enforces: at least one confirmation, and never
+    // all of them, so a host can still exit later.
+    let max_threshold = uids.len().saturating_sub(1) as u32;
+    if p2p.threshold < 1 || p2p.threshold > max_threshold {
+        anyhow::bail!(
+            "topology transaction {index} has confirmation threshold {t}, which must be \
+             between 1 and {max_threshold} (one less than the {n} hosting participants)",
+            t = p2p.threshold,
+            n = uids.len()
+        );
+    }
+    Ok(())
+}
 
-        // Everything above checked a field at a time; this refuses anything the
-        // mapping might carry that the checks above do not know about, so a future
-        // Canton field cannot ride along unexamined.
-        let expected = PartyToParticipant {
-            party: bundle.party_id.clone(),
-            threshold: p2p.threshold,
-            participants: p2p.participants.clone(),
-            // The submitted key, not a rebuilt one: its fields were just checked
-            // individually, and its `usage` legitimately differs from what this node
-            // would construct.
-            party_signing_keys: Some(SigningKeysWithThreshold {
-                keys: vec![key.clone()],
-                threshold: 1,
-            }),
-        };
-        if p2p != expected {
+/// The submitted public key must be the party's only signing key, with at
+/// least the usages the party needs. Returns that key.
+fn check_signing_key<'a>(
+    index: usize,
+    p2p: &'a PartyToParticipant,
+    expected_key: &SigningPublicKey,
+) -> Result<&'a SigningPublicKey> {
+    // The party must be authorized by the key whose fingerprint *is* its
+    // namespace, and by nothing else. An extra key here would let its holder
+    // transact as the party.
+    let Some(keys) = &p2p.party_signing_keys else {
+        anyhow::bail!("topology transaction {index} carries no party signing keys");
+    };
+    if keys.keys.len() != 1 || keys.threshold != 1 {
+        anyhow::bail!(
+            "topology transaction {index} must carry exactly one party signing key at \
+             threshold 1, got {n} key(s) at threshold {t}",
+            n = keys.keys.len(),
+            t = keys.threshold
+        );
+    }
+    let key = &keys.keys[0];
+    if key.format != expected_key.format
+        || key.public_key != expected_key.public_key
+        || key.key_spec != expected_key.key_spec
+    {
+        anyhow::bail!(
+            "topology transaction {index} does not carry the submitted public key as the \
+             party's only signing key"
+        );
+    }
+    // Usage is checked as a floor, not an exact match, because Canton rewrites
+    // it: `GenerateTransactions` was handed `[Namespace, Protocol]` and returned
+    // `[Namespace, Protocol, ProofOfOwnership]`, so demanding equality here
+    // would reject this node's own generated topology. Being lax costs nothing —
+    // the security property is that the key *material* is the wallet's and is
+    // the only key, which is checked above. Usage flags on that one key grant
+    // nobody else anything.
+    //
+    // The floor still matters: without `Protocol` the party could never
+    // authorize a transaction, and without `Namespace` it could not authorize
+    // its own topology.
+    for required in [SigningKeyUsage::Namespace, SigningKeyUsage::Protocol] {
+        if !key.usage.contains(&(required as i32)) {
             anyhow::bail!(
-                "topology transaction {index} carries fields beyond a plain external-party \
-                 PartyToParticipant and will not be authorized"
+                "topology transaction {index} declares usage {usage:?} on the party's signing \
+                 key, which is missing {required:?}",
+                usage = key.usage
             );
         }
     }
+    Ok(key)
+}
 
+/// The mapping must be exactly the one the checks above proved.
+fn check_exact_mapping(
+    index: usize,
+    bundle: &ExternalPartyAllocatePayload,
+    p2p: &PartyToParticipant,
+    key: &SigningPublicKey,
+) -> Result<()> {
+    // Everything above checked a field at a time; this refuses anything the
+    // mapping might carry that the checks above do not know about, so a future
+    // Canton field cannot ride along unexamined.
+    let expected = PartyToParticipant {
+        party: bundle.party_id.clone(),
+        threshold: p2p.threshold,
+        participants: p2p.participants.clone(),
+        // The submitted key, not a rebuilt one: its fields were just checked
+        // individually, and its `usage` legitimately differs from what this node
+        // would construct.
+        party_signing_keys: Some(SigningKeysWithThreshold {
+            keys: vec![key.clone()],
+            threshold: 1,
+        }),
+    };
+    if *p2p != expected {
+        anyhow::bail!(
+            "topology transaction {index} carries fields beyond a plain external-party \
+             PartyToParticipant and will not be authorized"
+        );
+    }
     Ok(())
 }
 
