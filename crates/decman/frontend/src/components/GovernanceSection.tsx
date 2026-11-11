@@ -2381,9 +2381,8 @@ export const GovernanceSection = ({
   };
 
   // Render form fields based on selected action type
-  // Shared by the legacy DevNet Feature App action form and the Request DevNet
-  // Featured App Right and Accept Paid Credential proposal forms: all pin the
-  // DSO's current AmuletRules.
+  // Shared by the Request DevNet Featured App Right and Accept Paid Credential
+  // proposal forms: both pin the DSO's current AmuletRules.
   const renderAmuletRulesCidField = () => (
     <Box sx={{ display: "flex", gap: 1, alignItems: "center" }}>
       <TextField
