@@ -42,6 +42,7 @@ import {
   type AmuletOption,
 } from "../paidCredential";
 import { fieldHelpAdornment, TextHelp } from "./FieldHelp";
+import { ContractSelect } from "./governance/fields/ContractSelect";
 import { HelpTextField } from "./governance/fields/HelpTextField";
 import type {
   GovernanceResponse,
@@ -781,29 +782,16 @@ export const GovernanceSection = ({
 
   // UserService select shared by the credential proposal forms.
   const renderUserServiceSelect = (help: string) => (
-    <FormControl size="small" fullWidth required>
-      <InputLabel>
-        <TextHelp text={help}>UserService Contract ID</TextHelp>
-      </InputLabel>
-      <Select
-        label="UserService Contract ID"
-        value={proposalUserServiceCid}
-        onChange={(e) => setProposalUserServiceCid(e.target.value)}
-        MenuProps={{ disableScrollLock: true }}
-      >
-        {servicesLoading ? (
-          <MenuItem disabled>Loading services…</MenuItem>
-        ) : userServices.length > 0 ? (
-          userServices.map((svc) => (
-            <MenuItem key={svc.contract_id} value={svc.contract_id}>
-              {svc.contract_id}
-            </MenuItem>
-          ))
-        ) : (
-          <MenuItem disabled>No user services found</MenuItem>
-        )}
-      </Select>
-    </FormControl>
+    <ContractSelect
+      label="UserService Contract ID"
+      help={help}
+      value={proposalUserServiceCid}
+      onChange={setProposalUserServiceCid}
+      items={userServices}
+      loading={servicesLoading}
+      loadingText="Loading services…"
+      emptyText="No user services found"
+    />
   );
 
   // CredentialOffer picker shared by the direct Accept Free Credential action
@@ -3014,33 +3002,16 @@ export const GovernanceSection = ({
 
               {proposalType === "setup_utility" && (
                 <>
-                  <FormControl size="small" fullWidth required>
-                    <InputLabel>
-                      <TextHelp text="ProviderService contract this party received from the operator. Required to set up the registrar.">
-                        ProviderService
-                      </TextHelp>
-                    </InputLabel>
-                    <Select
-                      label="ProviderService"
-                      value={proposalProviderServiceCid}
-                      onChange={(e) => setProposalProviderServiceCid(e.target.value)}
-                      MenuProps={{ disableScrollLock: true }}
-                    >
-                      {servicesLoading ? (
-                        <MenuItem disabled>Loading services…</MenuItem>
-                      ) : providerServices.length > 0 ? (
-                        providerServices.map((svc) => (
-                          <MenuItem key={svc.contract_id} value={svc.contract_id}>
-                            {svc.contract_id}
-                          </MenuItem>
-                        ))
-                      ) : (
-                        <MenuItem disabled>
-                          No ProviderService found — run "Create Provider Service Request" first
-                        </MenuItem>
-                      )}
-                    </Select>
-                  </FormControl>
+                  <ContractSelect
+                    label="ProviderService"
+                    help="ProviderService contract this party received from the operator. Required to set up the registrar."
+                    value={proposalProviderServiceCid}
+                    onChange={setProposalProviderServiceCid}
+                    items={providerServices}
+                    loading={servicesLoading}
+                    loadingText="Loading services…"
+                    emptyText='No ProviderService found — run "Create Provider Service Request" first'
+                  />
                   <HelpTextField
                     size="small"
                     label="Operator Party"
@@ -3353,33 +3324,17 @@ export const GovernanceSection = ({
 
               {proposalType === "set_provider_app_reward_beneficiaries" && (
                 <>
-                  <FormControl size="small" fullWidth required>
-                    <InputLabel>
-                      <TextHelp text="Which utility-issued instrument these beneficiaries apply to.">
-                        InstrumentConfiguration
-                      </TextHelp>
-                    </InputLabel>
-                    <Select
-                      label="InstrumentConfiguration"
-                      value={proposalInstrumentConfigurationCid}
-                      onChange={(e) => setProposalInstrumentConfigurationCid(e.target.value)}
-                      MenuProps={{ disableScrollLock: true }}
-                    >
-                      {instrumentsLoading ? (
-                        <MenuItem disabled>Loading instruments…</MenuItem>
-                      ) : availableInstruments.length > 0 ? (
-                        availableInstruments.map((inst) => (
-                          <MenuItem key={inst.contract_id} value={inst.contract_id}>
-                            {inst.instrument_id} ({inst.contract_id.slice(0, 8)}…)
-                          </MenuItem>
-                        ))
-                      ) : (
-                        <MenuItem disabled>
-                          No instruments found — run SetupUtility first
-                        </MenuItem>
-                      )}
-                    </Select>
-                  </FormControl>
+                  <ContractSelect
+                    label="InstrumentConfiguration"
+                    help="Which utility-issued instrument these beneficiaries apply to."
+                    value={proposalInstrumentConfigurationCid}
+                    onChange={setProposalInstrumentConfigurationCid}
+                    items={availableInstruments}
+                    loading={instrumentsLoading}
+                    loadingText="Loading instruments…"
+                    emptyText="No instruments found — run SetupUtility first"
+                    rowLabel={(inst) => <>{inst.instrument_id} ({inst.contract_id.slice(0, 8)}…)</>}
+                  />
                   <FormControlLabel
                     control={<Checkbox size="small" checked={proposalClearBeneficiaries} onChange={(e) => setProposalClearBeneficiaries(e.target.checked)} />}
                     label={
@@ -3491,31 +3446,14 @@ export const GovernanceSection = ({
 
               {proposalType === "set_enable_result_contracts" && (
                 <>
-                  <FormControl size="small" fullWidth required>
-                    <InputLabel>
-                      <TextHelp text="RegistrarService contract whose result-contract setting will be updated.">
-                        RegistrarService
-                      </TextHelp>
-                    </InputLabel>
-                    <Select
-                      label="RegistrarService"
-                      value={proposalRegistrarServiceCid}
-                      onChange={(e) => setProposalRegistrarServiceCid(e.target.value)}
-                      MenuProps={{ disableScrollLock: true }}
-                    >
-                      {registrarServiceContracts.length > 0 ? (
-                        registrarServiceContracts.map((c) => (
-                          <MenuItem key={c.contract_id} value={c.contract_id}>
-                            {c.contract_id}
-                          </MenuItem>
-                        ))
-                      ) : (
-                        <MenuItem disabled>
-                          No RegistrarService found — run SetupUtility first
-                        </MenuItem>
-                      )}
-                    </Select>
-                  </FormControl>
+                  <ContractSelect
+                    label="RegistrarService"
+                    help="RegistrarService contract whose result-contract setting will be updated."
+                    value={proposalRegistrarServiceCid}
+                    onChange={setProposalRegistrarServiceCid}
+                    items={registrarServiceContracts}
+                    emptyText="No RegistrarService found — run SetupUtility first"
+                  />
                   <FormControl size="small" fullWidth>
                     <InputLabel>
                       <TextHelp text="Whether the registrar should emit result contracts after operations. Clear sets the value back to None.">
@@ -3752,33 +3690,18 @@ export const GovernanceSection = ({
                         />
                       )}
                     />
-                    <FormControl size="small" fullWidth required disabled>
-                      <InputLabel>
-                        <TextHelp text="Instrument the request was made against. Derived automatically from the selected request.">
-                          Instrument
-                        </TextHelp>
-                      </InputLabel>
-                      <Select
-                        label="Instrument"
-                        value={proposalInstrumentConfigurationCid}
-                        onChange={(e) => setProposalInstrumentConfigurationCid(e.target.value)}
-                        MenuProps={{ disableScrollLock: true }}
-                      >
-                        {instrumentsLoading ? (
-                          <MenuItem disabled>Loading instruments…</MenuItem>
-                        ) : availableInstruments.length > 0 ? (
-                          availableInstruments.map((inst) => (
-                            <MenuItem key={inst.contract_id} value={inst.contract_id}>
-                              {inst.instrument_id} ({inst.contract_id.slice(0, 8)}…)
-                            </MenuItem>
-                          ))
-                        ) : (
-                          <MenuItem disabled>
-                            No instruments found — run SetupUtility first
-                          </MenuItem>
-                        )}
-                      </Select>
-                    </FormControl>
+                    <ContractSelect
+                      label="Instrument"
+                      help="Instrument the request was made against. Derived automatically from the selected request."
+                      value={proposalInstrumentConfigurationCid}
+                      onChange={setProposalInstrumentConfigurationCid}
+                      items={availableInstruments}
+                      loading={instrumentsLoading}
+                      loadingText="Loading instruments…"
+                      emptyText="No instruments found — run SetupUtility first"
+                      rowLabel={(inst) => <>{inst.instrument_id} ({inst.contract_id.slice(0, 8)}…)</>}
+                      disabled
+                    />
                     <Autocomplete
                       size="small"
                       multiple
@@ -4151,33 +4074,16 @@ export const GovernanceSection = ({
 
               {proposalType === "create_provider_configuration" && (
                 <>
-                  <FormControl size="small" fullWidth required>
-                    <InputLabel>
-                      <TextHelp text="ProviderService contract of this provider decparty. Its provider must be the governance party.">
-                        ProviderService
-                      </TextHelp>
-                    </InputLabel>
-                    <Select
-                      label="ProviderService"
-                      value={proposalProviderServiceCid}
-                      onChange={(e) => setProposalProviderServiceCid(e.target.value)}
-                      MenuProps={{ disableScrollLock: true }}
-                    >
-                      {servicesLoading ? (
-                        <MenuItem disabled>Loading services…</MenuItem>
-                      ) : providerServices.length > 0 ? (
-                        providerServices.map((svc) => (
-                          <MenuItem key={svc.contract_id} value={svc.contract_id}>
-                            {svc.contract_id}
-                          </MenuItem>
-                        ))
-                      ) : (
-                        <MenuItem disabled>
-                          No ProviderService found — run "Create Provider Service Request" first
-                        </MenuItem>
-                      )}
-                    </Select>
-                  </FormControl>
+                  <ContractSelect
+                    label="ProviderService"
+                    help="ProviderService contract of this provider decparty. Its provider must be the governance party."
+                    value={proposalProviderServiceCid}
+                    onChange={setProposalProviderServiceCid}
+                    items={providerServices}
+                    loading={servicesLoading}
+                    loadingText="Loading services…"
+                    emptyText='No ProviderService found — run "Create Provider Service Request" first'
+                  />
                   {renderRequirementRows(
                     "Registrar Requirements",
                     "Credential requirements a registrar must meet before the provider onboards it. Rows whose issuer is this governance party are minted automatically during Onboard Registrar.",
@@ -4234,119 +4140,52 @@ export const GovernanceSection = ({
 
               {proposalType === "onboard_registrar" && (
                 <>
-                  <FormControl size="small" fullWidth required>
-                    <InputLabel>
-                      <TextHelp text="ProviderService contract of this provider decparty, used to accept the request.">
-                        ProviderService
-                      </TextHelp>
-                    </InputLabel>
-                    <Select
-                      label="ProviderService"
-                      value={proposalProviderServiceCid}
-                      onChange={(e) => setProposalProviderServiceCid(e.target.value)}
-                      MenuProps={{ disableScrollLock: true }}
-                    >
-                      {servicesLoading ? (
-                        <MenuItem disabled>Loading services…</MenuItem>
-                      ) : providerServices.length > 0 ? (
-                        providerServices.map((svc) => (
-                          <MenuItem key={svc.contract_id} value={svc.contract_id}>
-                            {svc.contract_id}
-                          </MenuItem>
-                        ))
-                      ) : (
-                        <MenuItem disabled>
-                          No ProviderService found — run "Create Provider Service Request" first
-                        </MenuItem>
-                      )}
-                    </Select>
-                  </FormControl>
-                  <FormControl size="small" fullWidth required>
-                    <InputLabel>
-                      <TextHelp text="Pending RegistrarServiceRequest to accept. The request names the registrar to onboard; its provider must be this governance party.">
-                        RegistrarServiceRequest
-                      </TextHelp>
-                    </InputLabel>
-                    <Select
-                      label="RegistrarServiceRequest"
-                      value={proposalRegistrarServiceRequestCid}
-                      onChange={(e) => setProposalRegistrarServiceRequestCid(e.target.value)}
-                      MenuProps={{ disableScrollLock: true }}
-                    >
-                      {registrarServiceRequestsLoading ? (
-                        <MenuItem disabled>Loading requests…</MenuItem>
-                      ) : acceptableRegistrarServiceRequests.length > 0 ? (
-                        acceptableRegistrarServiceRequests.map((req) => (
-                          <MenuItem key={req.contract_id} value={req.contract_id}>
-                            {req.registrar.split("::")[0]} (…{req.contract_id.slice(-8)})
-                          </MenuItem>
-                        ))
-                      ) : (
-                        <MenuItem disabled>
-                          No pending requests for this provider — the registrar runs "Create Registrar Service Request" first
-                        </MenuItem>
-                      )}
-                    </Select>
-                  </FormControl>
-                  <FormControl size="small" fullWidth required>
-                    <InputLabel>
-                      <TextHelp text="ProviderConfiguration holding the registrar requirements to mint and validate against.">
-                        ProviderConfiguration
-                      </TextHelp>
-                    </InputLabel>
-                    <Select
-                      label="ProviderConfiguration"
-                      value={proposalProviderConfigurationCid}
-                      onChange={(e) => setProposalProviderConfigurationCid(e.target.value)}
-                      MenuProps={{ disableScrollLock: true }}
-                    >
-                      {providerConfigurationsLoading ? (
-                        <MenuItem disabled>Loading configurations…</MenuItem>
-                      ) : providerConfigurations.length > 0 ? (
-                        providerConfigurations.map((cfg) => (
-                          <MenuItem key={cfg.contract_id} value={cfg.contract_id}>
-                            {cfg.contract_id}
-                          </MenuItem>
-                        ))
-                      ) : (
-                        <MenuItem disabled>
-                          No ProviderConfiguration found — run "Create Provider Configuration" first
-                        </MenuItem>
-                      )}
-                    </Select>
-                  </FormControl>
+                  <ContractSelect
+                    label="ProviderService"
+                    help="ProviderService contract of this provider decparty, used to accept the request."
+                    value={proposalProviderServiceCid}
+                    onChange={setProposalProviderServiceCid}
+                    items={providerServices}
+                    loading={servicesLoading}
+                    loadingText="Loading services…"
+                    emptyText='No ProviderService found — run "Create Provider Service Request" first'
+                  />
+                  <ContractSelect
+                    label="RegistrarServiceRequest"
+                    help="Pending RegistrarServiceRequest to accept. The request names the registrar to onboard; its provider must be this governance party."
+                    value={proposalRegistrarServiceRequestCid}
+                    onChange={setProposalRegistrarServiceRequestCid}
+                    items={acceptableRegistrarServiceRequests}
+                    loading={registrarServiceRequestsLoading}
+                    loadingText="Loading requests…"
+                    emptyText='No pending requests for this provider — the registrar runs "Create Registrar Service Request" first'
+                    rowLabel={(req) => <>{req.registrar.split("::")[0]} (…{req.contract_id.slice(-8)})</>}
+                  />
+                  <ContractSelect
+                    label="ProviderConfiguration"
+                    help="ProviderConfiguration holding the registrar requirements to mint and validate against."
+                    value={proposalProviderConfigurationCid}
+                    onChange={setProposalProviderConfigurationCid}
+                    items={providerConfigurations}
+                    loading={providerConfigurationsLoading}
+                    loadingText="Loading configurations…"
+                    emptyText='No ProviderConfiguration found — run "Create Provider Configuration" first'
+                  />
                 </>
               )}
 
               {proposalType === "provision_instrument" && (
                 <>
-                  <FormControl size="small" fullWidth required>
-                    <InputLabel>
-                      <TextHelp text="RegistrarService contract of this registrar decparty, used to create the InstrumentConfiguration.">
-                        RegistrarService
-                      </TextHelp>
-                    </InputLabel>
-                    <Select
-                      label="RegistrarService"
-                      value={proposalRegistrarServiceCid}
-                      onChange={(e) => setProposalRegistrarServiceCid(e.target.value)}
-                      MenuProps={{ disableScrollLock: true }}
-                    >
-                      {registrarServicesLoading ? (
-                        <MenuItem disabled>Loading services…</MenuItem>
-                      ) : ownRegistrarServices.length > 0 ? (
-                        ownRegistrarServices.map((svc) => (
-                          <MenuItem key={svc.contract_id} value={svc.contract_id}>
-                            {svc.contract_id}
-                          </MenuItem>
-                        ))
-                      ) : (
-                        <MenuItem disabled>
-                          No RegistrarService for this party — run "Onboard Registrar" first
-                        </MenuItem>
-                      )}
-                    </Select>
-                  </FormControl>
+                  <ContractSelect
+                    label="RegistrarService"
+                    help="RegistrarService contract of this registrar decparty, used to create the InstrumentConfiguration."
+                    value={proposalRegistrarServiceCid}
+                    onChange={setProposalRegistrarServiceCid}
+                    items={ownRegistrarServices}
+                    loading={registrarServicesLoading}
+                    loadingText="Loading services…"
+                    emptyText='No RegistrarService for this party — run "Onboard Registrar" first'
+                  />
                   <HelpTextField
                     size="small"
                     label="Instrument ID"
@@ -4385,33 +4224,17 @@ export const GovernanceSection = ({
 
               {proposalType === "onboard_instrument_issuers" && (
                 <>
-                  <FormControl size="small" fullWidth required>
-                    <InputLabel>
-                      <TextHelp text="InstrumentConfiguration whose issuer requirements the new issuers are credentialed against.">
-                        InstrumentConfiguration
-                      </TextHelp>
-                    </InputLabel>
-                    <Select
-                      label="InstrumentConfiguration"
-                      value={proposalInstrumentConfigurationCid}
-                      onChange={(e) => setProposalInstrumentConfigurationCid(e.target.value)}
-                      MenuProps={{ disableScrollLock: true }}
-                    >
-                      {instrumentsLoading ? (
-                        <MenuItem disabled>Loading instruments…</MenuItem>
-                      ) : ownInstruments.length > 0 ? (
-                        ownInstruments.map((inst) => (
-                          <MenuItem key={inst.contract_id} value={inst.contract_id}>
-                            {inst.instrument_id} ({inst.contract_id.slice(0, 8)}…)
-                          </MenuItem>
-                        ))
-                      ) : (
-                        <MenuItem disabled>
-                          No instruments administered by this party — run "Provision Instrument" first
-                        </MenuItem>
-                      )}
-                    </Select>
-                  </FormControl>
+                  <ContractSelect
+                    label="InstrumentConfiguration"
+                    help="InstrumentConfiguration whose issuer requirements the new issuers are credentialed against."
+                    value={proposalInstrumentConfigurationCid}
+                    onChange={setProposalInstrumentConfigurationCid}
+                    items={ownInstruments}
+                    loading={instrumentsLoading}
+                    loadingText="Loading instruments…"
+                    emptyText='No instruments administered by this party — run "Provision Instrument" first'
+                    rowLabel={(inst) => <>{inst.instrument_id} ({inst.contract_id.slice(0, 8)}…)</>}
+                  />
                   <HelpTextField
                     size="small"
                     label="Instrument Issuers (one party id per line)"
@@ -4429,33 +4252,16 @@ export const GovernanceSection = ({
               )}
 
               {proposalType === "create_transfer_rule" && (
-                <FormControl size="small" fullWidth required>
-                  <InputLabel>
-                    <TextHelp text="RegistrarService contract of this registrar decparty. The new TransferRule belongs to it. Setup creates the first rule when asked to, so use this to add one later.">
-                      RegistrarService
-                    </TextHelp>
-                  </InputLabel>
-                  <Select
-                    label="RegistrarService"
-                    value={proposalRegistrarServiceCid}
-                    onChange={(e) => setProposalRegistrarServiceCid(e.target.value)}
-                    MenuProps={{ disableScrollLock: true }}
-                  >
-                    {registrarServicesLoading ? (
-                      <MenuItem disabled>Loading services…</MenuItem>
-                    ) : ownRegistrarServices.length > 0 ? (
-                      ownRegistrarServices.map((svc) => (
-                        <MenuItem key={svc.contract_id} value={svc.contract_id}>
-                          {svc.contract_id}
-                        </MenuItem>
-                      ))
-                    ) : (
-                      <MenuItem disabled>
-                        No RegistrarService for this party — run "Setup Utility" or "Onboard Registrar" first
-                      </MenuItem>
-                    )}
-                  </Select>
-                </FormControl>
+                <ContractSelect
+                  label="RegistrarService"
+                  help="RegistrarService contract of this registrar decparty. The new TransferRule belongs to it. Setup creates the first rule when asked to, so use this to add one later."
+                  value={proposalRegistrarServiceCid}
+                  onChange={setProposalRegistrarServiceCid}
+                  items={ownRegistrarServices}
+                  loading={registrarServicesLoading}
+                  loadingText="Loading services…"
+                  emptyText='No RegistrarService for this party — run "Setup Utility" or "Onboard Registrar" first'
+                />
               )}
 
               {proposalType === "update_instrument_configuration" && (
@@ -4466,60 +4272,27 @@ export const GovernanceSection = ({
                     field you clear is cleared on the ledger. The reward
                     beneficiaries stay as they are.
                   </Alert>
-                  <FormControl size="small" fullWidth required>
-                    <InputLabel>
-                      <TextHelp text="RegistrarService contract of this registrar decparty. The update runs through it.">
-                        RegistrarService
-                      </TextHelp>
-                    </InputLabel>
-                    <Select
-                      label="RegistrarService"
-                      value={proposalRegistrarServiceCid}
-                      onChange={(e) => setProposalRegistrarServiceCid(e.target.value)}
-                      MenuProps={{ disableScrollLock: true }}
-                    >
-                      {registrarServicesLoading ? (
-                        <MenuItem disabled>Loading services…</MenuItem>
-                      ) : ownRegistrarServices.length > 0 ? (
-                        ownRegistrarServices.map((svc) => (
-                          <MenuItem key={svc.contract_id} value={svc.contract_id}>
-                            {svc.contract_id}
-                          </MenuItem>
-                        ))
-                      ) : (
-                        <MenuItem disabled>
-                          No RegistrarService for this party — run "Onboard Registrar" first
-                        </MenuItem>
-                      )}
-                    </Select>
-                  </FormControl>
-                  <FormControl size="small" fullWidth required>
-                    <InputLabel>
-                      <TextHelp text="The InstrumentConfiguration to replace. Execution archives it and creates a new one.">
-                        InstrumentConfiguration
-                      </TextHelp>
-                    </InputLabel>
-                    <Select
-                      label="InstrumentConfiguration"
-                      value={proposalInstrumentConfigurationCid}
-                      onChange={(e) => selectConfigurationToUpdate(e.target.value)}
-                      MenuProps={{ disableScrollLock: true }}
-                    >
-                      {instrumentsLoading ? (
-                        <MenuItem disabled>Loading instruments…</MenuItem>
-                      ) : ownInstruments.length > 0 ? (
-                        ownInstruments.map((inst) => (
-                          <MenuItem key={inst.contract_id} value={inst.contract_id}>
-                            {inst.instrument_id} ({inst.contract_id.slice(0, 8)}…)
-                          </MenuItem>
-                        ))
-                      ) : (
-                        <MenuItem disabled>
-                          No instruments administered by this party — run "Provision Instrument" first
-                        </MenuItem>
-                      )}
-                    </Select>
-                  </FormControl>
+                  <ContractSelect
+                    label="RegistrarService"
+                    help="RegistrarService contract of this registrar decparty. The update runs through it."
+                    value={proposalRegistrarServiceCid}
+                    onChange={setProposalRegistrarServiceCid}
+                    items={ownRegistrarServices}
+                    loading={registrarServicesLoading}
+                    loadingText="Loading services…"
+                    emptyText='No RegistrarService for this party — run "Onboard Registrar" first'
+                  />
+                  <ContractSelect
+                    label="InstrumentConfiguration"
+                    help="The InstrumentConfiguration to replace. Execution archives it and creates a new one."
+                    value={proposalInstrumentConfigurationCid}
+                    onChange={selectConfigurationToUpdate}
+                    items={ownInstruments}
+                    loading={instrumentsLoading}
+                    loadingText="Loading instruments…"
+                    emptyText='No instruments administered by this party — run "Provision Instrument" first'
+                    rowLabel={(inst) => <>{inst.instrument_id} ({inst.contract_id.slice(0, 8)}…)</>}
+                  />
                   {configurationToUpdateUnreadable && (
                     <Alert severity="warning">
                       DecMan could not read this configuration&apos;s current
