@@ -10,6 +10,7 @@ import { beneficiariesProblem } from "../../../rewardBeneficiaries";
 import { offerDepositUsd, ownedAmulets, type AmuletOption } from "../../../paidCredential";
 import type { RequirementRow } from "../fields/RequirementRows";
 import type { FormProposalType } from "./proposalMenu";
+import { DEFAULT_TRANSFER_EXPIRY_HOURS } from "./transferPayloads";
 import type {
   ActiveCouponReassignmentDelegation,
   BlockListShardsResponse,
@@ -39,10 +40,6 @@ import type {
   UserServiceInfo,
   UserServicesResponse,
 } from "../../../types";
-
-/// Default validity window (hours) for a Transfer proposal / two-step offer.
-/// Mirrors the backend default; overridable per-transfer in the form.
-const DEFAULT_TRANSFER_EXPIRY_HOURS = 24;
 
 interface ProposalStateArgs {
   partyId: string;
@@ -1213,5 +1210,5 @@ const useProposalState = ({ partyId, defaultOperatorParty }: ProposalStateArgs) 
 
 type ProposalState = ReturnType<typeof useProposalState>;
 
-export { DEFAULT_TRANSFER_EXPIRY_HOURS, useProposalState };
+export { useProposalState };
 export type { ProposalState };
