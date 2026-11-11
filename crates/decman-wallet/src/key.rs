@@ -119,6 +119,25 @@ mod tests {
         assert!(ExternalKeyPair::from_seed_b64(&STANDARD.encode([1u8; 32])).is_ok());
     }
 
+    /// The messages a caller shows for a bad seed, byte for byte.
+    #[test]
+    fn from_seed_b64_errors_keep_their_messages() {
+        let not_base64 = match ExternalKeyPair::from_seed_b64("not base64!!") {
+            Ok(_) => panic!("a seed with spaces must not decode"),
+            Err(e) => e.to_string(),
+        };
+        assert_eq!(
+            not_base64,
+            "seed is not valid base64: Invalid symbol 32, offset 3."
+        );
+
+        let short = match ExternalKeyPair::from_seed_b64(&STANDARD.encode([1u8; 31])) {
+            Ok(_) => panic!("a 31-byte seed must not decode"),
+            Err(e) => e.to_string(),
+        };
+        assert_eq!(short, "seed must be 32 bytes, got 31");
+    }
+
     #[test]
     fn party_id_is_hint_plus_fingerprint() {
         let key = ExternalKeyPair::from_seed([9u8; 32]);
