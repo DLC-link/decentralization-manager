@@ -104,9 +104,6 @@ pub struct Composer {
     pub submit: ComposerSubmit,
     pub party_id: String,
     pub party_name: String,
-    /// The party-level governance type, used for the confirm call and to
-    /// refresh the approvals overlay afterwards.
-    pub governance_type: String,
     pub rules_contract_id: String,
     pub fields: Vec<ComposerField>,
     /// Index of the focused field; `fields.len()` is the virtual submit row.
@@ -132,31 +129,15 @@ const fn opt(key: &'static str, label: &'static str) -> TypeOption {
     TypeOption { key, label }
 }
 
-/// The governance action types offered for a party's governance type, in the
-/// same order and split the web frontend uses (`core_self` shows the four
-/// self-management actions; any other type shows the rest).
-pub fn action_types(governance_type: &str) -> Vec<TypeOption> {
-    if governance_type == "core_self" {
-        vec![
-            opt("governance_add_member", "Add governance member"),
-            opt("governance_remove_member", "Remove governance member"),
-            opt("governance_set_threshold", "Set governance threshold"),
-            opt("governance_set_timeout", "Set governance timeout"),
-        ]
-    } else {
-        vec![
-            opt("utility_create_provider_request", "Create provider service"),
-            opt("utility_create_user_request", "Create user service"),
-            opt("utility_setup", "Setup utility"),
-            opt(
-                "utility_accept_holder_service_request",
-                "Accept holder service",
-            ),
-            opt("credential_offer_free", "Offer free credential"),
-            opt("credential_accept_free", "Accept free credential"),
-            opt("dev_net_feature_app", "DevNet: feature app"),
-        ]
-    }
+/// The governance action types offered on a `core_self` party: the four
+/// self-management actions, in the order the web frontend uses.
+pub fn action_types() -> Vec<TypeOption> {
+    vec![
+        opt("governance_add_member", "Add governance member"),
+        opt("governance_remove_member", "Remove governance member"),
+        opt("governance_set_threshold", "Set governance threshold"),
+        opt("governance_set_timeout", "Set governance timeout"),
+    ]
 }
 
 /// The proposal types offered on a `core_self` party, grouped as in the web
@@ -359,66 +340,6 @@ pub fn fields_for_action(action_type: &str, ctx: &ComposerContext) -> Vec<Compos
             3_600_000_000,
             "1 hour = 3,600,000,000 µs",
         )],
-        "utility_create_provider_request" | "utility_create_user_request" => {
-            vec![text_value(
-                "operator",
-                "Operator party",
-                ctx.operator_party.clone(),
-            )]
-        }
-        "utility_setup" => vec![
-            text_value("operator", "Operator party", ctx.operator_party.clone()),
-            picker(
-                "provider_service_cid",
-                "Provider service cid",
-                PickerSource::ProviderServices,
-            ),
-            picker(
-                "user_service_cid",
-                "User service cid",
-                PickerSource::UserServices,
-            ),
-        ],
-        "utility_accept_holder_service_request" => vec![
-            text_value("operator", "Operator party", ctx.operator_party.clone()),
-            picker(
-                "provider_service_cid",
-                "Provider service cid",
-                PickerSource::ProviderServices,
-            ),
-            text("holder_service_request_cid", "Holder service request cid"),
-            text("holder", "Holder party"),
-        ],
-        "credential_offer_free" => vec![
-            text_value("operator", "Operator party", ctx.operator_party.clone()),
-            picker(
-                "user_service_cid",
-                "User service cid",
-                PickerSource::UserServices,
-            ),
-            text("holder", "Holder party"),
-            text("id", "Credential id"),
-            text("description", "Description"),
-            rows_required(
-                "claims",
-                "Claims (subject,property,value)",
-                vec!["subject", "property", "value"],
-            ),
-        ],
-        "credential_accept_free" => vec![
-            text_value("operator", "Operator party", ctx.operator_party.clone()),
-            picker(
-                "user_service_cid",
-                "User service cid",
-                PickerSource::UserServices,
-            ),
-            picker(
-                "credential_offer_cid",
-                "Credential offer cid",
-                PickerSource::CredentialOffers,
-            ),
-        ],
-        "dev_net_feature_app" => vec![text("amulet_rules_cid", "Amulet rules cid")],
         _ => Vec::new(),
     }
 }
@@ -753,7 +674,6 @@ mod tests {
             submit: ComposerSubmit::Propose,
             party_id: "dec::1220".to_owned(),
             party_name: "dec".to_owned(),
-            governance_type: "core_self".to_owned(),
             rules_contract_id: "00rules".to_owned(),
             fields,
             cursor: 0,
@@ -836,24 +756,12 @@ mod tests {
     }
 
     #[test]
-    fn action_types_split_by_governance_type() {
-        let core = action_types("core_self");
+    fn action_types_are_the_four_self_management_actions() {
+        let core = action_types();
         assert_eq!(core.len(), 4);
         assert!(
             core.iter()
                 .all(|option| option.key.starts_with("governance_"))
-        );
-
-        let other = action_types("other");
-        assert!(
-            other
-                .iter()
-                .any(|option| option.key == "utility_create_provider_request")
-        );
-        assert!(
-            !other
-                .iter()
-                .any(|option| option.key.starts_with("governance_"))
         );
 
         // The paid-credential proposals are web-only.
@@ -863,7 +771,7 @@ mod tests {
     }
 
     #[test]
-    fn fields_for_action_prefills_threshold_and_operator() {
+    fn composer_fields_prefill_threshold_and_operator() {
         let ctx = ComposerContext {
             party_id: "dec::1".to_owned(),
             operator_party: "op::1".to_owned(),
@@ -875,7 +783,7 @@ mod tests {
             None => panic!("new_threshold field missing"),
         }
 
-        let setup = fields_for_action("utility_setup", &ctx);
+        let setup = fields_for_proposal("setup_utility", &ctx);
         match setup.iter().find(|field| field.key == "operator") {
             Some(field) => assert_eq!(field.value, "op::1"),
             None => panic!("operator field missing"),
