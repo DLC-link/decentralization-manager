@@ -2,14 +2,14 @@
 //! parking it (#442). Drives a real coordinator, its Noise listener, and a real
 //! peer over localhost, without a Canton node.
 
-use tokio::net::TcpListener;
+use tokio::{net::TcpListener, sync::Mutex};
 
 use super::*;
 use crate::{
     config::{NetworkConfig, Peer},
     consts::PEER_SILENCE_LIMIT,
     noise::server::NoiseServer,
-    workflow::{DarsConfig, DarsStep, contracts::DarFile},
+    workflow::{DarsConfig, DarsStep, WorkflowType, contracts::DarFile},
 };
 
 const COORDINATOR_RUN: &str = "dars-coordinator-run";
