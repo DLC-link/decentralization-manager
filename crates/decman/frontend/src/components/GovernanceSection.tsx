@@ -42,6 +42,7 @@ import {
   type AmuletOption,
 } from "../paidCredential";
 import { fieldHelpAdornment, TextHelp } from "./FieldHelp";
+import { HelpTextField } from "./governance/fields/HelpTextField";
 import type {
   GovernanceResponse,
   ActionType,
@@ -908,7 +909,7 @@ export const GovernanceSection = ({
       </Typography>
       {rows.map((row, idx) => (
         <Box key={idx} sx={{ display: "flex", gap: 1, mb: 1, alignItems: "flex-start" }}>
-          <TextField
+          <HelpTextField
             label="Issuer Party"
             value={row.issuer}
             onChange={(e) => {
@@ -918,16 +919,9 @@ export const GovernanceSection = ({
             }}
             size="small"
             sx={{ flex: 2 }}
-            slotProps={{
-              input: {
-                endAdornment: fieldHelpAdornment(
-                  "Party id whose credential satisfies this requirement. The governance party mints the credential itself when it is the issuer; other issuers must credential the party out-of-band.",
-                  "Help for Issuer Party",
-                ),
-              },
-            }}
+            help="Party id whose credential satisfies this requirement. The governance party mints the credential itself when it is the issuer; other issuers must credential the party out-of-band."
           />
-          <TextField
+          <HelpTextField
             label="Required claims (one per line: property,value)"
             value={row.claimsText}
             onChange={(e) => {
@@ -940,14 +934,8 @@ export const GovernanceSection = ({
             multiline
             minRows={1}
             maxRows={4}
-            slotProps={{
-              input: {
-                endAdornment: fieldHelpAdornment(
-                  'Claims the issuer\'s credential must contain. One per line, each formatted as "property,value" (e.g. role,registrar).',
-                  "Help for Required Claims",
-                ),
-              },
-            }}
+            help={'Claims the issuer\'s credential must contain. One per line, each formatted as "property,value" (e.g. role,registrar).'}
+            helpLabel="Required Claims"
           />
           <Button
             size="small"
@@ -2245,21 +2233,14 @@ export const GovernanceSection = ({
   // proposal forms: both pin the DSO's current AmuletRules.
   const renderAmuletRulesCidField = () => (
     <Box sx={{ display: "flex", gap: 1, alignItems: "center" }}>
-      <TextField
+      <HelpTextField
         label="Amulet Rules CID"
         value={amuletRulesCid}
         onChange={(e) => setAmuletRulesCid(e.target.value)}
         fullWidth
         size="small"
         required
-        slotProps={{
-          input: {
-            endAdornment: fieldHelpAdornment(
-              "Contract id of the DSO's current AmuletRules contract, prefilled from the DSO scan API. Refresh it if the DSO has replaced the contract since this form opened.",
-              "Help for Amulet Rules CID",
-            ),
-          },
-        }}
+        help="Contract id of the DSO's current AmuletRules contract, prefilled from the DSO scan API. Refresh it if the DSO has replaced the contract since this form opened."
       />
       <Tooltip title="Refresh">
         <span>
@@ -2280,23 +2261,16 @@ export const GovernanceSection = ({
       case "governance_add_member":
         return (
           <>
-            <TextField
+            <HelpTextField
               label="Member Party ID"
               value={memberParty}
               onChange={(e) => setMemberParty(e.target.value)}
               size="small"
               fullWidth
               sx={{ mb: 2 }}
-              slotProps={{
-                input: {
-                  endAdornment: fieldHelpAdornment(
-                    "Party id of the new governance member to add to this rules contract.",
-                    "Help for Member Party ID",
-                  ),
-                },
-              }}
+              help="Party id of the new governance member to add to this rules contract."
             />
-            <TextField
+            <HelpTextField
               label="New Threshold"
               type="number"
               value={newThreshold}
@@ -2306,14 +2280,7 @@ export const GovernanceSection = ({
               }}
               size="small"
               fullWidth
-              slotProps={{
-                input: {
-                  endAdornment: fieldHelpAdornment(
-                    "Number of governance member confirmations required to execute an action after this member is added.",
-                    "Help for New Threshold",
-                  ),
-                },
-              }}
+              help="Number of governance member confirmations required to execute an action after this member is added."
             />
           </>
         );
@@ -2327,7 +2294,7 @@ export const GovernanceSection = ({
         return (
           <>
             {members.length > 0 ? (
-              <TextField
+              <HelpTextField
                 select
                 label="Member to remove"
                 value={memberParty}
@@ -2335,23 +2302,16 @@ export const GovernanceSection = ({
                 size="small"
                 fullWidth
                 sx={{ mb: 2 }}
-                slotProps={{
-                  input: {
-                    endAdornment: fieldHelpAdornment(
-                      "Pick which existing governance member to remove from this rules contract.",
-                      "Help for Member to remove",
-                    ),
-                  },
-                }}
+                help="Pick which existing governance member to remove from this rules contract."
               >
                 {members.map((id) => (
                   <MenuItem key={id} value={id}>
                     {id}
                   </MenuItem>
                 ))}
-              </TextField>
+              </HelpTextField>
             ) : (
-              <TextField
+              <HelpTextField
                 label="Member Party ID"
                 value={memberParty}
                 onChange={(e) => setMemberParty(e.target.value)}
@@ -2359,17 +2319,10 @@ export const GovernanceSection = ({
                 fullWidth
                 sx={{ mb: 2 }}
                 helperText="Members list not loaded — paste the party id directly"
-                slotProps={{
-                  input: {
-                    endAdornment: fieldHelpAdornment(
-                      "Party id of the governance member to remove.",
-                      "Help for Member Party ID",
-                    ),
-                  },
-                }}
+                help="Party id of the governance member to remove."
               />
             )}
-            <TextField
+            <HelpTextField
               label="New Threshold"
               type="number"
               value={newThreshold}
@@ -2379,21 +2332,14 @@ export const GovernanceSection = ({
               }}
               size="small"
               fullWidth
-              slotProps={{
-                input: {
-                  endAdornment: fieldHelpAdornment(
-                    "Number of governance member confirmations required to execute an action after this member is removed.",
-                    "Help for New Threshold",
-                  ),
-                },
-              }}
+              help="Number of governance member confirmations required to execute an action after this member is removed."
             />
           </>
         );
       }
       case "governance_set_threshold":
         return (
-          <TextField
+          <HelpTextField
             label="New Threshold"
             type="number"
             value={newThreshold}
@@ -2403,19 +2349,12 @@ export const GovernanceSection = ({
             }}
             size="small"
             fullWidth
-            slotProps={{
-              input: {
-                endAdornment: fieldHelpAdornment(
-                  "Number of governance member confirmations required to execute an action.",
-                  "Help for New Threshold",
-                ),
-              },
-            }}
+            help="Number of governance member confirmations required to execute an action."
           />
         );
       case "governance_set_timeout":
         return (
-          <TextField
+          <HelpTextField
             label="Timeout (microseconds)"
             type="number"
             value={timeoutMicroseconds}
@@ -2426,19 +2365,13 @@ export const GovernanceSection = ({
             size="small"
             fullWidth
             helperText="1 hour = 3,600,000,000 microseconds"
-            slotProps={{
-              input: {
-                endAdornment: fieldHelpAdornment(
-                  "How long a confirmation stays valid before expiring, in microseconds. 1 hour = 3,600,000,000.",
-                  "Help for Timeout",
-                ),
-              },
-            }}
+            help="How long a confirmation stays valid before expiring, in microseconds. 1 hour = 3,600,000,000."
+            helpLabel="Timeout"
           />
         );
       case "governance_set_disclosure_observers":
         return (
-          <TextField
+          <HelpTextField
             label="Disclosure Observers (one party id per line)"
             value={disclosureObserversText}
             onChange={(e) => {
@@ -2451,14 +2384,8 @@ export const GovernanceSection = ({
             minRows={2}
             maxRows={6}
             helperText="This list replaces the current one. Leave it empty to remove every observer."
-            slotProps={{
-              input: {
-                endAdornment: fieldHelpAdornment(
-                  "Parties that can see the rules contract without hosting the governance party. Observers cannot confirm or execute actions.",
-                  "Help for Disclosure Observers",
-                ),
-              },
-            }}
+            help="Parties that can see the rules contract without hosting the governance party. Observers cannot confirm or execute actions."
+            helpLabel="Disclosure Observers"
           />
         );
       default:
@@ -2665,7 +2592,7 @@ export const GovernanceSection = ({
                 )}
 
               {proposalType === "generic_vote" && (
-                <TextField
+                <HelpTextField
                   size="small"
                   label="Vote Description"
                   value={proposalDescription}
@@ -2676,14 +2603,7 @@ export const GovernanceSection = ({
                   minRows={2}
                   maxRows={6}
                   helperText="Describe what the governance members are voting on"
-                  slotProps={{
-                    input: {
-                      endAdornment: fieldHelpAdornment(
-                        "Free-form human-readable note describing what governance members are voting on.",
-                        "Help for Vote Description",
-                      ),
-                    },
-                  }}
+                  help="Free-form human-readable note describing what governance members are voting on."
                 />
               )}
 
@@ -2695,37 +2615,23 @@ export const GovernanceSection = ({
                       issuing another would create a duplicate and burn fees again.
                     </Alert>
                   )}
-                  <TextField
+                  <HelpTextField
                     size="small"
                     label="Provider Party"
                     value={proposalProvider}
                     onChange={(e) => setProposalProvider(e.target.value)}
                     fullWidth
                     required
-                    slotProps={{
-                      input: {
-                        endAdornment: fieldHelpAdornment(
-                          "Party id of the app provider that will receive the TransferPreapproval (usually the Splice app provider).",
-                          "Help for Provider Party",
-                        ),
-                      },
-                    }}
+                    help="Party id of the app provider that will receive the TransferPreapproval (usually the Splice app provider)."
                   />
-                  <TextField
+                  <HelpTextField
                     size="small"
                     label="Expected DSO Party"
                     value={proposalExpectedDso}
                     onChange={(e) => setProposalExpectedDso(e.target.value)}
                     fullWidth
                     required
-                    slotProps={{
-                      input: {
-                        endAdornment: fieldHelpAdornment(
-                          "Party id of the Splice DSO; the proposal verifies the AmuletRules contract belongs to this DSO.",
-                          "Help for Expected DSO Party",
-                        ),
-                      },
-                    }}
+                    help="Party id of the Splice DSO; the proposal verifies the AmuletRules contract belongs to this DSO."
                   />
                 </>
               )}
@@ -2739,37 +2645,23 @@ export const GovernanceSection = ({
                       issuing another for the same instrument would likely be redundant.
                     </Alert>
                   )}
-                  <TextField
+                  <HelpTextField
                     size="small"
                     label="Operator Party"
                     value={proposalOperator}
                     onChange={(e) => setProposalOperator(e.target.value)}
                     fullWidth
                     required
-                    slotProps={{
-                      input: {
-                        endAdornment: fieldHelpAdornment(
-                          "Party id of the utility operator that runs the token registrar.",
-                          "Help for Operator Party",
-                        ),
-                      },
-                    }}
+                    help="Party id of the utility operator that runs the token registrar."
                   />
-                  <TextField
+                  <HelpTextField
                     size="small"
                     label="Instrument Admin"
                     value={proposalInstrumentAdmin}
                     onChange={(e) => setProposalInstrumentAdmin(e.target.value)}
                     fullWidth
                     required
-                    slotProps={{
-                      input: {
-                        endAdornment: fieldHelpAdornment(
-                          "Issuer party of the token whose TransferPreapproval is being set up.",
-                          "Help for Instrument Admin",
-                        ),
-                      },
-                    }}
+                    help="Issuer party of the token whose TransferPreapproval is being set up."
                   />
                   <Typography variant="caption" sx={{ display: "block" }} color="text.secondary">
                     <TextHelp text="Optional per-instrument allowance ids that limit which tokens this preapproval covers. Leave empty to cover all.">
@@ -2778,7 +2670,7 @@ export const GovernanceSection = ({
                   </Typography>
                   {proposalInstrumentAllowances.map((a) => (
                     <Box key={a.uid} sx={{ display: "flex", gap: 1, mb: 1 }}>
-                      <TextField
+                      <HelpTextField
                         label="Allowance ID"
                         value={a.id}
                         onChange={(e) =>
@@ -2792,14 +2684,7 @@ export const GovernanceSection = ({
                         }
                         size="small"
                         sx={{ flex: 1 }}
-                        slotProps={{
-                          input: {
-                            endAdornment: fieldHelpAdornment(
-                              "Identifier of an allowed instrument under this preapproval.",
-                              "Help for Allowance ID",
-                            ),
-                          },
-                        }}
+                        help="Identifier of an allowed instrument under this preapproval."
                       />
                       <Button
                         size="small"
@@ -2830,7 +2715,7 @@ export const GovernanceSection = ({
 
               {proposalType === "transfer" && (
                 <>
-                  <TextField
+                  <HelpTextField
                     select
                     size="small"
                     label="Instrument"
@@ -2846,14 +2731,7 @@ export const GovernanceSection = ({
                           ? "No holdings available for this party"
                           : "Pick an instrument — admin, ID, factory CID and expected admin will be prefilled"
                     }
-                    slotProps={{
-                      input: {
-                        endAdornment: fieldHelpAdornment(
-                          "Token to transfer, picked from this party's holdings. Selecting one prefills the matching TransferFactory and expected admin.",
-                          "Help for Instrument",
-                        ),
-                      },
-                    }}
+                    help="Token to transfer, picked from this party's holdings. Selecting one prefills the matching TransferFactory and expected admin."
                   >
                     {transferHoldings.map((h) => {
                       const key = `${h.instrument_admin}::${h.instrument_id}`;
@@ -2878,7 +2756,7 @@ export const GovernanceSection = ({
                         </MenuItem>
                       );
                     })}
-                  </TextField>
+                  </HelpTextField>
                   {selectedHoldingKey &&
                     (() => {
                       const holding = transferHoldings.find(
@@ -2916,23 +2794,16 @@ export const GovernanceSection = ({
                         </Box>
                       ) : null;
                     })()}
-                  <TextField
+                  <HelpTextField
                     size="small"
                     label="Receiver Party"
                     value={proposalReceiver}
                     onChange={(e) => setProposalReceiver(e.target.value)}
                     fullWidth
                     required
-                    slotProps={{
-                      input: {
-                        endAdornment: fieldHelpAdornment(
-                          "Party id that will receive the transferred tokens.",
-                          "Help for Receiver Party",
-                        ),
-                      },
-                    }}
+                    help="Party id that will receive the transferred tokens."
                   />
-                  <TextField
+                  <HelpTextField
                     size="small"
                     label="Amount"
                     value={proposalAmount}
@@ -2942,13 +2813,8 @@ export const GovernanceSection = ({
                     type="number"
                     slotProps={{
                       htmlInput: { min: 0, step: "any" },
-                      input: {
-                        endAdornment: fieldHelpAdornment(
-                          "How much of the selected instrument to transfer. Must be positive and not exceed the available balance.",
-                          "Help for Amount",
-                        ),
-                      },
                     }}
+                    help="How much of the selected instrument to transfer. Must be positive and not exceed the available balance."
                     error={(() => {
                       if (!proposalAmount) return false;
                       const n = Number(proposalAmount);
@@ -2976,7 +2842,7 @@ export const GovernanceSection = ({
                       return "";
                     })()}
                   />
-                  <TextField
+                  <HelpTextField
                     size="small"
                     label="Offer expiry (hours)"
                     value={proposalTransferExpiryHours}
@@ -2987,13 +2853,9 @@ export const GovernanceSection = ({
                     type="number"
                     slotProps={{
                       htmlInput: { min: 1, step: 1 },
-                      input: {
-                        endAdornment: fieldHelpAdornment(
-                          `How long the transfer stays valid (default ${DEFAULT_TRANSFER_EXPIRY_HOURS}h). If the recipient isn't preapproved, this becomes an offer they must accept before it expires; after expiry the escrowed funds are released back to you.`,
-                          "Help for Offer expiry",
-                        ),
-                      },
                     }}
+                    help={`How long the transfer stays valid (default ${DEFAULT_TRANSFER_EXPIRY_HOURS}h). If the recipient isn't preapproved, this becomes an offer they must accept before it expires; after expiry the escrowed funds are released back to you.`}
+                    helpLabel="Offer expiry"
                     error={(() => {
                       const n = Number(proposalTransferExpiryHours);
                       return (
@@ -3021,7 +2883,7 @@ export const GovernanceSection = ({
                     {showTransferAdvanced ? "Hide advanced" : "Show advanced"}
                   </Button>
                   {showTransferAdvanced && (
-                    <TextField
+                    <HelpTextField
                       size="small"
                       label="Input Holding CIDs (comma-separated)"
                       value={proposalInputHoldingCids}
@@ -3030,14 +2892,8 @@ export const GovernanceSection = ({
                       }
                       fullWidth
                       helperText="Optional — pin specific Holding contracts to spend. Leave empty to let the server select your holdings of the chosen instrument automatically (change is returned)."
-                      slotProps={{
-                        input: {
-                          endAdornment: fieldHelpAdornment(
-                            "Optional list of specific Holding contract ids to spend, comma-separated. Leave empty to let the server select your holdings of the chosen instrument automatically; the transfer consumes what it needs and returns change.",
-                            "Help for Input Holding CIDs",
-                          ),
-                        },
-                      }}
+                      help="Optional list of specific Holding contract ids to spend, comma-separated. Leave empty to let the server select your holdings of the chosen instrument automatically; the transfer consumes what it needs and returns change."
+                      helpLabel="Input Holding CIDs"
                     />
                   )}
                 </>
@@ -3185,37 +3041,23 @@ export const GovernanceSection = ({
                       )}
                     </Select>
                   </FormControl>
-                  <TextField
+                  <HelpTextField
                     size="small"
                     label="Operator Party"
                     value={proposalOperator}
                     onChange={(e) => setProposalOperator(e.target.value)}
                     fullWidth
                     required
-                    slotProps={{
-                      input: {
-                        endAdornment: fieldHelpAdornment(
-                          "Party id of the utility operator that issued the ProviderService.",
-                          "Help for Operator Party",
-                        ),
-                      },
-                    }}
+                    help="Party id of the utility operator that issued the ProviderService."
                   />
-                  <TextField
+                  <HelpTextField
                     size="small"
                     label="Instrument ID"
                     value={proposalInstrumentIdText}
                     onChange={(e) => setProposalInstrumentIdText(e.target.value)}
                     fullWidth
                     required
-                    slotProps={{
-                      input: {
-                        endAdornment: fieldHelpAdornment(
-                          "Token name for the instrument this utility will mint and burn (e.g. \"cTM\"). The governance party is the issuer.",
-                          "Help for Instrument ID",
-                        ),
-                      },
-                    }}
+                    help={"Token name for the instrument this utility will mint and burn (e.g. \"cTM\"). The governance party is the issuer."}
                   />
                   <FormControlLabel
                     control={<Checkbox size="small" checked={proposalCreateTransferRule} onChange={(e) => setProposalCreateTransferRule(e.target.checked)} />}
@@ -3245,37 +3087,23 @@ export const GovernanceSection = ({
                       another request will fail when executed.
                     </Alert>
                   )}
-                  <TextField
+                  <HelpTextField
                     size="small"
                     label="Operator Party"
                     value={proposalOperator}
                     onChange={(e) => setProposalOperator(e.target.value)}
                     fullWidth
                     required
-                    slotProps={{
-                      input: {
-                        endAdornment: fieldHelpAdornment(
-                          "Party id of the utility operator that will receive and sign off on this request.",
-                          "Help for Operator Party",
-                        ),
-                      },
-                    }}
+                    help="Party id of the utility operator that will receive and sign off on this request."
                   />
-                  <TextField
+                  <HelpTextField
                     size="small"
                     label="Provider Party"
                     value={proposalProvider}
                     onChange={(e) => setProposalProvider(e.target.value)}
                     fullWidth
                     required
-                    slotProps={{
-                      input: {
-                        endAdornment: fieldHelpAdornment(
-                          "Party id that wants to become a provider on the utility (usually this governance party).",
-                          "Help for Provider Party",
-                        ),
-                      },
-                    }}
+                    help="Party id that wants to become a provider on the utility (usually this governance party)."
                   />
                 </>
               )}
@@ -3289,37 +3117,23 @@ export const GovernanceSection = ({
                       another request will fail when executed.
                     </Alert>
                   )}
-                  <TextField
+                  <HelpTextField
                     size="small"
                     label="Operator Party"
                     value={proposalOperator}
                     onChange={(e) => setProposalOperator(e.target.value)}
                     fullWidth
                     required
-                    slotProps={{
-                      input: {
-                        endAdornment: fieldHelpAdornment(
-                          "Party id of the utility operator that will receive and sign off on this request.",
-                          "Help for Operator Party",
-                        ),
-                      },
-                    }}
+                    help="Party id of the utility operator that will receive and sign off on this request."
                   />
-                  <TextField
+                  <HelpTextField
                     size="small"
                     label="User Party"
                     value={proposalUser}
                     onChange={(e) => setProposalUser(e.target.value)}
                     fullWidth
                     required
-                    slotProps={{
-                      input: {
-                        endAdornment: fieldHelpAdornment(
-                          "Party id that wants to become a user of the utility (usually this governance party).",
-                          "Help for User Party",
-                        ),
-                      },
-                    }}
+                    help="Party id that wants to become a user of the utility (usually this governance party)."
                   />
                 </>
               )}
@@ -3359,20 +3173,13 @@ export const GovernanceSection = ({
                       </li>
                     </Typography>
                   </Alert>
-                  <TextField
+                  <HelpTextField
                     label="DSO Party"
                     value={proposalDelegationDso}
                     onChange={(e) => setProposalDelegationDso(e.target.value)}
                     fullWidth
                     required
-                    slotProps={{
-                      input: {
-                        endAdornment: fieldHelpAdornment(
-                          "The DSO whose coupons this delegation may assign. Anyone can mint a coupon naming themselves DSO, so the automation ignores every coupon whose DSO is not this one. Getting it wrong silently assigns nothing.",
-                          "Help for DSO Party",
-                        ),
-                      },
-                    }}
+                    help="The DSO whose coupons this delegation may assign. Anyone can mint a coupon naming themselves DSO, so the automation ignores every coupon whose DSO is not this one. Getting it wrong silently assigns nothing."
                   />
                   {delegationPicker({
                     label: "Replaces Delegation",
@@ -3473,7 +3280,7 @@ export const GovernanceSection = ({
                                 alignItems: "center",
                               }}
                             >
-                              <TextField
+                              <HelpTextField
                                 label="Weight"
                                 value={b.weight}
                                 onChange={(e) => {
@@ -3483,14 +3290,7 @@ export const GovernanceSection = ({
                                 }}
                                 size="small"
                                 sx={{ width: 110 }}
-                                slotProps={{
-                                  input: {
-                                    endAdornment: fieldHelpAdornment(
-                                      "A whole number. Only the ratio matters: 1/1/1 is equal thirds, 80/20 is four to one. The exact percentage is derived.",
-                                      "Help for Weight",
-                                    ),
-                                  },
-                                }}
+                                help="A whole number. Only the ratio matters: 1/1/1 is equal thirds, 80/20 is four to one. The exact percentage is derived."
                               />
                               <Typography
                                 variant="caption"
@@ -3604,7 +3404,7 @@ export const GovernanceSection = ({
                           key={idx}
                           sx={{ display: "flex", gap: 1, mb: 1 }}
                         >
-                          <TextField
+                          <HelpTextField
                             label="Beneficiary Party"
                             value={b.beneficiary}
                             onChange={(e) => {
@@ -3617,16 +3417,9 @@ export const GovernanceSection = ({
                             }}
                             size="small"
                             sx={{ flex: 2 }}
-                            slotProps={{
-                              input: {
-                                endAdornment: fieldHelpAdornment(
-                                  "Party id that receives this share of the instrument's app rewards.",
-                                  "Help for Beneficiary Party",
-                                ),
-                              },
-                            }}
+                            help="Party id that receives this share of the instrument's app rewards."
                           />
-                          <TextField
+                          <HelpTextField
                             label="Weight"
                             value={b.weight}
                             onChange={(e) => {
@@ -3636,14 +3429,7 @@ export const GovernanceSection = ({
                             }}
                             size="small"
                             sx={{ flex: 1 }}
-                            slotProps={{
-                              input: {
-                                endAdornment: fieldHelpAdornment(
-                                  "Fraction of rewards this beneficiary gets, as a decimal. All row weights must sum to 1.0.",
-                                  "Help for Weight",
-                                ),
-                              },
-                            }}
+                            help="Fraction of rewards this beneficiary gets, as a decimal. All row weights must sum to 1.0."
                           />
                           <Button
                             size="small"
@@ -3750,21 +3536,14 @@ export const GovernanceSection = ({
               )}
 
               {proposalType === "create_delegated_batched_markers_proxy" && (
-                <TextField
+                <HelpTextField
                   size="small"
                   label="Operator Party"
                   value={proposalOperator}
                   onChange={(e) => setProposalOperator(e.target.value)}
                   fullWidth
                   required
-                  slotProps={{
-                    input: {
-                      endAdornment: fieldHelpAdornment(
-                        "Party id of the utility operator that will own the delegated batched markers proxy.",
-                        "Help for Operator Party",
-                      ),
-                    },
-                  }}
+                  help="Party id of the utility operator that will own the delegated batched markers proxy."
                 />
               )}
 
@@ -3773,39 +3552,25 @@ export const GovernanceSection = ({
 
               {proposalType === "setup_minting_delegation" && (
                 <>
-                  <TextField
+                  <HelpTextField
                     size="small"
                     label="Delegate Party"
                     value={proposalDelegate}
                     onChange={(e) => setProposalDelegate(e.target.value)}
                     fullWidth
                     required
-                    slotProps={{
-                      input: {
-                        endAdornment: fieldHelpAdornment(
-                          "Party id of the validator node operator authorized to mint the decentralized party's reward coupons. It accepts the resulting MintingDelegationProposal out-of-band via the wallet API.",
-                          "Help for Delegate Party",
-                        ),
-                      },
-                    }}
+                    help="Party id of the validator node operator authorized to mint the decentralized party's reward coupons. It accepts the resulting MintingDelegationProposal out-of-band via the wallet API."
                   />
-                  <TextField
+                  <HelpTextField
                     size="small"
                     label="DSO Party"
                     value={proposalExpectedDso}
                     onChange={(e) => setProposalExpectedDso(e.target.value)}
                     fullWidth
                     required
-                    slotProps={{
-                      input: {
-                        endAdornment: fieldHelpAdornment(
-                          "Party id of the Splice DSO; the delegation's mint transfers verify the AmuletRules contract belongs to this DSO.",
-                          "Help for DSO Party",
-                        ),
-                      },
-                    }}
+                    help="Party id of the Splice DSO; the delegation's mint transfers verify the AmuletRules contract belongs to this DSO."
                   />
-                  <TextField
+                  <HelpTextField
                     size="small"
                     label="Expires At"
                     type="datetime-local"
@@ -3817,15 +3582,10 @@ export const GovernanceSection = ({
                     required
                     slotProps={{
                       inputLabel: { shrink: true },
-                      input: {
-                        endAdornment: fieldHelpAdornment(
-                          "When the delegation stops being valid. There is no auto-renewal — a new proposal must be voted in before this time to keep collecting rewards.",
-                          "Help for Expires At",
-                        ),
-                      },
                     }}
+                    help="When the delegation stops being valid. There is no auto-renewal — a new proposal must be voted in before this time to keep collecting rewards."
                   />
-                  <TextField
+                  <HelpTextField
                     size="small"
                     label="Amulet Merge Limit"
                     type="number"
@@ -3833,36 +3593,22 @@ export const GovernanceSection = ({
                     onChange={(e) => setProposalAmuletMergeLimit(e.target.value)}
                     fullWidth
                     required
-                    slotProps={{
-                      input: {
-                        endAdornment: fieldHelpAdornment(
-                          "Number of amulet contracts to keep after auto-merging; the delegate merges contracts once there are strictly more than this number. Must be positive.",
-                          "Help for Amulet Merge Limit",
-                        ),
-                      },
-                    }}
+                    help="Number of amulet contracts to keep after auto-merging; the delegate merges contracts once there are strictly more than this number. Must be positive."
                   />
-                  <TextField
+                  <HelpTextField
                     size="small"
                     label="Description"
                     value={proposalDescription}
                     onChange={(e) => setProposalDescription(e.target.value)}
                     fullWidth
                     required
-                    slotProps={{
-                      input: {
-                        endAdornment: fieldHelpAdornment(
-                          "Free-form note recorded on the proposal, e.g. why this delegation is being set up.",
-                          "Help for Description",
-                        ),
-                      },
-                    }}
+                    help="Free-form note recorded on the proposal, e.g. why this delegation is being set up."
                   />
                 </>
               )}
 
               {proposalType === "accept_external_party_setup" && (
-                <TextField
+                <HelpTextField
                   size="small"
                   label="External Party Setup Proposal Contract Id"
                   value={proposalExternalPartySetupCid}
@@ -3871,14 +3617,7 @@ export const GovernanceSection = ({
                   }
                   fullWidth
                   required
-                  slotProps={{
-                    input: {
-                      endAdornment: fieldHelpAdornment(
-                        "Contract id of the ExternalPartySetupProposal the validator operator created (via POST /api/validator/v0/admin/external-party/setup-proposal). Accepting it creates the decentralized party's ValidatorRight + TransferPreapproval, unblocking reward collection.",
-                        "Help for External Party Setup Proposal Contract Id",
-                      ),
-                    },
-                  }}
+                  help="Contract id of the ExternalPartySetupProposal the validator operator created (via POST /api/validator/v0/admin/external-party/setup-proposal). Accepting it creates the decentralized party's ValidatorRight + TransferPreapproval, unblocking reward collection."
                 />
               )}
 
@@ -4165,21 +3904,14 @@ export const GovernanceSection = ({
                         )}
                       />
                     )}
-                    <TextField
+                    <HelpTextField
                       size="small"
                       label="Description"
                       value={proposalDescription}
                       onChange={(e) => setProposalDescription(e.target.value)}
                       fullWidth
                       required
-                      slotProps={{
-                        input: {
-                          endAdornment: fieldHelpAdornment(
-                            "Free-form human-readable note explaining why this request is being accepted.",
-                            "Help for Description",
-                          ),
-                        },
-                      }}
+                      help="Free-form human-readable note explaining why this request is being accepted."
                     />
                   </>
                 );
@@ -4191,55 +3923,34 @@ export const GovernanceSection = ({
                   {renderUserServiceSelect(
                     "Contract id of this governance party's UserService, used to issue the credential offer.",
                   )}
-                  <TextField
+                  <HelpTextField
                     size="small"
                     label="Holder Party"
                     value={proposalHolder}
                     onChange={(e) => setProposalHolder(e.target.value)}
                     fullWidth
                     required
-                    slotProps={{
-                      input: {
-                        endAdornment: fieldHelpAdornment(
-                          "Party id that will receive the credential offer.",
-                          "Help for Holder Party",
-                        ),
-                      },
-                    }}
+                    help="Party id that will receive the credential offer."
                   />
-                  <TextField
+                  <HelpTextField
                     size="small"
                     label="Credential ID"
                     value={proposalCredentialId}
                     onChange={(e) => setProposalCredentialId(e.target.value)}
                     fullWidth
                     required
-                    slotProps={{
-                      input: {
-                        endAdornment: fieldHelpAdornment(
-                          "Unique identifier for this credential (free-form string).",
-                          "Help for Credential ID",
-                        ),
-                      },
-                    }}
+                    help="Unique identifier for this credential (free-form string)."
                   />
-                  <TextField
+                  <HelpTextField
                     size="small"
                     label="Description"
                     value={proposalDescription}
                     onChange={(e) => setProposalDescription(e.target.value)}
                     fullWidth
                     required
-                    slotProps={{
-                      input: {
-                        endAdornment: fieldHelpAdornment(
-                          "Free-form human-readable description of what this credential certifies.",
-                          "Help for Description",
-                        ),
-                      },
-                    }}
+                    help="Free-form human-readable description of what this credential certifies."
                   />
-                  <TextField
+                  <HelpTextField
                     size="small"
                     label="Claims (one per line: subject,property,value)"
                     value={proposalCredentialClaimsText}
@@ -4249,94 +3960,53 @@ export const GovernanceSection = ({
                     minRows={2}
                     maxRows={6}
                     helperText='Each line: "<subject>,<property>,<value>"'
-                    slotProps={{
-                      input: {
-                        endAdornment: fieldHelpAdornment(
-                          "Claims baked into the credential. One per line, each formatted as subject,property,value.",
-                          "Help for Claims",
-                        ),
-                      },
-                    }}
+                    help="Claims baked into the credential. One per line, each formatted as subject,property,value."
+                    helpLabel="Claims"
                   />
                   {proposalType === "offer_paid_credential" && (
                     <>
-                      <TextField
+                      <HelpTextField
                         size="small"
                         label="Fee per Day (USD)"
                         value={proposalFeePerDayUsd}
                         onChange={(e) => setProposalFeePerDayUsd(e.target.value)}
                         fullWidth
                         required
-                        slotProps={{
-                          input: {
-                            endAdornment: fieldHelpAdornment(
-                              "The credential's daily fee in USD. Billing takes it from the holder's deposit.",
-                              "Help for Fee per Day (USD)",
-                            ),
-                          },
-                        }}
+                        help="The credential's daily fee in USD. Billing takes it from the holder's deposit."
                       />
-                      <TextField
+                      <HelpTextField
                         size="small"
                         label="Billing Period (minutes)"
                         value={proposalBillingPeriodMinutes}
                         onChange={(e) => setProposalBillingPeriodMinutes(e.target.value)}
                         fullWidth
                         required
-                        slotProps={{
-                          input: {
-                            endAdornment: fieldHelpAdornment(
-                              "Minutes between fee charges. Each charge covers the time since the last one.",
-                              "Help for Billing Period (minutes)",
-                            ),
-                          },
-                        }}
+                        help="Minutes between fee charges. Each charge covers the time since the last one."
                       />
-                      <TextField
+                      <HelpTextField
                         size="small"
                         label="Deposit Target (USD)"
                         value={proposalDepositTargetAmountUsd}
                         onChange={(e) => setProposalDepositTargetAmountUsd(e.target.value)}
                         fullWidth
                         required
-                        slotProps={{
-                          input: {
-                            endAdornment: fieldHelpAdornment(
-                              "The deposit in USD that the holder keeps locked to cover fees. Top-ups refill the deposit to this amount.",
-                              "Help for Deposit Target (USD)",
-                            ),
-                          },
-                        }}
+                        help="The deposit in USD that the holder keeps locked to cover fees. Top-ups refill the deposit to this amount."
                       />
-                      <TextField
+                      <HelpTextField
                         size="small"
                         label="Holder Activity Weight"
                         value={proposalHolderActivityWeight}
                         onChange={(e) => setProposalHolderActivityWeight(e.target.value)}
                         fullWidth
-                        slotProps={{
-                          input: {
-                            endAdornment: fieldHelpAdornment(
-                              "The holder's share of the activity reward, from 0 to 1. The issuer gets the rest. Leave empty for 0.",
-                              "Help for Holder Activity Weight",
-                            ),
-                          },
-                        }}
+                        help="The holder's share of the activity reward, from 0 to 1. The issuer gets the rest. Leave empty for 0."
                       />
-                      <TextField
+                      <HelpTextField
                         size="small"
                         label="Initial Deposit (USD)"
                         value={proposalDepositInitialAmountUsd}
                         onChange={(e) => setProposalDepositInitialAmountUsd(e.target.value)}
                         fullWidth
-                        slotProps={{
-                          input: {
-                            endAdornment: fieldHelpAdornment(
-                              "The USD amount the holder locks on accept. Leave empty to lock the Deposit Target.",
-                              "Help for Initial Deposit (USD)",
-                            ),
-                          },
-                        }}
+                        help="The USD amount the holder locks on accept. Leave empty to lock the Deposit Target."
                       />
                     </>
                   )}
@@ -4431,7 +4101,7 @@ export const GovernanceSection = ({
                   />
                   {renderAmuletRulesCidField()}
                   <Box sx={{ display: "flex", gap: 1, alignItems: "center" }}>
-                    <TextField
+                    <HelpTextField
                       size="small"
                       label="Open Mining Round CID"
                       value={proposalOpenMiningRoundCid}
@@ -4445,14 +4115,7 @@ export const GovernanceSection = ({
                             ? `Round ${openMiningRound.round}, open until ${new Date(openMiningRound.target_closes_at).toLocaleTimeString()}`
                             : undefined
                       }
-                      slotProps={{
-                        input: {
-                          endAdornment: fieldHelpAdornment(
-                            "Contract id of an OpenMiningRound that is open now. DecMan fills in the newest one from scan. You can paste another one.",
-                            "Help for Open Mining Round CID",
-                          ),
-                        },
-                      }}
+                      help="Contract id of an OpenMiningRound that is open now. DecMan fills in the newest one from scan. You can paste another one."
                     />
                     <Tooltip title="Refresh">
                       <span>
@@ -4470,20 +4133,13 @@ export const GovernanceSection = ({
                   {openMiningRoundError && (
                     <Alert severity="warning">{openMiningRoundError}</Alert>
                   )}
-                  <TextField
+                  <HelpTextField
                     size="small"
                     label="Featured App Right CID"
                     value={proposalFeaturedAppRightCid}
                     onChange={(e) => setProposalFeaturedAppRightCid(e.target.value)}
                     fullWidth
-                    slotProps={{
-                      input: {
-                        endAdornment: fieldHelpAdornment(
-                          "Optional FeaturedAppRight of the credential issuer. The deposit transfer is unfeatured, so you can leave this empty.",
-                          "Help for Featured App Right CID",
-                        ),
-                      },
-                    }}
+                    help="Optional FeaturedAppRight of the credential issuer. The deposit transfer is unfeatured, so you can leave this empty."
                   />
                   <Alert severity="info">
                     The proposal pins these Amulets and this open mining round.
@@ -4539,37 +4195,23 @@ export const GovernanceSection = ({
 
               {proposalType === "create_registrar_service_request" && (
                 <>
-                  <TextField
+                  <HelpTextField
                     size="small"
                     label="Operator Party"
                     value={proposalOperator}
                     onChange={(e) => setProposalOperator(e.target.value)}
                     fullWidth
                     required
-                    slotProps={{
-                      input: {
-                        endAdornment: fieldHelpAdornment(
-                          "Party id of the utility operator the registrar service runs under.",
-                          "Help for Operator Party",
-                        ),
-                      },
-                    }}
+                    help="Party id of the utility operator the registrar service runs under."
                   />
-                  <TextField
+                  <HelpTextField
                     size="small"
                     label="Provider Party"
                     value={proposalProvider}
                     onChange={(e) => setProposalProvider(e.target.value)}
                     fullWidth
                     required
-                    slotProps={{
-                      input: {
-                        endAdornment: fieldHelpAdornment(
-                          "Party id of the provider decparty this request asks for registrar service. The provider accepts via Onboard Registrar.",
-                          "Help for Provider Party",
-                        ),
-                      },
-                    }}
+                    help="Party id of the provider decparty this request asks for registrar service. The provider accepts via Onboard Registrar."
                   />
                   <FormControlLabel
                     control={<Checkbox size="small" checked={proposalCreateTransferRule} onChange={(e) => setProposalCreateTransferRule(e.target.checked)} />}
@@ -4705,21 +4347,14 @@ export const GovernanceSection = ({
                       )}
                     </Select>
                   </FormControl>
-                  <TextField
+                  <HelpTextField
                     size="small"
                     label="Instrument ID"
                     value={proposalInstrumentIdText}
                     onChange={(e) => setProposalInstrumentIdText(e.target.value)}
                     fullWidth
                     required
-                    slotProps={{
-                      input: {
-                        endAdornment: fieldHelpAdornment(
-                          "Token name for the instrument this registrar will manage (e.g. \"cTM\").",
-                          "Help for Instrument ID",
-                        ),
-                      },
-                    }}
+                    help={"Token name for the instrument this registrar will manage (e.g. \"cTM\")."}
                   />
                   {renderRequirementRows(
                     "Issuer Requirements",
@@ -4733,7 +4368,7 @@ export const GovernanceSection = ({
                     proposalHolderRequirements,
                     setProposalHolderRequirements,
                   )}
-                  <TextField
+                  <HelpTextField
                     size="small"
                     label="Initial Instrument Issuers (one party id per line)"
                     value={proposalInitialInstrumentIssuersText}
@@ -4742,14 +4377,8 @@ export const GovernanceSection = ({
                     multiline
                     minRows={2}
                     maxRows={6}
-                    slotProps={{
-                      input: {
-                        endAdornment: fieldHelpAdornment(
-                          "Parties credentialed as instrument issuers at provisioning, one party id per line. Leave empty to onboard issuers later.",
-                          "Help for Initial Instrument Issuers",
-                        ),
-                      },
-                    }}
+                    help="Parties credentialed as instrument issuers at provisioning, one party id per line. Leave empty to onboard issuers later."
+                    helpLabel="Initial Instrument Issuers"
                   />
                 </>
               )}
@@ -4783,7 +4412,7 @@ export const GovernanceSection = ({
                       )}
                     </Select>
                   </FormControl>
-                  <TextField
+                  <HelpTextField
                     size="small"
                     label="Instrument Issuers (one party id per line)"
                     value={proposalInstrumentIssuersText}
@@ -4793,14 +4422,8 @@ export const GovernanceSection = ({
                     multiline
                     minRows={2}
                     maxRows={6}
-                    slotProps={{
-                      input: {
-                        endAdornment: fieldHelpAdornment(
-                          "Parties to credential as instrument issuers, one party id per line. At least one is required.",
-                          "Help for Instrument Issuers",
-                        ),
-                      },
-                    }}
+                    help="Parties to credential as instrument issuers, one party id per line. At least one is required."
+                    helpLabel="Instrument Issuers"
                   />
                 </>
               )}
@@ -4904,20 +4527,13 @@ export const GovernanceSection = ({
                     </Alert>
                   )}
                   {blockListProblem && <Alert severity="warning">{blockListProblem}</Alert>}
-                  <TextField
+                  <HelpTextField
                     size="small"
                     label="Instrument ID"
                     value={proposalInstrumentIdText}
                     fullWidth
                     disabled
-                    slotProps={{
-                      input: {
-                        endAdornment: fieldHelpAdornment(
-                          "The instrument's id. Holdings name the instrument by it, so the update cannot change it.",
-                          "Help for Instrument ID",
-                        ),
-                      },
-                    }}
+                    help="The instrument's id. Holdings name the instrument by it, so the update cannot change it."
                   />
                   <Typography variant="caption" color="text.secondary" sx={{ display: "block" }}>
                     <TextHelp text="Other identifiers of the instrument, each with its source party, id and scheme.">
@@ -4984,7 +4600,7 @@ export const GovernanceSection = ({
               {(proposalType === "provision_instrument" ||
                 proposalType === "onboard_instrument_issuers") && (
                 <>
-                  <TextField
+                  <HelpTextField
                     size="small"
                     label="Credentials Valid From (optional)"
                     type="datetime-local"
@@ -4993,15 +4609,11 @@ export const GovernanceSection = ({
                     fullWidth
                     slotProps={{
                       inputLabel: { shrink: true },
-                      input: {
-                        endAdornment: fieldHelpAdornment(
-                          "When the minted credentials start to be valid. Leave empty for valid from the moment the action executes.",
-                          "Help for Credentials Valid From",
-                        ),
-                      },
                     }}
+                    help="When the minted credentials start to be valid. Leave empty for valid from the moment the action executes."
+                    helpLabel="Credentials Valid From"
                   />
-                  <TextField
+                  <HelpTextField
                     size="small"
                     label="Credentials Valid Until (optional)"
                     type="datetime-local"
@@ -5010,13 +4622,9 @@ export const GovernanceSection = ({
                     fullWidth
                     slotProps={{
                       inputLabel: { shrink: true },
-                      input: {
-                        endAdornment: fieldHelpAdornment(
-                          "When the minted credentials expire. Leave empty for credentials that never expire; ending those takes an Offboard Instrument Issuers vote. The proposal description shows this window to voters, and execution is refused once it has passed.",
-                          "Help for Credentials Valid Until",
-                        ),
-                      },
                     }}
+                    help="When the minted credentials expire. Leave empty for credentials that never expire; ending those takes an Offboard Instrument Issuers vote. The proposal description shows this window to voters, and execution is refused once it has passed."
+                    helpLabel="Credentials Valid Until"
                   />
                 </>
               )}
@@ -5030,7 +4638,7 @@ export const GovernanceSection = ({
                   </Typography>
                   {proposalOffboardRows.map((row, idx) => (
                     <Box key={idx} sx={{ display: "flex", gap: 1, mb: 1, alignItems: "flex-start" }}>
-                      <TextField
+                      <HelpTextField
                         label="Instrument Issuer Party"
                         value={row.party}
                         onChange={(e) => {
@@ -5045,14 +4653,7 @@ export const GovernanceSection = ({
                         }}
                         size="small"
                         sx={{ flex: 2 }}
-                        slotProps={{
-                          input: {
-                            endAdornment: fieldHelpAdornment(
-                              "Party id of the issuer being offboarded. The credential list below filters to credentials whose claims all name this party.",
-                              "Help for Instrument Issuer Party",
-                            ),
-                          },
-                        }}
+                        help="Party id of the issuer being offboarded. The credential list below filters to credentials whose claims all name this party."
                       />
                       <Autocomplete
                         size="small"
