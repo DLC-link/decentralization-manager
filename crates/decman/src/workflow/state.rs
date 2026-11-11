@@ -11,7 +11,6 @@ use std::{
     hash::Hash,
     marker::PhantomData,
     sync::Arc,
-    time::{SystemTime, UNIX_EPOCH},
 };
 
 use common::types::{AcsTransferDirection, AcsTransferProgress};
@@ -24,6 +23,7 @@ use crate::{
     error::Result,
     noise::MessageType,
     server::{WorkflowKind, mark_run_failed},
+    utils,
     workflow::party_replication::pipe::{ExportSession, PipeBlock},
 };
 
@@ -552,10 +552,7 @@ impl<S: WorkflowStep + 'static> WorkflowState<S> {
     }
 
     async fn persist_step_progress(&self, step: S, completed: Vec<CantonId>) {
-        let updated_at = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_secs() as i64)
-            .unwrap_or(0);
+        let updated_at = utils::now_secs();
 
         let mut tx = match self.db.begin_transaction().await {
             Ok(t) => t,

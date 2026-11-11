@@ -1,11 +1,10 @@
-use std::time::{SystemTime, UNIX_EPOCH};
-
 use sqlx::SqlitePool;
 
 use crate::{
     db::schema::{Commitable, SchemaWrite},
     noise::MessageType,
     server::WorkflowKind,
+    utils,
     workflow::{
         AddPartyStep, ChangeThresholdStep, ContractsStep, DarsStep, KickStep, OnboardingStep,
         state::WorkflowStep,
@@ -63,10 +62,7 @@ pub(super) async fn persist_peer_step(
     let Some((step_name, step_index, _step_total)) = peer_step_for_command(kind, command) else {
         return;
     };
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0);
+    let now = utils::now_secs();
     let mut tx = match db.begin_transaction().await {
         Ok(t) => t,
         Err(e) => {

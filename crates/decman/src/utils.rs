@@ -1,4 +1,7 @@
-use std::future::Future;
+use std::{
+    future::Future,
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 use futures::StreamExt;
 
@@ -18,6 +21,15 @@ pub use crate::canton::{
         forget_synchronizer_id_on_unknown_store, get_synchronizer_id,
     },
 };
+
+/// The current Unix time in whole seconds. A clock set before the Unix epoch
+/// reads as 0.
+pub fn now_secs() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_secs() as i64)
+        .unwrap_or_default()
+}
 
 /// Whether version `v` is at least `min`, by semver precedence: a
 /// pre-release precedes its own release (`1.4.3-rc1` < `1.4.3`) but outranks
@@ -169,5 +181,17 @@ mod tests {
         assert!(!version_at_least("1.0", "0.1.9"));
         assert!(!version_at_least("-rc1", "0.1.9"));
         assert!(!version_at_least("abc", "0.1.9"));
+    }
+
+    /// The helper reads the same clock as chrono, in whole seconds.
+    #[test]
+    fn now_secs_is_the_current_unix_time() {
+        let before = chrono::Utc::now().timestamp();
+        let now = now_secs();
+        let after = chrono::Utc::now().timestamp();
+        assert!(
+            (before..=after).contains(&now),
+            "{before} <= {now} <= {after}"
+        );
     }
 }
