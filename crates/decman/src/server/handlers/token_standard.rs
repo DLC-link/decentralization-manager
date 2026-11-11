@@ -78,6 +78,24 @@ pub struct ContractQueryParams {
     pub include_payload: bool,
 }
 
+/// Answer a ledger list read: the rows in their response, or a 500 that
+/// names the list (`what`) and carries the ledger error.
+fn list_response<T, R: serde::Serialize>(
+    rows: crate::error::Result<Vec<T>>,
+    what: &str,
+    wrap: impl FnOnce(Vec<T>) -> R,
+) -> HttpResponse {
+    match rows {
+        Ok(rows) => HttpResponse::Ok().json(wrap(rows)),
+        Err(e) => {
+            tracing::error!("Failed to fetch {what}: {e}");
+            HttpResponse::InternalServerError().json(ErrorResponse {
+                error: format!("Failed to fetch {what}: {e}"),
+            })
+        }
+    }
+}
+
 /// Get ProviderService contracts
 #[utoipa::path(
     tag = "Services",
@@ -97,15 +115,11 @@ pub async fn get_provider_services_handler(
     let token = get_party_token(&data, party_id).await;
     let packages = packages();
 
-    match get_provider_services(&data.config, party_id, token, &packages).await {
-        Ok(services) => HttpResponse::Ok().json(ProviderServicesResponse { services }),
-        Err(e) => {
-            tracing::error!("Failed to fetch provider services: {e}");
-            HttpResponse::InternalServerError().json(ErrorResponse {
-                error: format!("Failed to fetch provider services: {e}"),
-            })
-        }
-    }
+    list_response(
+        get_provider_services(&data.config, party_id, token, &packages).await,
+        "provider services",
+        |services| ProviderServicesResponse { services },
+    )
 }
 
 /// Get UserService contracts
@@ -127,15 +141,11 @@ pub async fn get_user_services_handler(
     let token = get_party_token(&data, party_id).await;
     let packages = packages();
 
-    match get_user_services(&data.config, party_id, token, &packages).await {
-        Ok(services) => HttpResponse::Ok().json(UserServicesResponse { services }),
-        Err(e) => {
-            tracing::error!("Failed to fetch user services: {e}");
-            HttpResponse::InternalServerError().json(ErrorResponse {
-                error: format!("Failed to fetch user services: {e}"),
-            })
-        }
-    }
+    list_response(
+        get_user_services(&data.config, party_id, token, &packages).await,
+        "user services",
+        |services| UserServicesResponse { services },
+    )
 }
 
 /// Get CredentialOffer contracts visible to the party
@@ -157,17 +167,11 @@ pub async fn get_credential_offers_handler(
     let token = get_party_token(&data, party_id).await;
     let packages = packages();
 
-    match get_credential_offers(&data.config, party_id, token, &packages).await {
-        Ok(credential_offers) => {
-            HttpResponse::Ok().json(CredentialOffersResponse { credential_offers })
-        }
-        Err(e) => {
-            tracing::error!("Failed to fetch credential offers: {e}");
-            HttpResponse::InternalServerError().json(ErrorResponse {
-                error: format!("Failed to fetch credential offers: {e}"),
-            })
-        }
-    }
+    list_response(
+        get_credential_offers(&data.config, party_id, token, &packages).await,
+        "credential offers",
+        |credential_offers| CredentialOffersResponse { credential_offers },
+    )
 }
 
 /// Get `Credential` contracts visible to the party. The accept mint/burn
@@ -191,15 +195,11 @@ pub async fn get_credentials_handler(
     let token = get_party_token(&data, party_id).await;
     let packages = packages();
 
-    match get_credentials(&data.config, party_id, token, &packages).await {
-        Ok(credentials) => HttpResponse::Ok().json(CredentialsResponse { credentials }),
-        Err(e) => {
-            tracing::error!("Failed to fetch credentials: {e}");
-            HttpResponse::InternalServerError().json(ErrorResponse {
-                error: format!("Failed to fetch credentials: {e}"),
-            })
-        }
-    }
+    list_response(
+        get_credentials(&data.config, party_id, token, &packages).await,
+        "credentials",
+        |credentials| CredentialsResponse { credentials },
+    )
 }
 
 /// Get `RegistrarServiceRequest` contracts visible to the party. The
@@ -227,19 +227,13 @@ pub async fn get_registrar_service_requests_handler(
     let token = get_party_token(&data, party_id).await;
     let packages = packages();
 
-    match get_registrar_service_requests(&data.config, party_id, token, &packages).await {
-        Ok(registrar_service_requests) => {
-            HttpResponse::Ok().json(RegistrarServiceRequestsResponse {
-                registrar_service_requests,
-            })
-        }
-        Err(e) => {
-            tracing::error!("Failed to fetch registrar service requests: {e}");
-            HttpResponse::InternalServerError().json(ErrorResponse {
-                error: format!("Failed to fetch registrar service requests: {e}"),
-            })
-        }
-    }
+    list_response(
+        get_registrar_service_requests(&data.config, party_id, token, &packages).await,
+        "registrar service requests",
+        |registrar_service_requests| RegistrarServiceRequestsResponse {
+            registrar_service_requests,
+        },
+    )
 }
 
 /// Get `ProviderConfiguration` contracts visible to the party. The
@@ -267,17 +261,13 @@ pub async fn get_provider_configurations_handler(
     let token = get_party_token(&data, party_id).await;
     let packages = packages();
 
-    match get_provider_configurations(&data.config, party_id, token, &packages).await {
-        Ok(provider_configurations) => HttpResponse::Ok().json(ProviderConfigurationsResponse {
+    list_response(
+        get_provider_configurations(&data.config, party_id, token, &packages).await,
+        "provider configurations",
+        |provider_configurations| ProviderConfigurationsResponse {
             provider_configurations,
-        }),
-        Err(e) => {
-            tracing::error!("Failed to fetch provider configurations: {e}");
-            HttpResponse::InternalServerError().json(ErrorResponse {
-                error: format!("Failed to fetch provider configurations: {e}"),
-            })
-        }
-    }
+        },
+    )
 }
 
 /// Get `StoredBlockListPartyShas` contracts visible to the party. The
@@ -300,17 +290,11 @@ pub async fn get_block_list_shards_handler(
 
     let token = get_party_token(&data, party_id).await;
 
-    match get_block_list_shards(&data.config, party_id, token).await {
-        Ok(block_list_shards) => {
-            HttpResponse::Ok().json(BlockListShardsResponse { block_list_shards })
-        }
-        Err(e) => {
-            tracing::error!("Failed to fetch block list shards: {e}");
-            HttpResponse::InternalServerError().json(ErrorResponse {
-                error: format!("Failed to fetch block list shards: {e}"),
-            })
-        }
-    }
+    list_response(
+        get_block_list_shards(&data.config, party_id, token).await,
+        "block list shards",
+        |block_list_shards| BlockListShardsResponse { block_list_shards },
+    )
 }
 
 /// Get RegistrarService contracts
@@ -332,15 +316,11 @@ pub async fn get_registrar_services_handler(
     let token = get_party_token(&data, party_id).await;
     let packages = packages();
 
-    match get_registrar_services(&data.config, party_id, token, &packages).await {
-        Ok(services) => HttpResponse::Ok().json(RegistrarServicesResponse { services }),
-        Err(e) => {
-            tracing::error!("Failed to fetch registrar services: {e}");
-            HttpResponse::InternalServerError().json(ErrorResponse {
-                error: format!("Failed to fetch registrar services: {e}"),
-            })
-        }
-    }
+    list_response(
+        get_registrar_services(&data.config, party_id, token, &packages).await,
+        "registrar services",
+        |services| RegistrarServicesResponse { services },
+    )
 }
 
 /// List open `TransferInstruction` contracts (status
@@ -368,17 +348,13 @@ pub async fn get_transfer_instructions_handler(
     let party_id = &query.party_id;
     let token = get_party_token(&data, party_id).await;
 
-    match get_open_transfer_instructions(&data.config, party_id, token).await {
-        Ok(transfer_instructions) => HttpResponse::Ok().json(TransferInstructionsResponse {
+    list_response(
+        get_open_transfer_instructions(&data.config, party_id, token).await,
+        "transfer instructions",
+        |transfer_instructions| TransferInstructionsResponse {
             transfer_instructions,
-        }),
-        Err(e) => {
-            tracing::error!("Failed to fetch transfer instructions: {e}");
-            HttpResponse::InternalServerError().json(ErrorResponse {
-                error: format!("Failed to fetch transfer instructions: {e}"),
-            })
-        }
-    }
+        },
+    )
 }
 
 /// Open `MintRequest` contracts the governance party can accept. Returns
@@ -401,15 +377,11 @@ pub async fn get_mint_requests_handler(
     let token = get_party_token(&data, party_id).await;
     let packages = packages();
 
-    match get_open_mint_requests(&data.config, party_id, token, &packages).await {
-        Ok(mint_requests) => HttpResponse::Ok().json(MintRequestsResponse { mint_requests }),
-        Err(e) => {
-            tracing::error!("Failed to fetch mint requests: {e}");
-            HttpResponse::InternalServerError().json(ErrorResponse {
-                error: format!("Failed to fetch mint requests: {e}"),
-            })
-        }
-    }
+    list_response(
+        get_open_mint_requests(&data.config, party_id, token, &packages).await,
+        "mint requests",
+        |mint_requests| MintRequestsResponse { mint_requests },
+    )
 }
 
 /// Open `BurnRequest` contracts. Mirrors `/governance/mint-requests`.
@@ -430,15 +402,11 @@ pub async fn get_burn_requests_handler(
     let token = get_party_token(&data, party_id).await;
     let packages = packages();
 
-    match get_open_burn_requests(&data.config, party_id, token, &packages).await {
-        Ok(burn_requests) => HttpResponse::Ok().json(BurnRequestsResponse { burn_requests }),
-        Err(e) => {
-            tracing::error!("Failed to fetch burn requests: {e}");
-            HttpResponse::InternalServerError().json(ErrorResponse {
-                error: format!("Failed to fetch burn requests: {e}"),
-            })
-        }
-    }
+    list_response(
+        get_open_burn_requests(&data.config, party_id, token, &packages).await,
+        "burn requests",
+        |burn_requests| BurnRequestsResponse { burn_requests },
+    )
 }
 
 /// Count active `TransferPreapproval` contracts visible to this party, split
@@ -572,15 +540,11 @@ pub async fn get_instruments_handler(
 
     let token = get_party_token(&data, party_id).await;
 
-    match get_instruments(&data.config, party_id, token).await {
-        Ok(instruments) => HttpResponse::Ok().json(InstrumentsResponse { instruments }),
-        Err(e) => {
-            tracing::error!("Failed to fetch instruments: {e}");
-            HttpResponse::InternalServerError().json(ErrorResponse {
-                error: format!("Failed to fetch instruments: {e}"),
-            })
-        }
-    }
+    list_response(
+        get_instruments(&data.config, party_id, token).await,
+        "instruments",
+        |instruments| InstrumentsResponse { instruments },
+    )
 }
 
 /// List active `TransferFactory` contracts visible to the party. Used by the
@@ -748,15 +712,11 @@ pub async fn get_holdings_handler(
     let party_id = &query.party_id;
     let token = get_party_token(&data, party_id).await;
 
-    match get_holdings(&data.config, party_id, token).await {
-        Ok(holdings) => HttpResponse::Ok().json(HoldingsResponse { holdings }),
-        Err(e) => {
-            tracing::error!("Failed to fetch holdings: {e}");
-            HttpResponse::InternalServerError().json(ErrorResponse {
-                error: format!("Failed to fetch holdings: {e}"),
-            })
-        }
-    }
+    list_response(
+        get_holdings(&data.config, party_id, token).await,
+        "holdings",
+        |holdings| HoldingsResponse { holdings },
+    )
 }
 
 /// Query contract IDs by template or interface, optionally with their decoded
@@ -1102,5 +1062,119 @@ mod open_mining_round_tests {
             body["error"].as_str().is_some_and(|e| e.contains("boom")),
             "{body}"
         );
+    }
+}
+
+#[cfg(test)]
+mod list_endpoint_tests {
+    use actix_web::{App, http::StatusCode, test as actix_test};
+
+    use super::*;
+
+    /// The ledger list endpoints, with the words each error names its list
+    /// by. Holdings is checked apart, because its read fails with its own
+    /// error.
+    const LISTS: [(&str, &str); 12] = [
+        ("/services/provider", "provider services"),
+        ("/services/user", "user services"),
+        ("/credential-offers", "credential offers"),
+        ("/credentials", "credentials"),
+        ("/registrar-service-requests", "registrar service requests"),
+        ("/provider-configurations", "provider configurations"),
+        ("/block-list-shards", "block list shards"),
+        ("/services/registrar", "registrar services"),
+        ("/governance/transfer-instructions", "transfer instructions"),
+        ("/governance/mint-requests", "mint requests"),
+        ("/governance/burn-requests", "burn requests"),
+        ("/instruments", "instruments"),
+    ];
+
+    fn party() -> anyhow::Result<CantonId> {
+        CantonId::parse(&format!("party::1220{}", "a".repeat(64)))
+    }
+
+    /// A test state whose ledger port has nothing listening on it.
+    async fn state_with_closed_ledger() -> anyhow::Result<web::Data<AppState>> {
+        let port = std::net::TcpListener::bind("127.0.0.1:0")?
+            .local_addr()?
+            .port();
+        let mut state = AppState::for_test(None).await?.into_inner();
+        std::sync::Arc::get_mut(&mut state)
+            .ok_or_else(|| anyhow::anyhow!("a fresh test state has one owner"))?
+            .config
+            .canton
+            .ledger_api_port = port;
+        Ok(web::Data::from(state))
+    }
+
+    /// A ledger the node cannot reach turns each list into a 500 whose JSON
+    /// body names the list and carries the ledger error.
+    #[actix_web::test]
+    async fn a_ledger_failure_is_a_500_naming_the_list() -> anyhow::Result<()> {
+        let data = state_with_closed_ledger().await?;
+        let party = party()?;
+        let ledger_error = get_instruments(&data.config, &party, None)
+            .await
+            .err()
+            .ok_or_else(|| anyhow::anyhow!("the closed ledger port must refuse the read"))?
+            .to_string();
+        let holdings_error = get_holdings(&data.config, &party, None)
+            .await
+            .err()
+            .ok_or_else(|| anyhow::anyhow!("the closed ledger port must refuse the read"))?
+            .to_string();
+        let app = actix_test::init_service(
+            App::new()
+                .app_data(data)
+                .service(get_holdings_handler)
+                .service(get_provider_services_handler)
+                .service(get_user_services_handler)
+                .service(get_credential_offers_handler)
+                .service(get_credentials_handler)
+                .service(get_registrar_service_requests_handler)
+                .service(get_provider_configurations_handler)
+                .service(get_block_list_shards_handler)
+                .service(get_registrar_services_handler)
+                .service(get_transfer_instructions_handler)
+                .service(get_mint_requests_handler)
+                .service(get_burn_requests_handler)
+                .service(get_instruments_handler),
+        )
+        .await;
+
+        let lists = LISTS
+            .iter()
+            .map(|&(uri, label)| (uri, label, ledger_error.as_str()))
+            .chain([("/holdings", "holdings", holdings_error.as_str())]);
+        for (uri, label, ledger_error) in lists {
+            let request = actix_test::TestRequest::get()
+                .uri(&format!("{uri}?party_id={party}"))
+                .to_request();
+            let response = actix_test::call_service(&app, request).await;
+
+            assert_eq!(
+                response.status(),
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "{uri}"
+            );
+            assert_eq!(
+                response
+                    .headers()
+                    .get("content-type")
+                    .and_then(|v| v.to_str().ok()),
+                Some("application/json"),
+                "{uri}"
+            );
+            let body = actix_test::read_body(response).await;
+            let expected = serde_json::to_vec(&ErrorResponse {
+                error: format!("Failed to fetch {label}: {ledger_error}"),
+            })?;
+            assert_eq!(
+                String::from_utf8_lossy(&body),
+                String::from_utf8_lossy(&expected),
+                "{uri}"
+            );
+        }
+        Ok(())
     }
 }
