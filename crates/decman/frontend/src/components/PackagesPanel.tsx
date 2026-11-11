@@ -1,29 +1,5 @@
 import { useState, useRef, useEffect, useCallback, useMemo } from "react";
-import {
-  Typography,
-  Box,
-  Skeleton,
-  Table,
-  TableHead,
-  TableBody,
-  TableRow,
-  TableCell,
-  Button,
-  CircularProgress,
-  TextField,
-  Tooltip,
-  InputAdornment,
-  Autocomplete,
-  Chip,
-  Alert,
-  FormControlLabel,
-  Switch,
-  IconButton,
-  Dialog,
-  DialogTitle,
-  DialogContent,
-  DialogActions,
-} from "@mui/material";
+import { Typography, Box, Skeleton, Table, TableHead, TableBody, TableRow, TableCell, Button, CircularProgress, TextField, Tooltip, InputAdornment, Autocomplete, Chip, Alert, FormControlLabel, Switch, IconButton, Dialog, DialogTitle, DialogContent, DialogActions } from "@mui/material";
 import SearchIcon from "@mui/icons-material/Search";
 import CloudUploadIcon from "@mui/icons-material/CloudUpload";
 import CompareArrowsIcon from "@mui/icons-material/CompareArrows";
@@ -41,33 +17,8 @@ import { useSnackbar } from "../contexts";
 import { authenticatedFetch } from "../api";
 import type { Theme } from "@mui/material/styles";
 import { finderTableSx, ROW_HOVER_TINT, zebraRow, zebraStripe } from "../styles";
-import {
-  PACKAGE_GROUPS,
-  compareCell,
-  compareUrl,
-  filterTerms,
-  indexPeer,
-  matchesPackageFilter,
-  participantLabel,
-  partyParticipants,
-  rowDiffers,
-  summarize,
-  type CellStatus,
-  type ParticipantOption,
-  canDistribute,
-  expectedIndex,
-  expectedNotHeld,
-} from "../packageCompare";
-import type {
-  DecentralizedParty,
-  DistributePackageRequest,
-  ExpectedVersionsResponse,
-  PackageInfo,
-  VettedPackageInfo,
-  PeerPackageComparison,
-  PeerPackageResult,
-  Peer,
-} from "../types";
+import { PACKAGE_GROUPS, compareCell, compareUrl, filterTerms, indexPeer, matchesPackageFilter, participantLabel, partyParticipants, rowDiffers, summarize, type CellStatus, type ParticipantOption, type PeerIndex, canDistribute, expectedIndex, expectedNotHeld } from "../packageCompare";
+import type { DecentralizedParty, DistributePackageRequest, ExpectedVersionsResponse, PackageInfo, VettedPackageInfo, PeerPackageComparison, PeerPackageResult, Peer } from "../types";
 
 /// Why this node has no package list for a peer, in the operator's terms.
 ///
@@ -171,6 +122,375 @@ const localColumns = (
     <col style={{ width: VERSION_COL_WIDTH }} />
     <col style={{ width: PACKAGE_ID_COL_WIDTH }} />
   </colgroup>
+);
+
+const LocalPackagesSkeleton = () => (
+  <Table
+    size="small"
+    stickyHeader
+    sx={{ minWidth: LOCAL_TABLE_MIN_WIDTH, tableLayout: "fixed", ...finderTableSx }}
+  >
+    {localColumns}
+    <TableHead>
+      <TableRow>
+        <TableCell sx={{ py: 1 }}><Skeleton width="60%" /></TableCell>
+        <TableCell sx={{ py: 1 }}><Skeleton width={50} /></TableCell>
+        <TableCell sx={{ py: 1 }}><Skeleton width="70%" /></TableCell>
+      </TableRow>
+    </TableHead>
+    <TableBody>
+      {Array.from({ length: 20 }).map((_, i) => (
+        <TableRow key={i} sx={zebraRow(i)}>
+          <TableCell sx={{ py: 1 }}><Skeleton width={`${50 + (i % 3) * 15}%`} /></TableCell>
+          <TableCell sx={{ py: 1 }}><Skeleton width={40} /></TableCell>
+          <TableCell sx={{ py: 1 }}><Skeleton width={`${55 + (i % 4) * 10}%`} /></TableCell>
+        </TableRow>
+      ))}
+    </TableBody>
+  </Table>
+);
+
+const statusColor = (status: CellStatus, rowIndex: number): string => {
+  const even = rowIndex % 2 === 0;
+  switch (status) {
+    case "match":
+      return even ? "rgba(76, 175, 80, 0.08)" : "rgba(76, 175, 80, 0.15)";
+    case "other_version":
+      return even ? "rgba(255, 152, 0, 0.10)" : "rgba(255, 152, 0, 0.18)";
+    case "missing":
+      return even ? "rgba(244, 67, 54, 0.08)" : "rgba(244, 67, 54, 0.15)";
+    case "unknown":
+    case "unreachable":
+      return even ? "transparent" : "action.hover";
+  }
+};
+
+interface PackageComparisonTableProps {
+  peerIndexes: PeerIndex[];
+  expected: ExpectedVersionsResponse | null;
+  comparisonPaging: { pageItems: PackageInfo[] };
+  expectedByName: Map<string, string>;
+  configuredPeerIds: Set<string>;
+  setDistributeTarget: (target: { pkg: PackageInfo; peer: PeerPackageResult }) => void;
+}
+
+const PackageComparisonTable = ({
+  peerIndexes,
+  expected,
+  comparisonPaging,
+  expectedByName,
+  configuredPeerIds,
+  setDistributeTarget,
+}: PackageComparisonTableProps) => (
+  <Table
+    size="small"
+    // The header row stays in view while the rows scroll.
+    stickyHeader
+    sx={{
+      // Fixed rather than auto: auto treats a column width as a
+      // suggestion and takes the shortfall out of whichever column
+      // it likes, which left the last peer squeezed against its
+      // neighbours. Fixed honours them, so every peer is one width.
+      tableLayout: "fixed",
+      // The theme pads a table's leading/trailing cell out to
+      // `--content-pad`. This table isn't full-bleed — it's a fixed
+      // grid inside a scroller — and that padding ate the last peer
+      // column, leaving its tick sitting against the column's left
+      // edge while the column itself painted full width. The Finder
+      // rule replaces both with a fixed gutter, so the package name
+      // stays at the left of the pane at any window width.
+      ...finderTableSx,
+      // Grows with the peer count, so the columns keep their width
+      // and the table overflows into the scroller instead of every
+      // column shrinking as peers are added.
+      minWidth:
+        PACKAGE_MIN_WIDTH +
+        2 * VERSION_COL_WIDTH +
+        peerIndexes.length * PEER_COL_WIDTH,
+    }}
+  >
+    {/* Columns are declared here rather than inferred from the
+      * header cells: sizing a fixed-layout table off its cells left
+      * the last peer's column painting one width while laying its
+      * content out at another. The package column is left open so it
+      * takes whatever the stated columns leave. */}
+    <colgroup>
+      <col />
+      <col style={{ width: VERSION_COL_WIDTH }} />
+      <col style={{ width: VERSION_COL_WIDTH }} />
+      {peerIndexes.map(({ peer }) => (
+        <col key={peer.participant_id} style={{ width: PEER_COL_WIDTH }} />
+      ))}
+    </colgroup>
+    <TableHead>
+      <TableRow>
+        {/* Pinned left as well as to the top, above the other header cells. */}
+        <TableCell sx={{ py: 1, fontWeight: "bold", left: 0, zIndex: 3 }}>
+          Package
+        </TableCell>
+        <TableCell sx={{ py: 1, fontWeight: "bold" }}>
+          Version
+        </TableCell>
+        <TableCell sx={{ py: 1, fontWeight: "bold" }}>
+          <Tooltip
+            title={
+              expected
+                ? `From the ${expected.source}, read ${new Date(expected.fetched_at * 1000).toLocaleString()}. Only Splice packages have an expected version.`
+                : "Only Splice packages have an expected version"
+            }
+            arrow
+          >
+            <span>Expected</span>
+          </Tooltip>
+        </TableCell>
+        {peerIndexes.map(({ peer }) => (
+          <TableCell
+            key={peer.participant_id}
+            sx={{
+              py: 1,
+              fontWeight: "bold",
+              textAlign: "center",
+              whiteSpace: "nowrap",
+            }}
+          >
+            {/* Dim the contents, not the cell: the header is sticky,
+              * and a translucent cell would show the rows under it. */}
+            <Box
+              sx={{
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+                gap: 0.5,
+                opacity: peer.reachable ? 1 : 0.5,
+              }}
+            >
+              <Tooltip title={peer.participant_id} arrow>
+                <Box
+                  component="span"
+                  sx={{
+                    minWidth: 0,
+                    overflow: "hidden",
+                    textOverflow: "ellipsis",
+                    whiteSpace: "nowrap",
+                  }}
+                >
+                  {peer.name || peer.participant_id}
+                </Box>
+              </Tooltip>
+              {!peer.reachable && (
+                <Tooltip title={peerErrorTooltip(peer)} arrow>
+                  <SignalWifiOffIcon
+                    sx={{
+                      fontSize: 14,
+                      color: "text.disabled",
+                      flexShrink: 0,
+                    }}
+                  />
+                </Tooltip>
+              )}
+            </Box>
+          </TableCell>
+        ))}
+      </TableRow>
+    </TableHead>
+    <TableBody>
+      {comparisonPaging.pageItems
+        .map((pkg, idx) => (
+          <TableRow key={pkg.package_id} sx={zebraRow(idx)}>
+            <TableCell
+              sx={{
+                py: 1,
+                overflow: "hidden",
+                textOverflow: "ellipsis",
+                whiteSpace: "nowrap",
+                ...pinnedCellSx(idx),
+              }}
+            >
+              {pkg.name || "-"}
+            </TableCell>
+            <VersionCell version={pkg.version} />
+            <TableCell
+              sx={{ py: 1 }}
+              data-testid="expected-version"
+              data-pkg={pkg.name}
+            >
+              {(() => {
+                const want = expectedByName.get(pkg.name);
+                if (!want) {
+                  return (
+                    <Tooltip
+                      title="No trusted source gives an expected version for this package"
+                      arrow
+                    >
+                      <Typography variant="caption" color="text.disabled">
+                        —
+                      </Typography>
+                    </Tooltip>
+                  );
+                }
+                return (
+                  <Typography
+                    variant="body2"
+                    component="span"
+                    sx={{
+                      color: want === pkg.version ? "success.main" : "text.secondary",
+                      fontWeight: want === pkg.version ? 600 : 400,
+                    }}
+                  >
+                    {want}
+                  </Typography>
+                );
+              })()}
+            </TableCell>
+            {peerIndexes.map((index) => {
+              const { peer, unnamed } = index;
+              const { status, versions } = compareCell(index, pkg);
+              const missingHint =
+                unnamed > 0
+                  ? ` It vets ${unnamed} package(s) this node does not hold, so it may have a version this node lacks.`
+                  : "";
+              return (
+                <TableCell
+                  key={peer.participant_id}
+                  data-testid="peer-dar-status"
+                  data-pkg={pkg.name}
+                  data-status={status}
+                  sx={{
+                    py: 1,
+                    textAlign: "center",
+                    bgcolor: statusColor(status, idx),
+                  }}
+                >
+                  {status === "match" && (
+                    <Tooltip title="Matches local package" arrow>
+                      <CheckCircleIcon
+                        sx={{ fontSize: 16, color: "success.main" }}
+                      />
+                    </Tooltip>
+                  )}
+                  {status === "other_version" && (
+                    <Tooltip
+                      title={`Vets ${versions.join(", ")}, not ${pkg.version}`}
+                      arrow
+                    >
+                      <Box
+                        component="span"
+                        sx={{
+                          display: "inline-flex",
+                          alignItems: "center",
+                          gap: 0.5,
+                          color: "warning.main",
+                          // Shrinks to the peer column so a long
+                          // version ends in an ellipsis; the
+                          // tooltip carries the full list.
+                          maxWidth: "100%",
+                        }}
+                      >
+                        <SyncProblemIcon sx={{ fontSize: 16, flexShrink: 0 }} />
+                        <Typography variant="caption" noWrap sx={{ minWidth: 0 }}>
+                          {versions.join(", ")}
+                        </Typography>
+                      </Box>
+                    </Tooltip>
+                  )}
+                  {status === "missing" && (
+                    <Tooltip
+                      title={`No version of this package is vetted.${missingHint}`}
+                      arrow
+                    >
+                      <ErrorIcon
+                        sx={{ fontSize: 16, color: "error.main" }}
+                      />
+                    </Tooltip>
+                  )}
+                  {canDistribute(status) && ADMIN_ACCESS && (
+                    <Tooltip
+                      title={
+                        configuredPeerIds.has(peer.participant_id)
+                          ? `Distribute ${pkg.name} ${pkg.version} to ${participantLabel({ id: peer.participant_id, name: peer.name })}`
+                          : "Not a configured peer: DARs can only be distributed to configured peers"
+                      }
+                      arrow
+                    >
+                      <span>
+                        <IconButton
+                          size="small"
+                          aria-label={`Distribute ${pkg.name} to ${participantLabel({ id: peer.participant_id, name: peer.name })}`}
+                          disabled={!configuredPeerIds.has(peer.participant_id)}
+                          onClick={() => setDistributeTarget({ pkg, peer })}
+                          sx={{ ml: 0.5, p: 0.25 }}
+                          data-testid="distribute-dar"
+                        >
+                          <SendIcon sx={{ fontSize: 14 }} />
+                        </IconButton>
+                      </span>
+                    </Tooltip>
+                  )}
+                  {status === "unknown" && (
+                    <Tooltip
+                      title="This node has no name for this package, so only its id can be compared, and the id does not match"
+                      arrow
+                    >
+                      <HelpOutlineIcon
+                        sx={{ fontSize: 16, color: "text.disabled" }}
+                      />
+                    </Tooltip>
+                  )}
+                  {status === "unreachable" && (
+                    <Tooltip title={peerErrorTooltip(peer)} arrow>
+                      <Typography
+                        variant="caption"
+                        color="text.disabled"
+                      >
+                        unavailable
+                      </Typography>
+                    </Tooltip>
+                  )}
+                </TableCell>
+              );
+            })}
+          </TableRow>
+        ))}
+    </TableBody>
+  </Table>
+);
+
+interface LocalPackagesTableProps {
+  localPaging: { pageItems: VettedPackageInfo[] };
+}
+
+const LocalPackagesTable = ({ localPaging }: LocalPackagesTableProps) => (
+  <Table
+    size="small"
+    stickyHeader
+    sx={{ minWidth: LOCAL_TABLE_MIN_WIDTH, tableLayout: "fixed", ...finderTableSx }}
+  >
+    {localColumns}
+    <TableHead>
+      <TableRow>
+        <TableCell sx={{ py: 1 }}>Package Name</TableCell>
+        <TableCell sx={{ py: 1 }}>Version</TableCell>
+        <TableCell sx={{ py: 1 }}>Package ID</TableCell>
+      </TableRow>
+    </TableHead>
+    <TableBody>
+      {localPaging.pageItems.map((p, idx) => (
+        <TableRow key={p.package_id} sx={zebraRow(idx)}>
+          <TableCell sx={{ py: 1, overflowWrap: "anywhere" }}>
+            {p.package_name || "-"}
+          </TableCell>
+          <VersionCell version={p.package_version} />
+          <TableCell sx={{ py: 1 }}>
+            <CopyableText
+              text={p.package_id}
+              truncate={{ start: 16, end: 16 }}
+              variant="body2"
+            />
+          </TableCell>
+        </TableRow>
+      ))}
+    </TableBody>
+  </Table>
 );
 
 export const PackagesPanel = ({
@@ -393,21 +713,6 @@ export const PackagesPanel = ({
   }, [sorted, comparison, updateScrollShadows]);
 
   const handleComparePeers = () => runComparison(selected);
-
-  const statusColor = (status: CellStatus, rowIndex: number): string => {
-    const even = rowIndex % 2 === 0;
-    switch (status) {
-      case "match":
-        return even ? "rgba(76, 175, 80, 0.08)" : "rgba(76, 175, 80, 0.15)";
-      case "other_version":
-        return even ? "rgba(255, 152, 0, 0.10)" : "rgba(255, 152, 0, 0.18)";
-      case "missing":
-        return even ? "rgba(244, 67, 54, 0.08)" : "rgba(244, 67, 54, 0.15)";
-      case "unknown":
-      case "unreachable":
-        return even ? "transparent" : "action.hover";
-    }
-  };
 
   const configuredPeerIds = useMemo(
     () => new Set(peers.map((p) => p.participant_id)),
@@ -633,335 +938,20 @@ export const PackagesPanel = ({
             }}
           >
             {loadingPackages ? (
-              <Table
-                size="small"
-                stickyHeader
-                sx={{ minWidth: LOCAL_TABLE_MIN_WIDTH, tableLayout: "fixed", ...finderTableSx }}
-              >
-                {localColumns}
-                <TableHead>
-                  <TableRow>
-                    <TableCell sx={{ py: 1 }}><Skeleton width="60%" /></TableCell>
-                    <TableCell sx={{ py: 1 }}><Skeleton width={50} /></TableCell>
-                    <TableCell sx={{ py: 1 }}><Skeleton width="70%" /></TableCell>
-                  </TableRow>
-                </TableHead>
-                <TableBody>
-                  {Array.from({ length: 20 }).map((_, i) => (
-                    <TableRow key={i} sx={zebraRow(i)}>
-                      <TableCell sx={{ py: 1 }}><Skeleton width={`${50 + (i % 3) * 15}%`} /></TableCell>
-                      <TableCell sx={{ py: 1 }}><Skeleton width={40} /></TableCell>
-                      <TableCell sx={{ py: 1 }}><Skeleton width={`${55 + (i % 4) * 10}%`} /></TableCell>
-                    </TableRow>
-                  ))}
-                </TableBody>
-              </Table>
+              <LocalPackagesSkeleton />
             ) : comparison ? (
               /* Comparison table */
-              <Table
-                size="small"
-                // The header row stays in view while the rows scroll.
-                stickyHeader
-                sx={{
-                  // Fixed rather than auto: auto treats a column width as a
-                  // suggestion and takes the shortfall out of whichever column
-                  // it likes, which left the last peer squeezed against its
-                  // neighbours. Fixed honours them, so every peer is one width.
-                  tableLayout: "fixed",
-                  // The theme pads a table's leading/trailing cell out to
-                  // `--content-pad`. This table isn't full-bleed — it's a fixed
-                  // grid inside a scroller — and that padding ate the last peer
-                  // column, leaving its tick sitting against the column's left
-                  // edge while the column itself painted full width. The Finder
-                  // rule replaces both with a fixed gutter, so the package name
-                  // stays at the left of the pane at any window width.
-                  ...finderTableSx,
-                  // Grows with the peer count, so the columns keep their width
-                  // and the table overflows into the scroller instead of every
-                  // column shrinking as peers are added.
-                  minWidth:
-                    PACKAGE_MIN_WIDTH +
-                    2 * VERSION_COL_WIDTH +
-                    peerIndexes.length * PEER_COL_WIDTH,
-                }}
-              >
-                {/* Columns are declared here rather than inferred from the
-                  * header cells: sizing a fixed-layout table off its cells left
-                  * the last peer's column painting one width while laying its
-                  * content out at another. The package column is left open so it
-                  * takes whatever the stated columns leave. */}
-                <colgroup>
-                  <col />
-                  <col style={{ width: VERSION_COL_WIDTH }} />
-                  <col style={{ width: VERSION_COL_WIDTH }} />
-                  {peerIndexes.map(({ peer }) => (
-                    <col key={peer.participant_id} style={{ width: PEER_COL_WIDTH }} />
-                  ))}
-                </colgroup>
-                <TableHead>
-                  <TableRow>
-                    {/* Pinned left as well as to the top, above the other header cells. */}
-                    <TableCell sx={{ py: 1, fontWeight: "bold", left: 0, zIndex: 3 }}>
-                      Package
-                    </TableCell>
-                    <TableCell sx={{ py: 1, fontWeight: "bold" }}>
-                      Version
-                    </TableCell>
-                    <TableCell sx={{ py: 1, fontWeight: "bold" }}>
-                      <Tooltip
-                        title={
-                          expected
-                            ? `From the ${expected.source}, read ${new Date(expected.fetched_at * 1000).toLocaleString()}. Only Splice packages have an expected version.`
-                            : "Only Splice packages have an expected version"
-                        }
-                        arrow
-                      >
-                        <span>Expected</span>
-                      </Tooltip>
-                    </TableCell>
-                    {peerIndexes.map(({ peer }) => (
-                      <TableCell
-                        key={peer.participant_id}
-                        sx={{
-                          py: 1,
-                          fontWeight: "bold",
-                          textAlign: "center",
-                          whiteSpace: "nowrap",
-                        }}
-                      >
-                        {/* Dim the contents, not the cell: the header is sticky,
-                          * and a translucent cell would show the rows under it. */}
-                        <Box
-                          sx={{
-                            display: "flex",
-                            alignItems: "center",
-                            justifyContent: "center",
-                            gap: 0.5,
-                            opacity: peer.reachable ? 1 : 0.5,
-                          }}
-                        >
-                          <Tooltip title={peer.participant_id} arrow>
-                            <Box
-                              component="span"
-                              sx={{
-                                minWidth: 0,
-                                overflow: "hidden",
-                                textOverflow: "ellipsis",
-                                whiteSpace: "nowrap",
-                              }}
-                            >
-                              {peer.name || peer.participant_id}
-                            </Box>
-                          </Tooltip>
-                          {!peer.reachable && (
-                            <Tooltip title={peerErrorTooltip(peer)} arrow>
-                              <SignalWifiOffIcon
-                                sx={{
-                                  fontSize: 14,
-                                  color: "text.disabled",
-                                  flexShrink: 0,
-                                }}
-                              />
-                            </Tooltip>
-                          )}
-                        </Box>
-                      </TableCell>
-                    ))}
-                  </TableRow>
-                </TableHead>
-                <TableBody>
-                  {comparisonPaging.pageItems
-                    .map((pkg, idx) => (
-                      <TableRow key={pkg.package_id} sx={zebraRow(idx)}>
-                        <TableCell
-                          sx={{
-                            py: 1,
-                            overflow: "hidden",
-                            textOverflow: "ellipsis",
-                            whiteSpace: "nowrap",
-                            ...pinnedCellSx(idx),
-                          }}
-                        >
-                          {pkg.name || "-"}
-                        </TableCell>
-                        <VersionCell version={pkg.version} />
-                        <TableCell
-                          sx={{ py: 1 }}
-                          data-testid="expected-version"
-                          data-pkg={pkg.name}
-                        >
-                          {(() => {
-                            const want = expectedByName.get(pkg.name);
-                            if (!want) {
-                              return (
-                                <Tooltip
-                                  title="No trusted source gives an expected version for this package"
-                                  arrow
-                                >
-                                  <Typography variant="caption" color="text.disabled">
-                                    —
-                                  </Typography>
-                                </Tooltip>
-                              );
-                            }
-                            return (
-                              <Typography
-                                variant="body2"
-                                component="span"
-                                sx={{
-                                  color: want === pkg.version ? "success.main" : "text.secondary",
-                                  fontWeight: want === pkg.version ? 600 : 400,
-                                }}
-                              >
-                                {want}
-                              </Typography>
-                            );
-                          })()}
-                        </TableCell>
-                        {peerIndexes.map((index) => {
-                          const { peer, unnamed } = index;
-                          const { status, versions } = compareCell(index, pkg);
-                          const missingHint =
-                            unnamed > 0
-                              ? ` It vets ${unnamed} package(s) this node does not hold, so it may have a version this node lacks.`
-                              : "";
-                          return (
-                            <TableCell
-                              key={peer.participant_id}
-                              data-testid="peer-dar-status"
-                              data-pkg={pkg.name}
-                              data-status={status}
-                              sx={{
-                                py: 1,
-                                textAlign: "center",
-                                bgcolor: statusColor(status, idx),
-                              }}
-                            >
-                              {status === "match" && (
-                                <Tooltip title="Matches local package" arrow>
-                                  <CheckCircleIcon
-                                    sx={{ fontSize: 16, color: "success.main" }}
-                                  />
-                                </Tooltip>
-                              )}
-                              {status === "other_version" && (
-                                <Tooltip
-                                  title={`Vets ${versions.join(", ")}, not ${pkg.version}`}
-                                  arrow
-                                >
-                                  <Box
-                                    component="span"
-                                    sx={{
-                                      display: "inline-flex",
-                                      alignItems: "center",
-                                      gap: 0.5,
-                                      color: "warning.main",
-                                      // Shrinks to the peer column so a long
-                                      // version ends in an ellipsis; the
-                                      // tooltip carries the full list.
-                                      maxWidth: "100%",
-                                    }}
-                                  >
-                                    <SyncProblemIcon sx={{ fontSize: 16, flexShrink: 0 }} />
-                                    <Typography variant="caption" noWrap sx={{ minWidth: 0 }}>
-                                      {versions.join(", ")}
-                                    </Typography>
-                                  </Box>
-                                </Tooltip>
-                              )}
-                              {status === "missing" && (
-                                <Tooltip
-                                  title={`No version of this package is vetted.${missingHint}`}
-                                  arrow
-                                >
-                                  <ErrorIcon
-                                    sx={{ fontSize: 16, color: "error.main" }}
-                                  />
-                                </Tooltip>
-                              )}
-                              {canDistribute(status) && ADMIN_ACCESS && (
-                                <Tooltip
-                                  title={
-                                    configuredPeerIds.has(peer.participant_id)
-                                      ? `Distribute ${pkg.name} ${pkg.version} to ${participantLabel({ id: peer.participant_id, name: peer.name })}`
-                                      : "Not a configured peer: DARs can only be distributed to configured peers"
-                                  }
-                                  arrow
-                                >
-                                  <span>
-                                    <IconButton
-                                      size="small"
-                                      aria-label={`Distribute ${pkg.name} to ${participantLabel({ id: peer.participant_id, name: peer.name })}`}
-                                      disabled={!configuredPeerIds.has(peer.participant_id)}
-                                      onClick={() => setDistributeTarget({ pkg, peer })}
-                                      sx={{ ml: 0.5, p: 0.25 }}
-                                      data-testid="distribute-dar"
-                                    >
-                                      <SendIcon sx={{ fontSize: 14 }} />
-                                    </IconButton>
-                                  </span>
-                                </Tooltip>
-                              )}
-                              {status === "unknown" && (
-                                <Tooltip
-                                  title="This node has no name for this package, so only its id can be compared, and the id does not match"
-                                  arrow
-                                >
-                                  <HelpOutlineIcon
-                                    sx={{ fontSize: 16, color: "text.disabled" }}
-                                  />
-                                </Tooltip>
-                              )}
-                              {status === "unreachable" && (
-                                <Tooltip title={peerErrorTooltip(peer)} arrow>
-                                  <Typography
-                                    variant="caption"
-                                    color="text.disabled"
-                                  >
-                                    unavailable
-                                  </Typography>
-                                </Tooltip>
-                              )}
-                            </TableCell>
-                          );
-                        })}
-                      </TableRow>
-                    ))}
-                </TableBody>
-              </Table>
+              <PackageComparisonTable
+                peerIndexes={peerIndexes}
+                expected={expected}
+                comparisonPaging={comparisonPaging}
+                expectedByName={expectedByName}
+                configuredPeerIds={configuredPeerIds}
+                setDistributeTarget={setDistributeTarget}
+              />
             ) : (
               /* Default local-only table */
-              <Table
-                size="small"
-                stickyHeader
-                sx={{ minWidth: LOCAL_TABLE_MIN_WIDTH, tableLayout: "fixed", ...finderTableSx }}
-              >
-                {localColumns}
-                <TableHead>
-                  <TableRow>
-                    <TableCell sx={{ py: 1 }}>Package Name</TableCell>
-                    <TableCell sx={{ py: 1 }}>Version</TableCell>
-                    <TableCell sx={{ py: 1 }}>Package ID</TableCell>
-                  </TableRow>
-                </TableHead>
-                <TableBody>
-                  {localPaging.pageItems.map((p, idx) => (
-                    <TableRow key={p.package_id} sx={zebraRow(idx)}>
-                      <TableCell sx={{ py: 1, overflowWrap: "anywhere" }}>
-                        {p.package_name || "-"}
-                      </TableCell>
-                      <VersionCell version={p.package_version} />
-                      <TableCell sx={{ py: 1 }}>
-                        <CopyableText
-                          text={p.package_id}
-                          truncate={{ start: 16, end: 16 }}
-                          variant="body2"
-                        />
-                      </TableCell>
-                    </TableRow>
-                  ))}
-                </TableBody>
-              </Table>
+              <LocalPackagesTable localPaging={localPaging} />
             )}
           </Box>
           <Box
