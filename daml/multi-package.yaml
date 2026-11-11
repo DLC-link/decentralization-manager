@@ -4,6 +4,7 @@ packages:
   - governance-core-v2
   - orphan-marker
   - governance-core-test
+  - governance-core-v2-test
   - governance-rewards-automation
   - governance-rewards-assign-test
   - governance-rewards-test
