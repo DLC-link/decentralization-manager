@@ -44,12 +44,25 @@ import { CredentialOfferPicker } from "./governance/fields/CredentialOfferPicker
 import { HelpTextField } from "./governance/fields/HelpTextField";
 import { RequirementRows, type RequirementRow } from "./governance/fields/RequirementRows";
 import { SubmitButton } from "./governance/fields/SubmitButton";
+import {
+  buildRequirements,
+  credentialValidity,
+  parseClaimsText,
+  parsePartyLines,
+  requiredClaimsText,
+} from "./governance/proposalParse";
+import {
+  formatSplitShare,
+  parseSplitWeights,
+  splitFromWeights,
+  splitRemainderRow,
+  validateDelegationSplit,
+} from "./governance/rewardSplit";
 import type {
   GovernanceResponse,
   ActionType,
   ConfirmActionRequest,
   AppRewardBeneficiary,
-  Claim,
   ProviderServiceInfo,
   ProviderServicesResponse,
   UserServiceInfo,
@@ -128,10 +141,6 @@ const holdingAvailable = (h: Holding): number =>
 /// Default validity window (hours) for a Transfer proposal / two-step offer.
 /// Mirrors the backend default; overridable per-transfer in the form.
 const DEFAULT_TRANSFER_EXPIRY_HOURS = 24;
-
-/** The editor's "property,value" text for a list of required claims. */
-const requiredClaimsText = (claims: { property: string; value: string }[]) =>
-  claims.map((claim) => `${claim.property},${claim.value}`).join("\n");
 
 export const GovernanceSection = ({
   partyId,
@@ -1241,177 +1250,6 @@ export const GovernanceSection = ({
     }
   };
 
-  // Parse a multi-line "subject,property,value" textarea into a Claim[].
-  // Mirrors the comma-split-with-error-on-bad-line pattern used by
-  // set_provider_app_reward_beneficiaries.
-  const parseClaimsText = (text: string): Claim[] => {
-    const lines = text
-      .split("\n")
-      .map((line) => line.trim())
-      .filter(Boolean);
-    return lines.map((line, idx) => {
-      const parts = line.split(",").map((s) => s.trim());
-      if (parts.length !== 3 || !parts[0] || !parts[1] || !parts[2]) {
-        throw new Error(
-          `Claim line ${idx + 1}: expected "<subject>,<property>,<value>", got "${line}"`,
-        );
-      }
-      return { subject: parts[0], property: parts[1], value: parts[2] };
-    });
-  };
-
-  // Parse one requirement row's claims textarea. Each line is
-  // "<property>,<value>" — parseClaimsText minus the subject, because a
-  // requirement applies to whichever party gets credentialed.
-  const parseRequiredClaimsText = (
-    text: string,
-  ): { property: string; value: string }[] => {
-    const lines = text
-      .split("\n")
-      .map((line) => line.trim())
-      .filter(Boolean);
-    return lines.map((line, idx) => {
-      const parts = line.split(",").map((s) => s.trim());
-      if (parts.length !== 2 || !parts[0] || !parts[1]) {
-        throw new Error(
-          `Claim line ${idx + 1}: expected "<property>,<value>", got "${line}"`,
-        );
-      }
-      return { property: parts[0], value: parts[1] };
-    });
-  };
-
-  // Turn requirement-editor rows into PartyCredentialRequirement payloads.
-  // `label` names the list in error messages. A prefilled row whose text is
-  // unchanged sends its original claims, because the text form cannot carry
-  // a comma, a newline or edge whitespace inside a value.
-  const buildRequirements = (
-    rows: RequirementRow[],
-    label: string,
-  ): PartyCredentialRequirement[] =>
-    rows.map((row, idx) => {
-      const issuer = row.issuer.trim();
-      if (!issuer) {
-        throw new Error(`${label} requirement ${idx + 1}: issuer party is required`);
-      }
-      return {
-        issuer,
-        required_claims:
-          row.claims && row.claimsText === requiredClaimsText(row.claims)
-            ? row.claims
-            : parseRequiredClaimsText(row.claimsText),
-      };
-    });
-
-  // Split a one-party-per-line textarea into party ids. A duplicated party
-  // is an error, not silently deduplicated: the templates refuse duplicates
-  // (two mints for one subject would share a credential id), and dropping a
-  // line here would hide what the operator actually typed.
-  const parsePartyLines = (text: string): string[] => {
-    const lines = text
-      .split("\n")
-      .map((line) => line.trim())
-      .filter(Boolean);
-    const seen = new Set<string>();
-    for (const line of lines) {
-      if (seen.has(line)) {
-        throw new Error(`Party id listed more than once: ${line}`);
-      }
-      seen.add(line);
-    }
-    return lines;
-  };
-
-  // Daml's Decimal scale for a reward-split percentage: 10 places.
-  const SPLIT_SCALE = 10_000_000_000n;
-
-  /** Render a scaled integer as the fixed-point decimal the ledger stores. */
-  const formatSplitShare = (scaled: bigint): string => {
-    const s = scaled.toString().padStart(11, "0");
-    return `${s.slice(0, -10)}.${s.slice(-10)}`;
-  };
-
-  /**
-   * Turn integer weights into shares that sum to EXACTLY 1.0.
-   *
-   * The ledger compares the sum as exact Decimal, with no tolerance, so an even
-   * 3-way split is not expressible as a repeated decimal: 0.3333333333 three
-   * times is 0.9999999999 and the vote fails at execute, after the
-   * confirmations are already spent. Rather than ask a human to hand-balance
-   * the last entry, take integer weights and derive the decimals.
-   *
-   * Floor each `weight / total`, then give every leftover unit to the LARGEST
-   * weight (ties by row order). The rule is deterministic on purpose: a
-   * confirmer has to be able to reproduce the split from the weights alone, so
-   * "whichever row happened to be picked" is not good enough. Distortion is at
-   * most (n-1) × 1e-10.
-   *
-   * Returns null when the weights cannot produce a valid split.
-   */
-  const splitFromWeights = (weights: bigint[]): bigint[] | null => {
-    const total = weights.reduce((a, w) => a + w, 0n);
-    if (total <= 0n) return null;
-    const shares = weights.map((w) => (w * SPLIT_SCALE) / total);
-    const leftover = SPLIT_SCALE - shares.reduce((a, s) => a + s, 0n);
-    if (leftover > 0n) {
-      let largest = 0;
-      weights.forEach((w, i) => {
-        if (w > weights[largest]) largest = i;
-      });
-      shares[largest] += leftover;
-    }
-    return shares;
-  };
-
-  /** Index of the row that absorbs the rounding remainder, for the UI to mark. */
-  const splitRemainderRow = (weights: bigint[]): number => {
-    let largest = 0;
-    weights.forEach((w, i) => {
-      if (w > weights[largest]) largest = i;
-    });
-    return largest;
-  };
-
-  /** Parse the weight column; null if any entry is not a positive integer. */
-  const parseSplitWeights = (
-    split: { beneficiary: string; weight: string }[],
-  ): bigint[] | null => {
-    const out: bigint[] = [];
-    for (const row of split) {
-      const w = row.weight.trim();
-      if (!/^\d+$/.test(w)) return null;
-      const v = BigInt(w);
-      if (v <= 0n) return null;
-      out.push(v);
-    }
-    return out;
-  };
-
-  const validateDelegationSplit = (
-    split: { beneficiary: string; weight: string }[],
-  ): string | null => {
-    if (split.length === 0) return "Add at least one beneficiary";
-    if (split.length > 20) return "At most 20 beneficiaries";
-    if (split.some((b) => !b.beneficiary.trim())) {
-      return "Every row needs a beneficiary party";
-    }
-    const parties = split.map((b) => b.beneficiary.trim());
-    if (new Set(parties).size !== parties.length) {
-      return "Each beneficiary may appear only once";
-    }
-    const weights = parseSplitWeights(split);
-    if (!weights) return "Each weight must be a whole number greater than 0";
-    const shares = splitFromWeights(weights);
-    if (!shares) return "Weights must add up to more than 0";
-    // Daml requires every percentage in (0, 1]. A weight tiny enough against the
-    // total floors to zero, which the ledger rejects — catch it here instead.
-    const zeroAt = shares.findIndex((s) => s <= 0n);
-    if (zeroAt >= 0) {
-      return `Row ${zeroAt + 1}'s weight is too small against the total — its share rounds to 0, which the ledger rejects`;
-    }
-    return null;
-  };
-
   // Clear the action form fields after a successful submit so the next
   // action starts blank — keeps the form expanded and the submit button
   // visible (the new action shows up in the notification queue on its own).
@@ -1618,31 +1456,6 @@ export const GovernanceSection = ({
 
     try {
       let proposal: ProposalType;
-      // The credential validity window of the two instrument proposals, in
-      // micros since epoch. An empty input leaves that side unbounded.
-      // Onboard Registrar has none: its credential is checked only once.
-      const credentialValidity = () => {
-        const toMicros = (value: string, label: string) => {
-          if (!value) return undefined;
-          const ms = new Date(value).getTime();
-          if (!Number.isFinite(ms)) {
-            throw new Error(`${label} must be a valid date and time`);
-          }
-          if (!Number.isSafeInteger(ms * 1000)) {
-            throw new Error(`${label} is too far in the future`);
-          }
-          return ms * 1000;
-        };
-        const from = toMicros(proposalCredentialValidFrom, "Credentials Valid From");
-        const until = toMicros(proposalCredentialValidUntil, "Credentials Valid Until");
-        if (from !== undefined && until !== undefined && from >= until) {
-          throw new Error("Credentials Valid From must be before Credentials Valid Until");
-        }
-        return {
-          credential_valid_from_micros: from,
-          credential_valid_until_micros: until,
-        };
-      };
       switch (proposalType) {
         case "setup_cc_preapproval":
           proposal = {
@@ -1969,7 +1782,7 @@ export const GovernanceSection = ({
             initial_instrument_issuers: parsePartyLines(
               proposalInitialInstrumentIssuersText,
             ),
-            ...credentialValidity(),
+            ...credentialValidity(proposalCredentialValidFrom, proposalCredentialValidUntil),
           };
           break;
         case "create_transfer_rule":
@@ -2012,7 +1825,7 @@ export const GovernanceSection = ({
             type: "onboard_instrument_issuers",
             instrument_configuration_cid: proposalInstrumentConfigurationCid,
             instrument_issuers: parsePartyLines(proposalInstrumentIssuersText),
-            ...credentialValidity(),
+            ...credentialValidity(proposalCredentialValidFrom, proposalCredentialValidUntil),
           };
           break;
         case "offboard_instrument_issuers":
