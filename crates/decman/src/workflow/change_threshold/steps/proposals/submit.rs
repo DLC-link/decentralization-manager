@@ -134,7 +134,7 @@ async fn wait_for_dns_in_topology(
         found: format!("DNS threshold {expected_threshold} confirmed in topology"),
         failed: format!("DNS threshold did not become {expected_threshold} in topology"),
     };
-    topology::poll_until(text, || {
+    topology::poll_until!(text, || {
         let mut topology_read_client = topology_read_client.clone();
         async move {
             let request = tonic::Request::new(ListDecentralizedNamespaceDefinitionRequest {
@@ -179,7 +179,7 @@ async fn wait_for_p2p_in_topology(
         found: format!("P2P thresholds {expected:?} confirmed in topology"),
         failed: format!("P2P thresholds did not become {expected:?} in topology"),
     };
-    topology::poll_until(text, || {
+    topology::poll_until!(text, || {
         let mut topology_read_client = topology_read_client.clone();
         let party_id_str = &party_id_str;
         async move {

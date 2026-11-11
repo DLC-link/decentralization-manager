@@ -193,7 +193,7 @@ pub async fn wait_for_flag_cleared(
         found: "Onboarding flag cleared".to_string(),
         failed: "Onboarding flag was not cleared".to_string(),
     };
-    poll_until(text, || {
+    poll_until!(text, || {
         let new_member_str = &new_member_str;
         async move {
             let p2p = fetch_p2p_mapping(config, synchronizer_id, party_id).await?;
