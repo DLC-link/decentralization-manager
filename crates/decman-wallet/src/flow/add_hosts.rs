@@ -2,6 +2,7 @@
 
 use std::time::Duration;
 
+use common::api::TenantAcsBlockResponse;
 use common::api::TenantAddHostsExecuteRequest;
 use common::api::{HostPermission, TenantAcsImportRequest, TenantAddHostsRequest};
 use serde::Serialize;
@@ -175,9 +176,49 @@ pub async fn add_hosts(
 
     // Only the joiners submit: Canton needs the party namespace plus each new
     // participant, and the existing hosts are neither.
+    let reports = submit_to_joiners(new_hosts, &execute_request).await;
+
+    // Phase 2 and 3, per joiner. A joiner whose topology write failed is skipped:
+    // Canton scopes the export to the joiner's activation, which does not exist.
+    let relay = Relay {
+        current_hosts,
+        party_id,
+        base_serial,
+    };
+    let mut replicated = true;
+    let mut without_package_preflight = Vec::new();
+    for (host, report) in new_hosts.iter().zip(&reports) {
+        if report.error.is_some() {
+            replicated = false;
+            continue;
+        }
+        if !relay
+            .replicate_to(host, &mut without_package_preflight)
+            .await
+        {
+            replicated = false;
+        }
+    }
+
+    Ok(AddedHosts {
+        party_id: party_id.to_string(),
+        serial: prepared.serial,
+        hosts: reports,
+        replicated,
+        without_package_preflight,
+    })
+}
+
+/// Submit the signed add-hosts write on each joining host, in order. A host
+/// that rejects it is recorded in its [`HostReport`] rather than stopping the
+/// others.
+async fn submit_to_joiners(
+    new_hosts: &[WalletHost],
+    execute_request: &TenantAddHostsExecuteRequest,
+) -> Vec<HostReport> {
     let mut reports = Vec::with_capacity(new_hosts.len());
     for host in new_hosts {
-        let report = match host.client.add_hosts_execute(&execute_request).await {
+        let report = match host.client.add_hosts_execute(execute_request).await {
             Ok(resp) => {
                 tracing::info!(
                     host = host.client.base_url(),
@@ -197,88 +238,57 @@ pub async fn add_hosts(
         };
         reports.push(report);
     }
+    reports
+}
 
-    // Phase 2 and 3, per joiner. A joiner whose topology write failed is skipped:
-    // Canton scopes the export to the joiner's activation, which does not exist.
-    let mut replicated = true;
-    let mut without_package_preflight = Vec::new();
-    for (host, report) in new_hosts.iter().zip(&reports) {
-        if report.error.is_some() {
-            replicated = false;
-            continue;
-        }
-        // Relay the ACS block by block. The source holds its Canton export
-        // stream open, the joiner holds its import stream open, and this loop
-        // carries one block between them — so neither node buffers the snapshot
-        // and the size of the party never decides whether the transfer is
-        // possible. The same shape the add-party path runs over Noise; here the
-        // wallet stands in for the channel those two nodes do not have.
-        //
-        // Forward-only, so there is no resume. A break restarts from block 1
-        // with a fresh export, which is what the export stream's inability to
-        // rewind forces and what the add-party path accepts too.
+/// What relaying the party's ACS to a joining host needs.
+struct Relay<'a> {
+    /// The hosts that already hold the party, any of which can serve the export.
+    current_hosts: &'a [WalletHost],
+    party_id: &'a str,
+    /// The serial the topology write was pinned to.
+    base_serial: u32,
+}
+
+impl<'a> Relay<'a> {
+    /// Relay the ACS to the joining `host`, then wait for its onboarding marker
+    /// to clear. Returns whether both finished.
+    ///
+    /// The relay goes block by block. The source holds its Canton export
+    /// stream open, the joiner holds its import stream open, and this loop
+    /// carries one block between them — so neither node buffers the snapshot
+    /// and the size of the party never decides whether the transfer is
+    /// possible. The same shape the add-party path runs over Noise; here the
+    /// wallet stands in for the channel those two nodes do not have.
+    ///
+    /// Forward-only, so there is no resume. A break restarts from block 1
+    /// with a fresh export, which is what the export stream's inability to
+    /// rewind forces and what the add-party path accepts too.
+    async fn replicate_to(
+        &self,
+        host: &WalletHost,
+        without_package_preflight: &mut Vec<String>,
+    ) -> bool {
         let mut seq = 1u64;
-        let mut failed = false;
         // Fixed once the first block lands. Any current host can serve the
         // export — they all hold the party — but blocks stitched from two
         // exports are not a snapshot, so the fallback only applies before
         // anything has been relayed.
         let mut source: Option<&WalletHost> = None;
         loop {
-            let block = match source {
-                Some(source) => match source
-                    .client
-                    .acs_block(party_id, &host.participant_id, base_serial, seq)
-                    .await
-                {
-                    Ok(block) => Some(block),
-                    Err(e) => {
-                        tracing::warn!(
-                            source = source.client.base_url(),
-                            host = host.client.base_url(),
-                            seq,
-                            "ACS export failed: {e}"
-                        );
-                        None
-                    }
-                },
-                None => {
-                    let mut found = None;
-                    for candidate in current_hosts {
-                        match candidate
-                            .client
-                            .acs_block(party_id, &host.participant_id, base_serial, seq)
-                            .await
-                        {
-                            Ok(block) => {
-                                source = Some(candidate);
-                                found = Some(block);
-                                break;
-                            }
-                            Err(e) => tracing::warn!(
-                                source = candidate.client.base_url(),
-                                host = host.client.base_url(),
-                                "ACS export failed: {e}"
-                            ),
-                        }
-                    }
-                    found
-                }
-            };
-            let Some(block) = block else {
-                failed = true;
-                break;
+            let Some(block) = self.next_block(&mut source, host, seq).await else {
+                return false;
             };
             if seq == 1 && !block.package_preflight {
                 without_package_preflight.push(host.client.base_url().to_string());
             }
 
             let import = TenantAcsImportRequest {
-                party_id: party_id.to_string(),
+                party_id: self.party_id.to_string(),
                 // The same serial the topology write was pinned to, so a target
                 // removed and re-added does not inherit the earlier attempt's
                 // session.
-                base_serial,
+                base_serial: self.base_serial,
                 seq: block.seq,
                 chunk: block.chunk,
                 end: block.end,
@@ -292,8 +302,7 @@ pub async fn add_hosts(
                 Ok(progress) => progress,
                 Err(e) => {
                     tracing::warn!(host = host.client.base_url(), seq, "ACS import failed: {e}");
-                    failed = true;
-                    break;
+                    return false;
                 }
             };
 
@@ -303,23 +312,59 @@ pub async fn add_hosts(
                 // the request open for the synchronizer's safe time. The party
                 // is hosted but unusable until the clear is authorized, so wait
                 // for it here.
-                if !progress.marker_cleared && !wait_for_marker_clear(host, party_id).await {
-                    failed = true;
-                }
-                break;
+                return progress.marker_cleared || wait_for_marker_clear(host, self.party_id).await;
             }
             seq += 1;
         }
-        if failed {
-            replicated = false;
-        }
     }
 
-    Ok(AddedHosts {
-        party_id: party_id.to_string(),
-        serial: prepared.serial,
-        hosts: reports,
-        replicated,
-        without_package_preflight,
-    })
+    /// Export block `seq` for the joining `host`. Once a `source` has served a
+    /// block, only it is asked. Before that, the current hosts are tried in
+    /// order, and the first that answers becomes the `source`. `None` means no
+    /// source could serve the block.
+    async fn next_block(
+        &self,
+        source: &mut Option<&'a WalletHost>,
+        host: &WalletHost,
+        seq: u64,
+    ) -> Option<TenantAcsBlockResponse> {
+        match *source {
+            Some(source) => match source
+                .client
+                .acs_block(self.party_id, &host.participant_id, self.base_serial, seq)
+                .await
+            {
+                Ok(block) => Some(block),
+                Err(e) => {
+                    tracing::warn!(
+                        source = source.client.base_url(),
+                        host = host.client.base_url(),
+                        seq,
+                        "ACS export failed: {e}"
+                    );
+                    None
+                }
+            },
+            None => {
+                for candidate in self.current_hosts {
+                    match candidate
+                        .client
+                        .acs_block(self.party_id, &host.participant_id, self.base_serial, seq)
+                        .await
+                    {
+                        Ok(block) => {
+                            *source = Some(candidate);
+                            return Some(block);
+                        }
+                        Err(e) => tracing::warn!(
+                            source = candidate.client.base_url(),
+                            host = host.client.base_url(),
+                            "ACS export failed: {e}"
+                        ),
+                    }
+                }
+                None
+            }
+        }
+    }
 }
