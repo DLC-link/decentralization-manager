@@ -62,8 +62,8 @@ async fn sign_proposal(
     }
 
     // Persist as a single per-peer artefact. Each transaction is written
-    // as `varint(len)||proto`; concatenated, this matches the previous on-disk
-    // format produced by `write_messages_to_file`.
+    // as `varint(len)||proto`, so the submit step's
+    // `decode_messages_from_bytes` reads the concatenation back.
     let mut buffer = BytesMut::new();
     for tx in &response.transactions {
         let encoded = tx.encode_to_vec();

@@ -185,8 +185,8 @@ pub async fn sign_dns_p2p_proposals(
     }
 
     // Persist signed DNS + P2P as separate per-peer artefacts, each
-    // `varint(len)||proto`, so their concatenation is byte-identical to what
-    // `write_messages_to_file(&[dns, p2p], path)` produced before.
+    // `varint(len)||proto`, so their concatenation is the two-message buffer
+    // a peer sends the coordinator.
     storage
         .write_artifact(
             instance_name,

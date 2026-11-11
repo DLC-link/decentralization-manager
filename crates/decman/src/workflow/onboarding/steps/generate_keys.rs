@@ -189,10 +189,8 @@ pub(crate) async fn get_or_create_signing_key(
 }
 
 /// Encode the namespace + Daml signing keys as two consecutive
-/// `varint(len)||proto` messages — matches the on-disk format
-/// `utils::write_messages_to_file(&[ns, daml], path)` produced, so the
-/// coordinator's `read_all_messages_from_file` (now `read_all_messages` over
-/// bytes) reads them back identically.
+/// `varint(len)||proto` messages, which the coordinator's
+/// `decode_keys_payload` reads back.
 pub(crate) fn encode_keys_payload(
     namespace_key: &SigningPublicKey,
     daml_key: &SigningPublicKey,

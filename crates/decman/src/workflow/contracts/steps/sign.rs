@@ -397,9 +397,8 @@ fn decode_peer_keys(bytes: &[u8], node_id: &str) -> Result<Vec<SigningPublicKey>
     Ok(keys)
 }
 
-/// Encode a slice of protobuf messages as `varint(len)||proto` × N, matching the
-/// byte layout produced by `utils::write_messages_to_file`. Round-trips with
-/// `utils::read_all_messages_from_file` / `read_all_messages_from_bytes`.
+/// Encode a slice of protobuf messages as `varint(len)||proto` × N. Round-trips
+/// with `read_all_messages_from_bytes`.
 fn encode_messages_length_prefixed<M: prost::Message>(messages: &[M]) -> Vec<u8> {
     let mut buffer = BytesMut::new();
     for message in messages {

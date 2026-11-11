@@ -162,9 +162,7 @@ pub async fn prepare_submissions(
             .into_inner();
 
         // Persist as `varint(len)||proto` so reads via
-        // `utils::read_first_message_from_bytes` round-trip cleanly. This is
-        // the exact byte shape `utils::write_messages_to_file(&[m], path)`
-        // would have written for a single message.
+        // `utils::read_first_message_from_bytes` round-trip cleanly.
         let payload = utils::encode_length_prefixed_message(&prepared_submission);
         let ordinal = format!("{idx:04}");
         tracing::debug!(

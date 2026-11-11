@@ -149,7 +149,7 @@ fn split_signed_kick_pair(combined: &[u8]) -> Result<(Vec<u8>, Vec<u8>)> {
 }
 
 /// Re-emit a single proto with its varint length prefix. Round-trips the
-/// `varint(len)||proto` framing produced by `utils::write_message_to_file`.
+/// `varint(len)||proto` framing of `utils::encode_length_prefixed_message`.
 fn encode_length_prefixed_bytes(proto: &[u8]) -> Vec<u8> {
     let mut buffer = BytesMut::new();
     prost::encoding::encode_varint(proto.len() as u64, &mut buffer);
