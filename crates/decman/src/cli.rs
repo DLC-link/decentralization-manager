@@ -1,3 +1,5 @@
+mod apply;
+
 use std::path::PathBuf;
 
 use clap::Subcommand;
