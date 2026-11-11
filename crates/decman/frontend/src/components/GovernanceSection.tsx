@@ -42,6 +42,7 @@ import {
 import { fieldHelpAdornment, TextHelp } from "./FieldHelp";
 import { ContractSelect } from "./governance/fields/ContractSelect";
 import { HelpTextField } from "./governance/fields/HelpTextField";
+import { RequirementRows, type RequirementRow } from "./governance/fields/RequirementRows";
 import { SubmitButton } from "./governance/fields/SubmitButton";
 import type {
   GovernanceResponse,
@@ -128,13 +129,6 @@ const holdingAvailable = (h: Holding): number =>
 /// Default validity window (hours) for a Transfer proposal / two-step offer.
 /// Mirrors the backend default; overridable per-transfer in the form.
 const DEFAULT_TRANSFER_EXPIRY_HOURS = 24;
-
-/** One requirement-editor row. `claims` holds a prefilled row's exact claims. */
-type RequirementRow = {
-  issuer: string;
-  claimsText: string;
-  claims?: { property: string; value: string }[];
-};
 
 /** The editor's "property,value" text for a list of required claims. */
 const requiredClaimsText = (claims: { property: string; value: string }[]) =>
@@ -878,70 +872,6 @@ export const GovernanceSection = ({
         />
       )}
     />
-  );
-
-  // Requirement-list editor shared by the Create Provider Configuration and
-  // Provision Instrument forms. Each row is an issuer party id plus the
-  // claims a credential from that issuer must carry, one "property,value"
-  // per line. Mirrors the beneficiaries row editor.
-  const renderRequirementRows = (
-    label: string,
-    help: string,
-    rows: RequirementRow[],
-    setRows: (rows: RequirementRow[]) => void,
-  ) => (
-    <>
-      <Typography variant="caption" color="text.secondary" sx={{ display: "block" }}>
-        <TextHelp text={help}>{label} (add issuer + required claims)</TextHelp>
-      </Typography>
-      {rows.map((row, idx) => (
-        <Box key={idx} sx={{ display: "flex", gap: 1, mb: 1, alignItems: "flex-start" }}>
-          <HelpTextField
-            label="Issuer Party"
-            value={row.issuer}
-            onChange={(e) => {
-              const updated = [...rows];
-              updated[idx] = { ...row, issuer: e.target.value };
-              setRows(updated);
-            }}
-            size="small"
-            sx={{ flex: 2 }}
-            help="Party id whose credential satisfies this requirement. The governance party mints the credential itself when it is the issuer; other issuers must credential the party out-of-band."
-          />
-          <HelpTextField
-            label="Required claims (one per line: property,value)"
-            value={row.claimsText}
-            onChange={(e) => {
-              const updated = [...rows];
-              updated[idx] = { ...row, claimsText: e.target.value };
-              setRows(updated);
-            }}
-            size="small"
-            sx={{ flex: 3 }}
-            multiline
-            minRows={1}
-            maxRows={4}
-            help={'Claims the issuer\'s credential must contain. One per line, each formatted as "property,value" (e.g. role,registrar).'}
-            helpLabel="Required Claims"
-          />
-          <Button
-            size="small"
-            color="error"
-            onClick={() => setRows(rows.filter((_, i) => i !== idx))}
-          >
-            Remove
-          </Button>
-        </Box>
-      ))}
-      <Box sx={{ display: "flex", alignItems: "center", gap: 2 }}>
-        <Button
-          size="small"
-          onClick={() => setRows([...rows, { issuer: partyId, claimsText: "" }])}
-        >
-          Add Requirement
-        </Button>
-      </Box>
-    </>
   );
 
   // Fetch instruments when a proposal type needs them: Mint/Burn (for
@@ -4055,18 +3985,20 @@ export const GovernanceSection = ({
                     loadingText="Loading services…"
                     emptyText='No ProviderService found — run "Create Provider Service Request" first'
                   />
-                  {renderRequirementRows(
-                    "Registrar Requirements",
-                    "Credential requirements a registrar must meet before the provider onboards it. Rows whose issuer is this governance party are minted automatically during Onboard Registrar.",
-                    proposalRegistrarRequirements,
-                    setProposalRegistrarRequirements,
-                  )}
-                  {renderRequirementRows(
-                    "Holder Requirements",
-                    "Credential requirements a token holder must meet on this provider's utility.",
-                    proposalHolderRequirements,
-                    setProposalHolderRequirements,
-                  )}
+                  <RequirementRows
+                    label="Registrar Requirements"
+                    help="Credential requirements a registrar must meet before the provider onboards it. Rows whose issuer is this governance party are minted automatically during Onboard Registrar."
+                    rows={proposalRegistrarRequirements}
+                    setRows={setProposalRegistrarRequirements}
+                    defaultIssuer={partyId}
+                  />
+                  <RequirementRows
+                    label="Holder Requirements"
+                    help="Credential requirements a token holder must meet on this provider's utility."
+                    rows={proposalHolderRequirements}
+                    setRows={setProposalHolderRequirements}
+                    defaultIssuer={partyId}
+                  />
                 </>
               )}
 
@@ -4166,18 +4098,20 @@ export const GovernanceSection = ({
                     required
                     help={"Token name for the instrument this registrar will manage (e.g. \"cTM\")."}
                   />
-                  {renderRequirementRows(
-                    "Issuer Requirements",
-                    "Credential requirements an instrument issuer must meet. Rows whose issuer is this governance party are minted automatically for the initial issuers below.",
-                    proposalIssuerRequirements,
-                    setProposalIssuerRequirements,
-                  )}
-                  {renderRequirementRows(
-                    "Holder Requirements",
-                    "Credential requirements a holder of this instrument must meet.",
-                    proposalHolderRequirements,
-                    setProposalHolderRequirements,
-                  )}
+                  <RequirementRows
+                    label="Issuer Requirements"
+                    help="Credential requirements an instrument issuer must meet. Rows whose issuer is this governance party are minted automatically for the initial issuers below."
+                    rows={proposalIssuerRequirements}
+                    setRows={setProposalIssuerRequirements}
+                    defaultIssuer={partyId}
+                  />
+                  <RequirementRows
+                    label="Holder Requirements"
+                    help="Credential requirements a holder of this instrument must meet."
+                    rows={proposalHolderRequirements}
+                    setRows={setProposalHolderRequirements}
+                    defaultIssuer={partyId}
+                  />
                   <HelpTextField
                     size="small"
                     label="Initial Instrument Issuers (one party id per line)"
@@ -4326,18 +4260,20 @@ export const GovernanceSection = ({
                       Add Identifier
                     </Button>
                   </Box>
-                  {renderRequirementRows(
-                    "Issuer Requirements",
-                    "Credential requirements an instrument issuer must meet.",
-                    proposalIssuerRequirements,
-                    setProposalIssuerRequirements,
-                  )}
-                  {renderRequirementRows(
-                    "Holder Requirements",
-                    "Credential requirements a holder of this instrument must meet.",
-                    proposalHolderRequirements,
-                    setProposalHolderRequirements,
-                  )}
+                  <RequirementRows
+                    label="Issuer Requirements"
+                    help="Credential requirements an instrument issuer must meet."
+                    rows={proposalIssuerRequirements}
+                    setRows={setProposalIssuerRequirements}
+                    defaultIssuer={partyId}
+                  />
+                  <RequirementRows
+                    label="Holder Requirements"
+                    help="Credential requirements a holder of this instrument must meet."
+                    rows={proposalHolderRequirements}
+                    setRows={setProposalHolderRequirements}
+                    defaultIssuer={partyId}
+                  />
                 </>
               )}
 
