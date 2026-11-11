@@ -14,7 +14,7 @@ use crate::server::{
 };
 
 use super::{
-    credentials::{get_party_credentials, packages},
+    credentials::{PartySession, packages},
     metrics::{ActionOutcome, ActionStep, count_action},
     propose::validate_inline_action,
     submit::{
@@ -52,18 +52,12 @@ pub async fn confirm_action(
     let party_id = &body.party_id;
 
     // Get token and credentials for this party
-    let (token, member_party_id) = match get_party_credentials(&data, party_id).await {
-        Ok(Some(creds)) => creds,
-        Ok(None) => {
-            return HttpResponse::NotFound().json(ErrorResponse {
-                error: "No credentials configured for party".to_string(),
-            });
-        }
-        Err(e) => {
-            return HttpResponse::InternalServerError().json(ErrorResponse {
-                error: format!("Failed to fetch auth token for party: {e}"),
-            });
-        }
+    let PartySession {
+        token,
+        member_party_id,
+    } = match PartySession::load(&data, party_id).await {
+        Ok(session) => session,
+        Err(e) => return e.into_response(),
     };
 
     let audit_pool = data.db.clone();
@@ -149,18 +143,12 @@ pub async fn execute_action(
     let party_id = &body.party_id;
 
     // Get token and credentials for this party
-    let (token, member_party_id) = match get_party_credentials(&data, party_id).await {
-        Ok(Some(creds)) => creds,
-        Ok(None) => {
-            return HttpResponse::NotFound().json(ErrorResponse {
-                error: "No credentials configured for party".to_string(),
-            });
-        }
-        Err(e) => {
-            return HttpResponse::InternalServerError().json(ErrorResponse {
-                error: format!("Failed to fetch auth token for party: {e}"),
-            });
-        }
+    let PartySession {
+        token,
+        member_party_id,
+    } = match PartySession::load(&data, party_id).await {
+        Ok(session) => session,
+        Err(e) => return e.into_response(),
     };
 
     let audit_pool = data.db.clone();
@@ -266,18 +254,12 @@ pub async fn expire_confirmation(
     let party_id = &body.party_id;
 
     // Get token and credentials for this party
-    let (token, member_party_id) = match get_party_credentials(&data, party_id).await {
-        Ok(Some(creds)) => creds,
-        Ok(None) => {
-            return HttpResponse::NotFound().json(ErrorResponse {
-                error: "No credentials configured for party".to_string(),
-            });
-        }
-        Err(e) => {
-            return HttpResponse::InternalServerError().json(ErrorResponse {
-                error: format!("Failed to fetch auth token for party: {e}"),
-            });
-        }
+    let PartySession {
+        token,
+        member_party_id,
+    } = match PartySession::load(&data, party_id).await {
+        Ok(session) => session,
+        Err(e) => return e.into_response(),
     };
 
     let audit_pool = data.db.clone();
@@ -355,18 +337,12 @@ pub async fn cancel_confirmation(
     }
     let party_id = &body.party_id;
 
-    let (token, member_party_id) = match get_party_credentials(&data, party_id).await {
-        Ok(Some(creds)) => creds,
-        Ok(None) => {
-            return HttpResponse::NotFound().json(ErrorResponse {
-                error: "No credentials configured for party".to_string(),
-            });
-        }
-        Err(e) => {
-            return HttpResponse::InternalServerError().json(ErrorResponse {
-                error: format!("Failed to fetch auth token for party: {e}"),
-            });
-        }
+    let PartySession {
+        token,
+        member_party_id,
+    } = match PartySession::load(&data, party_id).await {
+        Ok(session) => session,
+        Err(e) => return e.into_response(),
     };
 
     let audit_pool = data.db.clone();
@@ -444,18 +420,12 @@ pub async fn cancel_proposal(
     }
     let party_id = &body.party_id;
 
-    let (token, member_party_id) = match get_party_credentials(&data, party_id).await {
-        Ok(Some(creds)) => creds,
-        Ok(None) => {
-            return HttpResponse::NotFound().json(ErrorResponse {
-                error: "No credentials configured for party".to_string(),
-            });
-        }
-        Err(e) => {
-            return HttpResponse::InternalServerError().json(ErrorResponse {
-                error: format!("Failed to fetch auth token for party: {e}"),
-            });
-        }
+    let PartySession {
+        token,
+        member_party_id,
+    } = match PartySession::load(&data, party_id).await {
+        Ok(session) => session,
+        Err(e) => return e.into_response(),
     };
 
     let audit_pool = data.db.clone();
