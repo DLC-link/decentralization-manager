@@ -4,6 +4,8 @@ mod former_parties;
 mod governance;
 mod invitations;
 mod keys;
+mod packages;
+mod participants;
 mod parties;
 mod party_config;
 mod tenant;
@@ -41,11 +43,11 @@ pub(crate) use invitations::{
     list_handled_invitations,
 };
 pub(crate) use keys::get_key_status;
+pub(crate) use packages::{compare_peer_packages, get_expected_versions, get_vetted_packages};
+pub(crate) use participants::{clear_acs_import_quarantine, get_participants_status};
 pub(crate) use parties::{
-    Discovery, DiscoveryGate, MAX_CONCURRENT_DISCOVERIES, clear_acs_import_quarantine,
-    compare_peer_packages, discover_and_cache, get_decentralized_parties, get_expected_versions,
-    get_participants_status, get_vetted_packages, refresh_party_for_kick,
-    resolve_owner_keys_from_peers,
+    Discovery, DiscoveryGate, MAX_CONCURRENT_DISCOVERIES, discover_and_cache,
+    get_decentralized_parties, refresh_party_for_kick, resolve_owner_keys_from_peers,
 };
 pub(crate) use party_config::{discover_member_party, get_party_config, save_party_config};
 pub(crate) use tenant::{
