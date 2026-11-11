@@ -169,6 +169,12 @@ pub enum Error {
     )]
     InvalidContractId { contract_id: String },
 
+    /// The base64 seed given to
+    /// [`ExternalKeyPair::from_seed_b64`](crate::ExternalKeyPair::from_seed_b64)
+    /// cannot become a key. Nothing was sent anywhere.
+    #[error(transparent)]
+    InvalidSeed(SeedError),
+
     /// The signed execute left the wallet, but its answer did not arrive,
     /// could not be read, or had a status that leaves the outcome open. The
     /// participant may have committed the transaction. Check the ledger
@@ -201,6 +207,18 @@ pub enum Error {
         #[source]
         source: Box<Error>,
     },
+}
+
+/// Why a base64 seed cannot become a key.
+#[derive(Debug, Error)]
+pub enum SeedError {
+    /// The text is not base64.
+    #[error("seed is not valid base64: {0}")]
+    NotBase64(#[source] base64::DecodeError),
+
+    /// The text decodes to a length other than 32 bytes.
+    #[error("seed must be 32 bytes, got {0}")]
+    WrongLength(usize),
 }
 
 /// Why the wallet refused to sign a prepared transaction.
@@ -253,13 +271,14 @@ impl Error {
             | Self::HostDisagreement { host, .. }
             | Self::TransactionRefused { host, .. } => host,
             // Not about any one host: a signing failure is local, a missing
-            // host set has nobody to name, and an empty wallet or a bad
-            // contract id is the wallet's own state.
+            // host set has nobody to name, and an empty wallet, a bad
+            // contract id or a bad seed is the wallet's own state.
             Self::NotEnoughHosts(_)
             | Self::Signing { .. }
             | Self::NoHosts { .. }
             | Self::NoHoldings { .. }
-            | Self::InvalidContractId { .. } => "",
+            | Self::InvalidContractId { .. }
+            | Self::InvalidSeed(_) => "",
         }
     }
 
