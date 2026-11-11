@@ -66,6 +66,11 @@ import {
   buildSetupCouponReassignmentDelegation,
   buildRevokeCouponReassignmentDelegation,
 } from "./couponDelegationPayloads";
+import { MintingDelegationForms } from "./MintingDelegationForms";
+import {
+  buildSetupMintingDelegation,
+  buildAcceptExternalPartySetup,
+} from "./mintingDelegationPayloads";
 import { PROPOSAL_MENU, type FormProposalType } from "./proposalMenu";
 import type { ProposalState } from "./useProposalState";
 import type {
@@ -105,14 +110,6 @@ export const ProposalForm = ({
     setProposalType,
     proposalProvider,
     setProposalProvider,
-    proposalExpectedDso,
-    setProposalExpectedDso,
-    proposalDelegate,
-    setProposalDelegate,
-    proposalDelegationExpiresAt,
-    setProposalDelegationExpiresAt,
-    proposalAmuletMergeLimit,
-    setProposalAmuletMergeLimit,
     proposalCredentialValidFrom,
     setProposalCredentialValidFrom,
     proposalCredentialValidUntil,
@@ -189,8 +186,6 @@ export const ProposalForm = ({
     setProposalInstrumentIssuersText,
     proposalOffboardRows,
     setProposalOffboardRows,
-    proposalExternalPartySetupCid,
-    setProposalExternalPartySetupCid,
     amuletRulesCid,
     providerServices,
     userServices,
@@ -330,43 +325,12 @@ export const ProposalForm = ({
         case "request_dev_net_featured_app_right":
           proposal = buildRequestDevNetFeaturedAppRight(state);
           break;
-        case "setup_minting_delegation": {
-          const expiresAtMs = new Date(proposalDelegationExpiresAt).getTime();
-          if (!Number.isFinite(expiresAtMs)) {
-            throw new Error("Expires At must be a valid date and time");
-          }
-          // Micros beyond MAX_SAFE_INTEGER (~year 2255) would silently lose
-          // precision; the datetime-local input allows dates up to year 9999.
-          if (!Number.isSafeInteger(expiresAtMs * 1000)) {
-            throw new Error("Expires At is too far in the future");
-          }
-          const mergeLimit = Number(proposalAmuletMergeLimit);
-          if (!Number.isInteger(mergeLimit) || mergeLimit <= 0) {
-            throw new Error("Amulet Merge Limit must be a positive integer");
-          }
-          proposal = {
-            type: "setup_minting_delegation",
-            delegate: proposalDelegate,
-            dso: proposalExpectedDso,
-            expires_at_micros: expiresAtMs * 1000,
-            amulet_merge_limit: mergeLimit,
-            description: proposalDescription,
-          };
+        case "setup_minting_delegation":
+          proposal = buildSetupMintingDelegation(state);
           break;
-        }
-        case "accept_external_party_setup": {
-          const proposalCid = proposalExternalPartySetupCid.trim();
-          if (!proposalCid) {
-            throw new Error(
-              "External Party Setup Proposal Contract Id must not be empty",
-            );
-          }
-          proposal = {
-            type: "accept_external_party_setup",
-            proposal_cid: proposalCid,
-          };
+        case "accept_external_party_setup":
+          proposal = buildAcceptExternalPartySetup(state);
           break;
-        }
         case "accept_mint_request":
           if (acceptNeedsBlockListShards && acceptBlockListShardCids.length === 0) {
             throw new Error("Pick at least one Block List Shard");
@@ -646,76 +610,7 @@ export const ProposalForm = ({
 
           <RewardBeneficiariesForm state={state} />
 
-          {proposalType === "setup_minting_delegation" && (
-            <>
-              <HelpTextField
-                size="small"
-                label="Delegate Party"
-                value={proposalDelegate}
-                onChange={(e) => setProposalDelegate(e.target.value)}
-                fullWidth
-                required
-                help="Party id of the validator node operator authorized to mint the decentralized party's reward coupons. It accepts the resulting MintingDelegationProposal out-of-band via the wallet API."
-              />
-              <HelpTextField
-                size="small"
-                label="DSO Party"
-                value={proposalExpectedDso}
-                onChange={(e) => setProposalExpectedDso(e.target.value)}
-                fullWidth
-                required
-                help="Party id of the Splice DSO; the delegation's mint transfers verify the AmuletRules contract belongs to this DSO."
-              />
-              <HelpTextField
-                size="small"
-                label="Expires At"
-                type="datetime-local"
-                value={proposalDelegationExpiresAt}
-                onChange={(e) =>
-                  setProposalDelegationExpiresAt(e.target.value)
-                }
-                fullWidth
-                required
-                slotProps={{
-                  inputLabel: { shrink: true },
-                }}
-                help="When the delegation stops being valid. There is no auto-renewal — a new proposal must be voted in before this time to keep collecting rewards."
-              />
-              <HelpTextField
-                size="small"
-                label="Amulet Merge Limit"
-                type="number"
-                value={proposalAmuletMergeLimit}
-                onChange={(e) => setProposalAmuletMergeLimit(e.target.value)}
-                fullWidth
-                required
-                help="Number of amulet contracts to keep after auto-merging; the delegate merges contracts once there are strictly more than this number. Must be positive."
-              />
-              <HelpTextField
-                size="small"
-                label="Description"
-                value={proposalDescription}
-                onChange={(e) => setProposalDescription(e.target.value)}
-                fullWidth
-                required
-                help="Free-form note recorded on the proposal, e.g. why this delegation is being set up."
-              />
-            </>
-          )}
-
-          {proposalType === "accept_external_party_setup" && (
-            <HelpTextField
-              size="small"
-              label="External Party Setup Proposal Contract Id"
-              value={proposalExternalPartySetupCid}
-              onChange={(e) =>
-                setProposalExternalPartySetupCid(e.target.value)
-              }
-              fullWidth
-              required
-              help="Contract id of the ExternalPartySetupProposal the validator operator created (via POST /api/validator/v0/admin/external-party/setup-proposal). Accepting it creates the decentralized party's ValidatorRight + TransferPreapproval, unblocking reward collection."
-            />
-          )}
+          <MintingDelegationForms state={state} />
 
           {(proposalType === "accept_mint_request" || proposalType === "accept_burn_request") && (() => {
             const isMint = proposalType === "accept_mint_request";
