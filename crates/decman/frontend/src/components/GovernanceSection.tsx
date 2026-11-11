@@ -29,6 +29,7 @@ import {
   TEMPLATE_REGISTRAR_SERVICE,
 } from "../constants";
 import { authenticatedFetch } from "../api";
+import { usePartyList } from "../hooks/usePartyList";
 import { getActionTypeOptions } from "../governanceFormat";
 import { beneficiariesProblem, beneficiaryWeightSum } from "../rewardBeneficiaries";
 import {
@@ -53,13 +54,9 @@ import type {
   UserServicesResponse,
   CredentialOfferInfo,
   CredentialOffersResponse,
-  CredentialInfo,
   CredentialsResponse,
-  RegistrarServiceInfo,
   RegistrarServicesResponse,
-  RegistrarServiceRequestInfo,
   RegistrarServiceRequestsResponse,
-  ProviderConfigurationInfo,
   ProviderConfigurationsResponse,
   PartyCredentialRequirement,
   ContractWithBlob,
@@ -71,9 +68,7 @@ import type {
   ProposalType,
   InstrumentAllowance,
   InstrumentIdentifier,
-  InstrumentInfo,
   InstrumentsResponse,
-  TransferInstructionInfo,
   TransferInstructionsResponse,
   TokenRequestInfo,
   MintRequestsResponse,
@@ -87,7 +82,6 @@ import type {
   GovernanceStateResponse,
   ActiveCouponReassignmentDelegation,
   CouponReassignmentDelegationSummary,
-  BlockListShardInfo,
   BlockListShardsResponse,
 } from "../types";
 
@@ -352,8 +346,16 @@ export const GovernanceSection = ({
   const [userServices, setUserServices] = useState<UserServiceInfo[]>([]);
   // Pending CredentialOffer contracts visible to this party. Powers the
   // CredentialOffer dropdowns on the Accept Free Credential forms.
-  const [credentialOffers, setCredentialOffers] = useState<CredentialOfferInfo[]>([]);
-  const [credentialOffersLoading, setCredentialOffersLoading] = useState(false);
+  const {
+    items: credentialOffers,
+    loading: credentialOffersLoading,
+    load: fetchCredentialOffers,
+  } = usePartyList<CredentialOffersResponse>({
+    path: `${API_BASE}/credential-offers`,
+    partyId,
+    field: "credential_offers",
+    what: "credential offers",
+  });
   // Amulets this party owns. Powers the deposit picker on the Accept Paid
   // Credential form.
   const [ownAmulets, setOwnAmulets] = useState<AmuletOption[]>([]);
@@ -362,41 +364,111 @@ export const GovernanceSection = ({
   // Typed `MintRequest`/`BurnRequest` rows so the Accept dropdowns can show
   // holder → amount instrument (…cid) — mirroring the Accept Transfer UX —
   // instead of just the contract id slug.
-  const [mintRequestContracts, setMintRequestContracts] = useState<TokenRequestInfo[]>([]);
-  const [burnRequestContracts, setBurnRequestContracts] = useState<TokenRequestInfo[]>([]);
-  const [mintRequestsLoading, setMintRequestsLoading] = useState(false);
-  const [burnRequestsLoading, setBurnRequestsLoading] = useState(false);
+  const {
+    items: mintRequestContracts,
+    loading: mintRequestsLoading,
+    load: fetchOpenMintRequests,
+  } = usePartyList<MintRequestsResponse>({
+    path: `${API_BASE}/governance/mint-requests`,
+    partyId,
+    field: "mint_requests",
+    what: "mint requests",
+  });
+  const {
+    items: burnRequestContracts,
+    loading: burnRequestsLoading,
+    load: fetchOpenBurnRequests,
+  } = usePartyList<BurnRequestsResponse>({
+    path: `${API_BASE}/governance/burn-requests`,
+    partyId,
+    field: "burn_requests",
+    what: "burn requests",
+  });
   // `Credential` contracts visible to this party. Powers the issuer
   // credential picker on the Accept Mint/Burn Request forms.
-  const [availableCredentials, setAvailableCredentials] = useState<CredentialInfo[]>([]);
-  const [credentialsLoading, setCredentialsLoading] = useState(false);
-  // Block list shards visible to this party. Power the shard picker on the
-  // Accept Mint/Burn Request forms.
-  const [availableBlockListShards, setAvailableBlockListShards] = useState<BlockListShardInfo[]>([]);
-  const [blockListShardsLoading, setBlockListShardsLoading] = useState(false);
+  const {
+    items: availableCredentials,
+    loading: credentialsLoading,
+    load: fetchCredentials,
+  } = usePartyList<CredentialsResponse>({
+    path: `${API_BASE}/credentials`,
+    partyId,
+    field: "credentials",
+    what: "credentials",
+  });
+  // Block list shards (`StoredBlockListPartyShas`) visible to this party.
+  // Power the shard picker on the Accept Mint/Burn Request forms.
+  const {
+    items: availableBlockListShards,
+    loading: blockListShardsLoading,
+    load: fetchBlockListShards,
+  } = usePartyList<BlockListShardsResponse>({
+    path: `${API_BASE}/block-list-shards`,
+    partyId,
+    field: "block_list_shards",
+    what: "block list shards",
+  });
   // Pending `RegistrarServiceRequest` and `ProviderConfiguration` contracts.
   // Power the pickers on the Onboard Registrar form.
-  const [registrarServiceRequests, setRegistrarServiceRequests] = useState<RegistrarServiceRequestInfo[]>([]);
-  const [registrarServiceRequestsLoading, setRegistrarServiceRequestsLoading] = useState(false);
+  const {
+    items: registrarServiceRequests,
+    loading: registrarServiceRequestsLoading,
+    load: fetchRegistrarServiceRequests,
+  } = usePartyList<RegistrarServiceRequestsResponse>({
+    path: `${API_BASE}/registrar-service-requests`,
+    partyId,
+    field: "registrar_service_requests",
+    what: "registrar service requests",
+  });
   // Typed `RegistrarService` contracts. Power the Provision Instrument
   // picker, which needs the registrar field to filter out services this
   // decparty co-signed as the provider.
-  const [availableRegistrarServices, setAvailableRegistrarServices] = useState<RegistrarServiceInfo[]>([]);
-  const [registrarServicesLoading, setRegistrarServicesLoading] = useState(false);
-  const [providerConfigurations, setProviderConfigurations] = useState<ProviderConfigurationInfo[]>([]);
-  const [providerConfigurationsLoading, setProviderConfigurationsLoading] = useState(false);
+  const {
+    items: availableRegistrarServices,
+    loading: registrarServicesLoading,
+    load: fetchRegistrarServices,
+  } = usePartyList<RegistrarServicesResponse>({
+    path: `${API_BASE}/services/registrar`,
+    partyId,
+    field: "services",
+    what: "registrar services",
+  });
+  const {
+    items: providerConfigurations,
+    loading: providerConfigurationsLoading,
+    load: fetchProviderConfigurations,
+  } = usePartyList<ProviderConfigurationsResponse>({
+    path: `${API_BASE}/provider-configurations`,
+    partyId,
+    field: "provider_configurations",
+    what: "provider configurations",
+  });
   // InstrumentConfiguration contracts fetched from /instruments. Each one
   // represents a token the governance party can mint/burn against and exposes
   // its parsed instrument_admin + instrument_id, so we can drive a real
   // dropdown without the frontend having to decode contract blobs.
-  const [availableInstruments, setAvailableInstruments] = useState<InstrumentInfo[]>([]);
-  const [instrumentsLoading, setInstrumentsLoading] = useState(false);
+  const {
+    items: availableInstruments,
+    loading: instrumentsLoading,
+    load: fetchInstruments,
+  } = usePartyList<InstrumentsResponse>({
+    path: `${API_BASE}/instruments`,
+    partyId,
+    field: "instruments",
+    what: "instruments",
+  });
   // Open TransferInstruction contracts addressed to this dec-party. Powers the
   // Accept Transfer proposal dropdown.
-  const [openTransferInstructions, setOpenTransferInstructions] = useState<
-    TransferInstructionInfo[]
-  >([]);
-  const [transferInstructionsLoading, setTransferInstructionsLoading] = useState(false);
+  const {
+    items: openTransferInstructions,
+    loading: transferInstructionsLoading,
+    load: fetchOpenTransferInstructions,
+  } = usePartyList<TransferInstructionsResponse>({
+    path: `${API_BASE}/governance/transfer-instructions`,
+    partyId,
+    field: "transfer_instructions",
+    what: "transfer instructions",
+  });
   // Holdings + TransferFactory contracts power the Transfer Proposal form's
   // instrument dropdown. Holdings define which instruments the user can pick
   // (and the available balance); factories prefill the factory contract id +
@@ -565,121 +637,6 @@ export const GovernanceSection = ({
       fetchServices();
     }
   }, [proposalType, fetchServices]);
-
-  // Fetch pending `CredentialOffer` contracts so the Accept Free Credential
-  // forms can offer a dropdown instead of a hand-pasted contract id.
-  const fetchCredentialOffers = useCallback(async () => {
-    setCredentialOffersLoading(true);
-    try {
-      const res = await authenticatedFetch(
-        `${API_BASE}/credential-offers?party_id=${encodeURIComponent(partyId)}`,
-      );
-      if (res.ok) {
-        const response: CredentialOffersResponse = await res.json();
-        setCredentialOffers(response.credential_offers);
-      }
-    } catch (e) {
-      console.error("Failed to fetch credential offers:", e);
-    } finally {
-      setCredentialOffersLoading(false);
-    }
-  }, [partyId]);
-
-  // Fetch `Credential` contracts so the Accept Mint/Burn Request forms can
-  // offer an issuer-credential picker instead of hand-pasted contract ids.
-  const fetchCredentials = useCallback(async () => {
-    setCredentialsLoading(true);
-    try {
-      const res = await authenticatedFetch(
-        `${API_BASE}/credentials?party_id=${encodeURIComponent(partyId)}`,
-      );
-      if (res.ok) {
-        const response: CredentialsResponse = await res.json();
-        setAvailableCredentials(response.credentials);
-      }
-    } catch (e) {
-      console.error("Failed to fetch credentials:", e);
-    } finally {
-      setCredentialsLoading(false);
-    }
-  }, [partyId]);
-
-  // Fetch `StoredBlockListPartyShas` contracts so the Accept Mint/Burn
-  // Request forms can offer a shard picker for instruments that check a
-  // block list.
-  const fetchBlockListShards = useCallback(async () => {
-    setBlockListShardsLoading(true);
-    try {
-      const res = await authenticatedFetch(
-        `${API_BASE}/block-list-shards?party_id=${encodeURIComponent(partyId)}`,
-      );
-      if (res.ok) {
-        const response: BlockListShardsResponse = await res.json();
-        setAvailableBlockListShards(response.block_list_shards);
-      }
-    } catch (e) {
-      console.error("Failed to fetch block list shards:", e);
-    } finally {
-      setBlockListShardsLoading(false);
-    }
-  }, [partyId]);
-
-  // Fetch pending `RegistrarServiceRequest` contracts so the Onboard
-  // Registrar form can offer a picker instead of a hand-pasted contract id.
-  const fetchRegistrarServiceRequests = useCallback(async () => {
-    setRegistrarServiceRequestsLoading(true);
-    try {
-      const res = await authenticatedFetch(
-        `${API_BASE}/registrar-service-requests?party_id=${encodeURIComponent(partyId)}`,
-      );
-      if (res.ok) {
-        const response: RegistrarServiceRequestsResponse = await res.json();
-        setRegistrarServiceRequests(response.registrar_service_requests);
-      }
-    } catch (e) {
-      console.error("Failed to fetch registrar service requests:", e);
-    } finally {
-      setRegistrarServiceRequestsLoading(false);
-    }
-  }, [partyId]);
-
-  // Fetch `ProviderConfiguration` contracts so the Onboard Registrar form
-  // can offer a picker instead of a hand-pasted contract id.
-  const fetchProviderConfigurations = useCallback(async () => {
-    setProviderConfigurationsLoading(true);
-    try {
-      const res = await authenticatedFetch(
-        `${API_BASE}/provider-configurations?party_id=${encodeURIComponent(partyId)}`,
-      );
-      if (res.ok) {
-        const response: ProviderConfigurationsResponse = await res.json();
-        setProviderConfigurations(response.provider_configurations);
-      }
-    } catch (e) {
-      console.error("Failed to fetch provider configurations:", e);
-    } finally {
-      setProviderConfigurationsLoading(false);
-    }
-  }, [partyId]);
-
-  // Fetch typed `RegistrarService` contracts so the Provision Instrument
-  // picker can filter on the registrar field.
-  const fetchRegistrarServices = useCallback(async () => {
-    setRegistrarServicesLoading(true);
-    try {
-      const res = await authenticatedFetch(
-        `${API_BASE}/services/registrar?party_id=${encodeURIComponent(partyId)}`,
-      );
-      if (res.ok) {
-        const response: RegistrarServicesResponse = await res.json();
-        setAvailableRegistrarServices(response.services);
-      }
-    } catch (e) {
-      console.error("Failed to fetch registrar services:", e);
-    } finally {
-      setRegistrarServicesLoading(false);
-    }
-  }, [partyId]);
 
   useEffect(() => {
     if (
@@ -1012,27 +969,9 @@ export const GovernanceSection = ({
     </>
   );
 
-  // Fetch InstrumentConfiguration contracts (a.k.a. "our tokens"). Used by
-  // Mint/Burn (for instrument_id + instrument_configuration_cid) and by
+  // Fetch instruments when a proposal type needs them: Mint/Burn (for
+  // instrument_id + instrument_configuration_cid) and
   // set_provider_app_reward_beneficiaries (for instrument_configuration_cid).
-  const fetchInstruments = useCallback(async () => {
-    setInstrumentsLoading(true);
-    try {
-      const res = await authenticatedFetch(
-        `${API_BASE}/instruments?party_id=${encodeURIComponent(partyId)}`,
-      );
-      if (res.ok) {
-        const response: InstrumentsResponse = await res.json();
-        setAvailableInstruments(response.instruments);
-      }
-    } catch (e) {
-      console.error("Failed to fetch instruments:", e);
-    } finally {
-      setInstrumentsLoading(false);
-    }
-  }, [partyId]);
-
-  // Fetch instruments when a proposal type needs them
   useEffect(() => {
     if (
       proposalType === "accept_mint_request" ||
@@ -1045,68 +984,11 @@ export const GovernanceSection = ({
     }
   }, [proposalType, fetchInstruments]);
 
-  // Fetch open `TransferInstruction` contracts for the Accept Transfer
-  // proposal dropdown so operators can pick a transfer offer instead of
-  // pasting a contract id.
-  const fetchOpenTransferInstructions = useCallback(async () => {
-    setTransferInstructionsLoading(true);
-    try {
-      const res = await authenticatedFetch(
-        `${API_BASE}/governance/transfer-instructions?party_id=${encodeURIComponent(partyId)}`,
-      );
-      if (res.ok) {
-        const response: TransferInstructionsResponse = await res.json();
-        setOpenTransferInstructions(response.transfer_instructions);
-      }
-    } catch (e) {
-      console.error("Failed to fetch transfer instructions:", e);
-    } finally {
-      setTransferInstructionsLoading(false);
-    }
-  }, [partyId]);
-
   useEffect(() => {
     if (proposalType === "accept_transfer") {
       fetchOpenTransferInstructions();
     }
   }, [proposalType, fetchOpenTransferInstructions]);
-
-  // Pull typed open mint/burn requests for the Accept dropdowns. Mirrors the
-  // Accept Transfer flow above — the backend extracts holder/amount/instrument
-  // from the contract payload so we can render a useful label.
-  const fetchOpenMintRequests = useCallback(async () => {
-    setMintRequestsLoading(true);
-    try {
-      const res = await authenticatedFetch(
-        `${API_BASE}/governance/mint-requests?party_id=${encodeURIComponent(partyId)}`,
-      );
-      if (res.ok) {
-        const response: MintRequestsResponse = await res.json();
-        setMintRequestContracts(response.mint_requests);
-      }
-    } catch (e) {
-      console.error("Failed to fetch mint requests:", e);
-    } finally {
-      setMintRequestsLoading(false);
-    }
-  }, [partyId]);
-
-  const fetchOpenBurnRequests = useCallback(async () => {
-    setBurnRequestsLoading(true);
-    try {
-      const res = await authenticatedFetch(
-        `${API_BASE}/governance/burn-requests?party_id=${encodeURIComponent(partyId)}`,
-      );
-      if (res.ok) {
-        const response: BurnRequestsResponse = await res.json();
-        setBurnRequestContracts(response.burn_requests);
-      }
-    } catch (e) {
-      console.error("Failed to fetch burn requests:", e);
-    } finally {
-      setBurnRequestsLoading(false);
-    }
-  }, [partyId]);
 
   // Fetch holdings + transfer factories for the Transfer Proposal dropdown.
   // Both endpoints are cheap (one ACS query each) and we need them together
