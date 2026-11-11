@@ -16,6 +16,7 @@ use crate::{
     noise::{Message, MessageType, NoiseKeypair, parse_public_key, send_noise_message},
     server::{
         AppState,
+        error::ApiError,
         middleware::require_admin,
         types::{
             ContractsInvitePayload, ContractsRequest, ErrorResponse, WorkflowGuard,
@@ -59,12 +60,23 @@ pub async fn start_contracts(
     if let Err(resp) = require_admin(&http_req, data.admin_role.as_deref()) {
         return resp;
     }
+    start_contracts_run(&data, &body)
+        .await
+        .unwrap_or_else(ApiError::into_response)
+}
+
+/// Check a contracts request, resolve and commit the deployment, then
+/// register the run and start it.
+async fn start_contracts_run(
+    data: &web::Data<AppState>,
+    body: &ContractsRequest,
+) -> std::result::Result<HttpResponse, ApiError> {
     // Peers sign one prepared create per contract, so an empty run would
     // invite them and then fail on every one of them at signing.
     if body.contracts.is_empty() {
-        return HttpResponse::BadRequest().json(ErrorResponse {
-            error: "The request lists no contracts to deploy".to_string(),
-        });
+        return Err(ApiError::BadRequest(
+            "The request lists no contracts to deploy".to_string(),
+        ));
     }
 
     // Create contracts config from request
@@ -113,13 +125,11 @@ pub async fn start_contracts(
     if let Some((run, kind)) =
         find_inprogress_run_for_party(&data.db, &body.decentralized_party_id).await
     {
-        return HttpResponse::Conflict().json(ErrorResponse {
-            error: format!(
-                "Party {} already has a {kind} workflow in flight (run {run}); wait for it \
+        return Err(ApiError::Conflict(format!(
+            "Party {} already has a {kind} workflow in flight (run {run}); wait for it \
                  to finish or cancel it first",
-                body.decentralized_party_id
-            ),
-        });
+            body.decentralized_party_id
+        )));
     }
 
     // Refuse to invite any peer that can't speak the concurrent-workflows wire
@@ -127,56 +137,47 @@ pub async fn start_contracts(
     let incompatible =
         preflight_incompatible_peers(&data.config, &data.db, &contracts_invitees).await;
     if !incompatible.is_empty() {
-        return HttpResponse::Conflict().json(ErrorResponse {
-            error: format_incompatible_peers(&incompatible),
-        });
+        return Err(ApiError::Conflict(format_incompatible_peers(&incompatible)));
     }
 
     // Resolve aliases once, before persisting or inviting. Preparation and
     // retries must use the same package IDs the operators approved.
-    if let Err(error) = workflow::contracts::steps::prepare::resolve_package_ids(
+    workflow::contracts::steps::prepare::resolve_package_ids(
         &data.config,
         &mut contracts_config.contracts,
     )
     .await
-    {
-        return HttpResponse::BadRequest().json(ErrorResponse {
-            error: format!("Cannot resolve deployment packages: {error:#}"),
-        });
-    }
+    .map_err(|error| {
+        ApiError::BadRequest(format!("Cannot resolve deployment packages: {error:#}"))
+    })?;
 
     // Commit to the exact creates before persisting or inviting. Peers verify
     // the prepared transactions against these, including on a resumed run.
-    match workflow::contracts::steps::prepare::commit_deployment(&data.db, &contracts_config).await
-    {
-        Ok(committed) => contracts_config.committed_deployment = Some(committed),
-        Err(error) => {
-            return HttpResponse::BadRequest().json(ErrorResponse {
-                error: format!("Cannot commit the deployment: {error:#}"),
-            });
-        }
-    }
+    let committed =
+        workflow::contracts::steps::prepare::commit_deployment(&data.db, &contracts_config)
+            .await
+            .map_err(|error| {
+                ApiError::BadRequest(format!("Cannot commit the deployment: {error:#}"))
+            })?;
+    contracts_config.committed_deployment = Some(committed);
 
     // Register + persist atomically w.r.t. duplicates (registry insert dedups
     // before the upsert; a persist failure unregisters so nothing leaks).
-    if let Err(error) = register_and_persist(
-        &data,
+    register_and_persist(
+        data,
         &instance,
         ContractsStep::WaitingForPeers,
         &contracts_config,
         &contracts_invitees,
         Some(body.decentralized_party_id.clone()),
     )
-    .await
-    {
-        return error.into_response();
-    }
+    .await?;
 
     let config = data.config.clone();
     let db = data.db.clone();
     let workflow_auth = data.auth.read().await.clone();
     let auth_lock = data.auth.clone();
-    let discovery_gate = super::DiscoveryGate::of(&data);
+    let discovery_gate = super::DiscoveryGate::of(data);
     let contracts_state_clone = instance.http.clone();
     let instance_for_coord = instance.clone();
     let kind = instance.kind;
@@ -321,11 +322,11 @@ pub async fn start_contracts(
     drop(status_guard);
     drop(abort_guard);
 
-    HttpResponse::Accepted().json(WorkflowResponse {
+    Ok(HttpResponse::Accepted().json(WorkflowResponse {
         status: WorkflowProgress::InProgress,
         message: "Contracts workflow started".to_string(),
         instance_name: instance_name_for_run,
-    })
+    }))
 }
 
 /// Get the current status of the contracts workflow

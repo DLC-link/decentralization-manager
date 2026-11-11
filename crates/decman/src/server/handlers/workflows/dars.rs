@@ -15,6 +15,7 @@ use crate::{
     noise::{Message, MessageType, NoiseKeypair, parse_public_key, send_noise_message},
     server::{
         AppState,
+        error::ApiError,
         middleware::require_admin,
         package_inventory::fetch_dar_for_package,
         types::{
@@ -66,9 +67,7 @@ pub async fn upload_dars_local(
         }
         Err(e) => {
             tracing::error!("Failed to upload DARs to local node: {e}");
-            HttpResponse::InternalServerError().json(ErrorResponse {
-                error: format!("Failed to upload DARs: {e}"),
-            })
+            ApiError::Internal(format!("Failed to upload DARs: {e}")).into_response()
         }
     }
 }
@@ -99,12 +98,13 @@ pub async fn start_dars(
         return resp;
     }
     if body.peer_ids.is_empty() {
-        return HttpResponse::BadRequest().json(ErrorResponse {
-            error: "peer_ids must contain at least one peer".to_string(),
-        });
+        return ApiError::BadRequest("peer_ids must contain at least one peer".to_string())
+            .into_response();
     }
     let body = body.into_inner();
-    launch_dars(&data, body.dar_files, body.peer_ids).await
+    launch_dars(&data, body.dar_files, body.peer_ids)
+        .await
+        .unwrap_or_else(ApiError::into_response)
 }
 
 /// Distribute the DAR on this node that holds a package
@@ -134,30 +134,38 @@ pub async fn start_dars_for_package(
     if let Err(resp) = require_admin(&http_req, data.admin_role.as_deref()) {
         return resp;
     }
+    start_dars_for_package_run(&data, body.into_inner())
+        .await
+        .unwrap_or_else(ApiError::into_response)
+}
+
+/// Read the DAR that holds the requested package, then distribute it.
+async fn start_dars_for_package_run(
+    data: &web::Data<AppState>,
+    body: DistributePackageRequest,
+) -> std::result::Result<HttpResponse, ApiError> {
     if body.peer_ids.is_empty() {
-        return HttpResponse::BadRequest().json(ErrorResponse {
-            error: "peer_ids must contain at least one peer".to_string(),
-        });
+        return Err(ApiError::BadRequest(
+            "peer_ids must contain at least one peer".to_string(),
+        ));
     }
     let dar = match fetch_dar_for_package(&data.config, &body.package_id).await {
         Ok(Some(dar)) => dar,
         Ok(None) => {
-            return HttpResponse::NotFound().json(ErrorResponse {
-                error: format!("No DAR on this node holds package {}", body.package_id),
-            });
+            return Err(ApiError::NotFound(format!(
+                "No DAR on this node holds package {}",
+                body.package_id
+            )));
         }
         Err(e) => {
             tracing::error!(
                 "Failed to read the DAR for package {}: {e:#}",
                 body.package_id
             );
-            return HttpResponse::InternalServerError().json(ErrorResponse {
-                error: format!("Failed to read the DAR: {e}"),
-            });
+            return Err(ApiError::Internal(format!("Failed to read the DAR: {e}")));
         }
     };
-    let body = body.into_inner();
-    launch_dars(&data, vec![dar], body.peer_ids).await
+    launch_dars(data, vec![dar], body.peer_ids).await
 }
 
 /// Start a DARs distribution run: register it, invite the peers and run the
@@ -167,7 +175,7 @@ async fn launch_dars(
     data: &web::Data<AppState>,
     dar_files: Vec<DarFile>,
     peer_ids: Vec<CantonId>,
-) -> HttpResponse {
+) -> std::result::Result<HttpResponse, ApiError> {
     // Create DARs config from request
     let timestamp = now_secs();
     let instance_name = format!("dars-distribute-{timestamp}");
@@ -187,14 +195,12 @@ async fn launch_dars(
     // format — NO invites are sent if even one invitee fails the version gate.
     let incompatible = preflight_incompatible_peers(&data.config, &data.db, &peer_ids).await;
     if !incompatible.is_empty() {
-        return HttpResponse::Conflict().json(ErrorResponse {
-            error: format_incompatible_peers(&incompatible),
-        });
+        return Err(ApiError::Conflict(format_incompatible_peers(&incompatible)));
     }
 
     // Register + persist atomically w.r.t. duplicates (registry insert dedups
     // before the upsert; a persist failure unregisters so nothing leaks).
-    if let Err(error) = register_and_persist(
+    register_and_persist(
         data,
         &instance,
         DarsStep::WaitingForPeers,
@@ -202,10 +208,7 @@ async fn launch_dars(
         &peer_ids,
         None,
     )
-    .await
-    {
-        return error.into_response();
-    }
+    .await?;
 
     let config = data.config.clone();
     let db = data.db.clone();
@@ -353,11 +356,11 @@ async fn launch_dars(
     drop(status_guard);
     drop(abort_guard);
 
-    HttpResponse::Accepted().json(WorkflowResponse {
+    Ok(HttpResponse::Accepted().json(WorkflowResponse {
         status: WorkflowProgress::InProgress,
         message: "DARs distribution workflow started".to_string(),
         instance_name,
-    })
+    }))
 }
 
 /// Get the current status of the DARs distribution workflow

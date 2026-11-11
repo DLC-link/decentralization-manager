@@ -18,6 +18,7 @@ use crate::{
     noise::{Message, MessageType, NoiseKeypair, parse_public_key, send_noise_message},
     server::{
         AppState,
+        error::ApiError,
         middleware::require_admin,
         types::{
             ErrorResponse, MissingEdgeKind, MissingPeerEdge, OnboardingInvitePayload,
@@ -66,13 +67,29 @@ pub async fn start_onboarding(
     // would otherwise fail deep in the workflow as an opaque Canton proto
     // deserialization error ~90s later. Fail fast with a clear 400 instead.
     if let Err(msg) = validate_party_id_prefix(&body.party_id_prefix) {
-        return HttpResponse::BadRequest().json(ErrorResponse { error: msg });
+        return ApiError::BadRequest(msg).into_response();
     }
 
     // Pre-flight: every selected peer must have every other selected peer in
     // its network config, otherwise the coordinator workflow will hang waiting
     // for peer connections that can never be established.
-    match verify_peer_mesh(&data.config, &data.db, &body.peer_ids).await {
+    if let Some(refusal) = peer_mesh_refusal(&data, &body.peer_ids).await {
+        return refusal;
+    }
+
+    start_onboarding_run(&data, &body)
+        .await
+        .unwrap_or_else(ApiError::into_response)
+}
+
+/// The answer that refuses an onboarding whose peers are not fully meshed,
+/// or `None` when the mesh is complete. The 422 carries the missing edges as
+/// well as the text, so it keeps its own body type.
+async fn peer_mesh_refusal(
+    data: &web::Data<AppState>,
+    peer_ids: &[CantonId],
+) -> Option<HttpResponse> {
+    match verify_peer_mesh(&data.config, &data.db, peer_ids).await {
         Ok(missing) if !missing.is_empty() => {
             // Tag each edge with its failure mode in the human-readable
             // summary; the structured `missing_edges` array carries the same
@@ -95,28 +112,35 @@ pub async fn start_onboarding(
                 "Onboarding rejected: {n} missing peer mesh edge(s): {edge_summary}",
                 n = missing.len()
             );
-            return HttpResponse::UnprocessableEntity().json(OnboardingMeshErrorResponse {
-                error: format!(
-                    "Could not verify a full peer mesh. Two failure modes are folded together: \
-                     `unreachable from coordinator` (the coordinator cannot query that peer — \
-                     it's missing from network config, has no/invalid public key, didn't \
-                     answer, or replied with an unparsable peer list — fix the coordinator's \
-                     view of `to`, or `to` itself), and `mesh hole` (peer `from` is reachable \
-                     but does not have peer `to` in its peer list — add `to` to `from`'s \
-                     network config). Edges: {edge_summary}"
-                ),
-                missing_edges: missing,
-            });
+            Some(
+                HttpResponse::UnprocessableEntity().json(OnboardingMeshErrorResponse {
+                    error: format!(
+                        "Could not verify a full peer mesh. Two failure modes are folded together: \
+                         `unreachable from coordinator` (the coordinator cannot query that peer — \
+                         it's missing from network config, has no/invalid public key, didn't \
+                         answer, or replied with an unparsable peer list — fix the coordinator's \
+                         view of `to`, or `to` itself), and `mesh hole` (peer `from` is reachable \
+                         but does not have peer `to` in its peer list — add `to` to `from`'s \
+                         network config). Edges: {edge_summary}"
+                    ),
+                    missing_edges: missing,
+                }),
+            )
         }
-        Ok(_) => {}
+        Ok(_) => None,
         Err(e) => {
             tracing::error!("Failed to run mesh pre-flight: {e:#}");
-            return HttpResponse::InternalServerError().json(ErrorResponse {
-                error: "Failed to verify peer mesh".into(),
-            });
+            Some(ApiError::Internal("Failed to verify peer mesh".into()).into_response())
         }
     }
+}
 
+/// Check the rest of an onboarding request, then register the run and start
+/// it.
+async fn start_onboarding_run(
+    data: &web::Data<AppState>,
+    body: &OnboardingRequest,
+) -> std::result::Result<HttpResponse, ApiError> {
     // Build instance + config up-front so the persisted workflow_runs row
     // can carry the same identifier as the spawned coordinator task.
     let party_id_prefix = body.party_id_prefix.clone();
@@ -136,20 +160,16 @@ pub async fn start_onboarding(
     if let Some(t) = body.threshold
         && !(1..=owner_count).contains(&t)
     {
-        return HttpResponse::BadRequest().json(ErrorResponse {
-            error: format!(
-                "threshold must be between 1 and {owner_count} (invited peers + this node); got {t}"
-            ),
-        });
+        return Err(ApiError::BadRequest(format!(
+            "threshold must be between 1 and {owner_count} (invited peers + this node); got {t}"
+        )));
     }
     // Every owner's node also hosts the party, so the same count bounds the
     // confirmation threshold.
     if let Some(confirmation) = body.confirmation_threshold
         && let Err(e) = check_confirmation_threshold(confirmation, owner_count as usize)
     {
-        return HttpResponse::BadRequest().json(ErrorResponse {
-            error: e.to_string(),
-        });
+        return Err(ApiError::BadRequest(e.to_string()));
     }
 
     let onboarding_config = workflow::OnboardingConfig::new(
@@ -167,12 +187,10 @@ pub async fn start_onboarding(
     // from owners + threshold). Surface a clear 409 upfront instead.
     match find_party_with_prefix(&data.db, &party_id_prefix).await {
         Ok(Some(existing_party_id)) => {
-            return HttpResponse::Conflict().json(ErrorResponse {
-                error: format!(
-                    "A decentralized party with the prefix '{party_id_prefix}' already exists \
+            return Err(ApiError::Conflict(format!(
+                "A decentralized party with the prefix '{party_id_prefix}' already exists \
                      ({existing_party_id}). Choose a different prefix."
-                ),
-            });
+            )));
         }
         Ok(None) => {}
         Err(e) => {
@@ -184,26 +202,21 @@ pub async fn start_onboarding(
     // format — NO invites are sent if even one invitee fails the version gate.
     let incompatible = preflight_incompatible_peers(&data.config, &data.db, &peer_ids).await;
     if !incompatible.is_empty() {
-        return HttpResponse::Conflict().json(ErrorResponse {
-            error: format_incompatible_peers(&incompatible),
-        });
+        return Err(ApiError::Conflict(format_incompatible_peers(&incompatible)));
     }
 
     // Onboarding's instance_name is deterministic (`{prefix}-creation`), so a
     // racing same-prefix request is realistic — register_and_persist's registry
     // insert rejects it before the upsert can clobber the in-flight run's row.
-    if let Err(error) = register_and_persist(
-        &data,
+    register_and_persist(
+        data,
         &instance,
         OnboardingStep::WaitingForPeers,
         &onboarding_config,
         &peer_ids,
         None,
     )
-    .await
-    {
-        return error.into_response();
-    }
+    .await?;
 
     let config = data.config.clone();
     let db = data.db.clone();
@@ -214,7 +227,7 @@ pub async fn start_onboarding(
     *onboarding_state.invited_peers.write().await = peer_ids.clone();
     let party_credentials = data.party_credentials.clone();
     let auth_lock = data.auth.clone();
-    let discovery_gate = super::DiscoveryGate::of(&data);
+    let discovery_gate = super::DiscoveryGate::of(data);
     let last_seen = data.last_seen.clone();
     let instance_for_task = instance_name.clone();
 
@@ -371,11 +384,11 @@ pub async fn start_onboarding(
     drop(status_guard);
     drop(abort_guard);
 
-    HttpResponse::Accepted().json(OnboardingResponse {
+    Ok(HttpResponse::Accepted().json(OnboardingResponse {
         status: OnboardingStatus::InProgress,
         message: "Onboarding workflow started".to_string(),
         instance_name,
-    })
+    }))
 }
 
 /// Get the current status of the onboarding workflow

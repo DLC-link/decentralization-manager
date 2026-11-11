@@ -12,6 +12,9 @@ pub(crate) enum ApiError {
     /// 400: the request is wrong.
     #[error("{0}")]
     BadRequest(String),
+    /// 404: what the request names does not exist.
+    #[error("{0}")]
+    NotFound(String),
     /// 409: the request conflicts with the node's state.
     #[error("{0}")]
     Conflict(String),
@@ -25,6 +28,7 @@ impl ApiError {
     pub(crate) fn into_response(self) -> HttpResponse {
         match self {
             Self::BadRequest(error) => HttpResponse::BadRequest().json(ErrorResponse { error }),
+            Self::NotFound(error) => HttpResponse::NotFound().json(ErrorResponse { error }),
             Self::Conflict(error) => HttpResponse::Conflict().json(ErrorResponse { error }),
             Self::Internal(error) => {
                 HttpResponse::InternalServerError().json(ErrorResponse { error })
@@ -48,6 +52,7 @@ mod tests {
                 ApiError::BadRequest("bad \"one\"".into()),
                 StatusCode::BAD_REQUEST,
             ),
+            (ApiError::NotFound("gone".into()), StatusCode::NOT_FOUND),
             (ApiError::Conflict("busy".into()), StatusCode::CONFLICT),
             (
                 ApiError::Internal("broke".into()),
