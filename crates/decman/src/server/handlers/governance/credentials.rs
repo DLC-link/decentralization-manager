@@ -154,6 +154,13 @@ pub(crate) fn packages() -> PackageConfig {
     default_package_config()
 }
 
+/// Held by each test that makes a token fetch fail. A failed fetch logs a
+/// warning, and one test captures that warning with a thread-local
+/// subscriber; the same log line hit at once from another test's thread can
+/// hide it from the capture.
+#[cfg(test)]
+static TOKEN_FAILURE: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 #[cfg(test)]
 mod get_party_credentials_tests {
     use std::sync::{Arc, Mutex as StdMutex};
@@ -231,6 +238,7 @@ mod get_party_credentials_tests {
     /// very next request — the one `get_party_credentials` makes.
     #[tokio::test]
     async fn token_fetch_failure_is_err_and_logged() -> Result<()> {
+        let _serial = super::TOKEN_FAILURE.lock().await;
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path_regex(r".*/token$"))
@@ -508,6 +516,7 @@ mod credential_answer_tests {
 
     #[actix_web::test]
     async fn a_failed_token_fetch_is_a_500_everywhere() -> Result<()> {
+        let _serial = super::TOKEN_FAILURE.lock().await;
         let server = MockServer::start().await;
         let data = state_with_a_failing_token(&server).await?;
         let error = get_party_credentials(&data, &party_id()?)
