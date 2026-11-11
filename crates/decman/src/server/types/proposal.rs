@@ -22,7 +22,7 @@ use decman_lib::{
             SetProviderAppRewardBeneficiaries, SetupUtility, UpdateInstrumentConfiguration,
         },
     },
-    framework::{GrpcPayload, Validate},
+    framework::{GrpcPayload, Validate, ValidationCtx},
 };
 use serde::{Deserialize, Serialize};
 
@@ -168,7 +168,7 @@ impl ProposalType {
     /// for `governance_party`, or when a time that must lie in the future has
     /// passed.
     pub fn validate(&self, governance_party: &CantonId) -> Result<(), String> {
-        let ctx = decman_lib::framework::ValidationCtx {
+        let ctx = ValidationCtx {
             governance_party,
             now_micros: Utc::now().timestamp_micros(),
         };
