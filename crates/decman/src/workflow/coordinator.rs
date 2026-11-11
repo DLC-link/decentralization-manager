@@ -10,24 +10,10 @@ use crate::{
     db::schema::SchemaRead,
     error::Result,
     noise::server::ActiveWorkflow,
-    server::{WorkflowInstance, peer_status::LastSeen},
+    server::{CoordinatorRequest, WorkflowInstance, peer_status::LastSeen},
     utils,
-    workflow::{
-        AddPartyConfig, ChangeThresholdConfig, ContractsConfig, DarsConfig, KickConfig,
-        OnboardingConfig, add_party, change_threshold, contracts, dars, kick, onboarding,
-    },
+    workflow::{add_party, change_threshold, contracts, dars, kick, onboarding},
 };
-
-/// Workflow types that can be run
-#[derive(Clone, Copy, Debug)]
-pub enum WorkflowType {
-    Onboarding,
-    Contracts,
-    Dars,
-    Kick,
-    AddParty,
-    ChangeThreshold,
-}
 
 /// Result from a coordinator workflow, optionally containing the created party ID
 pub struct CoordinatorResult {
@@ -35,25 +21,30 @@ pub struct CoordinatorResult {
     pub created_party_id: Option<CantonId>,
 }
 
+/// The name the start log line gives the workflow of `request`.
+fn workflow_name(request: &CoordinatorRequest) -> &'static str {
+    match request {
+        CoordinatorRequest::Onboarding(_) => "Onboarding",
+        CoordinatorRequest::Contracts(_) => "Contracts",
+        CoordinatorRequest::Dars(_) => "Dars",
+        CoordinatorRequest::Kick(_) => "Kick",
+        CoordinatorRequest::AddParty(_) => "AddParty",
+        CoordinatorRequest::ChangeThreshold(_) => "ChangeThreshold",
+    }
+}
+
 /// Start a coordinator workflow (called when this node initiates the workflow from UI)
 ///
 /// # Errors
 ///
-/// Returns an error if the peers cannot be read from the database, or if the
-/// config that `workflow_type` needs is `None`. Returns an error if the chosen
-/// workflow fails. Causes include an unreadable Noise keypair, a failed step
-/// such as a Canton Admin API call, and peers that give up or go silent.
-#[allow(clippy::too_many_arguments)]
-pub async fn start_coordinator(
+/// Returns an error if the peers cannot be read from the database. Returns an
+/// error if the chosen workflow fails. Causes include an unreadable Noise
+/// keypair, a failed step such as a Canton Admin API call, and peers that give
+/// up or go silent.
+pub(crate) async fn start_coordinator(
     node_config: NodeConfig,
     db: SqlitePool,
-    workflow_type: WorkflowType,
-    onboarding_config: Option<OnboardingConfig>,
-    kick_config: Option<KickConfig>,
-    contracts_config: Option<ContractsConfig>,
-    dars_config: Option<DarsConfig>,
-    add_party_config: Option<AddPartyConfig>,
-    change_threshold_config: Option<ChangeThresholdConfig>,
+    request: CoordinatorRequest,
     workflow_auth: Option<WorkflowAuth>,
     last_seen: LastSeen,
     instance: Arc<WorkflowInstance>,
@@ -61,13 +52,11 @@ pub async fn start_coordinator(
     tracing::info!("Loading peers from database...");
     let network_config = NetworkConfig::from_peers(db.get_all_peers().await?);
 
-    tracing::info!("Starting {workflow_type:?} workflow as COORDINATOR");
+    let name = workflow_name(&request);
+    tracing::info!("Starting {name} workflow as COORDINATOR");
 
-    match workflow_type {
-        WorkflowType::Onboarding => {
-            let config = onboarding_config.ok_or_else(|| {
-                anyhow::anyhow!("OnboardingConfig is required for Onboarding workflow")
-            })?;
+    match request {
+        CoordinatorRequest::Onboarding(config) => {
             let party_id = onboarding::coordinator::start_coordinator(
                 node_config,
                 network_config,
@@ -81,10 +70,7 @@ pub async fn start_coordinator(
                 created_party_id: Some(party_id),
             })
         }
-        WorkflowType::Contracts => {
-            let config = contracts_config.ok_or_else(|| {
-                anyhow::anyhow!("ContractsConfig is required for Contracts workflow")
-            })?;
+        CoordinatorRequest::Contracts(config) => {
             contracts::coordinator::start_coordinator(
                 node_config,
                 network_config,
@@ -99,9 +85,7 @@ pub async fn start_coordinator(
                 created_party_id: None,
             })
         }
-        WorkflowType::Dars => {
-            let config = dars_config
-                .ok_or_else(|| anyhow::anyhow!("DarsConfig is required for Dars workflow"))?;
+        CoordinatorRequest::Dars(config) => {
             dars::coordinator::start_coordinator(
                 node_config,
                 network_config,
@@ -115,9 +99,7 @@ pub async fn start_coordinator(
                 created_party_id: None,
             })
         }
-        WorkflowType::Kick => {
-            let config = kick_config
-                .ok_or_else(|| anyhow::anyhow!("KickConfig is required for Kick workflow"))?;
+        CoordinatorRequest::Kick(config) => {
             kick::coordinator::start_coordinator(
                 node_config,
                 network_config,
@@ -131,10 +113,7 @@ pub async fn start_coordinator(
                 created_party_id: None,
             })
         }
-        WorkflowType::AddParty => {
-            let config = add_party_config.ok_or_else(|| {
-                anyhow::anyhow!("AddPartyConfig is required for AddParty workflow")
-            })?;
+        CoordinatorRequest::AddParty(config) => {
             add_party::coordinator::start_coordinator(
                 node_config,
                 network_config,
@@ -149,10 +128,7 @@ pub async fn start_coordinator(
                 created_party_id: None,
             })
         }
-        WorkflowType::ChangeThreshold => {
-            let config = change_threshold_config.ok_or_else(|| {
-                anyhow::anyhow!("ChangeThresholdConfig is required for ChangeThreshold workflow")
-            })?;
+        CoordinatorRequest::ChangeThreshold(config) => {
             change_threshold::coordinator::start_coordinator(
                 node_config,
                 network_config,

@@ -20,7 +20,7 @@ use crate::{
     },
     workflow::{
         self, AddPartyConfig, ChangeThresholdConfig, ContractsConfig, CoordinatorResult,
-        DarsConfig, KickConfig, OnboardingConfig, WorkflowType,
+        DarsConfig, KickConfig, OnboardingConfig,
     },
 };
 
@@ -57,9 +57,6 @@ impl CoordinatorRequest {
     }
 
     /// Drive the coordinator for this request to its end.
-    ///
-    /// [`workflow::start_coordinator`] still takes the workflow type and six
-    /// optional configs. This is the one place that fills them in.
     pub(crate) async fn start(
         self,
         node_config: NodeConfig,
@@ -68,62 +65,7 @@ impl CoordinatorRequest {
         last_seen: LastSeen,
         instance: Arc<WorkflowInstance>,
     ) -> Result<CoordinatorResult> {
-        let (workflow_type, onboarding, kick, contracts, dars, add_party, change_threshold) =
-            match self {
-                Self::Onboarding(c) => (
-                    WorkflowType::Onboarding,
-                    Some(c),
-                    None,
-                    None,
-                    None,
-                    None,
-                    None,
-                ),
-                Self::Kick(c) => (WorkflowType::Kick, None, Some(c), None, None, None, None),
-                Self::Contracts(c) => (
-                    WorkflowType::Contracts,
-                    None,
-                    None,
-                    Some(c),
-                    None,
-                    None,
-                    None,
-                ),
-                Self::Dars(c) => (WorkflowType::Dars, None, None, None, Some(c), None, None),
-                Self::AddParty(c) => (
-                    WorkflowType::AddParty,
-                    None,
-                    None,
-                    None,
-                    None,
-                    Some(c),
-                    None,
-                ),
-                Self::ChangeThreshold(c) => (
-                    WorkflowType::ChangeThreshold,
-                    None,
-                    None,
-                    None,
-                    None,
-                    None,
-                    Some(c),
-                ),
-            };
-        workflow::start_coordinator(
-            node_config,
-            db,
-            workflow_type,
-            onboarding,
-            kick,
-            contracts,
-            dars,
-            add_party,
-            change_threshold,
-            workflow_auth,
-            last_seen,
-            instance,
-        )
-        .await
+        workflow::start_coordinator(node_config, db, self, workflow_auth, last_seen, instance).await
     }
 }
 

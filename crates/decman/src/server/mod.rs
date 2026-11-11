@@ -50,7 +50,7 @@ pub(crate) use queries::compare_versions;
 // Reached externally as `dec_party_manager::server::NodeConfigResponse` by the
 // `gen-types` binary (a separate crate from this lib), so it must stay `pub`.
 pub use handlers::NodeConfigResponse;
-pub(crate) use handlers::mark_run_failed;
+pub(crate) use handlers::{CoordinatorRequest, mark_run_failed};
 pub(crate) use types::*;
 // These wire DTOs are likewise reached externally as `dec_party_manager::server::…`,
 // by `gen-types` (TS generation) and, for `GovernanceResponse`, by the integration

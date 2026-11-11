@@ -20,9 +20,8 @@ pub mod validation;
 pub use add_party::{AddPartyConfig, AddPartyStep};
 pub use change_threshold::{ChangeThresholdConfig, ChangeThresholdStep};
 pub use contracts::{ContractsConfig, ContractsStep};
-pub use coordinator::{
-    CoordinatorResult, WorkflowType, run_workflow_with_handler, start_coordinator,
-};
+pub(crate) use coordinator::start_coordinator;
+pub use coordinator::{CoordinatorResult, run_workflow_with_handler};
 pub use dars::{DarsConfig, DarsStep};
 pub use kick::{KickConfig, KickStep};
 pub use onboarding::{OnboardingConfig, OnboardingStep};
