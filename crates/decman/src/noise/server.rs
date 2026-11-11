@@ -5,6 +5,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+use canton_proto_rs::com::digitalasset::canton::protocol::v30::PartyToParticipant;
 use sqlx::SqlitePool;
 use tokio::sync::RwLock;
 
@@ -33,6 +34,7 @@ use crate::{
         kick::{KickConfig, KickStep},
         onboarding::OnboardingStep,
         party_replication::pipe::{PipeBlock, encode_block},
+        signing_keys::requires_signing_key_adoption,
         state::WorkflowStep,
         topology,
     },
@@ -199,20 +201,10 @@ async fn resolve_peer_threshold(
         WorkflowKind::Kick | WorkflowKind::Contracts => {
             let run = run?;
             let party_id = run.dec_party_id.as_ref()?;
-            // A kick on a party whose keys are still in the deprecated
-            // `PartyToKeyMapping` moves every survivor's key inline, and
-            // Canton makes each added key sign the transaction that adds it.
-            // A quorum would leave the proposal short of signatures, so that
-            // kick needs every survivor, not a quorum.
-            if kind == WorkflowKind::Kick && party_keys_are_legacy(config, party_id).await {
-                tracing::info!(
-                    "{party_id} keeps its signing keys in a legacy PartyToKeyMapping; this \
-                     kick needs every surviving peer to sign, not a quorum"
-                );
-                return None;
-            }
             if kind == WorkflowKind::Kick {
-                return lookup_kick_peer_threshold(db, run, expected_peers).await;
+                let mapping = kick_party_mapping(config, party_id).await;
+                return kick_peer_threshold_from_mapping(db, run, expected_peers, mapping.as_ref())
+                    .await;
             }
             let m = lookup_party_threshold(db, party_id).await?;
             Some(peers_for_party_threshold(m, expected_peers))
@@ -240,27 +232,42 @@ async fn lookup_kick_peer_threshold(
     ))
 }
 
-/// Whether a party still keeps its signing keys in the deprecated
-/// `PartyToKeyMapping` instead of inline on its `PartyToParticipant`.
-///
-/// Answers `true` when the mapping cannot be read at all. The cost of being
-/// wrong that way is a run that waits for every peer; the cost of the other
-/// way is a run that advances without the signatures Canton demands.
-async fn party_keys_are_legacy(config: &NodeConfig, party_id: &CantonId) -> bool {
+/// Fully and partially legacy parties need each added key to sign. Requiring
+/// every invitee prevents an ordinary namespace quorum from skipping one.
+async fn kick_peer_threshold_from_mapping(
+    db: &SqlitePool,
+    run: &WorkflowRun,
+    expected_peers: usize,
+    mapping: Option<&PartyToParticipant>,
+) -> Option<usize> {
+    let mapping = mapping?;
+    if requires_signing_key_adoption(mapping) {
+        tracing::info!(
+            "This kick must move legacy signing keys inline; every invited peer must sign"
+        );
+        return None;
+    }
+    lookup_kick_peer_threshold(db, run, expected_peers).await
+}
+
+/// Read the P2P mapping for the kick's signature gate. An unavailable mapping
+/// requires every invitee rather than risking an unsigned key adoption.
+async fn kick_party_mapping(
+    config: &NodeConfig,
+    party_id: &CantonId,
+) -> Option<PartyToParticipant> {
     let synchronizer_id = match utils::get_synchronizer_id(config).await {
         Ok(id) => id,
         Err(e) => {
             tracing::warn!("Cannot resolve the synchronizer id to classify {party_id}: {e:#}");
-            return true;
+            return None;
         }
     };
     match topology::fetch_p2p_mapping(config, &synchronizer_id, party_id).await {
-        Ok(mapping) => mapping
-            .party_signing_keys
-            .is_none_or(|keys| keys.keys.is_empty()),
+        Ok(mapping) => Some(mapping),
         Err(e) => {
             tracing::warn!("Cannot read the P2P mapping for {party_id}: {e:#}");
-            true
+            None
         }
     }
 }
@@ -872,6 +879,11 @@ impl<S: WorkflowStep + 'static> NoiseServer<S> {
 
 #[cfg(test)]
 mod tests {
+    use canton_proto_rs::com::digitalasset::canton::{
+        crypto::v30::{SigningKeyUsage, SigningKeysWithThreshold, SigningPublicKey},
+        protocol::v30::{enums::ParticipantPermission, party_to_participant::HostingParticipant},
+    };
+
     use super::*;
     use crate::{
         canton_id::{NAMESPACE_LENGTH, Namespace},
@@ -1084,6 +1096,67 @@ mod tests {
         config.new_threshold = -1;
         run.config_json = serde_json::to_string(&config)?;
         assert_eq!(lookup_kick_peer_threshold(&pool, &run, 3).await, None);
+        Ok(())
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_partial_key_adoption_cannot_advance_at_just_namespace_quorum(
+        pool: SqlitePool,
+    ) -> anyhow::Result<()> {
+        let run = saved_kick(&pool, 2, 2).await?;
+        let mut mapping = PartyToParticipant {
+            participants: [1, 2, 3, 4, 9]
+                .into_iter()
+                .map(|tag| HostingParticipant {
+                    participant_uid: kick_peer(tag).to_string(),
+                    permission: ParticipantPermission::Confirmation as i32,
+                    ..Default::default()
+                })
+                .collect(),
+            party_signing_keys: Some(SigningKeysWithThreshold {
+                keys: vec![SigningPublicKey {
+                    public_key: vec![1; 32],
+                    usage: vec![SigningKeyUsage::Protocol as i32],
+                    ..Default::default()
+                }],
+                threshold: 1,
+            }),
+            threshold: 2,
+            ..Default::default()
+        };
+        let threshold = kick_peer_threshold_from_mapping(&pool, &run, 3, Some(&mapping)).await;
+        assert_eq!(threshold, None);
+        let state = WorkflowState::new(
+            pool.clone(),
+            run.instance_name.clone(),
+            KickStep::SignProposals,
+            run.expected_peers.clone(),
+            threshold,
+        );
+        state.peer_completed(kick_peer(2)).await;
+        assert_eq!(state.current_step().await, KickStep::SignProposals);
+        state.peer_completed(kick_peer(3)).await;
+        assert_eq!(state.current_step().await, KickStep::SignProposals);
+        state.peer_completed(kick_peer(4)).await;
+        assert_eq!(state.current_step().await, KickStep::SubmitKick);
+        mapping.party_signing_keys = Some(SigningKeysWithThreshold {
+            keys: (1..=5)
+                .map(|seed| SigningPublicKey {
+                    public_key: vec![seed; 32],
+                    usage: vec![SigningKeyUsage::Protocol as i32],
+                    ..Default::default()
+                })
+                .collect(),
+            threshold: 2,
+        });
+        assert_eq!(
+            kick_peer_threshold_from_mapping(&pool, &run, 3, Some(&mapping)).await,
+            Some(1)
+        );
+        assert_eq!(
+            kick_peer_threshold_from_mapping(&pool, &run, 3, None).await,
+            None
+        );
         Ok(())
     }
 

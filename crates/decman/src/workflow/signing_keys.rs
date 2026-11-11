@@ -26,12 +26,15 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
-use canton_proto_rs::com::digitalasset::canton::crypto::{
-    admin::v30::{
-        ListKeysFilters, ListMyKeysRequest, private_key_metadata,
-        vault_service_client::VaultServiceClient,
+use canton_proto_rs::com::digitalasset::canton::{
+    crypto::{
+        admin::v30::{
+            ListKeysFilters, ListMyKeysRequest, private_key_metadata,
+            vault_service_client::VaultServiceClient,
+        },
+        v30::{SigningKeyUsage, SigningPublicKey, public_key},
     },
-    v30::{SigningKeyUsage, SigningPublicKey, public_key},
+    protocol::v30::PartyToParticipant,
 };
 use sqlx::SqlitePool;
 
@@ -313,6 +316,64 @@ pub async fn known_signing_keys_by_member(
     }
 
     Ok(claims)
+}
+
+/// Whether rebuilding this mapping moves legacy keys inline. A partial
+/// migration needs adoption just as a mapping with no inline keys does.
+pub(crate) fn requires_signing_key_adoption(mapping: &PartyToParticipant) -> bool {
+    mapping
+        .party_signing_keys
+        .as_ref()
+        .map_or(0, |keys| keys.keys.len())
+        < mapping.participants.len()
+}
+
+/// Which named hosts must sign when their keys move inline.
+///
+/// # Errors
+///
+/// Errors when a partial migration's key attribution cannot establish whether
+/// a named host already has its key inline. Unknown attribution is not consent.
+pub(crate) fn members_requiring_key_adoption(
+    mapping: &PartyToParticipant,
+    members: &[String],
+    claims: &BTreeMap<String, Fingerprint>,
+) -> Result<Vec<String>> {
+    if !requires_signing_key_adoption(mapping) {
+        return Ok(Vec::new());
+    }
+    let inline: BTreeSet<Fingerprint> = mapping
+        .party_signing_keys
+        .as_ref()
+        .into_iter()
+        .flat_map(|keys| &keys.keys)
+        .map(utils::compute_fingerprint)
+        .collect();
+    let hosts: BTreeSet<&str> = mapping
+        .participants
+        .iter()
+        .map(|host| host.participant_uid.as_str())
+        .collect();
+    let mut required = Vec::new();
+    for member in members
+        .iter()
+        .filter(|member| hosts.contains(member.as_str()))
+    {
+        if inline.is_empty() {
+            required.push(member.clone());
+            continue;
+        }
+        let fingerprint = claims.get(member).ok_or_else(|| {
+            anyhow::anyhow!(
+                "Cannot tell whether {member}'s signing key must move inline. \
+                 Refresh /decentralized-parties so it reports its signing key, then retry"
+            )
+        })?;
+        if !inline.contains(fingerprint) {
+            required.push(member.clone());
+        }
+    }
+    Ok(required)
 }
 
 /// The key set a party should carry once `removed` is no longer a member.
@@ -622,7 +683,17 @@ pub fn legacy_signing_keys_for_members(
 
 #[cfg(test)]
 mod tests {
+    use canton_proto_rs::com::digitalasset::canton::{
+        crypto::v30::SigningKeysWithThreshold,
+        protocol::v30::party_to_participant::HostingParticipant,
+    };
+
     use super::*;
+    use crate::db::{
+        MIGRATOR,
+        rows::{DecPartyParticipantRow, DecPartyRow},
+        schema::{Commitable, SchemaWrite},
+    };
 
     /// A `SigningPublicKey` whose fingerprint is stable and distinct per
     /// `seed` — the tests only ever compare fingerprints.
@@ -958,5 +1029,108 @@ mod tests {
             err.to_string().contains("p3"),
             "the error names the member that cannot be resolved: {err}"
         );
+    }
+
+    fn mapping_with_inline_keys(inline: &[u8]) -> PartyToParticipant {
+        PartyToParticipant {
+            party: "party".to_string(),
+            threshold: 2,
+            participants: uids(&["p1", "p2", "p3", "p4"])
+                .into_iter()
+                .map(|participant_uid| HostingParticipant {
+                    participant_uid,
+                    ..Default::default()
+                })
+                .collect(),
+            party_signing_keys: Some(SigningKeysWithThreshold {
+                keys: inline.iter().copied().map(key).collect(),
+                threshold: 2,
+            }),
+        }
+    }
+
+    #[test]
+    fn a_legacy_non_peer_must_sign_before_its_key_moves_inline() -> Result {
+        let mapping = mapping_with_inline_keys(&[]);
+        assert!(requires_signing_key_adoption(&mapping));
+        assert_eq!(
+            members_requiring_key_adoption(&mapping, &uids(&["p3"]), &BTreeMap::new())?,
+            uids(&["p3"]),
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn a_partial_migration_names_only_the_non_peer_whose_key_is_not_inline() -> Result {
+        let mapping = mapping_with_inline_keys(&[1, 3]);
+        assert!(requires_signing_key_adoption(&mapping));
+        let attributed = claims(&[("p1", 1), ("p2", 2), ("p3", 3), ("p4", 4)]);
+        assert!(members_requiring_key_adoption(&mapping, &uids(&["p3"]), &attributed)?.is_empty());
+        assert_eq!(
+            members_requiring_key_adoption(&mapping, &uids(&["p2", "p3"]), &attributed)?,
+            uids(&["p2"]),
+        );
+        let unknown = members_requiring_key_adoption(&mapping, &uids(&["p3"]), &BTreeMap::new())
+            .expect_err("unknown attribution cannot establish that a missing member need not sign")
+            .to_string();
+        assert!(unknown.contains("p3"), "{unknown}");
+        assert!(unknown.contains("Refresh"), "{unknown}");
+        let inline = mapping_with_inline_keys(&[1, 2, 3, 4]);
+        assert!(!requires_signing_key_adoption(&inline));
+        assert!(
+            members_requiring_key_adoption(&inline, &uids(&["p3"]), &BTreeMap::new())?.is_empty()
+        );
+        Ok(())
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn key_adoption_uses_the_recorded_key_of_each_missing_member(pool: SqlitePool) -> Result {
+        let party = CantonId::parse(&format!("party::1220{}", "09".repeat(32)))?;
+        let members: Vec<String> = (1..=4)
+            .map(|tag| format!("p{tag}::1220{}", format!("{tag:02x}").repeat(32)))
+            .collect();
+        let rows: Vec<DecPartyParticipantRow> = members
+            .iter()
+            .enumerate()
+            .map(|(index, uid)| DecPartyParticipantRow {
+                dec_party_id: party.to_string(),
+                participant_uid: uid.clone(),
+                permission: "confirmation".to_string(),
+                owner_key: None,
+                signing_key: Some(fingerprint((index + 1) as u8).to_string()),
+            })
+            .collect();
+        let mut tx = pool.begin_transaction().await?;
+        tx.upsert_dec_party(&DecPartyRow {
+            party_id: party.to_string(),
+            prefix: party.prefix.clone(),
+            threshold: 2,
+            updated_at: 0,
+            my_owner_key: None,
+            confirmation_threshold: None,
+        })
+        .await?;
+        tx.replace_dec_party_participants(&party, &rows).await?;
+        Commitable::commit(tx).await?;
+        let mut config = NodeConfig::default();
+        config.node.participant_id = Some(CantonId::parse(&members[0])?);
+        let mut mapping = mapping_with_inline_keys(&[1, 2]);
+        for (host, uid) in mapping.participants.iter_mut().zip(&members) {
+            host.participant_uid = uid.clone();
+        }
+        let attributed =
+            known_signing_keys_by_member(&config, &pool, &party, &[key(1), key(2)]).await?;
+        assert_eq!(
+            members_requiring_key_adoption(&mapping, &members[2..3], &attributed)?,
+            members[2..3],
+        );
+        mapping.party_signing_keys = Some(SigningKeysWithThreshold {
+            keys: vec![key(1), key(3)],
+            threshold: 2,
+        });
+        // p2 still needs adoption, but p3 is a missing peer whose key is
+        // already inline. Its absence cannot justify refusing this kick.
+        assert!(members_requiring_key_adoption(&mapping, &members[2..3], &attributed)?.is_empty());
+        Ok(())
     }
 }

@@ -48,11 +48,16 @@ use crate::{
     workflow::{
         self, AddPartyStep, ChangeThresholdStep, ContractsStep, DarsStep, KickStep, OnboardingStep,
         contracts::DarFile,
+        signing_keys::{
+            known_signing_keys_by_member, members_requiring_key_adoption,
+            requires_signing_key_adoption,
+        },
         state::WorkflowStep,
         storage::WorkflowStorage,
         thresholds::{
             PartyThresholds, carried_confirmation_threshold, check_confirmation_threshold,
         },
+        topology,
     },
 };
 
@@ -450,6 +455,43 @@ fn kick_quorum_refusal(threshold: Option<usize>, signers: &KickSigners) -> Optio
     Some(message)
 }
 
+/// A namespace quorum cannot authorize a new inline signing key on behalf
+/// of an unreachable member. Read topology only when a survivor is not a peer.
+async fn kick_key_adoption_refusal(
+    config: &NodeConfig,
+    db: &SqlitePool,
+    party: &CantonId,
+    not_peers: &[CantonId],
+) -> Result<Option<String>> {
+    if not_peers.is_empty() {
+        return Ok(None);
+    }
+    let synchronizer_id = utils::get_synchronizer_id(config).await?;
+    let mapping = topology::fetch_p2p_mapping(config, &synchronizer_id, party).await?;
+    if !requires_signing_key_adoption(&mapping) {
+        return Ok(None);
+    }
+    let inline = mapping
+        .party_signing_keys
+        .as_ref()
+        .map_or(&[][..], |keys| keys.keys.as_slice());
+    let members: Vec<String> = not_peers.iter().map(ToString::to_string).collect();
+    let required = if inline.is_empty() {
+        members_requiring_key_adoption(&mapping, &members, &Default::default())?
+    } else {
+        let claims = known_signing_keys_by_member(config, db, party, inline).await?;
+        members_requiring_key_adoption(&mapping, &members, &claims)?
+    };
+    Ok((!required.is_empty()).then(|| {
+        format!(
+            "Cannot kick: these surviving members must sign because their party signing keys \
+             must move inline, but they are not configured peers: {}. Add them as peers, \
+             then retry",
+            required.join(", ")
+        )
+    }))
+}
+
 /// The member a kick removes.
 #[derive(Debug, PartialEq)]
 struct KickTarget {
@@ -682,7 +724,8 @@ async fn cached_confirmation_threshold(
         (status = 202, description = "Kick workflow started", body = WorkflowResponse),
         (status = 400, description = "Bad request", body = ErrorResponse),
         (status = 409, description = "Workflow already in progress, or owner key not yet resolved for the target participant", body = ErrorResponse),
-        (status = 500, description = "Internal server error", body = ErrorResponse)
+        (status = 500, description = "Internal server error", body = ErrorResponse),
+        (status = 503, description = "Cannot verify whether a surviving member must sign a legacy key adoption; refresh and retry", body = ErrorResponse)
     )
 )]
 #[post("/kick")]
@@ -946,6 +989,29 @@ pub async fn start_kick(
                  (run {run}); wait for it to finish or cancel it first"
             ),
         });
+    }
+
+    match kick_key_adoption_refusal(
+        &data.config,
+        &data.db,
+        &decentralized_party_id,
+        &signers.not_peers,
+    )
+    .await
+    {
+        Ok(Some(error)) => return HttpResponse::BadRequest().json(ErrorResponse { error }),
+        Ok(None) => {}
+        Err(e) => {
+            tracing::error!(
+                "Cannot check signing key adoption for {decentralized_party_id}: {e:#}"
+            );
+            return HttpResponse::ServiceUnavailable().json(ErrorResponse {
+                error: format!(
+                    "Cannot verify whether surviving members must sign a key adoption: {e:#}. \
+                     Refresh /decentralized-parties and retry"
+                ),
+            });
+        }
     }
 
     // Refuse to invite any peer that can't speak the concurrent-workflows wire
@@ -5390,6 +5456,60 @@ mod tests {
         );
         assert_eq!(accepted.kicked_participant, Some(pid(4)?));
         assert_eq!(accepted.threshold, Some(2));
+        Ok(())
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn an_unreadable_key_adoption_preflight_creates_no_kick_run(pool: SqlitePool) -> Result {
+        let party = pid(47)?;
+        cache_kick_party(&pool, &party, 2, &[1, 2, 3, 4], &[], &[2]).await?;
+        sqlx::query("DELETE FROM workflow_runs WHERE instance_name = 'contracts-in-flight'")
+            .execute(&pool)
+            .await?;
+        let state = Arc::try_unwrap(kick_state_on(pool.clone()).await?.into_inner())
+            .map_err(|_| anyhow::anyhow!("fresh state has one owner"))?;
+        let mut config = state.config.clone();
+        // Invalid URI fails at the Canton boundary without opening a socket.
+        config.canton.admin_api_host = "[".to_string();
+        let state = web::Data::new(AppState { config, ..state });
+        let app =
+            actix_test::init_service(App::new().app_data(state.clone()).service(start_kick)).await;
+        let request = actix_test::TestRequest::post()
+            .uri("/kick")
+            .set_json(serde_json::json!({
+                "decentralized_party_id": party,
+                "participant_id": pid(4)?,
+                "new_threshold": 2,
+            }))
+            .to_request();
+        request.extensions_mut().insert(admin());
+
+        let (status, body) = status_and_body(actix_test::call_service(&app, request).await).await;
+
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+        assert!(
+            body.contains("Cannot verify whether surviving members must sign a key adoption"),
+            "{body}"
+        );
+        assert!(body.contains("retry"), "{body}");
+        assert!(
+            pool.get_workflow_runs_by_kind(WorkflowKind::Kick)
+                .await?
+                .is_empty()
+        );
+        assert!(state.workflows.snapshot().is_empty());
+        assert!(state.pending_invitations.read().await.is_empty());
+        Ok(())
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_kick_with_no_missing_peer_skips_the_extra_topology_read(pool: SqlitePool) -> Result {
+        let mut config = NodeConfig::default();
+        config.canton.admin_api_host = "[".to_string();
+        assert_eq!(
+            kick_key_adoption_refusal(&config, &pool, &pid(48)?, &[]).await?,
+            None
+        );
         Ok(())
     }
 

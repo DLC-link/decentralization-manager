@@ -12,7 +12,8 @@ use crate::{
         kick::KickConfig,
         proposal_store,
         signing_keys::{
-            adopt_legacy_signing_keys, known_signing_keys_by_member, signing_keys_after_kick,
+            adopt_legacy_signing_keys, known_signing_keys_by_member, requires_signing_key_adoption,
+            signing_keys_after_kick,
         },
         storage::{WorkflowStorage, artifact_kinds},
         thresholds::{PartyThresholds, ensure_carried_from},
@@ -116,6 +117,7 @@ pub async fn create_proposals(
     let head = proposal_store::fetch_party_head(config, &synchronizer_id, &party_id).await?;
     head.ensure_namespace_is(&current_namespace_def)?;
     let current_p2p = head.p2p.clone();
+    let adopting_signing_keys = requires_signing_key_adoption(&current_p2p);
 
     tracing::info!(
         "Current P2P mapping has {count} participant(s)",
@@ -169,7 +171,7 @@ pub async fn create_proposals(
         .iter()
         .map(|p| p.participant_uid.clone())
         .collect();
-    let new_signing_keys = if current_signing_keys.len() < member_count {
+    let new_signing_keys = if adopting_signing_keys {
         // A party onboarded before Canton 3.4 keeps its keys in a deprecated
         // PartyToKeyMapping, and a pre-1.10.0 add leaves a party holding some
         // inline and the rest there. Adopting the survivors' keys moves them
