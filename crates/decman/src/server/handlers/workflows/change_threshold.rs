@@ -13,7 +13,7 @@ use super::{
     preflight::{
         find_inprogress_run_for_party, format_incompatible_peers, preflight_incompatible_peers,
     },
-    runs::{kind_status, now_secs, register_and_persist},
+    runs::{kind_status, register_and_persist},
 };
 use crate::{
     canton_id::CantonId,
@@ -31,6 +31,7 @@ use crate::{
             WorkflowStatusResponse,
         },
     },
+    utils::now_secs,
     workflow::{self, ChangeThresholdStep, thresholds::check_confirmation_threshold},
 };
 

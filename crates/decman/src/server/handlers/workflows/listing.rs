@@ -5,10 +5,7 @@ use std::collections::HashMap;
 use actix_web::{HttpRequest, HttpResponse, Responder, get, post, web};
 use sqlx::SqlitePool;
 
-use super::{
-    preflight::send_retry_workflow,
-    runs::{count_run_started, now_secs},
-};
+use super::{preflight::send_retry_workflow, runs::count_run_started};
 use crate::{
     canton_id::CantonId,
     db::schema::{Commitable, SchemaRead, SchemaWrite},
@@ -22,6 +19,7 @@ use crate::{
             WorkflowRun, WorkflowRunsResponse, permission_from_proto,
         },
     },
+    utils::now_secs,
     workflow::{self, storage::WorkflowStorage},
 };
 

@@ -3,7 +3,7 @@
 use std::{
     collections::{HashMap, HashSet},
     sync::Arc,
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::Duration,
 };
 
 use sqlx::SqlitePool;
@@ -21,6 +21,7 @@ use crate::{
         AppState, former_parties,
         types::{DecentralizedPartiesResponse, DecentralizedParty},
     },
+    utils::now_secs,
 };
 
 /// How many parties [`fetch_decentralized_parties`] reads at once.
@@ -49,13 +50,6 @@ pub(super) const SINGLE_FLIGHT_WAIT: Duration = Duration::from_secs(3);
 /// the request, so a burst of distinct values would each start their own
 /// discovery and put the concurrent load back on the participant.
 pub(crate) const MAX_CONCURRENT_DISCOVERIES: usize = 4;
-
-pub(super) fn now_secs() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|elapsed| elapsed.as_secs() as i64)
-        .unwrap_or_default()
-}
 
 /// Longest accepted `prefix`.
 ///

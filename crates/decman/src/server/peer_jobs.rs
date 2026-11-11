@@ -1,9 +1,6 @@
 //! The peer-side job listener that starts a peer run per accepted invite.
 
-use std::{
-    sync::Arc,
-    time::{SystemTime, UNIX_EPOCH},
-};
+use std::sync::Arc;
 
 use sqlx::SqlitePool;
 use tokio::sync::{RwLock, mpsc};
@@ -13,6 +10,7 @@ use crate::{
     config::NodeConfig,
     db::schema::{Commitable, SchemaRead, SchemaWrite},
     server::{PeerJob, types::WorkflowProgress},
+    utils::now_secs,
     workflow,
 };
 
@@ -29,10 +27,7 @@ async fn finalize_peer_run(
     success: bool,
     error_msg: Option<String>,
 ) {
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0);
+    let now = now_secs();
     let mut tx = match db.begin_transaction().await {
         Ok(t) => t,
         Err(e) => {

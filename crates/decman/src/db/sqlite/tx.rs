@@ -1,7 +1,5 @@
 //! Commitable writes inside one SQLite transaction.
 
-use std::time::{SystemTime, UNIX_EPOCH};
-
 use anyhow::Context;
 
 use super::write::{owner_key_refusal, write_invitation};
@@ -18,6 +16,7 @@ use crate::{
     },
     error::Result,
     server::{InvitationOutcome, PendingInvitation, WorkflowProgress, WorkflowRun},
+    utils::now_secs,
 };
 
 /// The refusal of a workflow run that would become in progress during a purge
@@ -767,10 +766,7 @@ impl Commitable for sqlx::Transaction<'static, sqlx::Sqlite> {
         payload: &[u8],
     ) -> Result {
         let encrypted = crypto::encrypt_bytes(payload)?;
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_secs() as i64)
-            .unwrap_or(0);
+        let now = now_secs();
 
         sqlx::query(
             r"
@@ -798,10 +794,7 @@ impl Commitable for sqlx::Transaction<'static, sqlx::Sqlite> {
         payload: &[u8],
     ) -> Result {
         let encrypted = crypto::encrypt_bytes(payload)?;
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_secs() as i64)
-            .unwrap_or(0);
+        let now = now_secs();
 
         sqlx::query(
             r"

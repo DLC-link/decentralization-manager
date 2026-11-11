@@ -1,9 +1,6 @@
 //! Workflow run rows: persistence, status lookups and run metrics.
 
-use std::{
-    sync::{Arc, LazyLock},
-    time::{SystemTime, UNIX_EPOCH},
-};
+use std::sync::{Arc, LazyLock};
 
 use actix_web::web;
 use prometheus::IntCounterVec;
@@ -21,6 +18,7 @@ use crate::{
             WorkflowStatusResponse,
         },
     },
+    utils::now_secs,
     workflow::state::WorkflowStep,
 };
 
@@ -35,13 +33,6 @@ use crate::{
 // ============================================================================
 // Workflow run persistence helpers
 // ============================================================================
-
-pub(super) fn now_secs() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0)
-}
 
 /// Insert the coordinator-side `workflow_runs` row for a freshly-started run.
 /// Duplicate-instance protection lives in the registry insert that precedes

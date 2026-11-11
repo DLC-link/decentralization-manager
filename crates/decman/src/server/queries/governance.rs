@@ -3,7 +3,6 @@
 use std::{
     collections::{HashMap, HashSet, hash_map::DefaultHasher},
     hash::{Hash, Hasher},
-    time::{SystemTime, UNIX_EPOCH},
 };
 
 use canton_proto_rs::com::daml::ledger::api::v2::{GetEventsByContractIdRequest, Identifier};
@@ -31,6 +30,7 @@ use crate::{
         },
     },
     utils,
+    utils::now_secs,
 };
 
 // ============================================================================
@@ -124,10 +124,7 @@ pub async fn get_governance_confirmations(
             .filter_map(|cid| cached.1.get(cid).map(|v| (cid.clone(), v.clone()))),
     );
 
-    let now_seconds = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0);
+    let now_seconds = now_secs();
 
     let members: Option<HashSet<CantonId>> =
         rules.map(|rules| rules.members.iter().cloned().collect());
@@ -555,10 +552,7 @@ pub async fn page_proposal_summaries(
         })
         .await?;
 
-    let now_seconds = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0);
+    let now_seconds = now_secs();
     let confirmations = read_domain_confirmations(config, party_id, token_for_counts, packages)
         .await
         .unwrap_or_default();

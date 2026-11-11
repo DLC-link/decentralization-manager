@@ -1,9 +1,6 @@
 //! Boot recovery: respawning the workflow runs a shutdown interrupted.
 
-use std::{
-    sync::Arc,
-    time::{SystemTime, UNIX_EPOCH},
-};
+use std::sync::Arc;
 
 use sqlx::SqlitePool;
 use tokio::sync::{RwLock, mpsc};
@@ -22,6 +19,7 @@ use crate::{
         peer_status::LastSeen,
         types::{WorkflowProgress, WorkflowRole, WorkflowRun},
     },
+    utils::now_secs,
 };
 
 /// On boot, re-spawn any InProgress workflow runs that were interrupted by the
@@ -229,10 +227,7 @@ async fn set_run_status(
     status: WorkflowProgress,
     error: Option<String>,
 ) -> Result {
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0);
+    let now = now_secs();
     let mut tx = db.begin_transaction().await?;
     tx.set_workflow_run_status(instance_name, status, error.as_deref(), now)
         .await?;

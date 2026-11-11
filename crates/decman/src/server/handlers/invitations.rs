@@ -1,7 +1,4 @@
-use std::{
-    collections::HashMap,
-    time::{Duration, SystemTime, UNIX_EPOCH},
-};
+use std::{collections::HashMap, time::Duration};
 
 use actix_web::{HttpRequest, HttpResponse, Responder, get, post, web};
 use serde::Deserialize;
@@ -27,6 +24,7 @@ use crate::{
             WorkflowProgress, WorkflowRole, WorkflowRun,
         },
     },
+    utils::now_secs,
     workflow::{
         AddPartyStep, ChangeThresholdStep, ContractsStep, DarsStep, KickStep, OnboardingStep,
         state::WorkflowStep, validation::hash_dar,
@@ -50,10 +48,7 @@ async fn persist_handled_invitation(
     outcome: InvitationOutcome,
 ) {
     let id = &invitation.id;
-    let handled_at = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0);
+    let handled_at = now_secs();
     let mut tx = match data.db.begin_transaction().await {
         Ok(tx) => tx,
         Err(e) => {
@@ -145,10 +140,7 @@ pub(crate) async fn insert_peer_run(
     invitation: &PendingInvitation,
 ) -> Option<String> {
     let kind: WorkflowKind = invitation.invitation_type.into();
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0);
+    let now = now_secs();
     let pubkey_short =
         &invitation.coordinator_pubkey[..invitation.coordinator_pubkey.len().min(16)];
     let run_suffix = match invitation.workflow_instance.as_deref() {
