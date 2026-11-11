@@ -16,10 +16,11 @@ use crate::{
     server::{WorkflowInstance, peer_status::LastSeen},
     utils,
     workflow::{
+        CoordinatorSteps, StepFlow,
         party_replication::{
             collect_party_package_ids, open_export_session, wait_for_flag_cleared,
         },
-        run_workflow_with_handler,
+        run_coordinator,
         state::WorkflowState,
         storage::{WorkflowStorage, artifact_kinds, identity_kinds},
         topology::{retire_legacy_keys_and_wait, store_signed_pairs},
@@ -58,45 +59,64 @@ pub async fn start_coordinator(
         last_seen,
     )
     .await?;
-    let server = Arc::new(server);
 
-    let workflow_state = server.get_workflow_state();
-    let node_config_clone = node_config.clone();
-    let add_party_config_clone = add_party_config.clone();
-    let db_clone = db.clone();
-    let workflow_handle = tokio::spawn(async move {
-        run_workflow(
-            workflow_state,
-            node_config_clone,
-            add_party_config_clone,
-            workflow_auth,
-            db_clone,
-        )
-        .await
-    });
-
-    run_workflow_with_handler(ActiveWorkflow::AddParty(server), instance, workflow_handle).await
+    let steps = AddPartySteps::start(
+        server.get_workflow_state(),
+        node_config.clone(),
+        add_party_config.clone(),
+        workflow_auth,
+        db.clone(),
+    );
+    run_coordinator(server, ActiveWorkflow::AddParty, instance, steps).await
 }
 
-async fn run_workflow(
-    workflow_state: Arc<WorkflowState<AddPartyStep>>,
+/// The add-party coordinator's work at each step.
+struct AddPartySteps {
     node_config: NodeConfig,
     add_party_config: AddPartyConfig,
     workflow_auth: Option<WorkflowAuth>,
     db: SqlitePool,
-) -> Result {
-    let instance_name = add_party_config.instance_name.clone();
-    let config_payload =
-        serde_json::to_vec(&add_party_config).context("Failed to serialize add-party config")?;
+    instance_name: String,
+    /// The serialized config: the bare payload of the peer-gated commands.
+    config_payload: Vec<u8>,
+}
 
-    // GenerateAddPartyKeys is the first command after the connection gate and
-    // carries the config; set it before the gate can auto-advance.
-    workflow_state
-        .set_command_payload(config_payload.clone())
-        .await;
+impl AddPartySteps {
+    /// Seed the first command with the add-party config.
+    async fn start(
+        workflow_state: Arc<WorkflowState<AddPartyStep>>,
+        node_config: NodeConfig,
+        add_party_config: AddPartyConfig,
+        workflow_auth: Option<WorkflowAuth>,
+        db: SqlitePool,
+    ) -> Result<Self> {
+        let instance_name = add_party_config.instance_name.clone();
+        let config_payload = serde_json::to_vec(&add_party_config)
+            .context("Failed to serialize add-party config")?;
 
-    loop {
-        let current_step = workflow_state.current_step().await;
+        // GenerateAddPartyKeys is the first command after the connection gate and
+        // carries the config; set it before the gate can auto-advance.
+        workflow_state
+            .set_command_payload(config_payload.clone())
+            .await;
+
+        Ok(Self {
+            node_config,
+            add_party_config,
+            workflow_auth,
+            db,
+            instance_name,
+            config_payload,
+        })
+    }
+}
+
+impl CoordinatorSteps<AddPartyStep> for AddPartySteps {
+    async fn run_step(
+        &mut self,
+        workflow_state: &WorkflowState<AddPartyStep>,
+        current_step: AddPartyStep,
+    ) -> Result<StepFlow> {
         tracing::debug!("Add-party coordinator in step: {current_step:?}");
 
         match current_step {
@@ -107,22 +127,23 @@ async fn run_workflow(
             | AddPartyStep::SignClearOnboarding => {
                 // Peer-gated (or connection-gated) — the listener advances the
                 // state as peers report in; the coordinator just idles.
-                tokio::time::sleep(Duration::from_secs(1)).await;
+                Ok(StepFlow::Idle)
             }
             AddPartyStep::SyncAcs => {
                 // Peer-gated like the arm above, but two things a resumed
                 // coordinator cannot rebuild live here: the command payload,
                 // which is restored from its artifact, and the Canton export
                 // stream, which has to be re-opened.
-                // Restored on mismatch, NOT merely when empty: `run_workflow`
+                // Restored on mismatch, NOT merely when empty: `start`
                 // seeds the payload with the bare config before this loop
                 // starts, so after a restart it is non-empty but wrong. The
                 // target decodes the SyncAcs command as two length-prefixed
                 // items and reads the config's leading `{"de` as a 2 GB length
                 // prefix, failing every attempt until it aborts.
-                if let Some(saved) = db
+                if let Some(saved) = self
+                    .db
                     .read_artifact(
-                        &instance_name,
+                        &self.instance_name,
                         artifact_kinds::ADD_PARTY_SYNC_ACS_COMMAND,
                         None,
                     )
@@ -143,45 +164,71 @@ async fn run_workflow(
                         "No ACS export is open — re-opening it; the transfer restarts \
                          from the beginning"
                     );
-                    let target = add_party_config.replication_target(&instance_name);
-                    let session = open_export_session(&node_config, &db, &target).await?;
+                    let target = self
+                        .add_party_config
+                        .replication_target(&self.instance_name);
+                    let session = open_export_session(&self.node_config, &self.db, &target).await?;
                     workflow_state
-                        .set_acs_export(add_party_config.new_participant_id.clone(), session)
+                        .set_acs_export(self.add_party_config.new_participant_id.clone(), session)
                         .await;
                 }
-                tokio::time::sleep(Duration::from_secs(1)).await;
+                Ok(StepFlow::Idle)
             }
             AddPartyStep::ExportState => {
                 tracing::info!("Coordinator executing: Export state");
-                save_new_member_keys(&workflow_state, &db, &instance_name, &add_party_config)
-                    .await?;
-                let ledger_token =
-                    resolve_ledger_token(&workflow_auth, &add_party_config.decentralized_party_id)
-                        .await;
+                save_new_member_keys(
+                    workflow_state,
+                    &self.db,
+                    &self.instance_name,
+                    &self.add_party_config,
+                )
+                .await?;
+                let ledger_token = resolve_ledger_token(
+                    &self.workflow_auth,
+                    &self.add_party_config.decentralized_party_id,
+                )
+                .await;
                 export_state(
-                    &node_config,
-                    &db,
-                    &instance_name,
-                    &add_party_config,
+                    &self.node_config,
+                    &self.db,
+                    &self.instance_name,
+                    &self.add_party_config,
                     ledger_token.as_deref(),
                 )
                 .await?;
                 workflow_state.advance_step().await;
+                Ok(StepFlow::Continue)
             }
             AddPartyStep::CreateProposals => {
                 tracing::info!("Coordinator executing: Create proposals");
-                create_proposals(&node_config, &db, &instance_name, &add_party_config).await?;
+                create_proposals(
+                    &self.node_config,
+                    &self.db,
+                    &self.instance_name,
+                    &self.add_party_config,
+                )
+                .await?;
 
-                let dns_data = db
-                    .read_artifact(&instance_name, artifact_kinds::ADD_PARTY_DNS_PROPOSAL, None)
+                let dns_data = self
+                    .db
+                    .read_artifact(
+                        &self.instance_name,
+                        artifact_kinds::ADD_PARTY_DNS_PROPOSAL,
+                        None,
+                    )
                     .await?
                     .ok_or_else(|| {
                         anyhow::anyhow!(
                             "ADD_PARTY_DNS_PROPOSAL artifact missing after CreateProposals"
                         )
                     })?;
-                let p2p_data = db
-                    .read_artifact(&instance_name, artifact_kinds::ADD_PARTY_P2P_PROPOSAL, None)
+                let p2p_data = self
+                    .db
+                    .read_artifact(
+                        &self.instance_name,
+                        artifact_kinds::ADD_PARTY_P2P_PROPOSAL,
+                        None,
+                    )
                     .await?
                     .ok_or_else(|| {
                         anyhow::anyhow!(
@@ -190,47 +237,64 @@ async fn run_workflow(
                     })?;
 
                 let payload =
-                    utils::encode_length_prefixed(&[&config_payload, &dns_data, &p2p_data]);
+                    utils::encode_length_prefixed(&[&self.config_payload, &dns_data, &p2p_data]);
                 workflow_state.set_command_payload(payload).await;
                 workflow_state.advance_step().await;
+                Ok(StepFlow::Continue)
             }
             AddPartyStep::SubmitProposals => {
                 tracing::info!("Coordinator executing: Submit proposals");
-                save_signature_pairs(&workflow_state, &db, &instance_name).await?;
-                submit_proposals(&node_config, &db, &instance_name, &add_party_config).await?;
-                copy_new_member_identity(&db, &instance_name, &add_party_config).await?;
+                save_signature_pairs(workflow_state, &self.db, &self.instance_name).await?;
+                submit_proposals(
+                    &self.node_config,
+                    &self.db,
+                    &self.instance_name,
+                    &self.add_party_config,
+                )
+                .await?;
+                copy_new_member_identity(&self.db, &self.instance_name, &self.add_party_config)
+                    .await?;
 
                 // The topology is live. Open the export but read nothing from it:
                 // the new member pulls it block by block straight into its own
                 // Canton import, so the snapshot is never assembled here.
-                let target = add_party_config.replication_target(&instance_name);
-                let session = open_export_session(&node_config, &db, &target).await?;
+                let target = self
+                    .add_party_config
+                    .replication_target(&self.instance_name);
+                let session = open_export_session(&self.node_config, &self.db, &target).await?;
                 workflow_state
-                    .set_acs_export(add_party_config.new_participant_id.clone(), session)
+                    .set_acs_export(self.add_party_config.new_participant_id.clone(), session)
                     .await;
 
                 // Package ids the new member must have to validate the imported
                 // ACS — its preflight fails fast (before disconnecting) if any
                 // are missing, instead of the import dying mid-window.
-                let party_id = add_party_config.decentralized_party_id.to_string();
-                let ledger_token =
-                    resolve_ledger_token(&workflow_auth, &add_party_config.decentralized_party_id)
-                        .await;
-                let package_ids =
-                    collect_party_package_ids(&node_config, &party_id, ledger_token.as_deref())
-                        .await?;
-                let package_ids_payload = package_ids.join("\n").into_bytes();
-                let payload =
-                    utils::encode_length_prefixed(&[&config_payload, &package_ids_payload]);
-                db.write_artifact(
-                    &instance_name,
-                    artifact_kinds::ADD_PARTY_SYNC_ACS_COMMAND,
-                    None,
-                    &payload,
+                let party_id = self.add_party_config.decentralized_party_id.to_string();
+                let ledger_token = resolve_ledger_token(
+                    &self.workflow_auth,
+                    &self.add_party_config.decentralized_party_id,
+                )
+                .await;
+                let package_ids = collect_party_package_ids(
+                    &self.node_config,
+                    &party_id,
+                    ledger_token.as_deref(),
                 )
                 .await?;
+                let package_ids_payload = package_ids.join("\n").into_bytes();
+                let payload =
+                    utils::encode_length_prefixed(&[&self.config_payload, &package_ids_payload]);
+                self.db
+                    .write_artifact(
+                        &self.instance_name,
+                        artifact_kinds::ADD_PARTY_SYNC_ACS_COMMAND,
+                        None,
+                        &payload,
+                    )
+                    .await?;
                 workflow_state.set_command_payload(payload).await;
                 workflow_state.advance_step().await;
+                Ok(StepFlow::Continue)
             }
             AddPartyStep::PrepareClearOnboarding => {
                 // SyncAcs is done, so close the Canton export stream rather
@@ -239,9 +303,10 @@ async fn run_workflow(
                 // Swap the SyncAcs payload for the bare config before the next
                 // peer-gated command.
                 workflow_state
-                    .set_command_payload(config_payload.clone())
+                    .set_command_payload(self.config_payload.clone())
                     .await;
                 workflow_state.advance_step().await;
+                Ok(StepFlow::Continue)
             }
             AddPartyStep::PrepareClearSign => {
                 tracing::info!("Coordinator executing: Prepare clearing proposal");
@@ -252,7 +317,7 @@ async fn run_workflow(
                 let peer_data = workflow_state.get_all_peer_data().await;
                 let mut proposal_blob = Vec::new();
                 for (peer_id, data) in peer_data {
-                    if peer_id != add_party_config.new_participant_id {
+                    if peer_id != self.add_party_config.new_participant_id {
                         anyhow::bail!(
                             "Unexpected clearing-proposal upload from {peer_id} — only the \
                              new member authors it"
@@ -268,34 +333,38 @@ async fn run_workflow(
                     // skipping the sign round — completing the workflow with
                     // the marker still set would leave the party suspended
                     // on the new member.
-                    let synchronizer_id = utils::get_synchronizer_id(&node_config).await?;
+                    let synchronizer_id = utils::get_synchronizer_id(&self.node_config).await?;
                     wait_for_flag_cleared(
-                        &node_config,
+                        &self.node_config,
                         &synchronizer_id,
-                        &add_party_config.decentralized_party_id,
-                        &add_party_config.new_participant_id,
+                        &self.add_party_config.decentralized_party_id,
+                        &self.add_party_config.new_participant_id,
                     )
                     .await?;
                     tracing::info!("Onboarding flag already cleared — skipping sign round");
                 }
                 // An empty blob doubles as the "already cleared" skip marker
                 // for both the peers and SubmitClearOnboarding.
-                db.write_artifact(
-                    &instance_name,
-                    artifact_kinds::ADD_PARTY_CLEAR_PROPOSAL,
-                    None,
-                    &proposal_blob,
-                )
-                .await?;
+                self.db
+                    .write_artifact(
+                        &self.instance_name,
+                        artifact_kinds::ADD_PARTY_CLEAR_PROPOSAL,
+                        None,
+                        &proposal_blob,
+                    )
+                    .await?;
 
-                let payload = utils::encode_length_prefixed(&[&config_payload, &proposal_blob]);
+                let payload =
+                    utils::encode_length_prefixed(&[&self.config_payload, &proposal_blob]);
                 workflow_state.set_command_payload(payload).await;
                 workflow_state.advance_step().await;
+                Ok(StepFlow::Continue)
             }
             AddPartyStep::SubmitClearOnboarding => {
-                let proposal = db
+                let proposal = self
+                    .db
                     .read_artifact(
-                        &instance_name,
+                        &self.instance_name,
                         artifact_kinds::ADD_PARTY_CLEAR_PROPOSAL,
                         None,
                     )
@@ -306,27 +375,34 @@ async fn run_workflow(
                     workflow_state.clear_peer_data().await;
                 } else {
                     tracing::info!("Coordinator executing: Submit clearing proposal");
-                    save_clear_signatures(&workflow_state, &db, &instance_name).await?;
-                    submit_clear_proposal(&node_config, &db, &instance_name, &add_party_config)
-                        .await?;
+                    save_clear_signatures(workflow_state, &self.db, &self.instance_name).await?;
+                    submit_clear_proposal(
+                        &self.node_config,
+                        &self.db,
+                        &self.instance_name,
+                        &self.add_party_config,
+                    )
+                    .await?;
                 }
                 workflow_state.advance_step().await;
+                Ok(StepFlow::Continue)
             }
             AddPartyStep::RetireLegacyKeys => {
-                retire_legacy_keys_and_wait(&node_config, &add_party_config.decentralized_party_id)
-                    .await?;
+                retire_legacy_keys_and_wait(
+                    &self.node_config,
+                    &self.add_party_config.decentralized_party_id,
+                )
+                .await?;
                 workflow_state.advance_step().await;
+                Ok(StepFlow::Continue)
             }
             AddPartyStep::Complete => {
                 tracing::info!("Add-party workflow complete!");
                 tracing::debug!("Waiting for peers to receive Disconnect command...");
-                tokio::time::sleep(Duration::from_secs(2)).await;
-                break;
+                Ok(StepFlow::Finish(Duration::from_secs(2)))
             }
         }
     }
-
-    Ok(())
 }
 
 /// Persist the new member's `keys||participant_id` upload (the only data

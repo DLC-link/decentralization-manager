@@ -9,13 +9,14 @@ use super::{
 };
 use crate::{
     auth::WorkflowAuth,
+    canton_id::CantonId,
     config::{NetworkConfig, NodeConfig},
     error::Result,
     noise::server::{ActiveWorkflow, NoiseServer, lookup_party_threshold},
     server::{WorkflowInstance, peer_status::LastSeen},
     utils,
     workflow::{
-        run_workflow_with_handler,
+        CoordinatorSteps, StepFlow, run_coordinator,
         state::WorkflowState,
         storage::{WorkflowStorage, artifact_kinds},
     },
@@ -46,7 +47,7 @@ pub async fn start_coordinator(
 
     let server = NoiseServer::new(
         node_config.clone(),
-        network_config.clone(),
+        network_config,
         db.clone(),
         config.instance_name.clone(),
         ContractsStep::WaitingForPeers,
@@ -54,73 +55,89 @@ pub async fn start_coordinator(
         last_seen,
     )
     .await?;
-    let server = Arc::new(server);
 
     tracing::info!("Noise server initialized, listening for connections");
 
-    let workflow_state = server.get_workflow_state();
-    let node_config_clone = node_config.clone();
-    let db_clone = db.clone();
-    let workflow_handle = tokio::spawn(async move {
-        run_workflow(
-            workflow_state,
-            node_config_clone,
-            db_clone,
-            config,
-            workflow_auth,
-        )
-        .await
-    });
-
-    run_workflow_with_handler(ActiveWorkflow::Contracts(server), instance, workflow_handle).await
+    let steps = ContractsSteps::start(node_config, db, config, workflow_auth);
+    run_coordinator(server, ActiveWorkflow::Contracts, instance, steps).await
 }
 
-async fn run_workflow(
-    workflow_state: Arc<WorkflowState<ContractsStep>>,
+/// The contracts coordinator's work at each step.
+struct ContractsSteps {
     node_config: NodeConfig,
     db: sqlx::SqlitePool,
     config: ContractsConfig,
-    workflow_auth: Option<WorkflowAuth>,
-) -> Result {
-    let instance_name = config.instance_name.clone();
-    let dec_party_id = config.decentralized_party_id.clone();
+    instance_name: String,
+    dec_party_id: CantonId,
+    coordinator_only: bool,
+    auth: WorkflowAuth,
+}
 
-    // 1-of-N party: the coordinator's own signature already meets the threshold,
-    // so no peer signatures are required. The peer gates (WaitingForPeers /
-    // SignSubmissions) would otherwise wait for a peer that may never connect;
-    // the coordinator advances them itself below. Any other threshold (or an
-    // unresolved one) falls back to the normal peer wait.
-    let coordinator_only = lookup_party_threshold(&db, &dec_party_id).await == Some(1);
+impl ContractsSteps {
+    /// Look up the party's threshold and take the run's auth handle.
+    async fn start(
+        node_config: NodeConfig,
+        db: sqlx::SqlitePool,
+        config: ContractsConfig,
+        workflow_auth: Option<WorkflowAuth>,
+    ) -> Result<Self> {
+        let instance_name = config.instance_name.clone();
+        let dec_party_id = config.decentralized_party_id.clone();
 
-    // Auth handle for the decentralized party. We deliberately fetch a fresh
-    // token at each ledger-touching step rather than caching one snapshot up
-    // front: a workflow can sit in `WaitingForPeers` for an arbitrarily long
-    // time, and a token captured before that wait would be expired by the time
-    // Prepare/Execute run automatically once peers accept. `get_credentials`
-    // returns a cached-with-refresh token, so per-step calls are cheap.
-    let auth = workflow_auth
-        .ok_or_else(|| anyhow::anyhow!("Auth not configured, cannot run contracts workflow"))?;
+        // 1-of-N party: the coordinator's own signature already meets the threshold,
+        // so no peer signatures are required. The peer gates (WaitingForPeers /
+        // SignSubmissions) would otherwise wait for a peer that may never connect;
+        // the coordinator advances them itself below. Any other threshold (or an
+        // unresolved one) falls back to the normal peer wait.
+        let coordinator_only = lookup_party_threshold(&db, &dec_party_id).await == Some(1);
 
-    loop {
-        let current_step = workflow_state.current_step().await;
+        // Auth handle for the decentralized party. We deliberately fetch a fresh
+        // token at each ledger-touching step rather than caching one snapshot up
+        // front: a workflow can sit in `WaitingForPeers` for an arbitrarily long
+        // time, and a token captured before that wait would be expired by the time
+        // Prepare/Execute run automatically once peers accept. `get_credentials`
+        // returns a cached-with-refresh token, so per-step calls are cheap.
+        let auth = workflow_auth
+            .ok_or_else(|| anyhow::anyhow!("Auth not configured, cannot run contracts workflow"))?;
 
+        Ok(Self {
+            node_config,
+            db,
+            config,
+            instance_name,
+            dec_party_id,
+            coordinator_only,
+            auth,
+        })
+    }
+}
+
+impl CoordinatorSteps<ContractsStep> for ContractsSteps {
+    async fn run_step(
+        &mut self,
+        workflow_state: &WorkflowState<ContractsStep>,
+        current_step: ContractsStep,
+    ) -> Result<StepFlow> {
         match current_step {
             ContractsStep::WaitingForPeers => {
-                if coordinator_only {
+                if self.coordinator_only {
                     workflow_state
                         .advance_step_if(ContractsStep::WaitingForPeers)
                         .await;
                 }
-                tokio::time::sleep(Duration::from_secs(1)).await;
+                Ok(StepFlow::Idle)
             }
             ContractsStep::PrepareSubmissions => {
                 tracing::info!("Coordinator executing: Prepare submissions");
-                let creds = auth.get_credentials(&config.decentralized_party_id).await?;
+                let creds = self
+                    .auth
+                    .get_credentials(&self.config.decentralized_party_id)
+                    .await?;
                 prepare_submissions(
-                    &node_config,
-                    &db,
-                    &instance_name,
-                    &config,
+                    &self.node_config,
+                    &self.db,
+                    &self.instance_name,
+                    &self.config,
                     &creds.token,
                     &creds.user_id,
                 )
@@ -130,27 +147,35 @@ async fn run_workflow(
                 // SignSubmissions command. Pair with the contracts config so the
                 // peer can recover the instance name + dec party id on its side.
                 let submissions_payload =
-                    load_prepared_submissions_payload(&db, &instance_name, &config).await?;
+                    load_prepared_submissions_payload(&self.db, &self.instance_name, &self.config)
+                        .await?;
                 workflow_state
                     .set_command_payload(submissions_payload)
                     .await;
 
                 workflow_state.advance_step().await;
+                Ok(StepFlow::Continue)
             }
             ContractsStep::SignSubmissions => {
                 tracing::info!("Coordinator executing: Sign submissions");
-                let intents = &config.committed()?.intents;
-                sign_submissions(&node_config, &db, &instance_name, &dec_party_id, intents)
-                    .await
-                    .context("Failed to sign submissions")?;
-                if coordinator_only {
+                let intents = &self.config.committed()?.intents;
+                sign_submissions(
+                    &self.node_config,
+                    &self.db,
+                    &self.instance_name,
+                    &self.dec_party_id,
+                    intents,
+                )
+                .await
+                .context("Failed to sign submissions")?;
+                if self.coordinator_only {
                     // Coordinator's signature (just produced) already meets M=1;
                     // advance without waiting for peer signatures.
                     workflow_state
                         .advance_step_if(ContractsStep::SignSubmissions)
                         .await;
                 }
-                tokio::time::sleep(Duration::from_secs(1)).await;
+                Ok(StepFlow::Idle)
             }
             ContractsStep::ExecuteSubmissions => {
                 tracing::info!("Coordinator executing: Execute submissions");
@@ -162,37 +187,39 @@ async fn run_workflow(
                 let peer_data = workflow_state.get_all_peer_data().await;
                 for (peer_id, payload) in &peer_data {
                     let peer_key = peer_id.to_string();
-                    db.write_artifact(
-                        &instance_name,
-                        artifact_kinds::SUBMISSION_SIGNATURES,
-                        Some(&peer_key),
-                        payload,
-                    )
-                    .await?;
+                    self.db
+                        .write_artifact(
+                            &self.instance_name,
+                            artifact_kinds::SUBMISSION_SIGNATURES,
+                            Some(&peer_key),
+                            payload,
+                        )
+                        .await?;
                 }
                 workflow_state.clear_peer_data().await;
 
-                let creds = auth.get_credentials(&config.decentralized_party_id).await?;
+                let creds = self
+                    .auth
+                    .get_credentials(&self.config.decentralized_party_id)
+                    .await?;
                 execute_submissions(
-                    &node_config,
-                    &db,
-                    &instance_name,
-                    &config,
+                    &self.node_config,
+                    &self.db,
+                    &self.instance_name,
+                    &self.config,
                     &creds.token,
                     &creds.user_id,
                 )
                 .await?;
                 workflow_state.advance_step().await;
+                Ok(StepFlow::Continue)
             }
             ContractsStep::Complete => {
                 tracing::info!("Contracts workflow complete!");
-                tokio::time::sleep(Duration::from_secs(5)).await;
-                break;
+                Ok(StepFlow::Finish(Duration::from_secs(5)))
             }
         }
     }
-
-    Ok(())
 }
 
 /// Load all prepared submission artefacts from storage and encode them for
