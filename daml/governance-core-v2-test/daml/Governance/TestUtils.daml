@@ -7,12 +7,13 @@
 module Governance.TestUtils where
 
 import DA.Set as Set hiding (filter)
-import DA.Time (minutes)
+import DA.Time (RelTime, minutes)
 import Daml.Script
 
 import Governance.Action (GovernableAction)
 import Governance.Confirmation
 import Governance.ExecutionResult
+import Governance.MockActions (MockProposal(..))
 import Governance.Rules
 
 -- | Standard test party allocation.
@@ -54,6 +55,28 @@ createTestGovernance parties =
     actionConfirmationTimeout = minutes 30
     additionalProposers = None
     disclosureObservers = None
+
+-- | Create governance rules with the standard members and threshold, and the
+-- given timeout and additional proposers.
+createGovernanceWith : TestParties -> RelTime -> Optional (Set Party) -> Script (ContractId GovernanceRules)
+createGovernanceWith parties actionConfirmationTimeout additionalProposers =
+  submit parties.governanceParty $ createCmd GovernanceRules with
+    governanceParty = parties.governanceParty
+    members = getMembers parties
+    threshold = 2
+    actionConfirmationTimeout
+    additionalProposers
+    disclosureObservers = None
+
+-- | Propose a MockProposal to the test governance party.
+proposeMock : TestParties -> Party -> Text -> Text -> Script (ContractId GovernableAction)
+proposeMock parties proposer label payload = do
+  cid <- submit proposer $ createCmd MockProposal with
+    governanceParty = parties.governanceParty
+    proposer
+    label
+    payload
+  pure (toInterfaceContractId @GovernableAction cid)
 
 -- | Collect confirmations from a list of members for an interface action.
 submitConfirmations : Party -> ContractId GovernanceRules -> ContractId GovernableAction -> [Party] -> Script [ContractId GovernanceConfirmation]

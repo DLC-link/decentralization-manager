@@ -4,205 +4,215 @@
 -- | Tests for authorization: authority propagation, non-member restrictions.
 module Governance.Test.AuthorizationTest where
 
-import DA.Assert
 import DA.Set as Set hiding (filter)
 import DA.Time (minutes)
 import Daml.Script
 
 import Governance.Action (GovernableAction)
-import Governance.Rules
+import Governance.Confirmation
 import Governance.MockActions
+import Governance.Rules
 import Governance.TestUtils
 
--- | Governance party authority flows through interface execution.
--- MockAuthorityProposal exercises a choice on MockProtectedResource
--- that requires governanceParty as controller. This only works if
--- the governance exercise chain properly propagates authority.
-testAuthorityFlowsThroughInterface = script do
+import TestHarness
+
+-- ============================================================================
+-- Fixtures
+-- ============================================================================
+
+data AuthFixture = AuthFixture
+  with
+    parties : TestParties
+    rulesCid : ContractId GovernanceRules
+  deriving (Eq, Show)
+
+confirmAs : AuthFixture -> Party -> ContractId GovernableAction -> Script GovernanceConfirmation
+confirmAs f confirmer proposalCid = do
+  result <- submit (memberContext confirmer f.parties.governanceParty) $
+    exerciseCmd f.rulesCid GovernanceRules_ConfirmAction with
+      confirmer
+      actionProposalCid = proposalCid
+  Some confirmation <- queryContractId f.parties.governanceParty result.confirmationCid
+  pure confirmation
+
+-- ============================================================================
+-- Given
+-- ============================================================================
+
+given_governance_setup : Script AuthFixture
+given_governance_setup = do
   parties <- allocateTestParties
   rulesCid <- createTestGovernance parties
+  pure AuthFixture with ..
 
-  resourceCid <- submit parties.governanceParty $ createCmd MockProtectedResource with
-    governanceParty = parties.governanceParty
+-- | `outsider` is an additional proposer but not a member.
+given_outsider_is_additional_proposer : Script AuthFixture
+given_outsider_is_additional_proposer = do
+  parties <- allocateTestParties
+  rulesCid <- createGovernanceWith parties (minutes 30) (Some (Set.singleton parties.outsider))
+  pure AuthFixture with ..
+
+-- ============================================================================
+-- When
+-- ============================================================================
+
+-- | MockAuthorityProposal exercises a choice on MockProtectedResource that
+-- requires governanceParty as controller. This only works if the governance
+-- exercise chain properly propagates authority.
+when_authority_proposal_executed : AuthFixture -> Script MockProtectedResource
+when_authority_proposal_executed f = do
+  resourceCid <- submit f.parties.governanceParty $ createCmd MockProtectedResource with
+    governanceParty = f.parties.governanceParty
     value = "original"
-
-  proposalCid <- submit parties.member1 $ createCmd MockAuthorityProposal with
-    governanceParty = parties.governanceParty
-    proposer = parties.member1
+  proposalCid <- submit f.parties.member1 $ createCmd MockAuthorityProposal with
+    governanceParty = f.parties.governanceParty
+    proposer = f.parties.member1
     resourceCid
     newValue = "updated via governance"
+  confirmAndExecute f.parties f.rulesCid (toInterfaceContractId @GovernableAction proposalCid)
+    [f.parties.member1, f.parties.member2] f.parties.member3
+  [(_, resource)] <- query @MockProtectedResource f.parties.governanceParty
+  pure resource
 
-  let proposalIfaceCid = toInterfaceContractId @GovernableAction proposalCid
+-- | Harmless: a proposal is inert without confirmations.
+when_non_member_proposes : AuthFixture -> Script MockProposal
+when_non_member_proposes f = do
+  _ <- proposeMock f.parties f.parties.outsider "OutsiderProposal" "from outsider"
+  [(_, proposal)] <- query @MockProposal f.parties.outsider
+  pure proposal
 
-  confirmAndExecute parties rulesCid proposalIfaceCid
-    [parties.member1, parties.member2] parties.member3
+when_members_execute_additional_proposer_proposal : AuthFixture -> Script MockActionResult
+when_members_execute_additional_proposer_proposal f = do
+  proposalCid <- proposeMock f.parties f.parties.outsider "OutsiderProposal" "from outsider"
+  confirmAndExecute f.parties f.rulesCid proposalCid
+    [f.parties.member1, f.parties.member2] f.parties.member3
+  [(_, result)] <- query @MockActionResult f.parties.governanceParty
+  pure result
 
-  [(_, resource)] <- query @MockProtectedResource parties.governanceParty
-  resource.value === "updated via governance"
-
--- | Non-member can create a proposal (harmless — it's inert without confirmations).
-testNonMemberCanCreateProposal = script do
-  parties <- allocateTestParties
-  _rulesCid <- createTestGovernance parties
-
-  _proposalCid <- submit parties.outsider $ createCmd MockProposal with
-    governanceParty = parties.governanceParty
-    proposer = parties.outsider
-    label = "OutsiderProposal"
-    payload = "from outsider"
-
-  [(_, proposal)] <- query @MockProposal parties.outsider
-  proposal.label === "OutsiderProposal"
-
--- | A non-member can propose if they're in additionalProposers,
--- and members can confirm + execute the proposal.
-testAdditionalProposerProposalCanBeExecutedByMembers = script do
-  parties <- allocateTestParties
-
-  rulesCid <- submit parties.governanceParty $ createCmd GovernanceRules with
-    governanceParty = parties.governanceParty
-    members = getMembers parties
-    threshold = 2
-    actionConfirmationTimeout = minutes 30
-    additionalProposers = Some (Set.singleton parties.outsider)
-    disclosureObservers = None
-
-  proposalCid <- submit parties.outsider $ createCmd MockProposal with
-    governanceParty = parties.governanceParty
-    proposer = parties.outsider
-    label = "OutsiderProposal"
-    payload = "from outsider"
-
-  let proposalIfaceCid = toInterfaceContractId @GovernableAction proposalCid
-
-  confirmAndExecute parties rulesCid proposalIfaceCid
-    [parties.member1, parties.member2] parties.member3
-
-  [(_, result)] <- query @MockActionResult parties.governanceParty
-  result.label === "OutsiderProposal"
-  result.payload === "from outsider"
-
--- | Non-member cannot confirm, execute, or cancel via governance choices.
-testNonMemberCannotUseGovernanceChoices = script do
-  parties <- allocateTestParties
-  rulesCid <- createTestGovernance parties
-
-  proposalCid <- submit parties.member1 $ createCmd MockProposal with
-    governanceParty = parties.governanceParty
-    proposer = parties.member1
-    label = "TestAction"
-    payload = "test"
-
-  let proposalIfaceCid = toInterfaceContractId @GovernableAction proposalCid
-
-  submitMustFail (memberContext parties.outsider parties.governanceParty) $
-    exerciseCmd rulesCid GovernanceRules_ConfirmAction with
-      confirmer = parties.outsider
-      actionProposalCid = proposalIfaceCid
-
-  confirmationCids <- submitConfirmations parties.governanceParty rulesCid proposalIfaceCid
-    [parties.member1, parties.member2]
-
-  submitMustFail (memberContext parties.outsider parties.governanceParty) $
-    exerciseCmd rulesCid GovernanceRules_ExecuteConfirmedAction with
-      executor = parties.outsider
-      actionProposalCid = proposalIfaceCid
+when_non_member_confirms_and_executes : AuthFixture -> Script ()
+when_non_member_confirms_and_executes f = do
+  proposalCid <- proposeMock f.parties f.parties.member1 "TestAction" "test"
+  submitMustFail (memberContext f.parties.outsider f.parties.governanceParty) $
+    exerciseCmd f.rulesCid GovernanceRules_ConfirmAction with
+      confirmer = f.parties.outsider
+      actionProposalCid = proposalCid
+  confirmationCids <- submitConfirmations f.parties.governanceParty f.rulesCid proposalCid
+    [f.parties.member1, f.parties.member2]
+  submitMustFail (memberContext f.parties.outsider f.parties.governanceParty) $
+    exerciseCmd f.rulesCid GovernanceRules_ExecuteConfirmedAction with
+      executor = f.parties.outsider
+      actionProposalCid = proposalCid
       confirmations = confirmationCids
 
--- | Duplicate confirmations from the same member are rejected.
-testDuplicateConfirmationsRejected = script do
-  parties <- allocateTestParties
-  rulesCid <- createTestGovernance parties
+when_member_confirms_twice_and_executes : AuthFixture -> Script ()
+when_member_confirms_twice_and_executes f = do
+  proposalCid <- proposeMock f.parties f.parties.member1 "TestAction" "test"
+  confirmationCids <- submitConfirmations f.parties.governanceParty f.rulesCid proposalCid
+    [f.parties.member1, f.parties.member1]
+  submitMustFail (memberContext f.parties.member1 f.parties.governanceParty) $
+    exerciseCmd f.rulesCid GovernanceRules_ExecuteConfirmedAction with
+      executor = f.parties.member1
+      actionProposalCid = proposalCid
+      confirmations = confirmationCids
 
-  proposalCid <- submit parties.member1 $ createCmd MockProposal with
-    governanceParty = parties.governanceParty
-    proposer = parties.member1
-    label = "TestAction"
-    payload = "test"
+when_member_confirms_member_proposal : AuthFixture -> Script GovernanceConfirmation
+when_member_confirms_member_proposal f = do
+  proposalCid <- proposeMock f.parties f.parties.member1 "MemberProposed" "ok"
+  confirmAs f f.parties.member2 proposalCid
 
-  let proposalIfaceCid = toInterfaceContractId @GovernableAction proposalCid
+when_member_confirms_additional_proposer_proposal : AuthFixture -> Script GovernanceConfirmation
+when_member_confirms_additional_proposer_proposal f = do
+  proposalCid <- proposeMock f.parties f.parties.outsider "AdditionalProposerProposed" "ok"
+  confirmAs f f.parties.member1 proposalCid
 
-  confResult1 <- submit (memberContext parties.member1 parties.governanceParty) $
-    exerciseCmd rulesCid GovernanceRules_ConfirmAction with
-      confirmer = parties.member1
-      actionProposalCid = proposalIfaceCid
+-- | `outsider` is neither a member nor an additional proposer. This is the
+-- authorization boundary that issue #55 establishes.
+when_member_confirms_unauthorized_proposal : AuthFixture -> Script ()
+when_member_confirms_unauthorized_proposal f = do
+  proposalCid <- proposeMock f.parties f.parties.outsider "UnauthorizedProposed" "should reject"
+  submitMustFail (memberContext f.parties.member1 f.parties.governanceParty) $
+    exerciseCmd f.rulesCid GovernanceRules_ConfirmAction with
+      confirmer = f.parties.member1
+      actionProposalCid = proposalCid
 
-  confResult2 <- submit (memberContext parties.member1 parties.governanceParty) $
-    exerciseCmd rulesCid GovernanceRules_ConfirmAction with
-      confirmer = parties.member1
-      actionProposalCid = proposalIfaceCid
+-- ============================================================================
+-- Then
+-- ============================================================================
 
-  submitMustFail (memberContext parties.member1 parties.governanceParty) $
-    exerciseCmd rulesCid GovernanceRules_ExecuteConfirmedAction with
-      executor = parties.member1
-      actionProposalCid = proposalIfaceCid
-      confirmations = [confResult1.confirmationCid, confResult2.confirmationCid]
+then_resource_updated : AuthFixture -> MockProtectedResource -> Script Failures
+then_resource_updated _ resource = pure $
+  shouldBe "resource value" "updated via governance" resource.value
 
--- | Member proposer is accepted at confirm time.
--- Sanity check: the existing baseline behavior must keep working with the new check.
-testMemberProposerAcceptedAtConfirm = script do
-  parties <- allocateTestParties
-  rulesCid <- createTestGovernance parties
+then_outsider_sees_its_proposal : AuthFixture -> MockProposal -> Script Failures
+then_outsider_sees_its_proposal _ proposal = pure $
+  shouldBe "proposal label" "OutsiderProposal" proposal.label
 
-  proposalCid <- submit parties.member1 $ createCmd MockProposal with
-    governanceParty = parties.governanceParty
-    proposer = parties.member1
-    label = "MemberProposed"
-    payload = "ok"
+then_outsider_proposal_executed : AuthFixture -> MockActionResult -> Script Failures
+then_outsider_proposal_executed _ result = pure $
+  shouldBe "result label" "OutsiderProposal" result.label <>
+  shouldBe "result payload" "from outsider" result.payload
 
-  let proposalIfaceCid = toInterfaceContractId @GovernableAction proposalCid
+then_member2_confirmation_recorded : AuthFixture -> GovernanceConfirmation -> Script Failures
+then_member2_confirmation_recorded f confirmation = pure $
+  shouldBe "confirmer" f.parties.member2 confirmation.confirmer <>
+  shouldBe "action label" "MemberProposed" confirmation.actionLabel
 
-  _ <- submit (memberContext parties.member2 parties.governanceParty) $
-    exerciseCmd rulesCid GovernanceRules_ConfirmAction with
-      confirmer = parties.member2
-      actionProposalCid = proposalIfaceCid
+then_member1_confirmation_recorded : AuthFixture -> GovernanceConfirmation -> Script Failures
+then_member1_confirmation_recorded f confirmation = pure $
+  shouldBe "confirmer" f.parties.member1 confirmation.confirmer <>
+  shouldBe "action label" "AdditionalProposerProposed" confirmation.actionLabel
 
-  pure ()
+then_nothing : AuthFixture -> () -> Script Failures
+then_nothing _ _ = pure []
 
--- | Additional proposer (non-member) is accepted at confirm time.
-testAdditionalProposerAcceptedAtConfirm = script do
-  parties <- allocateTestParties
+-- ============================================================================
+-- Tests
+-- ============================================================================
 
-  -- Build governance rules where `outsider` is an additional proposer.
-  rulesCid <- submit parties.governanceParty $ createCmd GovernanceRules with
-    governanceParty = parties.governanceParty
-    members = getMembers parties
-    threshold = 2
-    actionConfirmationTimeout = minutes 30
-    additionalProposers = Some (Set.singleton parties.outsider)
-    disclosureObservers = None
+test_when_authority_proposal_executed_then_governance_authority_flows = script do
+  run Test with
+    given = given_governance_setup
+    when = when_authority_proposal_executed
+    then_ = then_resource_updated
 
-  proposalCid <- submit parties.outsider $ createCmd MockProposal with
-    governanceParty = parties.governanceParty
-    proposer = parties.outsider
-    label = "AdditionalProposerProposed"
-    payload = "ok"
+test_when_non_member_proposes_then_proposal_created = script do
+  run Test with
+    given = given_governance_setup
+    when = when_non_member_proposes
+    then_ = then_outsider_sees_its_proposal
 
-  let proposalIfaceCid = toInterfaceContractId @GovernableAction proposalCid
+test_when_members_execute_additional_proposer_proposal_then_executed = script do
+  run Test with
+    given = given_outsider_is_additional_proposer
+    when = when_members_execute_additional_proposer_proposal
+    then_ = then_outsider_proposal_executed
 
-  _ <- submit (memberContext parties.member1 parties.governanceParty) $
-    exerciseCmd rulesCid GovernanceRules_ConfirmAction with
-      confirmer = parties.member1
-      actionProposalCid = proposalIfaceCid
+test_when_non_member_confirms_or_executes_then_rejected = script do
+  run Test with
+    given = given_governance_setup
+    when = when_non_member_confirms_and_executes
+    then_ = then_nothing
 
-  pure ()
+test_when_member_confirms_twice_then_execute_rejected = script do
+  run Test with
+    given = given_governance_setup
+    when = when_member_confirms_twice_and_executes
+    then_ = then_nothing
 
--- | Outsider (neither member nor additional proposer) is rejected at confirm time.
--- This is the new authorization boundary that issue #55 establishes.
-testUnauthorizedProposerRejectedAtConfirm = script do
-  parties <- allocateTestParties
-  rulesCid <- createTestGovernance parties
+test_when_member_proposal_confirmed_then_accepted = script do
+  run Test with
+    given = given_governance_setup
+    when = when_member_confirms_member_proposal
+    then_ = then_member2_confirmation_recorded
 
-  -- `outsider` is neither a member nor an additional proposer.
-  proposalCid <- submit parties.outsider $ createCmd MockProposal with
-    governanceParty = parties.governanceParty
-    proposer = parties.outsider
-    label = "UnauthorizedProposed"
-    payload = "should reject"
+test_when_additional_proposer_proposal_confirmed_then_accepted = script do
+  run Test with
+    given = given_outsider_is_additional_proposer
+    when = when_member_confirms_additional_proposer_proposal
+    then_ = then_member1_confirmation_recorded
 
-  let proposalIfaceCid = toInterfaceContractId @GovernableAction proposalCid
-
-  submitMustFail (memberContext parties.member1 parties.governanceParty) $
-    exerciseCmd rulesCid GovernanceRules_ConfirmAction with
-      confirmer = parties.member1
-      actionProposalCid = proposalIfaceCid
+test_when_unauthorized_proposer_proposal_confirmed_then_rejected = script do
+  run Test with
+    given = given_governance_setup
+    when = when_member_confirms_unauthorized_proposal
+    then_ = then_nothing

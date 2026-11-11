@@ -4,112 +4,178 @@
 -- | Tests for GovernanceRules creation and validation.
 module Governance.Test.RulesTest where
 
-import DA.Assert
 import DA.Set as Set hiding (filter)
-import DA.Time (minutes, seconds)
+import DA.Time (RelTime, minutes, seconds)
 import Daml.Script
 
 import Governance.Rules
 import Governance.TestUtils
 
--- | Valid governance rules creation.
-testGovernanceRulesCreation = script do
+import TestHarness
+
+-- ============================================================================
+-- Fixtures
+-- ============================================================================
+
+data RulesFixture = RulesFixture
+  with
+    parties : TestParties
+  deriving (Eq, Show)
+
+-- | The contract id the create returned, and the only rules contract the
+-- governance party sees afterwards.
+data CreatedRules = CreatedRules
+  with
+    rulesCid : ContractId GovernanceRules
+    foundCid : ContractId GovernanceRules
+    rules : GovernanceRules
+  deriving (Eq, Show)
+
+rulesWith : RulesFixture -> Set Party -> Int -> RelTime -> GovernanceRules
+rulesWith f members threshold actionConfirmationTimeout = GovernanceRules with
+  governanceParty = f.parties.governanceParty
+  members
+  threshold
+  actionConfirmationTimeout
+  additionalProposers = None
+  disclosureObservers = None
+
+createdAfter : RulesFixture -> ContractId GovernanceRules -> Script CreatedRules
+createdAfter f rulesCid = do
+  [(foundCid, rules)] <- query @GovernanceRules f.parties.governanceParty
+  pure CreatedRules with ..
+
+createRulesFrom : RulesFixture -> GovernanceRules -> Script CreatedRules
+createRulesFrom f rules =
+  submit f.parties.governanceParty (createCmd rules) >>= createdAfter f
+
+-- | Returns how many rules contracts the governance party sees after the
+-- rejected create.
+rejectRulesFrom : RulesFixture -> GovernanceRules -> Script Int
+rejectRulesFrom f rules = do
+  submitMustFail f.parties.governanceParty $ createCmd rules
+  length <$> query @GovernanceRules f.parties.governanceParty
+
+-- ============================================================================
+-- Given
+-- ============================================================================
+
+given_test_parties : Script RulesFixture
+given_test_parties = do
   parties <- allocateTestParties
+  pure RulesFixture with ..
 
-  rulesCid <- createTestGovernance parties
+-- ============================================================================
+-- When
+-- ============================================================================
 
-  [(foundCid, rules)] <- query @GovernanceRules parties.governanceParty
-  foundCid === rulesCid
-  rules.members === getMembers parties
-  rules.threshold === 2
-  rules.actionConfirmationTimeout === minutes 30
+when_rules_created_with_standard_config : RulesFixture -> Script CreatedRules
+when_rules_created_with_standard_config f =
+  createTestGovernance f.parties >>= createdAfter f
 
--- | Reject creation with empty members.
-testRejectEmptyMembers = script do
-  parties <- allocateTestParties
-
-  submitMustFail parties.governanceParty $ createCmd GovernanceRules with
-    governanceParty = parties.governanceParty
-    members = Set.empty
-    threshold = 2
-    actionConfirmationTimeout = minutes 30
-    additionalProposers = None
-    disclosureObservers = None
-
--- | Governance with different timeout and threshold values.
-testCustomConfiguration = script do
-  parties <- allocateTestParties
-
-  _rulesCid <- submit parties.governanceParty $ createCmd GovernanceRules with
-    governanceParty = parties.governanceParty
-    members = getMembers parties
-    threshold = 3
-    actionConfirmationTimeout = minutes 60
-    additionalProposers = None
-    disclosureObservers = None
-
-  [(_, rules)] <- query @GovernanceRules parties.governanceParty
-  rules.threshold === 3
-  rules.actionConfirmationTimeout === minutes 60
-
--- | Reject creation with threshold of 0.
-testRejectZeroThresholdOnCreate = script do
-  parties <- allocateTestParties
-
-  submitMustFail parties.governanceParty $ createCmd GovernanceRules with
-    governanceParty = parties.governanceParty
-    members = getMembers parties
-    threshold = 0
-    actionConfirmationTimeout = minutes 30
-    additionalProposers = None
-    disclosureObservers = None
-
--- | Reject creation with a negative threshold.
-testRejectNegativeThresholdOnCreate = script do
-  parties <- allocateTestParties
-
-  submitMustFail parties.governanceParty $ createCmd GovernanceRules with
-    governanceParty = parties.governanceParty
-    members = getMembers parties
-    threshold = -1
-    actionConfirmationTimeout = minutes 30
-    additionalProposers = None
-    disclosureObservers = None
-
--- | Reject creation with threshold greater than member count.
-testRejectThresholdExceedingMembersOnCreate = script do
-  parties <- allocateTestParties
-
-  submitMustFail parties.governanceParty $ createCmd GovernanceRules with
-    governanceParty = parties.governanceParty
-    members = getMembers parties
-    threshold = 4
-    actionConfirmationTimeout = minutes 30
-    additionalProposers = None
-    disclosureObservers = None
-
--- | Reject creation with actionConfirmationTimeout shorter than 10 seconds.
-testRejectShortTimeoutOnCreate = script do
-  parties <- allocateTestParties
-
-  submitMustFail parties.governanceParty $ createCmd GovernanceRules with
-    governanceParty = parties.governanceParty
-    members = getMembers parties
-    threshold = 2
-    actionConfirmationTimeout = seconds 5
-    additionalProposers = None
-    disclosureObservers = None
+when_rules_created_with_threshold_3_and_60_minute_timeout : RulesFixture -> Script CreatedRules
+when_rules_created_with_threshold_3_and_60_minute_timeout f =
+  createRulesFrom f (rulesWith f (getMembers f.parties) 3 (minutes 60))
 
 -- | Threshold of exactly 1 with a single member is valid (boundary).
-testAllowMinimumThresholdOnCreate = script do
-  parties <- allocateTestParties
+when_rules_created_with_one_member_and_threshold_1 : RulesFixture -> Script CreatedRules
+when_rules_created_with_one_member_and_threshold_1 f =
+  createRulesFrom f (rulesWith f (Set.fromList [f.parties.member1]) 1 (seconds 10))
 
-  _rulesCid <- submit parties.governanceParty $ createCmd GovernanceRules with
-    governanceParty = parties.governanceParty
-    members = Set.fromList [parties.member1]
-    threshold = 1
-    actionConfirmationTimeout = seconds 10
-    additionalProposers = None
-    disclosureObservers = None
-  pure ()
+when_rules_created_with_no_members : RulesFixture -> Script Int
+when_rules_created_with_no_members f =
+  rejectRulesFrom f (rulesWith f Set.empty 2 (minutes 30))
 
+when_rules_created_with_threshold_0 : RulesFixture -> Script Int
+when_rules_created_with_threshold_0 f =
+  rejectRulesFrom f (rulesWith f (getMembers f.parties) 0 (minutes 30))
+
+when_rules_created_with_negative_threshold : RulesFixture -> Script Int
+when_rules_created_with_negative_threshold f =
+  rejectRulesFrom f (rulesWith f (getMembers f.parties) (-1) (minutes 30))
+
+when_rules_created_with_threshold_above_member_count : RulesFixture -> Script Int
+when_rules_created_with_threshold_above_member_count f =
+  rejectRulesFrom f (rulesWith f (getMembers f.parties) 4 (minutes 30))
+
+-- | actionConfirmationTimeout shorter than 10 seconds.
+when_rules_created_with_5_second_timeout : RulesFixture -> Script Int
+when_rules_created_with_5_second_timeout f =
+  rejectRulesFrom f (rulesWith f (getMembers f.parties) 2 (seconds 5))
+
+-- ============================================================================
+-- Then
+-- ============================================================================
+
+then_rules_have_standard_config : RulesFixture -> CreatedRules -> Script Failures
+then_rules_have_standard_config f c = pure $
+  shouldBe "found contract" c.rulesCid c.foundCid <>
+  shouldBe "members" (getMembers f.parties) c.rules.members <>
+  shouldBe "threshold" 2 c.rules.threshold <>
+  shouldBe "timeout" (minutes 30) c.rules.actionConfirmationTimeout
+
+then_rules_have_threshold_3_and_60_minute_timeout : RulesFixture -> CreatedRules -> Script Failures
+then_rules_have_threshold_3_and_60_minute_timeout _ c = pure $
+  shouldBe "threshold" 3 c.rules.threshold <>
+  shouldBe "timeout" (minutes 60) c.rules.actionConfirmationTimeout
+
+then_rules_have_one_member_and_threshold_1 : RulesFixture -> CreatedRules -> Script Failures
+then_rules_have_one_member_and_threshold_1 f c = pure $
+  shouldBe "members" (Set.fromList [f.parties.member1]) c.rules.members <>
+  shouldBe "threshold" 1 c.rules.threshold
+
+then_no_rules_created : RulesFixture -> Int -> Script Failures
+then_no_rules_created _ rulesCount = pure $
+  shouldBe "rules contracts" 0 rulesCount
+
+-- ============================================================================
+-- Tests
+-- ============================================================================
+
+test_when_rules_created_then_fields_match = script do
+  run Test with
+    given = given_test_parties
+    when = when_rules_created_with_standard_config
+    then_ = then_rules_have_standard_config
+
+test_when_rules_created_with_custom_config_then_fields_match = script do
+  run Test with
+    given = given_test_parties
+    when = when_rules_created_with_threshold_3_and_60_minute_timeout
+    then_ = then_rules_have_threshold_3_and_60_minute_timeout
+
+test_when_rules_created_with_minimum_threshold_then_accepted = script do
+  run Test with
+    given = given_test_parties
+    when = when_rules_created_with_one_member_and_threshold_1
+    then_ = then_rules_have_one_member_and_threshold_1
+
+test_when_rules_created_with_no_members_then_rejected = script do
+  run Test with
+    given = given_test_parties
+    when = when_rules_created_with_no_members
+    then_ = then_no_rules_created
+
+test_when_rules_created_with_zero_threshold_then_rejected = script do
+  run Test with
+    given = given_test_parties
+    when = when_rules_created_with_threshold_0
+    then_ = then_no_rules_created
+
+test_when_rules_created_with_negative_threshold_then_rejected = script do
+  run Test with
+    given = given_test_parties
+    when = when_rules_created_with_negative_threshold
+    then_ = then_no_rules_created
+
+test_when_rules_created_with_threshold_above_member_count_then_rejected = script do
+  run Test with
+    given = given_test_parties
+    when = when_rules_created_with_threshold_above_member_count
+    then_ = then_no_rules_created
+
+test_when_rules_created_with_short_timeout_then_rejected = script do
+  run Test with
+    given = given_test_parties
+    when = when_rules_created_with_5_second_timeout
+    then_ = then_no_rules_created
