@@ -214,6 +214,12 @@ pub fn serialize_reward_beneficiary(b: &RewardBeneficiary) -> Value {
 // Shared by `catalog::action::ActionType::from_cbtc_proto` and any
 // integrator decoding these payload shapes out of a custom `Value`.
 
+/// Deserialize a `Claim` record (`subject`, `property` and `value`).
+///
+/// # Errors
+///
+/// Returns [`Error::Decode`] when `value` is not a record, or when one of
+/// the three fields is missing or is not a `Text`.
 pub fn deserialize_claim(value: &Value) -> Result<Claim, Error> {
     let record = extract_record(value)?;
     Ok(Claim {
@@ -224,6 +230,11 @@ pub fn deserialize_claim(value: &Value) -> Result<Claim, Error> {
 }
 
 /// Deserialize RelTime (record with microseconds field) to i64
+///
+/// # Errors
+///
+/// Returns [`Error::Decode`] when `value` is not a record, or when its
+/// `microseconds` field is missing or is not an `Int64`.
 pub fn deserialize_reltime(value: &Value) -> Result<i64, Error> {
     let record = extract_record(value)?;
     extract_int64(get_field(record, "microseconds")?)

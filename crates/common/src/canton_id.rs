@@ -23,6 +23,11 @@ impl Namespace {
     }
 
     /// Parse a Namespace from a hex string
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when `hex_str` is not valid hex, or when it does not
+    /// decode to exactly [`NAMESPACE_LENGTH`] bytes.
     pub fn from_hex(hex_str: &str) -> Result<Self> {
         let bytes = hex::decode(hex_str)?;
         if bytes.len() != NAMESPACE_LENGTH {
@@ -204,6 +209,11 @@ impl CantonId {
     ///
     /// Expected format: `prefix::hex_encoded_namespace`
     /// Example: `participant::1220c4010d6883f367...`
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when `s` does not split on `::` into exactly two parts,
+    /// or when the second part is not a valid [`Namespace`] hex string.
     pub fn parse(s: &str) -> Result<Self> {
         let parts: Vec<&str> = s.split("::").collect();
         if parts.len() != 2 {
@@ -221,6 +231,11 @@ impl CantonId {
     }
 
     /// Parse a Canton ID from file content (strips "PAR::" prefix if present)
+    ///
+    /// # Errors
+    ///
+    /// Returns the errors of [`Self::parse`] for the trimmed content without
+    /// its `PAR::` prefix.
     pub fn parse_from_file(content: &str) -> Result<Self> {
         let trimmed = content.trim();
         let id_str = match trimmed.strip_prefix("PAR::") {

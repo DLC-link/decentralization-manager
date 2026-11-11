@@ -108,6 +108,12 @@ impl ActionType {
     ///
     /// Maps the self-management `ActionType` variants to the governance-core
     /// `GovernanceSelfAction` enum (different field names).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Encode`] for an action that has no
+    /// `GovernanceSelfAction` form, that is one for which
+    /// [`ActionType::is_governance_self_action`] is false.
     pub fn to_self_proto(&self) -> Result<Value, Error> {
         match self {
             ActionType::GovernanceAddMember {
@@ -194,6 +200,12 @@ impl ActionType {
     /// - GovernanceAction(Governance_AddMemberAndSetThreshold {...})
     /// - UtilityOnboardingAction(UtilityOnboarding_CreateProviderServiceRequest {...})
     /// - DevNetFeatureAppAction({...}) - direct record
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Decode`] when `value` or its nested action is not a
+    /// variant or has no inner value, when a constructor is unknown, or when a
+    /// field is missing or has the wrong type.
     pub fn from_cbtc_proto(value: &Value) -> Result<Self, Error> {
         let variant = as_variant(value)
             .ok_or_else(|| Error::decode("Expected Variant value for action".to_string()))?;
@@ -223,6 +235,12 @@ impl ActionType {
     }
 
     /// Deserialize a `GovernanceSelfAction` Daml variant to an `ActionType`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Decode`] when `value` is not a variant, has no inner
+    /// value or no inner record, when the constructor is unknown, or when a
+    /// field is missing or has the wrong type.
     pub fn from_self_proto(value: &Value) -> Result<Self, Error> {
         let variant = as_variant(value).ok_or_else(|| {
             Error::decode("Expected Variant value for GovernanceSelfAction".to_string())
@@ -324,6 +342,11 @@ impl ActionType {
     /// timeouts) before they reach Canton's Daml checks. Canton rejects bad
     /// values too, but here we surface a clear 400 rather than a generic
     /// submission error after the proposal contract is already on the wire.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Validation`] when a threshold is below 1, when a timeout
+    /// is below 10 seconds, or when a cancel action has a blank `proposal_cid`.
     pub fn validate(&self) -> Result<(), Error> {
         match self {
             ActionType::GovernanceAddMember { new_threshold, .. }

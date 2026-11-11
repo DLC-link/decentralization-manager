@@ -139,6 +139,13 @@ pub fn verify_prepared_submission(response: &PrepareSubmissionResponse) -> Resul
 /// Hash an intended create argument before preparing a ledger transaction.
 /// Normalizes optional record labels/type IDs and map ordering before using
 /// the transaction value encoder, so ledger annotations cannot change the commitment.
+///
+/// # Errors
+///
+/// Errors if the value nests more than 100 levels deep, if a record field,
+/// variant, map key or map value is missing, or if a map holds a duplicate
+/// key. Also errors if a value has no variant set, if a contract id is not
+/// hex, or if a length does not fit the int32 the encoding uses.
 pub fn hash_value(value: &canton_proto_rs::com::daml::ledger::api::v2::Value) -> Result<String> {
     let mut value = value.clone();
     normalize_intent_value(&mut value, 0)?;
