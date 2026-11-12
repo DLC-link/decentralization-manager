@@ -2359,7 +2359,7 @@ async fn send_change_threshold_invites(
 // ============================================================================
 
 /// Start a rotate-key workflow: replace this node's Daml signing key for a
-/// decentralized party with a new key from its vault.
+/// decentralized party with a new key.
 ///
 /// The vault must keep its keys in KMS, unless this node sets
 /// `DECPM_ALLOW_SOFTWARE_PARTY_KEYS` or runs in insecure mode. The members

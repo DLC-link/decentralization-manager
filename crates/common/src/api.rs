@@ -344,7 +344,7 @@ pub struct ChangeThresholdRequest {
 }
 
 /// Request to replace this node's Daml signing key for a decentralized party
-/// with a new key from its vault. The members and thresholds stay the same.
+/// with a new key. The members and thresholds stay the same.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(deny_unknown_fields)]

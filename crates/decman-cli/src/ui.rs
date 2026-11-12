@@ -2386,10 +2386,10 @@ fn rotate_key_popup(frame: &mut Frame, area: Rect, form: &RotateKeyForm) {
             Span::raw(form.party_name.clone()),
         ]),
         Line::default(),
-        dim("This node gets a new Daml signing key from its vault.".to_owned()),
+        dim("This node gets a new Daml signing key.".to_owned()),
         dim("The participant must keep its keys in KMS, or allow software keys.".to_owned()),
         dim(signers),
-        dim("The old key stays in the vault.".to_owned()),
+        dim("The old key is not deleted.".to_owned()),
     ];
 
     let width = 64.min(area.width.saturating_sub(4));

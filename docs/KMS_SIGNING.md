@@ -21,36 +21,45 @@ the KMS `Sign` API.
 - A vault that only wraps its software keys with a KMS key does not count.
   Those keys still need an export to sign.
 - Parties created before this rule keep their software keys. decman signs with
-  its stored copies, as the section on nodes without KMS explains. To move
-  such a party's key into KMS, see [Rotating a Daml key](#rotating-a-daml-key).
+  its stored copies, as [Signing on a node without KMS](#signing-on-a-node-without-kms)
+  explains. To move such a party's key into KMS, see
+  [Rotating a Daml key](#rotating-a-daml-key).
 - decman logs at boot whether its participant keeps its keys in KMS, and which
   rule applies.
 
 ### Participants without KMS
 
 A participant that has not moved to KMS yet can still hold new party keys.
-Set `DECPM_ALLOW_SOFTWARE_PARTY_KEYS=true` on its decman. decman then keeps a
-copy of each new Daml key in its key store:
+Set `DECPM_ALLOW_SOFTWARE_PARTY_KEYS=true` on its decman. decman then
+generates each new party Daml key itself, and Canton's vault never holds it:
 
 1. Before it creates a key, decman checks that its key store is on. It
    refuses the run otherwise.
-2. After it creates the Daml key, decman exports it at once. If Canton refuses
-   the export, decman stops the run before the key joins the party.
-3. decman stores the copy as soon as it knows the party. Add-party and
-   rotate-key know the party from the start. Onboarding learns it just before
-   the members sign the party's `PartyToParticipant` proposal. A member whose
-   copy fails refuses to sign, so the party does not come into force.
+2. decman generates an Ed25519 key and stores it encrypted in its key store,
+   in the `generated_party_keys` table. The key's name follows the vault's
+   naming of party keys, so a retried run finds the same key.
+3. Canton requires each new party key to sign the topology change that adds
+   it. The vault cannot sign with a key it does not hold, so decman adds that
+   signature itself.
+4. decman files the key under the party, so deploys sign with it. Add-party
+   and rotate-key know the party from the start. Onboarding learns it just
+   before the members sign the party's `PartyToParticipant` proposal. A member
+   that cannot file its key refuses to sign, so the party does not come into
+   force.
 
-On Splice 0.9, Canton always exports, so this works without other settings.
-On Splice 0.10, the export needs key download until the party is created.
-Turn it off again afterwards, as the last section explains. If an onboarding
-fails because Canton refused the export, turn on key download and retry the
-run from its coordinator.
+Canton never exports these keys, so they need no key download on Splice 0.10.
+The namespace key stays in the participant's vault, because the participant
+signs topology with it inside Canton.
 
-Insecure mode (`DECPM_INSECURE`, devnet only) also allows software keys. It
-only logs a warning and makes no copy, so a party created there on Splice 0.10
+On a participant that already uses KMS, the setting changes nothing: Canton
+creates the Daml key in KMS. A software key that such a vault finds by name
+predates the move to KMS, and decman refuses it, because it would need an
+export to sign.
+
+Insecure mode (`DECPM_INSECURE`, devnet only) lets the vault create a software
+key instead. It only logs a warning, so a party created there on Splice 0.10
 needs key download for its first deploy. A node that sets both settings
-follows the opt-out and keeps a copy.
+follows the opt-out, so decman generates the key.
 
 ## Background
 
@@ -140,8 +149,8 @@ that account. Signatures are still verified against the registered public key.
 | `Invalid kms_key_id` | Vault metadata contains an ARN, alias, or malformed ID. Use the bare ID of the participant's key and credentials for its account. |
 | `failed local verification against the registered public key` | The KMS key does not match the registered public key. Check that the `kms_key_id` belongs to this party's Daml key. |
 | Rotation fails at GenerateKey with `DecMan cannot sign with the new KMS key` | decman's role lacks `kms:Sign` on the new key. Grant it and start the rotation again, as [the KMS grant for the new key](#the-kms-grant-for-the-new-key) explains. |
-| Run fails with `Canton refused to export the new Daml key` | The node allows software keys, but Canton refuses exports. Turn on key download while the keys are created, or [move the participant to KMS](#moving-a-participant-to-kms). |
-| Onboarding fails with `Canton refused to export this node's Daml key` | The node allows software keys, but Canton refused the copy before the member signed. Turn on key download, then retry the run from its coordinator. |
+| Run fails with `The vault holds the software key ... from before this participant moved to KMS` | The participant uses KMS, but its vault still holds a software key under the new key's name. Delete that key from the vault, then retry. |
+| Onboarding fails with `DecMan cannot file this node's new Daml key under the party` | The member has no record of its key for the party, or its key store does not decrypt. Check `DECPM_KEY_STORE_KEY_FILE`, then retry the run from its coordinator. |
 | A peer refuses a rotation: `has ... on record as ...'s Daml key` | The coordinator's last rotation failed after it was submitted, and this peer did not record the new key. Retry that run. Do not start a new one. |
 | A peer refuses a rotation: `has no Daml key on record for ...` | The peer's party cache lacks a member's key. Refresh `/decentralized-parties` on that peer and retry. |
 | Workflow fails at export with `ExportKeyPair` | The key carries no `kms_key_id`, so decman used the vault-export path. Expected on JCE nodes; on a KMS node this means the key metadata is inconsistent. |
@@ -149,7 +158,7 @@ that account. Signatures are still verified against the registered public key.
 ## Rotating a Daml key
 
 The rotate-key workflow replaces one member's Daml key for a party with a new
-key from that member's vault. The members, the owners and both thresholds stay
+key. The members, the owners and both thresholds stay
 the same. Use it to replace a key you no longer trust. It also moves a key
 into KMS, when the participant kept its participant id through its move to
 KMS.
@@ -158,8 +167,9 @@ KMS.
    Key**. `decman-cli parties rotate-key` and `POST /rotate-key` do the same.
 2. Every other member accepts the invitation.
 3. decman creates the new key and checks that it can sign with it. On a KMS
-   node, it signs a fixed test message through KMS. On a node without KMS, it
-   copies the key into its key store.
+   node, the vault creates the key, and decman signs a fixed test message
+   through KMS. On a node with the opt-out, decman generates the key in its
+   key store and signs the proposal with it.
 4. Each other member checks the proposal before it signs. The proposal must
    keep the host entries and both thresholds in force, and swap only the
    named key for one new key. The signing threshold stays as it is, even
@@ -229,7 +239,8 @@ still create and join parties.
   KMS error until a dedicated backend exists.
 - Parties created before this feature hold Ed25519 vault keys on JCE nodes.
   decman copies those keys into its own key store, as the next section
-  explains.
+  explains. Keys created under the opt-out never sit in the vault, so they
+  need no copy.
 
 ## Signing on a node without KMS
 
@@ -274,6 +285,11 @@ copy of each key.
   default, so keep the encryption key stable and keep a copy of it. When it
   refuses, the copy task logs an error that says to restore the previous key.
 - decman never deletes a key from the vault.
+- A key that decman generated has no copy in the vault. Its only copy is the
+  `generated_party_keys` row, and only the encryption key opens it. Back up
+  decman's database and keep the encryption key safe. A member that loses
+  either can no longer sign for the party. The other members must then kick
+  it and add it again with add-party.
 
 ### Copying existing keys
 
@@ -303,6 +319,7 @@ Two cases need it:
   restart again.
 - **A party onboarded in insecure mode on a Splice 0.10 node.** The party's
   Daml key comes from the participant's software vault, so its first deploy
-  needs the flag. Outside insecure mode, decman refuses to create such a key,
-  as [New party keys require KMS](#new-party-keys-require-kms) explains.
+  needs the flag. Outside insecure mode, decman never puts a new party key
+  there, as [New party keys require KMS](#new-party-keys-require-kms)
+  explains.
 
