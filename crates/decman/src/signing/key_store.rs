@@ -286,6 +286,7 @@ impl KeyStore {
     /// Errors when the random source fails or the write fails.
     pub async fn generate(&self, name: &str) -> Result<(SigningPublicKey, bool)> {
         if let Some(public_key) = self.generated_public_key(name).await? {
+            self.require_readable(name, &public_key).await?;
             return Ok((public_key, true));
         }
         let seed: Zeroizing<[u8; 32]> = Zeroizing::new(
@@ -326,7 +327,20 @@ impl KeyStore {
         let public_key = self.generated_public_key(name).await?.ok_or_else(|| {
             anyhow::anyhow!("The generated key {name} vanished while it was being created")
         })?;
+        self.require_readable(name, &public_key).await?;
         Ok((public_key, true))
+    }
+
+    /// Refuse to reuse a generated key that this store cannot sign with.
+    async fn require_readable(&self, name: &str, public_key: &SigningPublicKey) -> Result {
+        match self.generated_seed(&compute_fingerprint(public_key)).await {
+            Ok(Some(_)) => Ok(()),
+            Ok(None) => anyhow::bail!("The generated key {name} has no row for its fingerprint"),
+            Err(e) => anyhow::bail!(
+                "DecMan generated the key {name} earlier but cannot use it: {e:#}. Restore the \
+                 previous key-store encryption key, then retry"
+            ),
+        }
     }
 
     async fn generated_public_key(&self, name: &str) -> Result<Option<SigningPublicKey>> {
@@ -368,16 +382,67 @@ impl KeyStore {
         };
         let public_key = SigningPublicKey::decode(public_key.as_slice())?;
         let aad = generated_associated_data(&name, fingerprint);
-        let seed = std::iter::once(&self.key)
-            .chain(self.derived.as_ref())
-            .find_map(|key| decrypt_seed(key, &nonce, &ciphertext, &aad).ok())
-            .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "The generated key {fingerprint} ({name}) does not decrypt. The key-store \
-                     encryption key changed, or the row was altered"
-                )
-            })?;
+        let (seed, under_derived) = match decrypt_seed(&self.key, &nonce, &ciphertext, &aad) {
+            Ok(seed) => (seed, false),
+            Err(_) => {
+                let seed = self
+                    .derived
+                    .as_ref()
+                    .and_then(|derived| decrypt_seed(derived, &nonce, &ciphertext, &aad).ok())
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "The generated key {fingerprint} ({name}) does not decrypt. The \
+                             key-store encryption key changed, or the row was altered"
+                        )
+                    })?;
+                (seed, true)
+            }
+        };
+        // The public key is not covered by the associated data, so check it.
+        anyhow::ensure!(
+            ed25519_signing_public_key(&seed) == public_key
+                && compute_fingerprint(&public_key) == *fingerprint,
+            "The generated key {fingerprint} ({name}) does not match its stored public key. The \
+             row was altered"
+        );
+        if under_derived {
+            match self.reencrypt_generated(&name, fingerprint, &seed).await {
+                Ok(()) => tracing::info!(
+                    "Re-encrypted DecMan's generated key {fingerprint} under the key file"
+                ),
+                Err(e) => tracing::warn!(
+                    "Could not re-encrypt DecMan's generated key {fingerprint} under the key \
+                     file: {e:#}"
+                ),
+            }
+        }
         Ok(Some((public_key, seed)))
+    }
+
+    async fn reencrypt_generated(
+        &self,
+        name: &str,
+        fingerprint: &Fingerprint,
+        seed: &[u8; 32],
+    ) -> Result {
+        let nonce: [u8; 12] = Generate::try_generate()
+            .map_err(|e| anyhow::anyhow!("nonce generation failed: {e}"))?;
+        let ciphertext = cipher(&self.key)
+            .encrypt(
+                &nonce.into(),
+                Payload {
+                    msg: seed,
+                    aad: &generated_associated_data(name, fingerprint),
+                },
+            )
+            .map_err(|e| anyhow::anyhow!("encryption failed: {e}"))?;
+        sqlx::query("UPDATE generated_party_keys SET nonce = ?2, ciphertext = ?3 WHERE name = ?1")
+            .bind(name)
+            .bind(nonce.as_slice())
+            .bind(ciphertext)
+            .execute(&self.db)
+            .await?;
+        Ok(())
     }
 
     /// The name and fingerprint of every key DecMan generated.
@@ -425,12 +490,18 @@ pub fn topology_transaction_hash(transaction: &[u8]) -> Vec<u8> {
 ///
 /// # Errors
 ///
-/// Errors when the signature does not verify against `public_key`.
+/// Errors when `seed` is not the private half of `public_key`, or the
+/// signature does not verify.
 pub fn sign_topology_transaction(
     seed: &[u8; 32],
     public_key: &SigningPublicKey,
     transaction: &[u8],
 ) -> Result<Signature> {
+    anyhow::ensure!(
+        ed25519_public_key(public_key)? == SigningKey::from_bytes(seed).verifying_key().to_bytes(),
+        "The seed does not belong to the key {fingerprint}",
+        fingerprint = compute_fingerprint(public_key)
+    );
     let key = SigningKeyContext {
         fingerprint: compute_fingerprint(public_key),
         public_key: public_key.clone(),
@@ -473,11 +544,8 @@ fn open_row(
                 )
             })?,
     );
-    let seed: [u8; 32] = plaintext
-        .as_slice()
-        .try_into()
-        .map_err(|_| anyhow::anyhow!("Stored key {fingerprint} is not a 32-byte seed"))?;
-    Ok(Zeroizing::new(seed))
+    copy_seed(&plaintext)
+        .ok_or_else(|| anyhow::anyhow!("Stored key {fingerprint} is not a 32-byte seed"))
 }
 
 fn associated_data(party: &CantonId, fingerprint: &Fingerprint) -> Vec<u8> {
@@ -508,11 +576,18 @@ fn decrypt_seed(
             )
             .map_err(|_| anyhow::anyhow!("decryption failed"))?,
     );
-    let seed: [u8; 32] = plaintext
-        .as_slice()
-        .try_into()
-        .map_err(|_| anyhow::anyhow!("not a 32-byte seed"))?;
-    Ok(Zeroizing::new(seed))
+    copy_seed(&plaintext).ok_or_else(|| anyhow::anyhow!("not a 32-byte seed"))
+}
+
+/// Copy a decrypted seed into a buffer that is wiped on drop, without an
+/// intermediate copy on the stack.
+fn copy_seed(plaintext: &[u8]) -> Option<Zeroizing<[u8; 32]>> {
+    let mut seed = Zeroizing::new([0u8; 32]);
+    if plaintext.len() != seed.len() {
+        return None;
+    }
+    seed.copy_from_slice(plaintext);
+    Some(seed)
 }
 
 /// Read an encryption key file: 64 hex characters, or the base64 of 32
@@ -716,6 +791,66 @@ mod tests {
         };
 
         assert!(error.contains("does not decrypt"), "{error}");
+        Ok(())
+    }
+
+    /// The public key column is outside the associated data, so a changed
+    /// column must not pass as the seed's key.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_changed_public_key_is_refused(db: SqlitePool) -> Result {
+        let store = store(db.clone(), 1);
+        let (public_key, _) = store.generate("p-daml-transactions").await?;
+        let other = ed25519_signing_public_key(&[3u8; 32]);
+        sqlx::query("UPDATE generated_party_keys SET public_key = ?1")
+            .bind(other.encode_to_vec())
+            .execute(&db)
+            .await?;
+
+        let error = match store
+            .generated_seed(&utils::compute_fingerprint(&public_key))
+            .await
+        {
+            Ok(found) => anyhow::bail!("accepted a changed key: {}", found.is_some()),
+            Err(e) => e.to_string(),
+        };
+
+        assert!(
+            error.contains("does not match its stored public key"),
+            "{error}"
+        );
+        Ok(())
+    }
+
+    /// A name whose key no longer decrypts is not reused, because DecMan
+    /// could not sign with it.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn an_unreadable_key_is_not_reused(db: SqlitePool) -> Result {
+        store(db.clone(), 1).generate("p-daml-transactions").await?;
+
+        let error = match store(db, 2).generate("p-daml-transactions").await {
+            Ok((key, _)) => anyhow::bail!("reused {}", utils::compute_fingerprint(&key)),
+            Err(e) => e.to_string(),
+        };
+
+        assert!(error.contains("cannot use it"), "{error}");
+        Ok(())
+    }
+
+    /// A key generated under the derived key moves to the key file's key on
+    /// its first read, so the derived key can later go.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_generated_key_moves_to_the_key_file(db: SqlitePool) -> Result {
+        let (public_key, _) = store(db.clone(), 2).generate("p-daml-transactions").await?;
+        let fingerprint = utils::compute_fingerprint(&public_key);
+        let with_file = KeyStore {
+            db: db.clone(),
+            key: Zeroizing::new([1; 32]),
+            derived: Some(Zeroizing::new([2; 32])),
+        };
+
+        assert!(with_file.generated_seed(&fingerprint).await?.is_some());
+
+        assert!(store(db, 1).generated_seed(&fingerprint).await?.is_some());
         Ok(())
     }
 

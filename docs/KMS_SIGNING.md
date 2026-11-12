@@ -290,6 +290,11 @@ copy of each key.
   decman's database and keep the encryption key safe. A member that loses
   either can no longer sign for the party. The other members must then kick
   it and add it again with add-party.
+- decman finds a generated key again by its name, as the vault does. A member
+  that is kicked and added again on the same node therefore gets the same
+  key back. After a suspected compromise, rotate the key instead. decman
+  refuses to reuse a key that no longer decrypts, and asks for the previous
+  encryption key.
 
 ### Copying existing keys
 

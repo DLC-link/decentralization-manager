@@ -26,7 +26,7 @@ use canton_proto_rs::com::digitalasset::canton::{
         },
         v30::{SigningKeyUsage, SigningPublicKey},
     },
-    protocol::v30::SignedTopologyTransaction,
+    protocol::v30::{SignedTopologyTransaction, topology_mapping},
 };
 use sqlx::SqlitePool;
 use tonic::transport::Channel;
@@ -45,8 +45,10 @@ use crate::{
         onboarding::steps::{
             generate_keys::get_or_create_signing_key, proposals::create::decode_keys_payload,
         },
+        signing_keys::vault_holds,
         storage::{WorkflowStorage, identity_kinds},
         topology::dedupe_signatures,
+        topology_version::decode_transaction,
     },
 };
 
@@ -223,9 +225,6 @@ pub async fn file_new_party_key(config: &NodeConfig, db: &SqlitePool, party: &Ca
     if software_keys(config) != SoftwareKeys::Stored {
         return Ok(());
     }
-    let Some(store) = KeyStore::open(config, db.clone()).await? else {
-        return Ok(());
-    };
     let self_id = config.participant_id().to_string();
     let payload = db
         .read_identity(party, identity_kinds::PEER_PUBLIC_KEYS, &self_id)
@@ -239,6 +238,9 @@ pub async fn file_new_party_key(config: &NodeConfig, db: &SqlitePool, party: &Ca
         );
     };
     let fingerprint = compute_fingerprint(daml_key);
+    let Some(store) = KeyStore::open(config, db.clone()).await? else {
+        return require_vault_holds(config, &fingerprint).await;
+    };
     if store.generated_seed(&fingerprint).await?.is_some() {
         file_under_party(&store, party, &fingerprint).await?;
     }
@@ -253,9 +255,13 @@ pub async fn file_new_party_key(config: &NodeConfig, db: &SqlitePool, party: &Ca
 /// cannot for a key DecMan generated, so DecMan adds the signature here. A
 /// key DecMan did not generate is left to the vault.
 ///
+/// DecMan signs only a `PartyToParticipant` mapping that carries the key, as
+/// a vault signs only where its key is needed.
+///
 /// # Errors
 ///
-/// Errors when the key store fails, or when the signature does not verify.
+/// Errors when the key store fails, when the transaction does not add the
+/// key to a party, or when the signature does not verify.
 pub async fn sign_with_generated_key(
     config: &NodeConfig,
     db: &SqlitePool,
@@ -265,18 +271,53 @@ pub async fn sign_with_generated_key(
     if software_keys(config) != SoftwareKeys::Stored {
         return Ok(false);
     }
+    let fingerprint = compute_fingerprint(key);
     let Some(store) = KeyStore::open(config, db.clone()).await? else {
+        require_vault_holds(config, &fingerprint).await?;
         return Ok(false);
     };
-    let fingerprint = compute_fingerprint(key);
     let Some((public_key, seed)) = store.generated_seed(&fingerprint).await? else {
         return Ok(false);
     };
+    require_adds_key(transaction, &fingerprint)?;
     let signature = sign_topology_transaction(&seed, &public_key, &transaction.transaction)?;
     transaction.signatures.push(signature);
     dedupe_signatures(transaction);
     tracing::info!("Signed the topology transaction with DecMan's key {fingerprint}");
     Ok(true)
+}
+
+/// With the key store off, only a key in the vault can sign. A key DecMan
+/// generated would be skipped, and the run would fail later in Canton.
+async fn require_vault_holds(config: &NodeConfig, fingerprint: &Fingerprint) -> Result {
+    if vault_holds(config, fingerprint).await? {
+        return Ok(());
+    }
+    anyhow::bail!(
+        "{STORE_OFF_HINT}. The Daml key {fingerprint} is not in Canton's vault, so DecMan must \
+         read it from its key store"
+    )
+}
+
+/// Refuse to sign a transaction that does not add `fingerprint` to a party.
+fn require_adds_key(transaction: &SignedTopologyTransaction, fingerprint: &Fingerprint) -> Result {
+    let decoded = decode_transaction(&transaction.transaction)?;
+    let adds = match decoded.mapping.and_then(|mapping| mapping.mapping) {
+        Some(topology_mapping::Mapping::PartyToParticipant(p2p)) => {
+            p2p.party_signing_keys.is_some_and(|keys| {
+                keys.keys
+                    .iter()
+                    .any(|key| compute_fingerprint(key) == *fingerprint)
+            })
+        }
+        _ => false,
+    };
+    anyhow::ensure!(
+        adds,
+        "Refusing to sign a topology transaction that does not carry DecMan's key {fingerprint} \
+         in a PartyToParticipant mapping"
+    );
+    Ok(())
 }
 
 /// Store a generated key under `party`, so the deploy signer finds it.
@@ -651,6 +692,43 @@ mod against_a_vault {
         open_store(config, db).await
     }
 
+    /// A versioned P2P transaction for the party that carries `keys`.
+    fn adding(keys: &[&SigningPublicKey]) -> SignedTopologyTransaction {
+        use canton_proto_rs::com::digitalasset::canton::{
+            crypto::v30::SigningKeysWithThreshold,
+            protocol::v30::{PartyToParticipant, TopologyMapping, TopologyTransaction},
+            version::v1::{UntypedVersionedMessage, untyped_versioned_message},
+        };
+        use prost::Message;
+
+        let transaction = TopologyTransaction {
+            operation: 1,
+            serial: 1,
+            mapping: Some(TopologyMapping {
+                mapping: Some(topology_mapping::Mapping::PartyToParticipant(
+                    PartyToParticipant {
+                        party: PARTY.to_string(),
+                        party_signing_keys: Some(SigningKeysWithThreshold {
+                            keys: keys.iter().map(|key| (*key).clone()).collect(),
+                            threshold: 1,
+                        }),
+                        ..Default::default()
+                    },
+                )),
+            }),
+        };
+        SignedTopologyTransaction {
+            transaction: UntypedVersionedMessage {
+                version: 30,
+                wrapper: Some(untyped_versioned_message::Wrapper::Data(
+                    transaction.encode_to_vec(),
+                )),
+            }
+            .encode_to_vec(),
+            ..Default::default()
+        }
+    }
+
     async fn party_rows(db: &SqlitePool) -> Result<i64> {
         Ok(sqlx::query_scalar("SELECT COUNT(*) FROM party_key_store")
             .fetch_one(db)
@@ -898,10 +976,7 @@ mod against_a_vault {
         )
         .await?
         .public_key;
-        let mut transaction = SignedTopologyTransaction {
-            transaction: b"a serialized topology transaction".to_vec(),
-            ..Default::default()
-        };
+        let mut transaction = adding(&[&key]);
 
         assert!(sign_with_generated_key(&node.config, &db, &mut transaction, &key).await?);
         assert!(sign_with_generated_key(&node.config, &db, &mut transaction, &key).await?);
@@ -919,14 +994,63 @@ mod against_a_vault {
         Ok(())
     }
 
+    /// A coordinator cannot get DecMan's signature on a mapping that does
+    /// not carry DecMan's key.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn refuses_to_sign_a_mapping_without_the_key(db: SqlitePool) -> Result {
+        let fake = FakeAdminApi::start(vec![]).await?;
+        let node = fake.node(SoftwareKeys::Stored, true).await?;
+        let key = new_daml_key(
+            &node.config,
+            &db,
+            &mut vault(&node.config).await?,
+            "p-daml-transactions",
+            None,
+        )
+        .await?
+        .public_key;
+        let other = VaultKey::software("other", 4).public_key;
+        let mut transaction = adding(&[&other]);
+
+        let error =
+            refusal(sign_with_generated_key(&node.config, &db, &mut transaction, &key).await)?;
+
+        assert!(error.contains("does not carry DecMan's key"), "{error}");
+        assert!(transaction.signatures.is_empty());
+        Ok(())
+    }
+
+    /// With the key store off, a key outside the vault cannot be signed with
+    /// or filed. The run stops instead of skipping it.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_key_outside_the_vault_needs_the_key_store(db: SqlitePool) -> Result {
+        let in_vault = VaultKey::kms("p-daml-transactions", 7)?;
+        let fake = FakeAdminApi::start(vec![in_vault.clone()]).await?;
+        let node = fake.node(SoftwareKeys::Stored, false).await?;
+        let elsewhere = VaultKey::software("elsewhere", 8).public_key;
+        let mut transaction = adding(&[&elsewhere]);
+
+        let error = refusal(
+            sign_with_generated_key(&node.config, &db, &mut transaction, &elsewhere).await,
+        )?;
+        assert!(error.contains(STORE_OFF_HINT), "{error}");
+        record_own_key(&node.config, &db, &elsewhere).await?;
+        let error = refusal(file_new_party_key(&node.config, &db, &party()?).await)?;
+        assert!(error.contains(STORE_OFF_HINT), "{error}");
+
+        assert!(
+            !sign_with_generated_key(&node.config, &db, &mut transaction, &in_vault.public_key)
+                .await?
+        );
+        record_own_key(&node.config, &db, &in_vault.public_key).await?;
+        file_new_party_key(&node.config, &db, &party()?).await
+    }
+
     #[sqlx::test(migrator = "MIGRATOR")]
     async fn a_vault_key_is_left_to_the_vault_to_sign(db: SqlitePool) -> Result {
         let vault_key = VaultKey::software("p-daml-transactions", 7);
         let fake = FakeAdminApi::start(vec![vault_key.clone()]).await?;
-        let mut transaction = SignedTopologyTransaction {
-            transaction: b"a serialized topology transaction".to_vec(),
-            ..Default::default()
-        };
+        let mut transaction = adding(&[&vault_key.public_key]);
 
         for rule in [
             SoftwareKeys::Stored,
