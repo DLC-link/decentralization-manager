@@ -1,8 +1,5 @@
 use canton_proto_rs::com::digitalasset::canton::{
-    crypto::{
-        admin::v30::vault_service_client::VaultServiceClient,
-        v30::{SigningKeyUsage, SigningPublicKey},
-    },
+    crypto::{admin::v30::vault_service_client::VaultServiceClient, v30::SigningPublicKey},
     protocol::v30::SignedTopologyTransaction,
     topology::admin::v30::SignTransactionsRequest,
 };
@@ -19,8 +16,7 @@ use crate::{
     utils::{self, compute_fingerprint},
     workflow::{
         onboarding::steps::{
-            generate_keys::{encode_keys_payload, get_or_create_signing_key},
-            proposals::create::decode_keys_payload,
+            generate_keys::encode_keys_payload, proposals::create::decode_keys_payload,
         },
         proposal_store,
         rotate_key::{RotateKeyConfig, config::signing_threshold_in_force},
@@ -32,17 +28,18 @@ use crate::{
 
 const LABEL: &str = "rotate-key";
 
-/// Create the coordinator's new Daml key in its vault.
+/// Create the coordinator's new Daml key.
 ///
-/// The key must live in KMS, unless this node allows software keys (see
-/// [`custody`]). A retry, or a new run that replaces the same key, finds the
-/// key by its name, which depends only on the replaced key.
+/// The key lives in KMS, unless this node allows participants without KMS.
+/// DecMan then generates the key itself (see [`custody`]). A retry, or a new
+/// run that replaces the same key, finds the key by its name, which depends
+/// only on the replaced key.
 ///
 /// # Errors
 ///
-/// Errors when the vault refuses, when the key is not in KMS and this node's
-/// rule refuses software keys, when DecMan cannot sign with a new KMS key or
-/// copy a new software key, or when the vault returns the key being replaced.
+/// Errors when the vault or the key store refuses, when the key is not in
+/// KMS and this node's rule refuses software keys, when DecMan cannot sign
+/// with a new KMS key, or when the key is the one being replaced.
 pub async fn generate_key(
     config: &NodeConfig,
     storage: &SqlitePool,
@@ -53,32 +50,26 @@ pub async fn generate_key(
     custody::require_kms_participant(config, storage, &mut vault_client).await?;
 
     let name = rotate.new_key_name();
-    let (key, existed) =
-        get_or_create_signing_key(&mut vault_client, &name, SigningKeyUsage::Protocol).await?;
+    let new = custody::new_daml_key(
+        config,
+        storage,
+        &mut vault_client,
+        &name,
+        Some(&rotate.decentralized_party_id),
+    )
+    .await?;
+    let key = new.public_key;
     let fingerprint = compute_fingerprint(&key);
     anyhow::ensure!(
         fingerprint != rotate.rotated_key,
-        "The vault returned the key being replaced, {fingerprint}, under the name {name}"
+        "The key under the name {name} is the key being replaced, {fingerprint}"
     );
-    let kms_key_id = custody::require_kms_key(config, &mut vault_client, &fingerprint).await?;
-    match kms_key_id.as_deref() {
-        Some(kms_key_id) => {
-            custody::require_kms_sign_access(&fingerprint, &key, kms_key_id).await?;
-        }
-        None => {
-            custody::secure_software_daml_key(
-                config,
-                storage,
-                &key,
-                None,
-                Some(&rotate.decentralized_party_id),
-            )
-            .await?;
-        }
+    if let Some(kms_key_id) = new.kms_key_id.as_deref() {
+        custody::require_kms_sign_access(&fingerprint, &key, kms_key_id).await?;
     }
     tracing::info!(
         "{verb} Daml key {fingerprint} ({name}) to replace {old} for {party}",
-        verb = if existed { "Reusing" } else { "Created" },
+        verb = if new.existed { "Reusing" } else { "Created" },
         old = rotate.rotated_key,
         party = rotate.decentralized_party_id,
     );
@@ -99,9 +90,10 @@ pub async fn generate_key(
 /// keys still sit in a legacy `PartyToKeyMapping` has its members' keys moved
 /// inline in the same proposal, as change-threshold does.
 ///
-/// The coordinator's participant signs with its namespace key and with the
-/// new key. Canton requires the second signature as proof that the new key's
-/// holder agrees to the key's addition.
+/// The coordinator signs with its namespace key and with the new key. Canton
+/// requires the second signature as proof that the new key's holder agrees to
+/// the key's addition. The vault adds it for a key it holds, and DecMan adds
+/// it for a key it generated.
 ///
 /// # Errors
 ///
@@ -155,7 +147,7 @@ pub async fn create_proposal(
     } else {
         inline
     };
-    let keys = swap_key(&current, &rotate.rotated_key, new_key)?;
+    let keys = swap_key(&current, &rotate.rotated_key, new_key.clone())?;
 
     let p2p = rotate.thresholds().party_to_participant(
         party.to_string(),
@@ -173,9 +165,10 @@ pub async fn create_proposal(
         topology::party_proposal_force_flags(),
     )
     .await?;
-    let proposal = signed
+    let mut proposal = signed
         .p2p
         .ok_or_else(|| anyhow::anyhow!("No rotate-key P2P proposal was signed"))?;
+    custody::sign_with_generated_key(config, storage, &mut proposal, &new_key).await?;
 
     storage
         .write_artifact(
@@ -499,6 +492,8 @@ async fn read_new_key(storage: &SqlitePool, instance_name: &str) -> Result<Signi
 
 #[cfg(test)]
 mod tests {
+    use canton_proto_rs::com::digitalasset::canton::crypto::v30::SigningKeyUsage;
+
     use super::*;
 
     fn key(seed: u8) -> SigningPublicKey {
@@ -612,6 +607,15 @@ mod tests {
             }
         }
 
+        async fn store(
+            node: &crate::signing::fake_admin_api::TestNode,
+            db: &SqlitePool,
+        ) -> Result<KeyStore> {
+            KeyStore::open(&node.config, db.clone())
+                .await?
+                .ok_or_else(|| anyhow::anyhow!("the key store is off"))
+        }
+
         /// The new key's name comes from the key it replaces, so a second run
         /// finds the key the first one made.
         #[sqlx::test(migrator = "MIGRATOR")]
@@ -623,55 +627,49 @@ mod tests {
             let name = format!("party-daml-transactions-rotated-from-{}", old.fingerprint());
 
             generate_key(&node.config, &db, RUN, &rotate).await?;
+            let first = new_key_artifact(&db).await?;
             generate_key(&node.config, &db, RUN, &rotate).await?;
 
-            assert_eq!(fake.generated(), vec![name.clone()]);
-            let new = fake
-                .key_named(&name)
-                .ok_or_else(|| anyhow::anyhow!("no key named {name}"))?;
-            assert_ne!(new.fingerprint(), old.fingerprint());
-            assert_eq!(new_key_artifact(&db).await?, Some(new.public_key.clone()));
+            let generated = store(&node, &db).await?.generated_keys().await?;
+            let [(generated_name, fingerprint)] = generated.as_slice() else {
+                anyhow::bail!("expected one generated key, got {generated:?}");
+            };
+            assert_eq!(generated_name, &name);
+            assert_ne!(fingerprint, &old.fingerprint());
+            let new = new_key_artifact(&db).await?;
+            assert_eq!(new, first);
+            assert_eq!(
+                new.as_ref().map(compute_fingerprint).as_ref(),
+                Some(fingerprint)
+            );
             Ok(())
         }
 
-        /// Under the opt-out the new key is copied for the party at once, so
-        /// DecMan can sign with it after Canton stops exporting keys.
+        /// Under the opt-out, DecMan generates the new key and files it for
+        /// the party at once, so it can sign deploys. Canton never holds the
+        /// key, so key download plays no part.
         #[sqlx::test(migrator = "MIGRATOR")]
-        async fn copies_a_new_software_key_for_the_party(db: SqlitePool) -> Result {
-            let old = old_key()?;
-            let fake = FakeAdminApi::start(vec![old.clone()]).await?;
-            let node = fake.node(SoftwareKeys::Stored, true).await?;
-            let rotate = rotation(&db, &old).await?;
-
-            generate_key(&node.config, &db, RUN, &rotate).await?;
-
-            let new = fake
-                .key_named(&rotate.new_key_name())
-                .ok_or_else(|| anyhow::anyhow!("no new key"))?;
-            assert_eq!(fake.exported(), vec![new.fingerprint()]);
-            let store = KeyStore::open(&node.config, db.clone())
-                .await?
-                .ok_or_else(|| anyhow::anyhow!("the key store is off"))?;
-            let seed = store.get(&party()?, &new.fingerprint()).await?;
-            assert_eq!(seed.map(|seed| *seed), new.seed);
-            Ok(())
-        }
-
-        #[sqlx::test(migrator = "MIGRATOR")]
-        async fn stops_when_canton_refuses_to_export_the_new_key(db: SqlitePool) -> Result {
+        async fn generates_the_new_key_in_decman_with_key_download_off(db: SqlitePool) -> Result {
             let old = old_key()?;
             let fake = FakeAdminApi::start(vec![old.clone()]).await?;
             fake.turn_off_key_download();
             let node = fake.node(SoftwareKeys::Stored, true).await?;
             let rotate = rotation(&db, &old).await?;
 
-            let error = refusal(generate_key(&node.config, &db, RUN, &rotate).await)?;
+            generate_key(&node.config, &db, RUN, &rotate).await?;
 
+            assert!(fake.generated().is_empty());
+            assert!(fake.exported().is_empty());
+            let new = new_key_artifact(&db)
+                .await?
+                .ok_or_else(|| anyhow::anyhow!("no new key"))?;
+            let store = store(&node, &db).await?;
             assert!(
-                error.contains("Canton refused to export the new Daml key"),
-                "{error}"
+                store
+                    .get(&party()?, &compute_fingerprint(&new))
+                    .await?
+                    .is_some()
             );
-            assert_eq!(new_key_artifact(&db).await?, None);
             Ok(())
         }
 
@@ -690,15 +688,20 @@ mod tests {
             Ok(())
         }
 
-        /// A vault that holds a KMS key may still return a software key, such
-        /// as one made before the participant moved to KMS.
+        /// A vault that holds a KMS key may still hold a software key under
+        /// the new key's name, made before the participant moved to KMS.
         #[sqlx::test(migrator = "MIGRATOR")]
         async fn refuses_a_new_key_outside_kms(db: SqlitePool) -> Result {
             let old = old_key()?;
-            let fake =
-                FakeAdminApi::start(vec![old.clone(), VaultKey::kms("participant", 2)?]).await?;
+            let probe = rotation(&db, &old).await?;
+            let fake = FakeAdminApi::start(vec![
+                old.clone(),
+                VaultKey::kms("participant", 2)?,
+                VaultKey::software(&probe.new_key_name(), 3),
+            ])
+            .await?;
             let node = fake.node(SoftwareKeys::Refused, true).await?;
-            let rotate = rotation(&db, &old).await?;
+            let rotate = probe;
 
             let error = refusal(generate_key(&node.config, &db, RUN, &rotate).await)?;
 
@@ -707,7 +710,8 @@ mod tests {
             Ok(())
         }
 
-        /// Insecure mode accepts a software key and keeps no copy of it.
+        /// Insecure mode lets the vault make a software key, and DecMan keeps
+        /// no copy of it.
         #[sqlx::test(migrator = "MIGRATOR")]
         async fn insecure_mode_accepts_a_software_key_without_a_copy(db: SqlitePool) -> Result {
             let old = old_key()?;

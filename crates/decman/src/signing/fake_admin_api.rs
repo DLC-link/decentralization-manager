@@ -184,9 +184,19 @@ impl Vault {
         &mut self,
         request: GenerateSigningKeyRequest,
     ) -> Result<GenerateSigningKeyResponse, Status> {
-        // A new key goes to the software vault, so a test that needs a KMS
-        // key puts one in the vault up front.
-        let key = VaultKey::software(&request.name, self.next_seed);
+        // A participant that holds a KMS key makes new keys in KMS, as a
+        // KMS-backed Canton does. Otherwise the key goes to the software
+        // vault.
+        let on_kms = self
+            .keys
+            .iter()
+            .any(|key| key.kms_key_id.as_deref().is_some_and(|id| !id.is_empty()));
+        let key = if on_kms {
+            VaultKey::kms(&request.name, self.next_seed)
+                .map_err(|e| Status::internal(e.to_string()))?
+        } else {
+            VaultKey::software(&request.name, self.next_seed)
+        };
         self.next_seed = self.next_seed.wrapping_add(1);
         self.generated.push(request.name);
         let public_key = key.public_key.clone();
@@ -278,15 +288,6 @@ impl FakeAdminApi {
     /// The fingerprints of the keys the vault exported, in order.
     pub fn exported(&self) -> Vec<Fingerprint> {
         lock(&self.vault).exported.clone()
-    }
-
-    /// The vault's key named `name`.
-    pub fn key_named(&self, name: &str) -> Option<VaultKey> {
-        lock(&self.vault)
-            .keys
-            .iter()
-            .find(|key| key.name == name)
-            .cloned()
     }
 
     /// A node whose participant is this fake, following `rule` for party keys

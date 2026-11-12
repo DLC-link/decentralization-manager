@@ -20,7 +20,7 @@ use crate::{
     error::Result,
     utils::{self, MULTIHASH_SHA256_PREFIX},
     workflow::{
-        onboarding::OnboardingConfig,
+        onboarding::{OnboardingConfig, steps::generate_keys::own_new_daml_key},
         storage::{WorkflowStorage, artifact_kinds, identity_kinds},
         thresholds::{PartyThresholds, check_confirmation_threshold},
         topology_version::ProposalFormat,
@@ -215,8 +215,8 @@ pub async fn create_proposals(
         "Persisted {count} peer identity records for {party_id}",
         count = key_payloads.len()
     );
-    // Before any topology change, so a refused copy leaves nothing on chain.
-    crate::signing::custody::copy_new_party_key(config, storage, &party_id).await?;
+    // Before any topology change, so a failure leaves nothing on chain.
+    crate::signing::custody::file_new_party_key(config, storage, &party_id).await?;
 
     // Step 9: Create PartyToParticipant mapping
     // PartyToParticipant carries the signing keys (Canton 3.4+); the standalone
@@ -287,9 +287,20 @@ pub async fn create_proposals(
     });
 
     let p2p_response = topology_client.authorize(p2p_request).await?.into_inner();
-    let p2p_transaction = p2p_response
+    let mut p2p_transaction = p2p_response
         .transaction
         .ok_or_else(|| anyhow::anyhow!("No P2P transaction returned"))?;
+    // The vault signed with this node's Daml key if it holds it. A key DecMan
+    // generated needs DecMan's own signature.
+    if let Some(own_key) = own_new_daml_key(config, storage, instance_name).await? {
+        crate::signing::custody::sign_with_generated_key(
+            config,
+            storage,
+            &mut p2p_transaction,
+            &own_key,
+        )
+        .await?;
+    }
 
     // Signing keys ride in the PartyToParticipant mapping above (Canton 3.4+), so there is
     // no separate PartyToKeyMapping transaction — that mapping is deprecated in Canton 3.5.

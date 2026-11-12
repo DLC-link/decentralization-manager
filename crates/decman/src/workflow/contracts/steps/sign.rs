@@ -147,16 +147,17 @@ pub async fn sign_submissions(
     Ok(())
 }
 
-/// This node's Daml signing key for `dec_party_id`, as the vault holds it.
+/// This node's Daml signing key for `dec_party_id`.
 ///
 /// The public half comes from the key bundle onboarding recorded, falling back
 /// to the onboarding artifacts and then to the party's on-chain keys. The
-/// vault must still hold the key, and its metadata says whether a KMS holds
-/// the private half.
+/// vault holds the key, and its metadata says whether a KMS holds the private
+/// half. A key DecMan generated lives in DecMan's key store instead.
 ///
 /// # Errors
 ///
-/// Errors when no source names this node's key, or the vault does not hold it.
+/// Errors when no source names this node's key, or neither the vault nor the
+/// key store holds it.
 pub async fn own_daml_key(
     config: &NodeConfig,
     db: &SqlitePool,
@@ -270,9 +271,20 @@ pub async fn own_daml_key(
         .into_inner();
 
     if keys_response.private_keys_metadata.is_empty() {
+        // A key DecMan generated lives only in its key store.
+        if let Some(store) = KeyStore::open(config, db.clone()).await?
+            && store.get(dec_party_id, &key_fingerprint).await?.is_some()
+        {
+            tracing::debug!("Daml key {key_fingerprint} lives in DecMan's key store");
+            return Ok(SigningKeyContext {
+                fingerprint: key_fingerprint,
+                public_key: signing_public_key.clone(),
+                kms_key_id: None,
+            });
+        }
         anyhow::bail!(
-            "Daml signing key with fingerprint {key_fingerprint} not found in Canton vault. \
-             This should not happen - the key was generated in step 1."
+            "Daml signing key with fingerprint {key_fingerprint} is neither in Canton's vault \
+             nor in DecMan's key store for {dec_party_id}"
         );
     }
 
@@ -738,6 +750,83 @@ mod deployment_intent_tests {
             canton_hash::hash_value(&map(entries.clone()))?,
             canton_hash::hash_value(&map(entries.into_iter().rev().collect()))?
         );
+        Ok(())
+    }
+}
+
+/// `own_daml_key` against a fake participant.
+#[cfg(test)]
+mod own_daml_key_tests {
+    use super::*;
+    use crate::{
+        db::MIGRATOR,
+        signing::{
+            custody::{SoftwareKeys, file_new_party_key, new_daml_key},
+            fake_admin_api::{FakeAdminApi, VaultKey},
+        },
+        workflow::onboarding::steps::generate_keys::encode_keys_payload,
+    };
+
+    fn party() -> Result<CantonId> {
+        CantonId::parse(
+            "party::1220bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        )
+    }
+
+    /// A key DecMan generated is not in the vault. The deploy signer must
+    /// still find it, and sign from the key store.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn finds_a_key_that_decman_generated(db: SqlitePool) -> Result {
+        let fake = FakeAdminApi::start(vec![VaultKey::software("party-namespace", 1)]).await?;
+        let node = fake.node(SoftwareKeys::Stored, true).await?;
+        let mut vault = VaultServiceClient::new(node.config.admin_channel().await?);
+        let key = new_daml_key(
+            &node.config,
+            &db,
+            &mut vault,
+            "party-daml-transactions",
+            None,
+        )
+        .await?
+        .public_key;
+        db.write_identity(
+            &party()?,
+            identity_kinds::PEER_PUBLIC_KEYS,
+            &node.config.participant_id().to_string(),
+            &encode_keys_payload(&VaultKey::software("ns", 2).public_key, &key),
+        )
+        .await?;
+        file_new_party_key(&node.config, &db, &party()?).await?;
+
+        let context = own_daml_key(&node.config, &db, &party()?).await?;
+
+        assert_eq!(context.public_key, key);
+        assert_eq!(context.kms_key_id, None);
+        Ok(())
+    }
+
+    /// A key that neither the vault nor the key store holds cannot sign.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn refuses_a_key_nobody_holds(db: SqlitePool) -> Result {
+        let fake = FakeAdminApi::start(vec![]).await?;
+        let node = fake.node(SoftwareKeys::Stored, true).await?;
+        db.write_identity(
+            &party()?,
+            identity_kinds::PEER_PUBLIC_KEYS,
+            &node.config.participant_id().to_string(),
+            &encode_keys_payload(
+                &VaultKey::software("ns", 2).public_key,
+                &VaultKey::software("elsewhere", 3).public_key,
+            ),
+        )
+        .await?;
+
+        let error = match own_daml_key(&node.config, &db, &party()?).await {
+            Ok(context) => anyhow::bail!("found {}", context.fingerprint),
+            Err(e) => e.to_string(),
+        };
+
+        assert!(error.contains("neither in Canton's vault"), "{error}");
         Ok(())
     }
 }
