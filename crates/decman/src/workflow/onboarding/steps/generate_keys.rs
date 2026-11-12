@@ -37,7 +37,8 @@ use crate::{
 /// Generate cryptographic keys and export them
 ///
 /// Refuses a participant that does not keep its keys in KMS, unless this node
-/// allows software keys (see [`custody`]).
+/// allows software keys (see [`custody`]). Under the opt-out, DecMan
+/// generates the Daml key itself.
 ///
 /// Generates:
 /// 1. Namespace signing key (for namespace delegation)
@@ -98,16 +99,11 @@ pub async fn generate_keys(
         );
     }
 
-    let (daml_key, _) =
-        get_or_create_signing_key(&mut vault_client, &daml_key_name, SigningKeyUsage::Protocol)
-            .await?;
-    let kms_key_id =
-        custody::require_kms_key(config, &mut vault_client, &compute_fingerprint(&daml_key))
-            .await?;
-    // The party does not exist yet, so this only proves the export works.
-    // The member copies the key once it learns the party id.
-    custody::secure_software_daml_key(config, storage, &daml_key, kms_key_id.as_deref(), None)
-        .await?;
+    // The party does not exist yet. A member whose key DecMan generated files
+    // it under the party once it learns the party id.
+    let daml_key = custody::new_daml_key(config, storage, &mut vault_client, &daml_key_name, None)
+        .await?
+        .public_key;
 
     // Persist keys + participant id under this node's own canton id so the
     // coordinator can later list every peer's keys/ids.
@@ -199,6 +195,40 @@ pub(crate) async fn get_or_create_signing_key(
         anyhow::bail!("No public key returned from VaultService");
     };
     Ok((spk, false))
+}
+
+/// The Daml key this node created for the run `instance_name`, from the key
+/// bundle GenerateKeys recorded. `None` when this node created no keys in the
+/// run, as for an existing member in add-party.
+///
+/// # Errors
+///
+/// Errors when the record cannot be read or does not hold two keys.
+pub(crate) async fn own_new_daml_key(
+    config: &NodeConfig,
+    storage: &SqlitePool,
+    instance_name: &str,
+) -> Result<Option<SigningPublicKey>> {
+    let self_id = config.participant_id().to_string();
+    let Some(payload) = storage
+        .read_artifact(
+            instance_name,
+            artifact_kinds::PEER_PUBLIC_KEYS,
+            Some(&self_id),
+        )
+        .await?
+    else {
+        return Ok(None);
+    };
+    let keys =
+        crate::workflow::onboarding::steps::proposals::create::decode_keys_payload(&payload)?;
+    match <[SigningPublicKey; 2]>::try_from(keys) {
+        Ok([_, daml_key]) => Ok(Some(daml_key)),
+        Err(keys) => anyhow::bail!(
+            "This node's key record for {instance_name} holds {count} keys, not 2",
+            count = keys.len()
+        ),
+    }
 }
 
 /// Encode the namespace + Daml signing keys as two consecutive

@@ -6,23 +6,27 @@
 //! export, because DecMan signs with the KMS `Sign` API. DecMan therefore
 //! puts a new party's keys into a vault that keeps its keys in KMS.
 //!
-//! Two settings allow the software vault:
+//! Two settings allow a participant without KMS:
 //!
 //! - `DECPM_ALLOW_SOFTWARE_PARTY_KEYS` is for a participant that has not moved
-//!   to KMS yet. DecMan then needs a copy of each new Daml key in its key
-//!   store, so it exports the key at once and refuses it when Canton refuses.
-//! - Insecure mode allows the software vault with a warning only. It runs on
-//!   devnet only.
+//!   to KMS yet. DecMan then generates each new party Daml key itself and
+//!   keeps it in its key store. Canton never holds the key, so it never has
+//!   to export it.
+//! - Insecure mode lets Canton create a software key, with a warning only. It
+//!   runs on devnet only.
 //!
 //! A vault that only wraps its software keys with a KMS key (`wrapper_key_id`)
 //! does not count. Those keys still need an export to sign.
 
-use canton_proto_rs::com::digitalasset::canton::crypto::{
-    admin::v30::{
-        ListKeysFilters, ListMyKeysRequest, PrivateKeyMetadata,
-        vault_service_client::VaultServiceClient,
+use canton_proto_rs::com::digitalasset::canton::{
+    crypto::{
+        admin::v30::{
+            ListKeysFilters, ListMyKeysRequest, PrivateKeyMetadata,
+            vault_service_client::VaultServiceClient,
+        },
+        v30::{SigningKeyUsage, SigningPublicKey},
     },
-    v30::SigningPublicKey,
+    protocol::v30::SignedTopologyTransaction,
 };
 use sqlx::SqlitePool;
 use tonic::transport::Channel;
@@ -34,27 +38,32 @@ use crate::{
     signing::{
         SigningKeyContext,
         aws_kms::AwsKmsSigner,
-        key_store::{KeyStore, STORE_OFF_HINT},
-        migration::{self, Outcome},
-        vault_export::{export_private_key, export_protocol_version, key_download_disabled},
+        key_store::{KeyStore, STORE_OFF_HINT, sign_topology_transaction},
     },
     utils::compute_fingerprint,
+    workflow::{
+        onboarding::steps::{
+            generate_keys::get_or_create_signing_key, proposals::create::decode_keys_payload,
+        },
+        storage::{WorkflowStorage, identity_kinds},
+        topology::dedupe_signatures,
+    },
 };
 
 /// What this node does with a new party key outside KMS.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SoftwareKeys {
-    /// Insecure mode accepts the key with a warning.
+    /// Insecure mode lets Canton create a software key, with a warning.
     Allowed,
-    /// The operator allowed software keys. DecMan accepts a Daml key only
-    /// when it can copy the key into its key store.
+    /// The operator allowed participants without KMS. DecMan generates each
+    /// new Daml key itself and keeps it in its key store.
     Stored,
     /// DecMan refuses the key.
     Refused,
 }
 
 /// This node's rule for new party keys outside KMS. The opt-out wins over
-/// insecure mode, because it keeps a copy that insecure mode would not.
+/// insecure mode, because a key that DecMan generates never needs an export.
 pub fn software_keys(config: &NodeConfig) -> SoftwareKeys {
     if config.allow_software_party_keys {
         SoftwareKeys::Stored
@@ -69,7 +78,7 @@ pub fn software_keys(config: &NodeConfig) -> SoftwareKeys {
 ///
 /// Call this before any key is generated, so a refused run leaves nothing
 /// behind in the vault or the topology. A node that allows software keys
-/// must have its key store on, because it needs a copy of each new key.
+/// must have its key store on, because DecMan generates the Daml key there.
 ///
 /// # Errors
 ///
@@ -127,79 +136,159 @@ pub async fn require_kms_key(
         .and_then(|m| m.kms_key_id.clone()))
 }
 
-/// Make sure DecMan can sign with a new Daml key outside KMS.
+/// A new party Daml key, and where it lives.
+#[derive(Debug)]
+pub struct NewDamlKey {
+    pub public_key: SigningPublicKey,
+    /// The KMS key id, when the key lives in KMS.
+    pub kms_key_id: Option<String>,
+    /// Whether an earlier run created the key under the same name.
+    pub existed: bool,
+}
+
+/// Create this node's Daml key for a party, or find the key an earlier run
+/// created under `name`.
 ///
-/// On a node that allows software keys, DecMan exports the key at once. A
-/// refused export means DecMan could never sign with the key, so the run
-/// stops before the key joins a party. When the party is known, DecMan
-/// stores the copy now. Onboarding learns the party later and copies the key
-/// with [`copy_new_party_key`]. Other nodes need nothing here.
+/// On a participant with KMS, Canton creates the key in KMS. On a participant
+/// without KMS, the opt-out has DecMan generate the key and keep it in its key
+/// store, so Canton never holds it. Insecure mode lets Canton create a
+/// software key instead. When `party` is known, DecMan files a key it
+/// generated under the party at once. Onboarding learns the party later and
+/// files the key with [`file_new_party_key`].
 ///
 /// # Errors
 ///
-/// Errors when the key store is off, when Canton refuses the export, or when
-/// the copy cannot be stored.
-pub async fn secure_software_daml_key(
+/// Errors when the vault cannot be listed or refuses, when the key store is
+/// off or fails, or when the key is outside KMS and this node's rule refuses
+/// software keys.
+pub async fn new_daml_key(
     config: &NodeConfig,
     db: &SqlitePool,
-    key: &SigningPublicKey,
-    kms_key_id: Option<&str>,
+    vault_client: &mut VaultServiceClient<Channel>,
+    name: &str,
     party: Option<&CantonId>,
-) -> Result {
-    if kms_key_id.is_some() || software_keys(config) != SoftwareKeys::Stored {
+) -> Result<NewDamlKey> {
+    let has_kms = list_keys(vault_client, None).await?.iter().any(in_kms);
+    if !has_kms && software_keys(config) == SoftwareKeys::Stored {
+        let store = open_store(config, db).await?;
+        let (public_key, existed) = store.generate(name).await?;
+        let fingerprint = compute_fingerprint(&public_key);
+        if let Some(party) = party {
+            file_under_party(&store, party, &fingerprint).await?;
+        }
+        tracing::info!(
+            "{verb} Daml key {fingerprint} ({name}) in DecMan's key store, because this \
+             participant has no KMS",
+            verb = if existed { "Reusing" } else { "Generated" },
+        );
+        return Ok(NewDamlKey {
+            public_key,
+            kms_key_id: None,
+            existed,
+        });
+    }
+    let (public_key, existed) =
+        get_or_create_signing_key(vault_client, name, SigningKeyUsage::Protocol).await?;
+    let fingerprint = compute_fingerprint(&public_key);
+    let kms_key_id = require_kms_key(config, vault_client, &fingerprint).await?;
+    if kms_key_id.is_none() && software_keys(config) == SoftwareKeys::Stored {
+        // Only a key made before the participant moved to KMS gets here.
+        anyhow::bail!(
+            "The vault holds the software key {fingerprint} under the name {name}, from before \
+             this participant moved to KMS. DecMan cannot sign with it without an export. \
+             Delete that key from the participant's vault, then retry"
+        );
+    }
+    Ok(NewDamlKey {
+        public_key,
+        kms_key_id,
+        existed,
+    })
+}
+
+/// File this node's Daml key for a party that onboarding is creating, when
+/// DecMan generated the key.
+///
+/// Onboarding generates the key before the party id is known, and DecMan
+/// signs each party's deploys with the key filed under that party. Each
+/// member calls this once it knows the id, and before it signs the party's
+/// `PartyToParticipant` mapping. A failure stops the member from signing, so
+/// the party never comes into force with a key DecMan cannot sign with.
+///
+/// # Errors
+///
+/// Errors when this node has no record of its key for the party, or when the
+/// key store fails.
+pub async fn file_new_party_key(config: &NodeConfig, db: &SqlitePool, party: &CantonId) -> Result {
+    if software_keys(config) != SoftwareKeys::Stored {
         return Ok(());
     }
-    let store = open_store(config, db).await?;
-    let fingerprint = compute_fingerprint(key);
-    let context = SigningKeyContext {
-        fingerprint: fingerprint.clone(),
-        public_key: key.clone(),
-        kms_key_id: None,
+    let Some(store) = KeyStore::open(config, db.clone()).await? else {
+        return Ok(());
     };
-    let channel = config.admin_channel().await?;
-    let protocol_version = export_protocol_version(config).await?;
-    let seed = match export_private_key(&channel, &context, protocol_version).await {
-        Ok(seed) => seed,
-        Err(e) if key_download_disabled(&e) => anyhow::bail!(
-            "Canton refused to export the new Daml key {fingerprint}, because key download is \
-             off. DecMan cannot sign with a key it cannot copy. Move the participant to KMS, or \
-             turn on key download while the party's keys are created"
-        ),
-        Err(e) => return Err(e.into()),
+    let self_id = config.participant_id().to_string();
+    let payload = db
+        .read_identity(party, identity_kinds::PEER_PUBLIC_KEYS, &self_id)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("This node has no record of its Daml key for {party}"))?;
+    let keys = decode_keys_payload(&payload)?;
+    let [_, daml_key] = keys.as_slice() else {
+        anyhow::bail!(
+            "This node's key record for {party} holds {count} keys, not 2",
+            count = keys.len()
+        );
     };
-    if let Some(party) = party {
-        store.put(party, &fingerprint, key, &seed).await?;
-        tracing::info!("Copied the new Daml key {fingerprint} for {party} into DecMan's key store");
+    let fingerprint = compute_fingerprint(daml_key);
+    if store.generated_seed(&fingerprint).await?.is_some() {
+        file_under_party(&store, party, &fingerprint).await?;
     }
     Ok(())
 }
 
-/// Copy this node's Daml key for a party that onboarding is creating.
+/// Add `key`'s signature to a topology transaction, when DecMan generated
+/// the key. Returns whether it signed.
 ///
-/// Onboarding creates the key before the party id is known, and DecMan
-/// stores each key under its party. Each member calls this once it knows the
-/// id, and before it signs the party's `PartyToParticipant` mapping. A
-/// failure stops the member from signing, so the party never comes into
-/// force with a key DecMan holds no copy of.
+/// Canton requires each key that a `PartyToParticipant` mapping adds to sign
+/// that mapping. Canton's vault adds the signature for a key it holds. It
+/// cannot for a key DecMan generated, so DecMan adds the signature here. A
+/// key DecMan did not generate is left to the vault.
 ///
 /// # Errors
 ///
-/// Errors on a node that allows software keys when the store is off, when
-/// Canton refuses the export, or when the copy cannot be stored.
-pub async fn copy_new_party_key(config: &NodeConfig, db: &SqlitePool, party: &CantonId) -> Result {
+/// Errors when the key store fails, or when the signature does not verify.
+pub async fn sign_with_generated_key(
+    config: &NodeConfig,
+    db: &SqlitePool,
+    transaction: &mut SignedTopologyTransaction,
+    key: &SigningPublicKey,
+) -> Result<bool> {
     if software_keys(config) != SoftwareKeys::Stored {
-        return Ok(());
+        return Ok(false);
     }
-    match migration::copy_party_key(config, db, party).await? {
-        Outcome::ExportRefused | Outcome::CopyUnreadable => anyhow::bail!(
-            "Canton refused to export this node's Daml key for {party}, so DecMan holds no copy \
-             of it. Turn on key download, then retry the run from its coordinator"
-        ),
-        outcome => {
-            tracing::info!("Key store copy of this node's Daml key for {party}: {outcome:?}");
-            Ok(())
-        }
+    let Some(store) = KeyStore::open(config, db.clone()).await? else {
+        return Ok(false);
+    };
+    let fingerprint = compute_fingerprint(key);
+    let Some((public_key, seed)) = store.generated_seed(&fingerprint).await? else {
+        return Ok(false);
+    };
+    let signature = sign_topology_transaction(&seed, &public_key, &transaction.transaction)?;
+    transaction.signatures.push(signature);
+    dedupe_signatures(transaction);
+    tracing::info!("Signed the topology transaction with DecMan's key {fingerprint}");
+    Ok(true)
+}
+
+/// Store a generated key under `party`, so the deploy signer finds it.
+async fn file_under_party(store: &KeyStore, party: &CantonId, fingerprint: &Fingerprint) -> Result {
+    let (public_key, seed) = store
+        .generated_seed(fingerprint)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("DecMan did not generate the key {fingerprint}"))?;
+    if store.put(party, fingerprint, &public_key, &seed).await? {
+        tracing::info!("Filed DecMan's Daml key {fingerprint} under {party}");
     }
+    Ok(())
 }
 
 /// Check that DecMan can sign with a new KMS key before the key joins a party.
@@ -272,8 +361,8 @@ pub async fn log_rule_at_boot(config: &NodeConfig, db: &SqlitePool) {
         (false, SoftwareKeys::Stored) => match open_store(config, db).await {
             Ok(_) => tracing::info!(
                 "This participant keeps its keys in Canton's software vault. \
-                 DECPM_ALLOW_SOFTWARE_PARTY_KEYS lets DecMan create party keys there, and \
-                 DecMan keeps a copy of each new Daml key"
+                 DECPM_ALLOW_SOFTWARE_PARTY_KEYS lets DecMan generate each new party Daml \
+                 key itself and keep it in its key store"
             ),
             Err(e) => tracing::error!("DecMan cannot create party keys on this node: {e:#}"),
         },
@@ -289,7 +378,7 @@ async fn open_store(config: &NodeConfig, db: &SqlitePool) -> Result<KeyStore> {
     KeyStore::open(config, db.clone()).await?.ok_or_else(|| {
         anyhow::anyhow!(
             "{STORE_OFF_HINT}. DECPM_ALLOW_SOFTWARE_PARTY_KEYS needs the key store, because \
-             DecMan must hold a copy of each software key it signs with"
+             DecMan generates each new Daml key there"
         )
     })
 }
@@ -314,17 +403,15 @@ fn check(in_kms: bool, rule: SoftwareKeys, problem: &str) -> Result {
             Ok(())
         }
         SoftwareKeys::Stored => {
-            tracing::info!(
-                "{problem}. DECPM_ALLOW_SOFTWARE_PARTY_KEYS allows it, so DecMan keeps a copy \
-                 of the Daml key in its key store"
-            );
+            tracing::info!("{problem}. DECPM_ALLOW_SOFTWARE_PARTY_KEYS allows it");
             Ok(())
         }
         SoftwareKeys::Refused => anyhow::bail!(
             "{problem}. DecMan creates party keys only on a KMS-backed participant, because \
              Canton 3.7 refuses to export a software key. Moving a participant to KMS is a \
              Canton migration, not a config change; docs/KMS_SIGNING.md explains it. Until \
-             then, set DECPM_ALLOW_SOFTWARE_PARTY_KEYS=true to keep copies in DecMan's key store"
+             then, set DECPM_ALLOW_SOFTWARE_PARTY_KEYS=true so DecMan generates the party's \
+             Daml keys itself"
         ),
     }
 }
@@ -411,17 +498,6 @@ mod tests {
         }
         Ok(())
     }
-
-    /// Only the opt-out exports a key. These calls return before the export,
-    /// so they need no Canton.
-    #[tokio::test]
-    async fn only_the_opt_out_copies_a_software_key() -> Result {
-        let db = SqlitePool::connect("sqlite::memory:").await?;
-        let key = SigningPublicKey::default();
-        secure_software_daml_key(&config(false, true), &db, &key, Some("kms-id"), None).await?;
-        secure_software_daml_key(&config(true, false), &db, &key, None, None).await?;
-        secure_software_daml_key(&config(false, false), &db, &key, None, None).await
-    }
 }
 
 /// The custody rules against a fake Canton admin API, so the vault calls,
@@ -431,7 +507,12 @@ mod against_a_vault {
     use super::*;
     use crate::{
         db::MIGRATOR,
-        signing::fake_admin_api::{FakeAdminApi, VaultKey},
+        signing::{
+            fake_admin_api::{FakeAdminApi, VaultKey},
+            key_store::{ed25519_signing_public_key, topology_transaction_hash},
+            vault_export::ed25519_public_key,
+        },
+        workflow::onboarding::steps::generate_keys::encode_keys_payload,
     };
 
     const PARTY: &str =
@@ -451,24 +532,6 @@ mod against_a_vault {
 
     async fn vault(config: &NodeConfig) -> Result<VaultServiceClient<Channel>> {
         Ok(VaultServiceClient::new(config.admin_channel().await?))
-    }
-
-    async fn stored_seed(
-        config: &NodeConfig,
-        db: &SqlitePool,
-        key: &VaultKey,
-    ) -> Result<Option<[u8; 32]>> {
-        let store = open_store(config, db).await?;
-        Ok(store
-            .get(&party()?, &key.fingerprint())
-            .await?
-            .map(|seed| *seed))
-    }
-
-    async fn stored_rows(db: &SqlitePool) -> Result<i64> {
-        Ok(sqlx::query_scalar("SELECT COUNT(*) FROM party_key_store")
-            .fetch_one(db)
-            .await?)
     }
 
     #[sqlx::test(migrator = "MIGRATOR")]
@@ -584,154 +647,304 @@ mod against_a_vault {
         Ok(())
     }
 
+    async fn store(config: &NodeConfig, db: &SqlitePool) -> Result<KeyStore> {
+        open_store(config, db).await
+    }
+
+    async fn party_rows(db: &SqlitePool) -> Result<i64> {
+        Ok(sqlx::query_scalar("SELECT COUNT(*) FROM party_key_store")
+            .fetch_one(db)
+            .await?)
+    }
+
+    async fn generated_rows(db: &SqlitePool) -> Result<i64> {
+        Ok(
+            sqlx::query_scalar("SELECT COUNT(*) FROM generated_party_keys")
+                .fetch_one(db)
+                .await?,
+        )
+    }
+
+    /// Record `key` as this node's Daml key for the party, as onboarding does
+    /// once the party id is known.
+    async fn record_own_key(
+        config: &NodeConfig,
+        db: &SqlitePool,
+        key: &SigningPublicKey,
+    ) -> Result {
+        let namespace = VaultKey::software("namespace", 1);
+        db.write_identity(
+            &party()?,
+            identity_kinds::PEER_PUBLIC_KEYS,
+            &config.participant_id().to_string(),
+            &encode_keys_payload(&namespace.public_key, key),
+        )
+        .await
+    }
+
+    /// Under the opt-out, DecMan generates the key. The vault makes nothing,
+    /// exports nothing, and a second run finds the same key by name.
     #[sqlx::test(migrator = "MIGRATOR")]
-    async fn the_opt_out_copies_a_new_daml_key_for_a_known_party(db: SqlitePool) -> Result {
-        let key = VaultKey::software("p-daml-transactions", 7);
-        let fake = FakeAdminApi::start(vec![key.clone()]).await?;
+    async fn the_opt_out_generates_the_daml_key_in_decman(db: SqlitePool) -> Result {
+        let fake = FakeAdminApi::start(vec![VaultKey::software("p-namespace", 1)]).await?;
         let node = fake.node(SoftwareKeys::Stored, true).await?;
+        let mut client = vault(&node.config).await?;
 
-        secure_software_daml_key(&node.config, &db, &key.public_key, None, Some(&party()?)).await?;
-
-        assert_eq!(fake.exported(), vec![key.fingerprint()]);
-        assert_eq!(stored_seed(&node.config, &db, &key).await?, key.seed);
-        Ok(())
-    }
-
-    /// Onboarding creates the key before the party exists. The export still
-    /// runs at once, so a node with key download off fails before the party
-    /// is created.
-    #[sqlx::test(migrator = "MIGRATOR")]
-    async fn the_opt_out_exports_the_key_before_the_party_exists(db: SqlitePool) -> Result {
-        let key = VaultKey::software("p-daml-transactions", 7);
-        let fake = FakeAdminApi::start(vec![key.clone()]).await?;
-        let node = fake.node(SoftwareKeys::Stored, true).await?;
-
-        secure_software_daml_key(&node.config, &db, &key.public_key, None, None).await?;
-
-        assert_eq!(fake.exported(), vec![key.fingerprint()]);
-        assert_eq!(stored_rows(&db).await?, 0);
-        Ok(())
-    }
-
-    #[sqlx::test(migrator = "MIGRATOR")]
-    async fn a_refused_export_stops_the_run(db: SqlitePool) -> Result {
-        let key = VaultKey::software("p-daml-transactions", 7);
-        let fake = FakeAdminApi::start(vec![key.clone()]).await?;
-        fake.turn_off_key_download();
-        let node = fake.node(SoftwareKeys::Stored, true).await?;
-
-        let error = refusal(
-            secure_software_daml_key(&node.config, &db, &key.public_key, None, Some(&party()?))
-                .await,
-        )?;
-
-        assert!(
-            error.contains(&format!(
-                "Canton refused to export the new Daml key {}",
-                key.fingerprint()
-            )),
-            "{error}"
-        );
-        assert_eq!(stored_rows(&db).await?, 0);
-        Ok(())
-    }
-
-    #[sqlx::test(migrator = "MIGRATOR")]
-    async fn the_opt_out_without_a_key_store_refuses_before_any_export(db: SqlitePool) -> Result {
-        let key = VaultKey::software("p-daml-transactions", 7);
-        let fake = FakeAdminApi::start(vec![key.clone()]).await?;
-        let node = fake.node(SoftwareKeys::Stored, false).await?;
-
-        let error = refusal(
-            secure_software_daml_key(&node.config, &db, &key.public_key, None, Some(&party()?))
-                .await,
-        )?;
-
-        assert!(error.contains(STORE_OFF_HINT), "{error}");
-        assert!(fake.exported().is_empty());
-        Ok(())
-    }
-
-    /// A KMS key needs no copy, and the other rules keep none.
-    #[sqlx::test(migrator = "MIGRATOR")]
-    async fn only_the_opt_out_exports_a_software_key(db: SqlitePool) -> Result {
-        let software = VaultKey::software("p-daml-transactions", 7);
-        let kms = VaultKey::kms("q-daml-transactions", 8)?;
-        let fake = FakeAdminApi::start(vec![software.clone(), kms.clone()]).await?;
-
-        let opt_out = fake.node(SoftwareKeys::Stored, true).await?;
-        secure_software_daml_key(
-            &opt_out.config,
+        let first = new_daml_key(
+            &node.config,
             &db,
-            &kms.public_key,
-            kms.kms_key_id.as_deref(),
+            &mut client,
+            "p-daml-transactions",
             Some(&party()?),
         )
         .await?;
-        for rule in [SoftwareKeys::Allowed, SoftwareKeys::Refused] {
-            let node = fake.node(rule, true).await?;
-            secure_software_daml_key(
+        let second = new_daml_key(
+            &node.config,
+            &db,
+            &mut client,
+            "p-daml-transactions",
+            Some(&party()?),
+        )
+        .await?;
+
+        assert!(!first.existed && second.existed);
+        assert_eq!(first.public_key, second.public_key);
+        assert_eq!(first.kms_key_id, None);
+        assert!(fake.generated().is_empty());
+        assert!(fake.exported().is_empty());
+        let fingerprint = compute_fingerprint(&first.public_key);
+        let store = store(&node.config, &db).await?;
+        let (public_key, seed) = store
+            .generated_seed(&fingerprint)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("DecMan holds no seed for {fingerprint}"))?;
+        assert_eq!(public_key, first.public_key);
+        assert_eq!(ed25519_signing_public_key(&seed), first.public_key);
+        assert_eq!(
+            store.get(&party()?, &fingerprint).await?.as_deref(),
+            Some(&*seed),
+            "the key is filed under the party, so deploys can sign with it"
+        );
+        Ok(())
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_kms_participant_keeps_the_daml_key_in_kms_under_the_opt_out(
+        db: SqlitePool,
+    ) -> Result {
+        let fake = FakeAdminApi::start(vec![VaultKey::kms("participant-signing", 1)?]).await?;
+        let node = fake.node(SoftwareKeys::Stored, true).await?;
+
+        let key = new_daml_key(
+            &node.config,
+            &db,
+            &mut vault(&node.config).await?,
+            "p-daml-transactions",
+            Some(&party()?),
+        )
+        .await?;
+
+        assert_eq!(fake.generated(), vec!["p-daml-transactions".to_string()]);
+        assert!(key.kms_key_id.is_some());
+        assert_eq!(generated_rows(&db).await?, 0);
+        assert_eq!(party_rows(&db).await?, 0);
+        Ok(())
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn insecure_mode_lets_the_vault_make_a_software_key(db: SqlitePool) -> Result {
+        let fake = FakeAdminApi::start(vec![VaultKey::software("p-namespace", 1)]).await?;
+        let node = fake.node(SoftwareKeys::Allowed, true).await?;
+
+        let key = new_daml_key(
+            &node.config,
+            &db,
+            &mut vault(&node.config).await?,
+            "p-daml-transactions",
+            None,
+        )
+        .await?;
+
+        assert_eq!(fake.generated(), vec!["p-daml-transactions".to_string()]);
+        assert_eq!(key.kms_key_id, None);
+        assert_eq!(generated_rows(&db).await?, 0);
+        Ok(())
+    }
+
+    /// A software key made before the participant moved to KMS needs an
+    /// export to sign, so the opt-out refuses it instead of using it.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn the_opt_out_refuses_a_pre_kms_software_key(db: SqlitePool) -> Result {
+        let old = VaultKey::software("p-daml-transactions", 2);
+        let fake = FakeAdminApi::start(vec![VaultKey::kms("participant-signing", 1)?, old.clone()])
+            .await?;
+        let node = fake.node(SoftwareKeys::Stored, true).await?;
+
+        let error = refusal(
+            new_daml_key(
                 &node.config,
                 &db,
-                &software.public_key,
+                &mut vault(&node.config).await?,
+                "p-daml-transactions",
                 None,
-                Some(&party()?),
             )
-            .await?;
-        }
+            .await,
+        )?;
 
+        assert!(
+            error.contains(&format!("software key {}", old.fingerprint())),
+            "{error}"
+        );
+        assert!(error.contains("moved to KMS"), "{error}");
         assert!(fake.exported().is_empty());
-        assert_eq!(stored_rows(&db).await?, 0);
         Ok(())
     }
 
     #[sqlx::test(migrator = "MIGRATOR")]
-    async fn onboarding_copies_the_key_once_the_party_id_is_known(db: SqlitePool) -> Result {
-        let key = VaultKey::software("p-daml-transactions", 7);
+    async fn the_opt_out_without_a_key_store_generates_nothing(db: SqlitePool) -> Result {
+        let fake = FakeAdminApi::start(vec![VaultKey::software("p-namespace", 1)]).await?;
+        let node = fake.node(SoftwareKeys::Stored, false).await?;
+
+        let error = refusal(
+            new_daml_key(
+                &node.config,
+                &db,
+                &mut vault(&node.config).await?,
+                "p-daml-transactions",
+                None,
+            )
+            .await,
+        )?;
+
+        assert!(error.contains(STORE_OFF_HINT), "{error}");
+        assert!(fake.generated().is_empty());
+        assert_eq!(generated_rows(&db).await?, 0);
+        Ok(())
+    }
+
+    /// Onboarding generates the key before the party exists, and files it
+    /// once the member knows the party id.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn onboarding_files_the_generated_key_once_the_party_id_is_known(
+        db: SqlitePool,
+    ) -> Result {
+        let fake = FakeAdminApi::start(vec![VaultKey::software("p-namespace", 1)]).await?;
+        let node = fake.node(SoftwareKeys::Stored, true).await?;
+        let key = new_daml_key(
+            &node.config,
+            &db,
+            &mut vault(&node.config).await?,
+            "p-daml-transactions",
+            None,
+        )
+        .await?
+        .public_key;
+        assert_eq!(party_rows(&db).await?, 0);
+        record_own_key(&node.config, &db, &key).await?;
+
+        file_new_party_key(&node.config, &db, &party()?).await?;
+
+        let fingerprint = compute_fingerprint(&key);
+        assert!(
+            store(&node.config, &db)
+                .await?
+                .get(&party()?, &fingerprint)
+                .await?
+                .is_some()
+        );
+        Ok(())
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn filing_leaves_a_vault_key_in_the_vault(db: SqlitePool) -> Result {
+        let key = VaultKey::kms("p-daml-transactions", 7)?;
         let fake = FakeAdminApi::start(vec![key.clone()]).await?;
         let node = fake.node(SoftwareKeys::Stored, true).await?;
         node.record_daml_key(&db, &party()?, &key).await?;
 
-        copy_new_party_key(&node.config, &db, &party()?).await?;
+        file_new_party_key(&node.config, &db, &party()?).await?;
 
-        assert_eq!(fake.exported(), vec![key.fingerprint()]);
-        assert_eq!(stored_seed(&node.config, &db, &key).await?, key.seed);
+        assert_eq!(party_rows(&db).await?, 0);
+        assert!(fake.exported().is_empty());
+        Ok(())
+    }
+
+    /// A member without a record of its key cannot file it, so it must not
+    /// sign the party mapping.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn filing_without_a_key_record_stops_the_member(db: SqlitePool) -> Result {
+        let fake = FakeAdminApi::start(vec![]).await?;
+        let node = fake.node(SoftwareKeys::Stored, true).await?;
+
+        let error = refusal(file_new_party_key(&node.config, &db, &party()?).await)?;
+
+        assert!(error.contains("no record of its Daml key"), "{error}");
+        Ok(())
+    }
+
+    /// A key DecMan generated signs the mapping that adds it, because the
+    /// vault cannot. Canton verifies the signature against the transaction's
+    /// hash.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_generated_key_signs_the_topology_transaction(db: SqlitePool) -> Result {
+        let fake = FakeAdminApi::start(vec![]).await?;
+        let node = fake.node(SoftwareKeys::Stored, true).await?;
+        let key = new_daml_key(
+            &node.config,
+            &db,
+            &mut vault(&node.config).await?,
+            "p-daml-transactions",
+            None,
+        )
+        .await?
+        .public_key;
+        let mut transaction = SignedTopologyTransaction {
+            transaction: b"a serialized topology transaction".to_vec(),
+            ..Default::default()
+        };
+
+        assert!(sign_with_generated_key(&node.config, &db, &mut transaction, &key).await?);
+        assert!(sign_with_generated_key(&node.config, &db, &mut transaction, &key).await?);
+
+        let [signature] = transaction.signatures.as_slice() else {
+            anyhow::bail!("expected one signature, got {:?}", transaction.signatures);
+        };
+        assert_eq!(signature.signed_by, compute_fingerprint(&key).to_string());
+        let verifying = ed25519_dalek::VerifyingKey::from_bytes(&ed25519_public_key(&key)?)?;
+        let bytes: [u8; 64] = signature.signature.as_slice().try_into()?;
+        verifying.verify_strict(
+            &topology_transaction_hash(&transaction.transaction),
+            &ed25519_dalek::Signature::from_bytes(&bytes),
+        )?;
         Ok(())
     }
 
     #[sqlx::test(migrator = "MIGRATOR")]
-    async fn onboarding_copies_nothing_outside_the_opt_out(db: SqlitePool) -> Result {
-        let key = VaultKey::software("p-daml-transactions", 7);
-        let fake = FakeAdminApi::start(vec![key.clone()]).await?;
+    async fn a_vault_key_is_left_to_the_vault_to_sign(db: SqlitePool) -> Result {
+        let vault_key = VaultKey::software("p-daml-transactions", 7);
+        let fake = FakeAdminApi::start(vec![vault_key.clone()]).await?;
+        let mut transaction = SignedTopologyTransaction {
+            transaction: b"a serialized topology transaction".to_vec(),
+            ..Default::default()
+        };
 
-        for rule in [SoftwareKeys::Allowed, SoftwareKeys::Refused] {
+        for rule in [
+            SoftwareKeys::Stored,
+            SoftwareKeys::Allowed,
+            SoftwareKeys::Refused,
+        ] {
             let node = fake.node(rule, true).await?;
-            node.record_daml_key(&db, &party()?, &key).await?;
-            copy_new_party_key(&node.config, &db, &party()?).await?;
+            assert!(
+                !sign_with_generated_key(
+                    &node.config,
+                    &db,
+                    &mut transaction,
+                    &vault_key.public_key
+                )
+                .await?
+            );
         }
-
-        assert!(fake.exported().is_empty());
-        assert_eq!(stored_rows(&db).await?, 0);
-        Ok(())
-    }
-
-    /// A refused copy stops the member before it signs the party mapping.
-    #[sqlx::test(migrator = "MIGRATOR")]
-    async fn a_refused_onboarding_copy_stops_the_member(db: SqlitePool) -> Result {
-        let key = VaultKey::software("p-daml-transactions", 7);
-        let fake = FakeAdminApi::start(vec![key.clone()]).await?;
-        fake.turn_off_key_download();
-        let node = fake.node(SoftwareKeys::Stored, true).await?;
-        node.record_daml_key(&db, &party()?, &key).await?;
-
-        let error = copy_new_party_key(&node.config, &db, &party()?)
-            .await
-            .err()
-            .map(|e| e.to_string())
-            .unwrap_or_default();
-
-        assert!(error.contains("Canton refused to export"), "{error}");
-        assert_eq!(stored_rows(&db).await?, 0);
+        assert!(transaction.signatures.is_empty());
         Ok(())
     }
 }

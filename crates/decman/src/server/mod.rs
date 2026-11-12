@@ -2118,7 +2118,11 @@ async fn handle_incoming_connection(
                             let requested_party_ids: Vec<String> =
                                 serde_json::from_slice(&msg.payload).unwrap_or_default();
                             let payload =
-                                match list_my_owner_keys(&triggers.config, &requested_party_ids)
+                                match list_my_owner_keys(
+                                    &triggers.config,
+                                    &triggers.db,
+                                    &requested_party_ids,
+                                )
                                     .await
                                 {
                                     Ok(data) => data,
@@ -2662,6 +2666,7 @@ async fn run_peer_listener(
 /// devnet (~170 parties, never returns within 60s; see #149).
 async fn list_my_owner_keys(
     config: &NodeConfig,
+    db: &SqlitePool,
     requested_party_ids: &[String],
 ) -> Result<Vec<u8>> {
     if requested_party_ids.is_empty() {
@@ -2703,11 +2708,13 @@ async fn list_my_owner_keys(
     // party old enough to predate it can hold the key under any name, and
     // then only the fingerprint identifies it.
     let mut my_protocol_fingerprints: HashSet<Fingerprint> = HashSet::new();
-    // Protocol-usage keys, indexed by the vault name onboarding / add-party
-    // gave them (`<party prefix>-daml-transactions`). The name is how
+    // Protocol-usage keys, with the vault name onboarding / add-party gave
+    // them (`<party prefix>-daml-transactions`). The name is how
     // `get_or_create_signing_key` finds the key again on a retry, so it is
     // also the only local record of which party a protocol key belongs to.
-    let mut my_protocol_keys_by_name: HashMap<String, Fingerprint> = HashMap::new();
+    // A key DecMan generated carries the same kind of name, and a vault key
+    // may share it, so two entries can have one name.
+    let mut my_protocol_keys_by_name: Vec<(String, Fingerprint)> = Vec::new();
     for key_meta in keys_response.private_keys_metadata {
         if let Some(private_key_metadata::PublicKeyWithName::V30(pub_key_with_name)) =
             &key_meta.public_key_with_name
@@ -2724,13 +2731,22 @@ async fn list_my_owner_keys(
                 .usage
                 .contains(&(SigningKeyUsage::Protocol as i32))
             {
-                my_protocol_keys_by_name.insert(
+                my_protocol_keys_by_name.push((
                     pub_key_with_name.name.clone(),
                     compute_fingerprint(signing_key),
-                );
+                ));
                 my_protocol_fingerprints.insert(compute_fingerprint(signing_key));
             }
         }
+    }
+    match generated_party_keys(config, db).await {
+        Ok(generated) => {
+            for (name, fingerprint) in generated {
+                my_protocol_fingerprints.insert(fingerprint.clone());
+                my_protocol_keys_by_name.push((name, fingerprint));
+            }
+        }
+        Err(e) => tracing::warn!("Cannot list the Daml keys DecMan generated: {e:#}"),
     }
 
     // Cached after first call (`get_synchronizer_id` memoises via OnceCell).
@@ -2816,11 +2832,24 @@ async fn list_my_owner_keys(
     Ok(serde_json::to_vec(&entries)?)
 }
 
+/// The name and fingerprint of each Daml key DecMan generated, or none when
+/// the key store is off.
+async fn generated_party_keys(
+    config: &NodeConfig,
+    db: &SqlitePool,
+) -> Result<Vec<(String, Fingerprint)>> {
+    match crate::signing::key_store::KeyStore::open(config, db.clone()).await? {
+        Some(store) => store.generated_keys().await,
+        None => Ok(Vec::new()),
+    }
+}
+
 /// This node's Daml signing key for a party, identified by fingerprint rather
 /// than by vault name: the one key in the party's on-chain key list whose
 /// private half this node holds.
 ///
-/// `mine` is every protocol-usage fingerprint in this node's vault. Answers
+/// `mine` is every protocol-usage fingerprint in this node's vault, and every
+/// key DecMan generated. Answers
 /// `None` when the party's keys cannot be read or none of them is ours; the
 /// caller then reports no key, exactly as it did before this fallback existed.
 async fn party_signing_key_by_fingerprint(

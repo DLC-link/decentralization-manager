@@ -126,26 +126,6 @@ pub async fn migrate_all(config: &NodeConfig, db: &SqlitePool) -> Result {
     Ok(())
 }
 
-/// Copy this node's Daml key for one party now, as the copy task does for
-/// every hosted party.
-///
-/// # Errors
-///
-/// Errors when the store is off or cannot be opened, or when the participant
-/// cannot be reached or reports the key wrongly.
-pub async fn copy_party_key(
-    config: &NodeConfig,
-    db: &SqlitePool,
-    party: &CantonId,
-) -> Result<Outcome> {
-    let store = KeyStore::open(config, db.clone())
-        .await?
-        .ok_or_else(|| anyhow::anyhow!("{STORE_OFF_HINT}"))?;
-    let channel = config.admin_channel().await?;
-    let protocol_version = export_protocol_version(config).await?;
-    migrate_party(config, db, &store, (&channel, protocol_version), party).await
-}
-
 /// The decentralized parties that DecMan's party cache lists
 /// `participant_uid` as a host of. The cache also holds parties that other
 /// members host, and this node has no key for those.
@@ -262,9 +242,9 @@ mod tests {
         Ok(())
     }
 
-    /// `copy_party_key` against a fake participant: a node under the opt-out
+    /// `migrate_party` against a fake participant: a node under the opt-out
     /// with its key store on.
-    mod copy_party_key {
+    mod migrate_party {
         use super::*;
         use crate::signing::{
             custody::SoftwareKeys,
@@ -273,6 +253,21 @@ mod tests {
 
         fn party() -> Result<CantonId> {
             CantonId::parse(&format!("party::{NS}"))
+        }
+
+        /// Copy this node's key for one party, as the copy task does for each.
+        async fn copy_party_key(
+            config: &NodeConfig,
+            db: &SqlitePool,
+            party: &CantonId,
+        ) -> Result<Outcome> {
+            let store = KeyStore::open(config, db.clone())
+                .await?
+                .ok_or_else(|| anyhow::anyhow!("the key store is off"))?;
+            let channel = config.admin_channel().await?;
+            let protocol_version = export_protocol_version(config).await?;
+            super::super::migrate_party(config, db, &store, (&channel, protocol_version), party)
+                .await
         }
 
         #[sqlx::test(migrator = "MIGRATOR")]
@@ -320,23 +315,6 @@ mod tests {
             let outcome = copy_party_key(&node.config, &db, &party()?).await?;
 
             assert_eq!(outcome, Outcome::ExportRefused);
-            Ok(())
-        }
-
-        #[sqlx::test(migrator = "MIGRATOR")]
-        async fn needs_the_key_store(db: SqlitePool) -> Result {
-            let key = VaultKey::software("party-daml-transactions", 7);
-            let fake = FakeAdminApi::start(vec![key.clone()]).await?;
-            let node = fake.node(SoftwareKeys::Stored, false).await?;
-            node.record_daml_key(&db, &party()?, &key).await?;
-
-            let error = match copy_party_key(&node.config, &db, &party()?).await {
-                Ok(outcome) => anyhow::bail!("copied without a key store: {outcome:?}"),
-                Err(e) => e.to_string(),
-            };
-
-            assert!(error.contains(STORE_OFF_HINT), "{error}");
-            assert!(fake.exported().is_empty());
             Ok(())
         }
     }

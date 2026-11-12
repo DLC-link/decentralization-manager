@@ -11,8 +11,10 @@ use sqlx::SqlitePool;
 use crate::{
     config::NodeConfig,
     error::Result,
+    signing::custody,
     utils,
     workflow::{
+        onboarding::steps::generate_keys::own_new_daml_key,
         storage::{WorkflowStorage, artifact_kinds},
         topology::sign_transactions_with_topology_retry,
     },
@@ -25,6 +27,10 @@ use crate::{
 /// p2p_proto.bin format). The signed result is persisted as a per-peer
 /// artefact under `(instance, kind, self_id)` using the same
 /// length-prefixed framing.
+///
+/// `adds_own_key` marks the P2P proposal, which adds this node's new Daml
+/// key. A key DecMan generated signs it here, because the vault does not
+/// hold that key.
 async fn sign_proposal(
     config: &NodeConfig,
     storage: &SqlitePool,
@@ -32,6 +38,7 @@ async fn sign_proposal(
     output_kind: &str,
     proposal_type: &str,
     proposal_data: &[u8],
+    adds_own_key: bool,
 ) -> Result {
     tracing::info!("Signing {proposal_type} proposal...");
 
@@ -55,10 +62,16 @@ async fn sign_proposal(
     };
 
     tracing::debug!("Calling SignTransactions RPC for {proposal_type}...");
-    let response = sign_transactions_with_topology_retry(config, request, proposal_type).await?;
+    let mut response =
+        sign_transactions_with_topology_retry(config, request, proposal_type).await?;
 
     if response.transactions.is_empty() {
         anyhow::bail!("No signed transaction returned for {proposal_type}");
+    }
+    if adds_own_key && let Some(own_key) = own_new_daml_key(config, storage, instance_name).await? {
+        for transaction in &mut response.transactions {
+            custody::sign_with_generated_key(config, storage, transaction, &own_key).await?;
+        }
     }
 
     // Persist as a single per-peer artefact. Each transaction is written
@@ -96,6 +109,7 @@ pub async fn sign_dns_proposals(
         artifact_kinds::SIGNED_DNS_PROPOSAL,
         "DNS",
         proposal_data,
+        false,
     )
     .await
 }
@@ -117,6 +131,7 @@ pub async fn sign_p2p_proposals(
         artifact_kinds::SIGNED_P2P_PROPOSAL,
         "P2P",
         proposal_data,
+        true,
     )
     .await
 }

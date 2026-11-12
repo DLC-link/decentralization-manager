@@ -63,20 +63,15 @@ pub async fn generate_keys(
         );
     }
 
-    let (daml_key, _) =
-        get_or_create_signing_key(&mut vault_client, &daml_key_name, SigningKeyUsage::Protocol)
-            .await?;
-    let kms_key_id =
-        custody::require_kms_key(config, &mut vault_client, &compute_fingerprint(&daml_key))
-            .await?;
-    custody::secure_software_daml_key(
+    let daml_key = custody::new_daml_key(
         config,
         storage,
-        &daml_key,
-        kms_key_id.as_deref(),
+        &mut vault_client,
+        &daml_key_name,
         Some(&add_party_config.decentralized_party_id),
     )
-    .await?;
+    .await?
+    .public_key;
 
     let self_id = config.participant_id().to_string();
 

@@ -14,6 +14,7 @@ use std::{
 };
 
 use canton_proto_rs::com::digitalasset::canton::{
+    crypto::v30::SigningPublicKey,
     protocol::v30::{
         DecentralizedNamespaceDefinition, PartyToKeyMapping, PartyToParticipant,
         SignedTopologyTransaction, TopologyTransaction, enums, topology_mapping,
@@ -981,6 +982,11 @@ pub async fn fetch_namespace_definition(
 ///
 /// `label` is a short workflow tag (`"kick"`, `"add-party"`,
 /// `"change-threshold"`) included in log lines and the sign-retry diagnostics.
+///
+/// `own_new_key` is this node's Daml key when the P2P adds it, as for the new
+/// member in add-party. A key DecMan generated signs the P2P here, because
+/// the vault does not hold that key.
+#[allow(clippy::too_many_arguments)]
 pub async fn sign_dns_p2p_proposals(
     config: &NodeConfig,
     storage: &SqlitePool,
@@ -989,6 +995,7 @@ pub async fn sign_dns_p2p_proposals(
     label: &str,
     dns_artifact_kind: &str,
     p2p_artifact_kind: &str,
+    own_new_key: Option<&SigningPublicKey>,
 ) -> Result {
     tracing::info!("Signing {label} proposals...");
 
@@ -1010,13 +1017,22 @@ pub async fn sign_dns_p2p_proposals(
     };
 
     tracing::debug!("Calling SignTransactions RPC for {label} proposals...");
-    let response = sign_transactions_with_topology_retry(config, request, label).await?;
+    let mut response = sign_transactions_with_topology_retry(config, request, label).await?;
 
     if response.transactions.len() != 2 {
         anyhow::bail!(
             "Expected 2 signed transactions (DNS and P2P), got {count}",
             count = response.transactions.len()
         );
+    }
+    if let Some(own_new_key) = own_new_key {
+        crate::signing::custody::sign_with_generated_key(
+            config,
+            storage,
+            &mut response.transactions[1],
+            own_new_key,
+        )
+        .await?;
     }
 
     // Persist signed DNS + P2P as separate per-peer artefacts, each

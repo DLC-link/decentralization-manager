@@ -643,14 +643,15 @@ async fn run_peer(
                     fail_step!("Refusing the coordinator's P2P proposal: {e}");
                     continue;
                 }
-                // A node that allows software keys copies its new Daml key
-                // before it signs, so the party never comes into force with a
-                // key DecMan cannot sign with. The copy needs the identity
-                // rows, which the hook after signing writes again.
+                // A node whose Daml key DecMan generated files the key under
+                // the party before it signs, so the party never comes into
+                // force with a key DecMan cannot sign its deploys with. Filing
+                // needs the identity rows, which the hook after signing
+                // writes again.
                 if crate::signing::custody::software_keys(&node_config)
                     == crate::signing::custody::SoftwareKeys::Stored
                 {
-                    let copied = match extract_party_id_from_p2p_payload(&payload) {
+                    let filed = match extract_party_id_from_p2p_payload(&payload) {
                         Ok(party) => match onboarding::peer::copy_self_identity_for_party(
                             &db,
                             &instance_name,
@@ -660,7 +661,7 @@ async fn run_peer(
                         .await
                         {
                             Ok(()) => {
-                                crate::signing::custody::copy_new_party_key(
+                                crate::signing::custody::file_new_party_key(
                                     &node_config,
                                     &db,
                                     &party,
@@ -671,10 +672,10 @@ async fn run_peer(
                         },
                         Err(e) => Err(e),
                     };
-                    if let Err(e) = copied {
+                    if let Err(e) = filed {
                         fail_step!(
-                            "Refusing to sign P2P: DecMan holds no copy of this node's new \
-                             Daml key: {e:#}"
+                            "Refusing to sign P2P: DecMan cannot file this node's new Daml key \
+                             under the party: {e:#}"
                         );
                         continue;
                     }
