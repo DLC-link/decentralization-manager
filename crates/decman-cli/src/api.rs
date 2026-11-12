@@ -1278,7 +1278,7 @@ impl DecmanClient {
     }
 
     /// Replace this node's Daml signing key for a decentralized party with a
-    /// new key from its vault. The other members sign the change.
+    /// new key. The other members sign the change.
     ///
     /// # Errors
     ///

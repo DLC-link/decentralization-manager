@@ -194,7 +194,7 @@ The database file path can be overridden with the `--db` CLI flag.
 | `DECPM_DB_PATH` | SQLite database path override (CLI flag `--db`) | _(defaults to `{dir}/data/decpm.db`)_ |
 | `DECPM_DB_ENCRYPTION_KEY` | Encryption key for secrets stored in the database | _(none)_ |
 | `DECPM_KEY_STORE_KEY_FILE` | File with the key that encrypts DecMan's copies of party Daml keys, as 64 hex characters or the base64 of 32 bytes. When unset, DecMan derives the key from a `DECPM_DB_ENCRYPTION_KEY` of at least 32 characters. See [docs/KMS_SIGNING.md](docs/KMS_SIGNING.md) | _(none)_ |
-| `DECPM_ALLOW_SOFTWARE_PARTY_KEYS` | Lets DecMan create party keys on a participant without KMS. DecMan then keeps a copy of each new Daml key in its key store, and refuses a key that Canton does not export. See [docs/KMS_SIGNING.md](docs/KMS_SIGNING.md) | `false` |
+| `DECPM_ALLOW_SOFTWARE_PARTY_KEYS` | Lets DecMan create party keys on a participant without KMS. DecMan then generates each new Daml key itself and keeps it in its key store, so Canton never has to export it. See [docs/KMS_SIGNING.md](docs/KMS_SIGNING.md) | `false` |
 | `DECPM_ADMIN_ROLE` | Role name that gates sensitive endpoints (unset skips the role check) | _(none)_ |
 | `DECPM_ALLOWED_ORIGIN` | Origin permitted by CORS (e.g. `https://decman.example.com`) | _(none, same-origin only)_ |
 | `DECPM_LOG_FORMAT` | Log format. `text` gives the readable console format for local work; any other value gives one JSON object per line | `json` |
@@ -630,8 +630,8 @@ Canton reaches it through `crypto.kms.endpoint-override`, and DecMan through
 `AWS_ENDPOINT_URL_KMS`. The `kms_party_keys` phase checks that this node's
 party keys live in the KMS and that its deploys sign through the KMS `Sign`
 API ([docs/KMS_SIGNING.md](docs/KMS_SIGNING.md)). This node runs the strict
-KMS rule. The other two keep software keys, so they run with
-`DECPM_ALLOW_SOFTWARE_PARTY_KEYS=true` and keep copies in DecMan's key store.
+KMS rule. The other two have no KMS, so they run with
+`DECPM_ALLOW_SOFTWARE_PARTY_KEYS=true`, and DecMan generates their party keys.
 
 ```bash
 # Quiet mode (default) — focused Given-When-Then trace

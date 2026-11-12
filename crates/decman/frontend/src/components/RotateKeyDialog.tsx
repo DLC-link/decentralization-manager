@@ -80,14 +80,13 @@ export const RotateKeyDialog = ({
       <DialogContent>
         <Box sx={{ display: "flex", flexDirection: "column", gap: 2, mt: 1 }}>
           <Typography variant="body2" color="text.secondary">
-            This node gets a new Daml signing key for the party from its vault.
-            The new key replaces this node's current key in the party's key
-            list.
+            This node gets a new Daml signing key for the party. The new key
+            replaces this node's current key in the party's key list.
           </Typography>
           <Typography variant="body2" color="text.secondary">
             The participant must keep its keys in KMS, unless this node sets
-            DECPM_ALLOW_SOFTWARE_PARTY_KEYS. DecMan refuses the rotation
-            otherwise.
+            DECPM_ALLOW_SOFTWARE_PARTY_KEYS. DecMan then generates the key
+            itself. DecMan refuses the rotation otherwise.
           </Typography>
           <Typography variant="body2" color="text.secondary">
             {others < 1
@@ -95,8 +94,8 @@ export const RotateKeyDialog = ({
               : others === 1
                 ? "The other member must sign the change."
                 : `The other ${others} members must sign the change.`}{" "}
-            The members, owners, and thresholds stay the same. The old key
-            stays in the vault.
+            The members, owners, and thresholds stay the same. The old key is
+            not deleted.
           </Typography>
 
           <TextField
