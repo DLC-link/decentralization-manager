@@ -7,7 +7,7 @@ use crate::{
     config::NodeConfig,
     error::Result,
     signing::custody,
-    utils::{compute_fingerprint, get_participant_id},
+    utils::{compute_fingerprint, get_participant_id, get_synchronizer_id},
     workflow::{
         add_party::AddPartyConfig,
         onboarding::steps::generate_keys::{
@@ -16,6 +16,7 @@ use crate::{
         },
         party_replication::capture_offset_once,
         storage::{WorkflowStorage, artifact_kinds},
+        topology,
     },
 };
 
@@ -42,13 +43,6 @@ pub async fn generate_keys(
     custody::require_kms_participant(config, storage, &mut vault_client).await?;
 
     let namespace_key_name = add_party_config.namespace_key_name();
-    let daml_key_name = run_daml_key_name(
-        config,
-        storage,
-        instance_name,
-        &add_party_config.decentralized_party_id.prefix,
-    )
-    .await?;
 
     let (namespace_key, namespace_was_existing) = get_or_create_signing_key(
         &mut vault_client,
@@ -70,15 +64,34 @@ pub async fn generate_keys(
         );
     }
 
-    let daml_key = custody::new_daml_key(
-        config,
-        storage,
-        &mut vault_client,
-        &daml_key_name,
-        Some(&add_party_config.decentralized_party_id),
-    )
-    .await?
-    .public_key;
+    // A former host that still owns the party keeps its key in the party's
+    // key set, so hosting it again reuses that key. Any other member gets a
+    // new key for this run.
+    let party = &add_party_config.decentralized_party_id;
+    let synchronizer_id = get_synchronizer_id(config).await?;
+    let (_, head) = topology::fetch_p2p_mapping_at_head(config, &synchronizer_id, party).await?;
+    let in_force = head
+        .party_signing_keys
+        .map(|keys| keys.keys)
+        .unwrap_or_default();
+    let daml_key =
+        match custody::party_key_in_force(config, storage, &mut vault_client, party, &in_force)
+            .await?
+        {
+            Some(key) => {
+                tracing::info!(
+                    "Reusing Daml key {fingerprint}, which {party} still carries for this node",
+                    fingerprint = compute_fingerprint(&key)
+                );
+                key
+            }
+            None => {
+                let name = run_daml_key_name(config, storage, instance_name, &party.prefix).await?;
+                custody::new_daml_key(config, storage, &mut vault_client, &name, Some(party))
+                    .await?
+                    .public_key
+            }
+        };
 
     let self_id = config.participant_id().to_string();
 

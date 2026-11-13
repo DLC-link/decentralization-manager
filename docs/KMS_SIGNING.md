@@ -308,7 +308,9 @@ copy of each key.
 - Each onboarding or add-party run creates a new Daml key. The key's name
   holds a random id that decman records with the run, so a retry finds the
   same key. A member that is kicked and added again therefore gets a new key,
-  never the key that a rotation replaced. On a KMS node, grant decman's role
+  never the key that a rotation replaced. A former host that still owns the
+  party keeps its key in the party's key set, so hosting it again reuses that
+  key. On a KMS node, grant decman's role
   `kms:Sign` on that new key, as step 2 of the setup describes. decman
   refuses to reuse a key that no longer decrypts, and asks for the previous
   encryption key.

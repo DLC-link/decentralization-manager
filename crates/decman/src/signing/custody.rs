@@ -343,6 +343,55 @@ pub async fn file_party_key(
     Ok(true)
 }
 
+/// The one key of `keys` that this node holds, for a party that still
+/// carries it.
+///
+/// A former host that still owns the party keeps its Daml key in the
+/// party's key set. Hosting it again must reuse that key, or the party would
+/// carry two keys for one member. A key that a kick or a rotation removed is
+/// no longer in `keys`, so a member never gets such a key back from here.
+///
+/// # Errors
+///
+/// Errors when the vault or the key store cannot be read, when this node
+/// holds more than one of `keys`, or when a vault key breaks this node's KMS
+/// rule.
+pub async fn party_key_in_force(
+    config: &NodeConfig,
+    db: &SqlitePool,
+    vault_client: &mut VaultServiceClient<Channel>,
+    party: &CantonId,
+    keys: &[SigningPublicKey],
+) -> Result<Option<SigningPublicKey>> {
+    let mut held = Vec::new();
+    for key in keys {
+        let fingerprint = compute_fingerprint(key);
+        if holds_party_key(config, db, party, &fingerprint).await? {
+            held.push((key, fingerprint));
+        }
+    }
+    let (key, fingerprint) = match held.as_slice() {
+        [] => return Ok(None),
+        [(key, fingerprint)] => (*key, fingerprint),
+        _ => anyhow::bail!(
+            "This node holds {count} of {party}'s signing keys ({all}), so it cannot tell which \
+             one is its own",
+            count = held.len(),
+            all = held
+                .iter()
+                .map(|(_, fingerprint)| fingerprint.to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+    };
+    if vault_holds(config, fingerprint).await? {
+        require_kms_key(config, vault_client, fingerprint).await?;
+    } else {
+        file_party_key(config, db, party, fingerprint).await?;
+    }
+    Ok(Some(key.clone()))
+}
+
 /// With the key store off, only a key in the vault can sign. A key DecMan
 /// generated would be skipped, and the run would fail later in Canton.
 async fn require_vault_holds(config: &NodeConfig, fingerprint: &Fingerprint) -> Result {
@@ -1202,6 +1251,98 @@ mod against_a_vault {
             holds_party_key(&without_store.config, &db, &party, &in_vault.fingerprint()).await?
         );
         assert!(!holds_party_key(&without_store.config, &db, &party, &generated).await?);
+        Ok(())
+    }
+
+    /// A former host that the party still carries a key for gets that key
+    /// back, from the vault or from the key store. A node that holds none of
+    /// the party's keys gets nothing, and one that holds two is refused.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_former_host_finds_the_key_the_party_still_carries(db: SqlitePool) -> Result {
+        let in_vault = VaultKey::software("q-daml-transactions", 5);
+        let fake = FakeAdminApi::start(vec![in_vault.clone()]).await?;
+        let node = fake.node(SoftwareKeys::Stored, true).await?;
+        let mut vault_client = vault(&node.config).await?;
+        let generated = new_daml_key(
+            &node.config,
+            &db,
+            &mut vault_client,
+            "p-daml-transactions-run-1",
+            None,
+        )
+        .await?
+        .public_key;
+        let elsewhere = VaultKey::software("elsewhere", 6).public_key;
+        let party = party()?;
+
+        let found = party_key_in_force(
+            &node.config,
+            &db,
+            &mut vault_client,
+            &party,
+            &[elsewhere.clone(), generated.clone()],
+        )
+        .await?;
+        assert_eq!(found, Some(generated.clone()));
+        assert_eq!(party_rows(&db).await?, 1, "the generated key is filed");
+
+        let found = party_key_in_force(
+            &node.config,
+            &db,
+            &mut vault_client,
+            &party,
+            &[in_vault.public_key.clone(), elsewhere.clone()],
+        )
+        .await?;
+        assert_eq!(found, Some(in_vault.public_key.clone()));
+
+        let none = party_key_in_force(
+            &node.config,
+            &db,
+            &mut vault_client,
+            &party,
+            std::slice::from_ref(&elsewhere),
+        )
+        .await?;
+        assert_eq!(none, None);
+
+        let error = match party_key_in_force(
+            &node.config,
+            &db,
+            &mut vault_client,
+            &party,
+            &[in_vault.public_key.clone(), generated],
+        )
+        .await
+        {
+            Ok(found) => anyhow::bail!("two held keys must be refused, got {found:?}"),
+            Err(e) => e.to_string(),
+        };
+        assert!(error.contains("holds 2 of"), "{error}");
+        Ok(())
+    }
+
+    /// A strict node refuses to reuse a software key from its vault, as it
+    /// refuses to create one.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_strict_node_does_not_reuse_a_software_vault_key(db: SqlitePool) -> Result {
+        let in_vault = VaultKey::software("q-daml-transactions", 5);
+        let fake = FakeAdminApi::start(vec![in_vault.clone()]).await?;
+        let node = fake.node(SoftwareKeys::Refused, false).await?;
+
+        let error = match party_key_in_force(
+            &node.config,
+            &db,
+            &mut vault(&node.config).await?,
+            &party()?,
+            std::slice::from_ref(&in_vault.public_key),
+        )
+        .await
+        {
+            Ok(found) => anyhow::bail!("a software key must be refused, got {found:?}"),
+            Err(e) => e.to_string(),
+        };
+        assert!(error.contains("software vault, not in a KMS"), "{error}");
         Ok(())
     }
 
