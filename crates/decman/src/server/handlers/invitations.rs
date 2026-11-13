@@ -8,10 +8,7 @@ use crate::{
     config::Peer,
     consts::{DECLINE_NOTIFY_BACKOFF_SECS, DECLINE_NOTIFY_MAX_ATTEMPTS},
     db::schema::{Commitable, SchemaRead, SchemaWrite},
-    noise::{
-        Message, MessageType, NoiseKeypair, client::NoiseClient, parse_public_key,
-        send_noise_message_with_chunked_response,
-    },
+    noise::client::NoiseClient,
     server::{
         AppState, InvitationType,
         handlers::refresh_party_for_kick,
@@ -26,7 +23,7 @@ use crate::{
     },
     workflow::{
         AddPartyStep, ChangeThresholdStep, ContractsStep, DarsStep, KickStep, OnboardingStep,
-        state::WorkflowStep,
+        dars::peer::fetch_dar_from_coordinator, state::WorkflowStep,
     },
 };
 
@@ -656,13 +653,14 @@ pub async fn get_invitation_dar(
     };
 
     let dar = match fetch_dar_from_coordinator(
-        &data,
+        &data.config,
         &coordinator,
         &RequestDarPayload {
             workflow_instance,
             index,
             filename: filename.clone(),
         },
+        &data.config.noise_retry,
     )
     .await
     {
@@ -746,42 +744,6 @@ fn sanitize_filename(name: &str) -> String {
             c => c,
         })
         .collect()
-}
-
-/// Ask the coordinator for one DAR over Noise, reassembling a chunked answer.
-async fn fetch_dar_from_coordinator(
-    data: &web::Data<AppState>,
-    coordinator: &Peer,
-    request: &RequestDarPayload,
-) -> anyhow::Result<Vec<u8>> {
-    let peer_pub_key = parse_public_key(&coordinator.public_key)
-        .map_err(|e| anyhow::anyhow!("the coordinator's public key does not parse: {e}"))?;
-    let keypair = NoiseKeypair::from_file(&data.config.key_file_path()).await?;
-    let psk = keypair.derive_psk(&peer_pub_key);
-    let identity = data.config.participant_id().to_string();
-
-    let message = Message::new(MessageType::RequestDar, serde_json::to_vec(request)?);
-    let response = send_noise_message_with_chunked_response(
-        &coordinator.address,
-        coordinator.port,
-        &psk,
-        identity.as_bytes(),
-        &message,
-        &data.config.noise_retry,
-    )
-    .await
-    .map_err(|e| anyhow::anyhow!("{e}"))?;
-
-    let response = Message::from_bytes(&response)
-        .map_err(|_| anyhow::anyhow!("the coordinator's answer does not parse"))?;
-    match response.msg_type {
-        MessageType::Data => Ok(response.payload),
-        MessageType::Error => Err(anyhow::anyhow!(
-            "{}",
-            String::from_utf8_lossy(&response.payload)
-        )),
-        other => Err(anyhow::anyhow!("unexpected answer {other:?}")),
-    }
 }
 
 #[cfg(test)]

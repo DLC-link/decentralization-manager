@@ -19,7 +19,7 @@ use crate::{
 /// Max attempts to fetch a single chunk (each on a fresh connection) before the
 /// chunked transfer gives up. Lets a transient stall/reset recover in place
 /// instead of restarting the whole download.
-const CHUNK_FETCH_MAX_ATTEMPTS: usize = 3;
+pub(crate) const CHUNK_FETCH_MAX_ATTEMPTS: usize = 3;
 
 /// Client for connecting to the coordinator
 #[derive(Clone)]
@@ -362,6 +362,16 @@ impl NoiseClient {
 
     /// Poll coordinator for next command, returning full message with payload
     pub async fn get_next_command_with_payload(&self) -> Result<Message, NoiseError> {
+        self.get_next_command_leaving_chunks(None).await
+    }
+
+    /// Poll coordinator for next command, returning full message with payload,
+    /// except for a chunked payload of command `left`. That command arrives
+    /// with an empty payload, and its chunks stay on the coordinator.
+    pub async fn get_next_command_leaving_chunks(
+        &self,
+        left: Option<MessageType>,
+    ) -> Result<Message, NoiseError> {
         tracing::debug!("Polling coordinator for next command");
 
         let message = Message::new_empty(MessageType::GetNextCommand);
@@ -372,6 +382,12 @@ impl NoiseClient {
 
         // Handle chunked transfer
         if resp_msg.msg_type == MessageType::ChunkedCommand {
+            if let Some(command) = left
+                && chunked_command_is(&resp_msg.payload, command)
+            {
+                tracing::info!("Leaving the chunked payload of {command:?} on the coordinator");
+                return Ok(Message::new_empty(command));
+            }
             return self.receive_chunked_payload(&resp_msg.payload).await;
         }
 
@@ -393,7 +409,7 @@ impl NoiseClient {
             MessageType::try_from(command_type).map_err(|_| NoiseError::InvalidMessage)?;
 
         // Bound coordinator-supplied metadata before allocating or looping
-        // (mirrors `send_noise_message_with_chunked_response`): a malicious or
+        // (mirrors `receive_chunked_response`): a malicious or
         // buggy coordinator could otherwise advertise multi-GB sizes and OOM
         // us, or send a chunk_count inconsistent with total_size.
         if total_size > MAX_CHUNKED_TOTAL_SIZE || chunk_count > MAX_CHUNK_COUNT {
@@ -579,4 +595,9 @@ impl NoiseClient {
 
         Ok(resp_msg.payload[4..].to_vec())
     }
+}
+
+/// Whether `ChunkedCommand` metadata announces a payload of `command`.
+fn chunked_command_is(meta: &[u8], command: MessageType) -> bool {
+    meta.get(..2) == Some(command.to_u16().to_be_bytes().as_slice())
 }

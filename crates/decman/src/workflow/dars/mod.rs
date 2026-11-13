@@ -1,5 +1,9 @@
 pub mod config;
 pub mod coordinator;
+pub mod peer;
+
+#[cfg(test)]
+mod peer_tests;
 
 pub use config::DarsConfig;
 
