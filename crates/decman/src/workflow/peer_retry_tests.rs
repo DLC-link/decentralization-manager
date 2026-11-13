@@ -292,7 +292,16 @@ async fn an_oversized_command_ends_the_peer_run_at_once() -> Result {
         .err()
         .ok_or_else(|| anyhow::anyhow!("the oversized command did not end the run"))?;
     assert!(
-        format!("{error:#}").contains("payload is too large for this node"),
+        format!("{error:#}")
+            .contains("Peer failed on the coordinator's payload: Payload too large"),
+        "{error:#}"
+    );
+    assert_eq!(
+        format!("{error:#}")
+            .to_lowercase()
+            .matches("too large")
+            .count(),
+        1,
         "{error:#}"
     );
     assert_eq!(run.polls.len(), 1, "the peer retried an oversized payload");

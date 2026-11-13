@@ -364,9 +364,7 @@ async fn run_peer(
                 // one above this node's limit never fits. A retry only delays
                 // the report.
                 if matches!(e, NoiseError::PayloadTooLarge { .. }) {
-                    anyhow::bail!(
-                        "Peer failed: the coordinator's payload is too large for this node: {e}"
-                    );
+                    anyhow::bail!("Peer failed on the coordinator's payload: {e}");
                 }
 
                 consecutive_errors += 1;
