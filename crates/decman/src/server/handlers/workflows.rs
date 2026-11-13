@@ -50,8 +50,9 @@ use crate::{
         self, AddPartyStep, ChangeThresholdStep, ContractsStep, DarsStep, KickStep, OnboardingStep,
         contracts::DarFile,
         signing_keys::{
-            ensure_survivor_keys_preserved, kick_key_claims, known_signing_keys_by_member,
-            members_requiring_key_adoption, requires_signing_key_adoption,
+            KeyClaimError, ensure_survivor_keys_preserved, kick_key_claims,
+            known_signing_keys_by_member, members_requiring_key_adoption,
+            requires_signing_key_adoption,
         },
         state::WorkflowStep,
         storage::WorkflowStorage,
@@ -526,6 +527,32 @@ fn kick_missing_adopters(required: &[String]) -> Option<String> {
     })
 }
 
+/// The response to a failed signing-key check of a kick. A key-claim refusal
+/// says what to do, so it goes back as it is. Any other failure is logged and
+/// answered with generic text.
+fn kick_key_check_failure(party: &CantonId, e: &anyhow::Error) -> HttpResponse {
+    match e.downcast_ref::<KeyClaimError>() {
+        Some(KeyClaimError::Conflict(error)) => {
+            tracing::warn!("Kick of {party} refused: {error}");
+            HttpResponse::Conflict().json(ErrorResponse {
+                error: error.clone(),
+            })
+        }
+        Some(KeyClaimError::Unresolved(error)) => {
+            tracing::info!("Kick of {party} refused: {error}");
+            HttpResponse::ServiceUnavailable().json(ErrorResponse {
+                error: error.clone(),
+            })
+        }
+        None => {
+            tracing::error!("Cannot check the signing keys of {party} for a kick: {e:#}");
+            HttpResponse::ServiceUnavailable().json(ErrorResponse {
+                error: "Cannot check the party's signing keys right now. Retry later.".to_string(),
+            })
+        }
+    }
+}
+
 /// The member a kick removes.
 #[derive(Debug, PartialEq)]
 struct KickTarget {
@@ -757,9 +784,9 @@ async fn cached_confirmation_threshold(
     responses(
         (status = 202, description = "Kick workflow started", body = WorkflowResponse),
         (status = 400, description = "Bad request", body = ErrorResponse),
-        (status = 409, description = "Workflow already in progress, or owner key not yet resolved for the target participant", body = ErrorResponse),
+        (status = 409, description = "Workflow already in progress, owner key not yet resolved for the target participant, or two remaining members claim one signing key", body = ErrorResponse),
         (status = 500, description = "Internal server error", body = ErrorResponse),
-        (status = 503, description = "Cannot verify a surviving member's signing key ownership or adoption; refresh and retry", body = ErrorResponse)
+        (status = 503, description = "A remaining member's signing key is not on record, or the party's signing keys cannot be read right now", body = ErrorResponse)
     )
 )]
 #[post("/kick")]
@@ -1041,17 +1068,7 @@ pub async fn start_kick(
     {
         Ok(Some(error)) => return HttpResponse::BadRequest().json(ErrorResponse { error }),
         Ok(None) => {}
-        Err(e) => {
-            tracing::error!(
-                "Cannot check signing key adoption for {decentralized_party_id}: {e:#}"
-            );
-            return HttpResponse::ServiceUnavailable().json(ErrorResponse {
-                error: format!(
-                    "Cannot verify surviving signing key ownership or adoption: {e:#}. \
-                     Refresh /decentralized-parties and retry"
-                ),
-            });
-        }
+        Err(e) => return kick_key_check_failure(&decentralized_party_id, &e),
     }
 
     // Refuse to invite any peer that can't speak the concurrent-workflows wire
@@ -5513,8 +5530,25 @@ mod tests {
     async fn an_unreadable_key_adoption_preflight_creates_no_kick_run(pool: SqlitePool) -> Result {
         let party = pid(47)?;
         cache_kick_party(&pool, &party, 2, &[1, 2, 3, 4], &[], &[2]).await?;
+        let (state, status, body) = post_kick_without_run_in_flight(&pool, &party, 4).await?;
+
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+        assert_eq!(
+            error_text(&body)?,
+            "Cannot check the party's signing keys right now. Retry later."
+        );
+        assert_no_kick_started(&pool, &state).await
+    }
+
+    /// Posts a kick of `pid(target)` at threshold 2 once the party's run in
+    /// flight is gone. Canton is unreachable, so a ledger read fails at once.
+    async fn post_kick_without_run_in_flight(
+        pool: &SqlitePool,
+        party: &CantonId,
+        target: u8,
+    ) -> Result<(web::Data<AppState>, StatusCode, String)> {
         sqlx::query("DELETE FROM workflow_runs WHERE instance_name = 'contracts-in-flight'")
-            .execute(&pool)
+            .execute(pool)
             .await?;
         let state = Arc::try_unwrap(kick_state_on(pool.clone()).await?.into_inner())
             .map_err(|_| anyhow::anyhow!("fresh state has one owner"))?;
@@ -5524,24 +5558,21 @@ mod tests {
         let state = web::Data::new(AppState { config, ..state });
         let app =
             actix_test::init_service(App::new().app_data(state.clone()).service(start_kick)).await;
-        let request = actix_test::TestRequest::post()
-            .uri("/kick")
-            .set_json(serde_json::json!({
-                "decentralized_party_id": party,
-                "participant_id": pid(4)?,
-                "new_threshold": 2,
-            }))
-            .to_request();
+        let request = kick_request(party, &pid(target)?).to_request();
         request.extensions_mut().insert(admin());
-
         let (status, body) = status_and_body(actix_test::call_service(&app, request).await).await;
+        Ok((state, status, body))
+    }
 
-        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
-        assert!(
-            body.contains("Cannot verify surviving signing key ownership or adoption"),
-            "{body}"
-        );
-        assert!(body.contains("retry"), "{body}");
+    /// The `error` field of an error response body.
+    fn error_text(body: &str) -> Result<String> {
+        serde_json::from_str::<serde_json::Value>(body)?["error"]
+            .as_str()
+            .map(ToString::to_string)
+            .with_context(|| format!("no error text in {body}"))
+    }
+
+    async fn assert_no_kick_started(pool: &SqlitePool, state: &web::Data<AppState>) -> Result {
         assert!(
             pool.get_workflow_runs_by_kind(WorkflowKind::Kick)
                 .await?
@@ -5664,9 +5695,16 @@ mod tests {
         record_signing_keys(&pool, &party, &[(2, 3)]).await?;
         let error = preflight(pool)
             .await
-            .expect_err("two remaining members claim one key")
-            .to_string();
-        assert!(error.contains("both claim"), "{error}");
+            .expect_err("two remaining members claim one key");
+        assert!(
+            matches!(
+                error.downcast_ref::<KeyClaimError>(),
+                Some(KeyClaimError::Conflict(_))
+            ),
+            "{error:#}"
+        );
+        let response = kick_key_check_failure(&party, &error);
+        assert_eq!(response.status(), StatusCode::CONFLICT);
         Ok(())
     }
 
