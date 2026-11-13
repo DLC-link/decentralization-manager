@@ -34,6 +34,7 @@ use crate::{
     db::schema::SchemaRead,
     error::Result,
     server::WorkflowKind,
+    signing::custody,
     utils,
     workflow::{
         onboarding::steps::proposals::create::{
@@ -42,7 +43,7 @@ use crate::{
         rotate_key::config::signing_threshold_in_force,
         signing_keys::{
             ensure_survivor_keys_preserved, kick_key_claims, known_signing_keys_by_member,
-            own_namespace_key, recorded_signing_keys_by_member, vault_holds,
+            own_namespace_key, recorded_signing_keys_by_member,
         },
         storage::{WorkflowStorage, artifact_kinds, identity_kinds},
         topology, topology_version,
@@ -1129,9 +1130,10 @@ impl PeerExpectations {
             None => {
                 tracing::warn!(
                     "this node's keys are unrecorded for this party (onboarded before the \
-                     identity table existed); checking the proposal against the vault instead"
+                     identity table existed); checking the proposal against the keys this \
+                     node holds instead"
                 );
-                return self.check_vault_holds_a_party_key(config, mapping).await;
+                return self.check_holds_a_party_key(config, storage, mapping).await;
             }
         };
         let own_daml_fingerprint = utils::compute_fingerprint(&keys[1]);
@@ -1154,8 +1156,8 @@ impl PeerExpectations {
     }
 
     /// The fallback for a party this node has no local key record for: the
-    /// vault still knows whether this node holds the private half of one of
-    /// the proposed keys.
+    /// vault and DecMan's key store still know whether this node holds the
+    /// private half of one of the proposed keys.
     ///
     /// Without it a legacy party's members cannot check the attribution at
     /// all — the coordinator works out whose key is whose from its own
@@ -1165,19 +1167,22 @@ impl PeerExpectations {
     ///
     /// # Errors
     ///
-    /// Errors when the proposal carries no signing keys, when the vault holds
-    /// none of them, or when the vault cannot be read.
-    async fn check_vault_holds_a_party_key(
+    /// Errors when the proposal carries no signing keys, when this node holds
+    /// none of them, or when the vault or the key store cannot be read.
+    async fn check_holds_a_party_key(
         &self,
         config: &NodeConfig,
+        storage: &SqlitePool,
         mapping: &PartyToParticipant,
     ) -> Result {
         let Some(signing_keys) = mapping.party_signing_keys.as_ref() else {
             anyhow::bail!("P2P proposal carries no party signing keys");
         };
+        let party = CantonId::parse(&mapping.party)?;
 
         for key in &signing_keys.keys {
-            if vault_holds(config, &utils::compute_fingerprint(key)).await? {
+            let fingerprint = utils::compute_fingerprint(key);
+            if custody::holds_party_key(config, storage, &party, &fingerprint).await? {
                 return Ok(());
             }
         }
