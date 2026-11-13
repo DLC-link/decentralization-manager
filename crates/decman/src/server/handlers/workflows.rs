@@ -52,7 +52,7 @@ use crate::{
         signing_keys::{
             KeyClaimError, ensure_survivor_keys_preserved, kick_key_claims,
             known_signing_keys_by_member, members_requiring_key_adoption,
-            requires_signing_key_adoption,
+            recorded_signing_keys_by_member, requires_signing_key_adoption,
         },
         state::WorkflowStep,
         storage::WorkflowStorage,
@@ -525,6 +525,70 @@ fn kick_missing_adopters(required: &[String]) -> Option<String> {
             required.join(", ")
         )
     })
+}
+
+/// Refuse a kick whose proposal could not keep each remaining member's
+/// signing key. Only a record says which key is whose, so every remaining
+/// host other than this node needs one. This node reads its own key from its
+/// vault when it builds the proposal. Reads only the database.
+///
+/// # Errors
+///
+/// [`KeyClaimError`] when a key is not on record or two remaining members
+/// claim one key. Any other error is a database failure.
+async fn check_kick_survivor_keys(
+    db: &SqlitePool,
+    party: &CantonId,
+    self_id: &CantonId,
+    signers: &KickSigners,
+    removed: &str,
+) -> Result {
+    let claims = recorded_signing_keys_by_member(db, party).await?;
+    let survivors: Vec<String> = signers
+        .invitees
+        .iter()
+        .chain(&signers.not_peers)
+        .chain(std::iter::once(self_id))
+        .map(ToString::to_string)
+        .collect();
+    kick_key_claims(Some(removed), &survivors, &claims, &[])?;
+
+    let unknown = |members: &[CantonId]| -> Vec<String> {
+        members
+            .iter()
+            .map(ToString::to_string)
+            .filter(|member| !claims.contains_key(member))
+            .collect()
+    };
+    let peers = unknown(&signers.invitees);
+    let not_peers = unknown(&signers.not_peers);
+    if peers.is_empty() && not_peers.is_empty() {
+        return Ok(());
+    }
+    let mut message = format!(
+        "Cannot kick: this node has no record of the signing key of {members}. The kick must \
+         keep the key of each member that stays.",
+        members = peers
+            .iter()
+            .chain(&not_peers)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+    match not_peers.as_slice() {
+        [] => message
+            .push_str(" Refresh /decentralized-parties so each peer reports its key, then retry."),
+        [member] => message.push_str(&format!(
+            " {member} is not a configured peer of this node, so a refresh cannot read its \
+             key. Add it as a peer, refresh /decentralized-parties, then retry."
+        )),
+        several => message.push_str(&format!(
+            " {members} are not configured peers of this node, so a refresh cannot read their \
+             keys. Add them as peers, refresh /decentralized-parties, then retry.",
+            members = several.join(", ")
+        )),
+    }
+    Err(KeyClaimError::Unresolved(message).into())
 }
 
 /// The response to a failed signing-key check of a kick. A key-claim refusal
@@ -1056,6 +1120,17 @@ pub async fn start_kick(
         || kick_config.namespace_fingerprint.clone(),
         ToString::to_string,
     );
+    if let Err(e) = check_kick_survivor_keys(
+        &data.db,
+        &decentralized_party_id,
+        &self_id,
+        &signers,
+        &removed,
+    )
+    .await
+    {
+        return kick_key_check_failure(&decentralized_party_id, &e);
+    }
     match kick_key_adoption_refusal(
         &data.config,
         &data.db,
@@ -5530,6 +5605,7 @@ mod tests {
     async fn an_unreadable_key_adoption_preflight_creates_no_kick_run(pool: SqlitePool) -> Result {
         let party = pid(47)?;
         cache_kick_party(&pool, &party, 2, &[1, 2, 3, 4], &[], &[2]).await?;
+        record_signing_keys(&pool, &party, &[(2, 2), (3, 3)]).await?;
         let (state, status, body) = post_kick_without_run_in_flight(&pool, &party, 4).await?;
 
         assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
@@ -5581,6 +5657,87 @@ mod tests {
         assert!(state.workflows.snapshot().is_empty());
         assert!(state.pending_invitations.read().await.is_empty());
         Ok(())
+    }
+
+    /// Every remaining host's key must be on record, or the proposal cannot
+    /// keep it. The refusal comes before any run exists. It names the member,
+    /// and a member that is not a peer is told to become one.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_kick_needs_every_remaining_hosts_key_before_any_run(pool: SqlitePool) -> Result {
+        let party = pid(50)?;
+        cache_kick_party(&pool, &party, 2, &[1, 2, 3, 4], &[], &[2]).await?;
+        record_signing_keys(&pool, &party, &[(2, 2)]).await?;
+
+        let (state, status, body) = post_kick_without_run_in_flight(&pool, &party, 4).await?;
+
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+        let error = error_text(&body)?;
+        assert_eq!(
+            error,
+            format!(
+                "Cannot kick: this node has no record of the signing key of {p3}. The kick \
+                 must keep the key of each member that stays. {p3} is not a configured peer \
+                 of this node, so a refresh cannot read its key. Add it as a peer, refresh \
+                 /decentralized-parties, then retry.",
+                p3 = pid(3)?
+            )
+        );
+        assert_no_kick_started(&pool, &state).await
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_peer_without_a_recorded_key_is_asked_to_refresh(pool: SqlitePool) -> Result {
+        let party = pid(51)?;
+        cache_kick_party(&pool, &party, 2, &[1, 2, 3], &[], &[2, 3]).await?;
+        let (state, status, body) = post_kick_without_run_in_flight(&pool, &party, 3).await?;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+        let error = error_text(&body)?;
+        assert!(error.contains(&pid(2)?.to_string()), "{error}");
+        assert!(
+            error.ends_with(
+                " Refresh /decentralized-parties so each peer reports its key, then retry."
+            ),
+            "{error}"
+        );
+        assert!(!error.contains("Add it as a peer"), "{error}");
+        assert_no_kick_started(&pool, &state).await
+    }
+
+    /// Two remaining members that claim one key are a conflict no retry can
+    /// settle. The refusal is a 409 and comes before any run exists.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn two_survivors_that_claim_one_key_are_refused_with_a_conflict(
+        pool: SqlitePool,
+    ) -> Result {
+        let party = pid(52)?;
+        cache_kick_party(&pool, &party, 2, &[1, 2, 3, 4], &[], &[2, 3]).await?;
+        record_signing_keys(&pool, &party, &[(2, 2), (3, 2), (4, 4)]).await?;
+
+        let (state, status, body) = post_kick_without_run_in_flight(&pool, &party, 4).await?;
+
+        assert_eq!(status, StatusCode::CONFLICT, "{body}");
+        let error = error_text(&body)?;
+        assert!(error.contains("both claim signing key"), "{error}");
+        assert!(error.contains(&pid(2)?.to_string()), "{error}");
+        assert!(error.contains(&pid(3)?.to_string()), "{error}");
+        assert_no_kick_started(&pool, &state).await
+    }
+
+    /// The kicked member reports a remaining member's key as its own. That
+    /// claim is ignored, so it cannot block its own kick.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_target_that_claims_a_survivors_key_passes_the_key_check(pool: SqlitePool) -> Result {
+        let party = pid(53)?;
+        cache_kick_party(&pool, &party, 2, &[1, 2, 3, 4], &[], &[2, 3]).await?;
+        record_signing_keys(&pool, &party, &[(2, 2), (3, 3), (4, 2)]).await?;
+        let signers = kick_signers(
+            &ids(&[1, 2, 3, 4])?,
+            &ids(&[2, 3])?,
+            &pid(1)?,
+            Some(&pid(4)?),
+        );
+
+        check_kick_survivor_keys(&pool, &party, &pid(1)?, &signers, &pid(4)?.to_string()).await
     }
 
     #[sqlx::test(migrator = "MIGRATOR")]

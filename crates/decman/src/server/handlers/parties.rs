@@ -999,9 +999,10 @@ pub async fn resolve_owner_keys_from_peers(
                 }
 
                 // Absent from peers that predate the field. Nothing else can
-                // supply it — the party's signing keys carry no owner — so a
-                // kick coordinated here falls back to elimination until this
-                // peer answers a later refresh.
+                // supply it, because the party's signing keys carry no owner.
+                // A kick coordinated here refuses to start while a remaining
+                // host's key is unknown. Only the kicked member's key may be
+                // found by elimination.
                 let Some(signing_key) = entry["signing_key"].as_str() else {
                     continue;
                 };
