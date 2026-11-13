@@ -60,4 +60,14 @@ describe("A rotate-key invitation in the feed", () => {
       "1220dddddd…dddddddd",
     );
   });
+
+  it("says the replaced key is the coordinator's and the threshold stays", () => {
+    renderFeed();
+    fireEvent.click(screen.getByRole("button", { name: /Review/ }));
+
+    expect(screen.getByTestId("rotated-key-owner").textContent).toContain(
+      "the coordinator's own Daml key",
+    );
+    expect(screen.getByTestId("invitation-threshold").textContent).toBe("2, unchanged");
+  });
 });
