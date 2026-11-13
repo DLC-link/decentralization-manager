@@ -870,6 +870,11 @@ mod tests {
         };
 
         assert!(error.contains("cannot use it"), "{error}");
+        // The operator learns how to get the key back.
+        assert!(
+            error.contains("Restore the previous key-store encryption key"),
+            "{error}"
+        );
         Ok(())
     }
 
@@ -915,6 +920,69 @@ mod tests {
             utils::compute_fingerprint(&public_key).to_string()
         );
         assert_eq!(public_key.usage, vec![SigningKeyUsage::Protocol as i32]);
+        // Canton checks the signature against the transaction's hash, not
+        // against the transaction bytes.
+        let verifying = ed25519_dalek::VerifyingKey::from_bytes(&ed25519_public_key(&public_key)?)?;
+        let bytes: [u8; 64] = signature.signature.as_slice().try_into()?;
+        verifying.verify_strict(
+            &topology_transaction_hash(b"a transaction"),
+            &ed25519_dalek::Signature::from_bytes(&bytes),
+        )?;
+        Ok(())
+    }
+
+    /// A signature made with another seed would name a key that never
+    /// signed, and Canton would refuse the transaction.
+    #[test]
+    fn a_topology_signature_needs_the_keys_own_seed() {
+        let public_key = ed25519_signing_public_key(&[9u8; 32]);
+
+        let error = match sign_topology_transaction(&[8u8; 32], &public_key, b"a transaction") {
+            Ok(signature) => format!("signed as {}", signature.signed_by),
+            Err(e) => e.to_string(),
+        };
+
+        assert!(error.contains("does not belong to the key"), "{error}");
+    }
+
+    /// The associated data binds each seed to its name. A row moved to
+    /// another name must not decrypt, or a run would sign with the key of
+    /// another run.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_generated_key_moved_to_another_name_is_refused(db: SqlitePool) -> Result {
+        let store = store(db.clone(), 1);
+        let (p_key, _) = store.generate("p-daml-transactions").await?;
+        let (q_key, _) = store.generate("q-daml-transactions").await?;
+        for (from, to) in [
+            ("p-daml-transactions", "swap"),
+            ("q-daml-transactions", "p-daml-transactions"),
+            ("swap", "q-daml-transactions"),
+        ] {
+            sqlx::query("UPDATE generated_party_keys SET name = ?2 WHERE name = ?1")
+                .bind(from)
+                .bind(to)
+                .execute(&db)
+                .await?;
+        }
+
+        let error = match store.generate("p-daml-transactions").await {
+            Ok((key, _)) => anyhow::bail!(
+                "reused {} under p, whose key is {}",
+                utils::compute_fingerprint(&key),
+                utils::compute_fingerprint(&p_key)
+            ),
+            Err(e) => e.to_string(),
+        };
+        assert!(error.contains("cannot use it"), "{error}");
+
+        let error = match store
+            .generated_seed(&utils::compute_fingerprint(&q_key))
+            .await
+        {
+            Ok(found) => anyhow::bail!("decrypted a moved row: {}", found.is_some()),
+            Err(e) => e.to_string(),
+        };
+        assert!(error.contains("does not decrypt"), "{error}");
         Ok(())
     }
 

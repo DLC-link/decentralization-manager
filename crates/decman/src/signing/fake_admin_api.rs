@@ -8,6 +8,13 @@
 //! `ExportKeyPair`, and `SynchronizerConnectivityService.GetSynchronizerId`.
 //! It records each key it generates and each key it exports, so a test can
 //! show what DecMan asked the vault to do.
+//!
+//! It also serves a synchronizer's topology head state. A test publishes the
+//! namespace definitions, `PartyToParticipant` mappings and legacy
+//! `PartyToKeyMapping`s it needs. The read service lists them. The write
+//! service records each `Authorize` call and returns the proposed transaction
+//! unsigned, and it returns each transaction sent to `SignTransactions` as it
+//! came. That is what a participant that holds none of the keys would do.
 
 use std::{
     convert::Infallible,
@@ -27,8 +34,26 @@ use canton_proto_rs::com::digitalasset::canton::{
             SigningPublicKey, public_key,
         },
     },
+    protocol::v30::{
+        DecentralizedNamespaceDefinition, NamespaceDelegation, PartyToKeyMapping,
+        PartyToParticipant, SignedTopologyTransaction, TopologyMapping, TopologyTransaction, enums,
+        topology_mapping,
+    },
+    topology::admin::v30::{
+        AuthorizeRequest, AuthorizeResponse, BaseResult, GetIdRequest, GetIdResponse,
+        ListAllRequest, ListAllResponse, ListDecentralizedNamespaceDefinitionRequest,
+        ListDecentralizedNamespaceDefinitionResponse, ListNamespaceDelegationRequest,
+        ListNamespaceDelegationResponse, ListPartyToKeyMappingRequest,
+        ListPartyToKeyMappingResponse, ListPartyToParticipantRequest,
+        ListPartyToParticipantResponse, SignTransactionsRequest, SignTransactionsResponse,
+        TopologyTransactions, authorize_request, list_decentralized_namespace_definition_response,
+        list_namespace_delegation_response, list_party_to_key_mapping_response,
+        list_party_to_participant_response, topology_transactions,
+    },
+    version::v1::{UntypedVersionedMessage, untyped_versioned_message},
 };
 use p256::pkcs8::EncodePublicKey;
+use prost::Message;
 use sqlx::SqlitePool;
 use tempfile::TempDir;
 use tokio::task::JoinHandle;
@@ -55,6 +80,11 @@ use crate::{
 /// The synchronizer the fake reports, on protocol version 34.
 const SYNCHRONIZER_ID: &str =
     "global-domain::1220cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc::34-0";
+
+/// The participant id the fake reports, which [`FakeAdminApi::node`] also
+/// configures.
+const PARTICIPANT_ID: &str =
+    "node1::1220aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 
 /// What Canton 3.7 answers an export while key download is off.
 const KEY_DOWNLOAD_OFF: &str = "Remote export of private keys only allowed when explicitly enabled";
@@ -164,6 +194,62 @@ struct Vault {
     next_seed: u8,
     generated: Vec<String>,
     exported: Vec<Fingerprint>,
+    topology: Topology,
+    authorized: Vec<AuthorizeRequest>,
+}
+
+/// The synchronizer's head state: each mapping in force, with its serial.
+/// A namespace delegation that DecMan asks the fake to authorize goes in
+/// force at once, as on a participant that holds the namespace key.
+#[derive(Default)]
+struct Topology {
+    delegations: Vec<NamespaceDelegation>,
+    namespaces: Vec<(i32, DecentralizedNamespaceDefinition)>,
+    p2p: Vec<(i32, PartyToParticipant)>,
+    party_to_key: Vec<(i32, PartyToKeyMapping)>,
+}
+
+/// The context of a head-state row that adds or replaces a mapping.
+fn in_force(serial: i32) -> BaseResult {
+    BaseResult {
+        operation: enums::TopologyChangeOp::AddReplace as i32,
+        serial,
+        ..Default::default()
+    }
+}
+
+/// A topology transaction in its versioned envelope, as Canton serializes it.
+fn versioned_transaction(transaction: &TopologyTransaction) -> Vec<u8> {
+    versioned(transaction.encode_to_vec())
+}
+
+fn versioned(data: Vec<u8>) -> Vec<u8> {
+    UntypedVersionedMessage {
+        version: 30,
+        wrapper: Some(untyped_versioned_message::Wrapper::Data(data)),
+    }
+    .encode_to_vec()
+}
+
+/// An unsigned `AddReplace` of `mapping` at `serial`.
+fn unsigned(serial: i32, mapping: topology_mapping::Mapping) -> Result<SignedTopologyTransaction> {
+    Ok(SignedTopologyTransaction {
+        transaction: versioned_transaction(&TopologyTransaction {
+            operation: enums::TopologyChangeOp::AddReplace as i32,
+            serial: u32::try_from(serial)?,
+            mapping: Some(TopologyMapping {
+                mapping: Some(mapping),
+            }),
+        }),
+        ..Default::default()
+    })
+}
+
+/// The namespace of a party id, the part after `::`.
+fn party_namespace(party: &str) -> &str {
+    party
+        .split_once("::")
+        .map_or("", |(_, namespace)| namespace)
 }
 
 impl Vault {
@@ -231,6 +317,161 @@ impl Vault {
     }
 }
 
+impl Vault {
+    fn list_delegations(
+        &self,
+        request: ListNamespaceDelegationRequest,
+    ) -> ListNamespaceDelegationResponse {
+        ListNamespaceDelegationResponse {
+            results: self
+                .topology
+                .delegations
+                .iter()
+                .filter(|delegation| delegation.namespace.starts_with(&request.filter_namespace))
+                .filter(|delegation| {
+                    delegation.target_key.as_ref().is_some_and(|key| {
+                        compute_fingerprint(key)
+                            .as_str()
+                            .starts_with(&request.filter_target_key_fingerprint)
+                    })
+                })
+                .map(|delegation| list_namespace_delegation_response::Result {
+                    context: Some(in_force(1)),
+                    item: Some(list_namespace_delegation_response::result::Item::V30(
+                        delegation.clone(),
+                    )),
+                })
+                .collect(),
+        }
+    }
+
+    fn list_namespaces(
+        &self,
+        request: ListDecentralizedNamespaceDefinitionRequest,
+    ) -> ListDecentralizedNamespaceDefinitionResponse {
+        ListDecentralizedNamespaceDefinitionResponse {
+            results: self
+                .topology
+                .namespaces
+                .iter()
+                .filter(|(_, def)| {
+                    def.decentralized_namespace
+                        .starts_with(&request.filter_namespace)
+                })
+                .map(
+                    |(serial, def)| list_decentralized_namespace_definition_response::Result {
+                        context: Some(in_force(*serial)),
+                        item: Some(def.clone()),
+                    },
+                )
+                .collect(),
+        }
+    }
+
+    fn list_p2p(&self, request: ListPartyToParticipantRequest) -> ListPartyToParticipantResponse {
+        ListPartyToParticipantResponse {
+            results: self
+                .topology
+                .p2p
+                .iter()
+                .filter(|(_, p2p)| p2p.party.starts_with(&request.filter_party))
+                .map(|(serial, p2p)| list_party_to_participant_response::Result {
+                    context: Some(in_force(*serial)),
+                    item: Some(list_party_to_participant_response::result::Item::V30(
+                        p2p.clone(),
+                    )),
+                })
+                .collect(),
+        }
+    }
+
+    fn list_party_to_key(
+        &self,
+        request: ListPartyToKeyMappingRequest,
+    ) -> ListPartyToKeyMappingResponse {
+        ListPartyToKeyMappingResponse {
+            results: self
+                .topology
+                .party_to_key
+                .iter()
+                .filter(|(_, mapping)| mapping.party.starts_with(&request.filter_party))
+                .map(
+                    |(serial, mapping)| list_party_to_key_mapping_response::Result {
+                        context: Some(in_force(*serial)),
+                        item: Some(list_party_to_key_mapping_response::result::Item::V30(
+                            mapping.clone(),
+                        )),
+                    },
+                )
+                .collect(),
+        }
+    }
+
+    fn list_all(&self, request: ListAllRequest) -> Result<ListAllResponse, Status> {
+        let filter = request.filter_namespace.as_str();
+        let namespaces = self
+            .topology
+            .namespaces
+            .iter()
+            .filter(|(_, def)| def.decentralized_namespace.starts_with(filter))
+            .map(|(serial, def)| {
+                (
+                    *serial,
+                    topology_mapping::Mapping::DecentralizedNamespaceDefinition(def.clone()),
+                )
+            });
+        let p2p = self
+            .topology
+            .p2p
+            .iter()
+            .filter(|(_, p2p)| party_namespace(&p2p.party).starts_with(filter))
+            .map(|(serial, p2p)| {
+                (
+                    *serial,
+                    topology_mapping::Mapping::PartyToParticipant(p2p.clone()),
+                )
+            });
+        let items = namespaces
+            .chain(p2p)
+            .map(|(serial, mapping)| {
+                Ok(topology_transactions::Item {
+                    transaction: versioned(unsigned(serial, mapping)?.encode_to_vec()),
+                    ..Default::default()
+                })
+            })
+            .collect::<Result<Vec<_>>>()
+            .map_err(|e| Status::internal(e.to_string()))?;
+        Ok(ListAllResponse {
+            result: Some(TopologyTransactions { items }),
+        })
+    }
+
+    fn authorize(&mut self, request: AuthorizeRequest) -> Result<AuthorizeResponse, Status> {
+        self.authorized.push(request.clone());
+        let Some(authorize_request::Type::Proposal(proposal)) = request.r#type else {
+            return Err(Status::unimplemented("the fake authorizes proposals only"));
+        };
+        let Some(authorize_request::proposal::Mapping::V30(TopologyMapping {
+            mapping: Some(mapping),
+        })) = proposal.mapping
+        else {
+            return Err(Status::unimplemented(
+                "the fake authorizes v30 mappings only",
+            ));
+        };
+        if let topology_mapping::Mapping::NamespaceDelegation(delegation) = &mapping {
+            self.topology.delegations.push(delegation.clone());
+        }
+        let serial = i32::try_from(proposal.serial.max(1))
+            .map_err(|e| Status::invalid_argument(e.to_string()))?;
+        Ok(AuthorizeResponse {
+            transaction: Some(
+                unsigned(serial, mapping).map_err(|e| Status::internal(e.to_string()))?,
+            ),
+        })
+    }
+}
+
 type Shared = Arc<Mutex<Vault>>;
 
 fn lock(vault: &Shared) -> MutexGuard<'_, Vault> {
@@ -254,12 +495,17 @@ impl FakeAdminApi {
             next_seed: 100,
             generated: Vec::new(),
             exported: Vec::new(),
+            topology: Topology::default(),
+            authorized: Vec::new(),
         }));
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
         let port = listener.local_addr()?.port();
         let router = Server::builder()
             .add_service(VaultService(vault.clone()))
-            .add_service(ConnectivityService(vault.clone()));
+            .add_service(ConnectivityService(vault.clone()))
+            .add_service(TopologyReadService(vault.clone()))
+            .add_service(TopologyWriteService(vault.clone()))
+            .add_service(IdentityService(vault.clone()));
         let server = tokio::spawn(async move {
             if let Err(e) = router
                 .serve_with_incoming(TcpIncoming::from(listener))
@@ -290,14 +536,35 @@ impl FakeAdminApi {
         lock(&self.vault).exported.clone()
     }
 
+    /// Put `def` in force at `serial`.
+    pub fn publish_namespace(&self, serial: i32, def: DecentralizedNamespaceDefinition) {
+        lock(&self.vault).topology.namespaces.push((serial, def));
+    }
+
+    /// Put `mapping` in force at `serial`.
+    pub fn publish_p2p(&self, serial: i32, mapping: PartyToParticipant) {
+        lock(&self.vault).topology.p2p.push((serial, mapping));
+    }
+
+    /// Put the legacy `mapping` in force at `serial`.
+    pub fn publish_party_to_key(&self, serial: i32, mapping: PartyToKeyMapping) {
+        lock(&self.vault)
+            .topology
+            .party_to_key
+            .push((serial, mapping));
+    }
+
+    /// Each `Authorize` request DecMan sent, in order.
+    pub fn authorized(&self) -> Vec<AuthorizeRequest> {
+        lock(&self.vault).authorized.clone()
+    }
+
     /// A node whose participant is this fake, following `rule` for party keys
     /// outside KMS. `store` turns DecMan's key store on with a key file.
     pub async fn node(&self, rule: SoftwareKeys, store: bool) -> Result<TestNode> {
         let root = tempfile::tempdir()?;
         let mut config = NodeConfig::default().with_root_dir(root.path());
-        config.node.participant_id = Some(CantonId::parse(
-            "node1::1220aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-        )?);
+        config.node.participant_id = Some(CantonId::parse(PARTICIPANT_ID)?);
         config.canton.admin_api_host = "127.0.0.1".to_string();
         config.canton.admin_api_port = self.port;
         config.insecure = rule == SoftwareKeys::Allowed;
@@ -400,6 +667,57 @@ async fn dispatch(vault: Shared, request: http::Request<Body>) -> http::Response
             })
             .await
         }
+        Some("ListNamespaceDelegation") => {
+            unary(request, move |r: ListNamespaceDelegationRequest| {
+                Ok(lock(&vault).list_delegations(r))
+            })
+            .await
+        }
+        Some("ListDecentralizedNamespaceDefinition") => {
+            unary(
+                request,
+                move |r: ListDecentralizedNamespaceDefinitionRequest| {
+                    Ok(lock(&vault).list_namespaces(r))
+                },
+            )
+            .await
+        }
+        Some("ListPartyToParticipant") => {
+            unary(request, move |r: ListPartyToParticipantRequest| {
+                Ok(lock(&vault).list_p2p(r))
+            })
+            .await
+        }
+        Some("ListPartyToKeyMapping") => {
+            unary(request, move |r: ListPartyToKeyMappingRequest| {
+                Ok(lock(&vault).list_party_to_key(r))
+            })
+            .await
+        }
+        Some("ListAll") => unary(request, move |r: ListAllRequest| lock(&vault).list_all(r)).await,
+        Some("Authorize") => {
+            unary(request, move |r: AuthorizeRequest| {
+                lock(&vault).authorize(r)
+            })
+            .await
+        }
+        Some("SignTransactions") => {
+            unary(request, |r: SignTransactionsRequest| {
+                Ok(SignTransactionsResponse {
+                    transactions: r.transactions,
+                })
+            })
+            .await
+        }
+        Some("GetId") => {
+            unary(request, |_: GetIdRequest| {
+                Ok(GetIdResponse {
+                    initialized: true,
+                    unique_identifier: PARTICIPANT_ID.to_string(),
+                })
+            })
+            .await
+        }
         Some("GetSynchronizerId") => {
             unary(request, |_: GetSynchronizerIdRequest| {
                 Ok(GetSynchronizerIdResponse {
@@ -413,47 +731,51 @@ async fn dispatch(vault: Shared, request: http::Request<Body>) -> http::Response
     }
 }
 
-#[derive(Clone)]
-struct VaultService(Shared);
+/// A gRPC service of the fake under Canton's service name. Every service
+/// shares the one dispatcher, which routes on the method name.
+macro_rules! fake_service {
+    ($service:ident, $name:literal) => {
+        #[derive(Clone)]
+        struct $service(Shared);
 
-impl NamedService for VaultService {
-    const NAME: &'static str = "com.digitalasset.canton.crypto.admin.v30.VaultService";
+        impl NamedService for $service {
+            const NAME: &'static str = $name;
+        }
+
+        impl Service<http::Request<Body>> for $service {
+            type Response = http::Response<Body>;
+            type Error = Infallible;
+            type Future = BoxFuture<Self::Response, Infallible>;
+
+            fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Infallible>> {
+                Poll::Ready(Ok(()))
+            }
+
+            fn call(&mut self, request: http::Request<Body>) -> Self::Future {
+                let vault = self.0.clone();
+                Box::pin(async move { Ok(dispatch(vault, request).await) })
+            }
+        }
+    };
 }
 
-impl Service<http::Request<Body>> for VaultService {
-    type Response = http::Response<Body>;
-    type Error = Infallible;
-    type Future = BoxFuture<Self::Response, Infallible>;
-
-    fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Infallible>> {
-        Poll::Ready(Ok(()))
-    }
-
-    fn call(&mut self, request: http::Request<Body>) -> Self::Future {
-        let vault = self.0.clone();
-        Box::pin(async move { Ok(dispatch(vault, request).await) })
-    }
-}
-
-#[derive(Clone)]
-struct ConnectivityService(Shared);
-
-impl NamedService for ConnectivityService {
-    const NAME: &'static str =
-        "com.digitalasset.canton.admin.participant.v30.SynchronizerConnectivityService";
-}
-
-impl Service<http::Request<Body>> for ConnectivityService {
-    type Response = http::Response<Body>;
-    type Error = Infallible;
-    type Future = BoxFuture<Self::Response, Infallible>;
-
-    fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Infallible>> {
-        Poll::Ready(Ok(()))
-    }
-
-    fn call(&mut self, request: http::Request<Body>) -> Self::Future {
-        let vault = self.0.clone();
-        Box::pin(async move { Ok(dispatch(vault, request).await) })
-    }
-}
+fake_service!(
+    VaultService,
+    "com.digitalasset.canton.crypto.admin.v30.VaultService"
+);
+fake_service!(
+    ConnectivityService,
+    "com.digitalasset.canton.admin.participant.v30.SynchronizerConnectivityService"
+);
+fake_service!(
+    TopologyReadService,
+    "com.digitalasset.canton.topology.admin.v30.TopologyManagerReadService"
+);
+fake_service!(
+    TopologyWriteService,
+    "com.digitalasset.canton.topology.admin.v30.TopologyManagerWriteService"
+);
+fake_service!(
+    IdentityService,
+    "com.digitalasset.canton.topology.admin.v30.IdentityInitializationService"
+);

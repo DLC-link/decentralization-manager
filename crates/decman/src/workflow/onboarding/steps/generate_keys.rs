@@ -519,4 +519,48 @@ mod tests {
         assert!(fake.generated().is_empty());
         Ok(())
     }
+
+    /// Under the opt-out, each onboarding run gets a Daml key that only
+    /// DecMan holds. A retry of the run finds the same key and proposes no
+    /// second delegation. A new run gets a new key. The vault makes only the
+    /// namespace key, because the participant signs topology with it.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn each_onboarding_run_gets_its_own_generated_daml_key(db: SqlitePool) -> Result {
+        let fake = FakeAdminApi::start(vec![]).await?;
+        let node = fake.node(SoftwareKeys::Stored, true).await?;
+        insert_run(&db, "party-creation").await?;
+        insert_run(&db, "party-creation-2").await?;
+        let daml_key = |instance: &'static str| {
+            let config = node.config.clone();
+            let db = db.clone();
+            async move {
+                own_new_daml_key(&config, &db, instance)
+                    .await?
+                    .ok_or_else(|| anyhow::anyhow!("{instance} recorded no Daml key"))
+            }
+        };
+
+        generate_keys(&node.config, &db, "party-creation", &onboarding()).await?;
+        let first = daml_key("party-creation").await?;
+        generate_keys(&node.config, &db, "party-creation", &onboarding()).await?;
+        let retried = daml_key("party-creation").await?;
+        let second_run = OnboardingConfig::new(
+            "party".to_string(),
+            "party-creation-2".to_string(),
+            None,
+            None,
+        );
+        generate_keys(&node.config, &db, "party-creation-2", &second_run).await?;
+        let second = daml_key("party-creation-2").await?;
+
+        assert_eq!(retried, first, "a retry finds the run's key");
+        assert_ne!(second, first, "a new run gets a new key");
+        assert_eq!(fake.generated(), vec!["party-namespace".to_string()]);
+        assert_eq!(fake.authorized().len(), 1, "one namespace delegation");
+        let generated: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM generated_party_keys")
+            .fetch_one(&db)
+            .await?;
+        assert_eq!(generated, 2);
+        Ok(())
+    }
 }
