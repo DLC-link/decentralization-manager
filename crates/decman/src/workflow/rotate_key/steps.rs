@@ -19,7 +19,10 @@ use crate::{
             generate_keys::encode_keys_payload, proposals::create::decode_keys_payload,
         },
         proposal_store,
-        rotate_key::{RotateKeyConfig, config::signing_threshold_in_force},
+        rotate_key::{
+            RotateKeyConfig,
+            config::{require_complete_inline_keys, signing_threshold_in_force},
+        },
         signing_keys::{adopt_legacy_signing_keys, own_namespace_key},
         storage::{WorkflowStorage, artifact_kinds, identity_kinds},
         topology,
@@ -97,8 +100,9 @@ pub async fn generate_key(
 ///
 /// # Errors
 ///
-/// Errors when the thresholds changed since the run started, when the party
-/// no longer carries the key being replaced, or when Canton refuses to sign.
+/// Errors when the party carries fewer inline keys than hosts, when the
+/// thresholds changed since the run started, when the party no longer
+/// carries the key being replaced, or when Canton refuses to sign.
 pub async fn create_proposal(
     config: &NodeConfig,
     storage: &SqlitePool,
@@ -110,6 +114,7 @@ pub async fn create_proposal(
     let synchronizer_id = utils::get_synchronizer_id(config).await?;
 
     let head = proposal_store::fetch_party_head(config, &synchronizer_id, party).await?;
+    require_complete_inline_keys(&head.p2p, party)?;
     let legacy = if head.p2p.party_signing_keys.is_none() {
         topology::fetch_party_to_key_mapping(config, &synchronizer_id, party).await?
     } else {

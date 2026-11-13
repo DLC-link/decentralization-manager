@@ -40,7 +40,7 @@ use crate::{
         onboarding::steps::proposals::create::{
             compute_decentralized_namespace, decode_keys_payload,
         },
-        rotate_key::config::signing_threshold_in_force,
+        rotate_key::config::{require_complete_inline_keys, signing_threshold_in_force},
         signing_keys::{
             ensure_survivor_keys_preserved, kick_key_claims, known_signing_keys_by_member,
             own_namespace_key, recorded_signing_keys_by_member,
@@ -1491,7 +1491,41 @@ async fn check_against_head(
             .map(|key| utils::compute_fingerprint(key).into())
             .collect::<Vec<String>>(),
         legacy,
-    )
+    )?;
+    check_signing_key_attributes(kind, &current_keys, &proposed_keys.keys)
+}
+
+/// Each signing key a proposal keeps must equal the on-chain key, and each
+/// key it adds must be a protocol key.
+///
+/// A fingerprint covers only the key bytes. A proposal could keep a member's
+/// key bytes but drop the protocol usage, and every fingerprint check would
+/// still pass. That member's key would then stop counting toward the
+/// signing threshold.
+fn check_signing_key_attributes(
+    kind: WorkflowKind,
+    current: &[SigningPublicKey],
+    proposed: &[SigningPublicKey],
+) -> Result {
+    let on_chain: BTreeMap<Fingerprint, &SigningPublicKey> = current
+        .iter()
+        .map(|key| (utils::compute_fingerprint(key), key))
+        .collect();
+    for key in proposed {
+        let fingerprint = utils::compute_fingerprint(key);
+        match on_chain.get(&fingerprint) {
+            Some(kept) if *kept != key => anyhow::bail!(
+                "{kind:?} proposal keeps the signing key {fingerprint} but changes its usage, \
+                 spec or format"
+            ),
+            Some(_) => {}
+            None if !key.usage.contains(&(SigningKeyUsage::Protocol as i32)) => anyhow::bail!(
+                "{kind:?} proposal adds the signing key {fingerprint} without protocol usage"
+            ),
+            None => {}
+        }
+    }
+    Ok(())
 }
 
 /// The signing keys a proposal for `dec_party_id` is built from, and whether
@@ -1593,6 +1627,7 @@ async fn check_rotation_against_head(
             to = mapping.threshold
         );
     }
+    require_complete_inline_keys(&current_p2p, dec_party_id)?;
     let legacy_mapping = if current_p2p.party_signing_keys.is_none() {
         head.party_to_key_mapping(dec_party_id).await?
     } else {
@@ -1625,11 +1660,12 @@ async fn check_rotation_against_head(
              replaces"
         );
     }
-    let proposed: Vec<String> = mapping
+    let proposed_keys = &mapping
         .party_signing_keys
         .as_ref()
         .ok_or_else(|| anyhow::anyhow!("P2P proposal carries no party signing keys"))?
-        .keys
+        .keys;
+    let proposed: Vec<String> = proposed_keys
         .iter()
         .map(|key| utils::compute_fingerprint(key).into())
         .collect();
@@ -1656,6 +1692,7 @@ async fn check_rotation_against_head(
         &proposed,
         legacy,
     )?;
+    check_signing_key_attributes(kind, &current_keys, proposed_keys)?;
     Ok(Some(current_keys))
 }
 
@@ -2131,6 +2168,7 @@ mod tests {
             keys: (1..=count)
                 .map(|seed| SigningPublicKey {
                     public_key: vec![seed; 32],
+                    usage: vec![SigningKeyUsage::Protocol as i32],
                     ..Default::default()
                 })
                 .collect(),
@@ -3612,6 +3650,40 @@ mod tests {
         change_threshold_against(Some(inline), Some(legacy)).await
     }
 
+    /// A proposal that keeps a member's key bytes but drops its protocol
+    /// usage would pass every fingerprint check. That key would then stop
+    /// counting toward the signing threshold.
+    #[tokio::test]
+    async fn a_change_threshold_refuses_a_kept_key_with_another_usage() -> Result {
+        let def = namespace(&["a", "b", "c"]);
+        let head = StubHead {
+            dns: Some((2, def.clone())),
+            p2p: Some((5, keyed_p2p(Some(signing_keys(3, 2)))?)),
+            legacy_keys: None,
+        };
+        let mut rewritten = signing_keys(3, 2);
+        rewritten.keys[1].usage = vec![SigningKeyUsage::Namespace as i32];
+        let error = match check_against_head(
+            &head,
+            WorkflowKind::ChangeThreshold,
+            &canton_id("party", 9)?,
+            (3, &def),
+            (6, &keyed_p2p(Some(rewritten))?),
+            None,
+            Departing::default(),
+        )
+        .await
+        {
+            Ok(()) => anyhow::bail!("a key with another usage must be refused"),
+            Err(error) => error.to_string(),
+        };
+        assert!(
+            error.contains("changes its usage, spec or format"),
+            "unexpected error: {error}"
+        );
+        Ok(())
+    }
+
     #[tokio::test]
     async fn a_failed_topology_read_refuses_the_proposal() -> Result {
         let def = namespace(&["a", "b", "c"]);
@@ -4320,6 +4392,7 @@ mod tests {
     fn key_of(seed: u8) -> SigningPublicKey {
         SigningPublicKey {
             public_key: vec![seed; 32],
+            usage: vec![SigningKeyUsage::Protocol as i32],
             ..Default::default()
         }
     }
@@ -4409,6 +4482,74 @@ mod tests {
         let error = rotation_error(&keyed_p2p(Some(keyed(&[1, 3])))?, 2).await?;
         assert!(
             error.contains("adds 0 signing key"),
+            "unexpected error: {error}"
+        );
+        Ok(())
+    }
+
+    /// A coordinator could keep each member's key bytes and drop their
+    /// protocol usage. Its own new key would then be the only key that
+    /// counts toward the signing threshold.
+    #[tokio::test]
+    async fn a_rotation_keeps_each_other_key_as_it_is_on_chain() -> Result {
+        let mut rewritten = keyed(&[1, 9, 3]);
+        rewritten.keys[0].usage = vec![SigningKeyUsage::Namespace as i32];
+        let error = rotation_error(&keyed_p2p(Some(rewritten))?, 2).await?;
+        assert!(
+            error.contains("changes its usage, spec or format"),
+            "unexpected error: {error}"
+        );
+
+        let mut new_key = keyed(&[1, 9, 3]);
+        new_key.keys[1].usage = vec![SigningKeyUsage::Namespace as i32];
+        let error = rotation_error(&keyed_p2p(Some(new_key))?, 2).await?;
+        assert!(
+            error.contains("adds the signing key") && error.contains("without protocol usage"),
+            "unexpected error: {error}"
+        );
+        Ok(())
+    }
+
+    /// A half-migrated party counts only its inline keys. A rotation would
+    /// put every member's key inline at the inline threshold, so more
+    /// members could sign alone.
+    #[tokio::test]
+    async fn a_rotation_of_a_half_migrated_party_is_refused() -> Result {
+        let stub = StubHead {
+            dns: Some((
+                2,
+                DecentralizedNamespaceDefinition {
+                    threshold: 2,
+                    ..namespace(&["a", "b", "c"])
+                },
+            )),
+            p2p: Some((
+                5,
+                keyed_p2p(Some(SigningKeysWithThreshold {
+                    threshold: 1,
+                    ..keyed(&[2])
+                }))?,
+            )),
+            legacy_keys: Some(vec![key_of(1), key_of(3)]),
+        };
+        let proposed = keyed_p2p(Some(SigningKeysWithThreshold {
+            threshold: 1,
+            ..keyed(&[1, 9, 3])
+        }))?;
+        let error = match check_rotation_against_head(
+            &stub,
+            &canton_id("party", 9)?,
+            (6, &proposed),
+            &utils::compute_fingerprint(&key_of(2)),
+        )
+        .await
+        {
+            Ok(_) => anyhow::bail!("a half-migrated party must be refused"),
+            Err(error) => error.to_string(),
+        };
+        assert!(
+            error.contains("1 inline signing key(s) for 3 hosts")
+                && error.contains("Run change-threshold first"),
             "unexpected error: {error}"
         );
         Ok(())
