@@ -37,6 +37,12 @@ const RECENT_GOVERNANCE_AUDIT_SQL: &str = r"
     LIMIT ? OFFSET ?
 ";
 
+/// SQL condition that holds while a purge runs on this node. A purge takes
+/// the participant off its synchronizer, so neither a second purge nor a
+/// workflow run may start under it.
+const PURGE_RUNNING_SQL: &str =
+    "EXISTS (SELECT 1 FROM former_dec_party WHERE purge_status = 'running')";
+
 /// The refusal of a workflow run that would become in progress during a purge
 /// of former-party contracts. The purge takes the participant off its
 /// synchronizer, so a run would fail underneath it.
@@ -715,14 +721,14 @@ impl SchemaWrite for SqlitePool {
     async fn claim_former_party_purge(&self, party_id: &CantonId) -> Result<bool> {
         // One statement, so the "nothing else is running" check and the claim
         // cannot interleave with another purge or with a workflow start.
-        let result = sqlx::query(
+        let result = sqlx::query(&format!(
             "UPDATE former_dec_party \
              SET purge_status = 'running', purge_started_at = ?, purge_finished_at = NULL, \
                  purged_count = NULL, kept_count = NULL, purge_error = NULL \
              WHERE party_id = ? AND dismissed_at IS NULL \
-               AND NOT EXISTS (SELECT 1 FROM former_dec_party WHERE purge_status = 'running') \
+               AND NOT {PURGE_RUNNING_SQL} \
                AND NOT EXISTS (SELECT 1 FROM workflow_runs WHERE status = 'inprogress')",
-        )
+        ))
         .bind(chrono::Utc::now().timestamp())
         .bind(party_id.to_string())
         .execute(self)
@@ -1423,7 +1429,7 @@ impl Commitable for sqlx::Transaction<'static, sqlx::Sqlite> {
         // partial unique index that once forbade two InProgress runs per
         // (kind, role) — concurrency is governed by the in-memory registry.
         // The WHERE refuses an in-progress run while a purge runs.
-        let result = sqlx::query(
+        let result = sqlx::query(&format!(
             r"
             INSERT INTO workflow_runs (
                 instance_name,
@@ -1446,7 +1452,7 @@ impl Commitable for sqlx::Transaction<'static, sqlx::Sqlite> {
             )
             SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
             WHERE ? != 'inprogress'
-               OR NOT EXISTS (SELECT 1 FROM former_dec_party WHERE purge_status = 'running')
+               OR NOT {PURGE_RUNNING_SQL}
             ON CONFLICT(instance_name) DO UPDATE SET
                 kind                     = excluded.kind,
                 role                     = excluded.role,
@@ -1464,7 +1470,7 @@ impl Commitable for sqlx::Transaction<'static, sqlx::Sqlite> {
                 dismissed                = excluded.dismissed,
                 updated_at               = excluded.updated_at
             ",
-        )
+        ))
         .bind(&row.instance_name)
         .bind(&row.kind)
         .bind(&row.role)
@@ -1537,7 +1543,7 @@ impl Commitable for sqlx::Transaction<'static, sqlx::Sqlite> {
             WorkflowProgress::Cancelled => "cancelled",
         };
 
-        let result = sqlx::query(
+        let result = sqlx::query(&format!(
             r"
             UPDATE workflow_runs
             SET status = ?,
@@ -1545,9 +1551,9 @@ impl Commitable for sqlx::Transaction<'static, sqlx::Sqlite> {
                 updated_at = ?
             WHERE instance_name = ?
               AND (? != 'inprogress'
-                   OR NOT EXISTS (SELECT 1 FROM former_dec_party WHERE purge_status = 'running'))
+                   OR NOT {PURGE_RUNNING_SQL})
             ",
-        )
+        ))
         .bind(status_str)
         .bind(error)
         .bind(updated_at)
@@ -1558,11 +1564,9 @@ impl Commitable for sqlx::Transaction<'static, sqlx::Sqlite> {
         if result.rows_affected() == 0 && status == WorkflowProgress::InProgress {
             // No row changed: either the run is missing, which stays a no-op,
             // or a purge refused it.
-            let (purging,): (bool,) = sqlx::query_as(
-                "SELECT EXISTS (SELECT 1 FROM former_dec_party WHERE purge_status = 'running')",
-            )
-            .fetch_one(&mut **self)
-            .await?;
+            let (purging,): (bool,) = sqlx::query_as(&format!("SELECT {PURGE_RUNNING_SQL}"))
+                .fetch_one(&mut **self)
+                .await?;
             anyhow::ensure!(!purging, WORKFLOW_BLOCKED_BY_PURGE);
         }
 
