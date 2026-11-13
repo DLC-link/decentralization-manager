@@ -1408,8 +1408,14 @@ fn hosts_not_in<'a>(from: &'a PartyToParticipant, other: &PartyToParticipant) ->
 /// offline before this node recorded its key can never report it, so the peer
 /// accepts the named key without a record for the departing host. Every
 /// staying host's key is still known and differs from the named key, and no
-/// other participant has claimed it, so no staying member loses its
-/// authority. A record that names a different key still refuses.
+/// other participant has claimed it, so no staying host loses its authority.
+/// A record that names a different key still refuses.
+///
+/// The accepted risk: an owner that hosts nothing and that never sent this
+/// node its claim is not protected. A dishonest coordinator can name that
+/// owner's key in place of the departing host's key. The peer cannot narrow
+/// the key down further, because a party that needs this kick often also
+/// holds such an unclaimed owner, and then two keys fit.
 fn check_kicked_owner_key(
     owner: &str,
     departing: Option<&str>,
@@ -3384,6 +3390,17 @@ mod tests {
         let mut records = owner_records()?;
         records.host_keys.remove(&canton_id("p2", 2)?.to_string());
         host_kick(&["a", "b", "c"], (3, &["a", "c"]), "b", &records).await
+    }
+
+    /// The accepted risk, pinned on purpose: without a record for the
+    /// departing host, the peer accepts the key of an owner that hosts nothing
+    /// and that nobody claimed. A change to this rule must change this test.
+    #[tokio::test]
+    async fn an_unrecorded_departing_key_accepts_an_unclaimed_owners_key() -> Result {
+        let mut records = owner_records()?;
+        records.host_keys.remove(&canton_id("p2", 2)?.to_string());
+        records.claims.clear();
+        host_kick(&["a", "b", "c"], (3, &["a", "b"]), "c", &records).await
     }
 
     /// Without a record for the departing host, the named key may not be one
