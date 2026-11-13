@@ -1,0 +1,69 @@
+-- Copyright (c) 2026 DLC-Link, Inc. and/or its affiliates. All rights reserved.
+-- SPDX-License-Identifier: Apache-2.0
+
+-- | Confirmation contracts for governance actions.
+-- Each confirmation represents a single member's approval of a specific action proposal.
+module Governance.Confirmation where
+
+import Splice.Util (require)
+
+import Governance.Action (GovernableAction)
+
+-- | A confirmation that a governance member has approved an action proposal.
+-- Confirmations are matched to proposals by ContractId (globally unique).
+-- The actionLabel is stored for human readability and UI display only.
+--
+-- The governance party is the only signatory. The confirmer is a plain
+-- field. The governance party can therefore consume or expire a
+-- confirmation without the confirmer's participant (#615).
+--
+-- The confirmer field is trusted because every create path binds it to the
+-- controller of the confirm choice. The only create path in this package is
+-- `GovernanceRules_ConfirmAction`, whose controller is the confirmer.
+-- Any future create path must keep this binding, including a v1-to-v2
+-- migration. A migration must therefore let open v1 votes expire on v1. It
+-- must not copy them into v2.
+--
+-- A vote proves that the confirmer agreed only while no participant can
+-- submit as the governance party alone. Such a participant could create a
+-- confirmation that names any confirmer.
+--
+-- Any party can sign a confirmation that names itself as the governance
+-- party. Every `GovernanceRules` choice that reads a confirmation therefore
+-- requires `governanceParty` to match its own.
+template GovernanceConfirmation
+  with
+    governanceParty : Party
+      -- ^ The governance party this confirmation belongs to.
+    confirmer : Party
+      -- ^ The governance member who created this confirmation.
+    actionProposalCid : ContractId GovernableAction
+      -- ^ The action proposal being confirmed (primary matching key).
+    actionLabel : Text
+      -- ^ Human-readable label from the proposal (for UI/audit, not matching).
+    expiresAt : Time
+      -- ^ When this confirmation becomes invalid.
+  where
+    ensure actionLabel /= ""
+    signatory governanceParty
+
+    -- | Consume this confirmation during action execution.
+    -- Returns the confirmation data for validation.
+    choice GovernanceConfirmation_Consume : GovernanceConfirmation
+      controller governanceParty
+      do
+        now <- getTime
+        require "Confirmation has expired" (now < expiresAt)
+        pure this
+
+    -- | Expire a stale confirmation that has passed its expiry time.
+    choice GovernanceConfirmation_Expire : ()
+      controller governanceParty
+      do
+        now <- getTime
+        require "Confirmation has not expired yet" (now > expiresAt)
+
+    -- | Allow the confirmer to cancel their own confirmation.
+    choice GovernanceConfirmation_Cancel : ()
+      controller confirmer
+      do pure ()

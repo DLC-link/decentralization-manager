@@ -1,0 +1,238 @@
+-- Copyright (c) 2026 DLC-Link, Inc. and/or its affiliates. All rights reserved.
+-- SPDX-License-Identifier: Apache-2.0
+
+-- | Tests for cancelling a GovernableAction proposal by member vote (#518).
+module Governance.Test.CancelActionTest where
+
+import DA.Foldable (forA_)
+import DA.Set as Set hiding (filter)
+import DA.Time (minutes)
+import Daml.Script
+
+import Governance.Action (GovernableAction)
+import Governance.Confirmation
+import Governance.MockActions
+import Governance.Rules
+import Governance.TestUtils
+
+import TestHarness
+
+-- ============================================================================
+-- Fixtures
+-- ============================================================================
+
+data CancelFixture = CancelFixture
+  with
+    parties : TestParties
+    agent : Party
+      -- ^ Proposed while it was an additional proposer; the rules no longer
+      -- list it.
+    rulesCid : ContractId GovernanceRules
+    proposalCid : ContractId GovernableAction
+    targetConfirmations : [(Party, ContractId GovernanceConfirmation)]
+      -- ^ Member confirmations of the proposal, cast before the agent lost
+      -- its rights.
+  deriving (Eq, Show)
+
+data CancelOutcome = CancelOutcome
+  with
+    rulesCidAfter : ContractId GovernanceRules
+    proposals : [(ContractId MockProposal, MockProposal)]
+    executed : [(ContractId MockActionResult, MockActionResult)]
+  deriving (Eq, Show)
+
+data CleanupOutcome = CleanupOutcome
+  with
+    proposals : [(ContractId MockProposal, MockProposal)]
+    executed : [(ContractId MockActionResult, MockActionResult)]
+    confirmationsLeft : [(ContractId GovernanceConfirmation, GovernanceConfirmation)]
+  deriving (Eq, Show)
+
+cancelOf : CancelFixture -> GovernanceSelfAction
+cancelOf f = SelfAction_CancelAction with actionProposalCid = f.proposalCid
+
+cancelOutcome : CancelFixture -> ContractId GovernanceRules -> Script CancelOutcome
+cancelOutcome f rulesCidAfter = do
+  proposals <- query @MockProposal f.parties.governanceParty
+  executed <- query @MockActionResult f.parties.governanceParty
+  pure CancelOutcome with ..
+
+-- | The agent proposes while it is an additional proposer, `confirmers` vote
+-- for the proposal, and then members remove the agent from the rules.
+strandedProposal : (TestParties -> [Party]) -> Script CancelFixture
+strandedProposal confirmersOf = do
+  parties <- allocateTestParties
+  agent <- allocateParty "FormerAgent"
+  initialRulesCid <- submit parties.governanceParty $ createCmd GovernanceRules with
+    governanceParty = parties.governanceParty
+    members = getMembers parties
+    threshold = 2
+    actionConfirmationTimeout = minutes 30
+    additionalProposers = Some (Set.singleton agent)
+    disclosureObservers = None
+  mockCid <- submit agent $ createCmd MockProposal with
+    governanceParty = parties.governanceParty
+    proposer = agent
+    label = "StrandedAction"
+    payload = "Proposed by an agent the rules no longer list"
+  let proposalCid = toInterfaceContractId @GovernableAction mockCid
+      confirmers = confirmersOf parties
+  confirmationCids <- submitConfirmations parties.governanceParty initialRulesCid proposalCid confirmers
+  rulesCid <- confirmAndExecuteSelf parties initialRulesCid
+    (SelfAction_RemoveAdditionalProposer with additionalProposer = agent)
+    [parties.member1, parties.member2] parties.member1
+  let targetConfirmations = zip confirmers confirmationCids
+  pure CancelFixture with ..
+
+-- ============================================================================
+-- Given
+-- ============================================================================
+
+-- | One confirmation, and no member can add a second: the proposal can
+-- never reach the threshold of 2.
+given_stranded_proposal : Script CancelFixture
+given_stranded_proposal = strandedProposal (\p -> [p.member1])
+
+-- | Two confirmations, cast in time: the proposal could still execute.
+given_stranded_proposal_at_threshold : Script CancelFixture
+given_stranded_proposal_at_threshold = strandedProposal (\p -> [p.member1, p.member2])
+
+-- | A member's proposal that targets a different governance party.
+given_proposal_of_other_governance : Script CancelFixture
+given_proposal_of_other_governance = do
+  f <- given_stranded_proposal
+  otherGovernance <- allocateParty "OtherGovernance"
+  mockCid <- submit f.parties.member1 $ createCmd MockProposal with
+    governanceParty = otherGovernance
+    proposer = f.parties.member1
+    label = "ForeignAction"
+    payload = "Belongs to another governance"
+  pure f with
+    proposalCid = toInterfaceContractId @GovernableAction mockCid
+    targetConfirmations = []
+
+-- ============================================================================
+-- When
+-- ============================================================================
+
+when_members_vote_cancel : CancelFixture -> Script CancelOutcome
+when_members_vote_cancel f =
+  confirmAndExecuteSelf f.parties f.rulesCid (cancelOf f)
+    [f.parties.member1, f.parties.member2] f.parties.member1
+  >>= cancelOutcome f
+
+when_non_member_confirms_cancel : CancelFixture -> Script ()
+when_non_member_confirms_cancel f = do
+  submitMustFail (memberContext f.parties.outsider f.parties.governanceParty) $
+    exerciseCmd f.rulesCid GovernanceRules_ConfirmGovernanceAction with
+      confirmer = f.parties.outsider
+      action = cancelOf f
+  submitMustFail (memberContext f.agent f.parties.governanceParty) $
+    exerciseCmd f.rulesCid GovernanceRules_ConfirmGovernanceAction with
+      confirmer = f.agent
+      action = cancelOf f
+
+-- | Members cancel a proposal that has enough confirmations. Execution with
+-- those confirmations then fails, and each confirmer clears its own.
+when_cancelled_then_target_confirmations_used : CancelFixture -> Script CleanupOutcome
+when_cancelled_then_target_confirmations_used f = do
+  _ <- confirmAndExecuteSelf f.parties f.rulesCid (cancelOf f)
+    [f.parties.member1, f.parties.member2] f.parties.member1
+  submitMustFail (memberContext f.parties.member3 f.parties.governanceParty) $
+    exerciseCmd f.rulesCid GovernanceRules_ExecuteConfirmedAction with
+      executor = f.parties.member3
+      actionProposalCid = f.proposalCid
+      confirmations = map snd f.targetConfirmations
+  forA_ f.targetConfirmations $ \(confirmer, cid) ->
+    submit (memberContext confirmer f.parties.governanceParty) $
+      exerciseCmd cid GovernanceConfirmation_Cancel
+  proposals <- query @MockProposal f.parties.governanceParty
+  executed <- query @MockActionResult f.parties.governanceParty
+  confirmationsLeft <- query @GovernanceConfirmation f.parties.governanceParty
+  pure CleanupOutcome with ..
+
+-- | Three members vote to cancel. Members then remove member3, which
+-- replaces the rules contract, before anyone executes the cancellation.
+when_member_removed_before_cancel_executes : CancelFixture -> Script CancelOutcome
+when_member_removed_before_cancel_executes f = do
+  cancelConfirmations <- submitSelfConfirmations f.parties.governanceParty f.rulesCid (cancelOf f)
+    [f.parties.member1, f.parties.member2, f.parties.member3]
+  newRulesCid <- confirmAndExecuteSelf f.parties f.rulesCid
+    (SelfAction_RemoveMemberAndSetThreshold with
+      removedMember = f.parties.member3
+      newThresholdAfterRemove = 2)
+    [f.parties.member1, f.parties.member2] f.parties.member1
+  result <- submit (memberContext f.parties.member1 f.parties.governanceParty) $
+    exerciseCmd newRulesCid GovernanceRules_ExecuteGovernanceAction with
+      executor = f.parties.member1
+      action = cancelOf f
+      confirmations = cancelConfirmations
+  cancelOutcome f result.governanceRulesCid
+
+when_cancel_of_other_governance_executes : CancelFixture -> Script ()
+when_cancel_of_other_governance_executes f = do
+  confirmationCids <- submitSelfConfirmations f.parties.governanceParty f.rulesCid (cancelOf f)
+    [f.parties.member1, f.parties.member2]
+  submitMustFail (memberContext f.parties.member1 f.parties.governanceParty) $
+    exerciseCmd f.rulesCid GovernanceRules_ExecuteGovernanceAction with
+      executor = f.parties.member1
+      action = cancelOf f
+      confirmations = confirmationCids
+
+-- ============================================================================
+-- Then
+-- ============================================================================
+
+then_proposal_archived_unexecuted : CancelFixture -> CancelOutcome -> Script Failures
+then_proposal_archived_unexecuted f o = pure $
+  shouldBe "proposals left" 0 (length o.proposals) <>
+  shouldBe "actions executed" 0 (length o.executed) <>
+  shouldBe "rules contract" f.rulesCid o.rulesCidAfter
+
+then_proposal_archived_by_new_rules : CancelFixture -> CancelOutcome -> Script Failures
+then_proposal_archived_by_new_rules _ o = pure $
+  shouldBe "proposals left" 0 (length o.proposals) <>
+  shouldBe "actions executed" 0 (length o.executed)
+
+then_nothing_executed_and_nothing_left : CancelFixture -> CleanupOutcome -> Script Failures
+then_nothing_executed_and_nothing_left _ o = pure $
+  shouldBe "proposals left" 0 (length o.proposals) <>
+  shouldBe "actions executed" 0 (length o.executed) <>
+  shouldBe "confirmations left" 0 (length o.confirmationsLeft)
+
+then_nothing : CancelFixture -> () -> Script Failures
+then_nothing _ _ = pure []
+
+-- ============================================================================
+-- Tests
+-- ============================================================================
+
+test_when_members_vote_cancel_then_stranded_proposal_archived = script do
+  run Test with
+    given = given_stranded_proposal
+    when = when_members_vote_cancel
+    then_ = then_proposal_archived_unexecuted
+
+test_when_non_member_confirms_cancel_then_rejected = script do
+  run Test with
+    given = given_stranded_proposal
+    when = when_non_member_confirms_cancel
+    then_ = then_nothing
+
+test_when_proposal_cancelled_then_its_confirmations_cannot_execute_it = script do
+  run Test with
+    given = given_stranded_proposal_at_threshold
+    when = when_cancelled_then_target_confirmations_used
+    then_ = then_nothing_executed_and_nothing_left
+
+test_when_member_removed_before_cancel_executes_then_remaining_votes_suffice = script do
+  run Test with
+    given = given_stranded_proposal
+    when = when_member_removed_before_cancel_executes
+    then_ = then_proposal_archived_by_new_rules
+
+test_when_proposal_targets_other_governance_then_cancel_rejected = script do
+  run Test with
+    given = given_proposal_of_other_governance
+    when = when_cancel_of_other_governance_executes
+    then_ = then_nothing

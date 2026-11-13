@@ -123,8 +123,48 @@ jobs:
       - name: Run tests with coverage
         run: ./code-coverage.sh
 
+  # Integration Tests need only the governance-core-v2 DAR, which the
+  # offline-member phase uploads. This job builds that DAR and its one local
+  # dependency, so the tests do not wait for every Daml build and test.
+  # `--enable-multi-package=no` stops dpm from reading the other packages: the
+  # 3.4.11 compiler rejects the LF 2.3 target of the utility plugins.
+  governance-core-v2-dar:
+    name: Build governance-core-v2 DAR
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: daml
+    steps:
+      - uses: actions/checkout@v7
+      # Restore only. The Daml job saves this cache with both SDKs, and a save
+      # from here would store an SDK set that the Daml job cannot build with.
+      - name: Restore dpm + Daml SDK
+        id: cache-dpm
+        uses: actions/cache/restore@v6
+        with:
+          path: ~/.dpm
+          key: dpm-3.4.11-3.5.1
+      - name: Install dpm
+        if: steps.cache-dpm.outputs.cache-hit != 'true'
+        run: curl -sSL https://get.digitalasset.com/install/install.sh | sh
+      - name: Install Daml SDK
+        if: steps.cache-dpm.outputs.cache-hit != 'true'
+        run: ~/.dpm/bin/dpm install 3.4.11
+      - name: Build
+        run: |
+          (cd governance-action-v1 && ~/.dpm/bin/dpm build --enable-multi-package=no)
+          (cd governance-core-v2 && ~/.dpm/bin/dpm build --enable-multi-package=no)
+      - name: Upload governance-core-v2 DAR
+        uses: actions/upload-artifact@v7
+        with:
+          name: governance-core-v2-ci
+          path: daml/governance-core-v2/.daml/dist/governance-core-v2-0.1.0.dar
+          include-hidden-files: true
+          if-no-files-found: error
+
   integration-test:
     name: Integration Tests (Splice ${{ matrix.splice }})
+    needs: [governance-core-v2-dar]
     runs-on: ubuntu-very-big
     timeout-minutes: 45
     # MainNet runs Splice 0.9 until its upgrade, and DevNet and TestNet run
@@ -160,6 +200,11 @@ jobs:
       # builds the decman binary → build.rs → frontend, needing this file).
       - name: Generate frontend TypeScript bindings
         run: DECMAN_SKIP_FRONTEND=1 cargo run -p decman --features typegen --bin gen-types
+      - name: Download governance-core-v2 DAR
+        uses: actions/download-artifact@v8
+        with:
+          name: governance-core-v2-ci
+          path: daml/governance-core-v2/.daml/dist
       - name: Run integration tests
         run: ./integration-tests/run.sh
         env:
@@ -308,6 +353,8 @@ jobs:
         run: ~/.dpm/bin/dpm upgrade-check --both */.daml/dist/*.dar ../releases/v1/*.dar
       - name: Test governance-core
         run: cd governance-core-test && ~/.dpm/bin/dpm test
+      - name: Test governance-core-v2
+        run: cd governance-core-v2-test && ~/.dpm/bin/dpm test
       - name: Test governance-token-custody
         run: cd governance-token-custody-test && ~/.dpm/bin/dpm test
       - name: Test governance-utility-onboarding

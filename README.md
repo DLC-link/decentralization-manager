@@ -613,6 +613,13 @@ governance workflow exercising onboarding, DAR distribution, governance
 contract deployment, the token-custody / utility-onboarding / generic-vote
 plugins, and the kick workflow.
 
+The full localnet suite builds the governance-core-v2 DAR that the
+offline-member test uploads. It builds the DAR before it starts Canton or
+compiles Rust. Local runs need `dpm` and the pinned SDKs listed in
+[Contributing](docs/CONTRIBUTING.md). In GitHub Actions, a short job builds the
+same DAR before the integration tests start. Focused tests and the devnet suite
+do not need this DAR.
+
 ```bash
 # Quiet mode (default) — focused Given-When-Then trace
 ./integration-tests/run.sh

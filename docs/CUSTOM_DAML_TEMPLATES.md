@@ -582,6 +582,8 @@ After execution the `additionalProposers` field is `Some {compliance-bot::...}`,
 
 Additional proposers can **only propose** — they cannot confirm or execute, even with grants. Voting weight stays exclusively with `members`.
 
+In `governance-core-v2`, the governance party alone signs each confirmation. An additional proposer can still create a self-management confirmation as a proposal marker. A proposer that does not host the governance party cannot see or cancel that confirmation. Members can still expire it once its timeout passes.
+
 ### Cancel or expire
 
 ```bash

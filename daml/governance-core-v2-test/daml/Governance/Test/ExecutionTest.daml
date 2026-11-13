@@ -1,0 +1,188 @@
+-- Copyright (c) 2026 DLC-Link, Inc. and/or its affiliates. All rights reserved.
+-- SPDX-License-Identifier: Apache-2.0
+
+-- | Tests for the full confirm → execute flow for interface-based actions.
+module Governance.Test.ExecutionTest where
+
+import DA.Time (minutes)
+import Daml.Script
+
+import Governance.Action (GovernableAction)
+import Governance.Confirmation (GovernanceConfirmation)
+import Governance.ExecutionResult
+import Governance.MockActions
+import Governance.Rules
+import Governance.TestUtils
+
+import TestHarness
+
+-- ============================================================================
+-- Fixtures & Results for GWT tests
+-- ============================================================================
+
+data ExecutionFixture = ExecutionFixture
+  with
+    parties : TestParties
+    rulesCid : ContractId GovernanceRules
+  deriving (Eq, Show)
+
+data FullFlowResult = FullFlowResult
+  with
+    mockResult : MockActionResult
+    executionResult : GovernanceExecutionResult
+    remainingProposals : [(ContractId MockProposal, MockProposal)]
+  deriving (Eq, Show)
+
+executeMustFail : ExecutionFixture -> Party -> ContractId GovernableAction -> [ContractId GovernanceConfirmation] -> Script ()
+executeMustFail f executor actionProposalCid confirmations =
+  submitMustFail (memberContext executor f.parties.governanceParty) $
+    exerciseCmd f.rulesCid GovernanceRules_ExecuteConfirmedAction with
+      executor
+      actionProposalCid
+      confirmations
+
+given_governance_setup : Script ExecutionFixture
+given_governance_setup = do
+  parties <- allocateTestParties
+  rulesCid <- createTestGovernance parties
+  pure ExecutionFixture with ..
+
+given_governance_with_3_minute_timeout : Script ExecutionFixture
+given_governance_with_3_minute_timeout = do
+  parties <- allocateTestParties
+  rulesCid <- createGovernanceWith parties (minutes 3) None
+  pure ExecutionFixture with ..
+
+when_proposal_confirmed_and_executed : ExecutionFixture -> Script FullFlowResult
+when_proposal_confirmed_and_executed f = do
+  proposalCid <- submit f.parties.member1 $ createCmd MockProposal with
+    governanceParty = f.parties.governanceParty
+    proposer = f.parties.member1
+    label = "TestAction"
+    payload = "hello governance"
+
+  let proposalIfaceCid = toInterfaceContractId @GovernableAction proposalCid
+
+  result <- confirmAndExecute f.parties f.rulesCid proposalIfaceCid
+    [f.parties.member1, f.parties.member2] f.parties.member3
+
+  [(_, mockResult)] <- query @MockActionResult f.parties.governanceParty
+  Some executionResult <- queryContractId f.parties.governanceParty result.executionResultCid
+  remainingProposals <- query @MockProposal f.parties.governanceParty
+  pure FullFlowResult with ..
+
+-- | All 3 members confirm, more than the threshold.
+when_executed_with_extra_confirmations : ExecutionFixture -> Script MockActionResult
+when_executed_with_extra_confirmations f = do
+  proposalCid <- proposeMock f.parties f.parties.member1 "ExtraConfs" "extra"
+  confirmAndExecute f.parties f.rulesCid proposalCid
+    [f.parties.member1, f.parties.member2, f.parties.member3] f.parties.member1
+  [(_, result)] <- query @MockActionResult f.parties.governanceParty
+  pure result
+
+when_executed_with_one_confirmation : ExecutionFixture -> Script ()
+when_executed_with_one_confirmation f = do
+  proposalCid <- proposeMock f.parties f.parties.member1 "TestAction" "test"
+  confirmationCids <- submitConfirmations f.parties.governanceParty f.rulesCid proposalCid
+    [f.parties.member1]
+  executeMustFail f f.parties.member1 proposalCid confirmationCids
+
+when_non_member_executes : ExecutionFixture -> Script ()
+when_non_member_executes f = do
+  proposalCid <- proposeMock f.parties f.parties.member1 "TestAction" "test"
+  confirmationCids <- submitConfirmations f.parties.governanceParty f.rulesCid proposalCid
+    [f.parties.member1, f.parties.member2]
+  executeMustFail f f.parties.outsider proposalCid confirmationCids
+
+-- | An expired confirmation aborts execution rather than dropping out of the count.
+-- `GovernanceConfirmation_Consume` rejects it before `GovernanceRules_ExecuteConfirmedAction`
+-- reaches its `expiresAt` filter, so the whole execute fails.
+when_executed_with_expired_confirmation : ExecutionFixture -> Script ()
+when_executed_with_expired_confirmation f = do
+  proposalCid <- proposeMock f.parties f.parties.member1 "TestAction" "test"
+  [expiredCid] <- submitConfirmations f.parties.governanceParty f.rulesCid proposalCid
+    [f.parties.member1]
+  passTime (minutes 4)
+  [currentCid] <- submitConfirmations f.parties.governanceParty f.rulesCid proposalCid
+    [f.parties.member2]
+  executeMustFail f f.parties.member2 proposalCid [expiredCid, currentCid]
+
+-- | Governance approves, but the action's own execution fails.
+when_failing_action_executed : ExecutionFixture -> Script ()
+when_failing_action_executed f = do
+  mockCid <- submit f.parties.member1 $ createCmd MockFailingProposal with
+    governanceParty = f.parties.governanceParty
+    proposer = f.parties.member1
+  let proposalCid = toInterfaceContractId @GovernableAction mockCid
+  confirmationCids <- submitConfirmations f.parties.governanceParty f.rulesCid proposalCid
+    [f.parties.member1, f.parties.member2]
+  executeMustFail f f.parties.member1 proposalCid confirmationCids
+
+when_executed_with_confirmation_of_other_proposal : ExecutionFixture -> Script ()
+when_executed_with_confirmation_of_other_proposal f = do
+  proposalA <- proposeMock f.parties f.parties.member1 "ActionA" "a"
+  proposalB <- proposeMock f.parties f.parties.member1 "ActionB" "b"
+  [confirmationA] <- submitConfirmations f.parties.governanceParty f.rulesCid proposalA
+    [f.parties.member1]
+  [confirmationB] <- submitConfirmations f.parties.governanceParty f.rulesCid proposalB
+    [f.parties.member2]
+  executeMustFail f f.parties.member1 proposalA [confirmationA, confirmationB]
+
+then_action_and_result_created : ExecutionFixture -> FullFlowResult -> Script Failures
+then_action_and_result_created f r = pure $
+  shouldBe "mock label" "TestAction" r.mockResult.label <>
+  shouldBe "mock payload" "hello governance" r.mockResult.payload <>
+  shouldBe "result actionLabel" "TestAction" r.executionResult.actionLabel <>
+  shouldBe "result description" "hello governance" r.executionResult.description <>
+  shouldBe "result executor" f.parties.member3 r.executionResult.executor <>
+  shouldBe "proposal consumed" 0 (length r.remainingProposals)
+
+then_extra_confs_action_executed : ExecutionFixture -> MockActionResult -> Script Failures
+then_extra_confs_action_executed _ result = pure $
+  shouldBe "mock label" "ExtraConfs" result.label
+
+then_nothing : ExecutionFixture -> () -> Script Failures
+then_nothing _ _ = pure []
+
+-- | Full flow: create proposal → confirm → execute → verify result.
+test_when_proposal_executed_then_action_and_result_created = script do
+  run Test with
+    given = given_governance_setup
+    when = when_proposal_confirmed_and_executed
+    then_ = then_action_and_result_created
+
+test_when_all_members_confirm_then_action_executed = script do
+  run Test with
+    given = given_governance_setup
+    when = when_executed_with_extra_confirmations
+    then_ = then_extra_confs_action_executed
+
+test_when_confirmations_below_threshold_then_execute_rejected = script do
+  run Test with
+    given = given_governance_setup
+    when = when_executed_with_one_confirmation
+    then_ = then_nothing
+
+test_when_non_member_executes_then_rejected = script do
+  run Test with
+    given = given_governance_setup
+    when = when_non_member_executes
+    then_ = then_nothing
+
+test_when_a_confirmation_expired_then_execute_rejected = script do
+  run Test with
+    given = given_governance_with_3_minute_timeout
+    when = when_executed_with_expired_confirmation
+    then_ = then_nothing
+
+test_when_action_execution_fails_then_execute_rejected = script do
+  run Test with
+    given = given_governance_setup
+    when = when_failing_action_executed
+    then_ = then_nothing
+
+test_when_confirmations_reference_different_proposals_then_execute_rejected = script do
+  run Test with
+    given = given_governance_setup
+    when = when_executed_with_confirmation_of_other_proposal
+    then_ = then_nothing
