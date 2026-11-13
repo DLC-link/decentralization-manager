@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     canton_id::{CantonId, Fingerprint},
+    error::Result,
     workflow::{signing_keys::rotated_daml_key_name, thresholds::PartyThresholds},
 };
 
@@ -54,4 +55,32 @@ pub fn signing_threshold_in_force(
         .as_ref()
         .map(|keys| keys.threshold)
         .or_else(|| legacy.map(|mapping| mapping.threshold))
+}
+
+/// Refuse to rotate a key of a party that carries fewer inline signing keys
+/// than hosts.
+///
+/// Such a party keeps the other members' keys in a legacy
+/// `PartyToKeyMapping`, and Canton counts only the inline keys. A rotation
+/// moves every member's key inline but keeps the inline threshold. More
+/// members could then sign alone than before. Change-threshold moves every
+/// key inline under a threshold that all members vote on, so it runs first.
+///
+/// # Errors
+///
+/// Errors when the party carries inline keys for fewer members than it has.
+pub fn require_complete_inline_keys(p2p: &PartyToParticipant, party: &CantonId) -> Result {
+    if let Some(inline) = &p2p.party_signing_keys
+        && inline.keys.len() < p2p.participants.len()
+    {
+        anyhow::bail!(
+            "{party} carries {count} inline signing key(s) for {hosts} hosts, so the other keys \
+             are in its legacy PartyToKeyMapping. A rotation would put every key inline at the \
+             inline threshold of {threshold}. Run change-threshold first, then rotate",
+            count = inline.keys.len(),
+            hosts = p2p.participants.len(),
+            threshold = inline.threshold,
+        );
+    }
+    Ok(())
 }

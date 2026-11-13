@@ -2706,6 +2706,7 @@ async fn rotation_baseline(
         );
     }
 
+    workflow::rotate_key::config::require_complete_inline_keys(&p2p, party)?;
     let own = workflow::contracts::steps::sign::own_daml_key(config, db, party).await?;
     let mut keys = p2p
         .party_signing_keys
