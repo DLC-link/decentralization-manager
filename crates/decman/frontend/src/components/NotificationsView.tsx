@@ -521,11 +521,20 @@ const InvitationCard = ({
             <KickedOwnerKeyRow ownerKey={invitation.kicked_owner_key} />
           )}
           {invitation.rotated_key && (
-            <KeyRow
-              label="Replaced key"
-              fingerprint={invitation.rotated_key}
-              testId="rotated-key"
-            />
+            <>
+              <KeyRow
+                label="Replaced key"
+                fingerprint={invitation.rotated_key}
+                testId="rotated-key"
+              />
+              <Typography
+                variant="caption"
+                color="text.secondary"
+                data-testid="rotated-key-owner"
+              >
+                This is the coordinator's own Daml key. The other members keep their keys.
+              </Typography>
+            </>
           )}
           {invitation.new_participant && (
             <Box sx={{ display: "flex", alignItems: "center", gap: 1 }}>
@@ -565,8 +574,15 @@ const InvitationCard = ({
               >
                 Threshold
               </Typography>
-              <Typography variant="body2">
-                {invitation.previous_threshold != null ? (
+              <Typography variant="body2" data-testid="invitation-threshold">
+                {invitation.rotated_key ? (
+                  <>
+                    <Box component="span" sx={{ fontWeight: 600 }}>
+                      {invitation.new_threshold}
+                    </Box>
+                    , unchanged
+                  </>
+                ) : invitation.previous_threshold != null ? (
                   <>
                     <Box
                       component="span"
