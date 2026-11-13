@@ -484,7 +484,7 @@ mod tests {
             .bind(NODE1).execute(&pool).await?;
         sqlx::raw_sql(include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/migrations/000033_dec_party_topology_version.up.sql"
+            "/migrations/000030_dec_party_topology_version.up.sql"
         )))
         .execute(&pool)
         .await?;
