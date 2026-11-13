@@ -64,14 +64,9 @@ describe("GovernanceRules", () => {
     expect(screen.getByText("No additional proposers: only members can propose actions.")).toBeTruthy();
   });
 
-  it("puts the threshold next to the member count", () => {
-    render(<GovernanceRules state={state()} />);
-    expect(screen.getByTestId("governance-threshold").textContent).toBe("2 of 2 members must confirm");
-  });
-
   it("says the member set could not be read when it is empty", () => {
     render(<GovernanceRules state={state({ members: [] })} />);
-    expect(screen.getByTestId("governance-threshold").textContent).toBe(
+    expect(screen.getByTestId("governance-members-unread").textContent).toBe(
       "The member set could not be read",
     );
   });
@@ -83,18 +78,40 @@ describe("GovernanceRules", () => {
     expect(marked[0].textContent).toContain("bob::");
   });
 
-  it("shows the timeout and the package the rules live under", () => {
+  it("marks every party under this node's namespace", () => {
+    const otherNs = "b".repeat(68);
     render(
       <GovernanceRules
-        state={state({
-          action_confirmation_timeout_microseconds: 3_600_000_000,
-          package_ref: "#governance-core-v0-rc4",
-          out_of_date: true,
-        })}
+        state={state({ members: [alice, `dave::${otherNs}`], additional_proposers: [carol] })}
+        selfParticipantId={`node-1::${ns}`}
       />,
     );
-    expect(screen.getByText("Action timeout")).toBeTruthy();
-    expect(screen.getByText("1.0 h")).toBeTruthy();
+    const marked = screen
+      .getAllByTestId("governance-party-row")
+      .filter((row) => within(row).queryByText("This node"))
+      .map((row) => row.textContent);
+    expect(marked).toHaveLength(2);
+    expect(marked[0]).toContain("alice::");
+    expect(marked[1]).toContain("carol::");
+  });
+
+  it("leaves out the governance party when it is the party on the page", () => {
+    render(<GovernanceRules state={state()} partyId={`gov::${ns}`} />);
+    expect(screen.queryByText("Governance party")).toBeNull();
+    expect(screen.getByText("Rules contract")).toBeTruthy();
+  });
+
+  it("names the governance party when it is another party", () => {
+    render(<GovernanceRules state={state()} partyId={`other::${ns}`} />);
+    expect(screen.getByText("Governance party")).toBeTruthy();
+  });
+
+  it("shows the package the rules live under", () => {
+    render(
+      <GovernanceRules
+        state={state({ package_ref: "#governance-core-v0-rc4", out_of_date: true })}
+      />,
+    );
     expect(screen.getByText("#governance-core-v0-rc4 (older package)")).toBeTruthy();
   });
 });

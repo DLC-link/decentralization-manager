@@ -1233,14 +1233,14 @@ const App = () => {
           >
             <Tab
               label={
-                <Badge badgeContent={parties.length} color="primary" sx={{ pr: parties.length ? 2.5 : 0 }}>
+                <Badge badgeContent={parties.length} max={999} color="primary" sx={{ pr: parties.length ? 2.5 : 0 }}>
                   Parties
                 </Badge>
               }
             />
             <Tab
               label={
-                <Badge badgeContent={packageCount} color="primary" sx={{ pr: packageCount ? 2.5 : 0 }}>
+                <Badge badgeContent={packageCount} max={999} color="primary" sx={{ pr: packageCount ? 2.5 : 0 }}>
                   Packages
                 </Badge>
               }
@@ -1250,6 +1250,7 @@ const App = () => {
               label={
                 <Badge
                   badgeContent={notificationCount}
+                  max={999}
                   color={activeTab === 3 ? "primary" : "error"}
                   sx={{ pr: notificationCount ? 2.5 : 0 }}
                 >

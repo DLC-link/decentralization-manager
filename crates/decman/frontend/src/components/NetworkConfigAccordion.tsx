@@ -35,7 +35,8 @@ import { StatusDot } from "./StatusDot";
 import { SharedPartiesChip } from "./SharedPartiesChip";
 import { useSharedPartyCounts } from "../usePeerLinks";
 import { workflowKindLabel } from "../workflowSteps";
-import { peerStatusTooltip } from "../peerStatus";
+import { peerStatusTooltip, peerVersionLabel } from "../peerStatus";
+import { cantonIdName } from "../cantonId";
 import { PeersCsvDialog, type PeersCsvMode } from "./PeersCsvDialog";
 import { parsePeersCsv, peerToCsvRow } from "../peerCsv";
 import type {
@@ -68,6 +69,20 @@ const emptyPeer: Peer = {
   address: "localhost",
   port: 9000,
   public_key: "",
+};
+
+const PeerVersion = ({ version, build }: { version?: string; build?: string }) => {
+  const label = peerVersionLabel(version, build);
+  return (
+    <>
+      {label.version}
+      {label.build && (
+        <Box component="span" sx={{ ml: 0.75, color: "text.disabled" }}>
+          {label.build}
+        </Box>
+      )}
+    </>
+  );
 };
 
 export const NetworkConfigAccordion = ({
@@ -468,7 +483,7 @@ export const NetworkConfigAccordion = ({
                       color="text.secondary"
                       component="span"
                     >
-                      {selfPeer?.name || truncateParticipantId(selfEntry.participant_id)} (You)
+                      {selfPeer?.name || cantonIdName(selfEntry.participant_id)} (You)
                     </Typography>
                     {selfLatencyMs != null && (
                       <Tooltip title="Round-trip from this browser to your node" arrow>
@@ -487,7 +502,7 @@ export const NetworkConfigAccordion = ({
                       </Tooltip>
                     )}
                   </TableCell>
-                  <TableCell sx={{ py: 1, whiteSpace: "nowrap" }}>
+                  <TableCell sx={{ py: 1 }}>
                     {selfEntry.address}:{selfEntry.port}
                   </TableCell>
                   <TableCell
@@ -498,11 +513,10 @@ export const NetworkConfigAccordion = ({
                   <TableCell
                     sx={{ fontFamily: "var(--font-mono)", fontSize: "0.75rem", py: 1, whiteSpace: "nowrap" }}
                   >
-                    {getStat(selfEntry.participant_id)?.build_version ??
-                      getStat(selfEntry.participant_id)?.version ??
-                      nodeConfig?.build_version ??
-                      nodeConfig?.version ??
-                      "—"}
+                    <PeerVersion
+                      version={getStat(selfEntry.participant_id)?.version ?? nodeConfig?.version}
+                      build={getStat(selfEntry.participant_id)?.build_version ?? nodeConfig?.build_version}
+                    />
                   </TableCell>
                   {/* This node hosts every listed party. */}
                   <TableCell sx={{ py: 1 }}>—</TableCell>
@@ -542,7 +556,7 @@ export const NetworkConfigAccordion = ({
                         </Typography>
                       )}
                     </TableCell>
-                    <TableCell sx={{ py: 1, whiteSpace: "nowrap" }}>
+                    <TableCell sx={{ py: 1 }}>
                       {p.address}:{p.port}
                     </TableCell>
                     <TableCell
@@ -553,9 +567,7 @@ export const NetworkConfigAccordion = ({
                     <TableCell
                       sx={{ fontFamily: "var(--font-mono)", fontSize: "0.75rem", py: 1, whiteSpace: "nowrap" }}
                     >
-                      {/* Falls back to the compatibility semver: a peer that
-                        * predates `build_version` still reports `version`. */}
-                      {st?.build_version ?? st?.version ?? "—"}
+                      <PeerVersion version={st?.version} build={st?.build_version} />
                     </TableCell>
                     <TableCell sx={{ py: 1 }}>
                       {sharedCounts && onShowSharedParties ? (
