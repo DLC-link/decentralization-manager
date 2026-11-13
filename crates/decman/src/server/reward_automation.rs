@@ -63,6 +63,7 @@ use super::event_filters::{
     interface_filter, party_event_format, template_filter, wildcard_filter,
 };
 use super::handlers::{get_party_credentials, packages};
+use super::ledger_rejection::canton_error_id;
 use super::record::{
     extract_list, extract_record, field_decimal, field_list_len, field_optional_is_none,
     field_party_id, field_party_list, field_time, get_field,
@@ -1260,15 +1261,6 @@ const TRANSIENT_ASSIGN_ERROR_IDS: &[&str] = &[
     "REQUEST_TIME_OUT",
     "MEDIATOR_SAYS_TX_TIMED_OUT",
 ];
-
-/// The Canton error id a failed submission carries, i.e. the message prefix
-/// before `(`. `None` when the error is not a ledger rejection at all.
-fn canton_error_id(e: &anyhow::Error) -> Option<String> {
-    let status = e.downcast_ref::<tonic::Status>()?;
-    let id = status.message().split('(').next()?.trim();
-    (!id.is_empty() && id.bytes().all(|b| b.is_ascii_uppercase() || b == b'_'))
-        .then(|| id.to_string())
-}
 
 /// Whether a read failed only because a package it names is absent from this
 /// participant.

@@ -500,6 +500,8 @@ spec:
 
 Adapt the `ingressClassName` and TLS configuration to your cluster's Ingress controller (nginx, Contour, etc.). Make sure `<your-ui-host>` resolves to the cluster and is registered as a valid redirect URI on your IdP client.
 
+**Proxy timeout.** A governance write waits until the synchronizer decides on it. The mediator rejects the write only after its confirmation timeout when a confirming participant is offline. Set the response timeout of the Ingress or proxy to at least 120 seconds. DecMan then answers with status 504 and a JSON body that names each party that did not confirm. A 504 without a JSON body comes from the proxy. An expire or a cancel still runs to the end in that case. `GET /governance/audit` then shows its cause.
+
 ### Apply
 
 ```bash
