@@ -5181,6 +5181,7 @@ fn format_incompatible_peers(incompatible: &[(String, String)]) -> String {
 /// Claim `party` for this start request, and refuse it when a run is in
 /// flight for the party. The handler holds the claim until it returns. So a
 /// second request cannot pass the check before the first registers its run.
+#[allow(clippy::result_large_err)]
 async fn claim_party_for_start(
     data: &web::Data<AppState>,
     party: &CantonId,
