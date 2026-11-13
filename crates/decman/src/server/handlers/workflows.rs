@@ -50,7 +50,7 @@ use crate::{
         self, AddPartyStep, ChangeThresholdStep, ContractsStep, DarsStep, KickStep, OnboardingStep,
         contracts::DarFile,
         signing_keys::{
-            ensure_kick_key_claims, ensure_survivor_keys_preserved, known_signing_keys_by_member,
+            ensure_survivor_keys_preserved, kick_key_claims, known_signing_keys_by_member,
             members_requiring_key_adoption, requires_signing_key_adoption,
         },
         state::WorkflowStep,
@@ -506,7 +506,7 @@ async fn kick_key_adoption_refusal_for_mapping(
         return Ok(kick_missing_adopters(&members));
     }
     let claims = known_signing_keys_by_member(config, db, party, inline).await?;
-    ensure_kick_key_claims(Some(removed), &survivors, &claims, &members)?;
+    let claims = kick_key_claims(Some(removed), &survivors, &claims, &members)?;
     if !requires_signing_key_adoption(mapping) {
         ensure_survivor_keys_preserved(inline, &survivors, &claims)?;
         return Ok(None);
@@ -5571,16 +5571,28 @@ mod tests {
         }
     }
 
+    /// Records `kick_public_key(key)` as the signing key of host `pid(host)`.
+    async fn record_signing_keys(pool: &SqlitePool, party: &CantonId, keys: &[(u8, u8)]) -> Result {
+        for (host, key) in keys {
+            sqlx::query(
+                "UPDATE dec_party_participant SET signing_key = ? \
+                 WHERE dec_party_id = ? AND participant_uid = ?",
+            )
+            .bind(utils::compute_fingerprint(&kick_public_key(*key)).to_string())
+            .bind(party.to_string())
+            .bind(pid(*host)?.to_string())
+            .execute(pool)
+            .await?;
+        }
+        Ok(())
+    }
+
     async fn fully_inline_kick_keys(
         pool: &SqlitePool,
     ) -> Result<(NodeConfig, CantonId, PartyToParticipant)> {
         let party = pid(49)?;
         cache_kick_party(pool, &party, 2, &[1, 2, 3, 4], &[], &[2]).await?;
-        for tag in 1..=4 {
-            sqlx::query("UPDATE dec_party_participant SET signing_key = ? WHERE dec_party_id = ? AND participant_uid = ?")
-                .bind(utils::compute_fingerprint(&kick_public_key(tag)).to_string())
-                .bind(party.to_string()).bind(pid(tag)?.to_string()).execute(pool).await?;
-        }
+        record_signing_keys(pool, &party, &[(1, 1), (2, 2), (3, 3), (4, 4)]).await?;
         let mut config = NodeConfig::default();
         config.node.participant_id = Some(pid(1)?);
         config.canton.admin_api_host = "[".to_string();
@@ -5604,53 +5616,57 @@ mod tests {
         Ok((config, party, mapping))
     }
 
+    /// The kicked member claims the key of a remaining member that is not a
+    /// peer. The preflight ignores that claim, and the kick removes the
+    /// target's own key by elimination. A remaining member that claims the
+    /// same key as another one is still refused.
     #[sqlx::test(migrator = "MIGRATOR")]
-    async fn fully_inline_preflight_refuses_conflicting_target_and_non_peer_key_claims(
+    async fn fully_inline_preflight_ignores_a_target_claiming_a_non_peers_key(
         pool: SqlitePool,
     ) -> Result {
         let (config, party, mapping) = fully_inline_kick_keys(&pool).await?;
-        sqlx::query("UPDATE dec_party_participant SET signing_key = ? WHERE participant_uid = ?")
-            .bind(utils::compute_fingerprint(&kick_public_key(3)).to_string())
-            .bind(pid(4)?.to_string())
-            .execute(&pool)
-            .await?;
+        record_signing_keys(&pool, &party, &[(4, 3)]).await?;
+        let preflight = |pool: SqlitePool| {
+            let (config, party, mapping) = (config.clone(), party.clone(), mapping.clone());
+            async move {
+                kick_key_adoption_refusal_for_mapping(
+                    &config,
+                    &pool,
+                    &party,
+                    &[pid(3)?],
+                    &pid(4)?.to_string(),
+                    Some(&pid(4)?),
+                    &mapping,
+                )
+                .await
+            }
+        };
 
-        let error = kick_key_adoption_refusal_for_mapping(
-            &config,
-            &pool,
-            &party,
-            &[pid(3)?],
-            &pid(4)?.to_string(),
-            Some(&pid(4)?),
-            &mapping,
-        )
-        .await
-        .expect_err("the fully-inline fast path must check conflicting ownership")
-        .to_string();
-
-        assert!(error.contains(&pid(3)?.to_string()), "{error}");
-        assert!(error.contains(&pid(4)?.to_string()), "{error}");
-        assert!(error.contains("both claim"), "{error}");
-        assert!(error.contains("Refresh"), "{error}");
+        assert_eq!(preflight(pool.clone()).await?, None);
         let keys = &mapping
             .party_signing_keys
             .as_ref()
             .context("inline keys")?
             .keys;
         let attributed = known_signing_keys_by_member(&config, &pool, &party, keys).await?;
-        assert!(
-            signing_keys_after_kick(
-                keys,
-                &pid(4)?.to_string(),
-                &[
-                    pid(1)?.to_string(),
-                    pid(2)?.to_string(),
-                    pid(3)?.to_string()
-                ],
-                &attributed,
-            )
-            .is_err()
-        );
+        let kept = signing_keys_after_kick(
+            keys,
+            &pid(4)?.to_string(),
+            &[
+                pid(1)?.to_string(),
+                pid(2)?.to_string(),
+                pid(3)?.to_string(),
+            ],
+            &attributed,
+        )?;
+        assert_eq!(kept, keys[..3].to_vec());
+
+        record_signing_keys(&pool, &party, &[(2, 3)]).await?;
+        let error = preflight(pool)
+            .await
+            .expect_err("two remaining members claim one key")
+            .to_string();
+        assert!(error.contains("both claim"), "{error}");
         Ok(())
     }
 
@@ -5678,9 +5694,9 @@ mod tests {
         .expect_err("unknown non-peer ownership must request a refresh")
         .to_string();
         assert!(error.contains(&pid(3)?.to_string()), "{error}");
-        assert!(error.contains("has not reported"), "{error}");
+        assert!(error.contains("no record of the signing key"), "{error}");
         assert!(
-            error.contains("Refresh") && error.contains("peer"),
+            error.contains("A member that is not a peer must first be added as one."),
             "{error}"
         );
         sqlx::query("UPDATE dec_party_participant SET signing_key = ? WHERE participant_uid = ?")

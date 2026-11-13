@@ -12,7 +12,7 @@ use crate::{
         kick::KickConfig,
         proposal_store,
         signing_keys::{
-            adopt_legacy_signing_keys, ensure_kick_key_claims, ensure_survivor_keys_preserved,
+            adopt_legacy_signing_keys, ensure_survivor_keys_preserved, kick_key_claims,
             known_signing_keys_by_member, requires_signing_key_adoption, signing_keys_after_kick,
         },
         storage::{WorkflowStorage, artifact_kinds},
@@ -199,7 +199,7 @@ pub async fn create_proposals(
     };
     // Votes have not arrived yet. Any survivor may be absent from the final
     // quorum, so construction must preserve its recorded authority itself.
-    ensure_kick_key_claims(Some(&removed), &survivors, &claims, &survivors)?;
+    let claims = kick_key_claims(Some(&removed), &survivors, &claims, &survivors)?;
     ensure_survivor_keys_preserved(&new_signing_keys, &survivors, &claims)?;
 
     if new_signing_keys.len() != new_participants.len() {

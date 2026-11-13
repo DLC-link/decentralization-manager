@@ -40,7 +40,7 @@ use crate::{
             compute_decentralized_namespace, decode_keys_payload,
         },
         signing_keys::{
-            ensure_kick_key_claims, ensure_survivor_keys_preserved, own_namespace_key,
+            ensure_survivor_keys_preserved, kick_key_claims, own_namespace_key,
             recorded_signing_keys_by_member, vault_holds,
         },
         storage::{WorkflowStorage, artifact_kinds, identity_kinds},
@@ -468,7 +468,7 @@ impl PeerExpectations {
             .map(ToString::to_string)
             .or_else(|| self.kicked_owner_key.clone());
         let claims = recorded_signing_keys_by_member(storage, party).await?;
-        ensure_kick_key_claims(removed.as_deref(), &survivors, &claims, &[])?;
+        let claims = kick_key_claims(removed.as_deref(), &survivors, &claims, &[])?;
         ensure_survivor_keys_preserved(&keys.keys, &survivors, &claims)
     }
 
@@ -1937,6 +1937,93 @@ mod tests {
             threshold: 2,
         });
         accepted.check_surviving_daml_keys(&pool, &proposal).await
+    }
+
+    /// Records `keys[key]` as the signing key of `hosts[host]`, by index.
+    async fn record_claims(
+        pool: &SqlitePool,
+        party: &CantonId,
+        hosts: &[CantonId],
+        keys: &[SigningPublicKey],
+        claims: &[(usize, usize)],
+    ) -> Result {
+        for (host, key) in claims {
+            sqlx::query(
+                "INSERT INTO dec_party_participant \
+                 (dec_party_id, participant_uid, permission, signing_key) \
+                 VALUES (?, ?, 'confirmation', ?) \
+                 ON CONFLICT (dec_party_id, participant_uid) \
+                 DO UPDATE SET signing_key = excluded.signing_key",
+            )
+            .bind(party.to_string())
+            .bind(hosts[*host].to_string())
+            .bind(utils::compute_fingerprint(&keys[*key]).to_string())
+            .execute(pool)
+            .await?;
+        }
+        Ok(())
+    }
+
+    /// The kicked member claims a remaining member's key. A signer ignores
+    /// that claim, so the kick goes ahead, but it still refuses a proposal
+    /// that drops a key a remaining member claims, whoever else claims it.
+    #[sqlx::test(migrator = "crate::db::MIGRATOR")]
+    async fn a_peer_ignores_the_targets_claim_but_never_a_survivors(pool: SqlitePool) -> Result {
+        let party = canton_id("party", 9)?;
+        let hosts: Vec<CantonId> = (1..=4)
+            .map(|tag| canton_id(&format!("p{tag}"), tag))
+            .collect::<Result<_>>()?;
+        let all_keys = signing_keys(4, 2).keys;
+        sqlx::query(
+            "INSERT INTO dec_party (party_id, prefix, threshold, updated_at) VALUES (?, ?, 2, 0)",
+        )
+        .bind(party.to_string())
+        .bind(&party.prefix)
+        .execute(&pool)
+        .await?;
+        record_claims(
+            &pool,
+            &party,
+            &hosts,
+            &all_keys,
+            &[(0, 0), (1, 1), (2, 2), (3, 2)],
+        )
+        .await?;
+        let mut accepted = expectations(hosts[..3].to_vec(), hosts[1].clone());
+        accepted.kind = WorkflowKind::Kick;
+        accepted.dec_party_id = Some(party.clone());
+        accepted.kicked_participant = Some(hosts[3].clone());
+        let mut proposal = p2p(&party.to_string(), &hosts[..3], 2);
+        let proposed = |keys: [usize; 3]| SigningKeysWithThreshold {
+            keys: keys.iter().map(|index| all_keys[*index].clone()).collect(),
+            threshold: 2,
+        };
+
+        proposal.party_signing_keys = Some(proposed([0, 1, 2]));
+        accepted.check_surviving_daml_keys(&pool, &proposal).await?;
+
+        proposal.party_signing_keys = Some(proposed([0, 1, 3]));
+        let error = accepted
+            .check_surviving_daml_keys(&pool, &proposal)
+            .await
+            .expect_err("the target's claim cannot remove p3's key")
+            .to_string();
+        assert!(error.contains(&hosts[2].to_string()), "{error}");
+
+        // Now p3 claims the key p4 claims. That key stays whatever p4 says.
+        record_claims(&pool, &party, &hosts, &all_keys, &[(2, 3), (3, 3)]).await?;
+        proposal.party_signing_keys = Some(proposed([0, 1, 2]));
+        let error = accepted
+            .check_surviving_daml_keys(&pool, &proposal)
+            .await
+            .expect_err("a key a remaining member claims is never removed")
+            .to_string();
+        assert!(error.contains(&hosts[2].to_string()), "{error}");
+        assert!(
+            error.contains(&utils::compute_fingerprint(&all_keys[3]).to_string()),
+            "{error}"
+        );
+        Ok(())
     }
 
     #[test]
