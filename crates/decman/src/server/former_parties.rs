@@ -20,9 +20,7 @@ use std::{
 
 use canton_proto_rs::com::digitalasset::canton::{
     admin::participant::v30::{
-        DisconnectSynchronizerRequest, ListConnectedSynchronizersRequest, PurgeContractsRequest,
         ReconnectSynchronizerRequest,
-        participant_repair_service_client::ParticipantRepairServiceClient,
         synchronizer_connectivity_service_client::SynchronizerConnectivityServiceClient,
     },
     protocol::v30::enums::TopologyChangeOp,
@@ -47,19 +45,18 @@ use crate::{
         audit::{AuditActor, PurgeAuditEvent, log_purge_audit},
         event_filters::{party_event_format, wildcard_filter},
         ledger_paging::fetch_active_contracts_filtered,
+        participant_repair::{
+            CONNECTIVITY, connected_and_healthy, purge_offered, purge_while_disconnected,
+            running_workflows,
+        },
         types::{FormerParty, PurgeStatus},
     },
     utils,
     workflow::{
-        party_replication::acs::{manual_connect_enabled, synchronizer_healthy, verify_healthy},
+        party_replication::acs::{manual_connect_enabled, verify_healthy},
         topology::{head_state_query, history_query, p2p_rows},
     },
 };
-
-/// Serializes the operations that take the participant off its synchronizer
-/// or put it back. A purge holds it from its start until it records its
-/// outcome. A reconnect takes it, or refuses while a purge holds it.
-static CONNECTIVITY: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 /// How long the removal must have been in force before a purge.
 ///
@@ -68,15 +65,6 @@ static CONNECTIVITY: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 /// contract the purge removes, and replaying that archive on reconnect crashes
 /// the participant (exit 117).
 const MIN_REMOVAL_AGE: Duration = Duration::from_secs(60);
-
-/// Contract ids per `PurgeContracts` call. A contract id is about 140
-/// characters, so this keeps each request far below the 4 MiB gRPC cap.
-const PURGE_BATCH: usize = 500;
-
-/// Attempts per batch. The call is idempotent with `ignore_already_purged`.
-const PURGE_BATCH_ATTEMPTS: usize = 3;
-
-const PURGE_RETRY_DELAY: Duration = Duration::from_secs(2);
 
 /// Hosting reads in flight at once while classifying stakeholders.
 const HOSTING_READ_CONCURRENCY: usize = 8;
@@ -286,7 +274,7 @@ async fn read_held_contracts(
 }
 
 /// Whether this participant hosts `party` in its head state.
-async fn hosts(
+pub(crate) async fn hosts(
     mut client: TopologyManagerReadServiceClient<Channel>,
     synchronizer_id: &str,
     participant_uid: &str,
@@ -364,18 +352,6 @@ pub(crate) enum Refusal {
     Unsafe(String),
 }
 
-/// The in-progress workflow runs, named for an operator, or `None` when there
-/// are none.
-async fn running_workflows(db: &SqlitePool) -> Result<Option<String>> {
-    let runs = db.get_in_progress_workflow_runs().await?;
-    Ok((!runs.is_empty()).then(|| {
-        runs.iter()
-            .map(|run| format!("{:?} {}", run.kind, run.instance_name))
-            .collect::<Vec<_>>()
-            .join(", ")
-    }))
-}
-
 /// Check that a purge of `party` is safe to start now.
 pub(crate) async fn check_purge_allowed(
     config: &NodeConfig,
@@ -406,12 +382,7 @@ pub(crate) async fn check_purge_allowed(
     // of a recovery. Reconnecting it at the end of the purge could replay a
     // window in which it hosted a party without that party's contracts.
     let alias = config.synchronizer();
-    let connected = SynchronizerConnectivityServiceClient::new(config.admin_channel().await?)
-        .list_connected_synchronizers(tonic::Request::new(ListConnectedSynchronizersRequest {}))
-        .await?
-        .into_inner()
-        .connected_synchronizers;
-    if !synchronizer_healthy(&connected, alias) {
+    if !connected_and_healthy(config).await? {
         return refuse(format!(
             "The participant is not connected and healthy on synchronizer '{alias}'. The purge \
              disconnects and reconnects it, so it only starts from a healthy connection"
@@ -499,21 +470,11 @@ async fn purge_leftovers(
         return Ok((0, split.keep));
     }
 
-    let alias = config.synchronizer().to_string();
     let synchronizer_id = utils::get_synchronizer_id(config).await?;
-    let mut connectivity =
-        SynchronizerConnectivityServiceClient::new(config.admin_channel().await?);
-    // Disconnect and purge as one fallible unit. The reconnect below runs on
-    // every outcome, so the participant is never left off the synchronizer.
-    let purged = async {
-        connectivity
-            .disconnect_synchronizer(tonic::Request::new(DisconnectSynchronizerRequest {
-                synchronizer_alias: alias.clone(),
-            }))
-            .await?;
-        // The participant's topology stops changing once it is off the
-        // synchronizer. A rehost since the plan makes the planned contracts
-        // current again, so check for one here, before anything is removed.
+    // The participant's topology stops changing once it is off the
+    // synchronizer. A rehost since the plan makes the planned contracts
+    // current again, so the recheck looks for one before anything is removed.
+    purge_while_disconnected(config, &split.purge, async || {
         anyhow::ensure!(
             live_removal_time(config, &synchronizer_id, party)
                 .await?
@@ -521,34 +482,9 @@ async fn purge_leftovers(
             "this participant hosts the party again, so the purge stopped before removing \
              anything"
         );
-        purge_in_batches(config, &alias, &split.purge).await
-    }
-    .await;
-
-    let reconnected = async {
-        connectivity
-            .reconnect_synchronizer(tonic::Request::new(ReconnectSynchronizerRequest {
-                synchronizer_alias: alias.clone(),
-                retry: true,
-            }))
-            .await?;
-        verify_healthy(config).await
-    }
-    .await;
-
-    // An unhealthy participant is the failure an operator must act on first,
-    // so it is reported even when the purge failed too.
-    if let Err(reconnect_err) = reconnected {
-        let purge_note = match &purged {
-            Ok(()) => "the purge itself completed".to_string(),
-            Err(e) => format!("the purge also failed: {e:#}"),
-        };
-        anyhow::bail!(
-            "the participant did not come back connected and healthy on '{alias}' after the \
-             purge ({purge_note}): {reconnect_err:#}"
-        );
-    }
-    purged?;
+        Ok(())
+    })
+    .await?;
 
     let after = plan_purge(config, token, party).await?;
     anyhow::ensure!(
@@ -606,12 +542,7 @@ pub(crate) async fn reconnect_after_failed_purge(
     }
 
     let alias = config.synchronizer().to_string();
-    let connected = SynchronizerConnectivityServiceClient::new(config.admin_channel().await?)
-        .list_connected_synchronizers(tonic::Request::new(ListConnectedSynchronizersRequest {}))
-        .await?
-        .into_inner()
-        .connected_synchronizers;
-    if synchronizer_healthy(&connected, &alias) {
+    if connected_and_healthy(config).await? {
         return refuse(format!(
             "The participant is already connected and healthy on synchronizer '{alias}'"
         ));
@@ -642,65 +573,6 @@ pub(crate) async fn reconnect_after_failed_purge(
     Ok(Ok(()))
 }
 
-/// Whether the participant serves `PurgeContracts`. With Canton's repair
-/// commands off the method does not exist. The probe purges nothing: Canton
-/// refuses a request without contract ids before it reads the synchronizer.
-async fn purge_offered(config: &NodeConfig, alias: &str) -> Result<bool> {
-    let probe = ParticipantRepairServiceClient::new(config.admin_channel().await?)
-        .purge_contracts(tonic::Request::new(PurgeContractsRequest {
-            synchronizer_alias: alias.to_string(),
-            contract_ids: Vec::new(),
-            ignore_already_purged: true,
-            force_repair_when_topology_transaction_at_ledger_end: false,
-        }))
-        .await;
-    purge_probe_result(probe.map(drop))
-}
-
-fn purge_probe_result(probe: std::result::Result<(), tonic::Status>) -> Result<bool> {
-    match probe {
-        Ok(()) => Ok(true),
-        Err(status) => match status.code() {
-            tonic::Code::Unimplemented => Ok(false),
-            tonic::Code::InvalidArgument => Ok(true),
-            _ => Err(status.into()),
-        },
-    }
-}
-
-async fn purge_in_batches(config: &NodeConfig, alias: &str, contract_ids: &[String]) -> Result {
-    let mut repair = ParticipantRepairServiceClient::new(config.admin_channel().await?);
-    for (index, batch) in contract_ids.chunks(PURGE_BATCH).enumerate() {
-        let mut attempt = 1;
-        loop {
-            let request = PurgeContractsRequest {
-                synchronizer_alias: alias.to_string(),
-                contract_ids: batch.to_vec(),
-                ignore_already_purged: true,
-                force_repair_when_topology_transaction_at_ledger_end: false,
-            };
-            match repair.purge_contracts(tonic::Request::new(request)).await {
-                Ok(_) => break,
-                Err(status) if attempt < PURGE_BATCH_ATTEMPTS => {
-                    tracing::warn!(
-                        "PurgeContracts batch {} failed (attempt {attempt}/{PURGE_BATCH_ATTEMPTS}): \
-                         {status}",
-                        index + 1
-                    );
-                    attempt += 1;
-                    tokio::time::sleep(PURGE_RETRY_DELAY).await;
-                }
-                Err(status) => anyhow::bail!(
-                    "PurgeContracts failed on batch {} of {}: {status}",
-                    index + 1,
-                    contract_ids.len().div_ceil(PURGE_BATCH)
-                ),
-            }
-        }
-    }
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -711,18 +583,6 @@ mod tests {
             valid_from,
             hosts_participant,
         }
-    }
-
-    #[test]
-    fn a_missing_purge_method_means_repair_commands_are_off() -> Result {
-        assert!(!purge_probe_result(Err(tonic::Status::unimplemented(
-            "Method not found"
-        )))?);
-        assert!(purge_probe_result(Err(tonic::Status::invalid_argument(
-            "Missing contract ids to purge"
-        )))?);
-        assert!(purge_probe_result(Err(tonic::Status::unavailable("down"))).is_err());
-        Ok(())
     }
 
     #[test]
