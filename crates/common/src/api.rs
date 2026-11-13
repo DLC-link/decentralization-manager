@@ -1587,6 +1587,18 @@ pub struct CancelConfirmationRequest {
     pub governance_type: GovernanceType,
 }
 
+/// Request to dismiss or restore confirmations on this node only.
+///
+/// Name every confirmation of the action. An action is hidden only when it
+/// cannot be archived and every one of its confirmations is dismissed.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
+pub struct DismissConfirmationsRequest {
+    pub party_id: CantonId,
+    pub confirmation_cids: Vec<String>,
+}
+
 /// Request to retract a proposal the caller proposed.
 ///
 /// `confirmation_cid` carries the caller's own confirmation on that proposal,
