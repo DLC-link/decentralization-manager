@@ -816,16 +816,17 @@ async fn refresh_and_cache_parties(data: &web::Data<AppState>, prefix: &str) {
     }
 }
 
-/// Refresh one party's cached hosts and owner keys before this node checks a
-/// kick of it.
+/// Refresh one party's cached hosts and member keys before this node checks a
+/// kick or a key rotation of it.
 ///
-/// A peer refuses a kick unless it has every host's owner key on record. Its
-/// cache fills only at startup and on a party read, so a party that changed
-/// since then would have no keys to check. A discovery already running for
-/// the prefix is left to finish, and the keys are resolved for the hosts the
+/// A peer refuses a kick unless it has every host's owner key on record, and
+/// a rotation unless it has the coordinator's Daml key on record. Its cache
+/// fills only at startup and on a party read, so a party that changed since
+/// then would have no keys to check. A discovery already running for the
+/// prefix is left to finish, and the keys are resolved for the hosts the
 /// cache holds now. Failures are logged: the check that follows refuses the
-/// kick if a key is still missing.
-pub(crate) async fn refresh_party_for_kick(data: &web::Data<AppState>, party: &CantonId) {
+/// run if a key is still missing.
+pub(crate) async fn refresh_party_members(data: &web::Data<AppState>, party: &CantonId) {
     let auth = data.auth.read().await.clone();
     let party_creds = data.party_credentials.read().await.clone();
     let parties = match discover_and_cache(
@@ -841,7 +842,7 @@ pub(crate) async fn refresh_party_for_kick(data: &web::Data<AppState>, party: &C
     {
         Discovery::Done(response) => response.parties,
         Discovery::Failed(e) => {
-            tracing::warn!("Kick accept: refreshing {party} failed: {e:#}; using the cache");
+            tracing::warn!("Invitation accept: refreshing {party} failed: {e:#}; using the cache");
             cached_parties(&data.db, &party.prefix).await
         }
         Discovery::InFlight | Discovery::Superseded | Discovery::AtCapacity => {
@@ -853,7 +854,7 @@ pub(crate) async fn refresh_party_for_kick(data: &web::Data<AppState>, party: &C
         .filter(|cached| cached.party_id == *party)
         .collect();
     if parties.is_empty() {
-        tracing::warn!("Kick accept: {party} is not in this node's party cache");
+        tracing::warn!("Invitation accept: {party} is not in this node's party cache");
         return;
     }
     resolve_owner_keys_from_peers(&data.config, &data.db, &parties).await;

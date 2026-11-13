@@ -32,6 +32,10 @@ pub mod artifact_kinds {
     pub const SIGNED_DNS_PROPOSAL: &str = "signed_dns_proposal";
     pub const SIGNED_P2P_PROPOSAL: &str = "signed_p2p_proposal";
     pub const PEER_PUBLIC_KEYS: &str = "peer_public_keys";
+    /// The name of the Daml key this node creates in an onboarding or
+    /// add-party run. Plaintext UTF-8. A retry reads it to find the same
+    /// key, and a new run picks a new name.
+    pub const DAML_KEY_NAME: &str = "daml_key_name";
     pub const PARTICIPANT_ID: &str = "participant_id";
     /// Resolved decentralized party id (`{prefix}::{namespace_fingerprint}`)
     /// produced by onboarding's CreateProposals once all peer namespace
@@ -184,6 +188,19 @@ pub mod artifact_kinds {
     pub const SIGNED_CHANGE_THRESHOLD_P2P: &str = "signed_change_threshold_p2p";
     /// Full party id (plaintext) — used by submit to poll the P2P mapping.
     pub const CHANGE_THRESHOLD_PARTY_ID: &str = "change_threshold_party_id";
+
+    // Rotate-key (workflow_artifacts during a run)
+    /// The coordinator's new Daml `SigningPublicKey`, written in GenerateKey.
+    /// Length-prefixed proto.
+    pub const ROTATE_KEY_NEW_KEY: &str = "rotate_key_new_key";
+    /// The P2P proposal that swaps the coordinator's Daml key, signed by the
+    /// coordinator in CreateProposal. Length-prefixed proto.
+    pub const ROTATE_KEY_P2P_PROPOSAL: &str = "rotate_key_p2p_proposal";
+    /// Per-peer signed rotation proposal — single length-prefixed proto.
+    pub const SIGNED_ROTATE_KEY_P2P: &str = "signed_rotate_key_p2p";
+    /// The new key a peer validated in SignProposal, as a UTF-8 fingerprint.
+    /// RecordKey records only this key for the coordinator.
+    pub const ROTATE_KEY_ACCEPTED_NEW_KEY: &str = "rotate_key_accepted_new_key";
 }
 
 /// Identity-table artefact kinds. These survive the originating workflow run's

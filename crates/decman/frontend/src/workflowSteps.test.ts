@@ -45,6 +45,36 @@ describe("WORKFLOW_STEPS", () => {
   });
 });
 
+describe("rotate-key steps", () => {
+  it("lists the backend's eight steps in its order", () => {
+    // Mirrors `RotateKeyStep::step_name` in workflow/rotate_key/mod.rs.
+    expect(WORKFLOW_STEPS.RotateKey.map((s) => s.name)).toEqual([
+      "WaitingForPeers",
+      "GenerateKey",
+      "CreateProposal",
+      "SignProposal",
+      "Submit",
+      "RetireLegacyKeys",
+      "RecordKey",
+      "Complete",
+    ]);
+  });
+
+  it("labels a run on the recording step", () => {
+    const steps = WORKFLOW_STEPS.RotateKey;
+    expect(
+      currentStepLabel(
+        run({
+          kind: "RotateKey",
+          current_step: "RecordKey",
+          step_index: steps.findIndex((s) => s.name === "RecordKey"),
+          step_total: steps.length,
+        }),
+      ),
+    ).toBe("Recording the new key");
+  });
+});
+
 describe("stepsForRun", () => {
   it("returns the list when the run agrees with it", () => {
     const steps = WORKFLOW_STEPS.AddParty;
@@ -233,6 +263,7 @@ describe("workflowKindLabel", () => {
   it("labels every kind without PascalCase run-together words", () => {
     expect(workflowKindLabel("AddParty")).toBe("Add party");
     expect(workflowKindLabel("ChangeThreshold")).toBe("Change threshold");
+    expect(workflowKindLabel("RotateKey")).toBe("Rotate key");
     expect(workflowKindLabel("Dars")).toBe("DARs");
     for (const kind of KINDS) {
       expect(workflowKindLabel(kind), kind).not.toBe("");

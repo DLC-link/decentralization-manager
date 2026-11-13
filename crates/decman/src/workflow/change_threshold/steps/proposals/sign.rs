@@ -26,6 +26,7 @@ pub async fn sign_proposals(
         "change-threshold",
         artifact_kinds::SIGNED_CHANGE_THRESHOLD_DNS,
         artifact_kinds::SIGNED_CHANGE_THRESHOLD_P2P,
+        None,
     )
     .await
 }

@@ -61,6 +61,13 @@ pub enum Commands {
         #[arg(long, env = "DECPM_KEY_STORE_KEY_FILE")]
         key_store_key_file: Option<PathBuf>,
 
+        /// Let DecMan create party keys on a participant without KMS. DecMan
+        /// then generates each new Daml key itself and keeps it in its key
+        /// store, so Canton never has to export it. Off by default, so new
+        /// keys need a KMS-backed participant.
+        #[arg(long, env = "DECPM_ALLOW_SOFTWARE_PARTY_KEYS", default_value_t = false)]
+        allow_software_party_keys: bool,
+
         // Node settings
         /// Address to listen on for Noise protocol connections
         #[arg(long, env = "DECPM_LISTEN_ADDRESS")]

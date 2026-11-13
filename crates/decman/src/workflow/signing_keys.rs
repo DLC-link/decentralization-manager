@@ -52,11 +52,45 @@ use crate::{
 };
 
 /// Vault name of the Daml signing key a node holds for the party with this
-/// id prefix. Onboarding and add-party both mint the key under this name, and
-/// `get_or_create_signing_key` finds it again by it, so it is the local
-/// record of which party a protocol key belongs to.
+/// id prefix. Onboarding and add-party used this name before each run named
+/// its own key, so parties created earlier still hold their key under it.
+/// Every other Daml key name of the party starts with it.
 pub fn party_daml_key_name(party_id_prefix: &str) -> String {
     format!("{party_id_prefix}-daml-transactions")
+}
+
+/// Vault name of the Daml key that one onboarding or add-party run creates
+/// for the party with this id prefix. `run` is random, so each run creates a
+/// new key. A member that a party adds again after a kick then gets a new
+/// key, not the key that a rotation replaced.
+pub fn run_daml_key_name(party_id_prefix: &str, run: &str) -> String {
+    format!(
+        "{base}-run-{run}",
+        base = party_daml_key_name(party_id_prefix)
+    )
+}
+
+/// Vault name of the Daml key that replaces `replaced` for the party with
+/// this id prefix. The name depends only on the replaced key. A retry, or a
+/// new run after a failed one, finds the same key again. An operator who
+/// granted DecMan access to that key then needs no second grant. A later
+/// rotation replaces a different key, so it creates a new one.
+pub fn rotated_daml_key_name(party_id_prefix: &str, replaced: &Fingerprint) -> String {
+    format!(
+        "{base}-rotated-from-{replaced}",
+        base = party_daml_key_name(party_id_prefix)
+    )
+}
+
+/// Whether a vault name is one this tool gives a Daml key of the party with
+/// this id prefix: the earlier shared name, a run's name or a rotation's
+/// name.
+pub fn is_party_daml_key_name(name: &str, party_id_prefix: &str) -> bool {
+    let base = party_daml_key_name(party_id_prefix);
+    name == base
+        || name
+            .strip_prefix(&base)
+            .is_some_and(|rest| rest.starts_with("-rotated-") || rest.starts_with("-run-"))
 }
 
 /// Whether this node's vault holds the private half of a key.
@@ -138,7 +172,7 @@ pub async fn own_namespace_key(
 }
 
 /// This node's own Daml signing-key fingerprint for a party: from its
-/// long-lived identity row, then the vault key named after the party, then —
+/// long-lived identity row, then the one vault key named for the party, then —
 /// for any `candidates` the caller already holds — the one whose private half
 /// is in this node's vault. Returns `None` when none of the three answer.
 ///
@@ -166,13 +200,12 @@ async fn own_signing_key_fingerprint(
         );
     }
 
-    let name = party_daml_key_name(&dec_party_id.prefix);
     let mut vault_client = VaultServiceClient::new(config.admin_channel().await?);
     let response = vault_client
         .list_my_keys(tonic::Request::new(ListMyKeysRequest {
             filters: Some(ListKeysFilters {
                 fingerprint: String::new(),
-                name: name.clone(),
+                name: String::new(),
                 purpose: vec![],
                 usage_v30: vec![SigningKeyUsage::Protocol as i32],
             }),
@@ -181,16 +214,35 @@ async fn own_signing_key_fingerprint(
         .await?
         .into_inner();
 
-    for meta in response.private_keys_metadata {
-        if let Some(private_key_metadata::PublicKeyWithName::V30(pkn)) = meta.public_key_with_name
-            && let Some(pk) = pkn.public_key
-            && let Some(public_key::Key::SigningPublicKey(spk)) = pk.key
-        {
-            return Ok(Some(utils::compute_fingerprint(&spk)));
-        }
+    // A member that a party added again, or a member that rotated, holds
+    // more than one key named for the party. Only the party's key list says
+    // which one is in force, so several names go to the match below.
+    let named: Vec<Fingerprint> = response
+        .private_keys_metadata
+        .into_iter()
+        .filter_map(|meta| match meta.public_key_with_name {
+            Some(private_key_metadata::PublicKeyWithName::V30(pkn))
+                if is_party_daml_key_name(&pkn.name, &dec_party_id.prefix) =>
+            {
+                match pkn.public_key?.key? {
+                    public_key::Key::SigningPublicKey(spk) => {
+                        Some(utils::compute_fingerprint(&spk))
+                    }
+                    _ => None,
+                }
+            }
+            _ => None,
+        })
+        .collect();
+    if let [fingerprint] = named.as_slice() {
+        return Ok(Some(fingerprint.clone()));
     }
 
-    tracing::warn!("No Daml signing key named '{name}' in this node's vault");
+    tracing::warn!(
+        "This node's vault holds {count} Daml signing keys named for {dec_party_id}; matching \
+         them against the party's keys instead",
+        count = named.len()
+    );
 
     // `candidates` is the whole legacy mapping, which also holds the keys of
     // members that left, and a node that rotated its Daml key still holds the
@@ -819,6 +871,34 @@ mod tests {
         schema::{Commitable, SchemaWrite},
     };
 
+    #[test]
+    fn recognizes_the_onboarding_and_the_rotation_key_names() {
+        assert!(is_party_daml_key_name("xyz-daml-transactions", "xyz"));
+        assert!(is_party_daml_key_name(
+            &run_daml_key_name("xyz", "0123abcd"),
+            "xyz"
+        ));
+        assert!(!is_party_daml_key_name(
+            &run_daml_key_name("xy", "0123abcd"),
+            "xyz"
+        ));
+        assert!(is_party_daml_key_name(
+            &rotated_daml_key_name(
+                "xyz",
+                &format!("1220{:0>64}", "ab")
+                    .parse::<Fingerprint>()
+                    .expect("fingerprint")
+            ),
+            "xyz"
+        ));
+        assert!(!is_party_daml_key_name(
+            "xyz-daml-transactions-other",
+            "xyz"
+        ));
+        assert!(!is_party_daml_key_name("xy-daml-transactions", "xyz"));
+        assert!(!is_party_daml_key_name("xyz-namespace", "xyz"));
+    }
+
     /// A `SigningPublicKey` whose fingerprint is stable and distinct per
     /// `seed` — the tests only ever compare fingerprints.
     fn key(seed: u8) -> SigningPublicKey {
@@ -1325,5 +1405,62 @@ mod tests {
             ),
             "{error:#}"
         );
+    }
+}
+
+/// `own_signing_key_fingerprint` against a fake participant vault.
+#[cfg(test)]
+mod own_key_from_the_vault {
+    use super::*;
+    use crate::{
+        db::MIGRATOR,
+        signing::{
+            custody::SoftwareKeys,
+            fake_admin_api::{FakeAdminApi, VaultKey},
+        },
+    };
+
+    fn party() -> Result<CantonId> {
+        CantonId::parse(
+            "party::1220bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        )
+    }
+
+    /// A member that rotated holds its old and its new key, both named for
+    /// the party. The name cannot tell them apart, so the party's key list
+    /// decides. The key the party no longer carries is never taken.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_rotated_member_takes_the_key_the_party_carries(db: SqlitePool) -> Result {
+        let old = VaultKey::software("party-daml-transactions-run-0123abcd", 4);
+        let new = VaultKey::software(&rotated_daml_key_name("party", &old.fingerprint()), 5);
+        let fake = FakeAdminApi::start(vec![old.clone(), new.clone()]).await?;
+        let node = fake.node(SoftwareKeys::Stored, true).await?;
+        let peer = VaultKey::software("peer", 6).public_key;
+
+        let own = own_signing_key_fingerprint(
+            &node.config,
+            &db,
+            &party()?,
+            &[peer, new.public_key.clone()],
+        )
+        .await?;
+
+        assert_eq!(own, Some(new.fingerprint()));
+        Ok(())
+    }
+
+    /// One key named for the party answers on its own. A key named for
+    /// another party does not count, even with no key list to match.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn one_key_named_for_the_party_is_its_own(db: SqlitePool) -> Result {
+        let own = VaultKey::software("party-daml-transactions-run-0123abcd", 4);
+        let other = VaultKey::software("partyx-daml-transactions", 5);
+        let fake = FakeAdminApi::start(vec![other, own.clone()]).await?;
+        let node = fake.node(SoftwareKeys::Stored, true).await?;
+
+        let found = own_signing_key_fingerprint(&node.config, &db, &party()?, &[]).await?;
+
+        assert_eq!(found, Some(own.fingerprint()));
+        Ok(())
     }
 }

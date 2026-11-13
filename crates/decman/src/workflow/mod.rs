@@ -7,6 +7,7 @@ pub mod kick;
 pub mod onboarding;
 pub mod party_replication;
 pub mod proposal_store;
+pub mod rotate_key;
 pub mod signing_keys;
 pub mod state;
 pub mod storage;
@@ -52,6 +53,7 @@ pub use contracts::{ContractsConfig, ContractsStep};
 pub use dars::{DarsConfig, DarsStep};
 pub use kick::{KickConfig, KickStep};
 pub use onboarding::{OnboardingConfig, OnboardingStep};
+pub use rotate_key::{RotateKeyConfig, RotateKeyStep};
 pub use state::WorkflowState;
 
 /// Workflow types that can be run
@@ -63,6 +65,7 @@ pub enum WorkflowType {
     Kick,
     AddParty,
     ChangeThreshold,
+    RotateKey,
 }
 
 /// Result from a coordinator workflow, optionally containing the created party ID
@@ -83,6 +86,7 @@ pub async fn start_coordinator(
     dars_config: Option<DarsConfig>,
     add_party_config: Option<AddPartyConfig>,
     change_threshold_config: Option<ChangeThresholdConfig>,
+    rotate_key_config: Option<RotateKeyConfig>,
     workflow_auth: Option<WorkflowAuth>,
     last_seen: LastSeen,
     instance: Arc<WorkflowInstance>,
@@ -183,6 +187,23 @@ pub async fn start_coordinator(
                 anyhow::anyhow!("ChangeThresholdConfig is required for ChangeThreshold workflow")
             })?;
             change_threshold::coordinator::start_coordinator(
+                node_config,
+                network_config,
+                config,
+                db,
+                last_seen,
+                instance,
+            )
+            .await?;
+            Ok(CoordinatorResult {
+                created_party_id: None,
+            })
+        }
+        WorkflowType::RotateKey => {
+            let config = rotate_key_config.ok_or_else(|| {
+                anyhow::anyhow!("RotateKeyConfig is required for RotateKey workflow")
+            })?;
+            rotate_key::coordinator::start_coordinator(
                 node_config,
                 network_config,
                 config,
@@ -424,14 +445,25 @@ async fn run_peer(
             }
             MessageType::RetireLegacyKeys => {
                 // The target comes from the accepted invitation, never this command's payload.
-                let party = expectations.dec_party_id.as_ref().ok_or_else(|| {
-                    anyhow::anyhow!("No accepted party for legacy key retirement")
-                })?;
-                let synchronizer_id = utils::get_synchronizer_id(&node_config).await?;
-                topology::retire_legacy_keys(&node_config, &synchronizer_id, party).await?;
+                let Some(party) = expectations.dec_party_id.as_ref() else {
+                    fail_step!("No accepted party for legacy key retirement");
+                    continue;
+                };
+                // A failure retries like any other step. Ending the run here
+                // would skip RecordKey, and this node would keep the old key
+                // on record for the coordinator.
+                let retired = async {
+                    let synchronizer_id = utils::get_synchronizer_id(&node_config).await?;
+                    topology::retire_legacy_keys(&node_config, &synchronizer_id, party).await
+                }
+                .await;
+                if let Err(e) = retired {
+                    fail_step!("Failed to retire the legacy key mapping: {e:#}");
+                    continue;
+                }
                 consecutive_step_failures = 0;
                 client
-                    .send_status(b"RetireLegacyKeys completed".to_vec())
+                    .send_status(topology::RETIRED_LEGACY_KEYS_STATUS.to_vec())
                     .await?;
             }
             MessageType::Disconnect => {
@@ -621,6 +653,43 @@ async fn run_peer(
                 {
                     fail_step!("Refusing the coordinator's P2P proposal: {e}");
                     continue;
+                }
+                // A node whose Daml key DecMan generated files the key under
+                // the party before it signs, so the party never comes into
+                // force with a key DecMan cannot sign its deploys with. Filing
+                // needs the identity rows, which the hook after signing
+                // writes again.
+                if crate::signing::custody::software_keys(&node_config)
+                    == crate::signing::custody::SoftwareKeys::Stored
+                {
+                    let filed = match extract_party_id_from_p2p_payload(&payload) {
+                        Ok(party) => match onboarding::peer::copy_self_identity_for_party(
+                            &db,
+                            &instance_name,
+                            &node_config,
+                            &party,
+                        )
+                        .await
+                        {
+                            Ok(()) => {
+                                crate::signing::custody::file_new_party_key(
+                                    &node_config,
+                                    &db,
+                                    &party,
+                                )
+                                .await
+                            }
+                            Err(e) => Err(e),
+                        },
+                        Err(e) => Err(e),
+                    };
+                    if let Err(e) = filed {
+                        fail_step!(
+                            "Refusing to sign P2P: DecMan cannot file this node's new Daml key \
+                             under the party: {e:#}"
+                        );
+                        continue;
+                    }
                 }
                 if let Err(e) =
                     onboarding::sign_p2p_proposals(&node_config, &db, &instance_name, &payload)
@@ -845,6 +914,117 @@ async fn run_peer(
                         "Failed to send change-threshold signatures to coordinator: {e}"
                     );
                 }
+            }
+            MessageType::SignRotateKey => {
+                tracing::info!("Executing: Sign rotate-key proposal");
+                let items = match utils::decode_length_prefixed(&payload, 2) {
+                    Ok(items) => items,
+                    Err(e) => {
+                        fail_step!("Failed to decode SignRotateKey payload: {e}");
+                        continue;
+                    }
+                };
+                if let Err(e) = serde_json::from_slice::<rotate_key::RotateKeyConfig>(&items[0]) {
+                    fail_step!("Failed to deserialize rotate-key config: {e}");
+                    continue;
+                }
+                let new_key = match expectations
+                    .check_rotation_proposal(&node_config, &db, &instance_name, &items[1])
+                    .await
+                {
+                    Ok(new_key) => new_key,
+                    Err(e) => {
+                        fail_step!("Refusing the coordinator's rotate-key proposal: {e}");
+                        continue;
+                    }
+                };
+                // RecordKey later records only the key checked here.
+                if let Err(e) = db
+                    .write_artifact(
+                        &instance_name,
+                        artifact_kinds::ROTATE_KEY_ACCEPTED_NEW_KEY,
+                        None,
+                        new_key.as_str().as_bytes(),
+                    )
+                    .await
+                {
+                    fail_step!("Failed to record the checked rotation key: {e}");
+                    continue;
+                }
+                if let Err(e) =
+                    rotate_key::steps::sign_proposal(&node_config, &db, &instance_name, &items[1])
+                        .await
+                {
+                    fail_step!("Step execution failed: {e}");
+                    continue;
+                }
+                consecutive_step_failures = 0;
+                if let Err(e) = rotate_key::peer::send_rotate_key_signatures_to_coordinator(
+                    &client,
+                    &db,
+                    &instance_name,
+                    &node_config,
+                )
+                .await
+                {
+                    tracing::error!("Failed to send rotate-key signatures to coordinator: {e}");
+                }
+            }
+            MessageType::RecordRotatedKey => {
+                tracing::info!("Executing: Record the coordinator's new Daml key");
+                // The party, the coordinator and the replaced key all come
+                // from the accepted invitation. The payload names the new
+                // key, which must be the one this node checked in
+                // SignProposal, and which the topology must already carry.
+                let accepted = db
+                    .read_artifact(
+                        &instance_name,
+                        artifact_kinds::ROTATE_KEY_ACCEPTED_NEW_KEY,
+                        None,
+                    )
+                    .await;
+                let recorded = match (
+                    expectations.dec_party_id.as_ref(),
+                    expectations.rotated_key.as_ref(),
+                    accepted,
+                ) {
+                    (_, _, Err(e)) => Err(e),
+                    (_, _, Ok(None)) => Err(anyhow::anyhow!(
+                        "this node checked no proposal of this run, so it records no key"
+                    )),
+                    (Some(party), Some(rotated_key), Ok(Some(accepted))) => {
+                        match (
+                            rotate_key::steps::decode_recorded_key(&payload),
+                            String::from_utf8(accepted)
+                                .map_err(anyhow::Error::from)
+                                .and_then(|key| key.parse::<crate::canton_id::Fingerprint>()),
+                        ) {
+                            (Ok(new_key), Ok(accepted)) => {
+                                rotate_key::steps::record_peer_key(
+                                    &node_config,
+                                    &db,
+                                    party,
+                                    &expectations.coordinator_id,
+                                    (rotated_key, &accepted),
+                                    new_key,
+                                )
+                                .await
+                            }
+                            (Err(e), _) | (_, Err(e)) => Err(e),
+                        }
+                    }
+                    (_, _, Ok(Some(_))) => Err(anyhow::anyhow!(
+                        "the accepted rotate-key invitation names no party or no replaced key"
+                    )),
+                };
+                if let Err(e) = recorded {
+                    fail_step!("Failed to record the coordinator's new key: {e}");
+                    continue;
+                }
+                consecutive_step_failures = 0;
+                client
+                    .send_status(rotate_key::RECORDED_KEY_STATUS.to_vec())
+                    .await?;
             }
             MessageType::GenerateAddPartyKeys => {
                 tracing::info!("Executing: Generate add-party keys");
@@ -1427,6 +1607,20 @@ fn peer_step_for_command(
                 step.step_name(),
                 step.step_index(),
                 ChangeThresholdStep::step_total(),
+            ))
+        }
+        WorkflowKind::RotateKey => {
+            let step = match command {
+                MessageType::SignRotateKey => RotateKeyStep::SignProposal,
+                MessageType::RetireLegacyKeys => RotateKeyStep::RetireLegacyKeys,
+                MessageType::RecordRotatedKey => RotateKeyStep::RecordKey,
+                MessageType::Disconnect => RotateKeyStep::Complete,
+                _ => return None,
+            };
+            Some((
+                step.step_name(),
+                step.step_index(),
+                RotateKeyStep::step_total(),
             ))
         }
     }

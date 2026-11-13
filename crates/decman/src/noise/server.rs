@@ -34,8 +34,10 @@ use crate::{
         kick::{KickConfig, KickStep},
         onboarding::OnboardingStep,
         party_replication::pipe::{PipeBlock, encode_block},
+        rotate_key::RotateKeyStep,
         signing_keys::requires_signing_key_adoption,
         state::WorkflowStep,
+        storage::artifact_kinds,
         topology,
     },
 };
@@ -112,6 +114,7 @@ pub enum ActiveWorkflow {
     Dars(Arc<NoiseServer<DarsStep>>),
     AddParty(Arc<NoiseServer<AddPartyStep>>),
     ChangeThreshold(Arc<NoiseServer<ChangeThresholdStep>>),
+    RotateKey(Arc<NoiseServer<RotateKeyStep>>),
 }
 
 impl ActiveWorkflow {
@@ -128,6 +131,7 @@ impl ActiveWorkflow {
             Self::Dars(s) => s.handle_command(peer_id, message).await,
             Self::AddParty(s) => s.handle_command(peer_id, message).await,
             Self::ChangeThreshold(s) => s.handle_command(peer_id, message).await,
+            Self::RotateKey(s) => s.handle_command(peer_id, message).await,
         }
     }
 
@@ -141,6 +145,7 @@ impl ActiveWorkflow {
             Self::Dars(s) => s.wait_until_stranded().await,
             Self::AddParty(s) => s.wait_until_stranded().await,
             Self::ChangeThreshold(s) => s.wait_until_stranded().await,
+            Self::RotateKey(s) => s.wait_until_stranded().await,
         }
     }
 
@@ -155,6 +160,7 @@ impl ActiveWorkflow {
             Self::Dars(s) => s.workflow_state.connected_peers().await,
             Self::AddParty(s) => s.workflow_state.connected_peers().await,
             Self::ChangeThreshold(s) => s.workflow_state.connected_peers().await,
+            Self::RotateKey(s) => s.workflow_state.connected_peers().await,
         }
     }
 
@@ -196,7 +202,8 @@ async fn resolve_peer_threshold(
         WorkflowKind::Onboarding
         | WorkflowKind::Dars
         | WorkflowKind::AddParty
-        | WorkflowKind::ChangeThreshold => None,
+        | WorkflowKind::ChangeThreshold
+        | WorkflowKind::RotateKey => None,
         // Existing M-of-N party: a quorum is enough.
         WorkflowKind::Kick | WorkflowKind::Contracts => {
             let run = run?;
@@ -587,6 +594,15 @@ impl<S: WorkflowStep + 'static> NoiseServer<S> {
                 self.handle_peer_data(peer_id, message.payload, "change-threshold signatures")
                     .await
             }
+            MessageType::RotateKeySignatures => {
+                self.handle_recorded_upload(
+                    peer_id,
+                    &message.payload,
+                    MessageType::SignRotateKey,
+                    artifact_kinds::SIGNED_ROTATE_KEY_P2P,
+                )
+                .await
+            }
             MessageType::StatusUpdate => self.handle_status_update(peer_id, message.payload).await,
             MessageType::DeclineInvitation => Ok(self
                 .handle_decline_invitation(peer_id, message.payload)
@@ -753,6 +769,45 @@ impl<S: WorkflowStep + 'static> NoiseServer<S> {
         Ok(Message::new_empty(MessageType::Ack))
     }
 
+    /// Handle a peer upload that the coordinator stores before it counts the
+    /// peer complete. A complete peer never uploads again, so an upload held
+    /// only in memory would be lost if the coordinator restarts.
+    ///
+    /// The upload counts only while the current step sends `command`. A late
+    /// copy is acknowledged and dropped.
+    async fn handle_recorded_upload(
+        &self,
+        peer_id: CantonId,
+        payload: &[u8],
+        command: MessageType,
+        artifact_kind: &str,
+    ) -> Result<Message, NoiseError> {
+        tracing::info!("Handling {artifact_kind} from {peer_id}");
+        if self.workflow_state.current_command().await != Some(command) {
+            tracing::warn!(
+                "Ignoring {artifact_kind} from {peer_id}: the run no longer sends {command:?}"
+            );
+            return Ok(Message::new_empty(MessageType::Ack));
+        }
+        if let Err(e) = self
+            .workflow_state
+            .write_peer_artifact(artifact_kind, &peer_id, payload)
+            .await
+        {
+            // The peer is not complete, so it runs the step again on its
+            // next poll.
+            tracing::error!("Failed to store {artifact_kind} from {peer_id}: {e:#}");
+            return Ok(Message::new(
+                MessageType::Error,
+                b"The coordinator could not store the upload".to_vec(),
+            ));
+        }
+        self.workflow_state
+            .peer_completed_if(peer_id, |step| step.to_command() == Some(command))
+            .await;
+        Ok(Message::new_empty(MessageType::Ack))
+    }
+
     /// Handle status update from peer
     async fn handle_status_update(
         &self,
@@ -762,8 +817,13 @@ impl<S: WorkflowStep + 'static> NoiseServer<S> {
         let status = String::from_utf8_lossy(&payload);
         tracing::info!("Handling status update from {peer_id}: {status}");
 
-        // Mark peer as completed for this step
-        self.workflow_state.peer_completed(peer_id).await;
+        if !self
+            .workflow_state
+            .peer_completed_if(peer_id.clone(), |step| step.accepts_status(&payload))
+            .await
+        {
+            tracing::warn!("Status update from {peer_id} completes no step: {status}");
+        }
 
         Ok(Message::new_empty(MessageType::Ack))
     }
@@ -1172,5 +1232,208 @@ mod tests {
         assert_eq!(peers_for_party_threshold(1, 3), 1); // M=1 → 0 clamps up to 1
         assert_eq!(peers_for_party_threshold(9, 2), 2); // over-count clamps to all
         assert_eq!(peers_for_party_threshold(5, 0), 0); // no peers
+    }
+
+    /// A rotation coordinator's server, driven through `handle_command` the
+    /// way the Noise listener routes peer messages to it.
+    mod rotate_key_replies {
+        use common::types::WorkflowRole;
+
+        use super::*;
+        use crate::{
+            canton_id::{NAMESPACE_LENGTH, Namespace},
+            error::Result,
+            workflow::{
+                rotate_key::RECORDED_KEY_STATUS, storage::WorkflowStorage,
+                topology::RETIRED_LEGACY_KEYS_STATUS,
+            },
+        };
+
+        const RUN: &str = "rotate-key-run";
+
+        fn peer(n: u8) -> CantonId {
+            CantonId::new(format!("p{n}"), Namespace::new([n; NAMESPACE_LENGTH]))
+        }
+
+        async fn insert_run(db: &SqlitePool, step: RotateKeyStep, peers: &[CantonId]) -> Result {
+            sqlx::query(
+                "INSERT INTO workflow_runs
+                 (instance_name, kind, role, status, current_step, step_index, step_total,
+                  config_json, expected_peers_json, completed_peers_json, created_at, updated_at)
+                 VALUES (?, ?, ?, 'inprogress', ?, ?, ?, '{}', ?, '[]', 0, 0)",
+            )
+            .bind(RUN)
+            .bind(WorkflowKind::RotateKey.as_str())
+            .bind(WorkflowRole::Coordinator.as_str())
+            .bind(step.step_name())
+            .bind(step.step_index())
+            .bind(RotateKeyStep::step_total())
+            .bind(serde_json::to_string(peers)?)
+            .execute(db)
+            .await?;
+            Ok(())
+        }
+
+        /// Start the coordinator's server the way a node does, from its
+        /// persisted row. Calling it again acts as a restart.
+        async fn start(
+            db: &SqlitePool,
+            root: &tempfile::TempDir,
+        ) -> Result<NoiseServer<RotateKeyStep>> {
+            let config = NodeConfig::default().with_root_dir(root.path());
+            if !config.key_file_path().exists() {
+                tokio::fs::create_dir_all(config.data_dir()).await?;
+                NoiseKeypair::generate()
+                    .save_to_file(config.key_file_path())
+                    .await?;
+            }
+            Ok(NoiseServer::new(
+                config,
+                NetworkConfig::default(),
+                db.clone(),
+                RUN.into(),
+                RotateKeyStep::WaitingForPeers,
+                None,
+                Arc::new(RwLock::new(HashMap::new())),
+            )
+            .await?)
+        }
+
+        async fn send(
+            server: &NoiseServer<RotateKeyStep>,
+            from: &CantonId,
+            msg_type: MessageType,
+            payload: &[u8],
+        ) -> Result<MessageType> {
+            let reply = server
+                .handle_command(from.clone(), Message::new(msg_type, payload.to_vec()))
+                .await?;
+            Ok(reply.msg_type)
+        }
+
+        #[sqlx::test(migrations = "./migrations")]
+        async fn a_late_retirement_reply_does_not_complete_record_key(db: SqlitePool) -> Result {
+            let root = tempfile::tempdir()?;
+            insert_run(&db, RotateKeyStep::RecordKey, &[peer(1)]).await?;
+            let server = start(&db, &root).await?;
+
+            let reply = send(
+                &server,
+                &peer(1),
+                MessageType::StatusUpdate,
+                RETIRED_LEGACY_KEYS_STATUS,
+            )
+            .await?;
+            assert_eq!(reply, MessageType::Ack);
+            let state = server.get_workflow_state();
+            assert_eq!(state.current_step().await, RotateKeyStep::RecordKey);
+            assert!(!state.has_peer_completed(&peer(1)).await);
+
+            // The member still gets the command it has not run.
+            let command = send(&server, &peer(1), MessageType::GetNextCommand, &[]).await?;
+            assert_eq!(command, MessageType::RecordRotatedKey);
+
+            send(
+                &server,
+                &peer(1),
+                MessageType::StatusUpdate,
+                RECORDED_KEY_STATUS,
+            )
+            .await?;
+            assert_eq!(state.current_step().await, RotateKeyStep::Complete);
+            Ok(())
+        }
+
+        #[sqlx::test(migrations = "./migrations")]
+        async fn signatures_survive_a_coordinator_restart(db: SqlitePool) -> Result {
+            let root = tempfile::tempdir()?;
+            insert_run(&db, RotateKeyStep::SignProposal, &[peer(1), peer(2)]).await?;
+            let before = start(&db, &root).await?;
+            let reply = send(
+                &before,
+                &peer(1),
+                MessageType::RotateKeySignatures,
+                b"signed by p1",
+            )
+            .await?;
+            assert_eq!(reply, MessageType::Ack);
+            drop(before);
+
+            let after = start(&db, &root).await?;
+            let state = after.get_workflow_state();
+            assert_eq!(state.current_step().await, RotateKeyStep::SignProposal);
+            assert_eq!(
+                send(&after, &peer(1), MessageType::GetNextCommand, &[]).await?,
+                MessageType::Wait,
+                "p1 already signed, so it is not asked again"
+            );
+            send(
+                &after,
+                &peer(2),
+                MessageType::RotateKeySignatures,
+                b"signed by p2",
+            )
+            .await?;
+            assert_eq!(state.current_step().await, RotateKeyStep::Submit);
+
+            let mut stored = db
+                .list_artifacts(RUN, artifact_kinds::SIGNED_ROTATE_KEY_P2P)
+                .await?;
+            stored.sort();
+            let mut expected = vec![
+                (peer(1).to_string(), b"signed by p1".to_vec()),
+                (peer(2).to_string(), b"signed by p2".to_vec()),
+            ];
+            expected.sort();
+            assert_eq!(stored, expected);
+            Ok(())
+        }
+
+        #[sqlx::test(migrations = "./migrations")]
+        async fn a_signature_after_sign_proposal_counts_for_nothing(db: SqlitePool) -> Result {
+            let root = tempfile::tempdir()?;
+            insert_run(&db, RotateKeyStep::RetireLegacyKeys, &[peer(1)]).await?;
+            let server = start(&db, &root).await?;
+
+            let reply = send(
+                &server,
+                &peer(1),
+                MessageType::RotateKeySignatures,
+                b"a late copy",
+            )
+            .await?;
+            assert_eq!(reply, MessageType::Ack);
+            assert!(
+                !server
+                    .get_workflow_state()
+                    .has_peer_completed(&peer(1))
+                    .await
+            );
+            assert!(
+                db.list_artifacts(RUN, artifact_kinds::SIGNED_ROTATE_KEY_P2P)
+                    .await?
+                    .is_empty()
+            );
+            Ok(())
+        }
+
+        #[sqlx::test(migrations = "./migrations")]
+        async fn a_status_does_not_stand_in_for_a_signature(db: SqlitePool) -> Result {
+            let root = tempfile::tempdir()?;
+            insert_run(&db, RotateKeyStep::SignProposal, &[peer(1)]).await?;
+            let server = start(&db, &root).await?;
+
+            send(
+                &server,
+                &peer(1),
+                MessageType::StatusUpdate,
+                RECORDED_KEY_STATUS,
+            )
+            .await?;
+            let state = server.get_workflow_state();
+            assert_eq!(state.current_step().await, RotateKeyStep::SignProposal);
+            assert!(!state.has_peer_completed(&peer(1)).await);
+            Ok(())
+        }
     }
 }

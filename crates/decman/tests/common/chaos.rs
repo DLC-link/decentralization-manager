@@ -183,6 +183,25 @@ pub async fn ensure_nodes_healthy(f: &mut Fixture) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Poll `probe` every second until it returns a value or the deadline
+/// passes. Probe errors propagate.
+pub async fn poll_for<T, F, Fut>(deadline: Duration, mut probe: F) -> anyhow::Result<T>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = anyhow::Result<Option<T>>>,
+{
+    let start = Instant::now();
+    loop {
+        if let Some(value) = probe().await? {
+            return Ok(value);
+        }
+        if start.elapsed() >= deadline {
+            anyhow::bail!("poll_for exhausted deadline of {deadline:?}");
+        }
+        sleep(Duration::from_secs(1)).await;
+    }
+}
+
 /// Poll `probe` every second until it returns `true` or the deadline passes.
 /// Probe errors propagate.
 pub async fn poll_until<F, Fut>(deadline: Duration, mut probe: F) -> anyhow::Result<()>

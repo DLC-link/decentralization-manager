@@ -43,11 +43,6 @@ impl OnboardingConfig {
     pub fn namespace_key_name(&self) -> String {
         format!("{}-namespace", self.party_id_prefix)
     }
-
-    /// Get the Daml key name derived from party_id_prefix
-    pub fn daml_key_name(&self) -> String {
-        format!("{}-daml-transactions", self.party_id_prefix)
-    }
 }
 
 #[cfg(test)]

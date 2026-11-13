@@ -122,11 +122,15 @@ pub const MIN_PEER_VERSION: &str = "0.1.9";
 /// refuse one, so a coordinator checks every invitee lists this first.
 pub const OWNER_ONLY_KICK: &str = "owner-only-kick";
 
+/// A peer reads a rotate-key invitation. Older peers cannot decode one, so
+/// a coordinator checks every invitee lists this first.
+pub const ROTATE_KEY: &str = "rotate-key";
+
 /// Workflow features this build supports beyond [`MIN_PEER_VERSION`]. The
 /// Health reply lists them, so a coordinator can refuse a run that a peer
 /// would refuse, before it invites anyone. Every build reports the same
 /// version until a release bumps it, so the version cannot tell them apart.
-pub const FEATURES: &[&str] = &[OWNER_ONLY_KICK];
+pub const FEATURES: &[&str] = &[OWNER_ONLY_KICK, ROTATE_KEY];
 
 /// Retry budget for the peer's decline notification to the coordinator.
 ///

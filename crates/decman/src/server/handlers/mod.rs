@@ -44,7 +44,7 @@ pub(crate) use keys::get_key_status;
 pub(crate) use parties::{
     Discovery, DiscoveryGate, MAX_CONCURRENT_DISCOVERIES, clear_acs_import_quarantine,
     compare_peer_packages, discover_and_cache, get_decentralized_parties, get_expected_versions,
-    get_participants_status, get_vetted_packages, refresh_party_for_kick,
+    get_participants_status, get_vetted_packages, refresh_party_members,
     resolve_owner_keys_from_peers,
 };
 pub(crate) use party_config::{discover_member_party, get_party_config, save_party_config};
@@ -68,10 +68,10 @@ pub(crate) use token_standard::{
 pub(crate) use unhost::{get_unhost_audit, preview_unhost_external_party, unhost_external_party};
 pub(crate) use workflows::{
     cancel_add_party, cancel_change_threshold, cancel_contracts, cancel_dars, cancel_kick,
-    cancel_onboarding, cancel_workflow_instance, dismiss_workflow, get_add_party_status,
-    get_change_threshold_status, get_contracts_status, get_dars_status, get_kick_status,
-    get_onboarding_status, list_external_parties, list_workflows, mark_run_completed,
-    mark_run_failed, register_run_metrics, retry_workflow, start_add_party, start_change_threshold,
-    start_contracts, start_dars, start_dars_for_package, start_kick, start_onboarding,
-    upload_dars_local,
+    cancel_onboarding, cancel_rotate_key, cancel_workflow_instance, dismiss_workflow,
+    get_add_party_status, get_change_threshold_status, get_contracts_status, get_dars_status,
+    get_kick_status, get_onboarding_status, get_rotate_key_status, list_external_parties,
+    list_workflows, mark_run_completed, mark_run_failed, register_run_metrics, retry_workflow,
+    start_add_party, start_change_threshold, start_contracts, start_dars, start_dars_for_package,
+    start_kick, start_onboarding, start_rotate_key, upload_dars_local,
 };

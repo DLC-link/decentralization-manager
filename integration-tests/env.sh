@@ -61,6 +61,24 @@ P2_CANTON_ADMIN=2902
 P3_CANTON_LEDGER=4901
 P3_CANTON_ADMIN=4902
 
+# The SV participant (P3) keeps its keys in a mock AWS KMS, which
+# localnet-kms.yaml starts. The suite therefore runs DecMan's KMS path: the
+# custody rule sees real KMS key ids, and P3 signs its deploys through
+# AwsKmsSigner. DecMan reaches the mock on this host port. Exported for the
+# chaos respawns, like the settings above. Only P3 holds KMS keys, so P1 and
+# P2 never call the mock.
+export LOCALNET_KMS_PORT="${LOCALNET_KMS_PORT:-4599}"
+export AWS_ENDPOINT_URL_KMS="http://127.0.0.1:${LOCALNET_KMS_PORT}"
+export AWS_REGION=us-east-1
+export AWS_ACCESS_KEY_ID=localnet
+export AWS_SECRET_ACCESS_KEY=localnet
+# P1 and P2 keep their keys in the software vault, so they need the opt-out
+# and keep copies in DecMan's key store. P3's keys are in the KMS, so it runs
+# the strict rule.
+export P1_ALLOW_SOFTWARE_PARTY_KEYS=true
+export P2_ALLOW_SOFTWARE_PARTY_KEYS=true
+export P3_ALLOW_SOFTWARE_PARTY_KEYS=false
+
 # dec-party-manager HTTP and Noise ports
 P1_HTTP=8081
 P1_NOISE=9001
@@ -284,6 +302,48 @@ configure_localnet_key_download() {
     }
 }
 
+# The SV participant (P3) uses Canton's AWS KMS crypto provider, pointed at
+# the mock in localnet-kms.yaml. Canton cannot move a node with keys into a
+# KMS, so the setting must be there at the first boot. Every run starts from
+# `down -v`, so the node is always new. Idempotent.
+configure_localnet_kms() {
+    local conf="$LOCALNET_COMPOSE_DIR/conf/canton/app.conf"
+    if grep -q "endpoint-override" "$conf"; then
+        return 0
+    fi
+    cat >> "$conf" <<'EOF'
+
+canton.participants.sv.crypto {
+  provider = kms
+  kms {
+    type = aws
+    region = us-east-1
+    endpoint-override = "http://kms:8080"
+  }
+}
+EOF
+    grep -q "endpoint-override" "$conf" || {
+        echo "Failed to put the SV participant's keys into the mock KMS in $conf" >&2
+        return 1
+    }
+}
+
+# Turn Canton's key export off again and restart Canton, so its participants
+# refuse every export. The key_download_off phase runs this last, to show that
+# a deploy then signs from DecMan's key store.
+disable_localnet_key_download() {
+    local conf="$LOCALNET_COMPOSE_DIR/conf/canton/app.conf"
+    sed -i.bak '/enable-key-download/d' "$conf"
+    rm -f "$conf.bak"
+    if grep -q "enable-key-download" "$conf"; then
+        echo "Failed to turn off Canton's key export in $conf" >&2
+        return 1
+    fi
+    echo "Restarting Canton without key download..."
+    localnet_compose restart canton
+    localnet_compose up -d --wait canton splice postgres
+}
+
 localnet_compose() {
     export IMAGE_TAG="$LOCALNET_VERSION"
     docker compose \
@@ -291,6 +351,7 @@ localnet_compose() {
         --env-file "$LOCALNET_COMPOSE_DIR/env/common.env" \
         -f "$LOCALNET_COMPOSE_DIR/compose.yaml" \
         -f "$LOCALNET_COMPOSE_DIR/resource-constraints.yaml" \
+        -f "$SCRIPT_DIR/integration-tests/localnet-kms.yaml" \
         --profile sv \
         --profile app-provider \
         --profile app-user \
@@ -306,6 +367,7 @@ start_localnet() {
     configure_localnet_commitments
     configure_localnet_repair
     configure_localnet_key_download
+    configure_localnet_kms
 
     echo "Starting localnet..."
     # Only start the services our tests actually use. The 3 active profiles

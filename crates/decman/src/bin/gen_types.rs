@@ -164,6 +164,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         RequiredClaim,
         ResponseSource,
         RightsStatus,
+        RotateKeyInvitePayload,
+        RotateKeyRequest,
         SuccessResponse,
         TenantCallAuditEntry,
         TenantCallAuditResponse,
