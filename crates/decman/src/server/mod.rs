@@ -106,7 +106,7 @@ pub use types::{
     ConfirmActionRequest, CredentialOfferInfo, CredentialOffersResponse, DomainConfirmation,
     DomainGovernanceAction, ExecuteActionRequest, GovernanceAction, GovernanceConfirmation,
     GovernanceResponse, HoldingInfo, HoldingsResponse, MintRequestsResponse, PendingAction,
-    ProposalType, ProposeActionRequest, RewardStatusResponse, ServiceRequestDetails,
+    ProposalType, ProposeActionRequest, RewardStatusResponse, ServiceRequestDetails, StuckReason,
     TokenRequestInfo, TransferInstructionInfo, TransferInstructionStatus,
     TransferInstructionsResponse, TransferProposalDetails,
 };

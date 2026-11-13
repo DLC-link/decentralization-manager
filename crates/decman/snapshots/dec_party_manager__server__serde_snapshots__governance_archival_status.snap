@@ -1,0 +1,50 @@
+---
+source: crates/decman/src/server/serde_snapshots.rs
+expression: "(self_action, domain_action)"
+---
+[
+  {
+    "cannot_be_archived": true,
+    "action_hash": "hash",
+    "action": {
+      "type": "governance_set_threshold",
+      "new_threshold": 2
+    },
+    "confirmations": [
+      {
+        "stuck": "confirmer_not_member",
+        "contract_id": "00self",
+        "action": {
+          "type": "governance_set_threshold",
+          "new_threshold": 2
+        },
+        "confirming_party": "former::1220c4010d6883f367c7f45d55b2449501620130f9b21e96379f17dea455ac7a5892",
+        "created_at": 1,
+        "expires_at": 2
+      }
+    ],
+    "confirmation_count": 0,
+    "executable_confirmation_cids": [],
+    "can_execute": false,
+    "last_confirmation_at": 0
+  },
+  {
+    "cannot_be_archived": true,
+    "proposal_cid": "00proposal",
+    "action_label": "GenericVote",
+    "confirmations": [
+      {
+        "stuck": "participant_unresponsive",
+        "contract_id": "00domain",
+        "confirming_party": "offline::1220c4010d6883f367c7f45d55b2449501620130f9b21e96379f17dea455ac7a5892",
+        "created_at": 1,
+        "expires_at": 2
+      }
+    ],
+    "confirmation_count": 0,
+    "executable_confirmation_cids": [],
+    "can_execute": false,
+    "orphaned": true,
+    "proposer_not_authorized": false
+  }
+]

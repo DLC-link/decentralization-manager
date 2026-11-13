@@ -12,6 +12,7 @@ const formerAgentId = `agent::1220${"c".repeat(64)}`;
 const proposal = (
   overrides: Partial<DomainGovernanceAction>,
 ): DomainGovernanceAction => ({
+  cannot_be_archived: false,
   proposal_cid: "00proposal",
   action_label: "Transfer",
   confirmations: [],

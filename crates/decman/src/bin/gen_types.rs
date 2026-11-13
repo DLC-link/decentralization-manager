@@ -29,9 +29,9 @@ use dec_party_manager::{
         ExecuteActionRequest, GovernanceAction, GovernanceConfirmation, GovernanceResponse,
         HoldingInfo, HoldingsResponse, LinkHealth, MintRequestsResponse, NodeConfigResponse,
         NodeHealthResponse, NodeHealthStatus, ParticipantHealth, PendingAction, ProposalType,
-        ProposeActionRequest, RewardStatusResponse, ServiceRequestDetails, SynchronizerHealth,
-        TokenRequestInfo, TopologyQueues, TransferInstructionInfo, TransferInstructionStatus,
-        TransferInstructionsResponse, TransferProposalDetails,
+        ProposeActionRequest, RewardStatusResponse, ServiceRequestDetails, StuckReason,
+        SynchronizerHealth, TokenRequestInfo, TopologyQueues, TransferInstructionInfo,
+        TransferInstructionStatus, TransferInstructionsResponse, TransferProposalDetails,
     },
 };
 
@@ -213,6 +213,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ProposeActionRequest,
         RewardStatusResponse,
         ServiceRequestDetails,
+        StuckReason,
         TokenRequestInfo,
         TransferInstructionInfo,
         TransferInstructionStatus,

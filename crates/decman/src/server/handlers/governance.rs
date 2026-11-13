@@ -46,19 +46,22 @@ use crate::{
     auth::WorkflowAuth,
     canton_id::CantonId,
     config::{NetworkConfig, NodeConfig, PackageConfig, default_package_config},
-    db::{rows::ChainAuditCacheRow, schema::SchemaRead},
+    db::{
+        rows::ChainAuditCacheRow,
+        schema::{SchemaRead, SchemaWrite},
+    },
     error::Result,
     noise::{Message, MessageType, NoiseKeypair, parse_public_key, send_noise_message},
     server::{
         AppState,
         audit::{AuditEvent, AuditParams, spawn_audit_log, with_proposal_cid},
         chain_audit,
-        ledger_rejection::submission_failure,
+        ledger_rejection::{mediator_timeout, submission_failure},
         middleware::require_admin,
         queries::{
             GovernanceQueue, get_governance_confirmations,
-            get_governance_state as query_governance_state, resolve_contract_package_ref,
-            select_input_holdings,
+            get_governance_state as query_governance_state, known_governance_members, mark_stuck,
+            resolve_contract_package_ref, select_input_holdings,
         },
         scan::{self, OpenMiningRound, ScanNotConfigured},
         transfer_context::{
@@ -158,11 +161,28 @@ pub async fn get_governance(
     .await
     {
         Ok(GovernanceQueue {
-            actions,
+            mut actions,
             mut domain_actions,
             next_cursor,
             ..
         }) => {
+            let timeouts = match data.db.get_mediator_timeouts(party_id).await {
+                Ok(rows) => rows.into_iter().map(|row| row.contract_id).collect(),
+                Err(e) => {
+                    tracing::error!("Failed to read governance mediator timeouts: {e}");
+                    return HttpResponse::InternalServerError().json(ErrorResponse {
+                        error: format!("Failed to read governance mediator timeouts: {e}"),
+                    });
+                }
+            };
+            let members = known_governance_members(gov_state.as_ref());
+            mark_stuck(
+                &mut actions,
+                &mut domain_actions,
+                members.as_ref(),
+                &timeouts,
+                chrono::Utc::now().timestamp(),
+            );
             if !may_act {
                 withhold_payloads(&mut domain_actions);
             }
@@ -1503,6 +1523,29 @@ fn execute_failure(e: &anyhow::Error) -> (StatusCode, String) {
     (status, error)
 }
 
+/// Preserve timeout evidence inside the detached submission task, even if its
+/// request has gone away. Other failures cannot erase an earlier timeout.
+async fn remember_archival_outcome(
+    db: &sqlx::SqlitePool,
+    party_id: &CantonId,
+    contract_id: &str,
+    outcome: &Result<()>,
+) {
+    let persistence = match outcome {
+        Ok(()) => db.clear_mediator_timeout(party_id, contract_id).await,
+        Err(error) => match mediator_timeout(error) {
+            Some(timeout) => {
+                db.record_mediator_timeout(party_id, contract_id, &timeout.unresponsive)
+                    .await
+            }
+            None => return,
+        },
+    };
+    if let Err(e) = persistence {
+        tracing::error!(%party_id, contract_id, "Failed to persist governance archival outcome: {e}");
+    }
+}
+
 /// Expire a stale governance confirmation
 #[utoipa::path(
     tag = "Governance",
@@ -1552,6 +1595,7 @@ pub async fn expire_confirmation(
         let result =
             execute_expire_confirmation(&data.config, &body, &token, &member_party_id, &packages())
                 .await;
+        remember_archival_outcome(&data.db, &body.party_id, &body.confirmation_cid, &result).await;
         count_action(ActionStep::Expire, ActionOutcome::of(&result));
         let failure = result
             .err()
@@ -1636,6 +1680,7 @@ pub async fn cancel_confirmation(
         let result =
             execute_cancel_confirmation(&data.config, &body, &token, &member_party_id, &packages())
                 .await;
+        remember_archival_outcome(&data.db, &body.party_id, &body.confirmation_cid, &result).await;
         count_action(ActionStep::CancelConfirmation, ActionOutcome::of(&result));
         let failure = result
             .err()
@@ -3530,6 +3575,35 @@ mod mediator_timeout_tests {
     }
 
     #[sqlx::test(migrator = "MIGRATOR")]
+    async fn archival_outcomes_keep_timeouts_until_the_confirmation_is_archived(
+        pool: SqlitePool,
+    ) -> Result {
+        let party = CantonId::parse(&party())?;
+        let timeout = Err(anyhow::Error::new(fixtures::mediator_timeout(
+            OFFLINE_MEMBER,
+        )));
+        remember_archival_outcome(&pool, &party, "00conf", &timeout).await;
+        remember_archival_outcome(&pool, &party, "00other", &timeout).await;
+
+        let unrelated_failure = Err(anyhow::anyhow!("connection refused"));
+        remember_archival_outcome(&pool, &party, "00conf", &unrelated_failure).await;
+        let rows = pool.get_mediator_timeouts(&party).await?;
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].contract_id, "00conf");
+        assert_eq!(
+            serde_json::from_str::<Vec<String>>(&rows[0].unresponsive)?,
+            vec![OFFLINE_MEMBER]
+        );
+
+        remember_archival_outcome(&pool, &party, "00conf", &Ok(())).await;
+
+        let rows = pool.get_mediator_timeouts(&party).await?;
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].contract_id, "00other");
+        Ok(())
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
     async fn a_mediator_timeout_answers_504_and_names_the_party(pool: SqlitePool) -> Result {
         let _serial = super::action_metrics_tests::SERIAL.lock().await;
         let ledger = RejectingLedger::new();
@@ -3597,6 +3671,16 @@ mod mediator_timeout_tests {
                 message.contains(&format!("Unresponsive: {OFFLINE_MEMBER}.")),
                 "{event:?}: {message}"
             );
+            let party = CantonId::parse(&party())?;
+            let rows = pool.get_mediator_timeouts(&party).await?;
+            assert_eq!(rows.len(), 1, "{event:?}");
+            assert_eq!(rows[0].contract_id, "00c0ffee", "{event:?}");
+            assert_eq!(
+                serde_json::from_str::<Vec<String>>(&rows[0].unresponsive)?,
+                vec![OFFLINE_MEMBER],
+                "{event:?}"
+            );
+            pool.clear_mediator_timeout(&party, "00c0ffee").await?;
         }
         Ok(())
     }

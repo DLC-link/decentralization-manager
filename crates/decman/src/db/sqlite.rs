@@ -12,8 +12,8 @@ use super::{
     rows::{
         ChainAuditCacheRow, DecPartyContractRow, DecPartyIdentityRow, DecPartyOwnerRow,
         DecPartyParticipantRow, DecPartyRow, FormerDecPartyRow, GovernanceAuditRow,
-        HandledInvitationRow, OwnerKeyRefusal, PartyCredentialsRow, PeerRow, PendingInvitationRow,
-        WorkflowArtifactRow, WorkflowRunRow,
+        GovernanceMediatorTimeoutRow, HandledInvitationRow, OwnerKeyRefusal, PartyCredentialsRow,
+        PeerRow, PendingInvitationRow, WorkflowArtifactRow, WorkflowRunRow,
     },
     schema::{Commitable, SchemaRead, SchemaWrite},
 };
@@ -384,6 +384,18 @@ impl SchemaRead for SqlitePool {
         Ok(rows)
     }
 
+    async fn get_mediator_timeouts(
+        &self,
+        party_id: &CantonId,
+    ) -> Result<Vec<GovernanceMediatorTimeoutRow>> {
+        Ok(sqlx::query_as::<_, GovernanceMediatorTimeoutRow>(
+            "SELECT * FROM governance_mediator_timeout WHERE party_id = ? ORDER BY contract_id",
+        )
+        .bind(party_id.to_string())
+        .fetch_all(self)
+        .await?)
+    }
+
     async fn get_governance_audit(
         &self,
         party_id: &CantonId,
@@ -635,6 +647,38 @@ impl SchemaWrite for SqlitePool {
 
     async fn begin_transaction(&self) -> Result<Self::Transaction> {
         Ok(self.begin().await?)
+    }
+
+    async fn record_mediator_timeout(
+        &self,
+        party_id: &CantonId,
+        contract_id: &str,
+        unresponsive: &[String],
+    ) -> Result<()> {
+        sqlx::query(
+            "INSERT INTO governance_mediator_timeout \
+             (party_id, contract_id, unresponsive, observed_at) VALUES (?, ?, ?, ?) \
+             ON CONFLICT(party_id, contract_id) DO UPDATE SET \
+             unresponsive = excluded.unresponsive, observed_at = excluded.observed_at",
+        )
+        .bind(party_id.to_string())
+        .bind(contract_id)
+        .bind(serde_json::to_string(unresponsive)?)
+        .bind(chrono::Utc::now().timestamp())
+        .execute(self)
+        .await?;
+        Ok(())
+    }
+
+    async fn clear_mediator_timeout(&self, party_id: &CantonId, contract_id: &str) -> Result<()> {
+        sqlx::query(
+            "DELETE FROM governance_mediator_timeout WHERE party_id = ? AND contract_id = ?",
+        )
+        .bind(party_id.to_string())
+        .bind(contract_id)
+        .execute(self)
+        .await?;
+        Ok(())
     }
 
     async fn quarantine_acs_import(
@@ -1819,6 +1863,60 @@ mod tests {
         let ns = format!("1220{:0>64}", format!("{tag:02x}"));
         CantonId::parse(&format!("{prefix}::{ns}"))
             .map_err(|e| anyhow::anyhow!("bad test id {prefix}: {e}"))
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn mediator_timeouts_keep_one_observation_per_confirmation(pool: SqlitePool) -> Result {
+        let party = qid("dec", 1)?;
+        pool.record_mediator_timeout(&party, "00conf", &["offline-a".to_string()])
+            .await?;
+        pool.record_mediator_timeout(&party, "00conf", &["offline-b".to_string()])
+            .await?;
+        pool.record_mediator_timeout(&party, "00other", &[]).await?;
+
+        let rows = pool.get_mediator_timeouts(&party).await?;
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].contract_id, "00conf");
+        assert_eq!(rows[0].party_id, party.to_string());
+        assert_eq!(
+            serde_json::from_str::<Vec<String>>(&rows[0].unresponsive)?,
+            vec!["offline-b"]
+        );
+        assert!(rows[0].observed_at > 0);
+        assert_eq!(rows[1].unresponsive, "[]");
+        Ok(())
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn mediator_timeouts_are_scoped_to_party_and_confirmation(pool: SqlitePool) -> Result {
+        let party = qid("dec", 1)?;
+        let other = qid("dec", 2)?;
+        pool.record_mediator_timeout(&party, "shared-cid", &[])
+            .await?;
+        pool.record_mediator_timeout(&other, "shared-cid", &["offline".to_string()])
+            .await?;
+        pool.record_mediator_timeout(&party, "different-cid", &[])
+            .await?;
+
+        pool.clear_mediator_timeout(&party, "shared-cid").await?;
+
+        let rows = pool.get_mediator_timeouts(&party).await?;
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].contract_id, "different-cid");
+        assert_eq!(pool.get_mediator_timeouts(&other).await?.len(), 1);
+        Ok(())
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn clearing_a_mediator_timeout_removes_it_idempotently(pool: SqlitePool) -> Result {
+        let party = qid("dec", 1)?;
+        pool.record_mediator_timeout(&party, "00conf", &[]).await?;
+
+        pool.clear_mediator_timeout(&party, "00conf").await?;
+        pool.clear_mediator_timeout(&party, "00conf").await?;
+
+        assert!(pool.get_mediator_timeouts(&party).await?.is_empty());
+        Ok(())
     }
 
     /// The quarantine records a fact about a *participant*, so it must outlive
