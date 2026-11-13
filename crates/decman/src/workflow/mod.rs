@@ -445,11 +445,22 @@ async fn run_peer(
             }
             MessageType::RetireLegacyKeys => {
                 // The target comes from the accepted invitation, never this command's payload.
-                let party = expectations.dec_party_id.as_ref().ok_or_else(|| {
-                    anyhow::anyhow!("No accepted party for legacy key retirement")
-                })?;
-                let synchronizer_id = utils::get_synchronizer_id(&node_config).await?;
-                topology::retire_legacy_keys(&node_config, &synchronizer_id, party).await?;
+                let Some(party) = expectations.dec_party_id.as_ref() else {
+                    fail_step!("No accepted party for legacy key retirement");
+                    continue;
+                };
+                // A failure retries like any other step. Ending the run here
+                // would skip RecordKey, and this node would keep the old key
+                // on record for the coordinator.
+                let retired = async {
+                    let synchronizer_id = utils::get_synchronizer_id(&node_config).await?;
+                    topology::retire_legacy_keys(&node_config, &synchronizer_id, party).await
+                }
+                .await;
+                if let Err(e) = retired {
+                    fail_step!("Failed to retire the legacy key mapping: {e:#}");
+                    continue;
+                }
                 consecutive_step_failures = 0;
                 client
                     .send_status(topology::RETIRED_LEGACY_KEYS_STATUS.to_vec())
