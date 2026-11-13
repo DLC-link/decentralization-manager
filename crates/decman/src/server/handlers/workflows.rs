@@ -427,32 +427,62 @@ fn kick_signers(
 /// Why a kick cannot collect enough signatures, or `None` when it can.
 ///
 /// This node and each invitee sign. Both the current namespace threshold
-/// and the proposed one must be reachable, because the P2P mapping is
-/// submitted after the new namespace takes effect.
-fn kick_quorum_refusal(threshold: Option<usize>, signers: &KickSigners) -> Option<String> {
+/// (`current`, `None` when the party is not cached) and the requested one
+/// must be reachable, because the P2P mapping is submitted after the new
+/// namespace takes effect.
+fn kick_quorum_refusal(
+    current: Option<usize>,
+    requested: usize,
+    signers: &KickSigners,
+) -> Option<String> {
     let peers = signers.invitees.len();
     let available = 1 + peers;
-    let mut message = match threshold {
-        Some(threshold) if threshold > available => format!(
-            "Cannot kick: the required namespace threshold is {threshold}, but only {available} \
-             {members} can sign (this node and {peers} configured {peer_word}).",
-            members = if available == 1 { "member" } else { "members" },
-            peer_word = if peers == 1 { "peer" } else { "peers" },
-        ),
-        _ if peers == 0 => "Cannot kick: need at least one other hosting member besides this \
-                            node to co-sign, have 0."
-            .to_string(),
-        _ => return None,
+    let current_limits = current.is_some_and(|threshold| threshold > available);
+    let requested_limits = requested > available;
+    let mut message = if current_limits || requested_limits {
+        let limit = if let Some(threshold) = current.filter(|_| current_limits) {
+            format!("Cannot kick: the party's current namespace threshold is {threshold}.")
+        } else {
+            format!("Cannot kick: the requested new_threshold is {requested}.")
+        };
+        match peers {
+            0 => format!("{limit} Only this node can sign."),
+            1 => format!("{limit} Only 2 members can sign: this node and 1 configured peer."),
+            _ => format!(
+                "{limit} Only {available} members can sign: this node and {peers} configured \
+                 peers."
+            ),
+        }
+    } else if peers == 0 {
+        "Cannot kick: this node has no other hosting member to co-sign the kick.".to_string()
+    } else {
+        return None;
     };
     for id in &signers.not_peers {
         message.push_str(&format!(
             " {id} is a member of the party but is not a configured peer of this node."
         ));
     }
-    match signers.not_peers.len() {
-        0 => {}
-        1 => message.push_str(" Add it as a peer, then retry."),
-        _ => message.push_str(" Add them as peers, then retry."),
+    // Every member that stays signs once it is a peer. The run also needs a
+    // co-signer besides this node.
+    let reachable = available + signers.not_peers.len();
+    let required = current.unwrap_or(1).max(requested).max(2);
+    if !signers.not_peers.is_empty() && reachable >= required {
+        message.push_str(match signers.not_peers.len() {
+            1 => " Add it as a peer, then retry.",
+            _ => " Add them as peers, then retry.",
+        });
+    } else if current_limits {
+        message.push_str(
+            " Lower the threshold with Change Threshold first, while every host can still sign.",
+        );
+        if requested_limits {
+            message.push_str(&format!(
+                " Then pick a new_threshold of {available} or lower."
+            ));
+        }
+    } else if requested_limits {
+        message.push_str(&format!(" Pick a new_threshold of {available} or lower."));
     }
     Some(message)
 }
@@ -517,14 +547,24 @@ async fn kick_key_adoption_refusal_for_mapping(
 }
 
 fn kick_missing_adopters(required: &[String]) -> Option<String> {
-    (!required.is_empty()).then(|| {
-        format!(
-            "Cannot kick: these surviving members must sign because their party signing keys \
-             must move inline, but they are not configured peers: {}. Add them as peers, \
-             then retry",
-            required.join(", ")
-        )
-    })
+    let (owner, add) = match required {
+        [] => return None,
+        [member] => (
+            format!("{member} owns such a key but is not a configured peer of this node."),
+            "Add it as a peer, then retry.",
+        ),
+        several => (
+            format!(
+                "{members} own such keys but are not configured peers of this node.",
+                members = several.join(", ")
+            ),
+            "Add them as peers, then retry.",
+        ),
+    };
+    Some(format!(
+        "Cannot kick: the party still keeps signing keys in the older key mapping. The kick \
+         moves them into the hosting list. The owner of each moved key must sign. {owner} {add}"
+    ))
 }
 
 /// Refuse a kick whose proposal could not keep each remaining member's
@@ -1037,10 +1077,9 @@ pub async fn start_kick(
 
     // The DNS changes first. Its signatures satisfy the current threshold,
     // and the following P2P update must satisfy the proposed threshold too.
-    let required_threshold = namespace_threshold
-        .unwrap_or(1)
-        .max(body.new_threshold as usize);
-    if let Some(error) = kick_quorum_refusal(Some(required_threshold), &signers) {
+    if let Some(error) =
+        kick_quorum_refusal(namespace_threshold, body.new_threshold as usize, &signers)
+    {
         return HttpResponse::BadRequest().json(ErrorResponse { error });
     }
     if !signers.not_peers.is_empty() {
@@ -5212,48 +5251,140 @@ mod tests {
 
     #[test]
     fn a_kick_below_quorum_names_the_members_that_are_not_peers() -> anyhow::Result<()> {
-        let refusal = kick_quorum_refusal(Some(3), &signers(&[2], &[3, 5])?)
+        let refusal = kick_quorum_refusal(Some(3), 2, &signers(&[2], &[3, 5])?)
             .context("a kick two signers short of threshold 3 must be refused")?;
-        assert!(refusal.contains("namespace threshold is 3"), "{refusal}");
-        assert!(refusal.contains("only 2 members can sign"), "{refusal}");
+        assert!(
+            refusal.contains(
+                "the party's current namespace threshold is 3. Only 2 members can sign: this \
+                 node and 1 configured peer."
+            ),
+            "{refusal}"
+        );
         for tag in [3, 5] {
             assert!(
                 refusal.contains(&format!(
-                    "{} is a member of the party but is not a configured peer of this node",
+                    "{} is a member of the party but is not a configured peer of this node.",
                     pid(tag)?
                 )),
                 "{refusal}"
             );
         }
+        assert!(
+            refusal.ends_with(" Add them as peers, then retry."),
+            "{refusal}"
+        );
         assert!(!refusal.contains(&pid(2)?.to_string()), "{refusal}");
+        Ok(())
+    }
+
+    /// Adding the members that are not peers would still leave the kick
+    /// short, so the advice is about the threshold instead.
+    #[test]
+    fn a_kick_that_peers_cannot_save_points_to_the_threshold() -> anyhow::Result<()> {
+        let refusal = kick_quorum_refusal(Some(4), 2, &signers(&[2], &[3])?)
+            .context("three reachable signers cannot meet threshold 4")?;
+        assert!(refusal.contains(&pid(3)?.to_string()), "{refusal}");
+        assert!(!refusal.contains("Add it as a peer"), "{refusal}");
+        assert!(
+            refusal.ends_with(
+                " Lower the threshold with Change Threshold first, while every host can still \
+                 sign."
+            ),
+            "{refusal}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn a_short_kick_says_which_threshold_is_the_limit() -> anyhow::Result<()> {
+        let current = kick_quorum_refusal(Some(3), 2, &signers(&[2], &[])?)
+            .context("the current threshold 3 is out of reach")?;
+        assert!(
+            current.starts_with("Cannot kick: the party's current namespace threshold is 3."),
+            "{current}"
+        );
+        assert!(current.contains("Change Threshold"), "{current}");
+        assert!(!current.contains("Pick a new_threshold"), "{current}");
+
+        let requested = kick_quorum_refusal(Some(2), 3, &signers(&[2], &[])?)
+            .context("the requested threshold 3 is out of reach")?;
+        assert!(
+            requested.starts_with("Cannot kick: the requested new_threshold is 3."),
+            "{requested}"
+        );
+        assert!(
+            requested.ends_with(" Pick a new_threshold of 2 or lower."),
+            "{requested}"
+        );
+        assert!(!requested.contains("Change Threshold"), "{requested}");
+
+        let both = kick_quorum_refusal(Some(4), 3, &signers(&[2], &[])?)
+            .context("both thresholds are out of reach")?;
+        assert!(both.contains("current namespace threshold is 4."), "{both}");
+        assert!(
+            both.ends_with(" Then pick a new_threshold of 2 or lower."),
+            "{both}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn the_key_adoption_refusal_names_each_owner_and_the_next_step() -> anyhow::Result<()> {
+        assert_eq!(kick_missing_adopters(&[]), None);
+        let one = kick_missing_adopters(&[pid(3)?.to_string()])
+            .context("one owner that is not a peer must sign")?;
+        assert_eq!(
+            one,
+            format!(
+                "Cannot kick: the party still keeps signing keys in the older key mapping. The \
+                 kick moves them into the hosting list. The owner of each moved key must sign. \
+                 {p3} owns such a key but is not a configured peer of this node. Add it as a \
+                 peer, then retry.",
+                p3 = pid(3)?
+            )
+        );
+        let two = kick_missing_adopters(&[pid(3)?.to_string(), pid(4)?.to_string()])
+            .context("two owners that are not peers must sign")?;
+        assert!(
+            two.ends_with(
+                " own such keys but are not configured peers of this node. Add them as peers, \
+                 then retry."
+            ),
+            "{two}"
+        );
+        assert!(!two.contains("inline"), "{two}");
         Ok(())
     }
 
     #[test]
     fn a_kick_at_quorum_passes_with_a_member_that_is_not_a_peer() -> anyhow::Result<()> {
-        assert_eq!(kick_quorum_refusal(Some(2), &signers(&[2], &[3])?), None);
+        assert_eq!(kick_quorum_refusal(Some(2), 2, &signers(&[2], &[3])?), None);
         Ok(())
     }
 
     #[test]
     fn an_uncached_threshold_skips_the_quorum_check() -> anyhow::Result<()> {
-        assert_eq!(kick_quorum_refusal(None, &signers(&[2], &[3])?), None);
+        assert_eq!(kick_quorum_refusal(None, 2, &signers(&[2], &[3])?), None);
         Ok(())
     }
 
     #[test]
     fn a_kick_with_no_invitee_is_refused() -> anyhow::Result<()> {
-        let alone = kick_quorum_refusal(None, &signers(&[], &[])?)
+        let alone = kick_quorum_refusal(None, 1, &signers(&[], &[])?)
             .context("a kick with no co-signer must be refused")?;
-        assert!(
-            alone.contains("need at least one other hosting member"),
-            "{alone}"
+        assert_eq!(
+            alone,
+            "Cannot kick: this node has no other hosting member to co-sign the kick."
         );
 
-        let refusal = kick_quorum_refusal(Some(1), &signers(&[], &[3])?)
+        let refusal = kick_quorum_refusal(Some(1), 1, &signers(&[], &[3])?)
             .context("a kick whose only survivor is not a peer must be refused")?;
         assert!(
             refusal.contains(&format!("{} is a member of the party", pid(3)?)),
+            "{refusal}"
+        );
+        assert!(
+            refusal.ends_with(" Add it as a peer, then retry."),
             "{refusal}"
         );
         Ok(())
@@ -5459,10 +5590,11 @@ mod tests {
         let (status, body) = post_kick(pool.clone(), kick(3)?).await?;
         assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
         assert!(
-            body.contains("namespace threshold is 3, but only 2 members can sign"),
+            body.contains("the requested new_threshold is 3. Only 2 members can sign"),
             "{body}"
         );
         assert!(body.contains(&pid(4)?.to_string()), "{body}");
+        assert!(body.contains("Add it as a peer, then retry."), "{body}");
         assert!(!body.contains(&pid(3)?.to_string()), "{body}");
 
         let (status, body) = post_kick(pool, kick(2)?).await?;
@@ -5953,9 +6085,10 @@ mod tests {
         .await?;
         assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
         assert!(
-            body.contains("namespace threshold is 3, but only 2 members can sign"),
+            body.contains("current namespace threshold is 3. Only 2 members can sign"),
             "{body}"
         );
+        assert!(body.contains("Change Threshold"), "{body}");
         assert!(!body.contains(&pid(3)?.to_string()), "{body}");
         Ok(())
     }
