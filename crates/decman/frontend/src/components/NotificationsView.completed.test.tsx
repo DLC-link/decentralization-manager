@@ -65,6 +65,7 @@ const loadedParty = (
 
 const pendingProposal = (proposal_cid: string): DomainGovernanceAction => ({
   cannot_be_archived: false,
+  dismissed: false,
   proposal_cid,
   action_label: "Transfer",
   confirmations: [

@@ -28,6 +28,7 @@ const domainAction = (
   overrides: Partial<DomainGovernanceAction>,
 ): DomainGovernanceAction => ({
   cannot_be_archived: false,
+  dismissed: false,
   proposal_cid: proposalCid,
   action_label: "Transfer",
   description: "Pay March rent",
@@ -143,6 +144,7 @@ describe("Review on a self-management action", () => {
   it("shows the parsed action the confirm submits", () => {
     const action: GovernanceAction = {
       cannot_be_archived: false,
+      dismissed: false,
       action_hash: "hash-of-set-threshold",
       action: { type: "governance_set_threshold", new_threshold: 3 },
       confirmations: [],

@@ -59,7 +59,7 @@ use crate::{
         ledger_rejection::{mediator_timeout, submission_failure},
         middleware::require_admin,
         queries::{
-            GovernanceQueue, get_governance_confirmations,
+            GovernanceQueue, apply_dismissals, get_governance_confirmations,
             get_governance_state as query_governance_state, known_governance_members, mark_stuck,
             resolve_contract_package_ref, select_input_holdings,
         },
@@ -74,9 +74,9 @@ use crate::{
             AuditLogResponse, AuditScope, CancelConfirmationRequest, CancelProposalRequest,
             ChainAuditEntry, ChainAuditQuery, ChainAuditResponse, ConfirmActionRequest,
             DomainGovernanceAction, ErrorResponse, ExecuteActionRequest, ExpireConfirmationRequest,
-            GovernanceResponse, GovernanceStateResponse, GovernanceType, KnownMember,
-            KnownMembersResponse, MAX_RECENT_AUDIT_LIMIT, MessageResponse, ProposalType,
-            ProposalsPageResponse, ProposeActionRequest, RewardStatusResponse,
+            GovernanceResponse, GovernanceState, GovernanceStateResponse, GovernanceType,
+            KnownMember, KnownMembersResponse, MAX_RECENT_AUDIT_LIMIT, MessageResponse,
+            ProposalType, ProposalsPageResponse, ProposeActionRequest, RewardStatusResponse,
             chain_audit_entry_from_row,
         },
     },
@@ -99,10 +99,68 @@ fn withhold_payloads(domain_actions: &mut [DomainGovernanceAction]) {
     }
 }
 
+/// Query parameters for `GET /governance/confirmations`.
+#[derive(Debug, Deserialize, utoipa::IntoParams)]
+pub struct ConfirmationsQuery {
+    pub party_id: CantonId,
+    /// Proposals read from the ledger per request. Defaults to 25.
+    #[serde(default)]
+    pub limit: Option<usize>,
+    /// `next_cursor` from the previous batch. Absent starts at the top.
+    #[serde(default)]
+    pub cursor: Option<String>,
+    /// Also return the actions dismissed on this node, marked `dismissed`.
+    #[serde(default)]
+    pub include_dismissed: bool,
+}
+
+/// Mark the actions that cannot be archived, then apply this node's
+/// dismissals to them.
+async fn mark_archival_state(
+    db: &sqlx::SqlitePool,
+    party_id: &CantonId,
+    rules: Option<&GovernanceState>,
+    queue: &mut GovernanceQueue,
+    include_dismissed: bool,
+) -> Result<()> {
+    let timeouts = db
+        .get_mediator_timeouts(party_id)
+        .await
+        .context("Failed to read governance mediator timeouts")?
+        .into_iter()
+        .map(|row| row.contract_id)
+        .collect();
+    let dismissed = db
+        .get_dismissed_confirmations(party_id)
+        .await
+        .context("Failed to read dismissed governance confirmations")?
+        .into_iter()
+        .map(|row| row.contract_id)
+        .collect();
+    let members = known_governance_members(rules);
+    mark_stuck(
+        &mut queue.actions,
+        &mut queue.domain_actions,
+        members.as_ref(),
+        &timeouts,
+        chrono::Utc::now().timestamp(),
+    );
+    apply_dismissals(
+        &mut queue.actions,
+        &mut queue.domain_actions,
+        &dismissed,
+        include_dismissed,
+    );
+    Ok(())
+}
+
 /// Get governance confirmations with parsed actions
+///
+/// An action dismissed on this node is left out unless `include_dismissed`
+/// is set.
 #[utoipa::path(
     tag = "Governance",
-    params(GovernanceQuery),
+    params(ConfirmationsQuery),
     responses(
         (status = 200, description = "Governance confirmations", body = GovernanceResponse),
         (status = 500, description = "Internal server error", body = ErrorResponse)
@@ -112,7 +170,7 @@ fn withhold_payloads(domain_actions: &mut [DomainGovernanceAction]) {
 pub async fn get_governance(
     http_req: HttpRequest,
     data: web::Data<AppState>,
-    query: web::Query<GovernanceQuery>,
+    query: web::Query<ConfirmationsQuery>,
 ) -> impl Responder {
     let party_id = &query.party_id;
     let may_act = require_admin(&http_req, data.admin_role.as_deref()).is_ok();
@@ -160,29 +218,27 @@ pub async fn get_governance(
     )
     .await
     {
-        Ok(GovernanceQueue {
-            mut actions,
-            mut domain_actions,
-            next_cursor,
-            ..
-        }) => {
-            let timeouts = match data.db.get_mediator_timeouts(party_id).await {
-                Ok(rows) => rows.into_iter().map(|row| row.contract_id).collect(),
-                Err(e) => {
-                    tracing::error!("Failed to read governance mediator timeouts: {e}");
-                    return HttpResponse::InternalServerError().json(ErrorResponse {
-                        error: format!("Failed to read governance mediator timeouts: {e}"),
-                    });
-                }
-            };
-            let members = known_governance_members(gov_state.as_ref());
-            mark_stuck(
-                &mut actions,
-                &mut domain_actions,
-                members.as_ref(),
-                &timeouts,
-                chrono::Utc::now().timestamp(),
-            );
+        Ok(mut queue) => {
+            if let Err(e) = mark_archival_state(
+                &data.db,
+                party_id,
+                gov_state.as_ref(),
+                &mut queue,
+                query.include_dismissed,
+            )
+            .await
+            {
+                tracing::error!("{e:#}");
+                return HttpResponse::InternalServerError().json(ErrorResponse {
+                    error: format!("{e:#}"),
+                });
+            }
+            let GovernanceQueue {
+                actions,
+                mut domain_actions,
+                next_cursor,
+                ..
+            } = queue;
             if !may_act {
                 withhold_payloads(&mut domain_actions);
             }
@@ -3949,5 +4005,114 @@ mod paid_accept_disclosure_tests {
             "Failed to execute action: Failed to fetch the open mining rounds from scan: \
              scan answered 403 Forbidden: access denied"
         );
+    }
+}
+
+#[cfg(test)]
+mod archival_state_tests {
+    use serde_json::{Value, json};
+    use sqlx::SqlitePool;
+
+    use super::*;
+    use crate::db::MIGRATOR;
+
+    fn party_id(prefix: &str) -> Result<CantonId> {
+        CantonId::parse(&format!("{prefix}::1220{}", "ab".repeat(32)))
+    }
+
+    fn self_action(hash: &str, cid: &str, confirmer: &CantonId, expires_at: i64) -> Result<Value> {
+        let action = json!({ "type": "governance_set_threshold", "new_threshold": 2 });
+        Ok(json!({
+            "action_hash": hash,
+            "action": action,
+            "confirmations": [{
+                "contract_id": cid,
+                "action": action,
+                "confirming_party": confirmer,
+                "created_at": 1,
+                "expires_at": expires_at,
+            }],
+            "confirmation_count": 1,
+            "executable_confirmation_cids": [],
+            "can_execute": false,
+        }))
+    }
+
+    /// A self action from a former member that expired, and a live one from a
+    /// current member. Only the first cannot be archived.
+    fn queue_and_rules() -> Result<(GovernanceQueue, GovernanceState)> {
+        let now = chrono::Utc::now().timestamp();
+        let (member, former) = (party_id("member")?, party_id("former")?);
+        let actions = vec![
+            serde_json::from_value(self_action("stuck", "00stuck", &former, now - 60)?)?,
+            serde_json::from_value(self_action("live", "00live", &member, now + 3600)?)?,
+        ];
+        let rules = serde_json::from_value(json!({
+            "contract_id": "00rules",
+            "governance_party": party_id("dec")?,
+            "members": [member],
+            "threshold": 1,
+        }))?;
+        let queue = GovernanceQueue {
+            actions,
+            domain_actions: vec![],
+            next_cursor: None,
+            complete: true,
+        };
+        Ok((queue, rules))
+    }
+
+    /// The action hashes the confirmations list returns, each with its
+    /// `dismissed` mark.
+    async fn listed(pool: &SqlitePool, include_dismissed: bool) -> Result<Vec<(String, bool)>> {
+        let (mut queue, rules) = queue_and_rules()?;
+        mark_archival_state(
+            pool,
+            &party_id("dec")?,
+            Some(&rules),
+            &mut queue,
+            include_dismissed,
+        )
+        .await?;
+        Ok(queue
+            .actions
+            .into_iter()
+            .map(|a| (a.action_hash, a.dismissed))
+            .collect())
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn the_list_hides_a_dismissed_action_until_it_is_restored(pool: SqlitePool) -> Result {
+        let party = party_id("dec")?;
+        let both = || vec![("stuck".to_string(), false), ("live".to_string(), false)];
+        assert_eq!(listed(&pool, false).await?, both());
+
+        // The live action's confirmation is dismissed too, but it can be archived.
+        let ids = ["00stuck".to_string(), "00live".to_string()];
+        pool.dismiss_confirmations(&party, &ids, "admin").await?;
+
+        assert_eq!(listed(&pool, false).await?, [("live".to_string(), false)]);
+        assert_eq!(
+            listed(&pool, true).await?,
+            [("stuck".to_string(), true), ("live".to_string(), false)]
+        );
+
+        pool.restore_confirmations(&party, &ids[..1]).await?;
+
+        assert_eq!(listed(&pool, false).await?, both());
+        Ok(())
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_dismissal_for_another_party_hides_nothing(pool: SqlitePool) -> Result {
+        let ids = ["00stuck".to_string()];
+        pool.dismiss_confirmations(&party_id("other")?, &ids, "admin")
+            .await?;
+
+        assert_eq!(
+            listed(&pool, false).await?,
+            [("stuck".to_string(), false), ("live".to_string(), false)]
+        );
+        Ok(())
     }
 }

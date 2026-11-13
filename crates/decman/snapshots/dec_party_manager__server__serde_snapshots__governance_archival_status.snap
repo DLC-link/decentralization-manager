@@ -5,6 +5,7 @@ expression: "(self_action, domain_action)"
 [
   {
     "cannot_be_archived": true,
+    "dismissed": false,
     "action_hash": "hash",
     "action": {
       "type": "governance_set_threshold",
@@ -30,6 +31,7 @@ expression: "(self_action, domain_action)"
   },
   {
     "cannot_be_archived": true,
+    "dismissed": true,
     "proposal_cid": "00proposal",
     "action_label": "GenericVote",
     "confirmations": [

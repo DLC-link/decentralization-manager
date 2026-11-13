@@ -541,6 +541,8 @@ fn governance_archival_status_defaults_when_absent() {
 
     assert!(!self_action.cannot_be_archived);
     assert!(!domain_action.cannot_be_archived);
+    assert!(!self_action.dismissed);
+    assert!(!domain_action.dismissed);
     assert_eq!(self_action.confirmations[0].stuck, None);
     assert_eq!(domain_action.confirmations[0].stuck, None);
 }
@@ -552,6 +554,7 @@ fn governance_archival_status_http_json_is_stable() {
     self_action.cannot_be_archived = true;
     self_action.confirmations[0].stuck = Some(StuckReason::ConfirmerNotMember);
     domain_action.cannot_be_archived = true;
+    domain_action.dismissed = true;
     domain_action.confirmations[0].stuck = Some(StuckReason::ParticipantUnresponsive);
 
     insta::assert_json_snapshot!("governance_archival_status", (self_action, domain_action));

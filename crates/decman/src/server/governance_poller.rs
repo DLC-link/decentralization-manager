@@ -359,7 +359,7 @@ mod tests {
         config::{KeycloakConfig, PackageConfig, PartyCredentials},
         server::{
             ledger_paging::AcsCursor,
-            queries::mark_stuck,
+            queries::{apply_dismissals, mark_stuck},
             types::{
                 ActionType, DomainConfirmation, DomainGovernanceAction, GovernanceAction,
                 GovernanceConfirmation,
@@ -398,6 +398,7 @@ mod tests {
         };
         Ok(GovernanceAction {
             cannot_be_archived: false,
+            dismissed: false,
             action_hash: "hash".to_string(),
             confirmations: expiries.iter().copied().map(confirmation).collect(),
             action: action.clone(),
@@ -423,6 +424,7 @@ mod tests {
         };
         Ok(DomainGovernanceAction {
             cannot_be_archived: false,
+            dismissed: false,
             proposal_cid: "00p".to_string(),
             action_label: "GenericVote".to_string(),
             description: None,
@@ -527,6 +529,38 @@ mod tests {
         assert!(q.domain_actions[0].cannot_be_archived);
 
         assert_eq!(summarize(&q, NOW), PendingSummary::default());
+        Ok(())
+    }
+
+    /// The poller reads no dismissals. Only an action that cannot be archived
+    /// can be dismissed, and such an action is never pending, so a dismissal
+    /// cannot change the counts.
+    #[test]
+    fn a_dismissed_action_is_not_pending() -> anyhow::Result<()> {
+        let mut q = queue(
+            vec![self_action(true, &[NOW])?],
+            vec![proposal(true, true, &[NOW - 1])?],
+        );
+        mark_stuck(
+            &mut q.actions,
+            &mut q.domain_actions,
+            Some(&HashSet::new()),
+            &HashSet::new(),
+            NOW,
+        );
+        let without_dismissals = summarize(&q, NOW);
+
+        apply_dismissals(
+            &mut q.actions,
+            &mut q.domain_actions,
+            &HashSet::from(["00c".to_string()]),
+            true,
+        );
+
+        assert!(q.actions[0].dismissed);
+        assert!(q.domain_actions[0].dismissed);
+        assert_eq!(summarize(&q, NOW), without_dismissals);
+        assert_eq!(without_dismissals, PendingSummary::default());
         Ok(())
     }
 
