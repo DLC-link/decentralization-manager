@@ -1,0 +1,25 @@
+sdk-version: 3.4.11
+name: governance-settlement-test
+version: 0.1.0
+source: daml
+dependencies:
+  - daml-prim
+  - daml-stdlib
+  - daml-script
+data-dependencies:
+  - ../governance-action-v1/.daml/dist/governance-action-v1-0.1.0.dar
+  - ../governance-core/.daml/dist/governance-core-v1-0.1.0.dar
+  - ../governance-settlement/.daml/dist/governance-settlement-v1-0.1.0.dar
+  - ../dars/testlib-0.1.0.dar
+  - ../dars/splice-api-token-metadata-v1-1.0.0.dar
+  - ../dars/splice-api-token-holding-v2-1.0.0.dar
+  - ../dars/splice-api-token-allocation-v2-1.0.0.dar
+  - ../dars/splice-api-token-allocation-instruction-v2-1.0.0.dar
+  - ../dars/splice-api-token-transfer-instruction-v2-1.0.0.dar
+  - ../dars/splice-token-standard-utils-2.0.0.dar
+  - ../dars/splice-test-token-v2-1.0.1.dar
+build-options:
+  - --target=2.2
+  - -Wno-deprecated-exceptions
+  - --ghc-option=-Wunused-binds
+  - --ghc-option=-Wunused-matches
