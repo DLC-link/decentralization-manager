@@ -1133,6 +1133,85 @@ mod against_a_vault {
         Ok(())
     }
 
+    /// DecMan signs only a `PartyToParticipant` mapping that adds its key.
+    /// A legacy `PartyToKeyMapping` that carries the key is another mapping,
+    /// and DecMan's signature must not authorize it.
+    #[allow(deprecated)]
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn refuses_to_sign_another_mapping_that_carries_the_key(db: SqlitePool) -> Result {
+        use canton_proto_rs::com::digitalasset::canton::{
+            protocol::v30::{PartyToKeyMapping, TopologyMapping, TopologyTransaction},
+            version::v1::{UntypedVersionedMessage, untyped_versioned_message},
+        };
+        use prost::Message;
+
+        let fake = FakeAdminApi::start(vec![]).await?;
+        let node = fake.node(SoftwareKeys::Stored, true).await?;
+        let key = new_daml_key(
+            &node.config,
+            &db,
+            &mut vault(&node.config).await?,
+            "p-daml-transactions",
+            None,
+        )
+        .await?
+        .public_key;
+        let legacy = TopologyTransaction {
+            operation: 1,
+            serial: 1,
+            mapping: Some(TopologyMapping {
+                mapping: Some(topology_mapping::Mapping::PartyToKeyMapping(
+                    PartyToKeyMapping {
+                        party: PARTY.to_string(),
+                        threshold: 1,
+                        signing_keys: vec![key.clone()],
+                    },
+                )),
+            }),
+        };
+        let mut transaction = SignedTopologyTransaction {
+            transaction: UntypedVersionedMessage {
+                version: 30,
+                wrapper: Some(untyped_versioned_message::Wrapper::Data(
+                    legacy.encode_to_vec(),
+                )),
+            }
+            .encode_to_vec(),
+            ..Default::default()
+        };
+
+        let error =
+            refusal(sign_with_generated_key(&node.config, &db, &mut transaction, &key).await)?;
+
+        assert!(error.contains("does not carry DecMan's key"), "{error}");
+        assert!(transaction.signatures.is_empty());
+        Ok(())
+    }
+
+    /// A key copied into the key store for a party counts for that party,
+    /// even when the vault no longer lists it. It does not count for
+    /// another party.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_copied_key_counts_only_for_its_party(db: SqlitePool) -> Result {
+        let copied = VaultKey::software("p-daml-transactions", 5);
+        let fake = FakeAdminApi::start(vec![]).await?;
+        let node = fake.node(SoftwareKeys::Refused, true).await?;
+        let seed = copied
+            .seed
+            .ok_or_else(|| anyhow::anyhow!("a software key has a seed"))?;
+        store(&node.config, &db)
+            .await?
+            .put(&party()?, &copied.fingerprint(), &copied.public_key, &seed)
+            .await?;
+        let other_party = CantonId::parse(
+            "other::1220cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        )?;
+
+        assert!(holds_party_key(&node.config, &db, &party()?, &copied.fingerprint()).await?);
+        assert!(!holds_party_key(&node.config, &db, &other_party, &copied.fingerprint()).await?);
+        Ok(())
+    }
+
     /// With the key store off, a key outside the vault cannot be signed with
     /// or filed. The run stops instead of skipping it.
     #[sqlx::test(migrator = "MIGRATOR")]

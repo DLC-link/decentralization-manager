@@ -1407,3 +1407,60 @@ mod tests {
         );
     }
 }
+
+/// `own_signing_key_fingerprint` against a fake participant vault.
+#[cfg(test)]
+mod own_key_from_the_vault {
+    use super::*;
+    use crate::{
+        db::MIGRATOR,
+        signing::{
+            custody::SoftwareKeys,
+            fake_admin_api::{FakeAdminApi, VaultKey},
+        },
+    };
+
+    fn party() -> Result<CantonId> {
+        CantonId::parse(
+            "party::1220bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        )
+    }
+
+    /// A member that rotated holds its old and its new key, both named for
+    /// the party. The name cannot tell them apart, so the party's key list
+    /// decides. The key the party no longer carries is never taken.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_rotated_member_takes_the_key_the_party_carries(db: SqlitePool) -> Result {
+        let old = VaultKey::software("party-daml-transactions-run-0123abcd", 4);
+        let new = VaultKey::software(&rotated_daml_key_name("party", &old.fingerprint()), 5);
+        let fake = FakeAdminApi::start(vec![old.clone(), new.clone()]).await?;
+        let node = fake.node(SoftwareKeys::Stored, true).await?;
+        let peer = VaultKey::software("peer", 6).public_key;
+
+        let own = own_signing_key_fingerprint(
+            &node.config,
+            &db,
+            &party()?,
+            &[peer, new.public_key.clone()],
+        )
+        .await?;
+
+        assert_eq!(own, Some(new.fingerprint()));
+        Ok(())
+    }
+
+    /// One key named for the party answers on its own. A key named for
+    /// another party does not count, even with no key list to match.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn one_key_named_for_the_party_is_its_own(db: SqlitePool) -> Result {
+        let own = VaultKey::software("party-daml-transactions-run-0123abcd", 4);
+        let other = VaultKey::software("partyx-daml-transactions", 5);
+        let fake = FakeAdminApi::start(vec![other, own.clone()]).await?;
+        let node = fake.node(SoftwareKeys::Stored, true).await?;
+
+        let found = own_signing_key_fingerprint(&node.config, &db, &party()?, &[]).await?;
+
+        assert_eq!(found, Some(own.fingerprint()));
+        Ok(())
+    }
+}

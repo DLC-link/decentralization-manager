@@ -133,13 +133,19 @@ pub async fn generate_keys(
 
 #[cfg(test)]
 mod tests {
+    use canton_proto_rs::com::digitalasset::canton::{
+        crypto::v30::{SigningKeysWithThreshold, SigningPublicKey},
+        protocol::v30::PartyToParticipant,
+    };
+
     use super::*;
     use crate::{
         canton_id::CantonId,
         db::MIGRATOR,
         signing::{
             custody::SoftwareKeys,
-            fake_admin_api::{FakeAdminApi, VaultKey},
+            fake_admin_api::{FakeAdminApi, TestNode, VaultKey},
+            key_store::KeyStore,
         },
     };
 
@@ -166,6 +172,137 @@ mod tests {
 
         assert!(error.contains("software vault, not in a KMS"), "{error}");
         assert!(fake.generated().is_empty());
+        Ok(())
+    }
+
+    const RUN: &str = "party-add-party-2";
+
+    fn party() -> Result<CantonId> {
+        CantonId::parse(
+            "party::1220bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        )
+    }
+
+    /// A node without KMS under the opt-out, which DecMan gave a Daml key
+    /// for the party in an earlier run, under the name runs used before
+    /// each run named its own key. The vault holds the node's namespace key
+    /// for the party, so the run proposes no delegation.
+    async fn former_host(db: &SqlitePool) -> Result<(FakeAdminApi, TestNode, SigningPublicKey)> {
+        let fake = FakeAdminApi::start(vec![VaultKey::software("party-namespace", 1)]).await?;
+        let node = fake.node(SoftwareKeys::Stored, true).await?;
+        let earlier = custody::new_daml_key(
+            &node.config,
+            db,
+            &mut VaultServiceClient::new(node.config.admin_channel().await?),
+            &crate::workflow::signing_keys::party_daml_key_name("party"),
+            None,
+        )
+        .await?
+        .public_key;
+        sqlx::query(
+            "INSERT INTO workflow_runs (
+                 instance_name, kind, role, status, current_step, step_index, step_total,
+                 config_json, expected_peers_json, completed_peers_json,
+                 created_at, updated_at
+             ) VALUES (?1, 'AddParty', 'Peer', 'inprogress', 'GenerateKeys',
+                       0, 1, '{}', '[]', '[]', 0, 0)",
+        )
+        .bind(RUN)
+        .execute(db)
+        .await?;
+        // The ledger offset is already captured, so the step needs no ledger.
+        db.write_artifact(
+            RUN,
+            artifact_kinds::ADD_PARTY_PRE_ACTIVATION_OFFSET,
+            Some(&node.config.participant_id().to_string()),
+            b"42",
+        )
+        .await?;
+        Ok((fake, node, earlier))
+    }
+
+    fn hosting(keys: Vec<SigningPublicKey>) -> Result<PartyToParticipant> {
+        Ok(PartyToParticipant {
+            party: party()?.to_string(),
+            threshold: 1,
+            participants: Vec::new(),
+            party_signing_keys: Some(SigningKeysWithThreshold { keys, threshold: 1 }),
+        })
+    }
+
+    async fn add_this_node(node: &TestNode, db: &SqlitePool) -> Result<SigningPublicKey> {
+        let add = AddPartyConfig::new(
+            party()?,
+            node.config.participant_id().clone(),
+            2,
+            None,
+            1,
+            RUN.to_string(),
+        );
+        generate_keys(&node.config, db, RUN, &add, None).await?;
+        crate::workflow::onboarding::steps::generate_keys::own_new_daml_key(&node.config, db, RUN)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("the run recorded no Daml key"))
+    }
+
+    async fn filed_under_party(
+        node: &TestNode,
+        db: &SqlitePool,
+        key: &SigningPublicKey,
+    ) -> Result<bool> {
+        let store = KeyStore::open(&node.config, db.clone())
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("the key store is off"))?;
+        Ok(store
+            .get(&party()?, &compute_fingerprint(key))
+            .await?
+            .is_some())
+    }
+
+    /// A former host that still owns the party keeps its key in the
+    /// party's key set. Hosting it again reuses that key, or the party
+    /// would carry two keys for one member.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_former_host_the_party_still_carries_gets_its_key_back(db: SqlitePool) -> Result {
+        let (fake, node, earlier) = former_host(&db).await?;
+        let peer = VaultKey::software("peer", 7).public_key;
+        fake.publish_p2p(1, hosting(vec![peer, earlier.clone()])?);
+
+        let key = add_this_node(&node, &db).await?;
+
+        assert_eq!(key, earlier);
+        assert!(filed_under_party(&node, &db, &key).await?);
+        assert!(fake.authorized().is_empty(), "no delegation was proposed");
+        assert!(fake.generated().is_empty(), "the vault made no key");
+        Ok(())
+    }
+
+    /// A member whose key a kick or a rotation removed gets a new key, never
+    /// the removed one. Each run names its own key, so even the name the
+    /// earlier key was made under does not bring it back.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_member_added_again_gets_a_new_key(db: SqlitePool) -> Result {
+        let (fake, node, earlier) = former_host(&db).await?;
+        fake.publish_p2p(1, hosting(vec![VaultKey::software("peer", 7).public_key])?);
+
+        let key = add_this_node(&node, &db).await?;
+
+        assert_ne!(key, earlier);
+        let name = String::from_utf8(
+            db.read_artifact(
+                RUN,
+                artifact_kinds::DAML_KEY_NAME,
+                Some(&node.config.participant_id().to_string()),
+            )
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("the run recorded no key name"))?,
+        )?;
+        assert!(name.starts_with("party-daml-transactions-run-"), "{name}");
+        assert!(
+            filed_under_party(&node, &db, &key).await?,
+            "add-party knows the party, so it files the key at once"
+        );
+        assert!(fake.generated().is_empty(), "the vault made no key");
         Ok(())
     }
 }

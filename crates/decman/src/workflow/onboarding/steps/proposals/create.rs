@@ -488,3 +488,188 @@ mod tests {
         assert!(resolve_thresholds(&config(Some(1), Some(0)), 3, 3).is_err());
     }
 }
+
+/// `create_proposals` on a coordinator whose Daml key DecMan generated,
+/// against a fake Canton.
+#[cfg(test)]
+mod with_a_generated_key {
+    use canton_proto_rs::com::digitalasset::canton::{
+        crypto::admin::v30::vault_service_client::VaultServiceClient,
+        protocol::v30::SignedTopologyTransaction,
+    };
+
+    use super::*;
+    use crate::{
+        db::MIGRATOR,
+        signing::{
+            custody::{SoftwareKeys, new_daml_key},
+            fake_admin_api::{FakeAdminApi, TestNode, VaultKey},
+            key_store::{KeyStore, topology_transaction_hash},
+            vault_export::ed25519_public_key,
+        },
+        workflow::onboarding::steps::generate_keys::encode_keys_payload,
+    };
+
+    const RUN: &str = "party-creation";
+
+    fn onboarding() -> OnboardingConfig {
+        OnboardingConfig::new("party".to_string(), RUN.to_string(), None, None)
+    }
+
+    /// The other member, whose keys came in over the network.
+    fn peer() -> Result<CantonId> {
+        CantonId::parse(
+            "node2::1220dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        )
+    }
+
+    /// Record a coordinator run on `node`, with this node's generated Daml
+    /// key and a peer's keys, as GenerateKeys and the peers' uploads leave
+    /// them. Returns this node's Daml key.
+    async fn collected_keys(
+        fake: &FakeAdminApi,
+        node: &TestNode,
+        db: &SqlitePool,
+    ) -> Result<SigningPublicKey> {
+        sqlx::query(
+            "INSERT INTO workflow_runs (
+                 instance_name, kind, role, status, current_step, step_index, step_total,
+                 config_json, expected_peers_json, completed_peers_json,
+                 created_at, updated_at
+             ) VALUES (?1, 'Onboarding', 'Coordinator', 'inprogress', 'CreateProposals',
+                       1, 2, '{}', '[]', '[]', 0, 0)",
+        )
+        .bind(RUN)
+        .execute(db)
+        .await?;
+        let mut vault = VaultServiceClient::new(node.config.admin_channel().await?);
+        let key = new_daml_key(
+            &node.config,
+            db,
+            &mut vault,
+            "party-daml-transactions-run-1",
+            None,
+        )
+        .await?
+        .public_key;
+        assert!(fake.generated().is_empty(), "the vault made no Daml key");
+        let self_id = node.config.participant_id().clone();
+        let members = [
+            (
+                self_id.clone(),
+                encode_keys_payload(&VaultKey::software("party-namespace", 1).public_key, &key),
+            ),
+            (
+                peer()?,
+                encode_keys_payload(
+                    &VaultKey::software("peer-namespace", 2).public_key,
+                    &VaultKey::software("peer-daml", 3).public_key,
+                ),
+            ),
+        ];
+        for (member, keys) in members {
+            let member_id = member.to_string();
+            db.write_artifact(
+                RUN,
+                artifact_kinds::PEER_PUBLIC_KEYS,
+                Some(&member_id),
+                &keys,
+            )
+            .await?;
+            db.write_artifact(
+                RUN,
+                artifact_kinds::PARTICIPANT_ID,
+                Some(&member_id),
+                member.to_file_format().as_bytes(),
+            )
+            .await?;
+        }
+        Ok(key)
+    }
+
+    /// Canton requires the new key to sign the mapping that adds it, and the
+    /// vault cannot. So the coordinator signs the transaction's hash itself.
+    /// It also files the key under the new party before any topology change.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn the_coordinator_signs_the_party_mapping_with_its_generated_key(
+        db: SqlitePool,
+    ) -> Result {
+        let fake = FakeAdminApi::start(vec![VaultKey::software("party-namespace", 1)]).await?;
+        let node = fake.node(SoftwareKeys::Stored, true).await?;
+        let key = collected_keys(&fake, &node, &db).await?;
+
+        create_proposals(&node.config, &db, RUN, &onboarding()).await?;
+
+        assert_eq!(fake.authorized().len(), 2, "one DNS and one P2P proposal");
+        let p2p_bytes = db
+            .read_artifact(RUN, artifact_kinds::P2P_PROTO, None)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("no P2P proposal was saved"))?;
+        let p2p: SignedTopologyTransaction = utils::read_first_message_from_bytes(&p2p_bytes)?;
+        let fingerprint = utils::compute_fingerprint(&key);
+        let [signature] = p2p.signatures.as_slice() else {
+            anyhow::bail!("expected DecMan's one signature, got {:?}", p2p.signatures);
+        };
+        assert_eq!(signature.signed_by, fingerprint.to_string());
+        let verifying = ed25519_dalek::VerifyingKey::from_bytes(&ed25519_public_key(&key)?)?;
+        let bytes: [u8; 64] = signature.signature.as_slice().try_into()?;
+        verifying.verify_strict(
+            &topology_transaction_hash(&p2p.transaction),
+            &ed25519_dalek::Signature::from_bytes(&bytes),
+        )?;
+        let dns_bytes = db
+            .read_artifact(RUN, artifact_kinds::DNS_PROTO, None)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("no DNS proposal was saved"))?;
+        let dns: SignedTopologyTransaction = utils::read_first_message_from_bytes(&dns_bytes)?;
+        assert!(dns.signatures.is_empty(), "the Daml key signs only the P2P");
+
+        let party = String::from_utf8(
+            db.read_artifact(RUN, artifact_kinds::PARTY_ID, None)
+                .await?
+                .ok_or_else(|| anyhow::anyhow!("no party id was saved"))?,
+        )?;
+        let store = KeyStore::open(&node.config, db.clone())
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("the key store is off"))?;
+        assert!(
+            store
+                .get(&CantonId::parse(&party)?, &fingerprint)
+                .await?
+                .is_some(),
+            "the key is filed under the new party, so deploys sign with it"
+        );
+        Ok(())
+    }
+
+    /// A coordinator that cannot file its key stops before it proposes
+    /// anything. The party would otherwise carry a key DecMan cannot sign
+    /// its deploys with.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn the_coordinator_stops_before_any_proposal_when_it_cannot_file_its_key(
+        db: SqlitePool,
+    ) -> Result {
+        let fake = FakeAdminApi::start(vec![VaultKey::software("party-namespace", 1)]).await?;
+        let node = fake.node(SoftwareKeys::Stored, true).await?;
+        collected_keys(&fake, &node, &db).await?;
+        // The operator replaced the key-store key after GenerateKeys ran.
+        let other_key = tempfile::NamedTempFile::new()?;
+        tokio::fs::write(other_key.path(), hex::encode([0x6b; 32])).await?;
+        let mut config = node.config.clone();
+        config.key_store_key_file = Some(other_key.path().to_path_buf());
+
+        let error = match create_proposals(&config, &db, RUN, &onboarding()).await {
+            Ok(()) => anyhow::bail!("the coordinator proposed a party it cannot sign for"),
+            Err(e) => format!("{e:#}"),
+        };
+
+        assert!(error.contains("does not decrypt"), "{error}");
+        assert!(fake.authorized().is_empty(), "nothing reached the topology");
+        assert!(
+            db.read_artifact(RUN, artifact_kinds::P2P_PROTO, None)
+                .await?
+                .is_none()
+        );
+        Ok(())
+    }
+}

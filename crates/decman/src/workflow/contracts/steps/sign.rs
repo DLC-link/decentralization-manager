@@ -761,11 +761,16 @@ mod deployment_intent_tests {
 #[cfg(test)]
 mod own_daml_key_tests {
     use super::*;
+    use canton_proto_rs::com::digitalasset::canton::{
+        crypto::v30::SigningKeysWithThreshold,
+        protocol::v30::{DecentralizedNamespaceDefinition, PartyToKeyMapping, PartyToParticipant},
+    };
+
     use crate::{
         db::MIGRATOR,
         signing::{
             custody::{SoftwareKeys, file_new_party_key, new_daml_key},
-            fake_admin_api::{FakeAdminApi, VaultKey},
+            fake_admin_api::{FakeAdminApi, TestNode, VaultKey},
         },
         workflow::onboarding::steps::generate_keys::encode_keys_payload,
     };
@@ -866,6 +871,147 @@ mod own_daml_key_tests {
             .await?
             .ok_or_else(|| anyhow::anyhow!("the key store is off"))?;
         assert!(store.get(&party()?, &context.fingerprint).await?.is_some());
+        Ok(())
+    }
+
+    /// A node on the fake participant whose key record for the party is
+    /// lost, with a Daml key DecMan generated and a namespace key in the
+    /// vault. The chain carries the party's namespace with that key as an
+    /// owner. Returns the node, its Daml key and its namespace key.
+    async fn node_without_a_record(
+        fake: &FakeAdminApi,
+        db: &SqlitePool,
+    ) -> Result<(TestNode, SigningPublicKey, SigningPublicKey)> {
+        let node = fake.node(SoftwareKeys::Stored, true).await?;
+        let mut vault = VaultServiceClient::new(node.config.admin_channel().await?);
+        let key = new_daml_key(
+            &node.config,
+            db,
+            &mut vault,
+            "party-daml-transactions-run-1",
+            None,
+        )
+        .await?
+        .public_key;
+        let namespace = NAMESPACE.public_key.clone();
+        fake.publish_namespace(
+            1,
+            DecentralizedNamespaceDefinition {
+                decentralized_namespace: party()?.namespace.to_hex(),
+                threshold: 1,
+                owners: vec![
+                    utils::compute_fingerprint(&namespace).to_string(),
+                    utils::compute_fingerprint(&peer_key()).to_string(),
+                ],
+            },
+        );
+        Ok((node, key, namespace))
+    }
+
+    static NAMESPACE: std::sync::LazyLock<VaultKey> =
+        std::sync::LazyLock::new(|| VaultKey::software("party-namespace", 1));
+
+    /// Another member's Daml key, which this node does not hold.
+    fn peer_key() -> SigningPublicKey {
+        VaultKey::software("peer-daml-transactions", 7).public_key
+    }
+
+    fn hosted(signing_keys: Option<Vec<SigningPublicKey>>) -> Result<PartyToParticipant> {
+        Ok(PartyToParticipant {
+            party: party()?.to_string(),
+            threshold: 1,
+            participants: Vec::new(),
+            party_signing_keys: signing_keys
+                .map(|keys| SigningKeysWithThreshold { keys, threshold: 1 }),
+        })
+    }
+
+    /// The recovered record must name this node's namespace key and its
+    /// Daml key, in that order, so later checks read each key correctly.
+    async fn recorded_keys(node: &TestNode, db: &SqlitePool) -> Result<Vec<SigningPublicKey>> {
+        let bytes = db
+            .read_identity(
+                &party()?,
+                identity_kinds::PEER_PUBLIC_KEYS,
+                &node.config.participant_id().to_string(),
+            )
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("no key record was written"))?;
+        decode_peer_keys(&bytes, "node1")
+    }
+
+    /// A member that lost its key record finds its key on the chain. A key
+    /// DecMan generated is not in the vault, so only the key store can name
+    /// it as this node's. The deploy then files it under the party and signs.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn recovers_a_generated_key_from_the_party_mapping(db: SqlitePool) -> Result {
+        let fake = FakeAdminApi::start(vec![NAMESPACE.clone()]).await?;
+        let (node, key, namespace) = node_without_a_record(&fake, &db).await?;
+        fake.publish_p2p(1, hosted(Some(vec![peer_key(), key.clone()]))?);
+
+        let context = own_daml_key(&node.config, &db, &party()?).await?;
+
+        assert_eq!(context.public_key, key);
+        assert_eq!(context.kms_key_id, None);
+        assert_eq!(recorded_keys(&node, &db).await?, vec![namespace, key]);
+        let store = KeyStore::open(&node.config, db.clone())
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("the key store is off"))?;
+        assert!(store.get(&party()?, &context.fingerprint).await?.is_some());
+        Ok(())
+    }
+
+    /// A party onboarded before Canton 3.4 keeps its keys in a legacy
+    /// `PartyToKeyMapping`. The recovery reads that mapping when the party
+    /// mapping carries no keys.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn recovers_a_generated_key_from_a_legacy_mapping(db: SqlitePool) -> Result {
+        let fake = FakeAdminApi::start(vec![NAMESPACE.clone()]).await?;
+        let (node, key, namespace) = node_without_a_record(&fake, &db).await?;
+        fake.publish_p2p(1, hosted(None)?);
+        fake.publish_party_to_key(
+            1,
+            PartyToKeyMapping {
+                party: party()?.to_string(),
+                threshold: 1,
+                signing_keys: vec![peer_key(), key.clone()],
+            },
+        );
+
+        let context = own_daml_key(&node.config, &db, &party()?).await?;
+
+        assert_eq!(context.public_key, key);
+        assert_eq!(recorded_keys(&node, &db).await?, vec![namespace, key]);
+        Ok(())
+    }
+
+    /// A node that holds none of the party's keys is not a member. It must
+    /// not claim another member's key, and it records nothing.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn recovers_nothing_when_this_node_holds_no_party_key(db: SqlitePool) -> Result {
+        let fake = FakeAdminApi::start(vec![NAMESPACE.clone()]).await?;
+        let (node, _key, _) = node_without_a_record(&fake, &db).await?;
+        let other = VaultKey::software("other-daml-transactions", 8).public_key;
+        fake.publish_p2p(1, hosted(Some(vec![peer_key(), other]))?);
+
+        let error = match own_daml_key(&node.config, &db, &party()?).await {
+            Ok(context) => anyhow::bail!("claimed {}", context.fingerprint),
+            Err(e) => e.to_string(),
+        };
+
+        assert!(
+            error.contains("onboarding may not have completed"),
+            "{error}"
+        );
+        assert!(
+            db.read_identity(
+                &party()?,
+                identity_kinds::PEER_PUBLIC_KEYS,
+                &node.config.participant_id().to_string(),
+            )
+            .await?
+            .is_none()
+        );
         Ok(())
     }
 }

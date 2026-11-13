@@ -7159,6 +7159,77 @@ mod tests {
         Ok(())
     }
 
+    /// POST a contracts request for `party` to `data`, and return the status
+    /// and the error it gives.
+    async fn start_contracts_for(
+        data: web::Data<AppState>,
+        party: &CantonId,
+    ) -> anyhow::Result<(StatusCode, String)> {
+        let app =
+            actix_test::init_service(App::new().app_data(data).service(start_contracts)).await;
+        let request = actix_test::TestRequest::post()
+            .uri("/contracts")
+            .set_json(serde_json::json!({
+                "decentralized_party_id": party.to_string(),
+                "participant_ids": [pid(10)?.to_string()],
+                "participant_parties": [pid(11)?.to_string()],
+                "operator_party": party.to_string(),
+                "contracts": [{
+                    "id": "rules",
+                    "name": "Rules",
+                    "package_id": "#governance",
+                    "module_name": "Governance",
+                    "entity_name": "Rules",
+                    "fields": [],
+                }],
+            }))
+            .to_request();
+        request.extensions_mut().insert(Principal {
+            sub: "admin".to_string(),
+            issuer: "test".to_string(),
+            roles: Vec::new(),
+            email: None,
+        });
+        let response = actix_test::call_service(&app, request).await;
+        let status = response.status();
+        let body: serde_json::Value = actix_test::read_body_json(response).await;
+        Ok((
+            status,
+            body["error"].as_str().unwrap_or_default().to_string(),
+        ))
+    }
+
+    /// Two start requests for one party could both pass the in-flight check
+    /// before either registers its run. While one request holds the party's
+    /// claim, a second one is refused. A refused request gives the claim
+    /// back.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_start_request_is_refused_while_another_claims_the_party(
+        pool: SqlitePool,
+    ) -> anyhow::Result<()> {
+        let data = state_on(pool.clone()).await?;
+        let party = pid(9)?;
+        let claim = data
+            .workflows
+            .claim_start(&party)
+            .ok_or_else(|| anyhow::anyhow!("a fresh registry has no claims"))?;
+
+        let (status, error) = start_contracts_for(data.clone(), &party).await?;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert!(error.contains("Another request is starting"), "{error}");
+        drop(claim);
+
+        insert_run(&pool, &in_progress_run("contracts-1", &party)).await?;
+        let (status, error) = start_contracts_for(data.clone(), &party).await?;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert!(error.contains("already has a"), "{error}");
+        assert!(
+            data.workflows.claim_start(&party).is_some(),
+            "the refused request released its claim"
+        );
+        Ok(())
+    }
+
     fn started(kind: WorkflowKind) -> u64 {
         RUNS_STARTED
             .with_label_values(&[run_kind_label(kind)])
