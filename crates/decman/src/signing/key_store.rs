@@ -30,7 +30,7 @@ use std::path::{Path, PathBuf};
 
 use aes_gcm::{
     Aes256Gcm, KeyInit,
-    aead::{Aead, Generate, Payload},
+    aead::{Aead, Generate, Payload, common::getrandom},
 };
 use async_trait::async_trait;
 use base64::{Engine, engine::general_purpose::STANDARD};
@@ -289,9 +289,10 @@ impl KeyStore {
             self.require_readable(name, &public_key).await?;
             return Ok((public_key, true));
         }
-        let seed: Zeroizing<[u8; 32]> = Zeroizing::new(
-            Generate::try_generate().map_err(|e| anyhow::anyhow!("key generation failed: {e}"))?,
-        );
+        // The seed is filled in place, so no copy of it is left unwiped.
+        let mut seed = Zeroizing::new([0u8; 32]);
+        getrandom::fill(seed.as_mut_slice())
+            .map_err(|e| anyhow::anyhow!("key generation failed: {e}"))?;
         let public_key = ed25519_signing_public_key(&seed);
         let fingerprint = compute_fingerprint(&public_key);
         let nonce: [u8; 12] = Generate::try_generate()
@@ -343,14 +344,25 @@ impl KeyStore {
         }
     }
 
+    /// The public key of the key generated under `name`. The row's public
+    /// key must match its fingerprint. Otherwise an altered row could point
+    /// `name` at the key of another name.
     async fn generated_public_key(&self, name: &str) -> Result<Option<SigningPublicKey>> {
-        let row: Option<(Vec<u8>,)> =
-            sqlx::query_as("SELECT public_key FROM generated_party_keys WHERE name = ?1")
-                .bind(name)
-                .fetch_optional(&self.db)
-                .await?;
-        row.map(|(bytes,)| SigningPublicKey::decode(bytes.as_slice()).map_err(Into::into))
-            .transpose()
+        let row: Option<(String, Vec<u8>)> = sqlx::query_as(
+            "SELECT fingerprint, public_key FROM generated_party_keys WHERE name = ?1",
+        )
+        .bind(name)
+        .fetch_optional(&self.db)
+        .await?;
+        let Some((fingerprint, bytes)) = row else {
+            return Ok(None);
+        };
+        let public_key = SigningPublicKey::decode(bytes.as_slice())?;
+        anyhow::ensure!(
+            compute_fingerprint(&public_key).as_str() == fingerprint,
+            "The generated key {name} does not match its stored fingerprint. The row was altered"
+        );
+        Ok(Some(public_key))
     }
 
     /// The public key and seed of the key DecMan generated with
@@ -791,6 +803,31 @@ mod tests {
         };
 
         assert!(error.contains("does not decrypt"), "{error}");
+        Ok(())
+    }
+
+    /// A row could otherwise point its name at the key of another name, and
+    /// a run would reuse that key as its own.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_name_pointed_at_another_key_is_refused(db: SqlitePool) -> Result {
+        let store = store(db.clone(), 1);
+        let (p_key, _) = store.generate("p-daml-transactions").await?;
+        store.generate("q-daml-transactions").await?;
+        sqlx::query("UPDATE generated_party_keys SET public_key = ?1 WHERE name = ?2")
+            .bind(p_key.encode_to_vec())
+            .bind("q-daml-transactions")
+            .execute(&db)
+            .await?;
+
+        let error = match store.generate("q-daml-transactions").await {
+            Ok((key, _)) => anyhow::bail!("reused {key:?} under another name"),
+            Err(e) => e.to_string(),
+        };
+
+        assert!(
+            error.contains("does not match its stored fingerprint"),
+            "{error}"
+        );
         Ok(())
     }
 
