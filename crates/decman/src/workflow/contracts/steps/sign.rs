@@ -23,10 +23,12 @@ use crate::{
     config::NodeConfig,
     db::crypto,
     error::Result,
-    signing::{PreparedTransactionHash, SigningKeyContext, key_store::KeyStore, select_signer},
+    signing::{
+        PreparedTransactionHash, SigningKeyContext, custody, key_store::KeyStore, select_signer,
+    },
     utils,
     workflow::{
-        signing_keys::{own_namespace_key, vault_holds},
+        signing_keys::own_namespace_key,
         storage::{WorkflowStorage, artifact_kinds, identity_kinds},
         topology,
     },
@@ -211,7 +213,7 @@ pub async fn own_daml_key(
                          topology (PartyToParticipant / legacy PartyToKeyMapping) to \
                          recover this node's Daml signing key for {dec_party_id}"
                     );
-                    let bytes = backfill_peer_keys_from_chain(config, dec_party_id)
+                    let bytes = backfill_peer_keys_from_chain(config, db, dec_party_id)
                         .await?
                         .ok_or_else(|| {
                             anyhow::anyhow!(
@@ -272,9 +274,7 @@ pub async fn own_daml_key(
 
     if keys_response.private_keys_metadata.is_empty() {
         // A key DecMan generated lives only in its key store.
-        if let Some(store) = KeyStore::open(config, db.clone()).await?
-            && store.get(dec_party_id, &key_fingerprint).await?.is_some()
-        {
+        if custody::file_party_key(config, db, dec_party_id, &key_fingerprint).await? {
             tracing::debug!("Daml key {key_fingerprint} lives in DecMan's key store");
             return Ok(SigningKeyContext {
                 fingerprint: key_fingerprint,
@@ -443,9 +443,10 @@ fn encode_messages_length_prefixed<M: prost::Message>(messages: &[M]) -> Vec<u8>
 }
 
 /// On-chain backfill: recover the dec_party's protocol signing keys from
-/// Canton's topology store, then cross-reference them against this node's
-/// vault. The vault key whose fingerprint matches one of the on-chain
-/// signing keys is the Daml key this node contributes to the party.
+/// Canton's topology store, then cross-reference them against the keys this
+/// node holds, in its vault or in DecMan's key store. The held key whose
+/// fingerprint matches one of the on-chain signing keys is the Daml key this
+/// node contributes to the party.
 ///
 /// The keys live in one of two places depending on when the party was
 /// onboarded: `PartyToParticipant.party_signing_keys` (Canton 3.4+ — what the
@@ -461,6 +462,7 @@ fn encode_messages_length_prefixed<M: prost::Message>(messages: &[M]) -> Vec<u8>
 /// node an owner.
 async fn backfill_peer_keys_from_chain(
     config: &NodeConfig,
+    db: &SqlitePool,
     dec_party_id: &CantonId,
 ) -> Result<Option<Vec<u8>>> {
     let dec_party_id_str = dec_party_id.to_string();
@@ -505,12 +507,12 @@ async fn backfill_peer_keys_from_chain(
         return Ok(None);
     }
 
-    // 3. Walk the on-chain keys and pick the one our vault recognizes — that's
-    //    this node's contribution. Other entries belong to peer participants
-    //    and their private halves are not in our vault.
+    // 3. Walk the on-chain keys and pick the one this node holds — that's
+    //    this node's contribution. Other entries belong to peer participants,
+    //    and this node does not hold their private halves.
     for key in &signing_keys {
         let fingerprint = utils::compute_fingerprint(key);
-        if vault_holds(config, &fingerprint).await? {
+        if custody::holds_party_key(config, db, dec_party_id, &fingerprint).await? {
             tracing::info!(
                 "Recovered Daml signing key {fingerprint} for {dec_party_id} from the on-chain \
                  topology state"
@@ -533,8 +535,9 @@ async fn backfill_peer_keys_from_chain(
     }
 
     tracing::warn!(
-        "None of the {count} on-chain signing keys for {dec_party_id} are present in this \
-         node's vault — this node may not be a hosting participant of {dec_party_id}",
+        "This node holds none of the {count} on-chain signing keys for {dec_party_id}, in \
+         its vault or in DecMan's key store — it may not be a hosting participant of \
+         {dec_party_id}",
         count = signing_keys.len()
     );
     Ok(None)
@@ -827,6 +830,42 @@ mod own_daml_key_tests {
         };
 
         assert!(error.contains("neither in Canton's vault"), "{error}");
+        Ok(())
+    }
+
+    /// A member whose filing step never ran, and whose operator then removed
+    /// the opt-out, still signs. The deploy files the key DecMan generated
+    /// under the party.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn files_a_generated_key_that_onboarding_did_not_file(db: SqlitePool) -> Result {
+        let fake = FakeAdminApi::start(vec![VaultKey::software("party-namespace", 1)]).await?;
+        let opted_out = fake.node(SoftwareKeys::Stored, true).await?;
+        let mut vault = VaultServiceClient::new(opted_out.config.admin_channel().await?);
+        let key = new_daml_key(
+            &opted_out.config,
+            &db,
+            &mut vault,
+            "party-daml-transactions",
+            None,
+        )
+        .await?
+        .public_key;
+        db.write_identity(
+            &party()?,
+            identity_kinds::PEER_PUBLIC_KEYS,
+            &opted_out.config.participant_id().to_string(),
+            &encode_keys_payload(&VaultKey::software("ns", 2).public_key, &key),
+        )
+        .await?;
+        let node = fake.node(SoftwareKeys::Refused, true).await?;
+
+        let context = own_daml_key(&node.config, &db, &party()?).await?;
+
+        assert_eq!(context.public_key, key);
+        let store = KeyStore::open(&node.config, db.clone())
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("the key store is off"))?;
+        assert!(store.get(&party()?, &context.fingerprint).await?.is_some());
         Ok(())
     }
 }

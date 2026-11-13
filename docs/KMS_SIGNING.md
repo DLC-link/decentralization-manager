@@ -43,9 +43,13 @@ generates each new party Daml key itself, and Canton's vault never holds it:
    signature itself.
 4. decman files the key under the party, so deploys sign with it. Add-party
    and rotate-key know the party from the start. Onboarding learns it just
-   before the members sign the party's `PartyToParticipant` proposal. A member
-   that cannot file its key refuses to sign, so the party does not come into
-   force.
+   before the members sign the party's `PartyToParticipant` proposal. While
+   the setting is on, a member that cannot file its key refuses to sign, so
+   the party does not come into force.
+
+The setting decides only where a new key goes. A key that decman generated
+keeps signing after an operator removes the setting, as a vault key does. A
+deploy files such a key under its party when onboarding did not.
 
 Canton never exports these keys, so they need no key download on Splice 0.10.
 The namespace key stays in the participant's vault, because the participant
@@ -190,7 +194,9 @@ that names those members.
 The new key gets a name of the form
 `<prefix>-daml-transactions-rotated-from-<old key fingerprint>`. The name
 depends only on the key it replaces. A rotation that failed and starts again
-therefore reuses the same new key. The old key stays in the vault and in
+therefore reuses the same new key. The exception is a participant that moved
+to KMS in between. It gets a new KMS key instead of a key that decman
+generated earlier. The old key stays in the vault and in
 decman's key store, because decman never deletes a key. A party whose keys
 still sit in a legacy `PartyToKeyMapping` has its members' keys moved inline
 in the same change, and the members then retire the legacy mapping.
@@ -292,7 +298,8 @@ copy of each key.
   it and add it again with add-party.
 - decman finds a generated key again by its name, as the vault does. A member
   that is kicked and added again on the same node therefore gets the same
-  key back. After a suspected compromise, rotate the key instead. decman
+  key back, unless the participant has moved to KMS since. After a suspected
+  compromise, rotate the key instead. decman
   refuses to reuse a key that no longer decrypts, and asks for the previous
   encryption key.
 
