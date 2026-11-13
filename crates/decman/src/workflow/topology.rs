@@ -838,6 +838,61 @@ pub async fn check_proposal_standing(
 ) -> Result<Standing> {
     let transaction: TopologyTransaction =
         topology_version::decode_transaction(&proposal.transaction)?;
+    let (what, head) = head_for_proposal(config, synchronizer_id, &transaction).await?;
+    proposal_standing(what, &transaction, head.as_ref())
+}
+
+/// Refuse a proposal that changes a DNS or P2P mapping that already exists.
+///
+/// Onboarding creates a party, so its proposals must create their mappings.
+/// Kick, add-party and change-threshold change an existing party, and their
+/// peers check each change against the chain. An onboarding peer checks no
+/// such change, so it must not sign one. A proposal that equals the head is
+/// already in force, and a retried peer may sign it again.
+///
+/// # Errors
+///
+/// Errors when the proposal is neither a DNS nor a P2P, when the head cannot
+/// be read, or when the mapping exists with other content.
+pub async fn check_creates_mapping(
+    config: &NodeConfig,
+    synchronizer_id: &str,
+    proposal: &SignedTopologyTransaction,
+) -> Result {
+    let transaction: TopologyTransaction =
+        topology_version::decode_transaction(&proposal.transaction)?;
+    let (what, head) = head_for_proposal(config, synchronizer_id, &transaction).await?;
+    creates_mapping(what, &transaction, head.as_ref())
+}
+
+/// See [`check_creates_mapping`]. `head` is `None` when the synchronizer
+/// holds no add-or-replace for the mapping.
+///
+/// # Errors
+///
+/// Errors when the head holds the mapping with other content.
+pub fn creates_mapping(
+    what: &str,
+    proposal: &TopologyTransaction,
+    head: Option<&TopologyTransaction>,
+) -> Result {
+    match head {
+        None => Ok(()),
+        Some(head) if head == proposal => Ok(()),
+        Some(head) => anyhow::bail!(
+            "The {what} mapping already exists at serial {serial}. Onboarding creates a new \
+             party, so this node does not sign a change to an existing one",
+            serial = head.serial
+        ),
+    }
+}
+
+/// The head transaction for a proposal's mapping, and the mapping's name.
+async fn head_for_proposal(
+    config: &NodeConfig,
+    synchronizer_id: &str,
+    transaction: &TopologyTransaction,
+) -> Result<(&'static str, Option<TopologyTransaction>)> {
     let (what, head) = match transaction
         .mapping
         .as_ref()
@@ -869,7 +924,7 @@ pub async fn check_proposal_standing(
         }
         _ => anyhow::bail!("Only a DNS or a P2P proposal can be checked against the head"),
     };
-    proposal_standing(what, &transaction, head.as_ref().map(|(_, head)| head))
+    Ok((what, head.map(|(_, head)| head)))
 }
 
 /// Fetch the current `DecentralizedNamespaceDefinition` from the synchronizer
@@ -1611,6 +1666,30 @@ mod tests {
             proposal_standing("DNS", &namespace_change(1, 2), None)?,
             Standing::Next
         );
+        Ok(())
+    }
+
+    /// Onboarding creates its mappings. A mapping already on the chain with
+    /// other content belongs to an existing party, and an onboarding peer
+    /// must not sign a change to it. A retried peer may sign the proposal
+    /// that is already in force.
+    #[test]
+    fn onboarding_signs_only_a_mapping_that_does_not_exist_yet() -> Result {
+        let proposal = namespace_change(1, 2);
+        creates_mapping("DNS", &proposal, None)?;
+        creates_mapping("DNS", &proposal, Some(&proposal.clone()))?;
+
+        for head in [namespace_change(1, 1), namespace_change(3, 2)] {
+            let error = match creates_mapping("DNS", &proposal, Some(&head)) {
+                Ok(()) => anyhow::bail!("an existing mapping must be refused"),
+                Err(e) => e.to_string(),
+            };
+            assert!(
+                error.contains("already exists at serial")
+                    && error.contains("does not sign a change to an existing one"),
+                "{error}"
+            );
+        }
         Ok(())
     }
 

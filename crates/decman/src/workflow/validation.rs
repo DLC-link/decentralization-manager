@@ -279,6 +279,8 @@ impl PeerExpectations {
             );
         }
 
+        require_new_mapping(config, payload).await?;
+
         tracing::info!(
             "DNS proposal matches the accepted invitation: {count} owners, threshold {threshold}",
             count = owners.len(),
@@ -353,7 +355,8 @@ impl PeerExpectations {
             &mapping,
             WhenUnrecorded::Fail,
         )
-        .await
+        .await?;
+        require_new_mapping(config, payload).await
     }
 
     /// Validate the DNS + P2P proposal pair of a kick, add-party or
@@ -2020,6 +2023,15 @@ fn check_set_delta(
         );
     }
     Ok(())
+}
+
+/// Refuse an onboarding proposal whose mapping already exists on the chain.
+/// An onboarding peer checks the proposal against the invitation only, not
+/// against an existing party, so it must not sign a change to one.
+async fn require_new_mapping(config: &NodeConfig, payload: &[u8]) -> Result {
+    let proposal: SignedTopologyTransaction = utils::read_first_message_from_bytes(payload)?;
+    let synchronizer_id = utils::get_synchronizer_id(config).await?;
+    topology::check_creates_mapping(config, &synchronizer_id, &proposal).await
 }
 
 /// Unwrap a coordinator-supplied `varint(len)||SignedTopologyTransaction`
