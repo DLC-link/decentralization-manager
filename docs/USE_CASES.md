@@ -160,11 +160,13 @@ Adding a 4th custodian involves both governance and topology:
       }'
     ```
 
-3. **Peer list**: Kick first, then remove the peer. The kick never contacts
-   the removed participant, so it does not need that peer entry. Each member
-   that stays must remain a peer of the coordinator until the kick completes.
-   The coordinator refuses a kick that is short of signers. The refusal names
-   each member that is not a peer.
+3. **Peer list**: The kick never contacts the removed participant. Its peer
+   entry can therefore be deleted before or after the kick. For a node whose
+   Noise key leaked, delete the entry first. Each remaining member that must
+   sign has to stay a peer of the coordinator until the kick completes. A kick
+   goes ahead without a member that is not a peer when the reachable members
+   still meet the threshold. Otherwise the coordinator refuses the kick before
+   it invites anyone, and the refusal names each member that is not a peer.
 
 4. **Cleanup on the removed node**: The removed participant keeps every
    contract it held for the party. It no longer sees the party's archives, so
