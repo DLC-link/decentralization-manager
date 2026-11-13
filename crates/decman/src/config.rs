@@ -324,8 +324,8 @@ pub struct NodeConfig {
     /// mode, uses `key-store.key` in the data directory. Not serialized.
     #[serde(skip)]
     pub key_store_key_file: Option<PathBuf>,
-    /// Whether a participant without KMS may hold new party keys, which
-    /// DecMan then copies into its key store. Not serialized.
+    /// Whether DecMan may generate new party Daml keys in its own key store
+    /// on a participant without KMS. Not serialized.
     #[serde(skip)]
     pub allow_software_party_keys: bool,
     /// Root directory containing data/ subdirectory
