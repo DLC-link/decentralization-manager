@@ -3147,7 +3147,8 @@ fn dars_bundle_refusal(
         })?;
         lengths.push((file.filename.len(), data.len()));
     }
-    let size = utils::encoded_files_len(lengths);
+    // A size too large to count is over any limit.
+    let size = utils::encoded_files_len(lengths).unwrap_or(usize::MAX);
     if size <= limit {
         return Ok(());
     }

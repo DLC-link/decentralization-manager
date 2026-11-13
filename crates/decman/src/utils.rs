@@ -584,12 +584,17 @@ pub fn encode_files(files: &[(String, Vec<u8>)]) -> Vec<u8> {
 }
 
 /// The length of the payload [`encode_files`] builds, from each file's
-/// filename length and data length.
-pub fn encoded_files_len(files: impl IntoIterator<Item = (usize, usize)>) -> usize {
-    4 + files
+/// filename length and data length. `None` when the length does not fit in a
+/// `usize`, because a wrapped sum would pass a size check.
+pub fn encoded_files_len(files: impl IntoIterator<Item = (usize, usize)>) -> Option<usize> {
+    files
         .into_iter()
-        .map(|(name_len, data_len)| 8 + name_len + data_len)
-        .sum::<usize>()
+        .try_fold(4_usize, |total, (name_len, data_len)| {
+            total
+                .checked_add(8)?
+                .checked_add(name_len)?
+                .checked_add(data_len)
+        })
 }
 
 /// Decode files from a payload
@@ -1078,8 +1083,14 @@ mod tests {
             ("empty.dar".to_string(), Vec::new()),
         ];
         let lengths = files.iter().map(|(name, data)| (name.len(), data.len()));
-        assert_eq!(encoded_files_len(lengths), encode_files(&files).len());
-        assert_eq!(encoded_files_len([]), encode_files(&[]).len());
+        assert_eq!(encoded_files_len(lengths), Some(encode_files(&files).len()));
+        assert_eq!(encoded_files_len([]), Some(encode_files(&[]).len()));
+    }
+
+    #[test]
+    fn encoded_files_len_refuses_a_total_that_overflows() {
+        assert_eq!(encoded_files_len([(0, usize::MAX)]), None);
+        assert_eq!(encoded_files_len([(5, usize::MAX - 20), (5, 10)]), None);
     }
 
     #[test]
