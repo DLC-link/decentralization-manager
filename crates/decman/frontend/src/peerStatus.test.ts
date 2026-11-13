@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { peerStatusTooltip } from "./peerStatus";
+import { peerStatusTooltip, peerVersionLabel } from "./peerStatus";
 import type { ParticipantStatus } from "./types";
 import { WORKFLOW_STEPS } from "./workflowSteps";
 
@@ -79,5 +79,27 @@ describe("peerStatusTooltip", () => {
     expect(peerStatusTooltip(st, SELF)).toBe(
       "Connected via Noise protocol — 42 ms — in Onboarding (Signing the namespace)",
     );
+  });
+});
+
+describe("peerVersionLabel", () => {
+  it("shows a release by its tag", () => {
+    expect(peerVersionLabel("1.15.0", "v1.15.0")).toEqual({ version: "v1.15.0" });
+  });
+
+  it("shows a per-commit build as its semver plus the commit", () => {
+    expect(peerVersionLabel("1.15.0", "abc1234")).toEqual({ version: "v1.15.0", build: "abc1234" });
+  });
+
+  it("shows a local build as it names itself", () => {
+    expect(peerVersionLabel("1.15.0", "1.15.0-dev")).toEqual({ version: "1.15.0-dev" });
+  });
+
+  it("falls back to the semver for a peer that predates build_version", () => {
+    expect(peerVersionLabel("1.13.0", undefined)).toEqual({ version: "v1.13.0" });
+  });
+
+  it("shows a dash when the peer reported nothing", () => {
+    expect(peerVersionLabel(undefined, undefined)).toEqual({ version: "—" });
   });
 });

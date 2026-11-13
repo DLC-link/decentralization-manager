@@ -123,9 +123,7 @@ const LinkRow = ({ label, probe, link, token, bands }: LinkRowProps) => {
             fontFamily: "var(--font-mono)",
             fontSize: "0.66rem",
             color: "text.disabled",
-            overflow: "hidden",
-            textOverflow: "ellipsis",
-            whiteSpace: "nowrap",
+            overflowWrap: "anywhere",
           }}
         >
           {probe}
@@ -270,16 +268,22 @@ export const NodeHealthCard = ({ config, health, selfLatency }: NodeHealthCardPr
             {synchronizers.length > 0 ? (
               <Box sx={{ display: "flex", flexDirection: "column", gap: 0.25 }}>
                 {synchronizers.map((s) => (
-                  <Typography
+                  <Box
                     key={s.physical_synchronizer_id}
-                    sx={{
-                      ...VALUE_SX,
-                      color: s.healthy ? "text.primary" : "warning.main",
-                    }}
+                    sx={{ display: "flex", alignItems: "center", gap: 0.5, minWidth: 0 }}
                   >
-                    {s.physical_synchronizer_id}
-                    {!s.healthy && " (unhealthy)"}
-                  </Typography>
+                    <CopyableText
+                      text={s.physical_synchronizer_id}
+                      truncate={{ start: 16, end: 8 }}
+                      variant="body2"
+                      color={s.healthy ? undefined : "warning.main"}
+                    />
+                    {!s.healthy && (
+                      <Typography variant="body2" sx={{ color: "warning.main", flexShrink: 0 }}>
+                        (unhealthy)
+                      </Typography>
+                    )}
+                  </Box>
                 ))}
               </Box>
             ) : (

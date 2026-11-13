@@ -62,3 +62,17 @@ export const peerStatusTooltip = (
   }
   return title;
 };
+
+/**
+ * A node's version as the compatibility semver that peers gate on, so every
+ * row of the peers table compares on the same scale. A build whose identity
+ * is not that semver, such as a per-commit image, adds its build after it.
+ */
+export const peerVersionLabel = (
+  version: string | undefined,
+  build: string | undefined,
+): { version: string; build?: string } => {
+  if (!version) return { version: build ?? "—" };
+  if (!build || build.includes(version)) return { version: build ?? `v${version}` };
+  return { version: `v${version}`, build };
+};
