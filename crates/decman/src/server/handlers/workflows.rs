@@ -42,9 +42,9 @@ use crate::{
             KickInvitePayload, KickRequest, KickResponse, KickStatus, MessageResponse,
             MissingEdgeKind, MissingPeerEdge, OnboardingInvitePayload, OnboardingMeshErrorResponse,
             OnboardingRequest, OnboardingResponse, OnboardingStatus, RotateKeyInvitePayload,
-            RotateKeyRequest, SuccessResponse, WorkflowGuard, WorkflowInstance, WorkflowKind,
-            WorkflowProgress, WorkflowResponse, WorkflowRole, WorkflowRun, WorkflowRunsResponse,
-            WorkflowStatusResponse, permission_from_proto,
+            RotateKeyRequest, StartClaim, SuccessResponse, WorkflowGuard, WorkflowInstance,
+            WorkflowKind, WorkflowProgress, WorkflowResponse, WorkflowRole, WorkflowRun,
+            WorkflowRunsResponse, WorkflowStatusResponse, permission_from_proto,
         },
     },
     signing::custody,
@@ -1151,16 +1151,10 @@ pub async fn start_kick(
     // party's topology mutations must not interleave (two kicks, or a kick
     // racing a contracts deployment, conflict at the Canton layer with
     // confusing step failures).
-    if let Some((run, kind)) =
-        find_inprogress_run_for_party(&data.db, &decentralized_party_id).await
-    {
-        return HttpResponse::Conflict().json(ErrorResponse {
-            error: format!(
-                "Party {decentralized_party_id} already has a {kind} workflow in flight \
-                 (run {run}); wait for it to finish or cancel it first"
-            ),
-        });
-    }
+    let _start = match claim_party_for_start(&data, &decentralized_party_id).await {
+        Ok(claim) => claim,
+        Err(response) => return response,
+    };
 
     let removed = kick_config.participant_id.as_ref().map_or_else(
         || kick_config.namespace_fingerprint.clone(),
@@ -1699,16 +1693,10 @@ pub async fn start_add_party(
 
     // Refuse a second workflow targeting the SAME decentralized party (see
     // start_kick for the rationale — topology mutations must not interleave).
-    if let Some((run, kind)) =
-        find_inprogress_run_for_party(&data.db, &decentralized_party_id).await
-    {
-        return HttpResponse::Conflict().json(ErrorResponse {
-            error: format!(
-                "Party {decentralized_party_id} already has a {kind} workflow in flight \
-                 (run {run}); wait for it to finish or cancel it first"
-            ),
-        });
-    }
+    let _start = match claim_party_for_start(&data, &decentralized_party_id).await {
+        Ok(claim) => claim,
+        Err(response) => return response,
+    };
 
     // Refuse to invite any peer that can't speak the concurrent-workflows wire
     // format — NO invites are sent if even one invitee fails the version gate.
@@ -2099,16 +2087,10 @@ pub async fn start_change_threshold(
 
     // Refuse a second workflow targeting the SAME dec party (topology mutations
     // must not interleave — see start_kick).
-    if let Some((run, kind)) =
-        find_inprogress_run_for_party(&data.db, &decentralized_party_id).await
-    {
-        return HttpResponse::Conflict().json(ErrorResponse {
-            error: format!(
-                "Party {decentralized_party_id} already has a {kind} workflow in flight \
-                 (run {run}); wait for it to finish or cancel it first"
-            ),
-        });
-    }
+    let _start = match claim_party_for_start(&data, &decentralized_party_id).await {
+        Ok(claim) => claim,
+        Err(response) => return response,
+    };
 
     // Refuse to invite any peer that can't speak the concurrent-workflows wire
     // format — NO invites are sent if even one invitee fails the version gate.
@@ -2484,14 +2466,10 @@ pub async fn start_rotate_key(
         instance_name: instance_name.clone(),
     };
 
-    if let Some((run, kind)) = find_inprogress_run_for_party(&data.db, &party).await {
-        return HttpResponse::Conflict().json(ErrorResponse {
-            error: format!(
-                "Party {party} already has a {kind} workflow in flight (run {run}); wait for it \
-                 to finish or cancel it first"
-            ),
-        });
-    }
+    let _start = match claim_party_for_start(&data, &party).await {
+        Ok(claim) => claim,
+        Err(response) => return response,
+    };
     let health = probe_invitee_health(&data.config, &data.db, &invitees).await;
     let incompatible = incompatible_versions(&health);
     if !incompatible.is_empty() {
@@ -3541,17 +3519,10 @@ pub async fn start_contracts(
     let contracts_state = &instance.http;
     // Refuse a second workflow targeting the SAME decentralized party (see
     // `find_inprogress_run_for_party`).
-    if let Some((run, kind)) =
-        find_inprogress_run_for_party(&data.db, &body.decentralized_party_id).await
-    {
-        return HttpResponse::Conflict().json(ErrorResponse {
-            error: format!(
-                "Party {} already has a {kind} workflow in flight (run {run}); wait for it \
-                 to finish or cancel it first",
-                body.decentralized_party_id
-            ),
-        });
-    }
+    let _start = match claim_party_for_start(&data, &body.decentralized_party_id).await {
+        Ok(claim) => claim,
+        Err(response) => return response,
+    };
 
     // Refuse to invite any peer that can't speak the concurrent-workflows wire
     // format — NO invites are sent if even one invitee fails the version gate.
@@ -5205,6 +5176,31 @@ fn format_incompatible_peers(incompatible: &[(String, String)]) -> String {
          older builds cannot participate). Blocking peer(s): {list}. Upgrade or \
          deselect them and retry."
     )
+}
+
+/// Claim `party` for this start request, and refuse it when a run is in
+/// flight for the party. The handler holds the claim until it returns. So a
+/// second request cannot pass the check before the first registers its run.
+async fn claim_party_for_start(
+    data: &web::Data<AppState>,
+    party: &CantonId,
+) -> std::result::Result<StartClaim, HttpResponse> {
+    let Some(claim) = data.workflows.claim_start(party) else {
+        return Err(HttpResponse::Conflict().json(ErrorResponse {
+            error: format!(
+                "Another request is starting a workflow for {party}; retry once it has started"
+            ),
+        }));
+    };
+    if let Some((run, kind)) = find_inprogress_run_for_party(&data.db, party).await {
+        return Err(HttpResponse::Conflict().json(ErrorResponse {
+            error: format!(
+                "Party {party} already has a {kind} workflow in flight (run {run}); wait for it \
+                 to finish or cancel it first"
+            ),
+        }));
+    }
+    Ok(claim)
 }
 
 /// Any in-progress run on this node (either role) already targeting the given

@@ -1,6 +1,6 @@
 use std::{
-    collections::HashMap,
-    sync::{Arc, RwLock as StdRwLock},
+    collections::{HashMap, HashSet},
+    sync::{Arc, Mutex as StdMutex, RwLock as StdRwLock},
 };
 
 use canton_common::decimal::DamlDecimal;
@@ -178,6 +178,27 @@ impl WorkflowInstance {
 #[derive(Clone, Default)]
 pub struct WorkflowRegistry {
     inner: Arc<StdRwLock<HashMap<String, Arc<WorkflowInstance>>>>,
+    /// Parties that a start request is checking and registering a run for.
+    starting: Arc<StdMutex<HashSet<CantonId>>>,
+}
+
+/// A start request's claim on a party, released on drop.
+///
+/// A start handler checks that no run is in flight for the party, then
+/// registers its own run. Two requests could otherwise both pass the check
+/// before either registers.
+pub struct StartClaim {
+    starting: Arc<StdMutex<HashSet<CantonId>>>,
+    party: CantonId,
+}
+
+impl Drop for StartClaim {
+    fn drop(&mut self) {
+        self.starting
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&self.party);
+    }
 }
 
 impl WorkflowRegistry {
@@ -196,6 +217,20 @@ impl WorkflowRegistry {
         }
         guard.insert(instance.instance_name.clone(), instance);
         true
+    }
+
+    /// Claim `party` for one start request. Returns `None` while another
+    /// request holds the claim.
+    pub fn claim_start(&self, party: &CantonId) -> Option<StartClaim> {
+        let inserted = self
+            .starting
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(party.clone());
+        inserted.then(|| StartClaim {
+            starting: self.starting.clone(),
+            party: party.clone(),
+        })
     }
 
     /// Look up the instance registered under `instance_name`.
@@ -1145,6 +1180,27 @@ mod tests {
         .await
         .map_err(|e| anyhow::anyhow!("NoiseServer::new: {e}"))?;
         Ok(ActiveWorkflow::Onboarding(Arc::new(server)))
+    }
+
+    /// Two start requests for one party must not both pass the in-flight
+    /// check. The second is refused until the first drops its claim.
+    #[test]
+    fn one_start_request_at_a_time_claims_a_party() -> anyhow::Result<()> {
+        let registry = WorkflowRegistry::new();
+        let party = CantonId::parse(
+            "party::1220aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        )?;
+        let other = CantonId::parse(
+            "other::1220aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        )?;
+
+        let first = registry.claim_start(&party);
+        assert!(first.is_some());
+        assert!(registry.claim_start(&party).is_none());
+        assert!(registry.claim_start(&other).is_some());
+        drop(first);
+        assert!(registry.claim_start(&party).is_some());
+        Ok(())
     }
 
     #[test]
