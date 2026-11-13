@@ -1429,9 +1429,22 @@ fn hosts_not_in<'a>(from: &'a PartyToParticipant, other: &PartyToParticipant) ->
 /// against its own records. Canton counts only the namespace threshold, so a
 /// host whose key goes cannot block the change alone. A host whose key this
 /// node does not know could hold the named key, so the peer refuses until it
-/// knows every host's key. A recorded key that is no longer an owner is stale
-/// and counts as unknown, except for the departing host: a resumed kick may
-/// have removed its key already.
+/// knows every staying host's key. A recorded key that is no longer an owner
+/// is stale and counts as unknown, except for the departing host: a resumed
+/// kick may have removed its key already.
+///
+/// A peer learns a host's key only from that host. A departing host that went
+/// offline before this node recorded its key can never report it, so the peer
+/// accepts the named key without a record for the departing host. Every
+/// staying host's key is still known and differs from the named key, and no
+/// other participant has claimed it, so no staying host loses its authority.
+/// A record that names a different key still refuses.
+///
+/// The accepted risk: an owner that hosts nothing and that never sent this
+/// node its claim is not protected. A dishonest coordinator can name that
+/// owner's key in place of the departing host's key. The peer cannot narrow
+/// the key down further, because a party that needs this kick often also
+/// holds such an unclaimed owner, and then two keys fit.
 fn check_kicked_owner_key(
     owner: &str,
     departing: Option<&str>,
@@ -1446,12 +1459,23 @@ fn check_kicked_owner_key(
         let recorded = records.host_keys.get(uid).map(String::as_str);
         if Some(uid) == departing {
             departing_hosts = true;
-            if recorded != Some(owner) {
-                anyhow::bail!(
+            match recorded {
+                Some(found) if found != owner => anyhow::bail!(
                     "Kick invitation removes owner key {owner} with host {uid}, but this node has \
-                     {found} on record for {uid}",
-                    found = recorded.unwrap_or("no owner key")
-                );
+                     {found} on record for {uid}"
+                ),
+                Some(_) => {}
+                None => {
+                    if let Some(claimant) = records.claims.get(owner)
+                        && claimant != uid
+                    {
+                        anyhow::bail!(
+                            "Kick invitation removes owner key {owner} with host {uid}, but this \
+                             node has no owner key on record for {uid} and has {owner} on record \
+                             as claimed by {claimant}"
+                        );
+                    }
+                }
             }
             continue;
         }
@@ -3585,6 +3609,51 @@ mod tests {
         .await
     }
 
+    /// A departing host that never reported its key to this node, for example
+    /// because it went offline first, can still be kicked. Every staying
+    /// host's key is known and differs from the named one.
+    #[tokio::test]
+    async fn a_host_kick_accepts_an_unrecorded_departing_key() -> Result {
+        let mut records = owner_records()?;
+        records.host_keys.remove(&canton_id("p2", 2)?.to_string());
+        host_kick(&["a", "b", "c"], (3, &["a", "c"]), "b", &records).await
+    }
+
+    /// The accepted risk, pinned on purpose: without a record for the
+    /// departing host, the peer accepts the key of an owner that hosts nothing
+    /// and that nobody claimed. A change to this rule must change this test.
+    #[tokio::test]
+    async fn an_unrecorded_departing_key_accepts_an_unclaimed_owners_key() -> Result {
+        let mut records = owner_records()?;
+        records.host_keys.remove(&canton_id("p2", 2)?.to_string());
+        records.claims.clear();
+        host_kick(&["a", "b", "c"], (3, &["a", "b"]), "c", &records).await
+    }
+
+    /// Without a record for the departing host, the named key may not be one
+    /// that another participant has claimed.
+    #[tokio::test]
+    async fn an_unrecorded_departing_key_may_not_be_claimed_by_another() -> Result {
+        let mut records = owner_records()?;
+        records.host_keys.remove(&canton_id("p2", 2)?.to_string());
+        expect_refusal(
+            host_kick(&["a", "b", "c"], (3, &["a", "b"]), "c", &records).await,
+            "as claimed by p3::",
+        )
+    }
+
+    /// Without a record for the departing host, the named key still may not
+    /// be a staying host's key.
+    #[tokio::test]
+    async fn an_unrecorded_departing_key_may_not_be_a_staying_hosts() -> Result {
+        let mut records = owner_records()?;
+        records.host_keys.remove(&canton_id("p2", 2)?.to_string());
+        expect_refusal(
+            host_kick(&["a", "b", "c"], (3, &["b", "c"]), "a", &records).await,
+            "which belongs to host p1::",
+        )
+    }
+
     /// A DNS proposal equal to the namespace in force would leave p2's key
     /// "b" in it while p2 stops hosting the party.
     #[tokio::test]
@@ -3633,22 +3702,13 @@ mod tests {
         Ok(())
     }
 
-    /// The participant and the owner key the invitation names must belong
-    /// together in this node's records.
+    /// When this node has the departing host's key on record, the owner key
+    /// the invitation names must be that key.
     #[tokio::test]
     async fn a_host_kick_needs_the_hosts_recorded_key() -> Result {
-        let head = ["a", "b", "c"];
         expect_refusal(
-            host_kick(&head, (3, &["a", "b"]), "c", &owner_records()?).await,
+            host_kick(&["a", "b", "c"], (3, &["a", "b"]), "c", &owner_records()?).await,
             "this node has b on record for p2::",
-        )?;
-        let mut unrecorded = owner_records()?;
-        unrecorded
-            .host_keys
-            .remove(&canton_id("p2", 2)?.to_string());
-        expect_refusal(
-            host_kick(&head, (3, &["a", "c"]), "b", &unrecorded).await,
-            "this node has no owner key on record for p2::",
         )
     }
 
