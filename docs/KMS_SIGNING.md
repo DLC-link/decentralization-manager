@@ -126,14 +126,16 @@ that account. Signatures are still verified against the registered public key.
    }
    ```
 
-   To find the key id, list the participant's keys over the Admin API — the
-   party Daml key is named `<party-prefix>-daml-transactions`, or
-   `<party-prefix>-daml-transactions-rotated-from-<fingerprint>` after a
-   rotation, and its metadata carries `kmsKeyId`. A rotation that lacks the
-   grant names the key id in its error:
+   To find the key id, list the participant's keys over the Admin API. Each
+   party Daml key has a name that starts with `<party-prefix>-daml-transactions`,
+   and its metadata carries `kmsKeyId`. Each onboarding or add-party run adds
+   `-run-<random id>` to the name, and a rotation adds
+   `-rotated-from-<fingerprint>`. A party created before per-run names keeps
+   the bare name. A rotation that lacks the grant names the key id in its
+   error:
 
    ```bash
-   grpcurl -plaintext -d '{"filters":{"name":"<party-prefix>-daml-transactions"}}' \
+   grpcurl -plaintext -d '{}' \
      <admin-host>:<admin-port> \
      com.digitalasset.canton.crypto.admin.v30.VaultService/ListMyKeys
    ```
@@ -157,6 +159,7 @@ that account. Signatures are still verified against the registered public key.
 | Onboarding fails with `DecMan cannot file this node's new Daml key under the party` | The member has no record of its key for the party, or its key store does not decrypt. Check `DECPM_KEY_STORE_KEY_FILE`, then retry the run from its coordinator. |
 | A peer refuses a rotation: `has ... on record as ...'s Daml key` | The coordinator's last rotation failed after it was submitted, and this peer did not record the new key. Retry that run. Do not start a new one. |
 | A peer refuses a rotation: `has no Daml key on record for ...` | The peer's party cache lacks a member's key. Refresh `/decentralized-parties` on that peer and retry. |
+| A rotation refuses to start: `inline signing key(s) for ... hosts` | The party keeps some members' keys in a legacy mapping. Run change-threshold first, then rotate. |
 | Workflow fails at export with `ExportKeyPair` | The key carries no `kms_key_id`, so decman used the vault-export path. Expected on JCE nodes; on a KMS node this means the key metadata is inconsistent. |
 
 ## Rotating a Daml key
@@ -200,6 +203,12 @@ generated earlier. The old key stays in the vault and in
 decman's key store, because decman never deletes a key. A party whose keys
 still sit in a legacy `PartyToKeyMapping` has its members' keys moved inline
 in the same change, and the members then retire the legacy mapping.
+
+decman refuses to rotate a key of a party that carries fewer inline keys than
+hosts. Such a party keeps the other keys in its legacy mapping, and Canton
+counts only the inline keys. A rotation would put every key inline at the
+inline threshold, so more members could sign alone. Run change-threshold
+first. It moves every key inline under a threshold that all members vote on.
 
 ### The KMS grant for the new key
 
@@ -296,10 +305,11 @@ copy of each key.
   decman's database and keep the encryption key safe. A member that loses
   either can no longer sign for the party. The other members must then kick
   it and add it again with add-party.
-- decman finds a generated key again by its name, as the vault does. A member
-  that is kicked and added again on the same node therefore gets the same
-  key back, unless the participant has moved to KMS since. After a suspected
-  compromise, rotate the key instead. decman
+- Each onboarding or add-party run creates a new Daml key. The key's name
+  holds a random id that decman records with the run, so a retry finds the
+  same key. A member that is kicked and added again therefore gets a new key,
+  never the key that a rotation replaced. On a KMS node, grant decman's role
+  `kms:Sign` on that new key, as step 2 of the setup describes. decman
   refuses to reuse a key that no longer decrypts, and asks for the previous
   encryption key.
 
