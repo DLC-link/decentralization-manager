@@ -304,6 +304,8 @@ pub struct GovConfirmation {
 /// A pending off-chain governance action (core-self), grouped by hash.
 #[derive(Clone, Debug, Deserialize)]
 pub struct GovAction {
+    #[serde(default)]
+    pub action_hash: String,
     /// The `ActionType` payload, echoed back verbatim on confirm / execute.
     #[serde(default)]
     pub action: Value,
@@ -315,6 +317,8 @@ pub struct GovAction {
     pub confirmation_count: i64,
     #[serde(default)]
     pub can_execute: bool,
+    #[serde(default)]
+    pub cannot_be_archived: bool,
 }
 
 /// A pending on-chain (core-domain) governance proposal.
@@ -336,6 +340,8 @@ pub struct DomainGovAction {
     pub can_execute: bool,
     #[serde(default)]
     pub orphaned: bool,
+    #[serde(default)]
+    pub cannot_be_archived: bool,
 }
 
 /// `/governance/confirmations` response: pending actions awaiting signatures.

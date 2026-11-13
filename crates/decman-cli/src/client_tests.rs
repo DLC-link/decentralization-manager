@@ -704,6 +704,110 @@ fn expire_prints_the_unresponsive_party() {
     assert!(failure.to_string().contains(&error), "{failure}");
 }
 
+#[test]
+fn pending_passes_include_dismissed() {
+    // Arrange
+    let fake = Fake::start();
+    fake.token_grant("password", "a-1", 1);
+    fake.mount(
+        Mock::given(method("GET"))
+            .and(path("/decentralized-parties"))
+            .respond_with(party_list(ALPHA, 2, &["PAR::1"]))
+            .expect(1),
+    );
+    fake.mount(
+        Mock::given(method("GET"))
+            .and(path("/governance/confirmations"))
+            .and(query_param("party_id", ALPHA))
+            .and(query_param("include_dismissed", "true"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "actions": [] })))
+            .expect(1),
+    );
+
+    // Act
+    let outcome = run_command(
+        &fake,
+        parse(&[
+            "governance",
+            "pending",
+            "--party",
+            "alpha",
+            "--include-dismissed",
+        ]),
+    )
+    .unwrap();
+
+    // Assert
+    assert_eq!(outcome.value, json!({ "actions": [] }));
+}
+
+#[test]
+fn dismiss_reads_dismissed_actions_and_sends_every_confirmation() {
+    // Arrange
+    let fake = Fake::start();
+    fake.token_grant("password", "a-1", 1);
+    fake.mount(
+        Mock::given(method("GET"))
+            .and(path("/decentralized-parties"))
+            .respond_with(party_list(ALPHA, 2, &["PAR::1"]))
+            .expect(1),
+    );
+    fake.mount(
+        Mock::given(method("GET"))
+            .and(path("/governance/confirmations"))
+            .and(query_param("include_dismissed", "true"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "threshold": 2,
+                "rules_contract_id": "rules-1",
+                "actions": [{
+                    "action_hash": "h-stuck",
+                    "action": { "type": "governance_set_threshold", "new_threshold": 2 },
+                    "confirmations": [
+                        { "contract_id": "c-1", "confirming_party": "gone::1220", "expires_at": 1 },
+                        { "contract_id": "c-2", "confirming_party": "gone::1220", "expires_at": 1 },
+                    ],
+                    "cannot_be_archived": true,
+                }],
+                "domain_actions": [],
+            })))
+            .expect(1),
+    );
+    fake.mount(
+        Mock::given(method("POST"))
+            .and(path("/governance/dismiss"))
+            .and(body_json(json!({
+                "party_id": ALPHA,
+                "confirmation_cids": ["c-1", "c-2"],
+            })))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(
+                    json!({ "message": "Confirmations dismissed on this node: 2." }),
+                ),
+            )
+            .expect(1),
+    );
+
+    // Act
+    let outcome = run_command(
+        &fake,
+        parse(&[
+            "governance",
+            "dismiss",
+            "--party",
+            "alpha",
+            "--action",
+            "h-stuck",
+        ]),
+    )
+    .unwrap();
+
+    // Assert
+    assert_eq!(
+        outcome.value["message"],
+        "Confirmations dismissed on this node: 2."
+    );
+}
+
 #[cfg(unix)]
 #[test]
 fn grant_rights_takes_the_admin_client_from_the_profile() {

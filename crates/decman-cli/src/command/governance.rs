@@ -1,4 +1,5 @@
-//! Governance confirm, execute, revoke, expire and cancel-proposal.
+//! Governance confirm, execute, revoke, expire, cancel-proposal, dismiss and
+//! restore.
 //!
 //! Each of these needs ids from `GET /governance/confirmations`. The command
 //! reads that list, finds the action the caller names, and builds the same
@@ -6,7 +7,8 @@
 
 use anyhow::{Context, Result, bail};
 use common::api::{
-    CancelConfirmationRequest, CancelProposalRequest, ExpireConfirmationRequest, GovernanceType,
+    CancelConfirmationRequest, CancelProposalRequest, DismissConfirmationsRequest,
+    ExpireConfirmationRequest, GovernanceType,
 };
 use reqwest::Method;
 use serde_json::{Value, json};
@@ -31,6 +33,8 @@ pub enum Target {
     Confirmation(String),
     /// A self-governance action (`core_self`), by its full action JSON.
     Action(Value),
+    /// A self-governance action (`core_self`), by its `action_hash`.
+    ActionHash(String),
 }
 
 /// A pending action found in the confirmations list.
@@ -59,6 +63,13 @@ impl Pending<'_> {
         match self {
             Self::SelfAction(action) => action.can_execute,
             Self::Domain(domain) => domain.can_execute,
+        }
+    }
+
+    fn cannot_be_archived(&self) -> bool {
+        match self {
+            Self::SelfAction(action) => action.cannot_be_archived,
+            Self::Domain(domain) => domain.cannot_be_archived,
         }
     }
 
@@ -103,12 +114,32 @@ const MAX_PAGES: usize = 50;
 
 /// The full confirmations list for `party_id`, with every page of proposals.
 /// The server sends 25 proposals per page by default, so an older proposal
-/// is only found on a later page.
+/// is only found on a later page. Actions dismissed on this node are left out.
 ///
 /// # Errors
 ///
 /// Returns an error if a request fails or a response does not parse.
 pub fn fetch(client: &mut DecmanClient, party_id: &str) -> Result<GovernanceConfirmations> {
+    read_pages(client, party_id, false)
+}
+
+/// As [`fetch`], with the actions dismissed on this node, marked `dismissed`.
+///
+/// # Errors
+///
+/// Returns an error if a request fails or a response does not parse.
+pub fn fetch_with_dismissed(
+    client: &mut DecmanClient,
+    party_id: &str,
+) -> Result<GovernanceConfirmations> {
+    read_pages(client, party_id, true)
+}
+
+fn read_pages(
+    client: &mut DecmanClient,
+    party_id: &str,
+    include_dismissed: bool,
+) -> Result<GovernanceConfirmations> {
     let mut cursor: Option<String> = None;
     let mut all: Option<GovernanceConfirmations> = None;
     for page_number in 1..=MAX_PAGES {
@@ -116,6 +147,9 @@ pub fn fetch(client: &mut DecmanClient, party_id: &str) -> Result<GovernanceConf
             ("party_id".to_owned(), party_id.to_owned()),
             ("limit".to_owned(), PAGE_SIZE.to_string()),
         ];
+        if include_dismissed {
+            query.push(("include_dismissed".to_owned(), "true".to_owned()));
+        }
         if let Some(cursor) = &cursor {
             query.push(("cursor".to_owned(), cursor.clone()));
         }
@@ -171,6 +205,11 @@ pub fn find<'a>(
             .iter()
             .find(|pending| &pending.action == action)
             .map(Pending::SelfAction),
+        Target::ActionHash(hash) => confirmations
+            .actions
+            .iter()
+            .find(|pending| &pending.action_hash == hash)
+            .map(Pending::SelfAction),
         Target::Confirmation(cid) => confirmations
             .actions
             .iter()
@@ -191,6 +230,7 @@ fn require<'a>(confirmations: &'a GovernanceConfirmations, target: &Target) -> R
         Target::Proposal(cid) => format!("proposal {cid} is not pending for this party"),
         Target::Confirmation(cid) => format!("no pending action holds confirmation {cid}"),
         Target::Action(_) => "the given action is not pending for this party".to_owned(),
+        Target::ActionHash(hash) => format!("no pending action has the hash {hash}"),
     })
 }
 
@@ -329,6 +369,53 @@ pub fn cancel_proposal_body(
         proposal_cid: proposal_cid.to_owned(),
         confirmation_cid: mine,
     })
+}
+
+/// Body for `POST /governance/dismiss` or `POST /governance/restore`: every
+/// confirmation on the action.
+fn confirmation_ids_body(party_id: &str, pending: &Pending<'_>) -> Result<Value> {
+    to_body(&DismissConfirmationsRequest {
+        party_id: canton_id(party_id)?,
+        confirmation_cids: pending
+            .confirmations()
+            .iter()
+            .map(|confirmation| confirmation.contract_id.clone())
+            .collect(),
+    })
+}
+
+/// Body for `POST /governance/dismiss`, which hides the action on this node.
+///
+/// # Errors
+///
+/// Returns an error if the target is not listed, or if it can still be
+/// archived.
+pub fn dismiss_body(
+    confirmations: &GovernanceConfirmations,
+    party_id: &str,
+    target: &Target,
+) -> Result<Value> {
+    let pending = require(confirmations, target)?;
+    if !pending.cannot_be_archived() {
+        bail!(
+            "this action can still be archived. \
+             Only an action that cannot be archived can be dismissed"
+        );
+    }
+    confirmation_ids_body(party_id, &pending)
+}
+
+/// Body for `POST /governance/restore`, which shows the action again.
+///
+/// # Errors
+///
+/// Returns an error if the target is not listed.
+pub fn restore_body(
+    confirmations: &GovernanceConfirmations,
+    party_id: &str,
+    target: &Target,
+) -> Result<Value> {
+    confirmation_ids_body(party_id, &require(confirmations, target)?)
 }
 
 #[cfg(test)]
@@ -518,5 +605,103 @@ mod tests {
         // Assert
         assert_eq!(body["confirmation_cid"], Value::Null);
         assert_eq!(body["proposal_cid"], "p-1");
+    }
+
+    /// A self action and an orphaned proposal that cannot be archived, and a
+    /// live proposal that can.
+    fn stuck_confirmations() -> GovernanceConfirmations {
+        serde_json::from_value(json!({
+            "threshold": 2,
+            "rules_contract_id": "rules",
+            "actions": [{
+                "action_hash": "h-stuck",
+                "action": { "type": "governance_set_threshold", "new_threshold": 2 },
+                "confirmations": [
+                    { "contract_id": "c-a", "confirming_party": "gone::1220", "expires_at": 1 },
+                    { "contract_id": "c-b", "confirming_party": "gone::1220", "expires_at": 2 }
+                ],
+                "cannot_be_archived": true
+            }],
+            "domain_actions": [
+                {
+                    "proposal_cid": "p-orphan",
+                    "confirmations": [
+                        { "contract_id": "c-d", "confirming_party": "gone::1220", "expires_at": 1 }
+                    ],
+                    "orphaned": true,
+                    "cannot_be_archived": true
+                },
+                {
+                    "proposal_cid": "p-live",
+                    "confirmations": [
+                        { "contract_id": "c-e", "confirming_party": "gone::1220", "expires_at": 1 }
+                    ]
+                }
+            ]
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn dismiss_takes_every_confirmation_of_the_action() {
+        // Act
+        let by_hash = dismiss_body(
+            &stuck_confirmations(),
+            DEC,
+            &Target::ActionHash("h-stuck".to_owned()),
+        )
+        .unwrap();
+        let by_proposal = dismiss_body(
+            &stuck_confirmations(),
+            DEC,
+            &Target::Proposal("p-orphan".to_owned()),
+        )
+        .unwrap();
+
+        // Assert
+        assert_eq!(
+            by_hash,
+            json!({ "party_id": DEC, "confirmation_cids": ["c-a", "c-b"] })
+        );
+        assert_eq!(by_proposal["confirmation_cids"], json!(["c-d"]));
+    }
+
+    #[test]
+    fn dismiss_refuses_an_action_that_can_still_be_archived() {
+        for (confirmations, target) in [
+            (stuck_confirmations(), Target::Proposal("p-live".to_owned())),
+            (confirmations(), Target::Proposal("p-1".to_owned())),
+        ] {
+            let error = dismiss_body(&confirmations, DEC, &target).unwrap_err();
+            assert!(
+                error.to_string().contains("can still be archived"),
+                "{error}"
+            );
+        }
+    }
+
+    #[test]
+    fn restore_takes_every_confirmation_of_the_action() {
+        // Act
+        let body = restore_body(
+            &stuck_confirmations(),
+            DEC,
+            &Target::ActionHash("h-stuck".to_owned()),
+        )
+        .unwrap();
+
+        // Assert
+        assert_eq!(body["confirmation_cids"], json!(["c-a", "c-b"]));
+    }
+
+    #[test]
+    fn an_unknown_action_hash_is_an_error() {
+        let error = restore_body(
+            &stuck_confirmations(),
+            DEC,
+            &Target::ActionHash("h-missing".to_owned()),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("h-missing"), "{error}");
     }
 }

@@ -502,6 +502,29 @@ impl TargetArgs {
     }
 }
 
+/// Names one governance action to dismiss or restore.
+#[derive(Debug, Args)]
+#[command(group(ArgGroup::new("target").required(true).args(["proposal", "action"])))]
+pub struct DismissTargetArgs {
+    /// Contract id of an on-chain proposal.
+    #[arg(long)]
+    proposal: Option<String>,
+    /// The action_hash of a self-governance action, as `governance pending`
+    /// shows it.
+    #[arg(long, value_name = "HASH")]
+    action: Option<String>,
+}
+
+impl DismissTargetArgs {
+    fn target(&self) -> Result<Target> {
+        match (&self.proposal, &self.action) {
+            (Some(cid), _) => Ok(Target::Proposal(cid.clone())),
+            (_, Some(hash)) => Ok(Target::ActionHash(hash.clone())),
+            _ => bail!("name the action with --proposal or --action"),
+        }
+    }
+}
+
 #[derive(Debug, Subcommand)]
 pub enum GovernanceCommand {
     /// The governance rules: members, threshold, and timeout.
@@ -520,6 +543,9 @@ pub enum GovernanceCommand {
         /// The next_cursor of the previous page.
         #[arg(long)]
         cursor: Option<String>,
+        /// Also list the actions dismissed on this node.
+        #[arg(long)]
+        include_dismissed: bool,
     },
     /// Proposals, one page at a time.
     Proposals {
@@ -600,6 +626,21 @@ pub enum GovernanceCommand {
         /// Contract id of the proposal.
         #[arg(long)]
         proposal: String,
+    },
+    /// Hide an action that cannot be archived, on this node only. Nothing is
+    /// sent to the ledger.
+    Dismiss {
+        #[command(flatten)]
+        party: PartyArg,
+        #[command(flatten)]
+        target: DismissTargetArgs,
+    },
+    /// List a dismissed action again.
+    Restore {
+        #[command(flatten)]
+        party: PartyArg,
+        #[command(flatten)]
+        target: DismissTargetArgs,
     },
 }
 
@@ -1529,11 +1570,15 @@ fn run_governance(client: &mut DecmanClient, command: GovernanceCommand) -> Resu
             party,
             limit,
             cursor,
+            include_dismissed,
         } => {
             let party = resolve_party(client, &party)?;
             let mut query = vec![("party_id", party.id)];
             optional(&mut query, "limit", limit.map(|limit| limit.to_string()));
             optional(&mut query, "cursor", cursor);
+            if include_dismissed {
+                query.push(("include_dismissed", "true".to_owned()));
+            }
             get(client, "/governance/confirmations", &query)
         }
         GovernanceCommand::Proposals {
@@ -1632,6 +1677,20 @@ fn run_governance(client: &mut DecmanClient, command: GovernanceCommand) -> Resu
             let pending = governance::fetch(client, &party.id)?;
             let body = governance::cancel_proposal_body(&pending, &party.id, &proposal)?;
             post(client, "/governance/cancel-proposal", Some(&body))
+        }
+        GovernanceCommand::Dismiss { party, target } => {
+            let target = target.target()?;
+            let party = resolve_party(client, &party)?;
+            let pending = governance::fetch_with_dismissed(client, &party.id)?;
+            let body = governance::dismiss_body(&pending, &party.id, &target)?;
+            post(client, "/governance/dismiss", Some(&body))
+        }
+        GovernanceCommand::Restore { party, target } => {
+            let target = target.target()?;
+            let party = resolve_party(client, &party)?;
+            let pending = governance::fetch_with_dismissed(client, &party.id)?;
+            let body = governance::restore_body(&pending, &party.id, &target)?;
+            post(client, "/governance/restore", Some(&body))
         }
     }
 }
