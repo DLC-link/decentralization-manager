@@ -32,6 +32,10 @@ pub mod artifact_kinds {
     pub const SIGNED_DNS_PROPOSAL: &str = "signed_dns_proposal";
     pub const SIGNED_P2P_PROPOSAL: &str = "signed_p2p_proposal";
     pub const PEER_PUBLIC_KEYS: &str = "peer_public_keys";
+    /// The name of the Daml key this node creates in an onboarding or
+    /// add-party run. Plaintext UTF-8. A retry reads it to find the same
+    /// key, and a new run picks a new name.
+    pub const DAML_KEY_NAME: &str = "daml_key_name";
     pub const PARTICIPANT_ID: &str = "participant_id";
     /// Resolved decentralized party id (`{prefix}::{namespace_fingerprint}`)
     /// produced by onboarding's CreateProposals once all peer namespace

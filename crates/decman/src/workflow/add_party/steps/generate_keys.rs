@@ -12,6 +12,7 @@ use crate::{
         add_party::AddPartyConfig,
         onboarding::steps::generate_keys::{
             encode_keys_payload, get_or_create_signing_key, propose_namespace_delegation,
+            run_daml_key_name,
         },
         party_replication::capture_offset_once,
         storage::{WorkflowStorage, artifact_kinds},
@@ -23,7 +24,7 @@ use crate::{
 /// needs locally.
 ///
 /// Mirrors onboarding's `generate_keys` (same key names, same idempotent
-/// get-or-create path, same KMS requirement, same delegation proposal), plus
+/// get-or-create path, a new Daml key for each run, same KMS requirement, same delegation proposal), plus
 /// one add-party-specific extra: the participant's current ledger offset is
 /// captured BEFORE the party gets activated here, because
 /// `ClearPartyOnboardingFlag` later needs a `begin_offset_exclusive` that
@@ -41,7 +42,13 @@ pub async fn generate_keys(
     custody::require_kms_participant(config, storage, &mut vault_client).await?;
 
     let namespace_key_name = add_party_config.namespace_key_name();
-    let daml_key_name = add_party_config.daml_key_name();
+    let daml_key_name = run_daml_key_name(
+        config,
+        storage,
+        instance_name,
+        &add_party_config.decentralized_party_id.prefix,
+    )
+    .await?;
 
     let (namespace_key, namespace_was_existing) = get_or_create_signing_key(
         &mut vault_client,
