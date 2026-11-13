@@ -1623,12 +1623,14 @@ async fn store_parties_to_db(
             .map(|(p, _)| p)
             .unwrap_or(&party_id_str);
 
-        let version = topology_versions
-            .get(&party_id_str)
-            .copied()
-            .ok_or_else(|| {
-                anyhow::anyhow!("Cannot cache {party_id_str} without its DNS and P2P serials")
-            })?;
+        // Without both serials a stale read cannot be told from a fresh one.
+        // The party keeps its cached rows until a later refresh reads them.
+        let Some(version) = topology_versions.get(&party_id_str).copied() else {
+            tracing::warn!(
+                "Not caching {party_id_str}: the read returned no DNS or P2P serial for it"
+            );
+            continue;
+        };
         if !tx
             .advance_dec_party_topology_version(&party.party_id, version)
             .await?
@@ -3298,6 +3300,59 @@ mod tests {
         let owners = pool.get_dec_party_owners(&confirmed.party_id).await?;
         assert_eq!(owners.len(), 1);
         assert_eq!(owners[0].owner_key, "surviving-owner");
+        Ok(())
+    }
+
+    /// The read returned one party without its serials. That party is
+    /// skipped and keeps the rows it had. Every other party is still cached.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_party_without_serials_does_not_block_the_others(
+        pool: SqlitePool,
+    ) -> anyhow::Result<()> {
+        let unversioned = a_party()?;
+        let mut versioned = a_party()?;
+        versioned.party_id = CantonId::parse(&format!("cbtc::1220{}", "ab".repeat(32)))?;
+        let serials = |party: &DecentralizedParty, serial: i64| {
+            (
+                party.party_id.to_string(),
+                DecPartyTopologyVersion {
+                    namespace_serial: serial,
+                    p2p_serial: serial,
+                },
+            )
+        };
+        store_parties_to_db(
+            &pool,
+            "cbtc",
+            std::slice::from_ref(&unversioned),
+            &HashMap::from([serials(&unversioned, 1)]),
+        )
+        .await?;
+
+        let mut changed = unversioned.clone();
+        changed.threshold = 2;
+        versioned.threshold = 3;
+        store_parties_to_db(
+            &pool,
+            "cbtc",
+            &[changed, versioned.clone()],
+            &HashMap::from([serials(&versioned, 1)]),
+        )
+        .await?;
+
+        let cached: HashMap<String, i64> = pool
+            .get_dec_parties_by_prefix("cbtc")
+            .await?
+            .into_iter()
+            .map(|row| (row.party_id, row.threshold))
+            .collect();
+        assert_eq!(
+            cached,
+            HashMap::from([
+                (unversioned.party_id.to_string(), 1),
+                (versioned.party_id.to_string(), 3),
+            ])
+        );
         Ok(())
     }
 
