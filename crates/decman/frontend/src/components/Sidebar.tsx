@@ -204,7 +204,7 @@ export const Sidebar = ({
               </ListItemIcon>
               {!collapsed && <ListItemText primary={item.label} />}
               {!collapsed && count > 0 && (
-                <Badge badgeContent={count} color={badgeColor(item.index)} sx={{ mr: 1 }} />
+                <Badge badgeContent={count} max={999} color={badgeColor(item.index)} sx={{ mr: 1 }} />
               )}
             </ListItemButton>
           );
