@@ -393,7 +393,7 @@ impl NoiseClient {
             MessageType::try_from(command_type).map_err(|_| NoiseError::InvalidMessage)?;
 
         // Bound coordinator-supplied metadata before allocating or looping
-        // (mirrors `send_noise_message_with_chunked_response`): a malicious or
+        // (mirrors `receive_chunked_response`): a malicious or
         // buggy coordinator could otherwise advertise multi-GB sizes and OOM
         // us, or send a chunk_count inconsistent with total_size.
         if total_size > MAX_CHUNKED_TOTAL_SIZE || chunk_count > MAX_CHUNK_COUNT {

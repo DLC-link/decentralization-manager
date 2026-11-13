@@ -1042,7 +1042,7 @@ pub async fn send_noise_message_with_retry(
 /// big-endian.
 ///
 /// Returns `(command_type, total_size, chunk_count)` on success.
-fn parse_chunked_command_metadata(
+pub(crate) fn parse_chunked_command_metadata(
     payload: &[u8],
 ) -> Result<(MessageType, usize, usize), NoiseError> {
     if payload.len() < 10 {
@@ -1056,41 +1056,27 @@ fn parse_chunked_command_metadata(
     Ok((command_type, total_size, chunk_count))
 }
 
-/// Send a message that may receive a chunked response.
-///
-/// First call goes through `send_noise_message_with_retry`. If the response
-/// is `MessageType::ChunkedCommand`, this function transparently fetches the
-/// referenced chunks (one Noise call per chunk, each with retry) and
-/// returns the **assembled** Message bytes — i.e. the final `Bytes` is the
-/// `Message::to_bytes()` form of `Message::new(original_command_type,
-/// reassembled_payload)`. Callers can decode it the same way they would a
-/// non-chunked response.
-///
-/// If the response isn't chunked, the original bytes are returned unchanged.
+/// Fetch the chunks that a `MessageType::ChunkedCommand` answer announces in
+/// `meta`, and return them as one message of the announced type.
 ///
 /// Each chunk fetch is a fresh Noise connection (TCP connect + handshake +
-/// 1 round-trip). Retry policy applies to each individual chunk fetch.
-pub async fn send_noise_message_with_chunked_response(
+/// 1 round-trip). Retry policy applies to each individual chunk fetch. The
+/// requests carry no run instance, so the other node serves them from its
+/// chunk cache and not from a workflow's command.
+///
+/// # Errors
+///
+/// Errors when `meta` exceeds the caps or does not add up, when a chunk
+/// cannot be fetched, or when a chunk carries the wrong index.
+pub(crate) async fn receive_chunked_response(
     peer_address: &str,
     peer_port: u16,
     psk: &[u8; 32],
     identity: &[u8],
-    message: &Message,
+    meta: &[u8],
     config: &NoiseRetryConfig,
-) -> Result<Bytes, NoiseError> {
-    let response =
-        send_noise_message_with_retry(peer_address, peer_port, psk, identity, message, config)
-            .await?;
-
-    let resp_msg = Message::from_bytes(&response).map_err(|_| NoiseError::InvalidMessage)?;
-
-    if resp_msg.msg_type != MessageType::ChunkedCommand {
-        // Not chunked — caller can decode `response` directly.
-        return Ok(response);
-    }
-
-    let (command_type, total_size, chunk_count) =
-        parse_chunked_command_metadata(&resp_msg.payload)?;
+) -> Result<Message, NoiseError> {
+    let (command_type, total_size, chunk_count) = parse_chunked_command_metadata(meta)?;
 
     // Bound peer-supplied metadata before we allocate or loop. A malicious or
     // buggy peer could otherwise advertise multi-GB sizes and trigger an OOM.
@@ -1176,10 +1162,7 @@ pub async fn send_noise_message_with_chunked_response(
         return Err(NoiseError::InvalidMessage);
     }
 
-    // Re-encode as a complete Message of the original command type so the
-    // caller can decode it exactly as if the response had arrived unchunked.
-    let assembled_msg = Message::new(command_type, assembled);
-    Ok(Bytes::from(assembled_msg.to_bytes()))
+    Ok(Message::new(command_type, assembled))
 }
 
 #[cfg(test)]

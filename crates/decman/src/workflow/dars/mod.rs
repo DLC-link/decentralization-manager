@@ -1,5 +1,6 @@
 pub mod config;
 pub mod coordinator;
+pub mod peer;
 
 pub use config::DarsConfig;
 
