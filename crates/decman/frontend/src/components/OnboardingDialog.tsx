@@ -379,9 +379,9 @@ export const OnboardingDialog = ({
       slotProps={{
         paper: {
           sx: {
-            width: 480,
+            width: 540,
             maxWidth: "calc(100% - 32px)",
-            maxHeight: "min(90vh, 720px)",
+            maxHeight: "min(90vh, 780px)",
             borderRadius: "12px",
             border: "1px solid",
             borderColor: "divider",
@@ -408,13 +408,15 @@ export const OnboardingDialog = ({
         </Typography>
       </Box>
 
-      {/* Body — fills the modal; only the peer list scrolls. */}
+      {/* Body — fills the modal; the peer list takes the spare height and
+          scrolls. On a short screen the body scrolls instead of the list
+          shrinking below four rows. */}
       <Box
         sx={{
           p: "20px 24px",
           flex: 1,
           minHeight: 0,
-          overflow: "hidden",
+          overflowY: "auto",
           display: "flex",
           flexDirection: "column",
           gap: 2.25,
@@ -423,6 +425,7 @@ export const OnboardingDialog = ({
         <Box sx={{ flexShrink: 0 }}>
           <TextField
             label="Party ID prefix"
+            size="small"
             value={partyIdPrefix}
             onChange={(e) => setPartyIdPrefix(e.target.value)}
             placeholder="my-network"
@@ -468,8 +471,10 @@ export const OnboardingDialog = ({
           sx={{ height: "1px", bgcolor: "divider", mx: "-24px", flexShrink: 0 }}
         />
 
-        {/* Peers to invite — this section flexes to fill, the list scrolls. */}
-        <Box sx={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column" }}>
+        {/* Peers to invite. The list below is the body's flexing child: it
+            takes the spare height and scrolls, and never shrinks below four
+            rows. When even that does not fit, the body scrolls instead. */}
+        <Box sx={{ flexShrink: 0 }}>
           <Box
             sx={{
               flexShrink: 0,
@@ -493,20 +498,11 @@ export const OnboardingDialog = ({
             </Typography>
             {selectablePeers.length > 0 && (
               <Box sx={{ display: "flex", alignItems: "center", gap: 1.5 }}>
-                <Typography
-                  sx={{
-                    fontFamily: "var(--font-mono)",
-                    fontSize: 12,
-                    color: "text.secondary",
-                  }}
-                >
-                  <Box
-                    component="span"
-                    sx={{ color: "var(--accent)", fontWeight: 500 }}
-                  >
+                <Typography sx={{ fontSize: 12, color: "text.secondary" }}>
+                  <Box component="span" sx={{ color: "text.primary", fontWeight: 500 }}>
                     {selectedPeerIds.size}
                   </Box>{" "}
-                  of {selectablePeers.length}
+                  of {selectablePeers.length} selected
                 </Typography>
                 <Button
                   variant="text"
@@ -532,205 +528,203 @@ export const OnboardingDialog = ({
               No peers configured. Add peers in Network Configuration first.
             </Typography>
           ) : (
-            <>
-              {showFilter && (
-                <TextField
-                  size="small"
-                  fullWidth
-                  value={filter}
-                  onChange={(e) => setFilter(e.target.value)}
-                  placeholder="Filter by name or address"
-                  disabled={controlsDisabled}
-                  sx={{ mt: 1.5, flexShrink: 0 }}
-                  slotProps={{
-                    input: {
-                      startAdornment: (
-                        <InputAdornment position="start">
-                          <SearchIcon fontSize="small" />
-                        </InputAdornment>
-                      ),
-                    },
-                  }}
-                />
-              )}
-              <Box
-                sx={{
-                  mt: 1.25,
-                  flex: 1,
-                  minHeight: 80,
-                  border: "1px solid",
-                  borderColor: "divider",
-                  borderRadius: "8px",
-                  bgcolor: "background.default",
-                  overflowY: "auto",
-                  p: 0.5,
-                  display: "flex",
-                  flexDirection: "column",
-                  gap: "4px",
+            showFilter && (
+              <TextField
+                size="small"
+                fullWidth
+                value={filter}
+                onChange={(e) => setFilter(e.target.value)}
+                placeholder="Filter by name or address"
+                disabled={controlsDisabled}
+                sx={{ mt: 1.5 }}
+                slotProps={{
+                  input: {
+                    startAdornment: (
+                      <InputAdornment position="start">
+                        <SearchIcon fontSize="small" />
+                      </InputAdornment>
+                    ),
+                  },
                 }}
-              >
-                {visiblePeers.length === 0 ? (
-                  <Typography
-                    sx={{
-                      fontSize: 13,
-                      color: "text.disabled",
-                      textAlign: "center",
-                      py: 3,
-                    }}
-                  >
-                    No peers match “{filter.trim()}”.
-                  </Typography>
-                ) : (
-                  visiblePeers.map((peer) => {
-                    const sel = selectedPeerIds.has(peer.participant_id);
-                    return (
-                      <Box
-                        key={peer.participant_id}
-                        role="checkbox"
-                        aria-checked={sel}
-                        tabIndex={controlsDisabled ? -1 : 0}
-                        onClick={() =>
-                          !controlsDisabled && togglePeer(peer.participant_id)
-                        }
-                        onKeyDown={(e) => {
-                          if (
-                            (e.key === "Enter" || e.key === " ") &&
-                            !controlsDisabled
-                          ) {
-                            e.preventDefault();
-                            togglePeer(peer.participant_id);
-                          }
-                        }}
-                        sx={{
-                          display: "flex",
-                          alignItems: "center",
-                          gap: 1.5,
-                          p: "9px 10px",
-                          borderRadius: "6px",
-                          cursor: controlsDisabled ? "default" : "pointer",
-                          opacity: controlsDisabled ? 0.6 : 1,
-                          bgcolor: sel
-                            ? "rgba(214, 58, 15, 0.08)"
-                            : "transparent",
-                          transition: "background-color 0.12s ease-out",
-                          "&:hover": controlsDisabled
-                            ? undefined
-                            : {
-                                bgcolor: sel
-                                  ? "rgba(214, 58, 15, 0.14)"
-                                  : "action.hover",
-                              },
-                        }}
-                      >
-                        <Box
-                          sx={{
-                            flexShrink: 0,
-                            width: 18,
-                            height: 18,
-                            borderRadius: "4px",
-                            border: "1.5px solid",
-                            borderColor: sel ? "var(--accent)" : "text.secondary",
-                            bgcolor: sel ? "var(--accent)" : "transparent",
-                            color: "#fff",
-                            display: "grid",
-                            placeItems: "center",
-                            transition: "0.12s ease-out",
-                          }}
-                        >
-                          {sel && <CheckIcon sx={{ fontSize: 13 }} />}
-                        </Box>
-                        <Box sx={{ flex: 1, minWidth: 0 }}>
-                          <Typography
-                            sx={{ fontSize: 14, fontWeight: 500, lineHeight: 1.3 }}
-                          >
-                            {peer.name || peer.participant_id}
-                          </Typography>
-                          <Typography
-                            sx={{
-                              fontFamily: "var(--font-mono)",
-                              fontSize: 12,
-                              color: "text.secondary",
-                              whiteSpace: "nowrap",
-                              overflow: "hidden",
-                              textOverflow: "ellipsis",
-                            }}
-                          >
-                            {peer.address}:{peer.port}
-                          </Typography>
-                        </Box>
-                      </Box>
-                    );
-                  })
-                )}
-              </Box>
-            </>
+              />
+            )
           )}
         </Box>
+
+        {!loadingPeers && selectablePeers.length > 0 && (
+          <Box
+            sx={{
+              // Pulls the list closer to the filter than the body's gap.
+              mt: -1,
+              flex: 1,
+              // Four rows, or fewer when fewer peers match.
+              minHeight: Math.min(Math.max(visiblePeers.length, 1), 4) * 58 + 8,
+              border: "1px solid",
+              borderColor: "divider",
+              borderRadius: "8px",
+              bgcolor: "background.default",
+              overflowY: "auto",
+              p: 0.5,
+              display: "flex",
+              flexDirection: "column",
+              gap: "4px",
+            }}
+          >
+            {visiblePeers.length === 0 ? (
+              <Typography
+                sx={{
+                  fontSize: 13,
+                  color: "text.disabled",
+                  textAlign: "center",
+                  py: 3,
+                }}
+              >
+                No peers match “{filter.trim()}”.
+              </Typography>
+            ) : (
+              visiblePeers.map((peer) => {
+                const sel = selectedPeerIds.has(peer.participant_id);
+                return (
+                  <Box
+                    key={peer.participant_id}
+                    role="checkbox"
+                    aria-checked={sel}
+                    tabIndex={controlsDisabled ? -1 : 0}
+                    onClick={() =>
+                      !controlsDisabled && togglePeer(peer.participant_id)
+                    }
+                    onKeyDown={(e) => {
+                      if (
+                        (e.key === "Enter" || e.key === " ") &&
+                        !controlsDisabled
+                      ) {
+                        e.preventDefault();
+                        togglePeer(peer.participant_id);
+                      }
+                    }}
+                    sx={{
+                      display: "flex",
+                      alignItems: "center",
+                      gap: 1.5,
+                      p: "9px 10px",
+                      borderRadius: "6px",
+                      cursor: controlsDisabled ? "default" : "pointer",
+                      opacity: controlsDisabled ? 0.6 : 1,
+                      bgcolor: sel
+                        ? "rgba(214, 58, 15, 0.08)"
+                        : "transparent",
+                      transition: "background-color 0.12s ease-out",
+                      "&:hover": controlsDisabled
+                        ? undefined
+                        : {
+                            bgcolor: sel
+                              ? "rgba(214, 58, 15, 0.14)"
+                              : "action.hover",
+                          },
+                    }}
+                  >
+                    <Box
+                      sx={{
+                        flexShrink: 0,
+                        width: 18,
+                        height: 18,
+                        borderRadius: "4px",
+                        border: "1.5px solid",
+                        borderColor: sel ? "var(--accent)" : "text.secondary",
+                        bgcolor: sel ? "var(--accent)" : "transparent",
+                        color: "#fff",
+                        display: "grid",
+                        placeItems: "center",
+                        transition: "0.12s ease-out",
+                      }}
+                    >
+                      {sel && <CheckIcon sx={{ fontSize: 13 }} />}
+                    </Box>
+                    <Box sx={{ flex: 1, minWidth: 0 }}>
+                      <Typography
+                        sx={{ fontSize: 14, fontWeight: 500, lineHeight: 1.3 }}
+                      >
+                        {peer.name || peer.participant_id}
+                      </Typography>
+                      <Typography
+                        sx={{
+                          fontFamily: "var(--font-mono)",
+                          fontSize: 12,
+                          color: "text.secondary",
+                          whiteSpace: "nowrap",
+                          overflow: "hidden",
+                          textOverflow: "ellipsis",
+                        }}
+                      >
+                        {peer.address}:{peer.port}
+                      </Typography>
+                    </Box>
+                  </Box>
+                );
+              })
+            )}
+          </Box>
+        )}
 
         <Box
           sx={{ height: "1px", bgcolor: "divider", mx: "-24px", flexShrink: 0 }}
         />
 
         <Box sx={{ flexShrink: 0 }}>
-          <TextField
-            label="Threshold"
-            type="number"
-            value={threshold}
-            onChange={(e) => {
-              setThresholdTouched(true);
-              setThreshold(Math.max(1, parseInt(e.target.value) || 1));
-            }}
-            fullWidth
-            disabled={controlsDisabled}
-            error={threshold < 1 || threshold > ownerCount}
-            sx={{ "& input": { fontFamily: "var(--font-mono)" } }}
-            slotProps={{
-              htmlInput: { min: 1, max: ownerCount },
-              input: {
-                endAdornment: fieldHelpAdornment(
-                  "How many of the party's owners must sign a topology change. The party's signing keys use the same threshold. Owners are you plus the peers you invite. Defaults to a majority. Separate from the governance threshold.",
-                  "Help for Threshold",
-                ),
-              },
-            }}
-            helperText={
-              threshold > ownerCount
-                ? `Must be at most ${ownerCount} (you + ${selectedPeerIds.size} peer${
-                    selectedPeerIds.size === 1 ? "" : "s"
-                  })`
-                : `Of ${ownerCount} owner${ownerCount === 1 ? "" : "s"} (you + ${
-                    selectedPeerIds.size
-                  } peer${
-                    selectedPeerIds.size === 1 ? "" : "s"
-                  }). Default: majority (${defaultThreshold}).`
-            }
-          />
-          <TextField
-            label="Confirmation threshold"
-            type="number"
-            value={confirmationThreshold}
-            onChange={(e) =>
-              setConfirmationEdit(Math.max(1, parseInt(e.target.value) || 1))
-            }
-            fullWidth
-            disabled={controlsDisabled}
-            error={confirmationOutOfRange}
-            sx={{ mt: 2, "& input": { fontFamily: "var(--font-mono)" } }}
-            slotProps={{
-              htmlInput: { min: 1, max: ownerCount },
-              input: {
-                endAdornment: fieldHelpAdornment(
-                  "How many of the nodes hosting the party must confirm each of its transactions. Defaults to the threshold above.",
-                  "Help for Confirmation threshold",
-                ),
-              },
-            }}
-            helperText={
-              confirmationOutOfRange
-                ? `Must be between 1 and ${ownerCount}`
-                : "Threshold counts owners who sign topology changes. Confirmation threshold counts hosts that confirm transactions."
-            }
-          />
+          <Box sx={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 1.5 }}>
+            <TextField
+              label="Threshold"
+              type="number"
+              size="small"
+              value={threshold}
+              onChange={(e) => {
+                setThresholdTouched(true);
+                setThreshold(Math.max(1, parseInt(e.target.value) || 1));
+              }}
+              disabled={controlsDisabled}
+              error={threshold < 1 || threshold > ownerCount}
+              sx={{ "& input": { fontFamily: "var(--font-mono)" } }}
+              slotProps={{
+                htmlInput: { min: 1, max: ownerCount },
+                input: {
+                  endAdornment: fieldHelpAdornment(
+                    "How many of the party's owners must sign a topology change. The party's signing keys use the same threshold. Owners are you plus the peers you invite. Defaults to a majority. Separate from the governance threshold.",
+                    "Help for Threshold",
+                  ),
+                },
+              }}
+              helperText={threshold > ownerCount ? `Must be at most ${ownerCount}` : undefined}
+            />
+            <TextField
+              label="Confirmation threshold"
+              type="number"
+              size="small"
+              value={confirmationThreshold}
+              onChange={(e) =>
+                setConfirmationEdit(Math.max(1, parseInt(e.target.value) || 1))
+              }
+              disabled={controlsDisabled}
+              error={confirmationOutOfRange}
+              sx={{ "& input": { fontFamily: "var(--font-mono)" } }}
+              slotProps={{
+                htmlInput: { min: 1, max: ownerCount },
+                input: {
+                  endAdornment: fieldHelpAdornment(
+                    "How many of the nodes hosting the party must confirm each of its transactions. Defaults to the threshold.",
+                    "Help for Confirmation threshold",
+                  ),
+                },
+              }}
+              helperText={
+                confirmationOutOfRange ? `Must be between 1 and ${ownerCount}` : undefined
+              }
+            />
+          </Box>
+          <Typography sx={{ fontSize: 12, color: "text.secondary", mt: 1 }}>
+            {`Out of ${ownerCount} owner${ownerCount === 1 ? "" : "s"}: you and ${
+              selectedPeerIds.size
+            } peer${selectedPeerIds.size === 1 ? "" : "s"}. The default is a majority (${defaultThreshold}).`}
+          </Typography>
         </Box>
 
         {error && !meshErrors && (
@@ -838,14 +832,7 @@ export const OnboardingDialog = ({
         }}
       >
         {isStartState && selectablePeers.length > 0 && (
-          <Typography
-            sx={{
-              mr: "auto",
-              fontFamily: "var(--font-mono)",
-              fontSize: 12,
-              color: "text.disabled",
-            }}
-          >
+          <Typography sx={{ mr: "auto", fontSize: 13, color: "text.secondary" }}>
             {footerNote}
           </Typography>
         )}
