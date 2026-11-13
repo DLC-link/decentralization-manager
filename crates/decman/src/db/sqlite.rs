@@ -12,8 +12,9 @@ use super::{
     rows::{
         ChainAuditCacheRow, DecPartyContractRow, DecPartyIdentityRow, DecPartyOwnerRow,
         DecPartyParticipantRow, DecPartyRow, FormerDecPartyRow, GovernanceAuditRow,
-        GovernanceMediatorTimeoutRow, HandledInvitationRow, OwnerKeyRefusal, PartyCredentialsRow,
-        PeerRow, PendingInvitationRow, WorkflowArtifactRow, WorkflowRunRow,
+        GovernanceDismissedConfirmationRow, GovernanceMediatorTimeoutRow, HandledInvitationRow,
+        OwnerKeyRefusal, PartyCredentialsRow, PeerRow, PendingInvitationRow, WorkflowArtifactRow,
+        WorkflowRunRow,
     },
     schema::{Commitable, SchemaRead, SchemaWrite},
 };
@@ -396,6 +397,19 @@ impl SchemaRead for SqlitePool {
         .await?)
     }
 
+    async fn get_dismissed_confirmations(
+        &self,
+        party_id: &CantonId,
+    ) -> Result<Vec<GovernanceDismissedConfirmationRow>> {
+        Ok(sqlx::query_as::<_, GovernanceDismissedConfirmationRow>(
+            "SELECT * FROM governance_dismissed_confirmation WHERE party_id = ? \
+             ORDER BY contract_id",
+        )
+        .bind(party_id.to_string())
+        .fetch_all(self)
+        .await?)
+    }
+
     async fn get_governance_audit(
         &self,
         party_id: &CantonId,
@@ -679,6 +693,53 @@ impl SchemaWrite for SqlitePool {
         .execute(self)
         .await?;
         Ok(())
+    }
+
+    async fn dismiss_confirmations(
+        &self,
+        party_id: &CantonId,
+        contract_ids: &[String],
+        dismissed_by: &str,
+    ) -> Result<()> {
+        let now = chrono::Utc::now().timestamp();
+        let mut tx = self.begin().await?;
+        for contract_id in contract_ids {
+            sqlx::query(
+                "INSERT INTO governance_dismissed_confirmation \
+                 (party_id, contract_id, dismissed_by, dismissed_at) VALUES (?, ?, ?, ?) \
+                 ON CONFLICT(party_id, contract_id) DO NOTHING",
+            )
+            .bind(party_id.to_string())
+            .bind(contract_id)
+            .bind(dismissed_by)
+            .bind(now)
+            .execute(&mut *tx)
+            .await?;
+        }
+        tx.commit().await?;
+        Ok(())
+    }
+
+    async fn restore_confirmations(
+        &self,
+        party_id: &CantonId,
+        contract_ids: &[String],
+    ) -> Result<u64> {
+        let mut tx = self.begin().await?;
+        let mut restored = 0;
+        for contract_id in contract_ids {
+            restored += sqlx::query(
+                "DELETE FROM governance_dismissed_confirmation \
+                 WHERE party_id = ? AND contract_id = ?",
+            )
+            .bind(party_id.to_string())
+            .bind(contract_id)
+            .execute(&mut *tx)
+            .await?
+            .rows_affected();
+        }
+        tx.commit().await?;
+        Ok(restored)
     }
 
     async fn quarantine_acs_import(
@@ -1916,6 +1977,67 @@ mod tests {
         pool.clear_mediator_timeout(&party, "00conf").await?;
 
         assert!(pool.get_mediator_timeouts(&party).await?.is_empty());
+        Ok(())
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_second_dismissal_keeps_the_first_record(pool: SqlitePool) -> Result {
+        let party = qid("dec", 1)?;
+        let first = vec!["00a".to_string(), "00b".to_string()];
+        pool.dismiss_confirmations(&party, &first, "first@example.com")
+            .await?;
+        let before = pool.get_dismissed_confirmations(&party).await?;
+
+        let again = vec!["00b".to_string(), "00c".to_string()];
+        pool.dismiss_confirmations(&party, &again, "second@example.com")
+            .await?;
+
+        let rows = pool.get_dismissed_confirmations(&party).await?;
+        let ids: Vec<_> = rows.iter().map(|r| r.contract_id.as_str()).collect();
+        assert_eq!(ids, ["00a", "00b", "00c"]);
+        assert_eq!(rows[1].dismissed_by, "first@example.com");
+        assert_eq!(rows[1].dismissed_at, before[1].dismissed_at);
+        assert_eq!(rows[2].dismissed_by, "second@example.com");
+        assert!(rows.iter().all(|r| r.dismissed_at > 0));
+        Ok(())
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn restoring_removes_only_the_named_dismissals(pool: SqlitePool) -> Result {
+        let party = qid("dec", 1)?;
+        let ids = vec!["00a".to_string(), "00b".to_string()];
+        pool.dismiss_confirmations(&party, &ids, "admin").await?;
+
+        let restored = pool
+            .restore_confirmations(&party, &["00a".to_string(), "00never".to_string()])
+            .await?;
+
+        assert_eq!(restored, 1);
+        let rows = pool.get_dismissed_confirmations(&party).await?;
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].contract_id, "00b");
+        assert_eq!(
+            pool.restore_confirmations(&party, &["00a".to_string()])
+                .await?,
+            0
+        );
+        Ok(())
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn dismissals_are_scoped_to_their_party(pool: SqlitePool) -> Result {
+        let party = qid("dec", 1)?;
+        let other = qid("dec", 2)?;
+        let shared = vec!["shared-cid".to_string()];
+        pool.dismiss_confirmations(&party, &shared, "admin").await?;
+        pool.dismiss_confirmations(&other, &shared, "admin").await?;
+
+        assert_eq!(pool.restore_confirmations(&party, &shared).await?, 1);
+
+        assert!(pool.get_dismissed_confirmations(&party).await?.is_empty());
+        let rows = pool.get_dismissed_confirmations(&other).await?;
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].party_id, other.to_string());
         Ok(())
     }
 

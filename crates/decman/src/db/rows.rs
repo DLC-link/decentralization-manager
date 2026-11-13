@@ -213,6 +213,16 @@ pub struct GovernanceMediatorTimeoutRow {
     pub observed_at: i64,
 }
 
+/// A confirmation an operator dismissed on this node.
+#[derive(Debug, sqlx::FromRow)]
+pub struct GovernanceDismissedConfirmationRow {
+    pub party_id: String,
+    pub contract_id: String,
+    /// The admin's email, or their user id when the token carries no email.
+    pub dismissed_by: String,
+    pub dismissed_at: i64,
+}
+
 #[derive(Debug, sqlx::FromRow)]
 pub struct GovernanceAuditRow {
     pub id: i64,

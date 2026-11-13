@@ -1,6 +1,7 @@
 use super::rows::{
     ChainAuditCacheRow, DecPartyContractRow, DecPartyOwnerRow, DecPartyParticipantRow, DecPartyRow,
-    FormerDecPartyRow, GovernanceAuditRow, GovernanceMediatorTimeoutRow, OwnerKeyRefusal,
+    FormerDecPartyRow, GovernanceAuditRow, GovernanceDismissedConfirmationRow,
+    GovernanceMediatorTimeoutRow, OwnerKeyRefusal,
 };
 use crate::{
     canton_id::{CantonId, Fingerprint},
@@ -101,6 +102,15 @@ pub trait SchemaRead {
         &self,
         party_id: &CantonId,
     ) -> Result<Vec<GovernanceMediatorTimeoutRow>>;
+
+    /// Get the confirmations an operator dismissed on this node, scoped to a party.
+    ///
+    /// # Errors
+    /// Returns an error if the database read fails.
+    async fn get_dismissed_confirmations(
+        &self,
+        party_id: &CantonId,
+    ) -> Result<Vec<GovernanceDismissedConfirmationRow>>;
 
     /// Get paginated governance audit entries for a party, newest first
     async fn get_governance_audit(
@@ -219,6 +229,28 @@ pub trait SchemaWrite {
     /// # Errors
     /// Returns an error if the database write fails.
     async fn clear_mediator_timeout(&self, party_id: &CantonId, contract_id: &str) -> Result<()>;
+
+    /// Dismiss confirmations on this node. A confirmation already dismissed
+    /// keeps its first record.
+    ///
+    /// # Errors
+    /// Returns an error if the database write fails. Then nothing is stored.
+    async fn dismiss_confirmations(
+        &self,
+        party_id: &CantonId,
+        contract_ids: &[String],
+        dismissed_by: &str,
+    ) -> Result<()>;
+
+    /// Restore dismissed confirmations, and return how many were dismissed.
+    ///
+    /// # Errors
+    /// Returns an error if the database write fails. Then nothing is restored.
+    async fn restore_confirmations(
+        &self,
+        party_id: &CantonId,
+        contract_ids: &[String],
+    ) -> Result<u64>;
 
     /// Record that `participant_id` holds an unknown fraction of `party_id`'s
     /// ACS. Idempotent: re-recording keeps the first reason.
