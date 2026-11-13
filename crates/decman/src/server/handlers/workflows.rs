@@ -3147,10 +3147,14 @@ fn dars_bundle_refusal(
         })?;
         sizes.push((file.filename.as_str(), data.len()));
     }
-    match bundle_size_refusal(&sizes, limit) {
-        Some(error) => Err((StatusCode::PAYLOAD_TOO_LARGE, error)),
-        None => Ok(()),
-    }
+    let Some(error) = bundle_size_refusal(&sizes, limit) else {
+        return Ok(());
+    };
+    tracing::warn!(
+        "Refused to distribute {count} DAR file(s): {error}",
+        count = files.len()
+    );
+    Err((StatusCode::PAYLOAD_TOO_LARGE, error))
 }
 
 /// Why the bundle of `files`, each a name and a DAR length, does not fit in
