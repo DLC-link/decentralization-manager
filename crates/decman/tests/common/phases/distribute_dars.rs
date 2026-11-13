@@ -161,9 +161,9 @@ async fn refuse_an_oversized_set(f: &mut Fixture) -> anyhow::Result<()> {
                     "expected 413 for an oversized DAR set, got {status}: {body}"
                 );
                 anyhow::ensure!(
-                    body.contains("too large for one run")
-                        && body.contains(&format!("The limit is {MAX_CHUNKED_TOTAL_SIZE} bytes")),
-                    "the refusal should state the size and the limit: {body}"
+                    body.contains("oversized.dar is too large to distribute")
+                        && body.contains(&format!("the limit of {MAX_CHUNKED_TOTAL_SIZE} bytes")),
+                    "the refusal should name the DAR and state the limit: {body}"
                 );
                 let after = pending_dars_invitations(f, f.p2.http).await?;
                 anyhow::ensure!(

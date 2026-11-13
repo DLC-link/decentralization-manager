@@ -3134,7 +3134,7 @@ fn dars_bundle_refusal(
     files: &[DarFile],
     limit: usize,
 ) -> std::result::Result<(), (StatusCode, String)> {
-    let mut lengths = Vec::with_capacity(files.len());
+    let mut sizes = Vec::with_capacity(files.len());
     for file in files {
         let data = STANDARD.decode(&file.data).map_err(|e| {
             (
@@ -3145,24 +3145,66 @@ fn dars_bundle_refusal(
                 ),
             )
         })?;
-        lengths.push((file.filename.len(), data.len()));
+        sizes.push((file.filename.as_str(), data.len()));
     }
+    match bundle_size_refusal(&sizes, limit) {
+        Some(error) => Err((StatusCode::PAYLOAD_TOO_LARGE, error)),
+        None => Ok(()),
+    }
+}
+
+/// Why the bundle of `files`, each a name and a DAR length, does not fit in
+/// `limit` bytes, or `None` when it fits.
+///
+/// A DAR that is over the limit alone can never be distributed, so the
+/// refusal names it and does not suggest several runs.
+fn bundle_size_refusal(files: &[(&str, usize)], limit: usize) -> Option<String> {
     // A size too large to count is over any limit.
-    let size = utils::encoded_files_len(lengths).unwrap_or(usize::MAX);
+    let size_of = |files: &[(&str, usize)]| {
+        utils::encoded_files_len(files.iter().map(|(name, len)| (name.len(), *len)))
+            .unwrap_or(usize::MAX)
+    };
+    let size = size_of(files);
     if size <= limit {
-        return Ok(());
+        return None;
     }
     let mib = |bytes: usize| bytes as f64 / (1024.0 * 1024.0);
-    Err((
-        StatusCode::PAYLOAD_TOO_LARGE,
+    let limit_text = format!("{limit} bytes ({limit_mib:.1} MiB)", limit_mib = mib(limit));
+    let over = |size: usize| {
         format!(
-            "The DAR set is too large for one run. Its encoded bundle is {size} bytes \
-             ({size_mib:.1} MiB). The limit is {limit} bytes ({limit_mib:.1} MiB). Send the \
-             files in several runs, each within the limit.",
+            "That is {over} bytes over the limit of {limit_text}.",
+            over = size - limit
+        )
+    };
+    let alone: Vec<(&str, usize)> = files
+        .iter()
+        .map(|file| (file.0, size_of(std::slice::from_ref(file))))
+        .filter(|(_, size)| *size > limit)
+        .collect();
+    Some(match alone.as_slice() {
+        [] => format!(
+            "The DAR set is too large for one run. The files and their names take {size} bytes \
+             ({size_mib:.1} MiB). {over} Send the files in several runs, each within the limit.",
             size_mib = mib(size),
-            limit_mib = mib(limit),
+            over = over(size),
         ),
-    ))
+        [(name, alone_size)] => format!(
+            "{name} is too large to distribute, even on its own. The file and its name take \
+             {alone_size} bytes ({size_mib:.1} MiB). {over} Upload it to each node separately \
+             instead.",
+            size_mib = mib(*alone_size),
+            over = over(*alone_size),
+        ),
+        several => format!(
+            "These DARs are each too large to distribute, even on their own: {names}. The limit \
+             is {limit_text}. Upload them to each node separately instead.",
+            names = several
+                .iter()
+                .map(|(name, _)| *name)
+                .collect::<Vec<_>>()
+                .join(", "),
+        ),
+    })
 }
 
 /// Start a DARs distribution run: register it, invite the peers and run the
@@ -5531,17 +5573,59 @@ mod tests {
         }
     }
 
-    /// The bundle adds 12 bytes of framing and the filename to the DAR bytes.
+    /// Each file adds its name and 8 bytes of framing, and the set adds 4.
+    /// Two DARs that fit alone but not together can go in two runs.
     #[test]
-    fn a_bundle_above_the_limit_is_refused_with_size_and_limit() -> Result {
-        let refusal = dars_bundle_refusal(&[dar("a.dar", 120)], 100);
+    fn a_set_above_the_limit_states_its_size_and_excess() -> Result {
+        let refusal = dars_bundle_refusal(&[dar("a.dar", 60), dar("b.dar", 60)], 100);
         let Err((status, error)) = refusal else {
-            anyhow::bail!("a 137-byte bundle must be refused at limit 100");
+            anyhow::bail!("a 150-byte bundle must be refused at limit 100");
         };
         assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
-        assert!(error.contains("encoded bundle is 137 bytes"), "{error}");
-        assert!(error.contains("The limit is 100 bytes"), "{error}");
+        assert!(error.contains("their names take 150 bytes"), "{error}");
+        assert!(
+            error.contains("50 bytes over the limit of 100 bytes"),
+            "{error}"
+        );
+        assert!(error.contains("several runs"), "{error}");
         Ok(())
+    }
+
+    /// No split helps a DAR that is over the limit alone, so the refusal
+    /// names it and does not suggest several runs.
+    #[test]
+    fn a_dar_over_the_limit_alone_is_named_without_advice_to_split() -> Result {
+        let refusal = dars_bundle_refusal(&[dar("a.dar", 10), dar("big.dar", 120)], 100);
+        let Err((status, error)) = refusal else {
+            anyhow::bail!("a DAR over the limit alone must be refused");
+        };
+        assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
+        assert!(
+            error.starts_with("big.dar is too large to distribute"),
+            "{error}"
+        );
+        assert!(error.contains("its name take 139 bytes"), "{error}");
+        assert!(
+            error.contains("39 bytes over the limit of 100 bytes"),
+            "{error}"
+        );
+        assert!(!error.contains("several runs"), "{error}");
+        Ok(())
+    }
+
+    #[test]
+    fn every_dar_over_the_limit_alone_is_named() {
+        let refusal = bundle_size_refusal(&[("x.dar", 120), ("a.dar", 1), ("y.dar", 130)], 100)
+            .unwrap_or_default();
+        assert!(refusal.contains(": x.dar, y.dar."), "{refusal}");
+        assert!(!refusal.contains("several runs"), "{refusal}");
+    }
+
+    /// A size too large to add up is refused, not wrapped to a small one.
+    #[test]
+    fn a_size_that_overflows_is_refused() {
+        assert!(bundle_size_refusal(&[("a.dar", usize::MAX)], 100).is_some());
+        assert!(bundle_size_refusal(&[("a.dar", usize::MAX - 20), ("b.dar", 10)], 100).is_some());
     }
 
     #[test]
@@ -5602,9 +5686,14 @@ mod tests {
         let body = actix_test::read_body(response).await;
         let body = String::from_utf8_lossy(&body);
         assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE, "{body}");
-        assert!(body.contains("too large for one run"), "{body}");
         assert!(
-            body.contains(&format!("The limit is {MAX_CHUNKED_TOTAL_SIZE} bytes")),
+            body.contains("big.dar is too large to distribute"),
+            "{body}"
+        );
+        assert!(
+            body.contains(&format!(
+                "19 bytes over the limit of {MAX_CHUNKED_TOTAL_SIZE} bytes"
+            )),
             "{body}"
         );
         assert!(
@@ -5691,13 +5780,17 @@ mod tests {
         let body = String::from_utf8_lossy(&body);
         assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE, "{body}");
         assert!(
-            body.contains(&format!("encoded bundle is {size} bytes")),
+            body.contains(&format!("their names take {size} bytes")),
             "{body}"
         );
         assert!(
-            body.contains(&format!("The limit is {MAX_CHUNKED_TOTAL_SIZE} bytes")),
+            body.contains(&format!(
+                "{over} bytes over the limit of {MAX_CHUNKED_TOTAL_SIZE} bytes",
+                over = size - MAX_CHUNKED_TOTAL_SIZE
+            )),
             "{body}"
         );
+        assert!(body.contains("several runs"), "{body}");
         assert!(
             pool.get_workflow_runs_by_kind(WorkflowKind::Dars)
                 .await?
