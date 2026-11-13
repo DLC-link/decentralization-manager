@@ -1,6 +1,6 @@
 use super::rows::{
     ChainAuditCacheRow, DecPartyContractRow, DecPartyOwnerRow, DecPartyParticipantRow, DecPartyRow,
-    FormerDecPartyRow, GovernanceAuditRow, OwnerKeyRefusal,
+    FormerDecPartyRow, GovernanceAuditRow, GovernanceMediatorTimeoutRow, OwnerKeyRefusal,
 };
 use crate::{
     canton_id::{CantonId, Fingerprint},
@@ -92,6 +92,15 @@ pub trait SchemaRead {
 
     /// Get all contracts for parties matching a prefix (bulk query)
     async fn get_all_dec_party_contracts(&self, prefix: &str) -> Result<Vec<DecPartyContractRow>>;
+
+    /// Get recorded confirmation archival timeouts, scoped to a party.
+    ///
+    /// # Errors
+    /// Returns an error if the database read fails.
+    async fn get_mediator_timeouts(
+        &self,
+        party_id: &CantonId,
+    ) -> Result<Vec<GovernanceMediatorTimeoutRow>>;
 
     /// Get paginated governance audit entries for a party, newest first
     async fn get_governance_audit(
@@ -193,6 +202,23 @@ pub trait SchemaWrite {
 
     /// Begin a new database transaction
     async fn begin_transaction(&self) -> Result<Self::Transaction>;
+
+    /// Insert or refresh the most recent timeout for a confirmation.
+    ///
+    /// # Errors
+    /// Returns an error if serialization or the database write fails.
+    async fn record_mediator_timeout(
+        &self,
+        party_id: &CantonId,
+        contract_id: &str,
+        unresponsive: &[String],
+    ) -> Result<()>;
+
+    /// Clear a timeout after successfully archiving the same confirmation.
+    ///
+    /// # Errors
+    /// Returns an error if the database write fails.
+    async fn clear_mediator_timeout(&self, party_id: &CantonId, contract_id: &str) -> Result<()>;
 
     /// Record that `participant_id` holds an unknown fraction of `party_id`'s
     /// ACS. Idempotent: re-recording keeps the first reason.

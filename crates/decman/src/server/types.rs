@@ -590,6 +590,9 @@ pub struct ProposeActionRequest {
 #[derive(Clone, Debug, Deserialize, Serialize, utoipa::ToSchema)]
 #[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 pub struct DomainGovernanceAction {
+    /// Every remaining confirmation is stuck and no live proposal needs this action.
+    #[serde(default)]
+    pub cannot_be_archived: bool,
     /// Contract ID of the proposal
     pub proposal_cid: String,
     /// Human-readable label (e.g., "SetupCcPreapproval")
@@ -706,10 +709,24 @@ pub struct ExecuteActionRequest {
     pub proposal_cid: Option<String>,
 }
 
+/// Why an expired confirmation cannot currently be archived.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS))]
+pub enum StuckReason {
+    /// The confirmer no longer belongs to the current governance member set.
+    ConfirmerNotMember,
+    /// A prior expire or cancel attempt received a mediator timeout.
+    ParticipantUnresponsive,
+}
+
 /// A single governance confirmation with parsed action
 #[derive(Clone, Debug, Deserialize, Serialize, utoipa::ToSchema)]
 #[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 pub struct GovernanceConfirmation {
+    /// Local evidence that this expired confirmation cannot be archived.
+    #[serde(default)]
+    pub stuck: Option<StuckReason>,
     pub contract_id: String,
     pub action: ActionType,
     pub confirming_party: CantonId,
@@ -733,6 +750,9 @@ pub struct GovernanceConfirmation {
 #[derive(Clone, Debug, Deserialize, Serialize, utoipa::ToSchema)]
 #[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 pub struct DomainConfirmation {
+    /// Local evidence that this expired confirmation cannot be archived.
+    #[serde(default)]
+    pub stuck: Option<StuckReason>,
     pub contract_id: String,
     pub confirming_party: CantonId,
     /// Unix seconds when the confirmation contract was created on the ledger.
@@ -748,6 +768,9 @@ pub struct DomainConfirmation {
 #[derive(Clone, Debug, Deserialize, Serialize, utoipa::ToSchema)]
 #[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
 pub struct GovernanceAction {
+    /// Every remaining confirmation is stuck and no live proposal needs this action.
+    #[serde(default)]
+    pub cannot_be_archived: bool,
     /// Deterministic hash of the serialized action for grouping
     pub action_hash: String,
     /// The parsed action type
@@ -1372,9 +1395,11 @@ mod tests {
         let response = GovernanceResponse {
             next_cursor: None,
             actions: vec![GovernanceAction {
+                cannot_be_archived: false,
                 action_hash: "hash".to_owned(),
                 action: ActionType::GovernanceSetThreshold { new_threshold: 2 },
                 confirmations: vec![GovernanceConfirmation {
+                    stuck: None,
                     contract_id: "00conf".to_owned(),
                     action: ActionType::GovernanceSetThreshold { new_threshold: 2 },
                     confirming_party: test_party("m1")?,
@@ -1387,6 +1412,7 @@ mod tests {
                 last_confirmation_at: 0,
             }],
             domain_actions: vec![DomainGovernanceAction {
+                cannot_be_archived: false,
                 proposal_cid: "00prop".to_owned(),
                 action_label: "SetThreshold".to_owned(),
                 description: None,
@@ -1449,9 +1475,11 @@ mod tests {
         let response = GovernanceResponse {
             next_cursor: None,
             actions: vec![GovernanceAction {
+                cannot_be_archived: false,
                 action_hash: "hash".to_owned(),
                 action: ActionType::GovernanceSetThreshold { new_threshold: 7 },
                 confirmations: vec![GovernanceConfirmation {
+                    stuck: None,
                     contract_id: "self-conf".to_owned(),
                     action: ActionType::GovernanceSetThreshold { new_threshold: 7 },
                     confirming_party: test_party("m1")?,
@@ -1464,10 +1492,12 @@ mod tests {
                 last_confirmation_at: 0,
             }],
             domain_actions: vec![DomainGovernanceAction {
+                cannot_be_archived: false,
                 proposal_cid: "00prop".to_owned(),
                 action_label: "WithdrawPending".to_owned(),
                 description: None,
                 confirmations: vec![DomainConfirmation {
+                    stuck: None,
                     contract_id: "domain-conf".to_owned(),
                     confirming_party: test_party("m2")?,
                     created_at: 0,

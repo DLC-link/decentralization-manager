@@ -29,7 +29,10 @@ use decman_lib::catalog::proposals::utility::{
 use decman_lib::catalog::types::{AppTransferContextInput, RewardBeneficiary};
 
 use crate::canton_id::CantonId;
-use crate::server::types::{ActionType, AppRewardBeneficiary, BillingParams, ProposalType};
+use crate::server::types::{
+    ActionType, AppRewardBeneficiary, BillingParams, DomainGovernanceAction, GovernanceAction,
+    ProposalType, StuckReason,
+};
 
 fn cid(prefix: &str) -> CantonId {
     let ns = "1220c4010d6883f367c7f45d55b2449501620130f9b21e96379f17dea455ac7a5892";
@@ -496,6 +499,62 @@ fn proposal_type_http_json_is_stable() {
 fn proposal_type_optional_fields_stay_omitted() {
     let _guard = bind_snapshot_path();
     insta::assert_json_snapshot!("proposal_types_minimal", minimal_option_fixtures());
+}
+
+fn legacy_governance_actions() -> (GovernanceAction, DomainGovernanceAction) {
+    let self_action = serde_json::from_value(serde_json::json!({
+        "action_hash": "hash",
+        "action": { "type": "governance_set_threshold", "new_threshold": 2 },
+        "confirmations": [{
+            "contract_id": "00self",
+            "action": { "type": "governance_set_threshold", "new_threshold": 2 },
+            "confirming_party": cid("former"),
+            "created_at": 1,
+            "expires_at": 2,
+        }],
+        "confirmation_count": 0,
+        "executable_confirmation_cids": [],
+        "can_execute": false,
+    }))
+    .expect("legacy self-action wire shape");
+    let domain_action = serde_json::from_value(serde_json::json!({
+        "proposal_cid": "00proposal",
+        "action_label": "GenericVote",
+        "confirmations": [{
+            "contract_id": "00domain",
+            "confirming_party": cid("offline"),
+            "created_at": 1,
+            "expires_at": 2,
+        }],
+        "confirmation_count": 0,
+        "executable_confirmation_cids": [],
+        "can_execute": false,
+        "orphaned": true,
+    }))
+    .expect("legacy domain-action wire shape");
+    (self_action, domain_action)
+}
+
+#[test]
+fn governance_archival_status_defaults_when_absent() {
+    let (self_action, domain_action) = legacy_governance_actions();
+
+    assert!(!self_action.cannot_be_archived);
+    assert!(!domain_action.cannot_be_archived);
+    assert_eq!(self_action.confirmations[0].stuck, None);
+    assert_eq!(domain_action.confirmations[0].stuck, None);
+}
+
+#[test]
+fn governance_archival_status_http_json_is_stable() {
+    let _guard = bind_snapshot_path();
+    let (mut self_action, mut domain_action) = legacy_governance_actions();
+    self_action.cannot_be_archived = true;
+    self_action.confirmations[0].stuck = Some(StuckReason::ConfirmerNotMember);
+    domain_action.cannot_be_archived = true;
+    domain_action.confirmations[0].stuck = Some(StuckReason::ParticipantUnresponsive);
+
+    insta::assert_json_snapshot!("governance_archival_status", (self_action, domain_action));
 }
 
 // ---- Deserialize direction ----

@@ -203,6 +203,16 @@ pub struct FormerDecPartyRow {
     pub dismissed_at: Option<i64>,
 }
 
+/// The most recent mediator timeout for one confirmation's archival attempt.
+#[derive(Debug, sqlx::FromRow)]
+pub struct GovernanceMediatorTimeoutRow {
+    pub party_id: String,
+    pub contract_id: String,
+    /// JSON array of party IDs reported by Canton.
+    pub unresponsive: String,
+    pub observed_at: i64,
+}
+
 #[derive(Debug, sqlx::FromRow)]
 pub struct GovernanceAuditRow {
     pub id: i64,
