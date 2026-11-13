@@ -52,7 +52,7 @@ export const RewardStatus = ({ status, error }: RewardStatusProps) => {
         <Alert severity="warning">
           <AlertTitle>This participant does not have the rewards DAR</AlertTitle>
           Without governance-rewards-automation-v1, this node cannot reassign reward coupons.
-          Upload that DAR to this participant, or use Check DARs to distribute it from a peer.
+          Upload that DAR to this participant, or use Check Peer DARs to distribute it from a peer.
         </Alert>
       </Box>
     );

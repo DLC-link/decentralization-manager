@@ -412,7 +412,7 @@ export const PartyDetail = ({
     onCheckDars && {
       key: "check-dars",
       icon: <CompareArrowsIcon fontSize="small" />,
-      label: "Check DARs",
+      label: "Check Peer DARs",
       disabled: false,
       onClick: onCheckDars,
     },
@@ -524,7 +524,10 @@ export const PartyDetail = ({
           <StatCard
             label="Gov Threshold"
             value={governanceState.threshold}
+            // An empty member set is a failed read, not zero members.
+            unit={governanceState.members.length > 0 ? `of ${governanceState.members.length}` : undefined}
             helpText="Number of governance-member confirmations required to execute a governance action on this party."
+            testId="party-gov-threshold"
           />
         )}
         {governanceState?.action_confirmation_timeout_microseconds != null && (
@@ -579,6 +582,8 @@ export const PartyDetail = ({
           <GovernanceRules
             state={governanceState}
             memberPartyId={authStatus?.member_party_id}
+            selfParticipantId={selfParticipantId}
+            partyId={party.party_id}
           />
         </CollapsibleSection>
       )}
