@@ -1189,7 +1189,7 @@ fn request_failure_kind(err: &NoiseError) -> OwnerKeysFailureKind {
         }
         NoiseError::WireVersionMismatch { .. } => Kind::WireVersionMismatch,
         NoiseError::BadStatusCode(..) => Kind::Denied,
-        NoiseError::InvalidMessage => Kind::UnparsableReply,
+        NoiseError::InvalidMessage | NoiseError::PayloadTooLarge { .. } => Kind::UnparsableReply,
         NoiseError::JsonSerialization(_) => Kind::BadPayload,
         NoiseError::Io(_) | NoiseError::Hyper(_) => Kind::ConnectionBroken,
         NoiseError::Http(_)
@@ -2644,6 +2644,10 @@ fn peer_failure_hint(err: &NoiseError) -> &'static str {
         NoiseError::InvalidMessage => {
             "the peer answered with something this build cannot parse — most often an empty body \
              from a denied request or an unhealthy proxy, or a peer on an older wire format"
+        }
+        NoiseError::PayloadTooLarge { .. } => {
+            "the peer's reply is larger than this node accepts — the error states its size and \
+             the limit"
         }
         NoiseError::JsonSerialization(_) => {
             "the peer's payload did not deserialize — likely a version skew between the two builds"

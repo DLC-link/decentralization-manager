@@ -360,6 +360,13 @@ async fn run_peer(
                     continue;
                 }
 
+                // The coordinator serves the same payload on every poll, so
+                // one above this node's limit never fits. A retry only delays
+                // the report.
+                if matches!(e, NoiseError::PayloadTooLarge { .. }) {
+                    anyhow::bail!("Peer failed on the coordinator's payload: {e}");
+                }
+
                 consecutive_errors += 1;
 
                 // Per-attempt failures are WARN, not ERROR — the loop's design
