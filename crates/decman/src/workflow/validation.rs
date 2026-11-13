@@ -446,17 +446,40 @@ impl PeerExpectations {
         } else {
             None
         };
-        self.check_on_chain_delta(
-            config,
-            dec_party_id,
-            (decode_proposal_serial(dns_payload)?, &namespace_def),
-            (decode_proposal_serial(p2p_payload)?, &mapping),
-            new_member
+        let legacy_keys = self
+            .check_on_chain_delta(
+                config,
+                dec_party_id,
+                (decode_proposal_serial(dns_payload)?, &namespace_def),
+                (decode_proposal_serial(p2p_payload)?, &mapping),
+                new_member
+                    .as_ref()
+                    .map(|(namespace, daml)| (namespace.as_str(), daml.as_str())),
+                records.as_ref(),
+            )
+            .await?;
+        if let Some(legacy_keys) = legacy_keys {
+            let claims =
+                known_signing_keys_by_member(config, storage, dec_party_id, &legacy_keys).await?;
+            let hosts: Vec<String> = mapping
+                .participants
+                .iter()
+                .map(|p| p.participant_uid.clone())
+                .collect();
+            let proposed: Vec<Fingerprint> = mapping
+                .party_signing_keys
                 .as_ref()
-                .map(|(namespace, daml)| (namespace.as_str(), daml.as_str())),
-            records.as_ref(),
-        )
-        .await?;
+                .map(|keys| keys.keys.iter().map(utils::compute_fingerprint).collect())
+                .unwrap_or_default();
+            let new_participant = self.new_participant.as_ref().map(ToString::to_string);
+            check_legacy_claims(
+                self.kind,
+                &hosts,
+                new_participant.as_deref(),
+                &proposed,
+                &claims,
+            )?;
+        }
 
         tracing::info!(
             "{kind:?} proposals match the accepted invitation for {dec_party_id}",
@@ -669,13 +692,13 @@ impl PeerExpectations {
         p2p: (u32, &PartyToParticipant),
         new_member: Option<(&str, &str)>,
         records: Option<&OwnerRecords>,
-    ) -> Result {
+    ) -> Result<Option<Vec<SigningPublicKey>>> {
         let head = SynchronizerHead {
             config,
             synchronizer_id: utils::get_synchronizer_id(config).await?,
         };
         let kicked_participant = self.kicked_participant.as_ref().map(ToString::to_string);
-        check_against_head(
+        check_keys_against_head(
             &head,
             self.kind,
             dec_party_id,
@@ -1380,7 +1403,26 @@ struct OwnerRecords {
 /// removed its own hosting entry. A kick that removes no host must name the
 /// owner key, because the unchanged hosts give a peer nothing else to tie the
 /// removal to.
+#[cfg(test)]
 async fn check_against_head(
+    head: &impl TopologyHead,
+    kind: WorkflowKind,
+    dec_party_id: &CantonId,
+    dns: (u32, &DecentralizedNamespaceDefinition),
+    p2p: (u32, &PartyToParticipant),
+    new_member: Option<(&str, &str)>,
+    departing: Departing<'_>,
+) -> Result {
+    check_keys_against_head(head, kind, dec_party_id, dns, p2p, new_member, departing)
+        .await
+        .map(|_| ())
+}
+
+/// See [`check_against_head`]. Returns the on-chain key set when it comes
+/// from a legacy `PartyToKeyMapping`. Such a set still holds departed
+/// members' keys, so the caller pins the proposal to this node's records
+/// with [`check_legacy_claims`].
+async fn check_keys_against_head(
     head: &impl TopologyHead,
     kind: WorkflowKind,
     dec_party_id: &CantonId,
@@ -1388,7 +1430,7 @@ async fn check_against_head(
     (p2p_serial, mapping): (u32, &PartyToParticipant),
     new_member: Option<(&str, &str)>,
     departing: Departing<'_>,
-) -> Result {
+) -> Result<Option<Vec<SigningPublicKey>>> {
     let (head_dns_serial, current_def) = head
         .namespace_definition(&dec_party_id.namespace.to_hex())
         .await
@@ -1463,7 +1505,7 @@ async fn check_against_head(
         (p2p_serial, mapping),
         (head_p2p_serial, &current_p2p),
     )? {
-        return Ok(());
+        return Ok(None);
     }
 
     let (current_keys, legacy) = signing_key_baseline(head, dec_party_id, &current_p2p).await?;
@@ -1495,7 +1537,66 @@ async fn check_against_head(
             .collect::<Vec<String>>(),
         legacy,
     )?;
-    check_signing_key_attributes(kind, &current_keys, &proposed_keys.keys)
+    check_signing_key_attributes(kind, &current_keys, &proposed_keys.keys)?;
+    Ok(legacy.then_some(current_keys))
+}
+
+/// Hold a proposal built from a legacy key set to this node's records of
+/// each host's Daml key.
+///
+/// A legacy `PartyToKeyMapping` still holds the keys of members that left.
+/// So the on-chain delta lets a proposal drop any of its keys, and cannot
+/// tell a departed member's key from a current one. The coordinator keeps
+/// exactly the key each host claims. The proposal must therefore carry each
+/// host's recorded key and no other key. The one exception is the key of a
+/// new member that this node has not recorded yet. The new member pins that
+/// key itself.
+fn check_legacy_claims(
+    kind: WorkflowKind,
+    hosts: &[String],
+    new_member: Option<&str>,
+    proposed: &[Fingerprint],
+    claims: &BTreeMap<String, Fingerprint>,
+) -> Result {
+    let mut kept: BTreeMap<&Fingerprint, &str> = BTreeMap::new();
+    let mut unrecorded_new_member = false;
+    for host in hosts {
+        let is_new = Some(host.as_str()) == new_member;
+        match claims.get(host) {
+            Some(key) if proposed.contains(key) => {
+                if let Some(previous) = kept.insert(key, host) {
+                    anyhow::bail!(
+                        "This node has {key} on record for both {previous} and {host}. Refresh \
+                         /decentralized-parties on this node and retry"
+                    );
+                }
+            }
+            // The new member may come back with another key than the one
+            // this node recorded for it before.
+            _ if is_new => unrecorded_new_member = true,
+            Some(key) => anyhow::bail!(
+                "{kind:?} proposal drops {key}, which this node has on record as {host}'s Daml \
+                 key"
+            ),
+            None => anyhow::bail!(
+                "This node has no Daml key on record for {host}, so it cannot tell which keys of \
+                 the legacy mapping the {kind:?} proposal may drop. Refresh \
+                 /decentralized-parties on this node and retry"
+            ),
+        }
+    }
+    let unclaimed: Vec<&Fingerprint> = proposed
+        .iter()
+        .filter(|key| !kept.contains_key(key))
+        .collect();
+    let allowed = usize::from(unrecorded_new_member);
+    if unclaimed.len() > allowed {
+        anyhow::bail!(
+            "{kind:?} proposal keeps {unclaimed:?}, which no host holds by this node's records; \
+             it may keep {allowed} such key(s)"
+        );
+    }
+    Ok(())
 }
 
 /// Each signing key a proposal keeps must equal the on-chain key, and each
@@ -4687,6 +4788,118 @@ mod tests {
                 )
             })
             .collect()
+    }
+
+    fn legacy_claims_error(
+        kind: WorkflowKind,
+        hosts: &[&str],
+        new_member: Option<&str>,
+        proposed: &[u8],
+        claims: &[(&str, u8)],
+    ) -> Result<String> {
+        let hosts: Vec<String> = hosts.iter().map(ToString::to_string).collect();
+        match check_legacy_claims(
+            kind,
+            &hosts,
+            new_member,
+            &fingerprints(proposed),
+            &member_claims(claims),
+        ) {
+            Ok(()) => anyhow::bail!("expected a refusal"),
+            Err(e) => Ok(e.to_string()),
+        }
+    }
+
+    /// A legacy mapping still holds departed members' keys, so the on-chain
+    /// delta lets a proposal drop any of them. A coordinator could drop a
+    /// current member's key and keep a departed one. The records pin it.
+    #[test]
+    fn a_legacy_proposal_keeps_exactly_the_hosts_recorded_keys() -> Result {
+        let claims = member_claims(&[("a", 1), ("b", 2), ("gone", 3)]);
+        let hosts = ["a".to_string(), "b".to_string()];
+        check_legacy_claims(
+            WorkflowKind::ChangeThreshold,
+            &hosts,
+            None,
+            &fingerprints(&[1, 2]),
+            &claims,
+        )?;
+
+        let error = legacy_claims_error(
+            WorkflowKind::Kick,
+            &["a", "b"],
+            None,
+            &[1, 3],
+            &[("a", 1), ("b", 2), ("gone", 3)],
+        )?;
+        assert!(
+            error.contains("drops") && error.contains("on record as b's Daml key"),
+            "{error}"
+        );
+
+        let error = legacy_claims_error(
+            WorkflowKind::Kick,
+            &["a", "b"],
+            None,
+            &[1, 2, 3],
+            &[("a", 1), ("b", 2), ("gone", 3)],
+        )?;
+        assert!(error.contains("which no host holds"), "{error}");
+        Ok(())
+    }
+
+    /// The new member's key may be unrecorded, or differ from a key this node
+    /// recorded for it before a kick. Only that one key may be unclaimed.
+    #[test]
+    fn a_legacy_add_party_allows_only_the_new_members_key_unclaimed() -> Result {
+        let hosts = ["a".to_string(), "b".to_string(), "new".to_string()];
+        for claims in [
+            member_claims(&[("a", 1), ("b", 2)]),
+            member_claims(&[("a", 1), ("b", 2), ("new", 7)]),
+        ] {
+            check_legacy_claims(
+                WorkflowKind::AddParty,
+                &hosts,
+                Some("new"),
+                &fingerprints(&[1, 2, 9]),
+                &claims,
+            )?;
+        }
+
+        let error = legacy_claims_error(
+            WorkflowKind::AddParty,
+            &["a", "b", "new"],
+            Some("new"),
+            &[1, 2, 9, 3],
+            &[("a", 1), ("b", 2), ("gone", 3)],
+        )?;
+        assert!(error.contains("it may keep 1 such key"), "{error}");
+        Ok(())
+    }
+
+    #[test]
+    fn a_legacy_proposal_needs_a_record_of_each_host() -> Result {
+        let error = legacy_claims_error(
+            WorkflowKind::ChangeThreshold,
+            &["a", "b"],
+            None,
+            &[1, 2],
+            &[("a", 1)],
+        )?;
+        assert!(
+            error.contains("no Daml key on record for b") && error.contains("Refresh"),
+            "{error}"
+        );
+
+        let error = legacy_claims_error(
+            WorkflowKind::ChangeThreshold,
+            &["a", "b"],
+            None,
+            &[1, 2],
+            &[("a", 1), ("b", 1)],
+        )?;
+        assert!(error.contains("on record for both a and b"), "{error}");
+        Ok(())
     }
 
     /// A coordinator could otherwise set either threshold through its own
