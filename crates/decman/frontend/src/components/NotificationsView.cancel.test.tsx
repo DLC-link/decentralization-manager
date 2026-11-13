@@ -21,6 +21,7 @@ beforeEach(() => {
 
 const proposal = (overrides: Partial<DomainGovernanceAction> = {}): DomainGovernanceAction => ({
   cannot_be_archived: false,
+  dismissed: false,
   proposal_cid: "00stranded",
   action_label: "Transfer",
   description: "Pay the seat fee to the former agent",
@@ -37,6 +38,7 @@ const proposal = (overrides: Partial<DomainGovernanceAction> = {}): DomainGovern
 
 const cancellation = (proposalCid: string): GovernanceAction => ({
   cannot_be_archived: false,
+  dismissed: false,
   action_hash: "cancel-hash",
   action: { type: "governance_cancel_action", proposal_cid: proposalCid },
   confirmations: [

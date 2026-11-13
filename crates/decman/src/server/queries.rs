@@ -697,6 +697,40 @@ pub(crate) fn mark_stuck(
     }
 }
 
+/// Apply this node's dismissals after [`mark_stuck`].
+///
+/// An action is dismissed only when it cannot be archived and every one of its
+/// confirmations is in `dismissed`. A new confirmation therefore shows it
+/// again, and a dismissal never hides an action that can still be archived.
+/// A dismissed action leaves the lists, unless `include` keeps it marked.
+pub(crate) fn apply_dismissals(
+    actions: &mut Vec<GovernanceAction>,
+    domain_actions: &mut Vec<DomainGovernanceAction>,
+    dismissed: &HashSet<String>,
+    include: bool,
+) {
+    for action in actions.iter_mut() {
+        action.dismissed = action.cannot_be_archived
+            && !action.confirmations.is_empty()
+            && action
+                .confirmations
+                .iter()
+                .all(|c| dismissed.contains(&c.contract_id));
+    }
+    for action in domain_actions.iter_mut() {
+        action.dismissed = action.cannot_be_archived
+            && !action.confirmations.is_empty()
+            && action
+                .confirmations
+                .iter()
+                .all(|c| dismissed.contains(&c.contract_id));
+    }
+    if !include {
+        actions.retain(|action| !action.dismissed);
+        domain_actions.retain(|action| !action.dismissed);
+    }
+}
+
 /// Map an assembled domain proposal onto the wire DTO.
 ///
 /// The payload is rendered from the create arguments the proposal read already
@@ -709,6 +743,7 @@ fn domain_action_dto(
     let not_authorized = proposer_not_authorized(action.proposer.as_ref(), rules);
     DomainGovernanceAction {
         cannot_be_archived: false,
+        dismissed: false,
         proposal_cid: action.proposal_cid,
         action_label: action.action_label,
         description: action.description,
@@ -795,6 +830,7 @@ fn assemble_self_actions(
                 .unwrap_or(0);
             GovernanceAction {
                 cannot_be_archived: false,
+                dismissed: false,
                 action_hash,
                 action,
                 confirmations: unique_confirmations
@@ -4651,6 +4687,7 @@ mod stuck_tests {
             can_execute: false,
             last_confirmation_at: 1,
             cannot_be_archived: false,
+            dismissed: false,
         }
     }
 
@@ -4683,6 +4720,7 @@ mod stuck_tests {
             proposal_template_id: None,
             proposal_payload: None,
             cannot_be_archived: false,
+            dismissed: false,
         }
     }
 
@@ -4879,5 +4917,92 @@ mod stuck_tests {
         assert_eq!(domains[0].confirmations[0].stuck, None);
         assert!(!actions[0].cannot_be_archived);
         assert!(!domains[0].cannot_be_archived);
+    }
+
+    /// Actions after `mark_stuck` with no current member, then `apply_dismissals`.
+    fn dismiss(
+        mut actions: Vec<GovernanceAction>,
+        mut domains: Vec<DomainGovernanceAction>,
+        dismissed: &[&str],
+        include: bool,
+    ) -> (Vec<GovernanceAction>, Vec<DomainGovernanceAction>) {
+        mark_stuck(
+            &mut actions,
+            &mut domains,
+            Some(&HashSet::new()),
+            &HashSet::new(),
+            NOW,
+        );
+        let dismissed = dismissed.iter().map(|id| id.to_string()).collect();
+        apply_dismissals(&mut actions, &mut domains, &dismissed, include);
+        (actions, domains)
+    }
+
+    #[test]
+    fn a_dismissed_action_leaves_the_default_list() {
+        let (actions, domains) = dismiss(
+            vec![self_action(&[NOW, NOW - 1])],
+            vec![domain_action(true, &[NOW - 1])],
+            &["c0", "c1"],
+            false,
+        );
+
+        assert!(actions.is_empty());
+        assert!(domains.is_empty());
+    }
+
+    #[test]
+    fn include_dismissed_returns_the_action_marked() {
+        let (actions, domains) = dismiss(
+            vec![self_action(&[NOW, NOW - 1]), self_action(&[NOW])],
+            vec![domain_action(true, &[NOW - 1])],
+            &["c0", "c1"],
+            true,
+        );
+
+        assert_eq!(actions.len(), 2);
+        assert!(actions[0].dismissed);
+        assert!(actions[1].dismissed);
+        assert_eq!(domains.len(), 1);
+        assert!(domains[0].dismissed);
+    }
+
+    #[test]
+    fn a_new_confirmation_shows_a_dismissed_action_again() {
+        // c0 was dismissed. c1 arrived later and cannot be archived either.
+        let (actions, domains) = dismiss(
+            vec![self_action(&[NOW, NOW - 1])],
+            vec![domain_action(true, &[NOW, NOW - 1])],
+            &["c0"],
+            false,
+        );
+
+        assert_eq!(actions.len(), 1);
+        assert!(actions[0].cannot_be_archived);
+        assert!(!actions[0].dismissed);
+        assert_eq!(domains.len(), 1);
+        assert!(domains[0].cannot_be_archived);
+        assert!(!domains[0].dismissed);
+    }
+
+    #[test]
+    fn a_dismissal_never_hides_an_action_that_can_be_archived() {
+        let (actions, domains) = dismiss(
+            vec![self_action(&[NOW + 60]), self_action(&[0])],
+            // A live proposal: its proposer can still cancel it.
+            vec![domain_action(false, &[NOW - 1])],
+            &["c0"],
+            false,
+        );
+
+        assert_eq!(actions.len(), 2);
+        assert!(
+            actions
+                .iter()
+                .all(|a| !a.cannot_be_archived && !a.dismissed)
+        );
+        assert_eq!(domains.len(), 1);
+        assert!(!domains[0].cannot_be_archived);
+        assert!(!domains[0].dismissed);
     }
 }

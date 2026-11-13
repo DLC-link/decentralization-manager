@@ -88,6 +88,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         DisclosedContractInput,
         DiscoverMemberPartyRequest,
         DiscoverMemberPartyResponse,
+        DismissConfirmationsRequest,
         DistributePackageRequest,
         ErrorResponse,
         ExpectedPackageVersion,

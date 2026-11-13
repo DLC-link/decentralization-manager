@@ -23,9 +23,9 @@ pub use common::api::{
     ContractQueryResponse, ContractWithBlob, ContractsInvitePayload, ContractsRequest,
     CouponReassignmentDelegationSummary, CredentialInfo, CredentialsResponse, DarsInvitePayload,
     DarsRequest, DecentralizedPartiesResponse, DeclineInvitationPayload, DisclosedContractInput,
-    DiscoverMemberPartyRequest, DiscoverMemberPartyResponse, DistributePackageRequest,
-    ErrorResponse, ExpireConfirmationRequest, ExternalPartiesResponse, ExternalPartyHost,
-    ExternalPartyInfo, ExternalPartyUnhostPreview, ExternalPartyUnhostRequest,
+    DiscoverMemberPartyRequest, DiscoverMemberPartyResponse, DismissConfirmationsRequest,
+    DistributePackageRequest, ErrorResponse, ExpireConfirmationRequest, ExternalPartiesResponse,
+    ExternalPartyHost, ExternalPartyInfo, ExternalPartyUnhostPreview, ExternalPartyUnhostRequest,
     ExternalPartyUnhostResponse, FormerPartiesResponse, FormerParty, GovernanceState,
     GovernanceStateResponse, GovernanceType, GrantRightsRequest, GrantRightsResponse,
     HandledInvitationsResponse, InstrumentInfo, InstrumentsResponse, InvitationActionRequest,
@@ -593,6 +593,10 @@ pub struct DomainGovernanceAction {
     /// Every remaining confirmation is stuck and no live proposal needs this action.
     #[serde(default)]
     pub cannot_be_archived: bool,
+    /// An operator dismissed every confirmation on this node. Only a list read
+    /// with `include_dismissed` returns such an action.
+    #[serde(default)]
+    pub dismissed: bool,
     /// Contract ID of the proposal
     pub proposal_cid: String,
     /// Human-readable label (e.g., "SetupCcPreapproval")
@@ -771,6 +775,10 @@ pub struct GovernanceAction {
     /// Every remaining confirmation is stuck and no live proposal needs this action.
     #[serde(default)]
     pub cannot_be_archived: bool,
+    /// An operator dismissed every confirmation on this node. Only a list read
+    /// with `include_dismissed` returns such an action.
+    #[serde(default)]
+    pub dismissed: bool,
     /// Deterministic hash of the serialized action for grouping
     pub action_hash: String,
     /// The parsed action type
@@ -1396,6 +1404,7 @@ mod tests {
             next_cursor: None,
             actions: vec![GovernanceAction {
                 cannot_be_archived: false,
+                dismissed: false,
                 action_hash: "hash".to_owned(),
                 action: ActionType::GovernanceSetThreshold { new_threshold: 2 },
                 confirmations: vec![GovernanceConfirmation {
@@ -1413,6 +1422,7 @@ mod tests {
             }],
             domain_actions: vec![DomainGovernanceAction {
                 cannot_be_archived: false,
+                dismissed: false,
                 proposal_cid: "00prop".to_owned(),
                 action_label: "SetThreshold".to_owned(),
                 description: None,
@@ -1476,6 +1486,7 @@ mod tests {
             next_cursor: None,
             actions: vec![GovernanceAction {
                 cannot_be_archived: false,
+                dismissed: false,
                 action_hash: "hash".to_owned(),
                 action: ActionType::GovernanceSetThreshold { new_threshold: 7 },
                 confirmations: vec![GovernanceConfirmation {
@@ -1493,6 +1504,7 @@ mod tests {
             }],
             domain_actions: vec![DomainGovernanceAction {
                 cannot_be_archived: false,
+                dismissed: false,
                 proposal_cid: "00prop".to_owned(),
                 action_label: "WithdrawPending".to_owned(),
                 description: None,

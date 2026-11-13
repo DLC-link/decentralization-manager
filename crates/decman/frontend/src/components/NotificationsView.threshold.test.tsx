@@ -173,6 +173,7 @@ describe("Threshold changes in the feed", () => {
   it("shows the old threshold in what you're signing without a strikethrough", () => {
     const action: GovernanceAction = {
       cannot_be_archived: false,
+      dismissed: false,
       action_hash: "hash-of-set-threshold",
       action: { type: "governance_set_threshold", new_threshold: 2 },
       confirmations: [],

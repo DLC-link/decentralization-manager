@@ -170,6 +170,7 @@ Run `decman-cli <command> --help` for every option.
 | `auth status \| test \| grant-rights` | Check and grant the Canton rights of the party credentials |
 | `governance state \| pending \| proposals \| known-members \| audit \| chain-audit` | Read the governance state |
 | `governance propose \| confirm \| execute \| revoke \| expire \| cancel-proposal` | Change the governance state |
+| `governance dismiss \| restore` | Hide or show an action that cannot be archived, on this node only |
 | `ledger list <resource> \| query` | Read a party's contracts |
 | `api <METHOD> <PATH>` | Send any request, for a route without a command |
 
@@ -206,6 +207,15 @@ confirm.
 
 `governance pending` shows one page of proposals. Pass `--limit` for a larger
 page, and `--cursor` with the `next_cursor` of the previous page.
+
+`governance dismiss` hides an action that cannot be archived. It acts on this
+node only and sends nothing to the ledger. Other nodes still list the action.
+Name the action with `--proposal <cid>`, or with `--action <hash>`. Here
+`--action` takes the `action_hash` that `governance pending` shows, not the
+action JSON. The CLI refuses an action that can still be archived.
+`governance restore` takes the same flags and lists the action again.
+`governance pending --include-dismissed` also lists the dismissed actions. A
+new confirmation on a dismissed action lists it again.
 
 ### Governance Core
 

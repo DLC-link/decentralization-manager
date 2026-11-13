@@ -54,12 +54,15 @@ use crate::{
     noise::{Message, MessageType, NoiseKeypair, parse_public_key, send_noise_message},
     server::{
         AppState,
-        audit::{AuditEvent, AuditParams, spawn_audit_log, with_proposal_cid},
+        audit::{
+            AuditActor, AuditEvent, AuditParams, DismissalAuditEvent, log_dismissal_audit,
+            spawn_audit_log, with_proposal_cid,
+        },
         chain_audit,
         ledger_rejection::{mediator_timeout, submission_failure},
         middleware::require_admin,
         queries::{
-            GovernanceQueue, get_governance_confirmations,
+            GovernanceQueue, apply_dismissals, get_governance_confirmations,
             get_governance_state as query_governance_state, known_governance_members, mark_stuck,
             resolve_contract_package_ref, select_input_holdings,
         },
@@ -73,11 +76,11 @@ use crate::{
             ActionType, ActiveCouponReassignmentDelegation, AuditLogEntry, AuditLogQuery,
             AuditLogResponse, AuditScope, CancelConfirmationRequest, CancelProposalRequest,
             ChainAuditEntry, ChainAuditQuery, ChainAuditResponse, ConfirmActionRequest,
-            DomainGovernanceAction, ErrorResponse, ExecuteActionRequest, ExpireConfirmationRequest,
-            GovernanceResponse, GovernanceStateResponse, GovernanceType, KnownMember,
-            KnownMembersResponse, MAX_RECENT_AUDIT_LIMIT, MessageResponse, ProposalType,
-            ProposalsPageResponse, ProposeActionRequest, RewardStatusResponse,
-            chain_audit_entry_from_row,
+            DismissConfirmationsRequest, DomainGovernanceAction, ErrorResponse,
+            ExecuteActionRequest, ExpireConfirmationRequest, GovernanceResponse, GovernanceState,
+            GovernanceStateResponse, GovernanceType, KnownMember, KnownMembersResponse,
+            MAX_RECENT_AUDIT_LIMIT, MessageResponse, ProposalType, ProposalsPageResponse,
+            ProposeActionRequest, RewardStatusResponse, chain_audit_entry_from_row,
         },
     },
     utils,
@@ -99,10 +102,68 @@ fn withhold_payloads(domain_actions: &mut [DomainGovernanceAction]) {
     }
 }
 
+/// Query parameters for `GET /governance/confirmations`.
+#[derive(Debug, Deserialize, utoipa::IntoParams)]
+pub struct ConfirmationsQuery {
+    pub party_id: CantonId,
+    /// Proposals read from the ledger per request. Defaults to 25.
+    #[serde(default)]
+    pub limit: Option<usize>,
+    /// `next_cursor` from the previous batch. Absent starts at the top.
+    #[serde(default)]
+    pub cursor: Option<String>,
+    /// Also return the actions dismissed on this node, marked `dismissed`.
+    #[serde(default)]
+    pub include_dismissed: bool,
+}
+
+/// Mark the actions that cannot be archived, then apply this node's
+/// dismissals to them.
+async fn mark_archival_state(
+    db: &sqlx::SqlitePool,
+    party_id: &CantonId,
+    rules: Option<&GovernanceState>,
+    queue: &mut GovernanceQueue,
+    include_dismissed: bool,
+) -> Result<()> {
+    let timeouts = db
+        .get_mediator_timeouts(party_id)
+        .await
+        .context("Failed to read governance mediator timeouts")?
+        .into_iter()
+        .map(|row| row.contract_id)
+        .collect();
+    let dismissed = db
+        .get_dismissed_confirmations(party_id)
+        .await
+        .context("Failed to read dismissed governance confirmations")?
+        .into_iter()
+        .map(|row| row.contract_id)
+        .collect();
+    let members = known_governance_members(rules);
+    mark_stuck(
+        &mut queue.actions,
+        &mut queue.domain_actions,
+        members.as_ref(),
+        &timeouts,
+        chrono::Utc::now().timestamp(),
+    );
+    apply_dismissals(
+        &mut queue.actions,
+        &mut queue.domain_actions,
+        &dismissed,
+        include_dismissed,
+    );
+    Ok(())
+}
+
 /// Get governance confirmations with parsed actions
+///
+/// An action dismissed on this node is left out unless `include_dismissed`
+/// is set.
 #[utoipa::path(
     tag = "Governance",
-    params(GovernanceQuery),
+    params(ConfirmationsQuery),
     responses(
         (status = 200, description = "Governance confirmations", body = GovernanceResponse),
         (status = 500, description = "Internal server error", body = ErrorResponse)
@@ -112,7 +173,7 @@ fn withhold_payloads(domain_actions: &mut [DomainGovernanceAction]) {
 pub async fn get_governance(
     http_req: HttpRequest,
     data: web::Data<AppState>,
-    query: web::Query<GovernanceQuery>,
+    query: web::Query<ConfirmationsQuery>,
 ) -> impl Responder {
     let party_id = &query.party_id;
     let may_act = require_admin(&http_req, data.admin_role.as_deref()).is_ok();
@@ -160,29 +221,27 @@ pub async fn get_governance(
     )
     .await
     {
-        Ok(GovernanceQueue {
-            mut actions,
-            mut domain_actions,
-            next_cursor,
-            ..
-        }) => {
-            let timeouts = match data.db.get_mediator_timeouts(party_id).await {
-                Ok(rows) => rows.into_iter().map(|row| row.contract_id).collect(),
-                Err(e) => {
-                    tracing::error!("Failed to read governance mediator timeouts: {e}");
-                    return HttpResponse::InternalServerError().json(ErrorResponse {
-                        error: format!("Failed to read governance mediator timeouts: {e}"),
-                    });
-                }
-            };
-            let members = known_governance_members(gov_state.as_ref());
-            mark_stuck(
-                &mut actions,
-                &mut domain_actions,
-                members.as_ref(),
-                &timeouts,
-                chrono::Utc::now().timestamp(),
-            );
+        Ok(mut queue) => {
+            if let Err(e) = mark_archival_state(
+                &data.db,
+                party_id,
+                gov_state.as_ref(),
+                &mut queue,
+                query.include_dismissed,
+            )
+            .await
+            {
+                tracing::error!("{e:#}");
+                return HttpResponse::InternalServerError().json(ErrorResponse {
+                    error: format!("{e:#}"),
+                });
+            }
+            let GovernanceQueue {
+                actions,
+                mut domain_actions,
+                next_cursor,
+                ..
+            } = queue;
             if !may_act {
                 withhold_payloads(&mut domain_actions);
             }
@@ -1713,6 +1772,148 @@ pub async fn cancel_confirmation(
             tracing::error!("The cancel task ended without an outcome: {e}");
             HttpResponse::InternalServerError().json(ErrorResponse {
                 error: format!("Failed to cancel confirmation: {e}"),
+            })
+        }
+    }
+}
+
+/// The confirmation ids of a dismiss or restore request, each once.
+#[allow(clippy::result_large_err)]
+fn requested_confirmations(
+    body: &DismissConfirmationsRequest,
+) -> std::result::Result<Vec<String>, HttpResponse> {
+    if body.confirmation_cids.is_empty() {
+        return Err(HttpResponse::BadRequest().json(ErrorResponse {
+            error: "Name at least one confirmation.".to_string(),
+        }));
+    }
+    if body
+        .confirmation_cids
+        .iter()
+        .any(|cid| cid.trim().is_empty())
+    {
+        return Err(HttpResponse::BadRequest().json(ErrorResponse {
+            error: "A confirmation id is empty.".to_string(),
+        }));
+    }
+    let mut cids = body.confirmation_cids.clone();
+    cids.sort();
+    cids.dedup();
+    Ok(cids)
+}
+
+/// Dismiss an action that cannot be archived, on this node only
+///
+/// Stores the confirmation ids and writes an audit row. Nothing is sent to the
+/// ledger, and other nodes still list the action. `GET /governance/confirmations`
+/// hides an action only while it cannot be archived and every one of its
+/// confirmations is dismissed.
+#[utoipa::path(
+    tag = "Governance",
+    request_body = DismissConfirmationsRequest,
+    responses(
+        (status = 200, description = "Confirmations dismissed", body = MessageResponse),
+        (status = 400, description = "No confirmation named, or an empty id", body = ErrorResponse),
+        (status = 401, description = "Unauthorized", body = ErrorResponse),
+        (status = 403, description = "Forbidden: admin role required", body = ErrorResponse),
+        (status = 500, description = "Internal server error", body = ErrorResponse)
+    )
+)]
+#[post("/governance/dismiss")]
+pub async fn dismiss_confirmations(
+    http_req: HttpRequest,
+    data: web::Data<AppState>,
+    body: web::Json<DismissConfirmationsRequest>,
+) -> impl Responder {
+    let actor = match require_admin(&http_req, data.admin_role.as_deref()) {
+        Ok(principal) => AuditActor::from(&principal),
+        Err(resp) => return resp,
+    };
+    let cids = match requested_confirmations(&body) {
+        Ok(cids) => cids,
+        Err(resp) => return resp,
+    };
+    let party_id = &body.party_id;
+    let dismissed_by = actor.email.as_deref().unwrap_or(&actor.sub);
+    let outcome = data
+        .db
+        .dismiss_confirmations(party_id, &cids, dismissed_by)
+        .await
+        .map_err(|e| format!("{e:#}"));
+    log_dismissal_audit(
+        &data.db,
+        DismissalAuditEvent::Dismiss,
+        party_id,
+        &cids,
+        &actor,
+        outcome.as_ref().err().map(String::as_str),
+    )
+    .await;
+    match outcome {
+        Ok(()) => HttpResponse::Ok().json(MessageResponse {
+            message: format!("Confirmations dismissed on this node: {}.", cids.len()),
+        }),
+        Err(e) => {
+            tracing::error!(%party_id, "Failed to dismiss governance confirmations: {e}");
+            HttpResponse::InternalServerError().json(ErrorResponse {
+                error: format!("Failed to dismiss the confirmations: {e}"),
+            })
+        }
+    }
+}
+
+/// Restore confirmations dismissed on this node
+///
+/// Deletes the stored dismissals and writes an audit row. Nothing is sent to
+/// the ledger. The action is listed again by default.
+#[utoipa::path(
+    tag = "Governance",
+    request_body = DismissConfirmationsRequest,
+    responses(
+        (status = 200, description = "Confirmations restored", body = MessageResponse),
+        (status = 400, description = "No confirmation named, or an empty id", body = ErrorResponse),
+        (status = 401, description = "Unauthorized", body = ErrorResponse),
+        (status = 403, description = "Forbidden: admin role required", body = ErrorResponse),
+        (status = 500, description = "Internal server error", body = ErrorResponse)
+    )
+)]
+#[post("/governance/restore")]
+pub async fn restore_confirmations(
+    http_req: HttpRequest,
+    data: web::Data<AppState>,
+    body: web::Json<DismissConfirmationsRequest>,
+) -> impl Responder {
+    let actor = match require_admin(&http_req, data.admin_role.as_deref()) {
+        Ok(principal) => AuditActor::from(&principal),
+        Err(resp) => return resp,
+    };
+    let cids = match requested_confirmations(&body) {
+        Ok(cids) => cids,
+        Err(resp) => return resp,
+    };
+    let party_id = &body.party_id;
+    let outcome = data
+        .db
+        .restore_confirmations(party_id, &cids)
+        .await
+        .map_err(|e| format!("{e:#}"));
+    log_dismissal_audit(
+        &data.db,
+        DismissalAuditEvent::Restore,
+        party_id,
+        &cids,
+        &actor,
+        outcome.as_ref().err().map(String::as_str),
+    )
+    .await;
+    match outcome {
+        Ok(restored) => HttpResponse::Ok().json(MessageResponse {
+            message: format!("Dismissed confirmations restored on this node: {restored}."),
+        }),
+        Err(e) => {
+            tracing::error!(%party_id, "Failed to restore governance confirmations: {e}");
+            HttpResponse::InternalServerError().json(ErrorResponse {
+                error: format!("Failed to restore the confirmations: {e}"),
             })
         }
     }
@@ -3949,5 +4150,242 @@ mod paid_accept_disclosure_tests {
             "Failed to execute action: Failed to fetch the open mining rounds from scan: \
              scan answered 403 Forbidden: access denied"
         );
+    }
+}
+
+#[cfg(test)]
+mod archival_state_tests {
+    use serde_json::{Value, json};
+    use sqlx::SqlitePool;
+
+    use super::*;
+    use crate::db::MIGRATOR;
+
+    fn party_id(prefix: &str) -> Result<CantonId> {
+        CantonId::parse(&format!("{prefix}::1220{}", "ab".repeat(32)))
+    }
+
+    fn self_action(hash: &str, cid: &str, confirmer: &CantonId, expires_at: i64) -> Result<Value> {
+        let action = json!({ "type": "governance_set_threshold", "new_threshold": 2 });
+        Ok(json!({
+            "action_hash": hash,
+            "action": action,
+            "confirmations": [{
+                "contract_id": cid,
+                "action": action,
+                "confirming_party": confirmer,
+                "created_at": 1,
+                "expires_at": expires_at,
+            }],
+            "confirmation_count": 1,
+            "executable_confirmation_cids": [],
+            "can_execute": false,
+        }))
+    }
+
+    /// A self action from a former member that expired, and a live one from a
+    /// current member. Only the first cannot be archived.
+    fn queue_and_rules() -> Result<(GovernanceQueue, GovernanceState)> {
+        let now = chrono::Utc::now().timestamp();
+        let (member, former) = (party_id("member")?, party_id("former")?);
+        let actions = vec![
+            serde_json::from_value(self_action("stuck", "00stuck", &former, now - 60)?)?,
+            serde_json::from_value(self_action("live", "00live", &member, now + 3600)?)?,
+        ];
+        let rules = serde_json::from_value(json!({
+            "contract_id": "00rules",
+            "governance_party": party_id("dec")?,
+            "members": [member],
+            "threshold": 1,
+        }))?;
+        let queue = GovernanceQueue {
+            actions,
+            domain_actions: vec![],
+            next_cursor: None,
+            complete: true,
+        };
+        Ok((queue, rules))
+    }
+
+    /// The action hashes the confirmations list returns, each with its
+    /// `dismissed` mark.
+    async fn listed(pool: &SqlitePool, include_dismissed: bool) -> Result<Vec<(String, bool)>> {
+        let (mut queue, rules) = queue_and_rules()?;
+        mark_archival_state(
+            pool,
+            &party_id("dec")?,
+            Some(&rules),
+            &mut queue,
+            include_dismissed,
+        )
+        .await?;
+        Ok(queue
+            .actions
+            .into_iter()
+            .map(|a| (a.action_hash, a.dismissed))
+            .collect())
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn the_list_hides_a_dismissed_action_until_it_is_restored(pool: SqlitePool) -> Result {
+        let party = party_id("dec")?;
+        let both = || vec![("stuck".to_string(), false), ("live".to_string(), false)];
+        assert_eq!(listed(&pool, false).await?, both());
+
+        // The live action's confirmation is dismissed too, but it can be archived.
+        let ids = ["00stuck".to_string(), "00live".to_string()];
+        pool.dismiss_confirmations(&party, &ids, "admin").await?;
+
+        assert_eq!(listed(&pool, false).await?, [("live".to_string(), false)]);
+        assert_eq!(
+            listed(&pool, true).await?,
+            [("stuck".to_string(), true), ("live".to_string(), false)]
+        );
+
+        pool.restore_confirmations(&party, &ids[..1]).await?;
+
+        assert_eq!(listed(&pool, false).await?, both());
+        Ok(())
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_dismissal_for_another_party_hides_nothing(pool: SqlitePool) -> Result {
+        let ids = ["00stuck".to_string()];
+        pool.dismiss_confirmations(&party_id("other")?, &ids, "admin")
+            .await?;
+
+        assert_eq!(
+            listed(&pool, false).await?,
+            [("stuck".to_string(), false), ("live".to_string(), false)]
+        );
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod dismissal_tests {
+    use actix_web::{
+        App,
+        http::{StatusCode, header::AUTHORIZATION},
+        test as actix_test,
+    };
+    use serde_json::{Value, json};
+    use sqlx::SqlitePool;
+
+    use super::*;
+    use crate::{auth::mock::MOCK_USER_ID, db::MIGRATOR, server::middleware::AuthMiddleware};
+
+    fn party_id() -> Result<CantonId> {
+        CantonId::parse(&format!("dec::1220{}", "ab".repeat(32)))
+    }
+
+    fn request(uri: &str, cids: &[&str]) -> Result<actix_test::TestRequest> {
+        Ok(actix_test::TestRequest::post()
+            .uri(uri)
+            .insert_header((AUTHORIZATION, "Bearer any-token"))
+            .set_json(json!({ "party_id": party_id()?, "confirmation_cids": cids })))
+    }
+
+    /// Sends one request to the dismiss and restore routes, as an admin.
+    async fn send(pool: &SqlitePool, uri: &str, cids: &[&str]) -> Result<(StatusCode, Value)> {
+        let app = actix_test::init_service(
+            App::new()
+                .app_data(AppState::for_test_on(None, pool.clone()))
+                .wrap(AuthMiddleware)
+                .service(dismiss_confirmations)
+                .service(restore_confirmations),
+        )
+        .await;
+        let response = actix_test::call_service(&app, request(uri, cids)?.to_request()).await;
+        let status = response.status();
+        Ok((status, actix_test::read_body_json(response).await))
+    }
+
+    async fn dismissed(pool: &SqlitePool) -> Result<Vec<String>> {
+        Ok(pool
+            .get_dismissed_confirmations(&party_id()?)
+            .await?
+            .into_iter()
+            .map(|row| row.contract_id)
+            .collect())
+    }
+
+    #[actix_web::test]
+    async fn dismiss_and_restore_require_the_admin_role() -> Result {
+        let app = actix_test::init_service(
+            App::new()
+                .app_data(AppState::for_test_as_non_admin().await?)
+                .wrap(AuthMiddleware)
+                .service(dismiss_confirmations)
+                .service(restore_confirmations),
+        )
+        .await;
+        for uri in ["/governance/dismiss", "/governance/restore"] {
+            let response =
+                actix_test::call_service(&app, request(uri, &["00stuck"])?.to_request()).await;
+            assert_eq!(response.status(), StatusCode::FORBIDDEN, "{uri}");
+        }
+        Ok(())
+    }
+
+    /// The test state has no party credentials and no ledger. A dismissal
+    /// needs neither.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_dismissal_is_stored_once_per_confirmation_and_audited(pool: SqlitePool) -> Result {
+        let (status, body) = send(&pool, "/governance/dismiss", &["00b", "00a", "00a"]).await?;
+
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["message"], "Confirmations dismissed on this node: 2.");
+        assert_eq!(dismissed(&pool).await?, ["00a", "00b"]);
+        let rows = pool.get_dismissed_confirmations(&party_id()?).await?;
+        assert!(rows.iter().all(|r| r.dismissed_by == MOCK_USER_ID));
+
+        let audit = pool.get_governance_audit(&party_id()?, 50, 0).await?;
+        assert_eq!(audit.len(), 1);
+        assert_eq!(audit[0].event_type, "dismiss");
+        assert_eq!(audit[0].action_summary, "dismiss_confirmations");
+        assert_eq!(audit[0].status, "success");
+        assert_eq!(audit[0].governance_type, "none");
+        let details: Value = serde_json::from_str(&audit[0].details)?;
+        assert_eq!(details["confirmation_cids"], json!(["00a", "00b"]));
+        assert_eq!(details["admin_sub"], MOCK_USER_ID);
+        Ok(())
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_restore_removes_the_dismissals_and_is_audited(pool: SqlitePool) -> Result {
+        let ids = vec!["00a".to_string(), "00b".to_string()];
+        pool.dismiss_confirmations(&party_id()?, &ids, "admin")
+            .await?;
+
+        let (status, body) = send(&pool, "/governance/restore", &["00a", "00other"]).await?;
+
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(
+            body["message"],
+            "Dismissed confirmations restored on this node: 1."
+        );
+        assert_eq!(dismissed(&pool).await?, ["00b"]);
+        let audit = pool.get_governance_audit(&party_id()?, 50, 0).await?;
+        assert_eq!(audit.len(), 1);
+        assert_eq!(audit[0].event_type, "restore");
+        assert_eq!(audit[0].action_summary, "restore_confirmations");
+        assert_eq!(audit[0].status, "success");
+        Ok(())
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_request_without_a_confirmation_is_refused(pool: SqlitePool) -> Result {
+        for uri in ["/governance/dismiss", "/governance/restore"] {
+            for cids in [&[][..], &["00a", " "][..]] {
+                let (status, body) = send(&pool, uri, cids).await?;
+                assert_eq!(status, StatusCode::BAD_REQUEST, "{uri} {cids:?}: {body}");
+            }
+        }
+
+        assert!(dismissed(&pool).await?.is_empty());
+        let audit = pool.get_governance_audit(&party_id()?, 50, 0).await?;
+        assert!(audit.is_empty());
+        Ok(())
     }
 }

@@ -13,6 +13,7 @@ const proposal = (
   overrides: Partial<DomainGovernanceAction>,
 ): DomainGovernanceAction => ({
   cannot_be_archived: false,
+  dismissed: false,
   proposal_cid: "00proposal",
   action_label: "Transfer",
   confirmations: [],
