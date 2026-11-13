@@ -12,14 +12,23 @@ use tracing::info;
 use crate::common::{
     Fixture,
     http::{probe_workflow_run_visible, probe_workflow_status},
-    invitations::{InvitationIds, post_accept_invitation, probe_pending_invitation},
+    invitations::{post_accept_invitation, probe_pending_invitation},
     scenario::Scenario,
 };
+
+/// What the kick scenario carries from one step to the next.
+#[derive(Default)]
+struct KickCtx {
+    /// P2's kick invitation.
+    p2: Option<String>,
+    /// P1's peer list before the phase removed P3 from it.
+    p1_peers: Vec<Value>,
+}
 
 pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
     info!("Phase: kick");
 
-    Scenario::with_ctx("kick participant-3", InvitationIds::default())
+    Scenario::with_ctx("kick participant-3", KickCtx::default())
         .given("party + member parties present", |f, _| {
             Box::pin(async move {
                 f.party_id()?;
@@ -55,6 +64,36 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
                 })
             },
         )
+        // An operator removes a lost node from the peer list first. The kick
+        // must still accept it as a member of the party.
+        .when("P1 removes P3 from its peer list", |f, ctx| {
+            Box::pin(async move {
+                let config: Value = f
+                    .get_json(f.p1.http, "/network-config")
+                    .await
+                    .context("GET /network-config")?;
+                let peers = config["peers"]
+                    .as_array()
+                    .context("network config has no peer list")?
+                    .clone();
+                let p3 = f.p3.participant_id.as_str();
+                let kept: Vec<Value> = peers
+                    .iter()
+                    .filter(|peer| peer["participant_id"].as_str() != Some(p3))
+                    .cloned()
+                    .collect();
+                anyhow::ensure!(
+                    kept.len() + 1 == peers.len(),
+                    "P1's peer list should hold P3 once: {config}"
+                );
+                let _: Value = f
+                    .post_json(f.p1.http, "/network-config", &kept)
+                    .await
+                    .context("POST /network-config without P3")?;
+                ctx.p1_peers = peers;
+                Ok(())
+            })
+        })
         .when("P1 posts /kick", |f, _| {
             Box::pin(async move {
                 let party_id = f.party_id()?.to_string();
@@ -203,6 +242,16 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
                 })
             },
         )
+        // Later phases add P3 back to the party, so P1 needs its peer entry.
+        .when("P1 restores its peer list", |f, ctx| {
+            Box::pin(async move {
+                let _: Value = f
+                    .post_json(f.p1.http, "/network-config", &ctx.p1_peers)
+                    .await
+                    .context("POST /network-config with P3")?;
+                Ok(())
+            })
+        })
         .run(f)
         .await
 }

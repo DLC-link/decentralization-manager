@@ -26,12 +26,15 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
-use canton_proto_rs::com::digitalasset::canton::crypto::{
-    admin::v30::{
-        ListKeysFilters, ListMyKeysRequest, private_key_metadata,
-        vault_service_client::VaultServiceClient,
+use canton_proto_rs::com::digitalasset::canton::{
+    crypto::{
+        admin::v30::{
+            ListKeysFilters, ListMyKeysRequest, private_key_metadata,
+            vault_service_client::VaultServiceClient,
+        },
+        v30::{SigningKeyUsage, SigningPublicKey, public_key},
     },
-    v30::{SigningKeyUsage, SigningPublicKey, public_key},
+    protocol::v30::PartyToParticipant,
 };
 use sqlx::SqlitePool;
 
@@ -252,6 +255,24 @@ pub async fn known_signing_keys_by_member(
     dec_party_id: &CantonId,
     candidates: &[SigningPublicKey],
 ) -> Result<BTreeMap<String, Fingerprint>> {
+    let mut claims = recorded_signing_keys_by_member(db, dec_party_id).await?;
+
+    let self_id = config.participant_id().to_string();
+    if !claims.contains_key(&self_id)
+        && let Some(own) = own_signing_key_fingerprint(config, db, dec_party_id, candidates).await?
+    {
+        claims.insert(self_id, own);
+    }
+
+    Ok(claims)
+}
+
+/// Member key fingerprints recorded in the cache and onboarding identities.
+/// This performs no ledger or vault call.
+pub(crate) async fn recorded_signing_keys_by_member(
+    db: &SqlitePool,
+    dec_party_id: &CantonId,
+) -> Result<BTreeMap<String, Fingerprint>> {
     let mut claims = BTreeMap::new();
 
     for participant in db.get_dec_party_participants(dec_party_id).await? {
@@ -305,14 +326,172 @@ pub async fn known_signing_keys_by_member(
         }
     }
 
-    let self_id = config.participant_id().to_string();
-    if !claims.contains_key(&self_id)
-        && let Some(own) = own_signing_key_fingerprint(config, db, dec_party_id, candidates).await?
-    {
-        claims.insert(self_id, own);
+    Ok(claims)
+}
+
+/// A refusal about who owns a party signing key. The message says what the
+/// operator can do, so it is safe to show as it is.
+#[derive(Debug, thiserror::Error)]
+pub enum KeyClaimError {
+    /// Two members that stay claim one key. A retry cannot tell which claim
+    /// is wrong.
+    #[error("{0}")]
+    Conflict(String),
+    /// A member's key is not on record, or not a key the party carries.
+    #[error("{0}")]
+    Unresolved(String),
+}
+
+/// The key claims a kick may rely on.
+///
+/// Each member reports its own key, and nothing checks the report. The member
+/// being removed must not block its own kick by claiming the key of a member
+/// that stays. Its claim is then dropped, and its key is found by
+/// elimination. `required` lists the members that stay whose key must be on
+/// record.
+///
+/// # Errors
+///
+/// Errors when two members that stay claim one key, or a required member's
+/// key is not on record.
+pub(crate) fn kick_key_claims(
+    removed: Option<&str>,
+    survivors: &[String],
+    claims: &BTreeMap<String, Fingerprint>,
+    required: &[String],
+) -> Result<BTreeMap<String, Fingerprint>> {
+    let mut owners: BTreeMap<&Fingerprint, &str> = BTreeMap::new();
+    for member in survivors {
+        let Some(fingerprint) = claims.get(member) else {
+            continue;
+        };
+        if let Some(other) = owners.insert(fingerprint, member)
+            && other != member
+        {
+            return Err(KeyClaimError::Conflict(format!(
+                "Cannot kick: members {other} and {member} both claim signing key \
+                 {fingerprint}. The kick cannot tell which claim is wrong. Check which of \
+                 the two nodes holds that key, then refresh /decentralized-parties."
+            ))
+            .into());
+        }
     }
 
-    Ok(claims)
+    let mut usable = claims.clone();
+    if let Some(removed) = removed
+        && let Some(fingerprint) = claims.get(removed)
+        && let Some(survivor) = owners.get(fingerprint)
+    {
+        tracing::warn!(
+            "{removed} claims signing key {fingerprint}, which {survivor} also claims. \
+             The claim of the member being removed is ignored"
+        );
+        usable.remove(removed);
+    }
+
+    let unknown: Vec<&str> = required
+        .iter()
+        .filter(|member| !claims.contains_key(*member))
+        .map(String::as_str)
+        .collect();
+    if !unknown.is_empty() {
+        return Err(KeyClaimError::Unresolved(format!(
+            "Cannot kick: this node has no record of the signing key of {members}. \
+             A peer reports its key when /decentralized-parties is refreshed. \
+             A member that is not a peer must first be added as one.",
+            members = unknown.join(", ")
+        ))
+        .into());
+    }
+    Ok(usable)
+}
+
+/// A quorum may omit any survivor, so a known survivor's authority must remain
+/// in the proposed mapping independently of which members later sign it.
+///
+/// # Errors
+///
+/// Errors when the proposed keys omit any known surviving member's key.
+pub(crate) fn ensure_survivor_keys_preserved(
+    proposed: &[SigningPublicKey],
+    survivors: &[String],
+    claims: &BTreeMap<String, Fingerprint>,
+) -> Result {
+    let keys: BTreeSet<Fingerprint> = proposed.iter().map(utils::compute_fingerprint).collect();
+    for survivor in survivors {
+        if let Some(fingerprint) = claims.get(survivor)
+            && !keys.contains(fingerprint)
+        {
+            return Err(KeyClaimError::Unresolved(format!(
+                "Kick proposal does not preserve surviving member {survivor}'s known signing \
+                 key {fingerprint}. Refresh /decentralized-parties to resolve the key records, \
+                 then retry"
+            ))
+            .into());
+        }
+    }
+    Ok(())
+}
+
+/// Whether rebuilding this mapping moves legacy keys inline. A partial
+/// migration needs adoption just as a mapping with no inline keys does.
+pub(crate) fn requires_signing_key_adoption(mapping: &PartyToParticipant) -> bool {
+    mapping
+        .party_signing_keys
+        .as_ref()
+        .map_or(0, |keys| keys.keys.len())
+        < mapping.participants.len()
+}
+
+/// Which of the hosts that are not peers of this node must sign because
+/// their keys move inline. Such a host cannot be invited to sign.
+///
+/// # Errors
+///
+/// Errors when a partial migration's key attribution cannot establish whether
+/// a named host already has its key inline. Unknown attribution is not consent.
+pub(crate) fn members_requiring_key_adoption(
+    mapping: &PartyToParticipant,
+    not_peers: &[String],
+    claims: &BTreeMap<String, Fingerprint>,
+) -> Result<Vec<String>> {
+    if !requires_signing_key_adoption(mapping) {
+        return Ok(Vec::new());
+    }
+    let inline: BTreeSet<Fingerprint> = mapping
+        .party_signing_keys
+        .as_ref()
+        .into_iter()
+        .flat_map(|keys| &keys.keys)
+        .map(utils::compute_fingerprint)
+        .collect();
+    let hosts: BTreeSet<&str> = mapping
+        .participants
+        .iter()
+        .map(|host| host.participant_uid.as_str())
+        .collect();
+    let mut required = Vec::new();
+    for member in not_peers
+        .iter()
+        .filter(|member| hosts.contains(member.as_str()))
+    {
+        if inline.is_empty() {
+            required.push(member.clone());
+            continue;
+        }
+        let fingerprint = claims.get(member).ok_or_else(|| {
+            KeyClaimError::Unresolved(format!(
+                "Cannot kick: this node has no record of the signing key of {member}. \
+                 Without it, the kick cannot tell whether that key must move into the \
+                 hosting list. {member} is not a peer of this node, so a refresh cannot read \
+                 its key. Add it as a peer, refresh /decentralized-parties, then retry."
+            ))
+        })?;
+        if !inline.contains(fingerprint) {
+            required.push(member.clone());
+        }
+    }
+    Ok(required)
 }
 
 /// The key set a party should carry once `removed` is no longer a member.
@@ -320,21 +499,22 @@ pub async fn known_signing_keys_by_member(
 /// `current` is the party's on-chain key list, `survivors` the members that
 /// stay, and `claims` the attribution [`known_signing_keys_by_member`]
 /// assembled. The removed member's key is identified directly when its
-/// fingerprint is known, and otherwise by elimination — a key no survivor
-/// claims can only be the departing member's.
+/// fingerprint is known and no survivor claims it, and otherwise by
+/// elimination — a key no survivor claims can only be the departing member's.
 ///
 /// # Errors
 ///
-/// Errors when the key cannot be attributed either way. Signing a mapping
-/// that still carries the key would leave a removed participant counting
-/// towards the party's signing threshold, which is the whole point of taking
-/// it out.
+/// Errors when survivor attribution is missing or conflicting, or the key
+/// cannot be identified. A removed member's key must leave without taking
+/// away a surviving member's authority.
 pub fn signing_keys_without_member(
     current: &[SigningPublicKey],
     removed: &str,
     survivors: &[String],
     claims: &BTreeMap<String, Fingerprint>,
 ) -> Result<Vec<SigningPublicKey>> {
+    let claims = &kick_key_claims(Some(removed), survivors, claims, survivors)?;
+    ensure_survivor_keys_preserved(current, survivors, claims)?;
     let fingerprints: Vec<Fingerprint> = current.iter().map(utils::compute_fingerprint).collect();
 
     let claimed_by_removed = claims.get(removed).filter(|f| fingerprints.contains(f));
@@ -378,12 +558,14 @@ pub fn signing_keys_without_member(
         }
     };
 
-    Ok(current
+    let proposed: Vec<SigningPublicKey> = current
         .iter()
         .zip(&fingerprints)
         .filter(|(_, fingerprint)| *fingerprint != &target)
         .map(|(key, _)| key.clone())
-        .collect())
+        .collect();
+    ensure_survivor_keys_preserved(&proposed, survivors, claims)?;
+    Ok(proposed)
 }
 
 /// The key set a party should carry once a kick removes `removed`.
@@ -405,6 +587,7 @@ pub fn signing_keys_after_kick(
     survivors: &[String],
     claims: &BTreeMap<String, Fingerprint>,
 ) -> Result<Vec<SigningPublicKey>> {
+    let claims = &kick_key_claims(Some(removed), survivors, claims, survivors)?;
     if current.len() <= survivors.len() + 1 {
         return signing_keys_without_member(current, removed, survivors, claims);
     }
@@ -436,12 +619,14 @@ pub fn signing_keys_after_kick(
         "Removing {count} signing keys that no remaining member claims",
         count = current.len() - kept.len()
     );
-    Ok(current
+    let proposed: Vec<SigningPublicKey> = current
         .iter()
         .zip(&fingerprints)
         .filter(|(_, fingerprint)| kept.contains(fingerprint))
         .map(|(key, _)| key.clone())
-        .collect())
+        .collect();
+    ensure_survivor_keys_preserved(&proposed, survivors, claims)?;
+    Ok(proposed)
 }
 
 /// Load the party's signing keys from its deprecated `PartyToKeyMapping` and
@@ -622,7 +807,17 @@ pub fn legacy_signing_keys_for_members(
 
 #[cfg(test)]
 mod tests {
+    use canton_proto_rs::com::digitalasset::canton::{
+        crypto::v30::SigningKeysWithThreshold,
+        protocol::v30::party_to_participant::HostingParticipant,
+    };
+
     use super::*;
+    use crate::db::{
+        MIGRATOR,
+        rows::{DecPartyParticipantRow, DecPartyRow},
+        schema::{Commitable, SchemaWrite},
+    };
 
     /// A `SigningPublicKey` whose fingerprint is stable and distinct per
     /// `seed` — the tests only ever compare fingerprints.
@@ -677,20 +872,28 @@ mod tests {
         match signing_keys_after_kick(&current, "p3", &uids(&["p1", "p2"]), &claims) {
             Ok(kept) => panic!("expected a refusal, kept {:?}", seeds(&kept)),
             Err(error) => assert!(
-                error.to_string().contains("p2 has not reported"),
+                error
+                    .to_string()
+                    .contains("no record of the signing key of p2"),
                 "unexpected error: {error}"
             ),
         }
     }
 
-    /// One surplus key needs only the kicked member's claim.
+    /// The target's claim cannot establish which authority survivors retain.
+    /// They may be absent from the final quorum, so missing records must stop.
     #[test]
-    fn a_kick_that_drops_one_key_needs_only_the_kicked_claim() -> Result {
+    fn a_kick_needs_survivor_claims_even_when_the_target_reports_a_key() {
         let current = vec![key(1), key(2), key(3)];
         let claims = claims(&[("p3", 3)]);
-        let kept = signing_keys_after_kick(&current, "p3", &uids(&["p1", "p2"]), &claims)?;
-        assert_eq!(seeds(&kept), vec![fingerprint(1), fingerprint(2)]);
-        Ok(())
+        let error = signing_keys_after_kick(&current, "p3", &uids(&["p1", "p2"]), &claims)
+            .expect_err("a target's claim cannot stand in for the surviving members")
+            .to_string();
+        assert!(
+            error.contains("no record of the signing key of p1"),
+            "{error}"
+        );
+        assert!(error.contains("refreshed"), "{error}");
     }
 
     #[test]
@@ -774,7 +977,7 @@ mod tests {
         match signing_keys_without_member(&current, "p3", &uids(&["p1", "p2"]), &claims) {
             Ok(_) => panic!("ambiguous attribution must not produce a key set"),
             Err(error) => assert!(
-                error.to_string().contains("Cannot tell which"),
+                error.to_string().contains("p2"),
                 "unexpected error: {error}"
             ),
         }
@@ -957,6 +1160,170 @@ mod tests {
         assert!(
             err.to_string().contains("p3"),
             "the error names the member that cannot be resolved: {err}"
+        );
+    }
+
+    fn mapping_with_inline_keys(inline: &[u8]) -> PartyToParticipant {
+        PartyToParticipant {
+            party: "party".to_string(),
+            threshold: 2,
+            participants: uids(&["p1", "p2", "p3", "p4"])
+                .into_iter()
+                .map(|participant_uid| HostingParticipant {
+                    participant_uid,
+                    ..Default::default()
+                })
+                .collect(),
+            party_signing_keys: Some(SigningKeysWithThreshold {
+                keys: inline.iter().copied().map(key).collect(),
+                threshold: 2,
+            }),
+        }
+    }
+
+    #[test]
+    fn a_legacy_non_peer_must_sign_before_its_key_moves_inline() -> Result {
+        let mapping = mapping_with_inline_keys(&[]);
+        assert!(requires_signing_key_adoption(&mapping));
+        assert_eq!(
+            members_requiring_key_adoption(&mapping, &uids(&["p3"]), &BTreeMap::new())?,
+            uids(&["p3"]),
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn a_partial_migration_names_only_the_non_peer_whose_key_is_not_inline() -> Result {
+        let mapping = mapping_with_inline_keys(&[1, 3]);
+        assert!(requires_signing_key_adoption(&mapping));
+        let attributed = claims(&[("p1", 1), ("p2", 2), ("p3", 3), ("p4", 4)]);
+        assert!(members_requiring_key_adoption(&mapping, &uids(&["p3"]), &attributed)?.is_empty());
+        assert_eq!(
+            members_requiring_key_adoption(&mapping, &uids(&["p2", "p3"]), &attributed)?,
+            uids(&["p2"]),
+        );
+        let unknown = members_requiring_key_adoption(&mapping, &uids(&["p3"]), &BTreeMap::new())
+            .expect_err("unknown attribution cannot establish that a missing member need not sign")
+            .to_string();
+        assert!(unknown.contains("p3"), "{unknown}");
+        assert!(unknown.contains("Add it as a peer"), "{unknown}");
+        let inline = mapping_with_inline_keys(&[1, 2, 3, 4]);
+        assert!(!requires_signing_key_adoption(&inline));
+        assert!(
+            members_requiring_key_adoption(&inline, &uids(&["p3"]), &BTreeMap::new())?.is_empty()
+        );
+        Ok(())
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn key_adoption_uses_the_recorded_key_of_each_missing_member(pool: SqlitePool) -> Result {
+        let party = CantonId::parse(&format!("party::1220{}", "09".repeat(32)))?;
+        let members: Vec<String> = (1..=4)
+            .map(|tag| format!("p{tag}::1220{}", format!("{tag:02x}").repeat(32)))
+            .collect();
+        let rows: Vec<DecPartyParticipantRow> = members
+            .iter()
+            .enumerate()
+            .map(|(index, uid)| DecPartyParticipantRow {
+                dec_party_id: party.to_string(),
+                participant_uid: uid.clone(),
+                permission: "confirmation".to_string(),
+                owner_key: None,
+                signing_key: Some(fingerprint((index + 1) as u8).to_string()),
+            })
+            .collect();
+        let mut tx = pool.begin_transaction().await?;
+        tx.upsert_dec_party(&DecPartyRow {
+            party_id: party.to_string(),
+            prefix: party.prefix.clone(),
+            threshold: 2,
+            updated_at: 0,
+            my_owner_key: None,
+            confirmation_threshold: None,
+        })
+        .await?;
+        tx.replace_dec_party_participants(&party, &rows).await?;
+        Commitable::commit(tx).await?;
+        let mut config = NodeConfig::default();
+        config.node.participant_id = Some(CantonId::parse(&members[0])?);
+        let mut mapping = mapping_with_inline_keys(&[1, 2]);
+        for (host, uid) in mapping.participants.iter_mut().zip(&members) {
+            host.participant_uid = uid.clone();
+        }
+        let attributed =
+            known_signing_keys_by_member(&config, &pool, &party, &[key(1), key(2)]).await?;
+        assert_eq!(
+            members_requiring_key_adoption(&mapping, &members[2..3], &attributed)?,
+            members[2..3],
+        );
+        mapping.party_signing_keys = Some(SigningKeysWithThreshold {
+            keys: vec![key(1), key(3)],
+            threshold: 2,
+        });
+        // p2 still needs adoption, but p3 is a missing peer whose key is
+        // already inline. Its absence cannot justify refusing this kick.
+        assert!(members_requiring_key_adoption(&mapping, &members[2..3], &attributed)?.is_empty());
+        Ok(())
+    }
+
+    /// The kicked member reports a remaining member's key as its own. It is
+    /// still kicked: its claim is ignored, its own key is found by
+    /// elimination, and the remaining member keeps its key.
+    #[test]
+    fn a_target_that_claims_a_survivors_key_is_still_kicked() -> Result {
+        let current = vec![key(1), key(2), key(3), key(4)];
+        let survivors = uids(&["p1", "p2", "p3"]);
+        let attributed = claims(&[("p1", 1), ("p2", 2), ("p3", 3), ("p4", 3)]);
+        for kept in [
+            signing_keys_without_member(&current, "p4", &survivors, &attributed)?,
+            signing_keys_after_kick(&current, "p4", &survivors, &attributed)?,
+        ] {
+            assert_eq!(
+                seeds(&kept),
+                vec![fingerprint(1), fingerprint(2), fingerprint(3)]
+            );
+        }
+        let wrong = vec![key(1), key(2), key(4)];
+        let error = ensure_survivor_keys_preserved(&wrong, &survivors, &attributed)
+            .expect_err("the right number of keys does not preserve p3's authority")
+            .to_string();
+        assert!(error.contains("p3"), "{error}");
+        assert!(error.contains(&fingerprint(3).to_string()), "{error}");
+        Ok(())
+    }
+
+    /// A remaining member's claim is never dropped for the kicked member's,
+    /// so the key a remaining member claims is never the one removed.
+    #[test]
+    fn a_survivors_claim_is_never_dropped_for_the_targets() -> Result {
+        let current = vec![key(1), key(2), key(3), key(4)];
+        let survivors = uids(&["p1", "p2", "p3"]);
+        let attributed = claims(&[("p1", 1), ("p2", 2), ("p3", 4), ("p4", 4)]);
+        for kept in [
+            signing_keys_without_member(&current, "p4", &survivors, &attributed)?,
+            signing_keys_after_kick(&current, "p4", &survivors, &attributed)?,
+        ] {
+            assert!(
+                seeds(&kept).contains(&fingerprint(4)),
+                "p3's claimed key stays"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn two_survivors_that_claim_one_key_are_a_conflict() {
+        let current = vec![key(1), key(2), key(3)];
+        let attributed = claims(&[("p1", 1), ("p2", 1), ("p3", 3)]);
+        let error = signing_keys_after_kick(&current, "p3", &uids(&["p1", "p2"]), &attributed)
+            .expect_err("two remaining members claim one key");
+        assert!(
+            matches!(
+                error.downcast_ref::<KeyClaimError>(),
+                Some(KeyClaimError::Conflict(message))
+                    if message.contains("p1") && message.contains("p2")
+            ),
+            "{error:#}"
         );
     }
 }

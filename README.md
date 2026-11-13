@@ -448,6 +448,12 @@ decentralized party.
    - Multi-party signing by remaining members
    - Proposal submission
 
+The kick never contacts the removed node, so its peer entry can be deleted
+before or after the kick. For a node whose Noise key leaked, delete it first.
+Each remaining member that must sign has to stay a configured peer of the
+coordinator until the kick completes. A kick goes ahead without a member that
+is not a peer when the reachable members still meet the threshold.
+
 ### Adding a Participant (Add Party)
 
 1. Open the party, click **Add member** in the Participants section, and choose

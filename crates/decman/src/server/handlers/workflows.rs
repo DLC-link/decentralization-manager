@@ -8,6 +8,7 @@ use actix_web::{HttpRequest, HttpResponse, Responder, get, http::StatusCode, pos
 
 use anyhow::Context;
 use base64::{Engine, engine::general_purpose::STANDARD};
+use canton_proto_rs::com::digitalasset::canton::protocol::v30::PartyToParticipant;
 use prometheus::IntCounterVec;
 use sqlx::SqlitePool;
 
@@ -48,11 +49,17 @@ use crate::{
     workflow::{
         self, AddPartyStep, ChangeThresholdStep, ContractsStep, DarsStep, KickStep, OnboardingStep,
         contracts::DarFile,
+        signing_keys::{
+            KeyClaimError, ensure_survivor_keys_preserved, kick_key_claims,
+            known_signing_keys_by_member, members_requiring_key_adoption,
+            recorded_signing_keys_by_member, requires_signing_key_adoption,
+        },
         state::WorkflowStep,
         storage::WorkflowStorage,
         thresholds::{
             PartyThresholds, carried_confirmation_threshold, check_confirmation_threshold,
         },
+        topology,
     },
 };
 
@@ -386,6 +393,270 @@ fn kick_threshold_bound(target_hosts: bool, member_count: usize, owner_count: us
     i32::try_from(hosts_left.min(owners_left)).unwrap_or(i32::MAX)
 }
 
+/// The members that stay after a kick, split by whether this node can invite
+/// them. Neither list holds this node or the kicked host.
+#[derive(Debug, PartialEq)]
+struct KickSigners {
+    /// Members that are configured peers. The kick invites these to sign.
+    invitees: Vec<CantonId>,
+    /// Members that are not configured peers. The kick cannot reach these.
+    not_peers: Vec<CantonId>,
+}
+
+/// Split the members that stay after a kick into invitees and members that
+/// are not peers. The kicked host never signs, so its peer entry plays no part.
+fn kick_signers(
+    members: &HashSet<CantonId>,
+    peer_ids: &HashSet<CantonId>,
+    self_id: &CantonId,
+    kicked_host: Option<&CantonId>,
+) -> KickSigners {
+    let (mut invitees, mut not_peers): (Vec<CantonId>, Vec<CantonId>) = members
+        .iter()
+        .filter(|member| *member != self_id && Some(*member) != kicked_host)
+        .cloned()
+        .partition(|member| peer_ids.contains(member));
+    invitees.sort();
+    not_peers.sort();
+    KickSigners {
+        invitees,
+        not_peers,
+    }
+}
+
+/// Why a kick cannot collect enough signatures, or `None` when it can.
+///
+/// This node and each invitee sign. Both the current namespace threshold
+/// (`current`, `None` when the party is not cached) and the requested one
+/// must be reachable, because the P2P mapping is submitted after the new
+/// namespace takes effect.
+fn kick_quorum_refusal(
+    current: Option<usize>,
+    requested: usize,
+    signers: &KickSigners,
+) -> Option<String> {
+    let peers = signers.invitees.len();
+    let available = 1 + peers;
+    let current_limits = current.is_some_and(|threshold| threshold > available);
+    let requested_limits = requested > available;
+    let mut message = if current_limits || requested_limits {
+        let limit = if let Some(threshold) = current.filter(|_| current_limits) {
+            format!("Cannot kick: the party's current namespace threshold is {threshold}.")
+        } else {
+            format!("Cannot kick: the requested new_threshold is {requested}.")
+        };
+        match peers {
+            0 => format!("{limit} Only this node can sign."),
+            1 => format!("{limit} Only 2 members can sign: this node and 1 configured peer."),
+            _ => format!(
+                "{limit} Only {available} members can sign: this node and {peers} configured \
+                 peers."
+            ),
+        }
+    } else if peers == 0 {
+        "Cannot kick: this node has no other hosting member to co-sign the kick.".to_string()
+    } else {
+        return None;
+    };
+    for id in &signers.not_peers {
+        message.push_str(&format!(
+            " {id} is a member of the party but is not a configured peer of this node."
+        ));
+    }
+    // Every member that stays signs once it is a peer. The run also needs a
+    // co-signer besides this node.
+    let reachable = available + signers.not_peers.len();
+    let required = current.unwrap_or(1).max(requested).max(2);
+    if !signers.not_peers.is_empty() && reachable >= required {
+        message.push_str(match signers.not_peers.len() {
+            1 => " Add it as a peer, then retry.",
+            _ => " Add them as peers, then retry.",
+        });
+    } else if current_limits {
+        message.push_str(
+            " Lower the threshold with Change Threshold first, while every host can still sign.",
+        );
+        if requested_limits {
+            message.push_str(&format!(
+                " Then pick a new_threshold of {available} or lower."
+            ));
+        }
+    } else if requested_limits {
+        message.push_str(&format!(" Pick a new_threshold of {available} or lower."));
+    }
+    Some(message)
+}
+
+/// A namespace quorum cannot authorize a new inline signing key on behalf
+/// of an unreachable member. Read topology only when a survivor is not a peer.
+async fn kick_key_adoption_refusal(
+    config: &NodeConfig,
+    db: &SqlitePool,
+    party: &CantonId,
+    not_peers: &[CantonId],
+    removed: &str,
+    kicked: Option<&CantonId>,
+) -> Result<Option<String>> {
+    if not_peers.is_empty() {
+        return Ok(None);
+    }
+    let synchronizer_id = utils::get_synchronizer_id(config).await?;
+    let mapping = topology::fetch_p2p_mapping(config, &synchronizer_id, party).await?;
+    kick_key_adoption_refusal_for_mapping(config, db, party, not_peers, removed, kicked, &mapping)
+        .await
+}
+
+async fn kick_key_adoption_refusal_for_mapping(
+    config: &NodeConfig,
+    db: &SqlitePool,
+    party: &CantonId,
+    not_peers: &[CantonId],
+    removed: &str,
+    kicked: Option<&CantonId>,
+    mapping: &PartyToParticipant,
+) -> Result<Option<String>> {
+    let inline = mapping
+        .party_signing_keys
+        .as_ref()
+        .map_or(&[][..], |keys| keys.keys.as_slice());
+    let kicked = kicked.map(ToString::to_string);
+    let survivors: Vec<String> = mapping
+        .participants
+        .iter()
+        .filter(|host| Some(&host.participant_uid) != kicked.as_ref())
+        .map(|host| host.participant_uid.clone())
+        .collect();
+    let members: Vec<String> = not_peers
+        .iter()
+        .map(ToString::to_string)
+        .filter(|member| survivors.contains(member))
+        .collect();
+    // With no inline keys every missing survivor must sign adoption. No
+    // attribution lookup can make that kick safe to start without them.
+    if inline.is_empty() {
+        return Ok(kick_missing_adopters(&members));
+    }
+    let claims = known_signing_keys_by_member(config, db, party, inline).await?;
+    let claims = kick_key_claims(Some(removed), &survivors, &claims, &members)?;
+    if !requires_signing_key_adoption(mapping) {
+        ensure_survivor_keys_preserved(inline, &survivors, &claims)?;
+        return Ok(None);
+    }
+    let required = members_requiring_key_adoption(mapping, &members, &claims)?;
+    Ok(kick_missing_adopters(&required))
+}
+
+fn kick_missing_adopters(required: &[String]) -> Option<String> {
+    let (owner, add) = match required {
+        [] => return None,
+        [member] => (
+            format!("{member} owns such a key but is not a configured peer of this node."),
+            "Add it as a peer, then retry.",
+        ),
+        several => (
+            format!(
+                "{members} own such keys but are not configured peers of this node.",
+                members = several.join(", ")
+            ),
+            "Add them as peers, then retry.",
+        ),
+    };
+    Some(format!(
+        "Cannot kick: the party still keeps signing keys in the older key mapping. The kick \
+         moves them into the hosting list. The owner of each moved key must sign. {owner} {add}"
+    ))
+}
+
+/// Refuse a kick whose proposal could not keep each remaining member's
+/// signing key. Only a record says which key is whose, so every remaining
+/// host other than this node needs one. This node reads its own key from its
+/// vault when it builds the proposal. Reads only the database.
+///
+/// # Errors
+///
+/// [`KeyClaimError`] when a key is not on record or two remaining members
+/// claim one key. Any other error is a database failure.
+async fn check_kick_survivor_keys(
+    db: &SqlitePool,
+    party: &CantonId,
+    self_id: &CantonId,
+    signers: &KickSigners,
+    removed: &str,
+) -> Result {
+    let claims = recorded_signing_keys_by_member(db, party).await?;
+    let survivors: Vec<String> = signers
+        .invitees
+        .iter()
+        .chain(&signers.not_peers)
+        .chain(std::iter::once(self_id))
+        .map(ToString::to_string)
+        .collect();
+    kick_key_claims(Some(removed), &survivors, &claims, &[])?;
+
+    let unknown = |members: &[CantonId]| -> Vec<String> {
+        members
+            .iter()
+            .map(ToString::to_string)
+            .filter(|member| !claims.contains_key(member))
+            .collect()
+    };
+    let peers = unknown(&signers.invitees);
+    let not_peers = unknown(&signers.not_peers);
+    if peers.is_empty() && not_peers.is_empty() {
+        return Ok(());
+    }
+    let mut message = format!(
+        "Cannot kick: this node has no record of the signing key of {members}. The kick must \
+         keep the key of each member that stays.",
+        members = peers
+            .iter()
+            .chain(&not_peers)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+    match not_peers.as_slice() {
+        [] => message
+            .push_str(" Refresh /decentralized-parties so each peer reports its key, then retry."),
+        [member] => message.push_str(&format!(
+            " {member} is not a configured peer of this node, so a refresh cannot read its \
+             key. Add it as a peer, refresh /decentralized-parties, then retry."
+        )),
+        several => message.push_str(&format!(
+            " {members} are not configured peers of this node, so a refresh cannot read their \
+             keys. Add them as peers, refresh /decentralized-parties, then retry.",
+            members = several.join(", ")
+        )),
+    }
+    Err(KeyClaimError::Unresolved(message).into())
+}
+
+/// The response to a failed signing-key check of a kick. A key-claim refusal
+/// says what to do, so it goes back as it is. Any other failure is logged and
+/// answered with generic text.
+fn kick_key_check_failure(party: &CantonId, e: &anyhow::Error) -> HttpResponse {
+    match e.downcast_ref::<KeyClaimError>() {
+        Some(KeyClaimError::Conflict(error)) => {
+            tracing::warn!("Kick of {party} refused: {error}");
+            HttpResponse::Conflict().json(ErrorResponse {
+                error: error.clone(),
+            })
+        }
+        Some(KeyClaimError::Unresolved(error)) => {
+            tracing::info!("Kick of {party} refused: {error}");
+            HttpResponse::ServiceUnavailable().json(ErrorResponse {
+                error: error.clone(),
+            })
+        }
+        None => {
+            tracing::error!("Cannot check the signing keys of {party} for a kick: {e:#}");
+            HttpResponse::ServiceUnavailable().json(ErrorResponse {
+                error: "Cannot check the party's signing keys right now. Retry later.".to_string(),
+            })
+        }
+    }
+}
+
 /// The member a kick removes.
 #[derive(Debug, PartialEq)]
 struct KickTarget {
@@ -617,8 +888,9 @@ async fn cached_confirmation_threshold(
     responses(
         (status = 202, description = "Kick workflow started", body = WorkflowResponse),
         (status = 400, description = "Bad request", body = ErrorResponse),
-        (status = 409, description = "Workflow already in progress, or owner key not yet resolved for the target participant", body = ErrorResponse),
-        (status = 500, description = "Internal server error", body = ErrorResponse)
+        (status = 409, description = "Workflow already in progress, owner key not yet resolved for the target participant, or two remaining members claim one signing key", body = ErrorResponse),
+        (status = 500, description = "Internal server error", body = ErrorResponse),
+        (status = 503, description = "A remaining member's signing key is not on record, or the party's signing keys cannot be read right now", body = ErrorResponse)
     )
 )]
 #[post("/kick")]
@@ -693,9 +965,8 @@ pub async fn start_kick(
     // The participant that leaves the hosting mapping, if the member hosts.
     let kicked_host = target.participant.clone().filter(|_| target.hosts);
 
-    // Load peers once: we use the count to bound `new_threshold` per the
-    // audit finding, then filter into `invitees`. A DB error here is fatal
-    // — we can't safely proceed without knowing how many signers remain.
+    // The peer list decides which members the kick can invite. A DB error
+    // here is fatal, because without it the signer count is unknown.
     let peers = match data.db.get_all_peers().await {
         Ok(p) => p,
         Err(e) => {
@@ -732,33 +1003,38 @@ pub async fn start_kick(
             parsed
         }
     };
-    let peers: Vec<_> = peers
-        .into_iter()
-        .filter(|p| party_member_ids.contains(&p.participant_id))
-        .collect();
+    // The target was checked against the membership above. Its peer entry
+    // does not matter, because the kick never contacts it. Each member that
+    // stays has to sign, and the kick reaches a member only through its peer
+    // entry.
+    let peer_ids: HashSet<CantonId> = peers.into_iter().map(|p| p.participant_id).collect();
+    let signers = kick_signers(&party_member_ids, &peer_ids, &self_id, kicked_host.as_ref());
+    let member_count = party_member_count(&party_member_ids, &self_id);
+    let namespace_threshold =
+        match cached_namespace_threshold(&data.db, &decentralized_party_id).await {
+            Ok(threshold) => threshold,
+            Err(e) => {
+                tracing::error!("Failed to read the cached threshold for kick: {e}");
+                return HttpResponse::InternalServerError().json(ErrorResponse {
+                    error: "Failed to read the party's cached thresholds".to_string(),
+                });
+            }
+        };
 
-    // Preconditions for a kick: there must be at least one peer left
-    // after the kick (so the surviving signer set is non-empty), and a host
-    // being kicked must be a known peer. Without these checks
-    // the `post_kick_member_count` below could go negative and produce
-    // a "between 1 and -1" error that obscures the real problem.
-    let co_signers = peers
-        .iter()
-        .filter(|p| Some(&p.participant_id) != kicked_host.as_ref())
-        .count();
-    if co_signers < 1 {
-        return HttpResponse::BadRequest().json(ErrorResponse {
-            error: format!(
-                "Cannot kick: need at least one other hosting member besides this node \
-                 to co-sign, have {co_signers}"
-            ),
-        });
-    }
-    if let Some(host) = &kicked_host
-        && !peers.iter().any(|p| p.participant_id == *host)
+    // Only the hosts sign. An owner that hosts nothing cannot be asked, so
+    // the namespace threshold in force must be reachable without it.
+    if !target.hosts
+        && let Some(threshold) = namespace_threshold
+        && threshold > member_count
     {
         return HttpResponse::BadRequest().json(ErrorResponse {
-            error: format!("Cannot kick {host}: not a member of this decentralized party"),
+            error: format!(
+                "Cannot kick owner key {key}: the party's namespace threshold is \
+                 {threshold}, but only its {member_count} hosting members can sign. \
+                 The owner being removed would have to sign too, and a kick cannot \
+                 ask it",
+                key = target.owner_key
+            ),
         });
     }
 
@@ -769,18 +1045,17 @@ pub async fn start_kick(
     // rollback. The upper bound is the post-kick member count — there
     // must be at least as many remaining signers as the threshold needs.
     //
-    // Counted from the party's OWN member set, not from `peers`. `peers` is
-    // scoped to invitees and so excludes this node, which is itself a member —
-    // it signs the proposals. Bounding by it undercounts by one, and a party
-    // whose threshold already equals its member count then has no acceptable
-    // value at all: the peers reject anything below the current threshold, and
-    // this check rejects anything at or above it. The add-party and
-    // change-threshold bounds below already count the party set.
+    // Counted from the party's OWN member set, not from the invitees. They
+    // exclude this node, which is itself a member — it signs the proposals.
+    // Bounding by them undercounts by one, and a party whose threshold
+    // already equals its member count then has no acceptable value at all:
+    // the peers reject anything below the current threshold, and this check
+    // rejects anything at or above it. The add-party and change-threshold
+    // bounds below already count the party set.
     //
     // The party's signing threshold follows the namespace one and counts the
     // hosts' keys, so the hosts left after the kick bound it as well as the
     // owners left. An owner that hosts nothing leaves every host in place.
-    let member_count = party_member_count(&party_member_ids, &self_id);
     let post_kick_member_count = member_count - usize::from(target.hosts);
     let max_threshold = kick_threshold_bound(target.hosts, member_count, owner_rows.len());
     if body.new_threshold < 1 || body.new_threshold > max_threshold {
@@ -800,29 +1075,24 @@ pub async fn start_kick(
         });
     }
 
-    // Only the hosts sign. An owner that hosts nothing cannot be asked, so
-    // the namespace threshold in force must be reachable without it.
-    if !target.hosts {
-        match cached_namespace_threshold(&data.db, &decentralized_party_id).await {
-            Ok(Some(threshold)) if threshold > member_count => {
-                return HttpResponse::BadRequest().json(ErrorResponse {
-                    error: format!(
-                        "Cannot kick owner key {key}: the party's namespace threshold is \
-                         {threshold}, but only its {member_count} hosting members can sign. \
-                         The owner being removed would have to sign too, and a kick cannot \
-                         ask it",
-                        key = target.owner_key
-                    ),
-                });
-            }
-            Ok(_) => {}
-            Err(e) => {
-                tracing::error!("Failed to read the cached threshold for kick: {e}");
-                return HttpResponse::InternalServerError().json(ErrorResponse {
-                    error: "Failed to read the party's cached thresholds".to_string(),
-                });
-            }
-        }
+    // The DNS changes first. Its signatures satisfy the current threshold,
+    // and the following P2P update must satisfy the proposed threshold too.
+    if let Some(error) =
+        kick_quorum_refusal(namespace_threshold, body.new_threshold as usize, &signers)
+    {
+        return HttpResponse::BadRequest().json(ErrorResponse { error });
+    }
+    if !signers.not_peers.is_empty() {
+        tracing::info!(
+            "Kick of {decentralized_party_id} proceeds without members that are not \
+             configured peers: {ids}",
+            ids = signers
+                .not_peers
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
     }
 
     let confirmation_threshold = match cached_confirmation_threshold(
@@ -841,14 +1111,9 @@ pub async fn start_kick(
         }
     };
 
-    // Compute peers we're going to invite — every peer except self + the kicked participant.
-    // Done before the InProgress flip so a concurrent /kick/cancel cannot observe
-    // InProgress while we're still preparing.
-    let invitees: Vec<CantonId> = peers
-        .into_iter()
-        .map(|p| p.participant_id)
-        .filter(|p| *p != self_id && Some(p) != kicked_host.as_ref())
-        .collect();
+    // Fixed before the InProgress flip so a concurrent /kick/cancel cannot
+    // observe InProgress while we're still preparing.
+    let invitees = signers.invitees.clone();
 
     // Compute instance name + config up-front so the persisted workflow_runs row
     // can carry the same identifier the coordinator task will use.
@@ -890,6 +1155,36 @@ pub async fn start_kick(
         });
     }
 
+    let removed = kick_config.participant_id.as_ref().map_or_else(
+        || kick_config.namespace_fingerprint.clone(),
+        ToString::to_string,
+    );
+    if let Err(e) = check_kick_survivor_keys(
+        &data.db,
+        &decentralized_party_id,
+        &self_id,
+        &signers,
+        &removed,
+    )
+    .await
+    {
+        return kick_key_check_failure(&decentralized_party_id, &e);
+    }
+    match kick_key_adoption_refusal(
+        &data.config,
+        &data.db,
+        &decentralized_party_id,
+        &signers.not_peers,
+        &removed,
+        kick_config.participant_id.as_ref(),
+    )
+    .await
+    {
+        Ok(Some(error)) => return HttpResponse::BadRequest().json(ErrorResponse { error }),
+        Ok(None) => {}
+        Err(e) => return kick_key_check_failure(&decentralized_party_id, &e),
+    }
+
     // Refuse to invite any peer that can't speak the concurrent-workflows wire
     // format — NO invites are sent if even one invitee fails the version gate.
     let health = probe_invitee_health(&data.config, &data.db, &invitees).await;
@@ -925,7 +1220,6 @@ pub async fn start_kick(
         return resp;
     }
 
-    let invitees_for_invites = invitees.clone();
     *kick_state.invited_peers.write().await = invitees;
 
     // Spawn the kick workflow in the background
@@ -950,8 +1244,7 @@ pub async fn start_kick(
         let _workflow_guard = WorkflowGuard::new(workflows, instance_for_task.clone());
 
         // Send kick invites to the surviving party members before starting workflow
-        let invite_result =
-            send_kick_invites(&config, &db, &kick_config, &invitees_for_invites).await;
+        let invite_result = send_kick_invites(&config, &db, &kick_config, &signers).await;
         if let Err(e) = invite_result {
             tracing::error!("Failed to send kick invites: {e}");
             let msg = format!("Failed to send invites: {e}");
@@ -1095,29 +1388,48 @@ async fn kind_status(data: &web::Data<AppState>, kind: WorkflowKind) -> Workflow
     }
 }
 
-/// Send kick invites to all peers using Noise protocol (excluding the peer being kicked)
+/// Pin the complete surviving host set in the accepted invitation. Members
+/// that are not peers remain on the topology even though they cannot sign.
+fn kick_invite_payload(
+    kick_config: &workflow::KickConfig,
+    signers: &KickSigners,
+    coordinator: &CantonId,
+) -> KickInvitePayload {
+    let mut participants: Vec<CantonId> = signers
+        .invitees
+        .iter()
+        .chain(&signers.not_peers)
+        .cloned()
+        .collect();
+    participants.push(coordinator.clone());
+    participants.sort();
+    participants.dedup();
+    KickInvitePayload {
+        dec_party_id: kick_config.decentralized_party_id.clone(),
+        kicked_participant: kick_config.participant_id.clone(),
+        kicked_owner_key: Some(kick_config.namespace_fingerprint.clone()),
+        new_threshold: kick_config.new_threshold,
+        previous_threshold: kick_config.previous_threshold,
+        confirmation_threshold: kick_config.confirmation_threshold,
+        participants,
+        workflow_instance: Some(kick_config.instance_name.clone()),
+    }
+}
+
+/// Send kick invites only to the reachable members selected for this run.
 async fn send_kick_invites(
     config: &NodeConfig,
     db: &SqlitePool,
     kick_config: &workflow::KickConfig,
-    invitees: &[CantonId],
+    signers: &KickSigners,
 ) -> Result {
     let network_config = NetworkConfig::from_peers(db.get_all_peers().await?);
     let keypair = NoiseKeypair::from_file(&config.key_file_path()).await?;
 
     let current_participant_id = config.participant_id();
     let kicked_participant = kick_config.participant_id.as_ref();
-    let invitee_set: HashSet<&CantonId> = invitees.iter().collect();
-    let payload = KickInvitePayload {
-        dec_party_id: kick_config.decentralized_party_id.clone(),
-        kicked_participant: kicked_participant.cloned(),
-        kicked_owner_key: Some(kick_config.namespace_fingerprint.clone()),
-        new_threshold: kick_config.new_threshold,
-        previous_threshold: kick_config.previous_threshold,
-        confirmation_threshold: kick_config.confirmation_threshold,
-        participants: invitees.to_vec(),
-        workflow_instance: Some(kick_config.instance_name.clone()),
-    };
+    let invitee_set: HashSet<&CantonId> = signers.invitees.iter().collect();
+    let payload = kick_invite_payload(kick_config, signers, current_participant_id);
     let payload_bytes = serde_json::to_vec(&payload).context("encode KickInvitePayload")?;
     let invite_message = Message::new(MessageType::InviteKick, payload_bytes);
 
@@ -4608,9 +4920,22 @@ async fn send_contracts_invites(
 #[cfg(test)]
 mod tests {
     use actix_web::{App, HttpMessage, http::StatusCode, test as actix_test};
+    use canton_proto_rs::com::digitalasset::canton::{
+        crypto::v30::{SigningKeyUsage, SigningKeysWithThreshold, SigningPublicKey},
+        protocol::v30::{enums::ParticipantPermission, party_to_participant::HostingParticipant},
+    };
 
+    use super::super::invitations::insert_peer_run;
     use super::*;
-    use crate::{auth::Principal, db::MIGRATOR, server::AppState};
+    use crate::{
+        auth::Principal,
+        db::MIGRATOR,
+        server::{AppState, PendingInvitation},
+        workflow::{
+            kick::prune_cached_membership, signing_keys::signing_keys_after_kick,
+            validation::PeerExpectations,
+        },
+    };
 
     /// A minimal coordinator run row for `party`, in progress.
     fn in_progress_run(instance: &str, party: &CantonId) -> WorkflowRun {
@@ -4970,6 +5295,924 @@ mod tests {
         let bound = party_member_count(&cached_without_self, &me) as i32 - 1;
         assert_eq!(bound, 3, "a 4-member party leaves 3 after a kick");
         assert!(bound >= 3, "threshold 3 must be expressible");
+        Ok(())
+    }
+
+    fn ids(tags: &[u8]) -> anyhow::Result<HashSet<CantonId>> {
+        tags.iter().map(|tag| pid(*tag)).collect()
+    }
+
+    fn signers(invitees: &[u8], not_peers: &[u8]) -> anyhow::Result<KickSigners> {
+        Ok(KickSigners {
+            invitees: invitees
+                .iter()
+                .map(|tag| pid(*tag))
+                .collect::<anyhow::Result<_>>()?,
+            not_peers: not_peers
+                .iter()
+                .map(|tag| pid(*tag))
+                .collect::<anyhow::Result<_>>()?,
+        })
+    }
+
+    #[test]
+    fn kick_signers_invites_only_members_that_are_peers() -> anyhow::Result<()> {
+        let split = kick_signers(
+            &ids(&[1, 2, 3, 4])?,
+            &ids(&[1, 2, 3, 9])?,
+            &pid(1)?,
+            Some(&pid(4)?),
+        );
+        assert_eq!(split, signers(&[2, 3], &[])?);
+        Ok(())
+    }
+
+    #[test]
+    fn a_kicked_host_that_is_not_a_peer_is_neither_invited_nor_reported() -> anyhow::Result<()> {
+        let split = kick_signers(&ids(&[1, 2, 3])?, &ids(&[2])?, &pid(1)?, Some(&pid(3)?));
+        assert_eq!(split, signers(&[2], &[])?);
+        Ok(())
+    }
+
+    #[test]
+    fn kick_signers_names_surviving_members_that_are_not_peers() -> anyhow::Result<()> {
+        let split = kick_signers(&ids(&[1, 2, 3, 4])?, &ids(&[2])?, &pid(1)?, Some(&pid(4)?));
+        assert_eq!(split, signers(&[2], &[3])?);
+        Ok(())
+    }
+
+    #[test]
+    fn a_kick_below_quorum_names_the_members_that_are_not_peers() -> anyhow::Result<()> {
+        let refusal = kick_quorum_refusal(Some(3), 2, &signers(&[2], &[3, 5])?)
+            .context("a kick two signers short of threshold 3 must be refused")?;
+        assert!(
+            refusal.contains(
+                "the party's current namespace threshold is 3. Only 2 members can sign: this \
+                 node and 1 configured peer."
+            ),
+            "{refusal}"
+        );
+        for tag in [3, 5] {
+            assert!(
+                refusal.contains(&format!(
+                    "{} is a member of the party but is not a configured peer of this node.",
+                    pid(tag)?
+                )),
+                "{refusal}"
+            );
+        }
+        assert!(
+            refusal.ends_with(" Add them as peers, then retry."),
+            "{refusal}"
+        );
+        assert!(!refusal.contains(&pid(2)?.to_string()), "{refusal}");
+        Ok(())
+    }
+
+    /// Adding the members that are not peers would still leave the kick
+    /// short, so the advice is about the threshold instead.
+    #[test]
+    fn a_kick_that_peers_cannot_save_points_to_the_threshold() -> anyhow::Result<()> {
+        let refusal = kick_quorum_refusal(Some(4), 2, &signers(&[2], &[3])?)
+            .context("three reachable signers cannot meet threshold 4")?;
+        assert!(refusal.contains(&pid(3)?.to_string()), "{refusal}");
+        assert!(!refusal.contains("Add it as a peer"), "{refusal}");
+        assert!(
+            refusal.ends_with(
+                " Lower the threshold with Change Threshold first, while every host can still \
+                 sign."
+            ),
+            "{refusal}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn a_short_kick_says_which_threshold_is_the_limit() -> anyhow::Result<()> {
+        let current = kick_quorum_refusal(Some(3), 2, &signers(&[2], &[])?)
+            .context("the current threshold 3 is out of reach")?;
+        assert!(
+            current.starts_with("Cannot kick: the party's current namespace threshold is 3."),
+            "{current}"
+        );
+        assert!(current.contains("Change Threshold"), "{current}");
+        assert!(!current.contains("Pick a new_threshold"), "{current}");
+
+        let requested = kick_quorum_refusal(Some(2), 3, &signers(&[2], &[])?)
+            .context("the requested threshold 3 is out of reach")?;
+        assert!(
+            requested.starts_with("Cannot kick: the requested new_threshold is 3."),
+            "{requested}"
+        );
+        assert!(
+            requested.ends_with(" Pick a new_threshold of 2 or lower."),
+            "{requested}"
+        );
+        assert!(!requested.contains("Change Threshold"), "{requested}");
+
+        let both = kick_quorum_refusal(Some(4), 3, &signers(&[2], &[])?)
+            .context("both thresholds are out of reach")?;
+        assert!(both.contains("current namespace threshold is 4."), "{both}");
+        assert!(
+            both.ends_with(" Then pick a new_threshold of 2 or lower."),
+            "{both}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn the_key_adoption_refusal_names_each_owner_and_the_next_step() -> anyhow::Result<()> {
+        assert_eq!(kick_missing_adopters(&[]), None);
+        let one = kick_missing_adopters(&[pid(3)?.to_string()])
+            .context("one owner that is not a peer must sign")?;
+        assert_eq!(
+            one,
+            format!(
+                "Cannot kick: the party still keeps signing keys in the older key mapping. The \
+                 kick moves them into the hosting list. The owner of each moved key must sign. \
+                 {p3} owns such a key but is not a configured peer of this node. Add it as a \
+                 peer, then retry.",
+                p3 = pid(3)?
+            )
+        );
+        let two = kick_missing_adopters(&[pid(3)?.to_string(), pid(4)?.to_string()])
+            .context("two owners that are not peers must sign")?;
+        assert!(
+            two.ends_with(
+                " own such keys but are not configured peers of this node. Add them as peers, \
+                 then retry."
+            ),
+            "{two}"
+        );
+        assert!(!two.contains("inline"), "{two}");
+        Ok(())
+    }
+
+    #[test]
+    fn a_kick_at_quorum_passes_with_a_member_that_is_not_a_peer() -> anyhow::Result<()> {
+        assert_eq!(kick_quorum_refusal(Some(2), 2, &signers(&[2], &[3])?), None);
+        Ok(())
+    }
+
+    #[test]
+    fn an_uncached_threshold_skips_the_quorum_check() -> anyhow::Result<()> {
+        assert_eq!(kick_quorum_refusal(None, 2, &signers(&[2], &[3])?), None);
+        Ok(())
+    }
+
+    #[test]
+    fn a_kick_with_no_invitee_is_refused() -> anyhow::Result<()> {
+        let alone = kick_quorum_refusal(None, 1, &signers(&[], &[])?)
+            .context("a kick with no co-signer must be refused")?;
+        assert_eq!(
+            alone,
+            "Cannot kick: this node has no other hosting member to co-sign the kick."
+        );
+
+        let refusal = kick_quorum_refusal(Some(1), 1, &signers(&[], &[3])?)
+            .context("a kick whose only survivor is not a peer must be refused")?;
+        assert!(
+            refusal.contains(&format!("{} is a member of the party", pid(3)?)),
+            "{refusal}"
+        );
+        assert!(
+            refusal.ends_with(" Add it as a peer, then retry."),
+            "{refusal}"
+        );
+        Ok(())
+    }
+
+    /// [`state_on`], with `pid(1)` as this node.
+    async fn kick_state_on(pool: SqlitePool) -> Result<web::Data<AppState>> {
+        let state = Arc::try_unwrap(state_on(pool).await?.into_inner())
+            .map_err(|_| anyhow::anyhow!("a fresh test state has one owner"))?;
+        let mut config = NodeConfig::default();
+        config.node.participant_id = Some(pid(1)?);
+        Ok(web::Data::new(AppState { config, ..state }))
+    }
+
+    /// A party hosted by this node and `pid(2..=4)` at namespace threshold 3.
+    /// Each host holds its own owner key. Only `pid(2)` is a configured peer.
+    async fn cache_party_with_one_peer(pool: &SqlitePool) -> Result<CantonId> {
+        let party = pid(40)?;
+        cache_party(pool, &party, 3, None).await?;
+        let keys: Vec<String> = (1..=4).map(|n| format!("k{n}")).collect();
+        let hosts = (1..=4)
+            .zip(&keys)
+            .map(|(tag, key)| Ok(host_row(&pid(tag)?, Some(key))))
+            .collect::<anyhow::Result<Vec<_>>>()?;
+        let mut tx = pool.begin_transaction().await?;
+        tx.replace_dec_party_participants(&party, &hosts).await?;
+        tx.replace_dec_party_owners(&party, &keys).await?;
+        tx.insert_peer(&crate::config::Peer {
+            participant_id: pid(2)?,
+            name: "peer-2".to_string(),
+            address: "127.0.0.1".to_string(),
+            port: 1,
+            public_key: String::new(),
+            party: None,
+        })
+        .await?;
+        Commitable::commit(tx).await?;
+        Ok(party)
+    }
+
+    /// A kick of `target` at threshold 2.
+    fn kick_request(party: &CantonId, target: &CantonId) -> actix_test::TestRequest {
+        actix_test::TestRequest::post()
+            .uri("/kick")
+            .set_json(serde_json::json!({
+                "decentralized_party_id": party,
+                "participant_id": target,
+                "new_threshold": 2,
+            }))
+    }
+
+    async fn status_and_body(response: actix_web::dev::ServiceResponse) -> (StatusCode, String) {
+        let status = response.status();
+        let body = actix_test::read_body(response).await;
+        (status, String::from_utf8_lossy(&body).into_owned())
+    }
+
+    /// The kicked host has no peer entry, which a kick does not need. The
+    /// refusal is about the survivor that is not a peer, so it names that
+    /// survivor. A participant outside the party is still refused as one.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_kick_refused_for_quorum_names_the_survivor_not_the_target(
+        pool: SqlitePool,
+    ) -> Result {
+        let party = cache_party_with_one_peer(&pool).await?;
+        let app = actix_test::init_service(
+            App::new()
+                .app_data(kick_state_on(pool).await?)
+                .service(start_kick),
+        )
+        .await;
+
+        let request = kick_request(&party, &pid(4)?).to_request();
+        request.extensions_mut().insert(admin());
+        let response = actix_test::call_service(&app, request).await;
+        let (status, body) = status_and_body(response).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        assert!(
+            body.contains(&format!(
+                "{} is a member of the party but is not a configured peer of this node",
+                pid(3)?
+            )),
+            "{body}"
+        );
+        assert!(
+            !body.contains("not a member of this decentralized party"),
+            "{body}"
+        );
+
+        let request = kick_request(&party, &pid(9)?).to_request();
+        request.extensions_mut().insert(admin());
+        let response = actix_test::call_service(&app, request).await;
+        let (status, body) = status_and_body(response).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        assert!(
+            body.contains("not a member of this decentralized party"),
+            "{body}"
+        );
+        Ok(())
+    }
+
+    /// Caches `party` at namespace threshold `threshold`, hosted by `hosts`
+    /// (this node is `pid(1)`), each under its own owner key `k{tag}`. The
+    /// keys in `owners_only` own the party without hosting it. Only `peers`
+    /// are configured peers of this node.
+    ///
+    /// The party also gets a run in flight. A kick that passes every check
+    /// then stops at the in-flight guard with a 409, before it probes or
+    /// invites any peer.
+    async fn cache_kick_party(
+        pool: &SqlitePool,
+        party: &CantonId,
+        threshold: i64,
+        hosts: &[u8],
+        owners_only: &[&str],
+        peers: &[u8],
+    ) -> Result {
+        cache_party(pool, party, threshold, None).await?;
+        let mut keys: Vec<String> = hosts.iter().map(|tag| format!("k{tag}")).collect();
+        let host_rows = hosts
+            .iter()
+            .zip(&keys)
+            .map(|(tag, key)| Ok(host_row(&pid(*tag)?, Some(key))))
+            .collect::<anyhow::Result<Vec<_>>>()?;
+        keys.extend(owners_only.iter().map(ToString::to_string));
+        let mut tx = pool.begin_transaction().await?;
+        tx.replace_dec_party_participants(party, &host_rows).await?;
+        tx.replace_dec_party_owners(party, &keys).await?;
+        for tag in peers {
+            tx.insert_peer(&crate::config::Peer {
+                participant_id: pid(*tag)?,
+                name: format!("peer-{tag}"),
+                address: "127.0.0.1".to_string(),
+                port: 1,
+                public_key: String::new(),
+                party: None,
+            })
+            .await?;
+        }
+        Commitable::commit(tx).await?;
+        insert_run(pool, &in_progress_run("contracts-in-flight", party)).await
+    }
+
+    async fn post_kick(pool: SqlitePool, body: serde_json::Value) -> Result<(StatusCode, String)> {
+        let app = actix_test::init_service(
+            App::new()
+                .app_data(kick_state_on(pool).await?)
+                .service(start_kick),
+        )
+        .await;
+        let request = actix_test::TestRequest::post()
+            .uri("/kick")
+            .set_json(body)
+            .to_request();
+        request.extensions_mut().insert(admin());
+        Ok(status_and_body(actix_test::call_service(&app, request).await).await)
+    }
+
+    /// Issue #617: the operator removed a lost host from the peer list, then
+    /// kicked it. The remaining members still reach the threshold, so the
+    /// kick must pass every check. It reaches the in-flight guard, the last
+    /// step before invitations.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_host_removed_from_the_peer_list_can_still_be_kicked(pool: SqlitePool) -> Result {
+        let party = pid(41)?;
+        cache_kick_party(&pool, &party, 2, &[1, 2, 3], &[], &[2]).await?;
+
+        let (status, body) = post_kick(
+            pool,
+            serde_json::json!({
+                "decentralized_party_id": party,
+                "participant_id": pid(3)?,
+                "new_threshold": 2,
+            }),
+        )
+        .await?;
+        assert_eq!(status, StatusCode::CONFLICT, "{body}");
+        assert!(body.contains("already has a"), "{body}");
+        Ok(())
+    }
+
+    /// The bound includes every surviving host, but a higher threshold
+    /// still needs enough configured peers to sign the P2P update.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_raised_threshold_needs_enough_reachable_signers(pool: SqlitePool) -> Result {
+        let party = pid(42)?;
+        cache_kick_party(&pool, &party, 2, &[1, 2, 3, 4], &[], &[2, 3]).await?;
+        let kick = |new_threshold: i64| -> anyhow::Result<serde_json::Value> {
+            Ok(serde_json::json!({
+                "decentralized_party_id": party,
+                "participant_id": pid(3)?,
+                "new_threshold": new_threshold,
+            }))
+        };
+
+        let (status, body) = post_kick(pool.clone(), kick(4)?).await?;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        assert!(
+            body.contains("new_threshold must be between 1 and 3"),
+            "{body}"
+        );
+
+        let (status, body) = post_kick(pool.clone(), kick(3)?).await?;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        assert!(
+            body.contains("the requested new_threshold is 3. Only 2 members can sign"),
+            "{body}"
+        );
+        assert!(body.contains(&pid(4)?.to_string()), "{body}");
+        assert!(body.contains("Add it as a peer, then retry."), "{body}");
+        assert!(!body.contains(&pid(3)?.to_string()), "{body}");
+
+        let (status, body) = post_kick(pool, kick(2)?).await?;
+        assert_eq!(status, StatusCode::CONFLICT, "{body}");
+        assert!(body.contains("already has a"), "{body}");
+        Ok(())
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_raised_threshold_at_reachable_quorum_passes(pool: SqlitePool) -> Result {
+        let party = pid(44)?;
+        cache_kick_party(&pool, &party, 2, &[1, 2, 3, 4], &[], &[2, 4]).await?;
+
+        let (status, body) = post_kick(
+            pool,
+            serde_json::json!({
+                "decentralized_party_id": party,
+                "participant_id": pid(3)?,
+                "new_threshold": 3,
+            }),
+        )
+        .await?;
+        assert_eq!(status, StatusCode::CONFLICT, "{body}");
+        assert!(body.contains("already has a"), "{body}");
+        Ok(())
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_lowered_kick_threshold_allows_an_immediate_second_kick(pool: SqlitePool) -> Result {
+        let party = pid(45)?;
+        cache_kick_party(&pool, &party, 3, &[1, 2, 3, 4], &[], &[2, 3, 4]).await?;
+
+        prune_cached_membership(
+            &pool,
+            &party,
+            Some(&pid(4)?),
+            "k4",
+            crate::db::rows::DecPartyTopologyVersion {
+                namespace_serial: 2,
+                p2p_serial: 2,
+            },
+            PartyThresholds::new(2, None),
+        )
+        .await?;
+
+        let (status, body) = post_kick(
+            pool,
+            serde_json::json!({
+                "decentralized_party_id": party,
+                "participant_id": pid(3)?,
+                "new_threshold": 2,
+            }),
+        )
+        .await?;
+        // The second kick passes quorum and reaches the no-invitations
+        // in-flight guard. A stale cached threshold of 3 refuses it first.
+        assert_eq!(status, StatusCode::CONFLICT, "{body}");
+        assert!(body.contains("already has a"), "{body}");
+        Ok(())
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_quorum_kick_advertises_non_peers_without_waiting_for_them(
+        pool: SqlitePool,
+    ) -> Result {
+        let party = pid(46)?;
+        cache_party(&pool, &party, 2, None).await?;
+        let signers = kick_signers(
+            &ids(&[1, 2, 3, 4])?,
+            &ids(&[2, 5])?,
+            &pid(1)?,
+            Some(&pid(4)?),
+        );
+        assert_eq!(signers.invitees, vec![pid(2)?]);
+        assert_eq!(signers.not_peers, vec![pid(3)?]);
+        let config = workflow::KickConfig::new(
+            party.clone(),
+            Some(pid(4)?),
+            "k4".to_string(),
+            2,
+            None,
+            2,
+            "quorum-kick".to_string(),
+        );
+        let payload = kick_invite_payload(&config, &signers, &pid(1)?);
+        // Exercise the existing wire schema; no new capability is needed.
+        let payload: KickInvitePayload = serde_json::from_slice(&serde_json::to_vec(&payload)?)?;
+        assert_eq!(
+            payload.participants.iter().cloned().collect::<HashSet<_>>(),
+            ids(&[1, 2, 3])?
+        );
+
+        insert_coordinator_run(
+            &pool,
+            &config.instance_name,
+            WorkflowKind::Kick,
+            KickStep::WaitingForPeers,
+            &config,
+            &signers.invitees,
+            Some(party),
+        )
+        .await?;
+        let run = pool
+            .get_workflow_run(&config.instance_name)
+            .await?
+            .context("coordinator run missing")?;
+        assert_eq!(run.expected_peers, vec![pid(2)?]);
+        let state = workflow::WorkflowState::new(
+            pool.clone(),
+            run.instance_name,
+            KickStep::WaitingForPeers,
+            run.expected_peers,
+            Some(1),
+        );
+        state.peer_connected(pid(2)?).await;
+        assert_eq!(state.current_step().await, KickStep::ExportState);
+
+        let mut received = serde_json::to_value(payload)?;
+        received["id"] = "kick-invite".into();
+        received["invitation_type"] = "Kick".into();
+        received["coordinator_pubkey"] = "a1".repeat(32).into();
+        received["received_at"] = 1000.into();
+        let invitation: PendingInvitation = serde_json::from_value(received)?;
+        let peer_instance = insert_peer_run(&pool, &invitation)
+            .await
+            .context("accepted peer run missing")?;
+        let mut node = NodeConfig::default();
+        node.node.participant_id = Some(pid(2)?);
+        let accepted = PeerExpectations::load(&pool, &peer_instance, &node, &pid(1)?).await?;
+        assert_eq!(
+            accepted.members.into_iter().collect::<HashSet<_>>(),
+            ids(&[1, 2, 3])?
+        );
+        assert_eq!(accepted.kicked_participant, Some(pid(4)?));
+        assert_eq!(accepted.threshold, Some(2));
+        Ok(())
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn an_unreadable_key_adoption_preflight_creates_no_kick_run(pool: SqlitePool) -> Result {
+        let party = pid(47)?;
+        cache_kick_party(&pool, &party, 2, &[1, 2, 3, 4], &[], &[2]).await?;
+        record_signing_keys(&pool, &party, &[(2, 2), (3, 3)]).await?;
+        let (state, status, body) = post_kick_without_run_in_flight(&pool, &party, 4).await?;
+
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+        assert_eq!(
+            error_text(&body)?,
+            "Cannot check the party's signing keys right now. Retry later."
+        );
+        assert_no_kick_started(&pool, &state).await
+    }
+
+    /// Posts a kick of `pid(target)` at threshold 2 once the party's run in
+    /// flight is gone. Canton is unreachable, so a ledger read fails at once.
+    async fn post_kick_without_run_in_flight(
+        pool: &SqlitePool,
+        party: &CantonId,
+        target: u8,
+    ) -> Result<(web::Data<AppState>, StatusCode, String)> {
+        sqlx::query("DELETE FROM workflow_runs WHERE instance_name = 'contracts-in-flight'")
+            .execute(pool)
+            .await?;
+        let state = Arc::try_unwrap(kick_state_on(pool.clone()).await?.into_inner())
+            .map_err(|_| anyhow::anyhow!("fresh state has one owner"))?;
+        let mut config = state.config.clone();
+        // Invalid URI fails at the Canton boundary without opening a socket.
+        config.canton.admin_api_host = "[".to_string();
+        let state = web::Data::new(AppState { config, ..state });
+        let app =
+            actix_test::init_service(App::new().app_data(state.clone()).service(start_kick)).await;
+        let request = kick_request(party, &pid(target)?).to_request();
+        request.extensions_mut().insert(admin());
+        let (status, body) = status_and_body(actix_test::call_service(&app, request).await).await;
+        Ok((state, status, body))
+    }
+
+    /// The `error` field of an error response body.
+    fn error_text(body: &str) -> Result<String> {
+        serde_json::from_str::<serde_json::Value>(body)?["error"]
+            .as_str()
+            .map(ToString::to_string)
+            .with_context(|| format!("no error text in {body}"))
+    }
+
+    async fn assert_no_kick_started(pool: &SqlitePool, state: &web::Data<AppState>) -> Result {
+        assert!(
+            pool.get_workflow_runs_by_kind(WorkflowKind::Kick)
+                .await?
+                .is_empty()
+        );
+        assert!(state.workflows.snapshot().is_empty());
+        assert!(state.pending_invitations.read().await.is_empty());
+        Ok(())
+    }
+
+    /// Every remaining host's key must be on record, or the proposal cannot
+    /// keep it. The refusal comes before any run exists. It names the member,
+    /// and a member that is not a peer is told to become one.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_kick_needs_every_remaining_hosts_key_before_any_run(pool: SqlitePool) -> Result {
+        let party = pid(50)?;
+        cache_kick_party(&pool, &party, 2, &[1, 2, 3, 4], &[], &[2]).await?;
+        record_signing_keys(&pool, &party, &[(2, 2)]).await?;
+
+        let (state, status, body) = post_kick_without_run_in_flight(&pool, &party, 4).await?;
+
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+        let error = error_text(&body)?;
+        assert_eq!(
+            error,
+            format!(
+                "Cannot kick: this node has no record of the signing key of {p3}. The kick \
+                 must keep the key of each member that stays. {p3} is not a configured peer \
+                 of this node, so a refresh cannot read its key. Add it as a peer, refresh \
+                 /decentralized-parties, then retry.",
+                p3 = pid(3)?
+            )
+        );
+        assert_no_kick_started(&pool, &state).await
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_peer_without_a_recorded_key_is_asked_to_refresh(pool: SqlitePool) -> Result {
+        let party = pid(51)?;
+        cache_kick_party(&pool, &party, 2, &[1, 2, 3], &[], &[2, 3]).await?;
+        let (state, status, body) = post_kick_without_run_in_flight(&pool, &party, 3).await?;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+        let error = error_text(&body)?;
+        assert!(error.contains(&pid(2)?.to_string()), "{error}");
+        assert!(
+            error.ends_with(
+                " Refresh /decentralized-parties so each peer reports its key, then retry."
+            ),
+            "{error}"
+        );
+        assert!(!error.contains("Add it as a peer"), "{error}");
+        assert_no_kick_started(&pool, &state).await
+    }
+
+    /// Two remaining members that claim one key are a conflict no retry can
+    /// settle. The refusal is a 409 and comes before any run exists.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn two_survivors_that_claim_one_key_are_refused_with_a_conflict(
+        pool: SqlitePool,
+    ) -> Result {
+        let party = pid(52)?;
+        cache_kick_party(&pool, &party, 2, &[1, 2, 3, 4], &[], &[2, 3]).await?;
+        record_signing_keys(&pool, &party, &[(2, 2), (3, 2), (4, 4)]).await?;
+
+        let (state, status, body) = post_kick_without_run_in_flight(&pool, &party, 4).await?;
+
+        assert_eq!(status, StatusCode::CONFLICT, "{body}");
+        let error = error_text(&body)?;
+        assert!(error.contains("both claim signing key"), "{error}");
+        assert!(error.contains(&pid(2)?.to_string()), "{error}");
+        assert!(error.contains(&pid(3)?.to_string()), "{error}");
+        assert_no_kick_started(&pool, &state).await
+    }
+
+    /// The kicked member reports a remaining member's key as its own. That
+    /// claim is ignored, so it cannot block its own kick.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_target_that_claims_a_survivors_key_passes_the_key_check(pool: SqlitePool) -> Result {
+        let party = pid(53)?;
+        cache_kick_party(&pool, &party, 2, &[1, 2, 3, 4], &[], &[2, 3]).await?;
+        record_signing_keys(&pool, &party, &[(2, 2), (3, 3), (4, 2)]).await?;
+        let signers = kick_signers(
+            &ids(&[1, 2, 3, 4])?,
+            &ids(&[2, 3])?,
+            &pid(1)?,
+            Some(&pid(4)?),
+        );
+
+        check_kick_survivor_keys(&pool, &party, &pid(1)?, &signers, &pid(4)?.to_string()).await
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_kick_with_no_missing_peer_skips_the_extra_topology_read(pool: SqlitePool) -> Result {
+        let mut config = NodeConfig::default();
+        config.canton.admin_api_host = "[".to_string();
+        assert_eq!(
+            kick_key_adoption_refusal(&config, &pool, &pid(48)?, &[], "unused", None).await?,
+            None
+        );
+        Ok(())
+    }
+
+    fn kick_public_key(tag: u8) -> SigningPublicKey {
+        SigningPublicKey {
+            public_key: vec![tag; 32],
+            usage: vec![SigningKeyUsage::Protocol as i32],
+            ..Default::default()
+        }
+    }
+
+    /// Records `kick_public_key(key)` as the signing key of host `pid(host)`.
+    async fn record_signing_keys(pool: &SqlitePool, party: &CantonId, keys: &[(u8, u8)]) -> Result {
+        for (host, key) in keys {
+            sqlx::query(
+                "UPDATE dec_party_participant SET signing_key = ? \
+                 WHERE dec_party_id = ? AND participant_uid = ?",
+            )
+            .bind(utils::compute_fingerprint(&kick_public_key(*key)).to_string())
+            .bind(party.to_string())
+            .bind(pid(*host)?.to_string())
+            .execute(pool)
+            .await?;
+        }
+        Ok(())
+    }
+
+    async fn fully_inline_kick_keys(
+        pool: &SqlitePool,
+    ) -> Result<(NodeConfig, CantonId, PartyToParticipant)> {
+        let party = pid(49)?;
+        cache_kick_party(pool, &party, 2, &[1, 2, 3, 4], &[], &[2]).await?;
+        record_signing_keys(pool, &party, &[(1, 1), (2, 2), (3, 3), (4, 4)]).await?;
+        let mut config = NodeConfig::default();
+        config.node.participant_id = Some(pid(1)?);
+        config.canton.admin_api_host = "[".to_string();
+        let mapping = PartyToParticipant {
+            party: party.to_string(),
+            threshold: 2,
+            participants: (1..=4)
+                .map(|tag| -> Result<HostingParticipant> {
+                    Ok(HostingParticipant {
+                        participant_uid: pid(tag)?.to_string(),
+                        permission: ParticipantPermission::Confirmation as i32,
+                        ..Default::default()
+                    })
+                })
+                .collect::<Result<Vec<_>>>()?,
+            party_signing_keys: Some(SigningKeysWithThreshold {
+                keys: (1..=4).map(kick_public_key).collect(),
+                threshold: 2,
+            }),
+        };
+        Ok((config, party, mapping))
+    }
+
+    /// The kicked member claims the key of a remaining member that is not a
+    /// peer. The preflight ignores that claim, and the kick removes the
+    /// target's own key by elimination. A remaining member that claims the
+    /// same key as another one is still refused.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn fully_inline_preflight_ignores_a_target_claiming_a_non_peers_key(
+        pool: SqlitePool,
+    ) -> Result {
+        let (config, party, mapping) = fully_inline_kick_keys(&pool).await?;
+        record_signing_keys(&pool, &party, &[(4, 3)]).await?;
+        let preflight = |pool: SqlitePool| {
+            let (config, party, mapping) = (config.clone(), party.clone(), mapping.clone());
+            async move {
+                kick_key_adoption_refusal_for_mapping(
+                    &config,
+                    &pool,
+                    &party,
+                    &[pid(3)?],
+                    &pid(4)?.to_string(),
+                    Some(&pid(4)?),
+                    &mapping,
+                )
+                .await
+            }
+        };
+
+        assert_eq!(preflight(pool.clone()).await?, None);
+        let keys = &mapping
+            .party_signing_keys
+            .as_ref()
+            .context("inline keys")?
+            .keys;
+        let attributed = known_signing_keys_by_member(&config, &pool, &party, keys).await?;
+        let kept = signing_keys_after_kick(
+            keys,
+            &pid(4)?.to_string(),
+            &[
+                pid(1)?.to_string(),
+                pid(2)?.to_string(),
+                pid(3)?.to_string(),
+            ],
+            &attributed,
+        )?;
+        assert_eq!(kept, keys[..3].to_vec());
+
+        record_signing_keys(&pool, &party, &[(2, 3)]).await?;
+        let error = preflight(pool)
+            .await
+            .expect_err("two remaining members claim one key");
+        assert!(
+            matches!(
+                error.downcast_ref::<KeyClaimError>(),
+                Some(KeyClaimError::Conflict(_))
+            ),
+            "{error:#}"
+        );
+        let response = kick_key_check_failure(&party, &error);
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        Ok(())
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_non_peer_needs_a_unique_known_key_even_on_a_fully_inline_party(
+        pool: SqlitePool,
+    ) -> Result {
+        let (config, party, mut mapping) = fully_inline_kick_keys(&pool).await?;
+        sqlx::query(
+            "UPDATE dec_party_participant SET signing_key = NULL WHERE participant_uid = ?",
+        )
+        .bind(pid(3)?.to_string())
+        .execute(&pool)
+        .await?;
+        let error = kick_key_adoption_refusal_for_mapping(
+            &config,
+            &pool,
+            &party,
+            &[pid(3)?],
+            &pid(4)?.to_string(),
+            Some(&pid(4)?),
+            &mapping,
+        )
+        .await
+        .expect_err("unknown non-peer ownership must request a refresh")
+        .to_string();
+        assert!(error.contains(&pid(3)?.to_string()), "{error}");
+        assert!(error.contains("no record of the signing key"), "{error}");
+        assert!(
+            error.contains("A member that is not a peer must first be added as one."),
+            "{error}"
+        );
+        sqlx::query("UPDATE dec_party_participant SET signing_key = ? WHERE participant_uid = ?")
+            .bind(utils::compute_fingerprint(&kick_public_key(3)).to_string())
+            .bind(pid(3)?.to_string())
+            .execute(&pool)
+            .await?;
+        assert_eq!(
+            kick_key_adoption_refusal_for_mapping(
+                &config,
+                &pool,
+                &party,
+                &[pid(3)?],
+                &pid(4)?.to_string(),
+                Some(&pid(4)?),
+                &mapping,
+            )
+            .await?,
+            None
+        );
+        // A reachable p2 needs adoption, but non-peer p3 is already inline.
+        mapping.party_signing_keys = Some(SigningKeysWithThreshold {
+            keys: vec![kick_public_key(1), kick_public_key(3)],
+            threshold: 2,
+        });
+        assert_eq!(
+            kick_key_adoption_refusal_for_mapping(
+                &config,
+                &pool,
+                &party,
+                &[pid(3)?],
+                &pid(4)?.to_string(),
+                Some(&pid(4)?),
+                &mapping,
+            )
+            .await?,
+            None
+        );
+        Ok(())
+    }
+
+    /// A host kick at a threshold equal to the host count can never collect
+    /// enough signatures, because the kicked host does not sign. The refusal
+    /// comes before any invitation. It is about the signers, so it does not
+    /// name the target, whose peer entry the kick does not need.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_kick_short_of_signers_does_not_blame_the_target(pool: SqlitePool) -> Result {
+        let party = pid(43)?;
+        cache_kick_party(&pool, &party, 3, &[1, 2, 3], &[], &[2]).await?;
+
+        let (status, body) = post_kick(
+            pool,
+            serde_json::json!({
+                "decentralized_party_id": party,
+                "participant_id": pid(3)?,
+                "new_threshold": 2,
+            }),
+        )
+        .await?;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        assert!(
+            body.contains("current namespace threshold is 3. Only 2 members can sign"),
+            "{body}"
+        );
+        assert!(body.contains("Change Threshold"), "{body}");
+        assert!(!body.contains(&pid(3)?.to_string()), "{body}");
+        Ok(())
+    }
+
+    /// An owner-only kick removes no host, so every host stays and has to
+    /// sign. A host that is not a peer cannot be invited. When that leaves
+    /// the run short of the threshold, the refusal names that host.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn an_owner_only_kick_short_of_signers_names_the_host_that_is_not_a_peer(
+        pool: SqlitePool,
+    ) -> Result {
+        let party = pid(44)?;
+        cache_kick_party(&pool, &party, 3, &[1, 2, 3], &["k5"], &[2]).await?;
+
+        let (status, body) = post_kick(
+            pool,
+            serde_json::json!({
+                "decentralized_party_id": party,
+                "owner_key": "k5",
+                "new_threshold": 2,
+            }),
+        )
+        .await?;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        assert!(
+            body.contains(&format!(
+                "{} is a member of the party but is not a configured peer of this node",
+                pid(3)?
+            )),
+            "{body}"
+        );
+        assert!(body.contains("namespace threshold is 3"), "{body}");
         Ok(())
     }
 

@@ -469,14 +469,39 @@ lists the workflow features it supports in its Health reply. The coordinator
 refuses such a kick before it sends any invitation when an invited peer does
 not list `owner-only-kick`.
 
+The kicked member is checked against the party's hosts and owners, not against
+the peer list, and it is never contacted. The coordinator invites each
+remaining member that is a configured peer. A remaining member that is not a
+peer stays in the invitation's member list but is not asked to sign.
+
+Before it sends any invitation, the coordinator refuses a kick in these cases:
+
+- This node and the invited peers cannot meet both the current and the
+  requested namespace threshold. The refusal says which threshold is the limit.
+- A remaining member that is not a peer must sign, because the kick moves its
+  key from the older `PartyToKeyMapping` into the hosting list.
+- A remaining host's signing key is not on record (`503`), or two remaining
+  members claim one key (`409`).
+
+Each member reports its own signing key, and nothing checks the report. A
+remaining member's claim always wins. When the kicked member claims a
+remaining member's key, its claim is ignored and its key is the one no
+remaining member claims. The proposal keeps every key a remaining member
+claims, and each signing peer checks the same rule against its own records.
+
+A refresh can read a party's namespace and hosting records on either side of
+the kick. The cache stores both topology serials per party and accepts a write
+only when neither serial is lower, so a stale refresh cannot write the removed
+member back.
+
 **Steps:**
 
 | # | Step | Actor | Description |
 |---|------|-------|-------------|
-| 1 | WaitingForPeers | Coordinator | Wait for remaining members to connect |
+| 1 | WaitingForPeers | Coordinator | Wait for the invited remaining members to connect |
 | 2 | ExportState | Coordinator | Export current DNS and P2P topology state |
 | 3 | CreateProposals | Coordinator | Create new DNS (reduced owners) and P2P (removed member, or the mapping in force when it does not change) proposals |
-| 4 | SignProposals | All remaining | Each remaining member signs the kick proposals |
+| 4 | SignProposals | Invited members | Each invited member checks and signs the kick proposals. A quorum is enough, unless the kick moves legacy keys into the hosting list |
 | 5 | SubmitKick | Coordinator | Submit signed proposals to Canton |
 | 6 | RetireLegacyKeys | All | Remove the party's obsolete `PartyToKeyMapping`, if it has one (see [Legacy party-key retirement](DEPLOYMENT_GUIDE.md#legacy-party-key-retirement)) |
 | 7 | Complete | All | Disconnect peers |

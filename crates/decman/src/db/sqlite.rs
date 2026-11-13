@@ -11,9 +11,9 @@ use super::{
     crypto,
     rows::{
         ChainAuditCacheRow, DecPartyContractRow, DecPartyIdentityRow, DecPartyOwnerRow,
-        DecPartyParticipantRow, DecPartyRow, FormerDecPartyRow, GovernanceAuditRow,
-        HandledInvitationRow, OwnerKeyRefusal, PartyCredentialsRow, PeerRow, PendingInvitationRow,
-        WorkflowArtifactRow, WorkflowRunRow,
+        DecPartyParticipantRow, DecPartyRow, DecPartyTopologyVersion, FormerDecPartyRow,
+        GovernanceAuditRow, HandledInvitationRow, OwnerKeyRefusal, PartyCredentialsRow, PeerRow,
+        PendingInvitationRow, WorkflowArtifactRow, WorkflowRunRow,
     },
     schema::{Commitable, SchemaRead, SchemaWrite},
 };
@@ -1028,6 +1028,56 @@ impl Commitable for sqlx::Transaction<'static, sqlx::Sqlite> {
         .await?;
 
         Ok(())
+    }
+
+    async fn advance_dec_party_topology_version(
+        &mut self,
+        party_id: &CantonId,
+        version: DecPartyTopologyVersion,
+    ) -> Result<bool> {
+        let result = sqlx::query(
+            "INSERT INTO dec_party_topology_version (party_id, namespace_serial, p2p_serial) \
+             VALUES (?, ?, ?) ON CONFLICT(party_id) DO UPDATE SET \
+                 namespace_serial = excluded.namespace_serial, p2p_serial = excluded.p2p_serial \
+             WHERE dec_party_topology_version.namespace_serial <= excluded.namespace_serial \
+               AND dec_party_topology_version.p2p_serial <= excluded.p2p_serial",
+        )
+        .bind(party_id.to_string())
+        .bind(version.namespace_serial)
+        .bind(version.p2p_serial)
+        .execute(&mut **self)
+        .await?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    async fn update_dec_party_thresholds_after_kick(
+        &mut self,
+        party_id: &CantonId,
+        confirmed_version: DecPartyTopologyVersion,
+        namespace_threshold: i64,
+        confirmation_threshold: Option<i64>,
+    ) -> Result<bool> {
+        let exists: bool =
+            sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM dec_party WHERE party_id = ?)")
+                .bind(party_id.to_string())
+                .fetch_one(&mut **self)
+                .await?;
+        if !exists
+            || !self
+                .advance_dec_party_topology_version(party_id, confirmed_version)
+                .await?
+        {
+            return Ok(false);
+        }
+        sqlx::query(
+            "UPDATE dec_party SET threshold = ?, confirmation_threshold = ? WHERE party_id = ?",
+        )
+        .bind(namespace_threshold)
+        .bind(confirmation_threshold)
+        .bind(party_id.to_string())
+        .execute(&mut **self)
+        .await?;
+        Ok(true)
     }
 
     async fn replace_dec_party_owners(&mut self, party_id: &CantonId, owners: &[String]) -> Result {

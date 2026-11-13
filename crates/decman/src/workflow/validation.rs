@@ -39,7 +39,10 @@ use crate::{
         onboarding::steps::proposals::create::{
             compute_decentralized_namespace, decode_keys_payload,
         },
-        signing_keys::{own_namespace_key, vault_holds},
+        signing_keys::{
+            ensure_survivor_keys_preserved, kick_key_claims, own_namespace_key,
+            recorded_signing_keys_by_member, vault_holds,
+        },
         storage::{WorkflowStorage, artifact_kinds, identity_kinds},
         topology, topology_version,
     },
@@ -69,10 +72,9 @@ pub struct PeerExpectations {
     /// other kind are refused outright.
     pub kind: WorkflowKind,
     pub contract_intents: Vec<common::api::ContractDeploymentIntent>,
-    /// The full member set: the participants named in the invitation plus the
-    /// coordinator itself (onboarding and kick invitations list only the
-    /// invitees; add-party and change-threshold already include the
-    /// coordinator, so the union is the same set either way).
+    /// The full member set accepted in the invitation, plus the coordinator.
+    /// Topology invitations include surviving hosts that are not invited to
+    /// sign; onboarding lists its invitees without the coordinator.
     pub members: BTreeSet<CantonId>,
     /// The dec party the run targets. Absent for onboarding, where the party
     /// does not exist yet.
@@ -403,10 +405,10 @@ impl PeerExpectations {
         self.check_p2p_membership(&mapping)?;
         self.check_onboarding_markers(&mapping)?;
         self.check_p2p_thresholds(&mapping)?;
-        // Kick rebuilds the key set to take the departing member's key out
-        // (#428), and it has to work out which key that is from local records.
-        // Get it wrong and a remaining member's key goes instead: the counts
-        // still match, so only the member whose key vanished can catch it.
+        if self.kind == WorkflowKind::Kick {
+            self.check_surviving_daml_keys(storage, &mapping).await?;
+        }
+        // Every signer also verifies its own key against its identity or vault.
         self.check_own_daml_key(
             config,
             storage,
@@ -441,6 +443,33 @@ impl PeerExpectations {
             kind = self.kind
         );
         Ok(())
+    }
+
+    /// Defend known survivors even when they do not contribute a signature.
+    /// This reads only local records; unknown legacy records remain subject to
+    /// each signer's existing identity/vault check.
+    async fn check_surviving_daml_keys(
+        &self,
+        storage: &SqlitePool,
+        mapping: &PartyToParticipant,
+    ) -> Result {
+        let party = self
+            .dec_party_id
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("accepted kick names no party"))?;
+        let keys = mapping
+            .party_signing_keys
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("P2P proposal carries no party signing keys"))?;
+        let survivors: Vec<String> = self.members.iter().map(ToString::to_string).collect();
+        let removed = self
+            .kicked_participant
+            .as_ref()
+            .map(ToString::to_string)
+            .or_else(|| self.kicked_owner_key.clone());
+        let claims = recorded_signing_keys_by_member(storage, party).await?;
+        let claims = kick_key_claims(removed.as_deref(), &survivors, &claims, &[])?;
+        ensure_survivor_keys_preserved(&keys.keys, &survivors, &claims)
     }
 
     /// The checks on a party DNS proposal that need no topology read: the
@@ -1795,6 +1824,204 @@ mod tests {
             expectations
                 .check_p2p_membership(&p2p("dec::x", &[a, b, mallory], 2))
                 .is_err()
+        );
+        Ok(())
+    }
+
+    #[sqlx::test(migrator = "crate::db::MIGRATOR")]
+    async fn accepted_kick_keeps_non_peer_hosts_and_still_checks_exact_membership(
+        pool: SqlitePool,
+    ) -> Result {
+        let (coordinator, peer, non_peer, kicked, outsider) = (
+            canton_id("p1", 1)?,
+            canton_id("p2", 2)?,
+            canton_id("p3", 3)?,
+            canton_id("p4", 4)?,
+            canton_id("p5", 5)?,
+        );
+        let party = canton_id("party", 9)?;
+        let config = serde_json::json!({
+            "participants": [&coordinator, &peer, &non_peer],
+            "participant_id": kicked,
+            "namespace_fingerprint": "owner-4",
+            "new_threshold": 2,
+        });
+        sqlx::query(
+            "INSERT INTO workflow_runs \
+             (instance_name, kind, role, status, current_step, step_index, step_total, \
+              config_json, expected_peers_json, completed_peers_json, dec_party_id, created_at, updated_at) \
+             VALUES ('accepted-quorum-kick', 'Kick', 'Peer', 'inprogress', 'Active', 0, 7, \
+                     ?, '[]', '[]', ?, 0, 0)",
+        )
+        .bind(config.to_string())
+        .bind(party.to_string())
+        .execute(&pool)
+        .await?;
+        let mut node = NodeConfig::default();
+        node.node.participant_id = Some(peer.clone());
+        let accepted =
+            PeerExpectations::load(&pool, "accepted-quorum-kick", &node, &coordinator).await?;
+        assert_eq!(accepted.kind, WorkflowKind::Kick);
+        accepted.check_p2p_membership(&p2p(
+            &party.to_string(),
+            &[coordinator.clone(), peer.clone(), non_peer.clone()],
+            2,
+        ))?;
+
+        for hosts in [
+            vec![coordinator.clone(), peer.clone()],
+            vec![
+                coordinator.clone(),
+                peer.clone(),
+                non_peer.clone(),
+                outsider,
+            ],
+            vec![coordinator, peer, non_peer, kicked],
+        ] {
+            let error = accepted
+                .check_p2p_membership(&p2p(&party.to_string(), &hosts, 2))
+                .expect_err("an omitted or extra host must still be refused")
+                .to_string();
+            assert!(error.contains("host set does not match"), "{error}");
+        }
+        Ok(())
+    }
+
+    #[sqlx::test(migrator = "crate::db::MIGRATOR")]
+    async fn a_peer_defends_a_known_absent_survivors_key_as_well_as_its_own(
+        pool: SqlitePool,
+    ) -> Result {
+        let party = canton_id("party", 9)?;
+        let hosts: Vec<CantonId> = (1..=4)
+            .map(|tag| canton_id(&format!("p{tag}"), tag))
+            .collect::<Result<_>>()?;
+        let all_keys = signing_keys(4, 2).keys;
+        sqlx::query(
+            "INSERT INTO dec_party (party_id, prefix, threshold, updated_at) VALUES (?, ?, 2, 0)",
+        )
+        .bind(party.to_string())
+        .bind(&party.prefix)
+        .execute(&pool)
+        .await?;
+        for (host, key) in hosts.iter().zip(&all_keys) {
+            sqlx::query("INSERT INTO dec_party_participant (dec_party_id, participant_uid, permission, signing_key) VALUES (?, ?, 'confirmation', ?)")
+                .bind(party.to_string()).bind(host.to_string())
+                .bind(utils::compute_fingerprint(key).to_string()).execute(&pool).await?;
+        }
+        let mut accepted = expectations(hosts[..3].to_vec(), hosts[1].clone());
+        accepted.kind = WorkflowKind::Kick;
+        accepted.dec_party_id = Some(party.clone());
+        accepted.kicked_participant = Some(hosts[3].clone());
+        let mut proposal = p2p(&party.to_string(), &hosts[..3], 2);
+        // The signer p2 keeps its own key, while absent p3 loses authority.
+        proposal.party_signing_keys = Some(SigningKeysWithThreshold {
+            keys: vec![
+                all_keys[0].clone(),
+                all_keys[1].clone(),
+                all_keys[3].clone(),
+            ],
+            threshold: 2,
+        });
+        let error = accepted
+            .check_surviving_daml_keys(&pool, &proposal)
+            .await
+            .expect_err("quorum signers must defend a known absent survivor too")
+            .to_string();
+        assert!(error.contains(&hosts[2].to_string()), "{error}");
+        assert!(
+            error.contains(&utils::compute_fingerprint(&all_keys[2]).to_string()),
+            "{error}"
+        );
+        proposal.party_signing_keys = Some(SigningKeysWithThreshold {
+            keys: all_keys[..3].to_vec(),
+            threshold: 2,
+        });
+        accepted.check_surviving_daml_keys(&pool, &proposal).await
+    }
+
+    /// Records `keys[key]` as the signing key of `hosts[host]`, by index.
+    async fn record_claims(
+        pool: &SqlitePool,
+        party: &CantonId,
+        hosts: &[CantonId],
+        keys: &[SigningPublicKey],
+        claims: &[(usize, usize)],
+    ) -> Result {
+        for (host, key) in claims {
+            sqlx::query(
+                "INSERT INTO dec_party_participant \
+                 (dec_party_id, participant_uid, permission, signing_key) \
+                 VALUES (?, ?, 'confirmation', ?) \
+                 ON CONFLICT (dec_party_id, participant_uid) \
+                 DO UPDATE SET signing_key = excluded.signing_key",
+            )
+            .bind(party.to_string())
+            .bind(hosts[*host].to_string())
+            .bind(utils::compute_fingerprint(&keys[*key]).to_string())
+            .execute(pool)
+            .await?;
+        }
+        Ok(())
+    }
+
+    /// The kicked member claims a remaining member's key. A signer ignores
+    /// that claim, so the kick goes ahead, but it still refuses a proposal
+    /// that drops a key a remaining member claims, whoever else claims it.
+    #[sqlx::test(migrator = "crate::db::MIGRATOR")]
+    async fn a_peer_ignores_the_targets_claim_but_never_a_survivors(pool: SqlitePool) -> Result {
+        let party = canton_id("party", 9)?;
+        let hosts: Vec<CantonId> = (1..=4)
+            .map(|tag| canton_id(&format!("p{tag}"), tag))
+            .collect::<Result<_>>()?;
+        let all_keys = signing_keys(4, 2).keys;
+        sqlx::query(
+            "INSERT INTO dec_party (party_id, prefix, threshold, updated_at) VALUES (?, ?, 2, 0)",
+        )
+        .bind(party.to_string())
+        .bind(&party.prefix)
+        .execute(&pool)
+        .await?;
+        record_claims(
+            &pool,
+            &party,
+            &hosts,
+            &all_keys,
+            &[(0, 0), (1, 1), (2, 2), (3, 2)],
+        )
+        .await?;
+        let mut accepted = expectations(hosts[..3].to_vec(), hosts[1].clone());
+        accepted.kind = WorkflowKind::Kick;
+        accepted.dec_party_id = Some(party.clone());
+        accepted.kicked_participant = Some(hosts[3].clone());
+        let mut proposal = p2p(&party.to_string(), &hosts[..3], 2);
+        let proposed = |keys: [usize; 3]| SigningKeysWithThreshold {
+            keys: keys.iter().map(|index| all_keys[*index].clone()).collect(),
+            threshold: 2,
+        };
+
+        proposal.party_signing_keys = Some(proposed([0, 1, 2]));
+        accepted.check_surviving_daml_keys(&pool, &proposal).await?;
+
+        proposal.party_signing_keys = Some(proposed([0, 1, 3]));
+        let error = accepted
+            .check_surviving_daml_keys(&pool, &proposal)
+            .await
+            .expect_err("the target's claim cannot remove p3's key")
+            .to_string();
+        assert!(error.contains(&hosts[2].to_string()), "{error}");
+
+        // Now p3 claims the key p4 claims. That key stays whatever p4 says.
+        record_claims(&pool, &party, &hosts, &all_keys, &[(2, 3), (3, 3)]).await?;
+        proposal.party_signing_keys = Some(proposed([0, 1, 2]));
+        let error = accepted
+            .check_surviving_daml_keys(&pool, &proposal)
+            .await
+            .expect_err("a key a remaining member claims is never removed")
+            .to_string();
+        assert!(error.contains(&hosts[2].to_string()), "{error}");
+        assert!(
+            error.contains(&utils::compute_fingerprint(&all_keys[3]).to_string()),
+            "{error}"
         );
         Ok(())
     }

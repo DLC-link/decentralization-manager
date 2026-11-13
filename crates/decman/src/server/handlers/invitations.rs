@@ -191,8 +191,8 @@ pub(crate) async fn insert_peer_run(
         // CancelInvite/RetryWorkflow and peer-resume routing.
         coordinator_instance: invitation.workflow_instance.clone(),
         coordinator_name: None,
-        // The participants list is the authoritative peer set carried in the
-        // invite (all four kinds send one).
+        // Peer rows retain the accepted membership for display and validation.
+        // Only coordinator rows gate progress on their transport invitees.
         expected_peers: invitation.participants.clone(),
         completed_peers: Vec::new(),
         connected_peers: Vec::new(),
