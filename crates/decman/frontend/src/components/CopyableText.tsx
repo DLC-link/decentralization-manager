@@ -2,6 +2,7 @@ import { Box, IconButton, Tooltip, Typography, useMediaQuery, useTheme } from "@
 import ContentCopyIcon from "@mui/icons-material/ContentCopy";
 import { useSnackbar } from "../contexts";
 import { copyToClipboard } from "../clipboard";
+import { shortenId } from "../cantonId";
 
 interface CopyableTextProps {
   text: string;
@@ -9,30 +10,24 @@ interface CopyableTextProps {
     start: number;
     end: number;
   };
-  /** On large screens (lg+), show the full text instead of truncating. */
-  expandOnWide?: boolean;
   variant?: "h6" | "body1" | "body2" | "caption";
+  color?: string;
 }
 
 export const CopyableText = ({
   text,
   truncate,
-  expandOnWide = false,
   variant = "body1",
+  color,
 }: CopyableTextProps) => {
   const { showSnackbar } = useSnackbar();
   const theme = useTheme();
   const isSmall = useMediaQuery(theme.breakpoints.down("sm"));
   const isMedium = useMediaQuery(theme.breakpoints.down("md"));
-  const isWide = useMediaQuery(theme.breakpoints.up("lg"));
 
   const getDisplayText = () => {
     if (!truncate) return text;
 
-    // Wide screens have room for the full value — no need to truncate.
-    if (expandOnWide && isWide) return text;
-
-    // Adjust truncation based on screen size
     let start = truncate.start;
     let end = truncate.end;
 
@@ -44,7 +39,7 @@ export const CopyableText = ({
       end = Math.min(truncate.end, 10);
     }
 
-    return `${text.slice(0, start)}...${text.slice(-end)}`;
+    return shortenId(text, start, end);
   };
 
   const handleCopy = async (e: React.MouseEvent) => {
@@ -53,15 +48,27 @@ export const CopyableText = ({
     showSnackbar(success ? "Copied to clipboard" : "Failed to copy");
   };
 
+  // One line, ellipsized when the cell is narrower than the text, so the copy
+  // button always stays inside its own cell.
   return (
-    <Box sx={{ display: "flex", alignItems: "center", gap: 1 }}>
+    <Box sx={{ display: "flex", alignItems: "center", gap: 1, minWidth: 0 }}>
       <Tooltip title={text}>
-        <Typography variant={variant} sx={{ fontFamily: "var(--font-mono)" }}>
+        <Typography
+          variant={variant}
+          sx={{
+            fontFamily: "var(--font-mono)",
+            minWidth: 0,
+            overflow: "hidden",
+            textOverflow: "ellipsis",
+            whiteSpace: "nowrap",
+            ...(color && { color }),
+          }}
+        >
           {getDisplayText()}
         </Typography>
       </Tooltip>
       <Tooltip title="Copy">
-        <IconButton size="small" onClick={handleCopy}>
+        <IconButton size="small" onClick={handleCopy} sx={{ flexShrink: 0 }}>
           <ContentCopyIcon fontSize="small" />
         </IconButton>
       </Tooltip>
