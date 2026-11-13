@@ -30,6 +30,7 @@ use crate::{
     utils::{compute_fingerprint, get_participant_id},
     workflow::{
         onboarding::OnboardingConfig,
+        signing_keys,
         storage::{WorkflowStorage, artifact_kinds},
     },
 };
@@ -62,7 +63,13 @@ pub async fn generate_keys(
 
     // Derive key names from party_id_prefix
     let namespace_key_name = onboarding_config.namespace_key_name();
-    let daml_key_name = onboarding_config.daml_key_name();
+    let daml_key_name = run_daml_key_name(
+        config,
+        storage,
+        instance_name,
+        &onboarding_config.party_id_prefix,
+    )
+    .await?;
 
     // Idempotency: re-use existing keys (matched by name) if a previous run
     // already created them. Re-generating would mint new fingerprints, leaving
@@ -195,6 +202,56 @@ pub(crate) async fn get_or_create_signing_key(
         anyhow::bail!("No public key returned from VaultService");
     };
     Ok((spk, false))
+}
+
+/// The name of the Daml key this node creates in the run `instance_name`.
+///
+/// The first call picks a random name and records it with the run, so a
+/// retry or a restart finds the same key. A new run gets a new key, even
+/// when it reuses the instance name, because a finished run's records are
+/// deleted. A run that recorded its keys before runs had their own names
+/// keeps the earlier shared name, so it finds the key it recorded.
+///
+/// # Errors
+///
+/// Errors when the record cannot be read or written, or is not UTF-8.
+pub(crate) async fn run_daml_key_name(
+    config: &NodeConfig,
+    storage: &SqlitePool,
+    instance_name: &str,
+    party_id_prefix: &str,
+) -> Result<String> {
+    let self_id = config.participant_id().to_string();
+    if let Some(name) = storage
+        .read_artifact(instance_name, artifact_kinds::DAML_KEY_NAME, Some(&self_id))
+        .await?
+    {
+        return Ok(String::from_utf8(name)?);
+    }
+    if storage
+        .read_artifact(
+            instance_name,
+            artifact_kinds::PEER_PUBLIC_KEYS,
+            Some(&self_id),
+        )
+        .await?
+        .is_some()
+    {
+        return Ok(signing_keys::party_daml_key_name(party_id_prefix));
+    }
+    let name = signing_keys::run_daml_key_name(
+        party_id_prefix,
+        &uuid::Uuid::new_v4().simple().to_string(),
+    );
+    storage
+        .write_artifact(
+            instance_name,
+            artifact_kinds::DAML_KEY_NAME,
+            Some(&self_id),
+            name.as_bytes(),
+        )
+        .await?;
+    Ok(name)
 }
 
 /// The Daml key this node created for the run `instance_name`, from the key
@@ -384,6 +441,71 @@ mod tests {
 
         assert!(error.contains("software vault, not in a KMS"), "{error}");
         assert!(fake.generated().is_empty());
+        Ok(())
+    }
+
+    /// A run's records refer to its `workflow_runs` row.
+    async fn insert_run(db: &SqlitePool, instance_name: &str) -> Result {
+        sqlx::query(
+            "INSERT INTO workflow_runs (
+                 instance_name, kind, role, status, current_step, step_index, step_total,
+                 config_json, expected_peers_json, completed_peers_json,
+                 created_at, updated_at
+             ) VALUES (?1, 'Onboarding', 'Coordinator', 'inprogress', 'GenerateKeys',
+                       0, 1, '{}', '[]', '[]', 0, 0)",
+        )
+        .bind(instance_name)
+        .execute(db)
+        .await?;
+        Ok(())
+    }
+
+    /// A retry finds the run's Daml key again. A new run with the same
+    /// instance name gets a new key, so a member that a party adds again
+    /// never gets back a key that a rotation replaced.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn each_run_names_its_own_daml_key(db: SqlitePool) -> Result {
+        let fake = FakeAdminApi::start(vec![VaultKey::kms("participant", 1)?]).await?;
+        let node = fake.node(SoftwareKeys::Refused, false).await?;
+        insert_run(&db, "party-creation").await?;
+
+        let first = run_daml_key_name(&node.config, &db, "party-creation", "party").await?;
+        assert!(first.starts_with("party-daml-transactions-run-"), "{first}");
+        assert!(signing_keys::is_party_daml_key_name(&first, "party"));
+        let retried = run_daml_key_name(&node.config, &db, "party-creation", "party").await?;
+        assert_eq!(retried, first);
+
+        // A finished run's records are deleted.
+        sqlx::query("DELETE FROM workflow_artifacts WHERE instance_name = ?")
+            .bind("party-creation")
+            .execute(&db)
+            .await?;
+        let next = run_daml_key_name(&node.config, &db, "party-creation", "party").await?;
+        assert_ne!(next, first);
+        assert!(signing_keys::is_party_daml_key_name(&next, "party"));
+        Ok(())
+    }
+
+    /// A run that recorded its keys before runs had their own names keeps
+    /// the earlier shared name. A new name would make it create a second
+    /// key in the middle of the run.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_run_from_before_run_names_keeps_the_shared_name(db: SqlitePool) -> Result {
+        let fake = FakeAdminApi::start(vec![VaultKey::kms("participant", 1)?]).await?;
+        let node = fake.node(SoftwareKeys::Refused, false).await?;
+        let self_id = node.config.participant_id().to_string();
+        insert_run(&db, "party-creation").await?;
+        db.write_artifact(
+            "party-creation",
+            artifact_kinds::PEER_PUBLIC_KEYS,
+            Some(&self_id),
+            b"keys",
+        )
+        .await?;
+
+        let name = run_daml_key_name(&node.config, &db, "party-creation", "party").await?;
+
+        assert_eq!(name, "party-daml-transactions");
         Ok(())
     }
 
