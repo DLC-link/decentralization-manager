@@ -8,6 +8,7 @@
       "ibtc-member-fra1::1220a1acf8c8e3be7e4a0a6f2cac5a620d1a6a8362671f665a372ef73d5c9427bac7"
     ],
     "threshold": 1,
+    "disclosure_observers": [],
     "additional_proposers": [
       "utility-registrar::122048489f16e6fc3a8d12acc154b12026fae3469c666860aabb88f84f07d089002a"
     ],
