@@ -36,7 +36,7 @@ use crate::{
     config::NodeConfig,
     error::Result,
     signing::{
-        SigningKeyContext,
+        SigningError, SigningKeyContext,
         aws_kms::AwsKmsSigner,
         key_store::{KeyStore, STORE_OFF_HINT, sign_topology_transaction},
     },
@@ -413,13 +413,21 @@ pub async fn require_kms_sign_access(
         .check_access(&context)
         .await
         .map_err(|e| {
-            // The context shows the AWS cause, such as AccessDeniedException,
-            // instead of only "service error".
-            let cause = aws_sdk_kms::error::DisplayErrorContext(&e);
+            // AWS's answer can name DecMan's role and the AWS account. Every
+            // signed-in user can read a run's error, so only the log gets it.
+            tracing::error!(
+                "DecMan cannot sign with the KMS key {kms_key_id} ({fingerprint}): {cause}",
+                cause = aws_sdk_kms::error::DisplayErrorContext(&e)
+            );
+            let reason = match &e {
+                SigningError::Kms(_) => "KMS refused the test signature".to_string(),
+                other => other.to_string(),
+            };
             anyhow::anyhow!(
-                "DecMan cannot sign with the new KMS key {kms_key_id} ({fingerprint}): {cause}. \
-                 Give DecMan's AWS role kms:Sign on that key, as docs/KMS_SIGNING.md explains. \
-                 Then start the rotation again, which reuses the same key"
+                "DecMan cannot sign with the new KMS key {kms_key_id} ({fingerprint}): {reason}. \
+                 The node's log holds AWS's full answer. Give DecMan's AWS role kms:Sign on that \
+                 key, as docs/KMS_SIGNING.md explains. Then start the rotation again, which \
+                 reuses the same key"
             )
         })
 }
