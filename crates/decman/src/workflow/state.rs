@@ -21,7 +21,10 @@ use crate::{
     error::Result,
     noise::MessageType,
     server::WorkflowKind,
-    workflow::party_replication::pipe::{ExportSession, PipeBlock},
+    workflow::{
+        party_replication::pipe::{ExportSession, PipeBlock},
+        storage::WorkflowStorage,
+    },
 };
 
 /// Trait for workflow steps. Implementations are small `Copy` enums per
@@ -409,31 +412,69 @@ impl<S: WorkflowStep + 'static> WorkflowState<S> {
     }
 
     pub async fn peer_completed(&self, peer_id: CantonId) {
+        self.peer_completed_if(peer_id, |_| true).await;
+    }
+
+    /// Count a completion only while the current step still accepts it.
+    pub(crate) async fn peer_completed_if(
+        &self,
+        peer_id: CantonId,
+        accepts: impl FnOnce(S) -> bool,
+    ) -> bool {
         if !self.expected_peers.contains(&peer_id) {
             tracing::warn!(
                 "ignoring step completion from unexpected peer {peer_id} (not in expected set for {})",
                 self.instance_name
             );
-            return;
+            return false;
         }
 
         {
+            // An advance takes the step lock before the completed set.
+            let current = self.current_step.read().await;
+            if !accepts(*current) {
+                return false;
+            }
             let mut completed = self.completed_peers.write().await;
             completed.insert(peer_id.clone());
-            let current = *self.current_step.read().await;
             let completed_vec: Vec<CantonId> = completed.iter().cloned().collect();
             tracing::info!(
                 "Peer completed step {current:?}: {peer_id} ({}/{})",
                 completed_vec.len(),
-                self.expected_peers.len()
+                self.expected_peers.len(),
+                current = *current
             );
-            // Persist the new completed-peers set. Failures here are logged but
-            // don't abort the workflow — on a future restart the recovery path
-            // re-issues the command, which steps are designed to no-op when the
-            // artefact already exists.
-            self.persist_step_progress(current, completed_vec).await;
+            // A failed progress write leaves the durable upload available for
+            // the peer's retry after a restart.
+            self.persist_step_progress(*current, completed_vec).await;
         }
         self.maybe_advance().await;
+        true
+    }
+
+    /// Store an expected peer's upload before counting its completion.
+    ///
+    /// # Errors
+    /// Returns an error for an unexpected peer or a failed storage write.
+    pub(crate) async fn write_peer_artifact(
+        &self,
+        artifact_kind: &str,
+        peer_id: &CantonId,
+        data: &[u8],
+    ) -> Result {
+        anyhow::ensure!(
+            self.expected_peers.contains(peer_id),
+            "{peer_id} is not a peer of run {}",
+            self.instance_name
+        );
+        self.db
+            .write_artifact(
+                &self.instance_name,
+                artifact_kind,
+                Some(&peer_id.to_string()),
+                data,
+            )
+            .await
     }
 
     /// Unconditional advance, used by the coordinator loop which drives its own

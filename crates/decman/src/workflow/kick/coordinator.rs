@@ -113,37 +113,14 @@ pub async fn start_coordinator(
                     KickStep::SubmitKick => {
                         tracing::info!("Coordinator executing: Submit kick");
 
-                        // Each peer sent us a single buffer containing two
-                        // length-prefixed protobufs (DNS sig followed by P2P sig).
-                        // Split that pair back into separate per-peer artefacts so
-                        // submit_kick can `list_artifacts(SIGNED_KICK_DNS)` and
-                        // `list_artifacts(SIGNED_KICK_P2P)` and join by peer id.
-                        let peer_data = workflow_state.get_all_peer_data().await;
-                        for (peer_id, combined) in &peer_data {
-                            let (dns_blob, p2p_blob) = split_signed_kick_pair(combined)
-                                .with_context(|| {
-                                    format!(
-                                        "Failed to split signed kick pair from \
-                                         peer {peer_id}"
-                                    )
-                                })?;
-                            let peer_key = peer_id.to_string();
-                            db.write_artifact(
-                                &instance_name,
-                                artifact_kinds::SIGNED_KICK_DNS,
-                                Some(&peer_key),
-                                &dns_blob,
-                            )
-                            .await?;
-                            db.write_artifact(
-                                &instance_name,
-                                artifact_kinds::SIGNED_KICK_P2P,
-                                Some(&peer_key),
-                                &p2p_blob,
-                            )
-                            .await?;
-                        }
-                        workflow_state.clear_peer_data().await;
+                        save_signature_pairs(
+                            &db,
+                            &instance_name,
+                            artifact_kinds::KICK_SIGNATURE_UPLOAD,
+                            artifact_kinds::SIGNED_KICK_DNS,
+                            artifact_kinds::SIGNED_KICK_P2P,
+                        )
+                        .await?;
 
                         let (confirmed_version, confirmed_thresholds) =
                             submit_kick(&node_config, &db, &instance_name).await?;
@@ -200,6 +177,28 @@ pub async fn start_coordinator(
         coordinator_workflow,
     )
     .await
+}
+
+/// Rebuild both per-peer artifacts from durable uploads on every submit.
+/// Retaining the upload makes a restart between output writes recoverable.
+pub(crate) async fn save_signature_pairs(
+    storage: &impl WorkflowStorage,
+    instance_name: &str,
+    upload_kind: &str,
+    dns_kind: &str,
+    p2p_kind: &str,
+) -> Result {
+    for (peer_id, combined) in storage.list_artifacts(instance_name, upload_kind).await? {
+        let (dns_blob, p2p_blob) = split_signed_kick_pair(&combined)
+            .with_context(|| format!("Failed to split {upload_kind} from peer {peer_id}"))?;
+        storage
+            .write_artifact(instance_name, dns_kind, Some(&peer_id), &dns_blob)
+            .await?;
+        storage
+            .write_artifact(instance_name, p2p_kind, Some(&peer_id), &p2p_blob)
+            .await?;
+    }
+    Ok(())
 }
 
 /// Split the combined `varint(len_dns)||dns_proto||varint(len_p2p)||p2p_proto`

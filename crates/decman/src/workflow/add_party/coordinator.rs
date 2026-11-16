@@ -11,7 +11,7 @@ use crate::{
     server::{WorkflowInstance, peer_status::LastSeen},
     utils,
     workflow::{
-        kick::coordinator::split_signed_kick_pair,
+        kick::coordinator::save_signature_pairs as save_recorded_signature_pairs,
         party_replication::{
             collect_party_package_ids, open_export_session, wait_for_flag_cleared,
         },
@@ -390,25 +390,8 @@ async fn save_new_member_keys(
     Ok(())
 }
 
-/// Guard the resume path for a coordinator step that turns peer uploads into
-/// per-peer artefacts.
-///
-/// `peer_data` lives only in memory (`WorkflowState::from_persisted` restores
-/// `completed_peers` but re-initialises `peer_data` empty), while the peers
-/// that uploaded are already marked `completed` and will never re-send. So a
-/// coordinator restart in the window between the peer-gated step advancing and
-/// this step writing its artefacts leaves nothing to write.
-///
-/// Writing nothing used to be silent: the loop over an empty map is a no-op,
-/// and the submit step's `len == len` check passes at `0 == 0`, so the run
-/// submitted carrying only the coordinator's own signature. For threshold > 1
-/// Canton rejects that, and `retry_workflow` cannot recover it because the
-/// peers stay complete.
-///
-/// So: nothing uploaded this pass is fine only if a previous pass already
-/// persisted artefacts of this kind. Otherwise the signatures are gone, and
-/// failing here names the reason instead of failing later as an opaque
-/// under-signed submission.
+/// Every invited peer signs both add-party rounds. Check the expected set,
+/// because advancing the signature step clears the completed set.
 async fn require_complete_or_uploaded(
     workflow_state: &WorkflowState<AddPartyStep>,
     storage: &SqlitePool,
@@ -416,7 +399,7 @@ async fn require_complete_or_uploaded(
     artifact_kind: &str,
     step: &str,
 ) -> Result {
-    let completed = workflow_state.completed_peers().await;
+    let expected = workflow_state.expected_peers();
     let persisted: HashSet<String> = storage
         .list_artifacts(instance_name, artifact_kind)
         .await?
@@ -424,7 +407,7 @@ async fn require_complete_or_uploaded(
         .map(|(peer, _)| peer)
         .collect();
 
-    let missing: Vec<String> = completed
+    let missing: Vec<String> = expected
         .iter()
         .map(std::string::ToString::to_string)
         .filter(|peer| !persisted.contains(peer))
@@ -432,18 +415,16 @@ async fn require_complete_or_uploaded(
 
     if !missing.is_empty() {
         anyhow::bail!(
-            "{step}: {count} peer(s) are marked complete but have no {artifact_kind} artefact \
-             and no buffered upload: {missing:?}. Their uploads were lost with the in-memory \
-             state, most likely a coordinator restart mid-handoff, and the peers will not \
-             re-send. Start a fresh add-party run for this party.",
+            "{step}: {count} expected peer(s) have no {artifact_kind} artifact: \
+             {missing:?}. A coordinator restart before this version could lose their uploads, \
+             and the peers will not re-send. Start a fresh add-party run for this party.",
             count = missing.len()
         );
     }
 
     tracing::info!(
-        "{step}: no uploads this pass; all {count} completed peer(s) already have a \
-         {artifact_kind} artefact (resumed run) — continuing",
-        count = completed.len()
+        "{step}: all {count} expected peer(s) have a {artifact_kind} artifact",
+        count = expected.len()
     );
     Ok(())
 }
@@ -455,82 +436,44 @@ async fn save_signature_pairs(
     storage: &SqlitePool,
     instance_name: &str,
 ) -> Result {
-    let peer_data = workflow_state.get_all_peer_data().await;
-    if peer_data.is_empty() {
-        // Both kinds, not just the DNS. They are written one after the other in
-        // the loop below, so a coordinator that died between the two writes for
-        // a peer leaves the DNS artefact present and the P2P one missing. A
-        // guard that checked only the DNS would wave that through and fail
-        // later on a mismatched pair, hiding the real cause.
-        for kind in [
-            artifact_kinds::SIGNED_ADD_PARTY_DNS,
-            artifact_kinds::SIGNED_ADD_PARTY_P2P,
-        ] {
-            require_complete_or_uploaded(
-                workflow_state,
-                storage,
-                instance_name,
-                kind,
-                "SubmitProposals",
-            )
-            .await?;
-        }
+    save_recorded_signature_pairs(
+        storage,
+        instance_name,
+        artifact_kinds::ADD_PARTY_SIGNATURE_UPLOAD,
+        artifact_kinds::SIGNED_ADD_PARTY_DNS,
+        artifact_kinds::SIGNED_ADD_PARTY_P2P,
+    )
+    .await?;
+    for kind in [
+        artifact_kinds::SIGNED_ADD_PARTY_DNS,
+        artifact_kinds::SIGNED_ADD_PARTY_P2P,
+    ] {
+        require_complete_or_uploaded(
+            workflow_state,
+            storage,
+            instance_name,
+            kind,
+            "SubmitProposals",
+        )
+        .await?;
     }
-    for (peer_id, combined) in &peer_data {
-        let (dns_blob, p2p_blob) = split_signed_kick_pair(combined).with_context(|| {
-            format!("Failed to split signed add-party pair from peer {peer_id}")
-        })?;
-        let peer_key = peer_id.to_string();
-        storage
-            .write_artifact(
-                instance_name,
-                artifact_kinds::SIGNED_ADD_PARTY_DNS,
-                Some(&peer_key),
-                &dns_blob,
-            )
-            .await?;
-        storage
-            .write_artifact(
-                instance_name,
-                artifact_kinds::SIGNED_ADD_PARTY_P2P,
-                Some(&peer_key),
-                &p2p_blob,
-            )
-            .await?;
-    }
-    workflow_state.clear_peer_data().await;
     Ok(())
 }
 
-/// Persist each peer's signed clearing proposal (a single blob — no split).
+/// Check the durable clearing signatures before submission.
 async fn save_clear_signatures(
     workflow_state: &WorkflowState<AddPartyStep>,
     storage: &SqlitePool,
     instance_name: &str,
 ) -> Result {
-    let peer_data = workflow_state.get_all_peer_data().await;
-    if peer_data.is_empty() {
-        require_complete_or_uploaded(
-            workflow_state,
-            storage,
-            instance_name,
-            artifact_kinds::SIGNED_ADD_PARTY_CLEAR,
-            "SubmitClearOnboarding",
-        )
-        .await?;
-    }
-    for (peer_id, data) in &peer_data {
-        storage
-            .write_artifact(
-                instance_name,
-                artifact_kinds::SIGNED_ADD_PARTY_CLEAR,
-                Some(&peer_id.to_string()),
-                data,
-            )
-            .await?;
-    }
-    workflow_state.clear_peer_data().await;
-    Ok(())
+    require_complete_or_uploaded(
+        workflow_state,
+        storage,
+        instance_name,
+        artifact_kinds::SIGNED_ADD_PARTY_CLEAR,
+        "SubmitClearOnboarding",
+    )
+    .await
 }
 
 /// Identity hook: once the topology includes the new member, copy its
@@ -712,6 +655,45 @@ mod tests {
             "SubmitProposals",
         )
         .await?;
+        Ok(())
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_resumed_submit_checks_peers_after_completions_are_cleared(
+        pool: SqlitePool,
+    ) -> anyhow::Result<()> {
+        insert_run(&pool, "run-1").await?;
+        let state = WorkflowState::from_persisted(
+            pool.clone(),
+            "run-1".into(),
+            AddPartyStep::SubmitProposals,
+            vec![peer(1)],
+            vec![],
+            None,
+        );
+        let err = save_signature_pairs(&state, &pool, "run-1")
+            .await
+            .expect_err("missing legacy uploads must not permit an under-signed submit");
+        assert!(err.to_string().contains(&peer(1).to_string()));
+
+        let combined = [1, 11, 1, 22];
+        pool.write_artifact(
+            "run-1",
+            artifact_kinds::ADD_PARTY_SIGNATURE_UPLOAD,
+            Some(&peer(1).to_string()),
+            &combined,
+        )
+        .await?;
+        save_signature_pairs(&state, &pool, "run-1").await?;
+        assert_eq!(
+            pool.read_artifact(
+                "run-1",
+                artifact_kinds::SIGNED_ADD_PARTY_P2P,
+                Some(&peer(1).to_string()),
+            )
+            .await?,
+            Some(vec![1, 22])
+        );
         Ok(())
     }
 

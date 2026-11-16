@@ -48,6 +48,12 @@ pub mod artifact_kinds {
     pub const PREPARED_SUBMISSION: &str = "prepared_submission";
     pub const SUBMISSION_SIGNATURES: &str = "submission_signatures";
 
+    /// Combined DNS/P2P uploads retained until workflow cleanup, so splitting
+    /// can resume after a restart between the two output writes.
+    pub const KICK_SIGNATURE_UPLOAD: &str = "kick_signature_upload";
+    pub const ADD_PARTY_SIGNATURE_UPLOAD: &str = "add_party_signature_upload";
+    pub const CHANGE_THRESHOLD_SIGNATURE_UPLOAD: &str = "change_threshold_signature_upload";
+
     // Kick (workflow_artifacts during a run)
     /// Current (pre-kick) decentralized namespace definition, exported from
     /// the topology snapshot in the ExportState step. Stored as a single

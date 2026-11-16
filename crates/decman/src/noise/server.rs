@@ -31,11 +31,12 @@ use crate::{
         change_threshold::ChangeThresholdStep,
         contracts::ContractsStep,
         dars::DarsStep,
-        kick::{KickConfig, KickStep},
+        kick::{KickConfig, KickStep, coordinator::split_signed_kick_pair},
         onboarding::OnboardingStep,
         party_replication::pipe::{PipeBlock, encode_block},
         signing_keys::requires_signing_key_adoption,
         state::WorkflowStep,
+        storage::artifact_kinds,
         topology,
     },
 };
@@ -564,28 +565,48 @@ impl<S: WorkflowStep + 'static> NoiseServer<S> {
                     .await
             }
             MessageType::KickSignatures => {
-                self.handle_peer_data(peer_id, message.payload, "kick signatures")
-                    .await
+                self.handle_recorded_upload(
+                    peer_id,
+                    &message.payload,
+                    MessageType::SignKick,
+                    artifact_kinds::KICK_SIGNATURE_UPLOAD,
+                )
+                .await
             }
             MessageType::AddPartyKeysUpload => {
                 self.handle_peer_data(peer_id, message.payload, "add-party keys upload")
                     .await
             }
             MessageType::AddPartySignatures => {
-                self.handle_peer_data(peer_id, message.payload, "add-party signatures")
-                    .await
+                self.handle_recorded_upload(
+                    peer_id,
+                    &message.payload,
+                    MessageType::SignAddParty,
+                    artifact_kinds::ADD_PARTY_SIGNATURE_UPLOAD,
+                )
+                .await
             }
             MessageType::AddPartyClearSignatures => {
-                self.handle_peer_data(peer_id, message.payload, "add-party clearing signature")
-                    .await
+                self.handle_recorded_upload(
+                    peer_id,
+                    &message.payload,
+                    MessageType::SignClearOnboarding,
+                    artifact_kinds::SIGNED_ADD_PARTY_CLEAR,
+                )
+                .await
             }
             MessageType::AddPartyClearProposal => {
                 self.handle_peer_data(peer_id, message.payload, "add-party clearing proposal")
                     .await
             }
             MessageType::ChangeThresholdSignatures => {
-                self.handle_peer_data(peer_id, message.payload, "change-threshold signatures")
-                    .await
+                self.handle_recorded_upload(
+                    peer_id,
+                    &message.payload,
+                    MessageType::SignChangeThreshold,
+                    artifact_kinds::CHANGE_THRESHOLD_SIGNATURE_UPLOAD,
+                )
+                .await
             }
             MessageType::StatusUpdate => self.handle_status_update(peer_id, message.payload).await,
             MessageType::DeclineInvitation => Ok(self
@@ -753,6 +774,47 @@ impl<S: WorkflowStep + 'static> NoiseServer<S> {
         Ok(Message::new_empty(MessageType::Ack))
     }
 
+    /// Persist each upload before completion, because completed peers do not
+    /// upload again after a coordinator restart.
+    async fn handle_recorded_upload(
+        &self,
+        peer_id: CantonId,
+        payload: &[u8],
+        command: MessageType,
+        artifact_kind: &str,
+    ) -> Result<Message, NoiseError> {
+        if self.workflow_state.current_command().await != Some(command) {
+            tracing::warn!(
+                "Ignoring {artifact_kind} from {peer_id}: the run no longer sends {command:?}"
+            );
+            return Ok(Message::new_empty(MessageType::Ack));
+        }
+        if command != MessageType::SignClearOnboarding
+            && let Err(e) = split_signed_kick_pair(payload)
+        {
+            tracing::warn!("Invalid {artifact_kind} from {peer_id}: {e:#}");
+            return Ok(Message::new(
+                MessageType::Error,
+                b"Invalid signature pair".to_vec(),
+            ));
+        }
+        if let Err(e) = self
+            .workflow_state
+            .write_peer_artifact(artifact_kind, &peer_id, payload)
+            .await
+        {
+            tracing::error!("Failed to store {artifact_kind} from {peer_id}: {e:#}");
+            return Ok(Message::new(
+                MessageType::Error,
+                b"The coordinator could not store the upload".to_vec(),
+            ));
+        }
+        self.workflow_state
+            .peer_completed_if(peer_id, |step| step.to_command() == Some(command))
+            .await;
+        Ok(Message::new_empty(MessageType::Ack))
+    }
+
     /// Handle status update from peer
     async fn handle_status_update(
         &self,
@@ -876,6 +938,9 @@ impl<S: WorkflowStep + 'static> NoiseServer<S> {
         }
     }
 }
+
+#[cfg(test)]
+mod recorded_upload_tests;
 
 #[cfg(test)]
 mod tests {
