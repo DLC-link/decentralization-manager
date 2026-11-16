@@ -789,6 +789,13 @@ impl<S: WorkflowStep + 'static> NoiseServer<S> {
             );
             return Ok(Message::new_empty(MessageType::Ack));
         }
+        if !self.workflow_state.expected_peers().contains(&peer_id) {
+            tracing::warn!("Ignoring {artifact_kind} from unexpected peer {peer_id}");
+            return Ok(Message::new(
+                MessageType::Error,
+                b"The peer is not expected in this workflow".to_vec(),
+            ));
+        }
         if command != MessageType::SignClearOnboarding
             && let Err(e) = split_signed_kick_pair(payload)
         {

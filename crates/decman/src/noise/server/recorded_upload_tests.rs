@@ -215,9 +215,16 @@ async fn invalid_unexpected_and_late_uploads_do_not_complete_a_step(db: SqlitePo
         send(&server, 1, MessageType::KickSignatures, &[5, 1]).await?,
         MessageType::Error
     );
+    let unexpected = server
+        .handle_command(
+            peer(9),
+            Message::new(MessageType::KickSignatures, PAIR.to_vec()),
+        )
+        .await?;
+    assert_eq!(unexpected.msg_type, MessageType::Error);
     assert_eq!(
-        send(&server, 9, MessageType::KickSignatures, PAIR).await?,
-        MessageType::Error
+        unexpected.payload,
+        b"The peer is not expected in this workflow"
     );
     assert_eq!(
         send(&server, 1, MessageType::AddPartySignatures, PAIR).await?,
