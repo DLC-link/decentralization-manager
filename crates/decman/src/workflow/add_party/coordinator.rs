@@ -49,6 +49,14 @@ pub async fn start_coordinator(
     let server = Arc::new(server);
 
     let workflow_state = server.get_workflow_state();
+    if !matches!(
+        workflow_state.current_step().await,
+        AddPartyStep::SignProposals | AddPartyStep::SignClearOnboarding
+    ) {
+        let config_payload = serde_json::to_vec(&add_party_config)
+            .context("Failed to serialize add-party config")?;
+        workflow_state.set_command_payload(config_payload).await;
+    }
     let node_config_clone = node_config.clone();
     let add_party_config_clone = add_party_config.clone();
     let db_clone = db.clone();
@@ -82,12 +90,6 @@ async fn run_workflow(
     let config_payload =
         serde_json::to_vec(&add_party_config).context("Failed to serialize add-party config")?;
 
-    // GenerateAddPartyKeys is the first command after the connection gate and
-    // carries the config; set it before the gate can auto-advance.
-    workflow_state
-        .set_command_payload(config_payload.clone())
-        .await;
-
     loop {
         let current_step = workflow_state.current_step().await;
         tracing::debug!("Add-party coordinator in step: {current_step:?}");
@@ -107,12 +109,8 @@ async fn run_workflow(
                 // coordinator cannot rebuild live here: the command payload,
                 // which is restored from its artifact, and the Canton export
                 // stream, which has to be re-opened.
-                // Restored on mismatch, NOT merely when empty: `run_workflow`
-                // seeds the payload with the bare config before this loop
-                // starts, so after a restart it is non-empty but wrong. The
-                // target decodes the SyncAcs command as two length-prefixed
-                // items and reads the config's leading `{"de` as a 2 GB length
-                // prefix, failing every attempt until it aborts.
+                // Startup seeds the bare config. Compare payloads rather than
+                // checking for emptiness so resumed commands include package IDs.
                 if let Some(saved) = db
                     .read_artifact(
                         &instance_name,

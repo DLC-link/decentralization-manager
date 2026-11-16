@@ -3,10 +3,18 @@ use crate::{
     canton_id::{NAMESPACE_LENGTH, Namespace},
     db::MIGRATOR,
     error::Result,
-    workflow::{kick::coordinator::save_signature_pairs, storage::WorkflowStorage},
+    server::{WorkflowInstance, WorkflowRole},
+    workflow::{
+        add_party::{
+            AddPartyConfig, coordinator::start_coordinator as start_add_party_coordinator,
+        },
+        kick::coordinator::save_signature_pairs,
+        storage::WorkflowStorage,
+    },
 };
 
 const RUN: &str = "signature-run";
+const CONFIG: &[u8] = br#"{"instance_name":"signature-run","marker":"saved-config"}"#;
 const PAIR: &[u8] = &[2, 11, 12, 3, 21, 22, 23];
 
 fn peer(n: u8) -> CantonId {
@@ -18,17 +26,42 @@ async fn insert_run<S: WorkflowStep>(db: &SqlitePool, step: S) -> Result {
         "INSERT INTO workflow_runs
          (instance_name, kind, role, status, current_step, step_index, step_total,
           config_json, expected_peers_json, completed_peers_json, created_at, updated_at)
-         VALUES (?, ?, 'Coordinator', 'inprogress', ?, ?, ?, '{}', ?, '[]', 0, 0)",
+         VALUES (?, ?, 'Coordinator', 'inprogress', ?, ?, ?, ?, ?, '[]', 0, 0)",
     )
     .bind(RUN)
     .bind(S::kind().as_str())
     .bind(step.step_name())
     .bind(step.step_index())
     .bind(S::step_total())
+    .bind(std::str::from_utf8(CONFIG)?)
     .bind(serde_json::to_string(&[peer(1), peer(2)])?)
     .execute(db)
     .await?;
+    for (kind, proposal) in proposal_artifacts(step) {
+        db.write_artifact(RUN, kind, None, proposal).await?;
+    }
     Ok(())
+}
+
+fn proposal_artifacts<S: WorkflowStep>(step: S) -> Vec<(&'static str, &'static [u8])> {
+    match step.to_command() {
+        Some(MessageType::SignKick) => vec![
+            (artifact_kinds::KICK_DNS_PROPOSAL, b"saved DNS"),
+            (artifact_kinds::KICK_P2P_PROPOSAL, b"saved P2P"),
+        ],
+        Some(MessageType::SignChangeThreshold) => vec![
+            (artifact_kinds::CHANGE_THRESHOLD_DNS_PROPOSAL, b"saved DNS"),
+            (artifact_kinds::CHANGE_THRESHOLD_P2P_PROPOSAL, b"saved P2P"),
+        ],
+        Some(MessageType::SignAddParty) => vec![
+            (artifact_kinds::ADD_PARTY_DNS_PROPOSAL, b"saved DNS"),
+            (artifact_kinds::ADD_PARTY_P2P_PROPOSAL, b"saved P2P"),
+        ],
+        Some(MessageType::SignClearOnboarding) => {
+            vec![(artifact_kinds::ADD_PARTY_CLEAR_PROPOSAL, b"saved clear")]
+        }
+        _ => vec![],
+    }
 }
 
 async fn start<S: WorkflowStep + 'static>(
@@ -89,6 +122,20 @@ async fn survives_restart<S: WorkflowStep + 'static>(
     let server = start(&db, &root, step).await?;
     assert!(server.workflow_state.get_all_peer_data().await.is_empty());
     assert!(server.workflow_state.has_peer_completed(&peer(1)).await);
+    assert_eq!(
+        send(&server, 1, MessageType::GetNextCommand, &[]).await?,
+        MessageType::Wait
+    );
+    let command = server
+        .handle_command(peer(2), Message::new_empty(MessageType::GetNextCommand))
+        .await?;
+    assert_eq!(Some(command.msg_type), step.to_command());
+    let proposals = proposal_artifacts(step);
+    let items = utils::decode_length_prefixed(&command.payload, proposals.len() + 1)?;
+    assert_eq!(items[0], CONFIG);
+    for (item, (_, proposal)) in items[1..].iter().zip(proposals) {
+        assert_eq!(item, proposal);
+    }
     assert_eq!(send(&server, 2, msg_type, PAIR).await?, MessageType::Ack);
     assert_eq!(
         server.workflow_state.current_step().await,
@@ -424,5 +471,161 @@ async fn an_upload_survives_a_failed_progress_write_and_replay(db: SqlitePool) -
             .len(),
         2
     );
+    Ok(())
+}
+
+#[sqlx::test(migrator = "MIGRATOR")]
+async fn a_missing_signature_proposal_refuses_startup(db: SqlitePool) -> Result {
+    let root = tempfile::tempdir()?;
+    insert_run(&db, KickStep::SignProposals).await?;
+    sqlx::query("DELETE FROM workflow_artifacts WHERE artifact_kind = ?")
+        .bind(artifact_kinds::KICK_P2P_PROPOSAL)
+        .execute(&db)
+        .await?;
+    let err = match start(&db, &root, KickStep::SignProposals).await {
+        Ok(_) => anyhow::bail!("a missing proposal must refuse startup"),
+        Err(err) => err,
+    };
+    assert!(
+        err.to_string()
+            .contains("kick_p2p_proposal artifact missing")
+    );
+    Ok(())
+}
+
+#[sqlx::test(migrator = "MIGRATOR")]
+async fn an_empty_clearing_marker_survives_but_a_missing_marker_refuses_startup(
+    db: SqlitePool,
+) -> Result {
+    let root = tempfile::tempdir()?;
+    insert_run(&db, AddPartyStep::SignClearOnboarding).await?;
+    db.write_artifact(RUN, artifact_kinds::ADD_PARTY_CLEAR_PROPOSAL, None, &[])
+        .await?;
+    let server = start(&db, &root, AddPartyStep::SignClearOnboarding).await?;
+    let command = server
+        .handle_command(peer(1), Message::new_empty(MessageType::GetNextCommand))
+        .await?;
+    assert_eq!(command.msg_type, MessageType::SignClearOnboarding);
+    assert_eq!(
+        utils::decode_length_prefixed(&command.payload, 2)?,
+        vec![CONFIG.to_vec(), vec![]]
+    );
+    drop(server);
+    sqlx::query("DELETE FROM workflow_artifacts WHERE artifact_kind = ?")
+        .bind(artifact_kinds::ADD_PARTY_CLEAR_PROPOSAL)
+        .execute(&db)
+        .await?;
+    let err = match start(&db, &root, AddPartyStep::SignClearOnboarding).await {
+        Ok(_) => anyhow::bail!("a missing marker must refuse startup"),
+        Err(err) => err,
+    };
+    assert!(
+        err.to_string()
+            .contains("add_party_clear_proposal artifact missing")
+    );
+    Ok(())
+}
+
+async fn production_add_party_command(
+    db: SqlitePool,
+    step: AddPartyStep,
+) -> Result<(Message, Vec<u8>)> {
+    let root = tempfile::tempdir()?;
+    insert_run(&db, step).await?;
+    // Preserve insignificant JSON whitespace to prove the resumed command uses
+    // the persisted bytes rather than a reserialized startup argument.
+    let config = AddPartyConfig::new(peer(7), peer(2), 2, None, 1, RUN.into());
+    let saved_config = serde_json::to_vec_pretty(&config)?;
+    sqlx::query("UPDATE workflow_runs SET config_json = ? WHERE instance_name = ?")
+        .bind(std::str::from_utf8(&saved_config)?)
+        .bind(RUN)
+        .execute(&db)
+        .await?;
+    let initialized = start(&db, &root, step).await?;
+    drop(initialized);
+    let instance = WorkflowInstance::new(
+        RUN.into(),
+        WorkflowKind::AddParty,
+        WorkflowRole::Coordinator,
+    );
+    let coordinating = tokio::spawn(start_add_party_coordinator(
+        NodeConfig::default().with_root_dir(root.path()),
+        NetworkConfig::default(),
+        config.clone(),
+        None,
+        db,
+        Arc::new(RwLock::new(HashMap::new())),
+        instance.clone(),
+    ));
+    let active = tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let active = instance.active.read().unwrap().clone();
+            if let Some(active) = active {
+                break active;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await?;
+    let command = if step == AddPartyStep::WaitingForPeers {
+        active
+            .handle_command(peer(1), Message::new_empty(MessageType::GetNextCommand))
+            .await?;
+        active
+            .handle_command(peer(2), Message::new_empty(MessageType::GetNextCommand))
+            .await?
+    } else {
+        active
+            .handle_command(peer(1), Message::new_empty(MessageType::GetNextCommand))
+            .await?
+    };
+    // A later poll must retain the same command payload.
+    tokio::time::sleep(Duration::from_millis(10)).await;
+    let repeated = active
+        .handle_command(peer(1), Message::new_empty(MessageType::GetNextCommand))
+        .await?;
+    assert_eq!(repeated.msg_type, command.msg_type);
+    assert_eq!(repeated.payload, command.payload);
+    coordinating.abort();
+    let _ = coordinating.await;
+    let expected_config = if step == AddPartyStep::WaitingForPeers {
+        serde_json::to_vec(&config)?
+    } else {
+        saved_config
+    };
+    Ok((command, expected_config))
+}
+
+#[sqlx::test(migrator = "MIGRATOR")]
+async fn production_add_party_start_preserves_the_restored_pair_command(db: SqlitePool) -> Result {
+    let (command, saved_config) =
+        production_add_party_command(db, AddPartyStep::SignProposals).await?;
+    assert_eq!(command.msg_type, MessageType::SignAddParty);
+    assert_eq!(
+        utils::decode_length_prefixed(&command.payload, 3)?,
+        vec![saved_config, b"saved DNS".to_vec(), b"saved P2P".to_vec()]
+    );
+    Ok(())
+}
+
+#[sqlx::test(migrator = "MIGRATOR")]
+async fn production_add_party_start_preserves_the_restored_clearing_command(
+    db: SqlitePool,
+) -> Result {
+    let (command, saved_config) =
+        production_add_party_command(db, AddPartyStep::SignClearOnboarding).await?;
+    assert_eq!(command.msg_type, MessageType::SignClearOnboarding);
+    assert_eq!(
+        utils::decode_length_prefixed(&command.payload, 2)?,
+        vec![saved_config, b"saved clear".to_vec()]
+    );
+    Ok(())
+}
+
+#[sqlx::test(migrator = "MIGRATOR")]
+async fn production_add_party_start_still_seeds_the_first_key_command(db: SqlitePool) -> Result {
+    let (command, config) = production_add_party_command(db, AddPartyStep::WaitingForPeers).await?;
+    assert_eq!(command.msg_type, MessageType::GenerateAddPartyKeys);
+    assert_eq!(command.payload, config);
     Ok(())
 }

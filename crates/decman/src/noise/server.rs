@@ -5,6 +5,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+use anyhow::Context;
 use canton_proto_rs::com::digitalasset::canton::protocol::v30::PartyToParticipant;
 use sqlx::SqlitePool;
 use tokio::sync::RwLock;
@@ -36,7 +37,7 @@ use crate::{
         party_replication::pipe::{PipeBlock, encode_block},
         signing_keys::requires_signing_key_adoption,
         state::WorkflowStep,
-        storage::artifact_kinds,
+        storage::{WorkflowStorage, artifact_kinds},
         topology,
     },
 };
@@ -360,6 +361,13 @@ impl<S: WorkflowStep + 'static> NoiseServer<S> {
             }
         };
 
+        let restored_payload = match persisted.as_ref() {
+            Some(run) if run.status == WorkflowProgress::InProgress => {
+                Self::signature_command_payload(&db, run).await?
+            }
+            _ => None,
+        };
+
         let expected_peers: Vec<CantonId> = match persisted.as_ref() {
             Some(run) => run.expected_peers.clone(),
             None => network_config
@@ -454,6 +462,10 @@ impl<S: WorkflowStep + 'static> NoiseServer<S> {
             ),
         };
 
+        if let Some(payload) = restored_payload {
+            workflow_state.set_command_payload(payload).await;
+        }
+
         Ok(Self {
             node_config: Arc::new(node_config),
             keypair: Arc::new(keypair),
@@ -464,6 +476,46 @@ impl<S: WorkflowStep + 'static> NoiseServer<S> {
             serving_since: Instant::now(),
             _p: PhantomData,
         })
+    }
+
+    /// Rebuild signature commands before the server can become active.
+    /// The persisted proposals must remain byte-identical across a restart.
+    async fn signature_command_payload(
+        db: &SqlitePool,
+        run: &WorkflowRun,
+    ) -> anyhow::Result<Option<Vec<u8>>> {
+        let command = S::try_from_step_name(&run.current_step).and_then(|step| step.to_command());
+        let kinds: &[&str] = match command {
+            Some(MessageType::SignKick) => &[
+                artifact_kinds::KICK_DNS_PROPOSAL,
+                artifact_kinds::KICK_P2P_PROPOSAL,
+            ],
+            Some(MessageType::SignChangeThreshold) => &[
+                artifact_kinds::CHANGE_THRESHOLD_DNS_PROPOSAL,
+                artifact_kinds::CHANGE_THRESHOLD_P2P_PROPOSAL,
+            ],
+            Some(MessageType::SignAddParty) => &[
+                artifact_kinds::ADD_PARTY_DNS_PROPOSAL,
+                artifact_kinds::ADD_PARTY_P2P_PROPOSAL,
+            ],
+            Some(MessageType::SignClearOnboarding) => &[artifact_kinds::ADD_PARTY_CLEAR_PROPOSAL],
+            _ => return Ok(None),
+        };
+        let mut items = vec![run.config_json.as_bytes().to_vec()];
+        for kind in kinds {
+            let proposal = db
+                .read_artifact(&run.instance_name, kind, None)
+                .await?
+                .with_context(|| {
+                    format!(
+                        "Cannot resume {} at {}: {kind} artifact missing",
+                        run.instance_name, run.current_step
+                    )
+                })?;
+            items.push(proposal);
+        }
+        let slices: Vec<&[u8]> = items.iter().map(Vec::as_slice).collect();
+        Ok(Some(utils::encode_length_prefixed(&slices)))
     }
 
     pub fn get_workflow_state(&self) -> Arc<WorkflowState<S>> {
