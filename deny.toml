@@ -35,4 +35,12 @@ ignore = [
   # and the latest sqlx (0.9.0) requires libsqlite3-sys below 0.38. Drop this
   # once a sqlx release allows 0.39 and we update to it.
   "RUSTSEC-2026-0459",
+  # chrono is unmaintained (RUSTSEC-2026-0543). The advisory reports no
+  # vulnerability, and it covers every version, so no update clears it.
+  #
+  # decman, decman-lib and decman-wallet use chrono directly. canton-lib's
+  # canton-api-client and common crates also pull it in, so a move to jiff or
+  # time here alone would still leave chrono in the graph. Drop this once
+  # canton-lib and this workspace have both moved off chrono.
+  "RUSTSEC-2026-0543",
 ]
