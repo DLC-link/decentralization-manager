@@ -779,9 +779,15 @@ async fn add_party_clear_rejects_malformed_and_conflicting_uploads(db: SqlitePoo
         send(&server, 1, MessageType::AddPartyClearProposal, &proposal).await?,
         MessageType::Ack
     );
-    assert_eq!(
-        send(&server, 1, MessageType::AddPartyClearProposal, &[]).await?,
-        MessageType::Error
+    let conflict = server
+        .handle_command(
+            peer(1),
+            Message::new_empty(MessageType::AddPartyClearProposal),
+        )
+        .await?;
+    assert_eq!(conflict.msg_type, MessageType::Error);
+    assert!(
+        std::str::from_utf8(&conflict.payload)?.contains("Upload conflicts with saved payload")
     );
     assert_eq!(
         db.read_artifact(

@@ -932,7 +932,10 @@ impl<S: WorkflowStep + 'static> NoiseServer<S> {
         .await;
         if let Err(error) = validation {
             tracing::warn!(%error, "Invalid {artifact_kind} from {peer_id}");
-            return Ok(Message::new(MessageType::Error, b"Invalid upload".to_vec()));
+            return Ok(Message::new(
+                MessageType::Error,
+                format!("Invalid upload: {error}").into_bytes(),
+            ));
         }
         if let Err(e) = self
             .workflow_state

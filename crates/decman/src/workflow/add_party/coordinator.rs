@@ -330,16 +330,37 @@ pub(crate) async fn save_new_member_keys(
     add_party_config: &AddPartyConfig,
 ) -> Result {
     let expected = &add_party_config.new_participant_id;
-    let data = storage
+    let peer_key = expected.to_string();
+    let uploaded = storage
         .read_artifact(
             instance_name,
             artifact_kinds::ADD_PARTY_KEYS_UPLOAD,
-            Some(&expected.to_string()),
+            Some(&peer_key),
         )
-        .await?
-        .ok_or_else(|| anyhow::anyhow!("New member key upload missing"))?;
+        .await?;
+    let Some(data) = uploaded else {
+        let keys = storage
+            .read_artifact(
+                instance_name,
+                artifact_kinds::PEER_PUBLIC_KEYS,
+                Some(&peer_key),
+            )
+            .await?;
+        let participant = storage
+            .read_artifact(
+                instance_name,
+                artifact_kinds::PARTICIPANT_ID,
+                Some(&peer_key),
+            )
+            .await?;
+        anyhow::ensure!(
+            keys.is_some() && participant.is_some(),
+            "New member key upload missing and saved key outputs incomplete"
+        );
+        tracing::info!(%expected, "Recovered both saved key outputs from a legacy add-party run");
+        return Ok(());
+    };
     let items = utils::decode_length_prefixed(&data, 2).context("Invalid new member key upload")?;
-    let peer_key = expected.to_string();
     for (kind, payload) in [
         (artifact_kinds::PEER_PUBLIC_KEYS, &items[0]),
         (artifact_kinds::PARTICIPANT_ID, &items[1]),
@@ -724,6 +745,53 @@ mod tests {
         })
         .await?;
         assert_eq!(restored, proposal);
+        Ok(())
+    }
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn legacy_key_recovery_requires_both_outputs(pool: SqlitePool) -> anyhow::Result<()> {
+        for (index, keys, participant) in [
+            (0, true, true),
+            (1, true, false),
+            (2, false, true),
+            (3, false, false),
+        ] {
+            let instance = format!("legacy-{index}");
+            insert_run(&pool, &instance).await?;
+            let config = AddPartyConfig::new(peer(9), peer(1), 1, None, 1, instance.clone());
+            let member = peer(1).to_string();
+            if keys {
+                pool.write_artifact(
+                    &instance,
+                    artifact_kinds::PEER_PUBLIC_KEYS,
+                    Some(&member),
+                    b"saved-keys",
+                )
+                .await?;
+            }
+            if participant {
+                pool.write_artifact(
+                    &instance,
+                    artifact_kinds::PARTICIPANT_ID,
+                    Some(&member),
+                    b"saved-participant",
+                )
+                .await?;
+            }
+            let recovered = save_new_member_keys(&pool, &instance, &config).await;
+            assert_eq!(recovered.is_ok(), keys && participant);
+            assert_eq!(
+                pool.read_artifact(&instance, artifact_kinds::PEER_PUBLIC_KEYS, Some(&member))
+                    .await?
+                    .as_deref(),
+                keys.then_some(b"saved-keys".as_slice())
+            );
+            assert_eq!(
+                pool.read_artifact(&instance, artifact_kinds::PARTICIPANT_ID, Some(&member))
+                    .await?
+                    .as_deref(),
+                participant.then_some(b"saved-participant".as_slice())
+            );
+        }
         Ok(())
     }
 }
