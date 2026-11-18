@@ -225,6 +225,18 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
                     body.to_lowercase().contains("missing package ids"),
                     "409 body should name the missing packages: {body}"
                 );
+                // The operator acts on the member and the package the error
+                // names, so both must be the real ones.
+                anyhow::ensure!(
+                    body.contains(&f.p3.participant_id),
+                    "409 body should name the new member {}: {body}",
+                    f.p3.participant_id
+                );
+                let orphan = orphan_package_id(f).await?;
+                anyhow::ensure!(
+                    body.contains(&orphan),
+                    "409 body should list the orphan-marker package {orphan}: {body}"
+                );
 
                 // The run row is written before the 202 returns, so a refused
                 // request that left none behind never sent an invite.
@@ -239,4 +251,16 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
     )
     .run(f)
     .await
+}
+
+/// The id of the `orphan-marker` package, read from P1's vetted packages.
+/// P1 vets it on upload, and the party's `OrphanMarker` contracts use it.
+async fn orphan_package_id(f: &Fixture) -> anyhow::Result<String> {
+    let vetted: Vec<Value> = f.get_json(f.p1.http, "/packages/vetted").await?;
+    vetted
+        .iter()
+        .find(|p| p["package_name"].as_str() == Some("orphan-marker"))
+        .and_then(|p| p["package_id"].as_str())
+        .map(str::to_string)
+        .context("P1 does not report orphan-marker as vetted")
 }

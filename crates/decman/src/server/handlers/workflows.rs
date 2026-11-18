@@ -7116,6 +7116,11 @@ mod tests {
             error.contains(r#"Missing package ids: ["pkg-a", "pkg-b"]"#),
             "lists the missing ids: {error}"
         );
+        // The add-member guide tells the operator to search for this text.
+        assert!(
+            error.contains("has not vetted 2 package(s)"),
+            "counts the missing ids: {error}"
+        );
         Ok(())
     }
 
@@ -7132,6 +7137,124 @@ mod tests {
         assert!(
             error.contains("ledger API unreachable"),
             "carries the cause: {error}"
+        );
+        Ok(())
+    }
+
+    /// [`state_on`], with `pid(1)` as this node. Its Ledger and Admin API
+    /// addresses do not parse, so every Canton read fails at once.
+    async fn add_party_state_on(pool: SqlitePool) -> Result<web::Data<AppState>> {
+        let state = Arc::try_unwrap(state_on(pool).await?.into_inner())
+            .map_err(|_| anyhow::anyhow!("a fresh test state has one owner"))?;
+        let mut config = NodeConfig::default();
+        config.node.participant_id = Some(pid(1)?);
+        config.canton.ledger_api_host = "[".to_string();
+        config.canton.admin_api_host = "[".to_string();
+        Ok(web::Data::new(AppState { config, ..state }))
+    }
+
+    /// Caches `party` hosted by this node and `pid(2)` at threshold 1. Both
+    /// `pid(2)` and `pid(3)` are configured peers, so `pid(3)` passes every
+    /// request check as the member to add.
+    async fn cache_party_to_grow(pool: &SqlitePool, party: &CantonId) -> Result {
+        cache_party(pool, party, 1, None).await?;
+        let keys = ["k1".to_string(), "k2".to_string()];
+        let hosts = [
+            host_row(&pid(1)?, Some("k1")),
+            host_row(&pid(2)?, Some("k2")),
+        ];
+        let mut tx = pool.begin_transaction().await?;
+        tx.replace_dec_party_participants(party, &hosts).await?;
+        tx.replace_dec_party_owners(party, &keys).await?;
+        for tag in [2, 3] {
+            tx.insert_peer(&crate::config::Peer {
+                participant_id: pid(tag)?,
+                name: format!("peer-{tag}"),
+                address: "127.0.0.1".to_string(),
+                port: 1,
+                public_key: String::new(),
+                party: None,
+            })
+            .await?;
+        }
+        Commitable::commit(tx).await
+    }
+
+    async fn post_add_party(
+        data: web::Data<AppState>,
+        party: &CantonId,
+        new_member: &CantonId,
+    ) -> Result<(StatusCode, String)> {
+        let app =
+            actix_test::init_service(App::new().app_data(data).service(start_add_party)).await;
+        let request = actix_test::TestRequest::post()
+            .uri("/add-party")
+            .set_json(serde_json::json!({
+                "decentralized_party_id": party,
+                "new_participant_id": new_member,
+                "new_threshold": 1,
+                "previous_threshold": 1,
+            }))
+            .to_request();
+        request.extensions_mut().insert(admin());
+        Ok(status_and_body(actix_test::call_service(&app, request).await).await)
+    }
+
+    /// The add passes every request check, but Canton cannot be read. The
+    /// start request must refuse it with 503 and leave no run behind. A run
+    /// is what sends the invites, so no peer is asked to join unchecked.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn an_add_whose_package_check_cannot_run_starts_no_run(pool: SqlitePool) -> Result {
+        let party = pid(60)?;
+        cache_party_to_grow(&pool, &party).await?;
+        let data = add_party_state_on(pool.clone()).await?;
+
+        let (status, body) = post_add_party(data.clone(), &party, &pid(3)?).await?;
+
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+        assert!(
+            body.contains("Cannot check the new member's packages"),
+            "{body}"
+        );
+        assert!(
+            pool.get_workflow_runs_by_kind(WorkflowKind::AddParty)
+                .await?
+                .is_empty(),
+            "a refused add must not persist a run"
+        );
+        assert!(
+            data.workflows.snapshot().is_empty(),
+            "a refused add must not register a run"
+        );
+        Ok(())
+    }
+
+    /// The request checks run before the package check, which reads the
+    /// party's whole ACS. Canton cannot be read here, so a 503 would mean the
+    /// package check ran first. Each refusal must come from its request check.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn the_request_checks_refuse_an_add_before_the_package_check(pool: SqlitePool) -> Result {
+        let party = pid(61)?;
+        cache_party_to_grow(&pool, &party).await?;
+        let data = add_party_state_on(pool.clone()).await?;
+
+        let (status, body) = post_add_party(data.clone(), &party, &pid(2)?).await?;
+        assert_eq!(status, StatusCode::CONFLICT, "{body}");
+        assert!(body.contains("is already a member of"), "{body}");
+
+        // The in-flight guard is the last request check that needs no peer.
+        // Only the peer version gate runs between it and the package check.
+        insert_run(&pool, &in_progress_run("contracts-in-flight", &party)).await?;
+        let (status, body) = post_add_party(data, &party, &pid(3)?).await?;
+        assert_eq!(status, StatusCode::CONFLICT, "{body}");
+        assert!(
+            body.contains("already has a Contracts workflow in flight"),
+            "{body}"
+        );
+        assert!(
+            pool.get_workflow_runs_by_kind(WorkflowKind::AddParty)
+                .await?
+                .is_empty()
         );
         Ok(())
     }
