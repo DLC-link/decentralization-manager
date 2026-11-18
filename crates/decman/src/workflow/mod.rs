@@ -1280,6 +1280,11 @@ async fn report_departure(client: NoiseClient, report: DeclineInvitationPayload)
 /// Pause between attempts to report a peer's failure.
 const FAILURE_REPORT_BACKOFF: std::time::Duration = std::time::Duration::from_secs(10);
 
+// Five pauses give uploads a sixty-second recovery window before the sixth attempt.
+const SIGNATURE_UPLOAD_BACKOFF: std::time::Duration = std::time::Duration::from_secs(12);
+
+const PEER_RETRY_BACKOFF: std::time::Duration = std::time::Duration::from_secs(2);
+
 /// Apply one retry budget to decoding, authorization, and execution failures.
 /// Control messages do not reset it; only completing (or legitimately skipping)
 /// a step does. The last failure returns immediately without another delay.
@@ -1303,7 +1308,7 @@ async fn retry_peer_step(
              ({command:?}): {reason}"
         );
     }
-    tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+    tokio::time::sleep(PEER_RETRY_BACKOFF).await;
     Ok(())
 }
 
@@ -1313,24 +1318,30 @@ async fn record_signature_upload(
     command: MessageType,
     outcome: Result,
 ) -> Result {
-    if outcome.is_ok() {
+    let Err(error) = outcome else {
         *consecutive_failures = 0;
         return Ok(());
-    }
+    };
     *consecutive_failures += 1;
-    // Coordinator errors can contain untrusted payloads, including signature bytes.
+    tracing::warn!(
+        ?command,
+        attempt = *consecutive_failures,
+        error = %error,
+        "Signature upload failed"
+    );
     if *consecutive_failures >= MAX_CONSECUTIVE_STEP_FAILURES {
         anyhow::bail!(
-            "Peer failed: signature upload refused after {} consecutive attempts ({command:?}); check coordinator storage and logs before retrying",
+            "Peer failed: signature upload failed after {} consecutive attempts ({command:?}): {error}",
             *consecutive_failures
         );
     }
     tracing::warn!(
         ?command,
         attempt = *consecutive_failures,
-        "Signature upload failed; retrying in 2 seconds"
+        backoff_seconds = SIGNATURE_UPLOAD_BACKOFF.as_secs(),
+        "Retrying signature upload"
     );
-    tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+    tokio::time::sleep(SIGNATURE_UPLOAD_BACKOFF).await;
     Ok(())
 }
 
@@ -1693,6 +1704,7 @@ mod tests {
         assert!(extract_party_id_from_p2p_payload(b"").is_err());
         assert!(extract_party_id_from_p2p_payload(b"not-a-valid-proto-blob").is_err());
     }
+
     #[tokio::test]
     async fn signature_upload_recovers_and_resets_budget() {
         let mut failures = 0;
@@ -1705,7 +1717,7 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(failures, 1);
-        assert!(start.elapsed() >= std::time::Duration::from_secs(2));
+        assert!(start.elapsed() >= SIGNATURE_UPLOAD_BACKOFF);
         record_signature_upload(&mut failures, MessageType::SignAddParty, Ok(()))
             .await
             .unwrap();
@@ -1721,13 +1733,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn signature_upload_exhaustion_redacts_payload() {
+    async fn signature_upload_exhaustion_reports_cause() {
         let mut failures = 0;
+        let start = tokio::time::Instant::now();
         for attempt in 1..MAX_CONSECUTIVE_STEP_FAILURES {
             record_signature_upload(
                 &mut failures,
                 MessageType::SignChangeThreshold,
-                Err(anyhow::anyhow!("secret-signature-bytes")),
+                Err(anyhow::anyhow!("local artifact missing")),
             )
             .await
             .unwrap();
@@ -1736,14 +1749,15 @@ mod tests {
         let error = record_signature_upload(
             &mut failures,
             MessageType::SignChangeThreshold,
-            Err(anyhow::anyhow!("secret-signature-bytes")),
+            Err(anyhow::anyhow!("local artifact missing")),
         )
         .await
         .unwrap_err();
         assert_eq!(failures, MAX_CONSECUTIVE_STEP_FAILURES);
+        assert!(start.elapsed() >= std::time::Duration::from_secs(60));
         let report = format!("{error:#}");
         assert!(report.contains("SignChangeThreshold"));
         assert!(report.contains(&failures.to_string()));
-        assert!(!report.contains("secret-signature-bytes"));
+        assert!(report.contains("local artifact missing"));
     }
 }
