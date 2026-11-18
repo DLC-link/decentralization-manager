@@ -213,6 +213,42 @@ pub async fn import_window_owner(
     .await?)
 }
 
+pub(super) async fn check_joiner_readiness(
+    config: &NodeConfig,
+    db: &SqlitePool,
+    target: &ReplicationTarget,
+) -> std::result::Result<(), AddHostsError> {
+    if db
+        .get_acs_import_quarantine(&target.party_id, &target.target_participant_id)
+        .await
+        .map_err(AddHostsError::Canton)?
+        .is_some()
+    {
+        return Err(AddHostsError::Invalid(anyhow::anyhow!(
+            "this participant is quarantined for the party; an operator must repair it before staging"
+        )));
+    }
+    let busy: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM tenant_import_window WHERE participant_id = ?) \
+         OR EXISTS (SELECT 1 FROM workflow_runs WHERE status = 'inprogress') \
+         OR EXISTS (SELECT 1 FROM former_dec_party WHERE purge_status = 'running')",
+    )
+    .bind(config.participant_id().to_string())
+    .fetch_one(db)
+    .await
+    .map_err(|error| AddHostsError::Canton(error.into()))?;
+    if busy {
+        return Err(AddHostsError::Busy(
+            "a staged import, workflow, or purge owns this participant; finish it before adding a host"
+                .into(),
+        ));
+    }
+    ensure_connected(config).await?;
+    check_vetted_packages_held(config)
+        .await
+        .map_err(AddHostsError::Canton)
+}
+
 async fn claim_import_window(
     db: &SqlitePool,
     target: &ReplicationTarget,
@@ -408,12 +444,9 @@ pub async fn stage_add_hosts(
             "only a joining participant stages a signature"
         )));
     }
-    ensure_connected(config).await?;
+    check_joiner_readiness(config, db, &target).await?;
     let expected = add_hosts_mapping(&current.mapping, new_hosts, permission)
         .map_err(AddHostsError::Invalid)?;
-    check_vetted_packages_held(config)
-        .await
-        .map_err(AddHostsError::Canton)?;
     capture_replication_offsets(config, db, party_id, new_hosts, base_serial, None).await?;
     let serial = next_serial(base_serial).map_err(AddHostsError::Invalid)?;
     let mut proposal = None;

@@ -219,6 +219,15 @@ host has no external parties.
 > A failed staged import leaves the joiner offline on manual connection.
 > Its operator must resolve the failure before reconnecting it.
 
+Each joiner checks its readiness during `prepare`.
+The caller must prepare every host before staging any joiner.
+Prepare refuses a joiner with quarantine, another import window, a running
+workflow or purge, or an active relay. It also checks connection health and
+verifies that locally vetted packages are present.
+These checks reserve nothing, and staging checks readiness again.
+A state change after prepare can still leave earlier joiners offline.
+The existing operator recovery limits therefore remain applicable.
+
 ### Check the DARs
 
 The joining hosts need every package the party's contracts use. DecMan cannot

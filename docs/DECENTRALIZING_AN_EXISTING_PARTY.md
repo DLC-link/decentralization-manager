@@ -91,6 +91,14 @@ the party owner this before you start.
 > must resolve the failure before reconnecting it. The downtime includes
 > authorization, export, and import, rather than only the copy.
 
+Joining nodes check their readiness during `prepare`, before staging takes any
+participant offline. The caller must prepare every host before staging any joiner.
+The checks cover quarantine, import windows, active workflows or purges, relay
+sessions, connection health, and vetted packages missing from local storage.
+Readiness can change afterward, so staging checks again before claiming its window.
+The checks reserve nothing and cannot identify every package the party needs.
+A later failure can still require the operator recovery described below.
+
 ## The calls
 
 All calls go to the tenant API and send the node's key as

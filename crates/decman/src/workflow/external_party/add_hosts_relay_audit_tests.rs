@@ -16,13 +16,15 @@ use canton_proto_rs::com::digitalasset::canton::{
     },
     crypto::v30::Signature,
     protocol::v30::{
-        TopologyTransaction,
+        TopologyTransaction, VettedPackages,
         party_to_participant::{HostingParticipant, hosting_participant},
+        vetted_packages::VettedPackage,
     },
     topology::admin::v30::{
-        BaseResult, ListAllResponse, ListPartyToParticipantResponse, SignTransactionsRequest,
-        SignTransactionsResponse, TopologyTransactions, list_party_to_participant_response,
-        topology_transactions,
+        BaseResult, GenerateTransactionsResponse, ListAllResponse, ListPartyToParticipantResponse,
+        ListVettedPackagesResponse, SignTransactionsRequest, SignTransactionsResponse,
+        TopologyTransactions, generate_transactions_response::GeneratedTransaction,
+        list_party_to_participant_response, list_vetted_packages_response, topology_transactions,
     },
 };
 use common::types::{WorkflowKind, WorkflowProgress, WorkflowRole, WorkflowRun};
@@ -46,6 +48,7 @@ use crate::{
     },
 };
 
+use super::super::prepare_add_hosts;
 use super::*;
 
 #[derive(Default)]
@@ -65,6 +68,8 @@ struct Connectivity {
     current_mapping: Option<(i32, PartyToParticipant)>,
     reject_signing: bool,
     sign_calls: usize,
+    vetted_packages: Vec<String>,
+    generate_calls: usize,
     import_entered: Option<Arc<Notify>>,
     import_release: Option<Arc<Notify>>,
     entered: Option<Arc<Notify>>,
@@ -90,6 +95,7 @@ impl CantonBoundary {
         let mut config = NodeConfig::default();
         config.node.participant_id = Some(participant(2));
         config.canton.admin_api_port = listener.local_addr()?.port();
+        config.canton.ledger_api_port = 1;
         let state = Arc::new(Mutex::new(Connectivity {
             connected,
             manual,
@@ -193,7 +199,37 @@ async fn respond(
         }
     }
     let payload = match method.as_str() {
-        "ListPackages" | "ListVettedPackages" => vec![],
+        "ListPackages" => vec![],
+        "ListVettedPackages" => ListVettedPackagesResponse {
+            results: vec![list_vetted_packages_response::Result {
+                context: None,
+                item: Some(VettedPackages {
+                    participant_uid: participant(2).to_string(),
+                    package_ids: vec![],
+                    packages: state
+                        .lock()
+                        .expect("state lock")
+                        .vetted_packages
+                        .iter()
+                        .map(|id| VettedPackage {
+                            package_id: id.clone(),
+                            ..Default::default()
+                        })
+                        .collect(),
+                }),
+            }],
+        }
+        .encode_to_vec(),
+        "GenerateTransactions" => {
+            state.lock().expect("state lock").generate_calls += 1;
+            GenerateTransactionsResponse {
+                generated_transactions: vec![GeneratedTransaction {
+                    serialized_transaction: signed(mapping()).transaction,
+                    transaction_hash: vec![0x55; 32],
+                }],
+            }
+            .encode_to_vec()
+        }
         "SignTransactions" => {
             let request = SignTransactionsRequest::decode(request_bytes)
                 .expect("the signing request decodes");
@@ -1450,5 +1486,215 @@ async fn a_staged_signature_insert_failure_rolls_back_its_participant_claim(
         assert_eq!(state.modifications, 0);
     }
     admit_workflow_after_stage_failure(&db).await?;
+    Ok(())
+}
+
+async fn assert_prepare_has_no_side_effects(
+    db: &SqlitePool,
+    boundary: &CantonBoundary,
+    target: &ReplicationTarget,
+    owner: Option<&str>,
+    connected: bool,
+) -> Result<()> {
+    assert_eq!(
+        import_window_owner(db, &participant(2)).await?.as_deref(),
+        owner
+    );
+    for kind in [
+        artifact_kinds::TENANT_ADD_HOSTS_STAGED_SIGNATURES,
+        artifact_kinds::TENANT_ADD_HOSTS_STAGE_READY,
+        target.artifacts.import_inflight,
+        artifact_kinds::TENANT_ADD_HOSTS_ACS_IMPORTED,
+        artifact_kinds::TENANT_ADD_HOSTS_IMPORT_COMPLETED,
+    ] {
+        assert!(
+            target.read_artifact(db, kind, None).await?.is_none(),
+            "prepare writes no {kind}"
+        );
+    }
+    let state = boundary.state.lock().expect("state lock");
+    assert_eq!(state.connected, connected);
+    assert!(!state.manual);
+    assert_eq!(state.sign_calls, 0);
+    assert_eq!(state.disconnects, 0);
+    assert_eq!(state.modifications, 0);
+    assert_eq!(state.reconnects, 0);
+    Ok(())
+}
+
+#[sqlx::test(migrator = "MIGRATOR")]
+async fn joiner_prepare_refuses_quarantine_lease_workflow_and_purge_without_mutation(
+    db: SqlitePool,
+) -> Result<()> {
+    let boundary = CantonBoundary::new(true, false)?;
+    let target = fresh_stage_fixture(&db, &boundary).await?;
+    sqlx::query("DELETE FROM tenant_replication_artifacts WHERE instance_name = ?")
+        .bind(&target.instance_name)
+        .execute(&db)
+        .await?;
+    let other = replication_target(
+        &format!("other::1220{}", "cd".repeat(32)),
+        &participant(2),
+        9,
+    )?;
+    let former = participant(9);
+    for cause in ["quarantine", "lease", "workflow", "purge"] {
+        match cause {
+            "quarantine" => {
+                db.quarantine_acs_import(&target.party_id, &participant(2), "known failure", 1)
+                    .await?
+            }
+            "lease" => {
+                assert!(claim_import_window(&db, &other, None).await?);
+            }
+            "workflow" => admit_workflow_after_stage_failure(&db).await?,
+            "purge" => {
+                db.record_former_dec_party(&former, 1).await?;
+                assert!(db.claim_former_party_purge(&former).await?);
+            }
+            _ => unreachable!(),
+        }
+        let result = prepare_add_hosts(
+            &boundary.config,
+            &db,
+            &target.party_id.to_string(),
+            &[participant(2)],
+            HostPermission::Confirmation,
+            7,
+            None,
+        )
+        .await;
+        let error = result
+            .err()
+            .expect("an unavailable joiner refuses preparation");
+        if cause == "quarantine" {
+            assert!(
+                matches!(error, AddHostsError::Invalid(_)),
+                "{cause}: {error}"
+            );
+        } else {
+            assert!(matches!(error, AddHostsError::Busy(_)), "{cause}: {error}");
+        }
+        let owner = (cause == "lease").then_some(other.instance_name.as_str());
+        assert_prepare_has_no_side_effects(&db, &boundary, &target, owner, true).await?;
+        let artifacts: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM tenant_replication_artifacts WHERE instance_name = ?",
+        )
+        .bind(&target.instance_name)
+        .fetch_one(&db)
+        .await?;
+        assert_eq!(
+            artifacts, 0,
+            "{cause} must fail before offset capture writes anything"
+        );
+        assert_eq!(
+            boundary.state.lock().expect("state lock").generate_calls,
+            0,
+            "{cause} must fail before topology generation"
+        );
+        match cause {
+            "quarantine" => {
+                db.clear_acs_import_quarantine(&target.party_id, &participant(2))
+                    .await?;
+            }
+            "lease" => release_import_window_owner(&db, &other).await?,
+            "workflow" => {
+                let mut tx = db.begin_transaction().await?;
+                tx.set_workflow_run_status(
+                    "workflow-after-refused-stage",
+                    WorkflowProgress::Completed,
+                    None,
+                    2,
+                )
+                .await?;
+                tx.commit().await?;
+            }
+            "purge" => {}
+            _ => unreachable!(),
+        }
+    }
+    Ok(())
+}
+
+#[sqlx::test(migrator = "MIGRATOR")]
+async fn joiner_prepare_refuses_disconnection_and_missing_vetted_packages_without_mutation(
+    db: SqlitePool,
+) -> Result<()> {
+    let boundary = CantonBoundary::new(false, false)?;
+    let target = fresh_stage_fixture(&db, &boundary).await?;
+    sqlx::query("DELETE FROM tenant_replication_artifacts WHERE instance_name = ?")
+        .bind(&target.instance_name)
+        .execute(&db)
+        .await?;
+    for missing_package in [false, true] {
+        {
+            let mut state = boundary.state.lock().expect("state lock");
+            state.connected = missing_package;
+            state.vetted_packages = if missing_package {
+                vec!["required-package-not-held".into()]
+            } else {
+                vec![]
+            };
+        }
+        let result = prepare_add_hosts(
+            &boundary.config,
+            &db,
+            &target.party_id.to_string(),
+            &[participant(2)],
+            HostPermission::Confirmation,
+            7,
+            None,
+        )
+        .await;
+        let error = result
+            .err()
+            .expect("an unavailable joiner refuses preparation");
+        if missing_package {
+            assert!(
+                matches!(error, AddHostsError::Canton(_)),
+                "the existing package error classification is preserved"
+            );
+            assert!(format!("{error:#}").contains("required-package-not-held"));
+        } else {
+            assert!(matches!(error, AddHostsError::Busy(_)));
+        }
+        assert_prepare_has_no_side_effects(&db, &boundary, &target, None, missing_package).await?;
+        let artifacts: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM tenant_replication_artifacts WHERE instance_name = ?",
+        )
+        .bind(&target.instance_name)
+        .fetch_one(&db)
+        .await?;
+        assert_eq!(
+            artifacts, 0,
+            "readiness failures must precede offset capture"
+        );
+        assert_eq!(boundary.state.lock().expect("state lock").generate_calls, 0);
+    }
+    Ok(())
+}
+
+#[sqlx::test(migrator = "MIGRATOR")]
+async fn ready_joiner_prepare_generates_topology_without_claiming_signing_or_disconnecting(
+    db: SqlitePool,
+) -> Result<()> {
+    let boundary = CantonBoundary::new(true, false)?;
+    let target = fresh_stage_fixture(&db, &boundary).await?;
+    let prepared = prepare_add_hosts(
+        &boundary.config,
+        &db,
+        &target.party_id.to_string(),
+        &[participant(2)],
+        HostPermission::Confirmation,
+        7,
+        None,
+    )
+    .await?;
+    assert_eq!(prepared.serial, 8);
+    assert_eq!(prepared.party_id, target.party_id.to_string());
+    assert_eq!(prepared.topology_transactions.len(), 1);
+    assert_eq!(prepared.transaction_hashes.len(), 1);
+    assert_prepare_has_no_side_effects(&db, &boundary, &target, None, true).await?;
+    assert_eq!(boundary.state.lock().expect("state lock").generate_calls, 1);
     Ok(())
 }

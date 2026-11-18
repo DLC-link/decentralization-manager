@@ -797,6 +797,60 @@ async fn add_hosts_does_not_publish_or_import_when_a_joiner_cannot_stage() {
 }
 
 #[tokio::test]
+async fn add_hosts_checks_every_joiners_readiness_before_any_staging_or_publication() {
+    for (status, reason) in [
+        (
+            409,
+            "this participant already owns another ACS import window",
+        ),
+        (400, "this participant is quarantined for this party"),
+    ] {
+        let source = MockServer::start().await;
+        let earlier_joiner = MockServer::start().await;
+        let later_joiner = MockServer::start().await;
+        for ready_host in [&source, &earlier_joiner] {
+            stub_add_hosts_prepare(ready_host, 5).await;
+        }
+        Mock::given(method("POST"))
+            .and(path("/v0/tenant/add-hosts/prepare"))
+            .respond_with(ResponseTemplate::new(status).set_body_json(json!({ "error": reason })))
+            .mount(&later_joiner)
+            .await;
+
+        let key = ExternalKeyPair::from_seed([4u8; 32]);
+        let result = decman_wallet::add_hosts(
+            &[host_for(&source, 1)],
+            &[host_for(&earlier_joiner, 2), host_for(&later_joiner, 3)],
+            &key,
+            "alice::1220aa",
+            HostPermission::Confirmation,
+            4,
+        )
+        .await;
+
+        let error = result.expect_err("a later joiner's readiness refusal must stop the flow");
+        let error = error.to_string();
+        assert!(
+            error.contains(reason),
+            "the wallet must preserve the readiness refusal: {error}"
+        );
+        assert!(
+            error.contains(&later_joiner.uri()),
+            "the wallet must identify the unready joiner: {error}"
+        );
+        for server in [&source, &earlier_joiner, &later_joiner] {
+            let requests = server.received_requests().await.unwrap();
+            assert_eq!(
+                requests.len(),
+                1,
+                "readiness refusal {status}: no host may receive a mutation"
+            );
+            assert_eq!(requests[0].url.path(), "/v0/tenant/add-hosts/prepare");
+        }
+    }
+}
+
+#[tokio::test]
 async fn add_hosts_publishes_only_after_collecting_every_joiners_staged_signatures() {
     let source = MockServer::start().await;
     let joiner_a = MockServer::start().await;

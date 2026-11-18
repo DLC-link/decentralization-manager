@@ -110,3 +110,58 @@ async fn relay_routes_audit_authenticated_refusals_without_disclosing_keys_or_si
     );
     Ok(())
 }
+
+#[sqlx::test(migrator = "MIGRATOR")]
+async fn joiner_prepare_refuses_an_open_actual_relay_before_calling_canton(
+    db: SqlitePool,
+) -> anyhow::Result<()> {
+    let state = state(db.clone());
+    let party = format!("observed::1220{}", "aa".repeat(32));
+    let target = replication_target(&party, state.config.participant_id(), 7)?;
+    state
+        .relay_sessions
+        .accept_block(
+            &state.config,
+            &state.db,
+            &target,
+            &[],
+            PipeBlock::Data {
+                seq: 1,
+                bytes: b"a relay block awaiting completion".to_vec(),
+            },
+            None,
+        )
+        .await?;
+    assert!(state.relay_sessions.any_session(|_| true).await);
+    let app = test::init_service(
+        App::new()
+            .app_data(state.clone())
+            .wrap(AuthMiddleware)
+            .service(tenant_add_hosts_prepare),
+    )
+    .await;
+    let response = test::call_service(
+        &app,
+        request("/v0/tenant/add-hosts/prepare", true).to_request(),
+    )
+    .await;
+    assert_eq!(
+        response.status(),
+        StatusCode::CONFLICT,
+        "the open-relay guard must refuse preparation before the unreachable Canton call"
+    );
+    let body: serde_json::Value = test::read_body_json(response).await;
+    assert!(
+        body["error"]
+            .as_str()
+            .expect("a refusal reason")
+            .contains("relay is still open")
+    );
+    assert!(
+        import_window_owner(&db, state.config.participant_id())
+            .await?
+            .is_none()
+    );
+    state.relay_sessions.discard(&target.instance_name).await;
+    Ok(())
+}

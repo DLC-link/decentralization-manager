@@ -366,7 +366,7 @@ pub async fn tenant_status(
         (status = 400, description = "Bad request, or a host set this party cannot take", body = ErrorResponse),
         (status = 401, description = "Invalid tenant API key", body = ErrorResponse),
         (status = 404, description = "No authorized PartyToParticipant for this party", body = ErrorResponse),
-        (status = 409, description = "This host reads a different serial for the party", body = ErrorResponse),
+        (status = 409, description = "The serial differs, or the joiner is busy, disconnected, or still relaying an ACS", body = ErrorResponse),
         (status = 429, description = "Rate limit for this tenant API key exceeded; Retry-After gives the seconds to wait", body = ErrorResponse),
         (status = 500, description = "A Canton call failed on this host", body = ErrorResponse)
     )
@@ -385,6 +385,22 @@ pub async fn tenant_add_hosts_prepare(
             error: "new_hosts must name at least one participant to add".to_string(),
         });
     }
+
+    let _admission = if body.new_hosts.contains(data.config.participant_id()) {
+        let admission = data.tenant_import_mu.lock().await;
+        if data.relay_sessions.any_session(|_| true).await {
+            return add_hosts_error_response(
+                "prepare",
+                AddHostsError::Busy(
+                    "an ACS relay is still open on this participant; finish it before preparing a joiner"
+                        .into(),
+                ),
+            );
+        }
+        Some(admission)
+    } else {
+        None
+    };
 
     // `prepare_add_hosts` reads head state itself and reports *why* it refused,
     // so there is no pre-read here: a second read would only widen the window in

@@ -451,6 +451,13 @@ The nodes need no direct connection because the wallet already talks to each.
 Each joiner stays offline from staging through successful import. That window
 includes authorization, export, and import, and pauses every other party there.
 
+`add_hosts` prepares every current host and joiner before staging any joiner.
+Each joiner's prepare checks quarantine, competing work, relay activity,
+connection health, and locally vetted package availability.
+A known refusal therefore stops the wallet before any joiner disconnects.
+The checks reserve nothing, so readiness can still change before staging.
+The package check does not replace checking every DAR the party needs.
+
 A joiner's successful import reconnects its participant and requests marker
 clearance. `add_hosts` polls until Canton authorizes that clearance.
 `replicated: false` reports an incomplete stage, publication, import, or clearance.

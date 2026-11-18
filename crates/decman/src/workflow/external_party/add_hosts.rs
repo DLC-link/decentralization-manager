@@ -419,6 +419,12 @@ pub async fn prepare_add_hosts(
     let mapping = add_hosts_mapping(&current.mapping, new_hosts, permission)
         .map_err(AddHostsError::Invalid)?;
 
+    if new_hosts.contains(config.participant_id()) {
+        let target = replication_target(party_id, config.participant_id(), base_serial)
+            .map_err(AddHostsError::Invalid)?;
+        relay::check_joiner_readiness(config, storage, &target).await?;
+    }
+
     capture_replication_offsets(
         config,
         storage,
