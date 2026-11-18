@@ -33,7 +33,7 @@ ed25519-dalek = { version = "3.0", features = ["zeroize"] }
 futures = { version = "0.3" }
 hex = { version = "0.4" }
 http = { version = "0.2" }
-hyper = { version = "0.14", features = ["full"] }
+hyper = { version = "1.11", features = ["full"] }
 hyper-noise = { version = "0.0.3" }
 insta = { version = "1", features = ["json"] }
 jsonwebtoken = { version = "11.0", features = ["aws_lc_rs"] }
