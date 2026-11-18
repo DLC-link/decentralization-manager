@@ -452,4 +452,209 @@ mod tests {
         }
         Ok(())
     }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn zero_expected_peers_pass_without_artifacts(pool: SqlitePool) -> anyhow::Result<()> {
+        insert_run(&pool).await?;
+        let state = resumed_state(&pool, vec![]);
+
+        prepare_signatures(&state, &pool, "run-1").await
+    }
+
+    /// A completed peer is no proof of a stored signature.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn completed_peers_without_artifacts_stop_the_submit(
+        pool: SqlitePool,
+    ) -> anyhow::Result<()> {
+        insert_run(&pool).await?;
+        let state = WorkflowState::from_persisted(
+            pool.clone(),
+            "run-1".into(),
+            ChangeThresholdStep::Submit,
+            vec![peer(1), peer(2)],
+            vec![peer(1), peer(2)],
+            None,
+        );
+
+        let message = prepare_signatures(&state, &pool, "run-1")
+            .await
+            .expect_err("completed peers without signatures must not submit")
+            .to_string();
+
+        assert!(message.contains(&peer(1).to_string()), "{message}");
+        assert!(message.contains(&peer(2).to_string()), "{message}");
+        Ok(())
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_non_expected_peer_pair_does_not_cover_a_missing_peer(
+        pool: SqlitePool,
+    ) -> anyhow::Result<()> {
+        insert_run(&pool).await?;
+        let state = resumed_state(&pool, vec![peer(1)]);
+        write(
+            &pool,
+            artifact_kinds::SIGNED_CHANGE_THRESHOLD_DNS,
+            &peer(3),
+            b"dns",
+        )
+        .await?;
+        write(
+            &pool,
+            artifact_kinds::SIGNED_CHANGE_THRESHOLD_P2P,
+            &peer(3),
+            b"p2p",
+        )
+        .await?;
+
+        let message = prepare_signatures(&state, &pool, "run-1")
+            .await
+            .expect_err("a stranger's pair must not stand in for an expected peer")
+            .to_string();
+
+        let expected = format!("[\"{}\"]", peer(1));
+        assert!(
+            message.contains(&format!("without a signed DNS proposal: {expected}")),
+            "{message}"
+        );
+        assert!(
+            message.contains(&format!("without a signed P2P proposal: {expected}")),
+            "{message}"
+        );
+        assert!(!message.contains(&peer(3).to_string()), "{message}");
+        Ok(())
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_pair_from_another_run_does_not_count(pool: SqlitePool) -> anyhow::Result<()> {
+        insert_run(&pool).await?;
+        sqlx::query(
+            "INSERT INTO workflow_runs (
+                 instance_name, kind, role, status, current_step, step_index, step_total,
+                 config_json, expected_peers_json, completed_peers_json,
+                 created_at, updated_at
+             ) VALUES ('run-2', 'ChangeThreshold', 'Coordinator', 'inprogress', 'Submit',
+                       4, 7, '{}', '[]', '[]', 0, 0)",
+        )
+        .execute(&pool)
+        .await?;
+        let state = resumed_state(&pool, vec![peer(1)]);
+        let key = peer(1).to_string();
+        for kind in [
+            artifact_kinds::SIGNED_CHANGE_THRESHOLD_DNS,
+            artifact_kinds::SIGNED_CHANGE_THRESHOLD_P2P,
+        ] {
+            pool.write_artifact("run-2", kind, Some(&key), b"sig")
+                .await?;
+        }
+
+        let message = prepare_signatures(&state, &pool, "run-1")
+            .await
+            .expect_err("another run's signatures must not submit this run")
+            .to_string();
+
+        assert_eq!(message.matches(&key).count(), 2, "{message}");
+        Ok(())
+    }
+
+    /// Complete split artifacts do not excuse a combined upload that cannot split.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_corrupt_combined_upload_stops_the_submit(pool: SqlitePool) -> anyhow::Result<()> {
+        insert_run(&pool).await?;
+        let state = resumed_state(&pool, vec![peer(1)]);
+        write(
+            &pool,
+            artifact_kinds::SIGNED_CHANGE_THRESHOLD_DNS,
+            &peer(1),
+            &[1, 11],
+        )
+        .await?;
+        write(
+            &pool,
+            artifact_kinds::SIGNED_CHANGE_THRESHOLD_P2P,
+            &peer(1),
+            &[1, 22],
+        )
+        .await?;
+        // The DNS length claims five bytes, but only one follows.
+        write(
+            &pool,
+            artifact_kinds::CHANGE_THRESHOLD_SIGNATURE_UPLOAD,
+            &peer(1),
+            &[5, 11],
+        )
+        .await?;
+
+        let message = format!(
+            "{:#}",
+            prepare_signatures(&state, &pool, "run-1")
+                .await
+                .expect_err("a corrupt upload must not submit")
+        );
+
+        assert!(message.contains("Failed to split"), "{message}");
+        assert!(message.contains(&peer(1).to_string()), "{message}");
+        Ok(())
+    }
+
+    /// The durable upload is the source of truth over older split artifacts.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_durable_upload_replaces_stale_split_artifacts(
+        pool: SqlitePool,
+    ) -> anyhow::Result<()> {
+        insert_run(&pool).await?;
+        let state = resumed_state(&pool, vec![peer(1), peer(2)]);
+        write(
+            &pool,
+            artifact_kinds::SIGNED_CHANGE_THRESHOLD_DNS,
+            &peer(1),
+            &[1, 99],
+        )
+        .await?;
+        write(
+            &pool,
+            artifact_kinds::SIGNED_CHANGE_THRESHOLD_P2P,
+            &peer(1),
+            &[1, 98],
+        )
+        .await?;
+        write(
+            &pool,
+            artifact_kinds::CHANGE_THRESHOLD_SIGNATURE_UPLOAD,
+            &peer(1),
+            &[1, 11, 1, 22],
+        )
+        .await?;
+        // peer(2) is a legacy peer with split artifacts only.
+        write(
+            &pool,
+            artifact_kinds::SIGNED_CHANGE_THRESHOLD_DNS,
+            &peer(2),
+            &[1, 33],
+        )
+        .await?;
+        write(
+            &pool,
+            artifact_kinds::SIGNED_CHANGE_THRESHOLD_P2P,
+            &peer(2),
+            &[1, 44],
+        )
+        .await?;
+
+        prepare_signatures(&state, &pool, "run-1").await?;
+
+        for (p, dns, p2p) in [(peer(1), [1, 11], [1, 22]), (peer(2), [1, 33], [1, 44])] {
+            let key = p.to_string();
+            let read = |kind| pool.read_artifact("run-1", kind, Some(&key));
+            assert_eq!(
+                read(artifact_kinds::SIGNED_CHANGE_THRESHOLD_DNS).await?,
+                Some(dns.to_vec())
+            );
+            assert_eq!(
+                read(artifact_kinds::SIGNED_CHANGE_THRESHOLD_P2P).await?,
+                Some(p2p.to_vec())
+            );
+        }
+        Ok(())
+    }
 }
