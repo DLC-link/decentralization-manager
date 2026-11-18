@@ -243,6 +243,7 @@ Contact the BitSafe team before you recover a participant in this state.
 | A list of incompatible peers | Upgrade those nodes to the same release |
 | "the new member … has not vetted N package(s)" | Distribute the missing DARs to the new member, then start the run again |
 | "Cannot check the new member's packages" | Open the party page and confirm that **Test Auth** succeeds. Then start the run again |
+| "Cannot check the new member's packages: the check did not finish within 60s" | Confirm that the coordinator's participant is healthy. Then start the run again |
 
 ### The run fails
 

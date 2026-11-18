@@ -657,6 +657,26 @@ fn kick_key_check_failure(party: &CantonId, e: &anyhow::Error) -> HttpResponse {
     }
 }
 
+/// How long an add-party start waits for the package check. The check streams
+/// the party's active contracts, so a large party needs time. A Canton call
+/// that stalls must still not leave the Add Member dialog waiting forever.
+const ADD_PARTY_PACKAGE_CHECK_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// Run the add-party package check under `limit`. A check that runs out of
+/// time is a check that could not run.
+async fn bounded_package_check(
+    limit: Duration,
+    check: impl std::future::Future<Output = Result>,
+) -> Result {
+    match tokio::time::timeout(limit, check).await {
+        Ok(result) => result,
+        Err(_) => anyhow::bail!(
+            "the check did not finish within {secs}s",
+            secs = limit.as_secs()
+        ),
+    }
+}
+
 /// The response to a failed package check of an add-party start. A missing
 /// package says what to do, so it goes back as it is. Any other failure means
 /// the check could not run, so the add is refused until it can.
@@ -1738,13 +1758,12 @@ pub async fn start_add_party(
         let auth = data.auth.read().await.clone();
         workflow::add_party::resolve_ledger_token(&auth, &decentralized_party_id).await
     };
-    if let Err(e) = workflow::add_party::packages::check_new_member_packages(
+    let check = workflow::add_party::packages::check_new_member_packages(
         &data.config,
         &add_party_config,
         ledger_token.as_deref(),
-    )
-    .await
-    {
+    );
+    if let Err(e) = bounded_package_check(ADD_PARTY_PACKAGE_CHECK_TIMEOUT, check).await {
         return add_party_package_check_failure(&decentralized_party_id, &e);
     }
 
@@ -7121,6 +7140,41 @@ mod tests {
             error.contains("has not vetted 2 package(s)"),
             "counts the missing ids: {error}"
         );
+        Ok(())
+    }
+
+    /// A Canton call that stalls ends in a 503, not in a request that never
+    /// answers.
+    #[actix_web::test]
+    async fn a_stalled_package_check_refuses_the_add_as_unavailable() -> anyhow::Result<()> {
+        let stalled = std::future::pending::<Result>();
+
+        let error = bounded_package_check(Duration::from_millis(10), stalled)
+            .await
+            .expect_err("a check that never finishes must fail");
+        let response = add_party_package_check_failure(&pid(1)?, &error);
+
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let error = error_body(response).await?;
+        assert!(error.contains("did not finish within"), "{error}");
+        Ok(())
+    }
+
+    /// A check that finishes in time passes its own result through, so a
+    /// missing package is still a 409 and not a timeout.
+    #[actix_web::test]
+    async fn a_check_that_finishes_in_time_keeps_its_own_answer() -> anyhow::Result<()> {
+        bounded_package_check(Duration::from_secs(5), async { Ok(()) }).await?;
+
+        let missing = anyhow::Error::from(workflow::add_party::MissingPackages {
+            participant: pid(3)?,
+            missing: vec!["pkg-a".to_string()],
+        });
+        let error = bounded_package_check(Duration::from_secs(5), async { Err(missing) })
+            .await
+            .expect_err("the missing package must come through");
+        let response = add_party_package_check_failure(&pid(1)?, &error);
+        assert_eq!(response.status(), StatusCode::CONFLICT);
         Ok(())
     }
 
