@@ -94,10 +94,64 @@ pub struct WorkflowState<S> {
     /// request time because this state is generic over the workflow kind and
     /// knows nothing about add-party's config.
     acs_export: Mutex<Option<(CantonId, ExportSession)>>,
+    add_party_upload: Mutex<()>,
     _p: PhantomData<()>,
 }
 
 impl<S: WorkflowStep + 'static> WorkflowState<S> {
+    pub(crate) async fn persist_add_party_upload(
+        &self,
+        peer_id: &CantonId,
+        payload: &[u8],
+        kind: &str,
+    ) -> Result {
+        use crate::db::schema::SchemaRead;
+        use crate::workflow::{add_party::AddPartyConfig, storage::WorkflowStorage};
+
+        let _upload_guard = self.add_party_upload.lock().await;
+        anyhow::ensure!(
+            S::kind() == WorkflowKind::AddParty,
+            "Wrong workflow for add-party upload"
+        );
+        let expected_step = match kind {
+            super::storage::artifact_kinds::ADD_PARTY_KEYS_UPLOAD => {
+                crate::utils::decode_length_prefixed(payload, 2)?;
+                "GenerateNewMemberKeys"
+            }
+            super::storage::artifact_kinds::ADD_PARTY_CLEAR_PROPOSAL => "ProposeClearOnboarding",
+            _ => anyhow::bail!("Unsupported add-party upload"),
+        };
+        anyhow::ensure!(
+            self.current_step().await.step_name() == expected_step,
+            "Unexpected add-party upload step"
+        );
+        let run = self
+            .db
+            .get_workflow_run(&self.instance_name)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("Add-party run missing"))?;
+        let config: AddPartyConfig = serde_json::from_str(&run.config_json)?;
+        anyhow::ensure!(
+            *peer_id == config.new_participant_id,
+            "Only the new member may upload {kind}"
+        );
+        if let Some(saved) = self
+            .db
+            .read_artifact(&self.instance_name, kind, None)
+            .await?
+        {
+            anyhow::ensure!(
+                saved == payload,
+                "Add-party upload conflicts with saved payload"
+            );
+            return Ok(());
+        }
+        self.db
+            .write_artifact(&self.instance_name, kind, None, payload)
+            .await?;
+        Ok(())
+    }
+
     /// Construct a fresh workflow state. Caller is expected to have already
     /// inserted a `workflow_runs` row for `instance_name` — this struct only
     /// updates the row, it doesn't create it.
@@ -119,6 +173,7 @@ impl<S: WorkflowStep + 'static> WorkflowState<S> {
             peer_data: RwLock::new(HashMap::new()),
             command_payload: RwLock::new(Vec::new()),
             acs_export: Mutex::new(None),
+            add_party_upload: Mutex::new(()),
             _p: PhantomData,
         })
     }
@@ -145,6 +200,7 @@ impl<S: WorkflowStep + 'static> WorkflowState<S> {
             peer_data: RwLock::new(HashMap::new()),
             command_payload: RwLock::new(Vec::new()),
             acs_export: Mutex::new(None),
+            add_party_upload: Mutex::new(()),
             _p: PhantomData,
         })
     }
@@ -1018,5 +1074,118 @@ mod tests {
         // A second call with the now-stale "from" must not advance again.
         state.advance_step_if(TestStep::WaitPeers).await;
         assert_eq!(state.current_step().await, TestStep::Sign);
+    }
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn add_party_upload_rejects_another_workflow(pool: SqlitePool) {
+        let state = WorkflowState::new(
+            pool,
+            "wrong-kind".into(),
+            TestStep::Sign,
+            vec![peer(1)],
+            None,
+        );
+        assert!(
+            state
+                .persist_add_party_upload(
+                    &peer(1),
+                    b"",
+                    crate::workflow::storage::artifact_kinds::ADD_PARTY_CLEAR_PROPOSAL
+                )
+                .await
+                .is_err()
+        );
+        assert_eq!(state.current_step().await, TestStep::Sign);
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn invalid_add_party_upload_cannot_replace_saved_keys(
+        pool: SqlitePool,
+    ) -> anyhow::Result<()> {
+        use crate::workflow::{
+            add_party::{AddPartyConfig, AddPartyStep},
+            storage::{WorkflowStorage, artifact_kinds},
+        };
+        let config = AddPartyConfig::new(peer(9), peer(1), 1, None, 1, "audit-run".into());
+        sqlx::query("INSERT INTO workflow_runs (instance_name, kind, role, status, current_step, step_index, step_total, config_json, expected_peers_json, completed_peers_json, created_at, updated_at) VALUES ('audit-run', 'AddParty', 'Coordinator', 'inprogress', 'GenerateNewMemberKeys', 1, 14, ?1, '[]', '[]', 0, 0)")
+            .bind(serde_json::to_string(&config)?).execute(&pool).await?;
+        let valid = crate::utils::encode_length_prefixed(&[b"keys", b"participant"]);
+        pool.write_artifact(
+            "audit-run",
+            artifact_kinds::ADD_PARTY_KEYS_UPLOAD,
+            None,
+            &valid,
+        )
+        .await?;
+        let state = WorkflowState::new(
+            pool.clone(),
+            "audit-run".into(),
+            AddPartyStep::GenerateNewMemberKeys,
+            vec![peer(1)],
+            None,
+        );
+        assert!(
+            state
+                .persist_add_party_upload(
+                    &peer(1),
+                    b"malformed",
+                    artifact_kinds::ADD_PARTY_KEYS_UPLOAD
+                )
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            pool.read_artifact("audit-run", artifact_kinds::ADD_PARTY_KEYS_UPLOAD, None)
+                .await?,
+            Some(valid.clone())
+        );
+        assert_eq!(
+            state.current_step().await,
+            AddPartyStep::GenerateNewMemberKeys
+        );
+        state
+            .persist_add_party_upload(&peer(1), &valid, artifact_kinds::ADD_PARTY_KEYS_UPLOAD)
+            .await?;
+        let conflicting = crate::utils::encode_length_prefixed(&[b"changed", b"participant"]);
+        assert!(
+            state
+                .persist_add_party_upload(
+                    &peer(1),
+                    &conflicting,
+                    artifact_kinds::ADD_PARTY_KEYS_UPLOAD
+                )
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            pool.read_artifact("audit-run", artifact_kinds::ADD_PARTY_KEYS_UPLOAD, None)
+                .await?,
+            Some(valid.clone())
+        );
+        let resumed = WorkflowState::from_persisted(
+            pool.clone(),
+            "audit-run".into(),
+            AddPartyStep::ExportState,
+            vec![peer(1)],
+            vec![],
+            None,
+        );
+        let replacement = crate::utils::encode_length_prefixed(&[b"other", b"participant"]);
+        assert!(
+            resumed
+                .persist_add_party_upload(
+                    &peer(1),
+                    &replacement,
+                    artifact_kinds::ADD_PARTY_KEYS_UPLOAD
+                )
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            pool.read_artifact("audit-run", artifact_kinds::ADD_PARTY_KEYS_UPLOAD, None)
+                .await?,
+            Some(valid)
+        );
+        assert_eq!(resumed.current_step().await, AddPartyStep::ExportState);
+        Ok(())
     }
 }

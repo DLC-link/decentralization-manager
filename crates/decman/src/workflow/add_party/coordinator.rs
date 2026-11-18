@@ -240,18 +240,16 @@ async fn run_workflow(
                 // requires the onboarding participant to issue the flag-clear
                 // transaction) and arrived as its ProposeClearOnboarding data
                 // upload; other peers replied with skip statuses (no data).
-                let peer_data = workflow_state.get_all_peer_data().await;
-                let mut proposal_blob = Vec::new();
-                for (peer_id, data) in peer_data {
-                    if peer_id != add_party_config.new_participant_id {
-                        anyhow::bail!(
-                            "Unexpected clearing-proposal upload from {peer_id} — only the \
-                             new member authors it"
-                        );
-                    }
-                    proposal_blob = data;
-                }
-                workflow_state.clear_peer_data().await;
+                let proposal_blob = db
+                    .read_artifact(
+                        &instance_name,
+                        artifact_kinds::ADD_PARTY_CLEAR_PROPOSAL,
+                        None,
+                    )
+                    .await?
+                    .ok_or_else(|| {
+                        anyhow::anyhow!("New member clearing proposal upload missing")
+                    })?;
 
                 if proposal_blob.is_empty() {
                     // The new member reported the flag already cleared.
@@ -269,16 +267,6 @@ async fn run_workflow(
                     .await?;
                     tracing::info!("Onboarding flag already cleared — skipping sign round");
                 }
-                // An empty blob doubles as the "already cleared" skip marker
-                // for both the peers and SubmitClearOnboarding.
-                db.write_artifact(
-                    &instance_name,
-                    artifact_kinds::ADD_PARTY_CLEAR_PROPOSAL,
-                    None,
-                    &proposal_blob,
-                )
-                .await?;
-
                 let payload = utils::encode_length_prefixed(&[&config_payload, &proposal_blob]);
                 workflow_state.set_command_payload(payload).await;
                 workflow_state.advance_step().await;
@@ -291,7 +279,7 @@ async fn run_workflow(
                         None,
                     )
                     .await?
-                    .unwrap_or_default();
+                    .ok_or_else(|| anyhow::anyhow!("Clearing proposal upload missing"))?;
                 if proposal.is_empty() {
                     tracing::info!("Onboarding flag already cleared — skipping submit");
                 } else {
@@ -322,65 +310,27 @@ async fn run_workflow(
     Ok(())
 }
 
-/// Persist the new member's `keys||participant_id` upload (the only data
-/// payload of the GenerateNewMemberKeys step — other peers reply with a
-/// skip status that carries no data).
+/// Rebuild both key outputs from the durable new-member upload on every retry.
 async fn save_new_member_keys(
     workflow_state: &WorkflowState<AddPartyStep>,
     storage: &SqlitePool,
     instance_name: &str,
     add_party_config: &AddPartyConfig,
 ) -> Result {
-    let peer_data = workflow_state.get_all_peer_data().await;
     let expected = &add_party_config.new_participant_id;
-
-    let mut found = false;
-    for (peer_id, data) in peer_data {
-        if &peer_id != expected {
-            anyhow::bail!(
-                "Unexpected key upload from {peer_id} — only the new member \
-                 {expected} generates keys in this run"
-            );
-        }
-        let items = utils::decode_length_prefixed(&data, 2)
-            .with_context(|| format!("Invalid key payload from new member {peer_id}"))?;
-        let peer_key = peer_id.to_string();
+    let data = storage
+        .read_artifact(instance_name, artifact_kinds::ADD_PARTY_KEYS_UPLOAD, None)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("New member key upload missing"))?;
+    let items = utils::decode_length_prefixed(&data, 2).context("Invalid new member key upload")?;
+    let peer_key = expected.to_string();
+    for (kind, payload) in [
+        (artifact_kinds::PEER_PUBLIC_KEYS, &items[0]),
+        (artifact_kinds::PARTICIPANT_ID, &items[1]),
+    ] {
         storage
-            .write_artifact(
-                instance_name,
-                artifact_kinds::PEER_PUBLIC_KEYS,
-                Some(&peer_key),
-                &items[0],
-            )
+            .write_artifact(instance_name, kind, Some(&peer_key), payload)
             .await?;
-        storage
-            .write_artifact(
-                instance_name,
-                artifact_kinds::PARTICIPANT_ID,
-                Some(&peer_key),
-                &items[1],
-            )
-            .await?;
-        found = true;
-    }
-    if !found {
-        // Resume path: a coordinator restart drops the in-memory peer_data,
-        // but a previous pass through this step may already have persisted
-        // the artefacts — re-entering ExportState must not fail the run then.
-        let already_saved = storage
-            .read_artifact(
-                instance_name,
-                artifact_kinds::PEER_PUBLIC_KEYS,
-                Some(&expected.to_string()),
-            )
-            .await?
-            .is_some();
-        if !already_saved {
-            anyhow::bail!(
-                "New member {expected} completed GenerateNewMemberKeys without uploading keys"
-            );
-        }
-        tracing::info!("New member keys already persisted (resumed run) — continuing");
     }
 
     workflow_state.clear_peer_data().await;
@@ -721,6 +671,113 @@ mod tests {
             .is_err(),
             "DNS artefacts must not satisfy the clearing-signature guard"
         );
+        Ok(())
+    }
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn key_upload_recovers_each_partial_output(pool: SqlitePool) -> anyhow::Result<()> {
+        insert_run(&pool, "run-1").await?;
+        let config = AddPartyConfig::new(peer(9), peer(1), 1, None, 1, "run-1".into());
+        sqlx::query("UPDATE workflow_runs SET config_json = ?1 WHERE instance_name = 'run-1'")
+            .bind(serde_json::to_string(&config)?)
+            .execute(&pool)
+            .await?;
+        let state = WorkflowState::new(
+            pool.clone(),
+            "run-1".into(),
+            AddPartyStep::GenerateNewMemberKeys,
+            vec![peer(1)],
+            None,
+        );
+        let payload = utils::encode_length_prefixed(&[b"keys", b"participant"]);
+        assert!(
+            state
+                .persist_add_party_upload(&peer(2), &payload, artifact_kinds::ADD_PARTY_KEYS_UPLOAD)
+                .await
+                .is_err()
+        );
+        state
+            .persist_add_party_upload(&peer(1), &payload, artifact_kinds::ADD_PARTY_KEYS_UPLOAD)
+            .await?;
+        state.peer_completed(peer(1)).await;
+        drop(state);
+        for partial in [false, true] {
+            if partial {
+                pool.write_artifact(
+                    "run-1",
+                    artifact_kinds::PEER_PUBLIC_KEYS,
+                    Some(&peer(1).to_string()),
+                    b"partial",
+                )
+                .await?;
+            }
+            let resumed = resumed_state(&pool, vec![peer(1)]);
+            save_new_member_keys(&resumed, &pool, "run-1", &config).await?;
+            for (kind, expected) in [
+                (artifact_kinds::PEER_PUBLIC_KEYS, b"keys".as_slice()),
+                (artifact_kinds::PARTICIPANT_ID, b"participant".as_slice()),
+            ] {
+                assert_eq!(
+                    pool.read_artifact("run-1", kind, Some(&peer(1).to_string()))
+                        .await?
+                        .as_deref(),
+                    Some(expected)
+                );
+            }
+        }
+        Ok(())
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn clearing_upload_preserves_explicit_empty_marker(
+        pool: SqlitePool,
+    ) -> anyhow::Result<()> {
+        insert_run(&pool, "run-1").await?;
+        let config = AddPartyConfig::new(peer(9), peer(1), 1, None, 1, "run-1".into());
+        sqlx::query("UPDATE workflow_runs SET config_json = ?1 WHERE instance_name = 'run-1'")
+            .bind(serde_json::to_string(&config)?)
+            .execute(&pool)
+            .await?;
+        assert_eq!(
+            pool.read_artifact("run-1", artifact_kinds::ADD_PARTY_CLEAR_PROPOSAL, None)
+                .await?,
+            None
+        );
+        for payload in [b"".as_slice()] {
+            let state = WorkflowState::new(
+                pool.clone(),
+                "run-1".into(),
+                AddPartyStep::ProposeClearOnboarding,
+                vec![peer(1)],
+                None,
+            );
+            assert!(
+                state
+                    .persist_add_party_upload(
+                        &peer(2),
+                        payload,
+                        artifact_kinds::ADD_PARTY_CLEAR_PROPOSAL
+                    )
+                    .await
+                    .is_err()
+            );
+            state
+                .persist_add_party_upload(
+                    &peer(1),
+                    payload,
+                    artifact_kinds::ADD_PARTY_CLEAR_PROPOSAL,
+                )
+                .await?;
+            state.peer_completed(peer(1)).await;
+            drop(state);
+            let resumed = resumed_state(&pool, vec![peer(1)]);
+            assert!(resumed.get_all_peer_data().await.is_empty());
+            assert_eq!(
+                pool.read_artifact("run-1", artifact_kinds::ADD_PARTY_CLEAR_PROPOSAL, None)
+                    .await?
+                    .as_deref(),
+                Some(payload)
+            );
+        }
         Ok(())
     }
 }

@@ -168,6 +168,8 @@ pub mod artifact_kinds {
     /// new member's Onboarding marker) created by the coordinator. Empty
     /// payload doubles as the "flag already cleared — skip the sign round"
     /// marker. Length-prefixed proto when non-empty.
+    pub const ADD_PARTY_KEYS_UPLOAD: &str = "add_party_keys_upload";
+
     pub const ADD_PARTY_CLEAR_PROPOSAL: &str = "add_party_clear_proposal";
     /// Per-peer signed clearing proposal — single length-prefixed proto.
     pub const SIGNED_ADD_PARTY_CLEAR: &str = "signed_add_party_clear";
