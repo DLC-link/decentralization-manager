@@ -9,7 +9,7 @@ use crate::{
     server::{WorkflowInstance, peer_status::LastSeen},
     utils,
     workflow::{
-        kick::coordinator::split_signed_kick_pair,
+        kick::coordinator::save_signature_pairs,
         storage::{WorkflowStorage, artifact_kinds},
     },
 };
@@ -119,37 +119,14 @@ pub async fn start_coordinator(
                     ChangeThresholdStep::Submit => {
                         tracing::info!("Coordinator executing: Submit change-threshold");
 
-                        // Each peer sent a single buffer of two length-prefixed
-                        // protobufs (DNS sig then P2P sig). Split that pair back
-                        // into per-peer artefacts so submit can list them by
-                        // kind and join by peer id. The kick splitter is
-                        // format-agnostic and shared for this.
-                        let peer_data = workflow_state.get_all_peer_data().await;
-                        for (peer_id, combined) in &peer_data {
-                            let (dns_blob, p2p_blob) = split_signed_kick_pair(combined)
-                                .with_context(|| {
-                                    format!(
-                                        "Failed to split signed change-threshold pair from \
-                                         peer {peer_id}"
-                                    )
-                                })?;
-                            let peer_key = peer_id.to_string();
-                            db.write_artifact(
-                                &instance_name,
-                                artifact_kinds::SIGNED_CHANGE_THRESHOLD_DNS,
-                                Some(&peer_key),
-                                &dns_blob,
-                            )
-                            .await?;
-                            db.write_artifact(
-                                &instance_name,
-                                artifact_kinds::SIGNED_CHANGE_THRESHOLD_P2P,
-                                Some(&peer_key),
-                                &p2p_blob,
-                            )
-                            .await?;
-                        }
-                        workflow_state.clear_peer_data().await;
+                        save_signature_pairs(
+                            &db,
+                            &instance_name,
+                            artifact_kinds::CHANGE_THRESHOLD_SIGNATURE_UPLOAD,
+                            artifact_kinds::SIGNED_CHANGE_THRESHOLD_DNS,
+                            artifact_kinds::SIGNED_CHANGE_THRESHOLD_P2P,
+                        )
+                        .await?;
 
                         submit_change(&node_config, &db, &instance_name, &change_config).await?;
                         workflow_state.advance_step().await;

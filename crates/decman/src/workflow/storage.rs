@@ -48,6 +48,12 @@ pub mod artifact_kinds {
     pub const PREPARED_SUBMISSION: &str = "prepared_submission";
     pub const SUBMISSION_SIGNATURES: &str = "submission_signatures";
 
+    /// Combined DNS/P2P uploads retained until workflow cleanup, so splitting
+    /// can resume after a restart between the two output writes.
+    pub const KICK_SIGNATURE_UPLOAD: &str = "kick_signature_upload";
+    pub const ADD_PARTY_SIGNATURE_UPLOAD: &str = "add_party_signature_upload";
+    pub const CHANGE_THRESHOLD_SIGNATURE_UPLOAD: &str = "change_threshold_signature_upload";
+
     // Kick (workflow_artifacts during a run)
     /// Current (pre-kick) decentralized namespace definition, exported from
     /// the topology snapshot in the ExportState step. Stored as a single
@@ -133,12 +139,9 @@ pub mod artifact_kinds {
     /// target's preflight needs). The ACS itself is not in it: the target pulls
     /// the snapshot block by block straight into Canton's import.
     ///
-    /// Persisted because the coordinator only holds it in memory. A resumed run
-    /// does not arrive with an *empty* payload — `run_workflow` seeds one with
-    /// the bare config before its loop starts — it arrives with the wrong one,
-    /// which the target decodes as a two-item command and rejects. So the
-    /// restore compares against what is currently served rather than testing
-    /// for absence.
+    /// Startup seeds the bare config, so a resumed run has a non-empty payload
+    /// without the package IDs. Restoration compares the complete payload
+    /// rather than checking for absence.
     pub const ADD_PARTY_SYNC_ACS_COMMAND: &str = "add_party_sync_acs_command";
     /// JSON `AcsTransferProgress` for the run's ACS transfer, so the UI can
     /// show movement during a step that otherwise looks frozen for minutes.
