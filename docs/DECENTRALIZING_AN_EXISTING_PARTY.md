@@ -352,7 +352,8 @@ removes them yet.
 | `400` from `authorize` on a joining node | A joiner must disconnect before publication | Use `stage` on the joiner and `publish` on the owner |
 | `400` "a Submission host needs the party's threshold to be 1" | The party's threshold is above 1 | Use `"permission": "confirmation"` |
 | `404` from `/status` on a failover host | `/status` checks Confirmation hosts only | Use the owner's `/state` instead |
-| `500` "Imported the ACS, but could not request the marker clear" on the last block | Canton already has its own marker clear pending | Nothing. Poll `/state` until `onboarding_hosts` is 0 |
+| `500` "Imported the ACS, but could not request the marker clear" on the last block | The ACS imports, but the clearance request fails | Retry the identical final block. Do not stage or import again |
+| `"marker_cleared": false` | Canton accepts the clearance request but waits for its safe time | Poll `/state` until `onboarding_hosts` is 0 |
 | `"package_preflight": false` in block 1 | The owner node cannot list the party's packages before the copy | Normal for a local party. Check the DARs yourself first |
 | A normal submission for the party fails after the conversion | The party now signs for itself | Switch the application to interactive submission |
 | `400` "the hosts that would remain" from unhost | The hosts that remain cannot meet the threshold | Lower the threshold with the party's key, then repeat the unhost |

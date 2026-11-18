@@ -464,7 +464,7 @@ when it completes or stops, with the reason it stopped.
 | The prepare answers differ | A host built a different mapping | Stop, and ask that host's operator |
 | `409` from the ACS or import call | The two ends disagree about the next block | The operator checks quarantine before restarting the copy from block 1 |
 | A staged import fails and the joiner stays offline | The import fails or the copy times out | The operator checks quarantine and repairs partial state before retrying |
-| `500` "Imported the ACS, but could not request the marker clear" on the last block | Canton already has its own marker clear pending | Nothing. Poll `/state` until `onboarding_hosts` is 0 |
+| `500` "Imported the ACS, but could not request the marker clear" on the last block | The ACS imports, but the clearance request fails | Retry the identical final block. Do not stage or import again |
 | `"marker_cleared": false` | Canton clears the marker a short time after the import | Poll `/state` until `onboarding_hosts` is 0 |
 | `"package_preflight": false` in a block | The source cannot list the party's packages | Normal for an external party. Check the DARs yourself before the copy |
 | The joining host crash-loops after an import | It holds archives of contracts it never had | Manual repair. Contact the BitSafe team |
