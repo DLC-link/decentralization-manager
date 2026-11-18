@@ -91,6 +91,10 @@ use crate::{
 // `gen-types` binary (a separate crate from this lib), so it must stay `pub`.
 pub use handlers::NodeConfigResponse;
 pub(crate) use handlers::mark_run_failed;
+#[cfg(test)]
+pub(crate) use handlers::tenant_acs_import as test_tenant_acs_import;
+#[cfg(test)]
+pub(crate) use middleware::AuthMiddleware as TestAuthMiddleware;
 pub(crate) use types::*;
 // These wire DTOs are likewise reached externally as `dec_party_manager::server::…`,
 // by `gen-types` (TS generation) and, for `GovernanceResponse`, by the integration
@@ -150,6 +154,8 @@ pub struct AppState {
     /// exemption and overwrite each other. Held by the auth middleware for
     /// the lifetime of a bootstrap request.
     pub bootstrap_mu: Arc<Mutex<()>>,
+    /// Serializes admission to participant-wide tenant import windows.
+    pub tenant_import_mu: Arc<Mutex<()>>,
     /// Wallet-relayed ACS transfers this node is part of, as source or joiner.
     ///
     /// Held here rather than per-request because both ends keep a Canton stream
@@ -273,6 +279,7 @@ impl AppState {
             admin_role: None,
             party_credentials: Arc::new(RwLock::new(Vec::new())),
             bootstrap_mu: Arc::new(Mutex::new(())),
+            tenant_import_mu: Arc::new(Mutex::new(())),
             relay_sessions: Arc::new(
                 crate::workflow::party_replication::relay::RelaySessions::new(),
             ),
@@ -1171,6 +1178,7 @@ pub async fn start_server(
         admin_role,
         party_credentials: party_credentials.clone(),
         bootstrap_mu: Arc::new(Mutex::new(())),
+        tenant_import_mu: Arc::new(Mutex::new(())),
         relay_sessions: relay_sessions.clone(),
         workflows: workflows.clone(),
         // "test_mode" here means the permissive/wildcard-token mode; driven by
@@ -1541,6 +1549,8 @@ pub async fn start_server(
             .service(handlers::tenant_add_hosts_prepare)
             .service(handlers::tenant_add_hosts_authorize)
             .service(handlers::tenant_add_hosts_execute)
+            .service(handlers::tenant_add_hosts_stage)
+            .service(handlers::tenant_add_hosts_publish)
             .service(handlers::tenant_acs_snapshot)
             .service(handlers::tenant_acs_import)
             .service(handlers::tenant_threshold_prepare)

@@ -40,6 +40,8 @@ const RECENT_GOVERNANCE_AUDIT_SQL: &str = r"
 /// The refusal of a workflow run that would become in progress during a purge
 /// of former-party contracts. The purge takes the participant off its
 /// synchronizer, so a run would fail underneath it.
+const WORKFLOW_BLOCKED_BY_IMPORT: &str = "A tenant ACS import owns this participant. Complete the import before starting another workflow";
+
 const WORKFLOW_BLOCKED_BY_PURGE: &str = "A purge of former-party contracts is running on this \
      node. Start the workflow again after the purge finishes";
 
@@ -721,7 +723,8 @@ impl SchemaWrite for SqlitePool {
                  purged_count = NULL, kept_count = NULL, purge_error = NULL \
              WHERE party_id = ? AND dismissed_at IS NULL \
                AND NOT EXISTS (SELECT 1 FROM former_dec_party WHERE purge_status = 'running') \
-               AND NOT EXISTS (SELECT 1 FROM workflow_runs WHERE status = 'inprogress')",
+               AND NOT EXISTS (SELECT 1 FROM workflow_runs WHERE status = 'inprogress') \
+               AND NOT EXISTS (SELECT 1 FROM tenant_import_window)",
         )
         .bind(chrono::Utc::now().timestamp())
         .bind(party_id.to_string())
@@ -1498,7 +1501,8 @@ impl Commitable for sqlx::Transaction<'static, sqlx::Sqlite> {
             )
             SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
             WHERE ? != 'inprogress'
-               OR NOT EXISTS (SELECT 1 FROM former_dec_party WHERE purge_status = 'running')
+               OR (NOT EXISTS (SELECT 1 FROM former_dec_party WHERE purge_status = 'running')
+                   AND NOT EXISTS (SELECT 1 FROM tenant_import_window))
             ON CONFLICT(instance_name) DO UPDATE SET
                 kind                     = excluded.kind,
                 role                     = excluded.role,
@@ -1538,7 +1542,14 @@ impl Commitable for sqlx::Transaction<'static, sqlx::Sqlite> {
         .execute(&mut **self)
         .await?;
 
-        anyhow::ensure!(result.rows_affected() > 0, WORKFLOW_BLOCKED_BY_PURGE);
+        if result.rows_affected() == 0 {
+            let (importing,): (bool,) =
+                sqlx::query_as("SELECT EXISTS (SELECT 1 FROM tenant_import_window)")
+                    .fetch_one(&mut **self)
+                    .await?;
+            anyhow::ensure!(!importing, WORKFLOW_BLOCKED_BY_IMPORT);
+            anyhow::bail!(WORKFLOW_BLOCKED_BY_PURGE);
+        }
         Ok(())
     }
 
@@ -1597,7 +1608,8 @@ impl Commitable for sqlx::Transaction<'static, sqlx::Sqlite> {
                 updated_at = ?
             WHERE instance_name = ?
               AND (? != 'inprogress'
-                   OR NOT EXISTS (SELECT 1 FROM former_dec_party WHERE purge_status = 'running'))
+                   OR (NOT EXISTS (SELECT 1 FROM former_dec_party WHERE purge_status = 'running')
+                       AND NOT EXISTS (SELECT 1 FROM tenant_import_window)))
             ",
         )
         .bind(status_str)
@@ -1616,6 +1628,11 @@ impl Commitable for sqlx::Transaction<'static, sqlx::Sqlite> {
             .fetch_one(&mut **self)
             .await?;
             anyhow::ensure!(!purging, WORKFLOW_BLOCKED_BY_PURGE);
+            let (importing,): (bool,) =
+                sqlx::query_as("SELECT EXISTS (SELECT 1 FROM tenant_import_window)")
+                    .fetch_one(&mut **self)
+                    .await?;
+            anyhow::ensure!(!importing, WORKFLOW_BLOCKED_BY_IMPORT);
         }
 
         // Clean up `workflow_artifacts` rows when the run reaches a clean
@@ -3827,6 +3844,60 @@ mod tests {
             created_at: 1000,
             updated_at: 1000,
         }
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn tenant_import_window_blocks_workflow_start_and_purge(pool: SqlitePool) -> Result {
+        let party = qid("former", 9)?;
+        pool.record_former_dec_party(&party, 1000).await?;
+        let mut idle = test_run("waiting", "AddParty", "Coordinator");
+        idle.status = WorkflowProgress::Idle;
+        let mut tx = pool.begin_transaction().await?;
+        tx.upsert_workflow_run(&idle).await?;
+        tx.commit().await?;
+        sqlx::query("INSERT INTO tenant_import_window VALUES ('participant', 'import', 'party')")
+            .execute(&pool)
+            .await?;
+
+        assert!(!pool.claim_former_party_purge(&party).await?);
+        let mut tx = pool.begin_transaction().await?;
+        let error = tx
+            .upsert_workflow_run(&test_run("new", "AddParty", "Coordinator"))
+            .await
+            .expect_err("an import prevents a new workflow");
+        assert!(
+            error
+                .to_string()
+                .contains(super::WORKFLOW_BLOCKED_BY_IMPORT)
+        );
+        let error = tx
+            .set_workflow_run_status("waiting", WorkflowProgress::InProgress, None, 2000)
+            .await
+            .expect_err("an import prevents a resumed workflow");
+        assert!(
+            error
+                .to_string()
+                .contains(super::WORKFLOW_BLOCKED_BY_IMPORT)
+        );
+        tx.commit().await?;
+        assert!(pool.get_workflow_run("new").await?.is_none());
+        assert_eq!(
+            pool.get_workflow_run("waiting").await?.unwrap().status,
+            WorkflowProgress::Idle
+        );
+
+        sqlx::query("DELETE FROM tenant_import_window")
+            .execute(&pool)
+            .await?;
+        let mut tx = pool.begin_transaction().await?;
+        tx.set_workflow_run_status("waiting", WorkflowProgress::InProgress, None, 2001)
+            .await?;
+        tx.commit().await?;
+        assert_eq!(
+            pool.get_workflow_run("waiting").await?.unwrap().status,
+            WorkflowProgress::InProgress
+        );
+        Ok(())
     }
 
     #[sqlx::test(migrator = "MIGRATOR")]

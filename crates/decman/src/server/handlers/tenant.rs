@@ -43,16 +43,19 @@ use crate::{
             ErrorResponse, ExternalPartyUnhostResponse, LocalPartyAdoptExecuteRequest,
             LocalPartyAdoptRequest, TenantAcsBlockResponse, TenantAcsImportRequest,
             TenantAcsImportResponse, TenantAddHostsExecuteRequest, TenantAddHostsExecuteResponse,
-            TenantAddHostsPrepareResponse, TenantAddHostsRequest, TenantExecuteRequest,
-            TenantExecuteResponse, TenantPartyStateResponse, TenantPrepareRequest,
-            TenantPrepareResponse, TenantThresholdExecuteRequest, TenantThresholdRequest,
-            TenantUnhostRequest, WorkflowProgress, WorkflowStatusResponse,
+            TenantAddHostsPrepareResponse, TenantAddHostsPublishRequest, TenantAddHostsRequest,
+            TenantAddHostsStageResponse, TenantExecuteRequest, TenantExecuteResponse,
+            TenantPartyStateResponse, TenantPrepareRequest, TenantPrepareResponse,
+            TenantThresholdExecuteRequest, TenantThresholdRequest, TenantUnhostRequest,
+            WorkflowProgress, WorkflowStatusResponse,
         },
     },
     workflow::external_party::{
         add_hosts::{
-            AddHostsError, ExternalPartyAddHostsPayload, authorize_add_hosts, prepare_add_hosts,
-            read_party_to_participant, replication_target, submit_add_hosts,
+            AddHostsError, ExternalPartyAddHostsPayload, authorize_add_hosts,
+            import_onboarding_ready, import_window_owner, prepare_add_hosts, publish_add_hosts,
+            read_party_to_participant, release_import_window_owner, replication_target,
+            stage_add_hosts, submit_add_hosts,
         },
         keys::fingerprint_from_public_key,
         local_party::{LocalPartyAdoptionPayload, prepare_adoption, submit_adoption},
@@ -67,12 +70,16 @@ use crate::{
         unhost_audit::RequestedVia,
     },
     workflow::party_replication::{
-        ClearOutcome, collect_party_package_ids, open_export_session,
+        ClearOutcome, ReplicationTarget, collect_party_package_ids, open_export_session,
         pipe::{PipeBlock, PipeTrailer},
         relay::{AcceptedBlock, ImportEnd, OnImportEnd, ServedBlock},
         request_onboarding_flag_clear,
     },
 };
+
+#[cfg(test)]
+use crate::db::MIGRATOR;
+use crate::workflow::storage::artifact_kinds;
 
 use super::{unhost::run_unhost, workflows::validate_confirmation_threshold};
 
@@ -422,10 +429,9 @@ pub async fn tenant_add_hosts_prepare(
 /// signing key does not move the namespace — so no wallet signature can ever
 /// satisfy `execute`.
 ///
-/// The caller invokes this on the node owning the party's namespace AND on each
-/// joining node. Canton wants both halves for an add and neither node holds
-/// both, so the change stays a proposal until the last call lands. Order does
-/// not matter, and a repeat is harmless.
+/// The namespace owner publishes the incomplete proposal here. Joining nodes
+/// sign through `add-hosts/stage`, then a current host relays those signatures
+/// through `add-hosts/publish`. Joining nodes cannot authorize through this route.
 #[utoipa::path(
     tag = "Tenant",
     request_body = TenantAddHostsRequest,
@@ -510,13 +516,11 @@ async fn tenant_add_hosts_authorize_on_this_host(
     })
 }
 
-/// Submit the wallet-signed add-hosts topology on THIS host. The wallet calls
-/// this on every host that must authorize; no host relays to another.
-/// Idempotent, so a wallet may safely retry a host.
+/// Publish the wallet-signed incomplete proposal on a current hosting participant.
+/// Joining nodes must use `add-hosts/stage` before a current host publishes their signatures.
 ///
-/// The bundle is validated against this host's own head-state read before its
-/// topology key co-signs anything — the party already exists and already holds
-/// contracts, so a forged serial N+1 could otherwise evict its current hosts.
+/// The bundle is validated against this host's own head-state read before
+/// publication so a forged serial N+1 cannot change the existing hosts.
 #[utoipa::path(
     tag = "Tenant",
     request_body = TenantAddHostsExecuteRequest,
@@ -608,6 +612,139 @@ async fn tenant_add_hosts_execute_on_this_host(
         party_id: body.party_id.clone(),
         serial,
     })
+}
+
+/// Sign the exact pending add-hosts proposal and disconnect before returning signatures.
+#[utoipa::path(
+    tag = "Tenant",
+    request_body = TenantAddHostsRequest,
+    responses(
+        (status = 200, description = "Joiner is disconnected and its signatures are ready", body = TenantAddHostsStageResponse),
+        (status = 400, description = "Invalid change or this participant is not a joiner", body = ErrorResponse),
+        (status = 409, description = "Another import owns the participant or the serial moved", body = ErrorResponse),
+        (status = 500, description = "A Canton call failed", body = ErrorResponse)
+    )
+)]
+#[post("/v0/tenant/add-hosts/stage")]
+pub async fn tenant_add_hosts_stage(
+    http_req: HttpRequest,
+    data: web::Data<AppState>,
+    body: web::Json<TenantAddHostsRequest>,
+) -> impl Responder {
+    let key = match tenant_caller(&http_req) {
+        Ok(key) => key,
+        Err(resp) => return resp,
+    };
+    let body = body.into_inner();
+    let party = body.party_id.clone();
+    audited_write(
+        &data,
+        key,
+        TenantEndpoint::AddHostsStage,
+        party,
+        move |data| async move {
+            let _admission = data.tenant_import_mu.lock().await;
+            if data.relay_sessions.any_session(|_| true).await {
+                return add_hosts_error_response(
+                    "stage",
+                    AddHostsError::Busy(
+                        "an ACS relay is still open on this participant; finish it before staging"
+                            .into(),
+                    ),
+                );
+            }
+            match stage_add_hosts(
+                &data.config,
+                &data.db,
+                &body.party_id,
+                &body.new_hosts,
+                body.permission,
+                body.base_serial,
+            )
+            .await
+            {
+                Ok(transactions) => HttpResponse::Ok().json(TenantAddHostsStageResponse {
+                    party_id: body.party_id,
+                    base_serial: body.base_serial,
+                    signed_topology_transactions: transactions
+                        .iter()
+                        .map(|tx| STANDARD.encode(tx))
+                        .collect(),
+                }),
+                Err(error) => add_hosts_error_response("stage", error),
+            }
+        },
+    )
+    .await
+}
+
+/// Publish disconnected joiners' signatures through a current hosting participant.
+#[utoipa::path(
+    tag = "Tenant",
+    request_body = TenantAddHostsPublishRequest,
+    responses(
+        (status = 202, description = "Joiner signatures submitted", body = TenantAddHostsExecuteResponse),
+        (status = 400, description = "The signatures do not describe the requested change", body = ErrorResponse),
+        (status = 409, description = "The pinned serial moved", body = ErrorResponse),
+        (status = 500, description = "A Canton call failed", body = ErrorResponse)
+    )
+)]
+#[post("/v0/tenant/add-hosts/publish")]
+pub async fn tenant_add_hosts_publish(
+    http_req: HttpRequest,
+    data: web::Data<AppState>,
+    body: web::Json<TenantAddHostsPublishRequest>,
+) -> impl Responder {
+    let key = match tenant_caller(&http_req) {
+        Ok(key) => key,
+        Err(resp) => return resp,
+    };
+    let body = body.into_inner();
+    let party = body.party_id.clone();
+    audited_write(
+        &data,
+        key,
+        TenantEndpoint::AddHostsPublish,
+        party,
+        move |data| async move {
+            let transactions = match decode_all(
+                &body.signed_topology_transactions,
+                "signed topology transaction",
+            ) {
+                Ok(transactions) => transactions,
+                Err(error) => return HttpResponse::BadRequest().json(ErrorResponse { error }),
+            };
+            match publish_add_hosts(
+                &data.config,
+                &data.db,
+                &body.party_id,
+                &body.new_hosts,
+                body.permission,
+                body.base_serial,
+                &transactions,
+            )
+            .await
+            {
+                Ok(base_serial) => {
+                    let (status, serial) =
+                        match read_party_to_participant(&data.config, &body.party_id).await {
+                            Ok(Some(current)) if current.serial > base_serial => {
+                                (WorkflowProgress::Completed, current.serial)
+                            }
+                            Ok(Some(current)) => (WorkflowProgress::InProgress, current.serial),
+                            _ => (WorkflowProgress::InProgress, base_serial),
+                        };
+                    HttpResponse::Accepted().json(TenantAddHostsExecuteResponse {
+                        party_id: body.party_id,
+                        serial,
+                        status,
+                    })
+                }
+                Err(error) => add_hosts_error_response("publish", error),
+            }
+        },
+    )
+    .await
 }
 
 // ============================================================================
@@ -808,7 +945,7 @@ pub async fn tenant_acs_import(
         Err(resp) => return resp,
     };
     // A copy this host admitted must never be refused partway, or the
-    // participant stays off the synchronizer until the reaper ends the copy.
+    // staged participant must stay offline until its ACS is complete.
     // So the next block of an open copy, the final one included, spends no
     // budget and writes no row here: the copy's teardown records how it ended.
     // Every other block spends budget: block 1, which opens a copy, block 0,
@@ -909,50 +1046,74 @@ async fn tenant_acs_import_on_this_host(
         Err(error) => return HttpResponse::BadRequest().json(ErrorResponse { error }),
     };
 
-    // Before anything disconnects this participant. `import_party_acs` checks
-    // packages, drops the synchronizer connections, and only then does Canton
-    // reject a party this node does not host — so without this check any holder
-    // of the tenant API key can take this node off the synchronizer by relaying
-    // a block for an arbitrary party id.
-    //
-    // Only on block 1: the check is a topology read, and repeating it per block
-    // would put a Canton round trip in front of every one.
-    if body.seq == 1 {
-        match read_party_to_participant(&data.config, &body.party_id).await {
-            Ok(Some(current)) => {
-                let self_uid = data.config.participant_id().to_string();
-                let onboarding_here = current
-                    .mapping
-                    .participants
-                    .iter()
-                    .any(|p| p.participant_uid == self_uid && p.onboarding.is_some());
-                if !onboarding_here {
-                    return HttpResponse::BadRequest().json(ErrorResponse {
-                        error: format!(
-                            "{party} is not being onboarded onto this participant; an import \
-                             would disconnect it from the synchronizer for a replication it is \
-                             not part of",
-                            party = body.party_id
-                        ),
+    let _admission = data.tenant_import_mu.lock().await;
+    let owner = match import_window_owner(&data.db, data.config.participant_id()).await {
+        Ok(owner) => owner,
+        Err(error) => {
+            tracing::error!("tenant acs import: could not read import ownership: {error:#}");
+            return HttpResponse::InternalServerError().json(ErrorResponse {
+                error: "Failed to read the import window; see the host's logs".into(),
+            });
+        }
+    };
+    if owner.as_deref() != Some(replication.instance_name.as_str()) {
+        if owner.is_none() && body.end {
+            match replication
+                .read_artifact(
+                    &data.db,
+                    artifact_kinds::TENANT_ADD_HOSTS_IMPORT_COMPLETED,
+                    None,
+                )
+                .await
+            {
+                Ok(Some(_)) => return completed_tenant_import(data, body, &replication).await,
+                Ok(None) => {}
+                Err(error) => {
+                    tracing::error!("tenant acs import: completed-import lookup failed: {error:#}");
+                    return HttpResponse::InternalServerError().json(ErrorResponse {
+                        error: "Failed to read the completed import; see the host's logs".into(),
                     });
                 }
             }
-            Ok(None) => {
-                return HttpResponse::NotFound().json(ErrorResponse {
-                    error: format!(
-                        "No authorized PartyToParticipant for {party}",
-                        party = body.party_id
-                    ),
+        }
+        return HttpResponse::Conflict().json(ErrorResponse {
+            error: "this replication does not own the participant's import window; stage the joiner before publishing hosting".into(),
+        });
+    }
+    if body.seq == 1 {
+        match import_onboarding_ready(&data.config, &data.db, &replication, body.base_serial).await
+        {
+            Ok(true) => {}
+            Ok(false) => {
+                return HttpResponse::BadRequest().json(ErrorResponse {
+                    error: "the exact staged onboarding proposal is not ready on this participant"
+                        .into(),
                 });
             }
-            Err(e) => {
-                tracing::error!("tenant acs import: topology read failed: {e:#}");
+            Err(error) => {
+                tracing::error!("tenant acs import: staged topology check failed: {error:#}");
                 return HttpResponse::InternalServerError().json(ErrorResponse {
-                    error: "Failed to read the party's topology; see the host's logs".to_string(),
+                    error: "Failed to check the staged topology; see the host's logs".into(),
                 });
             }
         }
     }
+    let db = data.db.clone();
+    let completed_target = replication.clone();
+    let on_end: Option<OnImportEnd> = Some(Box::new(move |outcome| {
+        Box::pin(async move {
+            if matches!(&outcome, ImportEnd::Completed)
+                && let Err(error) = release_import_window_owner(&db, &completed_target).await
+            {
+                tracing::error!(
+                    "tenant acs import: could not release completed import window: {error:#}"
+                );
+            }
+            if let Some(previous) = on_end {
+                previous(outcome).await;
+            }
+        })
+    }));
 
     let accepted = data
         .relay_sessions
@@ -966,7 +1127,6 @@ async fn tenant_acs_import_on_this_host(
         )
         .await;
 
-    let imported = body.total_len > 0 || !body.end || body.seq > 1;
     match accepted {
         Ok(AcceptedBlock::Accepted { seq }) => HttpResponse::Ok().json(TenantAcsImportResponse {
             party_id: body.party_id.clone(),
@@ -991,45 +1151,42 @@ async fn tenant_acs_import_on_this_host(
                 },
             })
         }
-        Ok(AcceptedBlock::Complete) => {
-            // Requested, not waited on. Canton schedules the clearance itself
-            // when its safe time has not arrived, so holding the request open
-            // for it would turn one call into a ten-minute one. The caller polls
-            // /status.
-            let marker_cleared =
-                match request_onboarding_flag_clear(&data.config, &data.db, &replication).await {
-                    Ok(ClearOutcome::Cleared) => true,
-                    Ok(ClearOutcome::Proposed) => false,
-                    Err(e) => {
-                        tracing::error!(
-                            "tenant acs import: requesting the marker clear failed: {e:#}"
-                        );
-                        return HttpResponse::InternalServerError().json(ErrorResponse {
-                            error: "Imported the ACS, but could not request the marker clear; \
-                                    see the host's logs"
-                                .to_string(),
-                        });
-                    }
-                };
-            HttpResponse::Ok().json(TenantAcsImportResponse {
-                party_id: body.party_id.clone(),
-                seq: body.seq,
-                complete: true,
-                imported,
-                marker_cleared,
-            })
-        }
+        Ok(AcceptedBlock::Complete) => completed_tenant_import(data, body, &replication).await,
         Err(e) => {
             tracing::error!("tenant acs import: import failed: {e:#}");
             HttpResponse::InternalServerError().json(ErrorResponse {
                 error: format!(
-                    "The ACS import failed on this host; the participant has been reconnected \
-                     and the transfer must restart from block 1. See the host's logs. ({first})",
+                    "The ACS import failed on this host; the staged participant stays disconnected. \
+                     Complete this import or repair it before reconnecting. See the host's logs. ({first})",
                     first = e.to_string().lines().next().unwrap_or("")
                 ),
             })
         }
     }
+}
+
+async fn completed_tenant_import(
+    data: &AppState,
+    body: &TenantAcsImportRequest,
+    target: &ReplicationTarget,
+) -> HttpResponse {
+    let marker_cleared = match request_onboarding_flag_clear(&data.config, &data.db, target).await {
+        Ok(ClearOutcome::Cleared) => true,
+        Ok(ClearOutcome::Proposed) => false,
+        Err(error) => {
+            tracing::error!("tenant acs import: requesting the marker clear failed: {error:#}");
+            return HttpResponse::InternalServerError().json(ErrorResponse {
+                error: "Imported the ACS, but could not request the marker clear; retry this final block without staging or importing again. See the host's logs".into(),
+            });
+        }
+    };
+    HttpResponse::Ok().json(TenantAcsImportResponse {
+        party_id: body.party_id.clone(),
+        seq: body.seq,
+        complete: true,
+        imported: body.total_len > 0 || body.seq > 1,
+        marker_cleared,
+    })
 }
 
 // ============================================================================
@@ -1764,6 +1921,12 @@ fn add_hosts_error_response(stage: &str, error: AddHostsError) -> HttpResponse {
                 error: error.to_string(),
             })
         }
+        AddHostsError::Busy(_) => {
+            tracing::info!("tenant add-hosts {stage}: {error}");
+            HttpResponse::Conflict().json(ErrorResponse {
+                error: error.to_string(),
+            })
+        }
         AddHostsError::Invalid(_) => {
             tracing::warn!("tenant add-hosts {stage}: refused the request: {error}");
             HttpResponse::BadRequest().json(ErrorResponse {
@@ -1782,6 +1945,21 @@ fn add_hosts_error_response(stage: &str, error: AddHostsError) -> HttpResponse {
             })
         }
     }
+}
+
+#[cfg(test)]
+async fn own_test_import(state: &AppState, party: &str) {
+    MIGRATOR
+        .run(&state.db)
+        .await
+        .expect("the test import uses the real schema");
+    let target = replication_target(party, state.config.participant_id(), 1)
+        .expect("the test party identifies a replication");
+    sqlx::query("INSERT INTO tenant_import_window (participant_id, instance_name, party_id) VALUES (?, ?, ?)")
+        .bind(state.config.participant_id().to_string())
+        .bind(target.instance_name)
+        .bind(party)
+        .execute(&state.db).await.expect("the admitted test import owns its window");
 }
 
 #[cfg(test)]
@@ -2042,6 +2220,7 @@ mod tests {
     async fn the_blocks_of_an_open_copy_are_not_metered() {
         let state = metered_state(1).await;
         let party = valid_party();
+        own_test_import(&state, &party).await;
         state
             .relay_sessions
             .open_test_import(&instance_of(&state, &party), None, Ok(()))
@@ -2376,6 +2555,7 @@ mod audit_tests {
             Ok(target) => target.instance_name,
             Err(e) => panic!("the test party must name a replication: {e}"),
         };
+        own_test_import(&state, &party).await;
         state
             .relay_sessions
             .open_test_import(
@@ -2420,6 +2600,7 @@ mod audit_tests {
     ) -> anyhow::Result<()> {
         let state = keyed_state(db.clone(), &["key"], 1);
         let party = valid_party();
+        own_test_import(&state, &party).await;
         state
             .relay_sessions
             .open_test_import(&instance_of(&state, &party), None, Ok(()))
@@ -2456,6 +2637,7 @@ mod audit_tests {
     ) -> anyhow::Result<()> {
         let state = keyed_state(db.clone(), &["key"], 1);
         let party = valid_party();
+        own_test_import(&state, &party).await;
         state
             .relay_sessions
             .open_test_import(&instance_of(&state, &party), None, Ok(()))
@@ -2529,6 +2711,7 @@ mod audit_tests {
     ) -> anyhow::Result<()> {
         let state = keyed_state(db.clone(), &["key"], 1);
         let party = valid_party();
+        own_test_import(&state, &party).await;
         state
             .relay_sessions
             .open_test_import(&instance_of(&state, &party), None, Ok(()))
@@ -2819,3 +3002,7 @@ mod audit_tests {
         Ok(())
     }
 }
+
+#[cfg(test)]
+#[path = "tenant_relay_audit_tests.rs"]
+mod relay_route_audit_tests;

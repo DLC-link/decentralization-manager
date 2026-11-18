@@ -39,7 +39,7 @@ use crate::{
     utils,
     workflow::{
         party_replication::{
-            ReplicationTarget, now_ms, offset,
+            ArtifactStore, ReplicationTarget, now_ms, offset,
             pipe::{ExportSession, PipeBlock, PipeTrailer},
         },
         storage::{WorkflowStorage, artifact_kinds},
@@ -428,8 +428,8 @@ where
     );
     // Disconnect + import as one fallible unit. Whatever its outcome — including
     // a `DisconnectSynchronizer` failing partway through the loop — the
-    // reconnect/health-verify bracket below ALWAYS runs, so the participant is
-    // never left (partially) disconnected.
+    // A staged tenant failure stays offline: reconnecting before its ACS lands
+    // could replay archives whose activation history it does not yet hold.
     let import_result = async {
         for s in &connected {
             connectivity
@@ -485,9 +485,18 @@ where
     }
     .await;
 
-    // The one reconnect of the step, after the import succeeded or the last
-    // attempt failed. A participant left disconnected (or half-reconnected) is
-    // a worse failure mode than a failed import, so it runs on both outcomes.
+    if opened_before_authorization
+        && matches!(target.store, ArtifactStore::Tenant)
+        && let Err(error) = import_result
+    {
+        return Err(error.context(
+            "the staged participant stays disconnected with manual connection enabled; \
+             complete this import or repair the participant before reconnecting it",
+        ));
+    }
+
+    // A successful staged tenant import reconnects here. Other callers retain
+    // their existing reconnect behavior on both success and failure.
     // Prioritise an unhealthy participant: that's the critical, operator-
     // actionable failure and must not be masked by the import error when both
     // fail. A failed import with a HEALTHY participant is reported after it.

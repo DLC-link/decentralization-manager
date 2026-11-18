@@ -24,9 +24,9 @@
 //!   `ImportPartyAcs` requires it, and now that window is paced by a third
 //!   party that can stall or vanish. So a session that goes quiet is reaped.
 //!   Reaping **drops the sender** rather than aborting the task: the callback
-//!   then fails, `import_party_acs` unwinds through its own reconnect-and-
-//!   verify bracket, and the participant comes back. Aborting would strand it
-//!   disconnected, which is the one outcome worse than a failed import.
+//!   then fails and `import_party_acs` finishes its failure handling. A staged
+//!   tenant stays disconnected until its ACS is complete or an operator repairs
+//!   it. Aborting would skip that handling and lose the failure report.
 //! * **There is no resume.** A break means a fresh export from block 1, exactly
 //!   as the add-party path accepts. Asking for block 1 again is therefore the
 //!   signal to throw the old session away and start over, not an error.
@@ -626,8 +626,8 @@ impl RelaySessions {
     /// Remove sessions untouched for longer than `idle_timeout`.
     ///
     /// Returns how many of each went. An import removed here is not aborted:
-    /// dropping its sender fails the callback, and `import_party_acs` reconnects
-    /// the participant on the way out.
+    /// dropping its sender fails the callback. A staged tenant keeps its import
+    /// ownership and stays offline until the operator can safely resume it.
     pub async fn reap(&self, idle_timeout: Duration) -> (usize, usize) {
         let now = Instant::now();
 
@@ -660,7 +660,7 @@ impl RelaySessions {
         for name in &stale {
             tracing::warn!(
                 "reaping an ACS relay import idle for over {secs}s ({name}) — the wallet \
-                 stopped relaying, so the import is failed and the participant reconnected",
+                 stopped relaying; the staged participant stays offline pending completion or repair",
                 secs = idle_timeout.as_secs()
             );
             if let Some(entry) = imports.remove(name)

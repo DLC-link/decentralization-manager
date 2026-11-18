@@ -404,7 +404,7 @@ to drift from the one the node validates against.
 ## Adding a host to a party that already exists
 
 Onboarding creates a party. `add_hosts` grows one, in the order Canton forces:
-topology, then state, then activation.
+an incomplete proposal, offline staging, publication, state, then activation.
 
 ```rust
 use common::api::HostPermission;
@@ -424,7 +424,7 @@ let added = add_hosts(
     base_serial,
 )
 .await?;
-assert!(added.replicated, "a joiner is hosted but still suspended");
+assert!(added.replicated, "a joiner has not completed replication");
 
 // Not `added.serial`. Clearing each joiner's onboarding marker is itself a
 // PartyToParticipant write, so by now the party has moved past the serial the
@@ -441,18 +441,30 @@ required to prepare the same bytes for it, which is what makes a single lying
 host detectable. A host whose own view has moved on answers 409 rather than
 preparing something different.
 
-The wallet carries the ACS snapshot from a current host to each joiner itself.
-There is no host-to-host channel: a partner's node is generally not in anyone
-else's mesh, and the wallet already talks to all of them.
+The wallet publishes the party-signed proposal through the first current host.
+Each joiner then signs that exact proposal and disconnects before returning
+its signatures. The wallet collects every signature and publishes them through
+the current host. Joining hosts refuse the old `execute` path.
 
-A joiner's import returns as soon as the node has asked Canton to clear the
-marker; `add_hosts` then polls that joiner's status until the clear is
-authorized. `replicated: false` means a joiner ran out that wait, not that the
-import failed — the party is hosted there and holds no contracts.
+The wallet carries the ACS snapshot from a current host to each joiner.
+The nodes need no direct connection because the wallet already talks to each.
+Each joiner stays offline from staging through successful import. That window
+includes authorization, export, and import, and pauses every other party there.
 
-`AddedHosts::without_package_preflight` names joiners whose source could not
-check their vetted packages up front, so their import validated after
-disconnecting rather than before. Empty is the good case.
+A joiner's successful import reconnects its participant and requests marker
+clearance. `add_hosts` polls until Canton authorizes that clearance.
+`replicated: false` reports an incomplete stage, publication, import, or clearance.
+The per-host reports identify staging and publication errors.
+
+A repeated staging request returns saved signatures without reconnecting.
+A failed staged import leaves the participant offline on manual connection.
+The operator checks its logs, topology, and quarantine before retrying.
+Partial imports can require repair or restoration. The operator must not
+reconnect the participant until its state is safe.
+
+`AddedHosts::without_package_preflight` names joiners whose source cannot list
+the party's required packages. Operators must check those DARs before staging.
+The host still validates the imported contracts. Empty is the good case.
 
 ### Failover
 
@@ -463,7 +475,8 @@ Raising the threshold above 1 then adds co-validation.
 `HostPermission::Submission` is for a party with no key of its own, whose host
 submits on its behalf. That is a local party, and its namespace is a
 participant's key, so no wallet signature can authorize its topology. Its hosts
-are added with `/v0/tenant/add-hosts/authorize` instead. See
+use `authorize` on the namespace owner, `stage` on each joiner, and `publish`
+on the owner. See
 [Decentralizing an existing party](../../docs/DECENTRALIZING_AN_EXISTING_PARTY.md).
 
 ## Asking a host to leave a party

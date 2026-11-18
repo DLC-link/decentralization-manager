@@ -211,12 +211,13 @@ host has no external parties.
 ## Add hosts to an existing party
 
 > [!WARNING]
-> **Keep the party idle from step 3 until the last import ends.** A joining host
-> starts to receive the party's traffic as soon as the change takes effect. It
-> leaves the synchronizer only when its import starts. If the party archives an
-> older contract in between, the joining host records an archive for a contract
-> it never held. A replay of that record crashed a MainNet participant on
-> 2026-09-16. So pause every application that acts as the party.
+> **Each joiner disconnects before the source authorizes its hosting.** Its
+> downtime starts during staging and includes authorization, export, and import.
+> Every other party on that participant pauses too. The current hosts keep
+> serving the party, including transactions that other parties initiate.
+>
+> A failed staged import leaves the joiner offline on manual connection.
+> Its operator must resolve the failure before reconnecting it.
 
 ### Check the DARs
 
@@ -224,8 +225,8 @@ The joining hosts need every package the party's contracts use. DecMan cannot
 check this for an external party. The check reads the contracts over the
 Ledger API, and the hosts hold no ledger credential for the party.
 
-Without the packages, the import fails after the joining host has left the
-synchronizer. So compare the vetted packages on the **Packages** page of each
+A missing package can prevent import while the joining host is offline.
+Compare the vetted packages on the **Packages** page of each
 joining host with a current host, and distribute what is missing.
 
 ### Steps
@@ -257,39 +258,68 @@ joining host with a current host, and distribute what is missing.
    [Compare the answers](#compare-before-you-sign), then sign one of them with
    `key.py sign`.
 
-3. **Execute on each joining host only.** Canton needs the party's signature and
-   each joining host's signature. The current hosts add nothing. Send the same
-   body to every joining host, with that host's own key.
+3. **Publish the incomplete proposal through the source.** The source submits
+   the party's signature without any joining host's signature. Joining hosts
+   refuse `execute` because publication must happen after they disconnect.
 
    ```bash
    jq -n --arg p "$PARTY" --argjson s "$SERIAL" \
      --slurpfile x prepare-<any host>.json --slurpfile g signed.json \
      '{party_id:$p, base_serial:$s, topology_transactions:$x[0].topology_transactions,
        signatures:$g[0].signatures, signed_by:$g[0].signed_by}' > execute.json
-   curl -sS -X POST "$JOINER/v0/tenant/add-hosts/execute" \
-     -H "Authorization: Bearer $JOINER_KEY" -H 'Content-Type: application/json' \
+   curl --fail-with-body -sS -X POST "$SOURCE/v0/tenant/add-hosts/execute" \
+     -H "Authorization: Bearer $SOURCE_KEY" -H 'Content-Type: application/json' \
      -d @execute.json
    ```
 
-4. **Wait for the change.** Poll `/state` on the source until `host_count`
-   includes the joining hosts. `onboarding_hosts` then counts them too. A
-   joining host holds the party now, but it does not confirm yet.
+4. **Stage each joining host with `add.json`.** Each host waits for the exact
+   proposal, signs it, and disconnects before returning its signatures.
 
-5. **Copy the contracts to each joining host.** Read block N from the source
+   ```bash
+   # joiners.txt contains: URL participant-ID tenant-key
+   stage_files=()
+   while read -r url pid key; do
+     stage_file="stage-${pid%%::*}.json"
+     curl --fail-with-body -sS -X POST "$url/v0/tenant/add-hosts/stage" \
+       -H "Authorization: Bearer $key" -H 'Content-Type: application/json' \
+       -d @add.json > "$stage_file" || exit 1
+     stage_files+=("$stage_file")
+   done < joiners.txt
+   jq -s '[.[].signed_topology_transactions[]]' "${stage_files[@]}" > staged-signatures.json
+   ```
+
+   A repeated stage call returns the persisted signatures without reconnecting.
+   Keep the same party, host list, permission, and pinned serial.
+
+5. **Publish the staged signatures through the source:**
+
+   ```bash
+   jq --slurpfile signatures staged-signatures.json \
+     '. + {signed_topology_transactions:$signatures[0]}' add.json > publish.json
+   curl --fail-with-body -sS -X POST "$SOURCE/v0/tenant/add-hosts/publish" \
+     -H "Authorization: Bearer $SOURCE_KEY" -H 'Content-Type: application/json' \
+     -d @publish.json
+   ```
+
+6. **Wait for authorization on the source.** Its `/state` must include the
+   joining hosts in `host_count` and `onboarding_hosts`. The joiners remain
+   disconnected and cannot read the new authorized mapping yet.
+
+7. **Copy the contracts to each joining host.** Read block N from the source
    and hand it to the joining host, until the import answers
    `"complete": true`:
 
    ```bash
    seq=1
    while :; do
-     curl -sS -H "Authorization: Bearer $SOURCE_KEY" \
-       "$SOURCE/v0/tenant/$PARTY/acs/$JOINER_ID?base_serial=$SERIAL&seq=$seq" > block.json
+     curl --fail-with-body -sS -H "Authorization: Bearer $SOURCE_KEY" \
+       "$SOURCE/v0/tenant/$PARTY/acs/$JOINER_ID?base_serial=$SERIAL&seq=$seq" > block.json || exit 1
      jq --arg p "$PARTY" --argjson s "$SERIAL" \
        '{party_id:$p, base_serial:$s, seq, chunk, end, total_len, sha256, package_ids}' \
        block.json > import.json
-     curl -sS -X POST "$JOINER/v0/tenant/add-hosts/import" \
+     curl --fail-with-body -sS -X POST "$JOINER/v0/tenant/add-hosts/import" \
        -H "Authorization: Bearer $JOINER_KEY" -H 'Content-Type: application/json' \
-       -d @import.json > result.json
+       -d @import.json > result.json || exit 1
      jq -e .complete result.json > /dev/null && break
      seq=$((seq + 1))
    done
@@ -299,24 +329,41 @@ joining host with a current host, and distribute what is missing.
    `$SERIAL` is the serial from step 1, not the new one. Use the same source
    host for every block of one copy.
 
-6. **Wait for the onboarding markers to clear.** Poll `/state` until
-   `onboarding_hosts` is 0. The party can transact again from here.
+8. **Wait for the onboarding markers to clear.** The joiners reconnect after
+   successful imports. Poll `/state` until `onboarding_hosts` is 0. Each joiner
+   can then serve the party.
 
 ### How the copy works
 
-The joining host leaves the synchronizer when block 1 arrives. It reconnects
-after the last block. For that time, every party on the joining host pauses.
-The current hosts keep running.
+The joining host leaves the synchronizer during staging, before authorization.
+It reconnects only after the complete snapshot imports successfully. Every
+party on that participant pauses for the entire window. The current hosts
+keep running.
 
 - Neither node writes the contracts to disk or keeps more than one block in
   memory. Each import call returns once Canton has taken the block, which sets
   the pace.
-- A copy cannot resume. If it breaks, ask for block 1 again. The source then
-  opens a fresh export, and the joining host starts a fresh import.
+- A copy cannot resume. Its operator checks the failure before restarting from
+  block 1. A quarantined partial import requires repair or restoration first.
 - One block may be sent twice after a network error. The source serves the
   last block again, so one retry is safe.
-- A copy that stays idle for 5 minutes ends. The joining host reconnects to
-  the synchronizer, and you start again from block 1.
+- A copy that stays idle for 5 minutes ends. A staged joiner stays offline
+  on manual connection, so its operator must resolve the abandoned import.
+
+### Recover a staged joiner
+
+A staging retry uses the same request and returns the saved signatures.
+A publication retry uses the same `publish.json` on the source. Neither retry
+reconnects a joiner or changes its pinned serial.
+
+A failed import needs an operator. The operator checks the host log, topology,
+and import quarantine before choosing a retry, repair, or restoration. DecMan
+keeps the staged participant disconnected instead of replaying incomplete state.
+The operator must not reconnect it merely to restore availability.
+
+A successful import restores automatic connection and verifies participant
+health. An operator who abandons onboarding must first remove the incomplete
+hosting change safely and repair any partial state.
 
 ### Raise the threshold
 
@@ -415,8 +462,8 @@ when it completes or stops, with the reason it stopped.
 | `404` from a prepare or execute call | No host mapping exists for the party | Check the party ID. A joining host still answers `200`, because it reads the shared topology |
 | `400` that names a field | The bundle does not match what the host built itself | Do not retry it as it is. Restart from prepare |
 | The prepare answers differ | A host built a different mapping | Stop, and ask that host's operator |
-| `409` from the ACS or import call | The two ends disagree about the next block | Restart the copy from block 1 |
-| The import fails, and the joining host is back online | A block failed, or the copy was idle too long | Restart the copy from block 1 |
+| `409` from the ACS or import call | The two ends disagree about the next block | The operator checks quarantine before restarting the copy from block 1 |
+| A staged import fails and the joiner stays offline | The import fails or the copy times out | The operator checks quarantine and repairs partial state before retrying |
 | `500` "Imported the ACS, but could not request the marker clear" on the last block | Canton already has its own marker clear pending | Nothing. Poll `/state` until `onboarding_hosts` is 0 |
 | `"marker_cleared": false` | Canton clears the marker a short time after the import | Poll `/state` until `onboarding_hosts` is 0 |
 | `"package_preflight": false` in a block | The source cannot list the party's packages | Normal for an external party. Check the DARs yourself before the copy |

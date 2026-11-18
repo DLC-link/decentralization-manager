@@ -139,6 +139,12 @@ pub mod artifact_kinds {
     /// Tenant add-hosts: durable disconnect-window marker, same contract as
     /// [`ADD_PARTY_ACS_IMPORT_INFLIGHT`].
     pub const TENANT_ADD_HOSTS_IMPORT_INFLIGHT: &str = "tenant_add_hosts_import_inflight";
+    /// The joiner's private signature and the request it signs, before publication.
+    pub const TENANT_ADD_HOSTS_STAGED_SIGNATURES: &str = "tenant_add_hosts_staged_signatures";
+    /// The joiner finishes disconnecting before it makes its signature available.
+    pub const TENANT_ADD_HOSTS_STAGE_READY: &str = "tenant_add_hosts_stage_ready";
+    /// A verified import releases its participant-wide offline window once.
+    pub const TENANT_ADD_HOSTS_IMPORT_COMPLETED: &str = "tenant_add_hosts_import_completed";
     /// The assembled SyncAcs command payload (config + the package ids the
     /// target's preflight needs). The ACS itself is not in it: the target pulls
     /// the snapshot block by block straight into Canton's import.
