@@ -6,9 +6,11 @@ use std::{
 };
 
 use anyhow::Context;
-use canton_proto_rs::com::digitalasset::canton::protocol::v30::PartyToParticipant;
+use canton_proto_rs::com::digitalasset::canton::protocol::v30::{
+    PartyToParticipant, SignedTopologyTransaction,
+};
 use sqlx::SqlitePool;
-use tokio::sync::RwLock;
+use tokio::sync::{Mutex, RwLock};
 
 use common::types::AcsTransferProgress;
 
@@ -28,7 +30,7 @@ use crate::{
     utils,
     workflow::{
         WorkflowState,
-        add_party::AddPartyStep,
+        add_party::{AddPartyConfig, AddPartyStep},
         change_threshold::ChangeThresholdStep,
         contracts::ContractsStep,
         dars::DarsStep,
@@ -87,6 +89,8 @@ fn decline_matches_run(
 
 /// Coordinator server that accepts connections from peers
 pub struct NoiseServer<S: WorkflowStep + 'static> {
+    db: SqlitePool,
+    recorded_upload: Mutex<()>,
     node_config: Arc<NodeConfig>,
     keypair: Arc<NoiseKeypair>,
     /// Full peer records (address + port + public_key) kept around so the
@@ -424,6 +428,7 @@ impl<S: WorkflowStep + 'static> NoiseServer<S> {
         // peers instead of starting fresh from `initial_step`. The
         // coordinator workflow loop is naturally driven by `current_step`, so
         // seeding it from the row picks the run back up at the right place.
+        let storage = db.clone();
         let workflow_state = match persisted {
             Some(run) if run.status == WorkflowProgress::InProgress => {
                 match S::try_from_step_name(&run.current_step) {
@@ -474,6 +479,8 @@ impl<S: WorkflowStep + 'static> NoiseServer<S> {
         }
 
         Ok(Self {
+            db: storage,
+            recorded_upload: Mutex::new(()),
             node_config: Arc::new(node_config),
             keypair: Arc::new(keypair),
             peers,
@@ -633,11 +640,11 @@ impl<S: WorkflowStep + 'static> NoiseServer<S> {
                 .await
             }
             MessageType::AddPartyKeysUpload => {
-                Self::handle_add_party_upload(
-                    &self.workflow_state,
+                self.handle_recorded_upload(
                     peer_id,
-                    message.payload,
-                    crate::workflow::storage::artifact_kinds::ADD_PARTY_KEYS_UPLOAD,
+                    &message.payload,
+                    MessageType::GenerateAddPartyKeys,
+                    artifact_kinds::ADD_PARTY_KEYS_UPLOAD,
                 )
                 .await
             }
@@ -660,11 +667,11 @@ impl<S: WorkflowStep + 'static> NoiseServer<S> {
                 .await
             }
             MessageType::AddPartyClearProposal => {
-                Self::handle_add_party_upload(
-                    &self.workflow_state,
+                self.handle_recorded_upload(
                     peer_id,
-                    message.payload,
-                    crate::workflow::storage::artifact_kinds::ADD_PARTY_CLEAR_PROPOSAL,
+                    &message.payload,
+                    MessageType::ClearOnboardingFlag,
+                    artifact_kinds::ADD_PARTY_CLEAR_PROPOSAL_UPLOAD,
                 )
                 .await
             }
@@ -835,23 +842,6 @@ impl<S: WorkflowStep + 'static> NoiseServer<S> {
     }
 
     /// Handle peer data upload (keys, signatures, etc.)
-    async fn handle_add_party_upload(
-        workflow_state: &WorkflowState<S>,
-        peer_id: CantonId,
-        payload: Vec<u8>,
-        kind: &str,
-    ) -> Result<Message, NoiseError> {
-        workflow_state
-            .persist_add_party_upload(&peer_id, &payload, kind)
-            .await
-            .map_err(|error| {
-                tracing::error!(%error, "Failed to persist add-party upload");
-                NoiseError::InvalidMessage
-            })?;
-        workflow_state.peer_completed(peer_id).await;
-        Ok(Message::new_empty(MessageType::Ack))
-    }
-
     async fn handle_peer_data(
         &self,
         peer_id: CantonId,
@@ -891,18 +881,58 @@ impl<S: WorkflowStep + 'static> NoiseServer<S> {
                 b"The peer is not expected in this workflow".to_vec(),
             ));
         }
-        // Kick, add-party and change-threshold upload a signed DNS and P2P
-        // pair. A clearing or rotation upload holds one signed mapping.
-        let uploads_a_pair = matches!(
+        let _upload_guard = self.recorded_upload.lock().await;
+        let new_member_upload = matches!(
             command,
-            MessageType::SignKick | MessageType::SignAddParty | MessageType::SignChangeThreshold
+            MessageType::GenerateAddPartyKeys | MessageType::ClearOnboardingFlag
         );
-        if uploads_a_pair && let Err(e) = split_signed_pair(payload) {
-            tracing::warn!("Invalid {artifact_kind} from {peer_id}: {e:#}");
-            return Ok(Message::new(
-                MessageType::Error,
-                b"Invalid signature pair".to_vec(),
-            ));
+        let validation: anyhow::Result<()> = async {
+            if new_member_upload {
+                anyhow::ensure!(
+                    S::kind() == WorkflowKind::AddParty,
+                    "Wrong workflow for add-party upload"
+                );
+                let run = self
+                    .db
+                    .get_workflow_run(self.workflow_state.instance_name())
+                    .await?
+                    .context("Add-party run missing")?;
+                let config: AddPartyConfig = serde_json::from_str(&run.config_json)?;
+                anyhow::ensure!(
+                    peer_id == config.new_participant_id,
+                    "Only the new member may upload"
+                );
+                if command == MessageType::GenerateAddPartyKeys {
+                    utils::decode_length_prefixed(payload, 2)?;
+                } else if !payload.is_empty() {
+                    let _: SignedTopologyTransaction =
+                        utils::read_first_message_from_bytes(payload)?;
+                }
+                if let Some(saved) = self
+                    .db
+                    .read_artifact(
+                        self.workflow_state.instance_name(),
+                        artifact_kind,
+                        Some(&peer_id.to_string()),
+                    )
+                    .await?
+                {
+                    anyhow::ensure!(saved == payload, "Upload conflicts with saved payload");
+                }
+            } else if matches!(
+                command,
+                MessageType::SignKick
+                    | MessageType::SignAddParty
+                    | MessageType::SignChangeThreshold
+            ) {
+                split_signed_pair(payload)?;
+            }
+            Ok(())
+        }
+        .await;
+        if let Err(error) = validation {
+            tracing::warn!(%error, "Invalid {artifact_kind} from {peer_id}");
+            return Ok(Message::new(MessageType::Error, b"Invalid upload".to_vec()));
         }
         if let Err(e) = self
             .workflow_state
@@ -1551,86 +1581,5 @@ mod tests {
             assert!(!state.has_peer_completed(&peer(1)).await);
             Ok(())
         }
-    }
-    #[sqlx::test(migrator = "MIGRATOR")]
-    async fn add_party_upload_handlers_survive_completion_restart(
-        pool: SqlitePool,
-    ) -> anyhow::Result<()> {
-        use crate::workflow::{
-            add_party::AddPartyConfig,
-            storage::{WorkflowStorage, artifact_kinds},
-        };
-        for (index, step, message_kind, payload, next) in [
-            (
-                0,
-                AddPartyStep::GenerateNewMemberKeys,
-                artifact_kinds::ADD_PARTY_KEYS_UPLOAD,
-                utils::encode_length_prefixed(&[b"keys", b"participant"]),
-                AddPartyStep::ExportState,
-            ),
-            (
-                1,
-                AddPartyStep::ProposeClearOnboarding,
-                artifact_kinds::ADD_PARTY_CLEAR_PROPOSAL,
-                utils::encode_length_prefixed_message(&canton_proto_rs::com::digitalasset::canton::protocol::v30::SignedTopologyTransaction::default()),
-                AddPartyStep::PrepareClearSign,
-            ),
-            (
-                2,
-                AddPartyStep::ProposeClearOnboarding,
-                artifact_kinds::ADD_PARTY_CLEAR_PROPOSAL,
-                vec![],
-                AddPartyStep::PrepareClearSign,
-            ),
-        ] {
-            let instance = format!("upload-{index}");
-            let member = kick_peer(1);
-            let config =
-                AddPartyConfig::new(kick_peer(9), member.clone(), 1, None, 1, instance.clone());
-            sqlx::query("INSERT INTO workflow_runs (instance_name, kind, role, status, current_step, step_index, step_total, config_json, expected_peers_json, completed_peers_json, created_at, updated_at) VALUES (?1, 'AddParty', 'Coordinator', 'inprogress', ?2, 0, 14, ?3, ?4, '[]', 0, 0)")
-                .bind(&instance).bind(step.step_name()).bind(serde_json::to_string(&config)?)
-                .bind(serde_json::to_string(&vec![member.clone()])?).execute(&pool).await?;
-            let state = WorkflowState::new(
-                pool.clone(),
-                instance.clone(),
-                step,
-                vec![member.clone()],
-                None,
-            );
-            if message_kind == artifact_kinds::ADD_PARTY_CLEAR_PROPOSAL {
-                assert!(NoiseServer::<AddPartyStep>::handle_add_party_upload(
-                    &state, member.clone(), b"malformed".to_vec(), message_kind,
-                ).await.is_err());
-                assert_eq!(state.current_step().await, step);
-                assert!(state.completed_peers().await.is_empty());
-                assert_eq!(pool.read_artifact(&instance, message_kind, None).await?, None);
-            }
-            let ack = NoiseServer::<AddPartyStep>::handle_add_party_upload(
-                &state,
-                member.clone(),
-                payload.clone(),
-                message_kind,
-            )
-            .await?;
-            assert_eq!(ack.msg_type, MessageType::Ack);
-            drop(state);
-            let saved = pool.get_workflow_run(&instance).await?.unwrap();
-            let restored_step = AddPartyStep::try_from_step_name(&saved.current_step).unwrap();
-            let resumed = WorkflowState::from_persisted(
-                pool.clone(),
-                instance.clone(),
-                restored_step,
-                saved.expected_peers,
-                saved.completed_peers,
-                None,
-            );
-            assert_eq!(resumed.current_step().await, next);
-            assert!(resumed.get_all_peer_data().await.is_empty());
-            assert_eq!(
-                pool.read_artifact(&instance, message_kind, None).await?,
-                Some(payload)
-            );
-        }
-        Ok(())
     }
 }

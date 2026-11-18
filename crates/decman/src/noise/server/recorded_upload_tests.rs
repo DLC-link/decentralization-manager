@@ -629,3 +629,281 @@ async fn production_add_party_start_still_seeds_the_first_key_command(db: Sqlite
     assert_eq!(command.payload, config);
     Ok(())
 }
+
+async fn add_party_upload_run(db: &SqlitePool, step: AddPartyStep) -> Result<AddPartyConfig> {
+    insert_run(db, step).await?;
+    let config = AddPartyConfig::new(peer(9), peer(1), 1, None, 1, RUN.into());
+    sqlx::query("UPDATE workflow_runs SET config_json = ? WHERE instance_name = ?")
+        .bind(serde_json::to_string(&config)?)
+        .bind(RUN)
+        .execute(db)
+        .await?;
+    Ok(config)
+}
+
+async fn add_party_upload_restart(
+    db: SqlitePool,
+    step: AddPartyStep,
+    msg_type: MessageType,
+    upload_kind: &str,
+    payload: Vec<u8>,
+) -> Result {
+    use crate::workflow::add_party::coordinator::save_new_member_keys;
+    let root = tempfile::tempdir()?;
+    let config = add_party_upload_run(&db, step).await?;
+    let server = start(&db, &root, step).await?;
+    assert_eq!(
+        send(&server, 2, msg_type, &payload).await?,
+        MessageType::Error
+    );
+    assert!(!server.workflow_state.has_peer_completed(&peer(2)).await);
+    assert_eq!(
+        send(&server, 1, msg_type, &payload).await?,
+        MessageType::Ack
+    );
+    let member = peer(1).to_string();
+    assert_eq!(
+        db.read_artifact(RUN, upload_kind, Some(&member)).await?,
+        Some(payload.clone())
+    );
+    drop(server);
+
+    // Restore before the other member's skip status completes this handoff.
+    let server = start(&db, &root, step).await?;
+    assert!(server.workflow_state.has_peer_completed(&peer(1)).await);
+    assert_eq!(
+        send(&server, 2, MessageType::StatusUpdate, b"skip").await?,
+        MessageType::Ack
+    );
+    assert_eq!(
+        server.workflow_state.current_step().await,
+        step.next().unwrap()
+    );
+    drop(server);
+    let server = start(&db, &root, step).await?;
+    assert_eq!(
+        server.workflow_state.current_step().await,
+        step.next().unwrap()
+    );
+    assert_eq!(
+        db.read_artifact(RUN, upload_kind, Some(&member)).await?,
+        Some(payload.clone())
+    );
+    if msg_type == MessageType::AddPartyKeysUpload {
+        // A crash after writing only the first output must not lose the second.
+        db.write_artifact(
+            RUN,
+            artifact_kinds::PEER_PUBLIC_KEYS,
+            Some(&member),
+            b"partial",
+        )
+        .await?;
+        drop(server);
+        let _server = start(&db, &root, step).await?;
+        save_new_member_keys(&db, RUN, &config).await?;
+        assert_eq!(
+            db.read_artifact(RUN, artifact_kinds::PEER_PUBLIC_KEYS, Some(&member))
+                .await?,
+            Some(b"keys".to_vec())
+        );
+        assert_eq!(
+            db.read_artifact(RUN, artifact_kinds::PARTICIPANT_ID, Some(&member))
+                .await?,
+            Some(b"participant".to_vec())
+        );
+    }
+    Ok(())
+}
+
+#[sqlx::test(migrator = "MIGRATOR")]
+async fn add_party_keys_survive_restart_and_partial_outputs(db: SqlitePool) -> Result {
+    add_party_upload_restart(
+        db,
+        AddPartyStep::GenerateNewMemberKeys,
+        MessageType::AddPartyKeysUpload,
+        artifact_kinds::ADD_PARTY_KEYS_UPLOAD,
+        utils::encode_length_prefixed(&[b"keys", b"participant"]),
+    )
+    .await
+}
+
+#[sqlx::test(migrator = "MIGRATOR")]
+async fn add_party_clear_proposal_survives_restart(db: SqlitePool) -> Result {
+    add_party_upload_restart(
+        db,
+        AddPartyStep::ProposeClearOnboarding,
+        MessageType::AddPartyClearProposal,
+        artifact_kinds::ADD_PARTY_CLEAR_PROPOSAL_UPLOAD,
+        utils::encode_length_prefixed_message(&SignedTopologyTransaction::default()),
+    )
+    .await
+}
+
+#[sqlx::test(migrator = "MIGRATOR")]
+async fn add_party_cleared_marker_survives_restart(db: SqlitePool) -> Result {
+    add_party_upload_restart(
+        db,
+        AddPartyStep::ProposeClearOnboarding,
+        MessageType::AddPartyClearProposal,
+        artifact_kinds::ADD_PARTY_CLEAR_PROPOSAL_UPLOAD,
+        Vec::new(),
+    )
+    .await
+}
+
+#[sqlx::test(migrator = "MIGRATOR")]
+async fn add_party_clear_rejects_malformed_and_conflicting_uploads(db: SqlitePool) -> Result {
+    let root = tempfile::tempdir()?;
+    add_party_upload_run(&db, AddPartyStep::ProposeClearOnboarding).await?;
+    let server = start(&db, &root, AddPartyStep::ProposeClearOnboarding).await?;
+    assert_eq!(
+        send(&server, 1, MessageType::AddPartyClearProposal, b"malformed").await?,
+        MessageType::Error
+    );
+    assert!(!server.workflow_state.has_peer_completed(&peer(1)).await);
+    assert_eq!(
+        db.read_artifact(
+            RUN,
+            artifact_kinds::ADD_PARTY_CLEAR_PROPOSAL_UPLOAD,
+            Some(&peer(1).to_string())
+        )
+        .await?,
+        None
+    );
+    let proposal = utils::encode_length_prefixed_message(&SignedTopologyTransaction::default());
+    assert_eq!(
+        send(&server, 1, MessageType::AddPartyClearProposal, &proposal).await?,
+        MessageType::Ack
+    );
+    assert_eq!(
+        send(&server, 1, MessageType::AddPartyClearProposal, &proposal).await?,
+        MessageType::Ack
+    );
+    assert_eq!(
+        send(&server, 1, MessageType::AddPartyClearProposal, &[]).await?,
+        MessageType::Error
+    );
+    assert_eq!(
+        db.read_artifact(
+            RUN,
+            artifact_kinds::ADD_PARTY_CLEAR_PROPOSAL_UPLOAD,
+            Some(&peer(1).to_string())
+        )
+        .await?,
+        Some(proposal)
+    );
+    Ok(())
+}
+
+#[sqlx::test(migrator = "MIGRATOR")]
+async fn add_party_keys_reject_malformed_conflicting_and_late_uploads(db: SqlitePool) -> Result {
+    let root = tempfile::tempdir()?;
+    let step = AddPartyStep::GenerateNewMemberKeys;
+    add_party_upload_run(&db, step).await?;
+    let server = start(&db, &root, step).await?;
+    assert_eq!(
+        send(&server, 1, MessageType::AddPartyKeysUpload, b"malformed").await?,
+        MessageType::Error
+    );
+    assert!(!server.workflow_state.has_peer_completed(&peer(1)).await);
+    let first = utils::encode_length_prefixed(&[b"keys", b"participant"]);
+    let second = utils::encode_length_prefixed(&[b"other", b"participant"]);
+    let (a, b) = tokio::join!(
+        send(&server, 1, MessageType::AddPartyKeysUpload, &first),
+        send(&server, 1, MessageType::AddPartyKeysUpload, &second)
+    );
+    let (a, b) = (a?, b?);
+    assert!(matches!(
+        (a, b),
+        (MessageType::Ack, MessageType::Error) | (MessageType::Error, MessageType::Ack)
+    ));
+    let saved = db
+        .read_artifact(
+            RUN,
+            artifact_kinds::ADD_PARTY_KEYS_UPLOAD,
+            Some(&peer(1).to_string()),
+        )
+        .await?
+        .unwrap();
+    assert!(saved == first || saved == second);
+    assert_eq!(
+        send(&server, 1, MessageType::AddPartyKeysUpload, &saved).await?,
+        MessageType::Ack
+    );
+    send(&server, 2, MessageType::StatusUpdate, b"skip").await?;
+    assert_eq!(
+        server.workflow_state.current_step().await,
+        AddPartyStep::ExportState
+    );
+    assert_eq!(
+        send(&server, 1, MessageType::AddPartyKeysUpload, b"late").await?,
+        MessageType::Ack
+    );
+    assert_eq!(
+        db.read_artifact(
+            RUN,
+            artifact_kinds::ADD_PARTY_KEYS_UPLOAD,
+            Some(&peer(1).to_string())
+        )
+        .await?,
+        Some(saved)
+    );
+    assert_eq!(
+        server.workflow_state.current_step().await,
+        AddPartyStep::ExportState
+    );
+    Ok(())
+}
+
+#[sqlx::test(migrator = "MIGRATOR")]
+async fn resumed_coordinator_prepares_saved_new_member_proposal(db: SqlitePool) -> Result {
+    let root = tempfile::tempdir()?;
+    let step = AddPartyStep::ProposeClearOnboarding;
+    let config = add_party_upload_run(&db, step).await?;
+    let server = start(&db, &root, step).await?;
+    let proposal = utils::encode_length_prefixed_message(&SignedTopologyTransaction::default());
+    send(&server, 1, MessageType::AddPartyClearProposal, &proposal).await?;
+    send(&server, 2, MessageType::StatusUpdate, b"skip").await?;
+    drop(server);
+
+    let instance = WorkflowInstance::new(
+        RUN.into(),
+        WorkflowKind::AddParty,
+        WorkflowRole::Coordinator,
+    );
+    let coordinating = tokio::spawn(start_add_party_coordinator(
+        NodeConfig::default().with_root_dir(root.path()),
+        NetworkConfig::default(),
+        config.clone(),
+        None,
+        db.clone(),
+        Arc::new(RwLock::new(HashMap::new())),
+        instance.clone(),
+    ));
+    let command = tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let active = instance.active.read().unwrap().clone();
+            if let Some(active) = active {
+                let command = active
+                    .handle_command(peer(2), Message::new_empty(MessageType::GetNextCommand))
+                    .await?;
+                if command.msg_type == MessageType::SignClearOnboarding {
+                    break Ok::<_, NoiseError>(command);
+                }
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await??;
+    coordinating.abort();
+    let _ = coordinating.await;
+    let decoded = utils::decode_length_prefixed(&command.payload, 2)?;
+    assert_eq!(decoded[0], serde_json::to_vec(&config)?);
+    assert_eq!(decoded[1], proposal);
+    assert_eq!(
+        db.read_artifact(RUN, artifact_kinds::ADD_PARTY_CLEAR_PROPOSAL, None)
+            .await?,
+        Some(proposal)
+    );
+    Ok(())
+}
