@@ -1,3 +1,4 @@
+use anyhow::Context;
 use bytes::{BufMut, BytesMut};
 use canton_proto_rs::com::digitalasset::canton::{
     protocol::v30::SignedTopologyTransaction,
@@ -14,7 +15,7 @@ use crate::{
     signing::custody,
     utils,
     workflow::{
-        onboarding::steps::generate_keys::own_new_daml_key,
+        onboarding::{peer::copy_self_identity_for_party, steps::generate_keys::own_new_daml_key},
         storage::{WorkflowStorage, artifact_kinds},
         topology::sign_transactions_with_topology_retry,
     },
@@ -112,6 +113,52 @@ pub async fn sign_dns_proposals(
         false,
     )
     .await
+}
+
+/// Sign the onboarding P2P proposal as a member, after this node files its
+/// Daml key under the party when DecMan generated that key.
+///
+/// A member that cannot file its key refuses to sign. The party would
+/// otherwise come into force with a key that DecMan cannot sign its deploys
+/// with. Filing needs this node's identity row for the party, which the hook
+/// after signing writes again.
+///
+/// # Errors
+///
+/// Errors when the key cannot be filed, and then nothing is signed. Also
+/// errors when signing fails.
+pub async fn file_key_and_sign_p2p(
+    config: &NodeConfig,
+    storage: &SqlitePool,
+    instance_name: &str,
+    proposal_data: &[u8],
+) -> Result {
+    if custody::software_keys(config) == custody::SoftwareKeys::Stored {
+        file_own_daml_key(config, storage, instance_name, proposal_data)
+            .await
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "Refusing to sign P2P: DecMan cannot file this node's new Daml key under \
+                     the party: {e:#}"
+                )
+            })?;
+    }
+    sign_p2p_proposals(config, storage, instance_name, proposal_data)
+        .await
+        .context("Step execution failed")
+}
+
+/// File this node's generated Daml key under the party that the proposal
+/// creates.
+async fn file_own_daml_key(
+    config: &NodeConfig,
+    storage: &SqlitePool,
+    instance_name: &str,
+    proposal_data: &[u8],
+) -> Result {
+    let party = crate::workflow::extract_party_id_from_p2p_payload(proposal_data)?;
+    copy_self_identity_for_party(storage, instance_name, config, &party).await?;
+    custody::file_new_party_key(config, storage, &party).await
 }
 
 /// Sign P2P proposals with peer's key
@@ -271,6 +318,79 @@ mod with_a_generated_key {
             &topology_transaction_hash(&transaction.transaction),
             &ed25519_dalek::Signature::from_bytes(&bytes),
         )?;
+        Ok(())
+    }
+
+    fn party_mapping(key: &SigningPublicKey) -> Vec<u8> {
+        payload(topology_mapping::Mapping::PartyToParticipant(
+            PartyToParticipant {
+                party: format!("party::{NAMESPACE}"),
+                threshold: 1,
+                participants: Vec::new(),
+                party_signing_keys: Some(SigningKeysWithThreshold {
+                    keys: vec![VaultKey::software("peer", 7).public_key, key.clone()],
+                    threshold: 1,
+                }),
+            },
+        ))
+    }
+
+    /// A member files its generated key under the party before it signs,
+    /// so deploys find the key once the party is in force.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_member_files_its_key_before_it_signs(db: SqlitePool) -> Result {
+        let fake = FakeAdminApi::start(vec![]).await?;
+        let (node, key) = member(&fake, &db).await?;
+
+        file_key_and_sign_p2p(&node.config, &db, RUN, &party_mapping(&key)).await?;
+
+        signed(&node, &db, artifact_kinds::SIGNED_P2P_PROPOSAL).await?;
+        let store = crate::signing::key_store::KeyStore::open(&node.config, db.clone())
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("the key store is off"))?;
+        let party = crate::canton_id::CantonId::parse(&format!("party::{NAMESPACE}"))?;
+        assert!(
+            store
+                .get(&party, &utils::compute_fingerprint(&key))
+                .await?
+                .is_some(),
+            "the key is filed under the party"
+        );
+        Ok(())
+    }
+
+    /// A member that cannot file its generated key refuses to sign. It saves
+    /// no signed proposal, so the run has no signature to send the
+    /// coordinator, and the party cannot come into force with that key.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_member_that_cannot_file_its_key_signs_nothing(db: SqlitePool) -> Result {
+        let fake = FakeAdminApi::start(vec![]).await?;
+        let (node, key) = member(&fake, &db).await?;
+        // The operator replaced the key-store key after GenerateKeys ran.
+        let other_key = tempfile::NamedTempFile::new()?;
+        tokio::fs::write(other_key.path(), hex::encode([0x6b; 32])).await?;
+        let mut config = node.config.clone();
+        config.key_store_key_file = Some(other_key.path().to_path_buf());
+
+        let error = match file_key_and_sign_p2p(&config, &db, RUN, &party_mapping(&key)).await {
+            Ok(()) => anyhow::bail!("the member signed a party it cannot sign deploys for"),
+            Err(e) => format!("{e:#}"),
+        };
+
+        assert!(
+            error.contains("Refusing to sign P2P") && error.contains("does not decrypt"),
+            "{error}"
+        );
+        assert!(
+            db.read_artifact(
+                RUN,
+                artifact_kinds::SIGNED_P2P_PROPOSAL,
+                Some(&node.config.participant_id().to_string()),
+            )
+            .await?
+            .is_none(),
+            "nothing was signed"
+        );
         Ok(())
     }
 

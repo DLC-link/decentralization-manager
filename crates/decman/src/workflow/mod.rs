@@ -654,48 +654,11 @@ async fn run_peer(
                     fail_step!("Refusing the coordinator's P2P proposal: {e}");
                     continue;
                 }
-                // A node whose Daml key DecMan generated files the key under
-                // the party before it signs, so the party never comes into
-                // force with a key DecMan cannot sign its deploys with. Filing
-                // needs the identity rows, which the hook after signing
-                // writes again.
-                if crate::signing::custody::software_keys(&node_config)
-                    == crate::signing::custody::SoftwareKeys::Stored
-                {
-                    let filed = match extract_party_id_from_p2p_payload(&payload) {
-                        Ok(party) => match onboarding::peer::copy_self_identity_for_party(
-                            &db,
-                            &instance_name,
-                            &node_config,
-                            &party,
-                        )
-                        .await
-                        {
-                            Ok(()) => {
-                                crate::signing::custody::file_new_party_key(
-                                    &node_config,
-                                    &db,
-                                    &party,
-                                )
-                                .await
-                            }
-                            Err(e) => Err(e),
-                        },
-                        Err(e) => Err(e),
-                    };
-                    if let Err(e) = filed {
-                        fail_step!(
-                            "Refusing to sign P2P: DecMan cannot file this node's new Daml key \
-                             under the party: {e:#}"
-                        );
-                        continue;
-                    }
-                }
                 if let Err(e) =
-                    onboarding::sign_p2p_proposals(&node_config, &db, &instance_name, &payload)
+                    onboarding::file_key_and_sign_p2p(&node_config, &db, &instance_name, &payload)
                         .await
                 {
-                    fail_step!("Step execution failed: {e}");
+                    fail_step!("{e:#}");
                     continue;
                 }
                 consecutive_step_failures = 0;
@@ -1498,7 +1461,7 @@ async fn send_skip_status(client: &NoiseClient, step: &str) {
 /// `transaction.mapping` is a `PartyToParticipant` mapping carrying `party`
 /// (i.e. `{prefix}::{namespace_fingerprint}`). We pull that out so the
 /// peer's identity hook can key its `dec_party_identity` rows.
-fn extract_party_id_from_p2p_payload(payload: &[u8]) -> Result<CantonId> {
+pub(crate) fn extract_party_id_from_p2p_payload(payload: &[u8]) -> Result<CantonId> {
     let signed: SignedTopologyTransaction = utils::read_first_message_from_bytes(payload)?;
 
     let tx = topology_version::decode_transaction(&signed.transaction)
