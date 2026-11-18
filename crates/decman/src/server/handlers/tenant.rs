@@ -73,7 +73,7 @@ use crate::{
         ClearOutcome, ReplicationTarget, collect_party_package_ids, open_export_session,
         pipe::{PipeBlock, PipeTrailer},
         relay::{AcceptedBlock, ImportEnd, OnImportEnd, ServedBlock},
-        request_onboarding_flag_clear,
+        request_onboarding_flag_clear, resume_tenant_import_window,
     },
 };
 
@@ -1080,6 +1080,45 @@ async fn tenant_acs_import_on_this_host(
             error: "this replication does not own the participant's import window; stage the joiner before publishing hosting".into(),
         });
     }
+    let imported = match replication
+        .read_artifact(
+            &data.db,
+            artifact_kinds::TENANT_ADD_HOSTS_ACS_IMPORTED,
+            None,
+        )
+        .await
+    {
+        Ok(imported) => imported.is_some(),
+        Err(error) => return tenant_import_failure_response(data, &replication, error).await,
+    };
+    if imported {
+        if !body.end {
+            return HttpResponse::Conflict().json(ErrorResponse {
+                error: "The ACS is already imported; retry the identical final block to finish reconnecting without importing again".into(),
+            });
+        }
+        if data
+            .relay_sessions
+            .any_session(|name| name == replication.instance_name)
+            .await
+        {
+            return HttpResponse::Conflict().json(ErrorResponse {
+                error: "The imported ACS is still finishing its reconnect; retry the identical final block after that request finishes".into(),
+            });
+        }
+        if let Err(error) = async {
+            anyhow::ensure!(
+                resume_tenant_import_window(&data.config, &data.db, &replication).await?,
+                "the imported ACS proof is missing"
+            );
+            release_import_window_owner(&data.db, &replication).await
+        }
+        .await
+        {
+            return tenant_import_failure_response(data, &replication, error).await;
+        }
+        return completed_tenant_import(data, body, &replication).await;
+    }
     if body.seq == 1 {
         match import_onboarding_ready(&data.config, &data.db, &replication, body.base_serial).await
         {
@@ -1152,17 +1191,38 @@ async fn tenant_acs_import_on_this_host(
             })
         }
         Ok(AcceptedBlock::Complete) => completed_tenant_import(data, body, &replication).await,
-        Err(e) => {
-            tracing::error!("tenant acs import: import failed: {e:#}");
-            HttpResponse::InternalServerError().json(ErrorResponse {
-                error: format!(
-                    "The ACS import failed on this host; the staged participant stays disconnected. \
-                     Complete this import or repair it before reconnecting. See the host's logs. ({first})",
-                    first = e.to_string().lines().next().unwrap_or("")
-                ),
-            })
-        }
+        Err(error) => tenant_import_failure_response(data, &replication, error).await,
     }
+}
+
+async fn tenant_import_failure_response(
+    data: &AppState,
+    target: &ReplicationTarget,
+    error: anyhow::Error,
+) -> HttpResponse {
+    tracing::error!("tenant acs import: import or reconnect failed: {error:#}");
+    let message = match target
+        .read_artifact(
+            &data.db,
+            artifact_kinds::TENANT_ADD_HOSTS_ACS_IMPORTED,
+            None,
+        )
+        .await
+    {
+        Ok(Some(_)) => {
+            "The ACS is imported, but reconnect or health verification failed. Retry the identical final block without staging or importing again. See the host's logs"
+        }
+        Ok(None) => {
+            "The ACS import failed on this host; the staged participant stays disconnected. Complete this import or repair it before reconnecting. See the host's logs"
+        }
+        Err(read_error) => {
+            tracing::error!("tenant acs import: could not read imported ACS proof: {read_error:#}");
+            "The import or reconnect failed and its durable status could not be read. Ask the operator to inspect this participant before retrying. See the host's logs"
+        }
+    };
+    HttpResponse::InternalServerError().json(ErrorResponse {
+        error: message.into(),
+    })
 }
 
 async fn completed_tenant_import(

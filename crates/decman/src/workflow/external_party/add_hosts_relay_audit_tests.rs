@@ -5,7 +5,8 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use actix_web::{App, test as actix_test, web};
+use actix_web::{App, http::StatusCode, test as actix_test, web};
+use base64::{Engine as _, engine::general_purpose::STANDARD};
 use canton_proto_rs::com::digitalasset::canton::{
     admin::participant::v30::{
         ClearPartyOnboardingFlagResponse, GetSynchronizerIdResponse,
@@ -48,11 +49,14 @@ struct Connectivity {
     manual: bool,
     disconnects: usize,
     imports: usize,
+    import_success: bool,
     reconnects: usize,
+    reconnect_failures: usize,
     modifications: usize,
     clear_failures: usize,
     clears: usize,
     proposal: Vec<u8>,
+    unrelated_proposals: Vec<Vec<u8>>,
     entered: Option<Arc<Notify>>,
     release: Option<Arc<Notify>>,
 }
@@ -116,13 +120,19 @@ async fn respond(
         .expect("the unary request completes");
     let request_bytes = body.get(5..).expect("a gRPC frame");
     if method == "ImportPartyAcs" {
-        state.lock().expect("state lock").imports += 1;
-        return Ok(Response::builder()
-            .header("content-type", "application/grpc")
-            .header("grpc-status", "3")
-            .header("grpc-message", "the snapshot is deliberately rejected")
-            .body(Body::empty())
-            .expect("a valid gRPC refusal"));
+        let succeeds = {
+            let mut state = state.lock().expect("state lock");
+            state.imports += 1;
+            state.import_success
+        };
+        if !succeeds {
+            return Ok(Response::builder()
+                .header("content-type", "application/grpc")
+                .header("grpc-status", "3")
+                .header("grpc-message", "the snapshot is deliberately rejected")
+                .body(Body::empty())
+                .expect("a valid gRPC refusal"));
+        }
     }
     if method == "ClearPartyOnboardingFlag" {
         let fails = {
@@ -148,6 +158,7 @@ async fn respond(
         }
     }
     let payload = match method.as_str() {
+        "ImportPartyAcs" => vec![],
         "ListConnectedSynchronizers" => {
             let connected = state.lock().expect("state lock").connected;
             ListConnectedSynchronizersResponse {
@@ -188,16 +199,31 @@ async fn respond(
             vec![]
         }
         "ReconnectSynchronizers" => {
-            let (entered, release) = {
+            let (entered, release, fails) = {
                 let mut state = state.lock().expect("state lock");
                 state.reconnects += 1;
-                (state.entered.clone(), state.release.clone())
+                let fails = state.reconnect_failures > 0;
+                if fails {
+                    state.reconnect_failures -= 1;
+                }
+                (state.entered.take(), state.release.take(), fails)
             };
             if let Some(entered) = entered {
                 entered.notify_one();
             }
             if let Some(release) = release {
                 release.notified().await;
+            }
+            if fails {
+                return Ok(Response::builder()
+                    .header("content-type", "application/grpc")
+                    .header("grpc-status", "14")
+                    .header(
+                        "grpc-message",
+                        "the first reconnect is deliberately unavailable",
+                    )
+                    .body(Body::empty())
+                    .expect("a valid gRPC refusal"));
             }
             state.lock().expect("state lock").connected = true;
             vec![]
@@ -231,15 +257,23 @@ async fn respond(
             physical_synchronizer_id: format!("global::1220{}::36-0", "cc".repeat(32)),
         }
         .encode_to_vec(),
-        "ListAll" => ListAllResponse {
-            result: Some(TopologyTransactions {
-                items: vec![topology_transactions::Item {
-                    transaction: state.lock().expect("state lock").proposal.clone(),
-                    ..Default::default()
-                }],
-            }),
+        "ListAll" => {
+            let state = state.lock().expect("state lock");
+            ListAllResponse {
+                result: Some(TopologyTransactions {
+                    items: state
+                        .unrelated_proposals
+                        .iter()
+                        .chain(std::iter::once(&state.proposal))
+                        .map(|bytes| topology_transactions::Item {
+                            transaction: bytes.clone(),
+                            ..Default::default()
+                        })
+                        .collect(),
+                }),
+            }
+            .encode_to_vec()
         }
-        .encode_to_vec(),
         "ListPartyToParticipant" => ListPartyToParticipantResponse {
             results: vec![list_party_to_participant_response::Result {
                 context: Some(BaseResult {
@@ -452,7 +486,27 @@ async fn import_requires_every_durable_proof_and_the_exact_local_proposal(
 ) -> Result<()> {
     let boundary = CantonBoundary::new(false, true)?;
     let (target, signatures) = stored_stage(&db).await?;
-    boundary.state.lock().expect("state lock").proposal = signatures[0].clone();
+    {
+        let mut state = boundary.state.lock().expect("state lock");
+        state.proposal = signatures[0].clone();
+        state.unrelated_proposals = vec![
+            vec![0xff],
+            UntypedVersionedMessage {
+                version: 31,
+                wrapper: Some(untyped_versioned_message::Wrapper::Data(vec![])),
+            }
+            .encode_to_vec(),
+        ];
+        let mut unrelated_mapping = mapping();
+        unrelated_mapping.party = unrelated_mapping.party.replace("observed", "unrelated");
+        let mut multi_signature_proposal = signed(unrelated_mapping);
+        multi_signature_proposal
+            .multi_transaction_signatures
+            .push(Default::default());
+        state
+            .unrelated_proposals
+            .push(encode_signed(&multi_signature_proposal));
+    }
     assert!(!import_onboarding_ready(&boundary.config, &db, &target, 7).await?);
     target
         .write_artifact(
@@ -693,5 +747,278 @@ async fn a_cancelled_final_http_request_still_releases_successful_import_ownersh
         "a completed final-block retry may only request marker clearance"
     );
     assert_eq!(state.clears, 2);
+    Ok(())
+}
+
+async fn reconnect_fixture(
+    db: &SqlitePool,
+    boundary: &CantonBoundary,
+) -> Result<(ReplicationTarget, web::Data<AppState>)> {
+    let (target, signatures) = stored_stage(db).await?;
+    boundary.state.lock().expect("state lock").proposal = signatures[0].clone();
+    for (kind, scope, bytes) in [
+        (
+            artifact_kinds::TENANT_ADD_HOSTS_STAGE_READY,
+            None,
+            b"1".as_slice(),
+        ),
+        (
+            target.artifacts.import_inflight,
+            None,
+            b"disconnect-first".as_slice(),
+        ),
+        (
+            target.artifacts.pre_activation_offset,
+            Some(participant(2).to_string()),
+            b"1".as_slice(),
+        ),
+    ] {
+        target
+            .write_artifact(db, kind, scope.as_deref(), bytes)
+            .await?;
+    }
+    let mut state = Arc::try_unwrap(AppState::for_test_on(None, db.clone()).into_inner())
+        .unwrap_or_else(|_| panic!("the test state has no other owner"));
+    state.config = boundary.config.clone();
+    Ok((target, web::Data::new(state)))
+}
+
+fn final_import_block(target: &ReplicationTarget, seq: u64, bytes: &[u8]) -> serde_json::Value {
+    serde_json::json!({
+        "party_id": target.party_id.to_string(), "base_serial": 7,
+        "seq": seq, "end": true, "chunk": "", "total_len": bytes.len(),
+        "sha256": hex::encode(Sha256::digest(bytes)),
+    })
+}
+
+#[sqlx::test(migrator = "MIGRATOR")]
+async fn a_successful_import_reconnect_failure_recovers_without_importing_twice(
+    db: SqlitePool,
+) -> Result<()> {
+    let boundary = CantonBoundary::new(false, true)?;
+    let (target, data) = reconnect_fixture(&db, &boundary).await?;
+    {
+        let mut state = boundary.state.lock().expect("state lock");
+        state.import_success = true;
+        state.reconnect_failures = 1;
+    }
+    let app = actix_test::init_service(
+        App::new()
+            .app_data(data.clone())
+            .wrap(TestAuthMiddleware)
+            .service(test_tenant_acs_import),
+    )
+    .await;
+    let bytes = b"the original snapshot bytes accepted by the Canton boundary";
+    let first = actix_test::call_service(
+        &app,
+        actix_test::TestRequest::post()
+            .uri("/v0/tenant/add-hosts/import")
+            .set_json(serde_json::json!({
+                "party_id": target.party_id.to_string(), "base_serial": 7,
+                "seq": 1, "end": false, "chunk": STANDARD.encode(bytes),
+            }))
+            .to_request(),
+    )
+    .await;
+    assert_eq!(first.status(), StatusCode::OK);
+    let final_block = final_import_block(&target, 2, bytes);
+    let failed = actix_test::call_service(
+        &app,
+        actix_test::TestRequest::post()
+            .uri("/v0/tenant/add-hosts/import")
+            .set_json(&final_block)
+            .to_request(),
+    )
+    .await;
+    assert_eq!(failed.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    let error: serde_json::Value = actix_test::read_body_json(failed).await;
+    let error = error["error"]
+        .as_str()
+        .expect("the failed request explains recovery");
+    assert!(
+        error.contains("ACS is imported") && error.contains("final block"),
+        "{error}"
+    );
+    assert!(
+        !error.contains("stays disconnected"),
+        "manual mode is already off: {error}"
+    );
+    assert!(
+        target
+            .read_artifact(&db, artifact_kinds::TENANT_ADD_HOSTS_ACS_IMPORTED, None)
+            .await?
+            .is_some()
+    );
+    assert!(
+        target
+            .read_artifact(&db, artifact_kinds::TENANT_ADD_HOSTS_IMPORT_COMPLETED, None)
+            .await?
+            .is_none()
+    );
+    assert_eq!(
+        import_window_owner(&db, &participant(2)).await?,
+        Some(target.instance_name.clone())
+    );
+    assert!(
+        db.get_acs_import_quarantine(&target.party_id, &target.target_participant_id)
+            .await?
+            .is_none()
+    );
+    {
+        let state = boundary.state.lock().expect("state lock");
+        assert_eq!(state.imports, 1);
+        assert_eq!(state.reconnects, 1);
+        assert_eq!(state.clears, 0);
+        assert!(!state.manual);
+    }
+    let restart = actix_test::call_service(
+        &app,
+        actix_test::TestRequest::post()
+            .uri("/v0/tenant/add-hosts/import")
+            .set_json(serde_json::json!({
+                "party_id": target.party_id.to_string(), "base_serial": 7,
+                "seq": 1, "end": false, "chunk": STANDARD.encode(bytes),
+            }))
+            .to_request(),
+    )
+    .await;
+    assert_eq!(restart.status(), StatusCode::CONFLICT);
+    assert_eq!(boundary.state.lock().expect("state lock").imports, 1);
+    let resumed = actix_test::call_service(
+        &app,
+        actix_test::TestRequest::post()
+            .uri("/v0/tenant/add-hosts/import")
+            .set_json(&final_block)
+            .to_request(),
+    )
+    .await;
+    assert_eq!(resumed.status(), StatusCode::OK);
+    let result: serde_json::Value = actix_test::read_body_json(resumed).await;
+    assert_eq!(result["complete"], true);
+    assert_eq!(result["marker_cleared"], true);
+    assert!(import_window_owner(&db, &participant(2)).await?.is_none());
+    assert!(
+        target
+            .read_artifact(&db, artifact_kinds::TENANT_ADD_HOSTS_IMPORT_COMPLETED, None)
+            .await?
+            .is_some()
+    );
+    let state = boundary.state.lock().expect("state lock");
+    assert_eq!(state.imports, 1, "recovery must never reimport the ACS");
+    assert_eq!(state.reconnects, 2);
+    assert_eq!(state.clears, 1);
+    assert!(state.connected && !state.manual);
+    Ok(())
+}
+
+#[sqlx::test(migrator = "MIGRATOR")]
+async fn an_empty_import_cannot_resume_while_retiring_but_can_after_reconnect_fails(
+    db: SqlitePool,
+) -> Result<()> {
+    let boundary = CantonBoundary::new(false, true)?;
+    let (target, data) = reconnect_fixture(&db, &boundary).await?;
+    let entered = Arc::new(Notify::new());
+    let release = Arc::new(Notify::new());
+    {
+        let mut state = boundary.state.lock().expect("state lock");
+        state.reconnect_failures = 1;
+        state.entered = Some(entered.clone());
+        state.release = Some(release.clone());
+    }
+    let task_data = data.clone();
+    let task_target = target.clone();
+    let first = tokio::spawn(async move {
+        task_data
+            .relay_sessions
+            .accept_block(
+                &task_data.config,
+                &task_data.db,
+                &task_target,
+                &[],
+                PipeBlock::End {
+                    seq: 1,
+                    trailer: PipeTrailer {
+                        total_len: 0,
+                        sha256: hex::encode(Sha256::digest([])),
+                    },
+                },
+                None,
+            )
+            .await
+    });
+    tokio::time::timeout(Duration::from_secs(5), entered.notified()).await?;
+    assert!(
+        target
+            .read_artifact(&db, artifact_kinds::TENANT_ADD_HOSTS_ACS_IMPORTED, None)
+            .await?
+            .is_some()
+    );
+    assert!(
+        data.relay_sessions
+            .any_session(|name| name == target.instance_name)
+            .await,
+        "the actual import must still own its retiring relay session"
+    );
+    let app = actix_test::init_service(
+        App::new()
+            .app_data(data.clone())
+            .wrap(TestAuthMiddleware)
+            .service(test_tenant_acs_import),
+    )
+    .await;
+    let final_block = final_import_block(&target, 1, &[]);
+    let busy = tokio::time::timeout(
+        Duration::from_secs(5),
+        actix_test::call_service(
+            &app,
+            actix_test::TestRequest::post()
+                .uri("/v0/tenant/add-hosts/import")
+                .set_json(&final_block)
+                .to_request(),
+        ),
+    )
+    .await?;
+    assert_eq!(busy.status(), StatusCode::CONFLICT);
+    assert_eq!(
+        boundary.state.lock().expect("state lock").reconnects,
+        1,
+        "a retiring import must finish before a recovery reconnect starts"
+    );
+    release.notify_one();
+    let first = tokio::time::timeout(Duration::from_secs(5), first).await??;
+    assert!(
+        first.is_err(),
+        "the first empty import fails at its reconnect"
+    );
+    assert!(
+        !data
+            .relay_sessions
+            .any_session(|name| name == target.instance_name)
+            .await
+    );
+    let resumed = actix_test::call_service(
+        &app,
+        actix_test::TestRequest::post()
+            .uri("/v0/tenant/add-hosts/import")
+            .set_json(&final_block)
+            .to_request(),
+    )
+    .await;
+    assert_eq!(resumed.status(), StatusCode::OK);
+    let result: serde_json::Value = actix_test::read_body_json(resumed).await;
+    assert_eq!(result["complete"], true);
+    assert_eq!(result["marker_cleared"], true);
+    assert!(import_window_owner(&db, &participant(2)).await?.is_none());
+    assert!(
+        target
+            .read_artifact(&db, artifact_kinds::TENANT_ADD_HOSTS_IMPORT_COMPLETED, None)
+            .await?
+            .is_some()
+    );
+    let state = boundary.state.lock().expect("state lock");
+    assert_eq!(state.imports, 0, "the empty ACS requires no import RPC");
+    assert_eq!(state.reconnects, 2);
+    assert_eq!(state.clears, 1);
     Ok(())
 }

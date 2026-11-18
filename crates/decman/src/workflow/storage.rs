@@ -143,6 +143,8 @@ pub mod artifact_kinds {
     pub const TENANT_ADD_HOSTS_STAGED_SIGNATURES: &str = "tenant_add_hosts_staged_signatures";
     /// The joiner finishes disconnecting before it makes its signature available.
     pub const TENANT_ADD_HOSTS_STAGE_READY: &str = "tenant_add_hosts_stage_ready";
+    /// Canton accepts the ACS before reconnect health and marker clearance finish.
+    pub const TENANT_ADD_HOSTS_ACS_IMPORTED: &str = "tenant_add_hosts_acs_imported";
     /// A verified import releases its participant-wide offline window once.
     pub const TENANT_ADD_HOSTS_IMPORT_COMPLETED: &str = "tenant_add_hosts_import_completed";
     /// The assembled SyncAcs command payload (config + the package ids the

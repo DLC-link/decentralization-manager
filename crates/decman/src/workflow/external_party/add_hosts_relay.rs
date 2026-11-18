@@ -141,7 +141,9 @@ async fn pending_proposal(
         if item.rejection_reason.is_some() {
             continue;
         }
-        let signed = decode_signed(&item.transaction)?;
+        let Ok(signed) = decode_signed(&item.transaction) else {
+            continue;
+        };
         if exact_mapping(&signed, mapping, serial).is_ok() {
             return Ok(Some(signed));
         }

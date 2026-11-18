@@ -456,6 +456,10 @@ clearance. `add_hosts` polls until Canton authorizes that clearance.
 `replicated: false` reports an incomplete stage, publication, import, or clearance.
 The per-host reports identify staging and publication errors.
 
+If the host reports an imported ACS with failed reconnect health verification,
+retry its identical final import block. This resumes reconnect without another
+ACS import. A failed marker clearance also requires only that final-block retry.
+
 A repeated staging request returns saved signatures without reconnecting.
 A failed staged import leaves the participant offline on manual connection.
 The operator checks its logs, topology, and quarantine before retrying.

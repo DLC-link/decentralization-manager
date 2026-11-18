@@ -254,6 +254,10 @@ done
 joining node already leaves the synchronizer during staging. It reconnects
 only after the complete snapshot imports successfully. A failed staged import
 leaves it offline for operator recovery.
+If Canton accepts the ACS but reconnect health verification fails, retry the
+identical final block. DecMan resumes reconnect without importing again.
+[Recovery limits](DECENTRALIZING_AN_EXTERNAL_PARTY.md#recover-a-staged-joiner)
+include the lack of a supported operator abort.
 [How the copy works](DECENTRALIZING_AN_EXTERNAL_PARTY.md#how-the-copy-works)
 explains restarts and time-outs.
 
@@ -352,6 +356,7 @@ removes them yet.
 | `400` from `authorize` on a joining node | A joiner must disconnect before publication | Use `stage` on the joiner and `publish` on the owner |
 | `400` "a Submission host needs the party's threshold to be 1" | The party's threshold is above 1 | Use `"permission": "confirmation"` |
 | `404` from `/status` on a failover host | `/status` checks Confirmation hosts only | Use the owner's `/state` instead |
+| `500` "The ACS is imported, but reconnect or health verification failed" | Canton accepts the ACS, but reconnect does not finish | Retry the identical final block. DecMan retries reconnect without importing again |
 | `500` "Imported the ACS, but could not request the marker clear" on the last block | The ACS imports, but the clearance request fails | Retry the identical final block. Do not stage or import again |
 | `"marker_cleared": false` | Canton accepts the clearance request but waits for its safe time | Poll `/state` until `onboarding_hosts` is 0 |
 | `"package_preflight": false` in block 1 | The owner node cannot list the party's packages before the copy | Normal for a local party. Check the DARs yourself first |

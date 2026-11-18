@@ -361,9 +361,15 @@ and import quarantine before choosing a retry, repair, or restoration. DecMan
 keeps the staged participant disconnected instead of replaying incomplete state.
 The operator must not reconnect it merely to restore availability.
 
-A successful import restores automatic connection and verifies participant
-health. An operator who abandons onboarding must first remove the incomplete
-hosting change safely and repair any partial state.
+Canton can accept the ACS before reconnect health verification finishes.
+If DecMan reports that the ACS is imported, retry the identical final block.
+DecMan resumes reconnect and marker clearance without importing the snapshot again.
+Do not restart staging or resend the snapshot in this case.
+
+DecMan currently provides no supported abort for the durable import window.
+The operator must not delete its SQLite row or lift quarantine merely to resume other workflows.
+The operator must prove that partial state and released signatures cannot cause an unsafe reconnect.
+[Issue #647](https://github.com/DLC-link/decentralization-manager/issues/647) tracks a supported operator recovery procedure.
 
 ### Raise the threshold
 
@@ -464,6 +470,7 @@ when it completes or stops, with the reason it stopped.
 | The prepare answers differ | A host built a different mapping | Stop, and ask that host's operator |
 | `409` from the ACS or import call | The two ends disagree about the next block | The operator checks quarantine before restarting the copy from block 1 |
 | A staged import fails and the joiner stays offline | The import fails or the copy times out | The operator checks quarantine and repairs partial state before retrying |
+| `500` "The ACS is imported, but reconnect or health verification failed" | Canton accepts the ACS, but reconnect does not finish | Retry the identical final block. DecMan retries reconnect without importing again |
 | `500` "Imported the ACS, but could not request the marker clear" on the last block | The ACS imports, but the clearance request fails | Retry the identical final block. Do not stage or import again |
 | `"marker_cleared": false` | Canton clears the marker a short time after the import | Poll `/state` until `onboarding_hosts` is 0 |
 | `"package_preflight": false` in a block | The source cannot list the party's packages | Normal for an external party. Check the DARs yourself before the copy |
