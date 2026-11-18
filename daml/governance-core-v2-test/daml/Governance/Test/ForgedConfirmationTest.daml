@@ -1,0 +1,184 @@
+-- Copyright (c) 2026 DLC-Link, Inc. and/or its affiliates. All rights reserved.
+-- SPDX-License-Identifier: Apache-2.0
+
+-- | Tests that the rules reject a confirmation that names another
+-- governance party (#615). A member can sign such a confirmation alone by
+-- naming itself as the governance party, and list any member as the
+-- confirmer.
+module Governance.Test.ForgedConfirmationTest where
+
+import DA.Optional (isSome)
+import DA.Time (minutes)
+import Daml.Script
+
+import Governance.Action (GovernableAction)
+import Governance.Confirmation
+import Governance.MockActions
+import Governance.Rules
+import Governance.TestUtils
+
+import TestHarness
+
+-- ============================================================================
+-- Fixtures
+-- ============================================================================
+
+data ForgedFixture = ForgedFixture
+  with
+    parties : TestParties
+    rulesCid : ContractId GovernanceRules
+    proposalCid : ContractId GovernableAction
+    selfAction : GovernanceSelfAction
+    confirmationCid : ContractId GovernanceConfirmation
+      -- ^ member1's own confirmation of `proposalCid`.
+    selfConfirmationCid : ContractId GovernanceSelfConfirmation
+      -- ^ member1's own confirmation of `selfAction`.
+    forgedConfirmationCid : ContractId GovernanceConfirmation
+      -- ^ Signed by member1 alone, naming itself as the governance party
+      -- and member2 as the confirmer.
+    forgedSelfConfirmationCid : ContractId GovernanceSelfConfirmation
+      -- ^ Signed by member1 alone, naming itself as the governance party
+      -- and member2 as the confirmer.
+  deriving (Eq, Show)
+
+data Outcome = Outcome
+  with
+    proposalLeft : Bool
+    executed : Int
+    threshold : Int
+    forgedConfirmationLeft : Bool
+    forgedSelfConfirmationLeft : Bool
+  deriving (Eq, Show)
+
+outcomeOf : ForgedFixture -> Script Outcome
+outcomeOf f = do
+  proposalLeft <- isSome <$> queryInterfaceContractId f.parties.governanceParty f.proposalCid
+  executed <- length <$> query @MockActionResult f.parties.governanceParty
+  [(_, rules)] <- query @GovernanceRules f.parties.governanceParty
+  let threshold = rules.threshold
+  forgedConfirmationLeft <- isSome <$> queryContractId f.parties.member1 f.forgedConfirmationCid
+  forgedSelfConfirmationLeft <- isSome <$> queryContractId f.parties.member1 f.forgedSelfConfirmationCid
+  pure Outcome with ..
+
+-- ============================================================================
+-- Given
+-- ============================================================================
+
+-- | Threshold 2 of 3. member1 confirms one action of each kind through the
+-- rules, then forges member2's vote for each: a copy of its own
+-- confirmation with only the governance party and the confirmer changed.
+given_member1_forged_member2_votes : Script ForgedFixture
+given_member1_forged_member2_votes = do
+  parties <- allocateTestParties
+  rulesCid <- createTestGovernance parties
+  mockCid <- submit parties.member1 $ createCmd MockProposal with
+    governanceParty = parties.governanceParty
+    proposer = parties.member1
+    label = "TestAction"
+    payload = "test"
+  let proposalCid = toInterfaceContractId @GovernableAction mockCid
+      selfAction = SelfAction_SetThreshold with updatedThreshold = 1
+  [confirmationCid] <- submitConfirmations parties.governanceParty rulesCid proposalCid
+    [parties.member1]
+  [selfConfirmationCid] <- submitSelfConfirmations parties.governanceParty rulesCid selfAction
+    [parties.member1]
+  Some confirmation <- queryContractId parties.governanceParty confirmationCid
+  Some selfConfirmation <- queryContractId parties.governanceParty selfConfirmationCid
+  forgedConfirmationCid <- submit parties.member1 $ createCmd confirmation with
+    governanceParty = parties.member1
+    confirmer = parties.member2
+  forgedSelfConfirmationCid <- submit parties.member1 $ createCmd selfConfirmation with
+    governanceParty = parties.member1
+    confirmer = parties.member2
+  pure ForgedFixture with ..
+
+-- ============================================================================
+-- When
+-- ============================================================================
+
+when_member1_executes_with_forged_confirmation : ForgedFixture -> Script Outcome
+when_member1_executes_with_forged_confirmation f = do
+  submitMustFail (memberContext f.parties.member1 f.parties.governanceParty) $
+    exerciseCmd f.rulesCid GovernanceRules_ExecuteConfirmedAction with
+      executor = f.parties.member1
+      actionProposalCid = f.proposalCid
+      confirmations = [f.confirmationCid, f.forgedConfirmationCid]
+  outcomeOf f
+
+when_member1_executes_with_forged_self_confirmation : ForgedFixture -> Script Outcome
+when_member1_executes_with_forged_self_confirmation f = do
+  submitMustFail (memberContext f.parties.member1 f.parties.governanceParty) $
+    exerciseCmd f.rulesCid GovernanceRules_ExecuteGovernanceAction with
+      executor = f.parties.member1
+      action = f.selfAction
+      confirmations = [f.selfConfirmationCid, f.forgedSelfConfirmationCid]
+  outcomeOf f
+
+when_member1_expires_forged_confirmation : ForgedFixture -> Script Outcome
+when_member1_expires_forged_confirmation f = do
+  passTime (minutes 31)
+  submitMustFail (memberContext f.parties.member1 f.parties.governanceParty) $
+    exerciseCmd f.rulesCid GovernanceRules_ExpireConfirmation with
+      member = f.parties.member1
+      staleConfirmationCid = f.forgedConfirmationCid
+  outcomeOf f
+
+when_member1_expires_forged_self_confirmation : ForgedFixture -> Script Outcome
+when_member1_expires_forged_self_confirmation f = do
+  passTime (minutes 31)
+  submitMustFail (memberContext f.parties.member1 f.parties.governanceParty) $
+    exerciseCmd f.rulesCid GovernanceRules_ExpireGovernanceSelfConfirmation with
+      member = f.parties.member1
+      staleConfirmationCid = f.forgedSelfConfirmationCid
+  outcomeOf f
+
+-- ============================================================================
+-- Then
+-- ============================================================================
+
+then_action_not_executed : ForgedFixture -> Outcome -> Script Failures
+then_action_not_executed _ o = pure $
+  shouldBe "proposal left" True o.proposalLeft <>
+  shouldBe "actions executed" 0 o.executed <>
+  shouldBe "forged confirmation left" True o.forgedConfirmationLeft
+
+then_self_action_not_executed : ForgedFixture -> Outcome -> Script Failures
+then_self_action_not_executed _ o = pure $
+  shouldBe "threshold" 2 o.threshold <>
+  shouldBe "forged self-confirmation left" True o.forgedSelfConfirmationLeft
+
+then_forged_confirmation_left : ForgedFixture -> Outcome -> Script Failures
+then_forged_confirmation_left _ o = pure $
+  shouldBe "forged confirmation left" True o.forgedConfirmationLeft
+
+then_forged_self_confirmation_left : ForgedFixture -> Outcome -> Script Failures
+then_forged_self_confirmation_left _ o = pure $
+  shouldBe "forged self-confirmation left" True o.forgedSelfConfirmationLeft
+
+-- ============================================================================
+-- Tests
+-- ============================================================================
+
+test_when_forged_confirmation_executes_action_then_rejected = script do
+  run Test with
+    given = given_member1_forged_member2_votes
+    when = when_member1_executes_with_forged_confirmation
+    then_ = then_action_not_executed
+
+test_when_forged_confirmation_executes_self_action_then_rejected = script do
+  run Test with
+    given = given_member1_forged_member2_votes
+    when = when_member1_executes_with_forged_self_confirmation
+    then_ = then_self_action_not_executed
+
+test_when_forged_confirmation_expired_through_rules_then_rejected = script do
+  run Test with
+    given = given_member1_forged_member2_votes
+    when = when_member1_expires_forged_confirmation
+    then_ = then_forged_confirmation_left
+
+test_when_forged_self_confirmation_expired_through_rules_then_rejected = script do
+  run Test with
+    given = given_member1_forged_member2_votes
+    when = when_member1_expires_forged_self_confirmation
+    then_ = then_forged_self_confirmation_left

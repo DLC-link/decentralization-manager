@@ -1,0 +1,367 @@
+-- Copyright (c) 2026 DLC-Link, Inc. and/or its affiliates. All rights reserved.
+-- SPDX-License-Identifier: Apache-2.0
+
+-- | Tests for governance self-management actions (built-in path).
+module Governance.Test.SelfActionTest where
+
+import DA.Optional (fromOptional)
+import DA.Set as Set hiding (filter)
+import DA.Time (minutes, seconds)
+import Daml.Script
+
+import Governance.Rules
+import Governance.TestUtils
+
+import TestHarness
+
+-- ============================================================================
+-- Fixtures
+-- ============================================================================
+
+data SelfFixture = SelfFixture
+  with
+    parties : TestParties
+    rulesCid : ContractId GovernanceRules
+  deriving (Eq, Show)
+
+data AddMemberOutcome = AddMemberOutcome
+  with
+    newMember : Party
+    rules : GovernanceRules
+  deriving (Eq, Show)
+
+-- | member1 and member2 confirm `action` and member1 executes it. Returns
+-- the only rules contract the governance party sees afterwards.
+executeSelf : SelfFixture -> GovernanceSelfAction -> Script GovernanceRules
+executeSelf f action = do
+  _ <- confirmAndExecuteSelf f.parties f.rulesCid action
+    [f.parties.member1, f.parties.member2] f.parties.member1
+  [(_, rules)] <- query @GovernanceRules f.parties.governanceParty
+  pure rules
+
+-- | `confirmers` confirm `action`, and member1's execute of it fails.
+executeSelfMustFail : SelfFixture -> GovernanceSelfAction -> [Party] -> Script ()
+executeSelfMustFail f action confirmers = do
+  confirmationCids <- submitSelfConfirmations f.parties.governanceParty f.rulesCid action confirmers
+  submitMustFail (memberContext f.parties.member1 f.parties.governanceParty) $
+    exerciseCmd f.rulesCid GovernanceRules_ExecuteGovernanceAction with
+      executor = f.parties.member1
+      action
+      confirmations = confirmationCids
+
+confirmSelfMustFail : SelfFixture -> Party -> GovernanceSelfAction -> Script ()
+confirmSelfMustFail f confirmer action =
+  submitMustFail (memberContext confirmer f.parties.governanceParty) $
+    exerciseCmd f.rulesCid GovernanceRules_ConfirmGovernanceAction with
+      confirmer
+      action
+
+seedSelfAction : SelfFixture -> GovernanceSelfAction -> Script (ContractId GovernanceSelfConfirmation)
+seedSelfAction f action = do
+  seed <- submit (memberContext f.parties.outsider f.parties.governanceParty) $
+    exerciseCmd f.rulesCid GovernanceRules_ConfirmGovernanceAction with
+      confirmer = f.parties.outsider
+      action
+  pure seed.confirmationCid
+
+raiseThreshold : GovernanceSelfAction
+raiseThreshold = SelfAction_SetThreshold with updatedThreshold = 3
+
+-- ============================================================================
+-- Given
+-- ============================================================================
+
+given_governance_setup : Script SelfFixture
+given_governance_setup = do
+  parties <- allocateTestParties
+  rulesCid <- createTestGovernance parties
+  pure SelfFixture with ..
+
+-- | `outsider` is an additional proposer but not a member.
+given_outsider_is_additional_proposer : Script SelfFixture
+given_outsider_is_additional_proposer = do
+  parties <- allocateTestParties
+  rulesCid <- createGovernanceWith parties (minutes 30) (Some (Set.singleton parties.outsider))
+  pure SelfFixture with ..
+
+-- | Another party is the only additional proposer; `outsider` is neither
+-- that nor a member.
+given_other_party_is_additional_proposer : Script SelfFixture
+given_other_party_is_additional_proposer = do
+  parties <- allocateTestParties
+  allowedProposer <- allocateParty "AllowedProposer"
+  rulesCid <- createGovernanceWith parties (minutes 30) (Some (Set.singleton allowedProposer))
+  pure SelfFixture with ..
+
+-- ============================================================================
+-- When
+-- ============================================================================
+
+when_member_added_with_threshold_3 : SelfFixture -> Script AddMemberOutcome
+when_member_added_with_threshold_3 f = do
+  newMember <- allocateParty "NewMember"
+  rules <- executeSelf f SelfAction_AddMemberAndSetThreshold with
+    newMember
+    newThresholdAfterAdd = 3
+  pure AddMemberOutcome with ..
+
+when_member3_removed : SelfFixture -> Script GovernanceRules
+when_member3_removed f =
+  executeSelf f SelfAction_RemoveMemberAndSetThreshold with
+    removedMember = f.parties.member3
+    newThresholdAfterRemove = 2
+
+when_threshold_set_to_3 : SelfFixture -> Script GovernanceRules
+when_threshold_set_to_3 f = executeSelf f raiseThreshold
+
+when_threshold_set_above_member_count : SelfFixture -> Script ()
+when_threshold_set_above_member_count f =
+  executeSelfMustFail f (SelfAction_SetThreshold with updatedThreshold = 4)
+    [f.parties.member1, f.parties.member2]
+
+when_threshold_set_to_0 : SelfFixture -> Script ()
+when_threshold_set_to_0 f =
+  executeSelfMustFail f (SelfAction_SetThreshold with updatedThreshold = 0)
+    [f.parties.member1, f.parties.member2]
+
+when_timeout_set_to_60_minutes : SelfFixture -> Script GovernanceRules
+when_timeout_set_to_60_minutes f =
+  executeSelf f SelfAction_SetTimeout with updatedTimeout = minutes 60
+
+-- | A timeout under 10 seconds.
+when_timeout_set_to_5_seconds : SelfFixture -> Script ()
+when_timeout_set_to_5_seconds f =
+  executeSelfMustFail f (SelfAction_SetTimeout with updatedTimeout = seconds 5)
+    [f.parties.member1, f.parties.member2]
+
+when_non_member_confirms : SelfFixture -> Script ()
+when_non_member_confirms f = confirmSelfMustFail f f.parties.outsider raiseThreshold
+
+when_non_member_executes : SelfFixture -> Script ()
+when_non_member_executes f = do
+  confirmationCids <- submitSelfConfirmations f.parties.governanceParty f.rulesCid raiseThreshold
+    [f.parties.member1, f.parties.member2]
+  submitMustFail (memberContext f.parties.outsider f.parties.governanceParty) $
+    exerciseCmd f.rulesCid GovernanceRules_ExecuteGovernanceAction with
+      executor = f.parties.outsider
+      action = raiseThreshold
+      confirmations = confirmationCids
+
+when_executed_with_one_confirmation : SelfFixture -> Script ()
+when_executed_with_one_confirmation f =
+  executeSelfMustFail f raiseThreshold [f.parties.member1]
+
+-- | member1 confirms one threshold change and member2 another; the execute
+-- of member1's action passes both confirmations.
+when_executed_with_confirmation_of_other_action : SelfFixture -> Script ()
+when_executed_with_confirmation_of_other_action f = do
+  let actionA = SelfAction_SetThreshold with updatedThreshold = 3
+      actionB = SelfAction_SetThreshold with updatedThreshold = 2
+  [confirmationA] <- submitSelfConfirmations f.parties.governanceParty f.rulesCid actionA
+    [f.parties.member1]
+  [confirmationB] <- submitSelfConfirmations f.parties.governanceParty f.rulesCid actionB
+    [f.parties.member2]
+  submitMustFail (memberContext f.parties.member1 f.parties.governanceParty) $
+    exerciseCmd f.rulesCid GovernanceRules_ExecuteGovernanceAction with
+      executor = f.parties.member1
+      action = actionA
+      confirmations = [confirmationA, confirmationB]
+
+when_outsider_added_as_additional_proposer : SelfFixture -> Script GovernanceRules
+when_outsider_added_as_additional_proposer f =
+  executeSelf f SelfAction_AddAdditionalProposer with
+    additionalProposer = f.parties.outsider
+
+when_outsider_removed_as_additional_proposer : SelfFixture -> Script GovernanceRules
+when_outsider_removed_as_additional_proposer f =
+  executeSelf f SelfAction_RemoveAdditionalProposer with
+    additionalProposer = f.parties.outsider
+
+-- | An `additionalProposer` may seed a `GovernanceSelfConfirmation` to put
+-- a self-action proposal on the ledger for members to observe. The marker
+-- coexists with member votes and is filtered out at execute time so it does
+-- not count toward the threshold.
+when_seeded_action_executed_with_member_votes : SelfFixture -> Script GovernanceRules
+when_seeded_action_executed_with_member_votes f = do
+  seed <- seedSelfAction f raiseThreshold
+  memberConfirmations <- submitSelfConfirmations f.parties.governanceParty f.rulesCid raiseThreshold
+    [f.parties.member1, f.parties.member2]
+  _ <- submit (memberContext f.parties.member1 f.parties.governanceParty) $
+    exerciseCmd f.rulesCid GovernanceRules_ExecuteGovernanceAction with
+      executor = f.parties.member1
+      action = raiseThreshold
+      confirmations = seed :: memberConfirmations
+  [(_, rules)] <- query @GovernanceRules f.parties.governanceParty
+  pure rules
+
+-- | Only member confirmations count toward the threshold.
+when_seeded_action_executed_alone : SelfFixture -> Script ()
+when_seeded_action_executed_alone f = do
+  seed <- seedSelfAction f raiseThreshold
+  submitMustFail (memberContext f.parties.member1 f.parties.governanceParty) $
+    exerciseCmd f.rulesCid GovernanceRules_ExecuteGovernanceAction with
+      executor = f.parties.member1
+      action = raiseThreshold
+      confirmations = [seed]
+
+-- | The allowlist widens the confirm gate only to its own parties.
+when_stranger_confirms : SelfFixture -> Script ()
+when_stranger_confirms f = confirmSelfMustFail f f.parties.outsider raiseThreshold
+
+-- | `members` and `additionalProposers` must remain disjoint.
+when_additional_proposer_added_as_member : SelfFixture -> Script ()
+when_additional_proposer_added_as_member f =
+  executeSelfMustFail f
+    (SelfAction_AddMemberAndSetThreshold with
+      newMember = f.parties.outsider
+      newThresholdAfterAdd = 3)
+    [f.parties.member1, f.parties.member2]
+
+-- ============================================================================
+-- Then
+-- ============================================================================
+
+then_new_member_added_with_threshold_3 : SelfFixture -> AddMemberOutcome -> Script Failures
+then_new_member_added_with_threshold_3 _ o = pure $
+  shouldBe "new member in set" True (o.newMember `Set.member` o.rules.members) <>
+  shouldBe "threshold" 3 o.rules.threshold <>
+  shouldBe "member count" 4 (Set.size o.rules.members)
+
+then_member3_gone : SelfFixture -> GovernanceRules -> Script Failures
+then_member3_gone f rules = pure $
+  shouldBe "member3 in set" False (f.parties.member3 `Set.member` rules.members) <>
+  shouldBe "member count" 2 (Set.size rules.members)
+
+then_threshold_is_3 : SelfFixture -> GovernanceRules -> Script Failures
+then_threshold_is_3 _ rules = pure $
+  shouldBe "threshold" 3 rules.threshold
+
+then_timeout_is_60_minutes : SelfFixture -> GovernanceRules -> Script Failures
+then_timeout_is_60_minutes _ rules = pure $
+  shouldBe "timeout" (minutes 60) rules.actionConfirmationTimeout
+
+then_outsider_is_only_additional_proposer : SelfFixture -> GovernanceRules -> Script Failures
+then_outsider_is_only_additional_proposer f rules = do
+  let additionalProposers = fromOptional Set.empty rules.additionalProposers
+  pure $
+    shouldBe "outsider is additional proposer" True
+      (f.parties.outsider `Set.member` additionalProposers) <>
+    shouldBe "additional proposer count" 1 (Set.size additionalProposers)
+
+then_additional_proposers_normalized_to_none : SelfFixture -> GovernanceRules -> Script Failures
+then_additional_proposers_normalized_to_none f rules = do
+  let additionalProposers = fromOptional Set.empty rules.additionalProposers
+  pure $
+    shouldBe "outsider is additional proposer" False
+      (f.parties.outsider `Set.member` additionalProposers) <>
+    shouldBe "additional proposer count" 0 (Set.size additionalProposers) <>
+    shouldBe "additionalProposers" None rules.additionalProposers
+
+then_nothing : SelfFixture -> () -> Script Failures
+then_nothing _ _ = pure []
+
+-- ============================================================================
+-- Tests
+-- ============================================================================
+
+test_when_member_added_then_members_and_threshold_updated = script do
+  run Test with
+    given = given_governance_setup
+    when = when_member_added_with_threshold_3
+    then_ = then_new_member_added_with_threshold_3
+
+test_when_member_removed_then_members_updated = script do
+  run Test with
+    given = given_governance_setup
+    when = when_member3_removed
+    then_ = then_member3_gone
+
+test_when_threshold_set_then_updated = script do
+  run Test with
+    given = given_governance_setup
+    when = when_threshold_set_to_3
+    then_ = then_threshold_is_3
+
+test_when_threshold_set_above_member_count_then_rejected = script do
+  run Test with
+    given = given_governance_setup
+    when = when_threshold_set_above_member_count
+    then_ = then_nothing
+
+test_when_threshold_set_below_one_then_rejected = script do
+  run Test with
+    given = given_governance_setup
+    when = when_threshold_set_to_0
+    then_ = then_nothing
+
+test_when_timeout_set_then_updated = script do
+  run Test with
+    given = given_governance_setup
+    when = when_timeout_set_to_60_minutes
+    then_ = then_timeout_is_60_minutes
+
+test_when_timeout_set_below_10_seconds_then_rejected = script do
+  run Test with
+    given = given_governance_setup
+    when = when_timeout_set_to_5_seconds
+    then_ = then_nothing
+
+test_when_non_member_confirms_self_action_then_rejected = script do
+  run Test with
+    given = given_governance_setup
+    when = when_non_member_confirms
+    then_ = then_nothing
+
+test_when_non_member_executes_self_action_then_rejected = script do
+  run Test with
+    given = given_governance_setup
+    when = when_non_member_executes
+    then_ = then_nothing
+
+test_when_self_action_has_too_few_confirmations_then_rejected = script do
+  run Test with
+    given = given_governance_setup
+    when = when_executed_with_one_confirmation
+    then_ = then_nothing
+
+test_when_self_confirmations_name_different_actions_then_rejected = script do
+  run Test with
+    given = given_governance_setup
+    when = when_executed_with_confirmation_of_other_action
+    then_ = then_nothing
+
+test_when_additional_proposer_added_then_listed = script do
+  run Test with
+    given = given_governance_setup
+    when = when_outsider_added_as_additional_proposer
+    then_ = then_outsider_is_only_additional_proposer
+
+test_when_last_additional_proposer_removed_then_none = script do
+  run Test with
+    given = given_outsider_is_additional_proposer
+    when = when_outsider_removed_as_additional_proposer
+    then_ = then_additional_proposers_normalized_to_none
+
+test_when_additional_proposer_seeds_self_action_then_member_votes_execute_it = script do
+  run Test with
+    given = given_outsider_is_additional_proposer
+    when = when_seeded_action_executed_with_member_votes
+    then_ = then_threshold_is_3
+
+test_when_only_additional_proposer_confirmed_then_execute_rejected = script do
+  run Test with
+    given = given_outsider_is_additional_proposer
+    when = when_seeded_action_executed_alone
+    then_ = then_nothing
+
+test_when_stranger_confirms_self_action_then_rejected = script do
+  run Test with
+    given = given_other_party_is_additional_proposer
+    when = when_stranger_confirms
+    then_ = then_nothing
+
+test_when_additional_proposer_added_as_member_then_rejected = script do
+  run Test with
+    given = given_outsider_is_additional_proposer
+    when = when_additional_proposer_added_as_member
+    then_ = then_nothing

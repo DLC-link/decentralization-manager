@@ -114,6 +114,7 @@ fi
 trap cleanup EXIT
 
 check_prerequisites
+prepare_governance_v2_fixture "$TARGET" "${DECPM_E2E_TEST:-governance_workflows_e2e}" "$SCRIPT_DIR"
 
 # Port-free check applies to both targets: PR #142 moved devnet to a
 # bare-process bringup (no longer docker-compose), so the same 6 ports

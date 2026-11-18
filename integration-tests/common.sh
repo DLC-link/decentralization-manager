@@ -117,6 +117,36 @@ check_prerequisites() {
     fi
 }
 
+# CI supplies this source-built DAR as an artifact. Local runs rebuild it so
+# an earlier build cannot hide a change to the confirmation model.
+prepare_governance_v2_fixture() {
+    local target=$1
+    local test_name=$2
+    local repo_root=$3
+    if [ "$target" != "localnet" ] || [ "$test_name" != "governance_workflows_e2e" ]; then
+        return 0
+    fi
+
+    local dar="$repo_root/daml/governance-core-v2/.daml/dist/governance-core-v2-0.1.0.dar"
+    if [ "${GITHUB_ACTIONS:-}" != "true" ]; then
+        local dpm
+        if command -v dpm >/dev/null 2>&1; then
+            dpm=$(command -v dpm)
+        elif [ -x "${HOME}/.dpm/bin/dpm" ]; then
+            dpm="${HOME}/.dpm/bin/dpm"
+        else
+            echo "ERROR: The full localnet suite needs dpm and the pinned Daml SDKs. See docs/CONTRIBUTING.md." >&2
+            return 1
+        fi
+        log_phase "Building governance v2 liveness fixture"
+        (cd "$repo_root/daml" && "$dpm" build --all) || return
+    fi
+    if [ ! -s "$dar" ]; then
+        echo "ERROR: Governance v2 liveness fixture is missing or empty: $dar" >&2
+        return 1
+    fi
+}
+
 # ============================================================================
 # Port availability
 # ============================================================================

@@ -1,0 +1,530 @@
+-- Copyright (c) 2026 DLC-Link, Inc. and/or its affiliates. All rights reserved.
+-- SPDX-License-Identifier: Apache-2.0
+
+-- | Core governance rules template.
+-- Provides multi-signature governance with two paths:
+-- 1. Built-in self-management (member/threshold/timeout changes) via closed enum
+-- 2. Extensible domain actions via the GovernableAction interface
+module Governance.Rules where
+
+import DA.List (unique)
+import DA.Optional (fromOptional)
+import DA.Set as Set hiding (filter)
+import DA.Time (RelTime, addRelTime, seconds)
+import Splice.Util (require)
+
+import Governance.Action
+import Governance.Confirmation
+import Governance.ExecutionResult
+
+
+-- ============================================================================
+-- Self-Management Types
+-- ============================================================================
+
+-- | Actions that modify the governance rules themselves.
+-- Small, closed enum — these use direct `self` access to avoid stale ContractId issues.
+data GovernanceSelfAction
+  = SelfAction_AddMemberAndSetThreshold
+      { newMember : Party
+      , newThresholdAfterAdd : Int
+      }
+  | SelfAction_RemoveMemberAndSetThreshold
+      { removedMember : Party
+      , newThresholdAfterRemove : Int
+      }
+  | SelfAction_SetThreshold
+      { updatedThreshold : Int
+      }
+  | SelfAction_SetTimeout
+      { updatedTimeout : RelTime
+      }
+  | SelfAction_AddAdditionalProposer
+      { additionalProposer : Party
+      }
+  | SelfAction_RemoveAdditionalProposer
+      { additionalProposer : Party
+      }
+  | SelfAction_SetDisclosureObservers
+      { updatedDisclosureObservers : Optional (Set Party)
+      }
+  | SelfAction_CancelAction
+      { actionProposalCid : ContractId GovernableAction
+      }
+  deriving (Show, Eq)
+
+-- | A confirmation for a governance self-management action.
+-- Uses value equality on GovernanceSelfAction for matching (closed enum, safe to compare).
+--
+-- This template is signed, checked and trusted like `GovernanceConfirmation`.
+-- The governance party alone signs it, and the confirmer is a plain field.
+-- An additional proposer that does not host the governance party is
+-- therefore not a stakeholder. It cannot see or cancel the confirmation it
+-- creates. Governance members can still expire it once its timeout passes.
+template GovernanceSelfConfirmation
+  with
+    governanceParty : Party
+      -- ^ The governance party this confirmation belongs to.
+    confirmer : Party
+      -- ^ The governance member who created this confirmation.
+    action : GovernanceSelfAction
+      -- ^ The self-management action being confirmed.
+    expiresAt : Time
+      -- ^ When this confirmation becomes invalid.
+  where
+    signatory governanceParty
+
+    -- | Consume this confirmation during action execution.
+    choice GovernanceSelfConfirmation_Consume : GovernanceSelfConfirmation
+      controller governanceParty
+      do
+        now <- getTime
+        require "Self-confirmation has expired" (now < expiresAt)
+        pure this
+
+    -- | Expire a stale confirmation.
+    choice GovernanceSelfConfirmation_Expire : ()
+      controller governanceParty
+      do
+        now <- getTime
+        require "Self-confirmation has not expired yet" (now > expiresAt)
+
+    -- | Allow the confirmer to cancel their own confirmation.
+    choice GovernanceSelfConfirmation_Cancel : ()
+      controller confirmer
+      do pure ()
+
+-- ============================================================================
+-- Result Types
+-- ============================================================================
+
+data GovernanceRules_AddMemberAndSetThresholdResult = GovernanceRules_AddMemberAndSetThresholdResult
+  with governanceRulesCid : ContractId GovernanceRules
+  deriving (Show, Eq)
+
+data GovernanceRules_RemoveMemberAndSetThresholdResult = GovernanceRules_RemoveMemberAndSetThresholdResult
+  with governanceRulesCid : ContractId GovernanceRules
+  deriving (Show, Eq)
+
+data GovernanceRules_SetThresholdResult = GovernanceRules_SetThresholdResult
+  with governanceRulesCid : ContractId GovernanceRules
+  deriving (Show, Eq)
+
+data GovernanceRules_SetActionConfirmationTimeoutResult = GovernanceRules_SetActionConfirmationTimeoutResult
+  with governanceRulesCid : ContractId GovernanceRules
+  deriving (Show, Eq)
+
+data GovernanceRules_AddAdditionalProposerResult = GovernanceRules_AddAdditionalProposerResult
+  with governanceRulesCid : ContractId GovernanceRules
+  deriving (Show, Eq)
+
+data GovernanceRules_RemoveAdditionalProposerResult = GovernanceRules_RemoveAdditionalProposerResult
+  with governanceRulesCid : ContractId GovernanceRules
+  deriving (Show, Eq)
+
+data GovernanceRules_SetDisclosureObserversResult = GovernanceRules_SetDisclosureObserversResult
+  with governanceRulesCid : ContractId GovernanceRules
+  deriving (Show, Eq)
+
+data GovernanceRules_ConfirmGovernanceActionResult = GovernanceRules_ConfirmGovernanceActionResult
+  with confirmationCid : ContractId GovernanceSelfConfirmation
+  deriving (Show, Eq)
+
+data GovernanceRules_ExecuteGovernanceActionResult = GovernanceRules_ExecuteGovernanceActionResult
+  with governanceRulesCid : ContractId GovernanceRules
+  deriving (Show, Eq)
+
+data GovernanceRules_ConfirmActionResult = GovernanceRules_ConfirmActionResult
+  with confirmationCid : ContractId GovernanceConfirmation
+  deriving (Show, Eq)
+
+-- ============================================================================
+-- Helpers
+-- ============================================================================
+
+-- | Validate that a threshold is valid for a given member count.
+validateThresholdForMemberCount : Int -> Int -> Update ()
+validateThresholdForMemberCount memberCount newThreshold = do
+  require "Threshold must be at least 1" (newThreshold >= 1)
+  require "Threshold cannot exceed member count" (newThreshold <= memberCount)
+
+-- ============================================================================
+-- Core Governance Template
+-- ============================================================================
+
+-- | The core governance rules contract.
+-- Manages a committee of members who must reach threshold consensus
+-- to execute privileged operations.
+template GovernanceRules
+  with
+    governanceParty : Party
+      -- ^ The decentralized governance party. Members host this party on their
+      -- participants with readAs rights for visibility.
+    members : Set Party
+      -- ^ Set of governance members who can confirm and execute actions.
+    threshold : Int
+      -- ^ Number of confirmations required to execute any action.
+    actionConfirmationTimeout : RelTime
+      -- ^ How long a confirmation remains valid before expiring.
+    additionalProposers : Optional (Set Party)
+      -- ^ Optional allowlist of parties that may propose GovernableActions
+      -- but cannot confirm or execute. The authoritative on-chain proposer
+      -- set is @members ∪ fromOptional Set.empty additionalProposers@.
+      -- @None@ is the canonical form for "no allowlist"; the Add/Remove
+      -- self-actions normalize the set back to @None@ when it becomes empty.
+    disclosureObservers : Optional (Set Party)
+      -- ^ Optional parties that observe this contract without hosting the
+      -- governance party, such as an additional proposer on another
+      -- participant (#165). Observing grants no right to confirm or execute.
+      -- @None@ is the canonical form for "no observers". A contract created
+      -- before this field existed reads as @None@ and gains observers only
+      -- when `SelfAction_SetDisclosureObservers` replaces it.
+  where
+    signatory governanceParty
+    -- Note: members are NOT observers. In Canton, each member hosts the
+    -- governance party on their participant with readAs rights. This keeps
+    -- visibility as a topology concern rather than a contract modeling concern.
+    -- `disclosureObservers` is the opt-in exception for parties that do not
+    -- host the governance party.
+    observer fromOptional Set.empty disclosureObservers
+    ensure not (Set.null members)
+        && threshold >= 1
+        && threshold <= Set.size members
+        && actionConfirmationTimeout >= seconds 10
+
+    -- ════════════════════════════════════════════════════════════════════════
+    -- BUILT-IN: Governance self-management choices
+    -- These are consuming choices that modify `self` directly.
+    -- They are controlled by governanceParty and invoked from
+    -- ExecuteGovernanceAction after threshold validation.
+    -- ════════════════════════════════════════════════════════════════════════
+
+    -- | Add a new member and set the threshold.
+    choice GovernanceRules_AddMemberAndSetThreshold
+        : GovernanceRules_AddMemberAndSetThresholdResult
+      with
+        member : Party
+        newThreshold : Int
+      controller governanceParty
+      do
+        require "Not yet a member" (member `Set.notMember` members)
+        require "Member must not also be an additional proposer"
+          (optional True (Set.notMember member) additionalProposers)
+        let newMembers = Set.insert member members
+        validateThresholdForMemberCount (Set.size newMembers) newThreshold
+        governanceRulesCid <- create this with
+          members = newMembers
+          threshold = newThreshold
+        pure GovernanceRules_AddMemberAndSetThresholdResult with governanceRulesCid
+
+    -- | Remove a member and set the threshold.
+    choice GovernanceRules_RemoveMemberAndSetThreshold
+        : GovernanceRules_RemoveMemberAndSetThresholdResult
+      with
+        member : Party
+        newThreshold : Int
+      controller governanceParty
+      do
+        require "Is a member" (member `Set.member` members)
+        let newMembers = Set.delete member members
+        require "Cannot remove last member" (not (Set.null newMembers))
+        validateThresholdForMemberCount (Set.size newMembers) newThreshold
+        governanceRulesCid <- create this with
+          members = newMembers
+          threshold = newThreshold
+        pure GovernanceRules_RemoveMemberAndSetThresholdResult with governanceRulesCid
+
+    -- | Set the threshold independently.
+    choice GovernanceRules_SetThreshold
+        : GovernanceRules_SetThresholdResult
+      with
+        newThreshold : Int
+      controller governanceParty
+      do
+        validateThresholdForMemberCount (Set.size members) newThreshold
+        governanceRulesCid <- create this with threshold = newThreshold
+        pure GovernanceRules_SetThresholdResult with governanceRulesCid
+
+    -- | Set the action confirmation timeout.
+    choice GovernanceRules_SetActionConfirmationTimeout
+        : GovernanceRules_SetActionConfirmationTimeoutResult
+      with
+        newTimeout : RelTime
+      controller governanceParty
+      do
+        require "Timeout must be at least 10 seconds" (newTimeout >= seconds 10)
+        governanceRulesCid <- create this with actionConfirmationTimeout = newTimeout
+        pure GovernanceRules_SetActionConfirmationTimeoutResult with governanceRulesCid
+
+    -- | Add a party to the additional-proposers allowlist.
+    choice GovernanceRules_AddAdditionalProposer
+        : GovernanceRules_AddAdditionalProposerResult
+      with
+        additionalProposer : Party
+      controller governanceParty
+      do
+        let currentSet = fromOptional Set.empty additionalProposers
+        require "Already an additional proposer"
+          (additionalProposer `Set.notMember` currentSet)
+        require "Additional proposer must not also be a member"
+          (additionalProposer `Set.notMember` members)
+        let newSet = Set.insert additionalProposer currentSet
+        governanceRulesCid <- create this with additionalProposers = Some newSet
+        pure GovernanceRules_AddAdditionalProposerResult with governanceRulesCid
+
+    -- | Remove a party from the additional-proposers allowlist.
+    choice GovernanceRules_RemoveAdditionalProposer
+        : GovernanceRules_RemoveAdditionalProposerResult
+      with
+        additionalProposer : Party
+      controller governanceParty
+      do
+        let currentSet = fromOptional Set.empty additionalProposers
+        require "Not an additional proposer"
+          (additionalProposer `Set.member` currentSet)
+        let newSet = Set.delete additionalProposer currentSet
+        let normalized = if Set.null newSet then None else Some newSet
+        governanceRulesCid <- create this with additionalProposers = normalized
+        pure GovernanceRules_RemoveAdditionalProposerResult with governanceRulesCid
+
+    -- | Replace the disclosure observers. An empty set normalizes to @None@.
+    choice GovernanceRules_SetDisclosureObservers
+        : GovernanceRules_SetDisclosureObserversResult
+      with
+        newDisclosureObservers : Optional (Set Party)
+      controller governanceParty
+      do
+        let normalized = case newDisclosureObservers of
+              Some observers | Set.null observers -> None
+              _ -> newDisclosureObservers
+        governanceRulesCid <- create this with disclosureObservers = normalized
+        pure GovernanceRules_SetDisclosureObserversResult with governanceRulesCid
+
+    -- ════════════════════════════════════════════════════════════════════════
+    -- BUILT-IN: Self-management confirm & execute
+    -- Uses GovernanceSelfAction (closed enum) for value-based matching.
+    -- ════════════════════════════════════════════════════════════════════════
+
+    -- | Confirm a governance self-management action.
+    --
+    -- `additionalProposers` may also submit a `GovernanceSelfConfirmation`,
+    -- which gives external admins (e.g. a federation operator) a way to seed
+    -- a self-action proposal on-chain for members to observe and then vote on
+    -- via their own confirmations. Confirmations from non-members are treated
+    -- purely as proposal markers — `ExecuteGovernanceAction` filters them out
+    -- before counting threshold, so voting power stays members-only.
+    nonconsuming choice GovernanceRules_ConfirmGovernanceAction
+        : GovernanceRules_ConfirmGovernanceActionResult
+      with
+        confirmer : Party
+        action : GovernanceSelfAction
+      controller confirmer
+      do
+        require "Confirmer is a member or additional proposer"
+          (confirmer `Set.member` members
+            || optional False (Set.member confirmer) additionalProposers)
+        now <- getTime
+        confirmationCid <- create GovernanceSelfConfirmation with
+          governanceParty
+          confirmer
+          action
+          expiresAt = now `addRelTime` actionConfirmationTimeout
+        pure GovernanceRules_ConfirmGovernanceActionResult with ..
+
+    -- | Execute a governance self-management action after threshold confirmations.
+    -- Note: this is nonconsuming — the inner choices (AddMember, SetThreshold, etc.)
+    -- handle consuming `self` and creating the new contract.
+    nonconsuming choice GovernanceRules_ExecuteGovernanceAction
+        : GovernanceRules_ExecuteGovernanceActionResult
+      with
+        executor : Party
+        action : GovernanceSelfAction
+        confirmations : [ContractId GovernanceSelfConfirmation]
+      controller executor
+      do
+        require "Executor is a governance member" (executor `Set.member` members)
+
+        -- Consume and validate confirmations. Confirmations from
+        -- `additionalProposers` are tolerated in the input list (they exist as
+        -- proposal markers, see `ConfirmGovernanceAction`) but filtered out
+        -- before counting threshold — only member votes count toward N.
+        now <- getTime
+        fetched <- mapA (\cid -> exercise cid GovernanceSelfConfirmation_Consume) confirmations
+        require "All confirmations belong to this governance party"
+          (all (\c -> c.governanceParty == governanceParty) fetched)
+        let valid = filter (\c -> c.expiresAt > now) fetched
+        let memberVotes = filter (\c -> c.confirmer `Set.member` members) valid
+        require "All confirmations must match the action being executed"
+          (all (\c -> c.action == action) valid)
+        require "No duplicate member confirmers"
+          (unique $ map (.confirmer) memberVotes)
+        require "Enough member confirmations to execute action"
+          (length memberVotes >= threshold)
+
+        -- Dispatch to the appropriate built-in choice
+        governanceRulesCid <- case action of
+          SelfAction_AddMemberAndSetThreshold newMember newThresholdAfterAdd -> do
+            result <- exercise self GovernanceRules_AddMemberAndSetThreshold with
+              member = newMember
+              newThreshold = newThresholdAfterAdd
+            pure result.governanceRulesCid
+
+          SelfAction_RemoveMemberAndSetThreshold removedMember newThresholdAfterRemove -> do
+            result <- exercise self GovernanceRules_RemoveMemberAndSetThreshold with
+              member = removedMember
+              newThreshold = newThresholdAfterRemove
+            pure result.governanceRulesCid
+
+          SelfAction_SetThreshold updatedThreshold -> do
+            result <- exercise self GovernanceRules_SetThreshold with
+              newThreshold = updatedThreshold
+            pure result.governanceRulesCid
+
+          SelfAction_SetTimeout updatedTimeout -> do
+            result <- exercise self GovernanceRules_SetActionConfirmationTimeout with
+              newTimeout = updatedTimeout
+            pure result.governanceRulesCid
+
+          SelfAction_AddAdditionalProposer additionalProposer -> do
+            result <- exercise self GovernanceRules_AddAdditionalProposer with
+              additionalProposer
+            pure result.governanceRulesCid
+
+          SelfAction_RemoveAdditionalProposer additionalProposer -> do
+            result <- exercise self GovernanceRules_RemoveAdditionalProposer with
+              additionalProposer
+            pure result.governanceRulesCid
+
+          SelfAction_SetDisclosureObservers updatedDisclosureObservers -> do
+            result <- exercise self GovernanceRules_SetDisclosureObservers with
+              newDisclosureObservers = updatedDisclosureObservers
+            pure result.governanceRulesCid
+
+          -- See the cancellation note below. The rules contract is unchanged.
+          SelfAction_CancelAction actionProposalCid -> do
+            actionView <- view <$> fetch actionProposalCid
+            require "Cancelled proposal targets this governance"
+              (actionView.governanceParty == governanceParty)
+            exercise actionProposalCid GovernableAction_Cancel
+            pure self
+        pure GovernanceRules_ExecuteGovernanceActionResult with ..
+
+    -- | Expire a stale self-management confirmation.
+    nonconsuming choice GovernanceRules_ExpireGovernanceSelfConfirmation : ()
+      with
+        member : Party
+        staleConfirmationCid : ContractId GovernanceSelfConfirmation
+      controller member
+      do
+        require "Only governance members can expire confirmations" (member `Set.member` members)
+        staleConfirmation <- fetch staleConfirmationCid
+        require "Confirmation belongs to this governance party"
+          (staleConfirmation.governanceParty == governanceParty)
+        exercise staleConfirmationCid GovernanceSelfConfirmation_Expire
+
+    -- ════════════════════════════════════════════════════════════════════════
+    -- EXTENSIBLE: Domain actions via GovernableAction interface
+    -- New action types are added by deploying new templates that implement
+    -- the GovernableAction interface — no changes to this module needed.
+    -- ════════════════════════════════════════════════════════════════════════
+
+    -- | Confirm an action proposal (GovernableAction interface).
+    nonconsuming choice GovernanceRules_ConfirmAction
+        : GovernanceRules_ConfirmActionResult
+      with
+        confirmer : Party
+        actionProposalCid : ContractId GovernableAction
+      controller confirmer
+      do
+        require "Confirmer is a governance member" (confirmer `Set.member` members)
+        actionView <- view <$> fetch actionProposalCid
+        require "Proposal targets this governance"
+          (actionView.governanceParty == governanceParty)
+        -- Proposer must be a member or an additional proposer. Canton has
+        -- already enforced that the on-chain `proposer` field is authentic
+        -- (the submitting participant must `actAs` that party); this check
+        -- enforces the trust boundary on top of that authenticity guarantee.
+        require "Proposer is authorized (member or additional proposer)"
+          (actionView.proposer `Set.member` members
+            || optional False (Set.member actionView.proposer) additionalProposers)
+        now <- getTime
+        confirmationCid <- create GovernanceConfirmation with
+          governanceParty
+          confirmer
+          actionProposalCid
+          actionLabel = actionView.actionLabel
+          expiresAt = now `addRelTime` actionConfirmationTimeout
+        pure GovernanceRules_ConfirmActionResult with ..
+
+    -- | Execute a confirmed action proposal after threshold confirmations are collected.
+    -- Creates a GovernanceExecutionResult contract as an on-chain audit trail.
+    nonconsuming choice GovernanceRules_ExecuteConfirmedAction
+        : ExecuteConfirmedActionResult
+      with
+        executor : Party
+        actionProposalCid : ContractId GovernableAction
+        confirmations : [ContractId GovernanceConfirmation]
+      controller executor
+      do
+        require "Executor is a governance member" (executor `Set.member` members)
+
+        -- Consume and validate confirmations
+        now <- getTime
+        fetched <- mapA (\cid -> exercise cid GovernanceConfirmation_Consume) confirmations
+        require "All confirmations belong to this governance party"
+          (all (\c -> c.governanceParty == governanceParty) fetched)
+        let valid = filter (\c -> c.expiresAt > now) fetched
+        require "All confirmations must reference the same proposal"
+          (all (\c -> c.actionProposalCid == actionProposalCid) valid)
+        require "All confirmers must be current governance members"
+          (all (\c -> c.confirmer `Set.member` members) valid)
+        require "No duplicate confirmers"
+          (unique $ map (.confirmer) valid)
+        require "Enough confirmations to execute action"
+          (length valid >= threshold)
+
+        -- Capture proposal metadata before execution consumes the contract
+        actionView <- view <$> fetch actionProposalCid
+
+        -- Execute: governanceParty's authority flows via exercise chain
+        exercise actionProposalCid GovernableAction_Execute
+
+        -- Create audit trail
+        executionResultCid <- create GovernanceExecutionResult with
+          governanceParty
+          actionLabel = actionView.actionLabel
+          description = actionView.description
+          executor
+          confirmers = map (.confirmer) valid
+          executedAt = now
+        pure ExecuteConfirmedActionResult with ..
+
+    -- Note: Proposal cancellation lives on the GovernableAction interface,
+    -- not as a GovernanceRules choice. The interface exposes two paths:
+    --   * GovernableAction_ProposerCancel — controlled by the proposer, lets
+    --     them retract their own proposal without a governance vote.
+    --   * GovernableAction_Cancel — controlled by governanceParty, used when
+    --     governance needs to clean up a stale proposal. Members reach it by
+    --     voting `SelfAction_CancelAction`, e.g. for a proposal whose proposer
+    --     the rules no longer authorize (#518).
+    -- Cancelling leaves the proposal's confirmations in place. They reference
+    -- an archived contract, so ExecuteConfirmedAction fails on them; each
+    -- confirmer cancels its own, or a member expires them later.
+    -- A cancellation vote has no proposer, so a change in proposer rights
+    -- cannot strand it. Its confirmations name the action, not a rules
+    -- contract, so they survive a membership change, and execution counts
+    -- only current members. If the proposal is archived first, execution
+    -- fails and the cancellation's confirmations expire unused.
+
+    -- | Expire a stale action confirmation.
+    nonconsuming choice GovernanceRules_ExpireConfirmation : ()
+      with
+        member : Party
+        staleConfirmationCid : ContractId GovernanceConfirmation
+      controller member
+      do
+        require "Only governance members can expire confirmations" (member `Set.member` members)
+        staleConfirmation <- fetch staleConfirmationCid
+        require "Confirmation belongs to this governance party"
+          (staleConfirmation.governanceParty == governanceParty)
+        exercise staleConfirmationCid GovernanceConfirmation_Expire

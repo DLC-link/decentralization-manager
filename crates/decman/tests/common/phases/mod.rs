@@ -25,6 +25,7 @@ pub mod external_party_tenant;
 pub mod external_party_unhost;
 pub mod generate_keys_idempotent;
 pub mod generic_vote;
+pub mod governance_v2_offline_confirmer;
 pub mod identity_survives_dismiss;
 pub mod invite_cap;
 pub mod invite_survives_peer_restart;

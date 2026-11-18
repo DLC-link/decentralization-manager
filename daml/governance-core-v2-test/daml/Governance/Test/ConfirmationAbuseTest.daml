@@ -1,0 +1,446 @@
+-- Copyright (c) 2026 DLC-Link, Inc. and/or its affiliates. All rights reserved.
+-- SPDX-License-Identifier: Apache-2.0
+
+-- | Tests that one member cannot exceed its power now that the governance
+-- party alone signs a confirmation (#615). Each test tries one way to make
+-- the rules count a vote that they must not count.
+module Governance.Test.ConfirmationAbuseTest where
+
+import DA.List (sort)
+import DA.Optional (isSome)
+import DA.Set qualified as Set
+import DA.Time (addRelTime, minutes)
+import Daml.Script
+
+import Governance.Action (GovernableAction)
+import Governance.Confirmation
+import Governance.MockActions
+import Governance.Rules
+import Governance.TestUtils
+
+import TestHarness
+
+-- ============================================================================
+-- Fixtures
+-- ============================================================================
+
+data AbuseFixture = AbuseFixture
+  with
+    parties : TestParties
+      -- ^ `outsider` is an additional proposer, not a member.
+    rulesCid : ContractId GovernanceRules
+    proposalCid : ContractId GovernableAction
+      -- ^ member1's proposal to the governance party.
+  deriving (Eq, Show)
+
+-- | What the governance party sees after an attempt.
+data Ledger = Ledger
+  with
+    rules : GovernanceRules
+      -- ^ The only active rules contract.
+    proposalLeft : Bool
+    executed : Int
+    confirmers : [Party]
+      -- ^ Confirmers of the active action confirmations, sorted.
+    selfConfirmers : [Party]
+      -- ^ Confirmers of the active self-action confirmations, sorted.
+  deriving (Eq, Show)
+
+ledgerOf : AbuseFixture -> Script Ledger
+ledgerOf f = do
+  let gp = f.parties.governanceParty
+  [(_, rules)] <- query @GovernanceRules gp
+  proposalLeft <- isSome <$> queryInterfaceContractId gp f.proposalCid
+  executed <- length <$> query @MockActionResult gp
+  confirmers <- sort . map ((.confirmer) . snd) <$> query @GovernanceConfirmation gp
+  selfConfirmers <- sort . map ((.confirmer) . snd) <$> query @GovernanceSelfConfirmation gp
+  pure Ledger with ..
+
+-- | The self-action under attack. It leaves members and threshold alone,
+-- so a member removal does not make it invalid.
+longerTimeout : GovernanceSelfAction
+longerTimeout = SelfAction_SetTimeout with updatedTimeout = minutes 60
+
+-- | member1's execute of `f.proposalCid` on `rulesCid` fails.
+executeActionMustFail : AbuseFixture -> ContractId GovernanceRules -> [ContractId GovernanceConfirmation] -> Script ()
+executeActionMustFail f rulesCid confirmations =
+  submitMustFail (memberContext f.parties.member1 f.parties.governanceParty) $
+    exerciseCmd rulesCid GovernanceRules_ExecuteConfirmedAction with
+      executor = f.parties.member1
+      actionProposalCid = f.proposalCid
+      confirmations
+
+-- | member1's execute of `longerTimeout` on `rulesCid` fails.
+executeSelfMustFail : AbuseFixture -> ContractId GovernanceRules -> [ContractId GovernanceSelfConfirmation] -> Script ()
+executeSelfMustFail f rulesCid confirmations =
+  submitMustFail (memberContext f.parties.member1 f.parties.governanceParty) $
+    exerciseCmd rulesCid GovernanceRules_ExecuteGovernanceAction with
+      executor = f.parties.member1
+      action = longerTimeout
+      confirmations
+
+seedAsOutsider : AbuseFixture -> Script (ContractId GovernanceSelfConfirmation)
+seedAsOutsider f = do
+  result <- submit (memberContext f.parties.outsider f.parties.governanceParty) $
+    exerciseCmd f.rulesCid GovernanceRules_ConfirmGovernanceAction with
+      confirmer = f.parties.outsider
+      action = longerTimeout
+  pure result.confirmationCid
+
+-- | Members vote member3 out and keep the threshold at 2.
+removeMember3 : AbuseFixture -> Script (ContractId GovernanceRules)
+removeMember3 f =
+  confirmAndExecuteSelf f.parties f.rulesCid
+    (SelfAction_RemoveMemberAndSetThreshold with
+      removedMember = f.parties.member3
+      newThresholdAfterRemove = 2)
+    [f.parties.member1, f.parties.member2] f.parties.member1
+
+-- ============================================================================
+-- Given
+-- ============================================================================
+
+-- | Threshold 2 of 3, a 30-minute timeout, `outsider` as an additional
+-- proposer, and one open proposal from member1.
+given_open_proposal : Script AbuseFixture
+given_open_proposal = do
+  parties <- allocateTestParties
+  rulesCid <- createGovernanceWith parties (minutes 30) (Some (Set.singleton parties.outsider))
+  proposalCid <- proposeMock parties parties.member1 "TestAction" "test"
+  pure AbuseFixture with ..
+
+-- ============================================================================
+-- When
+-- ============================================================================
+
+-- | member1 names member2 as the confirmer of each confirm choice.
+when_member1_confirms_in_member2s_name : AbuseFixture -> Script Ledger
+when_member1_confirms_in_member2s_name f = do
+  submitMustFail (memberContext f.parties.member1 f.parties.governanceParty) $
+    exerciseCmd f.rulesCid GovernanceRules_ConfirmAction with
+      confirmer = f.parties.member2
+      actionProposalCid = f.proposalCid
+  submitMustFail (memberContext f.parties.member1 f.parties.governanceParty) $
+    exerciseCmd f.rulesCid GovernanceRules_ConfirmGovernanceAction with
+      confirmer = f.parties.member2
+      action = longerTimeout
+  ledgerOf f
+
+-- | member1 reads as the governance party but cannot act as it, so it
+-- tries to create member2's votes without going through the rules.
+when_member1_creates_confirmations_directly : AbuseFixture -> Script Ledger
+when_member1_creates_confirmations_directly f = do
+  now <- getTime
+  let expiresAt = now `addRelTime` minutes 30
+  submitMustFail (memberContext f.parties.member1 f.parties.governanceParty) $
+    createCmd GovernanceConfirmation with
+      governanceParty = f.parties.governanceParty
+      confirmer = f.parties.member2
+      actionProposalCid = f.proposalCid
+      actionLabel = "TestAction"
+      expiresAt
+  submitMustFail (memberContext f.parties.member1 f.parties.governanceParty) $
+    createCmd GovernanceSelfConfirmation with
+      governanceParty = f.parties.governanceParty
+      confirmer = f.parties.member2
+      action = longerTimeout
+      expiresAt
+  ledgerOf f
+
+when_additional_proposer_seeds_in_member1s_name : AbuseFixture -> Script Ledger
+when_additional_proposer_seeds_in_member1s_name f = do
+  submitMustFail (memberContext f.parties.outsider f.parties.governanceParty) $
+    exerciseCmd f.rulesCid GovernanceRules_ConfirmGovernanceAction with
+      confirmer = f.parties.member1
+      action = longerTimeout
+  ledgerOf f
+
+-- | The seed and member1's vote are two confirmations of the action, but
+-- only one of them comes from a member.
+when_seed_and_one_member_vote_executed : AbuseFixture -> Script Ledger
+when_seed_and_one_member_vote_executed f = do
+  seed <- seedAsOutsider f
+  [vote] <- submitSelfConfirmations f.parties.governanceParty f.rulesCid longerTimeout
+    [f.parties.member1]
+  executeSelfMustFail f f.rulesCid [seed, vote]
+  ledgerOf f
+
+-- | Self-action confirm accepts additional proposers; action confirm must not.
+when_additional_proposer_confirms_action : AbuseFixture -> Script Ledger
+when_additional_proposer_confirms_action f = do
+  submitMustFail (memberContext f.parties.outsider f.parties.governanceParty) $
+    exerciseCmd f.rulesCid GovernanceRules_ConfirmAction with
+      confirmer = f.parties.outsider
+      actionProposalCid = f.proposalCid
+  ledgerOf f
+
+when_member1_votes_self_action_twice : AbuseFixture -> Script Ledger
+when_member1_votes_self_action_twice f = do
+  votes <- submitSelfConfirmations f.parties.governanceParty f.rulesCid longerTimeout
+    [f.parties.member1, f.parties.member1]
+  executeSelfMustFail f f.rulesCid votes
+  ledgerOf f
+
+-- | member1's vote expires before member2 votes.
+when_expired_self_vote_executed : AbuseFixture -> Script Ledger
+when_expired_self_vote_executed f = do
+  [expiredVote] <- submitSelfConfirmations f.parties.governanceParty f.rulesCid longerTimeout
+    [f.parties.member1]
+  passTime (minutes 31)
+  [currentVote] <- submitSelfConfirmations f.parties.governanceParty f.rulesCid longerTimeout
+    [f.parties.member2]
+  executeSelfMustFail f f.rulesCid [expiredVote, currentVote]
+  ledgerOf f
+
+-- | member3 votes and is then removed. member1 votes after the removal.
+when_removed_member_vote_executes_action : AbuseFixture -> Script Ledger
+when_removed_member_vote_executes_action f = do
+  [removedVote] <- submitConfirmations f.parties.governanceParty f.rulesCid f.proposalCid
+    [f.parties.member3]
+  rulesCid <- removeMember3 f
+  [currentVote] <- submitConfirmations f.parties.governanceParty rulesCid f.proposalCid
+    [f.parties.member1]
+  executeActionMustFail f rulesCid [removedVote, currentVote]
+  ledgerOf f
+
+-- | member3 votes and is then removed. member1 votes after the removal.
+when_removed_member_vote_executes_self_action : AbuseFixture -> Script Ledger
+when_removed_member_vote_executes_self_action f = do
+  [removedVote] <- submitSelfConfirmations f.parties.governanceParty f.rulesCid longerTimeout
+    [f.parties.member3]
+  rulesCid <- removeMember3 f
+  [currentVote] <- submitSelfConfirmations f.parties.governanceParty rulesCid longerTimeout
+    [f.parties.member1]
+  executeSelfMustFail f rulesCid [removedVote, currentVote]
+  ledgerOf f
+
+-- | The same three members also run a second governance party and vote
+-- the same self-action there. member1 reads as both parties and offers
+-- those votes to the first party's rules.
+when_other_governance_votes_replayed : AbuseFixture -> Script (Ledger, Int)
+when_other_governance_votes_replayed f = do
+  otherGovernance <- allocateParty "OtherGovernance"
+  let otherParties = f.parties with governanceParty = otherGovernance
+  otherRulesCid <- createGovernanceWith otherParties (minutes 30) None
+  otherVotes <- submitSelfConfirmations otherGovernance otherRulesCid longerTimeout
+    [f.parties.member1, f.parties.member2]
+  submitMustFail (memberContext f.parties.member1 f.parties.governanceParty <> readAs otherGovernance) $
+    exerciseCmd f.rulesCid GovernanceRules_ExecuteGovernanceAction with
+      executor = f.parties.member1
+      action = longerTimeout
+      confirmations = otherVotes
+  ledger <- ledgerOf f
+  otherVotesLeft <- length <$> query @GovernanceSelfConfirmation otherGovernance
+  pure (ledger, otherVotesLeft)
+
+-- | member1 can act as a second party, which signs a vote of each kind in
+-- member1's and member2's names. member1 submits each execute as both
+-- parties, so the second party's authority is on the submission.
+when_member1_executes_with_votes_its_own_party_signed : AbuseFixture -> Script Ledger
+when_member1_executes_with_votes_its_own_party_signed f = do
+  ownParty <- allocateParty "Member1OwnParty"
+  now <- getTime
+  let expiresAt = now `addRelTime` minutes 30
+      confirmers = [f.parties.member1, f.parties.member2]
+      attacker = actAs [f.parties.member1, ownParty] <> readAs f.parties.governanceParty
+  votes <- forA confirmers $ \confirmer ->
+    submit ownParty $ createCmd GovernanceConfirmation with
+      governanceParty = ownParty
+      confirmer
+      actionProposalCid = f.proposalCid
+      actionLabel = "TestAction"
+      expiresAt
+  selfVotes <- forA confirmers $ \confirmer ->
+    submit ownParty $ createCmd GovernanceSelfConfirmation with
+      governanceParty = ownParty
+      confirmer
+      action = longerTimeout
+      expiresAt
+  submitMustFail attacker $
+    exerciseCmd f.rulesCid GovernanceRules_ExecuteConfirmedAction with
+      executor = f.parties.member1
+      actionProposalCid = f.proposalCid
+      confirmations = votes
+  submitMustFail attacker $
+    exerciseCmd f.rulesCid GovernanceRules_ExecuteGovernanceAction with
+      executor = f.parties.member1
+      action = longerTimeout
+      confirmations = selfVotes
+  ledgerOf f
+
+-- | member2 tries to remove member1's live vote through the expire choice.
+when_member2_expires_live_self_vote : AbuseFixture -> Script Ledger
+when_member2_expires_live_self_vote f = do
+  [vote] <- submitSelfConfirmations f.parties.governanceParty f.rulesCid longerTimeout
+    [f.parties.member1]
+  submitMustFail (memberContext f.parties.member2 f.parties.governanceParty) $
+    exerciseCmd f.rulesCid GovernanceRules_ExpireGovernanceSelfConfirmation with
+      member = f.parties.member2
+      staleConfirmationCid = vote
+  ledgerOf f
+
+-- | member2 tries to remove member1's live votes by exercising the consume
+-- choices on them directly. Only the governance party controls those.
+when_member2_consumes_live_votes_directly : AbuseFixture -> Script Ledger
+when_member2_consumes_live_votes_directly f = do
+  [vote] <- submitConfirmations f.parties.governanceParty f.rulesCid f.proposalCid
+    [f.parties.member1]
+  [selfVote] <- submitSelfConfirmations f.parties.governanceParty f.rulesCid longerTimeout
+    [f.parties.member1]
+  let member2 = memberContext f.parties.member2 f.parties.governanceParty
+  submitMustFail member2 $ exerciseCmd vote GovernanceConfirmation_Consume
+  submitMustFail member2 $ exerciseCmd selfVote GovernanceSelfConfirmation_Consume
+  ledgerOf f
+
+-- ============================================================================
+-- Then
+-- ============================================================================
+
+then_no_confirmations : AbuseFixture -> Ledger -> Script Failures
+then_no_confirmations _ l = pure $
+  shouldBe "action confirmers" [] l.confirmers <>
+  shouldBe "self-action confirmers" [] l.selfConfirmers
+
+then_timeout_unchanged : AbuseFixture -> Ledger -> Script Failures
+then_timeout_unchanged _ l = pure $
+  shouldBe "timeout" (minutes 30) l.rules.actionConfirmationTimeout
+
+then_action_not_executed : AbuseFixture -> Ledger -> Script Failures
+then_action_not_executed _ l = pure $
+  shouldBe "proposal left" True l.proposalLeft <>
+  shouldBe "actions executed" 0 l.executed
+
+then_seed_and_vote_left_unexecuted : AbuseFixture -> Ledger -> Script Failures
+then_seed_and_vote_left_unexecuted f l = do
+  failures <- then_timeout_unchanged f l
+  pure $ failures <>
+    shouldBe "self-action confirmers" (sort [f.parties.member1, f.parties.outsider]) l.selfConfirmers
+
+then_double_vote_left_unexecuted : AbuseFixture -> Ledger -> Script Failures
+then_double_vote_left_unexecuted f l = do
+  failures <- then_timeout_unchanged f l
+  pure $ failures <>
+    shouldBe "self-action confirmers" [f.parties.member1, f.parties.member1] l.selfConfirmers
+
+then_both_votes_left_unexecuted : AbuseFixture -> Ledger -> Script Failures
+then_both_votes_left_unexecuted f l = do
+  failures <- then_timeout_unchanged f l
+  pure $ failures <>
+    shouldBe "self-action confirmers" (sort [f.parties.member1, f.parties.member2]) l.selfConfirmers
+
+then_action_not_executed_after_removal : AbuseFixture -> Ledger -> Script Failures
+then_action_not_executed_after_removal f l = do
+  failures <- then_action_not_executed f l
+  pure $ failures <>
+    shouldBe "members" (Set.fromList [f.parties.member1, f.parties.member2]) l.rules.members <>
+    shouldBe "action confirmers" (sort [f.parties.member1, f.parties.member3]) l.confirmers
+
+then_self_action_not_executed_after_removal : AbuseFixture -> Ledger -> Script Failures
+then_self_action_not_executed_after_removal f l = do
+  failures <- then_timeout_unchanged f l
+  pure $ failures <>
+    shouldBe "members" (Set.fromList [f.parties.member1, f.parties.member2]) l.rules.members <>
+    shouldBe "self-action confirmers" (sort [f.parties.member1, f.parties.member3]) l.selfConfirmers
+
+then_replay_rejected_and_other_votes_kept : AbuseFixture -> (Ledger, Int) -> Script Failures
+then_replay_rejected_and_other_votes_kept f (l, otherVotesLeft) = do
+  failures <- then_timeout_unchanged f l
+  pure $ failures <>
+    shouldBe "other governance votes left" 2 otherVotesLeft
+
+then_neither_kind_executed : AbuseFixture -> Ledger -> Script Failures
+then_neither_kind_executed f l = do
+  actionFailures <- then_action_not_executed f l
+  timeoutFailures <- then_timeout_unchanged f l
+  pure $ actionFailures <> timeoutFailures
+
+then_live_self_vote_kept : AbuseFixture -> Ledger -> Script Failures
+then_live_self_vote_kept f l = pure $
+  shouldBe "self-action confirmers" [f.parties.member1] l.selfConfirmers
+
+then_live_votes_kept : AbuseFixture -> Ledger -> Script Failures
+then_live_votes_kept f l = pure $
+  shouldBe "action confirmers" [f.parties.member1] l.confirmers <>
+  shouldBe "self-action confirmers" [f.parties.member1] l.selfConfirmers
+
+-- ============================================================================
+-- Tests
+-- ============================================================================
+
+test_when_member_confirms_in_another_members_name_then_rejected = script do
+  run Test with
+    given = given_open_proposal
+    when = when_member1_confirms_in_member2s_name
+    then_ = then_no_confirmations
+
+test_when_member_creates_confirmation_outside_rules_then_rejected = script do
+  run Test with
+    given = given_open_proposal
+    when = when_member1_creates_confirmations_directly
+    then_ = then_no_confirmations
+
+test_when_additional_proposer_seeds_in_members_name_then_rejected = script do
+  run Test with
+    given = given_open_proposal
+    when = when_additional_proposer_seeds_in_member1s_name
+    then_ = then_no_confirmations
+
+test_when_seed_and_one_member_vote_execute_then_seed_not_counted = script do
+  run Test with
+    given = given_open_proposal
+    when = when_seed_and_one_member_vote_executed
+    then_ = then_seed_and_vote_left_unexecuted
+
+test_when_additional_proposer_confirms_action_then_rejected = script do
+  run Test with
+    given = given_open_proposal
+    when = when_additional_proposer_confirms_action
+    then_ = then_no_confirmations
+
+test_when_member_votes_self_action_twice_then_execute_rejected = script do
+  run Test with
+    given = given_open_proposal
+    when = when_member1_votes_self_action_twice
+    then_ = then_double_vote_left_unexecuted
+
+test_when_a_self_confirmation_expired_then_execute_rejected = script do
+  run Test with
+    given = given_open_proposal
+    when = when_expired_self_vote_executed
+    then_ = then_both_votes_left_unexecuted
+
+test_when_removed_member_vote_executes_action_then_rejected = script do
+  run Test with
+    given = given_open_proposal
+    when = when_removed_member_vote_executes_action
+    then_ = then_action_not_executed_after_removal
+
+test_when_removed_member_vote_executes_self_action_then_not_counted = script do
+  run Test with
+    given = given_open_proposal
+    when = when_removed_member_vote_executes_self_action
+    then_ = then_self_action_not_executed_after_removal
+
+test_when_other_governance_votes_replayed_then_rejected = script do
+  run Test with
+    given = given_open_proposal
+    when = when_other_governance_votes_replayed
+    then_ = then_replay_rejected_and_other_votes_kept
+
+test_when_executor_also_acts_as_signing_party_then_rejected = script do
+  run Test with
+    given = given_open_proposal
+    when = when_member1_executes_with_votes_its_own_party_signed
+    then_ = then_neither_kind_executed
+
+test_when_member_expires_live_self_confirmation_then_rejected = script do
+  run Test with
+    given = given_open_proposal
+    when = when_member2_expires_live_self_vote
+    then_ = then_live_self_vote_kept
+
+test_when_member_consumes_live_votes_directly_then_rejected = script do
+  run Test with
+    given = given_open_proposal
+    when = when_member2_consumes_live_votes_directly
+    then_ = then_live_votes_kept
