@@ -121,9 +121,14 @@ pub async fn start_coordinator(
                     ChangeThresholdStep::Submit => {
                         tracing::info!("Coordinator executing: Submit change-threshold");
 
-                        prepare_signatures(&workflow_state, &db, &instance_name).await?;
-
-                        submit_change(&node_config, &db, &instance_name, &change_config).await?;
+                        submit_signed_change(
+                            &workflow_state,
+                            &node_config,
+                            &db,
+                            &instance_name,
+                            &change_config,
+                        )
+                        .await?;
                         workflow_state.advance_step().await;
                     }
                     ChangeThresholdStep::RetireLegacyKeys => {
@@ -153,6 +158,18 @@ pub async fn start_coordinator(
         coordinator_workflow,
     )
     .await
+}
+
+/// The `Submit` step: check the peer signatures, then submit to the synchronizer.
+async fn submit_signed_change(
+    workflow_state: &WorkflowState<ChangeThresholdStep>,
+    node_config: &NodeConfig,
+    storage: &SqlitePool,
+    instance_name: &str,
+    change_config: &ChangeThresholdConfig,
+) -> Result {
+    prepare_signatures(workflow_state, storage, instance_name).await?;
+    submit_change(node_config, storage, instance_name, change_config).await
 }
 
 /// Rebuild the per-peer signature artifacts, then refuse to submit unless every
@@ -458,6 +475,43 @@ mod tests {
                 Some(p2p.to_vec())
             );
         }
+        Ok(())
+    }
+
+    /// The `Submit` step must stop on the guard error. A default node config has
+    /// no reachable Canton, so a run that got past the guard would fail with a
+    /// connection error instead.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn the_submit_step_stops_on_a_missing_peer_before_reaching_canton(
+        pool: SqlitePool,
+    ) -> anyhow::Result<()> {
+        insert_run(&pool).await?;
+        let state = resumed_state(&pool, vec![peer(1)]);
+        write(
+            &pool,
+            artifact_kinds::SIGNED_CHANGE_THRESHOLD_DNS,
+            &peer(1),
+            b"dns",
+        )
+        .await?;
+        let change_config = ChangeThresholdConfig::new(peer(9), 2, None, 3, "run-1".into());
+
+        let message = submit_signed_change(
+            &state,
+            &NodeConfig::default(),
+            &pool,
+            "run-1",
+            &change_config,
+        )
+        .await
+        .expect_err("a missing P2P signature must stop the submit")
+        .to_string();
+
+        assert!(
+            message.contains("Change-threshold cannot submit"),
+            "{message}"
+        );
+        assert!(message.contains(&peer(1).to_string()), "{message}");
         Ok(())
     }
 
