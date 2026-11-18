@@ -246,6 +246,19 @@ everything that follows (`workflow::validation::PeerExpectations`).
   mapping is refused, and so is every serial but the head serial + 1: Canton
   checks the serial only on submission, so a signature on a later serial could
   be held back and submitted against a state the peer never checked.
+- For rotate-key, the peer reads the party's current `PartyToParticipant`.
+  The proposal must keep every host entry as it is, including its permission
+  and onboarding state. It must also keep the confirmation threshold and the
+  signing threshold in force. The inline keys' threshold is in force, or the
+  legacy mapping's when the party has no inline keys. It may remove only the key its invitation names, and it must add
+  exactly one new key. The peer must have a key on record for every other
+  host, and each of those keys must stay. Its records must name the removed
+  key as the coordinator's. The one key left over is the coordinator's new
+  key, and the peer later records only that key for the coordinator. Without
+  these checks, a coordinator could swap or drop another member's key, or
+  keep a departed member's key. Before the coordinator invites anyone, it
+  requires every other member to be a configured peer and to list the
+  `rotate-key` feature in its Health reply.
 - Prepared ledger submissions are re-hashed locally from the transaction that
   accompanies them (`canton_hash`), so a signature can only ever authorize the
   transaction the peer can inspect, and that transaction must act as the

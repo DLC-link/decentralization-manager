@@ -138,6 +138,9 @@ pub enum Request {
         new_threshold: i32,
         previous_threshold: i32,
     },
+    RotateKey {
+        party_id: String,
+    },
     CancelWorkflow(WorkflowKind),
     RetryWorkflow(String),
     ChainAudit(String),
@@ -278,6 +281,14 @@ pub struct ChangeThresholdForm {
     pub new_threshold: i32,
     /// Highest threshold allowed (the party's member count).
     pub max_threshold: i32,
+}
+
+/// The rotate-key confirmation: replace this node's Daml key for a party.
+pub struct RotateKeyForm {
+    pub party_id: String,
+    pub party_name: String,
+    /// The members other than this node, which must all sign.
+    pub other_members: usize,
 }
 
 /// One pending governance item shown in the approvals overlay: an off-chain
@@ -526,6 +537,8 @@ pub enum Overlay {
     AddParty(AddPartyForm),
     /// The change-threshold form (change a party's signing threshold).
     ChangeThreshold(ChangeThresholdForm),
+    /// The rotate-key confirmation (replace this node's Daml key).
+    RotateKey(RotateKeyForm),
     /// A scrollable detail view of a feed item (workflow run or invitation).
     /// Boxed: a feed item (with its workflow run) is large relative to the
     /// other overlay variants.
@@ -956,6 +969,12 @@ fn handle_request(client: &mut DecmanClient, request: Request) -> Update {
             client
                 .start_change_threshold(&party_id, new_threshold, previous_threshold)
                 .map(|()| "Change-threshold started".to_owned())
+                .map_err(err),
+        ),
+        Request::RotateKey { party_id } => Update::Action(
+            client
+                .start_rotate_key(&party_id)
+                .map(|()| "Key rotation started".to_owned())
                 .map_err(err),
         ),
         Request::CancelWorkflow(kind) => Update::Action(
@@ -2025,6 +2044,7 @@ impl App {
             Kick,
             AddParty,
             ChangeThreshold,
+            RotateKey,
             TestAuth,
             GovConfirm,
             GovExecute,
@@ -2126,6 +2146,11 @@ impl App {
                 KeyCode::Right | KeyCode::Char('+') => {
                     form.new_threshold = (form.new_threshold + 1).min(form.max_threshold);
                 }
+                _ => {}
+            },
+            Overlay::RotateKey(_) => match key.code {
+                KeyCode::Esc => act = Act::Close,
+                KeyCode::Enter => act = Act::RotateKey,
                 _ => {}
             },
             Overlay::ChangeThreshold(form) => match key.code {
@@ -2372,6 +2397,7 @@ impl App {
             Act::Kick => self.confirm_kick(),
             Act::AddParty => self.confirm_add_party(),
             Act::ChangeThreshold => self.confirm_change_threshold(),
+            Act::RotateKey => self.confirm_rotate_key(),
             Act::TestAuth => self.run_auth_test(),
             Act::GovConfirm => self.gov_confirm(),
             Act::GovExecute => self.gov_execute(),
@@ -2457,6 +2483,8 @@ impl App {
             KeyCode::Char('P') => self.open_add_party(),
             // Change this party's signing threshold.
             KeyCode::Char('T') => self.open_change_threshold(),
+            // Replace this node's Daml key for this party.
+            KeyCode::Char('R') => self.open_rotate_key(),
             // View the on-chain governance audit trail.
             KeyCode::Char('c') => self.open_chain_audit(),
             // Open the governance approvals list (confirm / execute / revoke).
@@ -3310,6 +3338,37 @@ impl App {
         };
         let _ = self.requests.send(request);
         self.overlay = Overlay::Busy("Changing threshold…".to_owned());
+    }
+
+    /// Open the rotate-key confirmation for the party in the detail view.
+    fn open_rotate_key(&mut self) {
+        let Some(party) = self.detail.as_ref() else {
+            return;
+        };
+        // Mirrors the server's refusal: a one-member party has nobody to sign.
+        if party.participants.len() < 2 {
+            self.overlay = Overlay::Message(
+                "Cannot rotate the key: the party has only one member.".to_owned(),
+            );
+            return;
+        }
+        self.overlay = Overlay::RotateKey(RotateKeyForm {
+            party_id: party.party_id.to_string(),
+            party_name: party_name(party).to_owned(),
+            other_members: party.participants.len() - 1,
+        });
+    }
+
+    /// Send the rotate-key request from the confirmation.
+    fn confirm_rotate_key(&mut self) {
+        let Overlay::RotateKey(form) = &self.overlay else {
+            return;
+        };
+        let request = Request::RotateKey {
+            party_id: form.party_id.clone(),
+        };
+        let _ = self.requests.send(request);
+        self.overlay = Overlay::Busy("Rotating the key…".to_owned());
     }
 
     /// Kick off the package checker.

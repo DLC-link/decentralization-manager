@@ -97,6 +97,12 @@ pub enum MessageType {
     /// `RequestDarPayload`; the answer is the DAR's bytes, chunked when they
     /// outgrow a frame. Only a peer the run invited is served.
     RequestDar = 0x0027,
+    /// Command: every party member signs the P2P proposal that replaces the
+    /// coordinator's Daml key.
+    SignRotateKey = 0x0028,
+    /// Command: every party member records the coordinator's new Daml key.
+    /// Payload is the new `SigningPublicKey`, length-prefixed.
+    RecordRotatedKey = 0x0029,
 
     // Invites (0x0010 - 0x001F)
     InviteOnboarding = 0x0010,
@@ -119,6 +125,9 @@ pub enum MessageType {
     /// Invite to participate in changing a decentralized party's threshold.
     /// Payload is a JSON `ChangeThresholdInvitePayload`.
     InviteChangeThreshold = 0x0018,
+    /// Invite to sign the rotation of the coordinator's Daml key. Payload is
+    /// a JSON `RotateKeyInvitePayload`.
+    InviteRotateKey = 0x0019,
 
     // Responses (0x0100 - 0x01FF)
     Ack = 0x0101,
@@ -152,6 +161,8 @@ pub enum MessageType {
     AddPartyClearProposal = 0x0209,
     /// Peer → coordinator: signed change-threshold DNS + P2P pair.
     ChangeThresholdSignatures = 0x020A,
+    /// Peer → coordinator: the signed key-rotation P2P proposal.
+    RotateKeySignatures = 0x020B,
 
     // Chunked Transfer (0x0300 - 0x03FF)
     /// Command with chunked payload - payload contains: [command_type (2 bytes)] [total_size (4 bytes)] [chunk_count (4 bytes)]
@@ -261,6 +272,9 @@ impl TryFrom<u16> for MessageType {
             0x0025 => Ok(Self::SignChangeThreshold),
             0x0026 => Ok(Self::RetireLegacyKeys),
             0x0027 => Ok(Self::RequestDar),
+            0x0028 => Ok(Self::SignRotateKey),
+            0x0029 => Ok(Self::RecordRotatedKey),
+            0x0019 => Ok(Self::InviteRotateKey),
             0x0018 => Ok(Self::InviteChangeThreshold),
             0x0101 => Ok(Self::Ack),
             0x0102 => Ok(Self::Data),
@@ -283,6 +297,7 @@ impl TryFrom<u16> for MessageType {
             0x0208 => Ok(Self::AddPartyClearSignatures),
             0x0209 => Ok(Self::AddPartyClearProposal),
             0x020A => Ok(Self::ChangeThresholdSignatures),
+            0x020B => Ok(Self::RotateKeySignatures),
             0x0300 => Ok(Self::ChunkedCommand),
             0x0301 => Ok(Self::GetChunk),
             0x0302 => Ok(Self::Chunk),
@@ -1245,6 +1260,19 @@ mod tests {
             MessageType::AddPartySignatures,
             MessageType::AddPartyClearSignatures,
             MessageType::AddPartyClearProposal,
+        ] {
+            assert_eq!(MessageType::try_from(mt.to_u16())?, mt);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn rotate_key_message_types_round_trip() -> Result {
+        for mt in [
+            MessageType::SignRotateKey,
+            MessageType::RecordRotatedKey,
+            MessageType::InviteRotateKey,
+            MessageType::RotateKeySignatures,
         ] {
             assert_eq!(MessageType::try_from(mt.to_u16())?, mt);
         }

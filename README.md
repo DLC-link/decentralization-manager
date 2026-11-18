@@ -194,6 +194,7 @@ The database file path can be overridden with the `--db` CLI flag.
 | `DECPM_DB_PATH` | SQLite database path override (CLI flag `--db`) | _(defaults to `{dir}/data/decpm.db`)_ |
 | `DECPM_DB_ENCRYPTION_KEY` | Encryption key for secrets stored in the database | _(none)_ |
 | `DECPM_KEY_STORE_KEY_FILE` | File with the key that encrypts DecMan's copies of party Daml keys, as 64 hex characters or the base64 of 32 bytes. When unset, DecMan derives the key from a `DECPM_DB_ENCRYPTION_KEY` of at least 32 characters. See [docs/KMS_SIGNING.md](docs/KMS_SIGNING.md) | _(none)_ |
+| `DECPM_ALLOW_SOFTWARE_PARTY_KEYS` | Lets DecMan create party keys on a participant without KMS. DecMan then generates each new Daml key itself and keeps it in its key store, so Canton never has to export it. See [docs/KMS_SIGNING.md](docs/KMS_SIGNING.md) | `false` |
 | `DECPM_ADMIN_ROLE` | Role name that gates sensitive endpoints (unset skips the role check) | _(none)_ |
 | `DECPM_ALLOWED_ORIGIN` | Origin permitted by CORS (e.g. `https://decman.example.com`) | _(none, same-origin only)_ |
 | `DECPM_LOG_FORMAT` | Log format. `text` gives the readable console format for local work; any other value gives one JSON object per line | `json` |
@@ -506,6 +507,8 @@ The table below is a curated subset. A complete, interactive API reference is av
 | `/add-party/status` | GET | Returns add-party progress |
 | `/change-threshold` | POST | Starts change-threshold workflow |
 | `/change-threshold/status` | GET | Returns change-threshold progress |
+| `/rotate-key` | POST | Starts rotate-key workflow, which replaces this node's Daml key for a party |
+| `/rotate-key/status` | GET | Returns rotate-key progress |
 | `/workflows` | GET | Lists workflow instances and their lifecycle state |
 | `/workflows/{instance_name}/dismiss` | POST | Dismisses a workflow instance |
 | `/workflows/{instance_name}/retry` | POST | Retries a failed workflow instance |
@@ -514,6 +517,7 @@ The table below is a curated subset. A complete, interactive API reference is av
 | `/kick/cancel` | POST | Cancels the kick workflow |
 | `/add-party/cancel` | POST | Cancels the add-party workflow |
 | `/change-threshold/cancel` | POST | Cancels the change-threshold workflow |
+| `/rotate-key/cancel` | POST | Cancels the rotate-key workflow |
 | `/dars/cancel` | POST | Cancels the DARs distribution workflow |
 | `/invitations` | GET | Returns pending workflow invitations |
 | `/invitations/accept` | POST | Accepts a pending invitation |
@@ -618,6 +622,16 @@ The full integration test boots a Splice localnet (Docker), spawns 3
 governance workflow exercising onboarding, DAR distribution, governance
 contract deployment, the token-custody / utility-onboarding / generic-vote
 plugins, and the kick workflow.
+
+The third instance drives the localnet's SV participant, which keeps its keys
+in a mock AWS KMS ([`nsmithuk/local-kms`](https://github.com/nsmithuk/local-kms),
+started by [`integration-tests/localnet-kms.yaml`](integration-tests/localnet-kms.yaml)).
+Canton reaches it through `crypto.kms.endpoint-override`, and DecMan through
+`AWS_ENDPOINT_URL_KMS`. The `kms_party_keys` phase checks that this node's
+party keys live in the KMS and that its deploys sign through the KMS `Sign`
+API ([docs/KMS_SIGNING.md](docs/KMS_SIGNING.md)). This node runs the strict
+KMS rule. The other two have no KMS, so they run with
+`DECPM_ALLOW_SOFTWARE_PARTY_KEYS=true`, and DecMan generates their party keys.
 
 ```bash
 # Quiet mode (default) — focused Given-When-Then trace

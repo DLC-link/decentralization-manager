@@ -15,6 +15,7 @@ use anyhow::{Context, Result, bail};
 use clap::{ArgGroup, Args, Subcommand, ValueEnum};
 use common::api::{
     AddPartyRequest, ChangeThresholdRequest, GrantRightsRequest, KickRequest, OnboardingRequest,
+    RotateKeyRequest,
 };
 use common::canton_id::CantonId;
 use reqwest::{Method, StatusCode};
@@ -250,6 +251,15 @@ pub enum PartiesCommand {
         /// two stay equal.
         #[arg(long)]
         confirmation_threshold: Option<i32>,
+        #[command(flatten)]
+        wait: WaitArgs,
+    },
+    /// Replace this node's Daml signing key for a party with a new key. The
+    /// participant must keep its keys in KMS, unless the node sets
+    /// DECPM_ALLOW_SOFTWARE_PARTY_KEYS, and every other member must sign.
+    RotateKey {
+        #[command(flatten)]
+        party: PartyArg,
         #[command(flatten)]
         wait: WaitArgs,
     },
@@ -1212,6 +1222,13 @@ fn run_parties(client: &mut DecmanClient, command: PartiesCommand) -> Result<Out
                 previous_threshold: known_threshold(&party)?,
             })?;
             start_workflow(client, "/change-threshold", &body, &wait)
+        }
+        PartiesCommand::RotateKey { party, wait } => {
+            let party = resolve_party(client, &party)?;
+            let body = to_body(&RotateKeyRequest {
+                decentralized_party_id: canton_id(&party.id)?,
+            })?;
+            start_workflow(client, "/rotate-key", &body, &wait)
         }
     }
 }

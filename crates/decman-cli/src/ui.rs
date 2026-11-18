@@ -9,9 +9,9 @@ use ratatui::widgets::{
 };
 
 use common::types::{
-    ConnectionStatus, DecentralizedParty, PackageInfo, PeerErrorKind, PeerPackageComparison,
-    PendingInvitation, Permission, VettedPackageInfo, WAITING_FOR_PEERS_STEP, WorkflowProgress,
-    WorkflowRole, WorkflowRun,
+    ConnectionStatus, DecentralizedParty, InvitationType, PackageInfo, PeerErrorKind,
+    PeerPackageComparison, PendingInvitation, Permission, VettedPackageInfo,
+    WAITING_FOR_PEERS_STEP, WorkflowProgress, WorkflowRole, WorkflowRun,
 };
 
 use crate::api::{
@@ -21,7 +21,7 @@ use crate::api::{
 use crate::app::{
     AddPartyForm, App, ChangeThresholdForm, ComposerKind, ComposerPick, DeployForm, DetailData,
     GovItem, GovView, GrantForm, IdpMode, KickForm, NetworkEditState, NodeInfoData, OnboardForm,
-    Overlay, PartyConfigForm, PcRow, PeerChoice, PeerForm, Status, Tab, TabView,
+    Overlay, PartyConfigForm, PcRow, PeerChoice, PeerForm, RotateKeyForm, Status, Tab, TabView,
 };
 use crate::composer::{Composer, FieldKind};
 use crate::config::Profile;
@@ -59,6 +59,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
             Overlay::Kick(_) => " ↑/↓ pick · ←/→ threshold · enter kick · esc cancel",
             Overlay::AddParty(_) => " ↑/↓ pick · ←/→ threshold · enter add · esc cancel",
             Overlay::ChangeThreshold(_) => " ←/→ threshold · enter apply · esc cancel",
+            Overlay::RotateKey(_) => " enter rotate · esc cancel",
             Overlay::Governance(_) => {
                 " ↑/↓ · c confirm · e exec · r revoke · x expire · n new · p propose · esc"
             }
@@ -73,7 +74,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
             Overlay::Message(_) | Overlay::Busy(_) => " enter / esc to close",
             _ => {
                 " ↑/↓ audit · enter json · a login · g gov · D deploy · c chain · K kick · \
-                 P add · T thresh · esc back"
+                 P add · T thresh · R rotate key · esc back"
             }
         };
         frame.render_widget(
@@ -1106,6 +1107,7 @@ fn footer_hint(active: Tab, overlay: &Overlay, can_logout: bool) -> String {
         Overlay::Kick(_) => " ↑/↓ pick · ←/→ threshold · enter kick · esc cancel".to_owned(),
         Overlay::AddParty(_) => " ↑/↓ pick · ←/→ threshold · enter add · esc cancel".to_owned(),
         Overlay::ChangeThreshold(_) => " ←/→ threshold · enter apply · esc cancel".to_owned(),
+        Overlay::RotateKey(_) => " enter rotate · esc cancel".to_owned(),
         Overlay::Auth { .. } => " ↑/↓ select · t test · g grant · e config · esc close".to_owned(),
         Overlay::GrantRights(_) => " ↑/↓ field · type · enter next/grant · esc cancel".to_owned(),
         Overlay::PartyConfig(_) => {
@@ -1231,6 +1233,7 @@ fn draw_overlay(frame: &mut Frame, area: Rect, overlay: &Overlay, spinner: &str)
         Overlay::Kick(form) => kick_popup(frame, area, form),
         Overlay::AddParty(form) => add_party_popup(frame, area, form),
         Overlay::ChangeThreshold(form) => change_threshold_popup(frame, area, form),
+        Overlay::RotateKey(form) => rotate_key_popup(frame, area, form),
         Overlay::FeedDetail { item, scroll } => feed_detail_popup(frame, area, item, *scroll),
         Overlay::ChainAudit { entries, scroll } => chain_audit_popup(frame, area, entries, *scroll),
         Overlay::Auth { parties, selected } => auth_popup(frame, area, parties, *selected),
@@ -2370,6 +2373,34 @@ fn change_threshold_popup(frame: &mut Frame, area: Rect, form: &ChangeThresholdF
     frame.render_widget(paragraph, rect);
 }
 
+/// The rotate-key confirmation popup: what the rotation does before it starts.
+fn rotate_key_popup(frame: &mut Frame, area: Rect, form: &RotateKeyForm) {
+    let signers = match form.other_members {
+        1 => "The other member must sign the change.".to_owned(),
+        n => format!("The other {n} members must sign the change."),
+    };
+    let dim = |text: String| Line::styled(text, Style::default().fg(Color::DarkGray));
+    let lines = vec![
+        Line::from(vec![
+            Span::styled("Party  ", Style::default().fg(Color::DarkGray)),
+            Span::raw(form.party_name.clone()),
+        ]),
+        Line::default(),
+        dim("This node gets a new Daml signing key.".to_owned()),
+        dim("The participant must keep its keys in KMS, or allow software keys.".to_owned()),
+        dim(signers),
+        dim("The old key is not deleted.".to_owned()),
+    ];
+
+    let width = 64.min(area.width.saturating_sub(4));
+    let height = ((lines.len() as u16) + 2).clamp(7, area.height.saturating_sub(4));
+    let rect = centered_rect(width, height, area);
+    let paragraph = Paragraph::new(lines).block(popup_block("Rotate Daml key"));
+    draw_shadow(frame, rect, area);
+    frame.render_widget(Clear, rect);
+    frame.render_widget(paragraph, rect);
+}
+
 /// This node's Noise key status and DSO network identity. Both sections render
 /// independently, so an unreachable DSO API still shows the local key status.
 fn node_info_popup(frame: &mut Frame, area: Rect, data: &NodeInfoData) {
@@ -2562,7 +2593,11 @@ fn invitation_detail_lines(invitation: &PendingInvitation) -> Vec<Line<'static>>
     if let Some(dec_party) = &invitation.dec_party_id {
         lines.push(detail_kv("Dec party", dec_party.to_string()));
     }
-    if invitation.previous_threshold.is_some() || invitation.new_threshold.is_some() {
+    if invitation.invitation_type == InvitationType::RotateKey {
+        if let Some(threshold) = invitation.new_threshold {
+            lines.push(detail_kv("Threshold", format!("{threshold}, unchanged")));
+        }
+    } else if invitation.previous_threshold.is_some() || invitation.new_threshold.is_some() {
         lines.push(detail_kv(
             "Threshold",
             format!(
@@ -2574,6 +2609,9 @@ fn invitation_detail_lines(invitation: &PendingInvitation) -> Vec<Line<'static>>
     }
     if let Some(kicked) = &invitation.kicked_participant {
         lines.push(detail_kv("Kicked", kicked.to_string()));
+    }
+    if let Some(key) = &invitation.rotated_key {
+        lines.push(detail_kv("Replaced key", key.clone()));
     }
     if !invitation.participants.is_empty() {
         lines.push(detail_kv("Participants", String::new()));
@@ -2846,6 +2884,7 @@ mod tests {
                 dar_hashes: Vec::new(),
                 kicked_participant: None,
                 kicked_owner_key: None,
+                rotated_key: None,
                 new_threshold: None,
                 previous_threshold: None,
                 confirmation_threshold: None,
@@ -3187,6 +3226,62 @@ mod tests {
         assert!(rendered.contains("Change threshold"));
         assert!(rendered.contains("cbtc-network"));
         assert!(rendered.contains("(was 2, max 4)"));
+    }
+
+    #[test]
+    fn rotate_key_popup_says_who_signs() {
+        let overlay = Overlay::RotateKey(RotateKeyForm {
+            party_id: "dec::1220".to_owned(),
+            party_name: "cbtc-network".to_owned(),
+            other_members: 2,
+        });
+        let rendered = render(|frame, area| draw_overlay(frame, area, &overlay, "⠋"));
+        assert!(rendered.contains("Rotate Daml key"));
+        assert!(rendered.contains("cbtc-network"));
+        assert!(rendered.contains("keep its keys in KMS"));
+        assert!(rendered.contains("The other 2 members must sign"));
+    }
+
+    /// A rotation keeps the thresholds, so the detail must not read as a
+    /// change from 0.
+    #[test]
+    fn a_rotate_key_invitation_names_the_replaced_key() {
+        let invitation = PendingInvitation {
+            id: "inv-rk".to_owned(),
+            invitation_type: InvitationType::RotateKey,
+            coordinator_pubkey: "1220deadbeef".to_owned(),
+            coordinator_name: None,
+            received_at: 0,
+            prefix: None,
+            participants: Vec::new(),
+            dar_filenames: Vec::new(),
+            dar_hashes: Vec::new(),
+            kicked_participant: None,
+            kicked_owner_key: None,
+            rotated_key: Some("1220abcdef".to_owned()),
+            new_threshold: Some(2),
+            previous_threshold: None,
+            confirmation_threshold: Some(2),
+            dec_party_id: None,
+            new_participant: None,
+            package_names: Vec::new(),
+            contract_intents: Vec::new(),
+            workflow_instance: None,
+        };
+        let text: Vec<String> = invitation_detail_lines(&invitation)
+            .iter()
+            .map(ToString::to_string)
+            .collect();
+        assert!(
+            text.iter()
+                .any(|line| line.contains("Replaced key") && line.contains("1220abcdef")),
+            "{text:?}"
+        );
+        assert!(
+            text.iter().any(|line| line.contains("2, unchanged")),
+            "{text:?}"
+        );
+        assert!(!text.iter().any(|line| line.contains('→')), "{text:?}");
     }
 
     #[test]

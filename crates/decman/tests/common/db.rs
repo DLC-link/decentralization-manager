@@ -322,6 +322,26 @@ pub async fn workflow_run_error(
     Ok(s.flatten())
 }
 
+/// The error the peer-side run of a coordinator run recorded, matched as
+/// [`peer_run_status_by_coordinator_instance`] matches it.
+pub async fn peer_run_error_by_coordinator_instance(
+    db_path: &Path,
+    coordinator_instance: &str,
+) -> anyhow::Result<Option<String>> {
+    let pool = open(db_path).await?;
+    let s: Option<Option<String>> = sqlx::query_scalar(
+        "SELECT error FROM workflow_runs \
+         WHERE role = 'Peer' AND coordinator_instance = ?1 \
+         ORDER BY created_at DESC LIMIT 1",
+    )
+    .bind(coordinator_instance)
+    .fetch_optional(&pool)
+    .await
+    .context("peer_run_error_by_coordinator_instance")?;
+    pool.close().await;
+    Ok(s.flatten())
+}
+
 /// Status of the (single) peer-side run that belongs to the given coordinator
 /// run, matched via the `coordinator_instance` column persisted at accept
 /// time. Returns `None` while the peer hasn't accepted (no row yet).
@@ -421,6 +441,43 @@ pub async fn count_stored_party_keys(db_path: &Path, party_id: &str) -> anyhow::
         .context("count_stored_party_keys")?;
     pool.close().await;
     Ok(n)
+}
+
+/// The fingerprints of the Daml keys DecMan's key store holds for `party_id`.
+pub async fn stored_party_key_fingerprints(
+    db_path: &Path,
+    party_id: &str,
+) -> anyhow::Result<Vec<String>> {
+    let pool = open(db_path).await?;
+    let fingerprints =
+        sqlx::query_scalar("SELECT fingerprint FROM party_key_store WHERE party_id = ?1")
+            .bind(party_id)
+            .fetch_all(&pool)
+            .await
+            .context("stored_party_key_fingerprints")?;
+    pool.close().await;
+    Ok(fingerprints)
+}
+
+/// The Daml key fingerprint this node has on record for `participant_uid`
+/// in `dec_party_id`'s cached membership.
+pub async fn cached_signing_key(
+    db_path: &Path,
+    dec_party_id: &str,
+    participant_uid: &str,
+) -> anyhow::Result<Option<String>> {
+    let pool = open(db_path).await?;
+    let key: Option<Option<String>> = sqlx::query_scalar(
+        "SELECT signing_key FROM dec_party_participant \
+         WHERE dec_party_id = ?1 AND participant_uid = ?2",
+    )
+    .bind(dec_party_id)
+    .bind(participant_uid)
+    .fetch_optional(&pool)
+    .await
+    .context("cached_signing_key")?;
+    pool.close().await;
+    Ok(key.flatten())
 }
 
 pub async fn count_artifacts(db_path: &Path, instance_name: &str) -> anyhow::Result<i64> {

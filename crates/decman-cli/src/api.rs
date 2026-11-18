@@ -1277,6 +1277,21 @@ impl DecmanClient {
         )
     }
 
+    /// Replace this node's Daml signing key for a decentralized party with a
+    /// new key. The other members sign the change.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if login or the request fails, or the API rejects it
+    /// (e.g. the participant keeps no keys in KMS, or a workflow is already in
+    /// progress for the party).
+    pub fn start_rotate_key(&mut self, party_id: &str) -> Result<()> {
+        self.post(
+            "/rotate-key",
+            Some(json!({ "decentralized_party_id": party_id })),
+        )
+    }
+
     /// Cancel an in-progress workflow run (coordinator side). The cancel
     /// endpoint is selected by the run's [`WorkflowKind`].
     ///
@@ -1291,6 +1306,7 @@ impl DecmanClient {
             WorkflowKind::Dars => "/dars/cancel",
             WorkflowKind::AddParty => "/add-party/cancel",
             WorkflowKind::ChangeThreshold => "/change-threshold/cancel",
+            WorkflowKind::RotateKey => "/rotate-key/cancel",
         };
         self.post(path, None)
     }
