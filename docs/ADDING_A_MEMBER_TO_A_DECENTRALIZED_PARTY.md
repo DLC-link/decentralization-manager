@@ -32,7 +32,8 @@ missing.
    must list each other. Every member must list the coordinator. Set up the full
    mesh anyway: a later run can have a different coordinator. See
    [Exchange peer details](#exchange-peer-details).
-3. **The new member has every DAR the party uses.** DecMan checks this before it
+3. **The new member has every DAR the party uses.** DecMan checks this when you
+   start the run, before it sends any invitation. It checks again before it
    writes any topology. See [Check the new member's DARs](#check-the-new-members-dars).
 4. **The coordinator can read the party's contracts.** The DAR check reads them
    over the Ledger API, with the party credentials stored on the coordinator.
@@ -240,6 +241,8 @@ Contact the BitSafe team before you recover a participant in this state.
 | "new_threshold must be between 1 and N" | Pick a value up to the current number of owners |
 | "already has a … workflow in flight" | Wait for that run to end, or cancel it |
 | A list of incompatible peers | Upgrade those nodes to the same release |
+| "the new member … has not vetted N package(s)" | Distribute the missing DARs to the new member, then start the run again |
+| "Cannot check the new member's packages" | Open the party page and confirm that **Test Auth** succeeds. Then start the run again |
 
 ### The run fails
 
@@ -250,7 +253,7 @@ retry needs.
 
 | Error says | Cause | Do this |
 |---|---|---|
-| "the new member … has not vetted N package(s)" | The new member has not uploaded or not vetted a DAR | Distribute the DAR, then click **Retry** |
+| "the new member … has not vetted N package(s)" | The party got contracts from a new DAR after the run started, and the new member lacks that DAR | Distribute the DAR, then click **Retry** |
 | "this participant has vetted N package(s) it does not hold" | The new member lost a DAR, for example in a restore from backup, but kept its vetting | Upload the DAR on the new member again, then click **Retry** |
 | "Re-hosting … leaves the namespace as it is" | A former member was re-added with a new threshold | Start a new run with the current threshold |
 | "… is quarantined for …" | An earlier copy failed after part of the contracts reached Canton | See [Quarantine](#quarantine) |

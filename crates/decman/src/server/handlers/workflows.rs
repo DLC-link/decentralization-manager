@@ -657,6 +657,26 @@ fn kick_key_check_failure(party: &CantonId, e: &anyhow::Error) -> HttpResponse {
     }
 }
 
+/// The response to a failed package check of an add-party start. A missing
+/// package says what to do, so it goes back as it is. Any other failure means
+/// the check could not run, so the add is refused until it can.
+fn add_party_package_check_failure(party: &CantonId, e: &anyhow::Error) -> HttpResponse {
+    match e.downcast_ref::<workflow::add_party::MissingPackages>() {
+        Some(missing) => {
+            tracing::warn!("Add-party to {party} refused: {missing}");
+            HttpResponse::Conflict().json(ErrorResponse {
+                error: missing.to_string(),
+            })
+        }
+        None => {
+            tracing::error!("Cannot check the new member's packages for {party}: {e:#}");
+            HttpResponse::ServiceUnavailable().json(ErrorResponse {
+                error: format!("Cannot check the new member's packages: {e:#}"),
+            })
+        }
+    }
+}
+
 /// The member a kick removes.
 #[derive(Debug, PartialEq)]
 struct KickTarget {
@@ -1530,8 +1550,9 @@ async fn send_kick_invites(
     responses(
         (status = 202, description = "Add-party workflow started", body = WorkflowResponse),
         (status = 400, description = "Bad request", body = ErrorResponse),
-        (status = 409, description = "Workflow already in progress for this party, or the participant is already a member", body = ErrorResponse),
-        (status = 500, description = "Internal server error", body = ErrorResponse)
+        (status = 409, description = "Workflow already in progress for this party, the participant is already a member, or it has not vetted a package the party's contracts need", body = ErrorResponse),
+        (status = 500, description = "Internal server error", body = ErrorResponse),
+        (status = 503, description = "The new member's packages could not be checked", body = ErrorResponse)
     )
 )]
 #[post("/add-party")]
@@ -1709,6 +1730,22 @@ pub async fn start_add_party(
         return HttpResponse::Conflict().json(ErrorResponse {
             error: format_incompatible_peers(&incompatible),
         });
+    }
+
+    // A missing DAR must stop the add before any invite goes out, so no peer
+    // waits and the new member generates no keys for a run that cannot finish.
+    let ledger_token = {
+        let auth = data.auth.read().await.clone();
+        workflow::add_party::resolve_ledger_token(&auth, &decentralized_party_id).await
+    };
+    if let Err(e) = workflow::add_party::packages::check_new_member_packages(
+        &data.config,
+        &add_party_config,
+        ledger_token.as_deref(),
+    )
+    .await
+    {
+        return add_party_package_check_failure(&decentralized_party_id, &e);
     }
 
     // Register + persist atomically w.r.t. duplicates (registry insert dedups
@@ -7044,6 +7081,58 @@ mod tests {
                 .is_empty()
         );
         assert!(data.workflows.snapshot().is_empty());
+        Ok(())
+    }
+
+    async fn error_body(response: HttpResponse) -> anyhow::Result<String> {
+        let body = actix_web::body::to_bytes(response.into_body())
+            .await
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+        let body: serde_json::Value = serde_json::from_slice(&body)?;
+        body["error"]
+            .as_str()
+            .map(str::to_string)
+            .context("the response has no error text")
+    }
+
+    /// A missing package goes back as a conflict that names the ids, because
+    /// the operator fixes it by uploading the DAR.
+    #[actix_web::test]
+    async fn a_missing_package_refuses_the_add_with_the_missing_ids() -> anyhow::Result<()> {
+        let error = anyhow::Error::from(workflow::add_party::MissingPackages {
+            participant: pid(3)?,
+            missing: vec!["pkg-a".to_string(), "pkg-b".to_string()],
+        });
+
+        let response = add_party_package_check_failure(&pid(1)?, &error);
+
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        let error = error_body(response).await?;
+        assert!(
+            error.contains(&pid(3)?.to_string()),
+            "names the new member: {error}"
+        );
+        assert!(
+            error.contains(r#"Missing package ids: ["pkg-a", "pkg-b"]"#),
+            "lists the missing ids: {error}"
+        );
+        Ok(())
+    }
+
+    /// A check that could not run refuses the add as well. Letting it through
+    /// unchecked would send the invites the check exists to hold back.
+    #[actix_web::test]
+    async fn a_check_that_cannot_run_refuses_the_add_as_unavailable() -> anyhow::Result<()> {
+        let error = anyhow::anyhow!("ledger API unreachable");
+
+        let response = add_party_package_check_failure(&pid(1)?, &error);
+
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let error = error_body(response).await?;
+        assert!(
+            error.contains("ledger API unreachable"),
+            "carries the cause: {error}"
+        );
         Ok(())
     }
 }
