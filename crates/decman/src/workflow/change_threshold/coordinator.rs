@@ -189,9 +189,17 @@ async fn prepare_signatures(
     )
     .await?;
     if !missing_dns.is_empty() || !missing_p2p.is_empty() {
+        let show = |peers: &[String]| {
+            if peers.is_empty() {
+                "none".to_string()
+            } else {
+                format!("{peers:?}")
+            }
+        };
+        let (missing_dns, missing_p2p) = (show(&missing_dns), show(&missing_p2p));
         anyhow::bail!(
             "Change-threshold cannot submit. Peers without a signed DNS proposal: \
-             {missing_dns:?}. Peers without a signed P2P proposal: {missing_p2p:?}. \
+             {missing_dns}. Peers without a signed P2P proposal: {missing_p2p}. \
              A coordinator restart under an older version can lose peer signatures, \
              and the peers do not send them again. Start a fresh change-threshold run."
         );
@@ -321,7 +329,7 @@ mod tests {
             .to_string();
 
         assert!(
-            message.contains("without a signed DNS proposal: []"),
+            message.contains("without a signed DNS proposal: none"),
             "{message}"
         );
         assert!(
