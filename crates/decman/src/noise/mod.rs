@@ -2217,6 +2217,53 @@ mod tests {
         Ok(())
     }
 
+    #[tokio::test]
+    async fn signature_upload_refusals_do_not_expose_payload_bytes() -> Result {
+        let root = tempfile::tempdir()?;
+        let mut config = NodeConfig::default().with_root_dir(root.path());
+        config.node.participant_id =
+            Some(CantonId::parse(&format!("peer::1220{}", "a".repeat(64)))?);
+        let keys = NoiseKeypair::generate();
+        tokio::fs::create_dir_all(config.data_dir()).await?;
+        keys.save_to_file(config.key_file_path()).await?;
+        let coordinator_keys = NoiseKeypair::generate();
+        let psk = *coordinator_keys.derive_psk(&keys.public_key);
+        let signature = b"signature-payload-must-not-appear".to_vec();
+        let refusal = Message::new(MessageType::Error, signature.clone());
+        let (port, served, server) = refusing_peer(psk, StatusCode::OK, refusal.to_bytes()).await?;
+        let coordinator = Peer {
+            participant_id: CantonId::parse(&format!("coordinator::1220{}", "b".repeat(64)))?,
+            name: "Refusing coordinator".into(),
+            address: "127.0.0.1".into(),
+            port,
+            public_key: coordinator_keys.public_key_hex(),
+            party: None,
+        };
+        let client = NoiseClient::new(config, coordinator, "run-1".into()).await?;
+        let outcomes = [
+            client.send_dns_signature(signature.clone()).await,
+            client.send_p2p_signatures(signature.clone()).await,
+            client.send_submission_signatures(signature.clone()).await,
+            client.send_kick_signatures(signature.clone()).await,
+            client
+                .send_change_threshold_signatures(signature.clone())
+                .await,
+            client.send_add_party_signatures(signature.clone()).await,
+            client
+                .send_add_party_clear_proposal(signature.clone())
+                .await,
+            client.send_add_party_clear_signature(signature).await,
+        ];
+        server.abort();
+        for outcome in outcomes {
+            let error = outcome.unwrap_err();
+            assert!(matches!(error, NoiseError::InvalidMessage));
+            assert!(!format!("{error}").contains("signature-payload-must-not-appear"));
+        }
+        assert_eq!(served.load(Ordering::SeqCst), 8);
+        Ok(())
+    }
+
     // Compile-time guard: the secret-bearing types must not expose Debug,
     // Clone, or Copy. Removing any of these breaks the security invariant.
     static_assertions::assert_not_impl_any!(NoiseKeypair: std::fmt::Debug, Clone, Copy);
