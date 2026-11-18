@@ -20,10 +20,12 @@ use canton_proto_rs::com::digitalasset::canton::{
         party_to_participant::{HostingParticipant, hosting_participant},
     },
     topology::admin::v30::{
-        BaseResult, ListAllResponse, ListPartyToParticipantResponse, TopologyTransactions,
-        list_party_to_participant_response, topology_transactions,
+        BaseResult, ListAllResponse, ListPartyToParticipantResponse, SignTransactionsRequest,
+        SignTransactionsResponse, TopologyTransactions, list_party_to_participant_response,
+        topology_transactions,
     },
 };
+use common::types::{WorkflowKind, WorkflowProgress, WorkflowRole, WorkflowRun};
 use http::{HeaderMap, HeaderValue};
 use hyper::{
     Body, Request, Response, Server,
@@ -33,7 +35,10 @@ use sha2::{Digest, Sha256};
 use tokio::sync::Notify;
 
 use crate::{
-    db::MIGRATOR,
+    db::{
+        MIGRATOR,
+        schema::{Commitable, SchemaWrite},
+    },
     server::{AppState, TestAuthMiddleware, tenant_call_audit, test_tenant_acs_import},
     workflow::party_replication::{
         TransferSource, import_party_acs,
@@ -57,6 +62,11 @@ struct Connectivity {
     clears: usize,
     proposal: Vec<u8>,
     unrelated_proposals: Vec<Vec<u8>>,
+    current_mapping: Option<(i32, PartyToParticipant)>,
+    reject_signing: bool,
+    sign_calls: usize,
+    import_entered: Option<Arc<Notify>>,
+    import_release: Option<Arc<Notify>>,
     entered: Option<Arc<Notify>>,
     release: Option<Arc<Notify>>,
 }
@@ -119,12 +129,37 @@ async fn respond(
         .await
         .expect("the unary request completes");
     let request_bytes = body.get(5..).expect("a gRPC frame");
+    if method == "SignTransactions" {
+        let rejects = {
+            let mut state = state.lock().expect("state lock");
+            state.sign_calls += 1;
+            state.reject_signing
+        };
+        if rejects {
+            return Ok(Response::builder()
+                .header("content-type", "application/grpc")
+                .header("grpc-status", "3")
+                .header("grpc-message", "the audit test refuses to sign")
+                .body(Body::empty())
+                .expect("a valid nonretryable signing refusal"));
+        }
+    }
     if method == "ImportPartyAcs" {
-        let succeeds = {
+        let (succeeds, entered, release) = {
             let mut state = state.lock().expect("state lock");
             state.imports += 1;
-            state.import_success
+            (
+                state.import_success,
+                state.import_entered.take(),
+                state.import_release.take(),
+            )
         };
+        if let Some(entered) = entered {
+            entered.notify_one();
+        }
+        if let Some(release) = release {
+            release.notified().await;
+        }
         if !succeeds {
             return Ok(Response::builder()
                 .header("content-type", "application/grpc")
@@ -158,6 +193,15 @@ async fn respond(
         }
     }
     let payload = match method.as_str() {
+        "ListPackages" | "ListVettedPackages" => vec![],
+        "SignTransactions" => {
+            let request = SignTransactionsRequest::decode(request_bytes)
+                .expect("the signing request decodes");
+            SignTransactionsResponse {
+                transactions: request.transactions,
+            }
+            .encode_to_vec()
+        }
         "ImportPartyAcs" => vec![],
         "ListConnectedSynchronizers" => {
             let connected = state.lock().expect("state lock").connected;
@@ -274,19 +318,27 @@ async fn respond(
             }
             .encode_to_vec()
         }
-        "ListPartyToParticipant" => ListPartyToParticipantResponse {
-            results: vec![list_party_to_participant_response::Result {
-                context: Some(BaseResult {
-                    serial: 8,
-                    operation: TopologyChangeOp::AddReplace as i32,
-                    ..Default::default()
-                }),
-                item: Some(list_party_to_participant_response::result::Item::V30(
-                    mapping(),
-                )),
-            }],
+        "ListPartyToParticipant" => {
+            let (serial, mapping) = state
+                .lock()
+                .expect("state lock")
+                .current_mapping
+                .clone()
+                .unwrap_or_else(|| (8, mapping()));
+            ListPartyToParticipantResponse {
+                results: vec![list_party_to_participant_response::Result {
+                    context: Some(BaseResult {
+                        serial,
+                        operation: TopologyChangeOp::AddReplace as i32,
+                        ..Default::default()
+                    }),
+                    item: Some(list_party_to_participant_response::result::Item::V30(
+                        mapping,
+                    )),
+                }],
+            }
+            .encode_to_vec()
         }
-        .encode_to_vec(),
         other => panic!("unexpected RPC {other}; the stage must never publish or reconnect"),
     };
     let mut frame = vec![0];
@@ -382,7 +434,7 @@ async fn stored_stage(db: &SqlitePool) -> Result<(ReplicationTarget, Vec<Vec<u8>
             &serde_json::to_vec(&staged)?,
         )
         .await?;
-    assert!(claim_import_window(db, &target).await?);
+    assert!(claim_import_window(db, &target, None).await?);
     Ok((target, signatures))
 }
 
@@ -1020,5 +1072,383 @@ async fn an_empty_import_cannot_resume_while_retiring_but_can_after_reconnect_fa
     assert_eq!(state.imports, 0, "the empty ACS requires no import RPC");
     assert_eq!(state.reconnects, 2);
     assert_eq!(state.clears, 1);
+    Ok(())
+}
+
+#[sqlx::test(migrator = "MIGRATOR")]
+async fn a_cancelled_nonempty_final_request_serializes_block_one_until_completion(
+    db: SqlitePool,
+) -> Result<()> {
+    let boundary = CantonBoundary::new(false, true)?;
+    let (target, data) = reconnect_fixture(&db, &boundary).await?;
+    let entered = Arc::new(Notify::new());
+    let release = Arc::new(Notify::new());
+    {
+        let mut state = boundary.state.lock().expect("state lock");
+        state.import_success = true;
+        state.import_entered = Some(entered.clone());
+        state.import_release = Some(release.clone());
+    }
+    let app = actix_test::init_service(
+        App::new()
+            .app_data(data.clone())
+            .wrap(TestAuthMiddleware)
+            .service(test_tenant_acs_import),
+    )
+    .await;
+    let bytes = b"nonempty snapshot whose Canton acknowledgement is delayed";
+    let first_block = serde_json::json!({
+        "party_id": target.party_id.to_string(), "base_serial": 7,
+        "seq": 1, "end": false, "chunk": STANDARD.encode(bytes),
+    });
+    let first = actix_test::call_service(
+        &app,
+        actix_test::TestRequest::post()
+            .uri("/v0/tenant/add-hosts/import")
+            .set_json(&first_block)
+            .to_request(),
+    )
+    .await;
+    assert_eq!(first.status(), StatusCode::OK);
+    let final_block = final_import_block(&target, 2, bytes);
+    let mut final_response = Box::pin(actix_test::call_service(
+        &app,
+        actix_test::TestRequest::post()
+            .uri("/v0/tenant/add-hosts/import")
+            .set_json(&final_block)
+            .to_request(),
+    ));
+    tokio::select! {
+        _ = &mut final_response => panic!("the final request must wait for Canton's acknowledgement"),
+        result = tokio::time::timeout(Duration::from_secs(15), entered.notified()) => result?,
+    }
+    drop(final_response);
+    assert!(
+        data.tenant_import_mu.try_lock().is_err(),
+        "cancelling the caller must not release admission before import finalization"
+    );
+    let mut restarted = Box::pin(actix_test::call_service(
+        &app,
+        actix_test::TestRequest::post()
+            .uri("/v0/tenant/add-hosts/import")
+            .set_json(&first_block)
+            .to_request(),
+    ));
+    tokio::select! {
+        _ = &mut restarted => panic!("block one must wait until the cancelled final request finishes"),
+        _ = tokio::time::sleep(Duration::from_millis(100)) => {},
+    }
+    {
+        let state = boundary.state.lock().expect("state lock");
+        assert_eq!(state.imports, 1);
+        assert!(state.manual && !state.connected);
+        assert_eq!(
+            state.modifications, 0,
+            "manual mode must remain enabled until import acknowledgement"
+        );
+        assert_eq!(state.reconnects, 0);
+    }
+    release.notify_one();
+    let restarted = tokio::time::timeout(Duration::from_secs(10), restarted).await?;
+    assert_eq!(
+        restarted.status(),
+        StatusCode::CONFLICT,
+        "a stale block-one request must recheck completed ownership after waiting"
+    );
+    assert!(import_window_owner(&db, &participant(2)).await?.is_none());
+    assert!(
+        target
+            .read_artifact(&db, artifact_kinds::TENANT_ADD_HOSTS_IMPORT_COMPLETED, None)
+            .await?
+            .is_some()
+    );
+    let state = boundary.state.lock().expect("state lock");
+    assert_eq!(
+        state.imports, 1,
+        "the cancelled final request must not permit reimport"
+    );
+    assert_eq!(state.disconnects, 0);
+    assert_eq!(state.reconnects, 1);
+    assert_eq!(state.modifications, 1);
+    assert!(state.connected && !state.manual);
+    Ok(())
+}
+
+#[sqlx::test(migrator = "MIGRATOR")]
+async fn a_completion_release_failure_returns_500_and_retries_without_reimport(
+    db: SqlitePool,
+) -> Result<()> {
+    let boundary = CantonBoundary::new(false, true)?;
+    let (target, data) = reconnect_fixture(&db, &boundary).await?;
+    boundary.state.lock().expect("state lock").import_success = true;
+    sqlx::query(
+        "CREATE TRIGGER refuse_tenant_release BEFORE DELETE ON tenant_import_window \
+        BEGIN SELECT RAISE(ABORT, 'the audit test refuses owner deletion'); END",
+    )
+    .execute(&db)
+    .await?;
+    let app = actix_test::init_service(
+        App::new()
+            .app_data(data.clone())
+            .wrap(TestAuthMiddleware)
+            .service(test_tenant_acs_import),
+    )
+    .await;
+    let bytes = b"snapshot imported before the durable owner release fails";
+    let first = actix_test::call_service(
+        &app,
+        actix_test::TestRequest::post()
+            .uri("/v0/tenant/add-hosts/import")
+            .set_json(serde_json::json!({
+                "party_id": target.party_id.to_string(), "base_serial": 7,
+                "seq": 1, "end": false, "chunk": STANDARD.encode(bytes),
+            }))
+            .to_request(),
+    )
+    .await;
+    assert_eq!(first.status(), StatusCode::OK);
+    let final_block = final_import_block(&target, 2, bytes);
+    let failed = actix_test::call_service(
+        &app,
+        actix_test::TestRequest::post()
+            .uri("/v0/tenant/add-hosts/import")
+            .set_json(&final_block)
+            .to_request(),
+    )
+    .await;
+    assert_eq!(
+        failed.status(),
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "an owner release failure must not report a completed import"
+    );
+    let body: serde_json::Value = actix_test::read_body_json(failed).await;
+    assert_ne!(body.get("complete"), Some(&serde_json::Value::Bool(true)));
+    let error = body["error"]
+        .as_str()
+        .expect("the release failure explains recovery");
+    assert!(
+        error.contains("durable import window")
+            && error.contains("Retry the identical final block"),
+        "{error}"
+    );
+    assert_eq!(
+        import_window_owner(&db, &participant(2)).await?,
+        Some(target.instance_name.clone())
+    );
+    assert!(
+        target
+            .read_artifact(&db, artifact_kinds::TENANT_ADD_HOSTS_ACS_IMPORTED, None)
+            .await?
+            .is_some()
+    );
+    assert!(
+        target
+            .read_artifact(&db, artifact_kinds::TENANT_ADD_HOSTS_IMPORT_COMPLETED, None)
+            .await?
+            .is_none()
+    );
+    {
+        let state = boundary.state.lock().expect("state lock");
+        assert_eq!(state.imports, 1);
+        assert_eq!(
+            state.clears, 0,
+            "clearance must wait for durable ownership release"
+        );
+        assert!(state.connected && !state.manual);
+    }
+    sqlx::query("DROP TRIGGER refuse_tenant_release")
+        .execute(&db)
+        .await?;
+    let resumed = actix_test::call_service(
+        &app,
+        actix_test::TestRequest::post()
+            .uri("/v0/tenant/add-hosts/import")
+            .set_json(&final_block)
+            .to_request(),
+    )
+    .await;
+    assert_eq!(resumed.status(), StatusCode::OK);
+    let body: serde_json::Value = actix_test::read_body_json(resumed).await;
+    assert_eq!(body["complete"], true);
+    assert_eq!(body["marker_cleared"], true);
+    assert!(import_window_owner(&db, &participant(2)).await?.is_none());
+    assert!(
+        target
+            .read_artifact(&db, artifact_kinds::TENANT_ADD_HOSTS_IMPORT_COMPLETED, None)
+            .await?
+            .is_some()
+    );
+    let state = boundary.state.lock().expect("state lock");
+    assert_eq!(
+        state.imports, 1,
+        "release recovery must not reimport the snapshot"
+    );
+    assert_eq!(state.clears, 1);
+    Ok(())
+}
+
+async fn fresh_stage_fixture(
+    db: &SqlitePool,
+    boundary: &CantonBoundary,
+) -> Result<ReplicationTarget> {
+    let proposed = mapping();
+    let target = replication_target(&proposed.party, &participant(2), 7)?;
+    let mut current = proposed.clone();
+    current
+        .participants
+        .retain(|host| host.participant_uid != participant(2).to_string());
+    {
+        let mut state = boundary.state.lock().expect("state lock");
+        state.current_mapping = Some((7, current));
+        state.proposal = encode_signed(&signed(proposed));
+    }
+    // Prepare captures these offsets before staging; neither is a signature or lease.
+    target
+        .write_artifact(db, target.artifacts.export_offset, None, b"1")
+        .await?;
+    target
+        .write_artifact(
+            db,
+            target.artifacts.pre_activation_offset,
+            Some(&participant(2).to_string()),
+            b"1",
+        )
+        .await?;
+    Ok(target)
+}
+
+async fn admit_workflow_after_stage_failure(db: &SqlitePool) -> Result<()> {
+    let run: WorkflowRun = serde_json::from_value(serde_json::json!({
+        "instance_name": "workflow-after-refused-stage",
+        "kind": WorkflowKind::AddParty,
+        "role": WorkflowRole::Coordinator,
+        "status": WorkflowProgress::InProgress,
+        "current_step": "WaitingForPeers", "step_index": 0, "step_total": 1,
+        "config_json": "{}", "expected_peers": [], "completed_peers": [],
+        "dismissed": false, "created_at": 1, "updated_at": 1,
+    }))?;
+    let mut transaction = db.begin_transaction().await?;
+    transaction.upsert_workflow_run(&run).await?;
+    transaction.commit().await?;
+    assert_eq!(
+        db.get_workflow_run(&run.instance_name)
+            .await?
+            .expect("the workflow is persisted")
+            .status,
+        WorkflowProgress::InProgress
+    );
+    Ok(())
+}
+
+#[sqlx::test(migrator = "MIGRATOR")]
+async fn a_nonretryable_signing_failure_does_not_claim_or_disconnect_the_participant(
+    db: SqlitePool,
+) -> Result<()> {
+    let boundary = CantonBoundary::new(true, false)?;
+    let target = fresh_stage_fixture(&db, &boundary).await?;
+    boundary.state.lock().expect("state lock").reject_signing = true;
+    let result = stage_add_hosts(
+        &boundary.config,
+        &db,
+        &target.party_id.to_string(),
+        &[participant(2)],
+        HostPermission::Confirmation,
+        7,
+    )
+    .await;
+    let error = result.expect_err("Canton refuses the signing request");
+    assert!(
+        format!("{error:#}").contains("the audit test refuses to sign"),
+        "{error:#}"
+    );
+    assert!(import_window_owner(&db, &participant(2)).await?.is_none());
+    assert!(
+        target
+            .read_artifact(
+                &db,
+                artifact_kinds::TENANT_ADD_HOSTS_STAGED_SIGNATURES,
+                None
+            )
+            .await?
+            .is_none()
+    );
+    assert!(
+        target
+            .read_artifact(&db, artifact_kinds::TENANT_ADD_HOSTS_STAGE_READY, None)
+            .await?
+            .is_none()
+    );
+    {
+        let state = boundary.state.lock().expect("state lock");
+        assert_eq!(
+            state.sign_calls, 1,
+            "an InvalidArgument refusal is not retried"
+        );
+        assert!(state.connected && !state.manual);
+        assert_eq!(state.disconnects, 0);
+        assert_eq!(state.modifications, 0);
+    }
+    admit_workflow_after_stage_failure(&db).await?;
+    Ok(())
+}
+
+#[sqlx::test(migrator = "MIGRATOR")]
+async fn a_staged_signature_insert_failure_rolls_back_its_participant_claim(
+    db: SqlitePool,
+) -> Result<()> {
+    let boundary = CantonBoundary::new(true, false)?;
+    let target = fresh_stage_fixture(&db, &boundary).await?;
+    sqlx::query(
+        "CREATE TRIGGER refuse_staged_signature BEFORE INSERT ON tenant_replication_artifacts \
+        WHEN NEW.artifact_kind = 'tenant_add_hosts_staged_signatures' \
+        BEGIN SELECT RAISE(ABORT, 'the audit test refuses signature persistence'); END",
+    )
+    .execute(&db)
+    .await?;
+    let result = stage_add_hosts(
+        &boundary.config,
+        &db,
+        &target.party_id.to_string(),
+        &[participant(2)],
+        HostPermission::Confirmation,
+        7,
+    )
+    .await;
+    let error = result.expect_err("the real SQLite trigger refuses signature persistence");
+    assert!(
+        format!("{error:#}").contains("the audit test refuses signature persistence"),
+        "{error:#}"
+    );
+    assert!(
+        import_window_owner(&db, &participant(2)).await?.is_none(),
+        "signature persistence and participant ownership must roll back together"
+    );
+    assert!(
+        target
+            .read_artifact(
+                &db,
+                artifact_kinds::TENANT_ADD_HOSTS_STAGED_SIGNATURES,
+                None
+            )
+            .await?
+            .is_none()
+    );
+    assert!(
+        target
+            .read_artifact(&db, target.artifacts.import_inflight, None)
+            .await?
+            .is_none()
+    );
+    {
+        let state = boundary.state.lock().expect("state lock");
+        assert_eq!(
+            state.sign_calls, 1,
+            "the test must reach persistence after signing succeeds"
+        );
+        assert!(state.connected && !state.manual);
+        assert_eq!(state.disconnects, 0);
+        assert_eq!(state.modifications, 0);
+    }
+    admit_workflow_after_stage_failure(&db).await?;
     Ok(())
 }

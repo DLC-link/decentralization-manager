@@ -279,7 +279,7 @@ joining host with a current host, and distribute what is missing.
    # joiners.txt contains: URL participant-ID tenant-key
    stage_files=()
    while read -r url pid key; do
-     stage_file="stage-${pid%%::*}.json"
+     stage_file="stage-${#stage_files[@]}.json"
      curl --fail-with-body -sS -X POST "$url/v0/tenant/add-hosts/stage" \
        -H "Authorization: Bearer $key" -H 'Content-Type: application/json' \
        -d @add.json > "$stage_file" || exit 1
@@ -470,6 +470,7 @@ when it completes or stops, with the reason it stopped.
 | The prepare answers differ | A host built a different mapping | Stop, and ask that host's operator |
 | `409` from the ACS or import call | The two ends disagree about the next block | The operator checks quarantine before restarting the copy from block 1 |
 | A staged import fails and the joiner stays offline | The import fails or the copy times out | The operator checks quarantine and repairs partial state before retrying |
+| `500` "The ACS is imported, but its durable import window could not be released" | The database cannot persist completion | Retry the identical final block. Check the host logs if the database failure persists |
 | `500` "The ACS is imported, but reconnect or health verification failed" | Canton accepts the ACS, but reconnect does not finish | Retry the identical final block. DecMan retries reconnect without importing again |
 | `500` "Imported the ACS, but could not request the marker clear" on the last block | The ACS imports, but the clearance request fails | Retry the identical final block. Do not stage or import again |
 | `"marker_cleared": false` | Canton clears the marker a short time after the import | Poll `/state` until `onboarding_hosts` is 0 |

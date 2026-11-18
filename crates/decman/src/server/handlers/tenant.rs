@@ -716,7 +716,6 @@ pub async fn tenant_add_hosts_publish(
             };
             match publish_add_hosts(
                 &data.config,
-                &data.db,
                 &body.party_id,
                 &body.new_hosts,
                 body.permission,
@@ -946,8 +945,9 @@ pub async fn tenant_acs_import(
     };
     // A copy this host admitted must never be refused partway, or the
     // staged participant must stay offline until its ACS is complete.
-    // So the next block of an open copy, the final one included, spends no
-    // budget and writes no row here: the copy's teardown records how it ended.
+    // The next block of an open copy, the final one included, spends no budget.
+    // Finalization runs in an audited task so cancellation cannot release its
+    // admission lock while Canton is still accepting the snapshot.
     // Every other block spends budget: block 1, which opens a copy, block 0,
     // which does not exist, a block that fails the checks below, and a block
     // that no open copy takes next. Two requests that carry the same next
@@ -971,10 +971,10 @@ pub async fn tenant_acs_import(
             }
             Err(_) => false,
         };
-        if next {
+        if next && !body.end {
             return tenant_acs_import_on_this_host(&data, &body, checked, None).await;
         }
-        if let Err(resp) = charge_tenant_key(&data, key.as_ref(), http_req.path()) {
+        if !next && let Err(resp) = charge_tenant_key(&data, key.as_ref(), http_req.path()) {
             return resp;
         }
     }
@@ -1230,6 +1230,14 @@ async fn completed_tenant_import(
     body: &TenantAcsImportRequest,
     target: &ReplicationTarget,
 ) -> HttpResponse {
+    if let Err(error) = release_import_window_owner(&data.db, target).await {
+        tracing::error!(
+            "tenant acs import: could not persist completed import ownership: {error:#}"
+        );
+        return HttpResponse::InternalServerError().json(ErrorResponse {
+            error: "The ACS is imported, but its durable import window could not be released. Retry the identical final block without staging or importing again. See the host's logs".into(),
+        });
+    }
     let marker_cleared = match request_onboarding_flag_clear(&data.config, &data.db, target).await {
         Ok(ClearOutcome::Cleared) => true,
         Ok(ClearOutcome::Proposed) => false,
@@ -2644,6 +2652,7 @@ mod audit_tests {
         assert_eq!(
             seen,
             [
+                ("/v0/tenant/add-hosts/import (end)", Some(500)),
                 ("/v0/tenant/add-hosts/import (completed)", None),
                 ("/v0/tenant/add-hosts/import (start)", Some(400)),
             ]

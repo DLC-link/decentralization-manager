@@ -37,11 +37,12 @@ const RECENT_GOVERNANCE_AUDIT_SQL: &str = r"
     LIMIT ? OFFSET ?
 ";
 
+/// A staged tenant import excludes new or resumed workflows on this participant.
+const WORKFLOW_BLOCKED_BY_IMPORT: &str = "A tenant ACS import owns this participant. Complete the import before starting another workflow";
+
 /// The refusal of a workflow run that would become in progress during a purge
 /// of former-party contracts. The purge takes the participant off its
 /// synchronizer, so a run would fail underneath it.
-const WORKFLOW_BLOCKED_BY_IMPORT: &str = "A tenant ACS import owns this participant. Complete the import before starting another workflow";
-
 const WORKFLOW_BLOCKED_BY_PURGE: &str = "A purge of former-party contracts is running on this \
      node. Start the workflow again after the purge finishes";
 

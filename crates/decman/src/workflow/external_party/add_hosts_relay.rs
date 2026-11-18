@@ -213,7 +213,12 @@ pub async fn import_window_owner(
     .await?)
 }
 
-async fn claim_import_window(db: &SqlitePool, target: &ReplicationTarget) -> Result<bool> {
+async fn claim_import_window(
+    db: &SqlitePool,
+    target: &ReplicationTarget,
+    staged_payload: Option<&[u8]>,
+) -> Result<bool> {
+    let mut transaction = db.begin().await?;
     sqlx::query(
         "INSERT INTO tenant_import_window (participant_id, instance_name, party_id) \
          SELECT ?1, ?2, ?3 \
@@ -224,12 +229,44 @@ async fn claim_import_window(db: &SqlitePool, target: &ReplicationTarget) -> Res
     .bind(target.target_participant_id.to_string())
     .bind(&target.instance_name)
     .bind(target.party_id.to_string())
-    .execute(db)
+    .execute(&mut *transaction)
     .await?;
-    Ok(import_window_owner(db, &target.target_participant_id)
-        .await?
-        .as_deref()
-        == Some(target.instance_name.as_str()))
+    let owner: Option<String> = sqlx::query_scalar(
+        "SELECT instance_name FROM tenant_import_window WHERE participant_id = ?",
+    )
+    .bind(target.target_participant_id.to_string())
+    .fetch_optional(&mut *transaction)
+    .await?;
+    if owner.as_deref() != Some(target.instance_name.as_str()) {
+        return Ok(false);
+    }
+    if let Some(payload) = staged_payload {
+        sqlx::query(
+            "INSERT INTO tenant_replication_artifacts \
+             (instance_name, artifact_kind, attestor_id, payload, created_at) \
+             VALUES (?, ?, '', ?, CAST(strftime('%s', 'now') AS INTEGER)) \
+             ON CONFLICT(instance_name, artifact_kind, attestor_id) DO NOTHING",
+        )
+        .bind(&target.instance_name)
+        .bind(artifact_kinds::TENANT_ADD_HOSTS_STAGED_SIGNATURES)
+        .bind(payload)
+        .execute(&mut *transaction)
+        .await?;
+        let persisted: Vec<u8> = sqlx::query_scalar(
+            "SELECT payload FROM tenant_replication_artifacts \
+             WHERE instance_name = ? AND artifact_kind = ? AND attestor_id = ''",
+        )
+        .bind(&target.instance_name)
+        .bind(artifact_kinds::TENANT_ADD_HOSTS_STAGED_SIGNATURES)
+        .fetch_one(&mut *transaction)
+        .await?;
+        ensure!(
+            persisted == payload,
+            "a different staged signature already exists"
+        );
+    }
+    transaction.commit().await?;
+    Ok(true)
 }
 
 /// Release ownership only after the tenant import reconnects and verifies health.
@@ -320,7 +357,6 @@ async fn ensure_offline(config: &NodeConfig) -> std::result::Result<(), AddHosts
 ///
 /// # Errors
 /// Returns a validation, stale-serial, busy-window, or Canton/database error.
-#[allow(clippy::too_many_arguments)]
 pub async fn stage_add_hosts(
     config: &NodeConfig,
     db: &SqlitePool,
@@ -397,14 +433,6 @@ pub async fn stage_add_hosts(
             "the exact add-hosts proposal has not reached this participant; publish the party authorization on a current host first"
         )));
     };
-    if !claim_import_window(db, &target)
-        .await
-        .map_err(AddHostsError::Canton)?
-    {
-        return Err(AddHostsError::Busy(
-            "another import, workflow, or purge owns this participant".to_string(),
-        ));
-    }
     let synchronizer = utils::get_synchronizer_id(config)
         .await
         .map_err(AddHostsError::Canton)?;
@@ -436,28 +464,17 @@ pub async fn stage_add_hosts(
         base_serial,
         signed_transactions: signed.iter().map(encode_signed).collect(),
     };
-    target
-        .write_artifact_if_absent(
-            db,
-            artifact_kinds::TENANT_ADD_HOSTS_STAGED_SIGNATURES,
-            None,
-            &serde_json::to_vec(&staged).map_err(|error| AddHostsError::Canton(error.into()))?,
-        )
-        .await
-        .map_err(AddHostsError::Canton)?;
-    let persisted = target
-        .read_artifact(db, artifact_kinds::TENANT_ADD_HOSTS_STAGED_SIGNATURES, None)
+    let payload =
+        serde_json::to_vec(&staged).map_err(|error| AddHostsError::Canton(error.into()))?;
+    if !claim_import_window(db, &target, Some(&payload))
         .await
         .map_err(AddHostsError::Canton)?
-        .context("the staged signature is not persisted")
-        .map_err(AddHostsError::Canton)?;
-    return_staged(
-        config,
-        db,
-        &target,
-        serde_json::from_slice(&persisted).map_err(|error| AddHostsError::Canton(error.into()))?,
-    )
-    .await
+    {
+        return Err(AddHostsError::Busy(
+            "another import, workflow, or purge owns this participant".to_string(),
+        ));
+    }
+    return_staged(config, db, &target, staged).await
 }
 
 async fn read_current(
@@ -477,10 +494,8 @@ async fn read_current(
 ///
 /// # Errors
 /// Rejects altered mappings, unrelated transactions, stale pins, and Canton failures.
-#[allow(clippy::too_many_arguments)]
 pub async fn publish_add_hosts(
     config: &NodeConfig,
-    _db: &SqlitePool,
     party_id: &str,
     new_hosts: &[CantonId],
     permission: HostPermission,
@@ -767,9 +782,9 @@ mod tests {
         let first = replication_target(&expected().party, &participant(2), 4)?;
         let second_party = format!("other::1220{}", "bb".repeat(32));
         let second = replication_target(&second_party, &participant(2), 8)?;
-        assert!(claim_import_window(&db, &first).await?);
-        assert!(claim_import_window(&db, &first).await?);
-        assert!(!claim_import_window(&db, &second).await?);
+        assert!(claim_import_window(&db, &first, None).await?);
+        assert!(claim_import_window(&db, &first, None).await?);
+        assert!(!claim_import_window(&db, &second, None).await?);
         release_import_window_owner(&db, &second).await?;
         assert_eq!(
             import_window_owner(&db, &participant(2)).await?,
@@ -782,7 +797,7 @@ mod tests {
                 .await?
                 .is_some()
         );
-        assert!(claim_import_window(&db, &second).await?);
+        assert!(claim_import_window(&db, &second, None).await?);
         Ok(())
     }
 
@@ -806,7 +821,7 @@ mod tests {
                 &serde_json::to_vec(&staged)?,
             )
             .await?;
-        assert!(claim_import_window(&db, &target).await?);
+        assert!(claim_import_window(&db, &target, None).await?);
         release_import_window_owner(&db, &target).await?;
         let mut config = NodeConfig::default();
         config.node.participant_id = Some(host.clone());

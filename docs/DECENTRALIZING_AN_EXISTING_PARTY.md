@@ -139,7 +139,7 @@ stays true after a conversion.
    # joiners.txt contains: URL participant-ID tenant-key
    stage_files=()
    while read -r url pid key; do
-     stage_file="stage-${pid%%::*}.json"
+     stage_file="stage-${#stage_files[@]}.json"
      curl --fail-with-body -sS -X POST "$url/v0/tenant/add-hosts/stage" \
        -H "Authorization: Bearer $key" -H 'Content-Type: application/json' \
        -d @add.json > "$stage_file" || exit 1
@@ -356,6 +356,7 @@ removes them yet.
 | `400` from `authorize` on a joining node | A joiner must disconnect before publication | Use `stage` on the joiner and `publish` on the owner |
 | `400` "a Submission host needs the party's threshold to be 1" | The party's threshold is above 1 | Use `"permission": "confirmation"` |
 | `404` from `/status` on a failover host | `/status` checks Confirmation hosts only | Use the owner's `/state` instead |
+| `500` "The ACS is imported, but its durable import window could not be released" | The database cannot persist completion | Retry the identical final block. Check the host logs if the database failure persists |
 | `500` "The ACS is imported, but reconnect or health verification failed" | Canton accepts the ACS, but reconnect does not finish | Retry the identical final block. DecMan retries reconnect without importing again |
 | `500` "Imported the ACS, but could not request the marker clear" on the last block | The ACS imports, but the clearance request fails | Retry the identical final block. Do not stage or import again |
 | `"marker_cleared": false` | Canton accepts the clearance request but waits for its safe time | Poll `/state` until `onboarding_hosts` is 0 |

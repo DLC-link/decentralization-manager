@@ -241,6 +241,28 @@ fn require_live_source(config: &NodeConfig, current: &CurrentPartyTopology) -> R
     Ok(())
 }
 
+fn require_namespace_authorizer(
+    config: &NodeConfig,
+    current: &CurrentPartyTopology,
+    new_hosts: &[CantonId],
+) -> Result<()> {
+    anyhow::ensure!(
+        owns_party_namespace(config, &current.mapping.party)
+            && !new_hosts.contains(config.participant_id()),
+        "only a non-joining namespace owner may authorize this proposal; a joiner must stage its signature"
+    );
+    let self_id = config.participant_id().to_string();
+    anyhow::ensure!(
+        !current
+            .mapping
+            .participants
+            .iter()
+            .any(|host| { host.participant_uid == self_id && host.onboarding.is_some() }),
+        "the namespace owner must finish its own onboarding before authorizing another host"
+    );
+    Ok(())
+}
+
 /// Read `party_id`'s authorized `PartyToParticipant` from this node's head state.
 ///
 /// Returns `None` when no authorized mapping exists — the party is unknown to
@@ -590,7 +612,7 @@ async fn capture_replication_offsets(
     Ok(())
 }
 
-/// Publish the namespace owner's partial authorization from a current live host.
+/// Publish partial authorization from a connected, non-joining namespace owner.
 ///
 /// The wallet-signed path cannot serve such a party. `validate_add_hosts_topology`
 /// requires `signed_by` to be the party's namespace, and for a party that is (or
@@ -628,7 +650,7 @@ pub async fn authorize_add_hosts(
             party: party_id.to_string(),
         });
     };
-    require_live_source(config, &current).map_err(AddHostsError::Invalid)?;
+    require_namespace_authorizer(config, &current, new_hosts).map_err(AddHostsError::Invalid)?;
     // Before the serial is even looked at. A node that holds neither half must
     // answer the same way whether or not the add has landed: once it is live, a
     // bystander reading head state would otherwise match the retry-as-success
@@ -1277,6 +1299,34 @@ mod tests {
             mapping: built(),
         };
         assert!(require_live_source(&test_config(3), &proposed).is_err());
+    }
+
+    #[test]
+    fn a_namespace_owner_that_unhosted_can_still_authorize_other_joiners() {
+        let owner = test_config(1);
+        let mut topology = current();
+        topology.mapping.party =
+            format!("converted::{}", owner.participant_id().namespace.to_hex());
+        topology
+            .mapping
+            .participants
+            .retain(|host| host.participant_uid != owner.participant_id().to_string());
+        assert!(require_namespace_authorizer(&owner, &topology, &[participant(3)]).is_ok());
+        assert!(require_live_source(&owner, &topology).is_err());
+        assert!(
+            require_namespace_authorizer(&test_config(2), &topology, &[participant(3)]).is_err()
+        );
+    }
+
+    #[test]
+    fn a_namespace_owner_must_stage_when_it_rejoins_or_is_still_onboarding() {
+        let owner = test_config(1);
+        let mut topology = current();
+        topology.mapping.party =
+            format!("converted::{}", owner.participant_id().namespace.to_hex());
+        assert!(require_namespace_authorizer(&owner, &topology, &[participant(1)]).is_err());
+        topology.mapping.participants[0].onboarding = Some(hosting_participant::Onboarding {});
+        assert!(require_namespace_authorizer(&owner, &topology, &[participant(3)]).is_err());
     }
 
     // ------------------------------------------------------------------
