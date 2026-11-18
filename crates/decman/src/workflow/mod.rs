@@ -1303,11 +1303,10 @@ async fn run_peer(
                                 // Flag dropped between the poll and the
                                 // authoring — report as cleared.
                                 consecutive_step_failures = 0;
-                                if let Err(e) = client
-                                    .send_status(b"ClearOnboardingFlag: Cleared".to_vec())
-                                    .await
+                                if let Err(e) =
+                                    client.send_add_party_clear_proposal(Vec::new()).await
                                 {
-                                    tracing::error!("Failed to send completion status: {e}");
+                                    tracing::error!("Failed to send cleared marker: {e}");
                                 }
                             }
                             Err(e) => {
@@ -1317,11 +1316,8 @@ async fn run_peer(
                     }
                     Ok(party_replication::ClearOutcome::Cleared) => {
                         consecutive_step_failures = 0;
-                        if let Err(e) = client
-                            .send_status(b"ClearOnboardingFlag: Cleared".to_vec())
-                            .await
-                        {
-                            tracing::error!("Failed to send completion status: {e}");
+                        if let Err(e) = client.send_add_party_clear_proposal(Vec::new()).await {
+                            tracing::error!("Failed to send cleared marker: {e}");
                         }
                     }
                     Err(e) => {

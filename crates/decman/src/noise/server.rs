@@ -1572,7 +1572,7 @@ mod tests {
                 1,
                 AddPartyStep::ProposeClearOnboarding,
                 artifact_kinds::ADD_PARTY_CLEAR_PROPOSAL,
-                b"proposal".to_vec(),
+                utils::encode_length_prefixed_message(&canton_proto_rs::com::digitalasset::canton::protocol::v30::SignedTopologyTransaction::default()),
                 AddPartyStep::PrepareClearSign,
             ),
             (
@@ -1597,6 +1597,14 @@ mod tests {
                 vec![member.clone()],
                 None,
             );
+            if message_kind == artifact_kinds::ADD_PARTY_CLEAR_PROPOSAL {
+                assert!(NoiseServer::<AddPartyStep>::handle_add_party_upload(
+                    &state, member.clone(), b"malformed".to_vec(), message_kind,
+                ).await.is_err());
+                assert_eq!(state.current_step().await, step);
+                assert!(state.completed_peers().await.is_empty());
+                assert_eq!(pool.read_artifact(&instance, message_kind, None).await?, None);
+            }
             let ack = NoiseServer::<AddPartyStep>::handle_add_party_upload(
                 &state,
                 member.clone(),

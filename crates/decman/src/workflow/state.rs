@@ -118,7 +118,13 @@ impl<S: WorkflowStep + 'static> WorkflowState<S> {
                 crate::utils::decode_length_prefixed(payload, 2)?;
                 "GenerateNewMemberKeys"
             }
-            super::storage::artifact_kinds::ADD_PARTY_CLEAR_PROPOSAL => "ProposeClearOnboarding",
+            super::storage::artifact_kinds::ADD_PARTY_CLEAR_PROPOSAL => {
+                if !payload.is_empty() {
+                    let _: canton_proto_rs::com::digitalasset::canton::protocol::v30::SignedTopologyTransaction =
+                        crate::utils::read_first_message_from_bytes(payload)?;
+                }
+                "ProposeClearOnboarding"
+            }
             _ => anyhow::bail!("Unsupported add-party upload"),
         };
         anyhow::ensure!(
