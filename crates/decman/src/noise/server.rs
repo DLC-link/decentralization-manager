@@ -32,10 +32,11 @@ use crate::{
         change_threshold::ChangeThresholdStep,
         contracts::ContractsStep,
         dars::DarsStep,
-        kick::{KickConfig, KickStep, coordinator::split_signed_kick_pair},
+        kick::{KickConfig, KickStep},
         onboarding::OnboardingStep,
         party_replication::pipe::{PipeBlock, encode_block},
         rotate_key::RotateKeyStep,
+        signature_pairs::split_signed_pair,
         signing_keys::requires_signing_key_adoption,
         state::WorkflowStep,
         storage::{WorkflowStorage, artifact_kinds},
@@ -869,7 +870,7 @@ impl<S: WorkflowStep + 'static> NoiseServer<S> {
             command,
             MessageType::SignKick | MessageType::SignAddParty | MessageType::SignChangeThreshold
         );
-        if uploads_a_pair && let Err(e) = split_signed_kick_pair(payload) {
+        if uploads_a_pair && let Err(e) = split_signed_pair(payload) {
             tracing::warn!("Invalid {artifact_kind} from {peer_id}: {e:#}");
             return Ok(Message::new(
                 MessageType::Error,

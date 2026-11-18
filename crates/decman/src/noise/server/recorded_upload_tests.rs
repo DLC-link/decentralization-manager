@@ -8,7 +8,7 @@ use crate::{
         add_party::{
             AddPartyConfig, coordinator::start_coordinator as start_add_party_coordinator,
         },
-        kick::coordinator::save_signature_pairs,
+        signature_pairs::save_signature_pairs,
         storage::WorkflowStorage,
     },
 };
