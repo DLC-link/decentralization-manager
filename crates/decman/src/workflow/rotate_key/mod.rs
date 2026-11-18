@@ -17,7 +17,8 @@ pub const RECORDED_KEY_STATUS: &[u8] = b"RecordRotatedKey completed";
 /// Rotate-key workflow steps.
 ///
 /// A member replaces its own Daml signing key for a party. The coordinator
-/// creates the new key in its vault and proposes a P2P mapping that differs
+/// creates the new key, in KMS or in DecMan's key store according to its
+/// custody setting. It then proposes a P2P mapping that differs
 /// from the current one only in that key. Every member signs it, the
 /// coordinator submits it, and every member then records the new key, so a
 /// later kick or rotation attributes it to the coordinator.
@@ -25,7 +26,7 @@ pub const RECORDED_KEY_STATUS: &[u8] = b"RecordRotatedKey completed";
 pub enum RotateKeyStep {
     /// Waiting for all peers to connect
     WaitingForPeers,
-    /// Coordinator creates the new key in its vault
+    /// Coordinator creates the new key, in KMS or in DecMan's key store
     GenerateKey,
     /// Coordinator builds and signs the P2P proposal
     CreateProposal,

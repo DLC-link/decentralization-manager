@@ -51,7 +51,7 @@ use crate::{
     },
 };
 
-/// Vault name of the Daml signing key a node holds for the party with this
+/// Key name of the Daml signing key a node holds for the party with this
 /// id prefix. Onboarding and add-party used this name before each run named
 /// its own key, so parties created earlier still hold their key under it.
 /// Every other Daml key name of the party starts with it.
@@ -59,7 +59,7 @@ pub fn party_daml_key_name(party_id_prefix: &str) -> String {
     format!("{party_id_prefix}-daml-transactions")
 }
 
-/// Vault name of the Daml key that one onboarding or add-party run creates
+/// Key name of the Daml key that one onboarding or add-party run creates
 /// for the party with this id prefix. `run` is random, so each run creates a
 /// new key. A member that a party adds again after a kick then gets a new
 /// key, not the key that a rotation replaced.
@@ -70,7 +70,7 @@ pub fn run_daml_key_name(party_id_prefix: &str, run: &str) -> String {
     )
 }
 
-/// Vault name of the Daml key that replaces `replaced` for the party with
+/// Key name of the Daml key that replaces `replaced` for the party with
 /// this id prefix. The name depends only on the replaced key. A retry, or a
 /// new run after a failed one, finds the same key again. An operator who
 /// granted DecMan access to that key then needs no second grant. A later

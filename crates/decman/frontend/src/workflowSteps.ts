@@ -244,7 +244,7 @@ export const WORKFLOW_STEPS: Record<WorkflowKind, WorkflowStepInfo[]> = {
       name: "GenerateKey",
       label: "Creating the new key",
       description:
-        "The coordinator's vault creates a new Daml key, in KMS on a KMS participant.",
+        "The coordinator creates a new Daml key, in KMS or in DecMan according to its custody setting.",
     },
     {
       name: "CreateProposal",

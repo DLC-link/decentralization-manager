@@ -12,7 +12,8 @@ use crate::{
 /// Configuration for the rotate-key workflow.
 ///
 /// The coordinator replaces its own Daml signing key for the party with a new
-/// key from its vault. Members, owners and thresholds stay the same. The
+/// key. The new key lives in KMS, or in DecMan's key store on a node with the
+/// opt-out. Members, owners and thresholds stay the same. The
 /// thresholds are read from the chain when the run starts and pinned here, so
 /// a peer can hold the proposal to what its operator accepted.
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -30,7 +31,7 @@ pub struct RotateKeyConfig {
 }
 
 impl RotateKeyConfig {
-    /// The vault name of the new key. It depends on the key being replaced,
+    /// The key name of the new key. It depends on the key being replaced,
     /// so every run that replaces that key reuses the same new key.
     pub fn new_key_name(&self) -> String {
         rotated_daml_key_name(&self.decentralized_party_id.prefix, &self.rotated_key)

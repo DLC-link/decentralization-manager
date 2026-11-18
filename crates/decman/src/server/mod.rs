@@ -2708,8 +2708,8 @@ async fn list_my_owner_keys(
     // party old enough to predate it can hold the key under any name, and
     // then only the fingerprint identifies it.
     let mut my_protocol_fingerprints: HashSet<Fingerprint> = HashSet::new();
-    // Protocol-usage keys, with the vault name onboarding / add-party gave
-    // them (`<party prefix>-daml-transactions`). The name is how
+    // Protocol-usage keys, with the key name onboarding, add-party or
+    // rotate-key gave them (`<party prefix>-daml-transactions...`). The name is how
     // `get_or_create_signing_key` finds the key again on a retry, so it is
     // also the only local record of which party a protocol key belongs to.
     // A key DecMan generated carries the same kind of name, and a vault key
