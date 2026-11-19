@@ -467,7 +467,9 @@ If the host reports an imported ACS with failed reconnect health verification,
 retry its identical final import block. This resumes reconnect without another
 ACS import. A failed marker clearance also requires only that final-block retry.
 
-A repeated staging request returns saved signatures without reconnecting.
+If publication fails before authorization, repeat `add_hosts` with the same arguments.
+Prepare accepts a joiner's own staged window with saved signatures while it stays offline.
+A repeated staging request returns those signatures without reconnecting.
 A failed staged import leaves the participant offline on manual connection.
 The operator checks its logs, topology, and quarantine before retrying.
 Partial imports can require repair or restoration. The operator must not

@@ -10,6 +10,8 @@
 //! hashes it does not compute, so a single host's word for what it is signing is not
 //! something it can verify alone.
 
+use std::sync::{Arc, Mutex};
+
 use base64::{Engine, engine::general_purpose::STANDARD};
 use common::{
     api::{HostPermission, TenantExecuteRequest, TenantPrepareRequest, TenantUnhostRequest},
@@ -893,6 +895,144 @@ async fn add_hosts_publishes_only_after_collecting_every_joiners_staged_signatur
     assert_eq!(added.hosts.len(), 2);
     assert!(added.hosts.iter().all(|report| report.error.is_none()));
     source.verify().await;
+}
+
+#[tokio::test]
+async fn add_hosts_retries_publication_after_a_joiner_stages_and_imports_on_the_second_call() {
+    #[derive(Default)]
+    struct RetryState {
+        staged: bool,
+        offline_prepares: usize,
+        stage_calls: usize,
+        publish_calls: usize,
+    }
+    let state = Arc::new(Mutex::new(RetryState::default()));
+    let source = MockServer::start().await;
+    let joiner = MockServer::start().await;
+    stub_add_hosts_prepare(&source, 5).await;
+    stub_add_hosts_execute(&source, 4).await;
+    let shared = state.clone();
+    Mock::given(method("POST"))
+        .and(path("/v0/tenant/add-hosts/prepare"))
+        .respond_with(move |_: &wiremock::Request| {
+            let mut state = shared.lock().expect("retry state lock");
+            if state.staged {
+                state.offline_prepares += 1;
+            }
+            ResponseTemplate::new(200).set_body_json(json!({
+                "party_id": "alice::1220aa", "serial": 5,
+                "transaction_hashes": TX_HASHES.map(|hash| STANDARD.encode(hash)),
+                "topology_transactions": ["dHgtb25l", "dHgtdHdv"],
+            }))
+        })
+        .expect(2)
+        .mount(&joiner)
+        .await;
+    let shared = state.clone();
+    Mock::given(method("POST"))
+        .and(path("/v0/tenant/add-hosts/stage"))
+        .respond_with(move |_: &wiremock::Request| {
+            let mut state = shared.lock().expect("retry state lock");
+            state.staged = true;
+            state.stage_calls += 1;
+            ResponseTemplate::new(200).set_body_json(json!({
+                "party_id": "alice::1220aa", "base_serial": 4,
+                "signed_topology_transactions": ["c2lnbmVkLW9uZQ==", "c2lnbmVkLXR3bw=="],
+            }))
+        })
+        .expect(2)
+        .mount(&joiner)
+        .await;
+    let shared = state.clone();
+    Mock::given(method("POST"))
+        .and(path("/v0/tenant/add-hosts/publish"))
+        .and(wiremock::matchers::body_partial_json(json!({
+            "signed_topology_transactions": ["c2lnbmVkLW9uZQ==", "c2lnbmVkLXR3bw=="],
+        })))
+        .respond_with(move |_: &wiremock::Request| {
+            let mut state = shared.lock().expect("retry state lock");
+            assert!(state.staged, "publication follows staging");
+            state.publish_calls += 1;
+            if state.publish_calls == 1 {
+                ResponseTemplate::new(503)
+                    .set_body_json(json!({"error": "temporary publication failure"}))
+            } else {
+                ResponseTemplate::new(202).set_body_json(json!({
+                    "status": "completed", "party_id": "alice::1220aa", "serial": 5,
+                }))
+            }
+        })
+        .expect(2)
+        .mount(&source)
+        .await;
+    stub_acs_relay(&source, &joiner).await;
+    let key = ExternalKeyPair::from_seed([4u8; 32]);
+    let current_hosts = [host_for(&source, 1)];
+    let new_hosts = [host_for(&joiner, 2)];
+
+    let first = decman_wallet::add_hosts(
+        &current_hosts,
+        &new_hosts,
+        &key,
+        "alice::1220aa",
+        HostPermission::Confirmation,
+        4,
+    )
+    .await
+    .expect("publication refusal reports incomplete replication");
+    assert!(!first.replicated);
+    assert_eq!(first.hosts.len(), 1);
+    assert!(
+        first.hosts[0]
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("temporary publication failure"))
+    );
+    assert!(state.lock().expect("retry state lock").staged);
+    for server in [&source, &joiner] {
+        let requests = server.received_requests().await.unwrap_or_default();
+        assert!(
+            requests
+                .iter()
+                .all(|request| !request.url.path().contains("/acs/"))
+        );
+        assert!(
+            requests
+                .iter()
+                .all(|request| request.url.path() != "/v0/tenant/add-hosts/import")
+        );
+    }
+
+    let second = decman_wallet::add_hosts(
+        &current_hosts,
+        &new_hosts,
+        &key,
+        "alice::1220aa",
+        HostPermission::Confirmation,
+        4,
+    )
+    .await
+    .expect("the wallet can prepare and stage the offline joiner again");
+    assert!(second.replicated);
+    assert_eq!(second.serial, 5);
+    assert!(second.hosts.iter().all(|report| report.error.is_none()));
+    let requests = joiner.received_requests().await.unwrap_or_default();
+    assert_eq!(
+        requests
+            .iter()
+            .filter(|request| request.url.path() == "/v0/tenant/add-hosts/import")
+            .count(),
+        2,
+        "only the successful retry imports the two ACS blocks"
+    );
+    {
+        let state = state.lock().expect("retry state lock");
+        assert_eq!(state.offline_prepares, 1);
+        assert_eq!(state.stage_calls, 2);
+        assert_eq!(state.publish_calls, 2);
+    }
+    source.verify().await;
+    joiner.verify().await;
 }
 
 /// Every current host holds the party, so a source whose export fails costs a

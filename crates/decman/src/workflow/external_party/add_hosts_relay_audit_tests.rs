@@ -1698,3 +1698,175 @@ async fn ready_joiner_prepare_generates_topology_without_claiming_signing_or_dis
     assert_eq!(boundary.state.lock().expect("state lock").generate_calls, 1);
     Ok(())
 }
+
+#[sqlx::test(migrator = "MIGRATOR")]
+async fn staged_joiner_prepares_offline_and_reuses_its_signatures_without_signing_or_disconnecting_again(
+    db: SqlitePool,
+) -> Result<()> {
+    let boundary = CantonBoundary::new(true, false)?;
+    let target = fresh_stage_fixture(&db, &boundary).await?;
+    let first = stage_add_hosts(
+        &boundary.config,
+        &db,
+        &target.party_id.to_string(),
+        &[participant(2)],
+        HostPermission::Confirmation,
+        7,
+    )
+    .await?;
+    let saved = target
+        .read_artifact(
+            &db,
+            artifact_kinds::TENANT_ADD_HOSTS_STAGED_SIGNATURES,
+            None,
+        )
+        .await?
+        .expect("stage durably saves its signatures");
+    {
+        let state = boundary.state.lock().expect("state lock");
+        assert!(!state.connected && state.manual);
+        assert_eq!(state.sign_calls, 1);
+        assert_eq!(state.disconnects, 1);
+    }
+
+    let prepared = prepare_add_hosts(
+        &boundary.config,
+        &db,
+        &target.party_id.to_string(),
+        &[participant(2)],
+        HostPermission::Confirmation,
+        7,
+        None,
+    )
+    .await?;
+    assert_eq!(prepared.serial, 8);
+    assert_eq!(prepared.party_id, target.party_id.to_string());
+    assert_eq!(prepared.topology_transactions.len(), 1);
+    let retried = stage_add_hosts(
+        &boundary.config,
+        &db,
+        &target.party_id.to_string(),
+        &[participant(2)],
+        HostPermission::Confirmation,
+        7,
+    )
+    .await?;
+    assert_eq!(retried, first, "retry returns the exact saved signatures");
+    assert_eq!(
+        target
+            .read_artifact(
+                &db,
+                artifact_kinds::TENANT_ADD_HOSTS_STAGED_SIGNATURES,
+                None
+            )
+            .await?,
+        Some(saved)
+    );
+    assert_eq!(
+        import_window_owner(&db, &participant(2)).await?.as_deref(),
+        Some(target.instance_name.as_str())
+    );
+    let state = boundary.state.lock().expect("state lock");
+    assert!(!state.connected && state.manual);
+    assert_eq!(state.sign_calls, 1);
+    assert_eq!(state.disconnects, 1);
+    assert_eq!(state.modifications, 1);
+    assert_eq!(state.reconnects, 0);
+    assert_eq!(state.generate_calls, 1);
+    Ok(())
+}
+
+#[sqlx::test(migrator = "MIGRATOR")]
+async fn prepare_recovery_requires_both_its_own_window_and_saved_signatures(
+    db: SqlitePool,
+) -> Result<()> {
+    let boundary = CantonBoundary::new(false, true)?;
+    let target = fresh_stage_fixture(&db, &boundary).await?;
+    let other = replication_target(&target.party_id.to_string(), &participant(2), 6)?;
+    for cause in ["missing-signatures", "missing-owner", "other-owner"] {
+        let (_, _) = stored_stage(&db).await?;
+        match cause {
+            "missing-signatures" => {
+                sqlx::query(
+                    "DELETE FROM tenant_replication_artifacts WHERE instance_name = ? AND artifact_kind = ?",
+                )
+                .bind(&target.instance_name)
+                .bind(artifact_kinds::TENANT_ADD_HOSTS_STAGED_SIGNATURES)
+                .execute(&db)
+                .await?;
+            }
+            "missing-owner" => {
+                sqlx::query("DELETE FROM tenant_import_window")
+                    .execute(&db)
+                    .await?;
+            }
+            "other-owner" => {
+                sqlx::query("UPDATE tenant_import_window SET instance_name = ?")
+                    .bind(&other.instance_name)
+                    .execute(&db)
+                    .await?;
+            }
+            _ => unreachable!(),
+        }
+        let result = prepare_add_hosts(
+            &boundary.config,
+            &db,
+            &target.party_id.to_string(),
+            &[participant(2)],
+            HostPermission::Confirmation,
+            7,
+            None,
+        )
+        .await;
+        assert!(matches!(result, Err(AddHostsError::Busy(_))), "{cause}");
+        sqlx::query("DELETE FROM tenant_import_window")
+            .execute(&db)
+            .await?;
+    }
+    let state = boundary.state.lock().expect("state lock");
+    assert!(!state.connected && state.manual);
+    assert_eq!(state.sign_calls, 0);
+    assert_eq!(state.disconnects, 0);
+    assert_eq!(state.generate_calls, 0);
+    assert_eq!(state.modifications, 0);
+    Ok(())
+}
+
+#[sqlx::test(migrator = "MIGRATOR")]
+async fn staged_joiner_prepare_still_refuses_quarantine(db: SqlitePool) -> Result<()> {
+    let boundary = CantonBoundary::new(true, false)?;
+    let target = fresh_stage_fixture(&db, &boundary).await?;
+    stage_add_hosts(
+        &boundary.config,
+        &db,
+        &target.party_id.to_string(),
+        &[participant(2)],
+        HostPermission::Confirmation,
+        7,
+    )
+    .await?;
+    db.quarantine_acs_import(&target.party_id, &participant(2), "known failure", 1)
+        .await?;
+    let result = prepare_add_hosts(
+        &boundary.config,
+        &db,
+        &target.party_id.to_string(),
+        &[participant(2)],
+        HostPermission::Confirmation,
+        7,
+        None,
+    )
+    .await;
+    assert!(matches!(result, Err(AddHostsError::Invalid(_))));
+    assert_eq!(
+        import_window_owner(&db, &participant(2)).await?.as_deref(),
+        Some(target.instance_name.as_str())
+    );
+    let state = boundary.state.lock().expect("state lock");
+    assert!(!state.connected && state.manual);
+    assert_eq!(state.sign_calls, 1);
+    assert_eq!(state.disconnects, 1);
+    assert_eq!(state.generate_calls, 0);
+    assert_eq!(state.reconnects, 0);
+    Ok(())
+}

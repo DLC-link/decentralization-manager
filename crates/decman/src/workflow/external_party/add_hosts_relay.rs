@@ -228,6 +228,20 @@ pub(super) async fn check_joiner_readiness(
             "this participant is quarantined for the party; an operator must repair it before staging"
         )));
     }
+    // A staged retry must reach stage while its participant remains offline.
+    if import_window_owner(db, config.participant_id())
+        .await
+        .map_err(AddHostsError::Canton)?
+        .as_deref()
+        == Some(target.instance_name.as_str())
+        && target
+            .read_artifact(db, artifact_kinds::TENANT_ADD_HOSTS_STAGED_SIGNATURES, None)
+            .await
+            .map_err(AddHostsError::Canton)?
+            .is_some()
+    {
+        return Ok(());
+    }
     let busy: bool = sqlx::query_scalar(
         "SELECT EXISTS (SELECT 1 FROM tenant_import_window WHERE participant_id = ?) \
          OR EXISTS (SELECT 1 FROM workflow_runs WHERE status = 'inprogress') \
