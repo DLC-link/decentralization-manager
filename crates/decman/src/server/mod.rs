@@ -19,6 +19,7 @@ pub(crate) mod ledger_paging;
 mod middleware;
 mod node_health;
 mod package_inventory;
+mod participant_repair;
 mod queries;
 mod record;
 mod reward_automation;
