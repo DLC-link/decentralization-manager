@@ -32,6 +32,7 @@ The [Threshold Model](docs/ARCHITECTURE.md#threshold-model) lists the party's th
 - [Decentralizing an Existing Party](docs/DECENTRALIZING_AN_EXISTING_PARTY.md) -- Adding hosts to a local party for failover or co-validation
 - [Purging a Former Party](docs/PURGING_A_FORMER_PARTY.md) -- Deleting the stale contracts a participant keeps after it leaves a party, and recovering from a failed purge
 - [Custom Daml Templates](docs/CUSTOM_DAML_TEMPLATES.md) -- Authoring and deploying your own Daml governance templates
+- [Integrating With a Canton You Already Run](docs/INTEGRATING.md) -- Pointing a node at a participant you operate, and the problems that appear afterwards
 - [Deployment Guide](docs/DEPLOYMENT_GUIDE.md) -- Deploying a node to Kubernetes from scratch: manifests, identity-provider setup, and configuration reference
 - [Use Cases](docs/USE_CASES.md) -- Joint custody governance, FAR rewards, multi-sig wallet, and utility service walkthroughs
 - [Contributing Guide](docs/CONTRIBUTING.md) -- Development setup, coding standards, commit conventions, and the PR process
