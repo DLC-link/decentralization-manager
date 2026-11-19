@@ -1,4 +1,4 @@
-use std::{collections::HashSet, sync::Arc};
+use std::sync::Arc;
 
 use anyhow::Context;
 use sqlx::SqlitePool;
@@ -14,7 +14,9 @@ use crate::{
         party_replication::{
             collect_party_package_ids, open_export_session, wait_for_flag_cleared,
         },
-        signature_pairs::save_signature_pairs as save_recorded_signature_pairs,
+        signature_pairs::{
+            peers_without_artifact, save_signature_pairs as save_recorded_signature_pairs,
+        },
         state::WorkflowState,
         storage::{WorkflowStorage, artifact_kinds, identity_kinds},
     },
@@ -383,18 +385,8 @@ async fn require_expected_peer_artifacts(
     step: &str,
 ) -> Result {
     let expected = workflow_state.expected_peers();
-    let persisted: HashSet<String> = storage
-        .list_artifacts(instance_name, artifact_kind)
-        .await?
-        .into_iter()
-        .map(|(peer, _)| peer)
-        .collect();
-
-    let missing: Vec<String> = expected
-        .iter()
-        .map(std::string::ToString::to_string)
-        .filter(|peer| !persisted.contains(peer))
-        .collect();
+    let missing =
+        peers_without_artifact(workflow_state, storage, instance_name, artifact_kind).await?;
 
     if !missing.is_empty() {
         anyhow::bail!(

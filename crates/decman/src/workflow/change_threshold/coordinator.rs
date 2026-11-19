@@ -10,7 +10,7 @@ use crate::{
     server::{WorkflowInstance, peer_status::LastSeen},
     utils,
     workflow::{
-        signature_pairs::save_signature_pairs,
+        signature_pairs::{peers_without_artifact, save_signature_pairs},
         state::WorkflowState,
         storage::{WorkflowStorage, artifact_kinds},
     },
@@ -222,29 +222,6 @@ async fn prepare_signatures(
         );
     }
     Ok(())
-}
-
-/// The expected peers that have no artifact of `artifact_kind`, sorted.
-async fn peers_without_artifact(
-    workflow_state: &WorkflowState<ChangeThresholdStep>,
-    storage: &SqlitePool,
-    instance_name: &str,
-    artifact_kind: &str,
-) -> Result<Vec<String>> {
-    let stored: HashSet<String> = storage
-        .list_artifacts(instance_name, artifact_kind)
-        .await?
-        .into_iter()
-        .map(|(peer, _)| peer)
-        .collect();
-    let mut missing: Vec<String> = workflow_state
-        .expected_peers()
-        .iter()
-        .map(ToString::to_string)
-        .filter(|peer| !stored.contains(peer))
-        .collect();
-    missing.sort();
-    Ok(missing)
 }
 
 #[cfg(test)]
