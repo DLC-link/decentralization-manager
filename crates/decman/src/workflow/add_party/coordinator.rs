@@ -11,10 +11,10 @@ use crate::{
     server::{WorkflowInstance, peer_status::LastSeen},
     utils,
     workflow::{
-        kick::coordinator::save_signature_pairs as save_recorded_signature_pairs,
         party_replication::{
             collect_party_package_ids, open_export_session, wait_for_flag_cleared,
         },
+        signature_pairs::save_signature_pairs as save_recorded_signature_pairs,
         state::WorkflowState,
         storage::{WorkflowStorage, artifact_kinds, identity_kinds},
     },
@@ -294,7 +294,6 @@ async fn run_workflow(
                     .unwrap_or_default();
                 if proposal.is_empty() {
                     tracing::info!("Onboarding flag already cleared — skipping submit");
-                    workflow_state.clear_peer_data().await;
                 } else {
                     tracing::info!("Coordinator executing: Submit clearing proposal");
                     save_clear_signatures(&workflow_state, &db, &instance_name).await?;
@@ -390,7 +389,7 @@ async fn save_new_member_keys(
 
 /// Every invited peer signs both add-party rounds. Check the expected set,
 /// because advancing the signature step clears the completed set.
-async fn require_complete_or_uploaded(
+async fn require_expected_peer_artifacts(
     workflow_state: &WorkflowState<AddPartyStep>,
     storage: &SqlitePool,
     instance_name: &str,
@@ -446,7 +445,7 @@ async fn save_signature_pairs(
         artifact_kinds::SIGNED_ADD_PARTY_DNS,
         artifact_kinds::SIGNED_ADD_PARTY_P2P,
     ] {
-        require_complete_or_uploaded(
+        require_expected_peer_artifacts(
             workflow_state,
             storage,
             instance_name,
@@ -464,7 +463,7 @@ async fn save_clear_signatures(
     storage: &SqlitePool,
     instance_name: &str,
 ) -> Result {
-    require_complete_or_uploaded(
+    require_expected_peer_artifacts(
         workflow_state,
         storage,
         instance_name,
@@ -567,7 +566,7 @@ mod tests {
         insert_run(&pool, "run-1").await?;
         let state = resumed_state(&pool, vec![peer(1), peer(2)]);
 
-        let err = require_complete_or_uploaded(
+        let err = require_expected_peer_artifacts(
             &state,
             &pool,
             "run-1",
@@ -605,7 +604,7 @@ mod tests {
         )
         .await?;
 
-        let err = require_complete_or_uploaded(
+        let err = require_expected_peer_artifacts(
             &state,
             &pool,
             "run-1",
@@ -645,7 +644,7 @@ mod tests {
             .await?;
         }
 
-        require_complete_or_uploaded(
+        require_expected_peer_artifacts(
             &state,
             &pool,
             "run-1",
@@ -711,7 +710,7 @@ mod tests {
         .await?;
 
         assert!(
-            require_complete_or_uploaded(
+            require_expected_peer_artifacts(
                 &state,
                 &pool,
                 "run-1",

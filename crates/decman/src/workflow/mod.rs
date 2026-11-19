@@ -8,6 +8,7 @@ pub mod onboarding;
 pub mod party_replication;
 pub mod proposal_store;
 pub mod rotate_key;
+pub(crate) mod signature_pairs;
 pub mod signing_keys;
 pub mod state;
 pub mod storage;

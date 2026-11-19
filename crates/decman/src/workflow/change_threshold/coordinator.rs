@@ -9,7 +9,7 @@ use crate::{
     server::{WorkflowInstance, peer_status::LastSeen},
     utils,
     workflow::{
-        kick::coordinator::save_signature_pairs,
+        signature_pairs::save_signature_pairs,
         storage::{WorkflowStorage, artifact_kinds},
     },
 };
