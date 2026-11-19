@@ -81,6 +81,16 @@ impl<'a, 'w> Visit for MessageOnlyVisitor<'a, 'w> {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires localnet — set DECPM_E2E_TEST=add_hosts_archived_contracts_e2e in integration-tests/run.sh"]
+async fn add_hosts_archived_contracts_e2e() -> anyhow::Result<()> {
+    init_tracing();
+    let mut f = Fixture::from_env()?;
+    f.discover_network_parties().await?;
+    phases::external_party_add_hosts::run(&mut f).await?;
+    phases::local_party_decentralization::run(&mut f).await
+}
+
+#[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires running localnet — invoke via integration-tests/run.sh"]
 async fn governance_workflows_e2e() -> anyhow::Result<()> {
     init_tracing();

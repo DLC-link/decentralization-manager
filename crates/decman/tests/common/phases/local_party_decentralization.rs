@@ -35,11 +35,20 @@
 //! ordinary submission and afterwards as a converted one through interactive
 //! submission.
 //!
+//! The party also observes three coupons another local party signs. That party
+//! archives two after the source activates the new mapping but before import.
+//! The joiner must stay disconnected until its snapshot lands, then recover
+//! after Canton restarts.
+//!
 //! P2 joins rather than P3. P3 must stay without `orphan-marker` for
 //! [`add_party_missing_dar`](super::add_party_missing_dar) to reproduce its
 //! failure, and a joiner here needs that DAR vetted before the import.
 
-use std::{path::Path, time::Duration};
+use std::{
+    collections::HashSet,
+    path::Path,
+    time::{Duration, SystemTime},
+};
 
 use anyhow::Context;
 use base64::{Engine as _, engine::general_purpose::STANDARD};
@@ -63,6 +72,7 @@ use canton_proto_rs::com::{
     },
 };
 use serde_json::{Value, json};
+use tokio::process::Command as ProcessCommand;
 use tracing::info;
 use uuid::Uuid;
 
@@ -79,11 +89,20 @@ use dec_party_manager::{
 use decman_wallet::ExternalKeyPair;
 
 use crate::common::{
-    Fixture,
+    Fixture, TestTarget,
     chaos::fresh_prefix,
     http::probe_workflow_status,
-    ledger_api::{P1_JSON_API, P2_JSON_API},
-    phases::deploy_gov_core::grant_rights,
+    ledger_api::{
+        P1_JSON_API, P2_JSON_API, REWARD_COUPON_V2_TEMPLATE, SeedCoupon, archive_command,
+        reward_coupon_create_command,
+    },
+    phases::{
+        add_party_rehost_disconnect_first::{
+            commitment_budget, connection_state, received_commitments_from, reconciliation_interval,
+        },
+        deploy_gov_core::grant_rights,
+    },
+    probe::Class,
     scenario::Scenario,
 };
 
@@ -413,6 +432,36 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
         .run(f)
         .await?;
 
+    // The observed party cannot prevent this signatory from archiving a coupon.
+    let archive_actor = format!("archiver-{hint}::{ns}", ns = p1.namespace.to_hex());
+    allocate_local_party(&p1_config, &archive_actor).await?;
+    wait_for_party(&p1_config, &archive_actor).await?;
+    grant_rights(f, P1_JSON_API, &archive_actor, "P1 coupon signatory").await?;
+    let expires_at = (chrono::Utc::now() + chrono::Duration::minutes(30))
+        .format("%Y-%m-%dT%H:%M:%SZ")
+        .to_string();
+    let observed: Vec<SeedCoupon> = (0..3)
+        .map(|round| SeedCoupon {
+            dso: archive_actor.clone(),
+            provider: party_id.clone(),
+            amount: "100.0".to_string(),
+            expires_at: expires_at.clone(),
+            round: 900_000 + round,
+        })
+        .collect();
+    f.submit_create(
+        P1_JSON_API,
+        &reward_coupon_create_command(&observed, &format!("add-hosts-observed-{}", f.run_id)),
+    )
+    .await?;
+    let observed_cids: Vec<String> = f
+        .active_coupon_ids(P1_JSON_API, &party_id)
+        .await?
+        .into_iter()
+        .map(|(cid, _)| cid)
+        .collect();
+    anyhow::ensure!(observed_cids.len() == 3, "expected three observed coupons");
+
     // ------------------------------------------------------------------
     // 2 — convert it, then prove the converted party can still transact.
     // ------------------------------------------------------------------
@@ -535,95 +584,133 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
     // 3 — the seam: a converted party gains a second host.
     // ------------------------------------------------------------------
     Scenario::with_ctx(format!("add P2 as a host of the converted {hint}"), ())
-        .when("both nodes authorize the add with their own vault keys", {
-            let party_id = party_id.clone();
-            move |f, _| {
+        .when(
+            "P2 disconnects before P1 publishes its hosting signature",
+            {
                 let party_id = party_id.clone();
-                Box::pin(async move {
-                    let state: Value = f
-                        .get_json(f.p1.http, &format!("/v0/tenant/{party_id}/state"))
-                        .await?;
-                    let base_serial = state
-                        .get("serial")
-                        .and_then(Value::as_u64)
-                        .context("party state missing serial")?;
-
-                    let request = json!({
-                        "party_id": party_id,
-                        "new_hosts": [&f.p2.participant_id],
-                        "base_serial": base_serial,
-                    });
-
-                    // The comparison is the security property, and it has to
-                    // hold for a party whose namespace is a participant key
-                    // rather than its own signing key.
-                    let mut prepared = Vec::new();
-                    for host in [f.p1.http, f.p2.http] {
-                        let prep: Value = f
-                            .post_json(host, "/v0/tenant/add-hosts/prepare", &request)
+                let joiner_config = p2_config.clone();
+                move |f, _| {
+                    let party_id = party_id.clone();
+                    let joiner_config = joiner_config.clone();
+                    Box::pin(async move {
+                        let state: Value = f
+                            .get_json(f.p1.http, &format!("/v0/tenant/{party_id}/state"))
                             .await?;
-                        prepared.push(prep);
-                    }
-                    let first = prepared
-                        .first()
-                        .context("no host answered add-hosts/prepare")?;
-                    for (index, other) in prepared.iter().enumerate().skip(1) {
-                        anyhow::ensure!(
-                            first.get("topology_transactions")
-                                == other.get("topology_transactions"),
-                            "host {index} prepared different bytes from host 0 — the wallet \
+                        let base_serial = state
+                            .get("serial")
+                            .and_then(Value::as_u64)
+                            .context("party state missing serial")?;
+
+                        let request = json!({
+                            "party_id": party_id,
+                            "new_hosts": [&f.p2.participant_id],
+                            "base_serial": base_serial,
+                        });
+
+                        // The comparison is the security property, and it has to
+                        // hold for a party whose namespace is a participant key
+                        // rather than its own signing key.
+                        let mut prepared = Vec::new();
+                        for host in [f.p1.http, f.p2.http] {
+                            let prep: Value = f
+                                .post_json(host, "/v0/tenant/add-hosts/prepare", &request)
+                                .await?;
+                            prepared.push(prep);
+                        }
+                        let first = prepared
+                            .first()
+                            .context("no host answered add-hosts/prepare")?;
+                        for (index, other) in prepared.iter().enumerate().skip(1) {
+                            anyhow::ensure!(
+                                first.get("topology_transactions")
+                                    == other.get("topology_transactions"),
+                                "host {index} prepared different bytes from host 0 — the wallet \
                              could not compare them:\n  host 0: {first:?}\n  host {index}: \
                              {other:?}"
-                        );
-                    }
+                            );
+                        }
 
-                    // NOT the wallet-signed onboard. The party's namespace is
-                    // still P1's participant key — adopting a signing key does
-                    // not move it — so nothing the wallet holds can authorize
-                    // this write. Each node signs its own half with its vault
-                    // key instead, and the change stays a proposal until both
-                    // have done so.
-                    for (host, name) in [(f.p1.http, "P1"), (f.p2.http, "P2")] {
+                        let refused: anyhow::Result<Value> = f
+                            .post_json(f.p2.http, "/v0/tenant/add-hosts/authorize", &request)
+                            .await;
+                        let error = refused.expect_err("a joiner must not publish its signature");
+                        anyhow::ensure!(format!("{error:#}").contains("400"), "{error:#}");
                         let _: Value = f
-                            .post_json(host, "/v0/tenant/add-hosts/authorize", &request)
+                            .post_json(f.p1.http, "/v0/tenant/add-hosts/authorize", &request)
                             .await
-                            .with_context(|| format!("add-hosts/authorize on {name}"))?;
-                    }
+                            .context("the namespace owner publishes the incomplete proposal")?;
 
-                    // The wallet-signed path must still refuse this party, or
-                    // the rule that only a party's namespace authorizes its
-                    // topology has quietly stopped meaning anything.
-                    let refused: anyhow::Result<Value> = f
-                        .post_json(
-                            f.p2.http,
-                            "/v0/tenant/add-hosts/execute",
-                            &json!({
-                                "party_id": party_id,
-                                "base_serial": base_serial,
-                                "topology_transactions": first
-                                    .get("topology_transactions")
-                                    .cloned()
-                                    .context("prepare response missing topology_transactions")?,
-                                "signatures": sign_prepared(first, seed)?,
-                                "signed_by": ExternalKeyPair::from_seed(seed).fingerprint(),
-                            }),
-                        )
-                        .await;
-                    let Err(e) = refused else {
-                        anyhow::bail!(
-                            "a wallet signature must not authorize a party whose namespace \
+                        // The wallet-signed path must still refuse this party, or
+                        // the rule that only a party's namespace authorizes its
+                        // topology has quietly stopped meaning anything.
+                        let refused: anyhow::Result<Value> = f
+                            .post_json(
+                                f.p1.http,
+                                "/v0/tenant/add-hosts/execute",
+                                &json!({
+                                    "party_id": party_id,
+                                    "base_serial": base_serial,
+                                    "topology_transactions": first
+                                        .get("topology_transactions")
+                                        .cloned()
+                                        .context("prepare response missing topology_transactions")?,
+                                    "signatures": sign_prepared(first, seed)?,
+                                    "signed_by": ExternalKeyPair::from_seed(seed).fingerprint(),
+                                }),
+                            )
+                            .await;
+                        let Err(e) = refused else {
+                            anyhow::bail!(
+                                "a wallet signature must not authorize a party whose namespace \
                                  is a participant key"
+                            );
+                        };
+                        let reason = format!("{e:#}");
+                        anyhow::ensure!(
+                            reason.contains("400") && reason.contains("namespace"),
+                            "the refusal must name the namespace, got: {reason}"
                         );
-                    };
-                    let reason = format!("{e:#}");
-                    anyhow::ensure!(
-                        reason.contains("400") && reason.contains("namespace"),
-                        "the refusal must name the namespace, got: {reason}"
-                    );
-                    Ok(())
-                })
-            }
-        })
+
+                        let staged: Value = f
+                            .post_json(f.p2.http, "/v0/tenant/add-hosts/stage", &request)
+                            .await?;
+                        let retry: Value = f
+                            .post_json(f.p2.http, "/v0/tenant/add-hosts/stage", &request)
+                            .await?;
+                        anyhow::ensure!(
+                            staged == retry,
+                            "staging must return the persisted signature"
+                        );
+                        anyhow::ensure!(
+                            connection_state(&joiner_config).await? == (false, true),
+                            "P2 must disconnect on manual connection before publication"
+                        );
+                        let state: Value = f
+                            .get_json(f.p1.http, &format!("/v0/tenant/{party_id}/state"))
+                            .await?;
+                        anyhow::ensure!(
+                            state.get("serial").and_then(Value::as_u64) == Some(base_serial),
+                            "staging must not activate the new mapping: {state}"
+                        );
+                        let _: Value = f
+                            .post_json(
+                                f.p1.http,
+                                "/v0/tenant/add-hosts/publish",
+                                &json!({
+                                    "party_id": party_id,
+                                    "new_hosts": [&f.p2.participant_id],
+                                    "base_serial": base_serial,
+                                    "signed_topology_transactions": staged
+                                        .get("signed_topology_transactions")
+                                        .context("stage response missing signed topology")?,
+                                }),
+                            )
+                            .await?;
+                        Ok(())
+                    })
+                }
+            },
+        )
         .then("the party reports two hosts", Duration::from_secs(180), {
             let party_id = party_id.clone();
             move |f, _| {
@@ -639,8 +726,44 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
                 })
             }
         })
+        .then(
+            "P2 stays disconnected after the source activates its onboarding mapping",
+            Duration::from_secs(120),
+            {
+                let config = p2_config.clone();
+                move |_f, _| {
+                    let config = config.clone();
+                    Box::pin(async move {
+                        let state = connection_state(&config).await.ok()?;
+                        if state != (false, true) {
+                            return Some(Err(anyhow::anyhow!("P2 reconnects before its import")));
+                        }
+                        Some(Ok(()))
+                    })
+                }
+            },
+        )
         .run(f)
         .await?;
+
+    let archived_cids = &observed_cids[..2];
+    for (index, cid) in archived_cids.iter().enumerate() {
+        f.submit_create(
+            P1_JSON_API,
+            &archive_command(
+                REWARD_COUPON_V2_TEMPLATE,
+                cid,
+                &archive_actor,
+                &format!("add-hosts-archive-{index}-{}", f.run_id),
+            ),
+        )
+        .await?;
+    }
+    anyhow::ensure!(
+        connection_state(&p2_config).await? == (false, true),
+        "P2 must stay disconnected while another party archives its observed contracts"
+    );
+    anyhow::ensure!(connection_state(&p1_config).await?.0, "P1 must remain live");
 
     // ------------------------------------------------------------------
     // 4 — carry the contracts across and switch the new host on.
@@ -764,6 +887,58 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
         )
         .run(f)
         .await?;
+
+    wait_for_replicated_contracts(f, &party_id, &observed_cids).await?;
+    restart_localnet_canton(f).await?;
+    wait_for_replicated_contracts(f, &party_id, &observed_cids).await?;
+    let interval = reconciliation_interval(&p2_config).await?;
+    anyhow::ensure!(
+        !interval.is_zero() && interval <= Duration::from_secs(60),
+        "the archive-race test needs a reconciliation interval of at most 60s, got {interval:?}"
+    );
+    let settled_at = SystemTime::now();
+    Scenario::with_ctx(
+        "P2's commitments agree with P1 after import and restart",
+        (),
+    )
+    .then(
+        "two complete commitment periods match",
+        commitment_budget(),
+        {
+            let config = p2_config.clone();
+            let counterparty = f.p1.participant_id.clone();
+            move |f, _| {
+                let config = config.clone();
+                let counterparty = counterparty.clone();
+                Box::pin(async move {
+                    let (matched, mismatched) =
+                        match received_commitments_from(&config, settled_at, Some(&counterparty))
+                            .await
+                        {
+                            Ok(commitments) => commitments,
+                            Err(error) => return Some(Err(error)),
+                        };
+                    if !mismatched.is_empty() {
+                        return Some(Err(anyhow::anyhow!(
+                            "P2's commitments from P1 mismatch after the archive-race import: \
+                             {mismatched:?}"
+                        )));
+                    }
+                    if matched < 2 {
+                        f.probe_diag.record(
+                            "P2 commitments from P1",
+                            Class::Transient,
+                            format!("{matched} complete matched periods, need 2"),
+                        );
+                        return None;
+                    }
+                    Some(Ok(()))
+                })
+            }
+        },
+    )
+    .run(f)
+    .await?;
 
     // ------------------------------------------------------------------
     // 5 — the point of the whole exercise: the party transacts from the new
@@ -909,6 +1084,96 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
         })
         .run(f)
         .await
+}
+
+async fn wait_for_replicated_contracts(
+    f: &Fixture,
+    party_id: &str,
+    observed_cids: &[String],
+) -> anyhow::Result<()> {
+    for _ in 0..60 {
+        let source: HashSet<String> = f
+            .active_contracts(P1_JSON_API, party_id)
+            .await?
+            .into_iter()
+            .map(|contract| contract.contract_id)
+            .collect();
+        let target: HashSet<String> = f
+            .active_contracts(P2_JSON_API, party_id)
+            .await?
+            .into_iter()
+            .map(|contract| contract.contract_id)
+            .collect();
+        if source == target
+            && target.contains(&observed_cids[2])
+            && observed_cids[..2].iter().all(|cid| !target.contains(cid))
+        {
+            info!("P2 holds the same {} active contracts as P1", target.len());
+            return Ok(());
+        }
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+    anyhow::bail!("P2's ACS does not match P1 with exactly the surviving observed coupon")
+}
+
+async fn restart_localnet_canton(f: &Fixture) -> anyhow::Result<()> {
+    if f.target != TestTarget::Localnet {
+        info!("Skipping the Canton container restart outside localnet");
+        return Ok(());
+    }
+    let compose_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../.localnet/splice-node/docker-compose/localnet")
+        .canonicalize()
+        .context("locating this checkout's localnet compose directory")?;
+    let output = ProcessCommand::new("docker")
+        .args([
+            "ps",
+            "--filter",
+            "label=com.docker.compose.service=canton",
+            "--filter",
+            &format!(
+                "label=com.docker.compose.project.working_dir={}",
+                compose_dir.display()
+            ),
+            "--filter",
+            &format!("publish={}", read_port("P2_CANTON_ADMIN")?),
+            "--format",
+            "{{.ID}}",
+        ])
+        .output()
+        .await
+        .context("finding this checkout's Canton container")?;
+    anyhow::ensure!(output.status.success(), "docker ps failed: {output:?}");
+    let ids = String::from_utf8(output.stdout)?;
+    let ids: Vec<&str> = ids.lines().filter(|id| !id.is_empty()).collect();
+    anyhow::ensure!(
+        ids.len() == 1,
+        "expected one checkout-local Canton container: {ids:?}"
+    );
+    let status = ProcessCommand::new("docker")
+        .args(["restart", "--time", "30", ids[0]])
+        .status()
+        .await
+        .context("restarting this checkout's Canton container")?;
+    anyhow::ensure!(status.success(), "the Canton container restart failed");
+
+    let configs = [
+        node_config(&f.p1.participant_id, "P1_CANTON_ADMIN", "P1_CANTON_LEDGER")?,
+        node_config(&f.p2.participant_id, "P2_CANTON_ADMIN", "P2_CANTON_LEDGER")?,
+        node_config(&f.p3.participant_id, "P3_CANTON_ADMIN", "P3_CANTON_LEDGER")?,
+    ];
+    for _ in 0..90 {
+        let mut healthy = true;
+        for config in &configs {
+            healthy &= matches!(connection_state(config).await, Ok((true, false)));
+        }
+        if healthy {
+            info!("Every localnet participant reconnects healthily after Canton restarts");
+            return Ok(());
+        }
+        tokio::time::sleep(Duration::from_secs(2)).await;
+    }
+    anyhow::bail!("a localnet participant does not recover after the archive-race import")
 }
 
 /// Sign every transaction hash in a prepare response with the wallet's key,

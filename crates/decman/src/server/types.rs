@@ -41,12 +41,12 @@ pub use common::api::{
     RightsStatus, RotateKeyInvitePayload, RotateKeyRequest, SuccessResponse,
     TenantAcsBlockResponse, TenantAcsImportRequest, TenantAcsImportResponse,
     TenantAddHostsExecuteRequest, TenantAddHostsExecuteResponse, TenantAddHostsPrepareResponse,
-    TenantAddHostsRequest, TenantCallAuditResponse, TenantExecuteRequest, TenantExecuteResponse,
-    TenantPartyStateResponse, TenantPrepareRequest, TenantPrepareResponse,
-    TenantThresholdExecuteRequest, TenantThresholdRequest, TenantUnhostRequest,
-    TransferFactoriesResponse, TransferFactoryInfo, TransferPreapprovalsResponse,
-    UnhostAuditResponse, UserServiceInfo, UserServicesResponse, WorkflowResponse,
-    WorkflowRunsResponse, WorkflowStatusResponse,
+    TenantAddHostsPublishRequest, TenantAddHostsRequest, TenantAddHostsStageResponse,
+    TenantCallAuditResponse, TenantExecuteRequest, TenantExecuteResponse, TenantPartyStateResponse,
+    TenantPrepareRequest, TenantPrepareResponse, TenantThresholdExecuteRequest,
+    TenantThresholdRequest, TenantUnhostRequest, TransferFactoriesResponse, TransferFactoryInfo,
+    TransferPreapprovalsResponse, UnhostAuditResponse, UserServiceInfo, UserServicesResponse,
+    WorkflowResponse, WorkflowRunsResponse, WorkflowStatusResponse,
 };
 pub use common::types::{
     AcsTransferProgress, AuditLogEntry, AuthConfigResponse, ConnectionStatus, ContractInfo,

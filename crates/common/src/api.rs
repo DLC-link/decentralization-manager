@@ -717,6 +717,31 @@ pub struct TenantAddHostsExecuteResponse {
     pub serial: u32,
 }
 
+/// Joining-host signatures returned only after the participant disconnects.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
+pub struct TenantAddHostsStageResponse {
+    pub party_id: String,
+    pub base_serial: u32,
+    /// Base64-encoded versioned SignedTopologyTransaction envelopes.
+    pub signed_topology_transactions: Vec<String>,
+}
+
+/// Relay the disconnected joiners' signatures through a current hosting participant.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
+pub struct TenantAddHostsPublishRequest {
+    pub party_id: String,
+    #[serde(default)]
+    pub permission: HostPermission,
+    pub new_hosts: Vec<CantonId>,
+    pub base_serial: u32,
+    /// Base64-encoded versioned SignedTopologyTransaction envelopes from stage.
+    pub signed_topology_transactions: Vec<String>,
+}
+
 /// One block of the party's ACS, plus the packages needed to validate it.
 ///
 /// The wallet is the transport: it reads block N here and hands block N to the

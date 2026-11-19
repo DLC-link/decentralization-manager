@@ -73,9 +73,11 @@ the party owner this before you start.
 2. **The joining nodes have every DAR the party uses.** DecMan cannot check
    this before the copy for a local party. Compare the vetted packages on each
    node's **Packages** page, and distribute what is missing.
-3. **The application can pause.** See the warning below.
+3. **The application supports the key conversion, if you choose co-validation.**
+   The existing hosts can continue serving the party while you add hosts.
 4. **You can take each joining participant offline for a while.** It leaves the
-   synchronizer during its copy. Every party it hosts pauses for that time.
+   synchronizer during staging, before the new hosting mapping takes effect.
+   Every party it hosts pauses until its import succeeds.
 5. **For failover:** each joining participant needs a Ledger API user for the
    application, with the rights to act and read as the party. The joining
    node's operator grants them.
@@ -83,27 +85,38 @@ the party owner this before you start.
    is ready for interactive submission.
 
 > [!WARNING]
-> **Keep the party idle from the add-hosts call until the last copy ends.** A
-> joining node starts to receive the party's traffic as soon as the change takes
-> effect. It leaves the synchronizer only when its copy starts. If the party
-> archives an older contract in between, the joining node records an archive for
-> a contract it never held. A replay of that record crashed a MainNet
-> participant on 2026-09-16. So pause every application that acts as the party.
+> **Keep each staged joiner disconnected until its import succeeds.** Staging
+> selects manual connection, so a participant restart cannot reconnect it early.
+> A failed publication or import leaves the staged joiner offline. Its operator
+> must resolve the failure before reconnecting it. The downtime includes
+> authorization, export, and import, rather than only the copy.
+
+Joining nodes check their readiness during `prepare`, before staging takes any
+participant offline. The caller must prepare every host before staging any joiner.
+The checks cover quarantine, import windows, active workflows or purges, relay
+sessions, connection health, and vetted packages missing from local storage.
+Readiness can change afterward, so staging checks again before claiming its window.
+The checks reserve nothing and cannot identify every package the party needs.
+A later failure can still require the operator recovery described below.
 
 ## The calls
 
 All calls go to the tenant API and send the node's key as
-`Authorization: Bearer <key>`. Every write answers `202 Accepted`. The change
-takes effect a moment later, so poll the owner's `/state` after each one.
+`Authorization: Bearer <key>`. Topology writes answer `202 Accepted` before
+the change takes effect. Staging answers `200` after the joiner disconnects.
+Poll the owner's `/state` to confirm authorization.
 
 Each write pins `base_serial`, the serial you last read from `/state`. A node
-whose serial has moved answers `409`. Then read `/state` again and repeat the
-call.
+whose serial has moved answers `409`. Before staging, read `/state` again and
+prepare the change again. After staging, preserve the pinned serial and ask
+the operator to resolve any conflicting topology change.
 
 | Call | Where | Signed by |
 |---|---|---|
 | `local-party/adopt-key/prepare` and `/execute` | The owner node | The owner node and the new party key |
-| `add-hosts/authorize` | The owner node and each joining node | Each node, with its own key |
+| `add-hosts/authorize` | The owner node only | The owner node |
+| `add-hosts/stage` | Each joining node | That node, before it disconnects |
+| `add-hosts/publish` | The owner node | The caller relays the staged signatures |
 | `threshold/authorize` | The owner node only | The owner node |
 | `{party}/acs/{joiner}` and `add-hosts/import` | The owner node, then the joining node | Nobody. This copies the contracts |
 
@@ -114,26 +127,54 @@ stays true after a conversion.
 ## Failover
 
 1. **Read the serial** from the owner's `/state`. Call it `$SERIAL`.
-2. **Authorize the add on the owner node and on each joining node,** with the
-   same body:
+2. **Publish the incomplete proposal on the owner node:**
 
    ```bash
    jq -n --arg p "$PARTY" --argjson s "$SERIAL" --argjson n "$NEW_HOSTS" \
      '{party_id:$p, permission:"submission", new_hosts:$n, base_serial:$s}' > add.json
-   curl -sS -X POST "$NODE/v0/tenant/add-hosts/authorize" \
-     -H "Authorization: Bearer $NODE_KEY" -H 'Content-Type: application/json' \
+   curl --fail-with-body -sS -X POST "$OWNER/v0/tenant/add-hosts/authorize" \
+     -H "Authorization: Bearer $OWNER_KEY" -H 'Content-Type: application/json' \
      -d @add.json
    ```
 
-   `$NEW_HOSTS` is a JSON array of the joining participant IDs. The order of the
-   calls does not matter. The change takes effect after the last one.
+   `$NEW_HOSTS` is a JSON array of joining participant IDs. Joining nodes refuse
+   `authorize`; they must stage their signatures instead.
 
-3. **Wait for the change.** Poll the owner's `/state` until `host_count`
-   includes the joining nodes and `onboarding_hosts` counts them.
-4. **Copy the contracts** from the owner node to each joining node. See
+3. **Stage every joining node with the same body.** Each node waits for its
+   proposal, signs it, and disconnects before returning its signatures.
+
+   ```bash
+   # joiners.txt contains: URL participant-ID tenant-key
+   stage_files=()
+   while read -r url pid key; do
+     stage_file="stage-${#stage_files[@]}.json"
+     curl --fail-with-body -sS -X POST "$url/v0/tenant/add-hosts/stage" \
+       -H "Authorization: Bearer $key" -H 'Content-Type: application/json' \
+       -d @add.json > "$stage_file" || exit 1
+     stage_files+=("$stage_file")
+   done < joiners.txt
+   jq -s '[.[].signed_topology_transactions[]]' "${stage_files[@]}" > staged-signatures.json
+   ```
+
+   A repeated stage call returns the persisted signatures without reconnecting.
+
+4. **Relay the signatures through the owner node:**
+
+   ```bash
+   jq --slurpfile signatures staged-signatures.json \
+     '. + {signed_topology_transactions:$signatures[0]}' add.json > publish.json
+   curl --fail-with-body -sS -X POST "$OWNER/v0/tenant/add-hosts/publish" \
+     -H "Authorization: Bearer $OWNER_KEY" -H 'Content-Type: application/json' \
+     -d @publish.json
+   ```
+
+5. **Wait for authorization on the owner node.** Its `/state` must include the
+   joining nodes in `host_count` and `onboarding_hosts`. Each joiner remains
+   disconnected and cannot read the new authorized mapping yet.
+6. **Copy the contracts** from the owner node to each joining node. See
    [Copy the contracts](#copy-the-contracts).
-5. **Wait for the markers to clear.** Poll the owner's `/state` until
-   `onboarding_hosts` is 0. The application can run again.
+7. **Wait for the markers to clear.** The joiners reconnect after successful
+   imports. Poll the owner's `/state` until `onboarding_hosts` is 0.
 
 The application now submits through any host, the normal way. Point it at a
 second host to use the failover.
@@ -173,7 +214,7 @@ second host to use the failover.
    Submission to Confirmation, so a normal submission for the party now fails.
    Plan the application's cutover for this moment.
 
-3. **Add the hosts** as in [Failover](#failover) steps 1 to 5, with
+3. **Add the hosts** as in [Failover](#failover) steps 1 to 7, with
    `"permission": "confirmation"`. Read the serial again first: the conversion
    moved it.
 4. **Raise the threshold** on the owner node, after every marker has cleared.
@@ -204,22 +245,27 @@ time.
 ```bash
 seq=1
 while :; do
-  curl -sS -H "Authorization: Bearer $OWNER_KEY" \
-    "$OWNER/v0/tenant/$PARTY/acs/$JOINER_ID?base_serial=$SERIAL&seq=$seq" > block.json
+  curl --fail-with-body -sS -H "Authorization: Bearer $OWNER_KEY" \
+    "$OWNER/v0/tenant/$PARTY/acs/$JOINER_ID?base_serial=$SERIAL&seq=$seq" > block.json || exit 1
   jq --arg p "$PARTY" --argjson s "$SERIAL" \
     '{party_id:$p, base_serial:$s, seq, chunk, end, total_len, sha256, package_ids}' \
     block.json > import.json
-  curl -sS -X POST "$JOINER/v0/tenant/add-hosts/import" \
+  curl --fail-with-body -sS -X POST "$JOINER/v0/tenant/add-hosts/import" \
     -H "Authorization: Bearer $JOINER_KEY" -H 'Content-Type: application/json' \
-    -d @import.json > result.json
+    -d @import.json > result.json || exit 1
   jq -e .complete result.json > /dev/null && break
   seq=$((seq + 1))
 done
 ```
 
 `$SERIAL` is the serial that the add-hosts call pinned, not a later one. The
-joining node leaves the synchronizer when block 1 arrives, and it reconnects
-after the last block.
+joining node already leaves the synchronizer during staging. It reconnects
+only after the complete snapshot imports successfully. A failed staged import
+leaves it offline for operator recovery.
+If Canton accepts the ACS but reconnect health verification fails, retry the
+identical final block. DecMan resumes reconnect without importing again.
+[Recovery limits](DECENTRALIZING_AN_EXTERNAL_PARTY.md#recover-a-staged-joiner)
+include the lack of a supported operator abort.
 [How the copy works](DECENTRALIZING_AN_EXTERNAL_PARTY.md#how-the-copy-works)
 explains restarts and time-outs.
 
@@ -312,13 +358,16 @@ removes them yet.
 
 | Symptom | Cause | Do this |
 |---|---|---|
-| `409` | The party's serial changed after you read it | Read `/state` again and repeat the call |
+| `409` | The party's serial changes | Before staging, read `/state` again. After staging, ask the operator to resolve the conflicting change |
 | `400` "not local to this participant" from adopt-key | The call went to a node that does not own the party | Call the owner node |
 | `400` "already carries party signing keys" | The party is already converted | Skip the conversion |
-| `400` "this node neither owns … namespace nor is joining it" | The call went to an unrelated node | Call only the owner node and the joining nodes |
+| `400` from `authorize` on a joining node | A joiner must disconnect before publication | Use `stage` on the joiner and `publish` on the owner |
 | `400` "a Submission host needs the party's threshold to be 1" | The party's threshold is above 1 | Use `"permission": "confirmation"` |
 | `404` from `/status` on a failover host | `/status` checks Confirmation hosts only | Use the owner's `/state` instead |
-| `500` "Imported the ACS, but could not request the marker clear" on the last block | Canton already has its own marker clear pending | Nothing. Poll `/state` until `onboarding_hosts` is 0 |
+| `500` "The ACS is imported, but its durable import window could not be released" | The database cannot persist completion | Retry the identical final block. Check the host logs if the database failure persists |
+| `500` "The ACS is imported, but reconnect or health verification failed" | Canton accepts the ACS, but reconnect does not finish | Retry the identical final block. DecMan retries reconnect without importing again |
+| `500` "Imported the ACS, but could not request the marker clear" on the last block | The ACS imports, but the clearance request fails | Retry the identical final block. Do not stage or import again |
+| `"marker_cleared": false` | Canton accepts the clearance request but waits for its safe time | Poll `/state` until `onboarding_hosts` is 0 |
 | `"package_preflight": false` in block 1 | The owner node cannot list the party's packages before the copy | Normal for a local party. Check the DARs yourself first |
 | A normal submission for the party fails after the conversion | The party now signs for itself | Switch the application to interactive submission |
 | `400` "the hosts that would remain" from unhost | The hosts that remain cannot meet the threshold | Lower the threshold with the party's key, then repeat the unhost |

@@ -9,8 +9,8 @@
 use common::{
     api::{
         HostPermission, TenantAcsImportRequest, TenantAddHostsExecuteRequest,
-        TenantAddHostsRequest, TenantExecuteRequest, TenantPrepareRequest,
-        TenantThresholdExecuteRequest, TenantThresholdRequest,
+        TenantAddHostsPublishRequest, TenantAddHostsRequest, TenantExecuteRequest,
+        TenantPrepareRequest, TenantThresholdExecuteRequest, TenantThresholdRequest,
     },
     canton_id::CantonId,
     types::WorkflowProgress,
@@ -330,8 +330,8 @@ pub struct AddedHosts {
     /// Per-host outcome of the topology write.
     pub hosts: Vec<HostReport>,
     /// Whether every joining host imported the ACS and cleared its onboarding
-    /// marker. `false` means at least one is hosted but still suspended, holding
-    /// none of the party's contracts.
+    /// marker. `false` means staging, publication, import, or clearance remains
+    /// incomplete. A staged participant can remain disconnected for recovery.
     pub replicated: bool,
     /// Joining hosts whose source could not preflight the packages, so their
     /// import validated them only after disconnecting. Empty is the good case.
@@ -347,8 +347,9 @@ pub struct AddedHosts {
 ///    requires them to agree, for exactly the reason onboarding does: the wallet
 ///    signs a hash it cannot parse, so agreement between hosts is the only thing
 ///    standing between it and a host that returns the hash of a mapping it never
-///    showed. Canton's rules need the party namespace plus each joining
-///    participant, so only the joiners submit.
+///    showed. A current host publishes the party-signed proposal. Each joiner
+///    then signs and disconnects before returning its signature. The current
+///    host publishes those signatures while the joiners remain disconnected.
 /// 2. **State.** A current host exports the ACS scoped to each joiner and the
 ///    wallet relays it. There is no host-to-host channel by design: a partner's
 ///    node is generally not in anyone else's mesh, and the wallet already talks
@@ -461,29 +462,76 @@ pub async fn add_hosts(
         signed_by: key.fingerprint(),
     };
 
-    // Only the joiners submit: Canton needs the party namespace plus each new
-    // participant, and the existing hosts are neither.
+    // The source publishes only the party signature. Each joiner disconnects
+    // before releasing the signature that lets the source authorize its hosting.
+    preparer.client.add_hosts_execute(&execute_request).await?;
     let mut reports = Vec::with_capacity(new_hosts.len());
+    let mut signed_topology_transactions = Vec::new();
     for host in new_hosts {
-        let report = match host.client.add_hosts_execute(&execute_request).await {
+        let staged = host.client.add_hosts_stage(&request).await.and_then(|staged| {
+            if staged.party_id != party_id
+                || staged.base_serial != base_serial
+                || staged.signed_topology_transactions.len() != prepared.topology_transactions.len()
+            {
+                return Err(Error::MalformedPreparation {
+                    host: host.client.base_url().to_string(),
+                    detail: "staged signatures do not match the requested party, serial, or transaction count"
+                        .to_string(),
+                });
+            }
+            Ok(staged)
+        });
+        let report = match staged {
             Ok(resp) => {
                 tracing::info!(
                     host = host.client.base_url(),
                     party_id = %resp.party_id,
-                    serial = resp.serial,
-                    "submitted add-hosts on joining host"
+                    base_serial,
+                    "staged add-hosts signatures with the joining host disconnected"
                 );
-                HostReport::ok(host, progress_to_status(resp.status))
+                signed_topology_transactions.extend(resp.signed_topology_transactions);
+                HostReport::ok(host, HostStatus::Pending)
             }
             Err(e) => {
                 tracing::warn!(
                     host = host.client.base_url(),
-                    "add-hosts submit failed: {e}"
+                    "add-hosts staging failed: {e}"
                 );
                 HostReport::failed(host, &e)
             }
         };
         reports.push(report);
+    }
+
+    if reports.iter().all(|report| report.error.is_none()) {
+        let publish = TenantAddHostsPublishRequest {
+            party_id: party_id.to_string(),
+            new_hosts: request.new_hosts.clone(),
+            permission,
+            base_serial,
+            signed_topology_transactions,
+        };
+        match preparer.client.add_hosts_publish(&publish).await {
+            Ok(response) => {
+                for report in &mut reports {
+                    report.status = Some(progress_to_status(response.status));
+                }
+            }
+            Err(error) => {
+                for (host, report) in new_hosts.iter().zip(&mut reports) {
+                    *report = HostReport::failed(host, &error);
+                }
+            }
+        }
+    } else {
+        // No hosting mapping is authorized until every joiner stages safely.
+        return Ok(AddedHosts {
+            party_id: party_id.to_string(),
+            serial: prepared.serial,
+            hosts: reports,
+            replicated: false,
+            without_package_preflight: Vec::new(),
+        });
     }
 
     // Phase 2 and 3, per joiner. A joiner whose topology write failed is skipped:

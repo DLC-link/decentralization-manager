@@ -10,6 +10,8 @@
 //! hashes it does not compute, so a single host's word for what it is signing is not
 //! something it can verify alone.
 
+use std::sync::{Arc, Mutex};
+
 use base64::{Engine, engine::general_purpose::STANDARD};
 use common::{
     api::{HostPermission, TenantExecuteRequest, TenantPrepareRequest, TenantUnhostRequest},
@@ -517,6 +519,35 @@ async fn stub_add_hosts_execute(server: &MockServer, serial: u32) {
         .await;
 }
 
+async fn stub_add_hosts_stage(joiner: &MockServer) {
+    Mock::given(method("POST"))
+        .and(path("/v0/tenant/add-hosts/stage"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "party_id": "alice::1220aa",
+            "base_serial": 4,
+            "signed_topology_transactions": ["c2lnbmVkLW9uZQ==", "c2lnbmVkLXR3bw=="],
+        })))
+        .mount(joiner)
+        .await;
+}
+
+async fn stub_add_hosts_signature_relay(source: &MockServer, joiner: &MockServer) {
+    stub_add_hosts_execute(source, 4).await;
+    stub_add_hosts_stage(joiner).await;
+    Mock::given(method("POST"))
+        .and(path("/v0/tenant/add-hosts/publish"))
+        .and(wiremock::matchers::body_partial_json(json!({
+            "signed_topology_transactions": ["c2lnbmVkLW9uZQ==", "c2lnbmVkLXR3bw=="],
+        })))
+        .respond_with(ResponseTemplate::new(202).set_body_json(json!({
+            "status": "completed",
+            "party_id": "alice::1220aa",
+            "serial": 5,
+        })))
+        .mount(source)
+        .await;
+}
+
 /// A stub source host that serves the party's ACS as ranges, and a joiner that
 /// accepts them and reports completion.
 async fn stub_acs_relay(source: &MockServer, joiner: &MockServer) {
@@ -595,7 +626,7 @@ async fn stub_import_blocks(joiner: &MockServer, marker_cleared: bool) {
 /// The safeguard: every host — current and joining — must prepare, because the
 /// wallet cannot check one host's word for what it is signing.
 #[tokio::test]
-async fn add_hosts_prepares_on_every_host_and_submits_only_to_joiners() {
+async fn add_hosts_prepares_everywhere_and_relays_offline_signatures_through_source() {
     let (p1, p2, p3) = (
         MockServer::start().await,
         MockServer::start().await,
@@ -604,7 +635,7 @@ async fn add_hosts_prepares_on_every_host_and_submits_only_to_joiners() {
     for (s, serial) in [(&p1, 5u32), (&p2, 5), (&p3, 5)] {
         stub_add_hosts_prepare(s, serial).await;
     }
-    stub_add_hosts_execute(&p3, 5).await;
+    stub_add_hosts_signature_relay(&p1, &p3).await;
     stub_acs_relay(&p1, &p3).await;
 
     let key = ExternalKeyPair::from_seed([4u8; 32]);
@@ -633,11 +664,28 @@ async fn add_hosts_prepares_on_every_host_and_submits_only_to_joiners() {
             "every host must be asked to prepare"
         );
     }
-    // Only the joiner submits: Canton needs the party namespace plus each new
-    // participant, and the existing hosts are neither.
-    assert_eq!(add_hosts_execute_calls(&p1).await, 0);
+    assert_eq!(add_hosts_execute_calls(&p1).await, 1);
     assert_eq!(add_hosts_execute_calls(&p2).await, 0);
-    assert_eq!(add_hosts_execute_calls(&p3).await, 1);
+    assert_eq!(add_hosts_execute_calls(&p3).await, 0);
+    let source_requests = p1.received_requests().await.unwrap();
+    let execute = source_requests
+        .iter()
+        .position(|request| request.url.path() == "/v0/tenant/add-hosts/execute")
+        .unwrap();
+    let publish = source_requests
+        .iter()
+        .position(|request| request.url.path() == "/v0/tenant/add-hosts/publish")
+        .unwrap();
+    assert!(
+        execute < publish,
+        "the source must publish the incomplete proposal first"
+    );
+    let joining_requests = p3.received_requests().await.unwrap();
+    assert!(
+        joining_requests
+            .iter()
+            .any(|request| request.url.path() == "/v0/tenant/add-hosts/stage")
+    );
     assert!(added.replicated, "the joiner should have been switched on");
     assert!(added.without_package_preflight.is_empty());
 }
@@ -656,7 +704,7 @@ async fn add_hosts_waits_out_a_marker_the_import_did_not_clear() {
     for s in [&p1, &p2, &p3] {
         stub_add_hosts_prepare(s, 5).await;
     }
-    stub_add_hosts_execute(&p3, 5).await;
+    stub_add_hosts_signature_relay(&p1, &p3).await;
     stub_acs_source(&p1).await;
     // Imported, clear only requested.
     stub_import_blocks(&p3, false).await;
@@ -713,6 +761,280 @@ async fn add_hosts_waits_out_a_marker_the_import_did_not_clear() {
     );
 }
 
+#[tokio::test]
+async fn add_hosts_does_not_publish_or_import_when_a_joiner_cannot_stage() {
+    let source = MockServer::start().await;
+    let joiner = MockServer::start().await;
+    for server in [&source, &joiner] {
+        stub_add_hosts_prepare(server, 5).await;
+    }
+    stub_add_hosts_execute(&source, 4).await;
+    Mock::given(method("POST"))
+        .and(path("/v0/tenant/add-hosts/stage"))
+        .respond_with(ResponseTemplate::new(500).set_body_json(json!({
+            "error": "the joiner could not disconnect",
+        })))
+        .mount(&joiner)
+        .await;
+    let key = ExternalKeyPair::from_seed([4u8; 32]);
+    let added = decman_wallet::add_hosts(
+        &[host_for(&source, 1)],
+        &[host_for(&joiner, 3)],
+        &key,
+        "alice::1220aa",
+        HostPermission::Confirmation,
+        4,
+    )
+    .await
+    .unwrap();
+    assert!(!added.replicated);
+    assert!(added.hosts[0].error.is_some());
+    for request in source.received_requests().await.unwrap() {
+        assert_ne!(request.url.path(), "/v0/tenant/add-hosts/publish");
+        assert!(!request.url.path().contains("/acs/"));
+    }
+    for request in joiner.received_requests().await.unwrap() {
+        assert_ne!(request.url.path(), "/v0/tenant/add-hosts/import");
+    }
+}
+
+#[tokio::test]
+async fn add_hosts_checks_every_joiners_readiness_before_any_staging_or_publication() {
+    for (status, reason) in [
+        (
+            409,
+            "this participant already owns another ACS import window",
+        ),
+        (400, "this participant is quarantined for this party"),
+    ] {
+        let source = MockServer::start().await;
+        let earlier_joiner = MockServer::start().await;
+        let later_joiner = MockServer::start().await;
+        for ready_host in [&source, &earlier_joiner] {
+            stub_add_hosts_prepare(ready_host, 5).await;
+        }
+        Mock::given(method("POST"))
+            .and(path("/v0/tenant/add-hosts/prepare"))
+            .respond_with(ResponseTemplate::new(status).set_body_json(json!({ "error": reason })))
+            .mount(&later_joiner)
+            .await;
+
+        let key = ExternalKeyPair::from_seed([4u8; 32]);
+        let result = decman_wallet::add_hosts(
+            &[host_for(&source, 1)],
+            &[host_for(&earlier_joiner, 2), host_for(&later_joiner, 3)],
+            &key,
+            "alice::1220aa",
+            HostPermission::Confirmation,
+            4,
+        )
+        .await;
+
+        let error = result.expect_err("a later joiner's readiness refusal must stop the flow");
+        let error = error.to_string();
+        assert!(
+            error.contains(reason),
+            "the wallet must preserve the readiness refusal: {error}"
+        );
+        assert!(
+            error.contains(&later_joiner.uri()),
+            "the wallet must identify the unready joiner: {error}"
+        );
+        for server in [&source, &earlier_joiner, &later_joiner] {
+            let requests = server.received_requests().await.unwrap();
+            assert_eq!(
+                requests.len(),
+                1,
+                "readiness refusal {status}: no host may receive a mutation"
+            );
+            assert_eq!(requests[0].url.path(), "/v0/tenant/add-hosts/prepare");
+        }
+    }
+}
+
+#[tokio::test]
+async fn add_hosts_publishes_only_after_collecting_every_joiners_staged_signatures() {
+    let source = MockServer::start().await;
+    let joiner_a = MockServer::start().await;
+    let joiner_b = MockServer::start().await;
+    for server in [&source, &joiner_a, &joiner_b] {
+        stub_add_hosts_prepare(server, 5).await;
+    }
+    stub_add_hosts_execute(&source, 4).await;
+    for joiner in [&joiner_a, &joiner_b] {
+        stub_add_hosts_stage(joiner).await;
+        stub_import_blocks(joiner, true).await;
+    }
+    Mock::given(method("POST"))
+        .and(path("/v0/tenant/add-hosts/publish"))
+        .and(wiremock::matchers::body_partial_json(json!({
+            "signed_topology_transactions": [
+                "c2lnbmVkLW9uZQ==", "c2lnbmVkLXR3bw==",
+                "c2lnbmVkLW9uZQ==", "c2lnbmVkLXR3bw==",
+            ],
+        })))
+        .respond_with(ResponseTemplate::new(202).set_body_json(json!({
+            "status": "completed", "party_id": "alice::1220aa", "serial": 5,
+        })))
+        .expect(1)
+        .mount(&source)
+        .await;
+    stub_acs_source(&source).await;
+    let key = ExternalKeyPair::from_seed([4u8; 32]);
+    let added = decman_wallet::add_hosts(
+        &[host_for(&source, 1)],
+        &[host_for(&joiner_a, 2), host_for(&joiner_b, 3)],
+        &key,
+        "alice::1220aa",
+        HostPermission::Confirmation,
+        4,
+    )
+    .await
+    .unwrap();
+    assert!(added.replicated);
+    assert_eq!(added.hosts.len(), 2);
+    assert!(added.hosts.iter().all(|report| report.error.is_none()));
+    source.verify().await;
+}
+
+#[tokio::test]
+async fn add_hosts_retries_publication_after_a_joiner_stages_and_imports_on_the_second_call() {
+    #[derive(Default)]
+    struct RetryState {
+        staged: bool,
+        offline_prepares: usize,
+        stage_calls: usize,
+        publish_calls: usize,
+    }
+    let state = Arc::new(Mutex::new(RetryState::default()));
+    let source = MockServer::start().await;
+    let joiner = MockServer::start().await;
+    stub_add_hosts_prepare(&source, 5).await;
+    stub_add_hosts_execute(&source, 4).await;
+    let shared = state.clone();
+    Mock::given(method("POST"))
+        .and(path("/v0/tenant/add-hosts/prepare"))
+        .respond_with(move |_: &wiremock::Request| {
+            let mut state = shared.lock().expect("retry state lock");
+            if state.staged {
+                state.offline_prepares += 1;
+            }
+            ResponseTemplate::new(200).set_body_json(json!({
+                "party_id": "alice::1220aa", "serial": 5,
+                "transaction_hashes": TX_HASHES.map(|hash| STANDARD.encode(hash)),
+                "topology_transactions": ["dHgtb25l", "dHgtdHdv"],
+            }))
+        })
+        .expect(2)
+        .mount(&joiner)
+        .await;
+    let shared = state.clone();
+    Mock::given(method("POST"))
+        .and(path("/v0/tenant/add-hosts/stage"))
+        .respond_with(move |_: &wiremock::Request| {
+            let mut state = shared.lock().expect("retry state lock");
+            state.staged = true;
+            state.stage_calls += 1;
+            ResponseTemplate::new(200).set_body_json(json!({
+                "party_id": "alice::1220aa", "base_serial": 4,
+                "signed_topology_transactions": ["c2lnbmVkLW9uZQ==", "c2lnbmVkLXR3bw=="],
+            }))
+        })
+        .expect(2)
+        .mount(&joiner)
+        .await;
+    let shared = state.clone();
+    Mock::given(method("POST"))
+        .and(path("/v0/tenant/add-hosts/publish"))
+        .and(wiremock::matchers::body_partial_json(json!({
+            "signed_topology_transactions": ["c2lnbmVkLW9uZQ==", "c2lnbmVkLXR3bw=="],
+        })))
+        .respond_with(move |_: &wiremock::Request| {
+            let mut state = shared.lock().expect("retry state lock");
+            assert!(state.staged, "publication follows staging");
+            state.publish_calls += 1;
+            if state.publish_calls == 1 {
+                ResponseTemplate::new(503)
+                    .set_body_json(json!({"error": "temporary publication failure"}))
+            } else {
+                ResponseTemplate::new(202).set_body_json(json!({
+                    "status": "completed", "party_id": "alice::1220aa", "serial": 5,
+                }))
+            }
+        })
+        .expect(2)
+        .mount(&source)
+        .await;
+    stub_acs_relay(&source, &joiner).await;
+    let key = ExternalKeyPair::from_seed([4u8; 32]);
+    let current_hosts = [host_for(&source, 1)];
+    let new_hosts = [host_for(&joiner, 2)];
+
+    let first = decman_wallet::add_hosts(
+        &current_hosts,
+        &new_hosts,
+        &key,
+        "alice::1220aa",
+        HostPermission::Confirmation,
+        4,
+    )
+    .await
+    .expect("publication refusal reports incomplete replication");
+    assert!(!first.replicated);
+    assert_eq!(first.hosts.len(), 1);
+    assert!(
+        first.hosts[0]
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("temporary publication failure"))
+    );
+    assert!(state.lock().expect("retry state lock").staged);
+    for server in [&source, &joiner] {
+        let requests = server.received_requests().await.unwrap_or_default();
+        assert!(
+            requests
+                .iter()
+                .all(|request| !request.url.path().contains("/acs/"))
+        );
+        assert!(
+            requests
+                .iter()
+                .all(|request| request.url.path() != "/v0/tenant/add-hosts/import")
+        );
+    }
+
+    let second = decman_wallet::add_hosts(
+        &current_hosts,
+        &new_hosts,
+        &key,
+        "alice::1220aa",
+        HostPermission::Confirmation,
+        4,
+    )
+    .await
+    .expect("the wallet can prepare and stage the offline joiner again");
+    assert!(second.replicated);
+    assert_eq!(second.serial, 5);
+    assert!(second.hosts.iter().all(|report| report.error.is_none()));
+    let requests = joiner.received_requests().await.unwrap_or_default();
+    assert_eq!(
+        requests
+            .iter()
+            .filter(|request| request.url.path() == "/v0/tenant/add-hosts/import")
+            .count(),
+        2,
+        "only the successful retry imports the two ACS blocks"
+    );
+    {
+        let state = state.lock().expect("retry state lock");
+        assert_eq!(state.offline_prepares, 1);
+        assert_eq!(state.stage_calls, 2);
+        assert_eq!(state.publish_calls, 2);
+    }
+    source.verify().await;
+    joiner.verify().await;
+}
+
 /// Every current host holds the party, so a source whose export fails costs a
 /// retry against the next one rather than the joiner.
 #[tokio::test]
@@ -725,7 +1047,7 @@ async fn add_hosts_falls_back_to_another_source_for_the_acs() {
     for s in [&p1, &p2, &p3] {
         stub_add_hosts_prepare(s, 5).await;
     }
-    stub_add_hosts_execute(&p3, 5).await;
+    stub_add_hosts_signature_relay(&p1, &p3).await;
     Mock::given(method("GET"))
         .and(wiremock::matchers::path_regex(r"^/v0/tenant/.+/acs/.+$"))
         .respond_with(ResponseTemplate::new(500).set_body_json(json!({"error": "export failed"})))
