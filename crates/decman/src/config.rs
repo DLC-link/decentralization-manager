@@ -308,6 +308,13 @@ pub struct NodeConfig {
     /// by its index without recording the key.
     #[serde(skip)]
     pub tenant_api_keys: Vec<String>,
+    /// Bearer API keys for this node's own operator on the `/v0/tenant/*`
+    /// endpoints. An operator key works on every tenant call. Only an operator
+    /// key may act on a party whose namespace is this node's participant
+    /// namespace, because the node signs for that party with its own key.
+    /// Ordered as configured, like `tenant_api_keys`. Not serialized.
+    #[serde(skip)]
+    pub operator_api_keys: Vec<String>,
     /// Requests per minute that one tenant API key may make to the metered
     /// `/v0/tenant/*` endpoints. 0 disables the limit. Default 120. Not
     /// serialized.
@@ -351,6 +358,7 @@ impl Default for NodeConfig {
             insecure: false,
             insecure_auth: InsecureAuthConfig::default(),
             tenant_api_keys: Vec::new(),
+            operator_api_keys: Vec::new(),
             tenant_rate_limit_per_minute: 120,
             validator_operator_party: None,
             key_store_key_file: None,

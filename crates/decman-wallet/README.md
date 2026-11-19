@@ -463,7 +463,8 @@ Raising the threshold above 1 then adds co-validation.
 `HostPermission::Submission` is for a party with no key of its own, whose host
 submits on its behalf. That is a local party, and its namespace is a
 participant's key, so no wallet signature can authorize its topology. Its hosts
-are added with `/v0/tenant/add-hosts/authorize` instead. See
+are added with `/v0/tenant/add-hosts/authorize` instead. On the owner node,
+that call needs an operator key from `DECPM_OPERATOR_API_KEYS`. See
 [Decentralizing an existing party](../../docs/DECENTRALIZING_AN_EXISTING_PARTY.md).
 
 ## Asking a host to leave a party

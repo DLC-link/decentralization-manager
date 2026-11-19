@@ -68,8 +68,9 @@ the party owner this before you start.
 ## Before you start
 
 1. **Every node runs DecMan with the tenant API on.** That covers the owner node
-   and each joining node. Set `DECPM_TENANT_API_KEYS` on each one. You call
-   every node's tenant API with its key.
+   and each joining node. Set `DECPM_TENANT_API_KEYS` on each joining node.
+   Set `DECPM_OPERATOR_API_KEYS` on the owner node. You call every node's
+   tenant API with its key.
 2. **The joining nodes have every DAR the party uses.** DecMan cannot check
    this before the copy for a local party. Compare the vetted packages on each
    node's **Packages** page, and distribute what is missing.
@@ -93,7 +94,9 @@ the party owner this before you start.
 ## The calls
 
 All calls go to the tenant API and send the node's key as
-`Authorization: Bearer <key>`. Every write answers `202 Accepted`. The change
+`Authorization: Bearer <key>`. On the owner node, that key must be an operator
+key. The owner node signs these calls with its own key, so it refuses a tenant
+key with `403`. Every write answers `202 Accepted`. The change
 takes effect a moment later, so poll the owner's `/state` after each one.
 
 Each write pins `base_serial`, the serial you last read from `/state`. A node
