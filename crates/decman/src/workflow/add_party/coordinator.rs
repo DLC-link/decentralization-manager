@@ -709,6 +709,7 @@ mod tests {
         );
         Ok(())
     }
+
     #[tokio::test]
     async fn missing_clearing_upload_requires_confirmed_ledger_state() -> anyhow::Result<()> {
         let cleared = confirmed_clearing_proposal(None, async { Ok(()) }).await?;
@@ -747,6 +748,7 @@ mod tests {
         assert_eq!(restored, proposal);
         Ok(())
     }
+
     #[sqlx::test(migrator = "MIGRATOR")]
     async fn legacy_key_recovery_requires_both_outputs(pool: SqlitePool) -> anyhow::Result<()> {
         for (index, keys, participant) in [

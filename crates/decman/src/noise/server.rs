@@ -90,6 +90,7 @@ fn decline_matches_run(
 /// Coordinator server that accepts connections from peers
 pub struct NoiseServer<S: WorkflowStep + 'static> {
     db: SqlitePool,
+    /// Serializes the conflict check, write, and completion for concurrent retries.
     recorded_upload: Mutex<()>,
     node_config: Arc<NodeConfig>,
     keypair: Arc<NoiseKeypair>,
@@ -896,7 +897,7 @@ impl<S: WorkflowStep + 'static> NoiseServer<S> {
                     .db
                     .get_workflow_run(self.workflow_state.instance_name())
                     .await?
-                    .context("Add-party run missing")?;
+                    .ok_or(sqlx::Error::RowNotFound)?;
                 let config: AddPartyConfig = serde_json::from_str(&run.config_json)?;
                 anyhow::ensure!(
                     peer_id == config.new_participant_id,
@@ -931,6 +932,13 @@ impl<S: WorkflowStep + 'static> NoiseServer<S> {
         }
         .await;
         if let Err(error) = validation {
+            if error.downcast_ref::<sqlx::Error>().is_some() {
+                tracing::error!(%error, "Failed to read {artifact_kind} storage for {peer_id}");
+                return Ok(Message::new(
+                    MessageType::Error,
+                    b"The coordinator could not store the upload".to_vec(),
+                ));
+            }
             tracing::warn!(%error, "Invalid {artifact_kind} from {peer_id}");
             return Ok(Message::new(
                 MessageType::Error,

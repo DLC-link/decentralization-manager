@@ -913,3 +913,46 @@ async fn resumed_coordinator_prepares_saved_new_member_proposal(db: SqlitePool) 
     );
     Ok(())
 }
+
+async fn assert_upload_read_failure(server: &NoiseServer<AddPartyStep>) -> Result {
+    let payload = utils::encode_length_prefixed(&[b"keys", b"participant"]);
+    let reply = server
+        .handle_command(
+            peer(1),
+            Message::new(MessageType::AddPartyKeysUpload, payload),
+        )
+        .await?;
+    assert_eq!(reply.msg_type, MessageType::Error);
+    assert_eq!(reply.payload, b"The coordinator could not store the upload");
+    assert!(!server.workflow_state.has_peer_completed(&peer(1)).await);
+    assert_eq!(
+        server.workflow_state.current_step().await,
+        AddPartyStep::GenerateNewMemberKeys
+    );
+    Ok(())
+}
+
+#[sqlx::test(migrator = "MIGRATOR")]
+async fn a_missing_upload_run_returns_a_storage_error(db: SqlitePool) -> Result {
+    let root = tempfile::tempdir()?;
+    let step = AddPartyStep::GenerateNewMemberKeys;
+    add_party_upload_run(&db, step).await?;
+    let server = start(&db, &root, step).await?;
+    sqlx::query("DELETE FROM workflow_runs WHERE instance_name = ?")
+        .bind(RUN)
+        .execute(&db)
+        .await?;
+    assert_upload_read_failure(&server).await
+}
+
+#[sqlx::test(migrator = "MIGRATOR")]
+async fn a_failed_upload_artifact_read_returns_a_storage_error(db: SqlitePool) -> Result {
+    let root = tempfile::tempdir()?;
+    let step = AddPartyStep::GenerateNewMemberKeys;
+    add_party_upload_run(&db, step).await?;
+    let server = start(&db, &root, step).await?;
+    sqlx::query("DROP TABLE workflow_artifacts")
+        .execute(&db)
+        .await?;
+    assert_upload_read_failure(&server).await
+}
