@@ -1,7 +1,15 @@
+use std::collections::HashSet;
+
 use anyhow::Context;
 use bytes::{Buf, BufMut, BytesMut};
 
-use crate::{error::Result, workflow::storage::WorkflowStorage};
+use crate::{
+    error::Result,
+    workflow::{
+        state::{WorkflowState, WorkflowStep},
+        storage::WorkflowStorage,
+    },
+};
 
 /// Rebuild both per-peer artifacts from durable uploads on every submit.
 /// Retaining the upload makes a restart between output writes recoverable.
@@ -23,6 +31,32 @@ pub(crate) async fn save_signature_pairs(
             .await?;
     }
     Ok(())
+}
+
+/// The expected peers that have no artifact of `artifact_kind`, sorted.
+///
+/// The check uses the expected set, because advancing a signing step clears
+/// the completed set. Each caller writes its own error message.
+pub(crate) async fn peers_without_artifact<S: WorkflowStep + 'static>(
+    workflow_state: &WorkflowState<S>,
+    storage: &impl WorkflowStorage,
+    instance_name: &str,
+    artifact_kind: &str,
+) -> Result<Vec<String>> {
+    let stored: HashSet<String> = storage
+        .list_artifacts(instance_name, artifact_kind)
+        .await?
+        .into_iter()
+        .map(|(peer, _)| peer)
+        .collect();
+    let mut missing: Vec<String> = workflow_state
+        .expected_peers()
+        .iter()
+        .map(ToString::to_string)
+        .filter(|peer| !stored.contains(peer))
+        .collect();
+    missing.sort();
+    Ok(missing)
 }
 
 /// Split the combined `varint(len_dns)||dns_proto||varint(len_p2p)||p2p_proto`
