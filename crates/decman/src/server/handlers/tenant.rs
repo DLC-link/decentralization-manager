@@ -35,6 +35,7 @@ use futures::FutureExt;
 
 use crate::{
     canton_id::validate_party_id_prefix,
+    config::NodeConfig,
     server::{
         AppState,
         middleware::{TenantKey, charge_tenant_key, tenant_caller},
@@ -455,6 +456,7 @@ pub async fn tenant_add_hosts_prepare(
         (status = 202, description = "Authorized on this node", body = TenantAddHostsExecuteResponse),
         (status = 400, description = "Bad host set, or a change this node holds no key for", body = ErrorResponse),
         (status = 401, description = "Invalid tenant API key", body = ErrorResponse),
+        (status = 403, description = "The party is in this node's own namespace, and the key is not an operator key", body = ErrorResponse),
         (status = 404, description = "No authorized PartyToParticipant for this party", body = ErrorResponse),
         (status = 409, description = "The pinned base serial has moved on this node", body = ErrorResponse),
         (status = 429, description = "Rate limit for this tenant API key exceeded; Retry-After gives the seconds to wait", body = ErrorResponse),
@@ -471,6 +473,9 @@ pub async fn tenant_add_hosts_authorize(
         Ok(key) => key,
         Err(resp) => return resp,
     };
+    if let Err(resp) = require_operator_for_own_party(&data.config, key.as_ref(), &body.party_id) {
+        return resp;
+    }
     let body = body.into_inner();
     let party_id = body.party_id.clone();
     audited_write(
@@ -544,6 +549,7 @@ async fn tenant_add_hosts_authorize_on_this_host(
         (status = 202, description = "Submitted on this host", body = TenantAddHostsExecuteResponse),
         (status = 400, description = "Bad request, or topology that is not a plain add-hosts", body = ErrorResponse),
         (status = 401, description = "Invalid tenant API key", body = ErrorResponse),
+        (status = 403, description = "The party is in this node's own namespace, and the key is not an operator key", body = ErrorResponse),
         (status = 404, description = "No authorized PartyToParticipant for this party", body = ErrorResponse),
         (status = 409, description = "The pinned base serial has moved on this host", body = ErrorResponse),
         (status = 429, description = "Rate limit for this tenant API key exceeded; Retry-After gives the seconds to wait", body = ErrorResponse),
@@ -560,6 +566,9 @@ pub async fn tenant_add_hosts_execute(
         Ok(key) => key,
         Err(resp) => return resp,
     };
+    if let Err(resp) = require_operator_for_own_party(&data.config, key.as_ref(), &body.party_id) {
+        return resp;
+    }
     let body = body.into_inner();
     let party_id = body.party_id.clone();
     audited_write(
@@ -637,6 +646,7 @@ async fn tenant_add_hosts_execute_on_this_host(
     responses(
         (status = 200, description = "Joiner is disconnected and its signatures are ready", body = TenantAddHostsStageResponse),
         (status = 400, description = "Invalid change or this participant is not a joiner", body = ErrorResponse),
+        (status = 403, description = "The party is in this node's own namespace, and the key is not an operator key", body = ErrorResponse),
         (status = 409, description = "Another import owns the participant or the serial moved", body = ErrorResponse),
         (status = 500, description = "A Canton call failed", body = ErrorResponse)
     )
@@ -651,6 +661,9 @@ pub async fn tenant_add_hosts_stage(
         Ok(key) => key,
         Err(resp) => return resp,
     };
+    if let Err(resp) = require_operator_for_own_party(&data.config, key.as_ref(), &body.party_id) {
+        return resp;
+    }
     let body = body.into_inner();
     let party = body.party_id.clone();
     audited_write(
@@ -701,6 +714,7 @@ pub async fn tenant_add_hosts_stage(
     responses(
         (status = 202, description = "Joiner signatures submitted", body = TenantAddHostsExecuteResponse),
         (status = 400, description = "The signatures do not describe the requested change", body = ErrorResponse),
+        (status = 403, description = "The party is in this node's own namespace, and the key is not an operator key", body = ErrorResponse),
         (status = 409, description = "The pinned serial moved", body = ErrorResponse),
         (status = 500, description = "A Canton call failed", body = ErrorResponse)
     )
@@ -715,6 +729,9 @@ pub async fn tenant_add_hosts_publish(
         Ok(key) => key,
         Err(resp) => return resp,
     };
+    if let Err(resp) = require_operator_for_own_party(&data.config, key.as_ref(), &body.party_id) {
+        return resp;
+    }
     let body = body.into_inner();
     let party = body.party_id.clone();
     audited_write(
@@ -794,6 +811,7 @@ pub async fn tenant_add_hosts_publish(
         (status = 200, description = "One block of the ACS", body = TenantAcsBlockResponse),
         (status = 400, description = "Bad target participant id or seq", body = ErrorResponse),
         (status = 401, description = "Invalid tenant API key", body = ErrorResponse),
+        (status = 403, description = "The party is in this node's own namespace, and the key is not an operator key", body = ErrorResponse),
         (status = 409, description = "Out of sync with this host's export; restart from block 1. Or this host is leaving the party", body = ErrorResponse),
         (status = 500, description = "Export failed on this host", body = ErrorResponse)
     )
@@ -806,10 +824,14 @@ pub async fn tenant_acs_snapshot(
     query: web::Query<AcsBlockQuery>,
 ) -> impl Responder {
     // The middleware spends no budget here: one ACS copy asks for many blocks.
-    if let Err(resp) = tenant_caller(&http_req) {
+    let key = match tenant_caller(&http_req) {
+        Ok(key) => key,
+        Err(resp) => return resp,
+    };
+    let (party_id, target) = path.into_inner();
+    if let Err(resp) = require_operator_for_own_party(&data.config, key.as_ref(), &party_id) {
         return resp;
     }
-    let (party_id, target) = path.into_inner();
     let target = match crate::canton_id::CantonId::parse(&target) {
         Ok(id) => id,
         Err(e) => {
@@ -942,6 +964,7 @@ pub async fn tenant_acs_snapshot(
         (status = 200, description = "Block taken; complete says whether the import finished", body = TenantAcsImportResponse),
         (status = 400, description = "Bad base64, bad party id, or missing packages", body = ErrorResponse),
         (status = 401, description = "Invalid tenant API key", body = ErrorResponse),
+        (status = 403, description = "The party is in this node's own namespace, and the key is not an operator key", body = ErrorResponse),
         (status = 404, description = "No authorized mapping for this party on this host", body = ErrorResponse),
         (status = 409, description = "Out of sync with this host's import; restart from block 1. Or this host is leaving the party", body = ErrorResponse),
         (status = 429, description = "Rate limit for this tenant API key exceeded; only a block that opens a copy, or that no open copy takes, counts. Retry-After gives the seconds to wait", body = ErrorResponse),
@@ -959,6 +982,9 @@ pub async fn tenant_acs_import(
         Ok(key) => key,
         Err(resp) => return resp,
     };
+    if let Err(resp) = require_operator_for_own_party(&data.config, key.as_ref(), &body.party_id) {
+        return resp;
+    }
     // A copy this host admitted must never be refused partway, or the
     // staged participant must stay offline until its ACS is complete.
     // The next block of an open copy, the final one included, spends no budget.
@@ -1345,6 +1371,7 @@ pub async fn tenant_threshold_prepare(
         (status = 202, description = "Authorized on this node", body = TenantAddHostsExecuteResponse),
         (status = 400, description = "A threshold this party cannot field, or a party this node holds no key for", body = ErrorResponse),
         (status = 401, description = "Invalid tenant API key", body = ErrorResponse),
+        (status = 403, description = "The party is in this node's own namespace, and the key is not an operator key", body = ErrorResponse),
         (status = 404, description = "No authorized PartyToParticipant for this party", body = ErrorResponse),
         (status = 409, description = "The pinned base serial has moved on this node", body = ErrorResponse),
         (status = 429, description = "Rate limit for this tenant API key exceeded; Retry-After gives the seconds to wait", body = ErrorResponse),
@@ -1361,6 +1388,9 @@ pub async fn tenant_threshold_authorize(
         Ok(key) => key,
         Err(resp) => return resp,
     };
+    if let Err(resp) = require_operator_for_own_party(&data.config, key.as_ref(), &body.party_id) {
+        return resp;
+    }
     let body = body.into_inner();
     let party_id = body.party_id.clone();
     audited_write(
@@ -1421,6 +1451,7 @@ async fn tenant_threshold_authorize_on_this_host(
         (status = 202, description = "Submitted on this host", body = TenantAddHostsExecuteResponse),
         (status = 400, description = "Bad request, or a bundle that changes more than the threshold", body = ErrorResponse),
         (status = 401, description = "Invalid tenant API key", body = ErrorResponse),
+        (status = 403, description = "The party is in this node's own namespace, and the key is not an operator key", body = ErrorResponse),
         (status = 404, description = "This host does not host this party", body = ErrorResponse),
         (status = 409, description = "The pinned base serial has moved on this host", body = ErrorResponse),
         (status = 429, description = "Rate limit for this tenant API key exceeded; Retry-After gives the seconds to wait", body = ErrorResponse),
@@ -1437,6 +1468,9 @@ pub async fn tenant_threshold_execute(
         Ok(key) => key,
         Err(resp) => return resp,
     };
+    if let Err(resp) = require_operator_for_own_party(&data.config, key.as_ref(), &body.party_id) {
+        return resp;
+    }
     let body = body.into_inner();
     let party_id = body.party_id.clone();
     audited_write(
@@ -1566,6 +1600,7 @@ pub async fn tenant_party_state(
         (status = 202, description = "The topology write was accepted but is not effective yet; repeat the call", body = ExternalPartyUnhostResponse),
         (status = 400, description = "participant_id is not this host, this host is the last host, or the hosts left could not meet the threshold", body = ErrorResponse),
         (status = 401, description = "Invalid tenant API key", body = ErrorResponse),
+        (status = 403, description = "The party is in this node's own namespace, and the key is not an operator key", body = ErrorResponse),
         (status = 404, description = "This host does not host the party", body = ErrorResponse),
         (status = 409, description = "The pinned serial moved, or an unhost or ACS relay for the party is running", body = ErrorResponse),
         (status = 422, description = "This host has no validator operator party, and splice_cleanup was not false", body = ErrorResponse),
@@ -1583,6 +1618,9 @@ pub async fn tenant_unhost(
         Ok(key) => key,
         Err(resp) => return resp,
     };
+    if let Err(resp) = require_operator_for_own_party(&data.config, key.as_ref(), &body.party_id) {
+        return resp;
+    }
     let body = body.into_inner();
     run_unhost(
         &data,
@@ -1591,7 +1629,7 @@ pub async fn tenant_unhost(
             base_serial: body.base_serial,
             splice_cleanup: body.splice_cleanup.unwrap_or(true),
             requested_via: RequestedVia::Tenant,
-            requested_by: tenant_requester(key.map(|k| k.index)),
+            requested_by: tenant_requester(key.as_ref()),
             named_participant: Some(body.participant_id),
         },
     )
@@ -1599,13 +1637,61 @@ pub async fn tenant_unhost(
 }
 
 /// How the audit names a tenant caller: by the index of its key in
-/// `DECPM_TENANT_API_KEYS`, never by the key.
-fn tenant_requester(key_index: Option<usize>) -> String {
-    match key_index {
-        Some(index) => format!("tenant-key-{index}"),
+/// `DECPM_TENANT_API_KEYS` or `DECPM_OPERATOR_API_KEYS`, never by the key.
+fn tenant_requester(key: Option<&TenantKey>) -> String {
+    match key {
+        Some(key) if key.operator => format!("operator-key-{index}", index = key.index),
+        Some(key) => format!("tenant-key-{index}", index = key.index),
         // Insecure/test mode checks no key.
         None => "tenant-key-unchecked".to_string(),
     }
+}
+
+/// Refuse a key that is not an operator key on a party whose namespace is
+/// this node's own.
+///
+/// The node's participant key is that party's namespace key. So a tenant call
+/// on such a party acts with the node's own authority, and only the node's
+/// operator may make it. Insecure/test mode checks no key and passes. The
+/// namespace is compared without regard to case, so a party id spelled in
+/// upper case gets the same answer.
+///
+/// # Errors
+/// A 403 for a tenant key on a party in this node's own namespace.
+#[allow(clippy::result_large_err)]
+fn require_operator_for_own_party(
+    config: &NodeConfig,
+    key: Option<&TenantKey>,
+    party_id: &str,
+) -> Result<(), HttpResponse> {
+    let Some(key) = key else {
+        return Ok(());
+    };
+    if key.operator {
+        return Ok(());
+    }
+    // A node that has not resolved its participant id cannot tell, so it
+    // refuses.
+    let own = config.node.participant_id.as_ref().is_none_or(|own| {
+        party_id
+            .rsplit_once("::")
+            .is_some_and(|(_, ns)| ns.eq_ignore_ascii_case(&own.namespace.to_hex()))
+    });
+    if !own {
+        return Ok(());
+    }
+    tracing::warn!(
+        key_index = key.index,
+        key_id = %key.id,
+        %party_id,
+        "refused a tenant key on a party in this node's own namespace"
+    );
+    Err(HttpResponse::Forbidden().json(ErrorResponse {
+        error: format!(
+            "{party_id} is in this node's own namespace; only an operator key from \
+             DECPM_OPERATOR_API_KEYS may act on it"
+        ),
+    }))
 }
 
 /// Run one tenant write and record it in the audit, in a task of its own, and
@@ -1794,6 +1880,7 @@ const EXPORT_BLOCK_SIZE: usize = 1024 * 1024;
         (status = 200, description = "Unsigned conversion", body = TenantAddHostsPrepareResponse),
         (status = 400, description = "Not local to this participant, already converted, or a bad key", body = ErrorResponse),
         (status = 401, description = "Invalid tenant API key", body = ErrorResponse),
+        (status = 403, description = "The party is in this node's own namespace, and the key is not an operator key", body = ErrorResponse),
         (status = 404, description = "No authorized mapping for this party on this host", body = ErrorResponse),
         (status = 409, description = "The pinned base serial has moved on this host", body = ErrorResponse),
         (status = 429, description = "Rate limit for this tenant API key exceeded; Retry-After gives the seconds to wait", body = ErrorResponse),
@@ -1806,7 +1893,11 @@ pub async fn tenant_local_party_adopt_prepare(
     data: web::Data<AppState>,
     body: web::Json<LocalPartyAdoptRequest>,
 ) -> impl Responder {
-    if let Err(resp) = tenant_caller(&http_req) {
+    let key = match tenant_caller(&http_req) {
+        Ok(key) => key,
+        Err(resp) => return resp,
+    };
+    if let Err(resp) = require_operator_for_own_party(&data.config, key.as_ref(), &body.party_id) {
         return resp;
     }
     let public_key = match decode_public_key(&body.public_key) {
@@ -1842,6 +1933,7 @@ pub async fn tenant_local_party_adopt_prepare(
         (status = 202, description = "Submitted on this host", body = TenantAddHostsExecuteResponse),
         (status = 400, description = "Bad request, not local to this participant, or a bundle that changes more than adopting the key", body = ErrorResponse),
         (status = 401, description = "Invalid tenant API key", body = ErrorResponse),
+        (status = 403, description = "The party is in this node's own namespace, and the key is not an operator key", body = ErrorResponse),
         (status = 404, description = "No authorized mapping for this party on this host", body = ErrorResponse),
         (status = 409, description = "The pinned base serial has moved on this host", body = ErrorResponse),
         (status = 429, description = "Rate limit for this tenant API key exceeded; Retry-After gives the seconds to wait", body = ErrorResponse),
@@ -1858,6 +1950,9 @@ pub async fn tenant_local_party_adopt_execute(
         Ok(key) => key,
         Err(resp) => return resp,
     };
+    if let Err(resp) = require_operator_for_own_party(&data.config, key.as_ref(), &body.party_id) {
+        return resp;
+    }
     let body = body.into_inner();
     let party_id = body.party_id.clone();
     audited_write(&data, key, TenantEndpoint::LocalPartyAdoptExecute, party_id, move |data| async move {
@@ -2159,10 +2254,17 @@ mod tests {
         }
     }
 
-    /// The audit names the key by its position, and must never carry the key.
+    /// The audit names the key by its list and position, and must never carry
+    /// the key.
     #[test]
     fn a_tenant_caller_is_recorded_by_key_index() {
-        assert_eq!(tenant_requester(Some(2)), "tenant-key-2");
+        let key = |operator| TenantKey {
+            index: 2,
+            id: "0123456789abcdef".to_string(),
+            operator,
+        };
+        assert_eq!(tenant_requester(Some(&key(false))), "tenant-key-2");
+        assert_eq!(tenant_requester(Some(&key(true))), "operator-key-2");
         assert_eq!(tenant_requester(None), "tenant-key-unchecked");
     }
 
@@ -2441,6 +2543,7 @@ mod audit_tests {
         TenantKey {
             index: 0,
             id: crate::server::middleware::tenant_key_id("key"),
+            operator: false,
         }
     }
 
@@ -3091,3 +3194,275 @@ mod audit_tests {
 #[cfg(test)]
 #[path = "tenant_relay_audit_tests.rs"]
 mod relay_route_audit_tests;
+
+/// Tenant calls on a party in this node's own namespace. The node signs for
+/// such a party with its own key, so only an operator key may make them.
+#[cfg(test)]
+mod own_party_tests {
+    use actix_web::{App, http::StatusCode, test as actix_test};
+    use serde_json::{Value, json};
+    use sqlx::SqlitePool;
+
+    use super::*;
+    use crate::{canton_id::CantonId, db::MIGRATOR, server::middleware::AuthMiddleware};
+
+    fn this_node() -> String {
+        format!("participant-3::1220{}", "bb".repeat(32))
+    }
+
+    fn other_node() -> String {
+        format!("participant-4::1220{}", "cc".repeat(32))
+    }
+
+    fn own_party() -> String {
+        format!("alice::1220{}", "bb".repeat(32))
+    }
+
+    fn other_party() -> String {
+        format!("alice::1220{}", "aa".repeat(32))
+    }
+
+    /// A node with the tenant key `tenant` and the operator key `operator`.
+    fn state(db: SqlitePool) -> web::Data<AppState> {
+        let Ok(mut state) =
+            std::sync::Arc::try_unwrap(AppState::for_test_on(None, db).into_inner())
+        else {
+            panic!("the freshly built state has no other owner");
+        };
+        state.test_mode = false;
+        state.config.tenant_api_keys = vec!["tenant".to_string()];
+        state.config.operator_api_keys = vec!["operator".to_string()];
+        state.config.tenant_rate_limit_per_minute = 0;
+        state.config.node.participant_id = CantonId::parse(&this_node()).ok();
+        // Nothing listens here, so a Canton call fails at once.
+        state.config.canton.admin_api_host = "127.0.0.1".to_string();
+        state.config.canton.admin_api_port = 1;
+        web::Data::new(state)
+    }
+
+    /// One request to each tenant call that can act on `party`, sent with
+    /// `key`.
+    fn calls(party: &str, key: &str) -> Vec<(&'static str, actix_test::TestRequest)> {
+        let bearer = ("Authorization", format!("Bearer {key}"));
+        let post = |uri: &str, body: Value| {
+            actix_test::TestRequest::post()
+                .uri(uri)
+                .insert_header(bearer.clone())
+                .set_json(body)
+        };
+        let signed = json!({
+            "party_id": party,
+            "base_serial": 1,
+            "topology_transactions": ["AQID"],
+            "signatures": ["BAU="],
+            "signed_by": "1220aa",
+        });
+        let public_key = STANDARD.encode([7u8; 32]);
+        vec![
+            (
+                "add-hosts/authorize",
+                post(
+                    "/v0/tenant/add-hosts/authorize",
+                    json!({
+                        "party_id": party,
+                        "permission": "submission",
+                        "new_hosts": [other_node()],
+                        "base_serial": 1,
+                    }),
+                ),
+            ),
+            (
+                "add-hosts/execute",
+                post("/v0/tenant/add-hosts/execute", signed.clone()),
+            ),
+            (
+                "add-hosts/stage",
+                post(
+                    "/v0/tenant/add-hosts/stage",
+                    json!({
+                        "party_id": party,
+                        "permission": "submission",
+                        "new_hosts": [this_node()],
+                        "base_serial": 1,
+                    }),
+                ),
+            ),
+            (
+                "add-hosts/publish",
+                post(
+                    "/v0/tenant/add-hosts/publish",
+                    json!({
+                        "party_id": party,
+                        "permission": "submission",
+                        "new_hosts": [other_node()],
+                        "base_serial": 1,
+                        "signed_topology_transactions": ["AQID"],
+                    }),
+                ),
+            ),
+            (
+                "threshold/authorize",
+                post(
+                    "/v0/tenant/threshold/authorize",
+                    json!({"party_id": party, "new_threshold": 1, "base_serial": 1}),
+                ),
+            ),
+            (
+                "threshold/execute",
+                post("/v0/tenant/threshold/execute", signed.clone()),
+            ),
+            (
+                "adopt-key/prepare",
+                post(
+                    "/v0/tenant/local-party/adopt-key/prepare",
+                    json!({"party_id": party, "public_key": public_key, "base_serial": 1}),
+                ),
+            ),
+            (
+                "adopt-key/execute",
+                post(
+                    "/v0/tenant/local-party/adopt-key/execute",
+                    json!({
+                        "party_id": party,
+                        "base_serial": 1,
+                        "public_key": public_key,
+                        "topology_transactions": ["AQID"],
+                        "signatures": ["BAU="],
+                        "signed_by": "1220aa",
+                    }),
+                ),
+            ),
+            (
+                "unhost",
+                post(
+                    "/v0/tenant/unhost",
+                    json!({"party_id": party, "participant_id": other_node(), "base_serial": 1}),
+                ),
+            ),
+            (
+                "acs",
+                actix_test::TestRequest::get()
+                    .uri(&format!(
+                        "/v0/tenant/{party}/acs/{target}?base_serial=1&seq=1",
+                        target = other_node()
+                    ))
+                    .insert_header(bearer.clone()),
+            ),
+            (
+                "import",
+                post(
+                    "/v0/tenant/add-hosts/import",
+                    json!({
+                        "party_id": party,
+                        "base_serial": 1,
+                        "seq": 1,
+                        "chunk": "AQID",
+                        "end": false,
+                    }),
+                ),
+            ),
+        ]
+    }
+
+    /// The status and body of each of [`calls`].
+    async fn answers(
+        db: SqlitePool,
+        party: &str,
+        key: &str,
+    ) -> Vec<(&'static str, StatusCode, Value)> {
+        let app = actix_test::init_service(
+            App::new()
+                .app_data(state(db))
+                .wrap(AuthMiddleware)
+                .service(tenant_add_hosts_authorize)
+                .service(tenant_add_hosts_execute)
+                .service(tenant_add_hosts_stage)
+                .service(tenant_add_hosts_publish)
+                .service(tenant_threshold_authorize)
+                .service(tenant_threshold_execute)
+                .service(tenant_local_party_adopt_prepare)
+                .service(tenant_local_party_adopt_execute)
+                .service(tenant_unhost)
+                .service(tenant_acs_snapshot)
+                .service(tenant_acs_import),
+        )
+        .await;
+        let mut answers = Vec::new();
+        for (label, request) in calls(party, key) {
+            let response = actix_test::call_service(&app, request.to_request()).await;
+            let status = response.status();
+            let body = actix_test::read_body(response).await;
+            answers.push((
+                label,
+                status,
+                serde_json::from_slice(&body).unwrap_or(Value::Null),
+            ));
+        }
+        answers
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_tenant_key_is_refused_on_every_call_for_an_own_party(
+        db: SqlitePool,
+    ) -> anyhow::Result<()> {
+        let answers = answers(db.clone(), &own_party(), "tenant").await;
+        assert_eq!(answers.len(), 11);
+        for (label, status, body) in answers {
+            assert_eq!(status, StatusCode::FORBIDDEN, "{label}: {body}");
+            let error = body["error"].as_str().unwrap_or_default();
+            assert!(error.contains("DECPM_OPERATOR_API_KEYS"), "{label}: {body}");
+        }
+        // Refused before any write, so no call reached the audit.
+        assert!(tenant_call_audit::list(&db, None, 100).await?.is_empty());
+        Ok(())
+    }
+
+    /// A party id with its namespace in upper case names the same party.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn the_check_ignores_the_case_of_the_namespace(db: SqlitePool) {
+        let party = format!("alice::1220{}", "BB".repeat(32));
+        for (label, status, body) in answers(db, &party, "tenant").await {
+            assert_eq!(status, StatusCode::FORBIDDEN, "{label}: {body}");
+        }
+    }
+
+    /// Only the check answers 403, so any other status shows the call got past
+    /// it. Here every call then fails at a Canton that is not there, or at
+    /// validation.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn an_operator_key_passes_the_check_on_an_own_party(db: SqlitePool) {
+        for (label, status, body) in answers(db, &own_party(), "operator").await {
+            assert_ne!(status, StatusCode::FORBIDDEN, "{label}: {body}");
+            assert_ne!(status, StatusCode::UNAUTHORIZED, "{label}: {body}");
+        }
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_tenant_key_passes_the_check_on_a_party_in_another_namespace(db: SqlitePool) {
+        for (label, status, body) in answers(db, &other_party(), "tenant").await {
+            assert_ne!(status, StatusCode::FORBIDDEN, "{label}: {body}");
+            assert_ne!(status, StatusCode::UNAUTHORIZED, "{label}: {body}");
+        }
+    }
+
+    /// A node that does not know its own participant id cannot tell which
+    /// parties are its own, so it refuses a tenant key on every party.
+    #[test]
+    fn a_node_without_a_participant_id_refuses_a_tenant_key() {
+        let config = NodeConfig::default();
+        let tenant = TenantKey {
+            index: 0,
+            id: "0123456789abcdef".to_string(),
+            operator: false,
+        };
+        let operator = TenantKey {
+            operator: true,
+            ..tenant.clone()
+        };
+        let refused = require_operator_for_own_party(&config, Some(&tenant), &other_party());
+        assert!(refused.is_err_and(|resp| resp.status() == StatusCode::FORBIDDEN));
+        assert!(require_operator_for_own_party(&config, Some(&operator), &other_party()).is_ok());
+        // Insecure/test mode checks no key.
+        assert!(require_operator_for_own_party(&config, None, &other_party()).is_ok());
+    }
+}

@@ -472,6 +472,7 @@ when it completes or stops, with the reason it stopped.
 | Symptom | Cause | Do this |
 |---|---|---|
 | `401` | The key is not one of that host's keys, or the host has no keys set | Send that host its own key. Check `DECPM_TENANT_API_KEYS` on the host |
+| `403` | The party is in the host's own namespace, so it is not an external party | Use the external party's ID. A local party needs the host operator. See [Decentralizing an existing party](DECENTRALIZING_AN_EXISTING_PARTY.md) |
 | `429` | More calls per minute than the host allows for that key | Wait the seconds in `Retry-After`, then retry. The operator can raise `DECPM_TENANT_RATE_LIMIT_PER_MINUTE` |
 | `409` from a prepare or execute call | The party's serial changed after you read it | Read `/state` again and restart from prepare |
 | `404` from a prepare or execute call | No host mapping exists for the party | Check the party ID. A joining host still answers `200`, because it reads the shared topology |
