@@ -1,0 +1,210 @@
+-- Copyright (c) 2026 DLC-Link, Inc. and/or its affiliates. All rights reserved.
+-- SPDX-License-Identifier: Apache-2.0
+
+-- | Test parties, governance rules and a Token Standard V2 cash instrument
+-- for the batch-settlement tests.
+--
+-- The cash is `splice-test-token-v2`, the standard's reference asset, driven
+-- the way a wallet drives it: the registry mints, the owner accepts, balances
+-- are read through the Holding interface.
+module Governance.Settlement.TestUtils where
+
+import DA.Optional (isNone, isSome)
+import DA.Set qualified as Set
+import DA.TextMap qualified as TextMap
+import DA.Time (addRelTime, minutes)
+
+import Daml.Script
+
+import Splice.Api.Token.MetadataV1
+import Splice.Api.Token.HoldingV2 qualified as V2
+import Splice.Api.Token.AllocationV2 qualified as V2
+import Splice.Api.Token.TransferInstructionV2 qualified as V2
+import Splice.TokenStandard.Utils (basicAccount, receiverSide, senderSide, toAnyContractId)
+import Splice.Testing.Tokens.TestTokenV2 qualified as TestTokenV2
+import Splice.Testing.Tokens.TestTokenV2.Holding qualified as TestTokenV2Holding
+import Splice.Testing.Tokens.TestTokenV2.Util (tokenRulesContextKey)
+
+import Governance.Action (GovernableAction)
+import Governance.Confirmation (GovernanceConfirmation)
+import Governance.Rules
+
+data SettlementTestParties = SettlementTestParties
+  with
+    governanceParty : Party
+    member1 : Party
+    member2 : Party
+    member3 : Party
+    proposer : Party
+      -- ^ The application's executor. An additional proposer, not a member.
+    receiver1 : Party
+    receiver2 : Party
+    receiver3 : Party
+    registry : Party
+      -- ^ The cash instrument's admin.
+    outsider : Party
+  deriving (Show, Eq)
+
+allocateSettlementTestParties : Script SettlementTestParties
+allocateSettlementTestParties = do
+  governanceParty <- allocateParty "GovernanceParty"
+  member1 <- allocateParty "Member1"
+  member2 <- allocateParty "Member2"
+  member3 <- allocateParty "Member3"
+  proposer <- allocateParty "Proposer"
+  receiver1 <- allocateParty "Receiver1"
+  receiver2 <- allocateParty "Receiver2"
+  receiver3 <- allocateParty "Receiver3"
+  registry <- allocateParty "CashRegistry"
+  outsider <- allocateParty "Outsider"
+  pure SettlementTestParties with ..
+
+getMembers : SettlementTestParties -> Set.Set Party
+getMembers parties = Set.fromList [parties.member1, parties.member2, parties.member3]
+
+-- | Submission context for a member, with readAs on the governance party.
+memberContext : Party -> Party -> SubmitOptions
+memberContext member gp = actAs member <> readAs gp
+
+-- | Rules at threshold two, with the proposer admitted as an additional
+-- proposer so it can file without being a member.
+createTestGovernance : SettlementTestParties -> Script (ContractId GovernanceRules)
+createTestGovernance parties =
+  submit parties.governanceParty $ createCmd GovernanceRules with
+    governanceParty = parties.governanceParty
+    members = getMembers parties
+    threshold = 2
+    actionConfirmationTimeout = minutes 30
+    additionalProposers = Some (Set.fromList [parties.proposer])
+
+submitConfirmations : Party -> ContractId GovernanceRules -> ContractId GovernableAction -> [Party] -> Script [ContractId GovernanceConfirmation]
+submitConfirmations governanceParty rulesCid proposalCid confirmers =
+  mapA (\confirmer -> do
+    result <- submit (memberContext confirmer governanceParty) $
+      exerciseCmd rulesCid GovernanceRules_ConfirmAction with
+        confirmer
+        actionProposalCid = proposalCid
+    pure result.confirmationCid
+  ) confirmers
+
+-- | The cash instrument as a client sees it: the registry's rules contract
+-- disclosed, its id in the choice context.
+data Cash = Cash
+  with
+    rulesCid : ContractId TestTokenV2.TokenRules
+    instrument : V2.InstrumentId
+    extraArgs : ExtraArgs
+    rules : Disclosure
+
+setupCash : Party -> Script Cash
+setupCash registry = do
+  rulesCid <- submit registry $ createCmd TestTokenV2.TokenRules with admin = registry
+  Some rules <- queryDisclosure registry rulesCid
+  let instrument = V2.InstrumentId with admin = registry; id = "USD"
+      extraArgs = ExtraArgs with
+        context = ChoiceContext with
+          values = TextMap.fromList
+            [(tokenRulesContextKey, AV_ContractId (toAnyContractId rulesCid))]
+        meta = emptyMetadata
+  pure Cash with ..
+
+-- | Mint as the reference token mints: the registry offers, the owner accepts.
+fund : Cash -> Party -> Decimal -> Script ()
+fund cash owner amount = do
+  let registry = cash.instrument.admin
+      account = basicAccount owner
+  now <- requestedAt
+  offer <- submit registry $ exerciseCmd cash.rulesCid TestTokenV2.TokenRules_OfferMint with
+    receiver = account
+    amount
+    instrumentId = cash.instrument
+    offeredAt = now
+    receiverConfig = TestTokenV2.AccountConfig with
+      admin = registry
+      account
+      ownerConfig = TestTokenV2.PartyConfig with canInitiate = True; mustApprove = True
+      providerConfig = TestTokenV2.PartyConfig with canInitiate = False; mustApprove = False
+  result <- submit (actAs owner <> disclose cash.rules) $
+    exerciseCmd (toInterfaceContractId @V2.TransferInstruction offer.offerCid)
+      V2.TransferInstruction_Accept with
+        actors = [owner]
+        extraArgs = cash.extraArgs
+  case result.output of
+    V2.TransferInstructionResult_Completed _ -> pure ()
+    _ -> fail "mint offer was not completed on accept"
+
+-- | A request stamp a little in the past. A participant assigns ledger time
+-- when it interprets the command, and a clock behind the caller's would make
+-- "now" strictly after it.
+requestedAt : Script Time
+requestedAt = do
+  now <- getTime
+  pure (now `addRelTime` minutes (-5))
+
+holdings : Cash -> Party -> Script [(ContractId V2.Holding, V2.HoldingView)]
+holdings cash p = do
+  hs <- queryInterface @V2.Holding p
+  pure
+    [ (cid, v)
+    | (cid, Some v) <- hs
+    , v.account == basicAccount p
+    , v.instrumentId == cash.instrument
+    ]
+
+balance : Cash -> Party -> Script Decimal
+balance cash p = do
+  hs <- holdings cash p
+  pure $ sum [ v.amount | (_, v) <- hs, isNone v.lock ]
+
+unlockedHoldingCids : Cash -> Party -> Script [ContractId V2.Holding]
+unlockedHoldingCids cash p = do
+  hs <- holdings cash p
+  pure [ cid | (cid, v) <- hs, isNone v.lock ]
+
+-- | What a caller must send with the execute, and why the request takes it.
+--
+-- `executeImpl` reaches the registry's rules contract and the sender's locked
+-- holdings. A member's node hosts neither: the sender is an application party
+-- on another participant. So they travel with the request, which is what
+-- `disclosed_contracts` carries on `POST /governance/execute`.
+-- The query is on the concrete `Token`, not on the `Holding` interface,
+-- because `queryDisclosure` needs a template contract id.
+executeDisclosures : Cash -> Party -> Script [Disclosure]
+executeDisclosures cash sender = do
+  tokens <- query @TestTokenV2Holding.Token sender
+  let lockedCids =
+        [ cid
+        | (cid, t) <- tokens
+        , t.holding.account == basicAccount sender
+        , t.holding.instrumentId == cash.instrument
+        , isSome t.holding.lock
+        ]
+  locked <- forA lockedCids $ \cid -> do
+    d <- queryDisclosure sender cid
+    case d of
+      Some disclosure -> pure disclosure
+      None -> fail "a locked holding could not be disclosed"
+  pure (cash.rules :: locked)
+
+-- | The sender's side: one allocation funding every leg, committed, so the
+-- sender cannot withdraw it and race the settlement.
+sendAllocationSpec : V2.InstrumentId -> V2.Account -> [V2.TransferLeg] -> V2.AllocationSpecification
+sendAllocationSpec instrument senderAccount legs = V2.AllocationSpecification with
+  admin = instrument.admin
+  authorizer = senderAccount
+  transferLegSides = map senderSide legs
+  settlementDeadline = None
+  nextIterationFunding = None
+  committed = True
+  meta = emptyMetadata
+
+-- | A receiver's side: the receipt of its own legs, uncommitted and unfunded.
+receiptAllocationSpec : V2.InstrumentId -> V2.Account -> [V2.TransferLeg] -> V2.AllocationSpecification
+receiptAllocationSpec instrument account legs = V2.AllocationSpecification with
+  admin = instrument.admin
+  authorizer = account
+  transferLegSides = map receiverSide legs
+  settlementDeadline = None
+  nextIterationFunding = None
+  committed = False
+  meta = emptyMetadata
