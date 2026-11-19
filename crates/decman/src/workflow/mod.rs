@@ -342,6 +342,7 @@ async fn run_peer(
     let mut consecutive_errors = 0;
     let mut consecutive_no_workflow = 0;
     let mut consecutive_step_failures = 0;
+    let mut consecutive_upload_failures = 0;
     loop {
         // Poll coordinator for next command (with payload for commands that need data)
         let message = match client.get_next_command_with_payload().await {
@@ -591,16 +592,18 @@ async fn run_peer(
                     continue;
                 }
                 consecutive_step_failures = 0;
-                if let Err(e) = onboarding::peer::send_dns_signature_to_coordinator(
-                    &client,
-                    &db,
-                    &instance_name,
-                    &node_config,
+                record_signature_upload(
+                    &mut consecutive_upload_failures,
+                    command,
+                    onboarding::peer::send_dns_signature_to_coordinator(
+                        &client,
+                        &db,
+                        &instance_name,
+                        &node_config,
+                    )
+                    .await,
                 )
-                .await
-                {
-                    tracing::error!("Failed to send DNS signature to coordinator: {e}");
-                }
+                .await?;
             }
             MessageType::SignP2p => {
                 tracing::info!("Executing: Sign P2P proposals");
@@ -662,16 +665,18 @@ async fn run_peer(
                     continue;
                 }
                 consecutive_step_failures = 0;
-                if let Err(e) = onboarding::peer::send_p2p_signatures_to_coordinator(
-                    &client,
-                    &db,
-                    &instance_name,
-                    &node_config,
+                record_signature_upload(
+                    &mut consecutive_upload_failures,
+                    command,
+                    onboarding::peer::send_p2p_signatures_to_coordinator(
+                        &client,
+                        &db,
+                        &instance_name,
+                        &node_config,
+                    )
+                    .await,
                 )
-                .await
-                {
-                    tracing::error!("Failed to send P2P signatures to coordinator: {e}");
-                }
+                .await?;
 
                 // Identity hook (peer side): the SignP2p payload is a
                 // SignedTopologyTransaction whose PartyToParticipant mapping
@@ -758,16 +763,18 @@ async fn run_peer(
                     continue;
                 }
                 consecutive_step_failures = 0;
-                if let Err(e) = contracts::peer::send_submission_signatures_to_coordinator(
-                    &client,
-                    &db,
-                    &instance_name,
-                    &node_config,
+                record_signature_upload(
+                    &mut consecutive_upload_failures,
+                    command,
+                    contracts::peer::send_submission_signatures_to_coordinator(
+                        &client,
+                        &db,
+                        &instance_name,
+                        &node_config,
+                    )
+                    .await,
                 )
-                .await
-                {
-                    tracing::error!("Failed to send submission signatures to coordinator: {e}");
-                }
+                .await?;
             }
             MessageType::SignKick => {
                 tracing::info!("Executing: Sign kick proposals");
@@ -808,16 +815,18 @@ async fn run_peer(
                     continue;
                 }
                 consecutive_step_failures = 0;
-                if let Err(e) = kick::peer::send_kick_signatures_to_coordinator(
-                    &client,
-                    &db,
-                    &instance_name,
-                    &node_config,
+                record_signature_upload(
+                    &mut consecutive_upload_failures,
+                    command,
+                    kick::peer::send_kick_signatures_to_coordinator(
+                        &client,
+                        &db,
+                        &instance_name,
+                        &node_config,
+                    )
+                    .await,
                 )
-                .await
-                {
-                    tracing::error!("Failed to send kick signatures to coordinator: {e}");
-                }
+                .await?;
             }
             MessageType::SignChangeThreshold => {
                 tracing::info!("Executing: Sign change-threshold proposals");
@@ -864,19 +873,18 @@ async fn run_peer(
                     continue;
                 }
                 consecutive_step_failures = 0;
-                if let Err(e) =
+                record_signature_upload(
+                    &mut consecutive_upload_failures,
+                    command,
                     change_threshold::peer::send_change_threshold_signatures_to_coordinator(
                         &client,
                         &db,
                         &instance_name,
                         &node_config,
                     )
-                    .await
-                {
-                    tracing::error!(
-                        "Failed to send change-threshold signatures to coordinator: {e}"
-                    );
-                }
+                    .await,
+                )
+                .await?;
             }
             MessageType::SignRotateKey => {
                 tracing::info!("Executing: Sign rotate-key proposal");
@@ -1130,16 +1138,18 @@ async fn run_peer(
                     continue;
                 }
                 consecutive_step_failures = 0;
-                if let Err(e) = add_party::peer::send_add_party_signatures_to_coordinator(
-                    &client,
-                    &db,
-                    &instance_name,
-                    &node_config,
+                record_signature_upload(
+                    &mut consecutive_upload_failures,
+                    command,
+                    add_party::peer::send_add_party_signatures_to_coordinator(
+                        &client,
+                        &db,
+                        &instance_name,
+                        &node_config,
+                    )
+                    .await,
                 )
-                .await
-                {
-                    tracing::error!("Failed to send add-party signatures to coordinator: {e}");
-                }
+                .await?;
 
                 // Identity hook (new member): same point in the protocol
                 // where onboarding peers persist their identity — the party
@@ -1278,12 +1288,15 @@ async fn run_peer(
                         {
                             Ok(Some(proposal)) => {
                                 consecutive_step_failures = 0;
-                                if let Err(e) = client.send_add_party_clear_proposal(proposal).await
-                                {
-                                    tracing::error!(
-                                        "Failed to send clearing proposal to coordinator: {e}"
-                                    );
-                                }
+                                record_signature_upload(
+                                    &mut consecutive_upload_failures,
+                                    command,
+                                    client
+                                        .send_add_party_clear_proposal(proposal)
+                                        .await
+                                        .map_err(Into::into),
+                                )
+                                .await?;
                             }
                             Ok(None) => {
                                 // Flag dropped between the poll and the
@@ -1345,16 +1358,18 @@ async fn run_peer(
                     continue;
                 }
                 consecutive_step_failures = 0;
-                if let Err(e) = add_party::peer::send_clear_signature_to_coordinator(
-                    &client,
-                    &db,
-                    &instance_name,
-                    &node_config,
+                record_signature_upload(
+                    &mut consecutive_upload_failures,
+                    command,
+                    add_party::peer::send_clear_signature_to_coordinator(
+                        &client,
+                        &db,
+                        &instance_name,
+                        &node_config,
+                    )
+                    .await,
                 )
-                .await
-                {
-                    tracing::error!("Failed to send clearing signature to coordinator: {e}");
-                }
+                .await?;
             }
             _ => {
                 tracing::warn!("Unexpected message type: {command:?}");
@@ -1408,6 +1423,11 @@ async fn report_departure(client: NoiseClient, report: DeclineInvitationPayload)
 /// Pause between attempts to report a peer's failure.
 const FAILURE_REPORT_BACKOFF: std::time::Duration = std::time::Duration::from_secs(10);
 
+// Five pauses give uploads a sixty-second recovery window before the sixth attempt.
+const SIGNATURE_UPLOAD_BACKOFF: std::time::Duration = std::time::Duration::from_secs(12);
+
+const PEER_RETRY_BACKOFF: std::time::Duration = std::time::Duration::from_secs(2);
+
 /// Apply one retry budget to decoding, authorization, and execution failures.
 /// Control messages do not reset it; only completing (or legitimately skipping)
 /// a step does. The last failure returns immediately without another delay.
@@ -1431,7 +1451,40 @@ async fn retry_peer_step(
              ({command:?}): {reason}"
         );
     }
-    tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+    tokio::time::sleep(PEER_RETRY_BACKOFF).await;
+    Ok(())
+}
+
+/// Upload failures have their own budget: successful polling or signing cannot reset it.
+async fn record_signature_upload(
+    consecutive_failures: &mut usize,
+    command: MessageType,
+    outcome: Result,
+) -> Result {
+    let Err(error) = outcome else {
+        *consecutive_failures = 0;
+        return Ok(());
+    };
+    *consecutive_failures += 1;
+    tracing::warn!(
+        ?command,
+        attempt = *consecutive_failures,
+        error = %error,
+        "Signature upload failed"
+    );
+    if *consecutive_failures >= MAX_CONSECUTIVE_STEP_FAILURES {
+        anyhow::bail!(
+            "Peer failed: signature upload failed after {} consecutive attempts ({command:?}): {error}",
+            *consecutive_failures
+        );
+    }
+    tracing::warn!(
+        ?command,
+        attempt = *consecutive_failures,
+        backoff_seconds = SIGNATURE_UPLOAD_BACKOFF.as_secs(),
+        "Retrying signature upload"
+    );
+    tokio::time::sleep(SIGNATURE_UPLOAD_BACKOFF).await;
     Ok(())
 }
 
@@ -1807,5 +1860,61 @@ mod tests {
         // Empty and non-proto payloads must error, not panic.
         assert!(extract_party_id_from_p2p_payload(b"").is_err());
         assert!(extract_party_id_from_p2p_payload(b"not-a-valid-proto-blob").is_err());
+    }
+
+    #[tokio::test]
+    async fn signature_upload_recovers_and_resets_budget() {
+        let mut failures = 0;
+        let start = tokio::time::Instant::now();
+        record_signature_upload(
+            &mut failures,
+            MessageType::SignAddParty,
+            Err(anyhow::anyhow!("temporary storage outage")),
+        )
+        .await
+        .unwrap();
+        assert_eq!(failures, 1);
+        assert!(start.elapsed() >= SIGNATURE_UPLOAD_BACKOFF);
+        record_signature_upload(&mut failures, MessageType::SignAddParty, Ok(()))
+            .await
+            .unwrap();
+        assert_eq!(failures, 0);
+        record_signature_upload(
+            &mut failures,
+            MessageType::SignAddParty,
+            Err(anyhow::anyhow!("another outage")),
+        )
+        .await
+        .unwrap();
+        assert_eq!(failures, 1);
+    }
+
+    #[tokio::test]
+    async fn signature_upload_exhaustion_reports_cause() {
+        let mut failures = 0;
+        let start = tokio::time::Instant::now();
+        for attempt in 1..MAX_CONSECUTIVE_STEP_FAILURES {
+            record_signature_upload(
+                &mut failures,
+                MessageType::SignChangeThreshold,
+                Err(anyhow::anyhow!("local artifact missing")),
+            )
+            .await
+            .unwrap();
+            assert_eq!(failures, attempt);
+        }
+        let error = record_signature_upload(
+            &mut failures,
+            MessageType::SignChangeThreshold,
+            Err(anyhow::anyhow!("local artifact missing")),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(failures, MAX_CONSECUTIVE_STEP_FAILURES);
+        assert!(start.elapsed() >= std::time::Duration::from_secs(60));
+        let report = format!("{error:#}");
+        assert!(report.contains("SignChangeThreshold"));
+        assert!(report.contains(&failures.to_string()));
+        assert!(report.contains("local artifact missing"));
     }
 }
