@@ -144,8 +144,7 @@ async fn run_workflow(
             }
             AddPartyStep::ExportState => {
                 tracing::info!("Coordinator executing: Export state");
-                save_new_member_keys(&workflow_state, &db, &instance_name, &add_party_config)
-                    .await?;
+                save_new_member_keys(&db, &instance_name, &add_party_config).await?;
                 let ledger_token =
                     resolve_ledger_token(&workflow_auth, &add_party_config.decentralized_party_id)
                         .await;
@@ -240,25 +239,14 @@ async fn run_workflow(
                 // requires the onboarding participant to issue the flag-clear
                 // transaction) and arrived as its ProposeClearOnboarding data
                 // upload; other peers replied with skip statuses (no data).
-                let peer_data = workflow_state.get_all_peer_data().await;
-                let mut proposal_blob = Vec::new();
-                for (peer_id, data) in peer_data {
-                    if peer_id != add_party_config.new_participant_id {
-                        anyhow::bail!(
-                            "Unexpected clearing-proposal upload from {peer_id} — only the \
-                             new member authors it"
-                        );
-                    }
-                    proposal_blob = data;
-                }
-                workflow_state.clear_peer_data().await;
-
-                if proposal_blob.is_empty() {
-                    // The new member reported the flag already cleared.
-                    // Verify against head state (bounded poll) before
-                    // skipping the sign round — completing the workflow with
-                    // the marker still set would leave the party suspended
-                    // on the new member.
+                let uploaded = db
+                    .read_artifact(
+                        &instance_name,
+                        artifact_kinds::ADD_PARTY_CLEAR_PROPOSAL_UPLOAD,
+                        Some(&add_party_config.new_participant_id.to_string()),
+                    )
+                    .await?;
+                let proposal_blob = confirmed_clearing_proposal(uploaded, async {
                     let synchronizer_id = utils::get_synchronizer_id(&node_config).await?;
                     wait_for_flag_cleared(
                         &node_config,
@@ -266,11 +254,9 @@ async fn run_workflow(
                         &add_party_config.decentralized_party_id,
                         &add_party_config.new_participant_id,
                     )
-                    .await?;
-                    tracing::info!("Onboarding flag already cleared — skipping sign round");
-                }
-                // An empty blob doubles as the "already cleared" skip marker
-                // for both the peers and SubmitClearOnboarding.
+                    .await
+                })
+                .await?;
                 db.write_artifact(
                     &instance_name,
                     artifact_kinds::ADD_PARTY_CLEAR_PROPOSAL,
@@ -278,7 +264,6 @@ async fn run_workflow(
                     &proposal_blob,
                 )
                 .await?;
-
                 let payload = utils::encode_length_prefixed(&[&config_payload, &proposal_blob]);
                 workflow_state.set_command_payload(payload).await;
                 workflow_state.advance_step().await;
@@ -291,7 +276,7 @@ async fn run_workflow(
                         None,
                     )
                     .await?
-                    .unwrap_or_default();
+                    .ok_or_else(|| anyhow::anyhow!("Clearing proposal upload missing"))?;
                 if proposal.is_empty() {
                     tracing::info!("Onboarding flag already cleared — skipping submit");
                 } else {
@@ -322,68 +307,69 @@ async fn run_workflow(
     Ok(())
 }
 
-/// Persist the new member's `keys||participant_id` upload (the only data
-/// payload of the GenerateNewMemberKeys step — other peers reply with a
-/// skip status that carries no data).
-async fn save_new_member_keys(
-    workflow_state: &WorkflowState<AddPartyStep>,
+/// Older members report an already-cleared flag as a status without an upload.
+/// Both missing uploads and explicit empty markers require ledger confirmation.
+async fn confirmed_clearing_proposal(
+    uploaded: Option<Vec<u8>>,
+    verify_cleared: impl std::future::Future<Output = Result>,
+) -> Result<Vec<u8>> {
+    match uploaded {
+        Some(proposal) if !proposal.is_empty() => Ok(proposal),
+        _ => {
+            verify_cleared.await?;
+            tracing::info!("Onboarding flag confirmed cleared — skipping sign round");
+            Ok(Vec::new())
+        }
+    }
+}
+
+/// Rebuild both key outputs from the durable new-member upload on every retry.
+pub(crate) async fn save_new_member_keys(
     storage: &SqlitePool,
     instance_name: &str,
     add_party_config: &AddPartyConfig,
 ) -> Result {
-    let peer_data = workflow_state.get_all_peer_data().await;
     let expected = &add_party_config.new_participant_id;
-
-    let mut found = false;
-    for (peer_id, data) in peer_data {
-        if &peer_id != expected {
-            anyhow::bail!(
-                "Unexpected key upload from {peer_id} — only the new member \
-                 {expected} generates keys in this run"
-            );
-        }
-        let items = utils::decode_length_prefixed(&data, 2)
-            .with_context(|| format!("Invalid key payload from new member {peer_id}"))?;
-        let peer_key = peer_id.to_string();
-        storage
-            .write_artifact(
-                instance_name,
-                artifact_kinds::PEER_PUBLIC_KEYS,
-                Some(&peer_key),
-                &items[0],
-            )
-            .await?;
-        storage
-            .write_artifact(
-                instance_name,
-                artifact_kinds::PARTICIPANT_ID,
-                Some(&peer_key),
-                &items[1],
-            )
-            .await?;
-        found = true;
-    }
-    if !found {
-        // Resume path: a coordinator restart drops the in-memory peer_data,
-        // but a previous pass through this step may already have persisted
-        // the artefacts — re-entering ExportState must not fail the run then.
-        let already_saved = storage
+    let peer_key = expected.to_string();
+    let uploaded = storage
+        .read_artifact(
+            instance_name,
+            artifact_kinds::ADD_PARTY_KEYS_UPLOAD,
+            Some(&peer_key),
+        )
+        .await?;
+    let Some(data) = uploaded else {
+        let keys = storage
             .read_artifact(
                 instance_name,
                 artifact_kinds::PEER_PUBLIC_KEYS,
-                Some(&expected.to_string()),
+                Some(&peer_key),
             )
-            .await?
-            .is_some();
-        if !already_saved {
-            anyhow::bail!(
-                "New member {expected} completed GenerateNewMemberKeys without uploading keys"
-            );
-        }
-        tracing::info!("New member keys already persisted (resumed run) — continuing");
+            .await?;
+        let participant = storage
+            .read_artifact(
+                instance_name,
+                artifact_kinds::PARTICIPANT_ID,
+                Some(&peer_key),
+            )
+            .await?;
+        anyhow::ensure!(
+            keys.is_some() && participant.is_some(),
+            "New member key upload missing and saved key outputs incomplete"
+        );
+        tracing::info!(%expected, "Recovered both saved key outputs from a legacy add-party run");
+        return Ok(());
+    };
+    let items = utils::decode_length_prefixed(&data, 2).context("Invalid new member key upload")?;
+    for (kind, payload) in [
+        (artifact_kinds::PEER_PUBLIC_KEYS, &items[0]),
+        (artifact_kinds::PARTICIPANT_ID, &items[1]),
+    ] {
+        storage
+            .write_artifact(instance_name, kind, Some(&peer_key), payload)
+            .await?;
     }
 
-    workflow_state.clear_peer_data().await;
     Ok(())
 }
 
@@ -721,6 +707,93 @@ mod tests {
             .is_err(),
             "DNS artefacts must not satisfy the clearing-signature guard"
         );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn missing_clearing_upload_requires_confirmed_ledger_state() -> anyhow::Result<()> {
+        let cleared = confirmed_clearing_proposal(None, async { Ok(()) }).await?;
+        assert!(cleared.is_empty());
+        let error = confirmed_clearing_proposal(None, async {
+            anyhow::bail!("Onboarding flag remains set")
+        })
+        .await
+        .expect_err("an older member's status cannot bypass the ledger check");
+        assert!(error.to_string().contains("flag remains set"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn explicit_clearing_marker_still_requires_confirmation() -> anyhow::Result<()> {
+        let cleared = confirmed_clearing_proposal(Some(Vec::new()), async { Ok(()) }).await?;
+        assert!(cleared.is_empty());
+        assert!(
+            confirmed_clearing_proposal(Some(Vec::new()), async {
+                anyhow::bail!("Onboarding flag remains set")
+            })
+            .await
+            .is_err()
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn saved_proposal_does_not_skip_or_poll_for_a_cleared_flag() -> anyhow::Result<()> {
+        use canton_proto_rs::com::digitalasset::canton::protocol::v30::SignedTopologyTransaction;
+        let proposal = utils::encode_length_prefixed_message(&SignedTopologyTransaction::default());
+        let restored = confirmed_clearing_proposal(Some(proposal.clone()), async {
+            panic!("a proposal must enter signing without waiting for its future effect")
+        })
+        .await?;
+        assert_eq!(restored, proposal);
+        Ok(())
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn legacy_key_recovery_requires_both_outputs(pool: SqlitePool) -> anyhow::Result<()> {
+        for (index, keys, participant) in [
+            (0, true, true),
+            (1, true, false),
+            (2, false, true),
+            (3, false, false),
+        ] {
+            let instance = format!("legacy-{index}");
+            insert_run(&pool, &instance).await?;
+            let config = AddPartyConfig::new(peer(9), peer(1), 1, None, 1, instance.clone());
+            let member = peer(1).to_string();
+            if keys {
+                pool.write_artifact(
+                    &instance,
+                    artifact_kinds::PEER_PUBLIC_KEYS,
+                    Some(&member),
+                    b"saved-keys",
+                )
+                .await?;
+            }
+            if participant {
+                pool.write_artifact(
+                    &instance,
+                    artifact_kinds::PARTICIPANT_ID,
+                    Some(&member),
+                    b"saved-participant",
+                )
+                .await?;
+            }
+            let recovered = save_new_member_keys(&pool, &instance, &config).await;
+            assert_eq!(recovered.is_ok(), keys && participant);
+            assert_eq!(
+                pool.read_artifact(&instance, artifact_kinds::PEER_PUBLIC_KEYS, Some(&member))
+                    .await?
+                    .as_deref(),
+                keys.then_some(b"saved-keys".as_slice())
+            );
+            assert_eq!(
+                pool.read_artifact(&instance, artifact_kinds::PARTICIPANT_ID, Some(&member))
+                    .await?
+                    .as_deref(),
+                participant.then_some(b"saved-participant".as_slice())
+            );
+        }
         Ok(())
     }
 }

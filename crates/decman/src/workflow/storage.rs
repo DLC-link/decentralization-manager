@@ -160,14 +160,13 @@ pub mod artifact_kinds {
     /// so the API reads that directly and never writes this.
     pub const ADD_PARTY_ACS_PROGRESS: &str = "add_party_acs_progress";
 
-    /// Tenant add-hosts: the package ids the staged snapshot needs, newline
-    /// separated. Computed once when the snapshot is staged, because the scan
-    /// behind it is a ledger query and a ranged transfer would otherwise repeat
-    /// it once per range.
-    /// Unsigned onboarding-flag clearing proposal (P2P update without the
-    /// new member's Onboarding marker) created by the coordinator. Empty
-    /// payload doubles as the "flag already cleared — skip the sign round"
-    /// marker. Length-prefixed proto when non-empty.
+    /// Raw new-member keys and participant identifier, stored before completion.
+    pub const ADD_PARTY_KEYS_UPLOAD: &str = "add_party_keys_upload";
+    /// Raw new-member clearing proposal, including the explicit empty skip marker.
+    pub const ADD_PARTY_CLEAR_PROPOSAL_UPLOAD: &str = "add_party_clear_proposal_upload";
+
+    /// New-member-authored onboarding-flag clearing proposal for the sign round.
+    /// Empty payload marks an already-cleared flag. Nonempty payload is a length-prefixed proto.
     pub const ADD_PARTY_CLEAR_PROPOSAL: &str = "add_party_clear_proposal";
     /// Per-peer signed clearing proposal — single length-prefixed proto.
     pub const SIGNED_ADD_PARTY_CLEAR: &str = "signed_add_party_clear";

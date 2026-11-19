@@ -6,9 +6,11 @@ use std::{
 };
 
 use anyhow::Context;
-use canton_proto_rs::com::digitalasset::canton::protocol::v30::PartyToParticipant;
+use canton_proto_rs::com::digitalasset::canton::protocol::v30::{
+    PartyToParticipant, SignedTopologyTransaction,
+};
 use sqlx::SqlitePool;
-use tokio::sync::RwLock;
+use tokio::sync::{Mutex, RwLock};
 
 use common::types::AcsTransferProgress;
 
@@ -28,7 +30,7 @@ use crate::{
     utils,
     workflow::{
         WorkflowState,
-        add_party::AddPartyStep,
+        add_party::{AddPartyConfig, AddPartyStep},
         change_threshold::ChangeThresholdStep,
         contracts::ContractsStep,
         dars::DarsStep,
@@ -87,6 +89,9 @@ fn decline_matches_run(
 
 /// Coordinator server that accepts connections from peers
 pub struct NoiseServer<S: WorkflowStep + 'static> {
+    db: SqlitePool,
+    /// Serializes the conflict check, write, and completion for concurrent retries.
+    recorded_upload: Mutex<()>,
     node_config: Arc<NodeConfig>,
     keypair: Arc<NoiseKeypair>,
     /// Full peer records (address + port + public_key) kept around so the
@@ -424,6 +429,7 @@ impl<S: WorkflowStep + 'static> NoiseServer<S> {
         // peers instead of starting fresh from `initial_step`. The
         // coordinator workflow loop is naturally driven by `current_step`, so
         // seeding it from the row picks the run back up at the right place.
+        let storage = db.clone();
         let workflow_state = match persisted {
             Some(run) if run.status == WorkflowProgress::InProgress => {
                 match S::try_from_step_name(&run.current_step) {
@@ -474,6 +480,8 @@ impl<S: WorkflowStep + 'static> NoiseServer<S> {
         }
 
         Ok(Self {
+            db: storage,
+            recorded_upload: Mutex::new(()),
             node_config: Arc::new(node_config),
             keypair: Arc::new(keypair),
             peers,
@@ -633,8 +641,13 @@ impl<S: WorkflowStep + 'static> NoiseServer<S> {
                 .await
             }
             MessageType::AddPartyKeysUpload => {
-                self.handle_peer_data(peer_id, message.payload, "add-party keys upload")
-                    .await
+                self.handle_recorded_upload(
+                    peer_id,
+                    &message.payload,
+                    MessageType::GenerateAddPartyKeys,
+                    artifact_kinds::ADD_PARTY_KEYS_UPLOAD,
+                )
+                .await
             }
             MessageType::AddPartySignatures => {
                 self.handle_recorded_upload(
@@ -655,8 +668,13 @@ impl<S: WorkflowStep + 'static> NoiseServer<S> {
                 .await
             }
             MessageType::AddPartyClearProposal => {
-                self.handle_peer_data(peer_id, message.payload, "add-party clearing proposal")
-                    .await
+                self.handle_recorded_upload(
+                    peer_id,
+                    &message.payload,
+                    MessageType::ClearOnboardingFlag,
+                    artifact_kinds::ADD_PARTY_CLEAR_PROPOSAL_UPLOAD,
+                )
+                .await
             }
             MessageType::ChangeThresholdSignatures => {
                 self.handle_recorded_upload(
@@ -864,17 +882,67 @@ impl<S: WorkflowStep + 'static> NoiseServer<S> {
                 b"The peer is not expected in this workflow".to_vec(),
             ));
         }
-        // Kick, add-party and change-threshold upload a signed DNS and P2P
-        // pair. A clearing or rotation upload holds one signed mapping.
-        let uploads_a_pair = matches!(
+        let _upload_guard = self.recorded_upload.lock().await;
+        let new_member_upload = matches!(
             command,
-            MessageType::SignKick | MessageType::SignAddParty | MessageType::SignChangeThreshold
+            MessageType::GenerateAddPartyKeys | MessageType::ClearOnboardingFlag
         );
-        if uploads_a_pair && let Err(e) = split_signed_pair(payload) {
-            tracing::warn!("Invalid {artifact_kind} from {peer_id}: {e:#}");
+        let validation: anyhow::Result<()> = async {
+            if new_member_upload {
+                anyhow::ensure!(
+                    S::kind() == WorkflowKind::AddParty,
+                    "Wrong workflow for add-party upload"
+                );
+                let run = self
+                    .db
+                    .get_workflow_run(self.workflow_state.instance_name())
+                    .await?
+                    .ok_or(sqlx::Error::RowNotFound)?;
+                let config: AddPartyConfig = serde_json::from_str(&run.config_json)?;
+                anyhow::ensure!(
+                    peer_id == config.new_participant_id,
+                    "Only the new member may upload"
+                );
+                if command == MessageType::GenerateAddPartyKeys {
+                    utils::decode_length_prefixed(payload, 2)?;
+                } else if !payload.is_empty() {
+                    let _: SignedTopologyTransaction =
+                        utils::read_first_message_from_bytes(payload)?;
+                }
+                if let Some(saved) = self
+                    .db
+                    .read_artifact(
+                        self.workflow_state.instance_name(),
+                        artifact_kind,
+                        Some(&peer_id.to_string()),
+                    )
+                    .await?
+                {
+                    anyhow::ensure!(saved == payload, "Upload conflicts with saved payload");
+                }
+            } else if matches!(
+                command,
+                MessageType::SignKick
+                    | MessageType::SignAddParty
+                    | MessageType::SignChangeThreshold
+            ) {
+                split_signed_pair(payload)?;
+            }
+            Ok(())
+        }
+        .await;
+        if let Err(error) = validation {
+            if error.downcast_ref::<sqlx::Error>().is_some() {
+                tracing::error!(%error, "Failed to read {artifact_kind} storage for {peer_id}");
+                return Ok(Message::new(
+                    MessageType::Error,
+                    b"The coordinator could not store the upload".to_vec(),
+                ));
+            }
+            tracing::warn!(%error, "Invalid {artifact_kind} from {peer_id}");
             return Ok(Message::new(
                 MessageType::Error,
-                b"Invalid signature pair".to_vec(),
+                format!("Invalid upload: {error}").into_bytes(),
             ));
         }
         if let Err(e) = self
