@@ -23,8 +23,8 @@ use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
 
 use super::{
-    AddHostsError, CurrentPartyTopology, mapping::add_hosts_mapping, read_party_to_participant,
-    replication::capture_replication_offsets, replication_target, submit::require_live_source,
+    AddHostsError, mapping::add_hosts_mapping, replication::capture_replication_offsets,
+    replication_target, submit::require_live_source,
 };
 use crate::{
     canton_id::CantonId,
@@ -34,6 +34,7 @@ use crate::{
     error::Result,
     utils,
     workflow::{
+        external_party::topology_bundle::{read_current, read_pinned},
         party_replication::{ReplicationTarget, check_vetted_packages_held, open_import_window},
         storage::artifact_kinds,
         topology, topology_version,
@@ -445,14 +446,7 @@ pub async fn stage_add_hosts(
         }
         return return_staged(config, db, &target, staged).await;
     }
-    let current = read_current(config, party_id).await?;
-    if current.serial != base_serial {
-        return Err(AddHostsError::StaleSerial {
-            party: party_id.to_string(),
-            pinned: base_serial,
-            found: current.serial,
-        });
-    }
+    let current = read_pinned(config, party_id, base_serial).await?;
     if !new_hosts.contains(config.participant_id()) {
         return Err(AddHostsError::Invalid(anyhow::anyhow!(
             "only a joining participant stages a signature"
@@ -522,18 +516,6 @@ pub async fn stage_add_hosts(
         ));
     }
     return_staged(config, db, &target, staged).await
-}
-
-async fn read_current(
-    config: &NodeConfig,
-    party_id: &str,
-) -> std::result::Result<CurrentPartyTopology, AddHostsError> {
-    read_party_to_participant(config, party_id)
-        .await
-        .map_err(AddHostsError::Canton)?
-        .ok_or_else(|| AddHostsError::UnknownParty {
-            party: party_id.to_string(),
-        })
 }
 
 /// Publish joining signatures from a connected current host after staging ends.

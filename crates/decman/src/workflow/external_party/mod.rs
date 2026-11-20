@@ -20,5 +20,6 @@ pub mod onboarding;
 pub mod status;
 pub mod steps;
 pub mod threshold;
+mod topology_bundle;
 pub mod unhost;
 pub mod unhost_audit;

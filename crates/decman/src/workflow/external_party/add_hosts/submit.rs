@@ -1,11 +1,5 @@
-use canton_proto_rs::com::digitalasset::canton::{
-    protocol::v30::{
-        PartyToParticipant, SignedTopologyTransaction, TopologyMapping, topology_mapping,
-    },
-    topology::admin::v30::{
-        AddTransactionsRequest,
-        topology_manager_write_service_client::TopologyManagerWriteServiceClient,
-    },
+use canton_proto_rs::com::digitalasset::canton::protocol::v30::{
+    PartyToParticipant, TopologyMapping, topology_mapping,
 };
 
 use crate::{
@@ -13,7 +7,10 @@ use crate::{
     error::Result,
     utils,
     workflow::{
-        external_party::keys::PartySignatureScheme,
+        external_party::{
+            keys::PartySignatureScheme,
+            topology_bundle::{party_signed, read_current, submit_signed},
+        },
         topology,
         topology_version::{self},
     },
@@ -21,7 +18,7 @@ use crate::{
 
 use super::{
     error::AddHostsError,
-    head::{CurrentPartyTopology, read_party_to_participant},
+    head::CurrentPartyTopology,
     relay,
     validate::{ExternalPartyAddHostsPayload, validate_add_hosts_topology},
 };
@@ -83,14 +80,7 @@ pub async fn submit_add_hosts(
     config: &NodeConfig,
     bundle: &ExternalPartyAddHostsPayload,
 ) -> std::result::Result<u32, AddHostsError> {
-    let Some(current) = read_party_to_participant(config, &bundle.party_id)
-        .await
-        .map_err(AddHostsError::Canton)?
-    else {
-        return Err(AddHostsError::UnknownParty {
-            party: bundle.party_id.clone(),
-        });
-    };
+    let current = read_current(config, &bundle.party_id).await?;
     require_live_source(config, &current).map_err(AddHostsError::Invalid)?;
     // Split out from the rest of validation: a pin that has moved is a race the
     // caller resolves by re-reading, not malformed input.
@@ -131,39 +121,15 @@ pub async fn submit_add_hosts(
     let store = topology::synchronizer_store_id(&synchronizer_id);
 
     let scheme = PartySignatureScheme::for_party(&current.mapping, &bundle.signed_by);
-    let signed: Vec<SignedTopologyTransaction> = bundle
-        .topology_transactions
-        .iter()
-        .zip(&bundle.signatures)
-        .map(|(transaction, signature)| SignedTopologyTransaction {
-            transaction: transaction.clone(),
-            signatures: vec![scheme.canton_signature(signature, &bundle.signed_by)],
-            proposal: true,
-            multi_transaction_signatures: vec![],
-        })
-        .collect();
+    let signed = party_signed(
+        &bundle.topology_transactions,
+        &bundle.signatures,
+        true,
+        |signature| scheme.canton_signature(signature, &bundle.signed_by),
+    );
 
     relay::ensure_connected(config).await?;
-    let mut client = TopologyManagerWriteServiceClient::new(
-        config
-            .admin_channel()
-            .await
-            .map_err(AddHostsError::Canton)?,
-    );
-    client
-        .add_transactions(tonic::Request::new(AddTransactionsRequest {
-            transactions: signed,
-            force_changes: vec![],
-            store: Some(store),
-            wait_to_become_effective: None,
-        }))
-        .await
-        .map_err(|e| {
-            AddHostsError::Canton(
-                anyhow::Error::new(e)
-                    .context("AddTransactions RPC failed for external-party add-hosts"),
-            )
-        })?;
+    submit_signed(config, signed, vec![], store, "external-party add-hosts").await?;
 
     tracing::info!(
         party_id = %bundle.party_id,
