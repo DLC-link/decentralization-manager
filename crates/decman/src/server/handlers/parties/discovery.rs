@@ -14,6 +14,7 @@ use crate::{
     config::{NodeConfig, PartyCredentials},
     db::schema::SchemaRead,
     error::Result,
+    party_discovery::known_party_filters,
     server::{
         AppState, former_parties,
         types::{DecentralizedPartiesResponse, DecentralizedParty},
@@ -24,7 +25,6 @@ use super::{
     cache::store_parties_to_db,
     fetch::{DiscoveredParties, fetch_decentralized_parties},
     list::PartyReadOpts,
-    topology::known_party_filters,
 };
 
 /// How many parties [`fetch_decentralized_parties`] reads at once.
@@ -53,14 +53,6 @@ pub(super) const SINGLE_FLIGHT_WAIT: Duration = Duration::from_secs(3);
 /// the request, so a burst of distinct values would each start their own
 /// discovery and put the concurrent load back on the participant.
 pub(crate) const MAX_CONCURRENT_DISCOVERIES: usize = 4;
-
-/// Deadline for a single topology read.
-///
-/// Canton applies no deadline of its own, so a read the participant cannot
-/// answer quickly holds the request open indefinitely, well past any gateway
-/// timeout in front of it, and every retry stacks another one on the
-/// participant.
-const TOPOLOGY_READ_TIMEOUT: Duration = Duration::from_secs(60);
 
 pub(super) fn now_secs() -> i64 {
     SystemTime::now()
@@ -427,34 +419,6 @@ async fn budgeted_fetch(
         Err(_) => anyhow::bail!(
             "discovery for prefix '{prefix}' exceeded {secs}s",
             secs = DISCOVERY_BUDGET.as_secs()
-        ),
-    }
-}
-
-/// Run one fallible call under [`TOPOLOGY_READ_TIMEOUT`].
-pub(super) async fn bounded_call<T>(
-    what: &str,
-    call: impl std::future::Future<Output = Result<T>>,
-) -> Result<T> {
-    match tokio::time::timeout(TOPOLOGY_READ_TIMEOUT, call).await {
-        Ok(result) => result,
-        Err(_) => anyhow::bail!(
-            "{what} did not answer within {secs}s",
-            secs = TOPOLOGY_READ_TIMEOUT.as_secs()
-        ),
-    }
-}
-
-/// Run one topology read under [`TOPOLOGY_READ_TIMEOUT`].
-pub(super) async fn bounded_read<T>(
-    what: &str,
-    read: impl std::future::Future<Output = std::result::Result<T, tonic::Status>>,
-) -> Result<T> {
-    match tokio::time::timeout(TOPOLOGY_READ_TIMEOUT, read).await {
-        Ok(result) => Ok(result?),
-        Err(_) => anyhow::bail!(
-            "{what} did not answer within {secs}s",
-            secs = TOPOLOGY_READ_TIMEOUT.as_secs()
         ),
     }
 }
