@@ -539,7 +539,7 @@ mod tests {
             server::{WorkflowKind, WorkflowRole},
             signing::{
                 custody::SoftwareKeys,
-                fake_admin_api::{FakeAdminApi, VaultKey},
+                fake_admin_api::{FakeAdminApi, TestNode, VaultKey},
                 key_store::KeyStore,
             },
             workflow::signing_keys::party_daml_key_name,
@@ -597,10 +597,7 @@ mod tests {
             }
         }
 
-        async fn store(
-            node: &crate::signing::fake_admin_api::TestNode,
-            db: &SqlitePool,
-        ) -> Result<KeyStore> {
+        async fn store(node: &TestNode, db: &SqlitePool) -> Result<KeyStore> {
             KeyStore::open(&node.config, db.clone())
                 .await?
                 .ok_or_else(|| anyhow::anyhow!("the key store is off"))

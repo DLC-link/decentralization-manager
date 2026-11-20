@@ -66,12 +66,12 @@ impl KickConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::error::Result;
 
     /// A run persisted before the confirmation threshold existed resumes
     /// with both thresholds equal, as it was started.
     #[test]
-    fn a_config_persisted_before_the_confirmation_threshold_still_decodes() -> crate::error::Result
-    {
+    fn a_config_persisted_before_the_confirmation_threshold_still_decodes() -> Result {
         let config: KickConfig = serde_json::from_value(serde_json::json!({
             "decentralized_party_id": format!("xyz::1220{}", "ab".repeat(32)),
             "participant_id": format!("p2::1220{}", "cd".repeat(32)),

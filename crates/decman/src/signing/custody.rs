@@ -18,6 +18,9 @@
 //! A vault that only wraps its software keys with a KMS key (`wrapper_key_id`)
 //! does not count. Those keys still need an export to sign.
 
+use std::time::Duration;
+
+use aws_sdk_kms::error::DisplayErrorContext;
 use canton_proto_rs::com::digitalasset::canton::{
     crypto::{
         admin::v30::{
@@ -466,7 +469,7 @@ pub async fn require_kms_sign_access(
             // signed-in user can read a run's error, so only the log gets it.
             tracing::error!(
                 "DecMan cannot sign with the KMS key {kms_key_id} ({fingerprint}): {cause}",
-                cause = aws_sdk_kms::error::DisplayErrorContext(&e)
+                cause = DisplayErrorContext(&e)
             );
             let reason = match &e {
                 SigningError::Kms(_) => "KMS refused the test signature".to_string(),
@@ -485,7 +488,7 @@ pub async fn require_kms_sign_access(
 /// learns it before a run fails. A participant that cannot be reached yet is
 /// skipped, because every run checks again.
 pub async fn log_rule_at_boot(config: &NodeConfig, db: &SqlitePool) {
-    let mut wait = std::time::Duration::from_secs(10);
+    let mut wait = Duration::from_secs(10);
     let has_kms = loop {
         let metadata = match config.admin_channel().await {
             Ok(channel) => list_keys(&mut VaultServiceClient::new(channel), None).await,
@@ -500,7 +503,7 @@ pub async fn log_rule_at_boot(config: &NodeConfig, db: &SqlitePool) {
                     wait.as_secs()
                 );
                 tokio::time::sleep(wait).await;
-                wait = (wait * 2).min(std::time::Duration::from_secs(300));
+                wait = (wait * 2).min(Duration::from_secs(300));
             }
         }
     };
@@ -658,6 +661,8 @@ mod tests {
 /// the export and the key store all run.
 #[cfg(test)]
 mod against_a_vault {
+    use std::fmt::Debug;
+
     use canton_proto_rs::com::digitalasset::canton::{
         crypto::v30::SigningKeysWithThreshold,
         protocol::v30::{
@@ -686,7 +691,7 @@ mod against_a_vault {
     }
 
     /// The error text of a call that should have been refused.
-    fn refusal<T: std::fmt::Debug>(result: Result<T>) -> Result<String> {
+    fn refusal<T: Debug>(result: Result<T>) -> Result<String> {
         match result {
             Ok(value) => anyhow::bail!("expected a refusal, got {value:?}"),
             Err(e) => Ok(format!("{e:#}")),

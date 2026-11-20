@@ -1,8 +1,8 @@
-use std::time::Duration;
+use std::{future::Future, time::Duration};
 
 use bytes::Bytes;
-use http::Uri;
-use hyper::{Body, Request, StatusCode};
+use http::{Uri, uri::InvalidUri};
+use hyper::{Body, Request, StatusCode, header::CONNECTION};
 use tokio::net::TcpStream;
 use tokio_noise::handshakes::nn_psk2::Initiator;
 
@@ -46,7 +46,7 @@ pub const NOISE_HANDLER_TIMEOUT: Duration = Duration::from_secs(45);
 pub const NOISE_ACS_BLOCK_TIMEOUT: Duration = Duration::from_secs(40);
 
 /// Helper function to parse flexible URIs (with or without scheme)
-pub fn parse_flexible_uri(uri_str: &str) -> Result<Uri, http::uri::InvalidUri> {
+pub fn parse_flexible_uri(uri_str: &str) -> Result<Uri, InvalidUri> {
     let url = match uri_str.find("://") {
         None => format!("http://{uri_str}"),
         Some(_) => uri_str.to_string(),
@@ -104,7 +104,7 @@ async fn send_noise_message_with_timeout(
     let request = Request::builder()
         .uri(uri)
         .method("POST")
-        .header(hyper::header::CONNECTION, "close")
+        .header(CONNECTION, "close")
         .body(Body::from(request_body))?;
 
     let tcp_stream = match tokio::time::timeout(timeout, TcpStream::connect(&socket_addr)).await {
@@ -151,7 +151,7 @@ async fn retry_loop<F, Fut>(
 ) -> Result<Bytes, NoiseError>
 where
     F: FnMut() -> Fut,
-    Fut: std::future::Future<Output = Result<Bytes, NoiseError>>,
+    Fut: Future<Output = Result<Bytes, NoiseError>>,
 {
     // Defense-in-depth: the CLI rejects 0 at parse time, but a misbehaving
     // direct construction of `NoiseRetryConfig` (e.g. in tests) shouldn't
@@ -398,14 +398,24 @@ pub async fn send_noise_message_with_chunked_response(
 
 #[cfg(test)]
 mod tests {
-    use std::sync::{
-        Arc,
-        atomic::{AtomicUsize, Ordering},
+    use std::{
+        future::Future,
+        io,
+        net::SocketAddr,
+        sync::{
+            Arc, Mutex,
+            atomic::{AtomicUsize, Ordering},
+        },
     };
 
     use bytes::Bytes;
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    use tracing_subscriber::layer::SubscriberExt;
+    use tokio::{
+        io::{AsyncReadExt, AsyncWriteExt},
+        net::TcpListener,
+        task::JoinHandle,
+    };
+    use tokio_noise::handshakes::nn_psk2::Responder;
+    use tracing_subscriber::layer::{Context, SubscriberExt};
 
     use super::*;
     use crate::{
@@ -498,14 +508,10 @@ mod tests {
     }
 
     /// Records the level of every event it sees.
-    struct Levels(Arc<std::sync::Mutex<Vec<tracing::Level>>>);
+    struct Levels(Arc<Mutex<Vec<tracing::Level>>>);
 
     impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for Levels {
-        fn on_event(
-            &self,
-            event: &tracing::Event<'_>,
-            _: tracing_subscriber::layer::Context<'_, S>,
-        ) {
+        fn on_event(&self, event: &tracing::Event<'_>, _: Context<'_, S>) {
             if let Ok(mut levels) = self.0.lock() {
                 levels.push(*event.metadata().level());
             }
@@ -517,7 +523,7 @@ mod tests {
     /// devnet, so a decman-wide error alert would fire all day (#362).
     #[tokio::test]
     async fn retry_exhaustion_logs_no_error() -> anyhow::Result<()> {
-        let levels = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let levels = Arc::new(Mutex::new(Vec::new()));
         let subscriber = tracing_subscriber::registry().with(Levels(levels.clone()));
         let _guard = tracing::subscriber::set_default(subscriber);
         let config = NoiseRetryConfig {
@@ -766,10 +772,7 @@ mod tests {
     /// bursts with a pause between them, the way a real link does. Over plain
     /// loopback the body arrives faster than the client reads it, so the client
     /// never finds its socket empty mid-response.
-    async fn paced_relay(
-        mut client: TcpStream,
-        server: std::net::SocketAddr,
-    ) -> std::io::Result<()> {
+    async fn paced_relay(mut client: TcpStream, server: SocketAddr) -> io::Result<()> {
         let mut server = TcpStream::connect(server).await?;
         let (mut client_read, mut client_write) = client.split();
         let (mut server_read, mut server_write) = server.split();
@@ -792,13 +795,10 @@ mod tests {
     }
 
     /// Accept connections until aborted, handing each to `handle`.
-    fn accept_loop<C, Fut>(
-        listener: tokio::net::TcpListener,
-        handle: C,
-    ) -> tokio::task::JoinHandle<()>
+    fn accept_loop<C, Fut>(listener: TcpListener, handle: C) -> JoinHandle<()>
     where
         C: Fn(TcpStream) -> Fut + Send + 'static,
-        Fut: std::future::Future<Output = ()> + Send + 'static,
+        Fut: Future<Output = ()> + Send + 'static,
     {
         tokio::spawn(async move {
             while let Ok((socket, _)) = listener.accept().await {
@@ -819,7 +819,7 @@ mod tests {
         let payload = (0..CHUNK_SIZE).map(|i| (i % 251) as u8).collect();
         let response = Bytes::from(Message::new(MessageType::Chunk, payload).to_bytes());
 
-        let server = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let server = TcpListener::bind("127.0.0.1:0").await?;
         let server_addr = server.local_addr()?;
         let served = response.clone();
         let server = accept_loop(server, move |socket| {
@@ -829,8 +829,7 @@ mod tests {
                     let body = body.clone();
                     async move { Ok::<_, hyper::Error>(hyper::Response::new(Body::from(body))) }
                 };
-                let responder =
-                    tokio_noise::handshakes::nn_psk2::Responder::new(move |_: &[u8]| Some(psk));
+                let responder = Responder::new(move |_: &[u8]| Some(psk));
                 if let Err(e) = hyper_noise::server::serve_http(
                     socket,
                     responder,
@@ -843,7 +842,7 @@ mod tests {
                 }
             }
         });
-        let relay = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let relay = TcpListener::bind("127.0.0.1:0").await?;
         let port = relay.local_addr()?.port();
         let relay = accept_loop(relay, move |socket| async move {
             if let Err(e) = paced_relay(socket, server_addr).await {
@@ -877,8 +876,8 @@ mod tests {
         psk: [u8; 32],
         status: StatusCode,
         body: Vec<u8>,
-    ) -> Result<(u16, Arc<AtomicUsize>, tokio::task::JoinHandle<()>)> {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    ) -> Result<(u16, Arc<AtomicUsize>, JoinHandle<()>)> {
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
         let port = listener.local_addr()?.port();
         let served = Arc::new(AtomicUsize::new(0));
         let counter = served.clone();
@@ -893,8 +892,7 @@ mod tests {
                     *response.status_mut() = status;
                     async move { Ok::<_, hyper::Error>(response) }
                 };
-                let responder =
-                    tokio_noise::handshakes::nn_psk2::Responder::new(move |_: &[u8]| Some(psk));
+                let responder = Responder::new(move |_: &[u8]| Some(psk));
                 if let Err(e) = hyper_noise::server::serve_http(
                     socket,
                     responder,

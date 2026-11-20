@@ -15,6 +15,7 @@ use crate::{
     signing::custody,
     utils,
     workflow::{
+        extract_party_id_from_p2p_payload,
         onboarding::{peer::copy_self_identity_for_party, steps::generate_keys::own_new_daml_key},
         storage::{WorkflowStorage, artifact_kinds},
         topology::sign_transactions_with_topology_retry,
@@ -156,7 +157,7 @@ async fn file_own_daml_key(
     instance_name: &str,
     proposal_data: &[u8],
 ) -> Result {
-    let party = crate::workflow::extract_party_id_from_p2p_payload(proposal_data)?;
+    let party = extract_party_id_from_p2p_payload(proposal_data)?;
     copy_self_identity_for_party(storage, instance_name, config, &party).await?;
     custody::file_new_party_key(config, storage, &party).await
 }
@@ -201,11 +202,12 @@ mod with_a_generated_key {
 
     use super::*;
     use crate::{
+        canton_id::CantonId,
         db::MIGRATOR,
         signing::{
             custody::{SoftwareKeys, new_daml_key},
             fake_admin_api::{FakeAdminApi, TestNode, VaultKey},
-            key_store::topology_transaction_hash,
+            key_store::{KeyStore, topology_transaction_hash},
             vault_export::ed25519_public_key,
         },
         workflow::onboarding::steps::generate_keys::encode_keys_payload,
@@ -345,10 +347,10 @@ mod with_a_generated_key {
         file_key_and_sign_p2p(&node.config, &db, RUN, &party_mapping(&key)).await?;
 
         signed(&node, &db, artifact_kinds::SIGNED_P2P_PROPOSAL).await?;
-        let store = crate::signing::key_store::KeyStore::open(&node.config, db.clone())
+        let store = KeyStore::open(&node.config, db.clone())
             .await?
             .ok_or_else(|| anyhow::anyhow!("the key store is off"))?;
-        let party = crate::canton_id::CantonId::parse(&format!("party::{NAMESPACE}"))?;
+        let party = CantonId::parse(&format!("party::{NAMESPACE}"))?;
         assert!(
             store
                 .get(&party, &utils::compute_fingerprint(&key))

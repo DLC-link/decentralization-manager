@@ -5,7 +5,7 @@ use canton_proto_rs::com::digitalasset::canton::admin::participant::v30::{
     party_management_service_client::PartyManagementServiceClient,
 };
 use common::types::{AcsTransferDirection, AcsTransferProgress};
-use futures::SinkExt;
+use futures::{SinkExt, channel::mpsc};
 use sha2::{Digest, Sha256};
 use sqlx::SqlitePool;
 use tonic::Code;
@@ -247,7 +247,7 @@ where
     tracing::info!("Importing the ACS as it arrives...");
 
     let mut client = PartyManagementServiceClient::new(config.admin_channel().await?);
-    let (mut tx, rx) = futures::channel::mpsc::channel::<ImportPartyAcsRequest>(IMPORT_READAHEAD);
+    let (mut tx, rx) = mpsc::channel::<ImportPartyAcsRequest>(IMPORT_READAHEAD);
 
     // Canton consumes the stream while we are still pulling blocks, so the
     // import and the transfer overlap and neither side accumulates. The RPC

@@ -3,6 +3,7 @@ use canton_proto_rs::com::digitalasset::canton::admin::participant::v30::{
     UploadDarRequest, package_service_client::PackageServiceClient,
     upload_dar_request::UploadDarData,
 };
+use tonic::transport::Channel;
 
 use crate::{config::NodeConfig, error::Result, workflow::contracts::DarFile};
 
@@ -65,7 +66,7 @@ pub async fn upload_dars_from_bytes(
 
 /// Upload a single DAR file by bytes
 async fn upload_dar_bytes(
-    client: &mut PackageServiceClient<tonic::transport::Channel>,
+    client: &mut PackageServiceClient<Channel>,
     filename: &str,
     dar_data: Vec<u8>,
 ) -> Result {

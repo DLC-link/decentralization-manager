@@ -1,5 +1,6 @@
 use std::collections::BTreeSet;
 
+use common::api::ContractDeploymentIntent;
 use sqlx::SqlitePool;
 
 use crate::{
@@ -21,7 +22,7 @@ pub struct PeerExpectations {
     /// The workflow kind the operator accepted. Commands belonging to any
     /// other kind are refused outright.
     pub kind: WorkflowKind,
-    pub contract_intents: Vec<common::api::ContractDeploymentIntent>,
+    pub contract_intents: Vec<ContractDeploymentIntent>,
     /// The full member set accepted in the invitation, plus the coordinator.
     /// Topology invitations include surviving hosts that are not invited to
     /// sign; onboarding lists its invitees without the coordinator.
@@ -60,7 +61,7 @@ pub struct PeerExpectations {
 #[derive(serde::Deserialize)]
 struct PeerRunConfig {
     #[serde(default)]
-    contract_intents: Vec<common::api::ContractDeploymentIntent>,
+    contract_intents: Vec<ContractDeploymentIntent>,
     #[serde(default)]
     prefix: Option<String>,
     #[serde(default)]

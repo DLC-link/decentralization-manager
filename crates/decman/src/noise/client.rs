@@ -1,7 +1,7 @@
 use std::{marker::PhantomData, sync::Arc, time::Duration};
 
 use bytes::Bytes;
-use hyper::{Body, Request};
+use hyper::{Body, Request, header::CONNECTION};
 use secp256k1::PublicKey;
 use tokio::net::TcpStream;
 use tokio_noise::handshakes::nn_psk2::Initiator;
@@ -105,7 +105,7 @@ impl NoiseClient {
         let request = Request::builder()
             .uri(uri)
             .method("POST")
-            .header(hyper::header::CONNECTION, "close")
+            .header(CONNECTION, "close")
             .body(Body::from(request_body))?;
 
         // Connect with timeout

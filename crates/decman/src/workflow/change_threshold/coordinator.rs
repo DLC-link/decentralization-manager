@@ -2,6 +2,7 @@ use std::{collections::HashSet, sync::Arc};
 
 use anyhow::Context;
 use sqlx::SqlitePool;
+use tokio::time::Duration;
 
 use super::{
     ChangeThresholdConfig, ChangeThresholdStep,
@@ -14,9 +15,11 @@ use crate::{
     server::{WorkflowInstance, peer_status::LastSeen},
     utils,
     workflow::{
+        run_workflow_with_handler,
         signature_pairs::{peers_without_artifact, save_signature_pairs},
         state::WorkflowState,
         storage::{WorkflowStorage, artifact_kinds},
+        topology::retire_legacy_keys_and_wait,
     },
 };
 
@@ -61,7 +64,7 @@ pub async fn start_coordinator(
 
                 match current_step {
                     ChangeThresholdStep::WaitingForPeers => {
-                        tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+                        tokio::time::sleep(Duration::from_secs(1)).await;
                     }
                     ChangeThresholdStep::ExportState => {
                         if !coordinator_completed_steps.contains(&ChangeThresholdStep::ExportState)
@@ -71,7 +74,7 @@ pub async fn start_coordinator(
                             coordinator_completed_steps.insert(ChangeThresholdStep::ExportState);
                             workflow_state.advance_step().await;
                         }
-                        tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+                        tokio::time::sleep(Duration::from_secs(1)).await;
                     }
                     ChangeThresholdStep::CreateProposals => {
                         tracing::info!("Coordinator executing: Create proposals");
@@ -115,7 +118,7 @@ pub async fn start_coordinator(
                         workflow_state.advance_step().await;
                     }
                     ChangeThresholdStep::SignProposals => {
-                        tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+                        tokio::time::sleep(Duration::from_secs(1)).await;
                     }
                     ChangeThresholdStep::Submit => {
                         tracing::info!("Coordinator executing: Submit change-threshold");
@@ -131,7 +134,7 @@ pub async fn start_coordinator(
                         workflow_state.advance_step().await;
                     }
                     ChangeThresholdStep::RetireLegacyKeys => {
-                        crate::workflow::topology::retire_legacy_keys_and_wait(
+                        retire_legacy_keys_and_wait(
                             &node_config,
                             &change_config.decentralized_party_id,
                         )
@@ -141,7 +144,7 @@ pub async fn start_coordinator(
                     ChangeThresholdStep::Complete => {
                         tracing::info!("Change-threshold workflow complete!");
                         tracing::debug!("Waiting for peers to receive Disconnect command...");
-                        tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+                        tokio::time::sleep(Duration::from_secs(2)).await;
                         break;
                     }
                 }
@@ -151,7 +154,7 @@ pub async fn start_coordinator(
         })
     };
 
-    crate::workflow::run_workflow_with_handler(
+    run_workflow_with_handler(
         ActiveWorkflow::ChangeThreshold(server),
         instance,
         coordinator_workflow,

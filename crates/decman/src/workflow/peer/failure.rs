@@ -1,3 +1,7 @@
+use std::time::Duration;
+
+use tokio::time::Instant;
+
 use crate::{
     consts::{MAX_CONSECUTIVE_STEP_FAILURES, PEER_SILENCE_LIMIT},
     error::Result,
@@ -22,7 +26,7 @@ pub(super) async fn report_departure(client: NoiseClient, report: DeclineInvitat
             return;
         }
     };
-    let deadline = tokio::time::Instant::now() + PEER_SILENCE_LIMIT;
+    let deadline = Instant::now() + PEER_SILENCE_LIMIT;
     loop {
         match client.report_failure(payload.clone()).await {
             Ok(()) => return,
@@ -30,10 +34,7 @@ pub(super) async fn report_departure(client: NoiseClient, report: DeclineInvitat
                 tracing::info!("Coordinator no longer runs this workflow; nothing to report");
                 return;
             }
-            Err(e)
-                if is_transient(&e)
-                    && tokio::time::Instant::now() + FAILURE_REPORT_BACKOFF < deadline =>
-            {
+            Err(e) if is_transient(&e) && Instant::now() + FAILURE_REPORT_BACKOFF < deadline => {
                 tracing::warn!("Could not report this peer's failure to the coordinator: {e}");
                 tokio::time::sleep(FAILURE_REPORT_BACKOFF).await;
             }
@@ -46,12 +47,12 @@ pub(super) async fn report_departure(client: NoiseClient, report: DeclineInvitat
 }
 
 /// Pause between attempts to report a peer's failure.
-pub(super) const FAILURE_REPORT_BACKOFF: std::time::Duration = std::time::Duration::from_secs(10);
+pub(super) const FAILURE_REPORT_BACKOFF: Duration = Duration::from_secs(10);
 
 // Five pauses give uploads a sixty-second recovery window before the sixth attempt.
-const SIGNATURE_UPLOAD_BACKOFF: std::time::Duration = std::time::Duration::from_secs(12);
+const SIGNATURE_UPLOAD_BACKOFF: Duration = Duration::from_secs(12);
 
-const PEER_RETRY_BACKOFF: std::time::Duration = std::time::Duration::from_secs(2);
+const PEER_RETRY_BACKOFF: Duration = Duration::from_secs(2);
 
 /// Apply one retry budget to decoding, authorization, and execution failures.
 /// Control messages do not reset it; only completing (or legitimately skipping)
@@ -120,7 +121,7 @@ mod tests {
     #[tokio::test]
     async fn signature_upload_recovers_and_resets_budget() {
         let mut failures = 0;
-        let start = tokio::time::Instant::now();
+        let start = Instant::now();
         record_signature_upload(
             &mut failures,
             MessageType::SignAddParty,
@@ -147,7 +148,7 @@ mod tests {
     #[tokio::test]
     async fn signature_upload_exhaustion_reports_cause() {
         let mut failures = 0;
-        let start = tokio::time::Instant::now();
+        let start = Instant::now();
         for attempt in 1..MAX_CONSECUTIVE_STEP_FAILURES {
             record_signature_upload(
                 &mut failures,
@@ -166,7 +167,7 @@ mod tests {
         .await
         .unwrap_err();
         assert_eq!(failures, MAX_CONSECUTIVE_STEP_FAILURES);
-        assert!(start.elapsed() >= std::time::Duration::from_secs(60));
+        assert!(start.elapsed() >= Duration::from_secs(60));
         let report = format!("{error:#}");
         assert!(report.contains("SignChangeThreshold"));
         assert!(report.contains(&failures.to_string()));

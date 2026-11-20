@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use base64::{Engine, engine::general_purpose::STANDARD};
+use tokio::time::Duration;
 
 use super::{DarsConfig, DarsStep};
 use crate::{
@@ -12,7 +13,7 @@ use crate::{
     },
     server::{WorkflowInstance, peer_status::LastSeen},
     utils,
-    workflow::contracts,
+    workflow::{contracts, run_workflow_with_handler, state::WorkflowState},
 };
 
 pub async fn start_coordinator(
@@ -52,16 +53,11 @@ pub async fn start_coordinator(
     let workflow_handle =
         tokio::spawn(async move { run_workflow(workflow_state, node_config_clone, config).await });
 
-    crate::workflow::run_workflow_with_handler(
-        ActiveWorkflow::Dars(server),
-        instance,
-        workflow_handle,
-    )
-    .await
+    run_workflow_with_handler(ActiveWorkflow::Dars(server), instance, workflow_handle).await
 }
 
 async fn run_workflow(
-    workflow_state: Arc<crate::workflow::state::WorkflowState<DarsStep>>,
+    workflow_state: Arc<WorkflowState<DarsStep>>,
     node_config: NodeConfig,
     config: DarsConfig,
 ) -> Result {
@@ -74,7 +70,7 @@ async fn run_workflow(
 
         match current_step {
             DarsStep::WaitingForPeers => {
-                tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+                tokio::time::sleep(Duration::from_secs(1)).await;
             }
             DarsStep::UploadDars => {
                 // While peers are downloading, this node ONLY serves chunks
@@ -82,7 +78,7 @@ async fn run_workflow(
                 // upload is deferred to `Complete` so its CPU/IO doesn't
                 // contend with — and stall — the chunk transfer to peers on
                 // CPU-limited nodes.
-                tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+                tokio::time::sleep(Duration::from_secs(1)).await;
             }
             DarsStep::Complete => {
                 // All peers have finished downloading (the step only advances
@@ -93,7 +89,7 @@ async fn run_workflow(
                 tracing::info!("Coordinator executing: Upload DARs");
                 contracts::upload_dars(&node_config, &config.dar_files).await?;
                 tracing::info!("DARs upload workflow complete!");
-                tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+                tokio::time::sleep(Duration::from_secs(5)).await;
                 break;
             }
         }

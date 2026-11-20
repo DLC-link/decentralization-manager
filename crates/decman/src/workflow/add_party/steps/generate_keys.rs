@@ -147,6 +147,9 @@ mod tests {
             fake_admin_api::{FakeAdminApi, TestNode, VaultKey},
             key_store::KeyStore,
         },
+        workflow::{
+            onboarding::steps::generate_keys::own_new_daml_key, signing_keys::party_daml_key_name,
+        },
     };
 
     /// A refused add leaves nothing in the vault to clean up.
@@ -194,7 +197,7 @@ mod tests {
             &node.config,
             db,
             &mut VaultServiceClient::new(node.config.admin_channel().await?),
-            &crate::workflow::signing_keys::party_daml_key_name("party"),
+            &party_daml_key_name("party"),
             None,
         )
         .await?
@@ -240,7 +243,7 @@ mod tests {
             RUN.to_string(),
         );
         generate_keys(&node.config, db, RUN, &add, None).await?;
-        crate::workflow::onboarding::steps::generate_keys::own_new_daml_key(&node.config, db, RUN)
+        own_new_daml_key(&node.config, db, RUN)
             .await?
             .ok_or_else(|| anyhow::anyhow!("the run recorded no Daml key"))
     }

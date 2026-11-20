@@ -2,8 +2,11 @@
 
 use std::{
     collections::VecDeque,
-    sync::{Arc, Mutex},
-    time::Duration,
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicUsize, Ordering},
+    },
+    time::{Duration, Instant},
 };
 
 use hyper::{Body, Response};
@@ -15,8 +18,11 @@ use crate::{
     canton_id::CantonId,
     config::{NodeConfig, Peer},
     consts::MAX_CONSECUTIVE_STEP_FAILURES,
+    db::{MIGRATOR, connect},
     error::Result,
-    noise::{Message, MessageType, NoiseKeypair},
+    noise::{
+        CHUNK_SIZE, MAX_CHUNK_COUNT, MAX_CHUNKED_TOTAL_SIZE, Message, MessageType, NoiseKeypair,
+    },
     server::{DeclineInvitationPayload, WorkflowKind},
     utils,
 };
@@ -24,7 +30,7 @@ use crate::{
 /// What the scripted coordinator saw of one peer run.
 struct PeerRun {
     result: Result,
-    polls: Vec<std::time::Instant>,
+    polls: Vec<Instant>,
     completions: usize,
     /// Failure reports the peer sent after giving up.
     reports: Vec<DeclineInvitationPayload>,
@@ -38,8 +44,8 @@ async fn run_commands(kind: WorkflowKind, commands: Vec<Message>) -> Result<Peer
     let root = tempfile::tempdir()?;
     let mut node = NodeConfig::default().with_root_dir(root.path());
     node.node.participant_id = Some(CantonId::parse(&format!("peer::1220{}", "a".repeat(64)))?);
-    let db = crate::db::connect(&node.db_path()).await?;
-    crate::db::MIGRATOR.run(&db).await?;
+    let db = connect(&node.db_path()).await?;
+    MIGRATOR.run(&db).await?;
     let keys = NoiseKeypair::generate();
     tokio::fs::create_dir_all(node.data_dir()).await?;
     keys.save_to_file(node.key_file_path()).await?;
@@ -68,7 +74,7 @@ async fn run_commands(kind: WorkflowKind, commands: Vec<Message>) -> Result<Peer
     .await?;
 
     let polls = Arc::new(Mutex::new(Vec::new()));
-    let completions = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let completions = Arc::new(AtomicUsize::new(0));
     let reports = Arc::new(Mutex::new(Vec::new()));
     let commands = Arc::new(Mutex::new(VecDeque::from(commands)));
     let server_polls = polls.clone();
@@ -102,14 +108,14 @@ async fn run_commands(kind: WorkflowKind, commands: Vec<Message>) -> Result<Peer
                             polls
                                 .lock()
                                 .map_err(|_| anyhow::anyhow!("poll lock poisoned"))?
-                                .push(std::time::Instant::now());
+                                .push(Instant::now());
                             commands
                                 .lock()
                                 .map_err(|_| anyhow::anyhow!("command lock poisoned"))?
                                 .pop_front()
                                 .unwrap_or_else(|| Message::new_empty(MessageType::Disconnect))
                         } else {
-                            completions.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            completions.fetch_add(1, Ordering::Relaxed);
                             Message::new_empty(MessageType::Wait)
                         };
                         Ok::<_, anyhow::Error>(Response::new(Body::from(reply.to_bytes())))
@@ -160,7 +166,7 @@ async fn run_commands(kind: WorkflowKind, commands: Vec<Message>) -> Result<Peer
     Ok(PeerRun {
         result: outcome?,
         polls,
-        completions: completions.load(std::sync::atomic::Ordering::Relaxed),
+        completions: completions.load(Ordering::Relaxed),
         reports,
     })
 }
@@ -292,8 +298,8 @@ async fn control_messages_preserve_failures_but_completed_steps_reset_them() -> 
 #[tokio::test]
 async fn an_oversized_command_ends_the_peer_run_at_once() -> Result {
     let mut meta = MessageType::UploadDars.to_u16().to_be_bytes().to_vec();
-    meta.extend_from_slice(&u32::try_from(crate::noise::MAX_CHUNKED_TOTAL_SIZE + 1)?.to_be_bytes());
-    meta.extend_from_slice(&u32::try_from(crate::noise::MAX_CHUNK_COUNT + 1)?.to_be_bytes());
+    meta.extend_from_slice(&u32::try_from(MAX_CHUNKED_TOTAL_SIZE + 1)?.to_be_bytes());
+    meta.extend_from_slice(&u32::try_from(MAX_CHUNK_COUNT + 1)?.to_be_bytes());
     let oversized = Message::new(MessageType::ChunkedCommand, meta);
 
     let run = run_commands(WorkflowKind::Dars, vec![oversized]).await?;
@@ -327,7 +333,7 @@ async fn an_oversized_command_ends_the_peer_run_at_once() -> Result {
 #[tokio::test]
 async fn an_oversized_upload_reports_its_size_and_the_limit() -> Result {
     let size: u32 = 20_000_000;
-    let chunks = usize::try_from(size)?.div_ceil(crate::noise::CHUNK_SIZE);
+    let chunks = usize::try_from(size)?.div_ceil(CHUNK_SIZE);
     let mut meta = MessageType::UploadDars.to_u16().to_be_bytes().to_vec();
     meta.extend_from_slice(&size.to_be_bytes());
     meta.extend_from_slice(&u32::try_from(chunks)?.to_be_bytes());
@@ -344,7 +350,7 @@ async fn an_oversized_upload_reports_its_size_and_the_limit() -> Result {
     let reason = report.reason.as_deref().unwrap_or_default();
     assert!(reason.contains("20000000 bytes"), "{reason}");
     assert!(
-        reason.contains(&crate::noise::MAX_CHUNKED_TOTAL_SIZE.to_string()),
+        reason.contains(&MAX_CHUNKED_TOTAL_SIZE.to_string()),
         "{reason}"
     );
     assert!(!reason.contains("Invalid message format"), "{reason}");

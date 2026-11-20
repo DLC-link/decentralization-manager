@@ -1,3 +1,6 @@
+use std::io;
+
+use http::uri;
 use hyper::StatusCode;
 
 use super::{Message, MessageType, WIRE_VERSION};
@@ -15,7 +18,7 @@ pub enum NoiseError {
     Http(#[from] http::Error),
 
     #[error("IO error: {0}")]
-    Io(#[from] std::io::Error),
+    Io(#[from] io::Error),
 
     #[error("JSON serialization error: {0}")]
     JsonSerialization(#[from] serde_json::Error),
@@ -41,7 +44,7 @@ pub enum NoiseError {
     WireVersionMismatch { peer: u8 },
 
     #[error("Invalid URI: {0}")]
-    InvalidUri(#[from] http::uri::InvalidUri),
+    InvalidUri(#[from] uri::InvalidUri),
 
     #[error("URI parsing error: {0}")]
     UriParsingError(String),

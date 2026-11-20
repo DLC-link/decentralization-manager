@@ -24,6 +24,7 @@ use crate::{
     config::NodeConfig,
     consts::topology_propagation_delay_secs,
     error::Result,
+    signing::custody,
     utils,
     workflow::{storage::WorkflowStorage, topology_version},
 };
@@ -244,7 +245,7 @@ pub async fn sign_dns_p2p_proposals(
         );
     }
     if let Some(own_new_key) = own_new_key {
-        crate::signing::custody::sign_with_generated_key(
+        custody::sign_with_generated_key(
             config,
             storage,
             &mut response.transactions[1],

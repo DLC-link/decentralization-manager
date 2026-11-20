@@ -7,6 +7,7 @@ use canton_proto_rs::com::{
         ListPackagesRequest, PackageDescription, package_service_client::PackageServiceClient,
     },
 };
+use common::api::ContractDeploymentIntent;
 use decman_lib::canton_hash;
 use sqlx::SqlitePool;
 
@@ -15,6 +16,7 @@ use crate::{
     config::NodeConfig,
     db::schema::SchemaRead,
     error::Result,
+    server::compare_versions,
     utils,
     workflow::{
         contracts::{CommittedDeployment, ContractDefinition, ContractsConfig, FieldDefinition},
@@ -55,7 +57,7 @@ fn resolve_package_id(reference: &str, packages: &[PackageDescription]) -> Resul
         return Ok(reference.to_ascii_lowercase());
     };
     let mut matches: Vec<_> = packages.iter().filter(|p| p.name == name).collect();
-    matches.sort_by(|a, b| crate::server::compare_versions(&b.version, &a.version));
+    matches.sort_by(|a, b| compare_versions(&b.version, &a.version));
     let selected = matches
         .first()
         .ok_or_else(|| anyhow::anyhow!("Package {reference} is not installed"))?;
@@ -281,7 +283,7 @@ pub async fn commit_deployment(
                         .collect::<Result<Vec<_>>>()?,
                 })),
             };
-            Ok(common::api::ContractDeploymentIntent {
+            Ok(ContractDeploymentIntent {
                 package_id: contract.package_id.clone(),
                 module_name: contract.module_name.clone(),
                 entity_name: contract.entity_name.clone(),

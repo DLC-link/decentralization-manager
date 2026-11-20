@@ -78,7 +78,7 @@ pub(super) fn require_live_source(
 pub async fn submit_add_hosts(
     config: &NodeConfig,
     bundle: &ExternalPartyAddHostsPayload,
-) -> std::result::Result<u32, AddHostsError> {
+) -> Result<u32, AddHostsError> {
     let current = read_current(config, &bundle.party_id).await?;
     require_live_source(config, &current).map_err(AddHostsError::Invalid)?;
     // Split out from the rest of validation: a pin that has moved is a race the

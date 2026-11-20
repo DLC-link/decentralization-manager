@@ -1,6 +1,7 @@
 use std::{collections::HashSet, sync::Arc};
 
 use anyhow::Context;
+use tokio::time::Duration;
 
 use super::{
     RotateKeyConfig, RotateKeyStep,
@@ -13,7 +14,11 @@ use crate::{
     noise::server::{ActiveWorkflow, NoiseServer},
     server::{WorkflowInstance, peer_status::LastSeen},
     utils,
-    workflow::storage::{WorkflowStorage, artifact_kinds},
+    workflow::{
+        run_workflow_with_handler,
+        storage::{WorkflowStorage, artifact_kinds},
+        topology::retire_legacy_keys_and_wait,
+    },
 };
 
 pub async fn start_coordinator(
@@ -56,7 +61,7 @@ pub async fn start_coordinator(
 
                 match current_step {
                     RotateKeyStep::WaitingForPeers => {
-                        tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+                        tokio::time::sleep(Duration::from_secs(1)).await;
                     }
                     // The payload is set before each of these steps starts. A
                     // resumed coordinator holds none, so it rebuilds it here.
@@ -69,7 +74,7 @@ pub async fn start_coordinator(
                             };
                             workflow_state.set_command_payload(payload).await;
                         }
-                        tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+                        tokio::time::sleep(Duration::from_secs(1)).await;
                     }
                     RotateKeyStep::GenerateKey => {
                         if completed.insert(RotateKeyStep::GenerateKey) {
@@ -77,7 +82,7 @@ pub async fn start_coordinator(
                             generate_key(&node_config, &db, &instance_name, &rotate_config).await?;
                             workflow_state.advance_step().await;
                         }
-                        tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+                        tokio::time::sleep(Duration::from_secs(1)).await;
                     }
                     RotateKeyStep::CreateProposal => {
                         tracing::info!("Coordinator executing: Create proposal");
@@ -101,7 +106,7 @@ pub async fn start_coordinator(
                         workflow_state.advance_step().await;
                     }
                     RotateKeyStep::RetireLegacyKeys => {
-                        crate::workflow::topology::retire_legacy_keys_and_wait(
+                        retire_legacy_keys_and_wait(
                             &node_config,
                             &rotate_config.decentralized_party_id,
                         )
@@ -113,7 +118,7 @@ pub async fn start_coordinator(
                     }
                     RotateKeyStep::Complete => {
                         tracing::info!("Rotate-key workflow complete!");
-                        tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+                        tokio::time::sleep(Duration::from_secs(2)).await;
                         break;
                     }
                 }
@@ -123,7 +128,7 @@ pub async fn start_coordinator(
         })
     };
 
-    crate::workflow::run_workflow_with_handler(
+    run_workflow_with_handler(
         ActiveWorkflow::RotateKey(server),
         instance,
         coordinator_workflow,
@@ -185,6 +190,8 @@ async fn record_payload(db: &sqlx::SqlitePool, instance_name: &str) -> Result<Ve
 
 #[cfg(test)]
 mod tests {
+    use common::types::{WorkflowKind, WorkflowRole};
+
     use super::*;
     use crate::canton_id::{NAMESPACE_LENGTH, Namespace};
 
@@ -202,8 +209,8 @@ mod tests {
              VALUES (?, ?, ?, 'inprogress', 'Submit', 4, 8, '{}', '[]', '[]', 0, 0)",
         )
         .bind(RUN)
-        .bind(common::types::WorkflowKind::RotateKey.as_str())
-        .bind(common::types::WorkflowRole::Coordinator.as_str())
+        .bind(WorkflowKind::RotateKey.as_str())
+        .bind(WorkflowRole::Coordinator.as_str())
         .execute(db)
         .await?;
         Ok(())

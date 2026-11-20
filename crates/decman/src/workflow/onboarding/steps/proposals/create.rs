@@ -19,6 +19,7 @@ use crate::{
     canton_id::CantonId,
     config::NodeConfig,
     error::Result,
+    signing::custody,
     utils::{self, MULTIHASH_SHA256_PREFIX},
     workflow::{
         onboarding::{OnboardingConfig, steps::generate_keys::own_new_daml_key},
@@ -310,7 +311,7 @@ async fn record_party(
         count = owners.payloads.len()
     );
     // Before any topology change, so a failure leaves nothing on chain.
-    crate::signing::custody::file_new_party_key(config, storage, &party_id).await?;
+    custody::file_new_party_key(config, storage, &party_id).await?;
 
     Ok(party_id_str)
 }
@@ -411,13 +412,7 @@ async fn authorize_proposals(
     // The vault signed with this node's Daml key if it holds it. A key DecMan
     // generated needs DecMan's own signature.
     if let Some(own_key) = own_new_daml_key(config, storage, instance_name).await? {
-        crate::signing::custody::sign_with_generated_key(
-            config,
-            storage,
-            &mut p2p_transaction,
-            &own_key,
-        )
-        .await?;
+        custody::sign_with_generated_key(config, storage, &mut p2p_transaction, &own_key).await?;
     }
 
     Ok((dns_transaction, p2p_transaction))

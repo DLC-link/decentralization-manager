@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashSet};
 
 use canton_proto_rs::com::digitalasset::canton::protocol::v30::SignedTopologyTransaction;
 use sqlx::SqlitePool;
@@ -98,7 +98,7 @@ impl PeerExpectations {
 
         self.check_threshold("namespace", namespace_def.threshold, owners.len())?;
 
-        let owner_set: std::collections::HashSet<String> = owners.iter().cloned().collect();
+        let owner_set: HashSet<String> = owners.iter().cloned().collect();
         let computed = compute_decentralized_namespace(&owner_set);
         if computed != namespace_def.decentralized_namespace {
             anyhow::bail!(

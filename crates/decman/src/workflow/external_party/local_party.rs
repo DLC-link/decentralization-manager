@@ -137,7 +137,7 @@ pub async fn prepare_adoption(
     party_id: &str,
     public_key: &[u8; 32],
     base_serial: u32,
-) -> std::result::Result<PreparedAdoption, AddHostsError> {
+) -> Result<PreparedAdoption, AddHostsError> {
     if !is_local_to(config, party_id) {
         return Err(AddHostsError::Invalid(anyhow::anyhow!(
             "{party_id} is not local to this participant; only the node whose namespace owns a \
@@ -278,7 +278,7 @@ pub fn validate_adoption_topology(
 pub async fn submit_adoption(
     config: &NodeConfig,
     bundle: &LocalPartyAdoptionPayload,
-) -> std::result::Result<u32, AddHostsError> {
+) -> Result<u32, AddHostsError> {
     let current = read_pinned(config, &bundle.party_id, bundle.base_serial).await?;
     validate_adoption_topology(config, &current, bundle).map_err(AddHostsError::Invalid)?;
 

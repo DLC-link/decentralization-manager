@@ -174,9 +174,7 @@ async fn offline_manual(config: &NodeConfig) -> Result<bool> {
             }))
 }
 
-pub(super) async fn ensure_connected(
-    config: &NodeConfig,
-) -> std::result::Result<(), AddHostsError> {
+pub(super) async fn ensure_connected(config: &NodeConfig) -> Result<(), AddHostsError> {
     let mut client = SynchronizerConnectivityServiceClient::new(
         config
             .admin_channel()
@@ -218,7 +216,7 @@ pub(super) async fn check_joiner_readiness(
     config: &NodeConfig,
     db: &SqlitePool,
     target: &ReplicationTarget,
-) -> std::result::Result<(), AddHostsError> {
+) -> Result<(), AddHostsError> {
     if db
         .get_acs_import_quarantine(&target.party_id, &target.target_participant_id)
         .await
@@ -359,7 +357,7 @@ async fn return_staged(
     db: &SqlitePool,
     target: &ReplicationTarget,
     staged: Staged,
-) -> std::result::Result<Vec<Vec<u8>>, AddHostsError> {
+) -> Result<Vec<Vec<u8>>, AddHostsError> {
     if import_window_owner(db, config.participant_id())
         .await
         .map_err(AddHostsError::Canton)?
@@ -390,7 +388,7 @@ async fn return_staged(
     Ok(staged.signed_transactions)
 }
 
-async fn ensure_offline(config: &NodeConfig) -> std::result::Result<(), AddHostsError> {
+async fn ensure_offline(config: &NodeConfig) -> Result<(), AddHostsError> {
     if !offline_manual(config)
         .await
         .map_err(AddHostsError::Canton)?
@@ -415,7 +413,7 @@ pub async fn stage_add_hosts(
     new_hosts: &[CantonId],
     permission: HostPermission,
     base_serial: u32,
-) -> std::result::Result<Vec<Vec<u8>>, AddHostsError> {
+) -> Result<Vec<Vec<u8>>, AddHostsError> {
     let target = replication_target(party_id, config.participant_id(), base_serial)
         .map_err(AddHostsError::Invalid)?;
     if db
@@ -530,7 +528,7 @@ pub async fn publish_add_hosts(
     permission: HostPermission,
     base_serial: u32,
     signed_transactions: &[Vec<u8>],
-) -> std::result::Result<u32, AddHostsError> {
+) -> Result<u32, AddHostsError> {
     let current = read_current(config, party_id).await?;
     require_live_source(config, &current).map_err(AddHostsError::Invalid)?;
     if signed_transactions.is_empty() {

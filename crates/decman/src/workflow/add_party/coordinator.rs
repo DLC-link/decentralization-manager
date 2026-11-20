@@ -1,7 +1,8 @@
-use std::sync::Arc;
+use std::{future::Future, sync::Arc};
 
 use anyhow::Context;
 use sqlx::SqlitePool;
+use tokio::time::Duration;
 
 use super::{
     AddPartyConfig, AddPartyStep, resolve_ledger_token,
@@ -18,11 +19,13 @@ use crate::{
         party_replication::{
             collect_party_package_ids, open_export_session, wait_for_flag_cleared,
         },
+        run_workflow_with_handler,
         signature_pairs::{
             peers_without_artifact, save_signature_pairs as save_recorded_signature_pairs,
         },
         state::WorkflowState,
         storage::{WorkflowStorage, artifact_kinds, identity_kinds},
+        topology::retire_legacy_keys_and_wait,
     },
 };
 
@@ -72,12 +75,7 @@ pub async fn start_coordinator(
         .await
     });
 
-    crate::workflow::run_workflow_with_handler(
-        ActiveWorkflow::AddParty(server),
-        instance,
-        workflow_handle,
-    )
-    .await
+    run_workflow_with_handler(ActiveWorkflow::AddParty(server), instance, workflow_handle).await
 }
 
 async fn run_workflow(
@@ -103,7 +101,7 @@ async fn run_workflow(
             | AddPartyStep::SignClearOnboarding => {
                 // Peer-gated (or connection-gated) — the listener advances the
                 // state as peers report in; the coordinator just idles.
-                tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+                tokio::time::sleep(Duration::from_secs(1)).await;
             }
             AddPartyStep::SyncAcs => {
                 // Peer-gated like the arm above, but two things a resumed
@@ -141,7 +139,7 @@ async fn run_workflow(
                         .set_acs_export(add_party_config.new_participant_id.clone(), session)
                         .await;
                 }
-                tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+                tokio::time::sleep(Duration::from_secs(1)).await;
             }
             AddPartyStep::ExportState => {
                 tracing::info!("Coordinator executing: Export state");
@@ -289,17 +287,14 @@ async fn run_workflow(
                 workflow_state.advance_step().await;
             }
             AddPartyStep::RetireLegacyKeys => {
-                crate::workflow::topology::retire_legacy_keys_and_wait(
-                    &node_config,
-                    &add_party_config.decentralized_party_id,
-                )
-                .await?;
+                retire_legacy_keys_and_wait(&node_config, &add_party_config.decentralized_party_id)
+                    .await?;
                 workflow_state.advance_step().await;
             }
             AddPartyStep::Complete => {
                 tracing::info!("Add-party workflow complete!");
                 tracing::debug!("Waiting for peers to receive Disconnect command...");
-                tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+                tokio::time::sleep(Duration::from_secs(2)).await;
                 break;
             }
         }
@@ -312,7 +307,7 @@ async fn run_workflow(
 /// Both missing uploads and explicit empty markers require ledger confirmation.
 async fn confirmed_clearing_proposal(
     uploaded: Option<Vec<u8>>,
-    verify_cleared: impl std::future::Future<Output = Result>,
+    verify_cleared: impl Future<Output = Result>,
 ) -> Result<Vec<u8>> {
     match uploaded {
         Some(proposal) if !proposal.is_empty() => Ok(proposal),

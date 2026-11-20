@@ -1,5 +1,7 @@
 //! The external parties this participant hosts, read from its own topology.
 
+use std::collections::HashSet;
+
 use canton_proto_rs::com::digitalasset::canton::{
     protocol::v30::enums::ParticipantPermission,
     topology::admin::v30::topology_manager_read_service_client::TopologyManagerReadServiceClient,
@@ -66,7 +68,7 @@ pub async fn list_hosted_external_parties(config: &NodeConfig) -> Result<Vec<Hos
     let mut client = TopologyManagerReadServiceClient::new(config.admin_channel().await?)
         .max_decoding_message_size(utils::MAX_GRPC_MESSAGE_SIZE);
 
-    let decentralized: std::collections::HashSet<String> = client
+    let decentralized: HashSet<String> = client
         .list_decentralized_namespace_definition(tonic::Request::new(
             build_decentralized_namespace_request(&synchronizer_id, ""),
         ))

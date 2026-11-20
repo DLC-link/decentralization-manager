@@ -18,6 +18,7 @@
 
 use std::{
     convert::Infallible,
+    future::Ready,
     sync::{Arc, Mutex, MutexGuard},
 };
 
@@ -52,11 +53,11 @@ use canton_proto_rs::com::digitalasset::canton::{
     },
     version::v1::{UntypedVersionedMessage, untyped_versioned_message},
 };
-use p256::pkcs8::EncodePublicKey;
+use p256::{ecdsa, pkcs8::EncodePublicKey};
 use prost::Message;
 use sqlx::SqlitePool;
 use tempfile::TempDir;
-use tokio::task::JoinHandle;
+use tokio::{net::TcpListener, task::JoinHandle};
 use tonic::{
     Request, Response, Status,
     body::Body,
@@ -134,7 +135,7 @@ impl VaultKey {
 
     /// A P-256 key held in AWS KMS.
     pub fn kms(name: &str, seed: u8) -> Result<Self> {
-        let signing_key = p256::ecdsa::SigningKey::from_slice(&[seed; 32])?;
+        let signing_key = ecdsa::SigningKey::from_slice(&[seed; 32])?;
         let spki = signing_key.verifying_key().to_public_key_der()?;
         Ok(Self {
             name: name.to_string(),
@@ -498,7 +499,7 @@ impl FakeAdminApi {
             topology: Topology::default(),
             authorized: Vec::new(),
         }));
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
         let port = listener.local_addr()?.port();
         let router = Server::builder()
             .add_service(VaultService(vault.clone()))
@@ -635,7 +636,7 @@ where
 {
     type Response = Response<Resp>;
     type Error = Status;
-    type Future = std::future::Ready<Result<Response<Resp>, Status>>;
+    type Future = Ready<Result<Response<Resp>, Status>>;
 
     fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Status>> {
         Poll::Ready(Ok(()))

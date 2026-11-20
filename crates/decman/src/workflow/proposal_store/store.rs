@@ -9,6 +9,7 @@ use canton_proto_rs::com::digitalasset::canton::topology::admin::v30::{
     topology_manager_read_service_client::TopologyManagerReadServiceClient,
     topology_manager_write_service_client::TopologyManagerWriteServiceClient,
 };
+use tokio::runtime::Handle;
 use tonic::transport::Channel;
 
 use crate::{config::NodeConfig, error::Result};
@@ -153,7 +154,7 @@ impl<A: StoreAdmin> Drop for ProposalStore<A> {
         }
         let admin = self.admin.clone();
         let name = std::mem::take(&mut self.name);
-        match tokio::runtime::Handle::try_current() {
+        match Handle::try_current() {
             Ok(runtime) => {
                 runtime.spawn(async move {
                     match admin.drop_store(&name).await {
@@ -275,6 +276,8 @@ mod tests {
         time::Duration,
     };
 
+    use tokio::sync::Notify;
+
     use super::*;
 
     /// A participant's temporary stores, kept in memory, with every call
@@ -391,7 +394,7 @@ mod tests {
     #[tokio::test]
     async fn the_store_is_dropped_when_the_run_is_cancelled() -> Result {
         let recorder = Recorder::default();
-        let created = Arc::new(tokio::sync::Notify::new());
+        let created = Arc::new(Notify::new());
         let task = tokio::spawn({
             let (recorder, created) = (recorder.clone(), created.clone());
             async move {

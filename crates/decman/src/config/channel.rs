@@ -1,5 +1,8 @@
+use std::time::Duration;
+
 use anyhow::Context;
-use tonic::transport::{Certificate, Channel, ClientTlsConfig, Endpoint, Identity};
+use tokio::net::TcpStream;
+use tonic::transport::{Certificate, Channel, ClientTlsConfig, Endpoint, Identity, Uri};
 
 use super::CantonTlsConfig;
 use crate::error::Result;
@@ -53,10 +56,10 @@ async fn client_tls_config(tls: &CantonTlsConfig, label: &str) -> Result<ClientT
 }
 
 /// How long a gRPC channel may take to establish before it is a failure.
-const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// How long the reachability probe in [`connect_advice`] waits.
-const TCP_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+const TCP_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Whether a plain TCP connect to `uri` succeeds.
 ///
@@ -64,7 +67,7 @@ const TCP_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2)
 /// opaque transport error, and reading its source chain only works while its
 /// internals keep exposing one. A TCP connect is direct evidence instead: if
 /// even that fails, nothing is listening and TLS cannot be the problem.
-async fn tcp_reachable(uri: &tonic::transport::Uri) -> bool {
+async fn tcp_reachable(uri: &Uri) -> bool {
     let Some(host) = uri.host() else {
         return true;
     };
@@ -78,11 +81,7 @@ async fn tcp_reachable(uri: &tonic::transport::Uri) -> bool {
     });
 
     matches!(
-        tokio::time::timeout(
-            TCP_PROBE_TIMEOUT,
-            tokio::net::TcpStream::connect((host, port)),
-        )
-        .await,
+        tokio::time::timeout(TCP_PROBE_TIMEOUT, TcpStream::connect((host, port)),).await,
         Ok(Ok(_))
     )
 }
@@ -154,6 +153,9 @@ pub(super) async fn connect_channel(
 
 #[cfg(test)]
 mod tests {
+    use tokio::net::TcpListener;
+    use tonic::transport::Uri;
+
     use super::*;
 
     /// A port nothing listens on, so `connect` fails immediately and the test
@@ -233,9 +235,9 @@ mod tests {
     /// endpoint.
     #[tokio::test]
     async fn a_listening_ipv6_endpoint_is_reachable() -> anyhow::Result<()> {
-        let listener = tokio::net::TcpListener::bind("[::1]:0").await?;
+        let listener = TcpListener::bind("[::1]:0").await?;
         let port = listener.local_addr()?.port();
-        let uri: tonic::transport::Uri = format!("http://[::1]:{port}").parse()?;
+        let uri: Uri = format!("http://[::1]:{port}").parse()?;
 
         assert!(
             tcp_reachable(&uri).await,

@@ -1,4 +1,5 @@
 use sqlx::SqlitePool;
+use tokio::time::Duration;
 
 use super::{
     failure::{record_signature_upload, report_departure, retry_peer_step},
@@ -10,6 +11,7 @@ use super::{
 };
 use crate::{
     auth::WorkflowAuth,
+    canton_id::Fingerprint,
     config::{NodeConfig, Peer},
     consts::{MAX_CONSECUTIVE_NO_WORKFLOW_POLLS, peer_wait_poll_delay_ms},
     error::Result,
@@ -140,7 +142,7 @@ async fn run_peer(
                         "Poll {consecutive_no_workflow}/{MAX_CONSECUTIVE_NO_WORKFLOW_POLLS}: \
                          coordinator has no active workflow yet, retrying"
                     );
-                    tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+                    tokio::time::sleep(Duration::from_secs(5)).await;
                     continue;
                 }
 
@@ -172,7 +174,7 @@ async fn run_peer(
                     );
                 }
 
-                tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+                tokio::time::sleep(Duration::from_secs(5)).await;
                 continue;
             }
         };
@@ -203,8 +205,7 @@ async fn run_peer(
             MessageType::Wait => {
                 tracing::trace!("Received command: Wait");
                 // Coordinator says to wait, poll again after delay
-                tokio::time::sleep(tokio::time::Duration::from_millis(peer_wait_poll_delay_ms()))
-                    .await;
+                tokio::time::sleep(Duration::from_millis(peer_wait_poll_delay_ms())).await;
             }
             MessageType::RetireLegacyKeys => {
                 // The target comes from the accepted invitation, never this command's payload.
@@ -736,7 +737,7 @@ async fn run_peer(
                             rotate_key::steps::decode_recorded_key(&payload),
                             String::from_utf8(accepted)
                                 .map_err(anyhow::Error::from)
-                                .and_then(|key| key.parse::<crate::canton_id::Fingerprint>()),
+                                .and_then(|key| key.parse::<Fingerprint>()),
                         ) {
                             (Ok(new_key), Ok(accepted)) => {
                                 rotate_key::steps::record_peer_key(

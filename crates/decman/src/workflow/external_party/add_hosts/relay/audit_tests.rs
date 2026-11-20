@@ -1,7 +1,9 @@
 #![allow(deprecated)] // The supported Canton releases expose ListAll.
 
 use std::{
+    collections::VecDeque,
     convert::Infallible,
+    net::TcpListener,
     sync::{Arc, Mutex},
 };
 
@@ -34,7 +36,7 @@ use hyper::{
     service::{make_service_fn, service_fn},
 };
 use sha2::{Digest, Sha256};
-use tokio::sync::Notify;
+use tokio::{sync::Notify, task::JoinHandle};
 
 use super::super::prepare_add_hosts;
 use super::*;
@@ -78,7 +80,7 @@ struct Connectivity {
 struct CantonBoundary {
     config: NodeConfig,
     state: Arc<Mutex<Connectivity>>,
-    task: tokio::task::JoinHandle<()>,
+    task: JoinHandle<()>,
 }
 
 impl Drop for CantonBoundary {
@@ -89,7 +91,7 @@ impl Drop for CantonBoundary {
 
 impl CantonBoundary {
     fn new(connected: bool, manual: bool) -> Result<Self> {
-        let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
+        let listener = TcpListener::bind("127.0.0.1:0")?;
         listener.set_nonblocking(true)?;
         let mut config = NodeConfig::default();
         config.node.participant_id = Some(participant(2));
@@ -676,7 +678,7 @@ async fn a_failed_staged_import_keeps_the_participant_offline_and_retains_owners
         total_len: bytes.len() as u64,
         sha256: hex::encode(Sha256::digest(&bytes)),
     };
-    let mut blocks = std::collections::VecDeque::from([
+    let mut blocks = VecDeque::from([
         PipeBlock::Data { seq: 1, bytes },
         PipeBlock::End { seq: 2, trailer },
     ]);
@@ -818,7 +820,7 @@ async fn a_cancelled_final_http_request_still_releases_successful_import_ownersh
             .to_request(),
     )
     .await;
-    assert_eq!(response.status(), actix_web::http::StatusCode::OK);
+    assert_eq!(response.status(), StatusCode::OK);
     let body: serde_json::Value = actix_test::read_body_json(response).await;
     assert_eq!(body["complete"], true);
     assert_eq!(body["marker_cleared"], true);
