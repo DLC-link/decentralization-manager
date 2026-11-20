@@ -6,14 +6,14 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::Line;
 use ratatui::widgets::Paragraph;
 
-use crate::app::{App, Overlay, Tab, TabView};
+use crate::app::{App, MemberChange, Overlay, Tab, TabView};
 use crate::logo;
 
 use crate::ui::detail::draw_party_detail;
-use crate::ui::popups::{add_party_popup, auth_popup, chain_audit_popup, change_threshold_popup};
+use crate::ui::popups::{auth_popup, chain_audit_popup, change_threshold_popup};
 use crate::ui::popups::{compare_popup, composer_pick_popup, composer_popup, deploy_popup};
 use crate::ui::popups::{feed_detail_popup, governance_popup, grant_popup, json_popup};
-use crate::ui::popups::{kick_popup, message_popup, network_edit_popup, node_info_popup};
+use crate::ui::popups::{member_change_popup, message_popup, network_edit_popup, node_info_popup};
 use crate::ui::popups::{onboard_popup, party_config_popup, peer_select_popup, rotate_key_popup};
 use crate::ui::tabs::{draw_dars, draw_feed, draw_parties, draw_peers, summary_line, tab_block};
 
@@ -46,8 +46,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         }
         let hint = match app.overlay() {
             Overlay::Json { .. } | Overlay::ChainAudit { .. } => " ↑/↓ scroll · esc close",
-            Overlay::Kick(_) => " ↑/↓ pick · ←/→ threshold · enter kick · esc cancel",
-            Overlay::AddParty(_) => " ↑/↓ pick · ←/→ threshold · enter add · esc cancel",
+            Overlay::MemberChange(form) => member_change_hint(form.kind),
             Overlay::ChangeThreshold(_) => " ←/→ threshold · enter apply · esc cancel",
             Overlay::RotateKey(_) => " enter rotate · esc cancel",
             Overlay::Governance(_) => {
@@ -153,6 +152,14 @@ pub fn draw_header(frame: &mut Frame, area: Rect, version: Option<&str>) {
     frame.render_widget(Paragraph::new(lines).alignment(Alignment::Center), area);
 }
 
+/// The footer hint of the kick and add-party forms.
+fn member_change_hint(kind: MemberChange) -> &'static str {
+    match kind {
+        MemberChange::Kick => " ↑/↓ pick · ←/→ threshold · enter kick · esc cancel",
+        MemberChange::Add => " ↑/↓ pick · ←/→ threshold · enter add · esc cancel",
+    }
+}
+
 /// Context-sensitive key hints for the footer, based on the active tab, any
 /// open overlay, and whether logout is available.
 fn footer_hint(active: Tab, overlay: &Overlay, can_logout: bool) -> String {
@@ -167,8 +174,7 @@ fn footer_hint(active: Tab, overlay: &Overlay, can_logout: bool) -> String {
         Overlay::Onboard(_) => {
             " ↑/↓ field · space toggle peer · enter start · esc cancel".to_owned()
         }
-        Overlay::Kick(_) => " ↑/↓ pick · ←/→ threshold · enter kick · esc cancel".to_owned(),
-        Overlay::AddParty(_) => " ↑/↓ pick · ←/→ threshold · enter add · esc cancel".to_owned(),
+        Overlay::MemberChange(form) => member_change_hint(form.kind).to_owned(),
         Overlay::ChangeThreshold(_) => " ←/→ threshold · enter apply · esc cancel".to_owned(),
         Overlay::RotateKey(_) => " enter rotate · esc cancel".to_owned(),
         Overlay::Auth { .. } => " ↑/↓ select · t test · g grant · e config · esc close".to_owned(),
@@ -251,8 +257,7 @@ pub fn draw_overlay(frame: &mut Frame, area: Rect, overlay: &Overlay, spinner: &
         }
         Overlay::Json { value, scroll } => json_popup(frame, area, value, *scroll),
         Overlay::Onboard(form) => onboard_popup(frame, area, form),
-        Overlay::Kick(form) => kick_popup(frame, area, form),
-        Overlay::AddParty(form) => add_party_popup(frame, area, form),
+        Overlay::MemberChange(form) => member_change_popup(frame, area, form),
         Overlay::ChangeThreshold(form) => change_threshold_popup(frame, area, form),
         Overlay::RotateKey(form) => rotate_key_popup(frame, area, form),
         Overlay::FeedDetail { item, scroll } => feed_detail_popup(frame, area, item, *scroll),
