@@ -80,7 +80,10 @@ impl AddPartyConfig {
     /// Namespace key name for the new member — same derivation onboarding
     /// uses, so a member added later is indistinguishable from a founding one.
     pub fn namespace_key_name(&self) -> String {
-        format!("{}-namespace", self.decentralized_party_id.prefix)
+        format!(
+            "{prefix}-namespace",
+            prefix = self.decentralized_party_id.prefix
+        )
     }
 
     /// This run's replication, addressed the way the party-type-agnostic core
@@ -109,8 +112,8 @@ mod tests {
     #[test]
     fn a_config_persisted_before_the_confirmation_threshold_still_decodes() -> Result {
         let config: AddPartyConfig = serde_json::from_value(serde_json::json!({
-            "decentralized_party_id": format!("xyz::1220{}", "ab".repeat(32)),
-            "new_participant_id": format!("p4::1220{}", "cd".repeat(32)),
+            "decentralized_party_id": format!("xyz::1220{digest}", digest = "ab".repeat(32)),
+            "new_participant_id": format!("p4::1220{digest}", digest = "cd".repeat(32)),
             "new_threshold": 2,
             "previous_threshold": 2,
             "instance_name": "xyz-add-party-1",

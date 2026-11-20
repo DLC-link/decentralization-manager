@@ -266,7 +266,7 @@ mod tests {
     };
 
     fn canton_id(prefix: &str, tag: u8) -> CantonId {
-        let namespace = format!("1220{}", format!("{tag:02x}").repeat(32));
+        let namespace = format!("1220{digest}", digest = format!("{tag:02x}").repeat(32));
         match CantonId::parse(&format!("{prefix}::{namespace}")) {
             Ok(id) => id,
             Err(e) => panic!("test id must parse: {e}"),

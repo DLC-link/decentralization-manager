@@ -160,8 +160,8 @@ async fn require_every_signature(
     }
     missing.sort();
     anyhow::bail!(
-        "No rotate-key signature on record from {}. Start a new rotation.",
-        missing.join(", ")
+        "No rotate-key signature on record from {missing}. Start a new rotation.",
+        missing = missing.join(", ")
     )
 }
 

@@ -499,8 +499,8 @@ pub async fn log_rule_at_boot(config: &NodeConfig, db: &SqlitePool) {
             Err(e) => {
                 tracing::debug!(
                     "The participant is not ready for the party key rule check: {e:#}. \
-                     Retrying in {}s",
-                    wait.as_secs()
+                     Retrying in {secs}s",
+                    secs = wait.as_secs()
                 );
                 tokio::time::sleep(wait).await;
                 wait = (wait * 2).min(Duration::from_secs(300));
@@ -990,7 +990,10 @@ mod against_a_vault {
         )?;
 
         assert!(
-            error.contains(&format!("software key {}", old.fingerprint())),
+            error.contains(&format!(
+                "software key {fingerprint}",
+                fingerprint = old.fingerprint()
+            )),
             "{error}"
         );
         assert!(error.contains("moved to KMS"), "{error}");
@@ -1102,7 +1105,10 @@ mod against_a_vault {
         assert!(sign_with_generated_key(&node.config, &db, &mut transaction, &key).await?);
 
         let [signature] = transaction.signatures.as_slice() else {
-            anyhow::bail!("expected one signature, got {:?}", transaction.signatures);
+            anyhow::bail!(
+                "expected one signature, got {signatures:?}",
+                signatures = transaction.signatures
+            );
         };
         assert_eq!(signature.signed_by, compute_fingerprint(&key).to_string());
         let verifying = ed25519_dalek::VerifyingKey::from_bytes(&ed25519_public_key(&key)?)?;
@@ -1293,7 +1299,10 @@ mod against_a_vault {
         );
 
         let [signature] = transaction.signatures.as_slice() else {
-            anyhow::bail!("expected one signature, got {:?}", transaction.signatures);
+            anyhow::bail!(
+                "expected one signature, got {signatures:?}",
+                signatures = transaction.signatures
+            );
         };
         assert_eq!(signature.signed_by, compute_fingerprint(&key).to_string());
         Ok(())

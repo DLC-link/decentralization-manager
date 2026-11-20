@@ -611,7 +611,10 @@ mod tests {
             let fake = FakeAdminApi::start(vec![old.clone()]).await?;
             let node = fake.node(SoftwareKeys::Stored, true).await?;
             let rotate = rotation(&db, &old).await?;
-            let name = format!("party-daml-transactions-rotated-from-{}", old.fingerprint());
+            let name = format!(
+                "party-daml-transactions-rotated-from-{fingerprint}",
+                fingerprint = old.fingerprint()
+            );
 
             generate_key(&node.config, &db, RUN, &rotate).await?;
             let first = new_key_artifact(&db).await?;

@@ -79,19 +79,18 @@ impl NoiseKeypair {
         // never lives in a non-zeroizing `String`. The decoded 32-byte secret
         // is also held in a zeroizing buffer before being moved into
         // `NoiseSecretKey`.
-        let raw = Zeroizing::new(
-            tokio::fs::read(path)
-                .await
-                .with_context(|| format!("Failed to read key file '{}'", path.display()))?,
-        );
+        let raw =
+            Zeroizing::new(tokio::fs::read(path).await.with_context(|| {
+                format!("Failed to read key file '{path}'", path = path.display())
+            })?);
         let hex_str = std::str::from_utf8(&raw)
-            .with_context(|| format!("Key file '{}' is not UTF-8", path.display()))?
+            .with_context(|| format!("Key file '{path}' is not UTF-8", path = path.display()))?
             .trim();
         let decoded = Zeroizing::new(hex::decode(hex_str)?);
         let bytes: [u8; 32] = decoded.as_slice().try_into().map_err(|_| {
             anyhow::anyhow!(
-                "Key file '{}' did not contain 32 bytes of hex",
-                path.display()
+                "Key file '{path}' did not contain 32 bytes of hex",
+                path = path.display()
             )
         })?;
         let secret_key = NoiseSecretKey::from_bytes(bytes)?;
@@ -111,9 +110,12 @@ impl NoiseKeypair {
         let path = path.as_ref();
 
         if let Some(parent) = path.parent() {
-            tokio::fs::create_dir_all(parent)
-                .await
-                .with_context(|| format!("Failed to create directory '{}'", parent.display()))?;
+            tokio::fs::create_dir_all(parent).await.with_context(|| {
+                format!(
+                    "Failed to create directory '{parent}'",
+                    parent = parent.display()
+                )
+            })?;
         }
 
         let hex_string = self.secret_key.as_hex();
@@ -128,7 +130,10 @@ impl NoiseKeypair {
                 tokio::fs::set_permissions(path, Permissions::from_mode(0o600))
                     .await
                     .with_context(|| {
-                        format!("Failed to chmod existing key file '{}'", path.display())
+                        format!(
+                            "Failed to chmod existing key file '{path}'",
+                            path = path.display()
+                        )
                     })?;
             }
             let mut file = OpenOptions::new()
@@ -138,19 +143,25 @@ impl NoiseKeypair {
                 .mode(0o600)
                 .open(path)
                 .await
-                .with_context(|| format!("Failed to open key file '{}'", path.display()))?;
+                .with_context(|| {
+                    format!("Failed to open key file '{path}'", path = path.display())
+                })?;
             file.write_all(hex_string.as_bytes())
                 .await
-                .with_context(|| format!("Failed to write key file '{}'", path.display()))?;
-            file.sync_all()
-                .await
-                .with_context(|| format!("Failed to sync key file '{}'", path.display()))?;
+                .with_context(|| {
+                    format!("Failed to write key file '{path}'", path = path.display())
+                })?;
+            file.sync_all().await.with_context(|| {
+                format!("Failed to sync key file '{path}'", path = path.display())
+            })?;
         }
         #[cfg(not(unix))]
         {
             tokio::fs::write(path, hex_string.as_bytes())
                 .await
-                .with_context(|| format!("Failed to write key file '{}'", path.display()))?;
+                .with_context(|| {
+                    format!("Failed to write key file '{path}'", path = path.display())
+                })?;
         }
 
         Ok(())
@@ -178,7 +189,7 @@ impl NoiseKeypair {
 async fn ensure_key_file_permissions(path: &Path) -> Result {
     let metadata = tokio::fs::metadata(path)
         .await
-        .with_context(|| format!("Failed to stat key file '{}'", path.display()))?;
+        .with_context(|| format!("Failed to stat key file '{path}'", path = path.display()))?;
     let current_mode = metadata.permissions().mode() & 0o777;
     if current_mode != 0o600 {
         tracing::warn!(
@@ -189,7 +200,7 @@ async fn ensure_key_file_permissions(path: &Path) -> Result {
         perms.set_mode(0o600);
         tokio::fs::set_permissions(path, perms)
             .await
-            .with_context(|| format!("Failed to chmod key file '{}'", path.display()))?;
+            .with_context(|| format!("Failed to chmod key file '{path}'", path = path.display()))?;
     }
     Ok(())
 }

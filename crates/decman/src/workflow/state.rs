@@ -459,8 +459,8 @@ impl<S: WorkflowStep + 'static> WorkflowState<S> {
     pub async fn peer_connected(&self, peer_id: CantonId) {
         if !self.expected_peers.contains(&peer_id) {
             tracing::warn!(
-                "ignoring connect from unexpected peer {peer_id} (not in expected set for {})",
-                self.instance_name
+                "ignoring connect from unexpected peer {peer_id} (not in expected set for {instance_name})",
+                instance_name = self.instance_name
             );
             return;
         }
@@ -469,10 +469,10 @@ impl<S: WorkflowStep + 'static> WorkflowState<S> {
             let mut connected = self.connected_peers.write().await;
             if connected.insert(peer_id.clone()) {
                 tracing::info!(
-                    "Peer connected: {peer_id} ({}/{}, need {} to start)",
-                    connected.len(),
-                    self.expected_peers.len(),
-                    self.peers_quorum()
+                    "Peer connected: {peer_id} ({connected}/{expected}, need {quorum} to start)",
+                    connected = connected.len(),
+                    expected = self.expected_peers.len(),
+                    quorum = self.peers_quorum()
                 );
             }
         }
@@ -500,8 +500,8 @@ impl<S: WorkflowStep + 'static> WorkflowState<S> {
     ) -> bool {
         if !self.expected_peers.contains(&peer_id) {
             tracing::warn!(
-                "ignoring step completion from unexpected peer {peer_id} (not in expected set for {})",
-                self.instance_name
+                "ignoring step completion from unexpected peer {peer_id} (not in expected set for {instance_name})",
+                instance_name = self.instance_name
             );
             return false;
         }
@@ -516,9 +516,9 @@ impl<S: WorkflowStep + 'static> WorkflowState<S> {
             completed.insert(peer_id.clone());
             let completed_vec: Vec<CantonId> = completed.iter().cloned().collect();
             tracing::info!(
-                "Peer completed step {current:?}: {peer_id} ({}/{})",
-                completed_vec.len(),
-                self.expected_peers.len(),
+                "Peer completed step {current:?}: {peer_id} ({completed}/{expected})",
+                completed = completed_vec.len(),
+                expected = self.expected_peers.len(),
                 current = *current
             );
             // A failed progress write leaves the durable upload available for
@@ -541,8 +541,8 @@ impl<S: WorkflowStep + 'static> WorkflowState<S> {
     ) -> Result {
         anyhow::ensure!(
             self.expected_peers.contains(peer_id),
-            "{peer_id} is not a peer of run {}",
-            self.instance_name
+            "{peer_id} is not a peer of run {instance_name}",
+            instance_name = self.instance_name
         );
         self.db
             .write_artifact(
@@ -583,7 +583,7 @@ impl<S: WorkflowStep + 'static> WorkflowState<S> {
     async fn advance_locked(&self, current: &mut S) {
         let mut completed = self.completed_peers.write().await;
         if let Some(next_step) = current.next() {
-            tracing::info!("Advancing workflow: {:?} -> {next_step:?}", *current);
+            tracing::info!("Advancing workflow: {current:?} -> {next_step:?}");
             *current = next_step;
             completed.clear();
             self.persist_step_progress(next_step, Vec::new()).await;
@@ -608,8 +608,8 @@ impl<S: WorkflowStep + 'static> WorkflowState<S> {
             Ok(t) => t,
             Err(e) => {
                 tracing::warn!(
-                    "persist_step_progress: begin_transaction failed for {}: {e}",
-                    self.instance_name
+                    "persist_step_progress: begin_transaction failed for {instance_name}: {e}",
+                    instance_name = self.instance_name
                 );
                 return;
             }
@@ -625,15 +625,15 @@ impl<S: WorkflowStep + 'static> WorkflowState<S> {
             .await
         {
             tracing::warn!(
-                "persist_step_progress: update failed for {}: {e}",
-                self.instance_name
+                "persist_step_progress: update failed for {instance_name}: {e}",
+                instance_name = self.instance_name
             );
             return;
         }
         if let Err(e) = Commitable::commit(tx).await {
             tracing::warn!(
-                "persist_step_progress: commit failed for {}: {e}",
-                self.instance_name
+                "persist_step_progress: commit failed for {instance_name}: {e}",
+                instance_name = self.instance_name
             );
         }
     }

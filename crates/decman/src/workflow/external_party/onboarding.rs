@@ -402,11 +402,7 @@ pub async fn prepare_topology(
         ));
     }
 
-    tracing::info!(
-        %party_id,
-        "external-party: generated onboarding topology ({} txs)",
-        response.generated_transactions.len()
-    );
+    tracing::info!(%party_id, "external-party: generated onboarding topology ({count} txs)", count = response.generated_transactions.len());
 
     let mut transaction_hashes = Vec::with_capacity(response.generated_transactions.len());
     let mut topology_transactions = Vec::with_capacity(response.generated_transactions.len());
@@ -577,7 +573,7 @@ mod tests {
     }
 
     fn participant(tag: u8) -> CantonId {
-        let namespace = format!("1220{}", format!("{tag:02x}").repeat(32));
+        let namespace = format!("1220{digest}", digest = format!("{tag:02x}").repeat(32));
         match CantonId::parse(&format!("participant-{tag}::{namespace}")) {
             Ok(id) => id,
             Err(e) => panic!("test participant id must parse: {e}"),

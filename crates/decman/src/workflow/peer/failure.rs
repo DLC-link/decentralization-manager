@@ -100,8 +100,8 @@ pub(super) async fn record_signature_upload(
     );
     if *consecutive_failures >= MAX_CONSECUTIVE_STEP_FAILURES {
         anyhow::bail!(
-            "Peer failed: signature upload failed after {} consecutive attempts ({command:?}): {error}",
-            *consecutive_failures
+            "Peer failed: signature upload failed after {failures} consecutive attempts ({command:?}): {error}",
+            failures = *consecutive_failures
         );
     }
     tracing::warn!(

@@ -43,7 +43,10 @@ struct PeerRun {
 async fn run_commands(kind: WorkflowKind, commands: Vec<Message>) -> Result<PeerRun> {
     let root = tempfile::tempdir()?;
     let mut node = NodeConfig::default().with_root_dir(root.path());
-    node.node.participant_id = Some(CantonId::parse(&format!("peer::1220{}", "a".repeat(64)))?);
+    node.node.participant_id = Some(CantonId::parse(&format!(
+        "peer::1220{digest}",
+        digest = "a".repeat(64)
+    ))?);
     let db = connect(&node.db_path()).await?;
     MIGRATOR.run(&db).await?;
     let keys = NoiseKeypair::generate();
@@ -54,7 +57,10 @@ async fn run_commands(kind: WorkflowKind, commands: Vec<Message>) -> Result<Peer
     let psk = *coordinator_keys.derive_psk(&keys.public_key);
     let listener = TcpListener::bind("127.0.0.1:0").await?;
     let coordinator = Peer {
-        participant_id: CantonId::parse(&format!("coordinator::1220{}", "b".repeat(64)))?,
+        participant_id: CantonId::parse(&format!(
+            "coordinator::1220{digest}",
+            digest = "b".repeat(64)
+        ))?,
         name: "Scripted coordinator".into(),
         address: "127.0.0.1".into(),
         port: listener.local_addr()?.port(),
@@ -174,7 +180,10 @@ async fn run_commands(kind: WorkflowKind, commands: Vec<Message>) -> Result<Peer
 /// Check that a peer which gave up told the coordinator, once, and why.
 fn assert_reported(run: &PeerRun, kind: WorkflowKind) {
     let [report] = run.reports.as_slice() else {
-        panic!("expected one failure report, got {}", run.reports.len());
+        panic!(
+            "expected one failure report, got {count}",
+            count = run.reports.len()
+        );
     };
     let error = run.result.as_ref().err().map(|e| format!("{e:#}"));
     assert!(report.abandoned, "the report was sent as a plain decline");
@@ -345,7 +354,10 @@ async fn an_oversized_upload_reports_its_size_and_the_limit() -> Result {
     .await?;
 
     let [report] = run.reports.as_slice() else {
-        anyhow::bail!("expected one failure report, got {}", run.reports.len());
+        anyhow::bail!(
+            "expected one failure report, got {count}",
+            count = run.reports.len()
+        );
     };
     let reason = report.reason.as_deref().unwrap_or_default();
     assert!(reason.contains("20000000 bytes"), "{reason}");

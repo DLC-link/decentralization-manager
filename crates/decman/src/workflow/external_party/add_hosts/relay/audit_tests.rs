@@ -334,8 +334,11 @@ async fn respond(
             vec![]
         }
         "GetSynchronizerId" => GetSynchronizerIdResponse {
-            synchronizer_id: format!("global::1220{}", "cc".repeat(32)),
-            physical_synchronizer_id: format!("global::1220{}::36-0", "cc".repeat(32)),
+            synchronizer_id: format!("global::1220{digest}", digest = "cc".repeat(32)),
+            physical_synchronizer_id: format!(
+                "global::1220{digest}::36-0",
+                digest = "cc".repeat(32)
+            ),
         }
         .encode_to_vec(),
         "ListAll" => {
@@ -401,14 +404,17 @@ async fn respond(
 }
 
 fn participant(tag: u8) -> CantonId {
-    format!("participant-{tag}::1220{}", format!("{tag:02x}").repeat(32))
-        .parse()
-        .expect("valid participant")
+    format!(
+        "participant-{tag}::1220{digest}",
+        digest = format!("{tag:02x}").repeat(32)
+    )
+    .parse()
+    .expect("valid participant")
 }
 
 fn mapping() -> PartyToParticipant {
     PartyToParticipant {
-        party: format!("observed::1220{}", "ab".repeat(32)),
+        party: format!("observed::1220{digest}", digest = "ab".repeat(32)),
         threshold: 1,
         participants: vec![
             HostingParticipant {
@@ -1534,7 +1540,7 @@ async fn joiner_prepare_refuses_quarantine_lease_workflow_and_purge_without_muta
         .execute(&db)
         .await?;
     let other = replication_target(
-        &format!("other::1220{}", "cd".repeat(32)),
+        &format!("other::1220{digest}", digest = "cd".repeat(32)),
         &participant(2),
         9,
     )?;

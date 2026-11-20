@@ -503,14 +503,21 @@ mod tests {
 
             let requests = server.received_requests().await.unwrap_or_default();
             let [request] = requests.as_slice() else {
-                anyhow::bail!("expected one Sign call, got {}", requests.len());
+                anyhow::bail!(
+                    "expected one Sign call, got {count}",
+                    count = requests.len()
+                );
             };
             let body = sign_request(request)?;
             assert_eq!(body["KeyId"], KEY_ID);
             assert_eq!(body["MessageType"], "RAW");
             assert_eq!(body["SigningAlgorithm"], "ECDSA_SHA_256");
             let message = STANDARD.decode(body["Message"].as_str().unwrap_or_default())?;
-            assert!(message.len() > 32, "signed {} bytes", message.len());
+            assert!(
+                message.len() > 32,
+                "signed {len} bytes",
+                len = message.len()
+            );
             Ok(())
         }
 

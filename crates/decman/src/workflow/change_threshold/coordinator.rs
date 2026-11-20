@@ -339,7 +339,10 @@ mod tests {
             "{message}"
         );
         assert!(
-            message.contains(&format!("without a signed P2P proposal: [\"{}\"]", peer(2))),
+            message.contains(&format!(
+                "without a signed P2P proposal: [\"{peer_id}\"]",
+                peer_id = peer(2)
+            )),
             "{message}"
         );
         Ok(())
@@ -363,7 +366,10 @@ mod tests {
             .to_string();
 
         assert!(
-            message.contains(&format!("without a signed DNS proposal: [\"{}\"]", peer(1))),
+            message.contains(&format!(
+                "without a signed DNS proposal: [\"{peer_id}\"]",
+                peer_id = peer(1)
+            )),
             "{message}"
         );
         Ok(())
@@ -524,7 +530,7 @@ mod tests {
             .expect_err("a stranger's pair must not stand in for an expected peer")
             .to_string();
 
-        let expected = format!("[\"{}\"]", peer(1));
+        let expected = format!("[\"{peer_id}\"]", peer_id = peer(1));
         assert!(
             message.contains(&format!("without a signed DNS proposal: {expected}")),
             "{message}"
@@ -589,8 +595,8 @@ mod tests {
         .await?;
 
         let message = format!(
-            "{:#}",
-            prepare_signatures(&state, &pool, "run-1")
+            "{error:#}",
+            error = prepare_signatures(&state, &pool, "run-1")
                 .await
                 .expect_err("a corrupt upload must not submit")
         );

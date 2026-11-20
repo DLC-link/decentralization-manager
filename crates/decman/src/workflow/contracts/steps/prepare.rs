@@ -66,8 +66,8 @@ fn resolve_package_id(reference: &str, packages: &[PackageDescription]) -> Resul
             .iter()
             .skip(1)
             .any(|p| p.version == selected.version && p.package_id != selected.package_id),
-        "Package {reference} has ambiguous IDs at version {}; specify an exact package ID",
-        selected.version
+        "Package {reference} has ambiguous IDs at version {version}; specify an exact package ID",
+        version = selected.version
     );
     resolve_package_id(&selected.package_id, &[])
 }
@@ -270,8 +270,8 @@ pub async fn commit_deployment(
             anyhow::ensure!(
                 contract.package_id.len() == 64
                     && contract.package_id.bytes().all(|b| b.is_ascii_hexdigit()),
-                "Contract {} must name a resolved package ID before invitation",
-                contract.name
+                "Contract {name} must name a resolved package ID before invitation",
+                name = contract.name
             );
             let argument = Value {
                 sum: Some(value::Sum::Record(Record {

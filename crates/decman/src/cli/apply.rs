@@ -66,9 +66,8 @@ impl Commands {
             tracing::info!("Database encryption enabled");
             if key_store_key_file.is_none() && !crypto::derives_keys(key) {
                 tracing::warn!(
-                    "DECPM_DB_ENCRYPTION_KEY has fewer than {} characters, so DecMan does \
-                     not derive the key store's key from it",
-                    MIN_DERIVING_PASSPHRASE_CHARS
+                    "DECPM_DB_ENCRYPTION_KEY has fewer than {MIN_DERIVING_PASSPHRASE_CHARS} characters, so DecMan does \
+                     not derive the key store's key from it"
                 );
             }
         }

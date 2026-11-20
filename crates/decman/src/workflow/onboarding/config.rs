@@ -41,7 +41,7 @@ impl OnboardingConfig {
 
     /// Get the namespace key name derived from party_id_prefix
     pub fn namespace_key_name(&self) -> String {
-        format!("{}-namespace", self.party_id_prefix)
+        format!("{prefix}-namespace", prefix = self.party_id_prefix)
     }
 }
 

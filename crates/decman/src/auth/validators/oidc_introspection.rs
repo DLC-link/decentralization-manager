@@ -332,12 +332,12 @@ mod tests {
     #[tokio::test]
     async fn accepts_active_token_and_projects_roles() -> Result {
         let server = MockServer::start().await;
-        let issuer = format!("{}/realms/test", server.uri());
+        let issuer = format!("{uri}/realms/test", uri = server.uri());
 
         Mock::given(method("GET"))
             .and(path("/realms/test/.well-known/openid-configuration"))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "introspection_endpoint": format!("{}/introspect", server.uri()),
+                "introspection_endpoint": format!("{uri}/introspect", uri = server.uri()),
             })))
             .mount(&server)
             .await;
@@ -367,12 +367,12 @@ mod tests {
     #[tokio::test]
     async fn rejects_inactive_token() {
         let server = MockServer::start().await;
-        let issuer = format!("{}/realms/test", server.uri());
+        let issuer = format!("{uri}/realms/test", uri = server.uri());
 
         Mock::given(method("GET"))
             .and(path("/realms/test/.well-known/openid-configuration"))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "introspection_endpoint": format!("{}/introspect", server.uri()),
+                "introspection_endpoint": format!("{uri}/introspect", uri = server.uri()),
             })))
             .mount(&server)
             .await;

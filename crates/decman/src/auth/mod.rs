@@ -391,8 +391,8 @@ impl AuthRegistry {
         for party in parties {
             let dec_party_id = party.dec_party_id.to_string();
             tracing::info!(
-                "Initializing authentication for dec_party={dec_party_id}, member_party={}",
-                party.member_party_id
+                "Initializing authentication for dec_party={dec_party_id}, member_party={member_party_id}",
+                member_party_id = party.member_party_id
             );
 
             let result = if let Some(ref auth0) = party.auth0 {
@@ -427,10 +427,10 @@ impl AuthRegistry {
 
         if managers.is_empty() && !failed.is_empty() {
             tracing::error!(
-                "Authentication failed for all {} configured parties: {}. \
+                "Authentication failed for all {count} configured parties: {parties}. \
                  This node can run no workflow until the credentials are fixed.",
-                failed.len(),
-                failed.join(", ")
+                count = failed.len(),
+                parties = failed.join(", ")
             );
         }
 

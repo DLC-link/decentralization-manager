@@ -885,7 +885,7 @@ mod tests {
         assert!(is_party_daml_key_name(
             &rotated_daml_key_name(
                 "xyz",
-                &format!("1220{:0>64}", "ab")
+                &format!("1220{digest:0>64}", digest = "ab")
                     .parse::<Fingerprint>()
                     .expect("fingerprint")
             ),
@@ -950,7 +950,10 @@ mod tests {
         let current = vec![key(1), key(2), key(3), key(4)];
         let claims = claims(&[("p1", 1), ("p3", 3)]);
         match signing_keys_after_kick(&current, "p3", &uids(&["p1", "p2"]), &claims) {
-            Ok(kept) => panic!("expected a refusal, kept {:?}", seeds(&kept)),
+            Ok(kept) => panic!(
+                "expected a refusal, kept {kept_seeds:?}",
+                kept_seeds = seeds(&kept)
+            ),
             Err(error) => assert!(
                 error
                     .to_string()
@@ -1297,9 +1300,14 @@ mod tests {
 
     #[sqlx::test(migrator = "MIGRATOR")]
     async fn key_adoption_uses_the_recorded_key_of_each_missing_member(pool: SqlitePool) -> Result {
-        let party = CantonId::parse(&format!("party::1220{}", "09".repeat(32)))?;
+        let party = CantonId::parse(&format!("party::1220{digest}", digest = "09".repeat(32)))?;
         let members: Vec<String> = (1..=4)
-            .map(|tag| format!("p{tag}::1220{}", format!("{tag:02x}").repeat(32)))
+            .map(|tag| {
+                format!(
+                    "p{tag}::1220{digest}",
+                    digest = format!("{tag:02x}").repeat(32)
+                )
+            })
             .collect();
         let rows: Vec<DecPartyParticipantRow> = members
             .iter()

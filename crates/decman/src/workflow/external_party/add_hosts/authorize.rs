@@ -288,8 +288,10 @@ mod tests {
     fn a_namespace_owner_that_unhosted_can_still_authorize_other_joiners() {
         let owner = test_config(1);
         let mut topology = current();
-        topology.mapping.party =
-            format!("converted::{}", owner.participant_id().namespace.to_hex());
+        topology.mapping.party = format!(
+            "converted::{namespace}",
+            namespace = owner.participant_id().namespace.to_hex()
+        );
         topology
             .mapping
             .participants
@@ -305,8 +307,10 @@ mod tests {
     fn a_namespace_owner_must_stage_when_it_rejoins_or_is_still_onboarding() {
         let owner = test_config(1);
         let mut topology = current();
-        topology.mapping.party =
-            format!("converted::{}", owner.participant_id().namespace.to_hex());
+        topology.mapping.party = format!(
+            "converted::{namespace}",
+            namespace = owner.participant_id().namespace.to_hex()
+        );
         assert!(require_namespace_authorizer(&owner, &topology, &[participant(1)]).is_err());
         topology.mapping.participants[0].onboarding = Some(hosting_participant::Onboarding {});
         assert!(require_namespace_authorizer(&owner, &topology, &[participant(3)]).is_err());

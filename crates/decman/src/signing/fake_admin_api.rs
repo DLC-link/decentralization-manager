@@ -304,7 +304,12 @@ impl Vault {
             .keys
             .iter()
             .find(|key| key.fingerprint().as_str() == request.fingerprint)
-            .ok_or_else(|| Status::not_found(format!("no key {}", request.fingerprint)))?;
+            .ok_or_else(|| {
+                Status::not_found(format!(
+                    "no key {fingerprint}",
+                    fingerprint = request.fingerprint
+                ))
+            })?;
         let seed = key
             .seed
             .ok_or_else(|| Status::failed_precondition("a KMS key cannot be exported"))?;

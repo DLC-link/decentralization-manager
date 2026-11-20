@@ -306,8 +306,8 @@ mod with_a_generated_key {
         let transaction = signed(&node, &db, artifact_kinds::SIGNED_P2P_PROPOSAL).await?;
         let [signature] = transaction.signatures.as_slice() else {
             anyhow::bail!(
-                "expected DecMan's one signature, got {:?}",
-                transaction.signatures
+                "expected DecMan's one signature, got {signatures:?}",
+                signatures = transaction.signatures
             );
         };
         assert_eq!(

@@ -80,13 +80,19 @@ async fn run() -> Result {
     // Resolve participant_id from Canton if not configured
     utils::resolve_participant_id(&mut config).await?;
 
-    tracing::info!("Running as participant: {}", config.participant_id());
+    tracing::info!(
+        "Running as participant: {participant_id}",
+        participant_id = config.participant_id()
+    );
 
     // Initialize database
     let db_path = match &args.command {
         Commands::Serve { db, .. } => db.clone().unwrap_or_else(|| config.db_path()),
     };
-    tracing::info!("Connecting to database at {}", db_path.display());
+    tracing::info!(
+        "Connecting to database at {db_path}",
+        db_path = db_path.display()
+    );
     let pool = db::connect(&db_path).await?;
 
     tracing::info!("Running database migrations");

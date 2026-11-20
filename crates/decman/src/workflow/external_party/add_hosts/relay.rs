@@ -694,14 +694,17 @@ mod tests {
     use crate::db::MIGRATOR;
 
     fn participant(tag: u8) -> CantonId {
-        format!("participant-{tag}::1220{}", format!("{tag:02x}").repeat(32))
-            .parse()
-            .expect("the participant id is valid")
+        format!(
+            "participant-{tag}::1220{digest}",
+            digest = format!("{tag:02x}").repeat(32)
+        )
+        .parse()
+        .expect("the participant id is valid")
     }
 
     fn expected() -> PartyToParticipant {
         PartyToParticipant {
-            party: format!("party::1220{}", "aa".repeat(32)),
+            party: format!("party::1220{digest}", digest = "aa".repeat(32)),
             threshold: 1,
             participants: vec![
                 HostingParticipant {
@@ -807,7 +810,7 @@ mod tests {
     #[sqlx::test(migrator = "MIGRATOR")]
     async fn a_participant_has_one_durable_window_across_parties(db: SqlitePool) -> Result<()> {
         let first = replication_target(&expected().party, &participant(2), 4)?;
-        let second_party = format!("other::1220{}", "bb".repeat(32));
+        let second_party = format!("other::1220{digest}", digest = "bb".repeat(32));
         let second = replication_target(&second_party, &participant(2), 8)?;
         assert!(claim_import_window(&db, &first, None).await?);
         assert!(claim_import_window(&db, &first, None).await?);

@@ -365,7 +365,11 @@ mod tests {
         )
         .await?;
 
-        assert!(recorder.stores()?.is_empty(), "{:?}", recorder.stores()?);
+        assert!(
+            recorder.stores()?.is_empty(),
+            "{stores:?}",
+            stores = recorder.stores()?
+        );
         assert_eq!(
             recorder.calls()?,
             [format!("create {used}"), format!("drop {used}")]
@@ -385,7 +389,11 @@ mod tests {
             .err()
             .ok_or_else(|| anyhow::anyhow!("body error was swallowed"))?;
         assert!(format!("{error}").contains("refused to sign"), "{error}");
-        assert!(recorder.stores()?.is_empty(), "{:?}", recorder.stores()?);
+        assert!(
+            recorder.stores()?.is_empty(),
+            "{stores:?}",
+            stores = recorder.stores()?
+        );
         Ok(())
     }
 
@@ -454,8 +462,8 @@ mod tests {
                 .calls()?
                 .iter()
                 .all(|call| !call.starts_with("drop")),
-            "{:?}",
-            recorder.calls()?
+            "{calls:?}",
+            calls = recorder.calls()?
         );
         Ok(())
     }
@@ -474,9 +482,9 @@ mod tests {
 
     #[test]
     fn store_names_fit_canton_and_name_their_run() {
-        let long = format!("{}-kick-1760000000", "p".repeat(400));
+        let long = format!("{prefix}-kick-1760000000", prefix = "p".repeat(400));
         let name = store_name(&long, u128::MAX);
-        assert!(name.len() <= 185, "{} characters", name.len());
+        assert!(name.len() <= 185, "{len} characters", len = name.len());
         assert!(name.starts_with(STORE_PREFIX));
 
         let odd = store_name("party with spaces/and::colons", 7);

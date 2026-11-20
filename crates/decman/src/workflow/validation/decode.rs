@@ -33,7 +33,10 @@ pub(super) fn decode_add_replace(payload: &[u8]) -> Result<TopologyTransaction> 
             "topology transaction is a {operation:?} operation, not an add-or-replace",
             operation = enums::TopologyChangeOp::try_from(transaction.operation)
                 .map(|op| op.as_str_name().to_string())
-                .unwrap_or_else(|_| format!("unknown ({})", transaction.operation))
+                .unwrap_or_else(|_| format!(
+                    "unknown ({operation})",
+                    operation = transaction.operation
+                ))
         );
     }
 

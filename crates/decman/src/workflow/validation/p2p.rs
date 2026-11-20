@@ -23,7 +23,10 @@ impl PeerExpectations {
                     "P2P proposal hosts {id} with permission {permission}, not Confirmation",
                     permission = enums::ParticipantPermission::try_from(participant.permission)
                         .map(|p| p.as_str_name().to_string())
-                        .unwrap_or_else(|_| format!("unknown ({})", participant.permission))
+                        .unwrap_or_else(|_| format!(
+                            "unknown ({permission})",
+                            permission = participant.permission
+                        ))
                 );
             }
         }

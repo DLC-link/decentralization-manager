@@ -98,8 +98,8 @@ mod tests {
         assert_eq!(got.len(), 40);
         assert!(
             peak.load(Ordering::SeqCst) <= 4,
-            "ran {} at once against a limit of 4",
-            peak.load(Ordering::SeqCst)
+            "ran {peak} at once against a limit of 4",
+            peak = peak.load(Ordering::SeqCst)
         );
         // And it really did overlap — a bound that serialised everything would
         // also satisfy the assertion above while losing all the concurrency.

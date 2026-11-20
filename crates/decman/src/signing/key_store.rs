@@ -670,7 +670,10 @@ async fn write_private(path: &Path, contents: &[u8]) -> Result {
     let suffix: [u8; 8] = Generate::try_generate()
         .map_err(|e| anyhow::anyhow!("temporary name generation failed: {e}"))?;
     let mut temporary = path.as_os_str().to_owned();
-    temporary.push(format!(".tmp-{}", hex::encode(suffix)));
+    temporary.push(format!(
+        ".tmp-{suffix_hex}",
+        suffix_hex = hex::encode(suffix)
+    ));
     let temporary = PathBuf::from(temporary);
     let mut options = OpenOptions::new();
     options.write(true).create_new(true);
@@ -805,7 +808,10 @@ mod tests {
         let fingerprint = utils::compute_fingerprint(&public_key);
 
         let error = match store(db, 2).generated_seed(&fingerprint).await {
-            Ok(found) => anyhow::bail!("decrypted under another key: {}", found.is_some()),
+            Ok(found) => anyhow::bail!(
+                "decrypted under another key: {found}",
+                found = found.is_some()
+            ),
             Err(e) => e.to_string(),
         };
 
@@ -854,7 +860,7 @@ mod tests {
             .generated_seed(&utils::compute_fingerprint(&public_key))
             .await
         {
-            Ok(found) => anyhow::bail!("accepted a changed key: {}", found.is_some()),
+            Ok(found) => anyhow::bail!("accepted a changed key: {found}", found = found.is_some()),
             Err(e) => e.to_string(),
         };
 
@@ -872,7 +878,10 @@ mod tests {
         store(db.clone(), 1).generate("p-daml-transactions").await?;
 
         let error = match store(db, 2).generate("p-daml-transactions").await {
-            Ok((key, _)) => anyhow::bail!("reused {}", utils::compute_fingerprint(&key)),
+            Ok((key, _)) => anyhow::bail!(
+                "reused {fingerprint}",
+                fingerprint = utils::compute_fingerprint(&key)
+            ),
             Err(e) => e.to_string(),
         };
 
@@ -945,7 +954,7 @@ mod tests {
         let public_key = ed25519_signing_public_key(&[9u8; 32]);
 
         let error = match sign_topology_transaction(&[8u8; 32], &public_key, b"a transaction") {
-            Ok(signature) => format!("signed as {}", signature.signed_by),
+            Ok(signature) => format!("signed as {signed_by}", signed_by = signature.signed_by),
             Err(e) => e.to_string(),
         };
 
@@ -974,9 +983,9 @@ mod tests {
 
         let error = match store.generate("p-daml-transactions").await {
             Ok((key, _)) => anyhow::bail!(
-                "reused {} under p, whose key is {}",
-                utils::compute_fingerprint(&key),
-                utils::compute_fingerprint(&p_key)
+                "reused {fingerprint} under p, whose key is {p_fingerprint}",
+                fingerprint = utils::compute_fingerprint(&key),
+                p_fingerprint = utils::compute_fingerprint(&p_key)
             ),
             Err(e) => e.to_string(),
         };
@@ -986,7 +995,7 @@ mod tests {
             .generated_seed(&utils::compute_fingerprint(&q_key))
             .await
         {
-            Ok(found) => anyhow::bail!("decrypted a moved row: {}", found.is_some()),
+            Ok(found) => anyhow::bail!("decrypted a moved row: {found}", found = found.is_some()),
             Err(e) => e.to_string(),
         };
         assert!(error.contains("does not decrypt"), "{error}");
@@ -1182,7 +1191,7 @@ mod tests {
     fn a_key_file_holds_hex_or_base64() {
         let key = [9u8; 32];
         for contents in [
-            format!("{}\n", hex::encode(key)).into_bytes(),
+            format!("{key_hex}\n", key_hex = hex::encode(key)).into_bytes(),
             STANDARD.encode(key).into_bytes(),
         ] {
             assert_eq!(parse_key(&contents).as_deref(), Some(&key));
@@ -1199,7 +1208,8 @@ mod tests {
 
     #[tokio::test]
     async fn the_default_key_file_is_created_once_and_read_back() -> Result {
-        let dir = std::env::temp_dir().join(format!("decman-key-store-{}", uuid::Uuid::new_v4()));
+        let dir =
+            std::env::temp_dir().join(format!("decman-key-store-{id}", id = uuid::Uuid::new_v4()));
         tokio::fs::create_dir_all(&dir).await?;
         let path = dir.join(DEFAULT_KEY_FILENAME);
         let created = read_or_create_default(&path).await?;

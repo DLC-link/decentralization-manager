@@ -522,8 +522,11 @@ mod tests {
     }
 
     fn party() -> CantonId {
-        CantonId::parse(&format!("party::{}", "1220".to_owned() + &"ab".repeat(32)))
-            .expect("valid party id")
+        CantonId::parse(&format!(
+            "party::{digest}",
+            digest = "1220".to_owned() + &"ab".repeat(32)
+        ))
+        .expect("valid party id")
     }
 
     /// This node's participant id in these tests, and a vault that names none of

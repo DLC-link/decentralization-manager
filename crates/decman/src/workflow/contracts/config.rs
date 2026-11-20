@@ -70,10 +70,7 @@ impl ContractsConfig {
     /// Fails for a run that an older version started without recording them.
     pub fn committed(&self) -> Result<&CommittedDeployment> {
         self.committed_deployment.as_ref().ok_or_else(|| {
-            anyhow::anyhow!(
-                "Contracts run {} has no recorded deployment commitments; start a new run",
-                self.instance_name
-            )
+            anyhow::anyhow!("Contracts run {instance_name} has no recorded deployment commitments; start a new run", instance_name = self.instance_name)
         })
     }
 }

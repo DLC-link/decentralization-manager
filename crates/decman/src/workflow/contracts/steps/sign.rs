@@ -809,7 +809,7 @@ mod own_daml_key_tests {
         .await?;
 
         let error = match own_daml_key(&node.config, &db, &party()?).await {
-            Ok(context) => anyhow::bail!("found {}", context.fingerprint),
+            Ok(context) => anyhow::bail!("found {fingerprint}", fingerprint = context.fingerprint),
             Err(e) => e.to_string(),
         };
 
@@ -974,7 +974,9 @@ mod own_daml_key_tests {
         fake.publish_p2p(1, hosted(Some(vec![peer_key(), other]))?);
 
         let error = match own_daml_key(&node.config, &db, &party()?).await {
-            Ok(context) => anyhow::bail!("claimed {}", context.fingerprint),
+            Ok(context) => {
+                anyhow::bail!("claimed {fingerprint}", fingerprint = context.fingerprint)
+            }
             Err(e) => e.to_string(),
         };
 

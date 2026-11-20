@@ -331,7 +331,7 @@ mod tests {
     // -- replay ------------------------------------------------------------
 
     fn party_ns() -> String {
-        format!("1220{}", "aa".repeat(32))
+        format!("1220{digest}", digest = "aa".repeat(32))
     }
 
     fn party() -> Result<CantonId> {

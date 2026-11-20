@@ -42,8 +42,8 @@ pub async fn get_participant_id(config: &NodeConfig) -> Result<CantonId> {
 pub async fn resolve_participant_id(config: &mut NodeConfig) -> Result {
     if config.has_participant_id() {
         tracing::debug!(
-            "Participant ID already configured: {}",
-            config.participant_id()
+            "Participant ID already configured: {participant_id}",
+            participant_id = config.participant_id()
         );
         return Ok(());
     }

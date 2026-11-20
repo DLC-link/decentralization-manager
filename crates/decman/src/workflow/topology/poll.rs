@@ -277,7 +277,11 @@ mod tests {
         })
         .await;
 
-        assert!(started.elapsed() >= delay, "slept {:?}", started.elapsed());
+        assert!(
+            started.elapsed() >= delay,
+            "slept {elapsed:?}",
+            elapsed = started.elapsed()
+        );
     }
 
     #[tokio::test]

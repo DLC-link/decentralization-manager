@@ -294,9 +294,9 @@ async fn preflight(
             verify_healthy(config).await.map_err(|e| {
                 anyhow::anyhow!(
                     "refusing to start ACS import: participant is not connected and healthy \
-                     on synchronizer '{}' and did not settle on its own — it is not \
+                     on synchronizer '{synchronizer}' and did not settle on its own — it is not \
                      reconnected from here; check it before retrying add-party: {e}",
-                    config.synchronizer()
+                    synchronizer = config.synchronizer()
                 )
             })?;
             connected = connectivity
@@ -350,8 +350,8 @@ where
         .await?;
 
     tracing::info!(
-        "Disconnecting from {} synchronizer(s) for the ACS import...",
-        connected.len()
+        "Disconnecting from {count} synchronizer(s) for the ACS import...",
+        count = connected.len()
     );
     // A staged tenant failure stays offline: reconnecting before its ACS lands
     // could replay archives whose activation history it does not yet hold.

@@ -242,7 +242,7 @@ fn namespace_definition(
     // Step 7: Create DecentralizedNamespaceDefinition
     let mut owners_vec: Vec<String> = namespaces.iter().cloned().collect();
     owners_vec.sort(); // Sort for consistent ordering
-    tracing::debug!("DNS owners (sorted): {:?}", owners_vec);
+    tracing::debug!("DNS owners (sorted): {owners_vec:?}");
 
     let namespace_def = DecentralizedNamespaceDefinition {
         decentralized_namespace: decentralized_namespace.clone(),
@@ -725,7 +725,10 @@ mod with_a_generated_key {
         let p2p: SignedTopologyTransaction = utils::read_first_message_from_bytes(&p2p_bytes)?;
         let fingerprint = utils::compute_fingerprint(&key);
         let [signature] = p2p.signatures.as_slice() else {
-            anyhow::bail!("expected DecMan's one signature, got {:?}", p2p.signatures);
+            anyhow::bail!(
+                "expected DecMan's one signature, got {signatures:?}",
+                signatures = p2p.signatures
+            );
         };
         assert_eq!(signature.signed_by, fingerprint.to_string());
         let verifying = ed25519_dalek::VerifyingKey::from_bytes(&ed25519_public_key(&key)?)?;

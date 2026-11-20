@@ -167,9 +167,9 @@ impl<S: WorkflowStep + 'static> NoiseServer<S> {
                     Some(step) => {
                         tracing::info!(
                             "Resuming workflow {instance_name} at step {step:?} \
-                             ({} of {} peers completed)",
-                            run.completed_peers.len(),
-                            expected_peers.len()
+                             ({completed} of {expected} peers completed)",
+                            completed = run.completed_peers.len(),
+                            expected = expected_peers.len()
                         );
                         WorkflowState::from_persisted(
                             db,
@@ -182,9 +182,9 @@ impl<S: WorkflowStep + 'static> NoiseServer<S> {
                     }
                     None => {
                         tracing::warn!(
-                            "Persisted current_step {:?} for {instance_name} is not a valid \
+                            "Persisted current_step {current_step:?} for {instance_name} is not a valid \
                              {kind} step; starting fresh from {initial_step:?}",
-                            run.current_step,
+                            current_step = run.current_step,
                             kind = std::any::type_name::<S>()
                         );
                         WorkflowState::new(
@@ -254,8 +254,9 @@ impl<S: WorkflowStep + 'static> NoiseServer<S> {
                 .await?
                 .with_context(|| {
                     format!(
-                        "Cannot resume {} at {}: {kind} artifact missing",
-                        run.instance_name, run.current_step
+                        "Cannot resume {instance_name} at {step}: {kind} artifact missing",
+                        instance_name = run.instance_name,
+                        step = run.current_step
                     )
                 })?;
             items.push(proposal);

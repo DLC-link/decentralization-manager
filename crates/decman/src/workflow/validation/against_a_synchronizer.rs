@@ -348,9 +348,9 @@ async fn a_legacy_change_threshold_keeps_each_hosts_recorded_key(db: SqlitePool)
     };
     assert!(
         error.contains(&format!(
-            "drops {}, which this node has on record as {}'s Daml key",
-            utils::compute_fingerprint(&daml_key(4)),
-            peer_id()?
+            "drops {fingerprint}, which this node has on record as {peer}'s Daml key",
+            fingerprint = utils::compute_fingerprint(&daml_key(4)),
+            peer = peer_id()?
         )),
         "{error}"
     );
