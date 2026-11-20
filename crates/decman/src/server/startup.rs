@@ -16,9 +16,11 @@ use utoipa_swagger_ui::SwaggerUi;
 
 use super::{recovery::recover_in_progress_workflows, state::AppState};
 use crate::server::{
-    HealthCache, PeerJob, WorkflowRegistry, WorkflowTriggers, assets, audit, former_parties,
-    governance_poller, handlers, node_health, peer_status, reward_automation, run_heartbeat,
-    run_peer_listener,
+    HealthCache, PeerJob, WorkflowRegistry, assets, audit, former_parties, governance_poller,
+    handlers, node_health,
+    peer_jobs::run_peer_listener,
+    peer_listener::{WorkflowTriggers, run_heartbeat},
+    peer_status, reward_automation,
 };
 use crate::{
     auth::{
