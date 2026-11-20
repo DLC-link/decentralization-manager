@@ -1119,3 +1119,497 @@ mod tests {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod start_kick_tests {
+    //! Pins every answer `POST /kick` gives before it starts a run: the
+    //! status code, the headers and the exact JSON error body.
+
+    use actix_web::http::StatusCode;
+    use serde_json::json;
+
+    use super::super::{
+        preflight::{format_incompatible_peers, incompatible_versions, probe_invitee_health},
+        test_support::{
+            Answer, TestNode, break_table, cache_hosted_party, closed_port, in_progress_run,
+            insert_peers, insert_run, kick_public_key, peer, pid, post_as, post_as_admin,
+            record_signing_keys, refuse_run_writes, test_node,
+        },
+    };
+    use super::*;
+    use crate::{db::MIGRATOR, utils};
+
+    type Result<T = ()> = anyhow::Result<T>;
+
+    /// This node is `pid(1)` and hosts the party `pid(9)` with `pid(2)` and
+    /// `pid(3)`. Each host holds the owner key named after it, and has
+    /// claimed it. Hosts 2 and 3 are this node's peers, without a usable
+    /// Noise key unless `reachable_keys`.
+    async fn three_host_party(pool: SqlitePool, reachable_keys: bool) -> Result<TestNode> {
+        let (p1, p2, p3) = (pid(1)?, pid(2)?, pid(3)?);
+        cache_hosted_party(
+            &pool,
+            &pid(9)?,
+            2,
+            &[(&p1, Some("k1")), (&p2, Some("k2")), (&p3, Some("k3"))],
+            &[("k1", Some(&p1)), ("k2", Some(&p2)), ("k3", Some(&p3))],
+        )
+        .await?;
+        let port = closed_port()?;
+        insert_peers(
+            &pool,
+            &[
+                peer(&p2, port, reachable_keys),
+                peer(&p3, port, reachable_keys),
+            ],
+        )
+        .await?;
+        test_node(pool, &p1).await
+    }
+
+    /// As [`three_host_party`], plus owner key `k4`, claimed by `pid(4)`,
+    /// which hosts nothing. The party's namespace threshold is `threshold`.
+    async fn party_with_an_owner_only_member(pool: SqlitePool, threshold: i64) -> Result<TestNode> {
+        let (p1, p2, p3, p4) = (pid(1)?, pid(2)?, pid(3)?, pid(4)?);
+        cache_hosted_party(
+            &pool,
+            &pid(9)?,
+            threshold,
+            &[(&p1, Some("k1")), (&p2, Some("k2")), (&p3, Some("k3"))],
+            &[
+                ("k1", Some(&p1)),
+                ("k2", Some(&p2)),
+                ("k3", Some(&p3)),
+                ("k4", Some(&p4)),
+            ],
+        )
+        .await?;
+        let port = closed_port()?;
+        insert_peers(&pool, &[peer(&p2, port, false), peer(&p3, port, false)]).await?;
+        test_node(pool, &p1).await
+    }
+
+    /// Record the signing key of each of `hosts` of the party `pid(9)`, so
+    /// the survivor key check passes.
+    async fn record_keys(pool: &SqlitePool, hosts: &[u8]) -> Result {
+        let keys: Vec<(u8, u8)> = hosts.iter().map(|host| (*host, *host)).collect();
+        record_signing_keys(pool, &pid(9)?, &keys).await
+    }
+
+    async fn kick(node: &TestNode, request: serde_json::Value) -> Answer {
+        post_as_admin(&node.data, start_kick, "/kick", request).await
+    }
+
+    fn kick_host(participant: &CantonId, new_threshold: i32) -> Result<serde_json::Value> {
+        Ok(json!({
+            "decentralized_party_id": pid(9)?.to_string(),
+            "participant_id": participant.to_string(),
+            "new_threshold": new_threshold,
+        }))
+    }
+
+    fn kick_owner_key(owner_key: &str, new_threshold: i32) -> Result<serde_json::Value> {
+        Ok(json!({
+            "decentralized_party_id": pid(9)?.to_string(),
+            "owner_key": owner_key,
+            "new_threshold": new_threshold,
+        }))
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn an_anonymous_caller_is_unauthorized(pool: SqlitePool) -> Result {
+        let node = three_host_party(pool, false).await?;
+        post_as(
+            &node.data,
+            start_kick,
+            "/kick",
+            kick_host(&pid(2)?, 1)?,
+            None,
+        )
+        .await
+        .assert_error(StatusCode::UNAUTHORIZED, "authentication required");
+        Ok(())
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn kicking_this_node_by_participant_is_refused(pool: SqlitePool) -> Result {
+        let node = three_host_party(pool, false).await?;
+        kick(&node, kick_host(&pid(1)?, 1)?)
+            .await
+            .assert_error(StatusCode::BAD_REQUEST, "Cannot kick yourself");
+        Ok(())
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_failed_member_read_answers_500(pool: SqlitePool) -> Result {
+        let node = three_host_party(pool.clone(), false).await?;
+        break_table(&pool, "dec_party_participant").await?;
+        kick(&node, kick_host(&pid(2)?, 1)?).await.assert_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Failed to load decentralized party members",
+        );
+        Ok(())
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_failed_owner_read_answers_500(pool: SqlitePool) -> Result {
+        let node = three_host_party(pool.clone(), false).await?;
+        break_table(&pool, "dec_party_owner").await?;
+        kick(&node, kick_host(&pid(2)?, 1)?).await.assert_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Failed to load decentralized party owners",
+        );
+        Ok(())
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn an_unnamed_member_is_a_bad_request(pool: SqlitePool) -> Result {
+        let node = three_host_party(pool, false).await?;
+        let request = json!({
+            "decentralized_party_id": pid(9)?.to_string(),
+            "new_threshold": 1,
+        });
+        kick(&node, request).await.assert_error(
+            StatusCode::BAD_REQUEST,
+            "Name the member to kick with participant_id, owner_key, or both",
+        );
+        Ok(())
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_host_without_a_known_key_is_a_conflict(pool: SqlitePool) -> Result {
+        let (p1, p2) = (pid(1)?, pid(2)?);
+        cache_hosted_party(
+            &pool,
+            &pid(9)?,
+            1,
+            &[(&p1, Some("k1")), (&p2, None)],
+            &[("k1", Some(&p1)), ("k2", None)],
+        )
+        .await?;
+        let node = test_node(pool, &p1).await?;
+        kick(&node, kick_host(&p2, 1)?).await.assert_error(
+            StatusCode::CONFLICT,
+            &format!(
+                "Participant {p2} hosts the party, but its current owner key has not been \
+                 resolved yet. Try refreshing /decentralized-parties first."
+            ),
+        );
+        Ok(())
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn kicking_this_node_by_owner_key_is_refused(pool: SqlitePool) -> Result {
+        let node = three_host_party(pool, false).await?;
+        kick(&node, kick_owner_key("k1", 1)?)
+            .await
+            .assert_error(StatusCode::BAD_REQUEST, "Cannot kick yourself");
+        Ok(())
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_failed_peer_read_answers_500(pool: SqlitePool) -> Result {
+        let node = three_host_party(pool.clone(), false).await?;
+        break_table(&pool, "peers").await?;
+        kick(&node, kick_host(&pid(2)?, 1)?)
+            .await
+            .assert_error(StatusCode::INTERNAL_SERVER_ERROR, "Failed to load peers");
+        Ok(())
+    }
+
+    /// The only other member that stays is not a peer, so this node would
+    /// sign alone below the current threshold.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_kick_needs_another_co_signer(pool: SqlitePool) -> Result {
+        let (p1, p2, p3) = (pid(1)?, pid(2)?, pid(3)?);
+        cache_hosted_party(
+            &pool,
+            &pid(9)?,
+            2,
+            &[(&p1, Some("k1")), (&p2, Some("k2")), (&p3, Some("k3"))],
+            &[("k1", Some(&p1)), ("k2", Some(&p2)), ("k3", Some(&p3))],
+        )
+        .await?;
+        insert_peers(&pool, &[peer(&p2, closed_port()?, false)]).await?;
+        let node = test_node(pool, &p1).await?;
+        kick(&node, kick_host(&p2, 1)?).await.assert_error(
+            StatusCode::BAD_REQUEST,
+            &format!(
+                "Cannot kick: the party's current namespace threshold is 2. Only this node can \
+                 sign. {p3} is a member of the party but is not a configured peer of this \
+                 node. Add it as a peer, then retry."
+            ),
+        );
+        Ok(())
+    }
+
+    /// No other member stays, so nobody co-signs, although the threshold
+    /// would allow it.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_kick_without_any_co_signer_is_a_bad_request(pool: SqlitePool) -> Result {
+        let (p1, p2) = (pid(1)?, pid(2)?);
+        cache_hosted_party(
+            &pool,
+            &pid(9)?,
+            1,
+            &[(&p1, Some("k1")), (&p2, Some("k2"))],
+            &[("k1", Some(&p1)), ("k2", Some(&p2))],
+        )
+        .await?;
+        let node = test_node(pool, &p1).await?;
+        kick(&node, kick_host(&p2, 1)?).await.assert_error(
+            StatusCode::BAD_REQUEST,
+            "Cannot kick: this node has no other hosting member to co-sign the kick.",
+        );
+        Ok(())
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_participant_outside_the_party_is_a_bad_request(pool: SqlitePool) -> Result {
+        let node = three_host_party(pool, false).await?;
+        let p5 = pid(5)?;
+        kick(&node, kick_host(&p5, 1)?).await.assert_error(
+            StatusCode::BAD_REQUEST,
+            &format!("Cannot kick {p5}: not a member of this decentralized party"),
+        );
+        Ok(())
+    }
+
+    /// The kicked host has no peer entry. A kick never contacts it, so the
+    /// kick starts.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_kicked_host_need_not_be_a_peer(pool: SqlitePool) -> Result {
+        let (p1, p2, p3) = (pid(1)?, pid(2)?, pid(3)?);
+        cache_hosted_party(
+            &pool,
+            &pid(9)?,
+            2,
+            &[(&p1, Some("k1")), (&p2, Some("k2")), (&p3, Some("k3"))],
+            &[("k1", Some(&p1)), ("k2", Some(&p2)), ("k3", Some(&p3))],
+        )
+        .await?;
+        insert_peers(&pool, &[peer(&p3, closed_port()?, false)]).await?;
+        record_keys(&pool, &[3]).await?;
+        let node = test_node(pool, &p1).await?;
+        let answer = kick(&node, kick_host(&p2, 1)?).await;
+        assert_eq!(answer.status, StatusCode::ACCEPTED, "{}", answer.body);
+        Ok(())
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_host_kick_threshold_out_of_range_is_a_bad_request(pool: SqlitePool) -> Result {
+        let node = three_host_party(pool, false).await?;
+        kick(&node, kick_host(&pid(2)?, 3)?).await.assert_error(
+            StatusCode::BAD_REQUEST,
+            "new_threshold must be between 1 and 2 (party member count 3, minus the \
+             participant being kicked); got 3",
+        );
+        Ok(())
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn an_owner_kick_threshold_out_of_range_is_a_bad_request(pool: SqlitePool) -> Result {
+        let node = party_with_an_owner_only_member(pool, 2).await?;
+        kick(&node, kick_owner_key("k4", 4)?).await.assert_error(
+            StatusCode::BAD_REQUEST,
+            "new_threshold must be between 1 and 3 (the party keeps its 3 hosts and 3 \
+             owners); got 4",
+        );
+        Ok(())
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn an_owner_kick_the_hosts_cannot_sign_is_a_bad_request(pool: SqlitePool) -> Result {
+        let node = party_with_an_owner_only_member(pool, 4).await?;
+        kick(&node, kick_owner_key("k4", 2)?).await.assert_error(
+            StatusCode::BAD_REQUEST,
+            "Cannot kick owner key k4: the party's namespace threshold is 4, but only its 3 \
+             hosting members can sign. The owner being removed would have to sign too, and \
+             a kick cannot ask it",
+        );
+        Ok(())
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn an_owner_kick_with_a_failed_threshold_read_answers_500(pool: SqlitePool) -> Result {
+        let node = party_with_an_owner_only_member(pool.clone(), 2).await?;
+        break_table(&pool, "dec_party").await?;
+        kick(&node, kick_owner_key("k4", 2)?).await.assert_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Failed to read the party's cached thresholds",
+        );
+        Ok(())
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_host_kick_with_a_failed_threshold_read_answers_500(pool: SqlitePool) -> Result {
+        let node = three_host_party(pool.clone(), false).await?;
+        break_table(&pool, "dec_party").await?;
+        kick(&node, kick_host(&pid(2)?, 1)?).await.assert_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Failed to read the party's cached thresholds",
+        );
+        Ok(())
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_party_with_a_run_in_flight_is_a_conflict(pool: SqlitePool) -> Result {
+        let party = pid(9)?;
+        let node = three_host_party(pool.clone(), false).await?;
+        insert_run(&pool, &in_progress_run("busy-run", &party)).await?;
+        kick(&node, kick_host(&pid(2)?, 1)?).await.assert_error(
+            StatusCode::CONFLICT,
+            &format!(
+                "Party {party} already has a Contracts workflow in flight (run busy-run); \
+                 wait for it to finish or cancel it from its coordinator"
+            ),
+        );
+        Ok(())
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_party_another_request_is_starting_is_a_conflict(pool: SqlitePool) -> Result {
+        let party = pid(9)?;
+        let node = three_host_party(pool, false).await?;
+        let _claim = node
+            .data
+            .workflows
+            .claim_start(&party)
+            .ok_or_else(|| anyhow::anyhow!("a fresh registry has no claims"))?;
+        kick(&node, kick_host(&pid(2)?, 1)?).await.assert_error(
+            StatusCode::CONFLICT,
+            &format!(
+                "Another request is starting a workflow for {party}; retry once it has started"
+            ),
+        );
+        Ok(())
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_survivor_without_a_recorded_key_is_unavailable(pool: SqlitePool) -> Result {
+        let node = three_host_party(pool, false).await?;
+        let p3 = pid(3)?;
+        kick(&node, kick_host(&pid(2)?, 1)?).await.assert_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            &format!(
+                "Cannot kick: this node has no record of the signing key of {p3}. The kick \
+                 must keep the key of each member that stays. Refresh /decentralized-parties \
+                 so each peer reports its key, then retry."
+            ),
+        );
+        Ok(())
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn two_survivors_with_one_key_are_a_conflict(pool: SqlitePool) -> Result {
+        let party = pid(9)?;
+        let (p2, p3) = (pid(2)?, pid(3)?);
+        cache_hosted_party(
+            &pool,
+            &party,
+            2,
+            &[
+                (&pid(1)?, Some("k1")),
+                (&p2, Some("k2")),
+                (&p3, Some("k3")),
+                (&pid(4)?, Some("k4")),
+            ],
+            &[("k1", None), ("k2", None), ("k3", None), ("k4", None)],
+        )
+        .await?;
+        let port = closed_port()?;
+        insert_peers(&pool, &[peer(&p2, port, false), peer(&p3, port, false)]).await?;
+        record_signing_keys(&pool, &party, &[(2, 2), (3, 2)]).await?;
+        let node = test_node(pool, &pid(1)?).await?;
+        let fingerprint = utils::compute_fingerprint(&kick_public_key(2));
+        kick(&node, kick_host(&pid(4)?, 2)?).await.assert_error(
+            StatusCode::CONFLICT,
+            &format!(
+                "Cannot kick: members {p2} and {p3} both claim signing key {fingerprint}. The \
+                 kick cannot tell which claim is wrong. Check which of the two nodes holds \
+                 that key, then refresh /decentralized-parties."
+            ),
+        );
+        Ok(())
+    }
+
+    /// A member that stays is not a peer, so the kick reads the topology
+    /// for its key. Canton is unreachable.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn an_unreadable_key_adoption_check_is_unavailable(pool: SqlitePool) -> Result {
+        let party = pid(9)?;
+        let (p1, p2, p3, p4) = (pid(1)?, pid(2)?, pid(3)?, pid(4)?);
+        cache_hosted_party(
+            &pool,
+            &party,
+            2,
+            &[
+                (&p1, Some("k1")),
+                (&p2, Some("k2")),
+                (&p3, Some("k3")),
+                (&p4, Some("k4")),
+            ],
+            &[("k1", None), ("k2", None), ("k3", None), ("k4", None)],
+        )
+        .await?;
+        insert_peers(&pool, &[peer(&p2, closed_port()?, false)]).await?;
+        record_keys(&pool, &[2, 3]).await?;
+        let node = test_node(pool, &p1).await?;
+        kick(&node, kick_host(&p4, 2)?).await.assert_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Cannot check the party's signing keys right now. Retry later.",
+        );
+        Ok(())
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn an_unverifiable_invitee_is_a_conflict(pool: SqlitePool) -> Result {
+        let node = three_host_party(pool.clone(), true).await?;
+        record_keys(&pool, &[3]).await?;
+        let probe = probe_invitee_health(&node.data.config, &pool, &[pid(3)?]).await;
+        let expected = format_incompatible_peers(&incompatible_versions(&probe));
+        assert!(expected.contains(&pid(3)?.to_string()), "{expected}");
+        kick(&node, kick_host(&pid(2)?, 1)?)
+            .await
+            .assert_error(StatusCode::CONFLICT, &expected);
+        Ok(())
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_failed_run_write_is_a_conflict_and_leaves_no_run(pool: SqlitePool) -> Result {
+        let node = three_host_party(pool.clone(), false).await?;
+        record_keys(&pool, &[3]).await?;
+        refuse_run_writes(&pool).await?;
+        let answer = kick(&node, kick_host(&pid(2)?, 1)?).await;
+        assert_eq!(answer.status, StatusCode::CONFLICT, "{}", answer.body);
+        assert_eq!(answer.content_type.as_deref(), Some("application/json"));
+        let body = answer.json()?;
+        let error = body["error"].as_str().unwrap_or_default();
+        assert!(
+            error.starts_with("Failed to start kick workflow: ") && error.contains("workflow_runs"),
+            "{error}"
+        );
+        assert_eq!(body.as_object().map(|o| o.len()), Some(1), "{body}");
+        assert!(node.data.workflows.snapshot().is_empty());
+        Ok(())
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_valid_kick_is_accepted(pool: SqlitePool) -> Result {
+        let node = three_host_party(pool.clone(), false).await?;
+        record_keys(&pool, &[3]).await?;
+        let answer = kick(&node, kick_host(&pid(2)?, 1)?).await;
+        assert_eq!(answer.status, StatusCode::ACCEPTED, "{}", answer.body);
+        assert_eq!(answer.content_type.as_deref(), Some("application/json"));
+        let body = answer.json()?;
+        let instance = body["instance_name"].as_str().unwrap_or_default();
+        assert!(instance.starts_with("validator-9-kick-"), "{body}");
+        assert_eq!(
+            answer.body,
+            format!(
+                r#"{{"status":"inprogress","message":"Kick workflow started","instance_name":"{instance}"}}"#
+            )
+        );
+        Ok(())
+    }
+}

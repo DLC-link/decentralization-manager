@@ -1,24 +1,26 @@
-//! Runs, party ids, app states, cached parties, kick fixtures and an admin
-//! request shared by the workflow handler tests.
+//! Runs, party ids, app states, cached parties, kick fixtures, an admin
+//! request and a test node shared by the workflow handler tests.
 
 use std::{collections::HashSet, sync::Arc};
 
-use actix_web::{http::StatusCode, test as actix_test, web};
+use actix_web::{App, HttpMessage, dev::HttpServiceFactory, http::StatusCode, test, web};
 use canton_proto_rs::com::digitalasset::canton::crypto::v30::{SigningKeyUsage, SigningPublicKey};
 use sqlx::SqlitePool;
 
 use crate::{
     auth::Principal,
     canton_id::CantonId,
+    config::Peer,
     db::{
-        rows::DecPartyParticipantRow,
+        rows::{DecPartyParticipantRow, DecPartyRow},
         schema::{Commitable, SchemaWrite},
     },
     error::Result,
+    noise::NoiseKeypair,
     server::{
         AppState,
         health::HealthReply,
-        types::{WorkflowKind, WorkflowProgress, WorkflowRole, WorkflowRun},
+        types::{ErrorResponse, WorkflowKind, WorkflowProgress, WorkflowRole, WorkflowRun},
     },
     utils,
 };
@@ -201,6 +203,217 @@ pub fn admin() -> Principal {
 
 pub async fn status_and_body(response: actix_web::dev::ServiceResponse) -> (StatusCode, String) {
     let status = response.status();
-    let body = actix_test::read_body(response).await;
+    let body = test::read_body(response).await;
     (status, String::from_utf8_lossy(&body).into_owned())
+}
+
+/// A node under test: its state on a test database, with a participant id and
+/// a Noise key in a temporary root directory.
+pub struct TestNode {
+    pub data: web::Data<AppState>,
+    _root: tempfile::TempDir,
+}
+
+/// A node whose participant id is `self_id`, on `pool`. Its Canton ports
+/// have nothing listening on them, so every Canton call fails.
+pub async fn test_node(pool: SqlitePool, self_id: &CantonId) -> anyhow::Result<TestNode> {
+    let root = tempfile::tempdir()?;
+    let mut state = AppState::for_test_on(None, pool).into_inner();
+    let node = Arc::get_mut(&mut state)
+        .ok_or_else(|| anyhow::anyhow!("a fresh test state has one owner"))?;
+    node.config = node.config.clone().with_root_dir(root.path());
+    node.config.node.participant_id = Some(self_id.clone());
+    node.config.canton.admin_api_port = closed_port()?;
+    node.config.canton.ledger_api_port = closed_port()?;
+    tokio::fs::create_dir_all(node.config.data_dir()).await?;
+    NoiseKeypair::generate()
+        .save_to_file(node.config.key_file_path())
+        .await?;
+    Ok(TestNode {
+        data: web::Data::from(state),
+        _root: root,
+    })
+}
+
+/// A port with nothing listening on it.
+pub fn closed_port() -> anyhow::Result<u16> {
+    Ok(std::net::TcpListener::bind("127.0.0.1:0")?
+        .local_addr()?
+        .port())
+}
+
+/// A peer on a port where nothing listens. With `reachable_key` its Noise
+/// key parses, so a health probe tries it and fails. Without it the key is
+/// empty, so the probe and the invites skip the peer.
+pub fn peer(id: &CantonId, port: u16, reachable_key: bool) -> Peer {
+    Peer {
+        participant_id: id.clone(),
+        name: id.prefix.clone(),
+        address: "127.0.0.1".to_string(),
+        port,
+        public_key: if reachable_key {
+            NoiseKeypair::generate().public_key_hex()
+        } else {
+            String::new()
+        },
+        party: None,
+    }
+}
+
+pub async fn insert_peers(pool: &SqlitePool, peers: &[Peer]) -> anyhow::Result<()> {
+    let mut tx = pool.begin_transaction().await?;
+    for peer in peers {
+        tx.insert_peer(peer).await?;
+    }
+    Commitable::commit(tx).await
+}
+
+/// Cache `party` with namespace threshold `threshold`, its hosts (each with
+/// its owner key, if known) and its owner keys (each with its claimant, if
+/// any).
+pub async fn cache_hosted_party(
+    pool: &SqlitePool,
+    party: &CantonId,
+    threshold: i64,
+    hosts: &[(&CantonId, Option<&str>)],
+    owners: &[(&str, Option<&CantonId>)],
+) -> anyhow::Result<()> {
+    let mut tx = pool.begin_transaction().await?;
+    tx.upsert_dec_party(&DecPartyRow {
+        party_id: party.to_string(),
+        prefix: party.prefix.clone(),
+        threshold,
+        updated_at: 0,
+        my_owner_key: None,
+        confirmation_threshold: None,
+    })
+    .await?;
+    let rows: Vec<DecPartyParticipantRow> = hosts
+        .iter()
+        .map(|(uid, owner_key)| DecPartyParticipantRow {
+            dec_party_id: party.to_string(),
+            participant_uid: uid.to_string(),
+            permission: "confirmation".to_string(),
+            owner_key: owner_key.map(str::to_string),
+            signing_key: None,
+        })
+        .collect();
+    tx.replace_dec_party_participants(party, &rows).await?;
+    let keys: Vec<String> = owners.iter().map(|(key, _)| key.to_string()).collect();
+    tx.replace_dec_party_owners(party, &keys).await?;
+    for (key, claimant) in owners {
+        if let Some(claimant) = claimant {
+            tx.update_owner_claim(party, key, &claimant.to_string())
+                .await?;
+        }
+    }
+    Commitable::commit(tx).await
+}
+
+/// Make every read of `table` fail, so a handler meets a database error.
+pub async fn break_table(pool: &SqlitePool, table: &str) -> anyhow::Result<()> {
+    sqlx::query(&format!("ALTER TABLE {table} RENAME TO {table}_gone"))
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+/// Make every new run row fail to write while reads still work, so a start
+/// passes its party claim and meets a database error at its run write.
+pub async fn refuse_run_writes(pool: &SqlitePool) -> anyhow::Result<()> {
+    sqlx::query(
+        "CREATE TRIGGER refuse_run_writes BEFORE INSERT ON workflow_runs \
+         BEGIN SELECT RAISE(ABORT, 'workflow_runs refuses writes'); END",
+    )
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// What a handler answered.
+#[derive(Debug)]
+pub struct Answer {
+    pub status: StatusCode,
+    pub content_type: Option<String>,
+    /// Every header as `(name, value)`, sorted.
+    pub headers: Vec<(String, String)>,
+    pub body: String,
+}
+
+impl Answer {
+    /// Assert a JSON `ErrorResponse` with `status` whose text is exactly
+    /// `error`, and no header but its content type.
+    #[track_caller]
+    pub fn assert_error(&self, status: StatusCode, error: &str) {
+        assert_eq!(self.status, status, "{}", self.body);
+        assert_eq!(self.content_type.as_deref(), Some("application/json"));
+        assert_eq!(
+            self.headers,
+            vec![("content-type".to_string(), "application/json".to_string())]
+        );
+        let expected = serde_json::to_string(&ErrorResponse {
+            error: error.to_string(),
+        })
+        .expect("an ErrorResponse serializes");
+        assert_eq!(self.body, expected);
+    }
+
+    /// The body as JSON.
+    pub fn json(&self) -> anyhow::Result<serde_json::Value> {
+        Ok(serde_json::from_str(&self.body)?)
+    }
+}
+
+/// POST `body` to `uri` on an app that serves only `service`, as `principal`
+/// (no principal means an anonymous caller).
+pub async fn post_as(
+    data: &web::Data<AppState>,
+    service: impl HttpServiceFactory + 'static,
+    uri: &str,
+    body: serde_json::Value,
+    principal: Option<Principal>,
+) -> Answer {
+    let app = test::init_service(App::new().app_data(data.clone()).service(service)).await;
+    let request = test::TestRequest::post()
+        .uri(uri)
+        .set_json(body)
+        .to_request();
+    if let Some(principal) = principal {
+        request.extensions_mut().insert(principal);
+    }
+    let response = test::call_service(&app, request).await;
+    let status = response.status();
+    let content_type = response
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_string);
+    let mut headers: Vec<(String, String)> = response
+        .headers()
+        .iter()
+        .map(|(name, value)| {
+            (
+                name.to_string(),
+                String::from_utf8_lossy(value.as_bytes()).into_owned(),
+            )
+        })
+        .collect();
+    headers.sort();
+    let body = String::from_utf8_lossy(&test::read_body(response).await).into_owned();
+    Answer {
+        status,
+        content_type,
+        headers,
+        body,
+    }
+}
+
+/// POST `body` to `uri` as an admin.
+pub async fn post_as_admin(
+    data: &web::Data<AppState>,
+    service: impl HttpServiceFactory + 'static,
+    uri: &str,
+    body: serde_json::Value,
+) -> Answer {
+    post_as(data, service, uri, body, Some(admin())).await
 }
