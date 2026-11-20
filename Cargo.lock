@@ -1813,7 +1813,7 @@ dependencies = [
  "futures",
  "hex",
  "http 0.2.12",
- "hyper 0.14.32",
+ "hyper 1.11.1",
  "hyper-noise",
  "insta",
  "jsonwebtoken",
