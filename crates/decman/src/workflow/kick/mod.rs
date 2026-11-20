@@ -11,7 +11,20 @@ pub use steps::{
 use crate::{
     noise::MessageType,
     server::WorkflowKind,
-    workflow::state::{WorkflowStep, workflow_steps},
+    workflow::{
+        state::{WorkflowStep, workflow_steps},
+        storage::artifact_kinds,
+        topology::DnsP2pArtifactKinds,
+    },
+};
+
+/// The artefact kinds of a kick run's DNS + P2P proposals and of each
+/// member's signed pair.
+pub const ARTIFACTS: DnsP2pArtifactKinds<'static> = DnsP2pArtifactKinds {
+    dns_proposal: artifact_kinds::KICK_DNS_PROPOSAL,
+    p2p_proposal: artifact_kinds::KICK_P2P_PROPOSAL,
+    signed_dns: artifact_kinds::SIGNED_KICK_DNS,
+    signed_p2p: artifact_kinds::SIGNED_KICK_P2P,
 };
 
 workflow_steps! {

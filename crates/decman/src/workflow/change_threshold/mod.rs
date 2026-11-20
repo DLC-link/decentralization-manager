@@ -9,7 +9,20 @@ pub use steps::{create_proposals, export_state, sign_proposals, submit_change};
 use crate::{
     noise::MessageType,
     server::WorkflowKind,
-    workflow::state::{WorkflowStep, workflow_steps},
+    workflow::{
+        state::{WorkflowStep, workflow_steps},
+        storage::artifact_kinds,
+        topology::DnsP2pArtifactKinds,
+    },
+};
+
+/// The artefact kinds of a change-threshold run's DNS + P2P proposals and of each
+/// member's signed pair.
+pub const ARTIFACTS: DnsP2pArtifactKinds<'static> = DnsP2pArtifactKinds {
+    dns_proposal: artifact_kinds::CHANGE_THRESHOLD_DNS_PROPOSAL,
+    p2p_proposal: artifact_kinds::CHANGE_THRESHOLD_P2P_PROPOSAL,
+    signed_dns: artifact_kinds::SIGNED_CHANGE_THRESHOLD_DNS,
+    signed_p2p: artifact_kinds::SIGNED_CHANGE_THRESHOLD_P2P,
 };
 
 workflow_steps! {

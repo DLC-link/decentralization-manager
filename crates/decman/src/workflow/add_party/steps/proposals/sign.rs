@@ -4,7 +4,7 @@ use crate::{
     config::NodeConfig,
     error::Result,
     workflow::{
-        onboarding::steps::generate_keys::own_new_daml_key, storage::artifact_kinds, topology,
+        add_party::ARTIFACTS, onboarding::steps::generate_keys::own_new_daml_key, topology,
     },
 };
 
@@ -33,8 +33,7 @@ pub async fn sign_proposals(
         instance_name,
         proposal_data,
         "add-party",
-        artifact_kinds::SIGNED_ADD_PARTY_DNS,
-        artifact_kinds::SIGNED_ADD_PARTY_P2P,
+        ARTIFACTS,
         own_new_key.as_ref(),
     )
     .await

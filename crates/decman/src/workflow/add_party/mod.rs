@@ -13,7 +13,11 @@ use crate::{
     canton_id::CantonId,
     noise::MessageType,
     server::WorkflowKind,
-    workflow::state::{WorkflowStep, workflow_steps},
+    workflow::{
+        state::{WorkflowStep, workflow_steps},
+        storage::artifact_kinds,
+        topology::DnsP2pArtifactKinds,
+    },
 };
 
 /// Resolve a ledger-API token for `party` from the node's auth registry.
@@ -45,6 +49,15 @@ pub(crate) async fn resolve_ledger_token(
         }
     }
 }
+
+/// The artefact kinds of an add-party run's DNS + P2P proposals and of each
+/// member's signed pair.
+pub const ARTIFACTS: DnsP2pArtifactKinds<'static> = DnsP2pArtifactKinds {
+    dns_proposal: artifact_kinds::ADD_PARTY_DNS_PROPOSAL,
+    p2p_proposal: artifact_kinds::ADD_PARTY_P2P_PROPOSAL,
+    signed_dns: artifact_kinds::SIGNED_ADD_PARTY_DNS,
+    signed_p2p: artifact_kinds::SIGNED_ADD_PARTY_P2P,
+};
 
 workflow_steps! {
     /// Add-party workflow steps (adding a new member to an existing

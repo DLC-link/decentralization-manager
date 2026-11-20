@@ -196,7 +196,7 @@ async fn head_for_proposal(
 /// both with the participant's topology keys — retrying the transient
 /// `TOPOLOGY_NO_APPROPRIATE_SIGNING_KEY_IN_STORE` via
 /// [`sign_transactions_with_topology_retry`] — and persists the signed results
-/// as `dns_artifact_kind` / `p2p_artifact_kind`, keyed by this node's
+/// as `kinds.signed_dns` / `kinds.signed_p2p`, keyed by this node's
 /// participant id. Each artefact is a single `varint(len)||proto` blob, so the
 /// coordinator reads them back with `utils::read_first_message_from_bytes` and
 /// the on-wire bytes stay byte-identical to the original combined-file format.
@@ -207,15 +207,13 @@ async fn head_for_proposal(
 /// `own_new_key` is this node's Daml key when the P2P adds it, as for the new
 /// member in add-party. A key DecMan generated signs the P2P here, because
 /// the vault does not hold that key.
-#[allow(clippy::too_many_arguments)]
 pub async fn sign_dns_p2p_proposals(
     config: &NodeConfig,
     storage: &SqlitePool,
     instance_name: &str,
     proposal_data: &[u8],
     label: &str,
-    dns_artifact_kind: &str,
-    p2p_artifact_kind: &str,
+    kinds: DnsP2pArtifactKinds<'_>,
     own_new_key: Option<&SigningPublicKey>,
 ) -> Result {
     tracing::info!("Signing {label} proposals...");
@@ -262,7 +260,7 @@ pub async fn sign_dns_p2p_proposals(
     storage
         .write_artifact(
             instance_name,
-            dns_artifact_kind,
+            kinds.signed_dns,
             Some(&node_id),
             &utils::encode_length_prefixed_message(&response.transactions[0]),
         )
@@ -270,7 +268,7 @@ pub async fn sign_dns_p2p_proposals(
     storage
         .write_artifact(
             instance_name,
-            p2p_artifact_kind,
+            kinds.signed_p2p,
             Some(&node_id),
             &utils::encode_length_prefixed_message(&response.transactions[1]),
         )
@@ -283,6 +281,7 @@ pub async fn sign_dns_p2p_proposals(
 /// The four artefact kinds a topology submit joins when aggregating peer
 /// signatures: the coordinator's original DNS / P2P proposals and the per-peer
 /// signed DNS / P2P blobs.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct DnsP2pArtifactKinds<'a> {
     pub dns_proposal: &'a str,
     pub p2p_proposal: &'a str,
