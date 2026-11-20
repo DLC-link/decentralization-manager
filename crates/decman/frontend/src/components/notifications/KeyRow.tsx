@@ -4,11 +4,6 @@ import { copyToClipboard } from "../../clipboard";
 import { useSnackbar } from "../../contexts";
 import { truncateKey } from "./format";
 
-/**
- * The namespace owner key a kick removes. A member that owns the namespace
- * without hosting the party may have no participant, so the key is the one
- * name every kick card can show.
- */
 /** A labelled key fingerprint, shortened, with a button that copies it whole. */
 const KeyRow = ({
   label,
@@ -47,6 +42,11 @@ const KeyRow = ({
   );
 };
 
+/**
+ * The namespace owner key a kick removes. A member that owns the namespace
+ * without hosting the party may have no participant, so the key is the one
+ * name every kick card can show.
+ */
 const KickedOwnerKeyRow = ({ ownerKey }: { ownerKey: string }) => (
   <KeyRow label="Owner key" fingerprint={ownerKey} testId="kicked-owner-key" />
 );
