@@ -2,7 +2,7 @@
 
 use std::time::Duration;
 
-use actix_web::{HttpRequest, HttpResponse, Responder, get, http::StatusCode, post, web};
+use actix_web::{HttpRequest, HttpResponse, Responder, get, post, web};
 use base64::{Engine, engine::general_purpose::STANDARD};
 use sqlx::SqlitePool;
 
@@ -17,6 +17,7 @@ use crate::{
     },
     server::{
         AppState,
+        error::ApiError,
         middleware::require_admin,
         package_inventory::fetch_dar_for_package,
         types::{
@@ -69,9 +70,7 @@ pub async fn upload_dars_local(
         }
         Err(e) => {
             tracing::error!("Failed to upload DARs to local node: {e}");
-            HttpResponse::InternalServerError().json(ErrorResponse {
-                error: format!("Failed to upload DARs: {e}"),
-            })
+            ApiError::Internal(format!("Failed to upload DARs: {e}")).into_response()
         }
     }
 }
@@ -103,12 +102,13 @@ pub async fn start_dars(
         return resp;
     }
     if body.peer_ids.is_empty() {
-        return HttpResponse::BadRequest().json(ErrorResponse {
-            error: "peer_ids must contain at least one peer".to_string(),
-        });
+        return ApiError::BadRequest("peer_ids must contain at least one peer".to_string())
+            .into_response();
     }
     let body = body.into_inner();
-    launch_dars(&data, body.dar_files, body.peer_ids).await
+    launch_dars(&data, body.dar_files, body.peer_ids)
+        .await
+        .unwrap_or_else(ApiError::into_response)
 }
 
 /// Distribute the DAR on this node that holds a package
@@ -139,30 +139,38 @@ pub async fn start_dars_for_package(
     if let Err(resp) = require_admin(&http_req, data.admin_role.as_deref()) {
         return resp;
     }
+    start_dars_for_package_run(&data, body.into_inner())
+        .await
+        .unwrap_or_else(ApiError::into_response)
+}
+
+/// Read the DAR that holds the requested package, then distribute it.
+async fn start_dars_for_package_run(
+    data: &web::Data<AppState>,
+    body: DistributePackageRequest,
+) -> std::result::Result<HttpResponse, ApiError> {
     if body.peer_ids.is_empty() {
-        return HttpResponse::BadRequest().json(ErrorResponse {
-            error: "peer_ids must contain at least one peer".to_string(),
-        });
+        return Err(ApiError::BadRequest(
+            "peer_ids must contain at least one peer".to_string(),
+        ));
     }
     let dar = match fetch_dar_for_package(&data.config, &body.package_id).await {
         Ok(Some(dar)) => dar,
         Ok(None) => {
-            return HttpResponse::NotFound().json(ErrorResponse {
-                error: format!("No DAR on this node holds package {}", body.package_id),
-            });
+            return Err(ApiError::NotFound(format!(
+                "No DAR on this node holds package {}",
+                body.package_id
+            )));
         }
         Err(e) => {
             tracing::error!(
                 "Failed to read the DAR for package {}: {e:#}",
                 body.package_id
             );
-            return HttpResponse::InternalServerError().json(ErrorResponse {
-                error: format!("Failed to read the DAR: {e}"),
-            });
+            return Err(ApiError::Internal(format!("Failed to read the DAR: {e}")));
         }
     };
-    let body = body.into_inner();
-    launch_dars(&data, vec![dar], body.peer_ids).await
+    launch_dars(data, vec![dar], body.peer_ids).await
 }
 
 /// Refuse a DAR set whose encoded `UploadDars` bundle exceeds `limit` bytes.
@@ -170,20 +178,14 @@ pub async fn start_dars_for_package(
 /// A peer checks the size only after it accepts the invitation, so the
 /// coordinator checks it first. The bundle frames each file with its name and
 /// two lengths, and those bytes count toward the limit.
-fn dars_bundle_refusal(
-    files: &[DarFile],
-    limit: usize,
-) -> std::result::Result<(), (StatusCode, String)> {
+fn dars_bundle_refusal(files: &[DarFile], limit: usize) -> std::result::Result<(), ApiError> {
     let mut sizes = Vec::with_capacity(files.len());
     for file in files {
         let data = STANDARD.decode(&file.data).map_err(|e| {
-            (
-                StatusCode::BAD_REQUEST,
-                format!(
-                    "DAR file {name} is not valid base64: {e}",
-                    name = file.filename
-                ),
-            )
+            ApiError::BadRequest(format!(
+                "DAR file {name} is not valid base64: {e}",
+                name = file.filename
+            ))
         })?;
         sizes.push((file.filename.as_str(), data.len()));
     }
@@ -194,7 +196,7 @@ fn dars_bundle_refusal(
         "Refused to distribute {count} DAR file(s): {error}",
         count = files.len()
     );
-    Err((StatusCode::PAYLOAD_TOO_LARGE, error))
+    Err(ApiError::PayloadTooLarge(error))
 }
 
 /// Why the bundle of `files`, each a name and a DAR length, does not fit in
@@ -258,10 +260,8 @@ async fn launch_dars(
     data: &web::Data<AppState>,
     dar_files: Vec<DarFile>,
     peer_ids: Vec<CantonId>,
-) -> HttpResponse {
-    if let Err((status, error)) = dars_bundle_refusal(&dar_files, MAX_CHUNKED_TOTAL_SIZE) {
-        return HttpResponse::build(status).json(ErrorResponse { error });
-    }
+) -> std::result::Result<HttpResponse, ApiError> {
+    dars_bundle_refusal(&dar_files, MAX_CHUNKED_TOTAL_SIZE)?;
 
     // Create DARs config from request
     let timestamp = now_secs();
@@ -282,14 +282,12 @@ async fn launch_dars(
     // format — NO invites are sent if even one invitee fails the version gate.
     let incompatible = preflight_incompatible_peers(&data.config, &data.db, &peer_ids).await;
     if !incompatible.is_empty() {
-        return HttpResponse::Conflict().json(ErrorResponse {
-            error: format_incompatible_peers(&incompatible),
-        });
+        return Err(ApiError::Conflict(format_incompatible_peers(&incompatible)));
     }
 
     // Register + persist atomically w.r.t. duplicates (registry insert dedups
     // before the upsert; a persist failure unregisters so nothing leaks).
-    if let Err(error) = register_and_persist(
+    register_and_persist(
         data,
         &instance,
         DarsStep::WaitingForPeers,
@@ -297,10 +295,7 @@ async fn launch_dars(
         &peer_ids,
         None,
     )
-    .await
-    {
-        return error.into_response();
-    }
+    .await?;
 
     let config = data.config.clone();
     let db = data.db.clone();
@@ -449,11 +444,11 @@ async fn launch_dars(
     drop(status_guard);
     drop(abort_guard);
 
-    HttpResponse::Accepted().json(WorkflowResponse {
+    Ok(HttpResponse::Accepted().json(WorkflowResponse {
         status: WorkflowProgress::InProgress,
         message: "DARs distribution workflow started".to_string(),
         instance_name,
-    })
+    }))
 }
 
 /// Get the current status of the DARs distribution workflow
@@ -549,7 +544,7 @@ async fn send_dars_invites(
 
 #[cfg(test)]
 mod tests {
-    use actix_web::{App, HttpMessage, test as actix_test};
+    use actix_web::{App, HttpMessage, http::StatusCode, test as actix_test};
 
     use crate::db::MIGRATOR;
 
@@ -568,10 +563,9 @@ mod tests {
     #[test]
     fn a_set_above_the_limit_states_its_size_and_excess() -> Result {
         let refusal = dars_bundle_refusal(&[dar("a.dar", 60), dar("b.dar", 60)], 100);
-        let Err((status, error)) = refusal else {
+        let Err(ApiError::PayloadTooLarge(error)) = refusal else {
             anyhow::bail!("a 150-byte bundle must be refused at limit 100");
         };
-        assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
         assert!(error.contains("their names take 150 bytes"), "{error}");
         assert!(
             error.contains("50 bytes over the limit of 100 bytes"),
@@ -586,10 +580,9 @@ mod tests {
     #[test]
     fn a_dar_over_the_limit_alone_is_named_without_advice_to_split() -> Result {
         let refusal = dars_bundle_refusal(&[dar("a.dar", 10), dar("big.dar", 120)], 100);
-        let Err((status, error)) = refusal else {
+        let Err(ApiError::PayloadTooLarge(error)) = refusal else {
             anyhow::bail!("a DAR over the limit alone must be refused");
         };
-        assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
         assert!(
             error.starts_with("big.dar is too large to distribute"),
             "{error}"
@@ -622,7 +615,7 @@ mod tests {
     fn framing_bytes_count_toward_the_limit() {
         let refusal = dars_bundle_refusal(&[dar("a.dar", 60), dar("b.dar", 40)], 100);
         assert!(
-            matches!(refusal, Err((StatusCode::PAYLOAD_TOO_LARGE, _))),
+            matches!(refusal, Err(ApiError::PayloadTooLarge(_))),
             "100 DAR bytes plus framing must exceed limit 100: {refusal:?}"
         );
     }
@@ -641,10 +634,9 @@ mod tests {
                 data: "not base64!".to_string(),
             },
         ];
-        let Err((status, error)) = dars_bundle_refusal(&files, 100) else {
+        let Err(ApiError::BadRequest(error)) = dars_bundle_refusal(&files, 100) else {
             anyhow::bail!("a DAR that is not base64 must be refused");
         };
-        assert_eq!(status, StatusCode::BAD_REQUEST);
         assert!(error.contains("broken.dar"), "{error}");
         Ok(())
     }

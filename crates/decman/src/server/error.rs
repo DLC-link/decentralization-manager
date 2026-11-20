@@ -12,12 +12,21 @@ pub(crate) enum ApiError {
     /// 400: the request is wrong.
     #[error("{0}")]
     BadRequest(String),
+    /// 404: what the request names does not exist.
+    #[error("{0}")]
+    NotFound(String),
     /// 409: the request conflicts with the node's state.
     #[error("{0}")]
     Conflict(String),
+    /// 413: the request carries more than the node can pass on.
+    #[error("{0}")]
+    PayloadTooLarge(String),
     /// 500: the node failed.
     #[error("{0}")]
     Internal(String),
+    /// 502: a service the node called failed.
+    #[error("{0}")]
+    BadGateway(String),
     /// 503: the node cannot serve the request right now.
     #[error("{0}")]
     ServiceUnavailable(String),
@@ -28,10 +37,15 @@ impl ApiError {
     pub(crate) fn into_response(self) -> HttpResponse {
         match self {
             Self::BadRequest(error) => HttpResponse::BadRequest().json(ErrorResponse { error }),
+            Self::NotFound(error) => HttpResponse::NotFound().json(ErrorResponse { error }),
             Self::Conflict(error) => HttpResponse::Conflict().json(ErrorResponse { error }),
+            Self::PayloadTooLarge(error) => {
+                HttpResponse::PayloadTooLarge().json(ErrorResponse { error })
+            }
             Self::Internal(error) => {
                 HttpResponse::InternalServerError().json(ErrorResponse { error })
             }
+            Self::BadGateway(error) => HttpResponse::BadGateway().json(ErrorResponse { error }),
             Self::ServiceUnavailable(error) => {
                 HttpResponse::ServiceUnavailable().json(ErrorResponse { error })
             }
@@ -54,10 +68,19 @@ mod tests {
                 ApiError::BadRequest("bad \"one\"".into()),
                 StatusCode::BAD_REQUEST,
             ),
+            (ApiError::NotFound("gone".into()), StatusCode::NOT_FOUND),
             (ApiError::Conflict("busy".into()), StatusCode::CONFLICT),
+            (
+                ApiError::PayloadTooLarge("too big".into()),
+                StatusCode::PAYLOAD_TOO_LARGE,
+            ),
             (
                 ApiError::Internal("broke".into()),
                 StatusCode::INTERNAL_SERVER_ERROR,
+            ),
+            (
+                ApiError::BadGateway("upstream".into()),
+                StatusCode::BAD_GATEWAY,
             ),
             (
                 ApiError::ServiceUnavailable("not now".into()),

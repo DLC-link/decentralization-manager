@@ -16,6 +16,7 @@ use crate::{
     noise::{Message, MessageType, NoiseKeypair, parse_public_key, send_noise_message},
     server::{
         AppState,
+        error::ApiError,
         middleware::require_admin,
         types::{
             ErrorResponse, MessageResponse, RotateKeyInvitePayload, RotateKeyRequest,
@@ -68,57 +69,58 @@ pub async fn start_rotate_key(
     if let Err(resp) = require_admin(&http_req, data.admin_role.as_deref()) {
         return resp;
     }
+    start_rotate_key_run(&data, &body)
+        .await
+        .unwrap_or_else(ApiError::into_response)
+}
+
+/// Check a rotate-key request against the cached party, the vault and the
+/// chain, then register the run and start it.
+async fn start_rotate_key_run(
+    data: &web::Data<AppState>,
+    body: &RotateKeyRequest,
+) -> std::result::Result<HttpResponse, ApiError> {
     let party = body.decentralized_party_id.clone();
     tracing::info!("Rotate-key request received: party={party}");
 
-    let members: HashSet<CantonId> = match data.db.get_dec_party_participants(&party).await {
-        Ok(rows) => rows
-            .iter()
-            .filter_map(|r| CantonId::parse(&r.participant_uid).ok())
-            .collect(),
-        Err(e) => {
+    let members: HashSet<CantonId> = data
+        .db
+        .get_dec_party_participants(&party)
+        .await
+        .map_err(|e| {
             tracing::error!("Failed to load dec party participants for rotate-key: {e}");
-            return HttpResponse::InternalServerError().json(ErrorResponse {
-                error: "Failed to load decentralized party members".to_string(),
-            });
-        }
-    };
+            ApiError::Internal("Failed to load decentralized party members".to_string())
+        })?
+        .iter()
+        .filter_map(|r| CantonId::parse(&r.participant_uid).ok())
+        .collect();
     if members.is_empty() {
-        return HttpResponse::Conflict().json(ErrorResponse {
-            error: format!(
-                "No cached membership for {party}. Try refreshing /decentralized-parties first."
-            ),
-        });
+        return Err(ApiError::Conflict(format!(
+            "No cached membership for {party}. Try refreshing /decentralized-parties first."
+        )));
     }
     if !members.contains(data.config.participant_id()) {
-        return HttpResponse::BadRequest().json(ErrorResponse {
-            error: format!(
-                "This node does not host {party}, so it holds no Daml key of it to rotate"
-            ),
-        });
+        return Err(ApiError::BadRequest(format!(
+            "This node does not host {party}, so it holds no Daml key of it to rotate"
+        )));
     }
     if members.len() < 2 {
-        return HttpResponse::BadRequest().json(ErrorResponse {
-            error: format!("Cannot rotate a key of {party}: it has only one member"),
-        });
+        return Err(ApiError::BadRequest(format!(
+            "Cannot rotate a key of {party}: it has only one member"
+        )));
     }
 
     if let Err(e) = require_kms_for_rotation(&data.config, &data.db).await {
         let error = format!("{e:#}");
-        return if canton_unreachable(&e) {
-            HttpResponse::BadGateway().json(ErrorResponse { error })
+        return Err(if canton_unreachable(&e) {
+            ApiError::BadGateway(error)
         } else {
-            HttpResponse::BadRequest().json(ErrorResponse { error })
-        };
+            ApiError::BadRequest(error)
+        });
     }
-    let rotation = match rotation_baseline(&data.config, &data.db, &party, &members).await {
-        Ok(rotation) => rotation,
-        Err(e) => {
-            return HttpResponse::Conflict().json(ErrorResponse {
-                error: format!("{e:#}"),
-            });
-        }
-    };
+    let rotation = rotation_baseline(&data.config, &data.db, &party, &members)
+        .await
+        .map_err(|e| ApiError::Conflict(format!("{e:#}")))?;
     #[cfg(feature = "test-mode")]
     let rotation = match injected_rotated_key().await {
         Some(rotated_key) => RotationBaseline {
@@ -128,30 +130,27 @@ pub async fn start_rotate_key(
         None => rotation,
     };
 
-    let invitees: Vec<CantonId> = match data.db.get_all_peers().await {
-        Ok(peers) => peers
-            .into_iter()
-            .map(|p| p.participant_id)
-            .filter(|p| members.contains(p) && p != data.config.participant_id())
-            .collect(),
-        Err(e) => {
+    let invitees: Vec<CantonId> = data
+        .db
+        .get_all_peers()
+        .await
+        .map_err(|e| {
             tracing::error!("Failed to load peers for rotate-key: {e}");
-            return HttpResponse::InternalServerError().json(ErrorResponse {
-                error: "Failed to load peers".to_string(),
-            });
-        }
-    };
+            ApiError::Internal("Failed to load peers".to_string())
+        })?
+        .into_iter()
+        .map(|p| p.participant_id)
+        .filter(|p| members.contains(p) && p != data.config.participant_id())
+        .collect();
     // Every other member must record the new key. A member that is not a
     // configured peer would keep the old key on record for this node.
     let unreachable = members_missing_from_peers(&members, &invitees, data.config.participant_id());
     if !unreachable.is_empty() {
-        return HttpResponse::Conflict().json(ErrorResponse {
-            error: format!(
-                "Cannot rotate this node's key of {party}: every other member must record the new \
-                 key, but these members are not configured peers: {list}. Add them as peers first",
-                list = unreachable.join(", ")
-            ),
-        });
+        return Err(ApiError::Conflict(format!(
+            "Cannot rotate this node's key of {party}: every other member must record the new \
+             key, but these members are not configured peers: {list}. Add them as peers first",
+            list = unreachable.join(", ")
+        )));
     }
 
     let instance_name = format!("{}-rotate-key-{}", party.prefix, now_secs());
@@ -168,37 +167,29 @@ pub async fn start_rotate_key(
         instance_name: instance_name.clone(),
     };
 
-    let _start = match claim_party_for_start(&data, &party).await {
-        Ok(claim) => claim,
-        Err(error) => return error.into_response(),
-    };
+    let _start = claim_party_for_start(data, &party).await?;
     let health = probe_invitee_health(&data.config, &data.db, &invitees).await;
     let incompatible = incompatible_versions(&health);
     if !incompatible.is_empty() {
-        return HttpResponse::Conflict().json(ErrorResponse {
-            error: format_incompatible_peers(&incompatible),
-        });
+        return Err(ApiError::Conflict(format_incompatible_peers(&incompatible)));
     }
     // An older peer cannot decode the invitation, so the run would stall
     // after the invites went out.
     let lacking = lacking_feature(&health, ROTATE_KEY);
     if !lacking.is_empty() {
-        return HttpResponse::Conflict().json(ErrorResponse {
-            error: format_peers_lacking_rotate_key(&lacking),
-        });
+        return Err(ApiError::Conflict(format_peers_lacking_rotate_key(
+            &lacking,
+        )));
     }
-    if let Err(error) = register_and_persist(
-        &data,
+    register_and_persist(
+        data,
         &instance,
         RotateKeyStep::WaitingForPeers,
         &rotate_config,
         &invitees,
         Some(party.clone()),
     )
-    .await
-    {
-        return error.into_response();
-    }
+    .await?;
 
     let state = &instance.http;
     *state.invited_peers.write().await = invitees.clone();
@@ -273,11 +264,11 @@ pub async fn start_rotate_key(
     drop(status_guard);
     drop(abort_guard);
 
-    HttpResponse::Accepted().json(WorkflowResponse {
+    Ok(HttpResponse::Accepted().json(WorkflowResponse {
         status: WorkflowProgress::InProgress,
         message: "Rotate-key workflow started".to_string(),
         instance_name,
-    })
+    }))
 }
 
 /// Get the current status of the rotate-key workflow
