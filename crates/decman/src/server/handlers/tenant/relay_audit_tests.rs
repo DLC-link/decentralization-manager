@@ -2,7 +2,15 @@ use actix_web::{App, http::StatusCode, test};
 use serde_json::json;
 use sqlx::SqlitePool;
 
-use crate::{canton_id::CantonId, db::MIGRATOR, server::middleware::AuthMiddleware};
+use crate::{
+    canton_id::CantonId,
+    db::MIGRATOR,
+    server::{middleware::AuthMiddleware, tenant_call_audit},
+    workflow::{
+        external_party::add_hosts::{import_window_owner, replication_target},
+        party_replication::pipe::PipeBlock,
+    },
+};
 
 use super::*;
 
