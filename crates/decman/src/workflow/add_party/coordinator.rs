@@ -487,6 +487,7 @@ async fn copy_new_member_identity(
 
 #[cfg(test)]
 mod tests {
+    use canton_proto_rs::com::digitalasset::canton::protocol::v30::SignedTopologyTransaction;
     use sqlx::SqlitePool;
 
     use super::*;
@@ -730,7 +731,6 @@ mod tests {
 
     #[tokio::test]
     async fn saved_proposal_does_not_skip_or_poll_for_a_cleared_flag() -> anyhow::Result<()> {
-        use canton_proto_rs::com::digitalasset::canton::protocol::v30::SignedTopologyTransaction;
         let proposal = utils::encode_length_prefixed_message(&SignedTopologyTransaction::default());
         let restored = confirmed_clearing_proposal(Some(proposal.clone()), async {
             panic!("a proposal must enter signing without waiting for its future effect")

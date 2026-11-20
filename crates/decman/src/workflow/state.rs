@@ -647,6 +647,10 @@ mod tests {
     use crate::{
         canton_id::{NAMESPACE_LENGTH, Namespace},
         db::MIGRATOR,
+        workflow::{
+            AddPartyStep, ChangeThresholdStep, ContractsStep, DarsStep, KickStep, OnboardingStep,
+            RotateKeyStep,
+        },
     };
 
     workflow_steps! {
@@ -1065,11 +1069,6 @@ mod tests {
     /// and a resumed run reads the name back. These values must never move.
     #[test]
     fn persisted_step_names_and_indexes_are_pinned() {
-        use crate::workflow::{
-            AddPartyStep, ChangeThresholdStep, ContractsStep, DarsStep, KickStep, OnboardingStep,
-            RotateKeyStep,
-        };
-
         fn pinned<S: WorkflowStep>(expected: &[(S, &str)]) {
             assert_eq!(S::step_total(), expected.len() as i64);
             for (index, (step, name)) in expected.iter().enumerate() {

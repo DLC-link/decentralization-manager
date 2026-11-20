@@ -14,7 +14,7 @@ use crate::{
     workflow::{
         add_party::{
             AddPartyConfig, AddPartyStep,
-            coordinator::start_coordinator as start_add_party_coordinator,
+            coordinator::{save_new_member_keys, start_coordinator as start_add_party_coordinator},
         },
         change_threshold::ChangeThresholdStep,
         kick::KickStep,
@@ -658,7 +658,6 @@ async fn add_party_upload_restart(
     upload_kind: &str,
     payload: Vec<u8>,
 ) -> Result {
-    use crate::workflow::add_party::coordinator::save_new_member_keys;
     let root = tempfile::tempdir()?;
     let config = add_party_upload_run(&db, step).await?;
     let server = start(&db, &root, step).await?;

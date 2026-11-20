@@ -5,6 +5,11 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use tonic::transport::Channel;
 
+/// Package identifiers for Daml contracts (configurable per party). Defined in
+/// the shared `common::api` crate (the frontend's TypeScript is generated from
+/// it); re-exported so `crate::config::PackageConfig` resolves unchanged.
+pub use common::api::PackageConfig;
+
 use crate::{
     canton_id::CantonId,
     consts::{DATA_DIR, DB_FILENAME, NOISE_KEY_FILENAME},
@@ -143,11 +148,6 @@ pub struct Auth0M2MConfig {
     /// Auth0 M2M application client secret
     pub client_secret: String,
 }
-
-/// Package identifiers for Daml contracts (configurable per party). Defined in
-/// the shared `common::api` crate (the frontend's TypeScript is generated from
-/// it); re-exported so `crate::config::PackageConfig` resolves unchanged.
-pub use common::api::PackageConfig;
 
 /// Credentials for a specific decentralized party
 #[derive(Clone, Debug, Deserialize, Serialize, utoipa::ToSchema)]

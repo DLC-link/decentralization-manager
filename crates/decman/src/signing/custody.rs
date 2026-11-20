@@ -658,6 +658,15 @@ mod tests {
 /// the export and the key store all run.
 #[cfg(test)]
 mod against_a_vault {
+    use canton_proto_rs::com::digitalasset::canton::{
+        crypto::v30::SigningKeysWithThreshold,
+        protocol::v30::{
+            PartyToKeyMapping, PartyToParticipant, TopologyMapping, TopologyTransaction,
+        },
+        version::v1::{UntypedVersionedMessage, untyped_versioned_message},
+    };
+    use prost::Message;
+
     use super::*;
     use crate::{
         db::MIGRATOR,
@@ -807,13 +816,6 @@ mod against_a_vault {
 
     /// A versioned P2P transaction for the party that carries `keys`.
     fn adding(keys: &[&SigningPublicKey]) -> SignedTopologyTransaction {
-        use canton_proto_rs::com::digitalasset::canton::{
-            crypto::v30::SigningKeysWithThreshold,
-            protocol::v30::{PartyToParticipant, TopologyMapping, TopologyTransaction},
-            version::v1::{UntypedVersionedMessage, untyped_versioned_message},
-        };
-        use prost::Message;
-
         let transaction = TopologyTransaction {
             operation: 1,
             serial: 1,
@@ -1139,12 +1141,6 @@ mod against_a_vault {
     #[allow(deprecated)]
     #[sqlx::test(migrator = "MIGRATOR")]
     async fn refuses_to_sign_another_mapping_that_carries_the_key(db: SqlitePool) -> Result {
-        use canton_proto_rs::com::digitalasset::canton::{
-            protocol::v30::{PartyToKeyMapping, TopologyMapping, TopologyTransaction},
-            version::v1::{UntypedVersionedMessage, untyped_versioned_message},
-        };
-        use prost::Message;
-
         let fake = FakeAdminApi::start(vec![]).await?;
         let node = fake.node(SoftwareKeys::Stored, true).await?;
         let key = new_daml_key(

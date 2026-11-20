@@ -33,6 +33,11 @@ pub use acs::{
     TransferSource, check_vetted_packages_held, collect_party_package_ids, import_party_acs,
     open_export_session, open_import_window,
 };
+pub use offset::{capture_offset_once, current_ledger_offset};
+pub use onboarding_flag::{
+    ClearOutcome, clear_onboarding_flag, has_onboarding_marker, request_onboarding_flag_clear,
+    wait_for_flag_cleared,
+};
 
 /// Unix milliseconds, saturating at 0 if the clock is before the epoch.
 ///
@@ -44,12 +49,6 @@ pub fn now_ms() -> i64 {
         .map(|d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX))
         .unwrap_or(0)
 }
-
-pub use offset::{capture_offset_once, current_ledger_offset};
-pub use onboarding_flag::{
-    ClearOutcome, clear_onboarding_flag, has_onboarding_marker, request_onboarding_flag_clear,
-    wait_for_flag_cleared,
-};
 
 /// The artifact keys one replication run reads and writes.
 ///
