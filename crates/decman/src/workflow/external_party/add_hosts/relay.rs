@@ -23,8 +23,8 @@ use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
 
 use super::{
-    AddHostsError, CurrentPartyTopology, add_hosts_mapping, capture_replication_offsets,
-    read_party_to_participant, replication_target, require_live_source,
+    AddHostsError, CurrentPartyTopology, mapping::add_hosts_mapping, read_party_to_participant,
+    replication::capture_replication_offsets, replication_target, submit::require_live_source,
 };
 use crate::{
     canton_id::CantonId,
@@ -888,5 +888,4 @@ mod tests {
 }
 
 #[cfg(test)]
-#[path = "add_hosts_relay_audit_tests.rs"]
 mod audit_tests;
