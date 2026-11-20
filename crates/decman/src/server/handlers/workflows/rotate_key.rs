@@ -1,6 +1,6 @@
 //! The rotate-key workflow: start, status, cancel and invites.
 
-use std::{collections::HashSet, time::Duration};
+use std::collections::HashSet;
 
 use actix_web::{HttpRequest, HttpResponse, Responder, get, post, web};
 use anyhow::Context;
@@ -20,8 +20,8 @@ use crate::{
         middleware::require_admin,
         types::{
             ErrorResponse, MessageResponse, RotateKeyInvitePayload, RotateKeyRequest,
-            WorkflowGuard, WorkflowInstance, WorkflowKind, WorkflowProgress, WorkflowResponse,
-            WorkflowRole, WorkflowStatusResponse,
+            WorkflowInstance, WorkflowKind, WorkflowProgress, WorkflowResponse, WorkflowRole,
+            WorkflowStatusResponse,
         },
     },
     signing::custody,
@@ -31,13 +31,13 @@ use crate::{
 
 use super::{
     cancel::cancel_workflow_state,
-    launch::CoordinatorRequest,
+    launch::{CoordinatorRequest, StatusOrder, launch_coordinator},
     onboarding::interpret_invite_reply,
     preflight::{
         claim_party_for_start, format_incompatible_peers, incompatible_versions, lacking_feature,
         probe_invitee_health,
     },
-    runs::{kind_status, mark_run_completed, mark_run_failed, now_secs, register_and_persist},
+    runs::{kind_status, now_secs, register_and_persist},
 };
 
 // ============================================================================
@@ -195,62 +195,24 @@ async fn start_rotate_key_run(
     let state = &instance.http;
     *state.invited_peers.write().await = invitees.clone();
 
-    let config = data.config.clone();
-    let db = data.db.clone();
-    let state_clone = instance.http.clone();
-    let instance_for_coord = instance.clone();
-    let kind = instance.kind;
-    let workflows = data.workflows.clone();
-    let last_seen = data.last_seen.clone();
-    let instance_for_task = instance_name.clone();
-
-    // abort_handle/status/error are flipped under simultaneously-held locks —
-    // see start_dars for the cancel-race rationale.
-    let mut abort_guard = state.abort_handle.lock().await;
-    let mut status_guard = state.status.write().await;
-    let mut error_guard = state.error.write().await;
-
-    let join_handle = tokio::spawn(async move {
-        let _workflow_guard = WorkflowGuard::new(workflows, instance_for_task.clone());
-
-        if let Err(e) = send_rotate_key_invites(&config, &db, &rotate_config, &invitees).await {
-            tracing::error!("Failed to send rotate-key invites: {e}");
-            let msg = format!("Failed to send invites: {e}");
-            mark_run_failed(&db, kind, &instance_for_task, &msg).await;
-            *state_clone.status.write().await = WorkflowProgress::Failed;
-            *state_clone.error.write().await = Some(msg);
-            return;
-        }
-
-        // Give peers time to start their peer workflows
-        tokio::time::sleep(Duration::from_secs(2)).await;
-
-        let result = CoordinatorRequest::RotateKey(rotate_config)
-            .start(config, db.clone(), None, last_seen, instance_for_coord)
-            .await;
-
-        // Durable row first, in-memory status second: see start_change_threshold.
-        match result {
-            Ok(_) => {
-                mark_run_completed(&db, kind, &instance_for_task).await;
-                *state_clone.status.write().await = WorkflowProgress::Completed;
-                tracing::info!("Rotate-key workflow completed successfully");
-            }
-            Err(e) => {
-                let msg = format!("{e}");
-                mark_run_failed(&db, kind, &instance_for_task, &msg).await;
-                *state_clone.status.write().await = WorkflowProgress::Failed;
-                *state_clone.error.write().await = Some(msg);
-                tracing::error!("Rotate-key workflow failed: {e}");
-            }
-        }
-    });
-    *abort_guard = Some(join_handle.abort_handle());
-    *status_guard = WorkflowProgress::InProgress;
-    *error_guard = None;
-    drop(error_guard);
-    drop(status_guard);
-    drop(abort_guard);
+    let invites = {
+        let config = data.config.clone();
+        let db = data.db.clone();
+        let rotate_config = rotate_config.clone();
+        Box::pin(
+            async move { send_rotate_key_invites(&config, &db, &rotate_config, &invitees).await },
+        )
+    };
+    launch_coordinator(
+        data,
+        &instance,
+        CoordinatorRequest::RotateKey(rotate_config),
+        None,
+        invites,
+        StatusOrder::RowFirstLockingEachAlone,
+        None,
+    )
+    .await;
 
     Ok(HttpResponse::Accepted().json(WorkflowResponse {
         status: WorkflowProgress::InProgress,

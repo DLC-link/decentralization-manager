@@ -178,6 +178,16 @@ pub(crate) enum StatusOrder {
     /// In memory, then the log line, then the run row. Kick, onboarding and
     /// a resumed run.
     MemoryFirst,
+    /// The run row, then in memory, then the log line. Contracts, add-party
+    /// and change-threshold.
+    RowFirst,
+    /// As [`RowFirst`](Self::RowFirst), except that a failed invite holds
+    /// the status locks while it writes the run row. DARs.
+    RowFirstHoldingLocksOnInviteFailure,
+    /// The run row, then the in-memory status and then its error, each
+    /// under its own lock, then the log line. A failed invite writes the
+    /// run row first as well. Rotate-key.
+    RowFirstLockingEachAlone,
 }
 
 /// How a coordinator task begins.
@@ -269,7 +279,14 @@ pub(crate) fn spawn_coordinator_task(
                     tracing::error!("Failed to send {} invites: {e}", invite_label(kind));
                     let msg = format!("Failed to send invites: {e}");
                     match order {
-                        StatusOrder::MemoryFirst => {
+                        StatusOrder::RowFirstHoldingLocksOnInviteFailure => {
+                            let mut status = state.status.write().await;
+                            let mut error = state.error.write().await;
+                            *status = WorkflowProgress::Failed;
+                            *error = Some(msg.clone());
+                            mark_run_failed(&db, kind, &instance_name, &msg).await;
+                        }
+                        StatusOrder::MemoryFirst | StatusOrder::RowFirst => {
                             {
                                 let mut status = state.status.write().await;
                                 let mut error = state.error.write().await;
@@ -277,6 +294,11 @@ pub(crate) fn spawn_coordinator_task(
                                 *error = Some(msg.clone());
                             }
                             mark_run_failed(&db, kind, &instance_name, &msg).await;
+                        }
+                        StatusOrder::RowFirstLockingEachAlone => {
+                            mark_run_failed(&db, kind, &instance_name, &msg).await;
+                            *state.status.write().await = WorkflowProgress::Failed;
+                            *state.error.write().await = Some(msg);
                         }
                     }
                     return;
@@ -297,6 +319,15 @@ pub(crate) fn spawn_coordinator_task(
         // across a DB await. The status endpoints take a read lock to serve
         // every poll; a writer holding it during the DB write would block
         // each concurrent read for that long on a slow runner.
+        //
+        // With `RowFirst` the run row is marked terminal BEFORE the in-memory
+        // status flips. The two are read by different callers — `/…/status`
+        // reads this lock, while the "already has a workflow in flight" guard
+        // scans the run rows — so flipping memory first opens a window where
+        // the API reports a run finished and refuses the next workflow for
+        // that party in the same breath. Doing the durable write first can
+        // only report a finished run as still running for an instant, which
+        // costs a poll rather than a rejected request.
         match result {
             Ok(_) => {
                 let log_completed = || {
@@ -311,6 +342,13 @@ pub(crate) fn spawn_coordinator_task(
                         *state.status.write().await = WorkflowProgress::Completed;
                         log_completed();
                         mark_run_completed(&db, kind, &instance_name).await;
+                    }
+                    StatusOrder::RowFirst
+                    | StatusOrder::RowFirstHoldingLocksOnInviteFailure
+                    | StatusOrder::RowFirstLockingEachAlone => {
+                        mark_run_completed(&db, kind, &instance_name).await;
+                        *state.status.write().await = WorkflowProgress::Completed;
+                        log_completed();
                     }
                 }
                 if let Some(after_success) = after_success {
@@ -337,6 +375,17 @@ pub(crate) fn spawn_coordinator_task(
                         write_failed().await;
                         log_failed();
                         mark_run_failed(&db, kind, &instance_name, &msg).await;
+                    }
+                    StatusOrder::RowFirst | StatusOrder::RowFirstHoldingLocksOnInviteFailure => {
+                        mark_run_failed(&db, kind, &instance_name, &msg).await;
+                        write_failed().await;
+                        log_failed();
+                    }
+                    StatusOrder::RowFirstLockingEachAlone => {
+                        mark_run_failed(&db, kind, &instance_name, &msg).await;
+                        *state.status.write().await = WorkflowProgress::Failed;
+                        *state.error.write().await = Some(msg.clone());
+                        log_failed();
                     }
                 }
             }
@@ -478,8 +527,7 @@ mod launch_tests {
 
     /// A failed invite fails the run in memory and in its row with the same
     /// text, and the run leaves the registry.
-    #[sqlx::test(migrator = "MIGRATOR")]
-    async fn a_failed_invite_fails_the_run(pool: SqlitePool) -> TestResult {
+    async fn a_failed_invite_fails_the_run_in(pool: SqlitePool, order: StatusOrder) -> TestResult {
         let node = test_node(pool.clone(), &pid(1)?).await?;
         let instance = registered_run(&pool, &node.data).await?;
 
@@ -489,7 +537,7 @@ mod launch_tests {
             request(),
             None,
             Box::pin(async { Err(anyhow::anyhow!("no route to the peers")) }),
-            StatusOrder::MemoryFirst,
+            order,
             None,
         )
         .await;
@@ -505,6 +553,27 @@ mod launch_tests {
         assert_eq!(row.status, WorkflowProgress::Failed);
         assert_eq!(row.error.as_deref(), Some(message));
         Ok(())
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_failed_invite_fails_the_run(pool: SqlitePool) -> TestResult {
+        a_failed_invite_fails_the_run_in(pool, StatusOrder::MemoryFirst).await
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_failed_invite_fails_a_run_that_writes_its_row_first(pool: SqlitePool) -> TestResult {
+        a_failed_invite_fails_the_run_in(pool, StatusOrder::RowFirst).await
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_failed_invite_fails_a_run_that_holds_its_locks(pool: SqlitePool) -> TestResult {
+        a_failed_invite_fails_the_run_in(pool, StatusOrder::RowFirstHoldingLocksOnInviteFailure)
+            .await
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_failed_invite_fails_a_run_that_locks_each_alone(pool: SqlitePool) -> TestResult {
+        a_failed_invite_fails_the_run_in(pool, StatusOrder::RowFirstLockingEachAlone).await
     }
 }
 
