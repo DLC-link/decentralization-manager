@@ -3,6 +3,7 @@ use canton_proto_rs::com::digitalasset::canton::protocol::v30::{
 };
 use serde::{Deserialize, Serialize};
 
+use super::head::CurrentPartyTopology;
 use crate::{
     config::NodeConfig,
     error::Result,
@@ -10,8 +11,6 @@ use crate::{
         BundleSerial, check_bundle_envelope, check_signature_forms, decode_p2p_change, serial_after,
     },
 };
-
-use super::head::CurrentPartyTopology;
 
 /// The party-signed add-hosts bundle a wallet submits to each new host.
 #[derive(Clone, Debug, Deserialize, Serialize)]

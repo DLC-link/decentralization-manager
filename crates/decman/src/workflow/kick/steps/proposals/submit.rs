@@ -285,11 +285,12 @@ fn p2p_matches(actual: &PartyToParticipant, expected: &PartyToParticipant) -> bo
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use canton_proto_rs::com::digitalasset::canton::{
         crypto::v30::{Signature, SigningKeysWithThreshold, SigningPublicKey},
         protocol::v30::{MultiTransactionSignatures, party_to_participant::HostingParticipant},
     };
+
+    use super::*;
 
     fn signed_by(fingerprints: &[&str]) -> SignedTopologyTransaction {
         SignedTopologyTransaction {

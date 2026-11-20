@@ -1,3 +1,5 @@
+mod channel;
+
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -8,9 +10,6 @@ use crate::{
     consts::{DATA_DIR, DB_FILENAME, NOISE_KEY_FILENAME},
     error::Result,
 };
-
-mod channel;
-
 use channel::connect_channel;
 
 /// Network configuration - list of peers in the network

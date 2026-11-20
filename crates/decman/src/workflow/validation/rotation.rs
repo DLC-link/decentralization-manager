@@ -5,6 +5,16 @@ use canton_proto_rs::com::digitalasset::canton::{
 };
 use sqlx::SqlitePool;
 
+use super::{
+    decode::{decode_party_to_participant, decode_proposal_serial},
+    delta::{AllowedDelta, already_applied, check_set_delta},
+    expectations::PeerExpectations,
+    head::{
+        SynchronizerHead, TopologyHead, check_signing_key_attributes, hosts_not_in,
+        signing_key_baseline,
+    },
+    own_keys::WhenUnrecorded,
+};
 use crate::{
     canton_id::{CantonId, Fingerprint},
     config::NodeConfig,
@@ -15,17 +25,6 @@ use crate::{
         rotate_key::config::{require_complete_inline_keys, signing_threshold_in_force},
         signing_keys::known_signing_keys_by_member,
     },
-};
-
-use super::{
-    decode::{decode_party_to_participant, decode_proposal_serial},
-    delta::{AllowedDelta, already_applied, check_set_delta},
-    expectations::PeerExpectations,
-    head::{
-        SynchronizerHead, TopologyHead, check_signing_key_attributes, hosts_not_in,
-        signing_key_baseline,
-    },
-    own_keys::WhenUnrecorded,
 };
 
 impl PeerExpectations {

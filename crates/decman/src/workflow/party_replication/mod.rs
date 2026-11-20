@@ -28,12 +28,11 @@ use sqlx::SqlitePool;
 
 use crate::{canton_id::CantonId, error::Result, workflow::storage::WorkflowStorage};
 
+pub(crate) use acs::resume_tenant_import_window;
 pub use acs::{
     TransferSource, check_vetted_packages_held, collect_party_package_ids, import_party_acs,
     open_export_session, open_import_window,
 };
-
-pub(crate) use acs::resume_tenant_import_window;
 
 /// Unix milliseconds, saturating at 0 if the clock is before the epoch.
 ///
@@ -256,9 +255,8 @@ impl ReplicationTarget {
 mod tests {
     use sqlx::SqlitePool;
 
-    use crate::db::MIGRATOR;
-
     use super::*;
+    use crate::db::MIGRATOR;
 
     const ARTIFACTS: ReplicationArtifacts = ReplicationArtifacts {
         export_offset: "test_export_offset",

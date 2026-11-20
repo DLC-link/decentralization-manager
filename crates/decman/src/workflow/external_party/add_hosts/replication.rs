@@ -1,5 +1,6 @@
 use sqlx::SqlitePool;
 
+use super::error::AddHostsError;
 use crate::{
     canton_id::CantonId,
     config::NodeConfig,
@@ -11,8 +12,6 @@ use crate::{
         storage::artifact_kinds,
     },
 };
-
-use super::error::AddHostsError;
 
 /// The artifact keys the tenant add-hosts replication uses. Distinct from the
 /// decparty add-party keys so the two flows cannot read each other's offsets.

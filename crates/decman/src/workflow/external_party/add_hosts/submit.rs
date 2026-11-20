@@ -2,6 +2,12 @@ use canton_proto_rs::com::digitalasset::canton::protocol::v30::{
     PartyToParticipant, TopologyMapping, topology_mapping,
 };
 
+use super::{
+    error::AddHostsError,
+    head::CurrentPartyTopology,
+    relay,
+    validate::{ExternalPartyAddHostsPayload, validate_add_hosts_topology},
+};
 use crate::{
     config::NodeConfig,
     error::Result,
@@ -14,13 +20,6 @@ use crate::{
         topology,
         topology_version::{self},
     },
-};
-
-use super::{
-    error::AddHostsError,
-    head::CurrentPartyTopology,
-    relay,
-    validate::{ExternalPartyAddHostsPayload, validate_add_hosts_topology},
 };
 
 /// Whether head state is already exactly what `bundle` asked for.

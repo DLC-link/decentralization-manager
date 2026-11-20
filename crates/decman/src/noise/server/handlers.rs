@@ -2,6 +2,7 @@ use std::time::Instant;
 
 use canton_proto_rs::com::digitalasset::canton::protocol::v30::SignedTopologyTransaction;
 
+use super::NoiseServer;
 use crate::{
     canton_id::CantonId,
     db::schema::SchemaRead,
@@ -19,8 +20,6 @@ use crate::{
         storage::{WorkflowStorage, artifact_kinds},
     },
 };
-
-use super::NoiseServer;
 
 /// How often the source logs ACS export progress, in blocks. The target is
 /// disconnected from every synchronizer for the whole transfer, so both sides

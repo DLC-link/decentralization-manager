@@ -338,9 +338,8 @@ mod tests {
     };
     use prost::Message as _;
 
-    use crate::{canton_id::CantonId, workflow::external_party::steps};
-
     use super::*;
+    use crate::{canton_id::CantonId, workflow::external_party::steps};
 
     const OWNER_KEY: [u8; 32] = [4u8; 32];
 

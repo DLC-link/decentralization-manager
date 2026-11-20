@@ -36,6 +36,8 @@ use hyper::{
 use sha2::{Digest, Sha256};
 use tokio::sync::Notify;
 
+use super::super::prepare_add_hosts;
+use super::*;
 use crate::{
     db::{
         MIGRATOR,
@@ -47,9 +49,6 @@ use crate::{
         pipe::{PipeBlock, PipeTrailer},
     },
 };
-
-use super::super::prepare_add_hosts;
-use super::*;
 
 #[derive(Default)]
 struct Connectivity {

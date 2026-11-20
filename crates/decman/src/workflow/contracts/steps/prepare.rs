@@ -1,9 +1,11 @@
-use canton_proto_rs::com::daml::ledger::api::v2::{
-    Command, CreateCommand, GenMap, Identifier, Optional, Record, RecordField, Value, command,
-    gen_map, interactive::PrepareSubmissionRequest, value,
-};
-use canton_proto_rs::com::digitalasset::canton::admin::participant::v30::{
-    ListPackagesRequest, PackageDescription, package_service_client::PackageServiceClient,
+use canton_proto_rs::com::{
+    daml::ledger::api::v2::{
+        Command, CreateCommand, GenMap, Identifier, Optional, Record, RecordField, Value, command,
+        gen_map, interactive::PrepareSubmissionRequest, value,
+    },
+    digitalasset::canton::admin::participant::v30::{
+        ListPackagesRequest, PackageDescription, package_service_client::PackageServiceClient,
+    },
 };
 use decman_lib::canton_hash;
 use sqlx::SqlitePool;

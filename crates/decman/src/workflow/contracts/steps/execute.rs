@@ -1,6 +1,3 @@
-use sqlx::SqlitePool;
-use uuid::Uuid;
-
 use canton_proto_rs::com::{
     daml::ledger::api::v2::{
         Signature, Transaction, event,
@@ -11,6 +8,8 @@ use canton_proto_rs::com::{
     },
     digitalasset::canton::crypto::v30::Signature as CantonSignature,
 };
+use sqlx::SqlitePool;
+use uuid::Uuid;
 
 use crate::{
     canton::framing::read_all_messages_from_bytes,

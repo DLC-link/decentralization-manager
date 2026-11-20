@@ -3,8 +3,6 @@ pub mod coordinator;
 pub mod peer;
 pub mod steps;
 
-pub use config::RotateKeyConfig;
-
 use crate::{
     noise::MessageType,
     server::WorkflowKind,
@@ -13,6 +11,8 @@ use crate::{
         topology::RETIRED_LEGACY_KEYS_STATUS,
     },
 };
+
+pub use config::RotateKeyConfig;
 
 /// The status a member sends once it has recorded the coordinator's new key.
 pub const RECORDED_KEY_STATUS: &[u8] = b"RecordRotatedKey completed";

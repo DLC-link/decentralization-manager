@@ -13,16 +13,15 @@ use canton_proto_rs::com::digitalasset::canton::{
     },
 };
 
+use super::requests::{
+    head_state_query, head_state_query_in, history_query, p2p_rows, p2p_v30, synchronizer_store_id,
+};
 use crate::{
     canton_id::{CantonId, Fingerprint},
     config::NodeConfig,
     error::Result,
     utils,
     workflow::topology_version,
-};
-
-use super::requests::{
-    head_state_query, head_state_query_in, history_query, p2p_rows, p2p_v30, synchronizer_store_id,
 };
 
 /// Every `PartyToParticipant` serial ever in force for `party_id`, paired with

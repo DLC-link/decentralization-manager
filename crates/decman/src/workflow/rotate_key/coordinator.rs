@@ -2,6 +2,10 @@ use std::{collections::HashSet, sync::Arc};
 
 use anyhow::Context;
 
+use super::{
+    RotateKeyConfig, RotateKeyStep,
+    steps::{create_proposal, generate_key, submit_rotation},
+};
 use crate::{
     canton_id::CantonId,
     config::{NetworkConfig, NodeConfig},
@@ -10,11 +14,6 @@ use crate::{
     server::{WorkflowInstance, peer_status::LastSeen},
     utils,
     workflow::storage::{WorkflowStorage, artifact_kinds},
-};
-
-use super::{
-    RotateKeyConfig, RotateKeyStep,
-    steps::{create_proposal, generate_key, submit_rotation},
 };
 
 pub async fn start_coordinator(

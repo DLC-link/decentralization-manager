@@ -3,10 +3,9 @@ mod apply;
 use std::path::PathBuf;
 
 use clap::Subcommand;
+use dec_party_manager::config::Network;
 
 pub use clap::Parser;
-
-use dec_party_manager::config::Network;
 
 fn parse_positive_usize(s: &str) -> std::result::Result<usize, String> {
     let v: usize = s

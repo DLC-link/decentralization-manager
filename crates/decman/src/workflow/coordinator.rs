@@ -11,12 +11,11 @@ use crate::{
     noise::server::ActiveWorkflow,
     server::{WorkflowInstance, peer_status::LastSeen},
     utils,
-};
-
-use crate::workflow::{
-    AddPartyConfig, ChangeThresholdConfig, ContractsConfig, DarsConfig, KickConfig,
-    OnboardingConfig, RotateKeyConfig, add_party, change_threshold, contracts, dars, kick,
-    onboarding, rotate_key,
+    workflow::{
+        AddPartyConfig, ChangeThresholdConfig, ContractsConfig, DarsConfig, KickConfig,
+        OnboardingConfig, RotateKeyConfig, add_party, change_threshold, contracts, dars, kick,
+        onboarding, rotate_key,
+    },
 };
 
 /// Workflow types that can be run

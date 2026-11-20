@@ -3,17 +3,17 @@ pub mod coordinator;
 pub mod peer;
 pub mod steps;
 
+use crate::{
+    noise::MessageType,
+    server::WorkflowKind,
+    workflow::state::{WorkflowStep, workflow_steps},
+};
+
 pub use config::{
     CommittedDeployment, ContractDefinition, ContractsConfig, DarFile, FieldDefinition,
 };
 pub use steps::{
     execute_submissions, prepare_submissions, sign_submissions, upload_dars, upload_dars_from_bytes,
-};
-
-use crate::{
-    noise::MessageType,
-    server::WorkflowKind,
-    workflow::state::{WorkflowStep, workflow_steps},
 };
 
 workflow_steps! {

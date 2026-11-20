@@ -10,10 +10,12 @@ use crate::{
     error::Result,
     noise::{MessageType, client::NoiseClient},
     utils,
-    workflow::storage::{WorkflowStorage, artifact_kinds},
+    workflow::{
+        add_party,
+        storage::{WorkflowStorage, artifact_kinds},
+        topology_version,
+    },
 };
-
-use crate::workflow::{add_party, topology_version};
 
 pub(super) fn decode_add_party_config(payload: &[u8]) -> Result<add_party::AddPartyConfig> {
     serde_json::from_slice(payload).context("Failed to deserialize add-party config")

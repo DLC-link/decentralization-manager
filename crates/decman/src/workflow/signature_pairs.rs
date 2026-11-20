@@ -228,6 +228,8 @@ mod tests {
     mod storage {
         use sqlx::SqlitePool;
 
+        use super::super::*;
+        use super::frame;
         use crate::{
             canton_id::{CantonId, NAMESPACE_LENGTH, Namespace},
             db::MIGRATOR,
@@ -236,9 +238,6 @@ mod tests {
                 storage::{WorkflowStorage, artifact_kinds},
             },
         };
-
-        use super::super::*;
-        use super::frame;
 
         const RUN: &str = "run-1";
 

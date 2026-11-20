@@ -9,6 +9,7 @@ use anyhow::Context;
 use sqlx::SqlitePool;
 use tokio::sync::{Mutex, RwLock};
 
+use super::threshold::resolve_peer_threshold;
 use crate::{
     canton_id::CantonId,
     config::{NetworkConfig, NodeConfig, Peer},
@@ -22,8 +23,6 @@ use crate::{
         storage::{WorkflowStorage, artifact_kinds},
     },
 };
-
-use super::threshold::resolve_peer_threshold;
 
 /// Coordinator server that accepts connections from peers
 pub struct NoiseServer<S: WorkflowStep + 'static> {

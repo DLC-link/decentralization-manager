@@ -15,14 +15,14 @@ use serde::Deserialize;
 use thiserror::Error;
 use tokio::sync::RwLock;
 
-pub use mock::{MockAuthRegistry, MockTokenManager};
-pub use validator::{Principal, TokenValidator, ValidationError};
-pub use validators::{JwtValidator, MockValidator, OidcIntrospectionValidator};
-
 use crate::{
     canton_id::CantonId,
     config::{Auth0M2MConfig, KeycloakConfig, PartyCredentials},
 };
+
+pub use mock::{MockAuthRegistry, MockTokenManager};
+pub use validator::{Principal, TokenValidator, ValidationError};
+pub use validators::{JwtValidator, MockValidator, OidcIntrospectionValidator};
 
 /// Authentication errors
 #[derive(Error, Debug)]

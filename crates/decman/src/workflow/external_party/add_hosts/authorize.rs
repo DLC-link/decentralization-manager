@@ -3,16 +3,7 @@ use canton_proto_rs::com::digitalasset::canton::{
     topology::admin::v30::{AuthorizeRequest, authorize_request},
 };
 use common::api::HostPermission;
-
 use sqlx::SqlitePool;
-
-use crate::{
-    canton_id::CantonId,
-    config::NodeConfig,
-    error::Result,
-    utils,
-    workflow::{topology, topology_version::ProposalFormat},
-};
 
 use super::{
     error::AddHostsError,
@@ -20,6 +11,13 @@ use super::{
     mapping::{add_hosts_mapping, hosts_present},
     relay,
     replication::capture_replication_offsets,
+};
+use crate::{
+    canton_id::CantonId,
+    config::NodeConfig,
+    error::Result,
+    utils,
+    workflow::{topology, topology_version::ProposalFormat},
 };
 
 /// Which half of Canton's "party namespace + the new participant namespace" this

@@ -3,6 +3,10 @@ use std::{collections::HashSet, sync::Arc};
 use anyhow::Context;
 use sqlx::SqlitePool;
 
+use super::{
+    OnboardingConfig, OnboardingStep,
+    steps::{create_proposals, generate_keys, submit_dns_proposals, submit_final_proposals},
+};
 use crate::{
     canton_id::CantonId,
     config::{NetworkConfig, NodeConfig},
@@ -14,11 +18,6 @@ use crate::{
         state::WorkflowState,
         storage::{WorkflowStorage, artifact_kinds},
     },
-};
-
-use super::{
-    OnboardingConfig, OnboardingStep,
-    steps::{create_proposals, generate_keys, submit_dns_proposals, submit_final_proposals},
 };
 
 /// Save each peer's combined `keys||participant_id` payload into

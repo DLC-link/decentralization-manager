@@ -1,21 +1,19 @@
 use std::collections::BTreeSet;
 
+use canton_proto_rs::com::digitalasset::canton::protocol::v30::SignedTopologyTransaction;
 use sqlx::SqlitePool;
 
-use canton_proto_rs::com::digitalasset::canton::protocol::v30::SignedTopologyTransaction;
-
+use super::{
+    decode::{decode_namespace_definition, decode_party_to_participant},
+    expectations::PeerExpectations,
+    own_keys::WhenUnrecorded,
+};
 use crate::{
     canton_id::CantonId,
     config::NodeConfig,
     error::Result,
     utils,
     workflow::{onboarding::steps::proposals::create::compute_decentralized_namespace, topology},
-};
-
-use super::{
-    decode::{decode_namespace_definition, decode_party_to_participant},
-    expectations::PeerExpectations,
-    own_keys::WhenUnrecorded,
 };
 
 impl PeerExpectations {

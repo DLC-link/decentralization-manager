@@ -3,6 +3,11 @@ use std::{sync::Arc, time::Duration};
 use common::types::WorkflowProgress;
 use sqlx::SqlitePool;
 
+use super::{
+    error::UnhostError,
+    splice_cleanup::splice_cleanup,
+    topology::{hosts, leave_mapping, leave_topology, refuse_a_decentralized_party},
+};
 use crate::{
     auth::WorkflowAuth,
     canton_id::CantonId,
@@ -17,12 +22,6 @@ use crate::{
         },
         party_replication::relay::{HoldRefused, PartyHold, RelaySessions},
     },
-};
-
-use super::{
-    error::UnhostError,
-    splice_cleanup::splice_cleanup,
-    topology::{hosts, leave_mapping, leave_topology, refuse_a_decentralized_party},
 };
 
 /// What the caller asked for.

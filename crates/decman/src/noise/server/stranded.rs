@@ -3,9 +3,8 @@ use std::{
     time::{Duration, Instant},
 };
 
-use crate::{canton_id::CantonId, consts::PEER_SILENCE_LIMIT, workflow::state::WorkflowStep};
-
 use super::NoiseServer;
+use crate::{canton_id::CantonId, consts::PEER_SILENCE_LIMIT, workflow::state::WorkflowStep};
 
 /// How often a coordinator checks whether its peers can still finish the run.
 const PEER_CHECK_INTERVAL: Duration = Duration::from_secs(5);

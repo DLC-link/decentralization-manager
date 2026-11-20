@@ -3,11 +3,6 @@ pub mod coordinator;
 pub mod peer;
 pub mod steps;
 
-pub use config::KickConfig;
-pub use steps::{
-    create_proposals, export_state, prune_cached_membership, sign_proposals, submit_kick,
-};
-
 use crate::{
     noise::MessageType,
     server::WorkflowKind,
@@ -16,6 +11,11 @@ use crate::{
         storage::artifact_kinds,
         topology::DnsP2pArtifactKinds,
     },
+};
+
+pub use config::KickConfig;
+pub use steps::{
+    create_proposals, export_state, prune_cached_membership, sign_proposals, submit_kick,
 };
 
 /// The artefact kinds of a kick run's DNS + P2P proposals and of each

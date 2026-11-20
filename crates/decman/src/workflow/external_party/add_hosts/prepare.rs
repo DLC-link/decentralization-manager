@@ -1,8 +1,13 @@
 use canton_proto_rs::com::digitalasset::canton::protocol::v30::topology_mapping;
 use common::api::HostPermission;
-
 use sqlx::SqlitePool;
 
+use super::{
+    error::AddHostsError,
+    mapping::add_hosts_mapping,
+    relay,
+    replication::{capture_replication_offsets, replication_target},
+};
 use crate::{
     canton_id::CantonId,
     config::NodeConfig,
@@ -11,13 +16,6 @@ use crate::{
         external_party::topology_bundle::{generate_p2p_change, read_pinned},
         topology_version::ProposalFormat,
     },
-};
-
-use super::{
-    error::AddHostsError,
-    mapping::add_hosts_mapping,
-    relay,
-    replication::{capture_replication_offsets, replication_target},
 };
 
 /// The unsigned add-hosts topology, plus the hash the party must sign for each

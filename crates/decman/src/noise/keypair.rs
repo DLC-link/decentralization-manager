@@ -8,9 +8,8 @@ use secp256k1::{PublicKey, Secp256k1, SecretKey, ecdh::SharedSecret};
 use tokio::io::AsyncWriteExt;
 use zeroize::Zeroizing;
 
-use crate::error::Result;
-
 use super::NoiseError;
+use crate::error::Result;
 
 /// Parse a hex-encoded public key string into a PublicKey
 pub fn parse_public_key(hex_str: &str) -> Result<PublicKey, NoiseError> {

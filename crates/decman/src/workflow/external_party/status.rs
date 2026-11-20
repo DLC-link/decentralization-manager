@@ -6,10 +6,11 @@ use canton_proto_rs::com::digitalasset::canton::{
     },
 };
 
+use crate::{config::NodeConfig, error::Result, utils, workflow::topology};
+
 pub use crate::party_discovery::{
     HostedExternalParty, HostedExternalPartyHost, list_hosted_external_parties,
 };
-use crate::{config::NodeConfig, error::Result, utils, workflow::topology};
 
 /// Whether this participant hosts an external party yet, from its own topology.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

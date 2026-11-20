@@ -9,18 +9,17 @@ use canton_proto_rs::com::digitalasset::canton::{
     },
 };
 
+use super::{
+    reads::{fetch_p2p_mapping, fetch_party_to_key_mapping},
+    requests::{head_state_query, synchronizer_store_id},
+    retry::authorize_with_topology_retry,
+};
 use crate::{
     canton_id::CantonId,
     config::NodeConfig,
     consts::{topology_retry_delay_secs, topology_retry_max_attempts},
     error::Result,
     utils,
-};
-
-use super::{
-    reads::{fetch_p2p_mapping, fetch_party_to_key_mapping},
-    requests::{head_state_query, synchronizer_store_id},
-    retry::authorize_with_topology_retry,
 };
 
 /// The status a member sends once it has signed the legacy mapping's removal.

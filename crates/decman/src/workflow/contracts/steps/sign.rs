@@ -555,7 +555,6 @@ pub async fn backfill_peer_keys(
 
 #[cfg(test)]
 mod deployment_intent_tests {
-    use super::*;
     use canton_proto_rs::com::daml::ledger::api::v2::{
         Identifier, Record, RecordField, Value,
         interactive::{
@@ -564,6 +563,8 @@ mod deployment_intent_tests {
         },
         value,
     };
+
+    use super::*;
 
     fn argument(text: &str) -> Value {
         Value {
@@ -739,12 +740,12 @@ mod deployment_intent_tests {
 /// `own_daml_key` against a fake participant.
 #[cfg(test)]
 mod own_daml_key_tests {
-    use super::*;
     use canton_proto_rs::com::digitalasset::canton::{
         crypto::v30::SigningKeysWithThreshold,
         protocol::v30::{DecentralizedNamespaceDefinition, PartyToKeyMapping, PartyToParticipant},
     };
 
+    use super::*;
     use crate::{
         db::MIGRATOR,
         signing::{

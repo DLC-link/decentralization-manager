@@ -4,12 +4,10 @@ use crate::{
     db::schema::{Commitable, SchemaWrite},
     noise::MessageType,
     server::WorkflowKind,
-    workflow::state::WorkflowStep,
-};
-
-use crate::workflow::{
-    AddPartyStep, ChangeThresholdStep, ContractsStep, DarsStep, KickStep, OnboardingStep,
-    RotateKeyStep,
+    workflow::{
+        AddPartyStep, ChangeThresholdStep, ContractsStep, DarsStep, KickStep, OnboardingStep,
+        RotateKeyStep, state::WorkflowStep,
+    },
 };
 
 /// Whether a command belongs to the workflow kind the operator accepted.

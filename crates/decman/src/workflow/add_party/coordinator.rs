@@ -3,6 +3,10 @@ use std::sync::Arc;
 use anyhow::Context;
 use sqlx::SqlitePool;
 
+use super::{
+    AddPartyConfig, AddPartyStep, resolve_ledger_token,
+    steps::{create_proposals, export_state, submit_clear_proposal, submit_proposals},
+};
 use crate::{
     auth::WorkflowAuth,
     config::{NetworkConfig, NodeConfig},
@@ -20,11 +24,6 @@ use crate::{
         state::WorkflowState,
         storage::{WorkflowStorage, artifact_kinds, identity_kinds},
     },
-};
-
-use super::{
-    AddPartyConfig, AddPartyStep, resolve_ledger_token,
-    steps::{create_proposals, export_state, submit_clear_proposal, submit_proposals},
 };
 
 pub async fn start_coordinator(

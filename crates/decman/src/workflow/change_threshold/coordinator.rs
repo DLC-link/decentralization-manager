@@ -3,6 +3,10 @@ use std::{collections::HashSet, sync::Arc};
 use anyhow::Context;
 use sqlx::SqlitePool;
 
+use super::{
+    ChangeThresholdConfig, ChangeThresholdStep,
+    steps::{create_proposals, export_state, submit_change},
+};
 use crate::{
     config::{NetworkConfig, NodeConfig},
     error::Result,
@@ -14,11 +18,6 @@ use crate::{
         state::WorkflowState,
         storage::{WorkflowStorage, artifact_kinds},
     },
-};
-
-use super::{
-    ChangeThresholdConfig, ChangeThresholdStep,
-    steps::{create_proposals, export_state, submit_change},
 };
 
 pub async fn start_coordinator(
