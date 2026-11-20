@@ -29,6 +29,7 @@ use std::fmt;
 use canton_proto_rs::com::daml::ledger::api::v2::{
     Value,
     interactive::{HashingSchemeVersion, PrepareSubmissionResponse, PreparedTransaction},
+    value::Sum,
 };
 
 use crate::canton_hash::encoding::{Encoder, required};
@@ -158,7 +159,6 @@ pub fn hash_value(value: &Value) -> Result<String> {
 }
 
 fn normalize_intent_value(value: &mut Value, depth: usize) -> Result {
-    use canton_proto_rs::com::daml::ledger::api::v2::value::Sum;
     ensure!(depth <= 100, "Intent value nesting exceeds 100 levels");
     let normalize = |v: &mut Value| normalize_intent_value(v, depth + 1);
     match value.sum.as_mut() {
