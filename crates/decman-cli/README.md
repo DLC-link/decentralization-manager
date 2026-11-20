@@ -200,6 +200,10 @@ The CLI reads every page of the pending proposals and builds the same request
 body as the web frontend. `execute` fails until the action has enough
 confirmations.
 
+Every command that changes the governance state fails with status 504 when the
+mediator times out. The error names each party whose participant did not
+confirm.
+
 `governance pending` shows one page of proposals. Pass `--limit` for a larger
 page, and `--cursor` with the `next_cursor` of the previous page.
 

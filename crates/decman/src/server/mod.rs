@@ -16,6 +16,7 @@ mod former_parties;
 mod governance_poller;
 mod handlers;
 pub(crate) mod ledger_paging;
+mod ledger_rejection;
 mod middleware;
 mod node_health;
 mod package_inventory;

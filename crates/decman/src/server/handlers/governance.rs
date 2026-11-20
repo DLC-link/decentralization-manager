@@ -1,6 +1,6 @@
 use std::{collections::HashSet, sync::LazyLock};
 
-use actix_web::{HttpRequest, HttpResponse, Responder, get, post, web};
+use actix_web::{HttpRequest, HttpResponse, Responder, get, http::StatusCode, post, web};
 use anyhow::Context;
 use base64::Engine;
 use prometheus::IntCounterVec;
@@ -53,6 +53,7 @@ use crate::{
         AppState,
         audit::{AuditEvent, AuditParams, spawn_audit_log, with_proposal_cid},
         chain_audit,
+        ledger_rejection::submission_failure,
         middleware::require_admin,
         queries::{
             GovernanceQueue, get_governance_confirmations,
@@ -794,7 +795,8 @@ fn credential_id_nonce() -> String {
         (status = 404, description = "No credentials configured for party", body = ErrorResponse),
         (status = 409, description = "A CouponReassignmentDelegation is already active; set prior_delegation to replace it", body = ErrorResponse),
         (status = 500, description = "Internal server error", body = ErrorResponse),
-        (status = 503, description = "Node not provisioned for this proposal: the target package is not configured (the response says so, and whether the proposal was already created), or it cannot be confirmed whether a CouponReassignmentDelegation is already active", body = ErrorResponse)
+        (status = 503, description = "Node not provisioned for this proposal: the target package is not configured (the response says so, and whether the proposal was already created), or it cannot be confirmed whether a CouponReassignmentDelegation is already active", body = ErrorResponse),
+        (status = 504, description = "The mediator timed out waiting for confirmations; the error names the parties that did not answer", body = ErrorResponse)
     )
 )]
 #[post("/governance/propose")]
@@ -1134,7 +1136,8 @@ pub async fn propose_action(
             }
         }
         Err(e) => {
-            tracing::error!("Failed to create proposal: {e}");
+            let (status, error) = submission_failure("Failed to create proposal", &e.into());
+            tracing::error!("{error}");
             count_action(ActionStep::Propose, ActionOutcome::Error);
             spawn_audit_log(
                 audit_pool,
@@ -1146,12 +1149,10 @@ pub async fn propose_action(
                     action_summary: audit_summary,
                     details: audit_details,
                     status: "failed",
-                    error_message: Some(format!("Failed to create proposal: {e}")),
+                    error_message: Some(error.clone()),
                 },
             );
-            return HttpResponse::InternalServerError().json(ErrorResponse {
-                error: format!("Failed to create proposal: {e}"),
-            });
+            return HttpResponse::build(status).json(ErrorResponse { error });
         }
     };
 
@@ -1227,7 +1228,11 @@ pub async fn propose_action(
             })
         }
         Err(e) => {
-            tracing::error!("Proposal created but confirmation failed: {e}");
+            let (status, error) = submission_failure(
+                &format!("Proposal created (CID: {proposal_cid}) but confirmation failed"),
+                &e.into(),
+            );
+            tracing::error!("{error}");
             count_action(ActionStep::Propose, ActionOutcome::Error);
             spawn_audit_log(
                 audit_pool,
@@ -1239,14 +1244,10 @@ pub async fn propose_action(
                     action_summary: audit_summary,
                     details: with_proposal_cid(&audit_details, &proposal_cid),
                     status: "failed",
-                    error_message: Some(format!("Proposal created but confirmation failed: {e}")),
+                    error_message: Some(error.clone()),
                 },
             );
-            HttpResponse::InternalServerError().json(ErrorResponse {
-                error: format!(
-                    "Proposal created (CID: {proposal_cid}) but confirmation failed: {e}"
-                ),
-            })
+            HttpResponse::build(status).json(ErrorResponse { error })
         }
     }
 }
@@ -1294,7 +1295,8 @@ fn validate_inline_action(
         (status = 401, description = "Unauthorized", body = ErrorResponse),
         (status = 403, description = "Forbidden: admin role required", body = ErrorResponse),
         (status = 404, description = "No credentials configured for party", body = ErrorResponse),
-        (status = 500, description = "Internal server error", body = ErrorResponse)
+        (status = 500, description = "Internal server error", body = ErrorResponse),
+        (status = 504, description = "The mediator timed out waiting for confirmations; the error names the parties that did not answer", body = ErrorResponse)
     )
 )]
 #[post("/governance/confirm")]
@@ -1359,7 +1361,8 @@ pub async fn confirm_action(
             })
         }
         Err(e) => {
-            tracing::error!("Failed to submit confirmation: {e}");
+            let (status, error) = submission_failure("Failed to submit confirmation", &e);
+            tracing::error!("{error}");
             spawn_audit_log(
                 audit_pool,
                 AuditParams {
@@ -1370,12 +1373,10 @@ pub async fn confirm_action(
                     action_summary: audit_summary,
                     details: audit_details,
                     status: "failed",
-                    error_message: Some(format!("{e}")),
+                    error_message: Some(error.clone()),
                 },
             );
-            HttpResponse::InternalServerError().json(ErrorResponse {
-                error: format!("Failed to submit confirmation: {e}"),
-            })
+            HttpResponse::build(status).json(ErrorResponse { error })
         }
     }
 }
@@ -1391,7 +1392,8 @@ pub async fn confirm_action(
         (status = 403, description = "Forbidden: admin role required", body = ErrorResponse),
         (status = 404, description = "No credentials configured for party", body = ErrorResponse),
         (status = 422, description = "A paid credential accept needs DECPM_SCAN_URL, which is not set", body = ErrorResponse),
-        (status = 500, description = "Internal server error", body = ErrorResponse)
+        (status = 500, description = "Internal server error", body = ErrorResponse),
+        (status = 504, description = "The mediator timed out waiting for confirmations; the error names the parties that did not answer", body = ErrorResponse)
     )
 )]
 #[post("/governance/execute")]
@@ -1468,7 +1470,8 @@ pub async fn execute_action(
             })
         }
         Err(e) => {
-            tracing::error!("Failed to execute action: {e:#}");
+            let (status, error) = execute_failure(&e);
+            tracing::error!("{error}");
             spawn_audit_log(
                 audit_pool,
                 AuditParams {
@@ -1479,28 +1482,25 @@ pub async fn execute_action(
                     action_summary: audit_summary,
                     details: audit_details,
                     status: "failed",
-                    error_message: Some(format!("{e:#}")),
+                    error_message: Some(error.clone()),
                 },
             );
-            execute_failure_response(&e)
+            HttpResponse::build(status).json(ErrorResponse { error })
         }
     }
 }
 
-/// The execute handler's answer to a failed execute. A node without
-/// `DECPM_SCAN_URL` cannot disclose what a paid credential accept reads. That
-/// is a setting the caller can fix, so it is a 422, not a server fault. The
-/// message carries the whole error chain, so a scan 403 reads differently from
-/// a malformed reply or a dropped connection.
-fn execute_failure_response(e: &anyhow::Error) -> HttpResponse {
-    let mut response = if e.downcast_ref::<ScanNotConfigured>().is_some() {
-        HttpResponse::UnprocessableEntity()
-    } else {
-        HttpResponse::InternalServerError()
-    };
-    response.json(ErrorResponse {
-        error: format!("Failed to execute action: {e:#}"),
-    })
+/// The execute handler's status and message for a failed execute. A node
+/// without `DECPM_SCAN_URL` cannot disclose what a paid credential accept
+/// reads. That is a setting the caller can fix, so it is a 422, not a server
+/// fault. The message carries the whole error chain, so a scan 403 reads
+/// differently from a malformed reply or a dropped connection.
+fn execute_failure(e: &anyhow::Error) -> (StatusCode, String) {
+    let (status, error) = submission_failure("Failed to execute action", e);
+    if e.downcast_ref::<ScanNotConfigured>().is_some() {
+        return (StatusCode::UNPROCESSABLE_ENTITY, error);
+    }
+    (status, error)
 }
 
 /// Expire a stale governance confirmation
@@ -1512,7 +1512,8 @@ fn execute_failure_response(e: &anyhow::Error) -> HttpResponse {
         (status = 401, description = "Unauthorized", body = ErrorResponse),
         (status = 403, description = "Forbidden: admin role required", body = ErrorResponse),
         (status = 404, description = "No credentials configured for party", body = ErrorResponse),
-        (status = 500, description = "Internal server error", body = ErrorResponse)
+        (status = 500, description = "Internal server error", body = ErrorResponse),
+        (status = 504, description = "The mediator timed out waiting for confirmations; the error names the parties that did not answer", body = ErrorResponse)
     )
 )]
 #[post("/governance/expire")]
@@ -1541,51 +1542,46 @@ pub async fn expire_confirmation(
         }
     };
 
-    let audit_pool = data.db.clone();
     let audit_details = serde_json::to_string(&*body).unwrap_or_default();
-    let audit_party_id = party_id.clone();
-    let audit_member = member_party_id.clone();
-    let audit_gov_type = body.governance_type;
+    let body = body.into_inner();
 
-    let packages = packages();
-
-    let result =
-        execute_expire_confirmation(&data.config, &body, &token, &member_party_id, &packages).await;
-    count_action(ActionStep::Expire, ActionOutcome::of(&result));
-    match result {
-        Ok(()) => {
-            spawn_audit_log(
-                audit_pool,
-                AuditParams {
-                    event_type: AuditEvent::Expire,
-                    party_id: audit_party_id,
-                    member_party_id: audit_member,
-                    governance_type: audit_gov_type,
-                    action_summary: "expire_confirmation".to_string(),
-                    details: audit_details,
-                    status: "success",
-                    error_message: None,
-                },
-            );
-            HttpResponse::Ok().json(MessageResponse {
-                message: "Confirmation expired successfully".to_string(),
-            })
+    // A proxy can hang up before the mediator decides, and the server then
+    // drops this handler. The submission runs on its own task, so it still
+    // ends and its audit row still records the cause.
+    let submission = tokio::spawn(async move {
+        let result =
+            execute_expire_confirmation(&data.config, &body, &token, &member_party_id, &packages())
+                .await;
+        count_action(ActionStep::Expire, ActionOutcome::of(&result));
+        let failure = result
+            .err()
+            .map(|e| submission_failure("Failed to expire confirmation", &e));
+        if let Some((_, error)) = &failure {
+            tracing::error!("{error}");
         }
+        let status = failure.as_ref().map_or("success", |_| "failed");
+        spawn_audit_log(
+            data.db.clone(),
+            AuditParams {
+                event_type: AuditEvent::Expire,
+                party_id: body.party_id,
+                member_party_id,
+                governance_type: body.governance_type,
+                action_summary: "expire_confirmation".to_string(),
+                details: audit_details,
+                status,
+                error_message: failure.as_ref().map(|(_, error)| error.clone()),
+            },
+        );
+        failure
+    });
+    match submission.await {
+        Ok(None) => HttpResponse::Ok().json(MessageResponse {
+            message: "Confirmation expired successfully".to_string(),
+        }),
+        Ok(Some((status, error))) => HttpResponse::build(status).json(ErrorResponse { error }),
         Err(e) => {
-            tracing::error!("Failed to expire confirmation: {e}");
-            spawn_audit_log(
-                audit_pool,
-                AuditParams {
-                    event_type: AuditEvent::Expire,
-                    party_id: audit_party_id,
-                    member_party_id: audit_member,
-                    governance_type: audit_gov_type,
-                    action_summary: "expire_confirmation".to_string(),
-                    details: audit_details,
-                    status: "failed",
-                    error_message: Some(format!("{e}")),
-                },
-            );
+            tracing::error!("The expire task ended without an outcome: {e}");
             HttpResponse::InternalServerError().json(ErrorResponse {
                 error: format!("Failed to expire confirmation: {e}"),
             })
@@ -1602,7 +1598,8 @@ pub async fn expire_confirmation(
         (status = 401, description = "Unauthorized", body = ErrorResponse),
         (status = 403, description = "Forbidden: admin role required", body = ErrorResponse),
         (status = 404, description = "No credentials configured for party", body = ErrorResponse),
-        (status = 500, description = "Internal server error", body = ErrorResponse)
+        (status = 500, description = "Internal server error", body = ErrorResponse),
+        (status = 504, description = "The mediator timed out waiting for confirmations; the error names the parties that did not answer", body = ErrorResponse)
     )
 )]
 #[post("/governance/cancel")]
@@ -1630,51 +1627,45 @@ pub async fn cancel_confirmation(
         }
     };
 
-    let audit_pool = data.db.clone();
     let audit_details = serde_json::to_string(&*body).unwrap_or_default();
-    let audit_party_id = party_id.clone();
-    let audit_member = member_party_id.clone();
-    let audit_gov_type = body.governance_type;
+    let body = body.into_inner();
 
-    let packages = packages();
-
-    let result =
-        execute_cancel_confirmation(&data.config, &body, &token, &member_party_id, &packages).await;
-    count_action(ActionStep::CancelConfirmation, ActionOutcome::of(&result));
-    match result {
-        Ok(()) => {
-            spawn_audit_log(
-                audit_pool,
-                AuditParams {
-                    event_type: AuditEvent::Cancel,
-                    party_id: audit_party_id,
-                    member_party_id: audit_member,
-                    governance_type: audit_gov_type,
-                    action_summary: "cancel_confirmation".to_string(),
-                    details: audit_details,
-                    status: "success",
-                    error_message: None,
-                },
-            );
-            HttpResponse::Ok().json(MessageResponse {
-                message: "Confirmation cancelled successfully".to_string(),
-            })
+    // Runs on its own task for the same reason as the expire handler: a
+    // dropped handler must not cut the submission or its audit row short.
+    let submission = tokio::spawn(async move {
+        let result =
+            execute_cancel_confirmation(&data.config, &body, &token, &member_party_id, &packages())
+                .await;
+        count_action(ActionStep::CancelConfirmation, ActionOutcome::of(&result));
+        let failure = result
+            .err()
+            .map(|e| submission_failure("Failed to cancel confirmation", &e));
+        if let Some((_, error)) = &failure {
+            tracing::error!("{error}");
         }
+        let status = failure.as_ref().map_or("success", |_| "failed");
+        spawn_audit_log(
+            data.db.clone(),
+            AuditParams {
+                event_type: AuditEvent::Cancel,
+                party_id: body.party_id,
+                member_party_id,
+                governance_type: body.governance_type,
+                action_summary: "cancel_confirmation".to_string(),
+                details: audit_details,
+                status,
+                error_message: failure.as_ref().map(|(_, error)| error.clone()),
+            },
+        );
+        failure
+    });
+    match submission.await {
+        Ok(None) => HttpResponse::Ok().json(MessageResponse {
+            message: "Confirmation cancelled successfully".to_string(),
+        }),
+        Ok(Some((status, error))) => HttpResponse::build(status).json(ErrorResponse { error }),
         Err(e) => {
-            tracing::error!("Failed to cancel confirmation: {e}");
-            spawn_audit_log(
-                audit_pool,
-                AuditParams {
-                    event_type: AuditEvent::Cancel,
-                    party_id: audit_party_id,
-                    member_party_id: audit_member,
-                    governance_type: audit_gov_type,
-                    action_summary: "cancel_confirmation".to_string(),
-                    details: audit_details,
-                    status: "failed",
-                    error_message: Some(format!("{e}")),
-                },
-            );
+            tracing::error!("The cancel task ended without an outcome: {e}");
             HttpResponse::InternalServerError().json(ErrorResponse {
                 error: format!("Failed to cancel confirmation: {e}"),
             })
@@ -1691,7 +1682,8 @@ pub async fn cancel_confirmation(
         (status = 401, description = "Unauthorized", body = ErrorResponse),
         (status = 403, description = "Forbidden: admin role required", body = ErrorResponse),
         (status = 404, description = "No credentials configured for party", body = ErrorResponse),
-        (status = 500, description = "Internal server error", body = ErrorResponse)
+        (status = 500, description = "Internal server error", body = ErrorResponse),
+        (status = 504, description = "The mediator timed out waiting for confirmations; the error names the parties that did not answer", body = ErrorResponse)
     )
 )]
 #[post("/governance/cancel-proposal")]
@@ -1749,7 +1741,8 @@ pub async fn cancel_proposal(
             })
         }
         Err(e) => {
-            tracing::error!("Failed to cancel proposal: {e}");
+            let (status, error) = submission_failure("Failed to cancel proposal", &e);
+            tracing::error!("{error}");
             spawn_audit_log(
                 audit_pool,
                 AuditParams {
@@ -1760,12 +1753,10 @@ pub async fn cancel_proposal(
                     action_summary: "cancel_proposal".to_string(),
                     details: audit_details,
                     status: "failed",
-                    error_message: Some(format!("{e}")),
+                    error_message: Some(error.clone()),
                 },
             );
-            HttpResponse::InternalServerError().json(ErrorResponse {
-                error: format!("Failed to cancel proposal: {e}"),
-            })
+            HttpResponse::build(status).json(ErrorResponse { error })
         }
     }
 }
@@ -3270,9 +3261,10 @@ mod action_metrics_tests {
         Ok(())
     }
 
-    // The handler tests below read and move the same series, so they take
-    // turns: every test in this binary shares one registry and runs in parallel.
-    static SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+    // Every test that posts to a write handler moves the same series, so they
+    // take turns: every test in this binary shares one registry and runs in
+    // parallel.
+    pub(super) static SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
     /// Posts `body` as an admin through all six governance write handlers.
     async fn post(uri: &str, body: serde_json::Value) -> Result<StatusCode> {
@@ -3396,6 +3388,221 @@ mod action_metrics_tests {
 }
 
 #[cfg(test)]
+mod mediator_timeout_tests {
+    use std::{convert::Infallible, sync::Arc, time::Duration};
+
+    use actix_web::{App, http::header::AUTHORIZATION, test as actix_test};
+    use sqlx::SqlitePool;
+    use tokio::sync::Notify;
+    use tonic::{
+        body::Body,
+        codegen::{BoxFuture, Context as TaskContext, Poll, Service, http},
+        server::NamedService,
+        transport::{Server, server::TcpIncoming},
+    };
+
+    use super::*;
+    use crate::{
+        auth::MockAuthRegistry,
+        db::MIGRATOR,
+        server::{ledger_rejection::fixtures, middleware::AuthMiddleware},
+    };
+
+    const OFFLINE_MEMBER: &str = "member-c::1220cccc";
+
+    /// The Ledger API command service of a participant whose submissions the
+    /// mediator rejects. Each `SubmitAndWait` signals `submitted`, then
+    /// answers with `rejection` once `release` is notified. The router answers
+    /// every other service as unimplemented, so the package-ref lookup falls
+    /// back to the configured package.
+    #[derive(Clone)]
+    struct RejectingLedger {
+        rejection: tonic::Status,
+        submitted: Arc<Notify>,
+        release: Arc<Notify>,
+    }
+
+    impl RejectingLedger {
+        fn new() -> Self {
+            Self {
+                rejection: fixtures::mediator_timeout(OFFLINE_MEMBER),
+                submitted: Arc::new(Notify::new()),
+                release: Arc::new(Notify::new()),
+            }
+        }
+
+        /// Serves the ledger on a free local port and returns the port.
+        fn serve(&self) -> Result<u16> {
+            let incoming = TcpIncoming::bind("127.0.0.1:0".parse()?)?;
+            let port = incoming.local_addr()?.port();
+            tokio::spawn(
+                Server::builder()
+                    .add_service(self.clone())
+                    .serve_with_incoming(incoming),
+            );
+            Ok(port)
+        }
+    }
+
+    impl Service<http::Request<Body>> for RejectingLedger {
+        type Response = http::Response<Body>;
+        type Error = Infallible;
+        type Future = BoxFuture<Self::Response, Infallible>;
+
+        fn poll_ready(&mut self, _: &mut TaskContext<'_>) -> Poll<Result<(), Infallible>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn call(&mut self, request: http::Request<Body>) -> Self::Future {
+            let ledger = self.clone();
+            Box::pin(async move {
+                if request.uri().path() != format!("/{}/SubmitAndWait", Self::NAME) {
+                    return Ok(tonic::Status::unimplemented("").into_http());
+                }
+                ledger.submitted.notify_one();
+                ledger.release.notified().await;
+                Ok(ledger.rejection.into_http())
+            })
+        }
+    }
+
+    impl NamedService for RejectingLedger {
+        const NAME: &'static str = "com.daml.ledger.api.v2.CommandService";
+    }
+
+    /// Mock credentials, and the Ledger API at `ledger_port`.
+    async fn state(pool: SqlitePool, ledger_port: u16) -> Result<web::Data<AppState>> {
+        let mut state = AppState::for_test_on(None, pool).into_inner();
+        Arc::get_mut(&mut state)
+            .context("a fresh test state has one owner")?
+            .config
+            .canton
+            .ledger_api_port = ledger_port;
+        let mock = MockAuthRegistry::new(state.party_credentials.clone());
+        *state.auth.write().await = Some(WorkflowAuth::Mock(Arc::new(mock)));
+        Ok(web::Data::from(state))
+    }
+
+    fn party() -> String {
+        format!("dec::1220{}", "ab".repeat(32))
+    }
+
+    fn expire() -> actix_test::TestRequest {
+        actix_test::TestRequest::post()
+            .uri("/governance/expire")
+            .insert_header((AUTHORIZATION, "Bearer any-token"))
+            .set_json(serde_json::json!({
+                "party_id": party(),
+                "rules_contract_id": "00rules",
+                "confirmation_cid": "00c0ffee",
+            }))
+    }
+
+    fn cancel() -> actix_test::TestRequest {
+        actix_test::TestRequest::post()
+            .uri("/governance/cancel")
+            .insert_header((AUTHORIZATION, "Bearer any-token"))
+            .set_json(serde_json::json!({
+                "party_id": party(),
+                "confirmation_cid": "00c0ffee",
+            }))
+    }
+
+    /// The `(status, error_message)` of the audit row of `event`, once the
+    /// detached write lands.
+    async fn audit_row(pool: &SqlitePool, event: AuditEvent) -> Result<(String, Option<String>)> {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let row = sqlx::query_as(
+                    "SELECT status, error_message FROM governance_audit WHERE event_type = ?",
+                )
+                .bind(event.as_str())
+                .fetch_optional(pool)
+                .await?;
+                if let Some(row) = row {
+                    return Ok(row);
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .context("no audit row was written")?
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_mediator_timeout_answers_504_and_names_the_party(pool: SqlitePool) -> Result {
+        let _serial = super::action_metrics_tests::SERIAL.lock().await;
+        let ledger = RejectingLedger::new();
+        ledger.release.notify_one();
+        let app = actix_test::init_service(
+            App::new()
+                .app_data(state(pool.clone(), ledger.serve()?).await?)
+                .wrap(AuthMiddleware)
+                .service(expire_confirmation),
+        )
+        .await;
+
+        let response = actix_test::call_service(&app, expire().to_request()).await;
+
+        assert_eq!(response.status(), StatusCode::GATEWAY_TIMEOUT);
+        let body: serde_json::Value = actix_test::read_body_json(response).await;
+        let error = body["error"].as_str().context("no error in the body")?;
+        assert!(
+            error.starts_with("Failed to expire confirmation: the mediator timed out"),
+            "{error}"
+        );
+        assert!(
+            error.contains(&format!("Unresponsive: {OFFLINE_MEMBER}.")),
+            "{error}"
+        );
+        let (status, message) = audit_row(&pool, AuditEvent::Expire).await?;
+        assert_eq!(status, "failed");
+        assert_eq!(message.as_deref(), Some(error));
+        Ok(())
+    }
+
+    /// A proxy that hangs up makes the server drop the handler. The expire and
+    /// the cancel still end, and the audit row names the unresponsive party.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_dropped_request_still_writes_the_audit_row(pool: SqlitePool) -> Result {
+        let _serial = super::action_metrics_tests::SERIAL.lock().await;
+        for (request, event) in [
+            (expire(), AuditEvent::Expire),
+            (cancel(), AuditEvent::Cancel),
+        ] {
+            let ledger = RejectingLedger::new();
+            let app = actix_test::init_service(
+                App::new()
+                    .app_data(state(pool.clone(), ledger.serve()?).await?)
+                    .wrap(AuthMiddleware)
+                    .service(expire_confirmation)
+                    .service(cancel_confirmation),
+            )
+            .await;
+
+            // Dropping the request future is what the server does to a
+            // handler whose client hung up.
+            tokio::select! {
+                _ = actix_test::call_service(&app, request.to_request()) => {
+                    anyhow::bail!("{event:?} answered before the ledger did");
+                }
+                () = ledger.submitted.notified() => {}
+            }
+            ledger.release.notify_one();
+
+            let (status, message) = audit_row(&pool, event).await?;
+            assert_eq!(status, "failed", "{event:?}");
+            let message = message.unwrap_or_default();
+            assert!(
+                message.contains(&format!("Unresponsive: {OFFLINE_MEMBER}.")),
+                "{event:?}: {message}"
+            );
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
 mod cancel_confirmation_gate_tests {
     use actix_web::{
         App,
@@ -3453,7 +3660,6 @@ mod cancel_confirmation_gate_tests {
 
 #[cfg(test)]
 mod paid_accept_disclosure_tests {
-    use actix_web::{body::to_bytes, http::StatusCode};
     use decman_lib::catalog::types::AppTransferContextInput;
     use decman_lib::framework::DamlProtoEncode;
     use wiremock::{
@@ -3591,8 +3797,8 @@ mod paid_accept_disclosure_tests {
             .expect_err("the round must come from scan");
 
         assert!(err.downcast_ref::<ScanNotConfigured>().is_some(), "{err:#}");
-        let response = execute_failure_response(&err);
-        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let (status, _) = execute_failure(&err);
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
     }
 
     #[tokio::test]
@@ -3639,34 +3845,25 @@ mod paid_accept_disclosure_tests {
         assert!(message.contains("00gone"), "{message}");
     }
 
-    #[actix_web::test]
-    async fn any_other_execute_failure_stays_a_500() -> Result<()> {
-        let response = execute_failure_response(&anyhow::anyhow!("ledger said no"));
+    #[test]
+    fn any_other_execute_failure_stays_a_500() {
+        let (status, error) = execute_failure(&anyhow::anyhow!("ledger said no"));
 
-        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
-        let body = to_bytes(response.into_body())
-            .await
-            .map_err(|e| anyhow::anyhow!("{e}"))?;
-        let body: serde_json::Value = serde_json::from_slice(&body)?;
-        assert_eq!(body["error"], "Failed to execute action: ledger said no");
-        Ok(())
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(error, "Failed to execute action: ledger said no");
     }
 
-    #[actix_web::test]
-    async fn an_execute_failure_names_its_underlying_cause() -> Result<()> {
+    #[test]
+    fn an_execute_failure_names_its_underlying_cause() {
         let error = anyhow::anyhow!("scan answered 403 Forbidden: access denied")
             .context("Failed to fetch the open mining rounds from scan");
-        let response = execute_failure_response(&error);
 
-        let body = to_bytes(response.into_body())
-            .await
-            .map_err(|e| anyhow::anyhow!("{e}"))?;
-        let body: serde_json::Value = serde_json::from_slice(&body)?;
+        let (_, error) = execute_failure(&error);
+
         assert_eq!(
-            body["error"],
+            error,
             "Failed to execute action: Failed to fetch the open mining rounds from scan: \
              scan answered 403 Forbidden: access denied"
         );
-        Ok(())
     }
 }
