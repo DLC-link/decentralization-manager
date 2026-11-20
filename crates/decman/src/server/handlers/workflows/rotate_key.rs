@@ -170,7 +170,7 @@ pub async fn start_rotate_key(
 
     let _start = match claim_party_for_start(&data, &party).await {
         Ok(claim) => claim,
-        Err(response) => return response,
+        Err(error) => return error.into_response(),
     };
     let health = probe_invitee_health(&data.config, &data.db, &invitees).await;
     let incompatible = incompatible_versions(&health);
@@ -187,7 +187,7 @@ pub async fn start_rotate_key(
             error: format_peers_lacking_rotate_key(&lacking),
         });
     }
-    if let Err(resp) = register_and_persist(
+    if let Err(error) = register_and_persist(
         &data,
         &instance,
         RotateKeyStep::WaitingForPeers,
@@ -197,7 +197,7 @@ pub async fn start_rotate_key(
     )
     .await
     {
-        return resp;
+        return error.into_response();
     }
 
     let state = &instance.http;

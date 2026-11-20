@@ -2,7 +2,6 @@
 
 use std::collections::HashSet;
 
-use actix_web::HttpResponse;
 use canton_proto_rs::com::digitalasset::canton::protocol::v30::PartyToParticipant;
 use sqlx::SqlitePool;
 
@@ -10,7 +9,7 @@ use crate::{
     canton_id::CantonId,
     config::NodeConfig,
     error::Result,
-    server::types::ErrorResponse,
+    server::error::ApiError,
     utils,
     workflow::{
         signing_keys::{
@@ -260,28 +259,24 @@ pub(super) async fn check_kick_survivor_keys(
     Err(KeyClaimError::Unresolved(message).into())
 }
 
-/// The response to a failed signing-key check of a kick. A key-claim refusal
+/// The answer to a failed signing-key check of a kick. A key-claim refusal
 /// says what to do, so it goes back as it is. Any other failure is logged and
 /// answered with generic text.
-pub(super) fn kick_key_check_failure(party: &CantonId, e: &anyhow::Error) -> HttpResponse {
+pub(super) fn kick_key_check_failure(party: &CantonId, e: &anyhow::Error) -> ApiError {
     match e.downcast_ref::<KeyClaimError>() {
         Some(KeyClaimError::Conflict(error)) => {
             tracing::warn!("Kick of {party} refused: {error}");
-            HttpResponse::Conflict().json(ErrorResponse {
-                error: error.clone(),
-            })
+            ApiError::Conflict(error.clone())
         }
         Some(KeyClaimError::Unresolved(error)) => {
             tracing::info!("Kick of {party} refused: {error}");
-            HttpResponse::ServiceUnavailable().json(ErrorResponse {
-                error: error.clone(),
-            })
+            ApiError::ServiceUnavailable(error.clone())
         }
         None => {
             tracing::error!("Cannot check the signing keys of {party} for a kick: {e:#}");
-            HttpResponse::ServiceUnavailable().json(ErrorResponse {
-                error: "Cannot check the party's signing keys right now. Retry later.".to_string(),
-            })
+            ApiError::ServiceUnavailable(
+                "Cannot check the party's signing keys right now. Retry later.".to_string(),
+            )
         }
     }
 }
@@ -595,7 +590,7 @@ mod tests {
             ),
             "{error:#}"
         );
-        let response = kick_key_check_failure(&party, &error);
+        let response = kick_key_check_failure(&party, &error).into_response();
         assert_eq!(response.status(), StatusCode::CONFLICT);
         Ok(())
     }

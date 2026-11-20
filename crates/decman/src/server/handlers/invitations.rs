@@ -396,9 +396,9 @@ pub async fn accept_invitation(
     let _start = if let Some(party) = &invitation.dec_party_id {
         match super::workflows::claim_party_for_start(&data, party).await {
             Ok(claim) => Some(claim),
-            Err(response) => {
+            Err(error) => {
                 restore_invitation(&data, &invitation).await;
-                return response;
+                return error.into_response();
             }
         }
     } else {

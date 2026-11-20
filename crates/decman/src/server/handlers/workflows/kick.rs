@@ -15,6 +15,7 @@ use crate::{
     noise::{Message, MessageType, NoiseKeypair, parse_public_key, send_noise_message},
     server::{
         AppState,
+        error::ApiError,
         middleware::require_admin,
         types::{
             ErrorResponse, KickInvitePayload, KickRequest, KickResponse, KickStatus, WorkflowGuard,
@@ -62,7 +63,17 @@ pub async fn start_kick(
     if let Err(resp) = require_admin(&http_req, data.admin_role.as_deref()) {
         return resp;
     }
+    start_kick_run(&data, &body)
+        .await
+        .unwrap_or_else(ApiError::into_response)
+}
 
+/// Check a kick request against the cached party and the peers, then
+/// register the run and start it.
+async fn start_kick_run(
+    data: &web::Data<AppState>,
+    body: &KickRequest,
+) -> std::result::Result<HttpResponse, ApiError> {
     tracing::info!(
         "Kick request received: party={}, participant_to_kick={:?}, owner_key={:?}, \
          threshold={}",
@@ -78,64 +89,46 @@ pub async fn start_kick(
     let self_id = data.config.participant_id().clone();
 
     if body.participant_id.as_ref() == Some(&self_id) {
-        return HttpResponse::BadRequest().json(ErrorResponse {
-            error: "Cannot kick yourself".to_string(),
-        });
+        return Err(ApiError::BadRequest("Cannot kick yourself".to_string()));
     }
 
-    let member_rows = match data
+    let member_rows = data
         .db
         .get_dec_party_participants(&decentralized_party_id)
         .await
-    {
-        Ok(rows) => rows,
-        Err(e) => {
+        .map_err(|e| {
             tracing::error!("Failed to load dec party participants for kick: {e}");
-            return HttpResponse::InternalServerError().json(ErrorResponse {
-                error: "Failed to load decentralized party members".to_string(),
-            });
-        }
-    };
-    let owner_rows = match data.db.get_dec_party_owners(&decentralized_party_id).await {
-        Ok(rows) => rows,
-        Err(e) => {
+            ApiError::Internal("Failed to load decentralized party members".to_string())
+        })?;
+    let owner_rows = data
+        .db
+        .get_dec_party_owners(&decentralized_party_id)
+        .await
+        .map_err(|e| {
             tracing::error!("Failed to load dec party owners for kick: {e}");
-            return HttpResponse::InternalServerError().json(ErrorResponse {
-                error: "Failed to load decentralized party owners".to_string(),
-            });
-        }
-    };
+            ApiError::Internal("Failed to load decentralized party owners".to_string())
+        })?;
 
     // The server works out the owner key from the cache rather than taking
     // it from the client, so an empty prefill becomes a clear error.
-    let target = match resolve_kick_target(
+    let target = resolve_kick_target(
         body.participant_id.as_ref(),
         body.owner_key.as_deref(),
         &member_rows,
         &owner_rows,
-    ) {
-        Ok(target) => target,
-        Err(e) => return e.into_response(),
-    };
+    )?;
     if target.participant.as_ref() == Some(&self_id) {
-        return HttpResponse::BadRequest().json(ErrorResponse {
-            error: "Cannot kick yourself".to_string(),
-        });
+        return Err(ApiError::BadRequest("Cannot kick yourself".to_string()));
     }
     // The participant that leaves the hosting mapping, if the member hosts.
     let kicked_host = target.participant.clone().filter(|_| target.hosts);
 
     // The peer list decides which members the kick can invite. A DB error
     // here is fatal, because without it the signer count is unknown.
-    let peers = match data.db.get_all_peers().await {
-        Ok(p) => p,
-        Err(e) => {
-            tracing::error!("Failed to load peers for kick: {e}");
-            return HttpResponse::InternalServerError().json(ErrorResponse {
-                error: "Failed to load peers".to_string(),
-            });
-        }
-    };
+    let peers = data.db.get_all_peers().await.map_err(|e| {
+        tracing::error!("Failed to load peers for kick: {e}");
+        ApiError::Internal("Failed to load peers".to_string())
+    })?;
 
     // Scope the kick to this dec party's actual members, not every peer this
     // node has configured. A party can be a strict subset of the configured
@@ -170,16 +163,12 @@ pub async fn start_kick(
     let peer_ids: HashSet<CantonId> = peers.into_iter().map(|p| p.participant_id).collect();
     let signers = kick_signers(&party_member_ids, &peer_ids, &self_id, kicked_host.as_ref());
     let member_count = party_member_count(&party_member_ids, &self_id);
-    let namespace_threshold =
-        match cached_namespace_threshold(&data.db, &decentralized_party_id).await {
-            Ok(threshold) => threshold,
-            Err(e) => {
-                tracing::error!("Failed to read the cached threshold for kick: {e}");
-                return HttpResponse::InternalServerError().json(ErrorResponse {
-                    error: "Failed to read the party's cached thresholds".to_string(),
-                });
-            }
-        };
+    let namespace_threshold = cached_namespace_threshold(&data.db, &decentralized_party_id)
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to read the cached threshold for kick: {e}");
+            ApiError::Internal("Failed to read the party's cached thresholds".to_string())
+        })?;
 
     // Only the hosts sign. An owner that hosts nothing cannot be asked, so
     // the namespace threshold in force must be reachable without it.
@@ -187,15 +176,13 @@ pub async fn start_kick(
         && let Some(threshold) = namespace_threshold
         && threshold > member_count
     {
-        return HttpResponse::BadRequest().json(ErrorResponse {
-            error: format!(
-                "Cannot kick owner key {key}: the party's namespace threshold is \
-                 {threshold}, but only its {member_count} hosting members can sign. \
-                 The owner being removed would have to sign too, and a kick cannot \
-                 ask it",
-                key = target.owner_key
-            ),
-        });
+        return Err(ApiError::BadRequest(format!(
+            "Cannot kick owner key {key}: the party's namespace threshold is \
+             {threshold}, but only its {member_count} hosting members can sign. \
+             The owner being removed would have to sign too, and a kick cannot \
+             ask it",
+            key = target.owner_key
+        )));
     }
 
     // Validate `new_threshold` before persisting anything. Negative or zero
@@ -227,12 +214,10 @@ pub async fn start_kick(
                 owners = owner_rows.len().saturating_sub(1)
             )
         };
-        return HttpResponse::BadRequest().json(ErrorResponse {
-            error: format!(
-                "new_threshold must be between 1 and {max_threshold} ({reason}); got {got}",
-                got = body.new_threshold,
-            ),
-        });
+        return Err(ApiError::BadRequest(format!(
+            "new_threshold must be between 1 and {max_threshold} ({reason}); got {got}",
+            got = body.new_threshold,
+        )));
     }
 
     // The DNS changes first. Its signatures satisfy the current threshold,
@@ -240,7 +225,7 @@ pub async fn start_kick(
     if let Some(error) =
         kick_quorum_refusal(namespace_threshold, body.new_threshold as usize, &signers)
     {
-        return HttpResponse::BadRequest().json(ErrorResponse { error });
+        return Err(ApiError::BadRequest(error));
     }
     if !signers.not_peers.is_empty() {
         tracing::info!(
@@ -255,21 +240,13 @@ pub async fn start_kick(
         );
     }
 
-    let confirmation_threshold = match cached_confirmation_threshold(
-        &data.db,
-        &decentralized_party_id,
-        post_kick_member_count,
-    )
-    .await
-    {
-        Ok(threshold) => threshold,
-        Err(e) => {
-            tracing::error!("Failed to read the cached thresholds for kick: {e}");
-            return HttpResponse::InternalServerError().json(ErrorResponse {
-                error: "Failed to read the party's cached thresholds".to_string(),
-            });
-        }
-    };
+    let confirmation_threshold =
+        cached_confirmation_threshold(&data.db, &decentralized_party_id, post_kick_member_count)
+            .await
+            .map_err(|e| {
+                tracing::error!("Failed to read the cached thresholds for kick: {e}");
+                ApiError::Internal("Failed to read the party's cached thresholds".to_string())
+            })?;
 
     // Fixed before the InProgress flip so a concurrent /kick/cancel cannot
     // observe InProgress while we're still preparing.
@@ -304,10 +281,7 @@ pub async fn start_kick(
     // party's topology mutations must not interleave (two kicks, or a kick
     // racing a contracts deployment, conflict at the Canton layer with
     // confusing step failures).
-    let _start = match claim_party_for_start(&data, &decentralized_party_id).await {
-        Ok(claim) => claim,
-        Err(response) => return response,
-    };
+    let _start = claim_party_for_start(data, &decentralized_party_id).await?;
 
     let removed = kick_config.participant_id.as_ref().map_or_else(
         || kick_config.namespace_fingerprint.clone(),
@@ -322,7 +296,7 @@ pub async fn start_kick(
     )
     .await
     {
-        return kick_key_check_failure(&decentralized_party_id, &e);
+        return Err(kick_key_check_failure(&decentralized_party_id, &e));
     }
     match kick_key_adoption_refusal(
         &data.config,
@@ -334,9 +308,9 @@ pub async fn start_kick(
     )
     .await
     {
-        Ok(Some(error)) => return HttpResponse::BadRequest().json(ErrorResponse { error }),
+        Ok(Some(error)) => return Err(ApiError::BadRequest(error)),
         Ok(None) => {}
-        Err(e) => return kick_key_check_failure(&decentralized_party_id, &e),
+        Err(e) => return Err(kick_key_check_failure(&decentralized_party_id, &e)),
     }
 
     // Refuse to invite any peer that can't speak the concurrent-workflows wire
@@ -344,35 +318,30 @@ pub async fn start_kick(
     let health = probe_invitee_health(&data.config, &data.db, &invitees).await;
     let incompatible = incompatible_versions(&health);
     if !incompatible.is_empty() {
-        return HttpResponse::Conflict().json(ErrorResponse {
-            error: format_incompatible_peers(&incompatible),
-        });
+        return Err(ApiError::Conflict(format_incompatible_peers(&incompatible)));
     }
     // An older peer refuses an owner-only kick with an error that does not
     // say why, so the run would fail after the invites went out.
     if !target.hosts {
         let lacking = lacking_feature(&health, OWNER_ONLY_KICK);
         if !lacking.is_empty() {
-            return HttpResponse::Conflict().json(ErrorResponse {
-                error: format_peers_lacking_owner_only_kick(&lacking),
-            });
+            return Err(ApiError::Conflict(format_peers_lacking_owner_only_kick(
+                &lacking,
+            )));
         }
     }
 
     // Register + persist atomically w.r.t. duplicates (registry insert dedups
     // before the upsert; a persist failure unregisters so nothing leaks).
-    if let Err(resp) = register_and_persist(
-        &data,
+    register_and_persist(
+        data,
         &instance,
         KickStep::WaitingForPeers,
         &kick_config,
         &invitees,
         Some(decentralized_party_id.clone()),
     )
-    .await
-    {
-        return resp;
-    }
+    .await?;
 
     *kick_state.invited_peers.write().await = invitees;
 
@@ -465,11 +434,11 @@ pub async fn start_kick(
     drop(status_guard);
     drop(abort_guard);
 
-    HttpResponse::Accepted().json(KickResponse {
+    Ok(HttpResponse::Accepted().json(KickResponse {
         status: KickStatus::InProgress,
         message: "Kick workflow started".to_string(),
         instance_name,
-    })
+    }))
 }
 
 /// Get the current status of the kick workflow

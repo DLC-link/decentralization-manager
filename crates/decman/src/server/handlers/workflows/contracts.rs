@@ -109,7 +109,7 @@ pub async fn start_contracts(
     // `find_inprogress_run_for_party`).
     let _start = match claim_party_for_start(&data, &body.decentralized_party_id).await {
         Ok(claim) => claim,
-        Err(response) => return response,
+        Err(error) => return error.into_response(),
     };
 
     // Refuse to invite any peer that can't speak the concurrent-workflows wire
@@ -149,7 +149,7 @@ pub async fn start_contracts(
 
     // Register + persist atomically w.r.t. duplicates (registry insert dedups
     // before the upsert; a persist failure unregisters so nothing leaks).
-    if let Err(resp) = register_and_persist(
+    if let Err(error) = register_and_persist(
         &data,
         &instance,
         ContractsStep::WaitingForPeers,
@@ -159,7 +159,7 @@ pub async fn start_contracts(
     )
     .await
     {
-        return resp;
+        return error.into_response();
     }
 
     let config = data.config.clone();

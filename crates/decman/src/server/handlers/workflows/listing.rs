@@ -418,7 +418,7 @@ pub async fn retry_workflow(
     let _start = if let Some(party) = &run.dec_party_id {
         match claim_party_for_start(&data, party).await {
             Ok(claim) => Some(claim),
-            Err(response) => return response,
+            Err(error) => return error.into_response(),
         }
     } else {
         None

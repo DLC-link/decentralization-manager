@@ -3,7 +3,7 @@
 
 use std::collections::HashSet;
 
-use actix_web::{HttpResponse, http::StatusCode, web};
+use actix_web::web;
 use sqlx::SqlitePool;
 
 use crate::{
@@ -18,8 +18,9 @@ use crate::{
     },
     server::{
         AppState,
+        error::ApiError,
         health::{HealthReply, classify_health_reply},
-        types::{ErrorResponse, StartClaim},
+        types::StartClaim,
         workflow_exclusion::{PartyStartRefusal, claim_party_for_workflow},
     },
     utils,
@@ -172,23 +173,19 @@ pub(super) fn format_incompatible_peers(incompatible: &[(String, String)]) -> St
 /// Claim `party` for this start request, and refuse it when a run is in
 /// flight for the party. The handler holds the claim until it returns. So a
 /// second request cannot pass the check before the first registers its run.
-#[allow(clippy::result_large_err)]
 pub(crate) async fn claim_party_for_start(
     data: &web::Data<AppState>,
     party: &CantonId,
-) -> std::result::Result<StartClaim, HttpResponse> {
+) -> std::result::Result<StartClaim, ApiError> {
     claim_party_for_workflow(&data.workflows, &data.db, party)
         .await
         .map_err(|refusal| {
-            let status = if matches!(refusal, PartyStartRefusal::Unavailable { .. }) {
+            if matches!(refusal, PartyStartRefusal::Unavailable { .. }) {
                 tracing::error!(error = ?refusal, "Failed to check party workflows");
-                StatusCode::SERVICE_UNAVAILABLE
+                ApiError::ServiceUnavailable(refusal.to_string())
             } else {
-                StatusCode::CONFLICT
-            };
-            HttpResponse::build(status).json(ErrorResponse {
-                error: refusal.to_string(),
-            })
+                ApiError::Conflict(refusal.to_string())
+            }
         })
 }
 
@@ -285,6 +282,8 @@ async fn broadcast_simple_message(
 
 #[cfg(test)]
 mod tests {
+    use actix_web::http::StatusCode;
+
     use crate::{
         consts::OWNER_ONLY_KICK,
         db::{
@@ -435,6 +434,7 @@ mod tests {
         let response = claim_party_for_start(&data, &party)
             .await
             .err()
+            .map(ApiError::into_response)
             .ok_or_else(|| anyhow::anyhow!("failed lookup must refuse the start"))?;
         assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
         assert!(data.workflows.claim_start(&party).is_some());
