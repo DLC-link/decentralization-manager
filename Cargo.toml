@@ -105,7 +105,7 @@ zeroize = { version = "1.8", features = ["derive"] }
 canton-common = { package = "common", git = "https://github.com/DLC-link/canton-lib", rev = "4e2a0f110164890d6eb87235f4d2d9ea3797a421" }
 canton-proto-rs = { git = "https://github.com/DLC-link/canton-lib", rev = "4e2a0f110164890d6eb87235f4d2d9ea3797a421" }
 canton-registry = { package = "registry", git = "https://github.com/DLC-link/canton-lib", rev = "4e2a0f110164890d6eb87235f4d2d9ea3797a421" }
-common = { path = "crates/common" }
+common = { package = "decman-common", path = "crates/common" }
 decman-lib = { path = "crates/decman-lib" }
 decman-wallet = { path = "crates/decman-wallet" }
 keycloak = { git = "https://github.com/DLC-link/canton-lib", rev = "4e2a0f110164890d6eb87235f4d2d9ea3797a421" }
