@@ -2,8 +2,10 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::canton_id::CantonId;
-use crate::types::{HandledInvitation, PendingInvitation, WorkflowKind};
+use crate::{
+    canton_id::CantonId,
+    types::{HandledInvitation, PendingInvitation, WorkflowKind},
+};
 
 /// Response for key status check
 #[derive(Serialize)]

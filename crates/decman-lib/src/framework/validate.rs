@@ -9,11 +9,12 @@
 use std::collections::HashSet;
 
 use canton_common::decimal::DamlDecimal;
-use common::api::PartyCredentialRequirement;
-use common::canton_id::CantonId;
+use common::{api::PartyCredentialRequirement, canton_id::CantonId};
 
-use crate::catalog::types::{AppRewardBeneficiary, RewardBeneficiary};
-use crate::error::Error;
+use crate::{
+    catalog::types::{AppRewardBeneficiary, RewardBeneficiary},
+    error::Error,
+};
 
 /// Check a new governance threshold before it is proposed.
 ///

@@ -13,12 +13,15 @@ mod fixtures;
 mod proposals;
 mod tally;
 
-pub use confirmations::parse_domain_confirmation;
-pub use confirmations::{ParsedConfirmation, ParsedDomainConfirmation, RulesState};
-pub use confirmations::{extract_governance_state, parse_confirmation};
-pub use proposals::extract_service_request_details;
-pub use proposals::{DESCRIPTION_PREVIEW_BYTES, ProposalInfo, extract_transfer_proposal_details};
-pub use proposals::{extract_accept_transfer_details_from_view, extract_proposal_info};
-pub use tally::{DomainAction, EXECUTE_EXPIRY_MARGIN_SECONDS, FALLBACK_PROPOSAL_LABEL};
-pub use tally::{assemble_domain_actions, counts_toward_threshold, dedupe_newest_per_party};
-pub use tally::{is_executable, live_count};
+pub use confirmations::{
+    ParsedConfirmation, ParsedDomainConfirmation, RulesState, extract_governance_state,
+    parse_confirmation, parse_domain_confirmation,
+};
+pub use proposals::{
+    DESCRIPTION_PREVIEW_BYTES, ProposalInfo, extract_accept_transfer_details_from_view,
+    extract_proposal_info, extract_service_request_details, extract_transfer_proposal_details,
+};
+pub use tally::{
+    DomainAction, EXECUTE_EXPIRY_MARGIN_SECONDS, FALLBACK_PROPOSAL_LABEL, assemble_domain_actions,
+    counts_toward_threshold, dedupe_newest_per_party, is_executable, live_count,
+};

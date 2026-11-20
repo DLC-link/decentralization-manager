@@ -11,20 +11,23 @@
 //! panicking.
 
 use canton_proto_rs::com::daml::ledger::api::v2::{Record, Value, Variant, value};
-use common::api::Claim;
-use common::canton_id::CantonId;
+use common::{api::Claim, canton_id::CantonId};
 
-use crate::catalog::types::{deserialize_claim, deserialize_reltime};
-use crate::error::Error;
-use crate::framework::encode::{
-    field, make_contract_id, make_int64, make_optional_party_set, make_party, make_record,
-    make_variant, serialize_reltime,
+use crate::{
+    catalog::types::{deserialize_claim, deserialize_reltime},
+    error::Error,
+    framework::{
+        encode::{
+            field, make_contract_id, make_int64, make_optional_party_set, make_party, make_record,
+            make_variant, serialize_reltime,
+        },
+        record::{
+            extract_contract_id, extract_int64, extract_list, extract_party_id, extract_party_set,
+            extract_record, extract_text, get_field,
+        },
+        validate::{validate_threshold, validate_timeout},
+    },
 };
-use crate::framework::record::{
-    extract_contract_id, extract_int64, extract_list, extract_party_id, extract_party_set,
-    extract_record, extract_text, get_field,
-};
-use crate::framework::validate::{validate_threshold, validate_timeout};
 
 /// Structured action types for decentralized-party governance
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]

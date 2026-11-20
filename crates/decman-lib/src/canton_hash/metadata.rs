@@ -6,7 +6,8 @@
 //! decide where and when the change may be committed.
 
 use canton_proto_rs::com::daml::ledger::api::v2::interactive::{
-    Metadata, metadata::InputContract, metadata::input_contract::Contract,
+    Metadata,
+    metadata::{InputContract, input_contract::Contract},
 };
 
 use crate::canton_hash::{

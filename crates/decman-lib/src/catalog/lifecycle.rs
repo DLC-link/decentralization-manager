@@ -50,8 +50,7 @@ pub fn classify_choice(choice: &str) -> Option<GovernanceLifecycleEvent> {
 
 #[cfg(test)]
 mod tests {
-    use super::GovernanceLifecycleEvent::*;
-    use super::*;
+    use super::{GovernanceLifecycleEvent::*, *};
 
     /// Every choice name the builders in `catalog::commands` exercise, with
     /// its expected event. The builder table test in `commands.rs` pins the

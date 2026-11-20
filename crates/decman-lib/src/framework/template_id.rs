@@ -2,8 +2,7 @@ use std::fmt;
 
 use canton_proto_rs::com::daml::ledger::api::v2::Identifier;
 
-use crate::error::Error;
-use crate::framework::PackageResolver;
+use crate::{error::Error, framework::PackageResolver};
 
 /// A Daml template or interface id under a `#package-name` reference.
 #[derive(Clone, Debug, Eq, PartialEq)]

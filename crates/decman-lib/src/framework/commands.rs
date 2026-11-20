@@ -7,9 +7,13 @@ use canton_proto_rs::com::daml::ledger::api::v2::{
 };
 use common::canton_id::CantonId;
 
-use crate::error::Error;
-use crate::framework::encode::{field, make_party};
-use crate::framework::{DamlProtoEncode, PackageResolver, TemplateInfo};
+use crate::{
+    error::Error,
+    framework::{
+        DamlProtoEncode, PackageResolver, TemplateInfo,
+        encode::{field, make_party},
+    },
+};
 
 /// The one `Commands` envelope every governance submission uses.
 /// `member` acts (`act_as`); the decentralized party reads (`read_as`).
@@ -136,8 +140,10 @@ mod tests {
     use common::api::PackageConfig;
 
     use super::*;
-    use crate::framework::encode::{make_record, make_text};
-    use crate::framework::traits::tests::FakeProposal;
+    use crate::framework::{
+        encode::{make_record, make_text},
+        traits::tests::FakeProposal,
+    };
 
     fn cid(prefix: &str) -> CantonId {
         CantonId::parse(&format!(

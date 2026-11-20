@@ -2,8 +2,10 @@
 //! the hosts agree, and signing what they prepared.
 
 use super::WalletHost;
-use crate::error::{Error, Result};
-use crate::signer::Signer;
+use crate::{
+    error::{Error, Result},
+    signer::Signer,
+};
 
 /// Require every other host's preparation to match the reference one.
 ///

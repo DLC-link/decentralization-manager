@@ -1,8 +1,10 @@
 use canton_proto_rs::com::daml::ledger::api::v2::Value;
 use common::canton_id::CantonId;
 
-use crate::error::Error;
-use crate::framework::{PackageResolver, TemplateId};
+use crate::{
+    error::Error,
+    framework::{PackageResolver, TemplateId},
+};
 
 /// Context a payload's protocol checks may need. Time enters as a
 /// parameter so validation is deterministic and testable.

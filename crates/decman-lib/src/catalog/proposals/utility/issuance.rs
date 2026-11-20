@@ -2,18 +2,20 @@
 
 use canton_common::decimal::DamlDecimal;
 use canton_proto_rs::com::daml::ledger::api::v2::{Value, value};
-use common::api::InstrumentId;
-use common::canton_id::CantonId;
+use common::{api::InstrumentId, canton_id::CantonId};
 
-use crate::error::Error;
-use crate::framework::ValidationCtx;
-use crate::framework::encode::serialize_instrument_id;
-use crate::framework::encode::{field, make_contract_id, make_empty_metadata, make_numeric};
-use crate::framework::encode::{
-    make_optional_contract_id_list, make_party, make_record, make_text,
+use crate::{
+    error::Error,
+    framework::{
+        DamlProtoEncode, PackageResolver, TemplateId, TemplateInfo, Validate, ValidationCtx,
+        encode::{
+            field, make_contract_id, make_empty_metadata, make_numeric,
+            make_optional_contract_id_list, make_party, make_record, make_text,
+            serialize_instrument_id,
+        },
+        validate::validate_positive_amount,
+    },
 };
-use crate::framework::validate::validate_positive_amount;
-use crate::framework::{DamlProtoEncode, PackageResolver, TemplateId, TemplateInfo, Validate};
 
 /// Offer a mint of `amount` tokens to `recipient` via
 /// `AllocationFactory_OfferMint`. The resulting `MintOffer` is accepted

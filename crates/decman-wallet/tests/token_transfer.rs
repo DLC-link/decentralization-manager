@@ -9,6 +9,13 @@
 //! wallet runs before it signs runs for real, against the same bytes a
 //! participant would send.
 
+use std::{
+    io::{BufRead, BufReader, Read, Write},
+    net::{TcpListener, TcpStream},
+    sync::mpsc,
+    time::Duration,
+};
+
 use base64::{Engine, engine::general_purpose::STANDARD};
 use chrono::{DateTime, SecondsFormat, TimeDelta, Utc};
 use decman_lib::{
@@ -25,13 +32,6 @@ use decman_lib::{
         value::Sum,
     },
 };
-use std::{
-    io::{BufRead, BufReader, Read, Write},
-    net::{TcpListener, TcpStream},
-    sync::mpsc,
-    time::Duration,
-};
-
 use decman_wallet::{
     AMULET_TRANSFER_INSTRUCTION_TEMPLATE, ClientOptions, Error, ExternalKeyPair, LedgerClient,
     Refusal, RegistryClient, TransferArgs, accept_transfer, send_transfer,

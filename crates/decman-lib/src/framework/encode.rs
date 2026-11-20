@@ -4,12 +4,12 @@
 //! `extraArgs`/choice-context builders, and `TransferValidity`. Integrators
 //! implementing `DamlProtoEncode` are built from these.
 
+use std::{collections::BTreeSet, fmt::Display};
+
 use canton_common::{
     decimal::DamlDecimal,
     transfer_factory::{Context as ChoiceContext, ContextValue},
 };
-use std::{collections::BTreeSet, fmt::Display};
-
 use canton_proto_rs::com::daml::ledger::api::v2::{
     GenMap, List, Optional, Record, RecordField, TextMap, Value, Variant, gen_map, text_map, value,
 };

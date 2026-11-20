@@ -3,17 +3,27 @@
 //! They stay in one module so the snapshot files keep their names, which
 //! insta derives from the module path.
 
-use common::api::{InstrumentId, InstrumentIdentifier, InstrumentIssuerCredentials};
-use common::api::{PartyCredentialRequirement, RequiredClaim};
-use common::canton_id::CantonId;
+use common::{
+    api::{
+        InstrumentId, InstrumentIdentifier, InstrumentIssuerCredentials,
+        PartyCredentialRequirement, RequiredClaim,
+    },
+    canton_id::CantonId,
+};
 
 use super::*;
-use crate::catalog::types::AppRewardBeneficiary;
-use crate::error::Error;
-use crate::framework::commands::proposal_create_arguments;
-use crate::framework::encode::{field, make_contract_id, make_optional_bool, make_optional_list};
-use crate::framework::encode::{make_optional_text, make_optional_timestamp};
-use crate::framework::{DamlProtoEncode, TemplateInfo, Validate, ValidationCtx};
+use crate::{
+    catalog::types::AppRewardBeneficiary,
+    error::Error,
+    framework::{
+        DamlProtoEncode, TemplateInfo, Validate, ValidationCtx,
+        commands::proposal_create_arguments,
+        encode::{
+            field, make_contract_id, make_optional_bool, make_optional_list, make_optional_text,
+            make_optional_timestamp,
+        },
+    },
+};
 
 /// Where the encode snapshots live, relative to this file. The file sits one
 /// directory below `catalog/proposals/`, so the path has one more `..` than

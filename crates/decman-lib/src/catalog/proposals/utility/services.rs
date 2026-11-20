@@ -4,9 +4,13 @@
 use canton_proto_rs::com::daml::ledger::api::v2::Value;
 use common::canton_id::CantonId;
 
-use crate::error::Error;
-use crate::framework::encode::{field, make_contract_id, make_party, make_record};
-use crate::framework::{DamlProtoEncode, PackageResolver, TemplateId, TemplateInfo, Validate};
+use crate::{
+    error::Error,
+    framework::{
+        DamlProtoEncode, PackageResolver, TemplateId, TemplateInfo, Validate,
+        encode::{field, make_contract_id, make_party, make_record},
+    },
+};
 
 /// Provision a Utility-Registry `ProviderService` with `operator = proposer`
 /// and `provider = governanceParty`. Produces the ProviderService cid

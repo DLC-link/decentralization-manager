@@ -4,21 +4,22 @@ use std::collections::HashSet;
 
 use canton_common::decimal::DamlDecimal;
 use canton_proto_rs::com::daml::ledger::api::v2::Value;
-use common::api::Claim;
-use common::canton_id::CantonId;
+use common::{api::Claim, canton_id::CantonId};
 
-use crate::catalog::types::{
-    AppTransferContextInput, BillingParams, serialize_app_transfer_context,
-    serialize_billing_params,
-};
-use crate::error::Error;
-use crate::framework::encode::{
-    field, make_contract_id, make_contract_id_list, make_list, make_optional_numeric, make_party,
-    make_record, make_text, serialize_claim,
-};
-use crate::framework::validate::validate_positive_amount;
-use crate::framework::{
-    DamlProtoEncode, PackageResolver, TemplateId, TemplateInfo, Validate, ValidationCtx,
+use crate::{
+    catalog::types::{
+        AppTransferContextInput, BillingParams, serialize_app_transfer_context,
+        serialize_billing_params,
+    },
+    error::Error,
+    framework::{
+        DamlProtoEncode, PackageResolver, TemplateId, TemplateInfo, Validate, ValidationCtx,
+        encode::{
+            field, make_contract_id, make_contract_id_list, make_list, make_optional_numeric,
+            make_party, make_record, make_text, serialize_claim,
+        },
+        validate::validate_positive_amount,
+    },
 };
 
 /// The package key of every payload in this module.

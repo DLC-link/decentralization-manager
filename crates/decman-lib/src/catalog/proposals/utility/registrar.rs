@@ -1,15 +1,19 @@
 //! Provider configuration and registrar onboarding.
 
 use canton_proto_rs::com::daml::ledger::api::v2::Value;
-use common::api::PartyCredentialRequirement;
-use common::canton_id::CantonId;
+use common::{api::PartyCredentialRequirement, canton_id::CantonId};
 
-use crate::error::Error;
-use crate::framework::ValidationCtx;
-use crate::framework::encode::serialize_party_credential_requirements;
-use crate::framework::encode::{field, make_bool, make_contract_id, make_party, make_record};
-use crate::framework::validate::validate_self_issued_requirements_have_claims;
-use crate::framework::{DamlProtoEncode, PackageResolver, TemplateId, TemplateInfo, Validate};
+use crate::{
+    error::Error,
+    framework::{
+        DamlProtoEncode, PackageResolver, TemplateId, TemplateInfo, Validate, ValidationCtx,
+        encode::{
+            field, make_bool, make_contract_id, make_party, make_record,
+            serialize_party_credential_requirements,
+        },
+        validate::validate_self_issued_requirements_have_claims,
+    },
+};
 
 /// Create the provider decparty's `ProviderConfiguration` with credential
 /// requirements for registrars and holders. Executed once by the provider
