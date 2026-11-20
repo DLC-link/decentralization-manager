@@ -14,6 +14,7 @@ use crate::{
     noise::{Message, MessageType, NoiseKeypair, parse_public_key, send_noise_message},
     server::{
         AppState,
+        error::ApiError,
         middleware::require_admin,
         types::{
             AddPartyInvitePayload, AddPartyRequest, ErrorResponse, MessageResponse, WorkflowGuard,
@@ -57,7 +58,17 @@ pub async fn start_add_party(
     if let Err(resp) = require_admin(&http_req, data.admin_role.as_deref()) {
         return resp;
     }
+    start_add_party_run(&data, &body)
+        .await
+        .unwrap_or_else(ApiError::into_response)
+}
 
+/// Check an add-party request against the peers and the cached party, then
+/// register the run and start it.
+async fn start_add_party_run(
+    data: &web::Data<AppState>,
+    body: &AddPartyRequest,
+) -> std::result::Result<HttpResponse, ApiError> {
     tracing::info!(
         "Add-party request received: party={}, new_participant={}, threshold={}",
         body.decentralized_party_id,
@@ -69,73 +80,55 @@ pub async fn start_add_party(
     let new_participant_id = body.new_participant_id.clone();
 
     if new_participant_id == *data.config.participant_id() {
-        return HttpResponse::BadRequest().json(ErrorResponse {
-            error: "Cannot add yourself as the new participant".to_string(),
-        });
+        return Err(ApiError::BadRequest(
+            "Cannot add yourself as the new participant".to_string(),
+        ));
     }
 
-    let peers = match data.db.get_all_peers().await {
-        Ok(p) => p,
-        Err(e) => {
-            tracing::error!("Failed to load peers for add-party: {e}");
-            return HttpResponse::InternalServerError().json(ErrorResponse {
-                error: "Failed to load peers".to_string(),
-            });
-        }
-    };
+    let peers = data.db.get_all_peers().await.map_err(|e| {
+        tracing::error!("Failed to load peers for add-party: {e}");
+        ApiError::Internal("Failed to load peers".to_string())
+    })?;
 
     // The new member must be a configured, known peer — invites travel over
     // Noise, so a participant this node can't reach can't join.
     if !peers.iter().any(|p| p.participant_id == new_participant_id) {
-        return HttpResponse::BadRequest().json(ErrorResponse {
-            error: format!(
-                "Participant {new_participant_id} is not a configured peer of this node"
-            ),
-        });
+        return Err(ApiError::BadRequest(format!(
+            "Participant {new_participant_id} is not a configured peer of this node"
+        )));
     }
 
     // Scope the existing-member set to the party's cached membership (same
     // rationale as start_kick — the party can be a strict subset of the
     // configured mesh).
-    let party_member_ids: HashSet<CantonId> = match data
+    let party_member_ids: HashSet<CantonId> = data
         .db
         .get_dec_party_participants(&decentralized_party_id)
         .await
-    {
-        Ok(rows) => rows
-            .iter()
-            .filter_map(|r| CantonId::parse(&r.participant_uid).ok())
-            .collect(),
-        Err(e) => {
+        .map_err(|e| {
             tracing::error!("Failed to load dec party participants for add-party: {e}");
-            return HttpResponse::InternalServerError().json(ErrorResponse {
-                error: "Failed to load decentralized party members".to_string(),
-            });
-        }
-    };
+            ApiError::Internal("Failed to load decentralized party members".to_string())
+        })?
+        .iter()
+        .filter_map(|r| CantonId::parse(&r.participant_uid).ok())
+        .collect();
     if party_member_ids.is_empty() {
-        return HttpResponse::Conflict().json(ErrorResponse {
-            error: format!(
-                "No cached membership for {decentralized_party_id}. Try refreshing \
+        return Err(ApiError::Conflict(format!(
+            "No cached membership for {decentralized_party_id}. Try refreshing \
                  /decentralized-parties first."
-            ),
-        });
+        )));
     }
     if party_member_ids.contains(&new_participant_id) {
-        return HttpResponse::Conflict().json(ErrorResponse {
-            error: format!(
-                "Participant {new_participant_id} is already a member of \
+        return Err(ApiError::Conflict(format!(
+            "Participant {new_participant_id} is already a member of \
                  {decentralized_party_id}"
-            ),
-        });
+        )));
     }
     if !party_member_ids.contains(data.config.participant_id()) {
-        return HttpResponse::BadRequest().json(ErrorResponse {
-            error: format!(
-                "This node is not a member of {decentralized_party_id}; only an existing \
+        return Err(ApiError::BadRequest(format!(
+            "This node is not a member of {decentralized_party_id}; only an existing \
                  member can coordinate adding one"
-            ),
-        });
+        )));
     }
 
     // Bound the new threshold by the members that can actually sign, which
@@ -150,31 +143,24 @@ pub async fn start_add_party(
     // validation against the live DNS owner set happens in ExportState.
     let signing_member_count = party_member_ids.len() as i32;
     if body.new_threshold < 1 || body.new_threshold > signing_member_count {
-        return HttpResponse::BadRequest().json(ErrorResponse {
-            error: format!(
-                "new_threshold must be between 1 and {signing_member_count} (the members that \
+        return Err(ApiError::BadRequest(format!(
+            "new_threshold must be between 1 and {signing_member_count} (the members that \
                  can sign; the member being added cannot until its ACS import completes); got \
                  {got}. To include it, run change-threshold once its onboarding marker clears",
-                got = body.new_threshold,
-            ),
-        });
+            got = body.new_threshold,
+        )));
     }
 
-    let confirmation_threshold = match cached_confirmation_threshold(
+    let confirmation_threshold = cached_confirmation_threshold(
         &data.db,
         &decentralized_party_id,
         party_member_ids.len() + 1,
     )
     .await
-    {
-        Ok(threshold) => threshold,
-        Err(e) => {
-            tracing::error!("Failed to read the cached thresholds for add-party: {e}");
-            return HttpResponse::InternalServerError().json(ErrorResponse {
-                error: "Failed to read the party's cached thresholds".to_string(),
-            });
-        }
-    };
+    .map_err(|e| {
+        tracing::error!("Failed to read the cached thresholds for add-party: {e}");
+        ApiError::Internal("Failed to read the party's cached thresholds".to_string())
+    })?;
 
     // Invitees: every existing member except self, plus the new member.
     let mut invitees: Vec<CantonId> = peers
@@ -205,18 +191,13 @@ pub async fn start_add_party(
 
     // Refuse a second workflow targeting the SAME decentralized party (see
     // start_kick for the rationale — topology mutations must not interleave).
-    let _start = match claim_party_for_start(&data, &decentralized_party_id).await {
-        Ok(claim) => claim,
-        Err(error) => return error.into_response(),
-    };
+    let _start = claim_party_for_start(data, &decentralized_party_id).await?;
 
     // Refuse to invite any peer that can't speak the concurrent-workflows wire
     // format — NO invites are sent if even one invitee fails the version gate.
     let incompatible = preflight_incompatible_peers(&data.config, &data.db, &invitees).await;
     if !incompatible.is_empty() {
-        return HttpResponse::Conflict().json(ErrorResponse {
-            error: format_incompatible_peers(&incompatible),
-        });
+        return Err(ApiError::Conflict(format_incompatible_peers(&incompatible)));
     }
 
     // A missing DAR must stop the add before any invite goes out, so no peer
@@ -231,23 +212,20 @@ pub async fn start_add_party(
         ledger_token.as_deref(),
     );
     if let Err(e) = bounded_package_check(ADD_PARTY_PACKAGE_CHECK_TIMEOUT, check).await {
-        return add_party_package_check_failure(&decentralized_party_id, &e);
+        return Err(add_party_package_check_failure(&decentralized_party_id, &e));
     }
 
     // Register + persist atomically w.r.t. duplicates (registry insert dedups
     // before the upsert; a persist failure unregisters so nothing leaks).
-    if let Err(error) = register_and_persist(
-        &data,
+    register_and_persist(
+        data,
         &instance,
         AddPartyStep::WaitingForPeers,
         &add_party_config,
         &invitees,
         Some(decentralized_party_id.clone()),
     )
-    .await
-    {
-        return error.into_response();
-    }
+    .await?;
 
     let invitees_for_invites = invitees.clone();
     *add_party_state.invited_peers.write().await = invitees;
@@ -350,11 +328,11 @@ pub async fn start_add_party(
     drop(status_guard);
     drop(abort_guard);
 
-    HttpResponse::Accepted().json(WorkflowResponse {
+    Ok(HttpResponse::Accepted().json(WorkflowResponse {
         status: WorkflowProgress::InProgress,
         message: "Add-party workflow started".to_string(),
         instance_name,
-    })
+    }))
 }
 
 /// How long an add-party start waits for the package check. The check streams
@@ -380,19 +358,15 @@ async fn bounded_package_check(
 /// The response to a failed package check of an add-party start. A missing
 /// package says what to do, so it goes back as it is. Any other failure means
 /// the check could not run, so the add is refused until it can.
-fn add_party_package_check_failure(party: &CantonId, e: &anyhow::Error) -> HttpResponse {
+fn add_party_package_check_failure(party: &CantonId, e: &anyhow::Error) -> ApiError {
     match e.downcast_ref::<workflow::add_party::MissingPackages>() {
         Some(missing) => {
             tracing::warn!("Add-party to {party} refused: {missing}");
-            HttpResponse::Conflict().json(ErrorResponse {
-                error: missing.to_string(),
-            })
+            ApiError::Conflict(missing.to_string())
         }
         None => {
             tracing::error!("Cannot check the new member's packages for {party}: {e:#}");
-            HttpResponse::ServiceUnavailable().json(ErrorResponse {
-                error: format!("Cannot check the new member's packages: {e:#}"),
-            })
+            ApiError::ServiceUnavailable(format!("Cannot check the new member's packages: {e:#}"))
         }
     }
 }
@@ -547,7 +521,7 @@ mod tests {
             missing: vec!["pkg-a".to_string(), "pkg-b".to_string()],
         });
 
-        let response = add_party_package_check_failure(&pid(1)?, &error);
+        let response = add_party_package_check_failure(&pid(1)?, &error).into_response();
 
         assert_eq!(response.status(), StatusCode::CONFLICT);
         let error = error_body(response).await?;
@@ -576,7 +550,7 @@ mod tests {
         let error = bounded_package_check(Duration::from_millis(10), stalled)
             .await
             .expect_err("a check that never finishes must fail");
-        let response = add_party_package_check_failure(&pid(1)?, &error);
+        let response = add_party_package_check_failure(&pid(1)?, &error).into_response();
 
         assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
         let error = error_body(response).await?;
@@ -597,7 +571,7 @@ mod tests {
         let error = bounded_package_check(Duration::from_secs(5), async { Err(missing) })
             .await
             .expect_err("the missing package must come through");
-        let response = add_party_package_check_failure(&pid(1)?, &error);
+        let response = add_party_package_check_failure(&pid(1)?, &error).into_response();
         assert_eq!(response.status(), StatusCode::CONFLICT);
         Ok(())
     }
@@ -608,7 +582,7 @@ mod tests {
     async fn a_check_that_cannot_run_refuses_the_add_as_unavailable() -> anyhow::Result<()> {
         let error = anyhow::anyhow!("ledger API unreachable");
 
-        let response = add_party_package_check_failure(&pid(1)?, &error);
+        let response = add_party_package_check_failure(&pid(1)?, &error).into_response();
 
         assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
         let error = error_body(response).await?;
