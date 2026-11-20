@@ -128,7 +128,7 @@ async fn wait_for_dns_in_topology(
         found: "DNS found in topology".to_string(),
         failed: "DNS did not appear in topology".to_string(),
     };
-    topology::poll_until(text, || {
+    topology::poll_until!(text, || {
         let mut topology_read_client = topology_read_client.clone();
         async move {
             let request = tonic::Request::new(ListDecentralizedNamespaceDefinitionRequest {
@@ -424,7 +424,7 @@ async fn wait_for_p2p_in_topology(
         found: "P2P found in topology".to_string(),
         failed: "P2P did not appear in topology".to_string(),
     };
-    let context = topology::poll_until(text, || {
+    let context = topology::poll_until!(text, || {
         let mut topology_read_client = topology_read_client.clone();
         let party_id_str = &party_id_str;
         async move {

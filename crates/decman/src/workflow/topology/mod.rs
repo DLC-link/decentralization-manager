@@ -25,7 +25,8 @@ pub use dns_p2p::{
 pub use legacy_keys::{
     RETIRED_LEGACY_KEYS_STATUS, retire_legacy_keys, retire_legacy_keys_and_wait,
 };
-pub use poll::{PollText, Polled, poll_until};
+pub use poll::{PollLog, PollText, Polled, poll_until_logged};
+pub(crate) use poll::{poll_log, poll_until};
 pub use reads::{
     check_added_signing_keys_signed, fetch_namespace_definition,
     fetch_namespace_definition_at_head, fetch_namespace_definition_at_head_in, fetch_p2p_history,

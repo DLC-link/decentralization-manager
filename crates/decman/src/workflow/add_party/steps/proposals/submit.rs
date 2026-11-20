@@ -133,7 +133,7 @@ async fn wait_for_owners(
         found: format!("DNS owner set contains all {total} expected owners"),
         failed: format!("DNS owner set did not contain all {total} expected owners"),
     };
-    topology::poll_until(text, || async move {
+    topology::poll_until!(text, || async move {
         let namespace_def =
             topology::fetch_namespace_definition(config, synchronizer_id, namespace).await?;
         let present = expected_owners
@@ -164,7 +164,7 @@ async fn wait_for_participant(
         found: format!("Participant {participant} present in P2P mapping"),
         failed: format!("Participant {participant} did not appear in the P2P mapping"),
     };
-    topology::poll_until(text, || {
+    topology::poll_until!(text, || {
         let participant_str = &participant_str;
         async move {
             let p2p = topology::fetch_p2p_mapping(config, synchronizer_id, party_id).await?;
