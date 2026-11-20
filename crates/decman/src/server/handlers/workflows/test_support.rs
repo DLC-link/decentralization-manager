@@ -3,7 +3,12 @@
 
 use std::{collections::HashSet, sync::Arc};
 
-use actix_web::{App, HttpMessage, dev::HttpServiceFactory, http::StatusCode, test, web};
+use actix_web::{
+    App, HttpMessage,
+    dev::{HttpServiceFactory, ServiceResponse},
+    http::StatusCode,
+    test, web,
+};
 use canton_proto_rs::com::digitalasset::canton::crypto::v30::{SigningKeyUsage, SigningPublicKey};
 use sqlx::SqlitePool;
 
@@ -381,7 +386,11 @@ pub async fn post_as(
     if let Some(principal) = principal {
         request.extensions_mut().insert(principal);
     }
-    let response = test::call_service(&app, request).await;
+    answer_of(test::call_service(&app, request).await).await
+}
+
+/// Read what a handler answered.
+pub async fn answer_of(response: ServiceResponse) -> Answer {
     let status = response.status();
     let content_type = response
         .headers()

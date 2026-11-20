@@ -737,3 +737,339 @@ mod tests {
         assert!(canton_unreachable(&unreachable));
     }
 }
+
+#[cfg(test)]
+mod start_rotate_key_tests {
+    //! Pins every answer `POST /rotate-key` gives before it starts a run:
+    //! the status code, the headers and the exact JSON error body. A fake
+    //! Canton admin API serves the vault and the party's topology.
+
+    use std::sync::Arc;
+
+    use actix_web::http::StatusCode;
+    use canton_proto_rs::com::digitalasset::canton::{
+        crypto::v30::SigningKeysWithThreshold,
+        protocol::v30::{
+            PartyToParticipant, enums::ParticipantPermission,
+            party_to_participant::HostingParticipant,
+        },
+    };
+    use serde_json::json;
+
+    use super::super::test_support::{
+        Answer, TestNode, break_table, cache_hosted_party, closed_port, in_progress_run,
+        insert_peers, insert_run, peer, pid, post_as, post_as_admin, refuse_run_writes, test_node,
+    };
+    use super::*;
+    use crate::{
+        db::MIGRATOR,
+        signing::{
+            custody::SoftwareKeys,
+            fake_admin_api::{self, FakeAdminApi, VaultKey},
+        },
+    };
+
+    type Result<T = ()> = anyhow::Result<T>;
+
+    /// A node `pid(1)` whose admin API is a fake Canton that holds this
+    /// node's KMS key for party `pid(9)`. The party is hosted on the chain
+    /// by `pid(1)` and `pid(2)`, and the cache names `cached` as its hosts.
+    /// The fake and the node's files live as long as the returned values.
+    struct RotationNode {
+        data: web::Data<AppState>,
+        _fake: FakeAdminApi,
+        _files: fake_admin_api::TestNode,
+    }
+
+    async fn rotation_node(pool: SqlitePool, cached: &[CantonId]) -> Result<RotationNode> {
+        let party = pid(9)?;
+        let daml = VaultKey::kms("party-daml-transactions", 2)?;
+        let fake =
+            FakeAdminApi::start(vec![VaultKey::kms("participant", 1)?, daml.clone()]).await?;
+        let mut files = fake.node(SoftwareKeys::Refused, false).await?;
+        files.config.node.participant_id = Some(pid(1)?);
+        tokio::fs::create_dir_all(files.config.data_dir()).await?;
+        crate::noise::NoiseKeypair::generate()
+            .save_to_file(files.config.key_file_path())
+            .await?;
+        files.record_daml_key(&pool, &party, &daml).await?;
+        let other = VaultKey::kms("other-daml-transactions", 3)?;
+        fake.publish_p2p(
+            1,
+            PartyToParticipant {
+                party: party.to_string(),
+                threshold: 1,
+                participants: [pid(1)?, pid(2)?]
+                    .iter()
+                    .map(|id| HostingParticipant {
+                        participant_uid: id.to_string(),
+                        permission: ParticipantPermission::Confirmation as i32,
+                        onboarding: None,
+                    })
+                    .collect(),
+                party_signing_keys: Some(SigningKeysWithThreshold {
+                    keys: vec![daml.public_key.clone(), other.public_key],
+                    threshold: 1,
+                }),
+            },
+        );
+        let hosts: Vec<(&CantonId, Option<&str>)> = cached.iter().map(|id| (id, None)).collect();
+        cache_hosted_party(&pool, &party, 1, &hosts, &[]).await?;
+        let state = Arc::try_unwrap(AppState::for_test(None).await?.into_inner())
+            .map_err(|_| anyhow::anyhow!("a fresh test state has one owner"))?;
+        let data = web::Data::new(AppState {
+            db: pool,
+            config: files.config.clone(),
+            ..state
+        });
+        Ok(RotationNode {
+            data,
+            _fake: fake,
+            _files: files,
+        })
+    }
+
+    /// As [`rotation_node`], with the chain's hosts cached and `pid(2)` a
+    /// peer, whose Noise key parses only if `reachable_key`.
+    async fn ready_node(pool: SqlitePool, reachable_key: bool) -> Result<RotationNode> {
+        insert_peers(&pool, &[peer(&pid(2)?, closed_port()?, reachable_key)]).await?;
+        rotation_node(pool, &[pid(1)?, pid(2)?]).await
+    }
+
+    fn request() -> Result<serde_json::Value> {
+        Ok(json!({ "decentralized_party_id": pid(9)?.to_string() }))
+    }
+
+    async fn rotate(data: &web::Data<AppState>) -> Result<Answer> {
+        Ok(post_as_admin(data, start_rotate_key, "/rotate-key", request()?).await)
+    }
+
+    /// A node on closed Canton ports with `members` cached as the hosts.
+    async fn plain_node(pool: SqlitePool, members: &[CantonId]) -> Result<TestNode> {
+        let hosts: Vec<(&CantonId, Option<&str>)> = members.iter().map(|id| (id, None)).collect();
+        cache_hosted_party(&pool, &pid(9)?, 1, &hosts, &[]).await?;
+        test_node(pool, &pid(1)?).await
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn an_anonymous_caller_is_unauthorized(pool: SqlitePool) -> Result {
+        let node = plain_node(pool, &[pid(1)?, pid(2)?]).await?;
+        post_as(
+            &node.data,
+            start_rotate_key,
+            "/rotate-key",
+            request()?,
+            None,
+        )
+        .await
+        .assert_error(StatusCode::UNAUTHORIZED, "authentication required");
+        Ok(())
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_failed_member_read_answers_500(pool: SqlitePool) -> Result {
+        let node = plain_node(pool.clone(), &[pid(1)?, pid(2)?]).await?;
+        break_table(&pool, "dec_party_participant").await?;
+        rotate(&node.data).await?.assert_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Failed to load decentralized party members",
+        );
+        Ok(())
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_party_without_cached_members_is_a_conflict(pool: SqlitePool) -> Result {
+        let node = test_node(pool, &pid(1)?).await?;
+        let party = pid(9)?;
+        rotate(&node.data).await?.assert_error(
+            StatusCode::CONFLICT,
+            &format!(
+                "No cached membership for {party}. Try refreshing /decentralized-parties first."
+            ),
+        );
+        Ok(())
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_node_that_does_not_host_the_party_is_a_bad_request(pool: SqlitePool) -> Result {
+        let node = plain_node(pool, &[pid(2)?, pid(3)?]).await?;
+        let party = pid(9)?;
+        rotate(&node.data).await?.assert_error(
+            StatusCode::BAD_REQUEST,
+            &format!("This node does not host {party}, so it holds no Daml key of it to rotate"),
+        );
+        Ok(())
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_lone_member_is_a_bad_request(pool: SqlitePool) -> Result {
+        let node = plain_node(pool, &[pid(1)?]).await?;
+        let party = pid(9)?;
+        rotate(&node.data).await?.assert_error(
+            StatusCode::BAD_REQUEST,
+            &format!("Cannot rotate a key of {party}: it has only one member"),
+        );
+        Ok(())
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn an_unreachable_canton_is_a_bad_gateway(pool: SqlitePool) -> Result {
+        let node = plain_node(pool.clone(), &[pid(1)?, pid(2)?]).await?;
+        let error = require_kms_for_rotation(&node.data.config, &pool)
+            .await
+            .err()
+            .ok_or_else(|| anyhow::anyhow!("a closed admin port must fail the check"))?;
+        assert!(canton_unreachable(&error), "{error:#}");
+        rotate(&node.data)
+            .await?
+            .assert_error(StatusCode::BAD_GATEWAY, &format!("{error:#}"));
+        Ok(())
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_participant_without_kms_is_a_bad_request(pool: SqlitePool) -> Result {
+        let fake = FakeAdminApi::start(vec![VaultKey::software("participant", 1)]).await?;
+        let mut files = fake.node(SoftwareKeys::Refused, false).await?;
+        files.config.node.participant_id = Some(pid(1)?);
+        let node = plain_node(pool.clone(), &[pid(1)?, pid(2)?]).await?;
+        let state = Arc::try_unwrap(AppState::for_test(None).await?.into_inner())
+            .map_err(|_| anyhow::anyhow!("a fresh test state has one owner"))?;
+        let data = web::Data::new(AppState {
+            db: pool.clone(),
+            config: files.config.clone(),
+            ..state
+        });
+        drop(node);
+        let error = require_kms_for_rotation(&data.config, &pool)
+            .await
+            .err()
+            .ok_or_else(|| anyhow::anyhow!("a software vault must fail the check"))?;
+        assert!(!canton_unreachable(&error), "{error:#}");
+        rotate(&data)
+            .await?
+            .assert_error(StatusCode::BAD_REQUEST, &format!("{error:#}"));
+        Ok(())
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_cache_that_differs_from_the_chain_is_a_conflict(pool: SqlitePool) -> Result {
+        let node = rotation_node(pool, &[pid(1)?, pid(3)?]).await?;
+        let (party, p1, p2, p3) = (pid(9)?, pid(1)?, pid(2)?, pid(3)?);
+        rotate(&node.data).await?.assert_error(
+            StatusCode::CONFLICT,
+            &format!(
+                "This node's cached members of {party} differ from the chain (cache \
+                 {{\"{p1}\", \"{p3}\"}}, chain {{\"{p1}\", \"{p2}\"}}). Refresh \
+                 /decentralized-parties and retry"
+            ),
+        );
+        Ok(())
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_failed_peer_read_answers_500(pool: SqlitePool) -> Result {
+        let node = ready_node(pool.clone(), false).await?;
+        break_table(&pool, "peers").await?;
+        rotate(&node.data)
+            .await?
+            .assert_error(StatusCode::INTERNAL_SERVER_ERROR, "Failed to load peers");
+        Ok(())
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_member_that_is_not_a_peer_is_a_conflict(pool: SqlitePool) -> Result {
+        let node = rotation_node(pool, &[pid(1)?, pid(2)?]).await?;
+        let (party, p2) = (pid(9)?, pid(2)?);
+        rotate(&node.data).await?.assert_error(
+            StatusCode::CONFLICT,
+            &format!(
+                "Cannot rotate this node's key of {party}: every other member must record the \
+                 new key, but these members are not configured peers: {p2}. Add them as peers \
+                 first"
+            ),
+        );
+        Ok(())
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_party_with_a_run_in_flight_is_a_conflict(pool: SqlitePool) -> Result {
+        let party = pid(9)?;
+        let node = ready_node(pool.clone(), false).await?;
+        insert_run(&pool, &in_progress_run("busy-run", &party)).await?;
+        rotate(&node.data).await?.assert_error(
+            StatusCode::CONFLICT,
+            &format!(
+                "Party {party} already has a Contracts workflow in flight (run busy-run); \
+                 wait for it to finish or cancel it from its coordinator"
+            ),
+        );
+        Ok(())
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_party_another_request_is_starting_is_a_conflict(pool: SqlitePool) -> Result {
+        let party = pid(9)?;
+        let node = ready_node(pool, false).await?;
+        let _claim = node
+            .data
+            .workflows
+            .claim_start(&party)
+            .ok_or_else(|| anyhow::anyhow!("a fresh registry has no claims"))?;
+        rotate(&node.data).await?.assert_error(
+            StatusCode::CONFLICT,
+            &format!(
+                "Another request is starting a workflow for {party}; retry once it has started"
+            ),
+        );
+        Ok(())
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn an_unverifiable_invitee_is_a_conflict(pool: SqlitePool) -> Result {
+        let node = ready_node(pool.clone(), true).await?;
+        let probe = probe_invitee_health(&node.data.config, &pool, &[pid(2)?]).await;
+        let expected = format_incompatible_peers(&incompatible_versions(&probe));
+        assert!(expected.contains(&pid(2)?.to_string()), "{expected}");
+        rotate(&node.data)
+            .await?
+            .assert_error(StatusCode::CONFLICT, &expected);
+        Ok(())
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_failed_run_write_is_a_conflict_and_leaves_no_run(pool: SqlitePool) -> Result {
+        let node = ready_node(pool.clone(), false).await?;
+        refuse_run_writes(&pool).await?;
+        let answer = rotate(&node.data).await?;
+        assert_eq!(answer.status, StatusCode::CONFLICT, "{}", answer.body);
+        assert_eq!(answer.content_type.as_deref(), Some("application/json"));
+        let body = answer.json()?;
+        let error = body["error"].as_str().unwrap_or_default();
+        assert!(
+            error.starts_with("Failed to start rotate-key workflow: ")
+                && error.contains("workflow_runs"),
+            "{error}"
+        );
+        assert_eq!(body.as_object().map(|o| o.len()), Some(1), "{body}");
+        assert!(node.data.workflows.snapshot().is_empty());
+        Ok(())
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_valid_rotation_is_accepted(pool: SqlitePool) -> Result {
+        let node = ready_node(pool, false).await?;
+        let answer = rotate(&node.data).await?;
+        assert_eq!(answer.status, StatusCode::ACCEPTED, "{}", answer.body);
+        assert_eq!(answer.content_type.as_deref(), Some("application/json"));
+        let body = answer.json()?;
+        let instance = body["instance_name"].as_str().unwrap_or_default();
+        assert!(instance.starts_with("validator-9-rotate-key-"), "{body}");
+        assert_eq!(
+            answer.body,
+            format!(
+                r#"{{"status":"inprogress","message":"Rotate-key workflow started","instance_name":"{instance}"}}"#
+            )
+        );
+        Ok(())
+    }
+}
