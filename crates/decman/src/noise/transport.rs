@@ -1103,18 +1103,30 @@ mod tests {
         };
         let client = NoiseClient::new(config, coordinator, "run-1".into()).await?;
         let outcomes = [
-            client.send_dns_signature(signature.clone()).await,
-            client.send_p2p_signatures(signature.clone()).await,
-            client.send_submission_signatures(signature.clone()).await,
-            client.send_kick_signatures(signature.clone()).await,
             client
-                .send_change_threshold_signatures(signature.clone())
+                .send(MessageType::DnsSignature, signature.clone())
                 .await,
-            client.send_add_party_signatures(signature.clone()).await,
             client
-                .send_add_party_clear_proposal(signature.clone())
+                .send(MessageType::P2pSignatures, signature.clone())
                 .await,
-            client.send_add_party_clear_signature(signature).await,
+            client
+                .send(MessageType::SubmissionSignatures, signature.clone())
+                .await,
+            client
+                .send(MessageType::KickSignatures, signature.clone())
+                .await,
+            client
+                .send(MessageType::ChangeThresholdSignatures, signature.clone())
+                .await,
+            client
+                .send(MessageType::AddPartySignatures, signature.clone())
+                .await,
+            client
+                .send(MessageType::AddPartyClearProposal, signature.clone())
+                .await,
+            client
+                .send(MessageType::AddPartyClearSignatures, signature)
+                .await,
         ];
         server.abort();
         for outcome in outcomes {

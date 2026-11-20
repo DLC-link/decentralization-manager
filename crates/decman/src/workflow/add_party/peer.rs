@@ -12,7 +12,7 @@ use crate::{
     config::NodeConfig,
     consts::{topology_retry_delay_secs, topology_retry_max_attempts},
     error::Result,
-    noise::client::NoiseClient,
+    noise::{MessageType, client::NoiseClient},
     utils,
     workflow::{
         storage::{WorkflowStorage, artifact_kinds},
@@ -114,7 +114,9 @@ pub async fn send_keys_to_coordinator(
         .ok_or_else(|| anyhow::anyhow!("PARTICIPANT_ID artifact missing for {self_id}"))?;
 
     let combined_payload = crate::utils::encode_length_prefixed(&[&keys_data, &id_data]);
-    client.upload_add_party_keys(combined_payload).await?;
+    client
+        .send(MessageType::AddPartyKeysUpload, combined_payload)
+        .await?;
     Ok(())
 }
 
@@ -150,7 +152,9 @@ pub async fn send_add_party_signatures_to_coordinator(
     payload.extend_from_slice(&dns);
     payload.extend_from_slice(&p2p);
 
-    client.send_add_party_signatures(payload).await?;
+    client
+        .send(MessageType::AddPartySignatures, payload)
+        .await?;
     Ok(())
 }
 
@@ -173,6 +177,8 @@ pub async fn send_clear_signature_to_coordinator(
         .await?
         .ok_or_else(|| anyhow::anyhow!("SIGNED_ADD_PARTY_CLEAR artifact missing for {node_id}"))?;
 
-    client.send_add_party_clear_signature(data).await?;
+    client
+        .send(MessageType::AddPartyClearSignatures, data)
+        .await?;
     Ok(())
 }

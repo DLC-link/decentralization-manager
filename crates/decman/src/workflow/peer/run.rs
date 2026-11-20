@@ -230,7 +230,10 @@ async fn run_peer(
                 }
                 consecutive_step_failures = 0;
                 client
-                    .send_status(topology::RETIRED_LEGACY_KEYS_STATUS.to_vec())
+                    .send(
+                        MessageType::StatusUpdate,
+                        topology::RETIRED_LEGACY_KEYS_STATUS.to_vec(),
+                    )
                     .await?;
             }
             MessageType::Disconnect => {
@@ -265,7 +268,10 @@ async fn run_peer(
                     continue;
                 }
                 consecutive_step_failures = 0;
-                if let Err(e) = client.send_status(b"UploadDars completed".to_vec()).await {
+                if let Err(e) = client
+                    .send(MessageType::StatusUpdate, b"UploadDars completed".to_vec())
+                    .await
+                {
                     tracing::error!("Failed to send completion status: {e}");
                 }
             }
@@ -760,7 +766,10 @@ async fn run_peer(
                 }
                 consecutive_step_failures = 0;
                 client
-                    .send_status(rotate_key::RECORDED_KEY_STATUS.to_vec())
+                    .send(
+                        MessageType::StatusUpdate,
+                        rotate_key::RECORDED_KEY_STATUS.to_vec(),
+                    )
                     .await?;
             }
             MessageType::GenerateAddPartyKeys => {
@@ -1004,7 +1013,10 @@ async fn run_peer(
                     anyhow::bail!("Aborting peer: the ACS import failed: {e:#}");
                 }
                 consecutive_step_failures = 0;
-                if let Err(e) = client.send_status(b"ImportAcs completed".to_vec()).await {
+                if let Err(e) = client
+                    .send(MessageType::StatusUpdate, b"ImportAcs completed".to_vec())
+                    .await
+                {
                     tracing::error!("Failed to send completion status: {e}");
                 }
             }
@@ -1058,7 +1070,7 @@ async fn run_peer(
                                     &mut consecutive_upload_failures,
                                     command,
                                     client
-                                        .send_add_party_clear_proposal(proposal)
+                                        .send(MessageType::AddPartyClearProposal, proposal)
                                         .await
                                         .map_err(Into::into),
                                 )
@@ -1068,8 +1080,9 @@ async fn run_peer(
                                 // Flag dropped between the poll and the
                                 // authoring — report as cleared.
                                 consecutive_step_failures = 0;
-                                if let Err(e) =
-                                    client.send_add_party_clear_proposal(Vec::new()).await
+                                if let Err(e) = client
+                                    .send(MessageType::AddPartyClearProposal, Vec::new())
+                                    .await
                                 {
                                     tracing::error!("Failed to send cleared marker: {e}");
                                 }
@@ -1081,7 +1094,10 @@ async fn run_peer(
                     }
                     Ok(party_replication::ClearOutcome::Cleared) => {
                         consecutive_step_failures = 0;
-                        if let Err(e) = client.send_add_party_clear_proposal(Vec::new()).await {
+                        if let Err(e) = client
+                            .send(MessageType::AddPartyClearProposal, Vec::new())
+                            .await
+                        {
                             tracing::error!("Failed to send cleared marker: {e}");
                         }
                     }
