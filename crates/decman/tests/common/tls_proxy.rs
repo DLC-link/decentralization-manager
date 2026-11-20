@@ -23,7 +23,7 @@ use tokio::{
 };
 use tokio_rustls::{
     TlsAcceptor,
-    rustls::{ServerConfig, pki_types::PrivateKeyDer},
+    rustls::{ServerConfig, crypto::aws_lc_rs, pki_types::PrivateKeyDer},
 };
 
 pub struct TlsProxy {
@@ -42,7 +42,7 @@ impl TlsProxy {
         // rustls needs a process-wide crypto provider. `install_default`
         // errors if one is already installed, which is fine — any provider
         // will do.
-        let _ = tokio_rustls::rustls::crypto::aws_lc_rs::default_provider().install_default();
+        let _ = aws_lc_rs::default_provider().install_default();
 
         // The SANs cover both spellings a client might use for loopback; the
         // IP one is what matters, since DecMan is pointed at 127.0.0.1.

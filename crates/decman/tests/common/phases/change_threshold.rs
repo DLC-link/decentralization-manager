@@ -9,7 +9,7 @@ use serde_json::{Value, json};
 use tracing::info;
 
 use crate::common::{
-    Fixture,
+    Fixture, TestTarget,
     http::{probe_workflow_run_visible, probe_workflow_status},
     invitations::{InvitationIds, post_accept_invitation, probe_pending_invitation},
     scenario::Scenario,
@@ -37,10 +37,10 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
     round("lower the threshold to 1", 2, 1).run(f).await?;
     // Threshold 1 is where a proposal published early takes effect at once
     // (#448). The phase changes topology directly, so it stays off devnet.
-    if matches!(f.target, crate::common::TestTarget::Localnet) {
+    if matches!(f.target, TestTarget::Localnet) {
         super::no_early_publish::run(f).await?;
     }
-    let legacy = if matches!(f.target, crate::common::TestTarget::Localnet) {
+    let legacy = if matches!(f.target, TestTarget::Localnet) {
         Some(super::legacy_key_retirement::seed(f).await?)
     } else {
         None

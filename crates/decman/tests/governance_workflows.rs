@@ -1,5 +1,7 @@
 mod common;
 
+use std::fmt;
+
 use tracing::field::{Field, Visit};
 use tracing_subscriber::{
     EnvFilter,
@@ -49,11 +51,7 @@ fn init_tracing() {
 struct MessageOnlyFields;
 
 impl<'w> FormatFields<'w> for MessageOnlyFields {
-    fn format_fields<R: RecordFields>(
-        &self,
-        mut writer: Writer<'w>,
-        fields: R,
-    ) -> std::fmt::Result {
+    fn format_fields<R: RecordFields>(&self, mut writer: Writer<'w>, fields: R) -> fmt::Result {
         let mut visitor = MessageOnlyVisitor {
             writer: &mut writer,
         };
@@ -73,7 +71,7 @@ impl<'a, 'w> Visit for MessageOnlyVisitor<'a, 'w> {
         }
     }
 
-    fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
+    fn record_debug(&mut self, field: &Field, value: &dyn fmt::Debug) {
         if field.name() == "message" {
             let _ = write!(self.writer, "{value:?}");
         }

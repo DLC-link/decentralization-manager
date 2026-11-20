@@ -16,7 +16,10 @@
 //! then `add_party_missing_dar` has kicked P3, so the party is P1 and P2, and
 //! both signed that phase's deploy.
 
-use std::{path::Path, time::Duration};
+use std::{
+    path::{Path, PathBuf},
+    time::Duration,
+};
 
 use anyhow::Context;
 use canton_proto_rs::com::digitalasset::canton::crypto::{
@@ -35,6 +38,7 @@ use dec_party_manager::{
     utils,
 };
 use serde_json::{Value, json};
+use tokio::process::Command;
 use tracing::info;
 
 use super::legacy_key_retirement::configs;
@@ -190,7 +194,7 @@ async fn a_rotation_needs_no_export(
 async fn turn_key_download_off() -> anyhow::Result<()> {
     let script = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../integration-tests/localnet-key-download-off.sh");
-    let status = tokio::process::Command::new("bash")
+    let status = Command::new("bash")
         .arg(&script)
         .status()
         .await
@@ -269,7 +273,7 @@ async fn synchronizer_connected(f: &Fixture, port: u16) -> bool {
         .is_some_and(|all| all.iter().any(|s| s["healthy"] == Value::Bool(true)))
 }
 
-fn log_path(f: &Fixture, participant: usize) -> std::path::PathBuf {
+fn log_path(f: &Fixture, participant: usize) -> PathBuf {
     f.dev_dir
         .join(format!("participant-{participant}"))
         .join("stderr.log")

@@ -38,12 +38,14 @@
 use std::time::Duration;
 
 use anyhow::Context;
-use common::api::{
-    CredentialsResponse, DecentralizedPartiesResponse, GovernanceStateResponse,
-    InstrumentsResponse, ProviderConfigurationsResponse, RegistrarServiceRequestsResponse,
-    RegistrarServicesResponse,
+use common::{
+    api::{
+        CredentialsResponse, DecentralizedPartiesResponse, GovernanceStateResponse,
+        InstrumentsResponse, ProviderConfigurationsResponse, RegistrarServiceRequestsResponse,
+        RegistrarServicesResponse,
+    },
+    types::InvitationType,
 };
-use common::types::InvitationType;
 use serde_json::{Value, json};
 use tracing::info;
 

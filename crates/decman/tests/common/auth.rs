@@ -2,6 +2,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::Context;
 use reqwest::Client;
+use tokio::sync::Mutex;
 
 const REFRESH_MARGIN: Duration = Duration::from_secs(30);
 
@@ -40,7 +41,7 @@ pub enum Refresher {
     Keycloak {
         client: Client,
         creds: KeycloakCreds,
-        state: tokio::sync::Mutex<TokenState>,
+        state: Mutex<TokenState>,
     },
 }
 
@@ -107,6 +108,7 @@ async fn fetch_token(client: &Client, creds: &KeycloakCreds) -> anyhow::Result<T
 
 #[cfg(test)]
 mod tests {
+    use tokio::sync::Mutex;
     use wiremock::{
         Mock, MockServer, ResponseTemplate,
         matchers::{method, path},
@@ -149,7 +151,7 @@ mod tests {
         let r = Refresher::Keycloak {
             client: Client::new(),
             creds,
-            state: tokio::sync::Mutex::new(TokenState::expired()),
+            state: Mutex::new(TokenState::expired()),
         };
 
         // First call: fetches from Keycloak.
@@ -199,7 +201,7 @@ mod tests {
         let r = Refresher::Keycloak {
             client: Client::new(),
             creds,
-            state: tokio::sync::Mutex::new(TokenState::expired()),
+            state: Mutex::new(TokenState::expired()),
         };
 
         // First call: expired initial state → fetches → returns "first".

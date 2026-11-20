@@ -27,11 +27,10 @@ use std::{path::Path, time::Duration};
 
 use anyhow::Context;
 use base64::{Engine as _, engine::general_purpose::STANDARD};
+use decman_wallet::ExternalKeyPair;
 use reqwest::StatusCode;
 use serde_json::{Value, json};
 use tracing::info;
-
-use decman_wallet::ExternalKeyPair;
 
 use crate::common::{
     Fixture, TestTarget,

@@ -1,4 +1,4 @@
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::Context;
 use serde::de::DeserializeOwned;
@@ -67,7 +67,7 @@ where
         });
     }
 
-    let start = std::time::Instant::now();
+    let start = Instant::now();
     loop {
         let r: R = f
             .get_json(port, path)

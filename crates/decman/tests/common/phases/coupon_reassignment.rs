@@ -52,16 +52,21 @@
 //! Only the gauge check pins the coupon reader's dso filter: without the
 //! filter, the dso assert in `Delegation_Assign` would still reject the coupon.
 
-use std::{collections::HashSet, time::Duration};
+use std::{
+    collections::HashSet,
+    io,
+    path::PathBuf,
+    time::{Duration, Instant},
+};
 
 use common::api::{ActiveCouponReassignmentDelegation, ContractQueryResponse};
 use serde_json::json;
 use tracing::{info, warn};
 
 use crate::common::{
-    Fixture,
+    Fixture, TestTarget,
     governance::propose_confirm_execute,
-    ledger_api::{ActiveCoupon, P1_JSON_API},
+    ledger_api::{self, ActiveCoupon, P1_JSON_API},
     phases::seed_reward_coupons::{
         FOREIGN_TTL_HOURS, SEED_AMOUNT, SEED_COUPON_COUNT, SEED_TTL_HOURS, SEEDED_SURVIVORS,
         UNASSIGNABLE_AMOUNT,
@@ -145,7 +150,7 @@ async fn counter_total(f: &Fixture, ports: &[u16], name: &str) -> anyhow::Result
 
 /// Removing the files on every exit prevents a failed assertion from leaving
 /// the node's background loop faulted during subsequent diagnostics.
-struct AssignmentFault(Vec<std::path::PathBuf>);
+struct AssignmentFault(Vec<PathBuf>);
 
 impl AssignmentFault {
     fn install(f: &Fixture, party: &str) -> anyhow::Result<Self> {
@@ -175,7 +180,7 @@ impl Drop for AssignmentFault {
     fn drop(&mut self) {
         for path in &self.0 {
             if let Err(error) = std::fs::remove_file(path)
-                && error.kind() != std::io::ErrorKind::NotFound
+                && error.kind() != io::ErrorKind::NotFound
             {
                 warn!(%error, path = %path.display(), "removing assignment test fault failed");
             }
@@ -222,7 +227,7 @@ async fn assert_assignment_fault(
     baseline: &[AssignmentMetrics],
     transient: bool,
 ) -> anyhow::Result<()> {
-    let deadline = std::time::Instant::now() + Duration::from_secs(90);
+    let deadline = Instant::now() + Duration::from_secs(90);
     loop {
         let current = assignment_metrics(f, party).await?;
         let mut ready = true;
@@ -247,7 +252,7 @@ async fn assert_assignment_fault(
             return Ok(());
         }
         anyhow::ensure!(
-            std::time::Instant::now() < deadline,
+            Instant::now() < deadline,
             "assignment failure metrics did not converge (transient={transient}): {current:?}"
         );
         tokio::time::sleep(Duration::from_secs(1)).await;
@@ -257,7 +262,7 @@ async fn assert_assignment_fault(
 pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
     info!("Phase: coupon_reassignment (CIP-104 Mode A delegation model)");
     anyhow::ensure!(
-        f.target == crate::common::TestTarget::Localnet,
+        f.target == TestTarget::Localnet,
         "coupon_reassignment seeds coupons and votes in its own delegation, so it runs on \
          localnet only; devnet runs coupon_reassignment_deployed (devnet_reward_e2e)"
     );
@@ -281,10 +286,10 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
     // ------------------------------------------------------------------
     let initial_coupon_cids = {
         let seeded = SEED_COUPON_COUNT + SEEDED_SURVIVORS;
-        let deadline = std::time::Instant::now() + Duration::from_secs(60);
+        let deadline = Instant::now() + Duration::from_secs(60);
         let cids = loop {
             let cids = query_reward_coupons(f, &decparty).await?;
-            if cids.len() >= seeded || std::time::Instant::now() >= deadline {
+            if cids.len() >= seeded || Instant::now() >= deadline {
                 break cids;
             }
             tokio::time::sleep(Duration::from_secs(2)).await;
@@ -537,7 +542,7 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
                     if b_total + o_total < seeded_total - 0.05 {
                         return None;
                     }
-                    let ok = crate::common::ledger_api::split_ok(b_total, o_total, 0.01)
+                    let ok = ledger_api::split_ok(b_total, o_total, 0.01)
                         && (b_total - expect_benef).abs() < 0.05
                         && (o_total - expect_operator).abs() < 0.05;
                     Some(if ok {

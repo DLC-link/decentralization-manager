@@ -24,6 +24,7 @@ use canton_proto_rs::com::digitalasset::canton::{
         topology_manager_read_service_client::TopologyManagerReadServiceClient,
     },
 };
+use common::canton_id::CantonId;
 use dec_party_manager::{config::NodeConfig, utils, workflow::topology};
 
 use crate::common::{Fixture, chaos::poll_until};
@@ -68,7 +69,7 @@ async fn head(
 #[allow(deprecated)]
 pub async fn seed(f: &Fixture) -> anyhow::Result<Legacy> {
     let configs = configs(f)?;
-    let party: common::canton_id::CantonId = f.party_id()?.parse()?;
+    let party: CantonId = f.party_id()?.parse()?;
     let sync = utils::get_synchronizer_id(&configs[0]).await?;
     let inline = topology::fetch_p2p_mapping(&configs[0], &sync, &party)
         .await?
@@ -164,7 +165,7 @@ pub async fn assert_removed(f: &Fixture, legacy: &Legacy) -> anyhow::Result<()> 
 pub async fn retry_after_partial_authorization(f: &Fixture) -> anyhow::Result<()> {
     let legacy = seed(f).await?;
     let configs = configs(f)?;
-    let party: common::canton_id::CantonId = f.party_id()?.parse()?;
+    let party: CantonId = f.party_id()?.parse()?;
     let sync = utils::get_synchronizer_id(&configs[0]).await?;
     let inline = topology::fetch_p2p_mapping(&configs[0], &sync, &party).await?;
     anyhow::ensure!(
