@@ -27,6 +27,7 @@ use crate::{
 
 use super::{
     cancel::cancel_workflow_state,
+    launch::CoordinatorRequest,
     onboarding::interpret_invite_reply,
     preflight::{claim_party_for_start, format_incompatible_peers, preflight_incompatible_peers},
     runs::{kind_status, mark_run_completed, mark_run_failed, now_secs, register_and_persist},
@@ -228,22 +229,9 @@ async fn start_change_threshold_run(
         // Give peers time to start their peer workflows
         tokio::time::sleep(Duration::from_secs(2)).await;
 
-        let result = workflow::start_coordinator(
-            config,
-            db.clone(),
-            workflow::WorkflowType::ChangeThreshold,
-            None, // No onboarding config
-            None, // No kick config
-            None, // No contracts config
-            None, // No dars config
-            None, // No add-party config
-            Some(change_config),
-            None, // No rotate-key config
-            None, // No auth registry for change-threshold
-            last_seen,
-            instance_for_coord,
-        )
-        .await;
+        let result = CoordinatorRequest::ChangeThreshold(change_config)
+            .start(config, db.clone(), None, last_seen, instance_for_coord)
+            .await;
 
         match result {
             Ok(_) => {

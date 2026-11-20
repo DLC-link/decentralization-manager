@@ -31,6 +31,7 @@ use crate::{
 
 use super::{
     cancel::cancel_workflow_state,
+    launch::CoordinatorRequest,
     onboarding::interpret_invite_reply,
     preflight::{
         claim_party_for_start, format_incompatible_peers, incompatible_versions, lacking_feature,
@@ -224,22 +225,9 @@ async fn start_rotate_key_run(
         // Give peers time to start their peer workflows
         tokio::time::sleep(Duration::from_secs(2)).await;
 
-        let result = workflow::start_coordinator(
-            config,
-            db.clone(),
-            workflow::WorkflowType::RotateKey,
-            None, // No onboarding config
-            None, // No kick config
-            None, // No contracts config
-            None, // No dars config
-            None, // No add-party config
-            None, // No change-threshold config
-            Some(rotate_config),
-            None, // No auth registry for rotate-key
-            last_seen,
-            instance_for_coord,
-        )
-        .await;
+        let result = CoordinatorRequest::RotateKey(rotate_config)
+            .start(config, db.clone(), None, last_seen, instance_for_coord)
+            .await;
 
         // Durable row first, in-memory status second: see start_change_threshold.
         match result {

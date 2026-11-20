@@ -27,6 +27,7 @@ use crate::{
 
 use super::{
     super::parties::resolve_owner_keys_from_peers,
+    launch::CoordinatorRequest,
     onboarding::interpret_invite_reply,
     preflight::{claim_party_for_start, format_incompatible_peers, preflight_incompatible_peers},
     runs::{kind_status, mark_run_completed, mark_run_failed, now_secs, register_and_persist},
@@ -212,22 +213,15 @@ async fn start_contracts_run(
         // Give peers time to start their peer workflows
         tokio::time::sleep(Duration::from_secs(2)).await;
 
-        let result = workflow::start_coordinator(
-            config.clone(),
-            db.clone(),
-            workflow::WorkflowType::Contracts,
-            None, // No onboarding config
-            None, // No kick config
-            Some(contracts_config.clone()),
-            None, // No dars config
-            None, // No add-party config
-            None, // No change-threshold config
-            None, // No rotate-key config
-            workflow_auth,
-            last_seen,
-            instance_for_coord,
-        )
-        .await;
+        let result = CoordinatorRequest::Contracts(contracts_config.clone())
+            .start(
+                config.clone(),
+                db.clone(),
+                workflow_auth,
+                last_seen,
+                instance_for_coord,
+            )
+            .await;
 
         // Update in-memory state in tight scopes — never hold the RwLock
         // across a DB await. /contracts/status acquires a read lock to

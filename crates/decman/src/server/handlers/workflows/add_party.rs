@@ -28,6 +28,7 @@ use crate::{
 use super::{
     cancel::cancel_workflow_state,
     kick_target::cached_confirmation_threshold,
+    launch::CoordinatorRequest,
     onboarding::interpret_invite_reply,
     preflight::{claim_party_for_start, format_incompatible_peers, preflight_incompatible_peers},
     runs::{kind_status, mark_run_completed, mark_run_failed, now_secs, register_and_persist},
@@ -269,22 +270,15 @@ async fn start_add_party_run(
         // Give peers time to start their peer workflows
         tokio::time::sleep(Duration::from_secs(2)).await;
 
-        let result = workflow::start_coordinator(
-            config,
-            db.clone(),
-            workflow::WorkflowType::AddParty,
-            None, // No onboarding config
-            None, // No kick config
-            None, // No contracts config
-            None, // No dars config
-            Some(add_party_config),
-            None, // No change-threshold config
-            None, // No rotate-key config
-            workflow_auth,
-            last_seen,
-            instance_for_coord,
-        )
-        .await;
+        let result = CoordinatorRequest::AddParty(add_party_config)
+            .start(
+                config,
+                db.clone(),
+                workflow_auth,
+                last_seen,
+                instance_for_coord,
+            )
+            .await;
 
         match result {
             Ok(_) => {
