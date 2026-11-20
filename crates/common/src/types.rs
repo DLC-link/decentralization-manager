@@ -9,7 +9,7 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
-use crate::canton_id::CantonId;
+use crate::{api::ContractDeploymentIntent, canton_id::CantonId};
 
 /// Implements `as_str` for a fieldless enum from a variant-to-name table, and
 /// the traits listed after the table over the same names: `Display` writes
@@ -642,7 +642,7 @@ pub struct PendingInvitation {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub package_names: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub contract_intents: Vec<crate::api::ContractDeploymentIntent>,
+    pub contract_intents: Vec<ContractDeploymentIntent>,
     /// RotateKey-only: fingerprint of the coordinator's Daml key that the
     /// rotation replaces.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -744,7 +744,9 @@ pub struct WorkflowInfo {
 
 #[cfg(test)]
 mod tests {
-    use std::str::FromStr;
+    use std::{fmt::Debug, str::FromStr};
+
+    use serde::de::DeserializeOwned;
 
     use super::*;
 
@@ -757,7 +759,7 @@ mod tests {
     }
 
     /// `value` read back from its serde name.
-    fn from_serde_name<T: serde::de::DeserializeOwned>(name: &str) -> T {
+    fn from_serde_name<T: DeserializeOwned>(name: &str) -> T {
         match serde_json::from_value(serde_json::Value::String(name.to_string())) {
             Ok(value) => value,
             Err(e) => panic!("{name} must deserialize: {e}"),
@@ -765,10 +767,7 @@ mod tests {
     }
 
     /// `T::from_str(input)` must fail with exactly `message`.
-    fn assert_parse_error<T: FromStr<Err = anyhow::Error> + std::fmt::Debug>(
-        input: &str,
-        message: &str,
-    ) {
+    fn assert_parse_error<T: FromStr<Err = anyhow::Error> + Debug>(input: &str, message: &str) {
         match T::from_str(input) {
             Ok(value) => panic!("{input} must not parse, got {value:?}"),
             Err(e) => assert_eq!(e.to_string(), message),

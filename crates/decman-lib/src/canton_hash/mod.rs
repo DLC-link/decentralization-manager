@@ -24,8 +24,11 @@ mod encoding;
 mod metadata;
 mod nodes;
 
-use canton_proto_rs::com::daml::ledger::api::v2::interactive::{
-    HashingSchemeVersion, PrepareSubmissionResponse, PreparedTransaction,
+use std::fmt;
+
+use canton_proto_rs::com::daml::ledger::api::v2::{
+    Value,
+    interactive::{HashingSchemeVersion, PrepareSubmissionResponse, PreparedTransaction},
 };
 
 use crate::canton_hash::encoding::{Encoder, required};
@@ -44,8 +47,8 @@ pub enum HashingScheme {
     V3,
 }
 
-impl std::fmt::Display for HashingScheme {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Display for HashingScheme {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::V2 => f.write_str("V2"),
             Self::V3 => f.write_str("V3"),
@@ -146,7 +149,7 @@ pub fn verify_prepared_submission(response: &PrepareSubmissionResponse) -> Resul
 /// variant, map key or map value is missing, or if a map holds a duplicate
 /// key. Also errors if a value has no variant set, if a contract id is not
 /// hex, or if a length does not fit the int32 the encoding uses.
-pub fn hash_value(value: &canton_proto_rs::com::daml::ledger::api::v2::Value) -> Result<String> {
+pub fn hash_value(value: &Value) -> Result<String> {
     let mut value = value.clone();
     normalize_intent_value(&mut value, 0)?;
     let mut encoder = Encoder::new();
@@ -154,15 +157,10 @@ pub fn hash_value(value: &canton_proto_rs::com::daml::ledger::api::v2::Value) ->
     Ok(hex::encode(encoder.digest()))
 }
 
-fn normalize_intent_value(
-    value: &mut canton_proto_rs::com::daml::ledger::api::v2::Value,
-    depth: usize,
-) -> Result {
+fn normalize_intent_value(value: &mut Value, depth: usize) -> Result {
     use canton_proto_rs::com::daml::ledger::api::v2::value::Sum;
     ensure!(depth <= 100, "Intent value nesting exceeds 100 levels");
-    let normalize = |v: &mut canton_proto_rs::com::daml::ledger::api::v2::Value| {
-        normalize_intent_value(v, depth + 1)
-    };
+    let normalize = |v: &mut Value| normalize_intent_value(v, depth + 1);
     match value.sum.as_mut() {
         Some(Sum::Record(record)) => {
             record.record_id = None;

@@ -229,7 +229,7 @@ pub fn validate_beneficiary_weights(beneficiaries: &[AppRewardBeneficiary]) -> R
         )));
     }
     let one: DamlDecimal = "1".parse().expect("'1' is a valid DamlDecimal");
-    let mut seen = std::collections::HashSet::new();
+    let mut seen = HashSet::new();
     for b in beneficiaries {
         if b.weight.value() <= DamlDecimal::ZERO.value() || b.weight.value() > one.value() {
             return Err(Error::Validation(format!(
@@ -285,7 +285,7 @@ pub fn validate_reward_beneficiaries(beneficiaries: &[RewardBeneficiary]) -> Res
         ));
     }
     let one = DamlDecimal::parse("1").map_err(|e| Error::Validation(e.to_string()))?;
-    let mut seen = std::collections::HashSet::new();
+    let mut seen = HashSet::new();
     for b in beneficiaries {
         if b.percentage.value() <= DamlDecimal::ZERO.value() || b.percentage.value() > one.value() {
             return Err(Error::Validation(format!(

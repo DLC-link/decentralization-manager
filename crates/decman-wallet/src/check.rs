@@ -27,7 +27,7 @@ use prost::Message;
 use serde_json::{Map, Value as Json, json};
 
 use crate::{
-    error::{Error, Refusal, Result},
+    error::{Error, Refusal},
     ledger::PreparedSubmission,
     text,
     transfer::TransferArgs,
@@ -74,7 +74,7 @@ pub(crate) fn check_prepared(
     host: &str,
     prepared: &PreparedSubmission,
     expected: &Expected<'_>,
-) -> Result<Vec<u8>> {
+) -> Result<Vec<u8>, Error> {
     let refused = |reason| Error::TransactionRefused {
         host: host.to_string(),
         reason,
@@ -105,7 +105,7 @@ pub(crate) fn check_prepared(
     Ok(recomputed)
 }
 
-fn decode_b64(host: &str, field: &'static str, value: &str) -> Result<Vec<u8>> {
+fn decode_b64(host: &str, field: &'static str, value: &str) -> Result<Vec<u8>, Error> {
     STANDARD.decode(value).map_err(|source| Error::Base64 {
         host: host.to_string(),
         field,
@@ -116,16 +116,13 @@ fn decode_b64(host: &str, field: &'static str, value: &str) -> Result<Vec<u8>> {
 /// The scheme the JSON Ledger API names, for example
 /// `HASHING_SCHEME_VERSION_V2`. Only the schemes `canton_hash` reproduces
 /// pass.
-fn hashing_scheme(name: &str) -> std::result::Result<HashingScheme, Refusal> {
+fn hashing_scheme(name: &str) -> Result<HashingScheme, Refusal> {
     let version = HashingSchemeVersion::from_str_name(name)
         .ok_or_else(|| Refusal::Unverifiable(format!("unknown hashing scheme version {name}")))?;
     HashingScheme::from_proto(i32::from(version)).map_err(|e| Refusal::Unverifiable(e.to_string()))
 }
 
-fn check_root(
-    transaction: &PreparedTransaction,
-    expected: &Expected<'_>,
-) -> std::result::Result<(), Refusal> {
+fn check_root(transaction: &PreparedTransaction, expected: &Expected<'_>) -> Result<(), Refusal> {
     let exercise = root_exercise(transaction)?;
 
     let interface = exercise
@@ -205,7 +202,7 @@ fn check_root(
 /// Without a max record time, Canton may record the signed transaction long
 /// after the wallet stopped waiting for it. So the check refuses a missing
 /// one too.
-fn same_max_record_time(asked: &str, found: Option<u64>) -> std::result::Result<(), Refusal> {
+fn same_max_record_time(asked: &str, found: Option<u64>) -> Result<(), Refusal> {
     let asked_micros = DateTime::parse_from_rfc3339(asked)
         .ok()
         .map(|time| time.timestamp_micros());
@@ -231,7 +228,7 @@ fn same_max_record_time(asked: &str, found: Option<u64>) -> std::result::Result<
 /// is `#package-name:Module:Entity`, and any package of that name passes.
 /// Any other `like` names the package by id, so the result is
 /// `package-id:Module:Entity`, and only that one package passes.
-fn template_of(exercise: &Exercise, like: &str) -> std::result::Result<String, Refusal> {
+fn template_of(exercise: &Exercise, like: &str) -> Result<String, Refusal> {
     let id = exercise
         .template_id
         .as_ref()
@@ -249,7 +246,7 @@ fn template_of(exercise: &Exercise, like: &str) -> std::result::Result<String, R
 }
 
 /// The one exercise at the root of the transaction.
-fn root_exercise(transaction: &PreparedTransaction) -> std::result::Result<&Exercise, Refusal> {
+fn root_exercise(transaction: &PreparedTransaction) -> Result<&Exercise, Refusal> {
     let tree = transaction
         .transaction
         .as_ref()
@@ -281,7 +278,7 @@ fn root_exercise(transaction: &PreparedTransaction) -> std::result::Result<&Exer
     Ok(exercise)
 }
 
-fn check_transfer(argument: &Value, args: &TransferArgs) -> std::result::Result<(), Refusal> {
+fn check_transfer(argument: &Value, args: &TransferArgs) -> Result<(), Refusal> {
     for (path, wanted) in [
         ("expectedAdmin", &args.instrument_admin),
         ("transfer.sender", &args.sender),
@@ -334,7 +331,7 @@ fn check_transfer(argument: &Value, args: &TransferArgs) -> std::result::Result<
     Ok(())
 }
 
-fn same(field: &'static str, expected: &str, found: &str) -> std::result::Result<(), Refusal> {
+fn same(field: &'static str, expected: &str, found: &str) -> Result<(), Refusal> {
     if expected == found {
         return Ok(());
     }
@@ -347,7 +344,7 @@ fn same(field: &'static str, expected: &str, found: &str) -> std::result::Result
 
 /// The value found by following the record labels in `path`, for example
 /// `transfer.sender`.
-fn field_at<'v>(value: &'v Value, path: &'static str) -> std::result::Result<&'v Value, Refusal> {
+fn field_at<'v>(value: &'v Value, path: &'static str) -> Result<&'v Value, Refusal> {
     let mut current = value;
     for label in path.split('.') {
         current = match current.sum.as_ref() {
@@ -364,7 +361,7 @@ fn field_at<'v>(value: &'v Value, path: &'static str) -> std::result::Result<&'v
 }
 
 /// The content of the value at `path`.
-fn value_at<'v>(value: &'v Value, path: &'static str) -> std::result::Result<&'v Sum, Refusal> {
+fn value_at<'v>(value: &'v Value, path: &'static str) -> Result<&'v Sum, Refusal> {
     field_at(value, path)?
         .sum
         .as_ref()
@@ -372,7 +369,7 @@ fn value_at<'v>(value: &'v Value, path: &'static str) -> std::result::Result<&'v
 }
 
 /// The party, text or numeric at `path`.
-fn text_at<'v>(value: &'v Value, path: &'static str) -> std::result::Result<&'v str, Refusal> {
+fn text_at<'v>(value: &'v Value, path: &'static str) -> Result<&'v str, Refusal> {
     match value_at(value, path)? {
         Sum::Party(text) | Sum::Text(text) | Sum::Numeric(text) => Ok(text),
         _ => Err(Refusal::Shape(format!(
@@ -382,7 +379,7 @@ fn text_at<'v>(value: &'v Value, path: &'static str) -> std::result::Result<&'v 
 }
 
 /// The time at `path`, in microseconds since the epoch.
-fn timestamp_at(value: &Value, path: &'static str) -> std::result::Result<i64, Refusal> {
+fn timestamp_at(value: &Value, path: &'static str) -> Result<i64, Refusal> {
     match value_at(value, path)? {
         Sum::Timestamp(micros) => Ok(*micros),
         _ => Err(Refusal::Shape(format!(
@@ -392,10 +389,7 @@ fn timestamp_at(value: &Value, path: &'static str) -> std::result::Result<i64, R
 }
 
 /// The list of contract ids at `path`, in order.
-fn contract_ids_at<'v>(
-    value: &'v Value,
-    path: &'static str,
-) -> std::result::Result<Vec<&'v str>, Refusal> {
+fn contract_ids_at<'v>(value: &'v Value, path: &'static str) -> Result<Vec<&'v str>, Refusal> {
     let not_ids = || Refusal::Shape(format!("its choice argument's {path} is not contract ids"));
     let Sum::List(list) = value_at(value, path)? else {
         return Err(not_ids());
@@ -412,7 +406,7 @@ fn contract_ids_at<'v>(
 /// Compare a value the wallet sent, in the JSON Ledger API's encoding, with
 /// the value at the same place in the transaction. Both sides are brought
 /// to one canonical JSON form first, so they differ only when a value does.
-fn same_value(field: &'static str, sent: &Json, found: &Value) -> std::result::Result<(), Refusal> {
+fn same_value(field: &'static str, sent: &Json, found: &Value) -> Result<(), Refusal> {
     let found_json = canonical_json(found).map_err(|part| {
         Refusal::Shape(format!(
             "the wallet cannot read {part}, so it cannot compare its {field}"
@@ -435,7 +429,7 @@ fn same_value(field: &'static str, sent: &Json, found: &Value) -> std::result::R
 ///
 /// The error names a part the wallet cannot read. A part it cannot read is
 /// a part it cannot compare, so the caller refuses the transaction.
-fn canonical_json(value: &Value) -> std::result::Result<Json, &'static str> {
+fn canonical_json(value: &Value) -> Result<Json, &'static str> {
     let sum = value.sum.as_ref().ok_or("an empty value")?;
     Ok(match sum {
         Sum::Unit(()) => Json::Object(Map::new()),
@@ -452,7 +446,7 @@ fn canonical_json(value: &Value) -> std::result::Result<Json, &'static str> {
             list.elements
                 .iter()
                 .map(canonical_json)
-                .collect::<std::result::Result<_, _>>()?,
+                .collect::<Result<_, _>>()?,
         ),
         Sum::TextMap(map) => {
             let mut object = Map::new();
@@ -605,7 +599,7 @@ fn canonical_date(days: i32) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use decman_lib::canton_proto_rs::com::daml::ledger::api::v2::{
-        GenMap, Identifier, List, Optional, Record, RecordField, TextMap, Variant,
+        Enum, GenMap, Identifier, List, Optional, Record, RecordField, TextMap, Variant,
         interactive::{
             DamlTransaction, Metadata, daml_transaction::Node, metadata::SubmitterInfo,
             transaction::v1,
@@ -756,12 +750,10 @@ mod tests {
 
     #[test]
     fn canonical_json_writes_unit_and_enum_as_the_json_ledger_api_does() {
-        let enumeration = daml(Sum::Enum(
-            decman_lib::canton_proto_rs::com::daml::ledger::api::v2::Enum {
-                enum_id: None,
-                constructor: "Red".to_string(),
-            },
-        ));
+        let enumeration = daml(Sum::Enum(Enum {
+            enum_id: None,
+            constructor: "Red".to_string(),
+        }));
         assert_eq!(canonical_json(&daml(Sum::Unit(()))), Ok(json!({})));
         assert_eq!(canonical_json(&enumeration), Ok(json!("Red")));
     }

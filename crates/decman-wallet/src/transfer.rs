@@ -673,6 +673,8 @@ fn after_execute(
 
 #[cfg(test)]
 mod tests {
+    use std::net::TcpListener;
+
     use super::*;
 
     fn args() -> TransferArgs {
@@ -751,12 +753,11 @@ mod tests {
     /// Nothing listens on the port, so the request never left the wallet.
     #[tokio::test]
     async fn an_execute_that_never_connected_keeps_its_transport_error() {
-        let address = match std::net::TcpListener::bind("127.0.0.1:0")
-            .and_then(|listener| listener.local_addr())
-        {
-            Ok(address) => address,
-            Err(e) => panic!("a free port must be found: {e}"),
-        };
+        let address =
+            match TcpListener::bind("127.0.0.1:0").and_then(|listener| listener.local_addr()) {
+                Ok(address) => address,
+                Err(e) => panic!("a free port must be found: {e}"),
+            };
         let source = match reqwest::Client::new()
             .post(format!("http://{address}/"))
             .send()

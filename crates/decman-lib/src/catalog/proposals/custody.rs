@@ -294,6 +294,7 @@ mod tests {
     use canton_proto_rs::com::daml::ledger::api::v2::Record;
 
     use super::*;
+    use crate::catalog::proposals::SNAPSHOT_PATH;
     use crate::framework::encode::TRANSFER_EXECUTE_BEFORE_MICROS;
 
     /// Fallback `requestedAt` for a `Transfer` record in these tests: epoch.
@@ -513,7 +514,7 @@ mod tests {
     #[test]
     fn encode_snapshots() {
         let mut settings = insta::Settings::clone_current();
-        settings.set_snapshot_path(crate::catalog::proposals::SNAPSHOT_PATH);
+        settings.set_snapshot_path(SNAPSHOT_PATH);
         let _guard = settings.bind_to_scope();
 
         insta::assert_debug_snapshot!(

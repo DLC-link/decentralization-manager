@@ -41,7 +41,7 @@
 //!   cargo run -p decman-wallet --example token_transfer
 //! ```
 
-use std::{env, error::Error, time::Duration};
+use std::{env, error::Error, result, time::Duration};
 
 use decman_wallet::{
     ExternalKeyPair, LedgerClient, RegistryClient, TransferArgs, accept_transfer, send_transfer,
@@ -49,7 +49,7 @@ use decman_wallet::{
 use tracing_subscriber::EnvFilter;
 use zeroize::Zeroizing;
 
-type Result<T = ()> = std::result::Result<T, Box<dyn Error>>;
+type Result<T = ()> = result::Result<T, Box<dyn Error>>;
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result {
