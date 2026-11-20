@@ -9,11 +9,11 @@ use sqlx::SqlitePool;
 
 use crate::{
     canton_id::{CantonId, Fingerprint},
-    config::{NetworkConfig, NodeConfig},
+    config::NodeConfig,
     consts::ROTATE_KEY,
     db::schema::SchemaRead,
     error::Result,
-    noise::{Message, MessageType, NoiseKeypair, parse_public_key, send_noise_message},
+    noise::{Message, MessageType},
     server::{
         AppState,
         error::ApiError,
@@ -31,8 +31,8 @@ use crate::{
 
 use super::{
     cancel::cancel_workflow_state,
+    invites::{InviteLabels, Recipients, send_invites},
     launch::{CoordinatorRequest, StatusOrder, launch_coordinator},
-    onboarding::interpret_invite_reply,
     preflight::{
         claim_party_for_start, format_incompatible_peers, incompatible_versions, lacking_feature,
         probe_invitee_health,
@@ -366,18 +366,15 @@ async fn rotation_baseline(
     })
 }
 
-/// Send rotate-key invites over Noise to every other member.
-async fn send_rotate_key_invites(
-    config: &NodeConfig,
-    db: &SqlitePool,
+/// The rotate-key invite. Its member set is the invitees and then this
+/// node.
+pub(super) fn rotate_key_invite(
+    coordinator: &CantonId,
     rotate_config: &workflow::RotateKeyConfig,
     invitees: &[CantonId],
-) -> Result {
-    let network_config = NetworkConfig::from_peers(db.get_all_peers().await?);
-    let keypair = NoiseKeypair::from_file(&config.key_file_path()).await?;
-
+) -> Result<Message> {
     let mut participants = invitees.to_vec();
-    participants.push(config.participant_id().clone());
+    participants.push(coordinator.clone());
     let payload = RotateKeyInvitePayload {
         dec_party_id: rotate_config.decentralized_party_id.clone(),
         rotated_key: rotate_config.rotated_key.to_string(),
@@ -386,46 +383,33 @@ async fn send_rotate_key_invites(
         participants,
         workflow_instance: Some(rotate_config.instance_name.clone()),
     };
-    let invite_message = Message::new(
+    Ok(Message::new(
         MessageType::InviteRotateKey,
         serde_json::to_vec(&payload).context("encode RotateKeyInvitePayload")?,
-    );
+    ))
+}
 
-    let invitee_set: HashSet<&CantonId> = invitees.iter().collect();
-    for peer in &network_config.peers {
-        if !invitee_set.contains(&peer.participant_id) {
-            continue;
-        }
-        let peer_pub_key = match parse_public_key(&peer.public_key) {
-            Ok(pk) => pk,
-            Err(e) => {
-                tracing::warn!(
-                    "Skipping rotate-key invite to {} - invalid public key: {e}",
-                    peer.participant_id
-                );
-                continue;
-            }
-        };
-        let psk = keypair.derive_psk(&peer_pub_key);
-        let identity = config.participant_id().to_string();
-        tracing::info!("Sending rotate-key invite to {}", peer.participant_id);
-        match send_noise_message(
-            &peer.address,
-            peer.port,
-            &psk,
-            identity.as_bytes(),
-            &invite_message,
-        )
-        .await
-        {
-            Ok(response) => interpret_invite_reply(&peer.participant_id, "rotate-key", &response)?,
-            Err(e) => tracing::error!(
-                "Failed to send rotate-key invite to {}: {e}",
-                peer.participant_id
-            ),
-        }
-    }
-    Ok(())
+/// Send rotate-key invites over Noise to every other member.
+async fn send_rotate_key_invites(
+    config: &NodeConfig,
+    db: &SqlitePool,
+    rotate_config: &workflow::RotateKeyConfig,
+    invitees: &[CantonId],
+) -> Result {
+    send_invites(
+        config,
+        db,
+        Recipients::Members(invitees),
+        InviteLabels {
+            kind: "rotate-key",
+            skip: "rotate-key ",
+            failed: "rotate-key ",
+            address: false,
+            empty_key_warning: false,
+        },
+        || rotate_key_invite(config.participant_id(), rotate_config, invitees),
+    )
+    .await
 }
 
 /// Operator-facing 409 message naming each peer that cannot take part in a
