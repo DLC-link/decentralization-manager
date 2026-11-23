@@ -195,6 +195,23 @@ jobs:
       - uses: actions/checkout@v7
       - uses: bnjbvr/cargo-machete@v0.10.1
 
+  wasm:
+    name: Check wasm32 build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup-build-env
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      # A browser app runs decman-lib, so decman-lib must build without the
+      # tonic transport and the Ledger API client.
+      - name: cargo check decman-lib for wasm32
+        run: cargo check -p decman-lib --target wasm32-unknown-unknown
+
   daml:
     name: Daml Build & Test
     runs-on: ubuntu-latest # TEMP stopgap: ubuntu-8-core larger runners unavailable — revert once restored
