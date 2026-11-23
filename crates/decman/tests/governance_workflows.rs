@@ -339,6 +339,20 @@ async fn dual_governance_e2e() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Run the early and final add-member package guards with only their setup.
+/// Invoke with `DECPM_E2E_TEST=add_party_package_validation_e2e ./integration-tests/run.sh`.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires running localnet — invoke via integration-tests/run.sh"]
+async fn add_party_package_validation_e2e() -> anyhow::Result<()> {
+    init_tracing();
+    let mut f = Fixture::from_env()?;
+    f.discover_network_parties().await?;
+    phases::create_dec_party::run(&mut f).await?;
+    phases::distribute_dars::run(&mut f).await?;
+    phases::deploy_gov_core::run(&mut f).await?;
+    phases::add_party_missing_dar::run(&mut f).await
+}
+
 /// Runs ONLY the CIP-104 reward phase, against a decparty that is already
 /// deployed on devnet (`cbtc-network`). It onboards nothing and votes nothing.
 /// The harness nodes assign the decparty's live coupons through its active

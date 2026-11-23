@@ -4986,6 +4986,15 @@ pub async fn retry_workflow(
         });
     }
 
+    let _start = if let Some(party) = &run.dec_party_id {
+        match claim_party_for_start(&data, party).await {
+            Ok(claim) => Some(claim),
+            Err(response) => return response,
+        }
+    } else {
+        None
+    };
+
     // Flip the row back to InProgress before re-spawning the task. Concurrent
     // same-kind runs are allowed now (no unique index); the registry insert in
     // respawn_coordinator still rejects a same-instance duplicate.
@@ -5238,7 +5247,7 @@ fn format_incompatible_peers(incompatible: &[(String, String)]) -> String {
 /// flight for the party. The handler holds the claim until it returns. So a
 /// second request cannot pass the check before the first registers its run.
 #[allow(clippy::result_large_err)]
-async fn claim_party_for_start(
+pub(super) async fn claim_party_for_start(
     data: &web::Data<AppState>,
     party: &CantonId,
 ) -> std::result::Result<StartClaim, HttpResponse> {
@@ -5249,7 +5258,16 @@ async fn claim_party_for_start(
             ),
         }));
     };
-    if let Some((run, kind)) = find_inprogress_run_for_party(&data.db, party).await {
+    let existing = match find_inprogress_run_for_party(&data.db, party).await {
+        Ok(existing) => existing,
+        Err(error) => {
+            tracing::error!(%party, "Failed to check party workflows: {error:#}");
+            return Err(HttpResponse::ServiceUnavailable().json(ErrorResponse {
+                error: format!("Cannot check running workflows for {party}; retry later"),
+            }));
+        }
+    };
+    if let Some((run, kind)) = existing {
         return Err(HttpResponse::Conflict().json(ErrorResponse {
             error: format!(
                 "Party {party} already has a {kind} workflow in flight (run {run}); wait for it \
@@ -5270,13 +5288,12 @@ async fn claim_party_for_start(
 async fn find_inprogress_run_for_party(
     db: &SqlitePool,
     party: &CantonId,
-) -> Option<(String, WorkflowKind)> {
-    SchemaRead::get_in_progress_workflow_runs(db)
-        .await
-        .unwrap_or_default()
+) -> Result<Option<(String, WorkflowKind)>> {
+    Ok(SchemaRead::get_in_progress_workflow_runs(db)
+        .await?
         .into_iter()
         .find(|r| r.dec_party_id.as_ref() == Some(party))
-        .map(|r| (r.instance_name, r.kind))
+        .map(|r| (r.instance_name, r.kind)))
 }
 
 async fn find_party_with_prefix(db: &SqlitePool, prefix: &str) -> Result<Option<String>> {
@@ -5540,7 +5557,7 @@ mod tests {
 
         // While it runs, a second workflow for the same party is refused — the
         // guard's whole purpose.
-        let found = find_inprogress_run_for_party(&pool, &party).await;
+        let found = find_inprogress_run_for_party(&pool, &party).await?;
         assert_eq!(
             found.map(|(run, _)| run),
             Some("contracts-1".to_string()),
@@ -5550,7 +5567,9 @@ mod tests {
         mark_run_completed(&pool, WorkflowKind::Contracts, "contracts-1").await;
 
         assert!(
-            find_inprogress_run_for_party(&pool, &party).await.is_none(),
+            find_inprogress_run_for_party(&pool, &party)
+                .await?
+                .is_none(),
             "a completed run must not block the next workflow for its party"
         );
         Ok(())
@@ -5570,7 +5589,9 @@ mod tests {
         mark_run_failed(&pool, WorkflowKind::Contracts, "contracts-2", "boom").await;
 
         assert!(
-            find_inprogress_run_for_party(&pool, &party).await.is_none(),
+            find_inprogress_run_for_party(&pool, &party)
+                .await?
+                .is_none(),
             "a failed run must not block the retry it invites"
         );
         Ok(())
@@ -7286,6 +7307,56 @@ mod tests {
         Ok(())
     }
 
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn simultaneous_named_starts_have_one_winner(pool: SqlitePool) -> Result {
+        let data = state_on(pool.clone()).await?;
+        let party = pid(63)?;
+        let start = |name: &'static str| {
+            let data = data.clone();
+            let party = party.clone();
+            async move {
+                let claim = claim_party_for_start(&data, &party).await.ok()?;
+                tokio::task::yield_now().await;
+                insert_run(&data.db, &in_progress_run(name, &party))
+                    .await
+                    .expect("persist winning start");
+                Some(claim)
+            }
+        };
+        let (first, second) = tokio::join!(start("distinct-a"), start("distinct-b"));
+        assert_ne!(first.is_some(), second.is_some());
+        let runs = pool.get_in_progress_workflow_runs().await?;
+        assert_eq!(runs.len(), 1);
+        assert!(matches!(
+            runs[0].instance_name.as_str(),
+            "distinct-a" | "distinct-b"
+        ));
+        drop((first, second));
+        mark_run_failed(
+            &pool,
+            WorkflowKind::Contracts,
+            &runs[0].instance_name,
+            "validation failed",
+        )
+        .await;
+        assert!(claim_party_for_start(&data, &party).await.is_ok());
+        Ok(())
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn unavailable_workflow_database_refuses_and_releases_start(pool: SqlitePool) -> Result {
+        let data = state_on(pool.clone()).await?;
+        let party = pid(64)?;
+        pool.close().await;
+        let response = claim_party_for_start(&data, &party)
+            .await
+            .err()
+            .ok_or_else(|| anyhow::anyhow!("failed lookup must refuse the start"))?;
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert!(data.workflows.claim_start(&party).is_some());
+        Ok(())
+    }
+
     fn started(kind: WorkflowKind) -> u64 {
         RUNS_STARTED
             .with_label_values(&[run_kind_label(kind)])
@@ -7526,6 +7597,52 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(started(kind), started_before + 1);
         assert_eq!(finished(kind, RunOutcome::Failed), failed_before + 1);
+        Ok(())
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn retry_cannot_bypass_a_start_claim_or_an_active_run(pool: SqlitePool) -> Result {
+        let party = pid(65)?;
+        let run = WorkflowRun {
+            status: WorkflowProgress::Failed,
+            ..in_progress_run("blocked-retry", &party)
+        };
+        insert_run(&pool, &run).await?;
+        let data = state_on(pool.clone()).await?;
+        let claim = data.workflows.claim_start(&party).expect("fresh party");
+        let app =
+            actix_test::init_service(App::new().app_data(data.clone()).service(retry_workflow))
+                .await;
+        for active_run in [false, true] {
+            let request = actix_test::TestRequest::post()
+                .uri("/workflows/blocked-retry/retry")
+                .to_request();
+            request.extensions_mut().insert(admin());
+            let response = actix_test::call_service(&app, request).await;
+            assert_eq!(
+                response.status(),
+                StatusCode::CONFLICT,
+                "active={active_run}"
+            );
+            assert_eq!(
+                status_of(&pool, "blocked-retry").await?,
+                Some(WorkflowProgress::Failed)
+            );
+            if !active_run {
+                insert_run(&pool, &in_progress_run("other-active-run", &party)).await?;
+            }
+        }
+        drop(claim);
+        let request = actix_test::TestRequest::post()
+            .uri("/workflows/blocked-retry/retry")
+            .to_request();
+        request.extensions_mut().insert(admin());
+        let response = actix_test::call_service(&app, request).await;
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        assert_eq!(
+            status_of(&pool, "blocked-retry").await?,
+            Some(WorkflowProgress::Failed)
+        );
         Ok(())
     }
 
@@ -8043,6 +8160,13 @@ mod tests {
             data.workflows.snapshot().is_empty(),
             "a refused add must not register a run"
         );
+        let (retry_status, retry_body) = post_add_party(data, &party, &pid(3)?).await?;
+        assert_eq!(
+            retry_status,
+            StatusCode::SERVICE_UNAVAILABLE,
+            "{retry_body}"
+        );
+        assert!(retry_body.contains("Cannot check the new member's packages"));
         Ok(())
     }
 

@@ -768,7 +768,7 @@ pub struct DecmanClient {
     cache: Option<TokenCache>,
     /// Whether `target` came from the cache rather than from discovery.
     target_from_cache: bool,
-    /// Timeout for [`Self::request`]; the TUI calls keep the client default.
+    /// Explicit timeout for [`Self::request`], overriding route defaults.
     request_timeout: Option<Duration>,
     /// When set, [`Self::request`] refuses every non-`GET` with this message.
     writes_blocked: Option<String>,
@@ -1035,7 +1035,11 @@ impl DecmanClient {
         if let Some(body) = body {
             request = request.json(body);
         }
-        if let Some(timeout) = self.request_timeout {
+        // Add-member validation can spend sixty seconds scanning packages.
+        let timeout = self.request_timeout.or_else(|| {
+            (method == Method::POST && path == "/add-party").then_some(Duration::from_secs(120))
+        });
+        if let Some(timeout) = timeout {
             request = request.timeout(timeout);
         }
         request

@@ -359,6 +359,20 @@ pub async fn accept_invitation(
         }
     };
 
+    // Accepts and coordinator starts share the same party claim until their
+    // run is persisted, including while an add-member package scan waits.
+    let _start = if let Some(party) = &invitation.dec_party_id {
+        match super::workflows::claim_party_for_start(&data, party).await {
+            Ok(claim) => Some(claim),
+            Err(response) => {
+                restore_invitation(&data, &invitation).await;
+                return response;
+            }
+        }
+    } else {
+        None
+    };
+
     persist_handled_invitation(&data, &invitation, InvitationOutcome::Accepted).await;
 
     // Refuse a second accept for a run we're already driving: a resurrected
@@ -1148,6 +1162,41 @@ mod handled_invitation_tests {
         assert_eq!(pending[0].id, "inv-1");
         assert!(pool.get_handled_invitations(50).await?.is_empty());
         assert_eq!(state.pending_invitations.read().await.len(), 1);
+        Ok(())
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn accept_waits_for_a_coordinator_start_and_preserves_the_invitation(
+        pool: SqlitePool,
+    ) -> anyhow::Result<()> {
+        let party = crate::canton_id::CantonId::parse(&format!("party::1220{}", "ab".repeat(32)))?;
+        let pending = PendingInvitation {
+            dec_party_id: Some(party.clone()),
+            ..invitation("reserved-invite")
+        };
+        let state = state_with(&pool, &pending).await?;
+        let claim = state.workflows.claim_start(&party).expect("fresh party");
+        let app = actix_test::init_service(
+            App::new()
+                .app_data(state.clone())
+                .service(accept_invitation),
+        )
+        .await;
+        let response =
+            actix_test::call_service(&app, post!("/invitations/accept", "reserved-invite")).await;
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        assert_eq!(pool.get_all_pending_invitations().await?.len(), 1);
+        assert_eq!(state.pending_invitations.read().await.len(), 1);
+        assert!(pool.get_handled_invitations(50).await?.is_empty());
+        assert!(pool.get_in_progress_workflow_runs().await?.is_empty());
+        drop(claim);
+
+        // The listener is absent, so this retry passes exclusion and fails later.
+        let response =
+            actix_test::call_service(&app, post!("/invitations/accept", "reserved-invite")).await;
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(state.workflows.claim_start(&party).is_some());
+        assert_eq!(pool.get_all_pending_invitations().await?.len(), 1);
         Ok(())
     }
 
