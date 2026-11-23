@@ -132,8 +132,8 @@ jobs:
     name: Integration Tests (Splice ${{ matrix.splice }})
     runs-on: ubuntu-very-big
     timeout-minutes: 45
-    # Every network runs Splice 0.10. Before a network upgrade, add the next
-    # version here so that each version gets a full run.
+    # Test every Splice version that a network runs. Add a version before the
+    # first network upgrades to it, and drop a version once no network runs it.
     strategy:
       fail-fast: false
       matrix:
