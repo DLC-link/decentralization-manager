@@ -7675,6 +7675,14 @@ mod tests {
             status_of(&pool, "blocked-retry").await?,
             Some(WorkflowProgress::Failed)
         );
+        mark_run_completed(&pool, WorkflowKind::Contracts, "other-active-run").await;
+        let request = actix_test::TestRequest::post()
+            .uri("/workflows/blocked-retry/retry")
+            .to_request();
+        request.extensions_mut().insert(admin());
+        let response = actix_test::call_service(&app, request).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(data.workflows.claim_start(&party).is_some());
         Ok(())
     }
 
