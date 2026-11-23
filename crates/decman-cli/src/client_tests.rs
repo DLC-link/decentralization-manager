@@ -1431,3 +1431,23 @@ fn add_member_honors_an_explicit_request_timeout() {
             .is_some_and(reqwest::Error::is_timeout)
     }));
 }
+
+#[test]
+fn add_member_returns_a_created_run_after_fifteen_seconds() {
+    let fake = Fake::start();
+    fake.token_grant("password", "access", 1);
+    fake.mount(
+        Mock::given(method("POST"))
+            .and(path("/add-party"))
+            .respond_with(
+                ResponseTemplate::new(202)
+                    .set_delay(std::time::Duration::from_secs(16))
+                    .set_body_json(json!({"message": "Add-party workflow started"})),
+            )
+            .expect(1),
+    );
+
+    fake.client()
+        .start_add_party(ALPHA, NEW_PEER, 1, 1)
+        .expect("a slow successful validation must return the created run result");
+}

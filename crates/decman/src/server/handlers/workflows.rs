@@ -7344,6 +7344,38 @@ mod tests {
     }
 
     #[sqlx::test(migrator = "MIGRATOR")]
+    async fn cancelled_validation_releases_only_its_party_reservation(pool: SqlitePool) -> Result {
+        let data = state_on(pool).await?;
+        let party = pid(67)?;
+        let other_party = pid(68)?;
+        let (validating, ready) = tokio::sync::oneshot::channel();
+        let mut validation = Box::pin(async {
+            let _claim = claim_party_for_start(&data, &party)
+                .await
+                .expect("a fresh party can start validation");
+            validating.send(()).expect("the test waits for validation");
+            std::future::pending::<()>().await;
+        });
+        tokio::select! {
+            _ = validation.as_mut() => panic!("validation must remain in progress"),
+            result = ready => result.expect("validation reaches the package scan"),
+        }
+        assert!(data.workflows.claim_start(&party).is_none());
+        let other_claim = claim_party_for_start(&data, &other_party)
+            .await
+            .expect("another party can validate concurrently");
+
+        drop(validation);
+
+        assert!(claim_party_for_start(&data, &party).await.is_ok());
+        assert!(data.workflows.claim_start(&other_party).is_none());
+        drop(other_claim);
+        assert!(claim_party_for_start(&data, &other_party).await.is_ok());
+        assert!(data.db.get_in_progress_workflow_runs().await?.is_empty());
+        Ok(())
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
     async fn unavailable_workflow_database_refuses_and_releases_start(pool: SqlitePool) -> Result {
         let data = state_on(pool.clone()).await?;
         let party = pid(64)?;
