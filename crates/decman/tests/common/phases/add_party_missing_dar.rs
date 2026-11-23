@@ -7,13 +7,10 @@
 //! party, then re-add P3 — whose participant never received `orphan-marker`. The
 //! party's exported ACS now contains contracts P3 cannot validate.
 //!
-//! With the preflight fix, the COORDINATOR must fail the run at `ExportState`,
-//! before it creates or submits any proposal, with an actionable
-//! missing-package error. This phase asserts exactly that (coordinator run
-//! `failed`, stopped on `ExportState`, error names the packages), which pins
-//! both the reproduction and the fix: stopping at `ExportState` is what proves
-//! the party was never hosted on P3, so its ACS journal cannot collect
-//! activation-less archives.
+//! The add-party start request must refuse the re-add with a 409 that names the
+//! missing packages, and must create no run. No run means no invite, no keys on
+//! P3, and no topology change, so the party is never hosted on P3 and its ACS
+//! journal cannot collect activation-less archives.
 
 use std::{path::Path, time::Duration};
 
@@ -24,11 +21,9 @@ use serde_json::{Value, json};
 use tracing::info;
 
 use crate::common::{
-    Fixture, chaos, db,
+    Fixture, db,
     http::probe_workflow_status,
-    invitations::{
-        InvitationIds, post_accept_invitation, probe_pending_invitation, probe_run_invitation,
-    },
+    invitations::{InvitationIds, post_accept_invitation, probe_pending_invitation},
     scenario::Scenario,
 };
 
@@ -202,117 +197,70 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
             })
         },
     )
-    // 4. Re-add P3 — its participant lacks orphan-marker.
-    .when("P1 re-adds P3", |f, ctx| {
-        Box::pin(async move {
-            let party_id = f.party_id()?.to_string();
-            let req = json!({
-                "decentralized_party_id": party_id,
-                "new_participant_id": f.p3.participant_id.clone(),
-                "new_threshold": 2_i64,
-                "previous_threshold": 2_i64,
-            });
-            ctx.run = Some(chaos::start_workflow_on(f, f.p1.http, "/add-party", &req).await?);
-            Ok(())
-        })
-    })
-    .then(
-        "AddParty invitation visible on P2",
-        Duration::from_secs(60),
-        |f, ctx| {
-            Box::pin(async move {
-                let run = ctx.run.as_deref()?;
-                let id = probe_run_invitation(f, f.p2.http, run).await?;
-                ctx.p2 = Some(id);
-                Some(Ok(()))
-            })
-        },
-    )
-    .then(
-        "AddParty invitation visible on P3",
-        Duration::from_secs(60),
-        |f, ctx| {
-            Box::pin(async move {
-                let run = ctx.run.as_deref()?;
-                let id = probe_run_invitation(f, f.p3.http, run).await?;
-                ctx.p3 = Some(id);
-                Some(Ok(()))
-            })
-        },
-    )
-    .when("P2 accepts AddParty invitation", |f, ctx| {
-        Box::pin(async move {
-            let id = ctx
-                .p2
-                .as_deref()
-                .context("P2 addparty invite id not set")?
-                .to_string();
-            post_accept_invitation(f, f.p2.http, &id)
-                .await
-                .context("accept AddParty on P2")
-        })
-    })
-    .when("P3 accepts AddParty invitation", |f, ctx| {
-        Box::pin(async move {
-            let id = ctx
-                .p3
-                .as_deref()
-                .context("P3 addparty invite id not set")?
-                .to_string();
-            post_accept_invitation(f, f.p3.http, &id)
-                .await
-                .context("accept AddParty on P3")
-        })
-    })
-    // 5. The fix must catch it: the coordinator FAILS at ExportState with a
-    //    missing-package error, before any proposal is created or submitted.
-    .then(
-        "the coordinator fails at ExportState with the missing packages",
-        Duration::from_secs(300),
+    // 4. Re-add P3 — its participant lacks orphan-marker. The start request
+    //    must refuse it before any run, invite, or proposal exists.
+    .when(
+        "P1 re-adds P3 — expect 409 naming the missing packages, and no run",
         |f, _| {
             Box::pin(async move {
                 let p1_db = f.db_path(1);
-                let instance = db::latest_coordinator_instance(&p1_db, "AddParty")
-                    .await
-                    .ok()
-                    .flatten()?;
-                match db::workflow_run_status(&p1_db, &instance, "Coordinator").await {
-                    Ok(Some(s)) if s.eq_ignore_ascii_case("failed") => {
-                        let err = db::workflow_run_error(&p1_db, &instance, "Coordinator")
-                            .await
-                            .ok()
-                            .flatten()
-                            .unwrap_or_default();
-                        let step = db::workflow_run_step(&p1_db, &instance, "Coordinator")
-                            .await
-                            .ok()
-                            .flatten()
-                            .unwrap_or_default();
-                        // The structured tail ("Missing package ids: [...]") is
-                        // emitted only by the preflight, so a generic Canton
-                        // package error cannot satisfy this.
-                        if !err.to_lowercase().contains("missing package ids") {
-                            return Some(Err(anyhow::anyhow!(
-                                "coordinator failed but NOT via the package preflight \
-                                 (expected a 'Missing package ids: [...]' error): {err}"
-                            )));
-                        }
-                        // ExportState precedes CreateProposals and SubmitProposals,
-                        // so stopping here is the proof that no topology was written.
-                        if step != "ExportState" {
-                            return Some(Err(anyhow::anyhow!(
-                                "coordinator failed with the right error but on step \
-                                 {step}, not ExportState — a proposal may already have \
-                                 been submitted"
-                            )));
-                        }
-                        Some(Ok(()))
-                    }
-                    _ => None,
-                }
+                let run_before = db::latest_coordinator_instance(&p1_db, "AddParty").await?;
+
+                let party_id = f.party_id()?.to_string();
+                let req = json!({
+                    "decentralized_party_id": party_id,
+                    "new_participant_id": f.p3.participant_id.clone(),
+                    "new_threshold": 2_i64,
+                    "previous_threshold": 2_i64,
+                });
+                let (status, body) = f.post_expect_status(f.p1.http, "/add-party", &req).await?;
+                anyhow::ensure!(
+                    status.as_u16() == 409,
+                    "expected 409 from the package check, got {status}: {body}"
+                );
+                // The structured tail ("Missing package ids: [...]") is emitted
+                // only by the package check, so a generic Canton package error
+                // cannot satisfy this.
+                anyhow::ensure!(
+                    body.to_lowercase().contains("missing package ids"),
+                    "409 body should name the missing packages: {body}"
+                );
+                // The operator acts on the member and the package the error
+                // names, so both must be the real ones.
+                anyhow::ensure!(
+                    body.contains(&f.p3.participant_id),
+                    "409 body should name the new member {}: {body}",
+                    f.p3.participant_id
+                );
+                let orphan = orphan_package_id(f).await?;
+                anyhow::ensure!(
+                    body.contains(&orphan),
+                    "409 body should list the orphan-marker package {orphan}: {body}"
+                );
+
+                // The run row is written before the 202 returns, so a refused
+                // request that left none behind never sent an invite.
+                let run_after = db::latest_coordinator_instance(&p1_db, "AddParty").await?;
+                anyhow::ensure!(
+                    run_after == run_before,
+                    "the refused add-party left a coordinator run behind: {run_after:?}"
+                );
+                Ok(())
             })
         },
     )
     .run(f)
     .await
+}
+
+/// The id of the `orphan-marker` package, read from P1's vetted packages.
+/// P1 vets it on upload, and the party's `OrphanMarker` contracts use it.
+async fn orphan_package_id(f: &Fixture) -> anyhow::Result<String> {
+    let vetted: Vec<Value> = f.get_json(f.p1.http, "/packages/vetted").await?;
+    vetted
+        .iter()
+        .find(|p| p["package_name"].as_str() == Some("orphan-marker"))
+        .and_then(|p| p["package_id"].as_str())
+        .map(str::to_string)
+        .context("P1 does not report orphan-marker as vetted")
 }

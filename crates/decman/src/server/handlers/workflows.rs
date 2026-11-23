@@ -664,6 +664,46 @@ fn kick_key_check_failure(party: &CantonId, e: &anyhow::Error) -> HttpResponse {
     }
 }
 
+/// How long an add-party start waits for the package check. The check streams
+/// the party's active contracts, so a large party needs time. A Canton call
+/// that stalls must still not leave the Add Member dialog waiting forever.
+const ADD_PARTY_PACKAGE_CHECK_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// Run the add-party package check under `limit`. A check that runs out of
+/// time is a check that could not run.
+async fn bounded_package_check(
+    limit: Duration,
+    check: impl std::future::Future<Output = Result>,
+) -> Result {
+    match tokio::time::timeout(limit, check).await {
+        Ok(result) => result,
+        Err(_) => anyhow::bail!(
+            "the check did not finish within {secs}s",
+            secs = limit.as_secs()
+        ),
+    }
+}
+
+/// The response to a failed package check of an add-party start. A missing
+/// package says what to do, so it goes back as it is. Any other failure means
+/// the check could not run, so the add is refused until it can.
+fn add_party_package_check_failure(party: &CantonId, e: &anyhow::Error) -> HttpResponse {
+    match e.downcast_ref::<workflow::add_party::MissingPackages>() {
+        Some(missing) => {
+            tracing::warn!("Add-party to {party} refused: {missing}");
+            HttpResponse::Conflict().json(ErrorResponse {
+                error: missing.to_string(),
+            })
+        }
+        None => {
+            tracing::error!("Cannot check the new member's packages for {party}: {e:#}");
+            HttpResponse::ServiceUnavailable().json(ErrorResponse {
+                error: format!("Cannot check the new member's packages: {e:#}"),
+            })
+        }
+    }
+}
+
 /// The member a kick removes.
 #[derive(Debug, PartialEq)]
 struct KickTarget {
@@ -1532,8 +1572,9 @@ async fn send_kick_invites(
     responses(
         (status = 202, description = "Add-party workflow started", body = WorkflowResponse),
         (status = 400, description = "Bad request", body = ErrorResponse),
-        (status = 409, description = "Workflow already in progress for this party, or the participant is already a member", body = ErrorResponse),
-        (status = 500, description = "Internal server error", body = ErrorResponse)
+        (status = 409, description = "Workflow already in progress for this party, the participant is already a member, or it has not vetted a package the party's contracts need", body = ErrorResponse),
+        (status = 500, description = "Internal server error", body = ErrorResponse),
+        (status = 503, description = "The new member's packages could not be checked", body = ErrorResponse)
     )
 )]
 #[post("/add-party")]
@@ -1705,6 +1746,21 @@ pub async fn start_add_party(
         return HttpResponse::Conflict().json(ErrorResponse {
             error: format_incompatible_peers(&incompatible),
         });
+    }
+
+    // A missing DAR must stop the add before any invite goes out, so no peer
+    // waits and the new member generates no keys for a run that cannot finish.
+    let ledger_token = {
+        let auth = data.auth.read().await.clone();
+        workflow::add_party::resolve_ledger_token(&auth, &decentralized_party_id).await
+    };
+    let check = workflow::add_party::packages::check_new_member_packages(
+        &data.config,
+        &add_party_config,
+        ledger_token.as_deref(),
+    );
+    if let Err(e) = bounded_package_check(ADD_PARTY_PACKAGE_CHECK_TIMEOUT, check).await {
+        return add_party_package_check_failure(&decentralized_party_id, &e);
     }
 
     // Register + persist atomically w.r.t. duplicates (registry insert dedups
@@ -7807,6 +7863,216 @@ mod tests {
                 .is_empty()
         );
         assert!(data.workflows.snapshot().is_empty());
+        Ok(())
+    }
+
+    async fn error_body(response: HttpResponse) -> anyhow::Result<String> {
+        let body = actix_web::body::to_bytes(response.into_body())
+            .await
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+        let body: serde_json::Value = serde_json::from_slice(&body)?;
+        body["error"]
+            .as_str()
+            .map(str::to_string)
+            .context("the response has no error text")
+    }
+
+    /// A missing package goes back as a conflict that names the ids, because
+    /// the operator fixes it by uploading the DAR.
+    #[actix_web::test]
+    async fn a_missing_package_refuses_the_add_with_the_missing_ids() -> anyhow::Result<()> {
+        let error = anyhow::Error::from(workflow::add_party::MissingPackages {
+            participant: pid(3)?,
+            missing: vec!["pkg-a".to_string(), "pkg-b".to_string()],
+        });
+
+        let response = add_party_package_check_failure(&pid(1)?, &error);
+
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        let error = error_body(response).await?;
+        assert!(
+            error.contains(&pid(3)?.to_string()),
+            "names the new member: {error}"
+        );
+        assert!(
+            error.contains(r#"Missing package ids: ["pkg-a", "pkg-b"]"#),
+            "lists the missing ids: {error}"
+        );
+        // The add-member guide tells the operator to search for this text.
+        assert!(
+            error.contains("has not vetted 2 package(s)"),
+            "counts the missing ids: {error}"
+        );
+        Ok(())
+    }
+
+    /// A Canton call that stalls ends in a 503, not in a request that never
+    /// answers.
+    #[actix_web::test]
+    async fn a_stalled_package_check_refuses_the_add_as_unavailable() -> anyhow::Result<()> {
+        let stalled = std::future::pending::<Result>();
+
+        let error = bounded_package_check(Duration::from_millis(10), stalled)
+            .await
+            .expect_err("a check that never finishes must fail");
+        let response = add_party_package_check_failure(&pid(1)?, &error);
+
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let error = error_body(response).await?;
+        assert!(error.contains("did not finish within"), "{error}");
+        Ok(())
+    }
+
+    /// A check that finishes in time passes its own result through, so a
+    /// missing package is still a 409 and not a timeout.
+    #[actix_web::test]
+    async fn a_check_that_finishes_in_time_keeps_its_own_answer() -> anyhow::Result<()> {
+        bounded_package_check(Duration::from_secs(5), async { Ok(()) }).await?;
+
+        let missing = anyhow::Error::from(workflow::add_party::MissingPackages {
+            participant: pid(3)?,
+            missing: vec!["pkg-a".to_string()],
+        });
+        let error = bounded_package_check(Duration::from_secs(5), async { Err(missing) })
+            .await
+            .expect_err("the missing package must come through");
+        let response = add_party_package_check_failure(&pid(1)?, &error);
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        Ok(())
+    }
+
+    /// A check that could not run refuses the add as well. Letting it through
+    /// unchecked would send the invites the check exists to hold back.
+    #[actix_web::test]
+    async fn a_check_that_cannot_run_refuses_the_add_as_unavailable() -> anyhow::Result<()> {
+        let error = anyhow::anyhow!("ledger API unreachable");
+
+        let response = add_party_package_check_failure(&pid(1)?, &error);
+
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let error = error_body(response).await?;
+        assert!(
+            error.contains("ledger API unreachable"),
+            "carries the cause: {error}"
+        );
+        Ok(())
+    }
+
+    /// [`state_on`], with `pid(1)` as this node. Its Ledger and Admin API
+    /// addresses do not parse, so every Canton read fails at once.
+    async fn add_party_state_on(pool: SqlitePool) -> Result<web::Data<AppState>> {
+        let state = Arc::try_unwrap(state_on(pool).await?.into_inner())
+            .map_err(|_| anyhow::anyhow!("a fresh test state has one owner"))?;
+        let mut config = NodeConfig::default();
+        config.node.participant_id = Some(pid(1)?);
+        config.canton.ledger_api_host = "[".to_string();
+        config.canton.admin_api_host = "[".to_string();
+        Ok(web::Data::new(AppState { config, ..state }))
+    }
+
+    /// Caches `party` hosted by this node and `pid(2)` at threshold 1. Both
+    /// `pid(2)` and `pid(3)` are configured peers, so `pid(3)` passes every
+    /// request check as the member to add.
+    async fn cache_party_to_grow(pool: &SqlitePool, party: &CantonId) -> Result {
+        cache_party(pool, party, 1, None).await?;
+        let keys = ["k1".to_string(), "k2".to_string()];
+        let hosts = [
+            host_row(&pid(1)?, Some("k1")),
+            host_row(&pid(2)?, Some("k2")),
+        ];
+        let mut tx = pool.begin_transaction().await?;
+        tx.replace_dec_party_participants(party, &hosts).await?;
+        tx.replace_dec_party_owners(party, &keys).await?;
+        for tag in [2, 3] {
+            tx.insert_peer(&crate::config::Peer {
+                participant_id: pid(tag)?,
+                name: format!("peer-{tag}"),
+                address: "127.0.0.1".to_string(),
+                port: 1,
+                public_key: String::new(),
+                party: None,
+            })
+            .await?;
+        }
+        Commitable::commit(tx).await
+    }
+
+    async fn post_add_party(
+        data: web::Data<AppState>,
+        party: &CantonId,
+        new_member: &CantonId,
+    ) -> Result<(StatusCode, String)> {
+        let app =
+            actix_test::init_service(App::new().app_data(data).service(start_add_party)).await;
+        let request = actix_test::TestRequest::post()
+            .uri("/add-party")
+            .set_json(serde_json::json!({
+                "decentralized_party_id": party,
+                "new_participant_id": new_member,
+                "new_threshold": 1,
+                "previous_threshold": 1,
+            }))
+            .to_request();
+        request.extensions_mut().insert(admin());
+        Ok(status_and_body(actix_test::call_service(&app, request).await).await)
+    }
+
+    /// The add passes every request check, but Canton cannot be read. The
+    /// start request must refuse it with 503 and leave no run behind. A run
+    /// is what sends the invites, so no peer is asked to join unchecked.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn an_add_whose_package_check_cannot_run_starts_no_run(pool: SqlitePool) -> Result {
+        let party = pid(60)?;
+        cache_party_to_grow(&pool, &party).await?;
+        let data = add_party_state_on(pool.clone()).await?;
+
+        let (status, body) = post_add_party(data.clone(), &party, &pid(3)?).await?;
+
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+        assert!(
+            body.contains("Cannot check the new member's packages"),
+            "{body}"
+        );
+        assert!(
+            pool.get_workflow_runs_by_kind(WorkflowKind::AddParty)
+                .await?
+                .is_empty(),
+            "a refused add must not persist a run"
+        );
+        assert!(
+            data.workflows.snapshot().is_empty(),
+            "a refused add must not register a run"
+        );
+        Ok(())
+    }
+
+    /// The request checks run before the package check, which reads the
+    /// party's whole ACS. Canton cannot be read here, so a 503 would mean the
+    /// package check ran first. Each refusal must come from its request check.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn the_request_checks_refuse_an_add_before_the_package_check(pool: SqlitePool) -> Result {
+        let party = pid(61)?;
+        cache_party_to_grow(&pool, &party).await?;
+        let data = add_party_state_on(pool.clone()).await?;
+
+        let (status, body) = post_add_party(data.clone(), &party, &pid(2)?).await?;
+        assert_eq!(status, StatusCode::CONFLICT, "{body}");
+        assert!(body.contains("is already a member of"), "{body}");
+
+        // The in-flight guard is the last request check that needs no peer.
+        // Only the peer version gate runs between it and the package check.
+        insert_run(&pool, &in_progress_run("contracts-in-flight", &party)).await?;
+        let (status, body) = post_add_party(data, &party, &pid(3)?).await?;
+        assert_eq!(status, StatusCode::CONFLICT, "{body}");
+        assert!(
+            body.contains("already has a Contracts workflow in flight"),
+            "{body}"
+        );
+        assert!(
+            pool.get_workflow_runs_by_kind(WorkflowKind::AddParty)
+                .await?
+                .is_empty()
+        );
         Ok(())
     }
 }

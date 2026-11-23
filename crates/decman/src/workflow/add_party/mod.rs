@@ -1,9 +1,11 @@
 pub mod config;
 pub mod coordinator;
+pub mod packages;
 pub mod peer;
 pub mod steps;
 
 pub use config::AddPartyConfig;
+pub use packages::MissingPackages;
 pub use steps::{author_clear_proposal, generate_keys, sign_clear_proposal, sign_proposals};
 
 use crate::{
