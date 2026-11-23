@@ -1777,7 +1777,7 @@ mod tests {
         let party = legacy_party();
         fake.publish_party_awaiting_key_retirement(&party);
         let node = fake.node(SoftwareKeys::Allowed, false).await?;
-        for status in ["cancelled", "failed", "completed"] {
+        for status in ["cancelled", "failed", "completed", "idle"] {
             sqlx::query("DELETE FROM workflow_runs")
                 .execute(&db)
                 .await?;
