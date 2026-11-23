@@ -153,8 +153,10 @@ pub async fn start_coordinator(
                         workflow_state.advance_step().await;
                     }
                     KickStep::RetireLegacyKeys => {
-                        crate::workflow::topology::retire_legacy_keys_and_wait(
+                        crate::workflow::topology::retire_legacy_keys_for_run(
                             &node_config,
+                            &db,
+                            &instance_name,
                             &kick_config.decentralized_party_id,
                         )
                         .await?;
@@ -179,4 +181,92 @@ pub async fn start_coordinator(
         coordinator_workflow,
     )
     .await
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{collections::HashMap, time::Duration};
+
+    use sqlx::SqlitePool;
+    use tokio::sync::RwLock;
+
+    use super::*;
+    use crate::{
+        canton_id::{CantonId, NAMESPACE_LENGTH, Namespace},
+        db::MIGRATOR,
+        noise::NoiseKeypair,
+        server::{WorkflowKind, WorkflowRole},
+        signing::{custody::SoftwareKeys, fake_admin_api::FakeAdminApi},
+        workflow::state::WorkflowStep,
+    };
+
+    const RUN: &str = "kick-run";
+
+    /// Cancelling a run aborts the task that drives it. A kick that is at the
+    /// legacy key retirement then must write no topology. Before the loop
+    /// stopped with its driver, it went on to sign the removal.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn an_aborted_kick_run_signs_no_topology(db: SqlitePool) -> Result {
+        let fake = FakeAdminApi::start(vec![]).await?;
+        let party = CantonId::new("party".to_string(), Namespace::new([7; NAMESPACE_LENGTH]));
+        fake.publish_party_awaiting_key_retirement(&party);
+        let node = fake.node(SoftwareKeys::Allowed, false).await?;
+        tokio::fs::create_dir_all(node.config.data_dir()).await?;
+        NoiseKeypair::generate()
+            .save_to_file(node.config.key_file_path())
+            .await?;
+
+        let kick_config = KickConfig::new(
+            party,
+            None,
+            "fingerprint".to_string(),
+            1,
+            None,
+            2,
+            RUN.to_string(),
+        );
+        let step = KickStep::RetireLegacyKeys;
+        sqlx::query(
+            "INSERT INTO workflow_runs
+             (instance_name, kind, role, status, current_step, step_index, step_total,
+              config_json, expected_peers_json, completed_peers_json, created_at, updated_at)
+             VALUES (?, 'Kick', 'Coordinator', 'inprogress', ?, ?, ?, ?, '[]', '[]', 0, 0)",
+        )
+        .bind(RUN)
+        .bind(step.step_name())
+        .bind(step.step_index())
+        .bind(KickStep::step_total())
+        .bind(serde_json::to_string(&kick_config)?)
+        .execute(&db)
+        .await?;
+
+        let instance = WorkflowInstance::new(
+            RUN.to_string(),
+            WorkflowKind::Kick,
+            WorkflowRole::Coordinator,
+        );
+        let driver = tokio::spawn(start_coordinator(
+            node.config.clone(),
+            NetworkConfig::default(),
+            kick_config,
+            db,
+            Arc::new(RwLock::new(HashMap::new())),
+            instance.clone(),
+        ));
+        // The driver registers the run's Noise handle right after it starts
+        // the coordinator loop, which is the loop's first moment to run.
+        while instance.active.read().is_ok_and(|active| active.is_none()) {
+            tokio::task::yield_now().await;
+        }
+
+        driver.abort();
+        assert!(driver.await.is_err_and(|e| e.is_cancelled()));
+        tokio::time::sleep(Duration::from_secs(2)).await;
+
+        assert!(
+            fake.authorized().is_empty(),
+            "the kick signed topology after its run was aborted"
+        );
+        Ok(())
+    }
 }

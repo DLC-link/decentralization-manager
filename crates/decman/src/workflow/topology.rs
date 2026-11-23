@@ -560,6 +560,18 @@ fn validate_legacy_retirement(p2p: &PartyToParticipant, legacy: &PartyToKeyMappi
     Ok(())
 }
 
+/// Coordinator side of the retirement round for run `instance_name`. A run
+/// that is no longer in progress writes nothing.
+pub async fn retire_legacy_keys_for_run(
+    config: &NodeConfig,
+    db: &SqlitePool,
+    instance_name: &str,
+    party: &CantonId,
+) -> Result {
+    crate::workflow::ensure_run_in_progress(db, instance_name).await?;
+    retire_legacy_keys_and_wait(config, party).await
+}
+
 /// Coordinator side of the retirement round. Peers contribute while this
 /// waits; completing the workflow requires observing the removal on-chain.
 pub async fn retire_legacy_keys_and_wait(config: &NodeConfig, party: &CantonId) -> Result {
@@ -1732,6 +1744,101 @@ mod tests {
         let error = standing_error(&namespace_change(5, 2), Some(&namespace_change(3, 1)))?;
         assert!(error.contains("holds serial 3"), "{error}");
         standing_error(&namespace_change(2, 2), None)?;
+        Ok(())
+    }
+
+    async fn insert_run(db: &SqlitePool, status: &str) -> Result {
+        sqlx::query(
+            "INSERT INTO workflow_runs
+             (instance_name, kind, role, status, current_step, step_index, step_total,
+              config_json, expected_peers_json, completed_peers_json, created_at, updated_at)
+             VALUES ('run', 'Kick', 'Coordinator', ?, 'RetireLegacyKeys', 5, 7, '{}', '[]', '[]', 0, 0)",
+        )
+        .bind(status)
+        .execute(db)
+        .await?;
+        Ok(())
+    }
+
+    fn legacy_party() -> CantonId {
+        CantonId::new(
+            "party".to_string(),
+            crate::canton_id::Namespace::new([7; crate::canton_id::NAMESPACE_LENGTH]),
+        )
+    }
+
+    /// A run that an operator cancelled must not sign the legacy mapping's
+    /// removal, whatever step its task still reaches.
+    #[sqlx::test(migrator = "crate::db::MIGRATOR")]
+    async fn a_run_that_is_not_in_progress_retires_no_legacy_keys(db: SqlitePool) -> Result {
+        use crate::signing::{custody::SoftwareKeys, fake_admin_api::FakeAdminApi};
+
+        let fake = FakeAdminApi::start(vec![]).await?;
+        let party = legacy_party();
+        fake.publish_party_awaiting_key_retirement(&party);
+        let node = fake.node(SoftwareKeys::Allowed, false).await?;
+        for status in ["cancelled", "failed", "completed"] {
+            sqlx::query("DELETE FROM workflow_runs")
+                .execute(&db)
+                .await?;
+            insert_run(&db, status).await?;
+
+            let error = retire_legacy_keys_for_run(&node.config, &db, "run", &party)
+                .await
+                .expect_err("a run that is not in progress wrote topology");
+
+            assert!(format!("{error:#}").contains(status), "{error:#}");
+            assert!(fake.authorized().is_empty(), "{status} run wrote topology");
+        }
+
+        sqlx::query("DELETE FROM workflow_runs")
+            .execute(&db)
+            .await?;
+        let error = retire_legacy_keys_for_run(&node.config, &db, "run", &party)
+            .await
+            .expect_err("a run with no record wrote topology");
+        assert!(format!("{error:#}").contains("no record"), "{error:#}");
+        assert!(fake.authorized().is_empty());
+        Ok(())
+    }
+
+    /// The guard must not stop a run that is in progress. The removal then
+    /// waits for the other members, so the test stops it after the first write.
+    #[sqlx::test(migrator = "crate::db::MIGRATOR")]
+    async fn a_run_in_progress_signs_the_legacy_mapping_removal(db: SqlitePool) -> Result {
+        use crate::signing::{custody::SoftwareKeys, fake_admin_api::FakeAdminApi};
+
+        let fake = FakeAdminApi::start(vec![]).await?;
+        let party = legacy_party();
+        fake.publish_party_awaiting_key_retirement(&party);
+        let node = fake.node(SoftwareKeys::Allowed, false).await?;
+        insert_run(&db, "inprogress").await?;
+
+        let config = node.config.clone();
+        let pool = db.clone();
+        let task =
+            tokio::spawn(
+                async move { retire_legacy_keys_for_run(&config, &pool, "run", &party).await },
+            );
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        while fake.authorized().is_empty() {
+            anyhow::ensure!(
+                tokio::time::Instant::now() < deadline && !task.is_finished(),
+                "the run never signed the removal"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        task.abort();
+
+        let sent = fake.authorized();
+        assert_eq!(sent.len(), 1);
+        assert_eq!(
+            sent[0].r#type.as_ref().and_then(|t| match t {
+                canton_proto_rs::com::digitalasset::canton::topology::admin::v30::authorize_request::Type::Proposal(p) => Some(p.change),
+                _ => None,
+            }),
+            Some(enums::TopologyChangeOp::Remove as i32)
+        );
         Ok(())
     }
 }

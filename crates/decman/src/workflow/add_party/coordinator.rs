@@ -290,8 +290,10 @@ async fn run_workflow(
                 workflow_state.advance_step().await;
             }
             AddPartyStep::RetireLegacyKeys => {
-                crate::workflow::topology::retire_legacy_keys_and_wait(
+                crate::workflow::topology::retire_legacy_keys_for_run(
                     &node_config,
+                    &db,
+                    &instance_name,
                     &add_party_config.decentralized_party_id,
                 )
                 .await?;

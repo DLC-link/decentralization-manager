@@ -39,7 +39,10 @@ use crate::{
     db::schema::{Commitable, SchemaRead, SchemaWrite},
     error::Result,
     noise::{MessageType, NoiseError, client::NoiseClient, is_transient, server::ActiveWorkflow},
-    server::{DeclineInvitationPayload, WorkflowInstance, WorkflowKind, peer_status::LastSeen},
+    server::{
+        DeclineInvitationPayload, WorkflowInstance, WorkflowKind, WorkflowProgress,
+        peer_status::LastSeen,
+    },
     utils,
     workflow::{
         state::WorkflowStep,
@@ -235,6 +238,9 @@ pub async fn run_workflow_with_handler(
     instance: Arc<WorkflowInstance>,
     mut workflow_handle: tokio::task::JoinHandle<Result>,
 ) -> Result {
+    // Dropping a `JoinHandle` detaches its task. Cancelling a run aborts this
+    // function, so the guard stops the coordinator loop with it.
+    let _stop_loop = AbortOnDrop(workflow_handle.abort_handle());
     instance.set_active(active.clone());
     let outcome = tokio::select! {
         outcome = &mut workflow_handle => outcome,
@@ -261,6 +267,39 @@ pub async fn run_workflow_with_handler(
             anyhow::bail!("Coordinator workflow task panicked: {e}");
         }
     }
+}
+
+/// Aborts its task when dropped. Aborting a finished task does nothing.
+struct AbortOnDrop(tokio::task::AbortHandle);
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
+/// Refuse a topology write for a run that no longer is in progress.
+///
+/// Cancelling a run marks its row `Cancelled` before the coordinator task
+/// stops, so a step that writes topology reads the row first. A missing row
+/// also refuses: no operator has asked for that run to continue.
+///
+/// # Errors
+///
+/// Errors when the run has no row, when the row is not `InProgress`, or when
+/// the read fails.
+pub(crate) async fn ensure_run_in_progress(db: &SqlitePool, instance_name: &str) -> Result {
+    let run = SchemaRead::get_workflow_run(db, instance_name)
+        .await?
+        .with_context(|| {
+            format!("Run {instance_name} has no record; refusing to write topology")
+        })?;
+    anyhow::ensure!(
+        run.status == WorkflowProgress::InProgress,
+        "Run {instance_name} is {}, not in progress; refusing to write topology",
+        run.status
+    );
+    Ok(())
 }
 
 /// Start node in peer mode (client)
@@ -455,6 +494,7 @@ async fn run_peer(
                 // would skip RecordKey, and this node would keep the old key
                 // on record for the coordinator.
                 let retired = async {
+                    ensure_run_in_progress(&db, &instance_name).await?;
                     let synchronizer_id = utils::get_synchronizer_id(&node_config).await?;
                     topology::retire_legacy_keys(&node_config, &synchronizer_id, party).await
                 }
@@ -1913,5 +1953,77 @@ mod tests {
         assert!(report.contains("SignChangeThreshold"));
         assert!(report.contains(&failures.to_string()));
         assert!(report.contains("local artifact missing"));
+    }
+
+    /// The coordinator loop runs in a task of its own that the run driver
+    /// awaits. Cancelling a run aborts the driver, and the loop must stop with
+    /// it. A loop that outlives its run keeps submitting topology for a run
+    /// the operator cancelled.
+    #[sqlx::test(migrator = "crate::db::MIGRATOR")]
+    async fn aborting_the_driver_stops_the_coordinator_loop(db: SqlitePool) -> Result {
+        use std::{
+            collections::HashMap,
+            sync::atomic::{AtomicUsize, Ordering},
+            time::Duration,
+        };
+
+        use tokio::sync::RwLock;
+
+        use crate::{
+            noise::{NoiseKeypair, server::NoiseServer},
+            server::WorkflowRole,
+        };
+
+        let root = tempfile::tempdir()?;
+        let config = NodeConfig::default().with_root_dir(root.path());
+        tokio::fs::create_dir_all(config.data_dir()).await?;
+        NoiseKeypair::generate()
+            .save_to_file(config.key_file_path())
+            .await?;
+        let server = NoiseServer::new(
+            config,
+            NetworkConfig::default(),
+            db,
+            "run".to_string(),
+            KickStep::WaitingForPeers,
+            None,
+            Arc::new(RwLock::new(HashMap::new())),
+        )
+        .await?;
+
+        let ticks = Arc::new(AtomicUsize::new(0));
+        let loop_ticks = ticks.clone();
+        let coordinator = tokio::spawn(async move {
+            loop {
+                loop_ticks.fetch_add(1, Ordering::SeqCst);
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        });
+        let instance = WorkflowInstance::new(
+            "run".to_string(),
+            WorkflowKind::Kick,
+            WorkflowRole::Coordinator,
+        );
+        let driver = tokio::spawn(run_workflow_with_handler(
+            ActiveWorkflow::Kick(Arc::new(server)),
+            instance,
+            coordinator,
+        ));
+        while ticks.load(Ordering::SeqCst) == 0 {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+
+        driver.abort();
+        assert!(driver.await.is_err_and(|e| e.is_cancelled()));
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let stopped_at = ticks.load(Ordering::SeqCst);
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        assert_eq!(
+            ticks.load(Ordering::SeqCst),
+            stopped_at,
+            "the coordinator loop kept running after its run was aborted"
+        );
+        Ok(())
     }
 }

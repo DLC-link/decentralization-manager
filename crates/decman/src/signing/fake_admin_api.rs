@@ -31,13 +31,13 @@ use canton_proto_rs::com::digitalasset::canton::{
         },
         v30::{
             CryptoKeyFormat, PublicKey, PublicKeyWithName, SigningKeySpec, SigningKeyUsage,
-            SigningPublicKey, public_key,
+            SigningKeysWithThreshold, SigningPublicKey, public_key,
         },
     },
     protocol::v30::{
         DecentralizedNamespaceDefinition, NamespaceDelegation, PartyToKeyMapping,
         PartyToParticipant, SignedTopologyTransaction, TopologyMapping, TopologyTransaction, enums,
-        topology_mapping,
+        party_to_participant::HostingParticipant, topology_mapping,
     },
     topology::admin::v30::{
         AuthorizeRequest, AuthorizeResponse, BaseResult, GetIdRequest, GetIdResponse,
@@ -552,6 +552,41 @@ impl FakeAdminApi {
             .topology
             .party_to_key
             .push((serial, mapping));
+    }
+
+    /// Publish `party` as a member party that already carries its keys inline
+    /// and still has a legacy `PartyToKeyMapping`, so that retiring the legacy
+    /// mapping is allowed.
+    pub fn publish_party_awaiting_key_retirement(&self, party: &CantonId) {
+        let keys = vec![
+            VaultKey::software("daml", 3).public_key,
+            VaultKey::software("daml", 4).public_key,
+        ];
+        let host = |uid: &str| HostingParticipant {
+            participant_uid: uid.to_string(),
+            permission: enums::ParticipantPermission::Confirmation as i32,
+            onboarding: None,
+        };
+        self.publish_p2p(
+            2,
+            PartyToParticipant {
+                party: party.to_string(),
+                threshold: 2,
+                participants: vec![host("node1"), host("node2")],
+                party_signing_keys: Some(SigningKeysWithThreshold {
+                    keys: keys.clone(),
+                    threshold: 2,
+                }),
+            },
+        );
+        self.publish_party_to_key(
+            1,
+            PartyToKeyMapping {
+                party: party.to_string(),
+                threshold: 2,
+                signing_keys: keys,
+            },
+        );
     }
 
     /// Each `Authorize` request DecMan sent, in order.

@@ -102,8 +102,10 @@ pub async fn start_coordinator(
                         workflow_state.advance_step().await;
                     }
                     RotateKeyStep::RetireLegacyKeys => {
-                        crate::workflow::topology::retire_legacy_keys_and_wait(
+                        crate::workflow::topology::retire_legacy_keys_for_run(
                             &node_config,
+                            &db,
+                            &instance_name,
                             &rotate_config.decentralized_party_id,
                         )
                         .await?;
