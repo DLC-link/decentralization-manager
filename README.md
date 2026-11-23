@@ -190,7 +190,7 @@ The database file path can be overridden with the `--db` CLI flag.
 | `DECPM_DIR` | Root directory for persistent data (`--dir`/`-d`) | `.` |
 | `DECPM_HOST` | Host address to bind the HTTP/UI server to | `0.0.0.0` |
 | `DECPM_PORT` | Port for the HTTP/UI server | `8080` |
-| `DECPM_HTTP_KEEP_ALIVE_SECS` | HTTP idle connection timeout in seconds; set above the proxy upstream idle timeout | `75` |
+| `DECPM_HTTP_KEEP_ALIVE_SECS` | HTTP idle connection timeout in seconds (`0` disables keep-alive); set above the proxy upstream idle timeout | `75` |
 | `DECPM_METRICS_PORT` | Port serving Prometheus metrics at `/metrics`, separate from the HTTP/UI port (`0` disables it) | `9464` |
 | `DECPM_DB_PATH` | SQLite database path override (CLI flag `--db`) | _(defaults to `{dir}/data/decpm.db`)_ |
 | `DECPM_DB_ENCRYPTION_KEY` | Encryption key for secrets stored in the database | _(none)_ |

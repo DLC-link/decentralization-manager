@@ -316,8 +316,12 @@ pub enum Commands {
         /// 0 disables the endpoint. Defaults to 9464.
         #[arg(long, env = "DECPM_METRICS_PORT")]
         metrics_port: Option<u16>,
-        /// HTTP idle connection timeout in seconds. Defaults to 75.
-        #[arg(long, env = "DECPM_HTTP_KEEP_ALIVE_SECS")]
+        /// HTTP idle connection timeout in seconds (0 disables keep-alive). Defaults to 75.
+        #[arg(
+            long,
+            env = "DECPM_HTTP_KEEP_ALIVE_SECS",
+            value_parser = clap::value_parser!(u64).range(0..=u32::MAX as u64)
+        )]
         http_keep_alive_secs: Option<u64>,
     },
 }
@@ -345,8 +349,32 @@ mod tests {
     }
 
     #[test]
+    fn http_keep_alive_accepts_timeout_boundaries() {
+        for seconds in [0, u32::MAX as u64] {
+            let cli = Cli::try_parse_from([
+                "dec-party-manager",
+                "serve",
+                "--http-keep-alive-secs",
+                &seconds.to_string(),
+            ])
+            .unwrap();
+            let Commands::Serve {
+                http_keep_alive_secs,
+                ..
+            } = cli.command;
+            assert_eq!(http_keep_alive_secs, Some(seconds));
+        }
+    }
+
+    #[test]
     fn http_keep_alive_rejects_invalid_seconds() {
-        for value in ["-1", "invalid", "18446744073709551616"] {
+        for value in [
+            "-1",
+            "invalid",
+            "4294967296",
+            "18446744073709551615",
+            "18446744073709551616",
+        ] {
             assert!(
                 Cli::try_parse_from([
                     "dec-party-manager",

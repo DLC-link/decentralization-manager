@@ -287,7 +287,7 @@ pub struct NodeConfig {
     /// Port serving Prometheus metrics at `/metrics`, on its own listener rather
     /// than the API port. 0 serves no metrics. Default 9464.
     pub metrics_port: u16,
-    /// HTTP idle connection timeout in seconds. Defaults to 75.
+    /// HTTP idle connection timeout in seconds (0 disables keep-alive). Defaults to 75.
     pub http_keep_alive_secs: u64,
     /// Top-level Keycloak config for frontend website gating
     pub keycloak: Option<KeycloakConfig>,
