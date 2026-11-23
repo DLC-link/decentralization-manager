@@ -15,7 +15,7 @@ use crate::{
 
 const RUN: &str = "signature-run";
 const CONFIG: &[u8] = br#"{"instance_name":"signature-run","marker":"saved-config"}"#;
-const PAIR: &[u8] = &[2, 11, 12, 3, 21, 22, 23];
+const PAIR: &[u8] = &[3, 10, 1, 1, 3, 10, 1, 2];
 
 fn peer(n: u8) -> CantonId {
     CantonId::new(format!("p{n}"), Namespace::new([n; NAMESPACE_LENGTH]))
@@ -110,12 +110,17 @@ async fn survives_restart<S: WorkflowStep + 'static>(
     let root = tempfile::tempdir()?;
     insert_run(&db, step).await?;
     let server = start(&db, &root, step).await?;
-    assert_eq!(send(&server, 1, msg_type, PAIR).await?, MessageType::Ack);
+    let payload = if split_kinds.is_some() {
+        PAIR
+    } else {
+        &PAIR[..4]
+    };
+    assert_eq!(send(&server, 1, msg_type, payload).await?, MessageType::Ack);
     assert_eq!(server.workflow_state.current_step().await, step);
     assert_eq!(
         db.read_artifact(RUN, upload_kind, Some(&peer(1).to_string()))
             .await?,
-        Some(PAIR.to_vec())
+        Some(payload.to_vec())
     );
     drop(server);
 
@@ -136,7 +141,7 @@ async fn survives_restart<S: WorkflowStep + 'static>(
     for (item, (_, proposal)) in items[1..].iter().zip(proposals) {
         assert_eq!(item, proposal);
     }
-    assert_eq!(send(&server, 2, msg_type, PAIR).await?, MessageType::Ack);
+    assert_eq!(send(&server, 2, msg_type, payload).await?, MessageType::Ack);
     assert_eq!(
         server.workflow_state.current_step().await,
         step.next().unwrap()
@@ -151,18 +156,18 @@ async fn survives_restart<S: WorkflowStep + 'static>(
     assert!(server.workflow_state.get_all_peer_data().await.is_empty());
     if let Some((dns_kind, p2p_kind)) = split_kinds {
         // A process may also stop after writing only one split artifact.
-        db.write_artifact(RUN, dns_kind, Some(&peer(1).to_string()), &[2, 11, 12])
+        db.write_artifact(RUN, dns_kind, Some(&peer(1).to_string()), &[3, 10, 1, 1])
             .await?;
         save_signature_pairs(&db, RUN, upload_kind, dns_kind, p2p_kind).await?;
         for p in [peer(1), peer(2)] {
             let key = p.to_string();
             assert_eq!(
                 db.read_artifact(RUN, dns_kind, Some(&key)).await?,
-                Some(vec![2, 11, 12])
+                Some(vec![3, 10, 1, 1])
             );
             assert_eq!(
                 db.read_artifact(RUN, p2p_kind, Some(&key)).await?,
-                Some(vec![3, 21, 22, 23])
+                Some(vec![3, 10, 1, 2])
             );
         }
     } else {
@@ -304,7 +309,7 @@ async fn an_upload_retries_after_storage_recovers(db: SqlitePool) -> Result {
             &server,
             1,
             MessageType::AddPartyClearSignatures,
-            b"clearing signature"
+            &[3, 10, 1, 1]
         )
         .await?,
         MessageType::Error
@@ -321,7 +326,7 @@ async fn an_upload_retries_after_storage_recovers(db: SqlitePool) -> Result {
             &server,
             1,
             MessageType::AddPartyClearSignatures,
-            b"clearing signature"
+            &[3, 10, 1, 1]
         )
         .await?,
         MessageType::Ack
@@ -336,7 +341,7 @@ async fn an_upload_retries_after_storage_recovers(db: SqlitePool) -> Result {
             Some(&peer(1).to_string())
         )
         .await?,
-        Some(b"clearing signature".to_vec())
+        Some(vec![3, 10, 1, 1])
     );
     Ok(())
 }
@@ -346,7 +351,7 @@ async fn submission_preserves_distinct_peer_pairs_and_ignores_a_late_replacement
     db: SqlitePool,
 ) -> Result {
     let root = tempfile::tempdir()?;
-    let other_pair = [1, 31, 2, 41, 42];
+    let other_pair = [3, 10, 1, 3, 3, 10, 1, 4];
     insert_run(&db, ChangeThresholdStep::SignProposals).await?;
     let server = start(&db, &root, ChangeThresholdStep::SignProposals).await?;
     assert_eq!(
@@ -392,8 +397,8 @@ async fn submission_preserves_distinct_peer_pairs_and_ignores_a_late_replacement
         )
         .await?;
         for (from, dns, p2p) in [
-            (1, vec![2, 11, 12], vec![3, 21, 22, 23]),
-            (2, vec![1, 31], vec![2, 41, 42]),
+            (1, vec![3, 10, 1, 1], vec![3, 10, 1, 2]),
+            (2, vec![3, 10, 1, 3], vec![3, 10, 1, 4]),
         ] {
             let key = peer(from).to_string();
             assert_eq!(
@@ -786,9 +791,7 @@ async fn add_party_clear_rejects_malformed_and_conflicting_uploads(db: SqlitePoo
         )
         .await?;
     assert_eq!(conflict.msg_type, MessageType::Error);
-    assert!(
-        std::str::from_utf8(&conflict.payload)?.contains("Upload conflicts with saved payload")
-    );
+    assert_eq!(conflict.payload, b"Invalid upload");
     assert_eq!(
         db.read_artifact(
             RUN,
@@ -955,4 +958,100 @@ async fn a_failed_upload_artifact_read_returns_a_storage_error(db: SqlitePool) -
         .execute(&db)
         .await?;
     assert_upload_read_failure(&server).await
+}
+
+async fn rejects_invalid_protobuf<S: WorkflowStep + 'static>(
+    db: SqlitePool,
+    step: S,
+    msg_type: MessageType,
+    kind: &str,
+    invalid: &[&[u8]],
+    corrected: &[u8],
+) -> Result {
+    let root = tempfile::tempdir()?;
+    insert_run(&db, step).await?;
+    let server = start(&db, &root, step).await?;
+    for payload in invalid {
+        let response = server
+            .handle_command(peer(1), Message::new(msg_type, payload.to_vec()))
+            .await?;
+        assert_eq!(response.msg_type, MessageType::Error);
+        assert_eq!(response.payload, b"Invalid upload");
+        assert!(!server.workflow_state.has_peer_completed(&peer(1)).await);
+        assert_eq!(server.workflow_state.current_step().await, step);
+        assert!(db.list_artifacts(RUN, kind).await?.is_empty());
+        let completed: String = sqlx::query_scalar(
+            "SELECT completed_peers_json FROM workflow_runs WHERE instance_name = ?",
+        )
+        .bind(RUN)
+        .fetch_one(&db)
+        .await?;
+        assert_eq!(completed, "[]");
+    }
+    drop(server);
+    let server = start(&db, &root, step).await?;
+    assert!(!server.workflow_state.has_peer_completed(&peer(1)).await);
+    assert_eq!(
+        send(&server, 1, msg_type, corrected).await?,
+        MessageType::Ack
+    );
+    assert!(server.workflow_state.has_peer_completed(&peer(1)).await);
+    assert_eq!(
+        db.read_artifact(RUN, kind, Some(&peer(1).to_string()))
+            .await?,
+        Some(corrected.to_vec())
+    );
+    Ok(())
+}
+
+#[sqlx::test(migrator = "MIGRATOR")]
+async fn invalid_pair_protobuf_members_allow_corrected_replay(db: SqlitePool) -> Result {
+    rejects_invalid_protobuf(
+        db,
+        KickStep::SignProposals,
+        MessageType::KickSignatures,
+        artifact_kinds::KICK_SIGNATURE_UPLOAD,
+        &[&[1, 255, 3, 10, 1, 2], &[3, 10, 1, 1, 1, 255]],
+        PAIR,
+    )
+    .await
+}
+
+#[sqlx::test(migrator = "MIGRATOR")]
+async fn invalid_clearing_protobuf_allows_corrected_replay(db: SqlitePool) -> Result {
+    rejects_invalid_protobuf(
+        db,
+        AddPartyStep::SignClearOnboarding,
+        MessageType::AddPartyClearSignatures,
+        artifact_kinds::SIGNED_ADD_PARTY_CLEAR,
+        &[&[1, 255]],
+        &PAIR[..4],
+    )
+    .await
+}
+
+#[sqlx::test(migrator = "MIGRATOR")]
+async fn invalid_add_party_pair_allows_corrected_replay_after_restart(db: SqlitePool) -> Result {
+    rejects_invalid_protobuf(
+        db,
+        AddPartyStep::SignProposals,
+        MessageType::AddPartySignatures,
+        artifact_kinds::ADD_PARTY_SIGNATURE_UPLOAD,
+        &[&[1, 255, 3, 10, 1, 2], &[3, 10, 1, 1, 1, 255]],
+        PAIR,
+    )
+    .await
+}
+
+#[sqlx::test(migrator = "MIGRATOR")]
+async fn invalid_threshold_pair_allows_corrected_replay_after_restart(db: SqlitePool) -> Result {
+    rejects_invalid_protobuf(
+        db,
+        ChangeThresholdStep::SignProposals,
+        MessageType::ChangeThresholdSignatures,
+        artifact_kinds::CHANGE_THRESHOLD_SIGNATURE_UPLOAD,
+        &[&[1, 255, 3, 10, 1, 2], &[3, 10, 1, 1, 1, 255]],
+        PAIR,
+    )
+    .await
 }

@@ -935,7 +935,11 @@ impl<S: WorkflowStep + 'static> NoiseServer<S> {
                     | MessageType::SignAddParty
                     | MessageType::SignChangeThreshold
             ) {
-                split_signed_pair(payload)?;
+                let (dns, p2p) = split_signed_pair(payload)?;
+                let _: SignedTopologyTransaction = utils::read_first_message_from_bytes(&dns)?;
+                let _: SignedTopologyTransaction = utils::read_first_message_from_bytes(&p2p)?;
+            } else if command == MessageType::SignClearOnboarding {
+                let _: SignedTopologyTransaction = utils::read_first_message_from_bytes(payload)?;
             }
             Ok(())
         }
@@ -948,11 +952,8 @@ impl<S: WorkflowStep + 'static> NoiseServer<S> {
                     b"The coordinator could not store the upload".to_vec(),
                 ));
             }
-            tracing::warn!(%error, "Invalid {artifact_kind} from {peer_id}");
-            return Ok(Message::new(
-                MessageType::Error,
-                format!("Invalid upload: {error}").into_bytes(),
-            ));
+            tracing::warn!("Invalid {artifact_kind} from {peer_id}");
+            return Ok(Message::new(MessageType::Error, b"Invalid upload".to_vec()));
         }
         if let Err(e) = self
             .workflow_state
