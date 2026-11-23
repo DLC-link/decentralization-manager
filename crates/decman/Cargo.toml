@@ -84,8 +84,8 @@ uuid = { workspace = true }
 x509-parser = { workspace = true }
 zeroize = { workspace = true }
 
-canton-common = { workspace = true }
-canton-proto-rs = { workspace = true }
+canton-common = { workspace = true, features = ["api-client"] }
+canton-proto-rs = { workspace = true, features = ["transport"] }
 canton-registry = { workspace = true }
 common = { workspace = true, features = ["openapi"] }
 decman-lib = { workspace = true, features = ["openapi"] }
