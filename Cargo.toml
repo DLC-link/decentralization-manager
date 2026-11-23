@@ -14,7 +14,18 @@ resolver = "2"
 # crates.io block first, then a blank line and the git/path deps.
 [workspace.dependencies]
 actix-cors = { version = "0.7" }
-actix-web = { version = "4" }
+# Every default feature except `cookies`. DecMan sets no cookies, and the
+# cookie 0.16 that actix-web 4 uses has RUSTSEC-2026-0594.
+actix-web = { version = "4", default-features = false, features = [
+  "compat",
+  "compress-brotli",
+  "compress-gzip",
+  "compress-zstd",
+  "http2",
+  "macros",
+  "unicode",
+  "ws",
+] }
 aes-gcm = { version = "0.11", features = ["zeroize"] }
 anyhow = { version = "1.0.98" }
 async-trait = { version = "0.1" }
