@@ -537,6 +537,7 @@ Most variables have a default that's only useful for local development (loopback
 |---|---|---|---|
 | `DECPM_LISTEN_ADDRESS` | `0.0.0.0` | optional | Noise transport bind address |
 | `DECPM_NOISE_PORT` | `9000` | optional | Noise transport port |
+| `DECPM_HTTP_KEEP_ALIVE_SECS` | `75` | optional | HTTP idle connection timeout in seconds. Set this above the proxy upstream idle timeout. |
 | `DECPM_METRICS_PORT` | `9464` | optional | Prometheus metrics port, separate from the API port. `0` serves no metrics. The listener is unauthenticated, so keep the port off the public internet (see [Service](#3d-service)) |
 | `DECPM_REWARD_AUTOMATION_INTERVAL_SECS` | `300` | optional | How often the CIP-104 reward automation sweeps each decparty for unassigned coupons |
 | `DECPM_REWARD_EXPIRY_READ_INTERVAL_SECS` | `3600` | optional | How often the automation re-reads the backlog purely to refresh `decman_reward_oldest_unassigned_expires_in_seconds`. Both expiry alert rules read that gauge, so this bounds how stale their input can get. A sweep reads the ledger too, so the gauge refreshes at whichever interval is shorter |

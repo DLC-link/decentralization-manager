@@ -316,5 +316,64 @@ pub enum Commands {
         /// 0 disables the endpoint. Defaults to 9464.
         #[arg(long, env = "DECPM_METRICS_PORT")]
         metrics_port: Option<u16>,
+        /// HTTP idle connection timeout in seconds. Defaults to 75.
+        #[arg(long, env = "DECPM_HTTP_KEEP_ALIVE_SECS")]
+        http_keep_alive_secs: Option<u64>,
     },
+}
+
+#[cfg(test)]
+mod tests {
+    use clap::CommandFactory;
+
+    use super::*;
+
+    #[test]
+    fn http_keep_alive_accepts_proxy_timeout_override() {
+        let cli = Cli::try_parse_from([
+            "dec-party-manager",
+            "serve",
+            "--http-keep-alive-secs",
+            "3601",
+        ])
+        .unwrap();
+        let Commands::Serve {
+            http_keep_alive_secs,
+            ..
+        } = cli.command;
+        assert_eq!(http_keep_alive_secs, Some(3601));
+    }
+
+    #[test]
+    fn http_keep_alive_rejects_invalid_seconds() {
+        for value in ["-1", "invalid", "18446744073709551616"] {
+            assert!(
+                Cli::try_parse_from([
+                    "dec-party-manager",
+                    "serve",
+                    "--http-keep-alive-secs",
+                    value,
+                ])
+                .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn http_keep_alive_exposes_operator_environment_variable() {
+        let command = Cli::command();
+        let serve = command.find_subcommand("serve").unwrap();
+        let argument = serve
+            .get_arguments()
+            .find(|argument| argument.get_id() == "http_keep_alive_secs")
+            .unwrap();
+        assert_eq!(
+            argument.get_env(),
+            Some(std::ffi::OsStr::new("DECPM_HTTP_KEEP_ALIVE_SECS"))
+        );
+        assert_eq!(
+            dec_party_manager::config::NodeConfig::default().http_keep_alive_secs,
+            75
+        );
+    }
 }

@@ -1503,6 +1503,7 @@ pub async fn start_server(
     tracing::info!("Starting HTTP server on {host}:{port}");
     tracing::info!("Frontend available at http://{host}:{port}/");
 
+    let http_keep_alive = Duration::from_secs(config.http_keep_alive_secs);
     HttpServer::new(move || {
         // Frontend is embedded and served from this same origin, so no
         // cross-origin access is required by default. `Cors::default()` is
@@ -1654,6 +1655,7 @@ pub async fn start_server(
         }
         app.service(assets::serve_frontend)
     })
+    .keep_alive(http_keep_alive)
     .bind((host, port))?
     .run()
     .await?;
