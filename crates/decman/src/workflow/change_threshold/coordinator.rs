@@ -171,7 +171,16 @@ async fn submit_signed_change(
     change_config: &ChangeThresholdConfig,
 ) -> Result {
     prepare_signatures(workflow_state, storage, instance_name).await?;
-    submit_change(node_config, storage, instance_name, change_config).await
+    let (config, db, name, change) = (
+        node_config.clone(),
+        storage.clone(),
+        instance_name.to_string(),
+        change_config.clone(),
+    );
+    crate::workflow::submit_topology(storage, instance_name, async move {
+        submit_change(&config, &db, &name, &change).await
+    })
+    .await
 }
 
 /// Rebuild the per-peer signature artifacts, then refuse to submit unless every

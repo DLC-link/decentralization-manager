@@ -189,7 +189,18 @@ async fn run_workflow(
             AddPartyStep::SubmitProposals => {
                 tracing::info!("Coordinator executing: Submit proposals");
                 save_signature_pairs(&workflow_state, &db, &instance_name).await?;
-                submit_proposals(&node_config, &db, &instance_name, &add_party_config).await?;
+                {
+                    let (config, storage, name, party) = (
+                        node_config.clone(),
+                        db.clone(),
+                        instance_name.clone(),
+                        add_party_config.clone(),
+                    );
+                    crate::workflow::submit_topology(&db, &instance_name, async move {
+                        submit_proposals(&config, &storage, &name, &party).await
+                    })
+                    .await?;
+                }
                 copy_new_member_identity(&db, &instance_name, &add_party_config).await?;
 
                 // The topology is live. Open the export but read nothing from it:

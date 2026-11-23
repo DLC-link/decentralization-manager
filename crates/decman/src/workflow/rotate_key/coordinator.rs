@@ -98,7 +98,18 @@ pub async fn start_coordinator(
                             workflow_state.expected_peers(),
                         )
                         .await?;
-                        submit_rotation(&node_config, &db, &instance_name, &rotate_config).await?;
+                        {
+                            let (config, storage, name, rotate) = (
+                                node_config.clone(),
+                                db.clone(),
+                                instance_name.clone(),
+                                rotate_config.clone(),
+                            );
+                            crate::workflow::submit_topology(&db, &instance_name, async move {
+                                submit_rotation(&config, &storage, &name, &rotate).await
+                            })
+                            .await?;
+                        }
                         workflow_state.advance_step().await;
                     }
                     RotateKeyStep::RetireLegacyKeys => {

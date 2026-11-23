@@ -11,6 +11,7 @@ use crate::{
     workflow::{
         signature_pairs::save_signature_pairs,
         storage::{WorkflowStorage, artifact_kinds},
+        submit_topology,
     },
 };
 
@@ -124,8 +125,14 @@ pub async fn start_coordinator(
                         )
                         .await?;
 
-                        let (confirmed_version, confirmed_thresholds) =
-                            submit_kick(&node_config, &db, &instance_name).await?;
+                        let (confirmed_version, confirmed_thresholds) = {
+                            let (config, storage, name) =
+                                (node_config.clone(), db.clone(), instance_name.clone());
+                            submit_topology(&db, &instance_name, async move {
+                                submit_kick(&config, &storage, &name).await
+                            })
+                            .await?
+                        };
                         // Deliberately not fatal. The kick is durable at this
                         // point, so failing the step would leave the workflow
                         // on SubmitKick and a resume would resubmit the same

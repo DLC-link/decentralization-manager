@@ -20,7 +20,7 @@ pub mod validation;
 #[cfg(test)]
 mod peer_retry_tests;
 
-use std::sync::Arc;
+use std::{future::Future, sync::Arc};
 
 use anyhow::Context;
 use canton_proto_rs::com::digitalasset::canton::protocol::v30::{
@@ -300,6 +300,28 @@ pub(crate) async fn ensure_run_in_progress(db: &SqlitePool, instance_name: &str)
         run.status
     );
     Ok(())
+}
+
+/// Submit topology for run `instance_name`, if the run is still in progress.
+///
+/// A submit is two transactions with a confirmation wait between them. An
+/// abort in that wait leaves the party with the first change in force and
+/// the second never sent, and a cancelled run never resumes. So the submit
+/// runs in a task of its own: a cancel that arrives while it is in flight
+/// lets it finish, and the aborted loop then stops at the step boundary.
+///
+/// # Errors
+///
+/// Errors when the run is not `InProgress`, or when the submit fails.
+pub(crate) async fn submit_topology<T: Send + 'static>(
+    db: &SqlitePool,
+    instance_name: &str,
+    work: impl Future<Output = Result<T>> + Send + 'static,
+) -> Result<T> {
+    ensure_run_in_progress(db, instance_name).await?;
+    tokio::spawn(work)
+        .await
+        .context("The topology submit task stopped")?
 }
 
 /// Start node in peer mode (client)
@@ -2023,6 +2045,107 @@ mod tests {
             ticks.load(Ordering::SeqCst),
             stopped_at,
             "the coordinator loop kept running after its run was aborted"
+        );
+        Ok(())
+    }
+
+    async fn insert_coordinator_run(db: &SqlitePool, status: &str) -> Result {
+        sqlx::query(
+            "INSERT INTO workflow_runs
+             (instance_name, kind, role, status, current_step, step_index, step_total,
+              config_json, expected_peers_json, completed_peers_json, created_at, updated_at)
+             VALUES ('run', 'Kick', 'Coordinator', ?, 'SubmitKick', 4, 7, '{}', '[]', '[]', 0, 0)",
+        )
+        .bind(status)
+        .execute(db)
+        .await?;
+        Ok(())
+    }
+
+    /// A cancel that lands between the two halves of a submit must not leave
+    /// the first half in force alone. The submit finishes, and its caller is
+    /// the only part that stops.
+    #[sqlx::test(migrator = "crate::db::MIGRATOR")]
+    async fn a_submit_finishes_when_its_caller_is_aborted(db: SqlitePool) -> Result {
+        use std::{
+            sync::atomic::{AtomicU8, Ordering},
+            time::Duration,
+        };
+
+        insert_coordinator_run(&db, "inprogress").await?;
+        let progress = Arc::new(AtomicU8::new(0));
+        let work = {
+            let progress = progress.clone();
+            async move {
+                progress.store(1, Ordering::SeqCst);
+                tokio::time::sleep(Duration::from_millis(200)).await;
+                progress.store(2, Ordering::SeqCst);
+                Ok(())
+            }
+        };
+        let caller = tokio::spawn(async move { submit_topology(&db, "run", work).await });
+        while progress.load(Ordering::SeqCst) == 0 {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+
+        caller.abort();
+        assert!(caller.await.is_err_and(|e| e.is_cancelled()));
+        assert_eq!(
+            progress.load(Ordering::SeqCst),
+            1,
+            "the submit was still in flight"
+        );
+        tokio::time::sleep(Duration::from_millis(400)).await;
+
+        assert_eq!(
+            progress.load(Ordering::SeqCst),
+            2,
+            "the aborted submit stopped half way"
+        );
+        Ok(())
+    }
+
+    /// A run that is not in progress starts no submit, and a run in progress
+    /// returns what the submit returns.
+    #[sqlx::test(migrator = "crate::db::MIGRATOR")]
+    async fn a_submit_starts_only_for_a_run_in_progress(db: SqlitePool) -> Result {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        for status in ["cancelled", "failed", "completed", "idle"] {
+            sqlx::query("DELETE FROM workflow_runs")
+                .execute(&db)
+                .await?;
+            insert_coordinator_run(&db, status).await?;
+            let started = Arc::new(AtomicBool::new(false));
+            let flag = started.clone();
+
+            let error = submit_topology(&db, "run", async move {
+                flag.store(true, Ordering::SeqCst);
+                Ok(())
+            })
+            .await
+            .expect_err("a run that is not in progress submitted");
+
+            assert!(format!("{error:#}").contains(status), "{error:#}");
+            assert!(
+                !started.load(Ordering::SeqCst),
+                "{status} run started a submit"
+            );
+        }
+
+        sqlx::query("DELETE FROM workflow_runs")
+            .execute(&db)
+            .await?;
+        assert!(submit_topology(&db, "run", async { Ok(()) }).await.is_err());
+
+        insert_coordinator_run(&db, "inprogress").await?;
+        assert_eq!(submit_topology(&db, "run", async { Ok(7) }).await?, 7);
+        assert!(
+            submit_topology(&db, "run", async {
+                anyhow::bail!("rejected") as Result<()>
+            })
+            .await
+            .is_err_and(|e| format!("{e:#}").contains("rejected"))
         );
         Ok(())
     }
