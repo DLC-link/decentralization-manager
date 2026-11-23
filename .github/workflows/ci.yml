@@ -7,6 +7,11 @@ on:
   workflow_call:
   workflow_dispatch:
 
+# Every job only reads the repository. A job that needs more access asks for
+# it in its own `permissions:` block.
+permissions:
+  contents: read
+
 # One in-flight CI run per PR: Integration Tests holds a 30-minute
 # `ubuntu-very-big` runner, so a superseded commit keeps a big machine busy
 # producing a result nobody reads.
@@ -200,6 +205,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
       - uses: ./.github/actions/setup-build-env
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
