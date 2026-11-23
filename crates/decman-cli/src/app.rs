@@ -29,6 +29,7 @@ use crate::composer::{
     SelectOption, TypeOption,
 };
 use crate::config::Profile;
+use crate::governance_body::placeholder_action;
 use crate::ui;
 
 /// Per-party detail extras (holdings + audit), each fetched independently so
@@ -1271,12 +1272,6 @@ fn pc_field_mut(form: &mut PartyConfigForm, row: Option<PcRow>) -> Option<&mut S
         PcRow::Auth0Secret => Some(&mut form.auth0_secret),
         PcRow::Mode | PcRow::Discover | PcRow::Submit => None,
     }
-}
-
-/// The placeholder action sent with on-chain (`core_domain`) confirm/execute —
-/// the server builds the real choice from `proposal_cid` and ignores this.
-fn placeholder_action() -> Value {
-    json!({ "type": "governance_set_threshold", "new_threshold": 0 })
 }
 
 /// Resolve the package id, members and operator needed to deploy governance
