@@ -285,7 +285,7 @@ async fn governance_workflows_e2e() -> anyhow::Result<()> {
     }
     // Restarts Canton with key download off and deploys once more for the
     // party, which must sign from DecMan's key store (#608). It runs last
-    // because key download stays off. Splice 0.10 localnet only.
+    // because key download stays off. Localnet only.
     phases::key_download_off::run(&mut f).await?;
     Ok(())
 }
