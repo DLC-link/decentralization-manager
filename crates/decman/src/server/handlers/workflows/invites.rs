@@ -447,6 +447,104 @@ mod tests {
         Ok(())
     }
 
+    /// Every line `send_invites` writes, in order, with its level, target
+    /// and text: each recipient list, and both label sets (rotate-key's
+    /// send line has no address, and its empty key fails to parse).
+    #[sqlx::test(migrator = "crate::db::MIGRATOR")]
+    async fn each_invite_line_keeps_its_level_and_text(pool: SqlitePool) -> anyhow::Result<()> {
+        use super::super::test_support::{
+            CapturedLogs, assert_lines, closed_port, insert_peers, peer, pid, test_node,
+        };
+
+        let (me, p2, p3, p4, p5) = (pid(1)?, pid(2)?, pid(3)?, pid(4)?, pid(5)?);
+        let port = closed_port()?;
+        let mut bad_key = peer(&p5, port, false);
+        bad_key.public_key = "not hex".to_string();
+        insert_peers(
+            &pool,
+            &[
+                peer(&me, port, false),
+                peer(&p2, port, true),
+                peer(&p3, port, false),
+                bad_key,
+            ],
+        )
+        .await?;
+        let node = test_node(pool.clone(), &me).await?;
+        let invite = || Ok(Message::new(MessageType::InviteDars, Vec::new()));
+        let labels = |name: &'static str, skip: &'static str, detailed: bool| InviteLabels {
+            kind: name,
+            skip,
+            failed: skip,
+            address: detailed,
+            empty_key_warning: detailed,
+        };
+        let logs = CapturedLogs::default();
+        let _default = tracing::subscriber::set_default(logs.subscriber());
+
+        let listed = [p2.clone(), p3.clone(), p5.clone(), p4.clone()];
+        send_invites(
+            &node.data.config,
+            &pool,
+            Recipients::Listed(&listed),
+            labels("add-party", "add-party ", true),
+            invite,
+        )
+        .await?;
+        let survivors = [me.clone(), p2.clone(), p3.clone()];
+        send_invites(
+            &node.data.config,
+            &pool,
+            Recipients::KickSurvivors {
+                invitees: &survivors,
+                kicked: Some(&p3),
+            },
+            InviteLabels {
+                failed: "kick ",
+                ..labels("kick", "", true)
+            },
+            invite,
+        )
+        .await?;
+        let members = [p2.clone(), p3.clone(), p5.clone()];
+        send_invites(
+            &node.data.config,
+            &pool,
+            Recipients::Members(&members),
+            labels("rotate-key", "rotate-key ", false),
+            invite,
+        )
+        .await?;
+
+        // The lines name the module that holds `send_invites`.
+        let here = module_path!().trim_end_matches("::tests");
+        assert_lines(
+            &logs.lines_at(here)?,
+            &[
+                format!(" INFO {here}: Sending add-party invite to {p2} at 127.0.0.1:{port}"),
+                format!("ERROR {here}: Failed to send add-party invite to {p2}: "),
+                format!(
+                    " WARN {here}: Skipping add-party invite to {p3} - no public key configured"
+                ),
+                format!(" WARN {here}: Skipping add-party invite to {p5} - invalid public key: "),
+                format!(" WARN {here}: Skipping invite to {p4} - peer not found in network config"),
+                format!("DEBUG {here}: Checking peer {me}: self_match=true, kicked_match=false"),
+                format!("DEBUG {here}: Skipping {me} - this is self"),
+                format!("DEBUG {here}: Checking peer {p2}: self_match=false, kicked_match=false"),
+                format!(" INFO {here}: Sending kick invite to {p2} at 127.0.0.1:{port}"),
+                format!("ERROR {here}: Failed to send kick invite to {p2}: "),
+                format!("DEBUG {here}: Checking peer {p3}: self_match=false, kicked_match=true"),
+                format!(" INFO {here}: Skipping invite to {p3} - they are being kicked"),
+                format!("DEBUG {here}: Checking peer {p5}: self_match=false, kicked_match=false"),
+                format!(" INFO {here}: Sending rotate-key invite to {p2}"),
+                format!("ERROR {here}: Failed to send rotate-key invite to {p2}: "),
+                format!(" WARN {here}: Skipping rotate-key invite to {p3} - invalid public key: "),
+                format!(" WARN {here}: Skipping rotate-key invite to {p5} - invalid public key: "),
+            ],
+        );
+        Ok(())
+    }
+
     #[test]
     fn the_rotate_key_invite_is_stable() -> anyhow::Result<()> {
         let rotated_key = format!("1220{}", "c".repeat(64));

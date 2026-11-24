@@ -445,7 +445,9 @@ mod launch_tests {
         server::types::WorkflowRole,
     };
 
-    use super::super::test_support::{in_progress_run, insert_run, pid, test_node};
+    use super::super::test_support::{
+        CapturedLogs, assert_lines, in_progress_run, insert_run, pid, test_node,
+    };
     use super::*;
 
     type TestResult = anyhow::Result<()>;
@@ -526,8 +528,10 @@ mod launch_tests {
     }
 
     /// A failed invite fails the run in memory and in its row with the same
-    /// text, and the run leaves the registry.
+    /// text, logs one error line, and the run leaves the registry.
     async fn a_failed_invite_fails_the_run_in(pool: SqlitePool, order: StatusOrder) -> TestResult {
+        let logs = CapturedLogs::default();
+        let _default = tracing::subscriber::set_default(logs.subscriber());
         let node = test_node(pool.clone(), &pid(1)?).await?;
         let instance = registered_run(&pool, &node.data).await?;
 
@@ -552,6 +556,14 @@ mod launch_tests {
             .ok_or_else(|| anyhow::anyhow!("the run row is gone"))?;
         assert_eq!(row.status, WorkflowProgress::Failed);
         assert_eq!(row.error.as_deref(), Some(message));
+        // The line names the module that holds the task.
+        let here = module_path!().trim_end_matches("::launch_tests");
+        assert_lines(
+            &logs.lines_at(here)?,
+            &[format!(
+                "ERROR {here}: Failed to send DARs invites: no route to the peers"
+            )],
+        );
         Ok(())
     }
 

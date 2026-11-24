@@ -1,7 +1,12 @@
 //! Runs, party ids, app states, cached parties, kick fixtures, an admin
-//! request and a test node shared by the workflow handler tests.
+//! request, a test node and a log capture shared by the workflow handler
+//! tests.
 
-use std::{collections::HashSet, sync::Arc};
+use std::{
+    collections::HashSet,
+    io::{self, Write},
+    sync::{Arc, Mutex},
+};
 
 use actix_web::{
     App, HttpMessage,
@@ -425,4 +430,78 @@ pub async fn post_as_admin(
     body: serde_json::Value,
 ) -> Answer {
     post_as(data, service, uri, body, Some(admin())).await
+}
+
+/// The log lines written while [`CapturedLogs::subscriber`] is the thread's
+/// default subscriber. Each line reads `LEVEL target: message`.
+#[derive(Clone, Default)]
+pub struct CapturedLogs(Arc<Mutex<Vec<u8>>>);
+
+impl Write for CapturedLogs {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.0
+            .lock()
+            .map_err(|_| io::Error::other("the log buffer lock is poisoned"))?
+            .extend_from_slice(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+impl CapturedLogs {
+    /// A subscriber that writes every level into this capture, without
+    /// timestamps or colours.
+    pub fn subscriber(&self) -> impl tracing::Subscriber + Send + Sync + 'static {
+        let logs = self.clone();
+        tracing_subscriber::fmt()
+            .with_writer(move || logs.clone())
+            .with_ansi(false)
+            .without_time()
+            .with_max_level(tracing::Level::TRACE)
+            .finish()
+    }
+
+    /// The captured lines, oldest first.
+    pub fn lines(&self) -> anyhow::Result<Vec<String>> {
+        let bytes = self
+            .0
+            .lock()
+            .map_err(|_| anyhow::anyhow!("the log buffer lock is poisoned"))?;
+        Ok(String::from_utf8_lossy(&bytes)
+            .lines()
+            .map(str::to_string)
+            .collect())
+    }
+
+    /// The captured lines whose tracing target is exactly `target`, oldest
+    /// first.
+    pub fn lines_at(&self, target: &str) -> anyhow::Result<Vec<String>> {
+        let prefix = format!("{target}: ");
+        Ok(self
+            .lines()?
+            .into_iter()
+            .filter(|line| line.get(6..).is_some_and(|rest| rest.starts_with(&prefix)))
+            .collect())
+    }
+}
+
+/// Assert that `lines` match `expected` one for one. An expected line that
+/// ends in `": "` is a prefix, because an error text follows it; any other
+/// expected line must match exactly.
+#[track_caller]
+pub fn assert_lines(lines: &[String], expected: &[String]) {
+    assert_eq!(lines.len(), expected.len(), "{lines:#?}");
+    for (line, expected) in lines.iter().zip(expected) {
+        if expected.ends_with(": ") {
+            assert!(
+                line.starts_with(expected.as_str()),
+                "{line:?} != {expected:?}..."
+            );
+        } else {
+            assert_eq!(line, expected);
+        }
+    }
 }
