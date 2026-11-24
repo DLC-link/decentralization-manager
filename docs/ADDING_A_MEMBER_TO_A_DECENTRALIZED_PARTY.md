@@ -232,6 +232,9 @@ Contact the BitSafe team before you recover a participant in this state.
 
 ### DecMan refuses to start the run
 
+The workflow-conflict and database errors can also appear when a peer accepts an
+invitation or when the coordinator retries a run.
+
 | Error says | Do this |
 |---|---|
 | "is not a configured peer of this node" | Add the new member as a peer on the coordinator |
@@ -239,7 +242,8 @@ Contact the BitSafe team before you recover a participant in this state.
 | "is already a member of …" | Nothing. The participant already hosts the party |
 | "This node is not a member of …" | Start the run from a node that hosts the party |
 | "new_threshold must be between 1 and N" | Pick a value up to the current number of owners |
-| "already has a … workflow in flight" | Wait for that run to end, or cancel it |
+| "already has a … workflow in flight" | Wait for that run to end, or cancel it from its coordinator. A peer cannot cancel its peer run; contact that run's coordinator |
+| "Cannot check running workflows for …" | Confirm that the node's database is available, then retry. No workflow starts while this check is unavailable |
 | A list of incompatible peers | Upgrade those nodes to the same release |
 | "the new member … has not vetted N package(s)" | Distribute the missing DARs to the new member, then start the run again |
 | "Cannot check the new member's packages" | Open the party page and confirm that **Test Auth** succeeds. Then start the run again |

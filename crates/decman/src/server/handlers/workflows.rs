@@ -46,6 +46,7 @@ use crate::{
             WorkflowKind, WorkflowProgress, WorkflowResponse, WorkflowRole, WorkflowRun,
             WorkflowRunsResponse, WorkflowStatusResponse, permission_from_proto,
         },
+        workflow_exclusion::{PartyStartRefusal, claim_party_for_workflow},
     },
     signing::custody,
     utils,
@@ -4941,7 +4942,8 @@ pub async fn dismiss_workflow(
     responses(
         (status = 200, description = "Retry started", body = MessageResponse),
         (status = 404, description = "Run not found", body = ErrorResponse),
-        (status = 409, description = "Run is not in a retryable state", body = ErrorResponse)
+        (status = 409, description = "Run is not in a retryable state", body = ErrorResponse),
+        (status = 503, description = "Cannot check running workflows", body = ErrorResponse)
     )
 )]
 #[post("/workflows/{instance_name}/retry")]
@@ -5251,49 +5253,19 @@ pub(super) async fn claim_party_for_start(
     data: &web::Data<AppState>,
     party: &CantonId,
 ) -> std::result::Result<StartClaim, HttpResponse> {
-    let Some(claim) = data.workflows.claim_start(party) else {
-        return Err(HttpResponse::Conflict().json(ErrorResponse {
-            error: format!(
-                "Another request is starting a workflow for {party}; retry once it has started"
-            ),
-        }));
-    };
-    let existing = match find_inprogress_run_for_party(&data.db, party).await {
-        Ok(existing) => existing,
-        Err(error) => {
-            tracing::error!(%party, "Failed to check party workflows: {error:#}");
-            return Err(HttpResponse::ServiceUnavailable().json(ErrorResponse {
-                error: format!("Cannot check running workflows for {party}; retry later"),
-            }));
-        }
-    };
-    if let Some((run, kind)) = existing {
-        return Err(HttpResponse::Conflict().json(ErrorResponse {
-            error: format!(
-                "Party {party} already has a {kind} workflow in flight (run {run}); wait for it \
-                 to finish or cancel it first"
-            ),
-        }));
-    }
-    Ok(claim)
-}
-
-/// Any in-progress run on this node (either role) already targeting the given
-/// decentralized party. The old global one-at-a-time gate incidentally
-/// prevented two workflows from mutating the same party's topology
-/// concurrently (e.g. two kicks, or a kick racing a contracts deployment);
-/// with concurrent workflows that protection must be explicit. Local-node
-/// guard only — two DIFFERENT nodes coordinating conflicting workflows on the
-/// same party is a distributed conflict Canton itself surfaces.
-async fn find_inprogress_run_for_party(
-    db: &SqlitePool,
-    party: &CantonId,
-) -> Result<Option<(String, WorkflowKind)>> {
-    Ok(SchemaRead::get_in_progress_workflow_runs(db)
-        .await?
-        .into_iter()
-        .find(|r| r.dec_party_id.as_ref() == Some(party))
-        .map(|r| (r.instance_name, r.kind)))
+    claim_party_for_workflow(&data.workflows, &data.db, party)
+        .await
+        .map_err(|refusal| {
+            let status = if matches!(refusal, PartyStartRefusal::Unavailable { .. }) {
+                tracing::error!(error = ?refusal, "Failed to check party workflows");
+                StatusCode::SERVICE_UNAVAILABLE
+            } else {
+                StatusCode::CONFLICT
+            };
+            HttpResponse::build(status).json(ErrorResponse {
+                error: refusal.to_string(),
+            })
+        })
 }
 
 async fn find_party_with_prefix(db: &SqlitePool, prefix: &str) -> Result<Option<String>> {
@@ -5493,6 +5465,7 @@ mod tests {
 
     use super::super::invitations::insert_peer_run;
     use super::*;
+    use crate::server::workflow_exclusion::find_inprogress_run_for_party;
     use crate::{
         auth::Principal,
         db::MIGRATOR,

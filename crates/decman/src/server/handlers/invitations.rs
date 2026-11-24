@@ -334,7 +334,9 @@ pub async fn list_handled_invitations(
         (status = 200, description = "Invitation accepted", body = MessageResponse),
         (status = 401, description = "Unauthorized", body = ErrorResponse),
         (status = 403, description = "Forbidden: admin role required", body = ErrorResponse),
-        (status = 404, description = "Invitation not found", body = ErrorResponse)
+        (status = 404, description = "Invitation not found", body = ErrorResponse),
+        (status = 409, description = "A workflow already targets this party or run", body = ErrorResponse),
+        (status = 503, description = "Cannot check running workflows", body = ErrorResponse)
     )
 )]
 #[post("/invitations/accept")]
@@ -1210,7 +1212,7 @@ mod handled_invitation_tests {
     }
 
     #[sqlx::test(migrator = "MIGRATOR")]
-    async fn accept_waits_for_a_coordinator_start_and_preserves_the_invitation(
+    async fn accept_refuses_a_coordinator_start_and_preserves_the_invitation(
         pool: SqlitePool,
     ) -> anyhow::Result<()> {
         let party = crate::canton_id::CantonId::parse(&format!("party::1220{}", "ab".repeat(32)))?;

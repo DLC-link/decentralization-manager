@@ -27,6 +27,7 @@ pub(crate) mod tenant_call_audit;
 mod tenant_rate_limit;
 mod transfer_context;
 mod types;
+mod workflow_exclusion;
 
 #[cfg(test)]
 mod peer_failure_tests;
@@ -973,22 +974,22 @@ impl WorkflowTriggers {
                 && (instance.is_empty() || r.coordinator_instance.as_deref() == Some(instance))
         }) {
             let _start = if let Some(party) = &run.dec_party_id {
-                let Some(claim) = self.workflows.claim_start(party) else {
-                    tracing::warn!(%party, "Cannot retry peer run while another workflow starts");
-                    continue;
-                };
-                match self.db.get_in_progress_workflow_runs().await {
-                    Ok(runs) if !runs.iter().any(|r| r.dec_party_id.as_ref() == Some(party)) => {}
-                    Ok(_) => {
-                        tracing::warn!(%party, "Cannot retry peer run while a workflow is in flight");
-                        continue;
-                    }
-                    Err(error) => {
-                        tracing::error!(%party, "Cannot check peer retry exclusion: {error:#}");
+                match workflow_exclusion::claim_party_for_workflow(&self.workflows, &self.db, party)
+                    .await
+                {
+                    Ok(claim) => Some(claim),
+                    Err(refusal) => {
+                        if matches!(
+                            refusal,
+                            workflow_exclusion::PartyStartRefusal::Unavailable { .. }
+                        ) {
+                            tracing::error!(error = ?refusal, "Cannot retry peer workflow");
+                        } else {
+                            tracing::warn!(%refusal, "Cannot retry peer workflow");
+                        }
                         continue;
                     }
                 }
-                Some(claim)
             } else {
                 None
             };

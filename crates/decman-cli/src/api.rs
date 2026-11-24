@@ -1007,14 +1007,25 @@ impl DecmanClient {
         query: &[(String, String)],
         body: Option<&Value>,
     ) -> Result<Response> {
+        self.send_authed_with_timeout(method, path, query, body, self.request_timeout)
+    }
+
+    fn send_authed_with_timeout(
+        &mut self,
+        method: &Method,
+        path: &str,
+        query: &[(String, String)],
+        body: Option<&Value>,
+        timeout: Option<Duration>,
+    ) -> Result<Response> {
         self.authenticate()?;
-        let response = self.send_request(method, path, query, body)?;
+        let response = self.send_request(method, path, query, body, timeout)?;
         if response.status() != StatusCode::UNAUTHORIZED {
             return Ok(response);
         }
         self.drop_access_token();
         self.authenticate()?;
-        self.send_request(method, path, query, body)
+        self.send_request(method, path, query, body, timeout)
     }
 
     fn send_request(
@@ -1023,6 +1034,7 @@ impl DecmanClient {
         path: &str,
         query: &[(String, String)],
         body: Option<&Value>,
+        timeout: Option<Duration>,
     ) -> Result<Response> {
         let url = format!("{base}{path}", base = self.base_url);
         let mut request = self.http.request(method.clone(), &url);
@@ -1035,10 +1047,6 @@ impl DecmanClient {
         if let Some(body) = body {
             request = request.json(body);
         }
-        // Add-member validation can spend sixty seconds scanning packages.
-        let timeout = self.request_timeout.or_else(|| {
-            (method == Method::POST && path == "/add-party").then_some(Duration::from_secs(120))
-        });
         if let Some(timeout) = timeout {
             request = request.timeout(timeout);
         }
@@ -1247,15 +1255,21 @@ impl DecmanClient {
         new_threshold: i32,
         previous_threshold: i32,
     ) -> Result<()> {
-        self.post(
+        // The server can spend sixty seconds scanning packages before creating the run.
+        let timeout = self.request_timeout.unwrap_or(Duration::from_secs(120));
+        let response = self.send_authed_with_timeout(
+            &Method::POST,
             "/add-party",
-            Some(json!({
+            &[],
+            Some(&json!({
                 "decentralized_party_id": party_id,
                 "new_participant_id": new_participant_id,
                 "new_threshold": new_threshold,
                 "previous_threshold": previous_threshold,
             })),
-        )
+            Some(timeout),
+        )?;
+        success_or_api_error(Method::POST, "/add-party", response).map(drop)
     }
 
     /// Change the signing threshold of an existing decentralized party

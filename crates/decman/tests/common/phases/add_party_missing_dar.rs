@@ -220,7 +220,7 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
             }
         },
     )
-    // 4. Re-add P3 — its participant lacks orphan-marker. The start request
+    // 4. Re-add P3 — it holds orphan-marker but no longer vets it. The start request
     //    must refuse it before any run, invite, or proposal exists.
     .when(
         "P1 re-adds P3 — expect 409 naming the missing packages, and no run",
