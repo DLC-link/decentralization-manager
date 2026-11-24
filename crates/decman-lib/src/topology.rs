@@ -25,6 +25,8 @@ use canton_proto_rs::com::digitalasset::canton::{
     },
     version::v1::{UntypedVersionedMessage, untyped_versioned_message},
 };
+use std::collections::BTreeSet;
+
 use prost::Message;
 use sha2::{Digest, Sha256};
 
@@ -38,6 +40,9 @@ const V31_PROTO_VERSION: i32 = 31;
 
 /// Canton's `HashPurpose.TopologyTransactionSignature`.
 const TOPOLOGY_TRANSACTION_HASH_PURPOSE: u32 = 11;
+
+/// Canton's `HashPurpose.MultiTopologyTransaction`.
+const MULTI_TOPOLOGY_TRANSACTION_HASH_PURPOSE: u32 = 55;
 
 /// The multihash prefix of a SHA-256 digest: code 0x12, length 0x20.
 const SHA256_MULTIHASH_PREFIX: [u8; 2] = [0x12, 0x20];
@@ -82,19 +87,21 @@ impl TopologyFormat {
     }
 }
 
-/// The format of a serialized topology transaction, read from its envelope.
+/// The proto version that a serialized topology transaction's envelope
+/// names. [`TopologyFormat::from_proto_version`] says whether it is known.
 ///
 /// # Errors
 ///
-/// Errors when the envelope does not decode or names an unknown version.
-pub fn envelope_format(bytes: &[u8]) -> Result<TopologyFormat, Error> {
-    let versioned = UntypedVersionedMessage::decode(bytes).map_err(|e| {
-        Error::decode_from(
-            "Failed to decode the topology transaction's versioned envelope",
-            e,
-        )
-    })?;
-    TopologyFormat::from_proto_version(versioned.version)
+/// Errors when the envelope does not decode.
+pub fn envelope_version(bytes: &[u8]) -> Result<i32, Error> {
+    UntypedVersionedMessage::decode(bytes)
+        .map(|versioned| versioned.version)
+        .map_err(|e| {
+            Error::decode_from(
+                "Failed to decode the topology transaction's versioned envelope",
+                e,
+            )
+        })
 }
 
 /// `transaction` serialized as Canton serializes it in `format`: the
@@ -326,6 +333,35 @@ pub fn topology_transaction_hash(transaction: &[u8]) -> Vec<u8> {
         .chain_update(transaction)
         .finalize();
     [SHA256_MULTIHASH_PREFIX.as_slice(), digest.as_slice()].concat()
+}
+
+/// The hash a multi-transaction signature covers. One such signature counts
+/// as a signature on every transaction in the set.
+///
+/// Canton's `MultiTransactionSignature.computeCombinedHash`: a SHA-256
+/// multihash over the purpose, the number of transactions, and each
+/// transaction hash in ascending order, each behind its length. Every integer
+/// is 4 bytes, big-endian. Canton takes a set, so a repeated hash counts once.
+/// Canton orders hashes by their hex form, which for these equal-length
+/// multihashes is their byte order.
+pub fn multi_transaction_hash(transaction_hashes: &[Vec<u8>]) -> Vec<u8> {
+    let hashes: BTreeSet<&[u8]> = transaction_hashes.iter().map(Vec::as_slice).collect();
+    let mut hasher = Sha256::new()
+        .chain_update(MULTI_TOPOLOGY_TRANSACTION_HASH_PURPOSE.to_be_bytes())
+        .chain_update(length_prefix(hashes.len()));
+    for hash in hashes {
+        hasher.update(length_prefix(hash.len()));
+        hasher.update(hash);
+    }
+    [
+        SHA256_MULTIHASH_PREFIX.as_slice(),
+        hasher.finalize().as_slice(),
+    ]
+    .concat()
+}
+
+fn length_prefix(length: usize) -> [u8; 4] {
+    u32::try_from(length).unwrap_or(u32::MAX).to_be_bytes()
 }
 
 /// An external party's signing key, as it appears in `PartyToParticipant`.
@@ -571,7 +607,7 @@ mod tests {
     fn an_encoded_transaction_names_its_format_and_decodes_back() -> Result<(), Error> {
         for format in [TopologyFormat::V30, TopologyFormat::V31] {
             let bytes = encode_transaction(format, v30_p2p_transaction());
-            assert_eq!(envelope_format(&bytes)?, format);
+            assert_eq!(envelope_version(&bytes)?, format.proto_version());
             assert_eq!(decode_transaction(&bytes)?, v30_p2p_transaction());
         }
         Ok(())
@@ -611,6 +647,37 @@ mod tests {
             )),
             "1220ddc8a584bebf95ead3cf2ce22f591ed98c41643025e3ad5ae99399ad6a4a46fa"
         );
+    }
+
+    /// The layout written out byte by byte: purpose 55, the count, then
+    /// each hash in byte order behind its length.
+    #[test]
+    fn the_multi_transaction_hash_follows_cantons_rule() {
+        let low = [[0x12, 0x20].as_slice(), &[0x01; 32]].concat();
+        let high = [[0x12, 0x20].as_slice(), &[0xfe; 32]].concat();
+        let mut layout = Vec::new();
+        layout.extend_from_slice(&55u32.to_be_bytes());
+        layout.extend_from_slice(&2u32.to_be_bytes());
+        for hash in [&low, &high] {
+            layout.extend_from_slice(&34u32.to_be_bytes());
+            layout.extend_from_slice(hash);
+        }
+        let expected = [[0x12, 0x20].as_slice(), Sha256::digest(&layout).as_slice()].concat();
+
+        assert_eq!(
+            multi_transaction_hash(&[high.clone(), low.clone()]),
+            expected
+        );
+    }
+
+    #[test]
+    fn the_multi_transaction_hash_ignores_order_and_repeats() {
+        let a = topology_transaction_hash(b"a");
+        let b = topology_transaction_hash(b"b");
+        let both = multi_transaction_hash(&[a.clone(), b.clone()]);
+        assert_eq!(multi_transaction_hash(&[b.clone(), a.clone()]), both);
+        assert_eq!(multi_transaction_hash(&[a.clone(), b, a.clone()]), both);
+        assert_ne!(multi_transaction_hash(&[a]), both);
     }
 
     #[test]

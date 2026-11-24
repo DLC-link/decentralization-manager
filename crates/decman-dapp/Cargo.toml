@@ -3,14 +3,16 @@ name = "decman-dapp"
 version = "0.1.0"
 edition = "2024"
 license = "Apache-2.0"
-description = "Browser-side checks for the DecMan dApp, compiled to WebAssembly"
+description = "Browser-side Rust for the DecMan dApp, compiled to WebAssembly"
 
 [lib]
 # `cdylib` is the WebAssembly module; `rlib` lets the native tests link.
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
+base64 = { workspace = true }
 common = { workspace = true }
+decman-lib = { workspace = true }
 ed25519-dalek = { workspace = true }
 hex = { workspace = true }
 serde = { workspace = true }
@@ -18,6 +20,9 @@ serde_json = { workspace = true }
 sha2 = { workspace = true }
 thiserror = { workspace = true }
 wasm-bindgen = { workspace = true }
+
+[dev-dependencies]
+prost = { workspace = true }
 
 [package.metadata.wasm-pack.profile.release]
 # wasm-opt downloads binaryen on the first build. The module is small, so the

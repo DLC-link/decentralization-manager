@@ -1,6 +1,7 @@
 use std::collections::{BTreeSet, HashSet};
 
 use common::fingerprint::{compute_decentralized_namespace, fingerprint_from_public_key};
+use ed25519_dalek::VerifyingKey;
 use serde::{Deserialize, Serialize};
 
 use crate::{Error, payload_digest, signature::parse_public_key};
@@ -9,6 +10,9 @@ use crate::{Error, payload_digest, signature::parse_public_key};
 const MAX_HINT_LENGTH: usize = 185;
 /// The dApp creates parties that more than one owner controls.
 const MIN_OWNERS: usize = 2;
+/// The most namespace owners that the Ledger API's `AllocateExternalParty`
+/// accepts for a decentralized party.
+pub const MAX_OWNERS: usize = 10;
 /// Canton puts this between the party name and the namespace.
 const PARTY_ID_DELIMITER: &str = "::";
 /// The domain of the digest that each owner signs to approve the party.
@@ -31,24 +35,14 @@ pub struct PartyProposal {
 pub struct ProposedOwner {
     /// The owner's raw 32-byte Ed25519 public key, hex-encoded.
     pub public_key: String,
-    /// The participant that hosts the party for this owner.
+    /// The participant id of the node that hosts the party for this owner.
     pub participant: String,
 }
 
-/// A checked proposal, its party id, and the digest that each owner signs.
+/// A checked proposal and the party id that its owners create.
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PartyPlan {
-    #[serde(flatten)]
-    pub content: PlanContent,
-    pub digest: String,
-}
-
-/// The part of the plan that the digest covers. The struct fixes the field
-/// order, so the same proposal always serializes to the same bytes.
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct PlanContent {
     pub party_id: String,
     pub namespace: String,
     /// Sorted by namespace.
@@ -57,6 +51,8 @@ pub struct PlanContent {
     pub hosts: Vec<String>,
     pub signing_threshold: u32,
     pub confirmation_threshold: u32,
+    /// The digest that each owner signs in the mock.
+    pub digest: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -65,6 +61,8 @@ pub struct PlannedOwner {
     pub namespace: String,
     pub public_key: String,
     pub participant: String,
+    #[serde(skip)]
+    pub key: VerifyingKey,
 }
 
 /// Checks `proposal` and derives the party id that its owners create.
@@ -76,6 +74,12 @@ pub fn plan_party(proposal: &PartyProposal) -> Result<PartyPlan, Error> {
     if proposal.owners.len() < MIN_OWNERS {
         return Err(Error::TooFewOwners {
             min: MIN_OWNERS,
+            got: proposal.owners.len(),
+        });
+    }
+    if proposal.owners.len() > MAX_OWNERS {
+        return Err(Error::TooManyOwners {
+            max: MAX_OWNERS,
             got: proposal.owners.len(),
         });
     }
@@ -112,16 +116,17 @@ pub fn plan_party(proposal: &PartyProposal) -> Result<PartyPlan, Error> {
     let owner_namespaces: HashSet<String> =
         owners.iter().map(|owner| owner.namespace.clone()).collect();
     let namespace = compute_decentralized_namespace(&owner_namespaces);
-    let content = PlanContent {
+    let mut plan = PartyPlan {
         party_id: format!("{}{PARTY_ID_DELIMITER}{namespace}", proposal.party_hint),
         namespace,
         owners,
         hosts: hosts.into_iter().collect(),
         signing_threshold: proposal.signing_threshold,
         confirmation_threshold: proposal.confirmation_threshold,
+        digest: String::new(),
     };
-    let digest = payload_digest(PARTY_PROPOSAL_DOMAIN, &serde_json::to_string(&content)?);
-    Ok(PartyPlan { content, digest })
+    plan.digest = payload_digest(PARTY_PROPOSAL_DOMAIN, &serde_json::to_string(&plan)?);
+    Ok(plan)
 }
 
 fn plan_owner(number: usize, owner: &ProposedOwner) -> Result<PlannedOwner, Error> {
@@ -135,6 +140,7 @@ fn plan_owner(number: usize, owner: &ProposedOwner) -> Result<PlannedOwner, Erro
         namespace: fingerprint_from_public_key(key.as_bytes()).to_string(),
         public_key: hex::encode(key.as_bytes()),
         participant: participant.to_owned(),
+        key,
     })
 }
 
@@ -215,8 +221,8 @@ mod tests {
             })
             .collect();
         let namespace = compute_decentralized_namespace(&owner_namespaces);
-        assert_eq!(plan.content.namespace, namespace);
-        assert_eq!(plan.content.party_id, format!("treasury::{namespace}"));
+        assert_eq!(plan.namespace, namespace);
+        assert_eq!(plan.party_id, format!("treasury::{namespace}"));
         Ok(())
     }
 
@@ -226,7 +232,7 @@ mod tests {
         proposal.covalidators = vec![" covalidator-c ".to_owned(), "participant-a".to_owned()];
         let plan = plan_party(&proposal)?;
         assert_eq!(
-            plan.content.hosts,
+            plan.hosts,
             ["covalidator-c", "participant-a", "participant-b"]
         );
         Ok(())
@@ -238,7 +244,7 @@ mod tests {
         reversed.owners.reverse();
         let plan = plan_party(&proposal())?;
         let reversed_plan = plan_party(&reversed)?;
-        assert_eq!(plan.content.party_id, reversed_plan.content.party_id);
+        assert_eq!(plan.party_id, reversed_plan.party_id);
         assert_eq!(plan.digest, reversed_plan.digest);
         Ok(())
     }
@@ -258,6 +264,28 @@ mod tests {
         assert!(matches!(
             plan_party(&proposal),
             Err(Error::TooFewOwners { min: 2, got: 1 })
+        ));
+    }
+
+    #[test]
+    fn accepts_ten_owners_and_rejects_eleven() {
+        let mut proposal = proposal();
+        proposal.owners = (1..=10)
+            .map(|seed| ProposedOwner {
+                public_key: key(seed),
+                participant: format!("participant-{seed}"),
+            })
+            .collect();
+        proposal.confirmation_threshold = 1;
+        assert!(plan_party(&proposal).is_ok());
+
+        proposal.owners.push(ProposedOwner {
+            public_key: key(11),
+            participant: "participant-11".to_owned(),
+        });
+        assert!(matches!(
+            plan_party(&proposal),
+            Err(Error::TooManyOwners { max: 10, got: 11 })
         ));
     }
 

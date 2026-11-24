@@ -12,6 +12,8 @@ pub enum Error {
     HintContainsDelimiter,
     #[error("A party needs at least {min} owners. This proposal has {got}.")]
     TooFewOwners { min: usize, got: usize },
+    #[error("A party can have at most {max} owners. This proposal has {got}.")]
+    TooManyOwners { max: usize, got: usize },
     #[error("Owner {number} has an invalid Ed25519 public key.")]
     InvalidOwnerKey { number: usize },
     #[error("Owner {number} has no participant.")]
@@ -30,6 +32,24 @@ pub enum Error {
     InvalidDigest,
     #[error("The signature is not 64 bytes of hex.")]
     InvalidSignature,
+    #[error("A signature comes from key {public_key}, which is not an owner.")]
+    SignerNotOwner { public_key: String },
+    #[error("Owner {namespace} signed more than once.")]
+    DuplicateSignature { namespace: String },
+    #[error("The signature of owner {namespace} does not match these transactions.")]
+    OwnerSignatureMismatch { namespace: String },
+    #[error("Owner {namespace} has not signed yet. Every owner must sign to create the party.")]
+    MissingOwnerSignature { namespace: String },
+    #[error("The synchronizer id is empty.")]
+    MissingSynchronizer,
+    #[error("The participant uses topology format {0}. The dApp supports formats 30 and 31.")]
+    UnsupportedTopologyFormat(String),
+    #[error("The participant's answer has no topology transactions to read the format from.")]
+    NoTopologyToProbe,
+    #[error("The participant's topology transactions use more than one format.")]
+    MixedTopologyFormats,
+    #[error("The participant's answer is not valid: {0}")]
+    InvalidParticipantAnswer(String),
     #[error(transparent)]
     Json(#[from] serde_json::Error),
 }
