@@ -3,7 +3,7 @@
 use actix_web::{HttpRequest, HttpResponse, Responder, post, web};
 
 use canton_proto_rs::com::daml::ledger::api::v2::{
-    SubmitAndWaitForTransactionRequest, SubmitAndWaitRequest,
+    Commands, SubmitAndWaitForTransactionRequest, SubmitAndWaitRequest,
     command_service_client::CommandServiceClient,
 };
 use decman_lib::catalog::commands::build_confirm_proposal;
@@ -18,10 +18,12 @@ use decman_lib::framework::encode::TransferValidity;
 
 use crate::{
     canton_id::CantonId,
+    config::PackageConfig,
     error::Result,
     server::{
         AppState,
         audit::{AuditEvent, AuditParams, spawn_audit_log, with_proposal_cid},
+        error::ApiError,
         middleware::require_admin,
         queries::{resolve_contract_package_ref, select_input_holdings},
         transfer_context::{
@@ -117,47 +119,8 @@ pub async fn propose_action(
         Err(e) => return e.into_response(),
     };
 
-    // Canton cannot enforce the per-decparty singleton, so the propose boundary
-    // is the only place a second CouponReassignmentDelegation is catchable.
-    //
-    // Match on the proposal type BEFORE reading the ledger: only one variant can
-    // trip this guard, and the read is a GetLedgerEnd plus a GetActiveContracts
-    // that every other propose would otherwise pay for nothing.
-    if may_create_second_delegation(&body.proposal) {
-        match crate::server::reward_automation::active_delegation(
-            &data.config,
-            &packages(),
-            data.test_mode,
-            party_id,
-            &token,
-        )
-        .await
-        {
-            Ok(Some(active)) => {
-                return HttpResponse::Conflict().json(ErrorResponse {
-                    error: format!(
-                        "a CouponReassignmentDelegation is already active ({}); set \
-                         prior_delegation to replace it — creating a second one stops \
-                         assignment entirely",
-                        active.cid
-                    ),
-                });
-            }
-            Ok(None) => {}
-            // Do not swallow this. The guard exists for exactly the state a
-            // failed read leaves us blind to, so let the proposer see it rather
-            // than admitting a second delegation on a transport blip.
-            Err(e) => {
-                tracing::warn!(%party_id, error = %e, "delegation singleton check failed");
-                return HttpResponse::ServiceUnavailable().json(ErrorResponse {
-                    error: format!(
-                        "cannot confirm whether a CouponReassignmentDelegation is already \
-                         active, so this proposal is refused rather than risk a second \
-                         one: {e}"
-                    ),
-                });
-            }
-        }
+    if let Err(e) = refuse_second_delegation(&data, &body.proposal, party_id, &token).await {
+        return e.into_response();
     }
 
     let audit_pool = data.db.clone();
@@ -168,220 +131,32 @@ pub async fn propose_action(
 
     let packages = packages();
 
-    // Resolve registry-backed context for token-standard transfer flows:
-    //   * `AcceptTransfer`: fetch the `transfer-rule` choice context the
-    //     `TransferInstruction_Accept` choice reads at execute time. Without it
-    //     execute fails with `Missing context entry for
-    //     utility.digitalasset.com/transfer-rule`.
-    //   * `Transfer` of a utility-registry instrument: `TransferFactory_Transfer`
-    //     reads `utility.digitalasset.com/instrument-configuration` from
-    //     `extraArgs.context.values` at execute time, so the context must be
-    //     fetched from the registrar and baked into the proposal regardless of
-    //     whether the dec party administers the instrument. For shared
-    //     instruments (e.g. CBTC, admin = `cbtc-network`) the factory isn't on
-    //     the dec party's ACS, so we also substitute the resolved factory cid.
-    //     Canton Coin is excluded — its `AmuletRules` factory and context come
-    //     from the DSO scan API. See `needs_registry_context`.
-    // Bounded validity window for any Transfer proposal, captured ONCE so the
-    // registry choice-context fetch and the on-chain create args agree
-    // byte-for-byte. A bounded `executeBefore` lets an unaccepted two-step offer
-    // expire and release its escrow instead of locking funds forever. The
-    // window defaults to 24h but the caller may override it per-transfer.
-    let now_micros = chrono::Utc::now().timestamp_micros();
-    let transfer_validity = match &body.proposal {
-        ProposalType::Transfer(Transfer {
-            validity_window_hours: Some(hours),
-            ..
-        }) => TransferValidity::from_now_with_window(
-            now_micros,
-            i64::from(*hours).saturating_mul(60 * 60 * 1_000_000),
-        ),
-        _ => TransferValidity::from_now(now_micros),
-    };
-
+    let transfer_validity =
+        transfer_validity_for(&body.proposal, chrono::Utc::now().timestamp_micros());
     let mut resolved_proposal = body.proposal.clone();
-    let transfer_choice_context = match &mut resolved_proposal {
-        ProposalType::AcceptTransfer(AcceptTransfer {
-            transfer_instruction_cid,
-        }) => match fetch_accept_transfer_context(
-            &data.config,
-            Some(token.clone()),
-            data.config.canton.network,
-            party_id,
-            transfer_instruction_cid,
-        )
-        .await
-        {
-            Ok(ctx) => Some(ctx),
-            Err(e) => {
-                tracing::warn!(
-                    "Failed to fetch AcceptTransfer choice context from registry: {e:#}"
-                );
-                return HttpResponse::BadGateway().json(ErrorResponse {
-                    error: format!("Failed to fetch transfer choice context: {e}"),
-                });
-            }
-        },
-        ProposalType::Transfer(Transfer {
-            transfer_factory_cid,
-            receiver,
-            amount,
-            instrument_id,
-            input_holding_cids,
-            ..
-        }) if needs_registry_context(
-            transfer_factory_cid,
-            &instrument_id.admin,
-            &party_id.to_string(),
-        ) =>
-        {
-            let admin: CantonId = match instrument_id.admin.parse() {
-                Ok(p) => p,
-                Err(e) => {
-                    return HttpResponse::BadRequest().json(ErrorResponse {
-                        error: format!("Invalid instrument admin party id: {e}"),
-                    });
-                }
-            };
-            // The token-standard transfer factory rejects an empty
-            // `inputHoldingCids` ("No holdings provided"). When the caller
-            // didn't pin specific holdings, fund the transfer with every
-            // Holding the sender owns for this instrument and let the choice
-            // consume what it needs (returning change).
-            if input_holding_cids.is_empty() {
-                match select_input_holdings(
-                    &data.config,
-                    party_id,
-                    Some(token.clone()),
-                    &admin,
-                    &instrument_id.id,
-                )
-                .await
-                {
-                    Ok(cids) if cids.is_empty() => {
-                        return HttpResponse::BadRequest().json(ErrorResponse {
-                            error: format!(
-                                "No holdings of instrument {} owned by {} to fund the transfer",
-                                instrument_id.id, party_id
-                            ),
-                        });
-                    }
-                    Ok(cids) => *input_holding_cids = cids,
-                    Err(e) => {
-                        tracing::warn!("Failed to select input holdings for transfer: {e:#}");
-                        return HttpResponse::InternalServerError().json(ErrorResponse {
-                            error: format!("Failed to select input holdings: {e}"),
-                        });
-                    }
-                }
-            }
-            match fetch_factory_for_propose(
-                data.config.canton.network,
-                ProposeTransferArgs {
-                    sender: party_id,
-                    receiver,
-                    amount,
-                    instrument_admin: &admin,
-                    instrument_id: &instrument_id.id,
-                    input_holding_cids,
-                    requested_at_micros: transfer_validity.requested_at_micros,
-                    execute_before_micros: transfer_validity.execute_before_micros,
-                },
-            )
-            .await
-            {
-                Ok(resolved) => {
-                    // Self-administered utility tokens already carry the factory
-                    // cid the UI read from the dec party's ACS; only fill it in
-                    // for shared instruments where the UI left it empty.
-                    if transfer_factory_cid.is_empty() {
-                        *transfer_factory_cid = resolved.factory_cid;
-                    }
-                    Some(AcceptTransferContext {
-                        context: resolved.context,
-                        disclosed_contracts: resolved.disclosed_contracts,
-                    })
-                }
-                Err(e) => {
-                    tracing::warn!("Failed to fetch Transfer choice context from registry: {e:#}");
-                    return HttpResponse::BadGateway().json(ErrorResponse {
-                        error: format!("Failed to fetch transfer factory: {e}"),
-                    });
-                }
-            }
-        }
-        _ => None,
+    let transfer_choice_context = match resolve_transfer_context(
+        &data,
+        party_id,
+        &token,
+        &mut resolved_proposal,
+        transfer_validity,
+    )
+    .await
+    {
+        Ok(context) => context,
+        Err(e) => return e.into_response(),
     };
 
-    // The two transfer variants carry runtime data that is not a payload
-    // field — the registry choice context, the validity window, and the
-    // on-chain `sender` (the governance party) — so they submit through
-    // their wrapper structs. The credential-minting variants carry a fresh
-    // credential id nonce through theirs. Every other variant is its own
-    // complete payload, reached through `grpc_payload()` without
-    // re-listing every arm.
-    let command_id = uuid::Uuid::new_v4().to_string();
-    let commands = match &resolved_proposal {
-        ProposalType::Transfer(t) => build_propose(
-            &TransferWithContext {
-                transfer: t,
-                sender: party_id,
-                context: transfer_choice_context.as_ref().map(|r| &r.context),
-                validity: transfer_validity,
-            },
-            party_id,
-            &member_party_id,
-            &packages,
-            command_id,
-        ),
-        ProposalType::AcceptTransfer(a) => build_propose(
-            &AcceptTransferWithContext {
-                accept: a,
-                context: transfer_choice_context.as_ref().map(|r| &r.context),
-            },
-            party_id,
-            &member_party_id,
-            &packages,
-            command_id,
-        ),
-        other => match (other.credential_minting_payload(), other.grpc_payload()) {
-            (Some(p), _) => build_propose(
-                &WithCredentialIdNonce {
-                    proposal: p,
-                    nonce: &credential_id_nonce(),
-                },
-                party_id,
-                &member_party_id,
-                &packages,
-                command_id,
-            ),
-            (None, Some(p)) => build_propose(p, party_id, &member_party_id, &packages, command_id),
-            // No variant reaches this today: `grpc_payload` returns `None`
-            // only for the two transfer variants, and both match above. A
-            // new variant that returns `None` gets a 500, not a panic.
-            (None, None) => {
-                tracing::error!("Proposal variant has no gRPC payload: {other:?}");
-                return HttpResponse::InternalServerError().json(ErrorResponse {
-                    error: "Unsupported proposal type".to_string(),
-                });
-            }
-        },
-    };
-    // An unconfigured package is a provisioning gap, not bad input: 503 with
-    // the lib's own `"<pkg> package not configured"` text, byte-identical to
-    // what the hand-written package match returned.
-    let commands = match commands {
-        Ok(c) => c,
-        Err(e @ decman_lib::Error::PackageNotConfigured(_)) => {
-            return HttpResponse::ServiceUnavailable().json(ErrorResponse {
-                error: e.to_string(),
-            });
-        }
-        Err(e) => {
-            return HttpResponse::BadRequest().json(ErrorResponse {
-                error: format!("Failed to build proposal create arguments: {e}"),
-            });
-        }
+    let commands = match build_propose_commands(
+        &resolved_proposal,
+        party_id,
+        &member_party_id,
+        &packages,
+        transfer_choice_context.as_ref(),
+        transfer_validity,
+    ) {
+        Ok(commands) => commands,
+        Err(e) => return e.into_response(),
     };
 
     let channel = match data.config.ledger_channel().await {
@@ -542,6 +317,283 @@ pub async fn propose_action(
     }
 }
 
+/// Refuse a proposal that would create a second
+/// `CouponReassignmentDelegation` on `party_id`.
+///
+/// Canton cannot enforce the per-decparty singleton, so the propose boundary
+/// is the only place a second CouponReassignmentDelegation is catchable.
+///
+/// Match on the proposal type BEFORE reading the ledger: only one variant can
+/// trip this guard, and the read is a GetLedgerEnd plus a GetActiveContracts
+/// that every other propose would otherwise pay for nothing.
+async fn refuse_second_delegation(
+    data: &AppState,
+    proposal: &ProposalType,
+    party_id: &CantonId,
+    token: &str,
+) -> Result<(), ApiError> {
+    if may_create_second_delegation(proposal) {
+        match crate::server::reward_automation::active_delegation(
+            &data.config,
+            &packages(),
+            data.test_mode,
+            party_id,
+            token,
+        )
+        .await
+        {
+            Ok(Some(active)) => {
+                return Err(ApiError::Conflict(format!(
+                    "a CouponReassignmentDelegation is already active ({}); set \
+                     prior_delegation to replace it — creating a second one stops \
+                     assignment entirely",
+                    active.cid
+                )));
+            }
+            Ok(None) => {}
+            // Do not swallow this. The guard exists for exactly the state a
+            // failed read leaves us blind to, so let the proposer see it rather
+            // than admitting a second delegation on a transport blip.
+            Err(e) => {
+                tracing::warn!(%party_id, error = %e, "delegation singleton check failed");
+                return Err(ApiError::ServiceUnavailable(format!(
+                    "cannot confirm whether a CouponReassignmentDelegation is already \
+                     active, so this proposal is refused rather than risk a second \
+                     one: {e}"
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Bounded validity window for any Transfer proposal, captured ONCE so the
+/// registry choice-context fetch and the on-chain create args agree
+/// byte-for-byte. A bounded `executeBefore` lets an unaccepted two-step offer
+/// expire and release its escrow instead of locking funds forever. The
+/// window defaults to 24h but the caller may override it per-transfer.
+fn transfer_validity_for(proposal: &ProposalType, now_micros: i64) -> TransferValidity {
+    match proposal {
+        ProposalType::Transfer(Transfer {
+            validity_window_hours: Some(hours),
+            ..
+        }) => TransferValidity::from_now_with_window(
+            now_micros,
+            i64::from(*hours).saturating_mul(60 * 60 * 1_000_000),
+        ),
+        _ => TransferValidity::from_now(now_micros),
+    }
+}
+
+/// Resolve registry-backed context for token-standard transfer flows:
+///   * `AcceptTransfer`: fetch the `transfer-rule` choice context the
+///     `TransferInstruction_Accept` choice reads at execute time. Without it
+///     execute fails with `Missing context entry for
+///     utility.digitalasset.com/transfer-rule`.
+///   * `Transfer` of a utility-registry instrument: `TransferFactory_Transfer`
+///     reads `utility.digitalasset.com/instrument-configuration` from
+///     `extraArgs.context.values` at execute time, so the context must be
+///     fetched from the registrar and baked into the proposal regardless of
+///     whether the dec party administers the instrument. For shared
+///     instruments (e.g. CBTC, admin = `cbtc-network`) the factory isn't on
+///     the dec party's ACS, so we also substitute the resolved factory cid.
+///     Canton Coin is excluded — its `AmuletRules` factory and context come
+///     from the DSO scan API. See `needs_registry_context`.
+async fn resolve_transfer_context(
+    data: &AppState,
+    party_id: &CantonId,
+    token: &str,
+    proposal: &mut ProposalType,
+    transfer_validity: TransferValidity,
+) -> Result<Option<AcceptTransferContext>, ApiError> {
+    Ok(match proposal {
+        ProposalType::AcceptTransfer(AcceptTransfer {
+            transfer_instruction_cid,
+        }) => match fetch_accept_transfer_context(
+            &data.config,
+            Some(token.to_string()),
+            data.config.canton.network,
+            party_id,
+            transfer_instruction_cid,
+        )
+        .await
+        {
+            Ok(ctx) => Some(ctx),
+            Err(e) => {
+                tracing::warn!(
+                    "Failed to fetch AcceptTransfer choice context from registry: {e:#}"
+                );
+                return Err(ApiError::BadGateway(format!(
+                    "Failed to fetch transfer choice context: {e}"
+                )));
+            }
+        },
+        ProposalType::Transfer(Transfer {
+            transfer_factory_cid,
+            receiver,
+            amount,
+            instrument_id,
+            input_holding_cids,
+            ..
+        }) if needs_registry_context(
+            transfer_factory_cid,
+            &instrument_id.admin,
+            &party_id.to_string(),
+        ) =>
+        {
+            let admin: CantonId = match instrument_id.admin.parse() {
+                Ok(p) => p,
+                Err(e) => {
+                    return Err(ApiError::BadRequest(format!(
+                        "Invalid instrument admin party id: {e}"
+                    )));
+                }
+            };
+            // The token-standard transfer factory rejects an empty
+            // `inputHoldingCids` ("No holdings provided"). When the caller
+            // didn't pin specific holdings, fund the transfer with every
+            // Holding the sender owns for this instrument and let the choice
+            // consume what it needs (returning change).
+            if input_holding_cids.is_empty() {
+                match select_input_holdings(
+                    &data.config,
+                    party_id,
+                    Some(token.to_string()),
+                    &admin,
+                    &instrument_id.id,
+                )
+                .await
+                {
+                    Ok(cids) if cids.is_empty() => {
+                        return Err(ApiError::BadRequest(format!(
+                            "No holdings of instrument {} owned by {} to fund the transfer",
+                            instrument_id.id, party_id
+                        )));
+                    }
+                    Ok(cids) => *input_holding_cids = cids,
+                    Err(e) => {
+                        tracing::warn!("Failed to select input holdings for transfer: {e:#}");
+                        return Err(ApiError::Internal(format!(
+                            "Failed to select input holdings: {e}"
+                        )));
+                    }
+                }
+            }
+            match fetch_factory_for_propose(
+                data.config.canton.network,
+                ProposeTransferArgs {
+                    sender: party_id,
+                    receiver,
+                    amount,
+                    instrument_admin: &admin,
+                    instrument_id: &instrument_id.id,
+                    input_holding_cids,
+                    requested_at_micros: transfer_validity.requested_at_micros,
+                    execute_before_micros: transfer_validity.execute_before_micros,
+                },
+            )
+            .await
+            {
+                Ok(resolved) => {
+                    // Self-administered utility tokens already carry the factory
+                    // cid the UI read from the dec party's ACS; only fill it in
+                    // for shared instruments where the UI left it empty.
+                    if transfer_factory_cid.is_empty() {
+                        *transfer_factory_cid = resolved.factory_cid;
+                    }
+                    Some(AcceptTransferContext {
+                        context: resolved.context,
+                        disclosed_contracts: resolved.disclosed_contracts,
+                    })
+                }
+                Err(e) => {
+                    tracing::warn!("Failed to fetch Transfer choice context from registry: {e:#}");
+                    return Err(ApiError::BadGateway(format!(
+                        "Failed to fetch transfer factory: {e}"
+                    )));
+                }
+            }
+        }
+        _ => None,
+    })
+}
+
+/// Build the create command of the proposal.
+///
+/// The two transfer variants carry runtime data that is not a payload
+/// field — the registry choice context, the validity window, and the
+/// on-chain `sender` (the governance party) — so they submit through
+/// their wrapper structs. The credential-minting variants carry a fresh
+/// credential id nonce through theirs. Every other variant is its own
+/// complete payload, reached through `grpc_payload()` without
+/// re-listing every arm.
+fn build_propose_commands(
+    proposal: &ProposalType,
+    party_id: &CantonId,
+    member_party_id: &CantonId,
+    packages: &PackageConfig,
+    transfer_choice_context: Option<&AcceptTransferContext>,
+    transfer_validity: TransferValidity,
+) -> Result<Commands, ApiError> {
+    let command_id = uuid::Uuid::new_v4().to_string();
+    let commands = match proposal {
+        ProposalType::Transfer(t) => build_propose(
+            &TransferWithContext {
+                transfer: t,
+                sender: party_id,
+                context: transfer_choice_context.map(|r| &r.context),
+                validity: transfer_validity,
+            },
+            party_id,
+            member_party_id,
+            packages,
+            command_id,
+        ),
+        ProposalType::AcceptTransfer(a) => build_propose(
+            &AcceptTransferWithContext {
+                accept: a,
+                context: transfer_choice_context.map(|r| &r.context),
+            },
+            party_id,
+            member_party_id,
+            packages,
+            command_id,
+        ),
+        other => match (other.credential_minting_payload(), other.grpc_payload()) {
+            (Some(p), _) => build_propose(
+                &WithCredentialIdNonce {
+                    proposal: p,
+                    nonce: &credential_id_nonce(),
+                },
+                party_id,
+                member_party_id,
+                packages,
+                command_id,
+            ),
+            (None, Some(p)) => build_propose(p, party_id, member_party_id, packages, command_id),
+            // No variant reaches this today: `grpc_payload` returns `None`
+            // only for the two transfer variants, and both match above. A
+            // new variant that returns `None` gets a 500, not a panic.
+            (None, None) => {
+                tracing::error!("Proposal variant has no gRPC payload: {other:?}");
+                return Err(ApiError::Internal("Unsupported proposal type".to_string()));
+            }
+        },
+    };
+    // An unconfigured package is a provisioning gap, not bad input: 503 with
+    // the lib's own `"<pkg> package not configured"` text, byte-identical to
+    // what the hand-written package match returned.
+    match commands {
+        Ok(c) => Ok(c),
+        Err(e @ decman_lib::Error::PackageNotConfigured(_)) => {
+            Err(ApiError::ServiceUnavailable(e.to_string()))
+        }
+        Err(e) => Err(ApiError::BadRequest(format!(
+            "Failed to build proposal create arguments: {e}"
+        ))),
+    }
+}
+
 /// Reject an inline action the `core_self` path cannot carry, before any
 /// ledger work happens.
 ///
@@ -619,6 +671,85 @@ mod propose_guard_tests {
         assert!(!may_create_second_delegation(&setup_with_prior));
         // unrelated proposals are never blocked, and never pay for the read
         assert!(!may_create_second_delegation(&unrelated));
+    }
+}
+
+#[cfg(test)]
+mod propose_step_tests {
+    use common::api::InstrumentId;
+    use decman_lib::catalog::proposals::core::GenericVote;
+    use decman_lib::framework::encode::TRANSFER_VALIDITY_WINDOW_MICROS;
+
+    use super::*;
+
+    fn party(prefix: &str) -> anyhow::Result<CantonId> {
+        CantonId::parse(&format!("{prefix}::{}", "0".repeat(68)))
+    }
+
+    fn transfer(validity_window_hours: Option<u32>) -> anyhow::Result<ProposalType> {
+        Ok(ProposalType::Transfer(Transfer {
+            transfer_factory_cid: "00tf".into(),
+            expected_admin: party("iadmin")?,
+            receiver: party("recv")?,
+            amount: "12.5".parse()?,
+            instrument_id: InstrumentId {
+                admin: "admin-party".into(),
+                id: "TOK".into(),
+            },
+            input_holding_cids: vec!["00hold".into()],
+            validity_window_hours,
+        }))
+    }
+
+    /// A transfer's own window wins; every other proposal gets the default.
+    #[test]
+    fn a_transfer_may_set_its_own_validity_window() -> anyhow::Result<()> {
+        let now = 1_000;
+        let two_hours = transfer_validity_for(&transfer(Some(2))?, now);
+        assert_eq!(two_hours.requested_at_micros, now);
+        assert_eq!(
+            two_hours.execute_before_micros,
+            now + 2 * 60 * 60 * 1_000_000
+        );
+
+        let vote = ProposalType::GenericVote(GenericVote {
+            description: "a vote".into(),
+        });
+        for proposal in [transfer(None)?, vote] {
+            let validity = transfer_validity_for(&proposal, now);
+            assert_eq!(validity.requested_at_micros, now);
+            assert_eq!(
+                validity.execute_before_micros,
+                now + TRANSFER_VALIDITY_WINDOW_MICROS
+            );
+        }
+        Ok(())
+    }
+
+    /// A proposal whose package is not configured answers 503 with the
+    /// library's text; a configured one builds one create command.
+    #[test]
+    fn the_create_command_needs_the_proposal_package() -> anyhow::Result<()> {
+        let vote = ProposalType::GenericVote(GenericVote {
+            description: "a vote".into(),
+        });
+        let (dec, member) = (party("dec")?, party("member")?);
+        let validity = TransferValidity::from_now(0);
+
+        let unconfigured = PackageConfig::default();
+        let error = build_propose_commands(&vote, &dec, &member, &unconfigured, None, validity)
+            .err()
+            .ok_or_else(|| anyhow::anyhow!("no package must give no command"))?;
+        let ApiError::ServiceUnavailable(text) = error else {
+            anyhow::bail!("an unconfigured package must answer 503: {error:?}");
+        };
+        assert!(text.ends_with("package not configured"), "{text}");
+
+        let commands = build_propose_commands(&vote, &dec, &member, &packages(), None, validity)
+            .map_err(|error| anyhow::anyhow!("{error:?}"))?;
+        assert_eq!(commands.commands.len(), 1);
+        assert!(!commands.command_id.is_empty());
+        Ok(())
     }
 }
 
