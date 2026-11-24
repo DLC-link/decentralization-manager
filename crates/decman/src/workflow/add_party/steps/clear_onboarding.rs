@@ -22,10 +22,6 @@ use crate::{
     },
 };
 
-/// Hard cap on how long the new member waits for Canton's "earliest safe
-/// time to clear the onboarding flag" to arrive. The safe time is normally
-/// seconds away (decision timeouts); ten minutes flags a genuinely stuck
-/// synchronizer instead of hanging the workflow forever.
 /// New-member side: author the clearing proposal and return it encoded as
 /// the `varint(len)||proto` blob the coordinator persists/ships. `None`
 /// when the flag is already gone.

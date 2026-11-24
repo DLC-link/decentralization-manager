@@ -5,7 +5,7 @@
 //! gets no `NamespaceDelegation`, so nothing on-chain says whose key is
 //! whose. Only the node that generated a key can say it is theirs.
 //!
-//! Three sources are therefore combined to attribute the keys of a party:
+//! Four sources are therefore combined to attribute the keys of a party:
 //!
 //! 1. `dec_party_identity` — every peer's key bundle on the node that
 //!    coordinated onboarding, the new member's on the node that ran
