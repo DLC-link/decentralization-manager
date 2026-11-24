@@ -15,6 +15,7 @@ use serde_json::{Value, json};
 
 use crate::auth::{AuthTarget, PasswordSource, TokenCache, TokenResponse, TokenSet, now_secs};
 use crate::composer::{PickerOption, PickerSource};
+use crate::governance_body;
 
 /// User credentials and optional IdP overrides for the OAuth2 password grant.
 ///
@@ -1443,15 +1444,13 @@ impl DecmanClient {
         governance_type: &str,
         proposal_cid: Option<&str>,
     ) -> Result<()> {
-        let mut body = json!({
-            "party_id": party_id,
-            "rules_contract_id": rules_contract_id,
-            "action": action,
-            "governance_type": governance_type,
-        });
-        if let Some(cid) = proposal_cid {
-            body["proposal_cid"] = json!(cid);
-        }
+        let body = governance_body::confirm(
+            party_id,
+            rules_contract_id,
+            action,
+            governance_type,
+            proposal_cid,
+        );
         self.post("/governance/confirm", Some(body))
     }
 
@@ -1471,17 +1470,15 @@ impl DecmanClient {
             .iter()
             .map(|(cid, blob)| json!({ "contract_id": cid, "blob": blob }))
             .collect();
-        let mut body = json!({
-            "party_id": party_id,
-            "rules_contract_id": rules_contract_id,
-            "action": execute.action,
-            "confirmation_cids": execute.confirmation_cids,
-            "disclosed_contracts": disclosed_json,
-            "governance_type": execute.governance_type,
-        });
-        if let Some(cid) = &execute.proposal_cid {
-            body["proposal_cid"] = json!(cid);
-        }
+        let body = governance_body::execute(
+            party_id,
+            rules_contract_id,
+            &execute.action,
+            &execute.governance_type,
+            execute.proposal_cid.as_deref(),
+            &execute.confirmation_cids,
+            json!(disclosed_json),
+        );
         self.post("/governance/execute", Some(body))
     }
 
@@ -1667,11 +1664,11 @@ impl DecmanClient {
     ) -> Result<()> {
         self.post(
             "/governance/cancel",
-            Some(json!({
-                "party_id": party_id,
-                "confirmation_cid": confirmation_cid,
-                "governance_type": governance_type,
-            })),
+            Some(governance_body::revoke(
+                party_id,
+                confirmation_cid,
+                governance_type,
+            )),
         )
     }
 
@@ -1689,12 +1686,12 @@ impl DecmanClient {
     ) -> Result<()> {
         self.post(
             "/governance/expire",
-            Some(json!({
-                "party_id": party_id,
-                "rules_contract_id": rules_contract_id,
-                "confirmation_cid": confirmation_cid,
-                "governance_type": governance_type,
-            })),
+            Some(governance_body::expire(
+                party_id,
+                rules_contract_id,
+                confirmation_cid,
+                governance_type,
+            )),
         )
     }
 
