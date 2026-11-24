@@ -12,7 +12,7 @@ use super::{
     cache::load_cached_parties,
     discovery::{
         Discovery, DiscoveryGate, MAX_PREFIX_LEN, SINGLE_FLIGHT_WAIT, discover_and_cache,
-        discovery_completed_since, is_within_ttl, now_secs,
+        discovery_completed_since, is_within_ttl,
     },
     owner_keys::resolve_owner_keys_from_peers,
 };
@@ -26,6 +26,7 @@ use crate::{
         types::{DecentralizedPartiesResponse, DecentralizedParty, ErrorResponse, ResponseSource},
     },
     utils,
+    utils::now_secs,
 };
 
 /// Query parameters for decentralized parties endpoint

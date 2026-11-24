@@ -7,7 +7,7 @@ use sqlx::SqlitePool;
 
 use super::{
     preflight::{claim_party_for_start, send_retry_workflow},
-    runs::{count_run_started, now_secs},
+    runs::count_run_started,
 };
 use crate::{
     canton_id::CantonId,
@@ -22,6 +22,7 @@ use crate::{
             WorkflowRun, WorkflowRunsResponse, permission_from_proto,
         },
     },
+    utils::now_secs,
     workflow::{self, storage::WorkflowStorage},
 };
 

@@ -12,7 +12,7 @@ use super::{
     kick_target::cached_confirmation_threshold,
     launch::{CoordinatorRequest, RunEnd, StatusOrder, launch_coordinator, run_log},
     preflight::{claim_party_for_start, format_incompatible_peers, preflight_incompatible_peers},
-    runs::{kind_status, now_secs, register_and_persist},
+    runs::{kind_status, register_and_persist},
 };
 use crate::{
     canton_id::CantonId,
@@ -30,6 +30,7 @@ use crate::{
             WorkflowStatusResponse,
         },
     },
+    utils::now_secs,
     workflow::{
         self, AddPartyStep,
         add_party::{MissingPackages, packages::check_new_member_packages},

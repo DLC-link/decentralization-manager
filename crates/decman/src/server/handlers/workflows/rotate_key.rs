@@ -16,7 +16,7 @@ use super::{
         claim_party_for_start, format_incompatible_peers, incompatible_versions, lacking_feature,
         probe_invitee_health,
     },
-    runs::{kind_status, now_secs, register_and_persist},
+    runs::{kind_status, register_and_persist},
 };
 use crate::{
     canton_id::{CantonId, Fingerprint},
@@ -37,6 +37,7 @@ use crate::{
     },
     signing::custody,
     utils,
+    utils::now_secs,
     workflow::{self, RotateKeyStep},
 };
 

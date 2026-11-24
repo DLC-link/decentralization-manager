@@ -1,9 +1,6 @@
 //! The workflow triggers the listener shares across connections: invitations, cancel and retry.
 
-use std::{
-    sync::Arc,
-    time::{SystemTime, UNIX_EPOCH},
-};
+use std::sync::Arc;
 
 use common::api::ContractDeploymentIntent;
 use sqlx::SqlitePool;
@@ -23,6 +20,7 @@ use crate::{
         },
         workflow_exclusion,
     },
+    utils::now_secs,
 };
 
 /// Workflow triggers shared across Noise server handlers
@@ -194,10 +192,7 @@ impl WorkflowTriggers {
             invitation_type,
             coordinator_pubkey: coordinator_pubkey.to_string(),
             coordinator_name: None,
-            received_at: SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .map(|d| d.as_secs() as i64)
-                .unwrap_or(0),
+            received_at: now_secs(),
             prefix,
             participants,
             dar_filenames,
@@ -345,10 +340,7 @@ impl WorkflowTriggers {
                 return;
             }
         };
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_secs() as i64)
-            .unwrap_or(0);
+        let now = now_secs();
         for run in runs.into_iter().filter(|r| {
             r.role == WorkflowRole::Peer
                 && r.coordinator_pubkey.as_deref() == Some(coordinator_pubkey)
@@ -405,10 +397,7 @@ impl WorkflowTriggers {
                 return;
             }
         };
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_secs() as i64)
-            .unwrap_or(0);
+        let now = now_secs();
         for run in runs.into_iter().filter(|r| {
             r.role == WorkflowRole::Peer
                 && r.status == WorkflowProgress::Failed
