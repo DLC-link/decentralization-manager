@@ -192,13 +192,14 @@ async fn run_workflow(
             AddPartyStep::SubmitProposals => {
                 tracing::info!("Coordinator executing: Submit proposals");
                 save_signature_pairs(&workflow_state, &db, &instance_name).await?;
-                crate::workflow::write_topology(
-                    &db,
-                    &instance,
-                    submit_proposals(&node_config, &db, &instance_name, &add_party_config),
-                )
+                // The identity copy belongs to the write: a cancel that landed
+                // after the submit but before the copy would leave a published
+                // host without its identity records.
+                crate::workflow::write_topology(&db, &instance, async {
+                    submit_proposals(&node_config, &db, &instance_name, &add_party_config).await?;
+                    copy_new_member_identity(&db, &instance_name, &add_party_config).await
+                })
                 .await?;
-                copy_new_member_identity(&db, &instance_name, &add_party_config).await?;
 
                 // The topology is live. Open the export but read nothing from it:
                 // the new member pulls it block by block straight into its own

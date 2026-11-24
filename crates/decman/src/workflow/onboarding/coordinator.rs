@@ -121,9 +121,11 @@ pub async fn start_coordinator(
     let node_config_clone = node_config.clone();
     let onboarding_config_clone = onboarding_config.clone();
     let db_clone = db.clone();
+    let loop_instance = instance.clone();
     let workflow_handle = tokio::spawn(async move {
         run_workflow(
             workflow_state,
+            loop_instance,
             node_config_clone,
             onboarding_config_clone,
             db_clone,
@@ -187,6 +189,7 @@ async fn ensure_coordinator_keys(
 
 async fn run_workflow(
     workflow_state: Arc<WorkflowState<OnboardingStep>>,
+    instance: Arc<WorkflowInstance>,
     node_config: NodeConfig,
     onboarding_config: OnboardingConfig,
     db: SqlitePool,
@@ -258,7 +261,12 @@ async fn run_workflow(
                     artifact_kinds::SIGNED_DNS_PROPOSAL,
                 )
                 .await?;
-                submit_dns_proposals(&node_config, &db, &instance_name).await?;
+                crate::workflow::write_topology(
+                    &db,
+                    &instance,
+                    submit_dns_proposals(&node_config, &db, &instance_name),
+                )
+                .await?;
 
                 // Load P2P proposal to send to peers with SignP2p command
                 let p2p_proposal_data = db
@@ -283,8 +291,12 @@ async fn run_workflow(
                     artifact_kinds::SIGNED_P2P_PROPOSAL,
                 )
                 .await?;
-                submit_final_proposals(&node_config, &db, &instance_name, &onboarding_config)
-                    .await?;
+                crate::workflow::write_topology(
+                    &db,
+                    &instance,
+                    submit_final_proposals(&node_config, &db, &instance_name, &onboarding_config),
+                )
+                .await?;
                 workflow_state.advance_step().await;
             }
             OnboardingStep::Complete => {
@@ -296,4 +308,63 @@ async fn run_workflow(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use super::*;
+    use crate::server::{WorkflowKind, WorkflowRole};
+
+    /// A cancel that holds the write lock marks the run cancelled before it
+    /// lets go. Each onboarding submit must then read that status and write
+    /// nothing, on a node with no Canton behind it.
+    #[sqlx::test(migrator = "crate::db::MIGRATOR")]
+    async fn each_onboarding_submit_refuses_a_cancelled_run(db: SqlitePool) -> Result {
+        for step in [OnboardingStep::SubmitDns, OnboardingStep::SubmitFinal] {
+            sqlx::query("DELETE FROM workflow_runs")
+                .execute(&db)
+                .await?;
+            sqlx::query(
+                "INSERT INTO workflow_runs
+                 (instance_name, kind, role, status, current_step, step_index, step_total,
+                  config_json, expected_peers_json, completed_peers_json, created_at, updated_at)
+                 VALUES ('run', ?, 'Coordinator', 'inprogress', ?, 4, 7, '{}', '[]', '[]', 0, 0)",
+            )
+            .bind(WorkflowKind::Onboarding.as_str())
+            .bind(format!("{step:?}"))
+            .execute(&db)
+            .await?;
+            let instance = WorkflowInstance::new(
+                "run".to_string(),
+                WorkflowKind::Onboarding,
+                WorkflowRole::Coordinator,
+            );
+            let state = WorkflowState::new(db.clone(), "run".to_string(), step, vec![], None);
+            let config = OnboardingConfig::new("prefix".into(), "run".into(), None, None);
+
+            let cancel = instance.topology_write.lock().await;
+            let driver = tokio::spawn(run_workflow(
+                state,
+                instance.clone(),
+                NodeConfig::default(),
+                config,
+                db.clone(),
+            ));
+            sqlx::query("UPDATE workflow_runs SET status = 'cancelled'")
+                .execute(&db)
+                .await?;
+            drop(cancel);
+
+            let outcome = tokio::time::timeout(Duration::from_secs(10), driver).await??;
+            let error = outcome.expect_err("a cancelled onboarding run wrote topology");
+            assert!(
+                format!("{error:#}")
+                    .contains("is cancelled, not in progress; refusing to write topology"),
+                "{step:?}: {error:#}"
+            );
+        }
+        Ok(())
+    }
 }

@@ -233,6 +233,11 @@ pub async fn start_coordinator(
 ///
 /// The run fails, naming the peers and why, once peers it still waits on have
 /// given up or gone silent and the rest cannot finish it.
+///
+/// # Errors
+///
+/// Errors when the coordinator loop returns an error or panics, or when the
+/// peers that the run waits on are stranded.
 pub async fn run_workflow_with_handler(
     active: ActiveWorkflow,
     instance: Arc<WorkflowInstance>,
@@ -300,6 +305,18 @@ pub(crate) async fn ensure_run_in_progress(db: &SqlitePool, instance_name: &str)
         run.status
     );
     Ok(())
+}
+
+/// Whether this node's own row for a peer run says `Cancelled`. A missing row
+/// or a failed read answers no, because only the operator's cancel stops a peer.
+pub(crate) async fn peer_run_is_cancelled(db: &SqlitePool, instance_name: &str) -> bool {
+    match SchemaRead::get_workflow_run(db, instance_name).await {
+        Ok(run) => run.is_some_and(|run| run.status == WorkflowProgress::Cancelled),
+        Err(e) => {
+            tracing::warn!("Could not read peer run {instance_name} to check for a cancel: {e:#}");
+            false
+        }
+    }
 }
 
 /// Run a coordinator topology write for `instance`, if its run is still in
@@ -481,6 +498,19 @@ async fn run_peer(
         let command = message.msg_type;
         let payload = message.payload;
 
+        // A cancelled peer run stops here. The coordinator can keep asking for
+        // signatures and topology writes after its own cancel, and this node's
+        // operator has withdrawn consent for them. `Wait` and `Disconnect`
+        // change nothing.
+        if !matches!(command, MessageType::Wait | MessageType::Disconnect)
+            && peer_run_is_cancelled(&db, &instance_name).await
+        {
+            tracing::info!(
+                "Peer run {instance_name} is cancelled; ignoring {command:?} and stopping"
+            );
+            break;
+        }
+
         // Keep every failure path on the same counter and backoff policy.
         macro_rules! fail_step {
             ($($reason:tt)*) => {
@@ -531,6 +561,14 @@ async fn run_peer(
                 }
                 .await;
                 if let Err(e) = retired {
+                    // A cancel during a retry backoff is not a step failure:
+                    // counting it would end the run as Failed.
+                    if peer_run_is_cancelled(&db, &instance_name).await {
+                        tracing::info!(
+                            "Peer run {instance_name} was cancelled during legacy key retirement"
+                        );
+                        break;
+                    }
                     fail_step!("Failed to retire the legacy key mapping: {e:#}");
                     continue;
                 }

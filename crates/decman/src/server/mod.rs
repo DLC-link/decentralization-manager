@@ -2562,12 +2562,23 @@ async fn finalize_peer_run(
     } else {
         WorkflowProgress::Failed
     };
-    if let Err(e) = tx
-        .set_workflow_run_status(instance_name, status, error_msg.as_deref(), now)
+    // The first terminal status wins. A peer run that the operator cancelled
+    // stays Cancelled, so a retry cannot restart it.
+    match tx
+        .finish_workflow_run(instance_name, status, error_msg.as_deref(), now)
         .await
     {
-        tracing::warn!("finalize_peer_run: update failed: {e}");
-        return;
+        Ok(true) => {}
+        Ok(false) => {
+            tracing::info!(
+                "finalize_peer_run: {instance_name} already has a terminal status; keeping it"
+            );
+            return;
+        }
+        Err(e) => {
+            tracing::warn!("finalize_peer_run: update failed: {e}");
+            return;
+        }
     }
     if let Err(e) = Commitable::commit(tx).await {
         tracing::warn!("finalize_peer_run: commit failed: {e}");
@@ -3024,6 +3035,45 @@ async fn peer_payload_response(
 #[cfg(test)]
 mod tests {
     use super::{Network, ensure_insecure_allowed};
+
+    /// A peer run that the operator cancelled stays Cancelled when its task
+    /// ends, whatever the task returns. Only a run that is still in progress
+    /// takes the task's outcome.
+    #[sqlx::test(migrator = "crate::db::MIGRATOR")]
+    async fn a_finished_peer_task_keeps_a_cancelled_run_cancelled(
+        pool: sqlx::SqlitePool,
+    ) -> crate::error::Result {
+        use crate::server::WorkflowProgress;
+
+        for (start, success, expected) in [
+            ("cancelled", true, WorkflowProgress::Cancelled),
+            ("cancelled", false, WorkflowProgress::Cancelled),
+            ("inprogress", true, WorkflowProgress::Completed),
+            ("inprogress", false, WorkflowProgress::Failed),
+        ] {
+            sqlx::query("DELETE FROM workflow_runs")
+                .execute(&pool)
+                .await?;
+            sqlx::query(
+                "INSERT INTO workflow_runs
+                 (instance_name, kind, role, status, current_step, step_index, step_total,
+                  config_json, expected_peers_json, completed_peers_json, created_at, updated_at)
+                 VALUES ('peer-run', 'Kick', 'Peer', ?, 'Active', 0, 1, '{}', '[]', '[]', 0, 0)",
+            )
+            .bind(start)
+            .execute(&pool)
+            .await?;
+
+            super::finalize_peer_run(&pool, "peer-run", success, (!success).then(|| "x".into()))
+                .await;
+
+            let row = crate::db::schema::SchemaRead::get_workflow_run(&pool, "peer-run")
+                .await?
+                .ok_or_else(|| anyhow::anyhow!("row vanished"))?;
+            assert_eq!(row.status, expected, "{start} + success={success}");
+        }
+        Ok(())
+    }
 
     #[test]
     fn insecure_allowed_on_devnet() {

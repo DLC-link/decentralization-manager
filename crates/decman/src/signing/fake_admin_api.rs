@@ -575,6 +575,12 @@ impl FakeAdminApi {
             .push((serial, mapping));
     }
 
+    /// Take every legacy `PartyToKeyMapping` out of force, as another member's
+    /// completed removal does.
+    pub fn remove_party_to_key(&self) {
+        lock(&self.vault).topology.party_to_key.clear();
+    }
+
     /// Publish `party` as a member party that already carries its keys inline
     /// and still has a legacy `PartyToKeyMapping`, so that retiring the legacy
     /// mapping is allowed.

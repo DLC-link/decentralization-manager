@@ -503,7 +503,7 @@ pub async fn retire_legacy_keys_while<Permit, PermitFut>(
     config: &NodeConfig,
     synchronizer_id: &str,
     party: &CantonId,
-    permit: Permit,
+    mut permit: Permit,
 ) -> Result
 where
     Permit: FnMut() -> PermitFut,
@@ -529,7 +529,26 @@ where
     let p2p = fetch_p2p_mapping(config, synchronizer_id, party).await?;
     validate_legacy_retirement(&p2p, &mapping)?;
     let request = legacy_retirement_request(synchronizer_id, serial, mapping)?;
-    if let Err(error) = authorize_while(config, request, "retire legacy party keys", permit).await {
+    let refused = std::sync::atomic::AtomicBool::new(false);
+    let permitted = || {
+        let verdict = permit();
+        let refused = &refused;
+        async move {
+            let verdict = verdict.await;
+            if verdict.is_err() {
+                refused.store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+            verdict
+        }
+    };
+    if let Err(error) =
+        authorize_while(config, request, "retire legacy party keys", permitted).await
+    {
+        // A refused permit sent nothing, so another member's removal says
+        // nothing about this run.
+        if refused.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err(error);
+        }
         // Another member may have completed this exact removal while we signed.
         if fetch_party_to_key_mapping(config, synchronizer_id, party)
             .await?
@@ -1939,6 +1958,45 @@ mod tests {
         let error = retire.await?.expect_err("a cancelled run went on signing");
         assert!(format!("{error:#}").contains("cancelled"), "{error:#}");
         assert_eq!(fake.authorized().len(), 1, "a cancelled run signed again");
+        Ok(())
+    }
+
+    /// A refused permit sent nothing. Another member's completed removal must
+    /// not make a cancelled run report the retirement as done.
+    #[sqlx::test(migrator = "crate::db::MIGRATOR")]
+    async fn a_refused_permit_is_not_success_when_another_member_removed_the_mapping(
+        db: SqlitePool,
+    ) -> Result {
+        use crate::signing::{custody::SoftwareKeys, fake_admin_api::FakeAdminApi};
+
+        let fake = FakeAdminApi::start(vec![]).await?;
+        let party = legacy_party();
+        fake.publish_party_awaiting_key_retirement(&party);
+        fake.reject_authorizations_until_key_ready(1);
+        let node = fake.node(SoftwareKeys::Allowed, false).await?;
+        insert_run(&db, "inprogress").await?;
+        let synchronizer_id = utils::get_synchronizer_id(&node.config).await?;
+
+        let config = node.config.clone();
+        let pool = db.clone();
+        let retire = tokio::spawn(async move {
+            retire_legacy_keys_while(&config, &synchronizer_id, &party, || {
+                crate::workflow::ensure_run_in_progress(&pool, "run")
+            })
+            .await
+        });
+        tokio::time::timeout(Duration::from_secs(10), fake.wait_for_authorized(1))
+            .await
+            .map_err(|_| anyhow::anyhow!("the first signing attempt never reached the node"))?;
+        fake.remove_party_to_key();
+        sqlx::query("UPDATE workflow_runs SET status = 'cancelled'")
+            .execute(&db)
+            .await?;
+
+        let error = retire
+            .await?
+            .expect_err("a cancelled run reported the retirement as done");
+        assert!(format!("{error:#}").contains("cancelled"), "{error:#}");
         Ok(())
     }
 

@@ -437,38 +437,67 @@ async fn a_peer_in_progress_signs_the_legacy_mapping_removal() -> Result {
 /// must give up after its retry budget instead of reporting the step done.
 #[tokio::test]
 async fn a_peer_run_not_in_progress_signs_no_legacy_mapping_removal() -> Result {
-    futures::future::try_join_all(["cancelled", "failed", "completed", "idle"].map(
-        |status| async move {
-            let (fake, node, row) = awaiting_retirement(status).await?;
+    futures::future::try_join_all(["failed", "completed", "idle"].map(|status| async move {
+        let (fake, node, row) = awaiting_retirement(status).await?;
 
-            let run = run_commands_on(
-                node.config.clone(),
-                row,
-                vec![
-                    Message::new_empty(MessageType::RetireLegacyKeys);
-                    MAX_CONSECUTIVE_STEP_FAILURES
-                ],
-            )
-            .await?;
+        let run = run_commands_on(
+            node.config.clone(),
+            row,
+            vec![Message::new_empty(MessageType::RetireLegacyKeys); MAX_CONSECUTIVE_STEP_FAILURES],
+        )
+        .await?;
 
-            let error = run
-                .result
-                .as_ref()
-                .err()
-                .map(|e| format!("{e:#}"))
-                .ok_or_else(|| anyhow::anyhow!("a {status} peer run finished the retirement"))?;
-            assert!(
-                error.contains(&format!("is {status}, not in progress")),
-                "{error}"
-            );
-            assert!(fake.authorized().is_empty(), "a {status} peer run signed");
-            assert_eq!(run.completions, 0, "a {status} peer run reported success");
-            assert_eq!(run.polls.len(), MAX_CONSECUTIVE_STEP_FAILURES);
-            assert_reported(&run, WorkflowKind::Kick);
-            Ok::<(), anyhow::Error>(())
-        },
-    ))
+        let error = run
+            .result
+            .as_ref()
+            .err()
+            .map(|e| format!("{e:#}"))
+            .ok_or_else(|| anyhow::anyhow!("a {status} peer run finished the retirement"))?;
+        assert!(
+            error.contains(&format!("is {status}, not in progress")),
+            "{error}"
+        );
+        assert!(fake.authorized().is_empty(), "a {status} peer run signed");
+        assert_eq!(run.completions, 0, "a {status} peer run reported success");
+        assert_eq!(run.polls.len(), MAX_CONSECUTIVE_STEP_FAILURES);
+        assert_reported(&run, WorkflowKind::Kick);
+        Ok::<(), anyhow::Error>(())
+    }))
     .await?;
+    Ok(())
+}
+
+/// A peer whose operator cancelled the run stops at the next command, whatever
+/// it asks for. The peer signs nothing and does not count the command as a
+/// failed step, so its run cannot end as Failed and be retried.
+#[tokio::test]
+async fn a_cancelled_peer_stops_at_the_next_command() -> Result {
+    for command in [MessageType::RetireLegacyKeys, MessageType::SignKick] {
+        let (fake, node, row) = awaiting_retirement("cancelled").await?;
+
+        let run = run_commands_on(
+            node.config.clone(),
+            row,
+            vec![Message::new_empty(command); MAX_CONSECUTIVE_STEP_FAILURES],
+        )
+        .await?;
+
+        run.result?;
+        assert_eq!(
+            run.polls.len(),
+            1,
+            "{command:?}: a cancelled peer kept polling"
+        );
+        assert_eq!(run.completions, 0, "{command:?}: a cancelled peer reported");
+        assert!(
+            fake.authorized().is_empty(),
+            "{command:?}: a cancelled peer signed"
+        );
+        assert!(
+            run.reports.is_empty(),
+            "{command:?}: a cancelled peer reported a failure"
+        );
+    }
     Ok(())
 }
 
@@ -501,6 +530,13 @@ async fn a_peer_cancelled_during_a_retry_backoff_signs_nothing_more() -> Result 
     cancelled?;
     let run = run?;
 
+    // The cancel ends the run quietly. A failure would count against the retry
+    // budget and finish the run as Failed.
+    run.result?;
+    assert!(
+        run.reports.is_empty(),
+        "a cancelled peer reported a failure"
+    );
     assert_eq!(fake.authorized().len(), 1, "a cancelled peer signed again");
     assert_eq!(run.completions, 0, "a cancelled peer reported success");
     Ok(())

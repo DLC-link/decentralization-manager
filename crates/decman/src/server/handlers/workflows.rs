@@ -4431,8 +4431,8 @@ async fn cancel_instance(
         );
         return HttpResponse::Conflict().json(ErrorResponse {
             error: format!(
-                "The {label} workflow is writing topology and cannot be cancelled now. Try again \
-                 when the write ends."
+                "The {label} workflow is writing topology, or another cancel is in progress, so \
+                 it cannot be cancelled now. Try again in a moment."
             ),
         });
     };
@@ -4529,7 +4529,7 @@ async fn cancel_instance(
     tag = "Workflows",
     responses(
         (status = 200, description = "Workflow cancelled", body = MessageResponse),
-        (status = 409, description = "No workflow in progress", body = ErrorResponse)
+        (status = 409, description = "No workflow in progress, or the run is writing topology and cannot stop", body = ErrorResponse)
     )
 )]
 #[post("/onboarding/cancel")]
@@ -5019,18 +5019,25 @@ pub async fn retry_workflow(
             });
         }
     };
-    if let Err(e) = tx
-        .set_workflow_run_status(
-            &instance_name,
-            WorkflowProgress::InProgress,
-            None,
-            now_secs(),
-        )
+    // The flip is conditional on Failed. A cancel or a second retry that won
+    // the race keeps its status, so a cancelled run is never revived.
+    match tx
+        .reopen_failed_workflow_run(&instance_name, now_secs())
         .await
     {
-        return HttpResponse::Conflict().json(ErrorResponse {
-            error: format!("Failed to flip status to InProgress: {e}"),
-        });
+        Ok(true) => {}
+        Ok(false) => {
+            return HttpResponse::Conflict().json(ErrorResponse {
+                error: "The workflow is no longer Failed (it was cancelled or retried \
+                        already); nothing was restarted"
+                    .to_string(),
+            });
+        }
+        Err(e) => {
+            return HttpResponse::Conflict().json(ErrorResponse {
+                error: format!("Failed to flip status to InProgress: {e}"),
+            });
+        }
     }
     if let Err(e) = Commitable::commit(tx).await {
         return HttpResponse::InternalServerError().json(ErrorResponse {
@@ -8190,7 +8197,13 @@ mod tests {
             sqlx::query("ROLLBACK").execute(&mut *writer).await?;
             Ok::<_, anyhow::Error>((held, row))
         };
-        let (status, observed) = tokio::join!(post_cancel(&data, NAME), observe);
+        // The timeout only bounds a failing run: a cancel that never takes the
+        // write lock leaves `observe` waiting for it.
+        let (status, observed) = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            tokio::join!(post_cancel(&data, NAME), observe)
+        })
+        .await
+        .map_err(|_| anyhow::anyhow!("the cancel never took the topology write lock"))?;
         let (held, row_in_window) = observed?;
 
         assert_eq!(row_in_window, Some(WorkflowProgress::InProgress));
@@ -8261,6 +8274,7 @@ mod tests {
 
         let (_, api) = App::new()
             .into_utoipa_app()
+            .service(cancel_onboarding)
             .service(cancel_kick)
             .service(cancel_add_party)
             .service(cancel_change_threshold)
@@ -8270,6 +8284,7 @@ mod tests {
         let document: serde_json::Value = serde_json::from_str(&api.to_json()?)?;
 
         for path in [
+            "/onboarding/cancel",
             "/kick/cancel",
             "/add-party/cancel",
             "/change-threshold/cancel",
