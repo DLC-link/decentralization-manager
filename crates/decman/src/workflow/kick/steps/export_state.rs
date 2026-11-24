@@ -22,6 +22,16 @@ use crate::{
 /// - Kick target (`KICK_TARGET_NAMESPACE` — the namespace fingerprint to remove)
 /// - Kick participant ID (`KICK_TARGET_PARTICIPANT`), when the run names one
 /// - New threshold after kick (`KICK_NEW_THRESHOLD`)
+///
+/// # Errors
+///
+/// Returns an error if the synchronizer ID cannot be read, the Admin API
+/// channel cannot be opened, or `ListDecentralizedNamespaceDefinition` or
+/// `ListPartyToParticipant` fails. Returns an error if the namespace is
+/// missing from the topology or has fewer than two owners. Returns an error if
+/// `kick_config.namespace_fingerprint` is not one of its owners. Returns an
+/// error if the party has no readable `PartyToParticipant` mapping, or if an
+/// artefact write fails.
 pub async fn export_state(
     config: &NodeConfig,
     storage: &SqlitePool,

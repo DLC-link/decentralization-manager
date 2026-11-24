@@ -53,6 +53,16 @@ use crate::{
 ///   the confirmation threshold set by
 ///   [`carried_confirmation_threshold`](crate::workflow::thresholds::carried_confirmation_threshold)
 ///   — persisted as `ADD_PARTY_P2P_PROPOSAL`
+///
+/// # Errors
+///
+/// Returns an error if the exported namespace or the new member's keys are
+/// missing or malformed, or if an Admin API read fails. Returns an error if the
+/// head namespace differs from the exported one, or if the new member's
+/// namespace key may belong to another member. Returns an error if the
+/// thresholds, the signing key count or the new host do not check out. Returns
+/// an error if signing or publishing the proposals fails, or if an artefact
+/// cannot be written.
 pub async fn create_proposals(
     config: &NodeConfig,
     storage: &SqlitePool,

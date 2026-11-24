@@ -72,6 +72,14 @@ pub async fn fetch_p2p_history(
 
 /// Fetch the party's current `PartyToParticipant` mapping from the
 /// synchronizer head state. Errors if the party has no mapping.
+///
+/// # Errors
+///
+/// Returns an error if the Admin API channel cannot be opened, or if
+/// `ListPartyToParticipant` fails. Returns an error if the head state has no
+/// add-or-replace mapping for `party_id`. Returns an error if a returned row
+/// holds a `v31` mapping with no `v30` form, or if the serial does not fit a
+/// `u32`.
 pub async fn fetch_p2p_mapping(
     config: &NodeConfig,
     synchronizer_id: &str,
@@ -446,6 +454,12 @@ pub async fn fetch_namespace_definition_at_head_in(
 
 /// Fetch the current `DecentralizedNamespaceDefinition` from the synchronizer
 /// head state. Errors if the namespace is not present.
+///
+/// # Errors
+///
+/// Returns an error if the Admin API channel cannot be opened, or if
+/// `ListDecentralizedNamespaceDefinition` fails. Returns an error if the
+/// response is empty or its first result carries no definition.
 pub async fn fetch_namespace_definition(
     config: &NodeConfig,
     synchronizer_id: &str,

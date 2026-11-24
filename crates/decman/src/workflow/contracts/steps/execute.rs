@@ -34,6 +34,14 @@ use crate::{
 /// * `contracts_config` - Contracts workflow configuration with party ID
 /// * `token` - Authentication token for Ledger API
 /// * `user_id` - User ID for Ledger API operations
+///
+/// # Errors
+///
+/// Returns an error if the `PREPARED_SUBMISSION` or `SUBMISSION_SIGNATURES`
+/// artefacts cannot be listed, are absent, or do not decode. Returns an error
+/// if a peer's bundle does not hold one signature per submission. Returns an
+/// error if the Ledger API client cannot be created, or if
+/// `ExecuteSubmissionAndWaitForTransaction` fails for a submission.
 pub async fn execute_submissions(
     config: &NodeConfig,
     db: &SqlitePool,

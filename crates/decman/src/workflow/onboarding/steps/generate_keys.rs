@@ -52,6 +52,18 @@ use crate::{
 ///
 /// This function generates signing keys and exports them,
 /// and proposes a namespace delegation for the generated namespace key.
+///
+/// # Errors
+///
+/// Returns an error if the Admin API channel cannot be opened or `ListMyKeys`
+/// fails. Returns an error if the participant or the namespace key is outside
+/// KMS while this node's rule refuses software keys. Returns an error if the
+/// run's Daml key name cannot be read or recorded. Returns an error if
+/// `GenerateSigningKey` fails or returns no public key, or if DecMan's key
+/// store is off or fails for a key it generates. Returns an error if
+/// `ListNamespaceDelegation` or the `Authorize` call for the namespace
+/// delegation fails. Returns an error if the participant ID cannot be read, or
+/// if an artefact write fails.
 pub async fn generate_keys(
     config: &NodeConfig,
     storage: &SqlitePool,

@@ -22,6 +22,15 @@ use crate::{
 /// briefly disappears), both mappings already exist here, so the waits check
 /// membership: DNS until the new member's fingerprint joins the owner set, P2P
 /// until the new participant appears.
+///
+/// # Errors
+///
+/// Returns an error if the synchronizer ID cannot be read, or if a proposal
+/// artefact or peer signature is missing, unreadable or unpaired. Returns an
+/// error if a signing key the P2P adds has not signed it, or if a proposal's
+/// serial moved since it was built. Returns an error if `AddTransactions`
+/// fails, or if the new owners or the new participant do not appear in head
+/// state within the polling budget.
 pub async fn submit_proposals(
     config: &NodeConfig,
     storage: &SqlitePool,

@@ -301,6 +301,12 @@ async fn own_signing_key_fingerprint(
 ///
 /// Reads the identity rows this node happens to hold, then the fingerprints
 /// participants reported for themselves, then — for this node — its own key.
+///
+/// # Errors
+///
+/// Errors when the party's participant rows or identity rows cannot be read
+/// from the database. When no claim names this node, it also errors when its
+/// own identity row cannot be read or decoded, or when a vault query fails.
 pub async fn known_signing_keys_by_member(
     config: &NodeConfig,
     db: &SqlitePool,
@@ -630,9 +636,10 @@ pub fn signing_keys_without_member(
 ///
 /// # Errors
 ///
-/// Errors when the surplus keys cannot be told apart from the survivors'.
-/// With several to remove, that needs every survivor's claim, and each claim
-/// must be a distinct key the party carries.
+/// Errors when a surviving member's key is not on record, or when two
+/// surviving members claim one key. Errors when the surplus keys cannot be
+/// told apart from the survivors': with several to remove, each claim must be
+/// a distinct key the party carries.
 pub fn signing_keys_after_kick(
     current: &[SigningPublicKey],
     removed: &str,

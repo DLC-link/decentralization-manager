@@ -98,6 +98,14 @@ async fn sign_proposal(
 ///
 /// This step must be run by each peer participant (except the coordinator who created the proposal).
 /// Each peer signs the DNS proposal with their namespace key.
+///
+/// # Errors
+///
+/// Returns an error if the synchronizer ID cannot be read, or if
+/// `proposal_data` does not decode as a signed topology transaction. Returns
+/// an error if the `SignTransactions` call fails, still finds no signing key
+/// after every retry, or returns no transaction. Returns an error if writing
+/// the `SIGNED_DNS_PROPOSAL` artefact fails.
 pub async fn sign_dns_proposals(
     config: &NodeConfig,
     storage: &SqlitePool,
@@ -166,6 +174,16 @@ async fn file_own_daml_key(
 ///
 /// **Canton 3.4+**: Signing keys are now embedded in the P2P mapping.
 /// This function signs the P2P proposal which contains both participant and key information.
+///
+/// # Errors
+///
+/// Returns an error if the synchronizer ID cannot be read, or if
+/// `proposal_data` does not decode as a signed topology transaction. Returns
+/// an error if the `SignTransactions` call fails, still finds no signing key
+/// after every retry, or returns no transaction. Returns an error if this
+/// node's key record for the run cannot be read, or if a key DecMan generated
+/// cannot sign the proposal. Returns an error if writing the
+/// `SIGNED_P2P_PROPOSAL` artefact fails.
 pub async fn sign_p2p_proposals(
     config: &NodeConfig,
     storage: &SqlitePool,

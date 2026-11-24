@@ -23,6 +23,17 @@ use crate::{
     },
 };
 
+/// Run the change-threshold workflow on this node as its coordinator, until the
+/// run completes or fails.
+///
+/// # Errors
+///
+/// Returns an error if the Noise key file cannot be read, or if a resumed run's
+/// saved proposals are missing. Returns an error if a step fails, for example a
+/// Canton Admin API call or a read or write of the run's stored artefacts.
+/// Returns an error if the requested thresholds do not fit the live topology.
+/// Returns an error if the peers the run waits on give up or go silent, or if
+/// the workflow task panics.
 pub async fn start_coordinator(
     node_config: NodeConfig,
     network_config: NetworkConfig,

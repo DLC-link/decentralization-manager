@@ -21,6 +21,17 @@ use crate::{
     },
 };
 
+/// Run the rotate-key workflow on this node as its coordinator, until the run
+/// completes or fails.
+///
+/// # Errors
+///
+/// Returns an error if the Noise key file cannot be read. Returns an error if a
+/// step fails, for example a Canton Admin API call, a vault or key store call,
+/// or a read or write of the run's stored artefacts. Returns an error if the
+/// saved proposal or new key is missing, or if a peer's signature is not on
+/// record at submit. Returns an error if the peers the run waits on give up or
+/// go silent, or if the workflow task panics.
 pub async fn start_coordinator(
     node_config: NodeConfig,
     network_config: NetworkConfig,

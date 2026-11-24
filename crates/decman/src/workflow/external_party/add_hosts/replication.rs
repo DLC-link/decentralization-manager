@@ -56,6 +56,10 @@ pub fn instance_is_for_party(instance: &str, party_id: &str) -> bool {
 }
 
 /// The replication this add-hosts implies: `party_id` moving onto `target`.
+///
+/// # Errors
+/// Returns an error if `party_id` does not parse as a `CantonId`. A valid id
+/// splits on `::` into a prefix and a valid namespace hex string.
 pub fn replication_target(
     party_id: &str,
     target: &CantonId,

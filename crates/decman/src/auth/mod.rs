@@ -489,6 +489,12 @@ impl WorkflowAuth {
     /// Returns token, user_id, and member_party_id.
     /// The member_party_id is the local party that owns the credentials and can
     /// act_as/read_as both itself and the decentralized party.
+    ///
+    /// # Errors
+    ///
+    /// Returns `AuthError::NoCredentials` if this node holds no credentials for
+    /// `dec_party_id`. Returns an error if the expired token cannot be refreshed
+    /// or the party cannot re-authenticate with its IdP. Mock auth never fails.
     pub async fn get_credentials(&self, dec_party_id: &CantonId) -> Result<PartyAuthCredentials> {
         match self {
             WorkflowAuth::Keycloak(registry) => {

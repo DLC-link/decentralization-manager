@@ -30,6 +30,20 @@ use crate::{
 /// captured BEFORE the party gets activated here, because
 /// `ClearPartyOnboardingFlag` later needs a `begin_offset_exclusive` that
 /// precedes the activation.
+///
+/// # Errors
+///
+/// Returns an error if the Admin API channel cannot be opened, or if a vault
+/// call to list or generate a signing key fails. Returns an error if the
+/// participant or the namespace key is outside KMS while this node's rule
+/// refuses software keys. Returns an error if the namespace delegation
+/// proposal is refused. Returns an error if the synchronizer ID or the party's
+/// head-state mapping cannot be read. Returns an error if this node holds more
+/// than one of the party's keys, if the run's Daml key name cannot be read or
+/// recorded, or if DecMan's key store is off or fails for a key it generates.
+/// Returns an error if `GetId` fails or returns an invalid ID. Returns an
+/// error if an artefact cannot be stored, or if the pre-activation offset
+/// cannot be captured or stored.
 pub async fn generate_keys(
     config: &NodeConfig,
     storage: &SqlitePool,

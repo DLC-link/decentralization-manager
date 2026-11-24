@@ -15,6 +15,12 @@ use crate::{config::NodeConfig, error::Result, server::fetch_vetted_package_ids,
 /// Coordinator side: the distinct package ids referenced by the party's active
 /// contracts. Shipped to the target so its ACS-import preflight can verify
 /// it has every package the imported contracts need before disconnecting.
+///
+/// # Errors
+///
+/// Returns an error if the Ledger API state client cannot be created, or if
+/// `GetLedgerEnd` fails. Returns an error if the `GetActiveContracts` stream
+/// cannot be opened or fails while it is read.
 pub async fn collect_party_package_ids(
     config: &NodeConfig,
     party_id: &str,
@@ -103,6 +109,13 @@ pub(super) async fn local_package_ids(config: &NodeConfig) -> Result<HashSet<Str
 /// after this member has left the synchronizer. Holding every vetted package,
 /// together with the coordinator's check, puts every package the party needs
 /// on this participant before it disconnects.
+///
+/// # Errors
+///
+/// Returns an error if the synchronizer ID cannot be resolved, or if the
+/// topology read of this participant's vetting fails. Returns an error if
+/// `ListPackages` fails, or if this participant has vetted a package it does
+/// not hold.
 pub async fn check_vetted_packages_held(config: &NodeConfig) -> Result {
     let vetted = fetch_vetted_package_ids(config, config.participant_id()).await?;
     let held = local_package_ids(config).await?;

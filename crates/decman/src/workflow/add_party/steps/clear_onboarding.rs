@@ -29,6 +29,12 @@ use crate::{
 /// New-member side: author the clearing proposal and return it encoded as
 /// the `varint(len)||proto` blob the coordinator persists/ships. `None`
 /// when the flag is already gone.
+///
+/// # Errors
+///
+/// Returns an error if the synchronizer ID cannot be read, or if the party has
+/// no `PartyToParticipant` mapping at head state. Returns an error if
+/// `Authorize` fails or returns no transaction.
 pub async fn author_clear_proposal(
     config: &NodeConfig,
     add_party_config: &AddPartyConfig,
@@ -44,6 +50,14 @@ pub async fn author_clear_proposal(
 /// flag-clear transaction (the coordinator's authorize fails with
 /// TOPOLOGY_NO_APPROPRIATE_SIGNING_KEY_IN_STORE — observed live). Returns
 /// `None` when the flag is already gone from head state.
+///
+/// # Errors
+///
+/// Returns an error if the synchronizer ID cannot be read, if
+/// `ListPartyToParticipant` fails, or if the party has no mapping at head
+/// state. Returns an error if `Authorize` fails, still reports
+/// `TOPOLOGY_NO_APPROPRIATE_SIGNING_KEY_IN_STORE` after the retry budget, or
+/// returns no transaction.
 pub async fn create_clear_proposal(
     config: &NodeConfig,
     add_party_config: &AddPartyConfig,
@@ -85,6 +99,13 @@ pub async fn create_clear_proposal(
 /// All-peer step: sign the clearing proposal. `proposal_data` is the single
 /// `varint(len)||proto` blob from the coordinator (config stripped by the
 /// peer loop). Persists the per-peer `SIGNED_ADD_PARTY_CLEAR` artefact.
+///
+/// # Errors
+///
+/// Returns an error if the synchronizer ID cannot be read, or if
+/// `proposal_data` does not decode as a topology transaction. Returns an error
+/// if `SignTransactions` fails or does not return exactly one transaction.
+/// Returns an error if the signed artefact cannot be written.
 pub async fn sign_clear_proposal(
     config: &NodeConfig,
     storage: &SqlitePool,
@@ -131,6 +152,14 @@ pub async fn sign_clear_proposal(
 /// Coordinator: aggregate the peers' signatures onto the clearing proposal,
 /// submit it, and wait for the onboarding marker to disappear from head
 /// state.
+///
+/// # Errors
+///
+/// Returns an error if the synchronizer ID cannot be read, or if the
+/// `ADD_PARTY_CLEAR_PROPOSAL` artefact is missing. Returns an error if that
+/// artefact or a peer's signed artefact cannot be read or decoded. Returns an
+/// error if `SignTransactions` or `AddTransactions` fails, or if the onboarding
+/// marker is still set when the polling budget runs out.
 pub async fn submit_clear_proposal(
     config: &NodeConfig,
     storage: &SqlitePool,
