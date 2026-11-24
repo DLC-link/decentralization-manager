@@ -2,6 +2,8 @@
 //! the shared workflow triggers, the ping loop and the replies to peers.
 
 mod connection;
+#[cfg(test)]
+mod connection_tests;
 mod heartbeat;
 mod ping;
 mod replies;
