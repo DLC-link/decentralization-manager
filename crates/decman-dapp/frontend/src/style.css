@@ -1,0 +1,125 @@
+/* Deliberately plain. The hosted dApp brings its own design. */
+:root {
+  color-scheme: light dark;
+  font-family: system-ui, sans-serif;
+  line-height: 1.5;
+}
+
+body {
+  margin: 0;
+}
+
+main {
+  max-width: 960px;
+  margin: 0 auto;
+  padding: 16px;
+}
+
+section {
+  margin: 24px 0;
+}
+
+table {
+  border-collapse: collapse;
+  width: 100%;
+  margin: 8px 0;
+}
+
+th,
+td {
+  text-align: left;
+  padding: 4px 8px;
+  border-bottom: 1px solid color-mix(in srgb, currentColor 20%, transparent);
+}
+
+.number {
+  text-align: right;
+}
+
+.form {
+  display: grid;
+  gap: 8px;
+  max-width: 480px;
+}
+
+.form label {
+  display: grid;
+  gap: 2px;
+}
+
+.row,
+.form.row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  max-width: none;
+}
+
+label.inline {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+
+nav {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 12px;
+}
+
+nav button.active {
+  font-weight: bold;
+}
+
+.card {
+  border: 1px solid color-mix(in srgb, currentColor 25%, transparent);
+  padding: 8px 12px;
+  margin: 12px 0;
+}
+
+.actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.banner {
+  border-left: 4px solid orange;
+  padding-left: 8px;
+}
+
+.hint {
+  opacity: 0.75;
+}
+
+.error {
+  color: #d22;
+}
+
+.result {
+  font-style: italic;
+}
+
+.hex {
+  font-size: 0.9em;
+}
+
+pre {
+  overflow-x: auto;
+  font-size: 0.85em;
+}
+
+button.link {
+  background: none;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+  color: inherit;
+  text-decoration: underline;
+}
+
+.history time {
+  opacity: 0.6;
+}
