@@ -53,8 +53,8 @@ const EXPORT_ATTEMPT: &str = "Attempted fingerprint: ";
 
 pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
     info!("Phase: key_download_off");
-    if !matches!(f.target, TestTarget::Localnet) || !exports_need_key_download() {
-        info!("key_download_off needs a Splice 0.10 localnet; skipping");
+    if !matches!(f.target, TestTarget::Localnet) {
+        info!("key_download_off needs a localnet; skipping");
         return Ok(());
     }
 
@@ -185,17 +185,6 @@ async fn a_rotation_needs_no_export(
     );
     info!("P1 rotated to {new_key} with key download off");
     Ok((*new_key).clone())
-}
-
-/// Splice 0.9 runs Canton 3.6, which exports keys without the setting.
-fn exports_need_key_download() -> bool {
-    let version = std::env::var("LOCALNET_VERSION").unwrap_or_else(|_| "0.10.0".to_string());
-    let mut parts = version
-        .split('.')
-        .map(|part| part.parse::<u32>().unwrap_or(0));
-    let major = parts.next().unwrap_or(0);
-    let minor = parts.next().unwrap_or(0);
-    (major, minor) >= (0, 10)
 }
 
 async fn turn_key_download_off() -> anyhow::Result<()> {

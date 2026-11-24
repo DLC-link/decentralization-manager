@@ -249,9 +249,9 @@ configure_localnet_reconciliation() {
     }
 }
 
-# Canton 3.6 turns the old ACS commitment processor off from protocol version
-# 36, and Splice 0.9.4 founds the synchronizer on 36. The re-host phase reads
-# P3's commitments with LookupReceivedAcsCommitments, and only the old
+# Canton turns the old ACS commitment processor off from protocol version 36,
+# and the localnet founds the synchronizer on 36 or later. The re-host phase
+# reads P3's commitments with LookupReceivedAcsCommitments, and only the old
 # processor feeds that RPC. Every participant inherits `_participant`, and
 # HOCON resolves `${_participant}` after the whole file merges, so one line at
 # the end reaches all three. Idempotent: the bundle stays cached between runs.
@@ -288,10 +288,6 @@ configure_localnet_repair() {
 # export on the same way until DecMan holds every key. Idempotent.
 configure_localnet_key_download() {
     local conf="$LOCALNET_COMPOSE_DIR/conf/canton/app.conf"
-    # Splice 0.9 runs Canton 3.6, which exports keys without the setting.
-    case "$LOCALNET_VERSION" in
-        0.[0-9].*) return 0 ;;
-    esac
     if grep -q "enable-key-download" "$conf"; then
         return 0
     fi
