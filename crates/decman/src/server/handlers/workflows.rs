@@ -7860,7 +7860,16 @@ mod tests {
                 Some(WorkflowProgress::InProgress),
                 "{uri} changed the row"
             );
+            assert_eq!(
+                *run.http.status.read().await,
+                WorkflowProgress::InProgress,
+                "{uri} changed the in-memory status"
+            );
             assert!(!task.is_finished(), "{uri} stopped the task");
+            assert!(
+                run.http.abort_handle.lock().await.is_some(),
+                "{uri} took the abort handle"
+            );
             drop(writing);
 
             assert_eq!(post().await.status(), StatusCode::OK, "{uri}");
@@ -8046,22 +8055,21 @@ mod tests {
         restart(&data).await;
 
         let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
-        while fake.authorized().is_empty() {
-            anyhow::ensure!(
-                tokio::time::Instant::now() < deadline,
-                "the resumed run never signed the removal"
-            );
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-        // The signing holds the lock until it returns, so a cancel can still
-        // find it held for a moment. Each 409 says to try again.
-        let status = loop {
-            let status = post_cancel(&data, "rotate-restart-3").await;
-            if status != StatusCode::CONFLICT || tokio::time::Instant::now() > deadline {
-                break status;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        };
+        tokio::time::timeout_at(deadline, fake.wait_for_authorized(1))
+            .await
+            .map_err(|_| anyhow::anyhow!("the resumed run never signed the removal"))?;
+        // The signing holds the lock until it returns. Wait for the release,
+        // so the cancel below does not race the end of the signing.
+        let run = data
+            .workflows
+            .get("rotate-restart-3")
+            .ok_or_else(|| anyhow::anyhow!("the resumed run is not registered"))?;
+        drop(
+            tokio::time::timeout_at(deadline, run.topology_write.lock())
+                .await
+                .map_err(|_| anyhow::anyhow!("the signing kept the write lock"))?,
+        );
+        let status = post_cancel(&data, "rotate-restart-3").await;
 
         assert_eq!(status, StatusCode::OK);
         assert_eq!(
@@ -8076,6 +8084,206 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
         assert_eq!(fake.authorized().len(), 1);
+        Ok(())
+    }
+
+    /// A real coordinator that resumes at the legacy key retirement holds the
+    /// write lock while the node handles its signing. A cancel then answers
+    /// 409 and changes nothing. Once the signing ends, the same cancel
+    /// succeeds, and the driver and the coordinator loop both stop.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_cancel_while_a_real_coordinator_signs_answers_409_and_later_stops_the_loop(
+        pool: SqlitePool,
+    ) -> Result {
+        const NAME: &str = "rotate-hold-1";
+        let fail_after = Duration::from_secs(10);
+        let (fake, node) = seed_rotate_key_at_retirement(&pool, "inprogress", NAME).await?;
+        fake.hold_authorizations();
+        let data = state_with_node(pool.clone(), node.config.clone()).await?;
+        restart(&data).await;
+        let run = data
+            .workflows
+            .get(NAME)
+            .ok_or_else(|| anyhow::anyhow!("the in-progress run did not resume"))?;
+
+        tokio::time::timeout(fail_after, fake.wait_for_authorize_arrivals(1))
+            .await
+            .map_err(|_| anyhow::anyhow!("the resumed run never asked to sign"))?;
+        assert_eq!(post_cancel(&data, NAME).await, StatusCode::CONFLICT);
+
+        assert_eq!(
+            status_of(&pool, NAME).await?,
+            Some(WorkflowProgress::InProgress)
+        );
+        assert_eq!(*run.http.status.read().await, WorkflowProgress::InProgress);
+        let handle = run
+            .http
+            .abort_handle
+            .lock()
+            .await
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("the refused cancel took the abort handle"))?;
+        assert!(!handle.is_finished(), "the refused cancel stopped the run");
+        assert!(data.workflows.get(NAME).is_some());
+
+        fake.release_authorizations();
+        tokio::time::timeout(fail_after, fake.wait_for_authorized(1))
+            .await
+            .map_err(|_| anyhow::anyhow!("the held signing never ended"))?;
+        drop(
+            tokio::time::timeout(fail_after, run.topology_write.lock())
+                .await
+                .map_err(|_| anyhow::anyhow!("the signing kept the write lock"))?,
+        );
+        assert_eq!(post_cancel(&data, NAME).await, StatusCode::OK);
+        assert_eq!(
+            status_of(&pool, NAME).await?,
+            Some(WorkflowProgress::Cancelled)
+        );
+
+        // The driver, the registry and the coordinator loop each hold the run.
+        // Only this test's handle may remain once the run has stopped.
+        tokio::time::timeout(fail_after, async {
+            while Arc::strong_count(&run) > 1 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .map_err(|_| anyhow::anyhow!("a task of the cancelled run kept running"))?;
+        assert_eq!(fake.authorized().len(), 1, "the run signed more than once");
+        Ok(())
+    }
+
+    /// A cancel that wins the write lock keeps it until the row says
+    /// Cancelled. If it let go earlier, a write could take the lock in between
+    /// and still read the run as in progress.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_winning_cancel_keeps_the_write_lock_until_the_row_says_cancelled(
+        pool: SqlitePool,
+    ) -> Result {
+        const NAME: &str = "rotate-window-1";
+        let kind = WorkflowKind::RotateKey;
+        let row = WorkflowRun {
+            kind,
+            ..in_progress_run(NAME, &pid(34)?)
+        };
+        insert_run(&pool, &row).await?;
+        let data = state_on(pool.clone()).await?;
+        let (run, task) = register_live_run(&data, NAME, kind).await?;
+        // The cancel takes the write lock, then waits here for the abort handle.
+        let handle_guard = run.http.abort_handle.lock().await;
+        let mut writer = pool.acquire().await?;
+
+        let observe = async {
+            while run.topology_write.try_lock().is_ok() {
+                tokio::task::yield_now().await;
+            }
+            // The open transaction holds back the cancel's write of the row.
+            sqlx::query("BEGIN IMMEDIATE").execute(&mut *writer).await?;
+            drop(handle_guard);
+            while run.http.abort_handle.lock().await.is_some() {
+                tokio::task::yield_now().await;
+            }
+            // The cancel took the handle and now waits to mark the row.
+            let held = run.topology_write.try_lock().is_err();
+            let row = status_of(&pool, NAME).await?;
+            sqlx::query("ROLLBACK").execute(&mut *writer).await?;
+            Ok::<_, anyhow::Error>((held, row))
+        };
+        let (status, observed) = tokio::join!(post_cancel(&data, NAME), observe);
+        let (held, row_in_window) = observed?;
+
+        assert_eq!(row_in_window, Some(WorkflowProgress::InProgress));
+        assert!(
+            held,
+            "the cancel let go of the write lock before the row said Cancelled"
+        );
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            status_of(&pool, NAME).await?,
+            Some(WorkflowProgress::Cancelled)
+        );
+        assert!(run.topology_write.try_lock().is_ok());
+        assert!(task.await.is_err_and(|e| e.is_cancelled()));
+        Ok(())
+    }
+
+    /// A restart resumes a coordinator run only when its row is in progress.
+    /// The in-progress row is the control: it shows that the restart resumes
+    /// runs at all.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_restart_resumes_only_the_runs_in_progress(pool: SqlitePool) -> Result {
+        const STATUSES: [&str; 5] = ["cancelled", "failed", "completed", "idle", "inprogress"];
+        // Each seed starts its own fake node. The restart runs on the last one.
+        let mut seeded = Vec::new();
+        for status in STATUSES {
+            seeded.push(
+                seed_rotate_key_at_retirement(&pool, status, &format!("rotate-{status}")).await?,
+            );
+        }
+        let config = seeded
+            .last()
+            .map(|(_, node)| node.config.clone())
+            .ok_or_else(|| anyhow::anyhow!("no node was seeded"))?;
+        let data = state_with_node(pool.clone(), config).await?;
+
+        restart(&data).await;
+
+        for status in STATUSES {
+            let name = format!("rotate-{status}");
+            let resumed = data.workflows.get(&name).is_some();
+            assert_eq!(
+                resumed,
+                status == "inprogress",
+                "a {status} run resumed: {resumed}"
+            );
+            if status != "inprogress" {
+                assert_eq!(
+                    status_of(&pool, &name).await?.map(|s| s.to_string()),
+                    Some(status.to_string()),
+                    "the restart changed the {status} row"
+                );
+            }
+        }
+        if let Some(run) = data.workflows.get("rotate-inprogress")
+            && let Some(handle) = run.http.abort_handle.lock().await.take()
+        {
+            handle.abort();
+        }
+        Ok(())
+    }
+
+    /// The OpenAPI document must tell a client that each cancel endpoint can
+    /// answer 409 while the run writes topology.
+    #[test]
+    fn the_openapi_document_lists_the_409_for_a_run_that_writes_topology() -> Result {
+        use utoipa_actix_web::AppExt;
+
+        let (_, api) = App::new()
+            .into_utoipa_app()
+            .service(cancel_kick)
+            .service(cancel_add_party)
+            .service(cancel_change_threshold)
+            .service(cancel_rotate_key)
+            .service(cancel_workflow_instance)
+            .split_for_parts();
+        let document: serde_json::Value = serde_json::from_str(&api.to_json()?)?;
+
+        for path in [
+            "/kick/cancel",
+            "/add-party/cancel",
+            "/change-threshold/cancel",
+            "/rotate-key/cancel",
+            "/workflows/{instance_name}/cancel",
+        ] {
+            let description = document["paths"][path]["post"]["responses"]["409"]["description"]
+                .as_str()
+                .ok_or_else(|| anyhow::anyhow!("{path} documents no 409"))?;
+            assert!(
+                description.contains("writing topology"),
+                "{path}: {description}"
+            );
+        }
         Ok(())
     }
 

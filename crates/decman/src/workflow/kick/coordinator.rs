@@ -211,10 +211,8 @@ mod tests {
 
     const RUN: &str = "kick-run";
 
-    /// How long the abort test watches for a signature that must not come.
-    /// A loop that survives its abort signs within milliseconds, and the
-    /// control test below proves that it does.
-    const QUIET_WINDOW: Duration = Duration::from_secs(2);
+    /// Bounds a wait that only a failing run reaches.
+    const FAIL_AFTER: Duration = Duration::from_secs(10);
 
     /// A coordinator for a kick that waits at the legacy key retirement, the
     /// first step that writes topology. `fake` holds the party that retirement
@@ -295,7 +293,15 @@ mod tests {
 
         run.driver.abort();
         assert!(run.driver.await.is_err_and(|e| e.is_cancelled()));
-        tokio::time::sleep(QUIET_WINDOW).await;
+        // The loop holds the only other handle on the run. The count drops to
+        // one when the loop stops, so after that no signature can come.
+        tokio::time::timeout(FAIL_AFTER, async {
+            while Arc::strong_count(&run.instance) > 1 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .map_err(|_| anyhow::anyhow!("the coordinator loop outlived its aborted run"))?;
 
         assert!(
             run.fake.authorized().is_empty(),
@@ -311,14 +317,9 @@ mod tests {
     async fn a_kick_run_that_is_not_aborted_signs_the_removal(db: SqlitePool) -> Result {
         let run = start_kick_at_retirement(db).await?;
 
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
-        while run.fake.authorized().is_empty() {
-            anyhow::ensure!(
-                tokio::time::Instant::now() < deadline && !run.driver.is_finished(),
-                "the kick never signed the removal"
-            );
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
+        tokio::time::timeout(FAIL_AFTER, run.fake.wait_for_authorized(1))
+            .await
+            .map_err(|_| anyhow::anyhow!("the kick never signed the removal"))?;
         run.driver.abort();
         Ok(())
     }
@@ -331,30 +332,19 @@ mod tests {
         db: SqlitePool,
     ) -> Result {
         let run = start_kick_at_retirement(db).await?;
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
-        while run.fake.authorized().is_empty() {
-            anyhow::ensure!(
-                tokio::time::Instant::now() < deadline && !run.driver.is_finished(),
-                "the kick never signed the removal"
-            );
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
+        tokio::time::timeout(FAIL_AFTER, run.fake.wait_for_authorized(1))
+            .await
+            .map_err(|_| anyhow::anyhow!("the kick never signed the removal"))?;
 
         // The fake keeps the legacy mapping, so the coordinator is now waiting
-        // for it to go away.
-        loop {
-            if let Ok(guard) = run.instance.topology_write.try_lock() {
-                drop(guard);
-                break;
-            }
-            anyhow::ensure!(
-                tokio::time::Instant::now() < deadline,
-                "the write lock stayed held after the signing"
-            );
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
+        // for it to go away. A cancel takes the lock without waiting, so the
+        // test holds it to show that nothing else does.
+        let lock = tokio::time::timeout(FAIL_AFTER, run.instance.topology_write.lock())
+            .await
+            .map_err(|_| anyhow::anyhow!("the write lock stayed held after the signing"))?;
 
         assert!(!run.driver.is_finished(), "the run did not keep waiting");
+        drop(lock);
         run.driver.abort();
         Ok(())
     }

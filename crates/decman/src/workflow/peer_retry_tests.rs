@@ -481,14 +481,9 @@ async fn a_peer_cancelled_during_a_retry_backoff_signs_nothing_more() -> Result 
     let db_path = node.config.db_path();
 
     let cancel = async {
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
-        while fake.authorized().is_empty() {
-            anyhow::ensure!(
-                tokio::time::Instant::now() < deadline,
-                "the peer never tried to sign"
-            );
-            tokio::time::sleep(Duration::from_millis(5)).await;
-        }
+        tokio::time::timeout(Duration::from_secs(20), fake.wait_for_authorized(1))
+            .await
+            .map_err(|_| anyhow::anyhow!("the peer never tried to sign"))?;
         // The first attempt failed, so the retry now waits out its delay.
         let db = crate::db::connect(&db_path).await?;
         sqlx::query("UPDATE workflow_runs SET status = 'cancelled'")

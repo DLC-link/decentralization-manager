@@ -1888,14 +1888,9 @@ mod tests {
         let task = tokio::spawn(async move {
             retire_legacy_keys_for_run(&config, &pool, &run_instance(), &party).await
         });
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
-        while fake.authorized().is_empty() {
-            anyhow::ensure!(
-                tokio::time::Instant::now() < deadline && !task.is_finished(),
-                "the run never signed the removal"
-            );
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
+        tokio::time::timeout(Duration::from_secs(10), fake.wait_for_authorized(1))
+            .await
+            .map_err(|_| anyhow::anyhow!("the run never signed the removal"))?;
         task.abort();
 
         let sent = fake.authorized();
@@ -1934,14 +1929,9 @@ mod tests {
             .await
         });
         // The first attempt failed, so the retry is now waiting out its delay.
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
-        while fake.authorized().is_empty() {
-            anyhow::ensure!(
-                tokio::time::Instant::now() < deadline && !retire.is_finished(),
-                "the first signing attempt never reached the node"
-            );
-            tokio::time::sleep(Duration::from_millis(5)).await;
-        }
+        tokio::time::timeout(Duration::from_secs(10), fake.wait_for_authorized(1))
+            .await
+            .map_err(|_| anyhow::anyhow!("the first signing attempt never reached the node"))?;
         sqlx::query("UPDATE workflow_runs SET status = 'cancelled'")
             .execute(&db)
             .await?;
