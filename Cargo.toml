@@ -119,6 +119,7 @@ canton-common = { package = "common", git = "https://github.com/DLC-link/canton-
 canton-proto-rs = { git = "https://github.com/DLC-link/canton-lib", rev = "849cf2430434e5a3b05d93ef5ffffe61124a9000", default-features = false }
 canton-registry = { package = "registry", git = "https://github.com/DLC-link/canton-lib", rev = "849cf2430434e5a3b05d93ef5ffffe61124a9000" }
 common = { path = "crates/common" }
+decman-dapp = { path = "crates/decman-dapp" }
 decman-lib = { path = "crates/decman-lib" }
 decman-wallet = { path = "crates/decman-wallet" }
 keycloak = { git = "https://github.com/DLC-link/canton-lib", rev = "849cf2430434e5a3b05d93ef5ffffe61124a9000" }

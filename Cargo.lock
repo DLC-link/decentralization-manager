@@ -1792,6 +1792,7 @@ dependencies = [
  "clap",
  "common 0.1.0",
  "common 0.13.0",
+ "decman-dapp",
  "decman-lib",
  "decman-wallet",
  "dotenvy",

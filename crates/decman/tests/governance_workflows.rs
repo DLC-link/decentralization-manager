@@ -124,6 +124,9 @@ async fn governance_workflows_e2e() -> anyhow::Result<()> {
     // Serial-N+1 against a party that already exists: onboards on P1+P2, then
     // adds P3. Same plain-HTTP path, so it sits here with its sibling.
     phases::external_party_add_hosts::run(&mut f).await?;
+    // The dApp's party creation: two owners and a covalidator, created through
+    // the JSON Ledger API with the dApp's Rust. It touches only its own party.
+    phases::dapp_party_onboarding::run(&mut f).await?;
     // Plan B1: an ordinary local party on P1 adopts a wallet-held key through
     // the adopt-key endpoints. Same plain-HTTP path, and it touches only its own
     // freshly allocated party, so it sits with the other two.
@@ -309,6 +312,7 @@ async fn external_party_e2e() -> anyhow::Result<()> {
     phases::external_party_tenant::run(&mut f).await?;
     phases::external_party_unhost::run(&mut f).await?;
     phases::external_party_add_hosts::run(&mut f).await?;
+    phases::dapp_party_onboarding::run(&mut f).await?;
     phases::local_party_adopt_endpoints::run(&mut f).await?;
     phases::local_party_decentralization::run(&mut f).await?;
     Ok(())
