@@ -54,13 +54,14 @@ use crate::{
         self, AddPartyStep, ChangeThresholdStep, ContractsStep, DarsStep, KickStep, OnboardingStep,
         RotateKeyStep,
         contracts::DarFile,
+        dars::DarListing,
         signing_keys::{
             KeyClaimError, ensure_survivor_keys_preserved, kick_key_claims,
             known_signing_keys_by_member, members_requiring_key_adoption,
             recorded_signing_keys_by_member, requires_signing_key_adoption,
         },
         state::WorkflowStep,
-        storage::WorkflowStorage,
+        storage::{WorkflowStorage, artifact_kinds},
         thresholds::{
             PartyThresholds, carried_confirmation_threshold, check_confirmation_threshold,
         },
@@ -92,6 +93,10 @@ fn now_secs() -> i64 {
 /// this call (migration 000013 dropped the one-InProgress-per-(kind, role)
 /// unique index — concurrent same-kind runs are allowed); a failure here is a
 /// genuine persistence error and bubbles back as 409.
+///
+/// The run's shared `artifacts` are written in the same transaction, so a run
+/// never exists without them.
+#[allow(clippy::too_many_arguments)]
 async fn insert_coordinator_run<S, C>(
     db: &SqlitePool,
     instance_name: &str,
@@ -100,6 +105,7 @@ async fn insert_coordinator_run<S, C>(
     config: &C,
     invitees: &[CantonId],
     dec_party_id: Option<CantonId>,
+    artifacts: &[(&str, &[u8])],
 ) -> Result
 where
     S: WorkflowStep,
@@ -141,6 +147,10 @@ where
 
     let mut tx = db.begin_transaction().await?;
     tx.upsert_workflow_run(&run).await?;
+    for (artifact_kind, payload) in artifacts {
+        tx.write_workflow_artifact(instance_name, artifact_kind, None, payload)
+            .await?;
+    }
     Commitable::commit(tx).await
 }
 
@@ -163,6 +173,33 @@ async fn register_and_persist<S, C>(
     config: &C,
     invitees: &[CantonId],
     dec_party_id: Option<CantonId>,
+) -> std::result::Result<(), HttpResponse>
+where
+    S: WorkflowStep,
+    C: serde::Serialize,
+{
+    register_and_persist_with_artifacts(
+        data,
+        instance,
+        initial_step,
+        config,
+        invitees,
+        dec_party_id,
+        &[],
+    )
+    .await
+}
+
+/// [`register_and_persist`], persisting the run's shared `artifacts` with its row.
+#[allow(clippy::result_large_err)]
+async fn register_and_persist_with_artifacts<S, C>(
+    data: &web::Data<AppState>,
+    instance: &Arc<WorkflowInstance>,
+    initial_step: S,
+    config: &C,
+    invitees: &[CantonId],
+    dec_party_id: Option<CantonId>,
+    artifacts: &[(&str, &[u8])],
 ) -> std::result::Result<(), HttpResponse>
 where
     S: WorkflowStep,
@@ -194,6 +231,7 @@ where
         config,
         invitees,
         dec_party_id,
+        artifacts,
     )
     .await
     {
@@ -3854,8 +3892,9 @@ pub async fn upload_dars_local(
         (status = 400, description = "Bad request (e.g. empty peer_ids)", body = ErrorResponse),
         (status = 401, description = "Unauthorized", body = ErrorResponse),
         (status = 403, description = "Forbidden: admin role required", body = ErrorResponse),
-        (status = 409, description = "Workflow already in progress", body = ErrorResponse),
-        (status = 413, description = "The DAR set exceeds the size one run can carry", body = ErrorResponse)
+        (status = 409, description = "A run in progress already sends one of these DARs to one of these peers", body = ErrorResponse),
+        (status = 413, description = "The DAR set exceeds the size one run can carry", body = ErrorResponse),
+        (status = 503, description = "Cannot check the DAR runs in progress", body = ErrorResponse)
     )
 )]
 #[post("/dars/distribute")]
@@ -3890,9 +3929,10 @@ pub async fn start_dars(
         (status = 401, description = "Unauthorized", body = ErrorResponse),
         (status = 403, description = "Forbidden: admin role required", body = ErrorResponse),
         (status = 404, description = "No DAR on this node holds the package", body = ErrorResponse),
-        (status = 409, description = "Workflow already in progress", body = ErrorResponse),
+        (status = 409, description = "A run in progress already sends this DAR to one of these peers", body = ErrorResponse),
         (status = 413, description = "The DAR exceeds the size one run can carry", body = ErrorResponse),
-        (status = 500, description = "The DAR could not be read", body = ErrorResponse)
+        (status = 500, description = "The DAR could not be read", body = ErrorResponse),
+        (status = 503, description = "Cannot check the DAR runs in progress", body = ErrorResponse)
     )
 )]
 #[post("/dars/distribute-package")]
@@ -3930,16 +3970,21 @@ pub async fn start_dars_for_package(
     launch_dars(&data, vec![dar], body.peer_ids).await
 }
 
-/// Refuse a DAR set whose encoded `UploadDars` bundle exceeds `limit` bytes.
+/// Why a DAR set is refused: the HTTP status and the reason.
+type DarsRefusal = (StatusCode, String);
+
+/// Decode a DAR set, refusing one whose encoded `UploadDars` bundle exceeds
+/// `limit` bytes.
 ///
 /// A peer checks the size only after it accepts the invitation, so the
 /// coordinator checks it first. The bundle frames each file with its name and
 /// two lengths, and those bytes count toward the limit.
-fn dars_bundle_refusal(
-    files: &[DarFile],
+fn decode_dars_within(
+    files: Vec<DarFile>,
     limit: usize,
-) -> std::result::Result<(), (StatusCode, String)> {
-    let mut sizes = Vec::with_capacity(files.len());
+) -> std::result::Result<Vec<(String, Vec<u8>)>, DarsRefusal> {
+    let count = files.len();
+    let mut decoded = Vec::with_capacity(count);
     for file in files {
         let data = STANDARD.decode(&file.data).map_err(|e| {
             (
@@ -3950,15 +3995,16 @@ fn dars_bundle_refusal(
                 ),
             )
         })?;
-        sizes.push((file.filename.as_str(), data.len()));
+        decoded.push((file.filename, data));
     }
+    let sizes: Vec<(&str, usize)> = decoded
+        .iter()
+        .map(|(name, data)| (name.as_str(), data.len()))
+        .collect();
     let Some(error) = bundle_size_refusal(&sizes, limit) else {
-        return Ok(());
+        return Ok(decoded);
     };
-    tracing::warn!(
-        "Refused to distribute {count} DAR file(s): {error}",
-        count = files.len()
-    );
+    tracing::warn!("Refused to distribute {count} DAR file(s): {error}");
     Err((StatusCode::PAYLOAD_TOO_LARGE, error))
 }
 
@@ -4016,6 +4062,62 @@ fn bundle_size_refusal(files: &[(&str, usize)], limit: usize) -> Option<String> 
     })
 }
 
+/// Serializes starting DAR runs, so the duplicate check in [`launch_dars`]
+/// sees every run started before it.
+static DARS_LAUNCH: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+/// Refuse a DAR run that repeats one still in progress: the same DAR to the
+/// same peer.
+///
+/// A peer that has not accepted the first invitation gains nothing from a
+/// second one. Each repeat is one more run that waits on the peer.
+#[allow(clippy::result_large_err)]
+async fn refuse_repeated_dars(
+    data: &web::Data<AppState>,
+    config: &workflow::DarsConfig,
+) -> std::result::Result<(), HttpResponse> {
+    let runs = data.db.get_in_progress_workflow_runs().await.map_err(|e| {
+        HttpResponse::ServiceUnavailable().json(ErrorResponse {
+            error: format!("Cannot check the DAR runs in progress: {e}"),
+        })
+    })?;
+    let mut repeats = Vec::new();
+    for run in runs
+        .iter()
+        .filter(|run| run.kind == WorkflowKind::Dars && run.role == WorkflowRole::Coordinator)
+    {
+        let Ok(running) = serde_json::from_str::<workflow::DarsConfig>(&run.config_json) else {
+            continue;
+        };
+        for dar in &config.dar_files {
+            if !running.dar_files.iter().any(|d| d.hash == dar.hash) {
+                continue;
+            }
+            for peer in config
+                .peer_ids
+                .iter()
+                .filter(|p| running.peer_ids.contains(p))
+            {
+                repeats.push(format!(
+                    "{dar} to {peer} in run {run}",
+                    dar = dar.filename,
+                    run = run.instance_name
+                ));
+            }
+        }
+    }
+    if repeats.is_empty() {
+        return Ok(());
+    }
+    Err(HttpResponse::Conflict().json(ErrorResponse {
+        error: format!(
+            "Runs in progress already send these DARs: {repeats}. Cancel those runs, or wait \
+             until they end.",
+            repeats = repeats.join("; ")
+        ),
+    }))
+}
+
 /// Start a DARs distribution run: register it, invite the peers and run the
 /// coordinator. The caller has checked the admin role and that `peer_ids` is
 /// not empty.
@@ -4024,9 +4126,10 @@ async fn launch_dars(
     dar_files: Vec<DarFile>,
     peer_ids: Vec<CantonId>,
 ) -> HttpResponse {
-    if let Err((status, error)) = dars_bundle_refusal(&dar_files, MAX_CHUNKED_TOTAL_SIZE) {
-        return HttpResponse::build(status).json(ErrorResponse { error });
-    }
+    let files = match decode_dars_within(dar_files, MAX_CHUNKED_TOTAL_SIZE) {
+        Ok(files) => files,
+        Err((status, error)) => return HttpResponse::build(status).json(ErrorResponse { error }),
+    };
 
     // Create DARs config from request
     let timestamp = now_secs();
@@ -4038,10 +4141,14 @@ async fn launch_dars(
     );
     let dars_state = &instance.http;
     let dars_config = workflow::DarsConfig {
-        dar_files,
+        dar_files: files
+            .iter()
+            .map(|(filename, data)| DarListing::of(filename, data))
+            .collect(),
         instance_name: instance_name.clone(),
         peer_ids: peer_ids.clone(),
     };
+    let bundle = workflow::dars::bundle_of(files);
 
     // Refuse to invite any peer that can't speak the concurrent-workflows wire
     // format — NO invites are sent if even one invitee fails the version gate.
@@ -4052,20 +4159,30 @@ async fn launch_dars(
         });
     }
 
+    // Held from the duplicate check through the insert, so two identical
+    // requests cannot both pass the check.
+    let launching = DARS_LAUNCH.lock().await;
+    if let Err(resp) = refuse_repeated_dars(data, &dars_config).await {
+        return resp;
+    }
     // Register + persist atomically w.r.t. duplicates (registry insert dedups
     // before the upsert; a persist failure unregisters so nothing leaks).
-    if let Err(resp) = register_and_persist(
+    if let Err(resp) = register_and_persist_with_artifacts(
         data,
         &instance,
         DarsStep::WaitingForPeers,
         &dars_config,
         &peer_ids,
         None,
+        &[(artifact_kinds::DARS_BUNDLE, &bundle)],
     )
     .await
     {
         return resp;
     }
+    drop(launching);
+    // The run reads its DARs back from the database once a peer joins.
+    drop(bundle);
 
     let config = data.config.clone();
     let db = data.db.clone();
@@ -4105,35 +4222,21 @@ async fn launch_dars(
             .collect();
         // Pin the content, not just the name: the invitation the operator sees
         // carries the hash of the exact bytes the peers will be asked to upload
-        // and vet. An empty hash list is the wire signal for "coordinator
-        // predates the field", which makes peers fall back to checking
-        // filenames only — so a DAR we cannot decode has to fail the run rather
-        // than quietly downgrade every peer's check.
-        let dar_hashes: std::result::Result<Vec<String>, _> = dars_config
+        // and vet.
+        let dar_hashes: Vec<String> = dars_config
             .dar_files
             .iter()
-            .map(|f| {
-                STANDARD
-                    .decode(&f.data)
-                    .map(|bytes| workflow::validation::hash_dar(&bytes))
-            })
+            .map(|f| f.hash.clone())
             .collect();
-        let invite_result = match dar_hashes {
-            Ok(dar_hashes) => {
-                send_dars_invites(
-                    &config,
-                    &db,
-                    &peer_ids,
-                    &dar_filenames,
-                    &dar_hashes,
-                    &dars_config.instance_name,
-                )
-                .await
-            }
-            Err(e) => Err(anyhow::anyhow!(
-                "Could not hash the DARs for the invitation: {e}"
-            )),
-        };
+        let invite_result = send_dars_invites(
+            &config,
+            &db,
+            &peer_ids,
+            &dar_filenames,
+            &dar_hashes,
+            &dars_config.instance_name,
+        )
+        .await;
         if let Err(e) = invite_result {
             tracing::error!("Failed to send DARs invites: {e}");
             let mut status = dars_state_clone.status.write().await;
@@ -6528,6 +6631,7 @@ mod tests {
             &config,
             &signers.invitees,
             Some(party),
+            &[],
         )
         .await?;
         let run = pool
@@ -7773,7 +7877,7 @@ mod tests {
     /// Two DARs that fit alone but not together can go in two runs.
     #[test]
     fn a_set_above_the_limit_states_its_size_and_excess() -> Result {
-        let refusal = dars_bundle_refusal(&[dar("a.dar", 60), dar("b.dar", 60)], 100);
+        let refusal = decode_dars_within(vec![dar("a.dar", 60), dar("b.dar", 60)], 100).map(drop);
         let Err((status, error)) = refusal else {
             anyhow::bail!("a 150-byte bundle must be refused at limit 100");
         };
@@ -7791,7 +7895,8 @@ mod tests {
     /// names it and does not suggest several runs.
     #[test]
     fn a_dar_over_the_limit_alone_is_named_without_advice_to_split() -> Result {
-        let refusal = dars_bundle_refusal(&[dar("a.dar", 10), dar("big.dar", 120)], 100);
+        let refusal =
+            decode_dars_within(vec![dar("a.dar", 10), dar("big.dar", 120)], 100).map(drop);
         let Err((status, error)) = refusal else {
             anyhow::bail!("a DAR over the limit alone must be refused");
         };
@@ -7826,7 +7931,7 @@ mod tests {
 
     #[test]
     fn framing_bytes_count_toward_the_limit() {
-        let refusal = dars_bundle_refusal(&[dar("a.dar", 60), dar("b.dar", 40)], 100);
+        let refusal = decode_dars_within(vec![dar("a.dar", 60), dar("b.dar", 40)], 100).map(drop);
         assert!(
             matches!(refusal, Err((StatusCode::PAYLOAD_TOO_LARGE, _))),
             "100 DAR bytes plus framing must exceed limit 100: {refusal:?}"
@@ -7835,7 +7940,10 @@ mod tests {
 
     #[test]
     fn a_bundle_at_the_limit_passes() {
-        assert_eq!(dars_bundle_refusal(&[dar("a.dar", 83)], 100), Ok(()));
+        assert_eq!(
+            decode_dars_within(vec![dar("a.dar", 83)], 100).map(drop),
+            Ok(())
+        );
     }
 
     #[test]
@@ -7847,7 +7955,7 @@ mod tests {
                 data: "not base64!".to_string(),
             },
         ];
-        let Err((status, error)) = dars_bundle_refusal(&files, 100) else {
+        let Err((status, error)) = decode_dars_within(files.to_vec(), 100).map(drop) else {
             anyhow::bail!("a DAR that is not base64 must be refused");
         };
         assert_eq!(status, StatusCode::BAD_REQUEST);
@@ -7933,7 +8041,7 @@ mod tests {
             let bundle = bundle_of(&files)?;
             assert_eq!(bundle.len(), bundle_len);
             let peer = check_chunked_metadata(bundle.len(), bundle.len().div_ceil(CHUNK_SIZE));
-            let coordinator = dars_bundle_refusal(&files, MAX_CHUNKED_TOTAL_SIZE);
+            let coordinator = decode_dars_within(files.clone(), MAX_CHUNKED_TOTAL_SIZE).map(drop);
             assert_eq!(
                 coordinator.is_ok(),
                 peer.is_ok(),
@@ -7993,6 +8101,177 @@ mod tests {
                 .is_empty()
         );
         assert!(data.workflows.snapshot().is_empty());
+        Ok(())
+    }
+
+    /// A started run keeps only the names and hashes of its DARs in its row.
+    /// Every query that lists runs reads the row, so the bytes go to the
+    /// bundle the run loads once a peer joins.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_started_run_keeps_its_dars_out_of_its_row(pool: SqlitePool) -> Result {
+        let data = state_on(pool.clone()).await?;
+        let app = actix_test::init_service(
+            App::new()
+                .app_data(web::JsonConfig::default().limit(100 * 1024 * 1024))
+                .app_data(data.clone())
+                .service(start_dars),
+        )
+        .await;
+        let request = actix_test::TestRequest::post()
+            .uri("/dars/distribute")
+            .set_json(serde_json::json!({
+                "dar_files": [dar("b.dar", 30), dar("a.dar", 20)],
+                "peer_ids": [pid(2)?],
+            }))
+            .to_request();
+        request.extensions_mut().insert(admin());
+
+        let response = actix_test::call_service(&app, request).await;
+
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+        let body: serde_json::Value = actix_test::read_body_json(response).await;
+        let instance = body["instance_name"]
+            .as_str()
+            .context("the response names no run")?;
+        let run = pool
+            .get_workflow_run(instance)
+            .await?
+            .context("the run has no row")?;
+        assert!(!run.config_json.contains("\"data\""), "{}", run.config_json);
+        let config: workflow::DarsConfig = serde_json::from_str(&run.config_json)?;
+        assert_eq!(
+            config.dar_files,
+            vec![
+                DarListing::of("b.dar", &[0; 30]),
+                DarListing::of("a.dar", &[0; 20])
+            ]
+        );
+        let bundle = pool
+            .read_artifact(instance, artifact_kinds::DARS_BUNDLE, None)
+            .await?;
+        assert_eq!(
+            bundle,
+            Some(workflow::bundle_of(vec![
+                ("b.dar".to_string(), vec![0; 30]),
+                ("a.dar".to_string(), vec![0; 20]),
+            ]))
+        );
+        Ok(())
+    }
+
+    /// Store a coordinator DAR run that sends `dars`, each a name and its
+    /// bytes, to `peers`.
+    async fn store_dars_run(
+        pool: &SqlitePool,
+        instance: &str,
+        dars: &[(&str, &[u8])],
+        peers: Vec<CantonId>,
+    ) -> Result<workflow::DarsConfig> {
+        let config = workflow::DarsConfig {
+            dar_files: dars
+                .iter()
+                .map(|(name, data)| DarListing::of(name, data))
+                .collect(),
+            instance_name: instance.to_string(),
+            peer_ids: peers.clone(),
+        };
+        insert_coordinator_run(
+            pool,
+            instance,
+            WorkflowKind::Dars,
+            DarsStep::WaitingForPeers,
+            &config,
+            &peers,
+            None,
+            &[],
+        )
+        .await?;
+        Ok(config)
+    }
+
+    /// The incident behind this check: 144 runs, each one DAR to a peer that
+    /// never accepted, many of them repeats. The refusal names each DAR, peer
+    /// and run that repeats, and nothing that does not.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_dar_already_on_its_way_to_a_peer_is_refused(pool: SqlitePool) -> Result {
+        let data = state_on(pool.clone()).await?;
+        store_dars_run(
+            &pool,
+            "dars-distribute-1",
+            &[("app.dar", b"app")],
+            vec![pid(2)?, pid(3)?],
+        )
+        .await?;
+        let repeat = workflow::DarsConfig {
+            dar_files: vec![
+                DarListing::of("app.dar", b"app"),
+                DarListing::of("lib.dar", b"lib"),
+            ],
+            instance_name: "dars-distribute-2".to_string(),
+            peer_ids: vec![pid(3)?, pid(4)?],
+        };
+
+        let Err(response) = refuse_repeated_dars(&data, &repeat).await else {
+            anyhow::bail!("a DAR already on its way to a peer must be refused");
+        };
+
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        let error = error_body(response).await?;
+        assert!(
+            error.contains(&format!("app.dar to {} in run dars-distribute-1", pid(3)?)),
+            "{error}"
+        );
+        assert!(!error.contains(&pid(4)?.to_string()), "{error}");
+        assert!(!error.contains("lib.dar"), "{error}");
+        Ok(())
+    }
+
+    /// The same DAR to another peer, other bytes under the same name, and a
+    /// DAR whose run has ended are not repeats.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn only_a_run_in_progress_with_the_same_dar_and_peer_is_a_repeat(
+        pool: SqlitePool,
+    ) -> Result {
+        let data = state_on(pool.clone()).await?;
+        store_dars_run(
+            &pool,
+            "dars-distribute-1",
+            &[("app.dar", b"app")],
+            vec![pid(2)?],
+        )
+        .await?;
+        store_dars_run(
+            &pool,
+            "dars-distribute-2",
+            &[("lib.dar", b"lib")],
+            vec![pid(3)?],
+        )
+        .await?;
+        assert!(
+            finish_run(
+                &pool,
+                "dars-distribute-2",
+                WorkflowProgress::Completed,
+                None
+            )
+            .await?
+        );
+        let to = |dar: DarListing, peer: CantonId| workflow::DarsConfig {
+            dar_files: vec![dar],
+            instance_name: "dars-distribute-3".to_string(),
+            peer_ids: vec![peer],
+        };
+
+        for config in [
+            to(DarListing::of("app.dar", b"app"), pid(3)?),
+            to(DarListing::of("app.dar", b"app v2"), pid(2)?),
+            to(DarListing::of("lib.dar", b"lib"), pid(3)?),
+        ] {
+            assert!(
+                refuse_repeated_dars(&data, &config).await.is_ok(),
+                "{config:?} is not a repeat"
+            );
+        }
         Ok(())
     }
 

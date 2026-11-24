@@ -49,7 +49,6 @@ use std::{
 use actix_cors::Cors;
 use actix_web::{App, HttpServer, web};
 use anyhow::{Context, bail};
-use base64::{Engine, engine::general_purpose::STANDARD};
 use canton_proto_rs::com::digitalasset::canton::{
     crypto::{
         admin::v30::{
@@ -1270,6 +1269,14 @@ pub async fn start_server(
             }
             Err(e) => tracing::warn!("Skipping the audit row of an interrupted purge: {e}"),
         }
+    }
+
+    // Before anything lists runs: older releases kept a DAR run's bytes in its
+    // config, so every listing loaded them.
+    match workflow::dars::move_inline_dars(&db).await {
+        Ok(0) => {}
+        Ok(moved) => tracing::info!("Moved the DARs of {moved} run(s) out of their configs"),
+        Err(e) => tracing::warn!("Could not move DARs out of run configs: {e:#}"),
     }
 
     // Boot-time workflow recovery. For any `workflow_runs` row that was
@@ -2966,9 +2973,14 @@ async fn dar_for_invited_peer(
             request.filename
         );
     }
-    STANDARD
-        .decode(&file.data)
-        .with_context(|| format!("DAR {} does not decode", file.filename))
+    // The bundle is sorted by name, so the DAR is found by its hash rather
+    // than by its index. The hash also tells apart two DARs with one name.
+    let bundle = workflow::dars::load_bundle(db, &request.workflow_instance).await?;
+    utils::decode_files(&bundle)?
+        .into_iter()
+        .find(|(_, data)| workflow::validation::hash_dar(data) == file.hash)
+        .map(|(_, data)| data)
+        .with_context(|| format!("the stored DARs of this run lack {}", file.filename))
 }
 
 /// Answer a peer request with `payload`: inline while it fits one Noise frame,
@@ -3075,9 +3087,11 @@ mod tests {
             server::types::{
                 RequestDarPayload, WorkflowKind, WorkflowProgress, WorkflowRole, WorkflowRun,
             },
-            workflow::DarsConfig,
+            workflow::{
+                DarListing, DarsConfig, bundle_of,
+                storage::{WorkflowStorage, artifact_kinds},
+            },
         };
-        use base64::{Engine, engine::general_purpose::STANDARD};
         use sqlx::SqlitePool;
 
         const DAR: &[u8] = b"not really a DAR, but bytes are bytes";
@@ -3092,10 +3106,7 @@ mod tests {
 
         fn dars_run(instance: &str, invited: Vec<CantonId>) -> anyhow::Result<WorkflowRun> {
             let config = DarsConfig {
-                dar_files: vec![common::api::DarFile {
-                    filename: "app.dar".to_string(),
-                    data: STANDARD.encode(DAR),
-                }],
+                dar_files: vec![DarListing::of("app.dar", DAR)],
                 peer_ids: invited.clone(),
                 instance_name: instance.to_string(),
             };
@@ -3136,6 +3147,19 @@ mod tests {
             let mut tx = pool.begin_transaction().await?;
             tx.upsert_workflow_run(run).await?;
             Commitable::commit(tx).await?;
+            Ok(())
+        }
+
+        /// Save a DAR run from [`dars_run`] with the bundle its coordinator stores.
+        async fn save_dars(pool: &SqlitePool, run: &WorkflowRun) -> anyhow::Result<()> {
+            save(pool, run).await?;
+            pool.write_artifact(
+                &run.instance_name,
+                artifact_kinds::DARS_BUNDLE,
+                None,
+                &bundle_of(vec![("app.dar".to_string(), DAR.to_vec())]),
+            )
+            .await?;
             Ok(())
         }
 
@@ -3206,7 +3230,7 @@ mod tests {
         #[sqlx::test(migrator = "MIGRATOR")]
         async fn an_invited_peer_reads_the_dar(pool: SqlitePool) -> anyhow::Result<()> {
             let invited = pid("validator-1", 0xaa)?;
-            save(&pool, &dars_run("dars-1", vec![invited.clone()])?).await?;
+            save_dars(&pool, &dars_run("dars-1", vec![invited.clone()])?).await?;
 
             let served = dar_for_invited_peer(
                 &pool,
@@ -3219,13 +3243,56 @@ mod tests {
             Ok(())
         }
 
+        /// The bundle is sorted by name, but the index follows the invitation.
+        /// Each index must still serve the DAR the invitation named there.
+        #[sqlx::test(migrator = "MIGRATOR")]
+        async fn each_index_serves_its_own_dar_whatever_the_bundle_order(
+            pool: SqlitePool,
+        ) -> anyhow::Result<()> {
+            let invited = pid("validator-1", 0xaa)?;
+            let files = vec![
+                ("z.dar".to_string(), b"last by name".to_vec()),
+                ("a.dar".to_string(), b"first by name".to_vec()),
+            ];
+            let mut run = dars_run("dars-2", vec![invited.clone()])?;
+            run.config_json = serde_json::to_string(&DarsConfig {
+                dar_files: files
+                    .iter()
+                    .map(|(name, data)| DarListing::of(name, data))
+                    .collect(),
+                peer_ids: vec![invited.clone()],
+                instance_name: "dars-2".to_string(),
+            })?;
+            save(&pool, &run).await?;
+            pool.write_artifact(
+                "dars-2",
+                artifact_kinds::DARS_BUNDLE,
+                None,
+                &bundle_of(files),
+            )
+            .await?;
+
+            for (index, name, expected) in
+                [(0, "z.dar", "last by name"), (1, "a.dar", "first by name")]
+            {
+                let served = dar_for_invited_peer(
+                    &pool,
+                    Some(&invited.to_string()),
+                    &ask("dars-2", index, name)?,
+                )
+                .await?;
+                assert_eq!(served, expected.as_bytes(), "index {index}");
+            }
+            Ok(())
+        }
+
         /// The gate this endpoint exists for: the DAR is readable before the
         /// peer accepts, so nothing but the invite list says who may read it.
         #[sqlx::test(migrator = "MIGRATOR")]
         async fn an_uninvited_peer_gets_nothing(pool: SqlitePool) -> anyhow::Result<()> {
             let invited = pid("validator-1", 0xaa)?;
             let stranger = pid("validator-9", 0xbb)?;
-            save(&pool, &dars_run("dars-1", vec![invited])?).await?;
+            save_dars(&pool, &dars_run("dars-1", vec![invited])?).await?;
 
             match dar_for_invited_peer(
                 &pool,
@@ -3243,7 +3310,7 @@ mod tests {
         #[sqlx::test(migrator = "MIGRATOR")]
         async fn an_unidentified_caller_gets_nothing(pool: SqlitePool) -> anyhow::Result<()> {
             let invited = pid("validator-1", 0xaa)?;
-            save(&pool, &dars_run("dars-1", vec![invited])?).await?;
+            save_dars(&pool, &dars_run("dars-1", vec![invited])?).await?;
 
             let refused = dar_for_invited_peer(&pool, None, &ask("dars-1", 0, "app.dar")?).await;
 
@@ -3258,7 +3325,7 @@ mod tests {
             pool: SqlitePool,
         ) -> anyhow::Result<()> {
             let invited = pid("validator-1", 0xaa)?;
-            save(&pool, &dars_run("dars-1", vec![invited.clone()])?).await?;
+            save_dars(&pool, &dars_run("dars-1", vec![invited.clone()])?).await?;
 
             match dar_for_invited_peer(
                 &pool,
@@ -3276,7 +3343,7 @@ mod tests {
         #[sqlx::test(migrator = "MIGRATOR")]
         async fn an_index_past_the_end_is_refused(pool: SqlitePool) -> anyhow::Result<()> {
             let invited = pid("validator-1", 0xaa)?;
-            save(&pool, &dars_run("dars-1", vec![invited.clone()])?).await?;
+            save_dars(&pool, &dars_run("dars-1", vec![invited.clone()])?).await?;
 
             let refused = dar_for_invited_peer(
                 &pool,

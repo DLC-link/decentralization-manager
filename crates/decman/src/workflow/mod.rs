@@ -51,7 +51,7 @@ use crate::{
 pub use add_party::{AddPartyConfig, AddPartyStep};
 pub use change_threshold::{ChangeThresholdConfig, ChangeThresholdStep};
 pub use contracts::{ContractsConfig, ContractsStep};
-pub use dars::{DarsConfig, DarsStep};
+pub use dars::{DarListing, DarsConfig, DarsStep, bundle_of};
 pub use kick::{KickConfig, KickStep};
 pub use onboarding::{OnboardingConfig, OnboardingStep};
 pub use rotate_key::{RotateKeyConfig, RotateKeyStep};
