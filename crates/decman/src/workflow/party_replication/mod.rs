@@ -28,7 +28,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use sqlx::SqlitePool;
 
-use crate::{canton_id::CantonId, error::Result, workflow::storage::WorkflowStorage};
+use crate::{canton_id::CantonId, error::Result, utils, workflow::storage::WorkflowStorage};
 
 pub(crate) use acs::resume_tenant_import_window;
 pub use acs::{
@@ -169,10 +169,7 @@ impl ReplicationTarget {
             }
             ArtifactStore::Tenant => {
                 let scope = scope.unwrap_or_default();
-                let now = SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .map(|d| d.as_secs() as i64)
-                    .unwrap_or_default();
+                let now = utils::now_secs();
                 let result = sqlx::query(
                     "INSERT INTO tenant_replication_artifacts \
                      (instance_name, artifact_kind, attestor_id, payload, created_at) \
@@ -209,10 +206,7 @@ impl ReplicationTarget {
             }
             ArtifactStore::Tenant => {
                 let scope = scope.unwrap_or_default();
-                let now = SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .map(|d| d.as_secs() as i64)
-                    .unwrap_or_default();
+                let now = utils::now_secs();
                 sqlx::query(
                     "INSERT INTO tenant_replication_artifacts \
                      (instance_name, artifact_kind, attestor_id, payload, created_at) \
