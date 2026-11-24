@@ -164,6 +164,14 @@ pub const MAX_CONSECUTIVE_NO_WORKFLOW_POLLS: usize = 4;
 /// also outlasts a pod restart, after which a peer resumes its run.
 pub const PEER_SILENCE_LIMIT: std::time::Duration = std::time::Duration::from_secs(600);
 
+/// How long a DAR distribution run waits for its peers to join before it
+/// fails.
+///
+/// A peer's operator accepts the invitation by hand, so the limit covers a
+/// weekend. Without a limit, runs whose peers never accept stay in progress
+/// for good and pile up. A retry starts the wait again.
+pub const DARS_PEER_JOIN_LIMIT: std::time::Duration = std::time::Duration::from_secs(72 * 60 * 60);
+
 /// Delay before a peer re-polls the coordinator after a `Wait` reply, in
 /// milliseconds.
 /// Default value; the actual delay is read via [`peer_wait_poll_delay_ms`].

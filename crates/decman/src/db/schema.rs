@@ -131,6 +131,10 @@ pub trait SchemaRead {
     /// Get a single workflow run by its instance name.
     async fn get_workflow_run(&self, instance_name: &str) -> Result<Option<WorkflowRun>>;
 
+    /// Name every coordinator DAR run whose `config_json` still carries the
+    /// DAR bytes, as rows written before the `dars_bundle` artefact did.
+    async fn get_dars_runs_with_inline_bytes(&self) -> Result<Vec<String>>;
+
     /// Look up an in-progress run for a given (kind, role) on this node. With
     /// concurrent same-kind runs (the per-kind unique index was dropped in
     /// migration 000013) several may match; returns the lowest `instance_name`.
@@ -450,6 +454,10 @@ pub trait Commitable {
         instance_name: &str,
         dec_party_id: &CantonId,
     ) -> Result;
+
+    /// Replace a run's `config_json`. Leaves `updated_at` alone, because a DAR
+    /// run counts its wait for peers from it.
+    async fn set_workflow_run_config(&mut self, instance_name: &str, config_json: &str) -> Result;
 
     /// Mark a terminal-state run as dismissed by the operator, hiding it
     /// from the notification feed. No-op when the run is still InProgress.

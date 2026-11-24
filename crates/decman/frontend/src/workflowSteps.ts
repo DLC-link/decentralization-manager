@@ -125,6 +125,12 @@ export const WORKFLOW_STEPS: Record<WorkflowKind, WorkflowStepInfo[]> = {
   Dars: [
     WAITING_FOR_PEERS,
     {
+      name: "LoadDars",
+      label: "Loading DARs",
+      description:
+        "The coordinator loads the DARs it sends to the members from its database.",
+    },
+    {
       name: "UploadDars",
       label: "Uploading DARs",
       description:

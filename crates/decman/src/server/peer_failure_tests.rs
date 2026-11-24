@@ -7,13 +7,17 @@ use tokio::net::TcpListener;
 use super::*;
 use crate::{
     config::{NetworkConfig, Peer},
-    consts::PEER_SILENCE_LIMIT,
-    noise::server::NoiseServer,
-    workflow::{DarsConfig, DarsStep, contracts::DarFile},
+    consts::{DARS_PEER_JOIN_LIMIT, PEER_SILENCE_LIMIT},
+    noise::server::{ActiveWorkflow, NoiseServer},
+    workflow::{
+        DarListing, DarsConfig, DarsStep, bundle_of,
+        storage::{WorkflowStorage, artifact_kinds},
+    },
 };
 
 const COORDINATOR_RUN: &str = "dars-coordinator-run";
 const PEER_RUN: &str = "dars-peer-run";
+const DAR: &[u8] = b"dar bytes";
 
 /// A node with its own data directory and Noise key.
 struct TestNode {
@@ -66,16 +70,72 @@ async fn insert_run(
         "INSERT INTO workflow_runs
          (instance_name, kind, role, status, current_step, step_index, step_total,
           config_json, expected_peers_json, completed_peers_json, created_at, updated_at)
-         VALUES (?, ?, ?, 'inprogress', ?, 0, 3, '{}', ?, '[]', 0, 0)",
+         VALUES (?, ?, ?, 'inprogress', ?, 0, 4, '{}', ?, '[]', ?, ?)",
     )
     .bind(instance)
     .bind(WorkflowKind::Dars.as_str())
     .bind(role.as_str())
     .bind(step)
     .bind(serde_json::to_string(expected_peers)?)
+    .bind(now_secs())
+    .bind(now_secs())
     .execute(db)
     .await?;
     Ok(())
+}
+
+fn now_secs() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs() as i64)
+}
+
+/// Store the coordinator run's bundle of one DAR, and return the config of a
+/// run that sends it to `peer`.
+async fn store_dars(db: &SqlitePool, peer: &CantonId) -> Result<DarsConfig> {
+    db.write_artifact(
+        COORDINATOR_RUN,
+        artifact_kinds::DARS_BUNDLE,
+        None,
+        &bundle_of(vec![("app.dar".into(), DAR.to_vec())]),
+    )
+    .await?;
+    Ok(DarsConfig {
+        dar_files: vec![DarListing::of("app.dar", DAR)],
+        instance_name: COORDINATOR_RUN.into(),
+        peer_ids: vec![peer.clone()],
+    })
+}
+
+/// Start the coordinator of a DAR run on its own task.
+fn spawn_coordinator(
+    coordinator: &TestNode,
+    db: &SqlitePool,
+    dars: DarsConfig,
+    workflows: &WorkflowRegistry,
+    last_seen: LastSeen,
+) -> tokio::task::JoinHandle<Result<workflow::CoordinatorResult>> {
+    let instance = WorkflowInstance::new(
+        COORDINATOR_RUN.into(),
+        WorkflowKind::Dars,
+        WorkflowRole::Coordinator,
+    );
+    workflows.insert(instance.clone());
+    tokio::spawn(workflow::start_coordinator(
+        coordinator.config.clone(),
+        db.clone(),
+        WorkflowType::Dars,
+        None,
+        None,
+        None,
+        Some(dars),
+        None,
+        None,
+        None,
+        None,
+        last_seen,
+        instance,
+    ))
 }
 
 /// Run the coordinator's always-on Noise listener on `listener`.
@@ -146,35 +206,8 @@ async fn a_peer_that_gives_up_fails_the_coordinator_run(db: SqlitePool) -> Resul
         last_seen.clone(),
     )
     .await?;
-    let instance = WorkflowInstance::new(
-        COORDINATOR_RUN.into(),
-        WorkflowKind::Dars,
-        WorkflowRole::Coordinator,
-    );
-    workflows.insert(instance.clone());
-    let dars = DarsConfig {
-        dar_files: vec![DarFile {
-            filename: "app.dar".into(),
-            data: STANDARD.encode(b"dar bytes"),
-        }],
-        instance_name: COORDINATOR_RUN.into(),
-        peer_ids: vec![peer.id()],
-    };
-    let coordinating = tokio::spawn(workflow::start_coordinator(
-        coordinator.config.clone(),
-        db.clone(),
-        WorkflowType::Dars,
-        None,
-        None,
-        None,
-        Some(dars),
-        None,
-        None,
-        None,
-        None,
-        last_seen,
-        instance,
-    ));
+    let dars = store_dars(&db, &peer.id()).await?;
+    let coordinating = spawn_coordinator(&coordinator, &db, dars, &workflows, last_seen);
 
     let peer_result = tokio::time::timeout(
         Duration::from_secs(60),
@@ -275,6 +308,137 @@ async fn a_peer_silent_past_the_limit_strands_the_run(db: SqlitePool) -> Result 
             .stranded_reason(heard + PEER_SILENCE_LIMIT)
             .await
             .is_some()
+    );
+    Ok(())
+}
+
+/// A run that waits for its peers holds none of its DARs in memory. With many
+/// runs waiting on a peer that never accepts, held DARs ran a node out of
+/// memory.
+#[sqlx::test(migrations = "./migrations")]
+async fn a_run_waiting_for_peers_holds_no_dars(db: SqlitePool) -> Result {
+    let coordinator = TestNode::new("coordinator", 'c').await?;
+    let peer = TestNode::new("peer", 'b').await?;
+    let mut tx = db.begin_transaction().await?;
+    tx.insert_peer(&peer.as_peer(1)).await?;
+    Commitable::commit(tx).await?;
+    insert_run(
+        &db,
+        COORDINATOR_RUN,
+        WorkflowRole::Coordinator,
+        "WaitingForPeers",
+        &[peer.id()],
+    )
+    .await?;
+    let dars = store_dars(&db, &peer.id()).await?;
+    let workflows = WorkflowRegistry::new();
+    let last_seen: LastSeen = Arc::new(RwLock::new(HashMap::new()));
+    let coordinating = spawn_coordinator(&coordinator, &db, dars, &workflows, last_seen);
+
+    let server = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if let Some(ActiveWorkflow::Dars(server)) = workflows.route(COORDINATOR_RUN) {
+                return server;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await?;
+    let state = server.get_workflow_state();
+    assert_eq!(state.current_step().await, DarsStep::WaitingForPeers);
+    assert!(state.get_command_payload().await.is_empty());
+
+    coordinating.abort();
+    Ok(())
+}
+
+/// A run resumed mid-transfer serves its DARs on the first poll, so no peer is
+/// sent an empty `UploadDars` after a coordinator restart.
+#[sqlx::test(migrations = "./migrations")]
+async fn a_resumed_transfer_serves_its_dars_on_the_first_poll(db: SqlitePool) -> Result {
+    let coordinator = TestNode::new("coordinator", 'c').await?;
+    let peer = TestNode::new("peer", 'b').await?;
+    let mut tx = db.begin_transaction().await?;
+    tx.insert_peer(&peer.as_peer(1)).await?;
+    Commitable::commit(tx).await?;
+    insert_run(
+        &db,
+        COORDINATOR_RUN,
+        WorkflowRole::Coordinator,
+        "UploadDars",
+        &[peer.id()],
+    )
+    .await?;
+    let dars = store_dars(&db, &peer.id()).await?;
+    let workflows = WorkflowRegistry::new();
+    let last_seen: LastSeen = Arc::new(RwLock::new(HashMap::new()));
+    let coordinating = spawn_coordinator(&coordinator, &db, dars, &workflows, last_seen);
+
+    let server = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if let Some(ActiveWorkflow::Dars(server)) = workflows.route(COORDINATOR_RUN) {
+                return server;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await?;
+    let command = server
+        .handle_command(peer.id(), Message::new_empty(MessageType::GetNextCommand))
+        .await?;
+
+    assert_eq!(command.msg_type, MessageType::UploadDars);
+    assert_eq!(
+        command.payload,
+        bundle_of(vec![("app.dar".into(), DAR.to_vec())])
+    );
+
+    coordinating.abort();
+    Ok(())
+}
+
+/// Peers that never accept fail the run once the join limit passes, so such
+/// runs do not pile up. The error names the peers the run waited on.
+#[sqlx::test(migrations = "./migrations")]
+async fn a_run_whose_peers_never_join_fails_at_the_limit(db: SqlitePool) -> Result {
+    let coordinator = TestNode::new("coordinator", 'c').await?;
+    let peer = TestNode::new("peer", 'b').await?;
+    let mut tx = db.begin_transaction().await?;
+    tx.insert_peer(&peer.as_peer(1)).await?;
+    Commitable::commit(tx).await?;
+    insert_run(
+        &db,
+        COORDINATOR_RUN,
+        WorkflowRole::Coordinator,
+        "WaitingForPeers",
+        &[peer.id()],
+    )
+    .await?;
+    sqlx::query("UPDATE workflow_runs SET updated_at = updated_at - ? WHERE instance_name = ?")
+        .bind(i64::try_from(DARS_PEER_JOIN_LIMIT.as_secs())?)
+        .bind(COORDINATOR_RUN)
+        .execute(&db)
+        .await?;
+    let dars = store_dars(&db, &peer.id()).await?;
+    let workflows = WorkflowRegistry::new();
+    let last_seen: LastSeen = Arc::new(RwLock::new(HashMap::new()));
+
+    let result = tokio::time::timeout(
+        Duration::from_secs(30),
+        spawn_coordinator(&coordinator, &db, dars, &workflows, last_seen),
+    )
+    .await??;
+
+    let error = result
+        .err()
+        .ok_or_else(|| anyhow::anyhow!("a run past the join limit did not fail"))?
+        .to_string();
+    assert!(
+        error.contains(&format!(
+            "These peers did not join within 72 hours: {}.",
+            peer.id()
+        )),
+        "{error}"
     );
     Ok(())
 }

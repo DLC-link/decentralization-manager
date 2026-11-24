@@ -52,6 +52,12 @@ pub mod artifact_kinds {
     pub const PREPARED_SUBMISSION: &str = "prepared_submission";
     pub const SUBMISSION_SIGNATURES: &str = "submission_signatures";
 
+    // DARs (workflow_artifacts during a run)
+    /// The DARs a distribution run sends, encoded as the `UploadDars` payload.
+    /// They live here rather than in the run's `config_json`, which every
+    /// query that lists runs reads. The run loads them once a peer joins.
+    pub const DARS_BUNDLE: &str = "dars_bundle";
+
     /// Combined DNS/P2P uploads retained until workflow cleanup, so splitting
     /// can resume after a restart between the two output writes.
     pub const KICK_SIGNATURE_UPLOAD: &str = "kick_signature_upload";

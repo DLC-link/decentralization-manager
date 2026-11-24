@@ -558,12 +558,19 @@ Uploads DAR packages to all participants without deploying contracts.
 
 | # | Step | Actor | Description |
 |---|------|-------|-------------|
-| 1 | WaitingForPeers | Coordinator | Wait for all participants to connect |
-| 2 | UploadDars | All | Each participant uploads DAR files to their local Canton node |
-| 3 | Complete | All | Disconnect peers |
+| 1 | WaitingForPeers | Coordinator | Wait for all participants to connect. The run fails if they have not all joined within 72 hours |
+| 2 | LoadDars | Coordinator | Load the DARs from the database. Peers get `Wait` until they are loaded |
+| 3 | UploadDars | All | Each participant uploads DAR files to their local Canton node |
+| 4 | Complete | All | Disconnect peers |
+
+The run's row holds only the names and hashes of its DARs. The bytes are the
+run's `dars_bundle` artefact, so a waiting run holds none of them in memory,
+and listing runs never loads them. DecMan refuses to start or retry a run that
+sends a DAR to a peer while another run in progress already sends that DAR to
+that peer.
 
 **Canton API calls:**
-- `PackageService.UploadDarFile` -- Upload DAR packages (step 2)
+- `PackageService.UploadDarFile` -- Upload DAR packages (step 3)
 
 **Minimum participants:** 2
 

@@ -11,6 +11,7 @@ use std::{
     sync::Arc,
 };
 
+use bytes::Bytes;
 use common::types::{AcsTransferDirection, AcsTransferProgress};
 use sqlx::SqlitePool;
 use tokio::sync::{Mutex, RwLock};
@@ -82,8 +83,9 @@ pub struct WorkflowState<S> {
     completed_peers: RwLock<HashSet<CantonId>>,
     /// Data received from peers (e.g., keys, signatures)
     peer_data: RwLock<HashMap<CantonId, Vec<u8>>>,
-    /// Payload data to send with the next command (e.g., proposals for signing)
-    command_payload: RwLock<Vec<u8>>,
+    /// Payload data to send with the next command (e.g., proposals for signing).
+    /// Shared so that serving it to a peer does not copy it.
+    command_payload: RwLock<Bytes>,
     /// The source's open ACS export, held between block requests, with the one
     /// participant allowed to pull from it.
     ///
@@ -117,7 +119,7 @@ impl<S: WorkflowStep + 'static> WorkflowState<S> {
             connected_peers: RwLock::new(HashSet::new()),
             completed_peers: RwLock::new(HashSet::new()),
             peer_data: RwLock::new(HashMap::new()),
-            command_payload: RwLock::new(Vec::new()),
+            command_payload: RwLock::new(Bytes::new()),
             acs_export: Mutex::new(None),
             _p: PhantomData,
         })
@@ -143,7 +145,7 @@ impl<S: WorkflowStep + 'static> WorkflowState<S> {
             connected_peers: RwLock::new(HashSet::new()),
             completed_peers: RwLock::new(completed_peers.into_iter().collect()),
             peer_data: RwLock::new(HashMap::new()),
-            command_payload: RwLock::new(Vec::new()),
+            command_payload: RwLock::new(Bytes::new()),
             acs_export: Mutex::new(None),
             _p: PhantomData,
         })
@@ -192,12 +194,13 @@ impl<S: WorkflowStep + 'static> WorkflowState<S> {
 
     /// Set payload data to be sent with the next command
     pub async fn set_command_payload(&self, payload: Vec<u8>) {
-        let mut cmd_payload = self.command_payload.write().await;
-        *cmd_payload = payload;
+        *self.command_payload.write().await = Bytes::from(payload);
     }
 
-    /// Get payload data to send with command (clones the data)
-    pub async fn get_command_payload(&self) -> Vec<u8> {
+    /// The payload to send with the command. A DAR bundle can be 16 MiB and
+    /// every peer poll and chunk request reads it, so this returns a shared
+    /// handle rather than a copy.
+    pub async fn get_command_payload(&self) -> Bytes {
         self.command_payload.read().await.clone()
     }
 
@@ -304,8 +307,7 @@ impl<S: WorkflowStep + 'static> WorkflowState<S> {
 
     /// Clear the command payload
     pub async fn clear_command_payload(&self) {
-        let mut cmd_payload = self.command_payload.write().await;
-        cmd_payload.clear();
+        *self.command_payload.write().await = Bytes::new();
     }
 
     pub async fn current_step(&self) -> S {

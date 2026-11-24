@@ -6,6 +6,7 @@ use std::{
 };
 
 use anyhow::Context;
+use bytes::Bytes;
 use canton_proto_rs::com::digitalasset::canton::protocol::v30::{
     PartyToParticipant, SignedTopologyTransaction,
 };
@@ -729,13 +730,13 @@ impl<S: WorkflowStep + 'static> NoiseServer<S> {
             let payload = if command_carries_payload(command) {
                 self.workflow_state.get_command_payload().await
             } else {
-                Vec::new()
+                Bytes::new()
             };
             if payload.is_empty() {
                 Ok(Message::new_empty(command))
             } else if payload.len() <= MAX_PAYLOAD_SIZE {
                 // Small payload - send directly
-                Ok(Message::new(command, payload))
+                Ok(Message::new(command, payload.to_vec()))
             } else {
                 // Large payload - use chunked transfer
                 let total_size = payload.len() as u32;

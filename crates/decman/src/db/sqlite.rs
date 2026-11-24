@@ -508,6 +508,22 @@ impl SchemaRead for SqlitePool {
         row.map(|r| r.into_domain()).transpose()
     }
 
+    async fn get_dars_runs_with_inline_bytes(&self) -> Result<Vec<String>> {
+        // A plain text match, so one malformed row cannot fail the query. A row
+        // it matches by mistake is parsed and left alone.
+        Ok(sqlx::query_scalar(
+            r#"
+            SELECT instance_name FROM workflow_runs
+            WHERE kind = ? AND role = ? AND config_json LIKE '%"data":%'
+            ORDER BY created_at ASC
+            "#,
+        )
+        .bind(WorkflowKind::Dars.as_str())
+        .bind(WorkflowRole::Coordinator.as_str())
+        .fetch_all(self)
+        .await?)
+    }
+
     async fn get_active_workflow_run(
         &self,
         kind: WorkflowKind,
@@ -1705,6 +1721,15 @@ impl Commitable for sqlx::Transaction<'static, sqlx::Sqlite> {
     ) -> Result {
         sqlx::query("UPDATE workflow_runs SET dec_party_id = ? WHERE instance_name = ?")
             .bind(dec_party_id.to_string())
+            .bind(instance_name)
+            .execute(&mut **self)
+            .await?;
+        Ok(())
+    }
+
+    async fn set_workflow_run_config(&mut self, instance_name: &str, config_json: &str) -> Result {
+        sqlx::query("UPDATE workflow_runs SET config_json = ? WHERE instance_name = ?")
+            .bind(config_json)
             .bind(instance_name)
             .execute(&mut **self)
             .await?;
