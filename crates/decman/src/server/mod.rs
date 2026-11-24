@@ -27,6 +27,7 @@ pub(crate) mod tenant_call_audit;
 mod tenant_rate_limit;
 mod transfer_context;
 mod types;
+mod workflow_exclusion;
 
 #[cfg(test)]
 mod peer_failure_tests;
@@ -972,6 +973,26 @@ impl WorkflowTriggers {
                 && r.coordinator_pubkey.as_deref() == Some(coordinator_pubkey)
                 && (instance.is_empty() || r.coordinator_instance.as_deref() == Some(instance))
         }) {
+            let _start = if let Some(party) = &run.dec_party_id {
+                match workflow_exclusion::claim_party_for_workflow(&self.workflows, &self.db, party)
+                    .await
+                {
+                    Ok(claim) => Some(claim),
+                    Err(refusal) => {
+                        if matches!(
+                            refusal,
+                            workflow_exclusion::PartyStartRefusal::Unavailable { .. }
+                        ) {
+                            tracing::error!(error = ?refusal, "Cannot retry peer workflow");
+                        } else {
+                            tracing::warn!(%refusal, "Cannot retry peer workflow");
+                        }
+                        continue;
+                    }
+                }
+            } else {
+                None
+            };
             let mut tx = match self.db.begin_transaction().await {
                 Ok(t) => t,
                 Err(e) => {
@@ -3049,7 +3070,7 @@ mod tests {
             canton_id::CantonId,
             db::{
                 MIGRATOR,
-                schema::{Commitable, SchemaWrite},
+                schema::{Commitable, SchemaRead, SchemaWrite},
             },
             server::types::{
                 RequestDarPayload, WorkflowKind, WorkflowProgress, WorkflowRole, WorkflowRun,
@@ -3124,6 +3145,62 @@ mod tests {
                 index,
                 filename: filename.to_string(),
             })?)
+        }
+
+        #[sqlx::test(migrator = "MIGRATOR")]
+        async fn peer_retry_respects_party_exclusion(pool: SqlitePool) -> anyhow::Result<()> {
+            let party = pid("party", 66)?;
+            let mut failed = dars_run("peer-retry", Vec::new())?;
+            failed.kind = WorkflowKind::AddParty;
+            failed.role = WorkflowRole::Peer;
+            failed.status = WorkflowProgress::Failed;
+            failed.dec_party_id = Some(party.clone());
+            failed.coordinator_pubkey = Some("coordinator".to_string());
+            failed.coordinator_instance = Some("remote-run".to_string());
+            save(&pool, &failed).await?;
+            let state = super::super::AppState::for_test_on(None, pool.clone());
+            let (sender, mut jobs) = tokio::sync::mpsc::unbounded_channel();
+            let triggers = super::super::WorkflowTriggers {
+                pending_invitations: state.pending_invitations.clone(),
+                config: state.config.clone(),
+                peer_chunk_cache: Default::default(),
+                db: pool.clone(),
+                party_credentials: state.party_credentials.clone(),
+                workflows: state.workflows.clone(),
+                peer_job_sender: sender,
+            };
+            let claim = state.workflows.claim_start(&party).expect("fresh party");
+            triggers
+                .retry_peer_runs_from("coordinator", "remote-run")
+                .await;
+            assert!(jobs.try_recv().is_err());
+            assert_eq!(
+                pool.get_workflow_run("peer-retry").await?.unwrap().status,
+                WorkflowProgress::Failed
+            );
+            drop(claim);
+            let mut active = dars_run("active-other", Vec::new())?;
+            active.dec_party_id = Some(party);
+            save(&pool, &active).await?;
+            triggers
+                .retry_peer_runs_from("coordinator", "remote-run")
+                .await;
+            assert!(jobs.try_recv().is_err());
+            assert_eq!(
+                pool.get_workflow_run("peer-retry").await?.unwrap().status,
+                WorkflowProgress::Failed
+            );
+            active.status = WorkflowProgress::Completed;
+            save(&pool, &active).await?;
+            triggers
+                .retry_peer_runs_from("coordinator", "remote-run")
+                .await;
+            assert_eq!(jobs.try_recv()?.instance_name, "peer-retry");
+            assert_eq!(
+                pool.get_workflow_run("peer-retry").await?.unwrap().status,
+                WorkflowProgress::InProgress
+            );
+            Ok(())
         }
 
         #[sqlx::test(migrator = "MIGRATOR")]

@@ -334,7 +334,9 @@ pub async fn list_handled_invitations(
         (status = 200, description = "Invitation accepted", body = MessageResponse),
         (status = 401, description = "Unauthorized", body = ErrorResponse),
         (status = 403, description = "Forbidden: admin role required", body = ErrorResponse),
-        (status = 404, description = "Invitation not found", body = ErrorResponse)
+        (status = 404, description = "Invitation not found", body = ErrorResponse),
+        (status = 409, description = "A workflow already targets this party or run", body = ErrorResponse),
+        (status = 503, description = "Cannot check running workflows", body = ErrorResponse)
     )
 )]
 #[post("/invitations/accept")]
@@ -359,8 +361,6 @@ pub async fn accept_invitation(
         }
     };
 
-    persist_handled_invitation(&data, &invitation, InvitationOutcome::Accepted).await;
-
     // Refuse a second accept for a run we're already driving: a resurrected
     // card (e.g. an in-flight invite delivered after a scoped cancel, or a
     // re-broadcast) would otherwise upsert the SAME peer row and enqueue a
@@ -381,6 +381,7 @@ pub async fn accept_invitation(
                     && r.coordinator_pubkey.as_deref() == Some(&invitation.coordinator_pubkey)
             });
         if already_running {
+            persist_handled_invitation(&data, &invitation, InvitationOutcome::Accepted).await;
             return HttpResponse::Conflict().json(serde_json::json!({
                 "error": format!(
                     "Already participating in workflow run {coord_instance} from this \
@@ -389,6 +390,22 @@ pub async fn accept_invitation(
             }));
         }
     }
+
+    // Accepts and coordinator starts share the same party claim until their
+    // run is persisted, including while an add-member package scan waits.
+    let _start = if let Some(party) = &invitation.dec_party_id {
+        match super::workflows::claim_party_for_start(&data, party).await {
+            Ok(claim) => Some(claim),
+            Err(response) => {
+                restore_invitation(&data, &invitation).await;
+                return response;
+            }
+        }
+    } else {
+        None
+    };
+
+    persist_handled_invitation(&data, &invitation, InvitationOutcome::Accepted).await;
 
     // The peer checks a kick's owner key, or a rotation's removed key,
     // against the keys it has on record for the members, and its cache may
@@ -1148,6 +1165,84 @@ mod handled_invitation_tests {
         assert_eq!(pending[0].id, "inv-1");
         assert!(pool.get_handled_invitations(50).await?.is_empty());
         assert_eq!(state.pending_invitations.read().await.len(), 1);
+        Ok(())
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_stale_invitation_for_an_active_run_is_handled(
+        pool: SqlitePool,
+    ) -> anyhow::Result<()> {
+        let party = crate::canton_id::CantonId::parse(&format!("party::1220{}", "ab".repeat(32)))?;
+        let pending = PendingInvitation {
+            dec_party_id: Some(party.clone()),
+            ..invitation("stale-invite")
+        };
+        let state = state_with(&pool, &pending).await?;
+        let instance = insert_peer_run(&pool, &pending)
+            .await
+            .ok_or_else(|| anyhow::anyhow!("peer run not persisted"))?;
+        let claim = state.workflows.claim_start(&party).expect("fresh claim");
+        let app = actix_test::init_service(
+            App::new()
+                .app_data(state.clone())
+                .service(accept_invitation),
+        )
+        .await;
+
+        let response =
+            actix_test::call_service(&app, post!("/invitations/accept", "stale-invite")).await;
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        let body: serde_json::Value = actix_test::read_body_json(response).await;
+        assert!(
+            body["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("Already participating")
+        );
+        assert!(state.pending_invitations.read().await.is_empty());
+        assert!(pool.get_all_pending_invitations().await?.is_empty());
+        let handled = pool.get_handled_invitations(50).await?;
+        assert_eq!(handled.len(), 1);
+        assert_eq!(handled[0].outcome, InvitationOutcome::Accepted);
+        let runs = pool.get_in_progress_workflow_runs().await?;
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].instance_name, instance);
+        drop(claim);
+        Ok(())
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn accept_refuses_a_coordinator_start_and_preserves_the_invitation(
+        pool: SqlitePool,
+    ) -> anyhow::Result<()> {
+        let party = crate::canton_id::CantonId::parse(&format!("party::1220{}", "ab".repeat(32)))?;
+        let pending = PendingInvitation {
+            dec_party_id: Some(party.clone()),
+            ..invitation("reserved-invite")
+        };
+        let state = state_with(&pool, &pending).await?;
+        let claim = state.workflows.claim_start(&party).expect("fresh party");
+        let app = actix_test::init_service(
+            App::new()
+                .app_data(state.clone())
+                .service(accept_invitation),
+        )
+        .await;
+        let response =
+            actix_test::call_service(&app, post!("/invitations/accept", "reserved-invite")).await;
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        assert_eq!(pool.get_all_pending_invitations().await?.len(), 1);
+        assert_eq!(state.pending_invitations.read().await.len(), 1);
+        assert!(pool.get_handled_invitations(50).await?.is_empty());
+        assert!(pool.get_in_progress_workflow_runs().await?.is_empty());
+        drop(claim);
+
+        // The listener is absent, so this retry passes exclusion and fails later.
+        let response =
+            actix_test::call_service(&app, post!("/invitations/accept", "reserved-invite")).await;
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(state.workflows.claim_start(&party).is_some());
+        assert_eq!(pool.get_all_pending_invitations().await?.len(), 1);
         Ok(())
     }
 
