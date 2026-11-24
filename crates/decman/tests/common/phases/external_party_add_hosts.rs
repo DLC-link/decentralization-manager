@@ -71,6 +71,10 @@ struct ListedParty {
     host_count: u32,
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "A scenario phase reads top to bottom as one sequence of steps."
+)]
 pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
     info!("Phase: external_party_add_hosts");
 

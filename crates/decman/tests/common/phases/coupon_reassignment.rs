@@ -259,6 +259,10 @@ async fn assert_assignment_fault(
     }
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "A scenario phase reads top to bottom as one sequence of steps."
+)]
 pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
     info!("Phase: coupon_reassignment (CIP-104 Mode A delegation model)");
     anyhow::ensure!(
