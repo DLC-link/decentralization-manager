@@ -1,9 +1,13 @@
 //! The HTTP client core: settings, errors, request and send.
 
+use std::error::Error as StdError;
+use std::fmt;
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use reqwest::blocking::{Client, Response};
+use reqwest::header::CONTENT_TYPE;
+use reqwest::redirect::Policy;
 use reqwest::{Method, StatusCode};
 use serde::de::DeserializeOwned;
 use serde_json::Value;
@@ -42,8 +46,8 @@ pub struct ApiError {
     pub body: String,
 }
 
-impl std::fmt::Display for ApiError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Display for ApiError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
             "decman API {method} {path} returned {status}: {body}",
@@ -55,7 +59,7 @@ impl std::fmt::Display for ApiError {
     }
 }
 
-impl std::error::Error for ApiError {}
+impl StdError for ApiError {}
 
 /// Blocking client for the decman HTTP API, authenticating via the OAuth2
 /// password grant (the same username/password login the web frontend uses).
@@ -96,7 +100,7 @@ impl DecmanClient {
         // with secrets (grant-rights, party-config) to that host.
         let http = Client::builder()
             .timeout(Duration::from_secs(15))
-            .redirect(reqwest::redirect::Policy::none())
+            .redirect(Policy::none())
             .build()
             .context("failed to build HTTP client")?;
 
@@ -339,7 +343,7 @@ impl DecmanClient {
 fn is_html(response: &Response) -> bool {
     response
         .headers()
-        .get(reqwest::header::CONTENT_TYPE)
+        .get(CONTENT_TYPE)
         .and_then(|value| value.to_str().ok())
         .is_some_and(|value| value.starts_with("text/html"))
 }

@@ -7,7 +7,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Clear, Paragraph};
 
 use crate::app::{ComposerKind, ComposerPick, DeployForm, GovItem, GovView};
-use crate::composer::{Composer, FieldKind};
+use crate::composer::{Composer, ComposerField, FieldKind};
 use crate::logo;
 
 use crate::ui::detail::format_micros_human;
@@ -119,7 +119,7 @@ pub fn composer_pick_popup(frame: &mut Frame, area: Rect, pick: &ComposerPick) {
 }
 
 /// The display string for a composer field's current value.
-fn composer_field_display(field: &crate::composer::ComposerField, focused: bool) -> String {
+fn composer_field_display(field: &ComposerField, focused: bool) -> String {
     match &field.kind {
         FieldKind::Bool => format!("‹ {} ›", field.value),
         FieldKind::Select(options) => {
