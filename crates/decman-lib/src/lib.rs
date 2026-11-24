@@ -7,7 +7,8 @@
 //! the by-value `ActionType` enum, one struct per proposal, template
 //! accessors, flow builders, and state interpretation. `canton_hash`
 //! recomputes the hash of an interactive-submission transaction, so a signer
-//! can check what it signs.
+//! can check what it signs. `topology` serializes and hashes Canton topology
+//! transactions in both wire formats.
 //!
 //! # Purity contract
 //!
@@ -28,8 +29,8 @@
 //! transport.
 //!
 //! The `Cargo.toml` dependency list is the check a reader can run. It holds
-//! `serde`, `thiserror`, `tracing`, `chrono`, `hex`, `sha2`, the two canton
-//! crates, and this workspace's `common`. A new dependency that does I/O,
+//! `serde`, `thiserror`, `tracing`, `chrono`, `hex`, `sha2`, `prost`, the two
+//! canton crates, and this workspace's `common`. A new dependency that does I/O,
 //! keeps state, or reads a clock breaks the contract.
 //!
 //! # Quick start: a custom proposal
@@ -99,6 +100,7 @@ pub mod canton_hash;
 pub mod catalog;
 pub mod error;
 pub mod framework;
+pub mod topology;
 
 pub use error::Error;
 

@@ -19,8 +19,7 @@
 use anyhow::Context;
 use canton_proto_rs::com::digitalasset::canton::{
     crypto::v30::{
-        CryptoKeyFormat, Signature, SignatureFormat, SigningAlgorithmSpec, SigningKeySpec,
-        SigningKeyUsage, SigningKeysWithThreshold, SigningPublicKey,
+        Signature, SignatureFormat, SigningAlgorithmSpec, SigningKeyUsage, SigningKeysWithThreshold,
     },
     protocol::v30::{
         PartyToParticipant, SignedTopologyTransaction, TopologyMapping,
@@ -37,6 +36,10 @@ use canton_proto_rs::com::digitalasset::canton::{
         topology_manager_write_service_client::TopologyManagerWriteServiceClient,
     },
 };
+/// The party's one signing key, as it appears in `PartyToParticipant`. It lives
+/// in `decman-lib` because [`prepare_topology`], [`validate_onboarding_topology`]
+/// and the dApp must agree on it byte for byte.
+pub use decman_lib::topology::party_signing_key;
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -59,29 +62,6 @@ pub struct PreparedTopology {
     pub transaction_hashes: Vec<Vec<u8>>,
     /// The serialized (versioned) topology transactions to submit.
     pub topology_transactions: Vec<Vec<u8>>,
-}
-
-/// DER prefix for an Ed25519 `SubjectPublicKeyInfo` (RFC 8410 §4): a 42-byte
-/// SEQUENCE holding the `id-Ed25519` (1.3.101.112) AlgorithmIdentifier and a
-/// 33-byte BIT STRING (unused-bits octet + the 32-byte key). Fixed for Ed25519,
-/// so the whole encoding is this prefix followed by the raw key.
-const ED25519_SPKI_DER_PREFIX: [u8; 12] = [
-    0x30, 0x2a, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x03, 0x21, 0x00,
-];
-
-/// Wrap a raw 32-byte Ed25519 public key as DER-encoded X.509
-/// `SubjectPublicKeyInfo`.
-///
-/// Canton's external-party RPCs parse the supplied key as X.509 SPKI and reject a
-/// bare 32-byte key, even when the format field says `RAW`. The party's namespace
-/// fingerprint is still computed over the *raw* key (Canton unwraps the SPKI
-/// first — see `utils::compute_fingerprint`), so wrapping here does not change the
-/// party id the wallet derived.
-fn ed25519_spki_der(public_key: &[u8; 32]) -> Vec<u8> {
-    let mut der = Vec::with_capacity(ED25519_SPKI_DER_PREFIX.len() + public_key.len());
-    der.extend_from_slice(&ED25519_SPKI_DER_PREFIX);
-    der.extend_from_slice(public_key);
-    der
 }
 
 /// Resolve the confirmation threshold DPM writes into the topology. An unset
@@ -281,43 +261,6 @@ fn validate_onboarding_topology(
     }
 
     Ok(())
-}
-
-/// The party's one signing key, as it appears in `PartyToParticipant`.
-///
-/// Built in exactly one place because two callers must agree byte-for-byte:
-/// [`prepare_topology`] puts it into the mapping it generates, and
-/// [`validate_onboarding_topology`] rejects a submitted mapping that does not carry
-/// precisely this. If they drifted, the validator would start refusing the topology
-/// this node itself produced.
-pub fn party_signing_key(public_key: &[u8; 32]) -> SigningPublicKey {
-    SigningPublicKey {
-        // Canton parses this as X.509 SubjectPublicKeyInfo and rejects a bare
-        // 32-byte key even when the format field says RAW.
-        format: CryptoKeyFormat::DerX509SubjectPublicKeyInfo as i32,
-        public_key: ed25519_spki_der(public_key),
-        key_spec: SigningKeySpec::EcCurve25519 as i32,
-        // This one key does two jobs, so it must declare both usages.
-        //
-        // `Namespace` (1) is what makes the party's own signature authorize its
-        // topology: the party id's namespace *is* this key's fingerprint, so the
-        // root is self-signed and no NamespaceDelegation is needed.
-        //
-        // `Protocol` (4) is what lets the key authorize Daml transactions —
-        // `party_signing_keys` is documented as holding protocol signing keys, and
-        // Canton filters on that usage when executing an externally signed
-        // submission. Declaring only `Namespace` still onboards fine, and then
-        // every submission fails with "1 external signatures were provided, which
-        // is more than the number of registered signing keys (0) with protocol
-        // usage" — a party that exists and can never transact.
-        usage: vec![
-            SigningKeyUsage::Namespace as i32,
-            SigningKeyUsage::Protocol as i32,
-        ],
-        // `scheme` is deprecated in favour of `key_spec`; Default leaves it unset
-        // rather than naming a deprecated field.
-        ..Default::default()
-    }
 }
 
 /// Ask Canton to build the external party's onboarding topology and the hash to

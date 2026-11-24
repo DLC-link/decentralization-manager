@@ -17,6 +17,7 @@ canton-proto-rs = { workspace = true }
 chrono = { workspace = true }
 common = { workspace = true }
 hex = { workspace = true }
+prost = { workspace = true }
 serde = { workspace = true }
 sha2 = { workspace = true }
 thiserror = { workspace = true }

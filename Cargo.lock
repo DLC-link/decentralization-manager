@@ -1887,6 +1887,7 @@ dependencies = [
  "common 0.13.0",
  "hex",
  "insta",
+ "prost",
  "prost-types",
  "serde",
  "sha2 0.11.1",
