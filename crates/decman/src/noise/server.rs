@@ -704,6 +704,14 @@ impl<S: WorkflowStep + 'static> NoiseServer<S> {
 
         // Get current command from workflow state
         if let Some(command) = self.workflow_state.current_command().await {
+            // A resumed coordinator re-opens its ACS export inside the SyncAcs
+            // step, and Canton can take minutes to answer. The new member
+            // pulls block 1 as soon as it has the command and gives up if no
+            // export is open, so it waits until the export is there.
+            if command == MessageType::ImportAcs && !self.workflow_state.has_acs_export().await {
+                tracing::debug!("Sending Wait to {peer_id} (ACS export not open yet)");
+                return Ok(Message::new_empty(MessageType::Wait));
+            }
             tracing::info!("Sending command {command:?} to {peer_id}");
             // Include payload only for commands that carry data (e.g. UploadDars,
             // SignDns). See `command_carries_payload` for why Disconnect is excluded.
@@ -1520,6 +1528,81 @@ mod tests {
             .await?;
             let state = server.get_workflow_state();
             assert_eq!(state.current_step().await, RotateKeyStep::SignProposal);
+            assert!(!state.has_peer_completed(&peer(1)).await);
+            Ok(())
+        }
+    }
+
+    mod add_party_resume {
+        use common::types::WorkflowRole;
+
+        use super::*;
+        use crate::{
+            canton_id::{NAMESPACE_LENGTH, Namespace},
+            error::Result,
+        };
+
+        const RUN: &str = "add-party-run";
+
+        fn peer(n: u8) -> CantonId {
+            CantonId::new(format!("p{n}"), Namespace::new([n; NAMESPACE_LENGTH]))
+        }
+
+        /// A coordinator restarted at SyncAcs has no ACS export until its step
+        /// loop re-opens one. Handing out ImportAcs before then makes the new
+        /// member ask for block 1, get refused, and abort the run.
+        #[sqlx::test(migrations = "./migrations")]
+        async fn a_resumed_sync_acs_holds_import_until_the_export_is_open(
+            db: SqlitePool,
+        ) -> Result {
+            let root = tempfile::tempdir()?;
+            sqlx::query(
+                "INSERT INTO workflow_runs
+                 (instance_name, kind, role, status, current_step, step_index, step_total,
+                  config_json, expected_peers_json, completed_peers_json, created_at, updated_at)
+                 VALUES (?, ?, ?, 'inprogress', ?, ?, ?, '{}', ?, '[]', 0, 0)",
+            )
+            .bind(RUN)
+            .bind(WorkflowKind::AddParty.as_str())
+            .bind(WorkflowRole::Coordinator.as_str())
+            .bind(AddPartyStep::SyncAcs.step_name())
+            .bind(AddPartyStep::SyncAcs.step_index())
+            .bind(AddPartyStep::step_total())
+            .bind(serde_json::to_string(&[peer(1)])?)
+            .execute(&db)
+            .await?;
+
+            let config = NodeConfig::default().with_root_dir(root.path());
+            tokio::fs::create_dir_all(config.data_dir()).await?;
+            NoiseKeypair::generate()
+                .save_to_file(config.key_file_path())
+                .await?;
+            let server = NoiseServer::new(
+                config,
+                NetworkConfig::default(),
+                db.clone(),
+                RUN.into(),
+                AddPartyStep::WaitingForPeers,
+                None,
+                Arc::new(RwLock::new(HashMap::new())),
+            )
+            .await?;
+            let state = server.get_workflow_state();
+            assert_eq!(state.current_step().await, AddPartyStep::SyncAcs);
+            assert_eq!(
+                state.current_command().await,
+                Some(MessageType::ImportAcs),
+                "the step itself still maps to ImportAcs"
+            );
+            assert!(!state.has_acs_export().await);
+
+            let reply = server
+                .handle_command(
+                    peer(1),
+                    Message::new(MessageType::GetNextCommand, Vec::new()),
+                )
+                .await?;
+            assert_eq!(reply.msg_type, MessageType::Wait);
             assert!(!state.has_peer_completed(&peer(1)).await);
             Ok(())
         }
