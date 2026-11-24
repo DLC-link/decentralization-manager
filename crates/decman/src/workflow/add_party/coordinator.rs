@@ -62,9 +62,11 @@ pub async fn start_coordinator(
     let node_config_clone = node_config.clone();
     let add_party_config_clone = add_party_config.clone();
     let db_clone = db.clone();
+    let loop_instance = instance.clone();
     let workflow_handle = tokio::spawn(async move {
         run_workflow(
             workflow_state,
+            loop_instance,
             node_config_clone,
             add_party_config_clone,
             workflow_auth,
@@ -83,6 +85,7 @@ pub async fn start_coordinator(
 
 async fn run_workflow(
     workflow_state: Arc<WorkflowState<AddPartyStep>>,
+    instance: Arc<WorkflowInstance>,
     node_config: NodeConfig,
     add_party_config: AddPartyConfig,
     workflow_auth: Option<WorkflowAuth>,
@@ -189,18 +192,12 @@ async fn run_workflow(
             AddPartyStep::SubmitProposals => {
                 tracing::info!("Coordinator executing: Submit proposals");
                 save_signature_pairs(&workflow_state, &db, &instance_name).await?;
-                {
-                    let (config, storage, name, party) = (
-                        node_config.clone(),
-                        db.clone(),
-                        instance_name.clone(),
-                        add_party_config.clone(),
-                    );
-                    crate::workflow::submit_topology(&db, &instance_name, async move {
-                        submit_proposals(&config, &storage, &name, &party).await
-                    })
-                    .await?;
-                }
+                crate::workflow::write_topology(
+                    &db,
+                    &instance,
+                    submit_proposals(&node_config, &db, &instance_name, &add_party_config),
+                )
+                .await?;
                 copy_new_member_identity(&db, &instance_name, &add_party_config).await?;
 
                 // The topology is live. Open the export but read nothing from it:
@@ -295,8 +292,12 @@ async fn run_workflow(
                 } else {
                     tracing::info!("Coordinator executing: Submit clearing proposal");
                     save_clear_signatures(&workflow_state, &db, &instance_name).await?;
-                    submit_clear_proposal(&node_config, &db, &instance_name, &add_party_config)
-                        .await?;
+                    crate::workflow::write_topology(
+                        &db,
+                        &instance,
+                        submit_clear_proposal(&node_config, &db, &instance_name, &add_party_config),
+                    )
+                    .await?;
                 }
                 workflow_state.advance_step().await;
             }
@@ -304,7 +305,7 @@ async fn run_workflow(
                 crate::workflow::topology::retire_legacy_keys_for_run(
                     &node_config,
                     &db,
-                    &instance_name,
+                    &instance,
                     &add_party_config.decentralized_party_id,
                 )
                 .await?;

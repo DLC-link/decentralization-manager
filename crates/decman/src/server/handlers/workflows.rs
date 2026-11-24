@@ -1902,7 +1902,7 @@ pub async fn get_add_party_status(data: web::Data<AppState>) -> impl Responder {
     tag = "Workflows",
     responses(
         (status = 200, description = "Workflow cancelled", body = MessageResponse),
-        (status = 409, description = "No workflow in progress", body = ErrorResponse)
+        (status = 409, description = "No workflow in progress, or the run is writing topology and cannot stop", body = ErrorResponse)
     )
 )]
 #[post("/add-party/cancel")]
@@ -2292,7 +2292,7 @@ pub async fn get_change_threshold_status(data: web::Data<AppState>) -> impl Resp
     tag = "Workflows",
     responses(
         (status = 200, description = "Workflow cancelled", body = MessageResponse),
-        (status = 409, description = "No workflow in progress", body = ErrorResponse)
+        (status = 409, description = "No workflow in progress, or the run is writing topology and cannot stop", body = ErrorResponse)
     )
 )]
 #[post("/change-threshold/cancel")]
@@ -2650,7 +2650,7 @@ pub async fn get_rotate_key_status(data: web::Data<AppState>) -> impl Responder 
     tag = "Workflows",
     responses(
         (status = 200, description = "Workflow cancelled", body = MessageResponse),
-        (status = 409, description = "No workflow in progress", body = ErrorResponse)
+        (status = 409, description = "No workflow in progress, or the run is writing topology and cannot stop", body = ErrorResponse)
     )
 )]
 #[post("/rotate-key/cancel")]
@@ -4402,7 +4402,8 @@ async fn cancel_persisted_run(
 /// Cancel exactly one registered coordinator run: abort its task, notify its
 /// invitees with an instance-stamped CancelInvite (sibling runs on the peers
 /// survive), and mirror Cancelled onto the persisted row. A row that already
-/// records an outcome keeps it, and the task is still stopped.
+/// records an outcome keeps it, and the task is still stopped. A run that is
+/// writing topology answers 409 and keeps running.
 async fn cancel_instance(
     data: &web::Data<AppState>,
     instance: &Arc<WorkflowInstance>,
@@ -4417,6 +4418,24 @@ async fn cancel_instance(
             });
         }
     }
+
+    // A run that is writing topology cannot be cancelled: stopping a submit
+    // between its two transactions leaves the party half-migrated, and a
+    // cancelled run never resumes. The guard stays until the task is aborted.
+    // A write that starts later then reads the row as Cancelled and sends
+    // nothing.
+    let Ok(_topology_write) = instance.topology_write.try_lock() else {
+        tracing::info!(
+            "{label} cancel refused: run {} is writing topology",
+            instance.instance_name
+        );
+        return HttpResponse::Conflict().json(ErrorResponse {
+            error: format!(
+                "The {label} workflow is writing topology and cannot be cancelled now. Try again \
+                 when the write ends."
+            ),
+        });
+    };
 
     // Take the abort handle FIRST. If it's None we're racing with a start path that
     // hasn't finished setting itself up yet; refuse the cancel rather than mark the
@@ -4479,6 +4498,9 @@ async fn cancel_instance(
     // run that de-facto finished — rare and benign (the work itself is already
     // committed on-ledger; only the feed status differs).
     handle.abort();
+    // The row says Cancelled, so a write that starts later refuses itself. A
+    // slow peer must not keep a second cancel waiting on this guard.
+    drop(_topology_write);
 
     let invitees = state.invited_peers.read().await.clone();
     if !invitees.is_empty()
@@ -4522,7 +4544,7 @@ pub async fn cancel_onboarding(http_req: HttpRequest, data: web::Data<AppState>)
     tag = "Workflows",
     responses(
         (status = 200, description = "Workflow cancelled", body = MessageResponse),
-        (status = 409, description = "No workflow in progress", body = ErrorResponse)
+        (status = 409, description = "No workflow in progress, or the run is writing topology and cannot stop", body = ErrorResponse)
     )
 )]
 #[post("/kick/cancel")]
@@ -4571,7 +4593,7 @@ pub async fn cancel_dars(http_req: HttpRequest, data: web::Data<AppState>) -> im
     tag = "Workflows",
     responses(
         (status = 200, description = "Workflow cancelled", body = MessageResponse),
-        (status = 409, description = "No in-flight run with this instance_name", body = ErrorResponse)
+        (status = 409, description = "No in-flight run with this instance_name, or the run is writing topology and cannot stop", body = ErrorResponse)
     )
 )]
 #[post("/workflows/{instance_name}/cancel")]
@@ -7538,31 +7560,50 @@ mod tests {
         }
     }
 
-    /// POSTs the per-instance cancel for a live coordinator run. Its in-memory
-    /// status reads InProgress and its task never ends on its own, like a
-    /// declined run idling in WaitingForPeers. Returns the status and the task.
+    /// Registers a live coordinator run. Its in-memory status reads InProgress
+    /// and its task never ends on its own, like a declined run idling in
+    /// WaitingForPeers.
+    async fn register_live_run(
+        data: &web::Data<AppState>,
+        instance: &str,
+        kind: WorkflowKind,
+    ) -> Result<(Arc<WorkflowInstance>, tokio::task::JoinHandle<()>)> {
+        let run = WorkflowInstance::new(instance.to_string(), kind, WorkflowRole::Coordinator);
+        *run.http.status.write().await = WorkflowProgress::InProgress;
+        let task = tokio::spawn(std::future::pending::<()>());
+        *run.http.abort_handle.lock().await = Some(task.abort_handle());
+        anyhow::ensure!(
+            data.workflows.insert(run.clone()),
+            "{instance} is already registered"
+        );
+        Ok((run, task))
+    }
+
+    /// POSTs the per-instance cancel for the registered run `instance`.
+    async fn post_cancel(data: &web::Data<AppState>, instance: &str) -> StatusCode {
+        let app = actix_test::init_service(
+            App::new()
+                .app_data(data.clone())
+                .service(cancel_workflow_instance),
+        )
+        .await;
+        let request = actix_test::TestRequest::post()
+            .uri(&format!("/workflows/{instance}/cancel"))
+            .to_request();
+        request.extensions_mut().insert(admin());
+        actix_test::call_service(&app, request).await.status()
+    }
+
+    /// Registers a live run and POSTs the per-instance cancel for it. Returns
+    /// the status and the task.
     async fn cancel_live_run(
         pool: SqlitePool,
         instance: &str,
         kind: WorkflowKind,
     ) -> Result<(StatusCode, tokio::task::JoinHandle<()>)> {
         let data = state_on(pool).await?;
-        let run = WorkflowInstance::new(instance.to_string(), kind, WorkflowRole::Coordinator);
-        *run.http.status.write().await = WorkflowProgress::InProgress;
-        let task = tokio::spawn(std::future::pending::<()>());
-        *run.http.abort_handle.lock().await = Some(task.abort_handle());
-        anyhow::ensure!(
-            data.workflows.insert(run),
-            "{instance} is already registered"
-        );
-        let app =
-            actix_test::init_service(App::new().app_data(data).service(cancel_workflow_instance))
-                .await;
-        let request = actix_test::TestRequest::post()
-            .uri(&format!("/workflows/{instance}/cancel"))
-            .to_request();
-        request.extensions_mut().insert(admin());
-        Ok((actix_test::call_service(&app, request).await.status(), task))
+        let (_, task) = register_live_run(&data, instance, kind).await?;
+        Ok((post_cancel(&data, instance).await, task))
     }
 
     /// A run whose own outcome landed first keeps it. The cancel still stops
@@ -7629,6 +7670,412 @@ mod tests {
         assert_eq!(finished(kind, RunOutcome::Failed), failed + 1);
         assert_eq!(finished(kind, RunOutcome::Cancelled), cancelled);
         assert!(task.await.is_err_and(|e| e.is_cancelled()));
+        Ok(())
+    }
+
+    /// A rotate-key row for a coordinator that waits at the legacy key
+    /// retirement, the first step that writes topology, and a fake Canton node
+    /// whose party still has its legacy mapping.
+    async fn seed_rotate_key_at_retirement(
+        pool: &SqlitePool,
+        status: &str,
+        instance: &str,
+    ) -> Result<(
+        crate::signing::fake_admin_api::FakeAdminApi,
+        crate::signing::fake_admin_api::TestNode,
+    )> {
+        use crate::{
+            canton_id::{NAMESPACE_LENGTH, Namespace},
+            noise::NoiseKeypair,
+            signing::{
+                custody::SoftwareKeys,
+                fake_admin_api::{FakeAdminApi, VaultKey},
+            },
+            workflow::{rotate_key::RotateKeyStep, state::WorkflowStep},
+        };
+
+        let fake = FakeAdminApi::start(vec![]).await?;
+        let party = CantonId::new("party".to_string(), Namespace::new([7; NAMESPACE_LENGTH]));
+        fake.publish_party_awaiting_key_retirement(&party);
+        let node = fake.node(SoftwareKeys::Allowed, false).await?;
+        tokio::fs::create_dir_all(node.config.data_dir()).await?;
+        NoiseKeypair::generate()
+            .save_to_file(node.config.key_file_path())
+            .await?;
+        let rotate_config = workflow::RotateKeyConfig {
+            decentralized_party_id: party,
+            rotated_key: crate::utils::compute_fingerprint(
+                &VaultKey::software("daml", 3).public_key,
+            ),
+            threshold: 2,
+            confirmation_threshold: 2,
+            instance_name: instance.to_string(),
+        };
+        let step = RotateKeyStep::RetireLegacyKeys;
+        sqlx::query(
+            "INSERT INTO workflow_runs
+             (instance_name, kind, role, status, current_step, step_index, step_total,
+              config_json, expected_peers_json, completed_peers_json, created_at, updated_at)
+             VALUES (?, ?, 'Coordinator', ?, ?, ?, ?, ?, '[]', '[]', 0, 0)",
+        )
+        .bind(instance)
+        .bind(WorkflowKind::RotateKey.as_str())
+        .bind(status)
+        .bind(step.step_name())
+        .bind(step.step_index())
+        .bind(RotateKeyStep::step_total())
+        .bind(serde_json::to_string(&rotate_config)?)
+        .execute(pool)
+        .await?;
+        Ok((fake, node))
+    }
+
+    /// `AppState::for_test` on `pool`, with this node's config.
+    async fn state_with_node(pool: SqlitePool, config: NodeConfig) -> Result<web::Data<AppState>> {
+        let state = Arc::try_unwrap(AppState::for_test(None).await?.into_inner())
+            .map_err(|_| anyhow::anyhow!("a fresh test state has one owner"))?;
+        Ok(web::Data::new(AppState {
+            db: pool,
+            config,
+            ..state
+        }))
+    }
+
+    /// What the boot does with the runs an earlier process left behind.
+    async fn restart(data: &web::Data<AppState>) {
+        crate::server::recover_in_progress_workflows(
+            data.db.clone(),
+            data.config.clone(),
+            data.workflows.clone(),
+            data.peer_job_sender.clone(),
+            data.auth.clone(),
+            data.last_seen.clone(),
+        )
+        .await;
+    }
+
+    /// A cancel that arrives while the run writes topology would stop a submit
+    /// between its two transactions. It answers 409, and the run, its row and
+    /// its task stay as they were. The same cancel works once the write ends.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_cancel_during_a_topology_write_answers_409_and_changes_nothing(
+        pool: SqlitePool,
+    ) -> Result {
+        use tokio::sync::oneshot;
+
+        let kind = WorkflowKind::RotateKey;
+        let row = WorkflowRun {
+            kind,
+            ..in_progress_run("rotate-write-1", &pid(30)?)
+        };
+        insert_run(&pool, &row).await?;
+        let data = state_on(pool.clone()).await?;
+        let (run, task) = register_live_run(&data, "rotate-write-1", kind).await?;
+        let (started_tx, started_rx) = oneshot::channel::<()>();
+        let (release_tx, release_rx) = oneshot::channel::<()>();
+        let write = {
+            let (pool, run) = (pool.clone(), run.clone());
+            tokio::spawn(async move {
+                workflow::write_topology(&pool, &run, async {
+                    let _ = started_tx.send(());
+                    let _ = release_rx.await;
+                    Ok(())
+                })
+                .await
+            })
+        };
+        started_rx.await?;
+
+        assert_eq!(
+            post_cancel(&data, "rotate-write-1").await,
+            StatusCode::CONFLICT
+        );
+
+        assert_eq!(
+            status_of(&pool, "rotate-write-1").await?,
+            Some(WorkflowProgress::InProgress)
+        );
+        assert_eq!(*run.http.status.read().await, WorkflowProgress::InProgress);
+        assert!(!task.is_finished(), "the refused cancel stopped the task");
+        assert!(
+            run.http.abort_handle.lock().await.is_some(),
+            "the refused cancel took the abort handle"
+        );
+
+        release_tx
+            .send(())
+            .map_err(|()| anyhow::anyhow!("the write ended early"))?;
+        write.await??;
+        assert_eq!(post_cancel(&data, "rotate-write-1").await, StatusCode::OK);
+        assert_eq!(
+            status_of(&pool, "rotate-write-1").await?,
+            Some(WorkflowProgress::Cancelled)
+        );
+        assert!(task.await.is_err_and(|e| e.is_cancelled()));
+        Ok(())
+    }
+
+    /// The per-kind cancel endpoints reach the same run, so they must refuse
+    /// too while the run writes topology. Each answers 409 and leaves the row
+    /// and the task alone, then cancels once the write ends.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn each_kind_cancel_during_a_topology_write_answers_409(pool: SqlitePool) -> Result {
+        let data = state_on(pool.clone()).await?;
+        let app = actix_test::init_service(
+            App::new()
+                .app_data(data.clone())
+                .service(cancel_kick)
+                .service(cancel_add_party)
+                .service(cancel_change_threshold)
+                .service(cancel_rotate_key),
+        )
+        .await;
+        for (tag, kind, uri) in [
+            (40, WorkflowKind::Kick, "/kick/cancel"),
+            (41, WorkflowKind::AddParty, "/add-party/cancel"),
+            (
+                42,
+                WorkflowKind::ChangeThreshold,
+                "/change-threshold/cancel",
+            ),
+            (43, WorkflowKind::RotateKey, "/rotate-key/cancel"),
+        ] {
+            let name = format!("{}-write", kind.as_str());
+            let row = WorkflowRun {
+                kind,
+                ..in_progress_run(&name, &pid(tag)?)
+            };
+            insert_run(&pool, &row).await?;
+            let (run, task) = register_live_run(&data, &name, kind).await?;
+            let post = || {
+                let request = actix_test::TestRequest::post().uri(uri).to_request();
+                request.extensions_mut().insert(admin());
+                actix_test::call_service(&app, request)
+            };
+
+            let writing = run.topology_write.lock().await;
+            assert_eq!(post().await.status(), StatusCode::CONFLICT, "{uri}");
+            assert_eq!(
+                status_of(&pool, &name).await?,
+                Some(WorkflowProgress::InProgress),
+                "{uri} changed the row"
+            );
+            assert!(!task.is_finished(), "{uri} stopped the task");
+            drop(writing);
+
+            assert_eq!(post().await.status(), StatusCode::OK, "{uri}");
+            assert_eq!(
+                status_of(&pool, &name).await?,
+                Some(WorkflowProgress::Cancelled),
+                "{uri}"
+            );
+            assert!(task.await.is_err_and(|e| e.is_cancelled()), "{uri}");
+            data.workflows.remove(&name);
+        }
+        Ok(())
+    }
+
+    /// A write that starts after a cancel finds the row cancelled and sends
+    /// nothing.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_topology_write_that_starts_after_a_cancel_sends_nothing(pool: SqlitePool) -> Result {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let kind = WorkflowKind::RotateKey;
+        let row = WorkflowRun {
+            kind,
+            ..in_progress_run("rotate-write-2", &pid(32)?)
+        };
+        insert_run(&pool, &row).await?;
+        let data = state_on(pool.clone()).await?;
+        let (run, _task) = register_live_run(&data, "rotate-write-2", kind).await?;
+        assert_eq!(post_cancel(&data, "rotate-write-2").await, StatusCode::OK);
+
+        let started = AtomicBool::new(false);
+        let error = workflow::write_topology(&pool, &run, async {
+            started.store(true, Ordering::SeqCst);
+            Ok(())
+        })
+        .await
+        .expect_err("a write went ahead after its run was cancelled");
+
+        assert!(format!("{error:#}").contains("cancelled"), "{error:#}");
+        assert!(!started.load(Ordering::SeqCst), "the write started");
+        Ok(())
+    }
+
+    /// A cancel and a write that start together must not both win. The cancel
+    /// wins and the write sends nothing, or the write finishes and the cancel
+    /// answers 409 and changes nothing. The yields move the start of the
+    /// cancel across the write's steps.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_cancel_and_a_topology_write_that_start_together_never_both_win(
+        pool: SqlitePool,
+    ) -> Result {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let kind = WorkflowKind::RotateKey;
+        let data = state_on(pool.clone()).await?;
+        for round in 0..60usize {
+            let name = format!("rotate-race-{round}");
+            let row = WorkflowRun {
+                kind,
+                ..in_progress_run(&name, &pid(33)?)
+            };
+            insert_run(&pool, &row).await?;
+            let (run, _task) = register_live_run(&data, &name, kind).await?;
+            let started = Arc::new(AtomicBool::new(false));
+            let finished = Arc::new(AtomicBool::new(false));
+            let write = {
+                let (pool, run) = (pool.clone(), run.clone());
+                let (started, finished) = (started.clone(), finished.clone());
+                tokio::spawn(async move {
+                    workflow::write_topology(&pool, &run, async move {
+                        started.store(true, Ordering::SeqCst);
+                        for _ in 0..4 {
+                            tokio::task::yield_now().await;
+                        }
+                        finished.store(true, Ordering::SeqCst);
+                        Ok(())
+                    })
+                    .await
+                })
+            };
+            for _ in 0..round % 6 {
+                tokio::task::yield_now().await;
+            }
+
+            let cancel = post_cancel(&data, &name).await;
+            // Read at once: a cancel that wins must not return in the middle of
+            // a write.
+            let started_at_cancel = started.load(Ordering::SeqCst);
+            let finished_at_cancel = finished.load(Ordering::SeqCst);
+            let write = write.await?;
+
+            match cancel {
+                // The cancel won the lock, or the write had already ended.
+                StatusCode::OK => {
+                    assert!(
+                        !started_at_cancel || finished_at_cancel,
+                        "round {round}: the cancel won in the middle of a write"
+                    );
+                    if started_at_cancel {
+                        assert!(write.is_ok(), "round {round}: a finished write failed");
+                    } else {
+                        assert!(write.is_err(), "round {round}: a cancelled run wrote");
+                    }
+                    assert_eq!(
+                        status_of(&pool, &name).await?,
+                        Some(WorkflowProgress::Cancelled)
+                    );
+                }
+                StatusCode::CONFLICT => {
+                    assert!(
+                        write.is_ok(),
+                        "round {round}: the write lost to a refused cancel"
+                    );
+                    assert!(
+                        finished.load(Ordering::SeqCst),
+                        "round {round}: the write stopped early"
+                    );
+                    assert_eq!(
+                        status_of(&pool, &name).await?,
+                        Some(WorkflowProgress::InProgress),
+                        "round {round}: a refused cancel changed the row"
+                    );
+                    assert_eq!(post_cancel(&data, &name).await, StatusCode::OK);
+                }
+                other => anyhow::bail!("round {round}: the cancel answered {other}"),
+            }
+        }
+        Ok(())
+    }
+
+    /// Restart, issue #660: a row that an operator cancelled stays cancelled.
+    /// Recovery reads only `InProgress` rows, and the resume path reads the
+    /// row again, so a cancel that lands between the two stops the resume.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_run_cancelled_before_a_restart_is_not_resumed(pool: SqlitePool) -> Result {
+        let (fake, node) =
+            seed_rotate_key_at_retirement(&pool, "cancelled", "rotate-restart-1").await?;
+        let data = state_with_node(pool.clone(), node.config.clone()).await?;
+
+        restart(&data).await;
+
+        assert!(data.workflows.get("rotate-restart-1").is_none());
+        assert!(fake.authorized().is_empty());
+
+        // A cancel that lands after recovery loaded the row, before it resumes.
+        sqlx::query("UPDATE workflow_runs SET status = 'inprogress'")
+            .execute(&pool)
+            .await?;
+        let loaded = pool
+            .get_workflow_run("rotate-restart-1")
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("the seeded run is missing"))?;
+        sqlx::query("UPDATE workflow_runs SET status = 'cancelled'")
+            .execute(&pool)
+            .await?;
+        respawn_coordinator(
+            pool.clone(),
+            node.config.clone(),
+            &loaded,
+            data.workflows.clone(),
+            data.auth.clone(),
+            data.last_seen.clone(),
+        )
+        .await;
+
+        assert!(data.workflows.get("rotate-restart-1").is_none());
+        assert!(fake.authorized().is_empty());
+        Ok(())
+    }
+
+    /// Restart: a run that was in progress resumes at its step and signs. The
+    /// write lock does not survive the restart, and it is free again once the
+    /// signing ends, so the operator can cancel the resumed run while it waits
+    /// for the other members.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_run_in_progress_at_a_restart_resumes_and_can_then_be_cancelled(
+        pool: SqlitePool,
+    ) -> Result {
+        let (fake, node) =
+            seed_rotate_key_at_retirement(&pool, "inprogress", "rotate-restart-3").await?;
+        let data = state_with_node(pool.clone(), node.config.clone()).await?;
+
+        restart(&data).await;
+
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        while fake.authorized().is_empty() {
+            anyhow::ensure!(
+                tokio::time::Instant::now() < deadline,
+                "the resumed run never signed the removal"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        // The signing holds the lock until it returns, so a cancel can still
+        // find it held for a moment. Each 409 says to try again.
+        let status = loop {
+            let status = post_cancel(&data, "rotate-restart-3").await;
+            if status != StatusCode::CONFLICT || tokio::time::Instant::now() > deadline {
+                break status;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        };
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            status_of(&pool, "rotate-restart-3").await?,
+            Some(WorkflowProgress::Cancelled)
+        );
+        while data.workflows.get("rotate-restart-3").is_some() {
+            anyhow::ensure!(
+                tokio::time::Instant::now() < deadline,
+                "the cancelled run kept its task"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(fake.authorized().len(), 1);
         Ok(())
     }
 

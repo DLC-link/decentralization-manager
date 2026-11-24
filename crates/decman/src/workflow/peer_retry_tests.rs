@@ -471,3 +471,42 @@ async fn a_peer_run_not_in_progress_signs_no_legacy_mapping_removal() -> Result 
     .await?;
     Ok(())
 }
+
+/// A cancel can land on the peer while its signing waits out a retry backoff.
+/// The next attempt must read the peer's row again and sign nothing.
+#[tokio::test]
+async fn a_peer_cancelled_during_a_retry_backoff_signs_nothing_more() -> Result {
+    let (fake, node, row) = awaiting_retirement("inprogress").await?;
+    fake.reject_authorizations_until_key_ready(1);
+    let db_path = node.config.db_path();
+
+    let cancel = async {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+        while fake.authorized().is_empty() {
+            anyhow::ensure!(
+                tokio::time::Instant::now() < deadline,
+                "the peer never tried to sign"
+            );
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        // The first attempt failed, so the retry now waits out its delay.
+        let db = crate::db::connect(&db_path).await?;
+        sqlx::query("UPDATE workflow_runs SET status = 'cancelled'")
+            .execute(&db)
+            .await?;
+        db.close().await;
+        Ok::<(), anyhow::Error>(())
+    };
+    let peer = run_commands_on(
+        node.config.clone(),
+        row,
+        vec![Message::new_empty(MessageType::RetireLegacyKeys)],
+    );
+    let (cancelled, run) = tokio::join!(cancel, peer);
+    cancelled?;
+    let run = run?;
+
+    assert_eq!(fake.authorized().len(), 1, "a cancelled peer signed again");
+    assert_eq!(run.completions, 0, "a cancelled peer reported success");
+    Ok(())
+}

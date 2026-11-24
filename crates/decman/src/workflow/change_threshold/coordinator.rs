@@ -52,6 +52,7 @@ pub async fn start_coordinator(
         let change_config = change_config.clone();
         let db = db.clone();
         let instance_name = change_config.instance_name.clone();
+        let instance = instance.clone();
 
         tokio::spawn(async move {
             let mut coordinator_completed_steps = HashSet::new();
@@ -123,6 +124,7 @@ pub async fn start_coordinator(
 
                         submit_signed_change(
                             &workflow_state,
+                            &instance,
                             &node_config,
                             &db,
                             &instance_name,
@@ -135,7 +137,7 @@ pub async fn start_coordinator(
                         crate::workflow::topology::retire_legacy_keys_for_run(
                             &node_config,
                             &db,
-                            &instance_name,
+                            &instance,
                             &change_config.decentralized_party_id,
                         )
                         .await?;
@@ -165,21 +167,18 @@ pub async fn start_coordinator(
 /// The `Submit` step: check the peer signatures, then submit to the synchronizer.
 async fn submit_signed_change(
     workflow_state: &WorkflowState<ChangeThresholdStep>,
+    instance: &WorkflowInstance,
     node_config: &NodeConfig,
     storage: &SqlitePool,
     instance_name: &str,
     change_config: &ChangeThresholdConfig,
 ) -> Result {
     prepare_signatures(workflow_state, storage, instance_name).await?;
-    let (config, db, name, change) = (
-        node_config.clone(),
-        storage.clone(),
-        instance_name.to_string(),
-        change_config.clone(),
-    );
-    crate::workflow::submit_topology(storage, instance_name, async move {
-        submit_change(&config, &db, &name, &change).await
-    })
+    crate::workflow::write_topology(
+        storage,
+        instance,
+        submit_change(node_config, storage, instance_name, change_config),
+    )
     .await
 }
 
@@ -468,8 +467,14 @@ mod tests {
         .await?;
         let change_config = ChangeThresholdConfig::new(peer(9), 2, None, 3, "run-1".into());
 
+        let instance = WorkflowInstance::new(
+            "run-1".to_string(),
+            crate::server::WorkflowKind::ChangeThreshold,
+            crate::server::WorkflowRole::Coordinator,
+        );
         let message = submit_signed_change(
             &state,
+            &instance,
             &NodeConfig::default(),
             &pool,
             "run-1",

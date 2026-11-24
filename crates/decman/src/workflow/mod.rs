@@ -302,26 +302,27 @@ pub(crate) async fn ensure_run_in_progress(db: &SqlitePool, instance_name: &str)
     Ok(())
 }
 
-/// Submit topology for run `instance_name`, if the run is still in progress.
+/// Run a coordinator topology write for `instance`, if its run is still in
+/// progress.
 ///
-/// A submit is two transactions with a confirmation wait between them. An
-/// abort in that wait leaves the party with the first change in force and
-/// the second never sent, and a cancelled run never resumes. So the submit
-/// runs in a task of its own: a cancel that arrives while it is in flight
-/// lets it finish, and the aborted loop then stops at the step boundary.
+/// A submit is two transactions with a confirmation wait between them, and a
+/// cancelled run never resumes. So a cancel must not stop a submit half-way.
+/// The write holds the run's `topology_write` lock from the status check to its
+/// end. A cancel that finds the lock held answers 409 and changes nothing. A
+/// cancel that wins the lock marks the run `Cancelled` first, so the write
+/// finds that status and sends nothing.
 ///
 /// # Errors
 ///
-/// Errors when the run is not `InProgress`, or when the submit fails.
-pub(crate) async fn submit_topology<T: Send + 'static>(
+/// Errors when the run is not `InProgress`, or when the write fails.
+pub(crate) async fn write_topology<T>(
     db: &SqlitePool,
-    instance_name: &str,
-    work: impl Future<Output = Result<T>> + Send + 'static,
+    instance: &WorkflowInstance,
+    write: impl Future<Output = Result<T>>,
 ) -> Result<T> {
-    ensure_run_in_progress(db, instance_name).await?;
-    tokio::spawn(work)
-        .await
-        .context("The topology submit task stopped")?
+    let _writing = instance.topology_write.lock().await;
+    ensure_run_in_progress(db, &instance.instance_name).await?;
+    write.await
 }
 
 /// Start node in peer mode (client)
@@ -518,7 +519,15 @@ async fn run_peer(
                 let retired = async {
                     ensure_run_in_progress(&db, &instance_name).await?;
                     let synchronizer_id = utils::get_synchronizer_id(&node_config).await?;
-                    topology::retire_legacy_keys(&node_config, &synchronizer_id, party).await
+                    // A cancel can land during a retry backoff, so each
+                    // signing attempt reads the row again.
+                    topology::retire_legacy_keys_while(
+                        &node_config,
+                        &synchronizer_id,
+                        party,
+                        || ensure_run_in_progress(&db, &instance_name),
+                    )
+                    .await
                 }
                 .await;
                 if let Err(e) = retired {
@@ -1979,22 +1988,26 @@ mod tests {
 
     /// The coordinator loop runs in a task of its own that the run driver
     /// awaits. Cancelling a run aborts the driver, and the loop must stop with
-    /// it. A loop that outlives its run keeps submitting topology for a run
-    /// the operator cancelled.
+    /// it. A loop that outlives its run keeps writing topology for a run the
+    /// operator cancelled.
     #[sqlx::test(migrator = "crate::db::MIGRATOR")]
     async fn aborting_the_driver_stops_the_coordinator_loop(db: SqlitePool) -> Result {
-        use std::{
-            collections::HashMap,
-            sync::atomic::{AtomicUsize, Ordering},
-            time::Duration,
-        };
+        use std::{collections::HashMap, time::Duration};
 
-        use tokio::sync::RwLock;
+        use tokio::sync::{RwLock, oneshot};
 
         use crate::{
             noise::{NoiseKeypair, server::NoiseServer},
             server::WorkflowRole,
         };
+
+        /// Tells the test when the loop's future is dropped.
+        struct LoopStopped(Option<oneshot::Sender<()>>);
+        impl Drop for LoopStopped {
+            fn drop(&mut self) {
+                self.0.take();
+            }
+        }
 
         let root = tempfile::tempdir()?;
         let config = NodeConfig::default().with_root_dir(root.path());
@@ -2013,13 +2026,10 @@ mod tests {
         )
         .await?;
 
-        let ticks = Arc::new(AtomicUsize::new(0));
-        let loop_ticks = ticks.clone();
+        let (stopped_tx, stopped_rx) = oneshot::channel::<()>();
         let coordinator = tokio::spawn(async move {
-            loop {
-                loop_ticks.fetch_add(1, Ordering::SeqCst);
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
+            let _stopped = LoopStopped(Some(stopped_tx));
+            std::future::pending::<Result>().await
         });
         let instance = WorkflowInstance::new(
             "run".to_string(),
@@ -2028,22 +2038,22 @@ mod tests {
         );
         let driver = tokio::spawn(run_workflow_with_handler(
             ActiveWorkflow::Kick(Arc::new(server)),
-            instance,
+            instance.clone(),
             coordinator,
         ));
-        while ticks.load(Ordering::SeqCst) == 0 {
-            tokio::time::sleep(Duration::from_millis(5)).await;
+        // The driver registers its handle once it holds the loop's abort guard.
+        while instance.active.read().is_ok_and(|active| active.is_none()) {
+            tokio::task::yield_now().await;
         }
 
         driver.abort();
         assert!(driver.await.is_err_and(|e| e.is_cancelled()));
-        tokio::time::sleep(Duration::from_millis(100)).await;
-        let stopped_at = ticks.load(Ordering::SeqCst);
-        tokio::time::sleep(Duration::from_millis(200)).await;
 
-        assert_eq!(
-            ticks.load(Ordering::SeqCst),
-            stopped_at,
+        // The loop reports its end by dropping the sender. The timeout only
+        // bounds a failing run.
+        let stopped = tokio::time::timeout(Duration::from_secs(10), stopped_rx).await;
+        assert!(
+            stopped.is_ok(),
             "the coordinator loop kept running after its run was aborted"
         );
         Ok(())
@@ -2062,90 +2072,492 @@ mod tests {
         Ok(())
     }
 
-    /// A cancel that lands between the two halves of a submit must not leave
-    /// the first half in force alone. The submit finishes, and its caller is
-    /// the only part that stops.
-    #[sqlx::test(migrator = "crate::db::MIGRATOR")]
-    async fn a_submit_finishes_when_its_caller_is_aborted(db: SqlitePool) -> Result {
-        use std::{
-            sync::atomic::{AtomicU8, Ordering},
-            time::Duration,
-        };
-
-        insert_coordinator_run(&db, "inprogress").await?;
-        let progress = Arc::new(AtomicU8::new(0));
-        let work = {
-            let progress = progress.clone();
-            async move {
-                progress.store(1, Ordering::SeqCst);
-                tokio::time::sleep(Duration::from_millis(200)).await;
-                progress.store(2, Ordering::SeqCst);
-                Ok(())
-            }
-        };
-        let caller = tokio::spawn(async move { submit_topology(&db, "run", work).await });
-        while progress.load(Ordering::SeqCst) == 0 {
-            tokio::time::sleep(Duration::from_millis(5)).await;
-        }
-
-        caller.abort();
-        assert!(caller.await.is_err_and(|e| e.is_cancelled()));
-        assert_eq!(
-            progress.load(Ordering::SeqCst),
-            1,
-            "the submit was still in flight"
-        );
-        tokio::time::sleep(Duration::from_millis(400)).await;
-
-        assert_eq!(
-            progress.load(Ordering::SeqCst),
-            2,
-            "the aborted submit stopped half way"
-        );
-        Ok(())
+    fn coordinator_instance() -> Arc<WorkflowInstance> {
+        WorkflowInstance::new(
+            "run".to_string(),
+            WorkflowKind::Kick,
+            crate::server::WorkflowRole::Coordinator,
+        )
     }
 
-    /// A run that is not in progress starts no submit, and a run in progress
-    /// returns what the submit returns.
+    /// A run that is not in progress writes nothing, and a run in progress
+    /// returns what its write returns.
     #[sqlx::test(migrator = "crate::db::MIGRATOR")]
-    async fn a_submit_starts_only_for_a_run_in_progress(db: SqlitePool) -> Result {
+    async fn a_write_starts_only_for_a_run_in_progress(db: SqlitePool) -> Result {
         use std::sync::atomic::{AtomicBool, Ordering};
 
+        let instance = coordinator_instance();
         for status in ["cancelled", "failed", "completed", "idle"] {
             sqlx::query("DELETE FROM workflow_runs")
                 .execute(&db)
                 .await?;
             insert_coordinator_run(&db, status).await?;
-            let started = Arc::new(AtomicBool::new(false));
-            let flag = started.clone();
+            let started = AtomicBool::new(false);
 
-            let error = submit_topology(&db, "run", async move {
-                flag.store(true, Ordering::SeqCst);
+            let error = write_topology(&db, &instance, async {
+                started.store(true, Ordering::SeqCst);
                 Ok(())
             })
             .await
-            .expect_err("a run that is not in progress submitted");
+            .expect_err("a run that is not in progress wrote topology");
 
             assert!(format!("{error:#}").contains(status), "{error:#}");
             assert!(
                 !started.load(Ordering::SeqCst),
-                "{status} run started a submit"
+                "{status} run started a write"
             );
         }
 
         sqlx::query("DELETE FROM workflow_runs")
             .execute(&db)
             .await?;
-        assert!(submit_topology(&db, "run", async { Ok(()) }).await.is_err());
+        let error = write_topology(&db, &instance, async { Ok(()) })
+            .await
+            .expect_err("a run with no record wrote topology");
+        assert!(format!("{error:#}").contains("no record"), "{error:#}");
 
         insert_coordinator_run(&db, "inprogress").await?;
-        assert_eq!(submit_topology(&db, "run", async { Ok(7) }).await?, 7);
+        assert_eq!(write_topology(&db, &instance, async { Ok(7) }).await?, 7);
         assert!(
-            submit_topology(&db, "run", async {
+            write_topology(&db, &instance, async {
                 anyhow::bail!("rejected") as Result<()>
             })
             .await
             .is_err_and(|e| format!("{e:#}").contains("rejected"))
+        );
+        // A failed write releases the lock for the next one.
+        assert!(instance.topology_write.try_lock().is_ok());
+        Ok(())
+    }
+
+    /// A cancel needs the lock, so it must find it held for the whole write,
+    /// and free again once the write ends.
+    #[sqlx::test(migrator = "crate::db::MIGRATOR")]
+    async fn a_write_holds_the_lock_until_it_ends(db: SqlitePool) -> Result {
+        use tokio::sync::oneshot;
+
+        insert_coordinator_run(&db, "inprogress").await?;
+        let instance = coordinator_instance();
+        let (started_tx, started_rx) = oneshot::channel::<()>();
+        let (release_tx, release_rx) = oneshot::channel::<()>();
+        let write = {
+            let (db, instance) = (db.clone(), instance.clone());
+            tokio::spawn(async move {
+                write_topology(&db, &instance, async {
+                    let _ = started_tx.send(());
+                    let _ = release_rx.await;
+                    Ok(())
+                })
+                .await
+            })
+        };
+        started_rx.await?;
+
+        assert!(
+            instance.topology_write.try_lock().is_err(),
+            "a cancel could take the lock in the middle of a write"
+        );
+
+        release_tx
+            .send(())
+            .map_err(|()| anyhow::anyhow!("the write ended early"))?;
+        write.await??;
+        assert!(instance.topology_write.try_lock().is_ok());
+        Ok(())
+    }
+
+    /// A cancel that holds the lock marks the run cancelled before it lets go.
+    /// A write that was waiting for the lock then finds that status and sends
+    /// nothing.
+    #[sqlx::test(migrator = "crate::db::MIGRATOR")]
+    async fn a_write_that_waited_for_a_cancel_sends_nothing(db: SqlitePool) -> Result {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        insert_coordinator_run(&db, "inprogress").await?;
+        let instance = coordinator_instance();
+        let cancel = instance.topology_write.lock().await;
+        let started = Arc::new(AtomicBool::new(false));
+        let write = {
+            let (db, instance, started) = (db.clone(), instance.clone(), started.clone());
+            tokio::spawn(async move {
+                write_topology(&db, &instance, async move {
+                    started.store(true, Ordering::SeqCst);
+                    Ok(())
+                })
+                .await
+            })
+        };
+
+        sqlx::query("UPDATE workflow_runs SET status = 'cancelled'")
+            .execute(&db)
+            .await?;
+        drop(cancel);
+
+        let error = write
+            .await?
+            .expect_err("a write went ahead after its run was cancelled");
+        assert!(format!("{error:#}").contains("cancelled"), "{error:#}");
+        assert!(
+            !started.load(Ordering::SeqCst),
+            "the write started after the cancel"
+        );
+        Ok(())
+    }
+
+    /// A node config with a Noise key, so a coordinator can start on it.
+    async fn coordinator_node(config: NodeConfig) -> Result<NodeConfig> {
+        tokio::fs::create_dir_all(config.data_dir()).await?;
+        crate::noise::NoiseKeypair::generate()
+            .save_to_file(config.key_file_path())
+            .await?;
+        Ok(config)
+    }
+
+    /// Starts a real coordinator of `kind` at `step`, a step that writes
+    /// topology, with no peers. The test holds the run's write lock as a
+    /// cancel does. The coordinator must wait for the lock, then read the
+    /// cancelled row and stop. Returns the coordinator's error.
+    async fn write_step_against_a_cancel<S, Start, Run>(
+        db: SqlitePool,
+        config: NodeConfig,
+        kind: WorkflowKind,
+        step: S,
+        config_json: String,
+        start: Start,
+    ) -> Result<String>
+    where
+        S: WorkflowStep + 'static,
+        Start: FnOnce(NodeConfig, SqlitePool, Arc<WorkflowInstance>) -> Run,
+        Run: Future<Output = Result> + Send + 'static,
+    {
+        use std::time::Duration;
+
+        sqlx::query(
+            "INSERT INTO workflow_runs
+             (instance_name, kind, role, status, current_step, step_index, step_total,
+              config_json, expected_peers_json, completed_peers_json, created_at, updated_at)
+             VALUES ('run', ?, 'Coordinator', 'inprogress', ?, ?, ?, ?, '[]', '[]', 0, 0)",
+        )
+        .bind(kind.as_str())
+        .bind(step.step_name())
+        .bind(step.step_index())
+        .bind(S::step_total())
+        .bind(config_json)
+        .execute(&db)
+        .await?;
+        let instance = WorkflowInstance::new(
+            "run".to_string(),
+            kind,
+            crate::server::WorkflowRole::Coordinator,
+        );
+
+        let cancel = instance.topology_write.lock().await;
+        let driver = tokio::spawn(start(config, db.clone(), instance.clone()));
+        // A step that skips the lock fails or signs within this time.
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        if driver.is_finished() {
+            anyhow::bail!(
+                "the {} write did not wait for the write lock: {:?}",
+                kind.as_str(),
+                driver.await?
+            );
+        }
+        sqlx::query("UPDATE workflow_runs SET status = 'cancelled'")
+            .execute(&db)
+            .await?;
+        drop(cancel);
+
+        let outcome = tokio::time::timeout(Duration::from_secs(10), driver).await??;
+        let error = outcome.expect_err("a cancelled run went on to write topology");
+        Ok(format!("{error:#}"))
+    }
+
+    fn party(byte: u8) -> CantonId {
+        CantonId::new(
+            "party".to_string(),
+            crate::canton_id::Namespace::new([byte; crate::canton_id::NAMESPACE_LENGTH]),
+        )
+    }
+
+    fn assert_refused(error: &str) {
+        assert!(
+            error.contains("is cancelled, not in progress; refusing to write topology"),
+            "{error}"
+        );
+    }
+
+    async fn kick_against_a_cancel(
+        db: SqlitePool,
+        node: NodeConfig,
+        step: KickStep,
+    ) -> Result<String> {
+        let kick = KickConfig::new(
+            party(7),
+            None,
+            "fingerprint".to_string(),
+            1,
+            None,
+            2,
+            "run".to_string(),
+        );
+        let config_json = serde_json::to_string(&kick)?;
+        write_step_against_a_cancel(
+            db,
+            node,
+            WorkflowKind::Kick,
+            step,
+            config_json,
+            |node, db, instance| {
+                kick::coordinator::start_coordinator(
+                    node,
+                    NetworkConfig::default(),
+                    kick,
+                    db,
+                    LastSeen::default(),
+                    instance,
+                )
+            },
+        )
+        .await
+    }
+
+    async fn add_party_against_a_cancel(
+        db: SqlitePool,
+        node: NodeConfig,
+        step: AddPartyStep,
+    ) -> Result<String> {
+        let add = AddPartyConfig::new(party(7), party(8), 2, None, 1, "run".to_string());
+        let config_json = serde_json::to_string(&add)?;
+        write_step_against_a_cancel(
+            db,
+            node,
+            WorkflowKind::AddParty,
+            step,
+            config_json,
+            |node, db, instance| {
+                add_party::coordinator::start_coordinator(
+                    node,
+                    NetworkConfig::default(),
+                    add,
+                    None,
+                    db,
+                    LastSeen::default(),
+                    instance,
+                )
+            },
+        )
+        .await
+    }
+
+    async fn change_threshold_against_a_cancel(
+        db: SqlitePool,
+        node: NodeConfig,
+        step: ChangeThresholdStep,
+    ) -> Result<String> {
+        let change = ChangeThresholdConfig::new(party(7), 2, None, 3, "run".to_string());
+        let config_json = serde_json::to_string(&change)?;
+        write_step_against_a_cancel(
+            db,
+            node,
+            WorkflowKind::ChangeThreshold,
+            step,
+            config_json,
+            |node, db, instance| {
+                change_threshold::coordinator::start_coordinator(
+                    node,
+                    NetworkConfig::default(),
+                    change,
+                    db,
+                    LastSeen::default(),
+                    instance,
+                )
+            },
+        )
+        .await
+    }
+
+    async fn rotate_key_against_a_cancel(
+        db: SqlitePool,
+        node: NodeConfig,
+        step: RotateKeyStep,
+    ) -> Result<String> {
+        let rotate = RotateKeyConfig {
+            decentralized_party_id: party(7),
+            rotated_key: crate::utils::compute_fingerprint(
+                &crate::signing::fake_admin_api::VaultKey::software("daml", 3).public_key,
+            ),
+            threshold: 2,
+            confirmation_threshold: 2,
+            instance_name: "run".to_string(),
+        };
+        let config_json = serde_json::to_string(&rotate)?;
+        write_step_against_a_cancel(
+            db,
+            node,
+            WorkflowKind::RotateKey,
+            step,
+            config_json,
+            |node, db, instance| {
+                rotate_key::coordinator::start_coordinator(
+                    node,
+                    NetworkConfig::default(),
+                    rotate,
+                    db,
+                    LastSeen::default(),
+                    instance,
+                )
+            },
+        )
+        .await
+    }
+
+    /// A node with no Canton behind it. A submit step fails at once on it,
+    /// because the run has no proposals.
+    async fn node_without_canton() -> Result<(tempfile::TempDir, NodeConfig)> {
+        let root = tempfile::tempdir()?;
+        let node = coordinator_node(NodeConfig::default().with_root_dir(root.path())).await?;
+        Ok((root, node))
+    }
+
+    /// A fake Canton node whose party, `party(7)`, still has its legacy key
+    /// mapping, so the retirement step has something to sign.
+    async fn node_awaiting_retirement() -> Result<(
+        crate::signing::fake_admin_api::FakeAdminApi,
+        crate::signing::fake_admin_api::TestNode,
+    )> {
+        use crate::signing::{custody::SoftwareKeys, fake_admin_api::FakeAdminApi};
+
+        let fake = FakeAdminApi::start(vec![]).await?;
+        fake.publish_party_awaiting_key_retirement(&party(7));
+        let node = fake.node(SoftwareKeys::Allowed, false).await?;
+        coordinator_node(node.config.clone()).await?;
+        Ok((fake, node))
+    }
+
+    #[sqlx::test(migrator = "crate::db::MIGRATOR")]
+    async fn the_kick_submit_waits_for_a_cancel_and_then_sends_nothing(db: SqlitePool) -> Result {
+        let (_root, node) = node_without_canton().await?;
+        assert_refused(&kick_against_a_cancel(db, node, KickStep::SubmitKick).await?);
+        Ok(())
+    }
+
+    #[sqlx::test(migrator = "crate::db::MIGRATOR")]
+    async fn the_add_party_submit_waits_for_a_cancel_and_then_sends_nothing(
+        db: SqlitePool,
+    ) -> Result {
+        let (_root, node) = node_without_canton().await?;
+        assert_refused(&add_party_against_a_cancel(db, node, AddPartyStep::SubmitProposals).await?);
+        Ok(())
+    }
+
+    /// The add-party clearing proposal is a second topology write of the same
+    /// run, so a cancel must wait for it as well.
+    #[sqlx::test(migrator = "crate::db::MIGRATOR")]
+    async fn the_add_party_clear_submit_waits_for_a_cancel_and_then_sends_nothing(
+        db: SqlitePool,
+    ) -> Result {
+        let (_root, node) = node_without_canton().await?;
+        let add = AddPartyConfig::new(party(7), party(8), 2, None, 1, "run".to_string());
+        let config_json = serde_json::to_string(&add)?;
+
+        let error = write_step_against_a_cancel(
+            db,
+            node,
+            WorkflowKind::AddParty,
+            AddPartyStep::SubmitClearOnboarding,
+            config_json,
+            |node, db, instance| async move {
+                // A non-empty proposal is what makes the step submit.
+                db.write_artifact(
+                    "run",
+                    storage::artifact_kinds::ADD_PARTY_CLEAR_PROPOSAL,
+                    None,
+                    b"proposal",
+                )
+                .await?;
+                add_party::coordinator::start_coordinator(
+                    node,
+                    NetworkConfig::default(),
+                    add,
+                    None,
+                    db,
+                    LastSeen::default(),
+                    instance,
+                )
+                .await
+            },
+        )
+        .await?;
+
+        assert_refused(&error);
+        Ok(())
+    }
+
+    #[sqlx::test(migrator = "crate::db::MIGRATOR")]
+    async fn the_change_threshold_submit_waits_for_a_cancel_and_then_sends_nothing(
+        db: SqlitePool,
+    ) -> Result {
+        let (_root, node) = node_without_canton().await?;
+        let step = ChangeThresholdStep::Submit;
+        assert_refused(&change_threshold_against_a_cancel(db, node, step).await?);
+        Ok(())
+    }
+
+    #[sqlx::test(migrator = "crate::db::MIGRATOR")]
+    async fn the_rotate_key_submit_waits_for_a_cancel_and_then_sends_nothing(
+        db: SqlitePool,
+    ) -> Result {
+        let (_root, node) = node_without_canton().await?;
+        assert_refused(&rotate_key_against_a_cancel(db, node, RotateKeyStep::Submit).await?);
+        Ok(())
+    }
+
+    #[sqlx::test(migrator = "crate::db::MIGRATOR")]
+    async fn the_kick_retirement_waits_for_a_cancel_and_then_signs_nothing(
+        db: SqlitePool,
+    ) -> Result {
+        let (fake, node) = node_awaiting_retirement().await?;
+        let step = KickStep::RetireLegacyKeys;
+        assert_refused(&kick_against_a_cancel(db, node.config.clone(), step).await?);
+        assert!(fake.authorized().is_empty(), "a cancelled kick signed");
+        Ok(())
+    }
+
+    #[sqlx::test(migrator = "crate::db::MIGRATOR")]
+    async fn the_add_party_retirement_waits_for_a_cancel_and_then_signs_nothing(
+        db: SqlitePool,
+    ) -> Result {
+        let (fake, node) = node_awaiting_retirement().await?;
+        let step = AddPartyStep::RetireLegacyKeys;
+        assert_refused(&add_party_against_a_cancel(db, node.config.clone(), step).await?);
+        assert!(fake.authorized().is_empty(), "a cancelled add-party signed");
+        Ok(())
+    }
+
+    #[sqlx::test(migrator = "crate::db::MIGRATOR")]
+    async fn the_change_threshold_retirement_waits_for_a_cancel_and_then_signs_nothing(
+        db: SqlitePool,
+    ) -> Result {
+        let (fake, node) = node_awaiting_retirement().await?;
+        let step = ChangeThresholdStep::RetireLegacyKeys;
+        assert_refused(&change_threshold_against_a_cancel(db, node.config.clone(), step).await?);
+        assert!(
+            fake.authorized().is_empty(),
+            "a cancelled change-threshold signed"
+        );
+        Ok(())
+    }
+
+    #[sqlx::test(migrator = "crate::db::MIGRATOR")]
+    async fn the_rotate_key_retirement_waits_for_a_cancel_and_then_signs_nothing(
+        db: SqlitePool,
+    ) -> Result {
+        let (fake, node) = node_awaiting_retirement().await?;
+        let step = RotateKeyStep::RetireLegacyKeys;
+        assert_refused(&rotate_key_against_a_cancel(db, node.config.clone(), step).await?);
+        assert!(
+            fake.authorized().is_empty(),
+            "a cancelled rotate-key signed"
         );
         Ok(())
     }

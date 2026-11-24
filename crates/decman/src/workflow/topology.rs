@@ -40,6 +40,7 @@ use crate::{
         topology_propagation_delay_secs, topology_retry_delay_secs, topology_retry_max_attempts,
     },
     error::Result,
+    server::WorkflowInstance,
     utils,
     workflow::{storage::WorkflowStorage, topology_version},
 };
@@ -118,6 +119,26 @@ pub async fn authorize_with_topology_retry(
     request: AuthorizeRequest,
     label: &str,
 ) -> Result<AuthorizeResponse> {
+    authorize_while(config, request, label, || async { Ok(()) }).await
+}
+
+/// [`authorize_with_topology_retry`] that asks `permit` before every attempt,
+/// the first included. A `permit` error stops the retries and is returned, so
+/// a caller whose run ends during a backoff sends nothing more.
+///
+/// # Errors
+///
+/// Errors when `permit` refuses, or as [`authorize_with_topology_retry`].
+pub async fn authorize_while<Permit, PermitFut>(
+    config: &NodeConfig,
+    request: AuthorizeRequest,
+    label: &str,
+    mut permit: Permit,
+) -> Result<AuthorizeResponse>
+where
+    Permit: FnMut() -> PermitFut,
+    PermitFut: Future<Output = Result>,
+{
     let mut topology_client = TopologyManagerWriteServiceClient::new(config.admin_channel().await?);
 
     let max_attempts = topology_retry_max_attempts();
@@ -126,6 +147,7 @@ pub async fn authorize_with_topology_retry(
     let mut attempt = 0usize;
     loop {
         attempt += 1;
+        permit().await?;
         match topology_client
             .authorize(tonic::Request::new(request.clone()))
             .await
@@ -467,6 +489,26 @@ pub async fn retire_legacy_keys(
     synchronizer_id: &str,
     party: &CantonId,
 ) -> Result {
+    retire_legacy_keys_while(config, synchronizer_id, party, || async { Ok(()) }).await
+}
+
+/// [`retire_legacy_keys`] that asks `permit` before each signing attempt. A
+/// peer passes a check of its run row, so a cancel that lands during a retry
+/// backoff stops the next attempt.
+///
+/// # Errors
+///
+/// Errors when `permit` refuses, or as [`retire_legacy_keys`].
+pub async fn retire_legacy_keys_while<Permit, PermitFut>(
+    config: &NodeConfig,
+    synchronizer_id: &str,
+    party: &CantonId,
+    permit: Permit,
+) -> Result
+where
+    Permit: FnMut() -> PermitFut,
+    PermitFut: Future<Output = Result>,
+{
     let mut reader = TopologyManagerReadServiceClient::new(config.admin_channel().await?);
     let response = reader
         .list_party_to_key_mapping(ListPartyToKeyMappingRequest {
@@ -487,9 +529,7 @@ pub async fn retire_legacy_keys(
     let p2p = fetch_p2p_mapping(config, synchronizer_id, party).await?;
     validate_legacy_retirement(&p2p, &mapping)?;
     let request = legacy_retirement_request(synchronizer_id, serial, mapping)?;
-    if let Err(error) =
-        authorize_with_topology_retry(config, request, "retire legacy party keys").await
-    {
+    if let Err(error) = authorize_while(config, request, "retire legacy party keys", permit).await {
         // Another member may have completed this exact removal while we signed.
         if fetch_party_to_key_mapping(config, synchronizer_id, party)
             .await?
@@ -560,16 +600,29 @@ fn validate_legacy_retirement(p2p: &PartyToParticipant, legacy: &PartyToKeyMappi
     Ok(())
 }
 
-/// Coordinator side of the retirement round for run `instance_name`. A run
-/// that is no longer in progress writes nothing.
+/// Coordinator side of the retirement round for `instance`'s run. The signing
+/// holds the run's topology write lock and refuses a run that is no longer in
+/// progress. The wait for the other members runs without the lock, so an
+/// operator can still cancel while the run waits for them.
+///
+/// # Errors
+///
+/// Errors when the run is not in progress, when the signing fails, or when the
+/// removal does not become visible in time.
 pub async fn retire_legacy_keys_for_run(
     config: &NodeConfig,
     db: &SqlitePool,
-    instance_name: &str,
+    instance: &WorkflowInstance,
     party: &CantonId,
 ) -> Result {
-    crate::workflow::ensure_run_in_progress(db, instance_name).await?;
-    retire_legacy_keys_and_wait(config, party).await
+    let synchronizer_id = utils::get_synchronizer_id(config).await?;
+    crate::workflow::write_topology(
+        db,
+        instance,
+        retire_legacy_keys(config, &synchronizer_id, party),
+    )
+    .await?;
+    wait_for_legacy_keys_gone(config, &synchronizer_id, party).await
 }
 
 /// Coordinator side of the retirement round. Peers contribute while this
@@ -577,8 +630,16 @@ pub async fn retire_legacy_keys_for_run(
 pub async fn retire_legacy_keys_and_wait(config: &NodeConfig, party: &CantonId) -> Result {
     let synchronizer_id = utils::get_synchronizer_id(config).await?;
     retire_legacy_keys(config, &synchronizer_id, party).await?;
+    wait_for_legacy_keys_gone(config, &synchronizer_id, party).await
+}
+
+async fn wait_for_legacy_keys_gone(
+    config: &NodeConfig,
+    synchronizer_id: &str,
+    party: &CantonId,
+) -> Result {
     for _ in 0..topology_retry_max_attempts() {
-        if fetch_party_to_key_mapping(config, &synchronizer_id, party)
+        if fetch_party_to_key_mapping(config, synchronizer_id, party)
             .await?
             .is_none()
         {
@@ -1760,6 +1821,14 @@ mod tests {
         Ok(())
     }
 
+    fn run_instance() -> std::sync::Arc<WorkflowInstance> {
+        WorkflowInstance::new(
+            "run".to_string(),
+            crate::server::WorkflowKind::Kick,
+            crate::server::WorkflowRole::Coordinator,
+        )
+    }
+
     fn legacy_party() -> CantonId {
         CantonId::new(
             "party".to_string(),
@@ -1783,7 +1852,7 @@ mod tests {
                 .await?;
             insert_run(&db, status).await?;
 
-            let error = retire_legacy_keys_for_run(&node.config, &db, "run", &party)
+            let error = retire_legacy_keys_for_run(&node.config, &db, &run_instance(), &party)
                 .await
                 .expect_err("a run that is not in progress wrote topology");
 
@@ -1794,7 +1863,7 @@ mod tests {
         sqlx::query("DELETE FROM workflow_runs")
             .execute(&db)
             .await?;
-        let error = retire_legacy_keys_for_run(&node.config, &db, "run", &party)
+        let error = retire_legacy_keys_for_run(&node.config, &db, &run_instance(), &party)
             .await
             .expect_err("a run with no record wrote topology");
         assert!(format!("{error:#}").contains("no record"), "{error:#}");
@@ -1816,10 +1885,9 @@ mod tests {
 
         let config = node.config.clone();
         let pool = db.clone();
-        let task =
-            tokio::spawn(
-                async move { retire_legacy_keys_for_run(&config, &pool, "run", &party).await },
-            );
+        let task = tokio::spawn(async move {
+            retire_legacy_keys_for_run(&config, &pool, &run_instance(), &party).await
+        });
         let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
         while fake.authorized().is_empty() {
             anyhow::ensure!(
@@ -1839,6 +1907,72 @@ mod tests {
             }),
             Some(enums::TopologyChangeOp::Remove as i32)
         );
+        Ok(())
+    }
+    /// A cancel can land while a signing attempt waits for its retry. The next
+    /// attempt must read the run row again and send nothing.
+    #[sqlx::test(migrator = "crate::db::MIGRATOR")]
+    async fn a_cancel_during_a_retry_backoff_stops_the_next_signing_attempt(
+        db: SqlitePool,
+    ) -> Result {
+        use crate::signing::{custody::SoftwareKeys, fake_admin_api::FakeAdminApi};
+
+        let fake = FakeAdminApi::start(vec![]).await?;
+        let party = legacy_party();
+        fake.publish_party_awaiting_key_retirement(&party);
+        fake.reject_authorizations_until_key_ready(1);
+        let node = fake.node(SoftwareKeys::Allowed, false).await?;
+        insert_run(&db, "inprogress").await?;
+        let synchronizer_id = utils::get_synchronizer_id(&node.config).await?;
+
+        let config = node.config.clone();
+        let pool = db.clone();
+        let retire = tokio::spawn(async move {
+            retire_legacy_keys_while(&config, &synchronizer_id, &party, || {
+                crate::workflow::ensure_run_in_progress(&pool, "run")
+            })
+            .await
+        });
+        // The first attempt failed, so the retry is now waiting out its delay.
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        while fake.authorized().is_empty() {
+            anyhow::ensure!(
+                tokio::time::Instant::now() < deadline && !retire.is_finished(),
+                "the first signing attempt never reached the node"
+            );
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        sqlx::query("UPDATE workflow_runs SET status = 'cancelled'")
+            .execute(&db)
+            .await?;
+
+        let error = retire.await?.expect_err("a cancelled run went on signing");
+        assert!(format!("{error:#}").contains("cancelled"), "{error:#}");
+        assert_eq!(fake.authorized().len(), 1, "a cancelled run signed again");
+        Ok(())
+    }
+
+    /// The same backoff for a run that stays in progress: the retry goes ahead
+    /// and signs. Without it the test above could pass for a retry that never
+    /// happens.
+    #[sqlx::test(migrator = "crate::db::MIGRATOR")]
+    async fn a_run_in_progress_signs_again_after_a_retry_backoff(db: SqlitePool) -> Result {
+        use crate::signing::{custody::SoftwareKeys, fake_admin_api::FakeAdminApi};
+
+        let fake = FakeAdminApi::start(vec![]).await?;
+        let party = legacy_party();
+        fake.publish_party_awaiting_key_retirement(&party);
+        fake.reject_authorizations_until_key_ready(1);
+        let node = fake.node(SoftwareKeys::Allowed, false).await?;
+        insert_run(&db, "inprogress").await?;
+        let synchronizer_id = utils::get_synchronizer_id(&node.config).await?;
+
+        retire_legacy_keys_while(&node.config, &synchronizer_id, &party, || {
+            crate::workflow::ensure_run_in_progress(&db, "run")
+        })
+        .await?;
+
+        assert_eq!(fake.authorized().len(), 2);
         Ok(())
     }
 }

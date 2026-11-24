@@ -196,6 +196,9 @@ struct Vault {
     exported: Vec<Fingerprint>,
     topology: Topology,
     authorized: Vec<AuthorizeRequest>,
+    /// How many of the next `Authorize` requests fail as if the signing key
+    /// were not in the store yet.
+    key_not_ready: usize,
 }
 
 /// The synchronizer's head state: each mapping in force, with its serial.
@@ -448,6 +451,12 @@ impl Vault {
 
     fn authorize(&mut self, request: AuthorizeRequest) -> Result<AuthorizeResponse, Status> {
         self.authorized.push(request.clone());
+        if self.key_not_ready > 0 {
+            self.key_not_ready -= 1;
+            return Err(Status::failed_precondition(
+                "TOPOLOGY_NO_APPROPRIATE_SIGNING_KEY_IN_STORE",
+            ));
+        }
         let Some(authorize_request::Type::Proposal(proposal)) = request.r#type else {
             return Err(Status::unimplemented("the fake authorizes proposals only"));
         };
@@ -497,6 +506,7 @@ impl FakeAdminApi {
             exported: Vec::new(),
             topology: Topology::default(),
             authorized: Vec::new(),
+            key_not_ready: 0,
         }));
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
         let port = listener.local_addr()?.port();
@@ -587,6 +597,13 @@ impl FakeAdminApi {
                 signing_keys: keys,
             },
         );
+    }
+
+    /// Fail the next `count` `Authorize` requests with the error Canton gives
+    /// while a signing key is not yet in its store. DecMan retries that error.
+    /// The failed requests still show in [`Self::authorized`].
+    pub fn reject_authorizations_until_key_ready(&self, count: usize) {
+        lock(&self.vault).key_not_ready = count;
     }
 
     /// Each `Authorize` request DecMan sent, in order.

@@ -11,7 +11,7 @@ use crate::{
     workflow::{
         signature_pairs::save_signature_pairs,
         storage::{WorkflowStorage, artifact_kinds},
-        submit_topology,
+        write_topology,
     },
 };
 
@@ -57,6 +57,7 @@ pub async fn start_coordinator(
         let kick_config = kick_config.clone();
         let db = db.clone();
         let instance_name = kick_config.instance_name.clone();
+        let instance = instance.clone();
 
         tokio::spawn(async move {
             let mut coordinator_completed_steps = HashSet::new();
@@ -125,14 +126,12 @@ pub async fn start_coordinator(
                         )
                         .await?;
 
-                        let (confirmed_version, confirmed_thresholds) = {
-                            let (config, storage, name) =
-                                (node_config.clone(), db.clone(), instance_name.clone());
-                            submit_topology(&db, &instance_name, async move {
-                                submit_kick(&config, &storage, &name).await
-                            })
-                            .await?
-                        };
+                        let (confirmed_version, confirmed_thresholds) = write_topology(
+                            &db,
+                            &instance,
+                            submit_kick(&node_config, &db, &instance_name),
+                        )
+                        .await?;
                         // Deliberately not fatal. The kick is durable at this
                         // point, so failing the step would leave the workflow
                         // on SubmitKick and a resume would resubmit the same
@@ -163,7 +162,7 @@ pub async fn start_coordinator(
                         crate::workflow::topology::retire_legacy_keys_for_run(
                             &node_config,
                             &db,
-                            &instance_name,
+                            &instance,
                             &kick_config.decentralized_party_id,
                         )
                         .await?;
@@ -195,7 +194,7 @@ mod tests {
     use std::{collections::HashMap, time::Duration};
 
     use sqlx::SqlitePool;
-    use tokio::sync::RwLock;
+    use tokio::{sync::RwLock, task::JoinHandle};
 
     use super::*;
     use crate::{
@@ -203,17 +202,31 @@ mod tests {
         db::MIGRATOR,
         noise::NoiseKeypair,
         server::{WorkflowKind, WorkflowRole},
-        signing::{custody::SoftwareKeys, fake_admin_api::FakeAdminApi},
+        signing::{
+            custody::SoftwareKeys,
+            fake_admin_api::{FakeAdminApi, TestNode},
+        },
         workflow::state::WorkflowStep,
     };
 
     const RUN: &str = "kick-run";
 
-    /// Cancelling a run aborts the task that drives it. A kick that is at the
-    /// legacy key retirement then must write no topology. Before the loop
-    /// stopped with its driver, it went on to sign the removal.
-    #[sqlx::test(migrator = "MIGRATOR")]
-    async fn an_aborted_kick_run_signs_no_topology(db: SqlitePool) -> Result {
+    /// How long the abort test watches for a signature that must not come.
+    /// A loop that survives its abort signs within milliseconds, and the
+    /// control test below proves that it does.
+    const QUIET_WINDOW: Duration = Duration::from_secs(2);
+
+    /// A coordinator for a kick that waits at the legacy key retirement, the
+    /// first step that writes topology. `fake` holds the party that retirement
+    /// would change.
+    struct KickAtRetirement {
+        fake: FakeAdminApi,
+        _node: TestNode,
+        instance: Arc<WorkflowInstance>,
+        driver: JoinHandle<Result>,
+    }
+
+    async fn start_kick_at_retirement(db: SqlitePool) -> Result<KickAtRetirement> {
         let fake = FakeAdminApi::start(vec![]).await?;
         let party = CantonId::new("party".to_string(), Namespace::new([7; NAMESPACE_LENGTH]));
         fake.publish_party_awaiting_key_retirement(&party);
@@ -265,15 +278,84 @@ mod tests {
         while instance.active.read().is_ok_and(|active| active.is_none()) {
             tokio::task::yield_now().await;
         }
+        Ok(KickAtRetirement {
+            fake,
+            _node: node,
+            instance,
+            driver,
+        })
+    }
 
-        driver.abort();
-        assert!(driver.await.is_err_and(|e| e.is_cancelled()));
-        tokio::time::sleep(Duration::from_secs(2)).await;
+    /// Cancelling a run aborts the task that drives it. A kick that is at the
+    /// legacy key retirement then must write no topology. Before the loop
+    /// stopped with its driver, it went on to sign the removal.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn an_aborted_kick_run_signs_no_topology(db: SqlitePool) -> Result {
+        let run = start_kick_at_retirement(db).await?;
+
+        run.driver.abort();
+        assert!(run.driver.await.is_err_and(|e| e.is_cancelled()));
+        tokio::time::sleep(QUIET_WINDOW).await;
 
         assert!(
-            fake.authorized().is_empty(),
+            run.fake.authorized().is_empty(),
             "the kick signed topology after its run was aborted"
         );
+        Ok(())
+    }
+
+    /// The control for the test above: the same run, left alone, signs the
+    /// removal. Without it, the quiet window could pass for a loop that never
+    /// reached the signing.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_kick_run_that_is_not_aborted_signs_the_removal(db: SqlitePool) -> Result {
+        let run = start_kick_at_retirement(db).await?;
+
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        while run.fake.authorized().is_empty() {
+            anyhow::ensure!(
+                tokio::time::Instant::now() < deadline && !run.driver.is_finished(),
+                "the kick never signed the removal"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        run.driver.abort();
+        Ok(())
+    }
+
+    /// The run's topology write lock is free while the coordinator waits for
+    /// the other members to finish the retirement, so the operator can still
+    /// cancel then.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn the_write_lock_is_free_while_the_kick_waits_for_the_other_members(
+        db: SqlitePool,
+    ) -> Result {
+        let run = start_kick_at_retirement(db).await?;
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        while run.fake.authorized().is_empty() {
+            anyhow::ensure!(
+                tokio::time::Instant::now() < deadline && !run.driver.is_finished(),
+                "the kick never signed the removal"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+
+        // The fake keeps the legacy mapping, so the coordinator is now waiting
+        // for it to go away.
+        loop {
+            if let Ok(guard) = run.instance.topology_write.try_lock() {
+                drop(guard);
+                break;
+            }
+            anyhow::ensure!(
+                tokio::time::Instant::now() < deadline,
+                "the write lock stayed held after the signing"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+
+        assert!(!run.driver.is_finished(), "the run did not keep waiting");
+        run.driver.abort();
         Ok(())
     }
 }
