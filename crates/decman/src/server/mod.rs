@@ -2568,8 +2568,9 @@ async fn finalize_peer_run(
     };
     // A task that ends well keeps a run that its coordinator cancelled as
     // Cancelled: the first terminal status wins. A task that fails still
-    // records Failed, as before. A coordinator retry reopens only Failed peer
-    // rows, so a peer that a decline's teardown cancelled can rejoin the retry.
+    // records Failed. A coordinator retry reopens only Failed peer rows, so a
+    // peer that a decline's teardown cancelled can rejoin a retry that starts
+    // after its task failed.
     if success {
         match tx
             .finish_workflow_run(instance_name, status, error_msg.as_deref(), now)

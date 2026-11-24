@@ -157,8 +157,9 @@ DAR upload are not covered, because they write outside this lock.
 
 A peer run that its coordinator cancelled stops at the next command from that
 coordinator. The coordinator sends the cancel on an operator cancel, and after
-another peer declines. A retry reopens only a run that is still Failed, on the
-coordinator and on its peers.
+another peer declines. The peer row stays Cancelled when its task ends
+normally, and becomes Failed when its task fails. A retry reopens only a run
+that is still Failed, on the coordinator and on its peers.
 
 ## Coordinator / Peer Model
 
