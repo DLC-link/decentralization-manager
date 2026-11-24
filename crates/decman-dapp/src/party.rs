@@ -4,7 +4,7 @@ use common::fingerprint::{compute_decentralized_namespace, fingerprint_from_publ
 use ed25519_dalek::VerifyingKey;
 use serde::{Deserialize, Serialize};
 
-use crate::{Error, payload_digest, signature::parse_public_key};
+use crate::{Error, signature::parse_public_key};
 
 /// Canton keeps the last 185 characters of a party id for the name.
 const MAX_HINT_LENGTH: usize = 185;
@@ -15,8 +15,6 @@ const MIN_OWNERS: usize = 2;
 pub const MAX_OWNERS: usize = 10;
 /// Canton puts this between the party name and the namespace.
 const PARTY_ID_DELIMITER: &str = "::";
-/// The domain of the digest that each owner signs to approve the party.
-const PARTY_PROPOSAL_DOMAIN: &str = "decman-dapp/party-proposal/v1";
 
 /// A new party as its creator proposes it.
 #[derive(Debug, Deserialize)]
@@ -51,8 +49,6 @@ pub struct PartyPlan {
     pub hosts: Vec<String>,
     pub signing_threshold: u32,
     pub confirmation_threshold: u32,
-    /// The digest that each owner signs in the mock.
-    pub digest: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -116,17 +112,14 @@ pub fn plan_party(proposal: &PartyProposal) -> Result<PartyPlan, Error> {
     let owner_namespaces: HashSet<String> =
         owners.iter().map(|owner| owner.namespace.clone()).collect();
     let namespace = compute_decentralized_namespace(&owner_namespaces);
-    let mut plan = PartyPlan {
+    Ok(PartyPlan {
         party_id: format!("{}{PARTY_ID_DELIMITER}{namespace}", proposal.party_hint),
         namespace,
         owners,
         hosts: hosts.into_iter().collect(),
         signing_threshold: proposal.signing_threshold,
         confirmation_threshold: proposal.confirmation_threshold,
-        digest: String::new(),
-    };
-    plan.digest = payload_digest(PARTY_PROPOSAL_DOMAIN, &serde_json::to_string(&plan)?);
-    Ok(plan)
+    })
 }
 
 fn plan_owner(number: usize, owner: &ProposedOwner) -> Result<PlannedOwner, Error> {
@@ -245,15 +238,7 @@ mod tests {
         let plan = plan_party(&proposal())?;
         let reversed_plan = plan_party(&reversed)?;
         assert_eq!(plan.party_id, reversed_plan.party_id);
-        assert_eq!(plan.digest, reversed_plan.digest);
-        Ok(())
-    }
-
-    #[test]
-    fn digest_changes_with_the_thresholds() -> Result<(), Error> {
-        let mut lower = proposal();
-        lower.signing_threshold = 1;
-        assert_ne!(plan_party(&proposal())?.digest, plan_party(&lower)?.digest);
+        assert_eq!(plan.owners[0].namespace, reversed_plan.owners[0].namespace);
         Ok(())
     }
 

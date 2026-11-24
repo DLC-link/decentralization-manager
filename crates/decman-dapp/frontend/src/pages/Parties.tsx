@@ -36,7 +36,7 @@ export function PartyDetail({ partyId }: { partyId: string }) {
   const state = useAppState()
   const party = state.parties.find((p) => p.partyId === partyId)
   const acting = actingWallet(state)
-  if (!party) return <p>This party does not exist in the mock ledger.</p>
+  if (!party) return <p>This browser does not know this party.</p>
   const actingIsOwner = !!acting && party.owners.some((o) => o.publicKey === acting.publicKey)
   const nameOf = (publicKey: string) => state.wallets.find((w) => w.publicKey === publicKey)?.name ?? '—'
 
@@ -273,7 +273,7 @@ function RequestCard({
           )}
           {verified >= party.signingThreshold && (
             <button onClick={() => run(() => executeRequest(party.partyId, request.id, acting))}>
-              Submit through {acting.participant}
+              Submit through {acting.participant.participantId}
             </button>
           )}
           <button onClick={() => run(() => rejectRequest(party.partyId, request.id, acting))}>Reject</button>

@@ -41,8 +41,8 @@ export function App() {
       <header>
         <h1>DecMan dApp</h1>
         <p className="banner">
-          Mock mode. The wallets, the ledger and the dApps are simulated in this browser. The party ids, digests and
-          signature checks are real, and they run in Rust compiled to WebAssembly.
+          Party creation is real. The dApp creates the party on your participants through the JSON Ledger API. Owner keys
+          stay in this browser and stand in for wallets. Holdings, transfers, history and dApp connections are simulated.
         </p>
         <div className="row">
           <label className="inline">
@@ -55,20 +55,20 @@ export function App() {
               {state.wallets.length === 0 && <option value="">no wallets</option>}
               {state.wallets.map((wallet) => (
                 <option key={wallet.id} value={wallet.id}>
-                  {wallet.name} ({wallet.participant})
+                  {wallet.name} ({wallet.participant.participantId})
                 </option>
               ))}
             </select>
           </label>
           <button
             onClick={() => {
-              if (window.confirm('Delete every mock wallet, proposal and party in this browser?')) {
+              if (window.confirm('Delete every wallet, covalidator, proposal and party in this browser?')) {
                 resetState()
                 navigate('wallets')
               }
             }}
           >
-            Reset mock data
+            Reset browser data
           </button>
         </div>
         <nav>

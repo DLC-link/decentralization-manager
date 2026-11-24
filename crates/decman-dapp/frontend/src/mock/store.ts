@@ -1,28 +1,54 @@
-// The mock's state: wallets, proposals and parties, kept in localStorage.
-// The real dApp reads parties from the ledger and proposals from the
-// coordination contracts instead.
+// The dApp's state in localStorage: wallets, covalidators, proposals and
+// parties. Party creation is real, so a proposal records what each
+// participant answered. The party's holdings, history and dApp connections
+// stay simulated.
 import { useSyncExternalStore } from 'react'
 
-import type { PartyPlan, PlannedOwner } from '../checks'
+import type { Onboarding, PartyPlan, PartyProposal, PlannedOwner } from '../checks'
+import type { Connection as LedgerConnection } from '../ledger'
 
+/** A participant's JSON Ledger API and the id it reported. */
+export type ParticipantLink = LedgerConnection & { participantId: string }
+
+/** An owner. The browser key stands in for a wallet. */
 export type Wallet = {
   id: string
   name: string
-  participant: string
+  participant: ParticipantLink
   publicKey: string
   namespace: string
   privateKeyJwk: JsonWebKey
 }
 
+/** A participant that hosts parties but holds no owner key. */
+export type Covalidator = { id: string; name: string; participant: ParticipantLink }
+
 export type Signature = { publicKey: string; signature: string; signedAt: string }
+
+export type HostStep = 'waiting' | 'approved' | 'submitted' | 'hosted' | 'failed'
+
+/** What one hosting participant did during the submission. */
+export type HostResult = {
+  participant: string
+  name: string
+  role: 'owner' | 'covalidator'
+  step: HostStep
+  detail?: string
+}
 
 export type Proposal = {
   id: string
   createdAt: string
   createdBy: string
+  proposal: PartyProposal
   plan: PartyPlan
+  synchronizerId: string
+  topologyVersion: number
+  onboarding: Onboarding
   signatures: Signature[]
-  status: 'collecting' | 'submitted'
+  status: 'collecting' | 'submitting' | 'submitted' | 'failed'
+  hosts: HostResult[]
+  error?: string
 }
 
 export type Host = { participant: string; role: 'owner' | 'covalidator'; approval: string }
@@ -67,17 +93,28 @@ export type Party = {
 export type AppState = {
   actingWalletId: string | null
   wallets: Wallet[]
+  covalidators: Covalidator[]
   proposals: Proposal[]
   parties: Party[]
 }
 
-const STORAGE_KEY = 'decman-dapp-mock-v1'
-const EMPTY: AppState = { actingWalletId: null, wallets: [], proposals: [], parties: [] }
+// v2 links each wallet to a real participant. v1 data does not load.
+const STORAGE_KEY = 'decman-dapp-v2'
+const EMPTY: AppState = { actingWalletId: null, wallets: [], covalidators: [], proposals: [], parties: [] }
 
 function load(): AppState {
   try {
     const raw = localStorage.getItem(STORAGE_KEY)
-    return raw ? { ...EMPTY, ...(JSON.parse(raw) as Partial<AppState>) } : EMPTY
+    const loaded: AppState = raw ? { ...EMPTY, ...(JSON.parse(raw) as Partial<AppState>) } : EMPTY
+    // A reload stops a running submission, so it can no longer finish.
+    return {
+      ...loaded,
+      proposals: loaded.proposals.map((p) =>
+        p.status === 'submitting'
+          ? { ...p, status: 'failed', error: 'The page reloaded during the submission. Try again.' }
+          : p,
+      ),
+    }
   } catch {
     return EMPTY
   }

@@ -1,10 +1,16 @@
-// Typed wrappers around the Rust checks in `decman-dapp`, compiled to
-// WebAssembly. Every party id, digest and signature check in the app comes
-// from here, so it matches what the server computes.
+// Typed wrappers around the Rust in `decman-dapp`, compiled to WebAssembly.
+// Every party id, topology transaction, hash, signature check and Ledger API
+// body in the app comes from here, so it matches what the server and Canton
+// compute.
 import init, {
+  allocationRequests as allocationRequestsJson,
+  generateTopologyRequest as generateTopologyRequestJson,
+  onboardingTransactions as onboardingTransactionsJson,
+  partyHostedLocally as partyHostedLocallyJson,
   payloadDigest,
   planParty as planPartyJson,
   publicKeyNamespace,
+  topologyVersionOfGenerated as topologyVersionOfGeneratedJson,
   verifySignature,
 } from './wasm/decman_dapp'
 
@@ -33,8 +39,16 @@ export type PartyPlan = {
   hosts: string[]
   signingThreshold: number
   confirmationThreshold: number
-  digest: string
 }
+
+export type OnboardingTransaction = { mapping: string; hash: string; transaction: string }
+
+export type Onboarding = { transactions: OnboardingTransaction[]; combinedHash: string }
+
+export type OwnerSignature = { publicKey: string; signature: string }
+
+/** The two `POST /v2/parties/external/allocate` bodies. */
+export type AllocationRequests = { hostingApproval: unknown; allocate: unknown }
 
 /** Checks the proposal. Throws an Error with a message for the form. */
 export function planParty(proposal: PartyProposal): PartyPlan {
@@ -47,6 +61,36 @@ export function tryPlanParty(proposal: PartyProposal): { plan: PartyPlan } | { e
   } catch (error) {
     return { error: error instanceof Error ? error.message : String(error) }
   }
+}
+
+/** The transactions that create the party, in topology format 30 or 31. */
+export function onboardingTransactions(proposal: PartyProposal, topologyVersion: number): Onboarding {
+  return JSON.parse(onboardingTransactionsJson(JSON.stringify(proposal), topologyVersion)) as Onboarding
+}
+
+/** Throws unless every owner signed the combined hash. */
+export function allocationRequests(
+  proposal: PartyProposal,
+  topologyVersion: number,
+  synchronizerId: string,
+  signatures: OwnerSignature[],
+): AllocationRequests {
+  return JSON.parse(
+    allocationRequestsJson(JSON.stringify(proposal), topologyVersion, synchronizerId, JSON.stringify(signatures)),
+  ) as AllocationRequests
+}
+
+export function generateTopologyRequest(synchronizerId: string, publicKey: string): unknown {
+  return JSON.parse(generateTopologyRequestJson(synchronizerId, publicKey))
+}
+
+/** The topology format, 30 or 31, of a generate-topology answer. */
+export function topologyVersionOfGenerated(response: unknown): number {
+  return topologyVersionOfGeneratedJson(JSON.stringify(response))
+}
+
+export function partyHostedLocally(response: unknown, partyId: string): boolean {
+  return partyHostedLocallyJson(JSON.stringify(response), partyId)
 }
 
 /** Malformed input counts as an invalid signature. */

@@ -1,8 +1,8 @@
 import { useState } from 'react'
 
 import { tryPlanParty, type PartyProposal } from '../checks'
-import { createProposal } from '../mock/actions'
 import { actingWallet, useAppState } from '../mock/store'
+import { createProposal } from '../onboarding'
 import { ErrorText, Hex, PartyId, Section, useAction } from '../ui'
 
 export function NewParty({ onCreated }: { onCreated: () => void }) {
@@ -10,28 +10,35 @@ export function NewParty({ onCreated }: { onCreated: () => void }) {
   const acting = actingWallet(state)
   const [hint, setHint] = useState('')
   const [ownerIds, setOwnerIds] = useState<string[]>([])
+  const [covalidatorIds, setCovalidatorIds] = useState<string[]>([])
   const [signingThreshold, setSigningThreshold] = useState(2)
   const [confirmationThreshold, setConfirmationThreshold] = useState(1)
-  const [covalidators, setCovalidators] = useState('')
+  const [busy, setBusy] = useState(false)
   const [error, run] = useAction()
 
   const owners = state.wallets.filter((w) => ownerIds.includes(w.id))
   const proposal: PartyProposal = {
     partyHint: hint,
-    owners: owners.map((w) => ({ publicKey: w.publicKey, participant: w.participant })),
+    owners: owners.map((w) => ({ publicKey: w.publicKey, participant: w.participant.participantId })),
     signingThreshold,
     confirmationThreshold,
-    covalidators: covalidators.split(',').map((c) => c.trim()).filter(Boolean),
+    covalidators: state.covalidators
+      .filter((c) => covalidatorIds.includes(c.id))
+      .map((c) => c.participant.participantId),
   }
   const check = tryPlanParty(proposal)
 
-  const toggle = (id: string) =>
-    setOwnerIds((ids) => (ids.includes(id) ? ids.filter((x) => x !== id) : [...ids, id]))
+  const toggle = (ids: string[], id: string) => (ids.includes(id) ? ids.filter((x) => x !== id) : [...ids, id])
 
   const create = () =>
-    run(() => {
+    run(async () => {
       if (!acting) throw new Error('Pick the wallet you act as first.')
-      createProposal(proposal, acting)
+      setBusy(true)
+      try {
+        await createProposal(proposal, acting)
+      } finally {
+        setBusy(false)
+      }
       onCreated()
     })
 
@@ -48,8 +55,26 @@ export function NewParty({ onCreated }: { onCreated: () => void }) {
             {state.wallets.length === 0 && <p>Add wallets on the Wallets page first.</p>}
             {state.wallets.map((wallet) => (
               <label key={wallet.id} className="inline">
-                <input type="checkbox" checked={ownerIds.includes(wallet.id)} onChange={() => toggle(wallet.id)} />
-                {wallet.name} ({wallet.participant})
+                <input
+                  type="checkbox"
+                  checked={ownerIds.includes(wallet.id)}
+                  onChange={() => setOwnerIds((ids) => toggle(ids, wallet.id))}
+                />
+                {wallet.name} ({wallet.participant.participantId})
+              </label>
+            ))}
+          </fieldset>
+          <fieldset>
+            <legend>Covalidators (optional)</legend>
+            {state.covalidators.length === 0 && <p>Add covalidators on the Wallets page.</p>}
+            {state.covalidators.map((covalidator) => (
+              <label key={covalidator.id} className="inline">
+                <input
+                  type="checkbox"
+                  checked={covalidatorIds.includes(covalidator.id)}
+                  onChange={() => setCovalidatorIds((ids) => toggle(ids, covalidator.id))}
+                />
+                {covalidator.name} ({covalidator.participant.participantId})
               </label>
             ))}
           </fieldset>
@@ -71,14 +96,6 @@ export function NewParty({ onCreated }: { onCreated: () => void }) {
               onChange={(e) => setConfirmationThreshold(Number(e.target.value))}
             />
           </label>
-          <label>
-            Covalidators: extra hosting participants, separated by commas (optional)
-            <input
-              value={covalidators}
-              onChange={(e) => setCovalidators(e.target.value)}
-              placeholder="covalidator-1"
-            />
-          </label>
         </div>
       </Section>
       <Section title="Check">
@@ -91,16 +108,24 @@ export function NewParty({ onCreated }: { onCreated: () => void }) {
             <dd>
               <PartyId value={check.plan.partyId} />
             </dd>
+            <dt>Namespace owners</dt>
+            <dd>
+              {check.plan.owners.map((owner) => (
+                <div key={owner.namespace}>
+                  <Hex value={owner.namespace} />
+                </div>
+              ))}
+            </dd>
             <dt>Hosts</dt>
             <dd>{check.plan.hosts.join(', ')}</dd>
-            <dt>Digest that every owner signs</dt>
-            <dd>
-              <Hex value={check.plan.digest} />
-            </dd>
           </dl>
         )}
-        <button disabled={'error' in check} onClick={create}>
-          Propose as {acting?.name ?? '…'}
+        <p className="hint">
+          Proposing asks the proposer's participant for its synchronizer and topology format. The owners then sign the
+          real topology transactions.
+        </p>
+        <button disabled={'error' in check || busy} onClick={create}>
+          {busy ? 'Asking the participant…' : `Propose as ${acting?.name ?? '…'}`}
         </button>
         <ErrorText error={error} />
       </Section>

@@ -1,23 +1,9 @@
-// Every change the mock makes. The ledger, the owners' participants, the
-// covalidator's DecMan and the connected dApps are simulated here. The checks
-// they call (party id, digest, signature) are the real Rust ones.
-import {
-  isValidSignature,
-  payloadDigest,
-  planParty,
-  publicKeyNamespace,
-  type PartyProposal,
-} from '../checks'
-import { generateKeyPair, signDigest } from './keys'
-import {
-  getState,
-  update,
-  type Party,
-  type Proposal,
-  type Signature,
-  type TransferRequest,
-  type Wallet,
-} from './store'
+// The party wallet's simulated parts: holdings, dApp connections and
+// transfer requests. The digests and signature checks they call are the real
+// Rust ones. Party creation is real and lives in ../onboarding.ts.
+import { isValidSignature, payloadDigest } from '../checks'
+import { signDigest } from './keys'
+import { getState, update, type Party, type Signature, type TransferRequest, type Wallet } from './store'
 
 const TRANSFER_DOMAIN = 'decman-dapp/transfer-request/v1'
 
@@ -38,108 +24,8 @@ export function verifiedSigners(
   )
 }
 
-// ---- Wallets ---------------------------------------------------------------
-
-export async function createWallet(name: string, participant: string): Promise<void> {
-  const keys = await generateKeyPair()
-  const wallet: Wallet = {
-    id: newId(),
-    name,
-    participant,
-    ...keys,
-    namespace: publicKeyNamespace(keys.publicKey),
-  }
-  update((s) => ({
-    ...s,
-    wallets: [...s.wallets, wallet],
-    actingWalletId: s.actingWalletId ?? wallet.id,
-  }))
-}
-
 export function setActingWallet(id: string): void {
   update((s) => ({ ...s, actingWalletId: id }))
-}
-
-// ---- Party proposals -------------------------------------------------------
-
-export function createProposal(proposal: PartyProposal, creator: Wallet): void {
-  const plan = planParty(proposal)
-  const entry: Proposal = {
-    id: newId(),
-    createdAt: now(),
-    createdBy: creator.name,
-    plan,
-    signatures: [],
-    status: 'collecting',
-  }
-  update((s) => ({ ...s, proposals: [entry, ...s.proposals] }))
-}
-
-function findProposal(id: string): Proposal {
-  const proposal = getState().proposals.find((p) => p.id === id)
-  if (!proposal) throw new Error('The proposal no longer exists.')
-  return proposal
-}
-
-export async function signProposal(id: string, wallet: Wallet): Promise<void> {
-  const proposal = findProposal(id)
-  if (!proposal.plan.owners.some((o) => o.publicKey === wallet.publicKey)) {
-    throw new Error(`${wallet.name} is not an owner of this party.`)
-  }
-  if (proposal.signatures.some((s) => s.publicKey === wallet.publicKey)) return
-  const signature = await signDigest(wallet.privateKeyJwk, proposal.plan.digest)
-  const entry: Signature = { publicKey: wallet.publicKey, signature, signedAt: now() }
-  update((s) => ({
-    ...s,
-    proposals: s.proposals.map((p) =>
-      p.id === id ? { ...p, signatures: [...p.signatures, entry] } : p,
-    ),
-  }))
-}
-
-/**
- * Creates the party. Canton needs every owner to sign the first definition of
- * a decentralized namespace, so the signing threshold applies only later.
- */
-export function submitProposal(id: string, wallet: Wallet): void {
-  const { plan } = findProposal(id)
-  const owners = plan.owners.map((o) => o.publicKey)
-  if (!owners.includes(wallet.publicKey)) {
-    throw new Error(`${wallet.name} is not an owner, so its participant cannot submit.`)
-  }
-  if (verifiedSigners(plan.digest, findProposal(id).signatures, owners).size < owners.length) {
-    throw new Error('Every owner must sign before the party can be created.')
-  }
-  if (getState().parties.some((p) => p.partyId === plan.partyId)) {
-    throw new Error('This party already exists.')
-  }
-  const ownerParticipants = new Set(plan.owners.map((o) => o.participant))
-  const party: Party = {
-    partyId: plan.partyId,
-    namespace: plan.namespace,
-    owners: plan.owners,
-    hosts: plan.hosts.map((participant) =>
-      ownerParticipants.has(participant)
-        ? { participant, role: 'owner', approval: 'Approved by its owner' }
-        : {
-            participant,
-            role: 'covalidator',
-            approval: "Approved automatically by the covalidator's DecMan policy",
-          },
-    ),
-    signingThreshold: plan.signingThreshold,
-    confirmationThreshold: plan.confirmationThreshold,
-    createdAt: now(),
-    holdings: {},
-    connections: [],
-    requests: [],
-    history: [{ at: now(), text: `Party created. ${wallet.name} submitted it through ${wallet.participant}.` }],
-  }
-  update((s) => ({
-    ...s,
-    proposals: s.proposals.map((p) => (p.id === id ? { ...p, status: 'submitted' } : p)),
-    parties: [party, ...s.parties],
-  }))
 }
 
 // ---- Party wallet ----------------------------------------------------------
@@ -327,7 +213,7 @@ export function executeRequest(partyId: string, requestId: string, wallet: Walle
     partyId,
     requestId,
     (r) => ({ ...r, status: 'executed', result }),
-    `${wallet.name} submitted the transfer through ${wallet.participant}. ${result}`,
+    `${wallet.name} submitted the transfer through ${wallet.participant.participantId}. ${result}`,
     { ...party.holdings, [request.instrument]: balance - request.amount },
   )
 }

@@ -1,29 +1,19 @@
-import { useState } from 'react'
+import { useId, useState } from 'react'
 
-import { createWallet, setActingWallet } from '../mock/actions'
-import { useAppState } from '../mock/store'
+import { LOCALNET_PARTICIPANTS, LOCALNET_TOKEN } from '../localnet'
+import { setActingWallet } from '../mock/actions'
+import { useAppState, type ParticipantLink } from '../mock/store'
+import { addCovalidator, createWallet } from '../onboarding'
 import { ErrorText, Hex, Section, useAction } from '../ui'
 
 export function Wallets() {
   const state = useAppState()
-  const [name, setName] = useState('')
-  const [participant, setParticipant] = useState('')
-  const [error, run] = useAction()
-
-  const add = () =>
-    run(async () => {
-      if (!name.trim() || !participant.trim()) throw new Error('Enter a name and a participant.')
-      await createWallet(name.trim(), participant.trim())
-      setName('')
-      setParticipant('')
-    })
-
   return (
     <>
       <Section title="Owner wallets">
         <p className="hint">
-          Each owner has a wallet with an Ed25519 key, and a participant node that hosts the party for them. In this
-          mock, the browser keeps every wallet, so you can act as each owner in turn.
+          Each owner has an Ed25519 key and a participant that hosts the party for them. The browser keeps every key, so
+          you can act as each owner in turn. The key stands in for a wallet.
         </p>
         {state.wallets.length === 0 ? (
           <p>No wallets yet. Add at least two.</p>
@@ -41,7 +31,9 @@ export function Wallets() {
               {state.wallets.map((wallet) => (
                 <tr key={wallet.id}>
                   <td>{wallet.name}</td>
-                  <td>{wallet.participant}</td>
+                  <td>
+                    <ParticipantCell link={wallet.participant} />
+                  </td>
                   <td>
                     <Hex value={wallet.namespace} />
                   </td>
@@ -58,24 +50,108 @@ export function Wallets() {
           </table>
         )}
       </Section>
-      <Section title="Add a wallet">
-        <div className="form">
-          <label>
-            Name
-            <input value={name} onChange={(e) => setName(e.target.value)} placeholder="Alice" />
-          </label>
-          <label>
-            Participant
-            <input
-              value={participant}
-              onChange={(e) => setParticipant(e.target.value)}
-              placeholder="participant-a"
-            />
-          </label>
-          <button onClick={add}>Generate key and add</button>
-        </div>
-        <ErrorText error={error} />
+      <ParticipantForm
+        title="Add a wallet"
+        namePlaceholder="Alice"
+        button="Generate key and add"
+        onAdd={createWallet}
+      />
+      <Section title="Covalidators">
+        <p className="hint">
+          A covalidator hosts the party but holds no owner key. On localnet the dApp sends its hosting approval itself.
+          That stands in for the covalidator's DecMan approval.
+        </p>
+        {state.covalidators.length === 0 ? (
+          <p>No covalidators. They are optional.</p>
+        ) : (
+          <table>
+            <thead>
+              <tr>
+                <th>Name</th>
+                <th>Participant</th>
+              </tr>
+            </thead>
+            <tbody>
+              {state.covalidators.map((covalidator) => (
+                <tr key={covalidator.id}>
+                  <td>{covalidator.name}</td>
+                  <td>
+                    <ParticipantCell link={covalidator.participant} />
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
       </Section>
+      <ParticipantForm
+        title="Add a covalidator"
+        namePlaceholder="Covalidator 1"
+        button="Add covalidator"
+        onAdd={addCovalidator}
+      />
     </>
+  )
+}
+
+function ParticipantCell({ link }: { link: ParticipantLink }) {
+  return (
+    <span title={link.apiUrl}>
+      <Hex value={link.participantId} />
+    </span>
+  )
+}
+
+/** Name, JSON Ledger API URL and token. Adding reads the participant id. */
+function ParticipantForm({
+  title,
+  namePlaceholder,
+  button,
+  onAdd,
+}: {
+  title: string
+  namePlaceholder: string
+  button: string
+  onAdd: (name: string, apiUrl: string, token: string) => Promise<void>
+}) {
+  const [name, setName] = useState('')
+  const [apiUrl, setApiUrl] = useState(LOCALNET_PARTICIPANTS[0].apiUrl)
+  const [token, setToken] = useState(LOCALNET_TOKEN)
+  const [error, run] = useAction()
+  const listId = useId()
+
+  const add = () =>
+    run(async () => {
+      await onAdd(name, apiUrl, token)
+      setName('')
+    })
+
+  return (
+    <Section title={title}>
+      <div className="form">
+        <label>
+          Name
+          <input value={name} onChange={(e) => setName(e.target.value)} placeholder={namePlaceholder} />
+        </label>
+        <label>
+          Participant JSON Ledger API URL
+          <input value={apiUrl} onChange={(e) => setApiUrl(e.target.value)} list={`${listId}-participants`} />
+          <datalist id={`${listId}-participants`}>
+            {LOCALNET_PARTICIPANTS.map((p) => (
+              <option key={p.apiUrl} value={p.apiUrl}>
+                {p.name}
+              </option>
+            ))}
+          </datalist>
+        </label>
+        <label>
+          Token (the localnet token by default)
+          <input value={token} onChange={(e) => setToken(e.target.value)} />
+        </label>
+        <button onClick={add}>{button}</button>
+      </div>
+      <p className="hint">The dApp reads the participant id from the participant when you add it.</p>
+      <ErrorText error={error} />
+    </Section>
   )
 }
