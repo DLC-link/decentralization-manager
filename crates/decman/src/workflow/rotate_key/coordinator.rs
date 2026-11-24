@@ -15,7 +15,8 @@ use crate::{
     server::{WorkflowInstance, peer_status::LastSeen},
     utils,
     workflow::{
-        run_workflow_with_handler,
+        CoordinatorSteps, StepFlow, run_coordinator,
+        state::WorkflowState,
         storage::{WorkflowStorage, artifact_kinds},
         topology::retire_legacy_keys_and_wait,
     },
@@ -53,98 +54,119 @@ pub async fn start_coordinator(
     )
     .await?;
 
-    let workflow_state = server.get_workflow_state();
-    let server = Arc::new(server);
-
-    let coordinator_workflow = {
-        let workflow_state = workflow_state.clone();
-        let node_config = node_config.clone();
-        let rotate_config = rotate_config.clone();
-        let db = db.clone();
-        let instance_name = rotate_config.instance_name.clone();
-
-        tokio::spawn(async move {
-            let mut completed = HashSet::new();
-
-            loop {
-                let current_step = workflow_state.current_step().await;
-                tracing::debug!("Coordinator in step: {current_step:?}");
-
-                match current_step {
-                    RotateKeyStep::WaitingForPeers => {
-                        tokio::time::sleep(Duration::from_secs(1)).await;
-                    }
-                    // The payload is set before each of these steps starts. A
-                    // resumed coordinator holds none, so it rebuilds it here.
-                    RotateKeyStep::SignProposal | RotateKeyStep::RecordKey => {
-                        if workflow_state.get_command_payload().await.is_empty() {
-                            let payload = if current_step == RotateKeyStep::SignProposal {
-                                sign_payload(&db, &instance_name, &rotate_config).await?
-                            } else {
-                                record_payload(&db, &instance_name).await?
-                            };
-                            workflow_state.set_command_payload(payload).await;
-                        }
-                        tokio::time::sleep(Duration::from_secs(1)).await;
-                    }
-                    RotateKeyStep::GenerateKey => {
-                        if completed.insert(RotateKeyStep::GenerateKey) {
-                            tracing::info!("Coordinator executing: Generate key");
-                            generate_key(&node_config, &db, &instance_name, &rotate_config).await?;
-                            workflow_state.advance_step().await;
-                        }
-                        tokio::time::sleep(Duration::from_secs(1)).await;
-                    }
-                    RotateKeyStep::CreateProposal => {
-                        tracing::info!("Coordinator executing: Create proposal");
-                        create_proposal(&node_config, &db, &instance_name, &rotate_config).await?;
-                        workflow_state
-                            .set_command_payload(
-                                sign_payload(&db, &instance_name, &rotate_config).await?,
-                            )
-                            .await;
-                        workflow_state.advance_step().await;
-                    }
-                    RotateKeyStep::Submit => {
-                        tracing::info!("Coordinator executing: Submit rotate-key");
-                        require_every_signature(
-                            &db,
-                            &instance_name,
-                            workflow_state.expected_peers(),
-                        )
-                        .await?;
-                        submit_rotation(&node_config, &db, &instance_name, &rotate_config).await?;
-                        workflow_state.advance_step().await;
-                    }
-                    RotateKeyStep::RetireLegacyKeys => {
-                        retire_legacy_keys_and_wait(
-                            &node_config,
-                            &rotate_config.decentralized_party_id,
-                        )
-                        .await?;
-                        workflow_state
-                            .set_command_payload(record_payload(&db, &instance_name).await?)
-                            .await;
-                        workflow_state.advance_step().await;
-                    }
-                    RotateKeyStep::Complete => {
-                        tracing::info!("Rotate-key workflow complete!");
-                        tokio::time::sleep(Duration::from_secs(2)).await;
-                        break;
-                    }
-                }
-            }
-
-            Ok(())
-        })
+    let steps = RotateKeySteps {
+        instance_name: rotate_config.instance_name.clone(),
+        node_config,
+        rotate_config,
+        db,
+        completed: HashSet::new(),
     };
-
-    run_workflow_with_handler(
-        ActiveWorkflow::RotateKey(server),
-        instance,
-        coordinator_workflow,
-    )
+    run_coordinator(server, ActiveWorkflow::RotateKey, instance, async {
+        Ok(steps)
+    })
     .await
+}
+
+/// The rotate-key coordinator's work at each step.
+struct RotateKeySteps {
+    node_config: NodeConfig,
+    rotate_config: RotateKeyConfig,
+    db: sqlx::SqlitePool,
+    instance_name: String,
+    /// The steps this node has run that it must not run again.
+    completed: HashSet<RotateKeyStep>,
+}
+
+impl CoordinatorSteps<RotateKeyStep> for RotateKeySteps {
+    async fn run_step(
+        &mut self,
+        workflow_state: &WorkflowState<RotateKeyStep>,
+        current_step: RotateKeyStep,
+    ) -> Result<StepFlow> {
+        tracing::debug!("Coordinator in step: {current_step:?}");
+
+        match current_step {
+            RotateKeyStep::WaitingForPeers => Ok(StepFlow::Idle),
+            // The payload is set before each of these steps starts. A
+            // resumed coordinator holds none, so it rebuilds it here.
+            RotateKeyStep::SignProposal | RotateKeyStep::RecordKey => {
+                if workflow_state.get_command_payload().await.is_empty() {
+                    let payload = if current_step == RotateKeyStep::SignProposal {
+                        sign_payload(&self.db, &self.instance_name, &self.rotate_config).await?
+                    } else {
+                        record_payload(&self.db, &self.instance_name).await?
+                    };
+                    workflow_state.set_command_payload(payload).await;
+                }
+                Ok(StepFlow::Idle)
+            }
+            RotateKeyStep::GenerateKey => {
+                if self.completed.insert(RotateKeyStep::GenerateKey) {
+                    tracing::info!("Coordinator executing: Generate key");
+                    generate_key(
+                        &self.node_config,
+                        &self.db,
+                        &self.instance_name,
+                        &self.rotate_config,
+                    )
+                    .await?;
+                    workflow_state.advance_step().await;
+                }
+                Ok(StepFlow::Idle)
+            }
+            RotateKeyStep::CreateProposal => {
+                tracing::info!("Coordinator executing: Create proposal");
+                create_proposal(
+                    &self.node_config,
+                    &self.db,
+                    &self.instance_name,
+                    &self.rotate_config,
+                )
+                .await?;
+                workflow_state
+                    .set_command_payload(
+                        sign_payload(&self.db, &self.instance_name, &self.rotate_config).await?,
+                    )
+                    .await;
+                workflow_state.advance_step().await;
+                Ok(StepFlow::Continue)
+            }
+            RotateKeyStep::Submit => {
+                tracing::info!("Coordinator executing: Submit rotate-key");
+                require_every_signature(
+                    &self.db,
+                    &self.instance_name,
+                    workflow_state.expected_peers(),
+                )
+                .await?;
+                submit_rotation(
+                    &self.node_config,
+                    &self.db,
+                    &self.instance_name,
+                    &self.rotate_config,
+                )
+                .await?;
+                workflow_state.advance_step().await;
+                Ok(StepFlow::Continue)
+            }
+            RotateKeyStep::RetireLegacyKeys => {
+                retire_legacy_keys_and_wait(
+                    &self.node_config,
+                    &self.rotate_config.decentralized_party_id,
+                )
+                .await?;
+                workflow_state
+                    .set_command_payload(record_payload(&self.db, &self.instance_name).await?)
+                    .await;
+                workflow_state.advance_step().await;
+                Ok(StepFlow::Continue)
+            }
+            RotateKeyStep::Complete => {
+                tracing::info!("Rotate-key workflow complete!");
+                Ok(StepFlow::Finish(Duration::from_secs(2)))
+            }
+        }
+    }
 }
 
 /// Fail unless every peer's signature is on record. The Noise server stores

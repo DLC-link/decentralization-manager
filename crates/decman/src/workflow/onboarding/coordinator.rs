@@ -16,7 +16,7 @@ use crate::{
     server::{WorkflowInstance, peer_status::LastSeen},
     utils,
     workflow::{
-        run_workflow_with_handler,
+        CoordinatorSteps, StepFlow, run_coordinator,
         state::{WorkflowState, WorkflowStep},
         storage::{WorkflowStorage, artifact_kinds},
     },
@@ -125,30 +125,16 @@ pub async fn start_coordinator(
         last_seen,
     )
     .await?;
-    let server = Arc::new(server);
 
     tracing::info!("Noise server initialized, listening for connections");
 
-    let workflow_state = server.get_workflow_state();
-    let node_config_clone = node_config.clone();
-    let onboarding_config_clone = onboarding_config.clone();
-    let db_clone = db.clone();
-    let workflow_handle = tokio::spawn(async move {
-        run_workflow(
-            workflow_state,
-            node_config_clone,
-            onboarding_config_clone,
-            db_clone,
-        )
-        .await
-    });
-
-    run_workflow_with_handler(
-        ActiveWorkflow::Onboarding(server),
-        instance,
-        workflow_handle,
-    )
-    .await?;
+    let steps = OnboardingSteps::start(
+        server.get_workflow_state(),
+        node_config.clone(),
+        onboarding_config.clone(),
+        db.clone(),
+    );
+    run_coordinator(server, ActiveWorkflow::Onboarding, instance, steps).await?;
 
     // Read the resolved party id from workflow_artifacts (written by
     // CreateProposals). This survives across the await on the server task
@@ -197,37 +183,59 @@ async fn ensure_coordinator_keys(
     Ok(())
 }
 
-async fn run_workflow(
-    workflow_state: Arc<WorkflowState<OnboardingStep>>,
+/// The onboarding coordinator's work at each step.
+struct OnboardingSteps {
     node_config: NodeConfig,
     onboarding_config: OnboardingConfig,
     db: SqlitePool,
-) -> Result {
-    let instance_name = onboarding_config.instance_name.clone();
-    let mut coordinator_completed_steps = HashSet::new();
+    instance_name: String,
+    /// The steps this node has run that it must not run again.
+    completed_steps: HashSet<OnboardingStep>,
+}
 
-    // Set the onboarding config as payload for GenerateKeys step
-    let config_payload =
-        serde_json::to_vec(&onboarding_config).context("Failed to serialize onboarding config")?;
-    workflow_state.set_command_payload(config_payload).await;
+impl OnboardingSteps {
+    /// Seed the first command with the onboarding config.
+    async fn start(
+        workflow_state: Arc<WorkflowState<OnboardingStep>>,
+        node_config: NodeConfig,
+        onboarding_config: OnboardingConfig,
+        db: SqlitePool,
+    ) -> Result<Self> {
+        let instance_name = onboarding_config.instance_name.clone();
 
-    loop {
-        let current_step = workflow_state.current_step().await;
+        // Set the onboarding config as payload for GenerateKeys step
+        let config_payload = serde_json::to_vec(&onboarding_config)
+            .context("Failed to serialize onboarding config")?;
+        workflow_state.set_command_payload(config_payload).await;
 
+        Ok(Self {
+            node_config,
+            onboarding_config,
+            db,
+            instance_name,
+            completed_steps: HashSet::new(),
+        })
+    }
+}
+
+impl CoordinatorSteps<OnboardingStep> for OnboardingSteps {
+    async fn run_step(
+        &mut self,
+        workflow_state: &WorkflowState<OnboardingStep>,
+        current_step: OnboardingStep,
+    ) -> Result<StepFlow> {
         match current_step {
-            OnboardingStep::WaitingForPeers => {
-                tokio::time::sleep(Duration::from_secs(1)).await;
-            }
+            OnboardingStep::WaitingForPeers => Ok(StepFlow::Idle),
             OnboardingStep::GenerateKeys => {
                 ensure_coordinator_keys(
-                    &mut coordinator_completed_steps,
-                    &node_config,
-                    &db,
-                    &instance_name,
-                    &onboarding_config,
+                    &mut self.completed_steps,
+                    &self.node_config,
+                    &self.db,
+                    &self.instance_name,
+                    &self.onboarding_config,
                 )
                 .await?;
-                tokio::time::sleep(Duration::from_secs(1)).await;
+                Ok(StepFlow::Idle)
             }
             OnboardingStep::CreateProposals => {
                 // The GenerateKeys arm above is skipped entirely if peers advance
@@ -235,21 +243,28 @@ async fn run_workflow(
                 // resume); make the coordinator's keys a precondition here so the
                 // proposals can be signed with them. No-op if already generated.
                 ensure_coordinator_keys(
-                    &mut coordinator_completed_steps,
-                    &node_config,
-                    &db,
-                    &instance_name,
-                    &onboarding_config,
+                    &mut self.completed_steps,
+                    &self.node_config,
+                    &self.db,
+                    &self.instance_name,
+                    &self.onboarding_config,
                 )
                 .await?;
                 tracing::info!("Coordinator executing: Create proposals");
                 // Save peer keys and participant IDs uploaded during GenerateKeys step
-                save_keys_and_ids(&workflow_state, &db, &instance_name).await?;
-                create_proposals(&node_config, &db, &instance_name, &onboarding_config).await?;
+                save_keys_and_ids(workflow_state, &self.db, &self.instance_name).await?;
+                create_proposals(
+                    &self.node_config,
+                    &self.db,
+                    &self.instance_name,
+                    &self.onboarding_config,
+                )
+                .await?;
 
                 // Load DNS proposal to send to peers with SignDns command
-                let dns_proposal_data = db
-                    .read_artifact(&instance_name, artifact_kinds::DNS_PROTO, None)
+                let dns_proposal_data = self
+                    .db
+                    .read_artifact(&self.instance_name, artifact_kinds::DNS_PROTO, None)
                     .await?
                     .ok_or_else(|| {
                         anyhow::anyhow!("DNS_PROTO artifact missing after CreateProposals")
@@ -257,24 +272,24 @@ async fn run_workflow(
                 workflow_state.set_command_payload(dns_proposal_data).await;
 
                 workflow_state.advance_step().await;
+                Ok(StepFlow::Continue)
             }
-            OnboardingStep::SignDns => {
-                tokio::time::sleep(Duration::from_secs(1)).await;
-            }
+            OnboardingStep::SignDns => Ok(StepFlow::Idle),
             OnboardingStep::SubmitDns => {
                 tracing::info!("Coordinator executing: Submit DNS proposals");
                 save_signed_proposals(
-                    &workflow_state,
-                    &db,
-                    &instance_name,
+                    workflow_state,
+                    &self.db,
+                    &self.instance_name,
                     artifact_kinds::SIGNED_DNS_PROPOSAL,
                 )
                 .await?;
-                submit_dns_proposals(&node_config, &db, &instance_name).await?;
+                submit_dns_proposals(&self.node_config, &self.db, &self.instance_name).await?;
 
                 // Load P2P proposal to send to peers with SignP2p command
-                let p2p_proposal_data = db
-                    .read_artifact(&instance_name, artifact_kinds::P2P_PROTO, None)
+                let p2p_proposal_data = self
+                    .db
+                    .read_artifact(&self.instance_name, artifact_kinds::P2P_PROTO, None)
                     .await?
                     .ok_or_else(|| {
                         anyhow::anyhow!("P2P_PROTO artifact missing after CreateProposals")
@@ -282,30 +297,32 @@ async fn run_workflow(
                 workflow_state.set_command_payload(p2p_proposal_data).await;
 
                 workflow_state.advance_step().await;
+                Ok(StepFlow::Continue)
             }
-            OnboardingStep::SignP2p => {
-                tokio::time::sleep(Duration::from_secs(1)).await;
-            }
+            OnboardingStep::SignP2p => Ok(StepFlow::Idle),
             OnboardingStep::SubmitFinal => {
                 tracing::info!("Coordinator executing: Submit final proposals");
                 save_signed_proposals(
-                    &workflow_state,
-                    &db,
-                    &instance_name,
+                    workflow_state,
+                    &self.db,
+                    &self.instance_name,
                     artifact_kinds::SIGNED_P2P_PROPOSAL,
                 )
                 .await?;
-                submit_final_proposals(&node_config, &db, &instance_name, &onboarding_config)
-                    .await?;
+                submit_final_proposals(
+                    &self.node_config,
+                    &self.db,
+                    &self.instance_name,
+                    &self.onboarding_config,
+                )
+                .await?;
                 workflow_state.advance_step().await;
+                Ok(StepFlow::Continue)
             }
             OnboardingStep::Complete => {
                 tracing::info!("Onboarding workflow complete!");
-                tokio::time::sleep(Duration::from_secs(5)).await;
-                break;
+                Ok(StepFlow::Finish(Duration::from_secs(5)))
             }
         }
     }
-
-    Ok(())
 }
