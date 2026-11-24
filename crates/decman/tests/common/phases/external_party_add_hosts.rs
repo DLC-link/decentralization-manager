@@ -42,11 +42,10 @@ use std::time::Duration;
 
 use anyhow::Context;
 use base64::{Engine, engine::general_purpose::STANDARD};
+use decman_wallet::ExternalKeyPair;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use tracing::info;
-
-use decman_wallet::ExternalKeyPair;
 
 use crate::common::{
     Fixture,
@@ -72,6 +71,10 @@ struct ListedParty {
     host_count: u32,
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "A scenario phase reads top to bottom as one sequence of steps."
+)]
 pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
     info!("Phase: external_party_add_hosts");
 

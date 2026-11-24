@@ -14,7 +14,7 @@
 //! * The **strict** family returns `Result<_, Error>` and is for callers that
 //!   want a decode failure to propagate: `field_party_id`, `field_decimal`,
 //!   `field_time`, `field_list_len`, `field_party_list`, `extract_party`,
-//!   `extract_party_id`, `extract_text`, `extract_int64`, `extract_numeric`,
+//!   `extract_party_id`, `extract_text`, `extract_int64`,
 //!   `extract_contract_id`, `extract_record`, `extract_list`, and `get_field`.
 //!   Every error is `Error::Decode`. An accessor that parses a value keeps
 //!   the parse error as the chained source, so `std::error::Error::source`
@@ -66,6 +66,12 @@ pub fn record_field<'a>(rec: &'a Record, label: &str) -> Option<&'a value::Sum> 
 }
 
 /// Read a `Party` field and parse it into a [`CantonId`].
+///
+/// # Errors
+///
+/// Returns [`Error::Decode`] when the field is absent, holds no value, or is
+/// not a `Party`. Also returns it when the party text is not a valid
+/// [`CantonId`]; the parse error is then its source.
 pub fn field_party_id(rec: &Record, label: &str) -> Result<CantonId, Error> {
     match record_field(rec, label) {
         Some(value::Sum::Party(p)) => p
@@ -78,6 +84,12 @@ pub fn field_party_id(rec: &Record, label: &str) -> Result<CantonId, Error> {
 }
 
 /// Read a `Numeric` field and parse it into a [`DamlDecimal`] (exact fixed-point).
+///
+/// # Errors
+///
+/// Returns [`Error::Decode`] when the field is absent, holds no value, or is
+/// not a `Numeric`. Also returns it when the text is not a valid
+/// [`DamlDecimal`]; the parse error is then its source.
 pub fn field_decimal(rec: &Record, label: &str) -> Result<DamlDecimal, Error> {
     match record_field(rec, label) {
         Some(value::Sum::Numeric(n)) => DamlDecimal::parse(n)
@@ -90,6 +102,12 @@ pub fn field_decimal(rec: &Record, label: &str) -> Result<DamlDecimal, Error> {
 
 /// Read a DAML `Time` field (encoded as microseconds since the epoch) into a
 /// UTC timestamp.
+///
+/// # Errors
+///
+/// Returns [`Error::Decode`] when the field is absent, holds no value, or is
+/// not a `Time`. Also returns it when the microsecond count is outside the
+/// range a `DateTime<Utc>` can hold.
 pub fn field_time(rec: &Record, label: &str) -> Result<DateTime<Utc>, Error> {
     let micros = match record_field(rec, label) {
         Some(value::Sum::Timestamp(t)) => *t,
@@ -116,6 +134,11 @@ pub fn field_optional_is_none(rec: &Record, label: &str) -> bool {
 }
 
 /// Return the number of elements in a `List` field.
+///
+/// # Errors
+///
+/// Returns [`Error::Decode`] when the field is absent, holds no value, or is
+/// not a `List`.
 pub fn field_list_len(rec: &Record, label: &str) -> Result<usize, Error> {
     match record_field(rec, label) {
         Some(value::Sum::List(l)) => Ok(l.elements.len()),
@@ -140,6 +163,12 @@ pub fn field_record<'a>(rec: &'a Record, label: &str) -> Option<&'a Record> {
 /// Read a list-of-`Party` field, parsing each element into a [`CantonId`].
 /// Mirrors `field_contract_id_list`, decoding each element the same way
 /// `field_party_id` decodes a single `Party` value.
+///
+/// # Errors
+///
+/// Returns [`Error::Decode`] when the field is absent, holds no value, or is
+/// not a `List`. Also returns it for the first element that is not a `Party`
+/// or whose text is not a valid [`CantonId`].
 pub fn field_party_list(rec: &Record, label: &str) -> Result<Vec<CantonId>, Error> {
     let list = match record_field(rec, label) {
         Some(value::Sum::List(l)) => l,
@@ -163,6 +192,10 @@ pub fn field_party_list(rec: &Record, label: &str) -> Result<Vec<CantonId>, Erro
 }
 
 /// Read a `Party` value.
+///
+/// # Errors
+///
+/// Returns [`Error::Decode`] when `value` is not a `Party`.
 pub fn extract_party(value: &Value) -> Result<String, Error> {
     match &value.sum {
         Some(value::Sum::Party(p)) => Ok(p.clone()),
@@ -171,6 +204,11 @@ pub fn extract_party(value: &Value) -> Result<String, Error> {
 }
 
 /// Read a `Party` value and parse it into a [`CantonId`].
+///
+/// # Errors
+///
+/// Returns [`Error::Decode`] when `value` is not a `Party`, or when the party
+/// text is not a valid [`CantonId`]; the parse error is then its source.
 pub fn extract_party_id(value: &Value) -> Result<CantonId, Error> {
     let party_str = extract_party(value)?;
     party_str
@@ -179,6 +217,10 @@ pub fn extract_party_id(value: &Value) -> Result<CantonId, Error> {
 }
 
 /// Read a `Text` value.
+///
+/// # Errors
+///
+/// Returns [`Error::Decode`] when `value` is not a `Text`.
 pub fn extract_text(value: &Value) -> Result<String, Error> {
     match &value.sum {
         Some(value::Sum::Text(t)) => Ok(t.clone()),
@@ -187,6 +229,10 @@ pub fn extract_text(value: &Value) -> Result<String, Error> {
 }
 
 /// Read an `Int64` value.
+///
+/// # Errors
+///
+/// Returns [`Error::Decode`] when `value` is not an `Int64`.
 pub fn extract_int64(value: &Value) -> Result<i64, Error> {
     match &value.sum {
         Some(value::Sum::Int64(n)) => Ok(*n),
@@ -194,15 +240,11 @@ pub fn extract_int64(value: &Value) -> Result<i64, Error> {
     }
 }
 
-/// Read a `Numeric` value.
-pub fn extract_numeric(value: &Value) -> Result<String, Error> {
-    match &value.sum {
-        Some(value::Sum::Numeric(n)) => Ok(n.clone()),
-        _ => Err(Error::decode("Expected Numeric value")),
-    }
-}
-
 /// Read a `ContractId` value.
+///
+/// # Errors
+///
+/// Returns [`Error::Decode`] when `value` is not a `ContractId`.
 pub fn extract_contract_id(value: &Value) -> Result<String, Error> {
     match &value.sum {
         Some(value::Sum::ContractId(c)) => Ok(c.clone()),
@@ -211,6 +253,10 @@ pub fn extract_contract_id(value: &Value) -> Result<String, Error> {
 }
 
 /// Read a `Record` value.
+///
+/// # Errors
+///
+/// Returns [`Error::Decode`] when `value` is not a `Record`.
 pub fn extract_record(value: &Value) -> Result<&Record, Error> {
     match &value.sum {
         Some(value::Sum::Record(r)) => Ok(r),
@@ -219,6 +265,10 @@ pub fn extract_record(value: &Value) -> Result<&Record, Error> {
 }
 
 /// Read a `List` value.
+///
+/// # Errors
+///
+/// Returns [`Error::Decode`] when `value` is not a `List`.
 pub fn extract_list(value: &Value) -> Result<&List, Error> {
     match &value.sum {
         Some(value::Sum::List(l)) => Ok(l),
@@ -227,6 +277,11 @@ pub fn extract_list(value: &Value) -> Result<&List, Error> {
 }
 
 /// Look up a field by label on a `Record`, erroring if absent.
+///
+/// # Errors
+///
+/// Returns [`Error::Decode`] when `record` has no field named `label`, or when
+/// that field holds no value.
 pub fn get_field<'a>(record: &'a Record, label: &str) -> Result<&'a Value, Error> {
     record_value(record, label).ok_or_else(|| Error::decode(format!("Missing field: {label}")))
 }
@@ -366,6 +421,8 @@ pub fn extract_reltime(value: &Value) -> Option<i64> {
 
 #[cfg(test)]
 mod tests {
+    use std::{error::Error as _, fmt::Debug};
+
     use canton_proto_rs::com::daml::ledger::api::v2::{List, Optional, RecordField, Value};
 
     use super::*;
@@ -394,8 +451,6 @@ mod tests {
     /// A shape mismatch has no deeper cause and reports `None`.
     #[test]
     fn a_failed_parse_chains_its_cause() {
-        use std::error::Error as _;
-
         let rec = record(vec![("owner", Some(value::Sum::Party("nope".to_string())))]);
         let err = field_party_id(&rec, "owner").expect_err("a bad party must fail");
 
@@ -416,8 +471,6 @@ mod tests {
     /// offending value and keeps the parse error underneath.
     #[test]
     fn extract_party_id_chains_its_cause() {
-        use std::error::Error as _;
-
         let value = Value {
             sum: Some(value::Sum::Party("nope".to_string())),
         };
@@ -442,7 +495,7 @@ mod tests {
     /// Assert a `Result` is `Err` and its rendered message contains `needle`.
     /// Test-only: a non-matching error trips a `panic!` (an allowed assertion
     /// macro), keeping the suite free of `.unwrap_err()` / `.expect_err()`.
-    fn assert_err_contains<T: std::fmt::Debug>(result: Result<T, Error>, needle: &str) {
+    fn assert_err_contains<T: Debug>(result: Result<T, Error>, needle: &str) {
         match result {
             Ok(v) => panic!("expected Err containing {needle:?}, got Ok({v:?})"),
             Err(e) => assert!(

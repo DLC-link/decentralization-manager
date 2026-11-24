@@ -24,9 +24,10 @@ use crate::{
             WorkflowProgress, WorkflowRole, WorkflowRun,
         },
     },
+    utils::now_secs,
     workflow::{
         AddPartyStep, ChangeThresholdStep, ContractsStep, DarsStep, KickStep, OnboardingStep,
-        RotateKeyStep, state::WorkflowStep,
+        RotateKeyStep, state::WorkflowStep, validation::hash_dar,
     },
 };
 
@@ -47,10 +48,7 @@ async fn persist_handled_invitation(
     outcome: InvitationOutcome,
 ) {
     let id = &invitation.id;
-    let handled_at = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0);
+    let handled_at = now_secs();
     let mut tx = match data.db.begin_transaction().await {
         Ok(tx) => tx,
         Err(e) => {
@@ -143,10 +141,7 @@ pub(crate) async fn insert_peer_run(
     invitation: &PendingInvitation,
 ) -> Option<String> {
     let kind: WorkflowKind = invitation.invitation_type.into();
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0);
+    let now = now_secs();
     let pubkey_short =
         &invitation.coordinator_pubkey[..invitation.coordinator_pubkey.len().min(16)];
     let run_suffix = match invitation.workflow_instance.as_deref() {
@@ -396,9 +391,9 @@ pub async fn accept_invitation(
     let _start = if let Some(party) = &invitation.dec_party_id {
         match super::workflows::claim_party_for_start(&data, party).await {
             Ok(claim) => Some(claim),
-            Err(response) => {
+            Err(error) => {
                 restore_invitation(&data, &invitation).await;
-                return response;
+                return error.into_response();
             }
         }
     } else {
@@ -591,8 +586,8 @@ async fn notify_coordinator_of_decline(data: &web::Data<AppState>, invitation: &
 }
 
 /// Look up the `Peer` record that owns the given Noise public key. The
-/// invitation carries the coordinator's pubkey but `get_peer` is keyed by
-/// participant id, so iterate the peers table.
+/// invitation carries the coordinator's pubkey, not its participant id, so
+/// search the peers table by key.
 async fn find_coordinator_peer(
     data: &web::Data<AppState>,
     coordinator_pubkey: &str,
@@ -703,7 +698,7 @@ pub async fn get_invitation_dar(
         );
         return dar_response(&filename, dar, true);
     };
-    let actual = crate::workflow::validation::hash_dar(&dar);
+    let actual = hash_dar(&dar);
     if actual != expected {
         tracing::warn!(
             "Coordinator served a {filename} that is not the one it invited us to \
@@ -877,7 +872,10 @@ mod handled_invitation_tests {
     use serde_json::{Value, json};
 
     use super::*;
-    use crate::{auth::Principal, db::MIGRATOR, server::InvitationType};
+    use crate::{
+        auth::Principal, canton_id::CantonId, config::NodeConfig, db::MIGRATOR,
+        server::InvitationType, workflow::validation::PeerExpectations,
+    };
 
     fn invitation(id: &str) -> PendingInvitation {
         PendingInvitation {
@@ -991,11 +989,8 @@ mod handled_invitation_tests {
             .await?;
         tx.mark_invitation_handled("inv-2", InvitationOutcome::Accepted, 6000)
             .await?;
-        tx.insert_peer(&crate::config::Peer {
-            participant_id: crate::canton_id::CantonId::parse(&format!(
-                "coordinator::1220{}",
-                "ab".repeat(32)
-            ))?,
+        tx.insert_peer(&Peer {
+            participant_id: CantonId::parse(&format!("coordinator::1220{}", "ab".repeat(32)))?,
             name: "Coordinator One".to_string(),
             address: "localhost".to_string(),
             port: 1,
@@ -1172,7 +1167,7 @@ mod handled_invitation_tests {
     async fn a_stale_invitation_for_an_active_run_is_handled(
         pool: SqlitePool,
     ) -> anyhow::Result<()> {
-        let party = crate::canton_id::CantonId::parse(&format!("party::1220{}", "ab".repeat(32)))?;
+        let party = CantonId::parse(&format!("party::1220{}", "ab".repeat(32)))?;
         let pending = PendingInvitation {
             dec_party_id: Some(party.clone()),
             ..invitation("stale-invite")
@@ -1215,7 +1210,7 @@ mod handled_invitation_tests {
     async fn accept_refuses_a_coordinator_start_and_preserves_the_invitation(
         pool: SqlitePool,
     ) -> anyhow::Result<()> {
-        let party = crate::canton_id::CantonId::parse(&format!("party::1220{}", "ab".repeat(32)))?;
+        let party = CantonId::parse(&format!("party::1220{}", "ab".repeat(32)))?;
         let pending = PendingInvitation {
             dec_party_id: Some(party.clone()),
             ..invitation("reserved-invite")
@@ -1252,9 +1247,8 @@ mod handled_invitation_tests {
     async fn an_accepted_confirmation_threshold_reaches_the_peer_checks(
         pool: SqlitePool,
     ) -> anyhow::Result<()> {
-        let party = crate::canton_id::CantonId::parse(&format!("party::1220{}", "ab".repeat(32)))?;
-        let coordinator =
-            crate::canton_id::CantonId::parse(&format!("coordinator::1220{}", "cd".repeat(32)))?;
+        let party = CantonId::parse(&format!("party::1220{}", "ab".repeat(32)))?;
+        let coordinator = CantonId::parse(&format!("coordinator::1220{}", "cd".repeat(32)))?;
         let invite = PendingInvitation {
             invitation_type: InvitationType::ChangeThreshold,
             prefix: None,
@@ -1264,22 +1258,15 @@ mod handled_invitation_tests {
             ..invitation("inv-1")
         };
 
-        let mut node_config = crate::config::NodeConfig::default();
-        node_config.node.participant_id = Some(crate::canton_id::CantonId::parse(&format!(
-            "peer::1220{}",
-            "ef".repeat(32)
-        ))?);
+        let mut node_config = NodeConfig::default();
+        node_config.node.participant_id =
+            Some(CantonId::parse(&format!("peer::1220{}", "ef".repeat(32)))?);
 
         let instance = insert_peer_run(&pool, &invite)
             .await
             .ok_or_else(|| anyhow::anyhow!("the peer run was not recorded"))?;
-        let expectations = crate::workflow::validation::PeerExpectations::load(
-            &pool,
-            &instance,
-            &node_config,
-            &coordinator,
-        )
-        .await?;
+        let expectations =
+            PeerExpectations::load(&pool, &instance, &node_config, &coordinator).await?;
 
         assert_eq!(expectations.threshold, Some(1));
         assert_eq!(expectations.confirmation_threshold, Some(3));

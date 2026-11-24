@@ -5,7 +5,7 @@
 //! gets no `NamespaceDelegation`, so nothing on-chain says whose key is
 //! whose. Only the node that generated a key can say it is theirs.
 //!
-//! Three sources are therefore combined to attribute the keys of a party:
+//! Four sources are therefore combined to attribute the keys of a party:
 //!
 //! 1. `dec_party_identity` — every peer's key bundle on the node that
 //!    coordinated onboarding, the new member's on the node that ran
@@ -301,6 +301,12 @@ async fn own_signing_key_fingerprint(
 ///
 /// Reads the identity rows this node happens to hold, then the fingerprints
 /// participants reported for themselves, then — for this node — its own key.
+///
+/// # Errors
+///
+/// Errors when the party's participant rows or identity rows cannot be read
+/// from the database. When no claim names this node, it also errors when its
+/// own identity row cannot be read or decoded, or when a vault query fails.
 pub async fn known_signing_keys_by_member(
     config: &NodeConfig,
     db: &SqlitePool,
@@ -630,9 +636,10 @@ pub fn signing_keys_without_member(
 ///
 /// # Errors
 ///
-/// Errors when the surplus keys cannot be told apart from the survivors'.
-/// With several to remove, that needs every survivor's claim, and each claim
-/// must be a distinct key the party carries.
+/// Errors when a surviving member's key is not on record, or when two
+/// surviving members claim one key. Errors when the surplus keys cannot be
+/// told apart from the survivors': with several to remove, each claim must be
+/// a distinct key the party carries.
 pub fn signing_keys_after_kick(
     current: &[SigningPublicKey],
     removed: &str,
@@ -885,7 +892,7 @@ mod tests {
         assert!(is_party_daml_key_name(
             &rotated_daml_key_name(
                 "xyz",
-                &format!("1220{:0>64}", "ab")
+                &format!("1220{digest:0>64}", digest = "ab")
                     .parse::<Fingerprint>()
                     .expect("fingerprint")
             ),
@@ -950,7 +957,10 @@ mod tests {
         let current = vec![key(1), key(2), key(3), key(4)];
         let claims = claims(&[("p1", 1), ("p3", 3)]);
         match signing_keys_after_kick(&current, "p3", &uids(&["p1", "p2"]), &claims) {
-            Ok(kept) => panic!("expected a refusal, kept {:?}", seeds(&kept)),
+            Ok(kept) => panic!(
+                "expected a refusal, kept {kept_seeds:?}",
+                kept_seeds = seeds(&kept)
+            ),
             Err(error) => assert!(
                 error
                     .to_string()
@@ -1297,9 +1307,14 @@ mod tests {
 
     #[sqlx::test(migrator = "MIGRATOR")]
     async fn key_adoption_uses_the_recorded_key_of_each_missing_member(pool: SqlitePool) -> Result {
-        let party = CantonId::parse(&format!("party::1220{}", "09".repeat(32)))?;
+        let party = CantonId::parse(&format!("party::1220{digest}", digest = "09".repeat(32)))?;
         let members: Vec<String> = (1..=4)
-            .map(|tag| format!("p{tag}::1220{}", format!("{tag:02x}").repeat(32)))
+            .map(|tag| {
+                format!(
+                    "p{tag}::1220{digest}",
+                    digest = format!("{tag:02x}").repeat(32)
+                )
+            })
             .collect();
         let rows: Vec<DecPartyParticipantRow> = members
             .iter()

@@ -7,29 +7,34 @@ use common::api::{
     Claim, InstrumentAllowance, InstrumentId, InstrumentIdentifier, InstrumentIssuerCredentials,
     PartyCredentialRequirement, RequiredClaim,
 };
-use decman_lib::catalog::proposals::core::GenericVote;
-use decman_lib::catalog::proposals::credential::{
-    AcceptFreeCredential, AcceptPaidCredential, OfferFreeCredential, OfferPaidCredential,
+use decman_lib::catalog::{
+    proposals::{
+        core::GenericVote,
+        credential::{
+            AcceptFreeCredential, AcceptPaidCredential, OfferFreeCredential, OfferPaidCredential,
+        },
+        custody::{AcceptTransfer, SetupCcPreapproval, SetupTokenPreapproval, Transfer},
+        rewards::{
+            AcceptExternalPartySetup, RevokeCouponReassignmentDelegation,
+            SetupCouponReassignmentDelegation, SetupMintingDelegation,
+        },
+        utility::{
+            AcceptBurnRequest, AcceptMintRequest, Burn, CreateDelegatedBatchedMarkersProxy,
+            CreateProviderConfiguration, CreateProviderServiceRequest,
+            CreateRegistrarServiceRequest, CreateTransferRule, CreateUserServiceRequest, Mint,
+            OffboardInstrumentIssuers, OnboardInstrumentIssuers, OnboardRegistrar,
+            ProvisionInstrument, ProvisionProviderService, RequestDevNetFeaturedAppRight,
+            SetEnableResultContracts, SetProviderAppRewardBeneficiaries, SetupUtility,
+            UpdateInstrumentConfiguration,
+        },
+    },
+    types::{AppTransferContextInput, RewardBeneficiary},
 };
-use decman_lib::catalog::proposals::custody::{
-    AcceptTransfer, SetupCcPreapproval, SetupTokenPreapproval, Transfer,
-};
-use decman_lib::catalog::proposals::rewards::{
-    AcceptExternalPartySetup, RevokeCouponReassignmentDelegation,
-    SetupCouponReassignmentDelegation, SetupMintingDelegation,
-};
-use decman_lib::catalog::proposals::utility::{
-    AcceptBurnRequest, AcceptMintRequest, Burn, CreateDelegatedBatchedMarkersProxy,
-    CreateProviderConfiguration, CreateProviderServiceRequest, CreateRegistrarServiceRequest,
-    CreateTransferRule, CreateUserServiceRequest, Mint, OffboardInstrumentIssuers,
-    OnboardInstrumentIssuers, OnboardRegistrar, ProvisionInstrument, ProvisionProviderService,
-    RequestDevNetFeaturedAppRight, SetEnableResultContracts, SetProviderAppRewardBeneficiaries,
-    SetupUtility, UpdateInstrumentConfiguration,
-};
-use decman_lib::catalog::types::{AppTransferContextInput, RewardBeneficiary};
 
-use crate::canton_id::CantonId;
-use crate::server::types::{ActionType, AppRewardBeneficiary, BillingParams, ProposalType};
+use crate::{
+    canton_id::CantonId,
+    server::types::{ActionType, AppRewardBeneficiary, BillingParams, ProposalType},
+};
 
 fn cid(prefix: &str) -> CantonId {
     let ns = "1220c4010d6883f367c7f45d55b2449501620130f9b21e96379f17dea455ac7a5892";

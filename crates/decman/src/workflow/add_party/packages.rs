@@ -1,11 +1,10 @@
 use std::collections::HashSet;
 
+use super::AddPartyConfig;
 use crate::{
     canton_id::CantonId, config::NodeConfig, error::Result, server::fetch_vetted_package_ids,
     workflow::party_replication::collect_party_package_ids,
 };
-
-use super::AddPartyConfig;
 
 /// A refusal to add a member that has not vetted every package the party's
 /// contracts need. The message says what the operator must do, so it is safe

@@ -18,12 +18,13 @@ pub mod tls_proxy;
 use std::{
     path::PathBuf,
     sync::{Arc, Mutex},
-    time::Duration,
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use anyhow::Context;
 use common::api::{NetworkInfo, OperatorInfo};
 use reqwest::Client;
+use tokio::sync::Mutex as TokioMutex;
 
 #[derive(Debug, Clone)]
 pub struct MemberCreds {
@@ -207,13 +208,13 @@ impl Fixture {
                 Arc::new(auth::Refresher::Keycloak {
                     client: client.clone(),
                     creds,
-                    state: tokio::sync::Mutex::new(auth::TokenState::expired()),
+                    state: TokioMutex::new(auth::TokenState::expired()),
                 })
             }
         };
         let run_id = std::env::var("DECPM_IT_RUN_ID").unwrap_or_else(|_| {
-            let ts = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
+            let ts = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
                 .map(|d| d.as_secs())
                 .unwrap_or(0);
             format!("decman-it-{ts}-{pid}", pid = std::process::id())

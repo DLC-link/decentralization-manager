@@ -1,6 +1,8 @@
 //! Parties this participant no longer hosts, and the purge of their leftover
 //! contracts. The rules live in [`crate::server::former_parties`].
 
+use std::fmt::Display;
+
 use actix_web::{HttpRequest, HttpResponse, Responder, delete, get, post, web};
 
 use super::governance::get_party_token;
@@ -37,7 +39,7 @@ fn not_former(party_id: &CantonId) -> HttpResponse {
     })
 }
 
-fn internal(context: &str, e: impl std::fmt::Display) -> HttpResponse {
+fn internal(context: &str, e: impl Display) -> HttpResponse {
     tracing::error!("{context}: {e}");
     HttpResponse::InternalServerError().json(ErrorResponse {
         error: format!("{context}: {e}"),

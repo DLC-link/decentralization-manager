@@ -3,11 +3,17 @@ use sqlx::SqlitePool;
 use crate::{
     config::NodeConfig,
     error::Result,
-    noise::client::NoiseClient,
+    noise::{MessageType, client::NoiseClient},
     workflow::storage::{WorkflowStorage, artifact_kinds},
 };
 
 /// Send this node's signed rotate-key proposal to the coordinator.
+///
+/// # Errors
+///
+/// Returns an error if this node's `SIGNED_ROTATE_KEY_P2P` artefact cannot be
+/// read or is missing. Returns an error if the Noise send fails or the
+/// coordinator does not answer with an Ack.
 pub async fn send_rotate_key_signatures_to_coordinator(
     client: &NoiseClient,
     storage: &SqlitePool,
@@ -23,6 +29,8 @@ pub async fn send_rotate_key_signatures_to_coordinator(
         )
         .await?
         .ok_or_else(|| anyhow::anyhow!("SIGNED_ROTATE_KEY_P2P artifact missing for {node_id}"))?;
-    client.send_rotate_key_signatures(signed).await?;
+    client
+        .send(MessageType::RotateKeySignatures, signed)
+        .await?;
     Ok(())
 }

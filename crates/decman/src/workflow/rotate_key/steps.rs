@@ -23,7 +23,7 @@ use crate::{
             RotateKeyConfig,
             config::{require_complete_inline_keys, signing_threshold_in_force},
         },
-        signing_keys::{adopt_legacy_signing_keys, own_namespace_key},
+        signing_keys::own_namespace_key,
         storage::{WorkflowStorage, artifact_kinds, identity_kinds},
         topology,
     },
@@ -134,24 +134,9 @@ pub async fn create_proposal(
         );
     }
 
-    let members: Vec<String> = head
-        .p2p
-        .participants
-        .iter()
-        .map(|p| p.participant_uid.clone())
-        .collect();
-    let inline = head
-        .p2p
-        .party_signing_keys
-        .clone()
-        .map(|keys| keys.keys)
-        .unwrap_or_default();
-    let current = if inline.len() < members.len() {
-        adopt_legacy_signing_keys(config, storage, &synchronizer_id, party, &members, &inline)
-            .await?
-    } else {
-        inline
-    };
+    let current =
+        proposal_store::hosts_signing_keys(config, storage, &synchronizer_id, party, &head.p2p)
+            .await?;
     let keys = swap_key(&current, &rotate.rotated_key, new_key.clone())?;
 
     let p2p = rotate.thresholds().party_to_participant(
@@ -554,7 +539,7 @@ mod tests {
             server::{WorkflowKind, WorkflowRole},
             signing::{
                 custody::SoftwareKeys,
-                fake_admin_api::{FakeAdminApi, VaultKey},
+                fake_admin_api::{FakeAdminApi, TestNode, VaultKey},
                 key_store::KeyStore,
             },
             workflow::signing_keys::party_daml_key_name,
@@ -612,10 +597,7 @@ mod tests {
             }
         }
 
-        async fn store(
-            node: &crate::signing::fake_admin_api::TestNode,
-            db: &SqlitePool,
-        ) -> Result<KeyStore> {
+        async fn store(node: &TestNode, db: &SqlitePool) -> Result<KeyStore> {
             KeyStore::open(&node.config, db.clone())
                 .await?
                 .ok_or_else(|| anyhow::anyhow!("the key store is off"))
@@ -629,7 +611,10 @@ mod tests {
             let fake = FakeAdminApi::start(vec![old.clone()]).await?;
             let node = fake.node(SoftwareKeys::Stored, true).await?;
             let rotate = rotation(&db, &old).await?;
-            let name = format!("party-daml-transactions-rotated-from-{}", old.fingerprint());
+            let name = format!(
+                "party-daml-transactions-rotated-from-{fingerprint}",
+                fingerprint = old.fingerprint()
+            );
 
             generate_key(&node.config, &db, RUN, &rotate).await?;
             let first = new_key_artifact(&db).await?;

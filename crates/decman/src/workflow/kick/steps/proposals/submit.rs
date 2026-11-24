@@ -11,19 +11,19 @@ use canton_proto_rs::com::digitalasset::canton::{
     },
 };
 use sqlx::SqlitePool;
-use tokio::time;
 
 use crate::{
     canton_id::CantonId,
     config::NodeConfig,
-    consts::{topology_retry_delay_secs, topology_retry_max_attempts},
     db::rows::DecPartyTopologyVersion,
     error::Result,
     utils,
     workflow::{
+        kick::ARTIFACTS,
         storage::{WorkflowStorage, artifact_kinds},
         thresholds::PartyThresholds,
-        topology, topology_version,
+        topology::{self, PollText, Polled},
+        topology_version,
     },
 };
 
@@ -33,6 +33,17 @@ use crate::{
 /// and submits the DNS mapping followed by the P2P mapping. A kicked owner's
 /// mapping already exists before submission, so both post-submit polls require
 /// the submitted serial and membership before legacy-key retirement can start.
+///
+/// # Errors
+///
+/// Returns an error if a kick artefact is missing or does not decode. Returns
+/// an error if the peers' signed DNS and P2P artefacts do not pair up, or if
+/// either proposal carries fewer distinct signatures than its namespace
+/// threshold. Returns an error if the P2P proposal adds a signing key that has
+/// not signed it, or holds no `PartyToParticipant` mapping. Returns an error
+/// if a Canton Admin API call fails, or if another change moved a serial after
+/// the proposals were built. Returns an error if the head state does not show
+/// the new DNS or P2P before the topology retry budget runs out.
 pub async fn submit_kick(
     config: &NodeConfig,
     storage: &SqlitePool,
@@ -43,17 +54,8 @@ pub async fn submit_kick(
     let synchronizer_id = utils::get_synchronizer_id(config).await?;
     tracing::debug!("Using synchronizer ID: {synchronizer_id}");
 
-    let (mut dns_transaction, mut p2p_transaction) = topology::aggregate_dns_p2p_signatures(
-        storage,
-        instance_name,
-        topology::DnsP2pArtifactKinds {
-            dns_proposal: artifact_kinds::KICK_DNS_PROPOSAL,
-            p2p_proposal: artifact_kinds::KICK_P2P_PROPOSAL,
-            signed_dns: artifact_kinds::SIGNED_KICK_DNS,
-            signed_p2p: artifact_kinds::SIGNED_KICK_P2P,
-        },
-    )
-    .await?;
+    let (mut dns_transaction, mut p2p_transaction) =
+        topology::aggregate_dns_p2p_signatures(storage, instance_name, ARTIFACTS).await?;
 
     // Read the new namespace definition + party id needed by the post-submit
     // topology polls.
@@ -174,45 +176,40 @@ async fn wait_for_dns_in_topology(
     expected: &DecentralizedNamespaceDefinition,
     expected_serial: u32,
 ) -> Result {
-    let mut topology_read_client =
-        TopologyManagerReadServiceClient::new(config.admin_channel().await?);
+    let topology_read_client = TopologyManagerReadServiceClient::new(config.admin_channel().await?);
 
-    let max_attempts = topology_retry_max_attempts();
-    let retry_delay = time::Duration::from_secs(topology_retry_delay_secs());
+    let text = PollText {
+        found: "DNS found in topology".to_string(),
+        failed: "DNS did not appear in topology".to_string(),
+    };
+    topology::poll_until!(text, || {
+        let mut topology_read_client = topology_read_client.clone();
+        async move {
+            let request = tonic::Request::new(ListDecentralizedNamespaceDefinitionRequest {
+                base_query: Some(topology::head_state_query(synchronizer_id)),
+                filter_namespace: expected.decentralized_namespace.clone(),
+            });
 
-    for attempt in 1..=max_attempts {
-        let request = tonic::Request::new(ListDecentralizedNamespaceDefinitionRequest {
-            base_query: Some(topology::head_state_query(synchronizer_id)),
-            filter_namespace: expected.decentralized_namespace.clone(),
-        });
+            let response = topology_read_client
+                .list_decentralized_namespace_definition(request)
+                .await?
+                .into_inner();
 
-        let response = topology_read_client
-            .list_decentralized_namespace_definition(request)
-            .await?
-            .into_inner();
-
-        if response.results.iter().any(|row| {
-            row.context.as_ref().is_some_and(|context| {
-                context.operation == TopologyChangeOp::AddReplace as i32
-                    && i64::from(context.serial) >= i64::from(expected_serial)
-            }) && row
-                .item
-                .as_ref()
-                .is_some_and(|actual| dns_matches(actual, expected))
-        }) {
-            tracing::info!("DNS found in topology after {attempt} attempt(s)");
-            return Ok(());
+            if response.results.iter().any(|row| {
+                row.context.as_ref().is_some_and(|context| {
+                    context.operation == TopologyChangeOp::AddReplace as i32
+                        && i64::from(context.serial) >= i64::from(expected_serial)
+                }) && row
+                    .item
+                    .as_ref()
+                    .is_some_and(|actual| dns_matches(actual, expected))
+            }) {
+                return Ok(Polled::Ready(()));
+            }
+            Ok(Polled::Pending("DNS not yet in topology".to_string()))
         }
-
-        if attempt < max_attempts {
-            tracing::debug!(
-                "DNS not yet in topology, attempt {attempt}/{max_attempts}, retrying in {retry_delay:?}..."
-            );
-            time::sleep(retry_delay).await;
-        }
-    }
-
-    anyhow::bail!("DNS did not appear in topology after {max_attempts} attempts")
+    })
+    .await
 }
 
 /// Wait for the submitted participant and inline signing-key sets to become effective.
@@ -222,47 +219,41 @@ async fn wait_for_p2p_in_topology(
     expected: &PartyToParticipant,
     expected_serial: u32,
 ) -> Result {
-    let party_id_str = expected.party.clone();
-    let mut topology_read_client =
-        TopologyManagerReadServiceClient::new(config.admin_channel().await?);
+    let topology_read_client = TopologyManagerReadServiceClient::new(config.admin_channel().await?);
 
-    let max_attempts = topology_retry_max_attempts();
-    let retry_delay = time::Duration::from_secs(topology_retry_delay_secs());
+    let text = PollText {
+        found: "P2P found in topology".to_string(),
+        failed: "P2P did not appear in topology".to_string(),
+    };
+    topology::poll_until!(text, || {
+        let mut topology_read_client = topology_read_client.clone();
+        async move {
+            let request = tonic::Request::new(ListPartyToParticipantRequest {
+                base_query: Some(topology::head_state_query(synchronizer_id)),
+                filter_party: expected.party.clone(),
+                filter_participant: String::new(),
+            });
 
-    for attempt in 1..=max_attempts {
-        let request = tonic::Request::new(ListPartyToParticipantRequest {
-            base_query: Some(topology::head_state_query(synchronizer_id)),
-            filter_party: party_id_str.clone(),
-            filter_participant: String::new(),
-        });
+            let response = topology_read_client
+                .list_party_to_participant(request)
+                .await?
+                .into_inner();
 
-        let response = topology_read_client
-            .list_party_to_participant(request)
-            .await?
-            .into_inner();
-
-        if topology::p2p_rows(response.results)?
-            .iter()
-            .any(|(context, actual)| {
-                context.as_ref().is_some_and(|context| {
-                    context.operation == TopologyChangeOp::AddReplace as i32
-                        && i64::from(context.serial) >= i64::from(expected_serial)
-                }) && p2p_matches(actual, expected)
-            })
-        {
-            tracing::info!("P2P found in topology after {attempt} attempt(s)");
-            return Ok(());
+            if topology::p2p_rows(response.results)?
+                .iter()
+                .any(|(context, actual)| {
+                    context.as_ref().is_some_and(|context| {
+                        context.operation == TopologyChangeOp::AddReplace as i32
+                            && i64::from(context.serial) >= i64::from(expected_serial)
+                    }) && p2p_matches(actual, expected)
+                })
+            {
+                return Ok(Polled::Ready(()));
+            }
+            Ok(Polled::Pending("P2P not yet in topology".to_string()))
         }
-
-        if attempt < max_attempts {
-            tracing::debug!(
-                "P2P not yet in topology, attempt {attempt}/{max_attempts}, retrying in {retry_delay:?}..."
-            );
-            time::sleep(retry_delay).await;
-        }
-    }
-
-    anyhow::bail!("P2P did not appear in topology after {max_attempts} attempts")
+    })
+    .await
 }
 
 fn dns_matches(
@@ -305,11 +296,12 @@ fn p2p_matches(actual: &PartyToParticipant, expected: &PartyToParticipant) -> bo
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use canton_proto_rs::com::digitalasset::canton::{
         crypto::v30::{Signature, SigningKeysWithThreshold, SigningPublicKey},
         protocol::v30::{MultiTransactionSignatures, party_to_participant::HostingParticipant},
     };
+
+    use super::*;
 
     fn signed_by(fingerprints: &[&str]) -> SignedTopologyTransaction {
         SignedTopologyTransaction {

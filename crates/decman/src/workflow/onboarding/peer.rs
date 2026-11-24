@@ -4,7 +4,7 @@ use crate::{
     canton_id::CantonId,
     config::NodeConfig,
     error::Result,
-    noise::client::NoiseClient,
+    noise::{MessageType, client::NoiseClient},
     utils,
     workflow::storage::{WorkflowStorage, artifact_kinds, identity_kinds},
 };
@@ -14,6 +14,12 @@ use crate::{
 /// `workflow_artifacts` keyed by this peer's canton id; we read them back
 /// and combine into a single length-prefixed payload (decoded as 2 items by
 /// the coordinator).
+///
+/// # Errors
+///
+/// Returns an error if this node's `PEER_PUBLIC_KEYS` or `PARTICIPANT_ID`
+/// artefact is missing or cannot be read. Returns an error if the Noise send
+/// fails or the coordinator does not answer with an Ack.
 pub async fn send_keys_to_coordinator(
     client: &NoiseClient,
     storage: &SqlitePool,
@@ -48,12 +54,20 @@ pub async fn send_keys_to_coordinator(
         id_len = id_data.len()
     );
 
-    client.upload_keys(combined_payload).await?;
+    client
+        .send(MessageType::KeysUpload, combined_payload)
+        .await?;
     Ok(())
 }
 
 /// Send this peer's signed DNS proposal (the `SIGNED_DNS_PROPOSAL`
 /// artefact written by `sign_dns_proposals`) to the coordinator.
+///
+/// # Errors
+///
+/// Returns an error if this node's `SIGNED_DNS_PROPOSAL` artefact is missing
+/// or cannot be read. Returns an error if the Noise send fails or the
+/// coordinator does not answer with an Ack.
 pub async fn send_dns_signature_to_coordinator(
     client: &NoiseClient,
     storage: &SqlitePool,
@@ -71,12 +85,18 @@ pub async fn send_dns_signature_to_coordinator(
         .await?
         .ok_or_else(|| anyhow::anyhow!("SIGNED_DNS_PROPOSAL artifact missing for {self_id}"))?;
 
-    client.send_dns_signature(data).await?;
+    client.send(MessageType::DnsSignature, data).await?;
     Ok(())
 }
 
 /// Send this peer's signed P2P proposal (the `SIGNED_P2P_PROPOSAL`
 /// artefact written by `sign_p2p_proposals`) to the coordinator.
+///
+/// # Errors
+///
+/// Returns an error if this node's `SIGNED_P2P_PROPOSAL` artefact is missing
+/// or cannot be read. Returns an error if the Noise send fails or the
+/// coordinator does not answer with an Ack.
 pub async fn send_p2p_signatures_to_coordinator(
     client: &NoiseClient,
     storage: &SqlitePool,
@@ -94,7 +114,7 @@ pub async fn send_p2p_signatures_to_coordinator(
         .await?
         .ok_or_else(|| anyhow::anyhow!("SIGNED_P2P_PROPOSAL artifact missing for {self_id}"))?;
 
-    client.send_p2p_signatures(data).await?;
+    client.send(MessageType::P2pSignatures, data).await?;
     Ok(())
 }
 
@@ -104,6 +124,12 @@ pub async fn send_p2p_signatures_to_coordinator(
 /// `dec_party_identity` keyed by `(party_id, self_id)`. These rows survive
 /// the workflow_runs row's eventual dismissal and are read by post-onboarding
 /// workflows on this node (e.g. contracts::sign_submissions).
+///
+/// # Errors
+///
+/// Returns an error if reading this node's `PEER_PUBLIC_KEYS` or
+/// `PARTICIPANT_ID` artefact fails, or if writing its identity row fails. A
+/// missing artefact is skipped, not an error.
 pub async fn copy_self_identity_for_party(
     storage: &SqlitePool,
     instance_name: &str,

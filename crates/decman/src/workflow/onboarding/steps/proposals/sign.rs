@@ -15,6 +15,7 @@ use crate::{
     signing::custody,
     utils,
     workflow::{
+        extract_party_id_from_p2p_payload,
         onboarding::{peer::copy_self_identity_for_party, steps::generate_keys::own_new_daml_key},
         storage::{WorkflowStorage, artifact_kinds},
         topology::sign_transactions_with_topology_retry,
@@ -76,8 +77,8 @@ async fn sign_proposal(
     }
 
     // Persist as a single per-peer artefact. Each transaction is written
-    // as `varint(len)||proto`; concatenated, this matches the previous on-disk
-    // format produced by `write_messages_to_file`.
+    // as `varint(len)||proto`, so the submit step's
+    // `decode_messages_from_bytes` reads the concatenation back.
     let mut buffer = BytesMut::new();
     for tx in &response.transactions {
         let encoded = tx.encode_to_vec();
@@ -97,6 +98,14 @@ async fn sign_proposal(
 ///
 /// This step must be run by each peer participant (except the coordinator who created the proposal).
 /// Each peer signs the DNS proposal with their namespace key.
+///
+/// # Errors
+///
+/// Returns an error if the synchronizer ID cannot be read, or if
+/// `proposal_data` does not decode as a signed topology transaction. Returns
+/// an error if the `SignTransactions` call fails, still finds no signing key
+/// after every retry, or returns no transaction. Returns an error if writing
+/// the `SIGNED_DNS_PROPOSAL` artefact fails.
 pub async fn sign_dns_proposals(
     config: &NodeConfig,
     storage: &SqlitePool,
@@ -156,7 +165,7 @@ async fn file_own_daml_key(
     instance_name: &str,
     proposal_data: &[u8],
 ) -> Result {
-    let party = crate::workflow::extract_party_id_from_p2p_payload(proposal_data)?;
+    let party = extract_party_id_from_p2p_payload(proposal_data)?;
     copy_self_identity_for_party(storage, instance_name, config, &party).await?;
     custody::file_new_party_key(config, storage, &party).await
 }
@@ -165,6 +174,16 @@ async fn file_own_daml_key(
 ///
 /// **Canton 3.4+**: Signing keys are now embedded in the P2P mapping.
 /// This function signs the P2P proposal which contains both participant and key information.
+///
+/// # Errors
+///
+/// Returns an error if the synchronizer ID cannot be read, or if
+/// `proposal_data` does not decode as a signed topology transaction. Returns
+/// an error if the `SignTransactions` call fails, still finds no signing key
+/// after every retry, or returns no transaction. Returns an error if this
+/// node's key record for the run cannot be read, or if a key DecMan generated
+/// cannot sign the proposal. Returns an error if writing the
+/// `SIGNED_P2P_PROPOSAL` artefact fails.
 pub async fn sign_p2p_proposals(
     config: &NodeConfig,
     storage: &SqlitePool,
@@ -201,11 +220,12 @@ mod with_a_generated_key {
 
     use super::*;
     use crate::{
+        canton_id::CantonId,
         db::MIGRATOR,
         signing::{
             custody::{SoftwareKeys, new_daml_key},
             fake_admin_api::{FakeAdminApi, TestNode, VaultKey},
-            key_store::topology_transaction_hash,
+            key_store::{KeyStore, topology_transaction_hash},
             vault_export::ed25519_public_key,
         },
         workflow::onboarding::steps::generate_keys::encode_keys_payload,
@@ -304,8 +324,8 @@ mod with_a_generated_key {
         let transaction = signed(&node, &db, artifact_kinds::SIGNED_P2P_PROPOSAL).await?;
         let [signature] = transaction.signatures.as_slice() else {
             anyhow::bail!(
-                "expected DecMan's one signature, got {:?}",
-                transaction.signatures
+                "expected DecMan's one signature, got {signatures:?}",
+                signatures = transaction.signatures
             );
         };
         assert_eq!(
@@ -345,10 +365,10 @@ mod with_a_generated_key {
         file_key_and_sign_p2p(&node.config, &db, RUN, &party_mapping(&key)).await?;
 
         signed(&node, &db, artifact_kinds::SIGNED_P2P_PROPOSAL).await?;
-        let store = crate::signing::key_store::KeyStore::open(&node.config, db.clone())
+        let store = KeyStore::open(&node.config, db.clone())
             .await?
             .ok_or_else(|| anyhow::anyhow!("the key store is off"))?;
-        let party = crate::canton_id::CantonId::parse(&format!("party::{NAMESPACE}"))?;
+        let party = CantonId::parse(&format!("party::{NAMESPACE}"))?;
         assert!(
             store
                 .get(&party, &utils::compute_fingerprint(&key))

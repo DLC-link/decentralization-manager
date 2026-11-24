@@ -1,7 +1,7 @@
 //! These tests turn on DecMan's database encryption. The key is set once for
 //! the whole process, so they live in their own test binary.
 
-use std::sync::Once;
+use std::{net::TcpListener, sync::Once};
 
 use dec_party_manager::{
     canton_id::CantonId,
@@ -147,9 +147,7 @@ async fn an_onboarding_record_that_does_not_decrypt_is_never_saved_as_the_keys(
     .execute(&db)
     .await?;
     // Nothing listens on the port, so the chain lookup fails too.
-    let closed_port = std::net::TcpListener::bind("127.0.0.1:0")?
-        .local_addr()?
-        .port();
+    let closed_port = TcpListener::bind("127.0.0.1:0")?.local_addr()?.port();
     let mut config = NodeConfig::default();
     config.node.participant_id = Some(CantonId::parse(NODE)?);
     config.canton.admin_api_port = closed_port;

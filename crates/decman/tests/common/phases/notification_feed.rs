@@ -10,7 +10,7 @@
 //! Runs after generic_vote and BEFORE kick (kick removes P3 from the
 //! dec_party, breaking the multi-node visibility check).
 
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::Context;
 use common::{
@@ -34,13 +34,17 @@ struct Ctx {
     proposal_cid: Option<String>,
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "A scenario phase reads top to bottom as one sequence of steps."
+)]
 pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
     info!("Phase: notification_feed");
 
     let probe_description = format!(
         "notification-feed visibility probe {}",
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
             .map(|d| d.as_millis())
             .unwrap_or_default()
     );

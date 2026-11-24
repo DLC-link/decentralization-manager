@@ -1,18 +1,25 @@
 //! `governance-rewards` proposal payloads.
 
+use std::collections::HashSet;
+
 use canton_proto_rs::com::daml::ledger::api::v2::{Value, value};
 use common::canton_id::CantonId;
 
-use crate::catalog::types::{RewardBeneficiary, serialize_reward_beneficiary};
-use crate::error::Error;
-use crate::framework::encode::{
-    field, make_contract_id, make_int64, make_list, make_optional_contract_id, make_party,
-    make_record, make_text,
+use crate::{
+    catalog::types::{RewardBeneficiary, serialize_reward_beneficiary},
+    error::Error,
+    framework::{
+        DamlProtoEncode, PackageResolver, TemplateId, TemplateInfo, Validate, ValidationCtx,
+        encode::{
+            field, make_contract_id, make_int64, make_list, make_optional_contract_id, make_party,
+            make_record, make_text,
+        },
+        validate::{validate_future_micros, validate_reward_beneficiaries},
+    },
 };
-use crate::framework::validate::{validate_future_micros, validate_reward_beneficiaries};
-use crate::framework::{
-    DamlProtoEncode, PackageResolver, TemplateId, TemplateInfo, Validate, ValidationCtx,
-};
+
+/// The package key of every payload in this module.
+const PACKAGE: &str = "governance_rewards";
 
 /// Create (or replace) the decparty's on-ledger CouponReassignmentDelegation.
 /// `prior_delegation` is the cid of the delegation being replaced (None for the first).
@@ -47,10 +54,7 @@ impl SetupCouponReassignmentDelegation {
 
 impl TemplateInfo for SetupCouponReassignmentDelegation {
     fn template_id(&self, pkgs: &dyn PackageResolver) -> Result<TemplateId, Error> {
-        let pkg = pkgs
-            .package_ref("governance_rewards")
-            .ok_or(Error::PackageNotConfigured("governance_rewards"))?;
-        Ok(TemplateId::new(pkg, Self::MODULE, Self::ENTITY))
+        TemplateId::for_package(pkgs, PACKAGE, Self::MODULE, Self::ENTITY)
     }
 }
 
@@ -84,7 +88,7 @@ impl Validate for SetupCouponReassignmentDelegation {
         if self.assigners.is_empty() {
             return Err(Error::Validation("assigners must not be empty".to_string()));
         }
-        let mut seen = std::collections::HashSet::new();
+        let mut seen = HashSet::new();
         for a in &self.assigners {
             if !seen.insert(a) {
                 return Err(Error::Validation(format!(
@@ -111,10 +115,7 @@ impl RevokeCouponReassignmentDelegation {
 
 impl TemplateInfo for RevokeCouponReassignmentDelegation {
     fn template_id(&self, pkgs: &dyn PackageResolver) -> Result<TemplateId, Error> {
-        let pkg = pkgs
-            .package_ref("governance_rewards")
-            .ok_or(Error::PackageNotConfigured("governance_rewards"))?;
-        Ok(TemplateId::new(pkg, Self::MODULE, Self::ENTITY))
+        TemplateId::for_package(pkgs, PACKAGE, Self::MODULE, Self::ENTITY)
     }
 }
 
@@ -162,10 +163,7 @@ impl SetupMintingDelegation {
 
 impl TemplateInfo for SetupMintingDelegation {
     fn template_id(&self, pkgs: &dyn PackageResolver) -> Result<TemplateId, Error> {
-        let pkg = pkgs
-            .package_ref("governance_rewards")
-            .ok_or(Error::PackageNotConfigured("governance_rewards"))?;
-        Ok(TemplateId::new(pkg, Self::MODULE, Self::ENTITY))
+        TemplateId::for_package(pkgs, PACKAGE, Self::MODULE, Self::ENTITY)
     }
 }
 
@@ -218,10 +216,7 @@ impl AcceptExternalPartySetup {
 
 impl TemplateInfo for AcceptExternalPartySetup {
     fn template_id(&self, pkgs: &dyn PackageResolver) -> Result<TemplateId, Error> {
-        let pkg = pkgs
-            .package_ref("governance_rewards")
-            .ok_or(Error::PackageNotConfigured("governance_rewards"))?;
-        Ok(TemplateId::new(pkg, Self::MODULE, Self::ENTITY))
+        TemplateId::for_package(pkgs, PACKAGE, Self::MODULE, Self::ENTITY)
     }
 }
 
@@ -254,6 +249,7 @@ impl Validate for AcceptExternalPartySetup {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::catalog::proposals::SNAPSHOT_PATH;
 
     /// Any valid `CantonId` — the exact value is irrelevant to these
     /// encode-shape snapshots.
@@ -381,7 +377,7 @@ mod tests {
     #[test]
     fn encode_snapshots() {
         let mut settings = insta::Settings::clone_current();
-        settings.set_snapshot_path(crate::catalog::proposals::SNAPSHOT_PATH);
+        settings.set_snapshot_path(SNAPSHOT_PATH);
         let _guard = settings.bind_to_scope();
 
         insta::assert_debug_snapshot!(

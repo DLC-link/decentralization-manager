@@ -4,7 +4,7 @@
 //! count for the new dec_party. Dismiss the onboarding workflow_runs row.
 //! Re-read and assert the identity rows are preserved.
 
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::Context;
 use common::{
@@ -34,8 +34,8 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
 
     let prefix = format!(
         "identity-keep-{}",
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
             .map(|d| d.as_secs())
             .unwrap_or_default()
     );

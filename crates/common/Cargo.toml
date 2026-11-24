@@ -21,5 +21,9 @@ serde = { workspace = true }
 serde-big-array = { workspace = true }
 serde_json = { workspace = true }
 sha2 = { workspace = true }
+thiserror = { workspace = true }
 ts-rs = { workspace = true, optional = true }
 utoipa = { workspace = true, optional = true }
+
+[lints]
+workspace = true

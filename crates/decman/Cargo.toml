@@ -113,3 +113,6 @@ tokio-rustls = { workspace = true }
 # canton-proto-rs already builds on it, so this adds no new crate.
 tonic-prost = { workspace = true }
 wiremock = { workspace = true }
+
+[lints]
+workspace = true

@@ -1,16 +1,18 @@
 use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
 
-use crate::{
-    db::schema::SchemaRead,
-    noise::{Message, MessageType},
-    server::ConnectionStatus,
-};
-
 // `WorkflowInfo` now lives in the shared `common` crate (consumed by both this
 // server and the `decman-cli` client). Re-exported here so the existing
 // `crate::server::health::WorkflowInfo` path keeps working.
 pub use common::types::WorkflowInfo;
+
+use crate::{
+    build_info::{SEMVER, build_version},
+    consts::FEATURES,
+    db::schema::SchemaRead,
+    noise::{Message, MessageType},
+    server::ConnectionStatus,
+};
 
 /// Health report a node returns in response to a `Health` Noise message.
 ///
@@ -92,12 +94,9 @@ pub async fn build_health_response(db: &SqlitePool, participant_id: &str) -> Hea
         in_workflow: workflow.is_some(),
         workflow,
         workflow_count,
-        version: crate::build_info::SEMVER.to_string(),
-        build_version: crate::build_info::build_version().to_string(),
-        features: crate::consts::FEATURES
-            .iter()
-            .map(ToString::to_string)
-            .collect(),
+        version: SEMVER.to_string(),
+        build_version: build_version().to_string(),
+        features: FEATURES.iter().map(ToString::to_string).collect(),
     }
 }
 
@@ -149,13 +148,13 @@ pub(crate) fn classify_health_reply(reply: &[u8]) -> HealthReply {
 mod tests {
     use anyhow::Context;
 
+    use super::*;
     use crate::{
+        consts::OWNER_ONLY_KICK,
         db::MIGRATOR,
         error::Result,
         server::{WorkflowKind, WorkflowRole},
     };
-
-    use super::*;
 
     #[test]
     fn health_response_payload_round_trips() -> Result {
@@ -172,7 +171,7 @@ mod tests {
             workflow_count: 1,
             version: "0.1.0".into(),
             build_version: "v0.1.0".into(),
-            features: vec![crate::consts::OWNER_ONLY_KICK.into()],
+            features: vec![OWNER_ONLY_KICK.into()],
         };
         let back =
             HealthResponse::from_payload(&h.to_payload()).context("payload should round-trip")?;
@@ -199,7 +198,7 @@ mod tests {
             workflow_count: 1,
             version: "0.1.0".into(),
             build_version: "v0.1.0".into(),
-            features: vec![crate::consts::OWNER_ONLY_KICK.into()],
+            features: vec![OWNER_ONLY_KICK.into()],
         };
         let reply = Message::new(MessageType::HealthResponse, hr.to_payload()).to_bytes();
         let r = classify_health_reply(&reply);
@@ -210,7 +209,7 @@ mod tests {
         );
         assert_eq!(r.version.as_deref(), Some("0.1.0"));
         assert_eq!(r.build_version.as_deref(), Some("v0.1.0"));
-        assert_eq!(r.features, vec![crate::consts::OWNER_ONLY_KICK.to_string()]);
+        assert_eq!(r.features, vec![OWNER_ONLY_KICK.to_string()]);
 
         // Peer that predates build_version: sends an empty string → normalized
         // to None, while version still parses.
@@ -251,11 +250,7 @@ mod tests {
         assert!(!h.in_workflow);
         assert!(h.workflow.is_none());
         assert_eq!(h.participant_id, "p1::1220ab");
-        assert!(
-            h.features
-                .iter()
-                .any(|f| f == crate::consts::OWNER_ONLY_KICK)
-        );
+        assert!(h.features.iter().any(|f| f == OWNER_ONLY_KICK));
     }
 
     /// A peer that predates the feature list still reports its version, and

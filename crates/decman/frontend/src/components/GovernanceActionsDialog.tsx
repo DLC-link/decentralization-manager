@@ -17,7 +17,6 @@ interface GovernanceActionsDialogProps {
   rulesContractId: string;
   defaultOperatorParty?: string;
   network?: Network;
-  governanceType: "core_self" | "core_domain";
   onAfterAction?: () => void;
   /**
    * Which half of GovernanceSection to render:
@@ -34,7 +33,6 @@ export const GovernanceActionsDialog = ({
   rulesContractId,
   defaultOperatorParty,
   network,
-  governanceType,
   onAfterAction,
   view = "actions",
 }: GovernanceActionsDialogProps) => {
@@ -56,10 +54,8 @@ export const GovernanceActionsDialog = ({
           <GovernanceSection
             partyId={partyId}
             rulesContractId={rulesContractId}
-            governanceContractIds={[rulesContractId]}
             defaultOperatorParty={defaultOperatorParty}
             network={network}
-            governanceType={governanceType}
             onAfterAction={onAfterAction}
             onProposalCreated={onClose}
             view={view}

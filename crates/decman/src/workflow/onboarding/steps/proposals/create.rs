@@ -3,8 +3,8 @@ use std::collections::HashSet;
 use canton_proto_rs::com::digitalasset::canton::{
     crypto::v30::SigningPublicKey,
     protocol::v30::{
-        DecentralizedNamespaceDefinition, enums, party_to_participant::HostingParticipant,
-        topology_mapping,
+        DecentralizedNamespaceDefinition, PartyToParticipant, SignedTopologyTransaction, enums,
+        party_to_participant::HostingParticipant, topology_mapping,
     },
     topology::admin::v30::{
         AuthorizeRequest, ForceFlag, StoreId, authorize_request, store_id,
@@ -12,12 +12,14 @@ use canton_proto_rs::com::digitalasset::canton::{
     },
 };
 use prost::Message;
+use sha2::{Digest, Sha256};
 use sqlx::SqlitePool;
 
 use crate::{
     canton_id::CantonId,
     config::NodeConfig,
     error::Result,
+    signing::custody,
     utils::{self, MULTIHASH_SHA256_PREFIX},
     workflow::{
         onboarding::{OnboardingConfig, steps::generate_keys::own_new_daml_key},
@@ -37,17 +39,30 @@ use crate::{
 /// This step:
 /// 1. Loads all peer key payloads from `workflow_artifacts`
 /// 2. Loads all participant ID payloads from `workflow_artifacts`
-/// 3. Creates two topology proposals:
-///    - Decentralized Namespace Definition (DNS)
-///    - Party-to-Participant mapping (P2P) with embedded signing keys (Canton 3.4+)
-/// 4. Saves proposals to `workflow_artifacts`
-/// 5. Once the dec_party_id is known, copies every peer's
+/// 3. Once the dec_party_id is known from the namespace, records it on the
+///    run and as the `PARTY_ID` artefact, copies every peer's
 ///    `PEER_PUBLIC_KEYS` + `PARTICIPANT_ID` artefact into
 ///    `dec_party_identity` so the rows survive the workflow run's dismissal
-///    (read by `contracts::sign_submissions`, future kicks, etc.).
+///    (read by `contracts::sign_submissions`, future kicks, etc.), and files
+///    this node's new Daml key under the party.
+/// 4. Creates two topology proposals:
+///    - Decentralized Namespace Definition (DNS)
+///    - Party-to-Participant mapping (P2P) with embedded signing keys (Canton 3.4+)
+/// 5. Saves proposals to `workflow_artifacts`
 ///
 /// **Note**: If you encounter TOPOLOGY_NO_APPROPRIATE_SIGNING_KEY_IN_STORE errors,
 /// ensure the participant is properly connected to a synchronizer first.
+///
+/// # Errors
+///
+/// Returns an error if the peers' key or participant ID artefacts are missing
+/// or malformed. Returns an error if the distinct namespace keys do not match
+/// the participant count, or if a configured threshold is out of range.
+/// Returns an error if a Canton Admin API call fails, or if `Authorize`
+/// returns no transaction. Returns an error if `party_id_prefix` does not form
+/// a valid party ID, or if a database write fails. Returns an error if this
+/// node's key record for the run cannot be read, if its key cannot be filed
+/// under the party, or if a key DecMan generated cannot sign the P2P.
 pub async fn create_proposals(
     config: &NodeConfig,
     storage: &SqlitePool,
@@ -59,6 +74,71 @@ pub async fn create_proposals(
     // Use party_id_prefix from onboarding config (provided via UI)
     let party_id_prefix = &onboarding_config.party_id_prefix;
 
+    let owners = collect_owner_keys(storage, instance_name).await?;
+    let hosts = collect_participants(storage, instance_name).await?;
+
+    // Validate that namespace owners match participant count
+    if owners.namespaces.len() != hosts.ids.len() {
+        anyhow::bail!(
+            "Mismatch: found {namespace_count} namespace owners but {participant_count} participants. Each participant must generate exactly one namespace key.",
+            namespace_count = owners.namespaces.len(),
+            participant_count = hosts.ids.len()
+        );
+    }
+
+    let (thresholds, namespace_def) =
+        namespace_definition(onboarding_config, &owners.namespaces, hosts.ids.len())?;
+    let party_id_str = record_party(
+        config,
+        storage,
+        instance_name,
+        party_id_prefix,
+        &namespace_def.decentralized_namespace,
+        &owners,
+        &hosts,
+    )
+    .await?;
+    let p2p_mapping = party_mapping(thresholds, &party_id_str, &hosts.ids, &owners.daml_keys)?;
+    let (dns_transaction, p2p_transaction) =
+        authorize_proposals(config, storage, instance_name, &namespace_def, p2p_mapping).await?;
+
+    // Signing keys ride in the PartyToParticipant mapping above (Canton 3.4+), so there is
+    // no separate PartyToKeyMapping transaction — that mapping is deprecated in Canton 3.5.
+
+    save_proposals(
+        storage,
+        instance_name,
+        &dns_transaction,
+        &p2p_transaction,
+        &namespace_def,
+    )
+    .await?;
+
+    tracing::info!("All proposals created and saved successfully");
+    Ok(())
+}
+
+/// Every peer's key payload, the namespaces its namespace keys define, and
+/// the Daml keys, in payload order.
+struct OwnerKeys {
+    /// `(peer_id, PEER_PUBLIC_KEYS payload)` for each peer.
+    payloads: Vec<(String, Vec<u8>)>,
+    /// The fingerprint of each peer's namespace key.
+    namespaces: HashSet<String>,
+    /// Each peer's Daml signing key.
+    daml_keys: Vec<SigningPublicKey>,
+}
+
+/// Every peer's participant-id payload and the id it holds.
+struct Hosts {
+    /// `(peer_id, PARTICIPANT_ID payload)` for each peer.
+    payloads: Vec<(String, Vec<u8>)>,
+    /// The participant ids, in payload order.
+    ids: Vec<CantonId>,
+}
+
+/// Load the peers' key payloads and split them into namespaces and Daml keys.
+async fn collect_owner_keys(storage: &SqlitePool, instance_name: &str) -> Result<OwnerKeys> {
     // Step 1: Load all peer key payloads from storage
     let key_payloads = storage
         .list_artifacts(instance_name, artifact_kinds::PEER_PUBLIC_KEYS)
@@ -111,6 +191,15 @@ pub async fn create_proposals(
         count = namespaces.len()
     );
 
+    Ok(OwnerKeys {
+        payloads: key_payloads,
+        namespaces,
+        daml_keys,
+    })
+}
+
+/// Load the peers' participant-id payloads and parse each id.
+async fn collect_participants(storage: &SqlitePool, instance_name: &str) -> Result<Hosts> {
     // Step 4: Load all participant ID payloads from storage
     let id_payloads = storage
         .list_artifacts(instance_name, artifact_kinds::PARTICIPANT_ID)
@@ -133,19 +222,23 @@ pub async fn create_proposals(
         participant_ids.push(participant_id);
     }
 
-    // Validate that namespace owners match participant count
-    if namespaces.len() != participant_ids.len() {
-        anyhow::bail!(
-            "Mismatch: found {namespace_count} namespace owners but {participant_count} participants. Each participant must generate exactly one namespace key.",
-            namespace_count = namespaces.len(),
-            participant_count = participant_ids.len()
-        );
-    }
+    Ok(Hosts {
+        payloads: id_payloads,
+        ids: participant_ids,
+    })
+}
 
+/// The thresholds, checked against the owner and host counts, and the
+/// namespace definition the owners define.
+fn namespace_definition(
+    onboarding_config: &OnboardingConfig,
+    namespaces: &HashSet<String>,
+    host_count: usize,
+) -> Result<(PartyThresholds, DecentralizedNamespaceDefinition)> {
     // Step 5: Determine the thresholds, validated against the resolved owner
     // and host counts — the topology is the source of truth.
     let owner_count = namespaces.len();
-    let thresholds = resolve_thresholds(onboarding_config, owner_count, participant_ids.len())?;
+    let thresholds = resolve_thresholds(onboarding_config, owner_count, host_count)?;
     tracing::info!(
         "Using namespace threshold {namespace} and confirmation threshold {confirmation} for \
          {owner_count} participants (configured: {configured:?}, {configured_confirmation:?})",
@@ -156,13 +249,13 @@ pub async fn create_proposals(
     );
 
     // Step 6: Compute decentralized namespace
-    let decentralized_namespace = compute_decentralized_namespace(&namespaces);
+    let decentralized_namespace = compute_decentralized_namespace(namespaces);
     tracing::info!("Computed decentralized namespace: {decentralized_namespace}");
 
     // Step 7: Create DecentralizedNamespaceDefinition
     let mut owners_vec: Vec<String> = namespaces.iter().cloned().collect();
     owners_vec.sort(); // Sort for consistent ordering
-    tracing::debug!("DNS owners (sorted): {:?}", owners_vec);
+    tracing::debug!("DNS owners (sorted): {owners_vec:?}");
 
     let namespace_def = DecentralizedNamespaceDefinition {
         decentralized_namespace: decentralized_namespace.clone(),
@@ -170,6 +263,21 @@ pub async fn create_proposals(
         owners: owners_vec,
     };
 
+    Ok((thresholds, namespace_def))
+}
+
+/// Derive the party id, keep it on the run, copy each peer's identity
+/// payloads to `dec_party_identity` under it, and file this node's new Daml
+/// key under it. Returns the party id.
+async fn record_party(
+    config: &NodeConfig,
+    storage: &SqlitePool,
+    instance_name: &str,
+    party_id_prefix: &str,
+    decentralized_namespace: &str,
+    owners: &OwnerKeys,
+    hosts: &Hosts,
+) -> Result<String> {
     let party_id_str = format!("{party_id_prefix}::{decentralized_namespace}");
     let party_id = CantonId::parse(&party_id_str)?;
     tracing::info!("Party ID: {party_id}");
@@ -196,7 +304,7 @@ pub async fn create_proposals(
     // into dec_party_identity, keyed by `(party_id, peer_id, kind)`. These
     // rows survive the workflow_runs row's eventual dismissal and are read by
     // post-onboarding workflows (e.g. contracts::sign_submissions).
-    for (peer_id, payload) in &key_payloads {
+    for (peer_id, payload) in &owners.payloads {
         storage
             .write_identity(
                 &party_id,
@@ -206,23 +314,34 @@ pub async fn create_proposals(
             )
             .await?;
     }
-    for (peer_id, payload) in &id_payloads {
+    for (peer_id, payload) in &hosts.payloads {
         storage
             .write_identity(&party_id, identity_kinds::PARTICIPANT_ID, peer_id, payload)
             .await?;
     }
     tracing::info!(
         "Persisted {count} peer identity records for {party_id}",
-        count = key_payloads.len()
+        count = owners.payloads.len()
     );
     // Before any topology change, so a failure leaves nothing on chain.
-    crate::signing::custody::file_new_party_key(config, storage, &party_id).await?;
+    custody::file_new_party_key(config, storage, &party_id).await?;
 
+    Ok(party_id_str)
+}
+
+/// The `PartyToParticipant` mapping: every host at Confirmation, with the
+/// Daml keys inline.
+fn party_mapping(
+    thresholds: PartyThresholds,
+    party_id_str: &str,
+    participant_ids: &[CantonId],
+    daml_keys: &[SigningPublicKey],
+) -> Result<PartyToParticipant> {
     // Step 9: Create PartyToParticipant mapping
     // PartyToParticipant carries the signing keys (Canton 3.4+); the standalone
     // PartyToKeyMapping is formally deprecated as of Canton 3.5.
     let p2p_mapping = thresholds.party_to_participant(
-        party_id_str.clone(),
+        party_id_str.to_string(),
         participant_ids
             .iter()
             .map(|pid| HostingParticipant {
@@ -231,7 +350,7 @@ pub async fn create_proposals(
                 onboarding: None,
             })
             .collect(),
-        daml_keys.clone(),
+        daml_keys.to_vec(),
     )?;
 
     // Debug: Log all Daml key fingerprints being added to P2P mapping
@@ -244,6 +363,19 @@ pub async fn create_proposals(
         tracing::info!("  Key {index}: fingerprint={fp}", index = idx + 1);
     }
 
+    Ok(p2p_mapping)
+}
+
+/// Authorize the DNS and P2P proposals in this node's authorized store, in
+/// the proposal format of the synchronizer. A Daml key DecMan generated adds
+/// its own signature to the P2P proposal.
+async fn authorize_proposals(
+    config: &NodeConfig,
+    storage: &SqlitePool,
+    instance_name: &str,
+    namespace_def: &DecentralizedNamespaceDefinition,
+    p2p_mapping: PartyToParticipant,
+) -> Result<(SignedTopologyTransaction, SignedTopologyTransaction)> {
     let mut topology_client = TopologyManagerWriteServiceClient::new(config.admin_channel().await?);
     let format = ProposalFormat::for_synchronizer(&utils::get_synchronizer_id(config).await?);
 
@@ -293,33 +425,35 @@ pub async fn create_proposals(
     // The vault signed with this node's Daml key if it holds it. A key DecMan
     // generated needs DecMan's own signature.
     if let Some(own_key) = own_new_daml_key(config, storage, instance_name).await? {
-        crate::signing::custody::sign_with_generated_key(
-            config,
-            storage,
-            &mut p2p_transaction,
-            &own_key,
-        )
-        .await?;
+        custody::sign_with_generated_key(config, storage, &mut p2p_transaction, &own_key).await?;
     }
 
-    // Signing keys ride in the PartyToParticipant mapping above (Canton 3.4+), so there is
-    // no separate PartyToKeyMapping transaction — that mapping is deprecated in Canton 3.5.
+    Ok((dns_transaction, p2p_transaction))
+}
 
+/// Save the DNS and P2P proposals and the namespace definition.
+async fn save_proposals(
+    storage: &SqlitePool,
+    instance_name: &str,
+    dns_transaction: &SignedTopologyTransaction,
+    p2p_transaction: &SignedTopologyTransaction,
+    namespace_def: &DecentralizedNamespaceDefinition,
+) -> Result {
     // Step 13: Persist proposals to storage. Each protobuf is written with the
     // same `varint(len)||proto` framing the original on-disk format used.
-    let dns_bytes = utils::encode_length_prefixed_message(&dns_transaction);
+    let dns_bytes = utils::encode_length_prefixed_message(dns_transaction);
     storage
         .write_artifact(instance_name, artifact_kinds::DNS_PROTO, None, &dns_bytes)
         .await?;
     tracing::info!("Saved DNS proposal to storage");
 
-    let p2p_bytes = utils::encode_length_prefixed_message(&p2p_transaction);
+    let p2p_bytes = utils::encode_length_prefixed_message(p2p_transaction);
     storage
         .write_artifact(instance_name, artifact_kinds::P2P_PROTO, None, &p2p_bytes)
         .await?;
     tracing::info!("Saved P2P proposal to storage");
 
-    let namespace_bytes = utils::encode_length_prefixed_message(&namespace_def);
+    let namespace_bytes = utils::encode_length_prefixed_message(namespace_def);
     storage
         .write_artifact(
             instance_name,
@@ -329,8 +463,6 @@ pub async fn create_proposals(
         )
         .await?;
     tracing::info!("Saved namespace definition to storage");
-
-    tracing::info!("All proposals created and saved successfully");
     Ok(())
 }
 
@@ -393,8 +525,6 @@ pub(crate) fn decode_keys_payload(payload: &[u8]) -> Result<Vec<SigningPublicKey
 ///
 /// The decentralized namespace is returned in multihash format with "1220" prefix
 pub(crate) fn compute_decentralized_namespace(namespaces: &HashSet<String>) -> String {
-    use sha2::{Digest, Sha256};
-
     // HashPurpose.DecentralizedNamespaceNamespace = 37
     const PURPOSE_DECENTRALIZED_NAMESPACE: i32 = 37;
 
@@ -608,7 +738,10 @@ mod with_a_generated_key {
         let p2p: SignedTopologyTransaction = utils::read_first_message_from_bytes(&p2p_bytes)?;
         let fingerprint = utils::compute_fingerprint(&key);
         let [signature] = p2p.signatures.as_slice() else {
-            anyhow::bail!("expected DecMan's one signature, got {:?}", p2p.signatures);
+            anyhow::bail!(
+                "expected DecMan's one signature, got {signatures:?}",
+                signatures = p2p.signatures
+            );
         };
         assert_eq!(signature.signed_by, fingerprint.to_string());
         let verifying = ed25519_dalek::VerifyingKey::from_bytes(&ed25519_public_key(&key)?)?;

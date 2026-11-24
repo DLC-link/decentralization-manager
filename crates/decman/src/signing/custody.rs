@@ -18,6 +18,9 @@
 //! A vault that only wraps its software keys with a KMS key (`wrapper_key_id`)
 //! does not count. Those keys still need an export to sign.
 
+use std::time::Duration;
+
+use aws_sdk_kms::error::DisplayErrorContext;
 use canton_proto_rs::com::digitalasset::canton::{
     crypto::{
         admin::v30::{
@@ -466,7 +469,7 @@ pub async fn require_kms_sign_access(
             // signed-in user can read a run's error, so only the log gets it.
             tracing::error!(
                 "DecMan cannot sign with the KMS key {kms_key_id} ({fingerprint}): {cause}",
-                cause = aws_sdk_kms::error::DisplayErrorContext(&e)
+                cause = DisplayErrorContext(&e)
             );
             let reason = match &e {
                 SigningError::Kms(_) => "KMS refused the test signature".to_string(),
@@ -485,7 +488,7 @@ pub async fn require_kms_sign_access(
 /// learns it before a run fails. A participant that cannot be reached yet is
 /// skipped, because every run checks again.
 pub async fn log_rule_at_boot(config: &NodeConfig, db: &SqlitePool) {
-    let mut wait = std::time::Duration::from_secs(10);
+    let mut wait = Duration::from_secs(10);
     let has_kms = loop {
         let metadata = match config.admin_channel().await {
             Ok(channel) => list_keys(&mut VaultServiceClient::new(channel), None).await,
@@ -496,11 +499,11 @@ pub async fn log_rule_at_boot(config: &NodeConfig, db: &SqlitePool) {
             Err(e) => {
                 tracing::debug!(
                     "The participant is not ready for the party key rule check: {e:#}. \
-                     Retrying in {}s",
-                    wait.as_secs()
+                     Retrying in {secs}s",
+                    secs = wait.as_secs()
                 );
                 tokio::time::sleep(wait).await;
-                wait = (wait * 2).min(std::time::Duration::from_secs(300));
+                wait = (wait * 2).min(Duration::from_secs(300));
             }
         }
     };
@@ -658,6 +661,17 @@ mod tests {
 /// the export and the key store all run.
 #[cfg(test)]
 mod against_a_vault {
+    use std::fmt::Debug;
+
+    use canton_proto_rs::com::digitalasset::canton::{
+        crypto::v30::SigningKeysWithThreshold,
+        protocol::v30::{
+            PartyToKeyMapping, PartyToParticipant, TopologyMapping, TopologyTransaction,
+        },
+        version::v1::{UntypedVersionedMessage, untyped_versioned_message},
+    };
+    use prost::Message;
+
     use super::*;
     use crate::{
         db::MIGRATOR,
@@ -677,7 +691,7 @@ mod against_a_vault {
     }
 
     /// The error text of a call that should have been refused.
-    fn refusal<T: std::fmt::Debug>(result: Result<T>) -> Result<String> {
+    fn refusal<T: Debug>(result: Result<T>) -> Result<String> {
         match result {
             Ok(value) => anyhow::bail!("expected a refusal, got {value:?}"),
             Err(e) => Ok(format!("{e:#}")),
@@ -807,13 +821,6 @@ mod against_a_vault {
 
     /// A versioned P2P transaction for the party that carries `keys`.
     fn adding(keys: &[&SigningPublicKey]) -> SignedTopologyTransaction {
-        use canton_proto_rs::com::digitalasset::canton::{
-            crypto::v30::SigningKeysWithThreshold,
-            protocol::v30::{PartyToParticipant, TopologyMapping, TopologyTransaction},
-            version::v1::{UntypedVersionedMessage, untyped_versioned_message},
-        };
-        use prost::Message;
-
         let transaction = TopologyTransaction {
             operation: 1,
             serial: 1,
@@ -983,7 +990,10 @@ mod against_a_vault {
         )?;
 
         assert!(
-            error.contains(&format!("software key {}", old.fingerprint())),
+            error.contains(&format!(
+                "software key {fingerprint}",
+                fingerprint = old.fingerprint()
+            )),
             "{error}"
         );
         assert!(error.contains("moved to KMS"), "{error}");
@@ -1095,7 +1105,10 @@ mod against_a_vault {
         assert!(sign_with_generated_key(&node.config, &db, &mut transaction, &key).await?);
 
         let [signature] = transaction.signatures.as_slice() else {
-            anyhow::bail!("expected one signature, got {:?}", transaction.signatures);
+            anyhow::bail!(
+                "expected one signature, got {signatures:?}",
+                signatures = transaction.signatures
+            );
         };
         assert_eq!(signature.signed_by, compute_fingerprint(&key).to_string());
         let verifying = ed25519_dalek::VerifyingKey::from_bytes(&ed25519_public_key(&key)?)?;
@@ -1139,12 +1152,6 @@ mod against_a_vault {
     #[allow(deprecated)]
     #[sqlx::test(migrator = "MIGRATOR")]
     async fn refuses_to_sign_another_mapping_that_carries_the_key(db: SqlitePool) -> Result {
-        use canton_proto_rs::com::digitalasset::canton::{
-            protocol::v30::{PartyToKeyMapping, TopologyMapping, TopologyTransaction},
-            version::v1::{UntypedVersionedMessage, untyped_versioned_message},
-        };
-        use prost::Message;
-
         let fake = FakeAdminApi::start(vec![]).await?;
         let node = fake.node(SoftwareKeys::Stored, true).await?;
         let key = new_daml_key(
@@ -1292,7 +1299,10 @@ mod against_a_vault {
         );
 
         let [signature] = transaction.signatures.as_slice() else {
-            anyhow::bail!("expected one signature, got {:?}", transaction.signatures);
+            anyhow::bail!(
+                "expected one signature, got {signatures:?}",
+                signatures = transaction.signatures
+            );
         };
         assert_eq!(signature.signed_by, compute_fingerprint(&key).to_string());
         Ok(())

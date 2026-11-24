@@ -6,19 +6,18 @@ use canton_proto_rs::com::digitalasset::canton::{
     },
 };
 use sqlx::SqlitePool;
-use tokio::time;
 
 use crate::{
     canton_id::CantonId,
     config::NodeConfig,
-    consts::{topology_retry_delay_secs, topology_retry_max_attempts},
     error::Result,
     utils,
     workflow::{
+        change_threshold::ARTIFACTS,
         change_threshold::ChangeThresholdConfig,
         storage::{WorkflowStorage, artifact_kinds},
         thresholds::PartyThresholds,
-        topology,
+        topology::{self, PollText, Polled},
     },
 };
 
@@ -29,6 +28,15 @@ use crate::{
 /// already exist (owners and participants are unchanged), so the post-submit
 /// polls wait on the new threshold *value* rather than mere existence — else
 /// the check passes before the change lands.
+///
+/// # Errors
+///
+/// Returns an error if the synchronizer ID cannot be read. Returns an error if
+/// a stored proposal, peer signature, new namespace or party ID is missing or
+/// does not decode. Returns an error if a signing key the P2P adds has not
+/// signed it, or if a proposal's serial moved since it was built. Returns an
+/// error if `AddTransactions` fails, or if the new thresholds do not appear in
+/// head state within the polling budget.
 pub async fn submit_change(
     config: &NodeConfig,
     storage: &SqlitePool,
@@ -40,17 +48,8 @@ pub async fn submit_change(
     let synchronizer_id = utils::get_synchronizer_id(config).await?;
     tracing::debug!("Using synchronizer ID: {synchronizer_id}");
 
-    let (mut dns_transaction, mut p2p_transaction) = topology::aggregate_dns_p2p_signatures(
-        storage,
-        instance_name,
-        topology::DnsP2pArtifactKinds {
-            dns_proposal: artifact_kinds::CHANGE_THRESHOLD_DNS_PROPOSAL,
-            p2p_proposal: artifact_kinds::CHANGE_THRESHOLD_P2P_PROPOSAL,
-            signed_dns: artifact_kinds::SIGNED_CHANGE_THRESHOLD_DNS,
-            signed_p2p: artifact_kinds::SIGNED_CHANGE_THRESHOLD_P2P,
-        },
-    )
-    .await?;
+    let (mut dns_transaction, mut p2p_transaction) =
+        topology::aggregate_dns_p2p_signatures(storage, instance_name, ARTIFACTS).await?;
 
     // Read the new namespace definition (for the target threshold) + party id
     // needed by the post-submit topology polls.
@@ -138,45 +137,38 @@ async fn wait_for_dns_in_topology(
     namespace: &str,
     expected_threshold: i32,
 ) -> Result {
-    let mut topology_read_client =
-        TopologyManagerReadServiceClient::new(config.admin_channel().await?);
+    let topology_read_client = TopologyManagerReadServiceClient::new(config.admin_channel().await?);
 
-    let max_attempts = topology_retry_max_attempts();
-    let retry_delay = time::Duration::from_secs(topology_retry_delay_secs());
+    let text = PollText {
+        found: format!("DNS threshold {expected_threshold} confirmed in topology"),
+        failed: format!("DNS threshold did not become {expected_threshold} in topology"),
+    };
+    topology::poll_until!(text, || {
+        let mut topology_read_client = topology_read_client.clone();
+        async move {
+            let request = tonic::Request::new(ListDecentralizedNamespaceDefinitionRequest {
+                base_query: Some(topology::head_state_query(synchronizer_id)),
+                filter_namespace: namespace.to_string(),
+            });
 
-    for attempt in 1..=max_attempts {
-        let request = tonic::Request::new(ListDecentralizedNamespaceDefinitionRequest {
-            base_query: Some(topology::head_state_query(synchronizer_id)),
-            filter_namespace: namespace.to_string(),
-        });
+            let response = topology_read_client
+                .list_decentralized_namespace_definition(request)
+                .await?
+                .into_inner();
 
-        let response = topology_read_client
-            .list_decentralized_namespace_definition(request)
-            .await?
-            .into_inner();
-
-        if response.results.iter().any(|r| {
-            r.item
-                .as_ref()
-                .is_some_and(|d| d.threshold == expected_threshold)
-        }) {
-            tracing::info!(
-                "DNS threshold {expected_threshold} confirmed in topology after {attempt} attempt(s)"
-            );
-            return Ok(());
+            if response.results.iter().any(|r| {
+                r.item
+                    .as_ref()
+                    .is_some_and(|d| d.threshold == expected_threshold)
+            }) {
+                return Ok(Polled::Ready(()));
+            }
+            Ok(Polled::Pending(format!(
+                "DNS threshold not yet {expected_threshold}"
+            )))
         }
-
-        if attempt < max_attempts {
-            tracing::debug!(
-                "DNS threshold not yet {expected_threshold}, attempt {attempt}/{max_attempts}, retrying in {retry_delay:?}..."
-            );
-            time::sleep(retry_delay).await;
-        }
-    }
-
-    anyhow::bail!(
-        "DNS threshold did not become {expected_threshold} in topology after {max_attempts} attempts"
-    )
+    })
+    .await
 }
 
 /// Wait until the party mapping's head state carries both `expected`
@@ -190,45 +182,39 @@ async fn wait_for_p2p_in_topology(
     expected: PartyThresholds,
 ) -> Result {
     let party_id_str = party_id.to_string();
-    let mut topology_read_client =
-        TopologyManagerReadServiceClient::new(config.admin_channel().await?);
+    let topology_read_client = TopologyManagerReadServiceClient::new(config.admin_channel().await?);
 
-    let max_attempts = topology_retry_max_attempts();
-    let retry_delay = time::Duration::from_secs(topology_retry_delay_secs());
+    let text = PollText {
+        found: format!("P2P thresholds {expected:?} confirmed in topology"),
+        failed: format!("P2P thresholds did not become {expected:?} in topology"),
+    };
+    topology::poll_until!(text, || {
+        let mut topology_read_client = topology_read_client.clone();
+        let party_id_str = &party_id_str;
+        async move {
+            let request = tonic::Request::new(ListPartyToParticipantRequest {
+                base_query: Some(topology::head_state_query(synchronizer_id)),
+                filter_party: party_id_str.clone(),
+                filter_participant: String::new(),
+            });
 
-    for attempt in 1..=max_attempts {
-        let request = tonic::Request::new(ListPartyToParticipantRequest {
-            base_query: Some(topology::head_state_query(synchronizer_id)),
-            filter_party: party_id_str.clone(),
-            filter_participant: String::new(),
-        });
+            let response = topology_read_client
+                .list_party_to_participant(request)
+                .await?
+                .into_inner();
 
-        let response = topology_read_client
-            .list_party_to_participant(request)
-            .await?
-            .into_inner();
-
-        if topology::p2p_rows(response.results)?
-            .iter()
-            .any(|(_, p)| carries_thresholds(p, expected))
-        {
-            tracing::info!(
-                "P2P thresholds {expected:?} confirmed in topology after {attempt} attempt(s)"
-            );
-            return Ok(());
+            if topology::p2p_rows(response.results)?
+                .iter()
+                .any(|(_, p)| carries_thresholds(p, expected))
+            {
+                return Ok(Polled::Ready(()));
+            }
+            Ok(Polled::Pending(format!(
+                "P2P thresholds not yet {expected:?}"
+            )))
         }
-
-        if attempt < max_attempts {
-            tracing::debug!(
-                "P2P thresholds not yet {expected:?}, attempt {attempt}/{max_attempts}, retrying in {retry_delay:?}..."
-            );
-            time::sleep(retry_delay).await;
-        }
-    }
-
-    anyhow::bail!(
-        "P2P thresholds did not become {expected:?} in topology after {max_attempts} attempts"
-    )
+    })
+    .await
 }
 
 /// The confirmation threshold sits on the mapping, the namespace one on its

@@ -1,8 +1,7 @@
 use sqlx::SqlitePool;
 
-use crate::{canton_id::CantonId, db::schema::SchemaRead, error::Result};
-
 use super::types::{StartClaim, WorkflowKind, WorkflowRegistry};
+use crate::{canton_id::CantonId, db::schema::SchemaRead, error::Result};
 
 #[derive(Debug, thiserror::Error)]
 pub(super) enum PartyStartRefusal {
@@ -31,7 +30,7 @@ pub(super) async fn claim_party_for_workflow(
     registry: &WorkflowRegistry,
     db: &SqlitePool,
     party: &CantonId,
-) -> std::result::Result<StartClaim, PartyStartRefusal> {
+) -> Result<StartClaim, PartyStartRefusal> {
     let claim = registry
         .claim_start(party)
         .ok_or_else(|| PartyStartRefusal::Starting {

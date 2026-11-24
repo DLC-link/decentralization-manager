@@ -205,8 +205,8 @@ pub fn encode_block(block: &PipeBlock) -> (bool, Vec<u8>) {
 pub fn decode_data(payload: &[u8]) -> Result<(u64, Vec<u8>)> {
     if payload.len() < 8 {
         anyhow::bail!(
-            "ACS block payload is {} bytes, need at least 8",
-            payload.len()
+            "ACS block payload is {len} bytes, need at least 8",
+            len = payload.len()
         );
     }
     let mut seq = [0u8; 8];
@@ -221,8 +221,8 @@ pub fn decode_data(payload: &[u8]) -> Result<(u64, Vec<u8>)> {
 pub fn decode_end(payload: &[u8]) -> Result<(u64, PipeTrailer)> {
     if payload.len() < 16 {
         anyhow::bail!(
-            "ACS block-end payload is {} bytes, need at least 16",
-            payload.len()
+            "ACS block-end payload is {len} bytes, need at least 16",
+            len = payload.len()
         );
     }
     let mut seq = [0u8; 8];

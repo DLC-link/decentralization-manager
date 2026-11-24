@@ -3,7 +3,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
+use jsonwebtoken::{Algorithm, EncodingKey, Header, encode, errors};
 use serde::Serialize;
 use tokio::sync::RwLock;
 
@@ -42,11 +42,7 @@ struct UnsafeClaims<'a> {
 /// # Errors
 ///
 /// Returns a `jsonwebtoken` error if token encoding fails.
-fn mint_unsafe_token(
-    secret: &str,
-    audience: &str,
-    subject: &str,
-) -> Result<String, jsonwebtoken::errors::Error> {
+fn mint_unsafe_token(secret: &str, audience: &str, subject: &str) -> Result<String, errors::Error> {
     let iat = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
@@ -72,9 +68,9 @@ fn mint_credentials(cfg: &InsecureAuthConfig) -> (String, String) {
     match mint_unsafe_token(&cfg.secret, &cfg.audience, &cfg.subject) {
         Ok(token) => {
             tracing::info!(
-                "Minted unsafe Canton HMAC token (aud={}, sub={})",
-                cfg.audience,
-                cfg.subject
+                "Minted unsafe Canton HMAC token (aud={audience}, sub={subject})",
+                audience = cfg.audience,
+                subject = cfg.subject
             );
             (token, cfg.subject.clone())
         }

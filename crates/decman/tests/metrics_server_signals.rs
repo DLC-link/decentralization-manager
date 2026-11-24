@@ -1,7 +1,7 @@
 //! This test sends SIGTERM to its own process. It lives in its own test binary,
 //! because in a shared binary the signal would also reach every other test.
 
-use std::time::Duration;
+use std::{net::TcpListener, process::Command, time::Duration};
 
 use anyhow::{Context, ensure};
 use dec_party_manager::server::metrics_server;
@@ -16,7 +16,7 @@ async fn the_metrics_server_keeps_serving_after_sigterm() -> anyhow::Result<()> 
     // Stands in for the API server's handler. Without one, SIGTERM kills the test.
     let mut sigterm = signal(SignalKind::terminate())?;
     let port = {
-        let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
+        let listener = TcpListener::bind("127.0.0.1:0")?;
         listener.local_addr()?.port()
     };
     let mut running = tokio::spawn(metrics_server("127.0.0.1", port)?);
@@ -24,7 +24,7 @@ async fn the_metrics_server_keeps_serving_after_sigterm() -> anyhow::Result<()> 
     // that answers has already had its chance to listen for SIGTERM.
     assert_eq!(get_metrics(port).await?, StatusCode::OK);
 
-    let kill = std::process::Command::new("kill")
+    let kill = Command::new("kill")
         .args(["-TERM", &std::process::id().to_string()])
         .status()?;
     ensure!(kill.success(), "kill -TERM failed: {kill}");

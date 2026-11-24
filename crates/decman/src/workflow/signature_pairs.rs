@@ -2,14 +2,77 @@ use std::collections::HashSet;
 
 use anyhow::Context;
 use bytes::{Buf, BufMut, BytesMut};
+use sqlx::SqlitePool;
 
 use crate::{
+    config::NodeConfig,
     error::Result,
+    noise::{MessageType, client::NoiseClient},
     workflow::{
         state::{WorkflowState, WorkflowStep},
         storage::WorkflowStorage,
+        topology::DnsP2pArtifactKinds,
     },
 };
+
+/// Send this node's signed DNS + P2P pair to the coordinator as one
+/// `message_type` message.
+///
+/// # Errors
+/// Returns an error if either signed artefact is missing or the send fails.
+pub(crate) async fn send_signed_pair(
+    client: &NoiseClient,
+    storage: &SqlitePool,
+    instance_name: &str,
+    node_config: &NodeConfig,
+    kinds: DnsP2pArtifactKinds<'_>,
+    message_type: MessageType,
+) -> Result {
+    let node_id = node_config.participant_id().to_string();
+    let payload = read_signed_pair(storage, instance_name, &node_id, kinds).await?;
+    client.send(message_type, payload).await?;
+    Ok(())
+}
+
+/// `node_id`'s signed DNS and P2P artefacts back to back. Each is a
+/// `varint(len)||proto` blob that `sign_dns_p2p_proposals` wrote, so the
+/// result is the two-message buffer the coordinator splits again.
+///
+/// # Errors
+/// Returns an error if either artefact is missing or the read fails.
+async fn read_signed_pair(
+    storage: &SqlitePool,
+    instance_name: &str,
+    node_id: &str,
+    kinds: DnsP2pArtifactKinds<'_>,
+) -> Result<Vec<u8>> {
+    let dns = read_signed(storage, instance_name, node_id, kinds.signed_dns).await?;
+    let p2p = read_signed(storage, instance_name, node_id, kinds.signed_p2p).await?;
+
+    let mut payload = Vec::with_capacity(dns.len() + p2p.len());
+    payload.extend_from_slice(&dns);
+    payload.extend_from_slice(&p2p);
+    Ok(payload)
+}
+
+/// One of `node_id`'s signed artefacts. The error names the kind in capitals,
+/// as its constant is named.
+async fn read_signed(
+    storage: &SqlitePool,
+    instance_name: &str,
+    node_id: &str,
+    kind: &str,
+) -> Result<Vec<u8>> {
+    storage
+        .read_artifact(instance_name, kind, Some(node_id))
+        .await?
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "{name} artifact missing for {node_id}",
+                name = kind.to_ascii_uppercase()
+            )
+        })
+}
 
 /// Rebuild both per-peer artifacts from durable uploads on every submit.
 /// Retaining the upload makes a restart between output writes recoverable.
@@ -98,7 +161,7 @@ pub(crate) fn split_signed_pair(combined: &[u8]) -> Result<(Vec<u8>, Vec<u8>)> {
 }
 
 /// Re-emit a single proto with its varint length prefix. Round-trips the
-/// `varint(len)||proto` framing produced by `utils::write_message_to_file`.
+/// `varint(len)||proto` framing of `utils::encode_length_prefixed_message`.
 fn encode_length_prefixed_bytes(proto: &[u8]) -> Vec<u8> {
     let mut buffer = BytesMut::new();
     prost::encoding::encode_varint(proto.len() as u64, &mut buffer);
@@ -160,5 +223,158 @@ mod tests {
         combined.extend_from_slice(&header);
         combined.extend_from_slice(&[9, 9]);
         assert!(split_signed_pair(&combined).is_err());
+    }
+
+    mod storage {
+        use sqlx::SqlitePool;
+
+        use super::super::*;
+        use super::frame;
+        use crate::{
+            canton_id::{CantonId, NAMESPACE_LENGTH, Namespace},
+            db::MIGRATOR,
+            workflow::{
+                add_party, change_threshold, kick,
+                storage::{WorkflowStorage, artifact_kinds},
+            },
+        };
+
+        const RUN: &str = "run-1";
+
+        /// `workflow_artifacts.instance_name` is a foreign key onto
+        /// `workflow_runs`, so an artefact needs its run row first.
+        async fn insert_run(pool: &SqlitePool) -> anyhow::Result<()> {
+            sqlx::query(
+                "INSERT INTO workflow_runs (
+                     instance_name, kind, role, status, current_step, step_index, step_total,
+                     config_json, expected_peers_json, completed_peers_json,
+                     created_at, updated_at
+                 ) VALUES (?1, 'Kick', 'Coordinator', 'inprogress', 'SubmitKick',
+                           0, 1, '{}', '[]', '[]', 0, 0)",
+            )
+            .bind(RUN)
+            .execute(pool)
+            .await?;
+            Ok(())
+        }
+
+        fn peer(n: u8) -> CantonId {
+            CantonId::new(format!("p{n}"), Namespace::new([n; NAMESPACE_LENGTH]))
+        }
+
+        /// What a peer sends is what the coordinator stores, half by half,
+        /// and reading the halves back gives the same buffer.
+        #[sqlx::test(migrator = "MIGRATOR")]
+        async fn a_stored_pair_reads_back_as_the_sent_buffer(pool: SqlitePool) -> Result<()> {
+            insert_run(&pool).await?;
+            let (dns, p2p) = (frame(&[1, 2, 3]), frame(&[4, 5]));
+            let combined = [dns.clone(), p2p.clone()].concat();
+            let key = peer(1).to_string();
+            pool.write_artifact(
+                RUN,
+                artifact_kinds::KICK_SIGNATURE_UPLOAD,
+                Some(&key),
+                &combined,
+            )
+            .await?;
+
+            save_signature_pairs(
+                &pool,
+                RUN,
+                artifact_kinds::KICK_SIGNATURE_UPLOAD,
+                kick::ARTIFACTS.signed_dns,
+                kick::ARTIFACTS.signed_p2p,
+            )
+            .await?;
+
+            let stored_dns = pool
+                .read_artifact(RUN, kick::ARTIFACTS.signed_dns, Some(&key))
+                .await?;
+            let stored_p2p = pool
+                .read_artifact(RUN, kick::ARTIFACTS.signed_p2p, Some(&key))
+                .await?;
+            assert_eq!(stored_dns, Some(dns));
+            assert_eq!(stored_p2p, Some(p2p));
+            assert_eq!(
+                read_signed_pair(&pool, RUN, &key, kick::ARTIFACTS).await?,
+                combined
+            );
+            Ok(())
+        }
+
+        #[sqlx::test(migrator = "MIGRATOR")]
+        async fn a_pair_that_does_not_split_names_the_upload_and_peer(
+            pool: SqlitePool,
+        ) -> Result<()> {
+            insert_run(&pool).await?;
+            let key = peer(2).to_string();
+            pool.write_artifact(
+                RUN,
+                artifact_kinds::CHANGE_THRESHOLD_SIGNATURE_UPLOAD,
+                Some(&key),
+                &[0xff],
+            )
+            .await?;
+
+            let Err(e) = save_signature_pairs(
+                &pool,
+                RUN,
+                artifact_kinds::CHANGE_THRESHOLD_SIGNATURE_UPLOAD,
+                change_threshold::ARTIFACTS.signed_dns,
+                change_threshold::ARTIFACTS.signed_p2p,
+            )
+            .await
+            else {
+                panic!("a one-byte pair must not split");
+            };
+
+            assert_eq!(
+                e.to_string(),
+                format!("Failed to split change_threshold_signature_upload from peer {key}")
+            );
+            Ok(())
+        }
+
+        /// The error names the artefact the way the per-workflow senders
+        /// did: the kind's constant name, in capitals.
+        #[sqlx::test(migrator = "MIGRATOR")]
+        async fn a_missing_half_is_named_in_capitals(pool: SqlitePool) -> Result<()> {
+            insert_run(&pool).await?;
+
+            let Err(e) = read_signed_pair(&pool, RUN, "p3", add_party::ARTIFACTS).await else {
+                panic!("nothing was signed");
+            };
+            assert_eq!(
+                e.to_string(),
+                "SIGNED_ADD_PARTY_DNS artifact missing for p3"
+            );
+
+            pool.write_artifact(RUN, add_party::ARTIFACTS.signed_dns, Some("p3"), &[1])
+                .await?;
+            let Err(e) = read_signed_pair(&pool, RUN, "p3", add_party::ARTIFACTS).await else {
+                panic!("the P2P half is missing");
+            };
+            assert_eq!(
+                e.to_string(),
+                "SIGNED_ADD_PARTY_P2P artifact missing for p3"
+            );
+            Ok(())
+        }
+
+        /// Peers and coordinators on other builds read these kinds from the
+        /// database, so the strings must not move.
+        #[test]
+        fn artifact_kinds_are_pinned() {
+            for (artifacts, prefix) in [
+                (kick::ARTIFACTS, "kick"),
+                (change_threshold::ARTIFACTS, "change_threshold"),
+                (add_party::ARTIFACTS, "add_party"),
+            ] {
+                assert_eq!(artifacts.dns_proposal, format!("{prefix}_dns_proposal"));
+                assert_eq!(artifacts.p2p_proposal, format!("{prefix}_p2p_proposal"));
+                assert_eq!(artifacts.signed_dns, format!("signed_{prefix}_dns"));
+                assert_eq!(artifacts.signed_p2p, format!("signed_{prefix}_p2p"));
+            }
+        }
     }
 }

@@ -24,7 +24,7 @@ use canton_proto_rs::com::digitalasset::canton::{
     topology::admin::v30::{AuthorizeRequest, ForceFlag, authorize_request},
 };
 use common::{
-    api::DecentralizedPartiesResponse,
+    api::{DecentralizedPartiesResponse, PendingInvitationsResponse},
     canton_id::CantonId,
     types::{DecentralizedParty, InvitationType},
 };
@@ -145,6 +145,10 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
     kick_owner_only(f, Shape::NoLeftoverKey).await
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "A scenario phase reads top to bottom as one sequence of steps."
+)]
 async fn kick_owner_only(f: &mut Fixture, shape: Shape) -> anyhow::Result<()> {
     let prefix = fresh_prefix(match shape {
         Shape::LeftoverKey => "owner-only",
@@ -402,7 +406,7 @@ async fn kick_owner_only(f: &mut Fixture, shape: Shape) -> anyhow::Result<()> {
             Duration::from_secs(60),
             |f, ctx| {
                 Box::pin(async move {
-                    let r: common::api::PendingInvitationsResponse =
+                    let r: PendingInvitationsResponse =
                         f.probe_get_json(f.p2.http, "/invitations").await?;
                     let owner_key = match ctx.p3_owner_key() {
                         Ok(key) => key.to_string(),

@@ -1,4 +1,4 @@
-use std::{collections::HashMap, future::Future};
+use std::{cmp::Reverse, collections::HashMap, future::Future};
 
 use anyhow::{Context, Result};
 use canton_proto_rs::com::daml::ledger::api::v2::{
@@ -10,17 +10,16 @@ use decman_lib::catalog::lifecycle::{GovernanceLifecycleEvent, classify_choice a
 use serde_json::{Value as JsonValue, json};
 use sqlx::SqlitePool;
 
-use crate::{
-    canton_id::CantonId,
-    config::{NodeConfig, PackageConfig},
-    utils,
-};
-
 use super::{
     event_filters::{interface_filter, party_event_format, template_filter, wildcard_filter},
     ledger_paging::{FETCH_CHUNK, TransactionPage, fetch_transactions_page},
     package_inventory::{fetch_package_names, matching_names, package_name_prefix},
     types::{AuditScope, ChainAuditEntry},
+};
+use crate::{
+    canton_id::CantonId,
+    config::{NodeConfig, PackageConfig},
+    utils,
 };
 
 struct ChainTemplate {
@@ -750,7 +749,7 @@ where
         }
     }
 
-    entries.sort_by_key(|e| std::cmp::Reverse(e.offset));
+    entries.sort_by_key(|e| Reverse(e.offset));
     let dropped = trim_to_offset_groups(&mut entries, limit);
 
     Ok(AuditPage {

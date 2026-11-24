@@ -63,7 +63,7 @@ pub mod signer;
 pub mod transfer;
 
 pub use client::{HostStatus, TenantClient};
-pub use error::{Error, Refusal, Result};
+pub use error::{Error, Refusal, Result, SeedError};
 pub use flow::{
     AddedHosts, HostReport, OnboardedParty, WalletHost, add_hosts, execute_co_validated,
     raise_threshold, statuses,

@@ -474,8 +474,8 @@ mod tests {
                 .error
                 .as_deref()
                 .is_some_and(|e| e.contains(&current.to_string())),
-            "{:?}",
-            crashed.error
+            "{error:?}",
+            error = crashed.error
         );
         assert_eq!(
             by_id(current).map(|row| row.status),

@@ -290,6 +290,7 @@ fn validate_key_id(key_id: &str) -> anyhow::Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use aws_sdk_kms::config::Region;
     use common::fingerprint::fingerprint_from_public_key;
     use p256::{
         ecdsa::{Signature as P256Signature, SigningKey, signature::Signer},
@@ -375,7 +376,7 @@ mod tests {
         // No credentials or endpoint: reaching the SDK would fail differently.
         let config = aws_sdk_kms::Config::builder()
             .behavior_version_latest()
-            .region(aws_sdk_kms::config::Region::new("us-east-1"))
+            .region(Region::new("us-east-1"))
             .build();
         let signer = AwsKmsSigner {
             client: aws_sdk_kms::Client::from_conf(config),
@@ -397,6 +398,10 @@ mod tests {
 
     /// `check_access` against a fake AWS KMS at the HTTP boundary.
     mod check_access {
+        use aws_sdk_kms::{
+            config::{Credentials, Region},
+            error::DisplayErrorContext,
+        };
         use base64::{Engine, engine::general_purpose::STANDARD};
         use canton_proto_rs::com::digitalasset::canton::crypto::v30::{
             CryptoKeyFormat, SigningPublicKey,
@@ -451,9 +456,9 @@ mod tests {
         fn signer_at(server: &MockServer) -> AwsKmsSigner {
             let config = aws_sdk_kms::Config::builder()
                 .behavior_version_latest()
-                .region(aws_sdk_kms::config::Region::new("us-east-1"))
+                .region(Region::new("us-east-1"))
                 .endpoint_url(server.uri())
-                .credentials_provider(aws_sdk_kms::config::Credentials::new(
+                .credentials_provider(Credentials::new(
                     "AKIDEXAMPLE",
                     "secret",
                     None,
@@ -498,14 +503,21 @@ mod tests {
 
             let requests = server.received_requests().await.unwrap_or_default();
             let [request] = requests.as_slice() else {
-                anyhow::bail!("expected one Sign call, got {}", requests.len());
+                anyhow::bail!(
+                    "expected one Sign call, got {count}",
+                    count = requests.len()
+                );
             };
             let body = sign_request(request)?;
             assert_eq!(body["KeyId"], KEY_ID);
             assert_eq!(body["MessageType"], "RAW");
             assert_eq!(body["SigningAlgorithm"], "ECDSA_SHA_256");
             let message = STANDARD.decode(body["Message"].as_str().unwrap_or_default())?;
-            assert!(message.len() > 32, "signed {} bytes", message.len());
+            assert!(
+                message.len() > 32,
+                "signed {len} bytes",
+                len = message.len()
+            );
             Ok(())
         }
 
@@ -558,7 +570,7 @@ mod tests {
                 Err(e) => e,
             };
 
-            let detail = aws_sdk_kms::error::DisplayErrorContext(&error).to_string();
+            let detail = DisplayErrorContext(&error).to_string();
             assert!(matches!(error, SigningError::Kms(_)), "{detail}");
             assert!(detail.contains("AccessDeniedException"), "{detail}");
             Ok(())

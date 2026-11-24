@@ -4,6 +4,8 @@
 //! on the target, which is why the capture is once-only and why finding the
 //! offset is three tiers deep rather than one call.
 
+use std::time::SystemTime;
+
 use canton_proto_rs::com::{
     daml::ledger::api::v2::GetLedgerEndRequest,
     digitalasset::canton::{
@@ -38,6 +40,10 @@ use crate::{
 /// contains it.
 ///
 /// So the first capture wins and later calls are a no-op.
+///
+/// # Errors
+/// Returns an error if the stored offset cannot be read or the new one cannot
+/// be written. Returns an error if [`current_ledger_offset`] fails.
 pub async fn capture_offset_once(
     config: &NodeConfig,
     storage: &SqlitePool,
@@ -90,6 +96,14 @@ pub async fn capture_offset_once(
 /// 3. Offset 1 — the smallest POSITIVE value the consumers accept. Loudly
 ///    warned: correct only when the participant was never hosted on the
 ///    party before (no stale activation to trip over).
+///
+/// # Errors
+/// Returns an error only when `GetLedgerEnd` yields no positive offset and the
+/// Admin API fallback cannot start. That happens when the synchronizer ID
+/// cannot be read, or does not split on `::` into two or three parts. It also
+/// happens when the Admin API channel cannot be opened. A failing
+/// `GetHighestOffsetByTimestamp` is not an error; the function then returns
+/// offset 1.
 pub async fn current_ledger_offset(config: &NodeConfig, ledger_token: Option<&str>) -> Result<i64> {
     match ledger_end_offset(config, ledger_token).await {
         Ok(offset) if offset > 0 => return Ok(offset),
@@ -109,7 +123,7 @@ pub async fn current_ledger_offset(config: &NodeConfig, ledger_token: Option<&st
     let mut client = PartyManagementServiceClient::new(config.admin_channel().await?);
 
     for force in [false, true] {
-        let now = std::time::SystemTime::now();
+        let now = SystemTime::now();
         let request = tonic::Request::new(GetHighestOffsetByTimestampRequest {
             synchronizer_id: synchronizer_id.clone(),
             timestamp: Some(prost_types::Timestamp::from(now)),

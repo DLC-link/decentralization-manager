@@ -4,7 +4,7 @@ use crate::{
     config::NodeConfig,
     error::Result,
     workflow::{
-        onboarding::steps::generate_keys::own_new_daml_key, storage::artifact_kinds, topology,
+        add_party::ARTIFACTS, onboarding::steps::generate_keys::own_new_daml_key, topology,
     },
 };
 
@@ -19,6 +19,15 @@ use crate::{
 /// item was already stripped by the peer loop). Delegates to
 /// [`topology::sign_dns_p2p_proposals`], persisting the per-peer results as
 /// `SIGNED_ADD_PARTY_DNS` / `SIGNED_ADD_PARTY_P2P`.
+///
+/// # Errors
+///
+/// Returns an error if this node's key record for the run cannot be read or
+/// does not hold two keys. Returns an error if the synchronizer ID cannot be
+/// read, or if `proposal_data` does not decode as two topology transactions.
+/// Returns an error if `SignTransactions` fails or does not return exactly two
+/// transactions. Returns an error if a key DecMan generated cannot sign the
+/// P2P. Returns an error if a signed artefact cannot be written.
 pub async fn sign_proposals(
     config: &NodeConfig,
     storage: &SqlitePool,
@@ -33,8 +42,7 @@ pub async fn sign_proposals(
         instance_name,
         proposal_data,
         "add-party",
-        artifact_kinds::SIGNED_ADD_PARTY_DNS,
-        artifact_kinds::SIGNED_ADD_PARTY_P2P,
+        ARTIFACTS,
         own_new_key.as_ref(),
     )
     .await

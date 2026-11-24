@@ -2,9 +2,13 @@
 
 use canton_proto_rs::com::daml::ledger::api::v2::Value;
 
-use crate::error::Error;
-use crate::framework::encode::{field, make_record, make_text};
-use crate::framework::{DamlProtoEncode, PackageResolver, TemplateId, TemplateInfo, Validate};
+use crate::{
+    error::Error,
+    framework::{
+        DamlProtoEncode, PackageResolver, TemplateId, TemplateInfo, Validate,
+        encode::{field, make_record, make_text},
+    },
+};
 
 /// Generic text-based vote (no on-chain effect beyond recording the result).
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -21,10 +25,7 @@ impl GenericVote {
 
 impl TemplateInfo for GenericVote {
     fn template_id(&self, pkgs: &dyn PackageResolver) -> Result<TemplateId, Error> {
-        let pkg = pkgs
-            .package_ref("governance_core")
-            .ok_or(Error::PackageNotConfigured("governance_core"))?;
-        Ok(TemplateId::new(pkg, Self::MODULE, Self::ENTITY))
+        TemplateId::for_package(pkgs, "governance_core", Self::MODULE, Self::ENTITY)
     }
 }
 
@@ -42,11 +43,12 @@ impl Validate for GenericVote {}
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::catalog::proposals::SNAPSHOT_PATH;
 
     #[test]
     fn encode_snapshots() {
         let mut settings = insta::Settings::clone_current();
-        settings.set_snapshot_path(crate::catalog::proposals::SNAPSHOT_PATH);
+        settings.set_snapshot_path(SNAPSHOT_PATH);
         let _guard = settings.bind_to_scope();
 
         insta::assert_debug_snapshot!(

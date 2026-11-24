@@ -32,6 +32,7 @@ use dec_party_manager::{
     workflow::{signing_keys::vault_holds, topology},
 };
 use serde_json::{Value, json};
+use tokio::process::Command;
 use tracing::info;
 
 use super::{deploy_gov_core::post_governance_rules, legacy_key_retirement::configs};
@@ -192,7 +193,7 @@ async fn ensure_not_stored(f: &Fixture, key: &KmsKey) -> anyhow::Result<()> {
 /// local-kms logs each one as "RAW message signed with ECC_NIST_P256, using
 /// key arn:aws:kms:<region>:<account>:key/<id>".
 async fn kms_sign_count(kms_key_id: &str) -> anyhow::Result<usize> {
-    let output = tokio::process::Command::new("docker")
+    let output = Command::new("docker")
         .args(["logs", KMS_CONTAINER])
         .output()
         .await

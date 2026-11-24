@@ -3,7 +3,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { SnackbarProvider } from "../contexts";
 import type { ContractsRequest } from "../types";
-import { ContractsDialog } from "./ContractsDialog";
+import { ContractsDialog } from "./contracts/ContractsDialog";
 
 const partyId = `shared::${"a".repeat(68)}`;
 const memberId = `member::${"b".repeat(68)}`;

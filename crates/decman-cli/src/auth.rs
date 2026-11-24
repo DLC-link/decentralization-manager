@@ -5,6 +5,10 @@
 //! refresh tokens per API URL and username, readable by the current user only.
 
 #[cfg(unix)]
+use std::fs::DirBuilder;
+use std::fs::{File, OpenOptions};
+use std::io::ErrorKind;
+#[cfg(unix)]
 use std::io::Write;
 #[cfg(unix)]
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
@@ -265,7 +269,7 @@ impl TokenCache {
     ///
     /// Returns an error if the cache directory is not private, or the lock
     /// file cannot be opened or locked.
-    pub fn lock(&self) -> Result<std::fs::File> {
+    pub fn lock(&self) -> Result<File> {
         let dir = self
             .path
             .parent()
@@ -290,7 +294,7 @@ impl TokenCache {
     pub fn clear(&self) -> Result<bool> {
         match std::fs::remove_file(&self.path) {
             Ok(()) => Ok(true),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+            Err(error) if error.kind() == ErrorKind::NotFound => Ok(false),
             Err(error) => Err(error).context("failed to delete the token cache"),
         }
     }
@@ -298,7 +302,7 @@ impl TokenCache {
 
 #[cfg(unix)]
 fn create_private_dir(dir: &Path) -> Result<()> {
-    std::fs::DirBuilder::new()
+    DirBuilder::new()
         .recursive(true)
         .mode(0o700)
         .create(dir)
@@ -329,14 +333,14 @@ fn is_private(_path: &Path) -> bool {
 #[cfg(unix)]
 fn write_private_file(path: &Path, bytes: &[u8]) -> Result<()> {
     let open = || {
-        std::fs::OpenOptions::new()
+        OpenOptions::new()
             .write(true)
             .create_new(true)
             .mode(0o600)
             .open(path)
     };
     let mut file = match open() {
-        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+        Err(error) if error.kind() == ErrorKind::AlreadyExists => {
             std::fs::remove_file(path).context("failed to remove a stale token cache file")?;
             open()
         }
@@ -348,8 +352,8 @@ fn write_private_file(path: &Path, bytes: &[u8]) -> Result<()> {
 }
 
 #[cfg(unix)]
-fn open_lock_file(path: &Path) -> Result<std::fs::File> {
-    std::fs::OpenOptions::new()
+fn open_lock_file(path: &Path) -> Result<File> {
+    OpenOptions::new()
         .write(true)
         .create(true)
         .truncate(false)
@@ -359,8 +363,8 @@ fn open_lock_file(path: &Path) -> Result<std::fs::File> {
 }
 
 #[cfg(not(unix))]
-fn open_lock_file(path: &Path) -> Result<std::fs::File> {
-    std::fs::OpenOptions::new()
+fn open_lock_file(path: &Path) -> Result<File> {
+    OpenOptions::new()
         .write(true)
         .create(true)
         .truncate(false)
@@ -375,6 +379,9 @@ fn write_private_file(path: &Path, bytes: &[u8]) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
+    use std::os::unix::fs::symlink;
+
     use super::*;
 
     fn response(json: &str) -> TokenResponse {
@@ -533,7 +540,7 @@ mod tests {
         cache.save(&target(), &tokens).unwrap();
         let real = dir.path().join("elsewhere.json");
         std::fs::rename(&cache.path, &real).unwrap();
-        std::os::unix::fs::symlink(&real, &cache.path).unwrap();
+        symlink(&real, &cache.path).unwrap();
 
         // Act / Assert
         assert!(cache.load().is_none());

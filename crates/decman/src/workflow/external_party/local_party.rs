@@ -26,19 +26,12 @@
 //! forever. That asymmetry is inherent to a local party and cannot be engineered
 //! away; it can only be disclosed.
 
-use anyhow::Context;
 use canton_proto_rs::com::digitalasset::canton::{
     crypto::v30::{Signature, SignatureFormat, SigningAlgorithmSpec, SigningKeysWithThreshold},
     protocol::v30::{
-        PartyToParticipant, SignedTopologyTransaction, TopologyMapping,
-        enums::{ParticipantPermission, TopologyChangeOp},
-        topology_mapping,
+        PartyToParticipant, TopologyMapping, enums::ParticipantPermission, topology_mapping,
     },
-    topology::admin::v30::{
-        AddTransactionsRequest, ForceFlag, GenerateTransactionsRequest, SignTransactionsRequest,
-        generate_transactions_request,
-        topology_manager_write_service_client::TopologyManagerWriteServiceClient,
-    },
+    topology::admin::v30::{ForceFlag, SignTransactionsRequest, generate_transactions_request},
 };
 use serde::{Deserialize, Serialize};
 
@@ -47,10 +40,14 @@ use crate::{
     utils,
     workflow::{
         external_party::{
-            add_hosts::{AddHostsError, CurrentPartyTopology, read_party_to_participant},
+            add_hosts::{AddHostsError, CurrentPartyTopology},
             steps::party_signing_key,
+            topology_bundle::{
+                BundleSerial, check_bundle_envelope, decode_p2p_change, generate_p2p_change,
+                party_signed, read_pinned, serial_after, submit_signed,
+            },
         },
-        topology, topology_version,
+        topology,
     },
 };
 
@@ -140,7 +137,7 @@ pub async fn prepare_adoption(
     party_id: &str,
     public_key: &[u8; 32],
     base_serial: u32,
-) -> std::result::Result<PreparedAdoption, AddHostsError> {
+) -> Result<PreparedAdoption, AddHostsError> {
     if !is_local_to(config, party_id) {
         return Err(AddHostsError::Invalid(anyhow::anyhow!(
             "{party_id} is not local to this participant; only the node whose namespace owns a \
@@ -151,70 +148,21 @@ pub async fn prepare_adoption(
     let synchronizer_id = utils::get_synchronizer_id(config)
         .await
         .map_err(AddHostsError::Canton)?;
-    let Some(current) = read_party_to_participant(config, party_id)
-        .await
-        .map_err(AddHostsError::Canton)?
-    else {
-        return Err(AddHostsError::UnknownParty {
-            party: party_id.to_string(),
-        });
-    };
-    if current.serial != base_serial {
-        return Err(AddHostsError::StaleSerial {
-            party: party_id.to_string(),
-            pinned: base_serial,
-            found: current.serial,
-        });
-    }
+    let current = read_pinned(config, party_id, base_serial).await?;
 
     let mapping =
         adoption_mapping(config, &current.mapping, public_key).map_err(AddHostsError::Invalid)?;
-    let next_serial = current.serial.checked_add(1).ok_or_else(|| {
-        AddHostsError::Invalid(anyhow::anyhow!(
-            "{party_id} is at serial {s}, which cannot be advanced",
-            s = current.serial
-        ))
-    })?;
-
-    let mut client = TopologyManagerWriteServiceClient::new(
-        config
-            .admin_channel()
-            .await
-            .map_err(AddHostsError::Canton)?,
-    );
-    let generated = client
-        .generate_transactions(tonic::Request::new(GenerateTransactionsRequest {
-            proposals: vec![generate_transactions_request::Proposal {
-                operation: TopologyChangeOp::AddReplace as i32,
-                serial: next_serial,
-                mapping: Some(generate_transactions_request::proposal::Mapping::V30(
-                    TopologyMapping {
-                        mapping: Some(topology_mapping::Mapping::PartyToParticipant(mapping)),
-                    },
-                )),
-                store: Some(topology::synchronizer_store_id(&synchronizer_id)),
-            }],
-            base_request: None,
-        }))
-        .await
-        .map_err(|e| {
-            AddHostsError::Canton(anyhow::Error::new(e).context("GenerateTransactions RPC failed"))
-        })?
-        .into_inner()
-        .generated_transactions;
-
-    if generated.is_empty() {
-        return Err(AddHostsError::Canton(anyhow::anyhow!(
-            "GenerateTransactions returned no transactions for {party_id}"
-        )));
-    }
-
-    let mut transaction_hashes = Vec::with_capacity(generated.len());
-    let mut topology_transactions = Vec::with_capacity(generated.len());
-    for tx in generated {
-        transaction_hashes.push(tx.transaction_hash);
-        topology_transactions.push(tx.serialized_transaction);
-    }
+    let generated = generate_p2p_change(
+        config,
+        party_id,
+        current.serial,
+        &synchronizer_id,
+        generate_transactions_request::proposal::Mapping::V30(TopologyMapping {
+            mapping: Some(topology_mapping::Mapping::PartyToParticipant(mapping)),
+        }),
+    )
+    .await?;
+    let next_serial = generated.serial;
 
     tracing::info!(
         %party_id,
@@ -226,8 +174,8 @@ pub async fn prepare_adoption(
     Ok(PreparedAdoption {
         party_id: party_id.to_string(),
         serial: next_serial,
-        transaction_hashes,
-        topology_transactions,
+        transaction_hashes: generated.transaction_hashes,
+        topology_transactions: generated.topology_transactions,
     })
 }
 
@@ -245,58 +193,27 @@ pub fn validate_adoption_topology(
     current: &CurrentPartyTopology,
     bundle: &LocalPartyAdoptionPayload,
 ) -> anyhow::Result<()> {
-    if bundle.topology_transactions.is_empty() {
-        anyhow::bail!("local-party adoption submitted no topology transactions");
-    }
-    if bundle.signatures.len() != bundle.topology_transactions.len() {
-        anyhow::bail!(
-            "local-party adoption submitted {t} transaction(s) and {s} signature(s); they must \
-             be index-aligned",
-            t = bundle.topology_transactions.len(),
-            s = bundle.signatures.len()
-        );
-    }
-    let next_serial = current.serial.checked_add(1).with_context(|| {
-        format!(
-            "{party} is at serial {s}, which cannot be advanced",
-            party = current.mapping.party,
-            s = current.serial
-        )
-    })?;
+    check_bundle_envelope(
+        "local-party adoption",
+        &bundle.topology_transactions,
+        &bundle.signatures,
+    )?;
+    let next_serial = serial_after(current)?;
 
     // Rebuilt locally from the submitted public key, so the comparison below is
     // against what this node would itself have written.
     let expected = adoption_mapping(config, &current.mapping, &bundle.public_key)?;
 
     for (index, serialized) in bundle.topology_transactions.iter().enumerate() {
-        let transaction = topology_version::decode_transaction(serialized).with_context(|| {
-            format!("topology transaction {index} is not a TopologyTransaction")
-        })?;
-
-        if transaction.operation != TopologyChangeOp::AddReplace as i32 {
-            anyhow::bail!(
-                "topology transaction {index} must be an ADD_REPLACE, got operation {op}",
-                op = transaction.operation
-            );
-        }
-        if transaction.serial != next_serial {
-            anyhow::bail!(
-                "topology transaction {index} has serial {serial}, which must be exactly one past \
-                 the current {current_serial}",
-                serial = transaction.serial,
-                current_serial = current.serial
-            );
-        }
-
-        let Some(TopologyMapping {
-            mapping: Some(topology_mapping::Mapping::PartyToParticipant(p2p)),
-        }) = transaction.mapping
-        else {
-            anyhow::bail!(
-                "topology transaction {index} must carry a PartyToParticipant mapping; this \
-                 endpoint converts a local party and authorizes nothing else"
-            );
-        };
+        let p2p = decode_p2p_change(
+            index,
+            serialized,
+            BundleSerial::Next {
+                current: current.serial,
+                next: next_serial,
+            },
+            "converts a local party",
+        )?;
 
         // Canton rewrites the key's usage (it appends ProofOfOwnership), so the
         // key is compared on material rather than on equality, exactly as the
@@ -361,22 +278,8 @@ pub fn validate_adoption_topology(
 pub async fn submit_adoption(
     config: &NodeConfig,
     bundle: &LocalPartyAdoptionPayload,
-) -> std::result::Result<u32, AddHostsError> {
-    let Some(current) = read_party_to_participant(config, &bundle.party_id)
-        .await
-        .map_err(AddHostsError::Canton)?
-    else {
-        return Err(AddHostsError::UnknownParty {
-            party: bundle.party_id.clone(),
-        });
-    };
-    if bundle.base_serial != current.serial {
-        return Err(AddHostsError::StaleSerial {
-            party: bundle.party_id.clone(),
-            pinned: bundle.base_serial,
-            found: current.serial,
-        });
-    }
+) -> Result<u32, AddHostsError> {
+    let current = read_pinned(config, &bundle.party_id, bundle.base_serial).await?;
     validate_adoption_topology(config, &current, bundle).map_err(AddHostsError::Invalid)?;
 
     let synchronizer_id = utils::get_synchronizer_id(config)
@@ -385,23 +288,18 @@ pub async fn submit_adoption(
     let store = topology::synchronizer_store_id(&synchronizer_id);
     let force = vec![ForceFlag::AllowUnvalidatedSigningKeys as i32];
 
-    let signed: Vec<SignedTopologyTransaction> = bundle
-        .topology_transactions
-        .iter()
-        .zip(&bundle.signatures)
-        .map(|(transaction, signature)| SignedTopologyTransaction {
-            transaction: transaction.clone(),
-            signatures: vec![Signature {
-                format: SignatureFormat::Concat as i32,
-                signature: signature.clone(),
-                signed_by: bundle.signed_by.clone(),
-                signing_algorithm_spec: SigningAlgorithmSpec::Ed25519 as i32,
-                signature_delegation: None,
-            }],
-            proposal: false,
-            multi_transaction_signatures: vec![],
-        })
-        .collect();
+    let signed = party_signed(
+        &bundle.topology_transactions,
+        &bundle.signatures,
+        false,
+        |signature| Signature {
+            format: SignatureFormat::Concat as i32,
+            signature: signature.clone(),
+            signed_by: bundle.signed_by.clone(),
+            signing_algorithm_spec: SigningAlgorithmSpec::Ed25519 as i32,
+            signature_delegation: None,
+        },
+    );
 
     let co_signed = topology::sign_transactions_with_topology_retry(
         config,
@@ -417,25 +315,7 @@ pub async fn submit_adoption(
     .map_err(AddHostsError::Canton)?
     .transactions;
 
-    let mut client = TopologyManagerWriteServiceClient::new(
-        config
-            .admin_channel()
-            .await
-            .map_err(AddHostsError::Canton)?,
-    );
-    client
-        .add_transactions(tonic::Request::new(AddTransactionsRequest {
-            transactions: co_signed,
-            force_changes: force,
-            store: Some(store),
-            wait_to_become_effective: None,
-        }))
-        .await
-        .map_err(|e| {
-            AddHostsError::Canton(
-                anyhow::Error::new(e).context("AddTransactions RPC failed for key adoption"),
-            )
-        })?;
+    submit_signed(config, co_signed, force, store, "key adoption").await?;
 
     tracing::info!(
         party_id = %bundle.party_id,
@@ -451,20 +331,23 @@ mod tests {
     use canton_proto_rs::com::digitalasset::canton::{
         protocol::v30::{
             TopologyTransaction,
+            enums::TopologyChangeOp,
             party_to_participant::{HostingParticipant, hosting_participant},
         },
         version::v1::{UntypedVersionedMessage, untyped_versioned_message},
     };
     use prost::Message as _;
 
-    use crate::{canton_id::CantonId, workflow::external_party::steps};
-
     use super::*;
+    use crate::{canton_id::CantonId, workflow::external_party::steps};
 
     const OWNER_KEY: [u8; 32] = [4u8; 32];
 
     fn participant() -> CantonId {
-        match CantonId::parse(&format!("participant-1::1220{}", "aa".repeat(32))) {
+        match CantonId::parse(&format!(
+            "participant-1::1220{digest}",
+            digest = "aa".repeat(32)
+        )) {
             Ok(id) => id,
             Err(e) => panic!("test participant must parse: {e}"),
         }
@@ -501,7 +384,7 @@ mod tests {
         assert!(is_local_to(&config(), &local_party_id()));
         assert!(!is_local_to(
             &config(),
-            &format!("alice::1220{}", "bb".repeat(32))
+            &format!("alice::1220{digest}", digest = "bb".repeat(32))
         ));
         assert!(!is_local_to(&config(), "malformed"));
     }
@@ -554,7 +437,7 @@ mod tests {
     fn refuses_a_party_this_node_does_not_host() {
         let mut mapping = local_mapping();
         mapping.participants[0] = HostingParticipant {
-            participant_uid: format!("participant-9::1220{}", "cc".repeat(32)),
+            participant_uid: format!("participant-9::1220{digest}", digest = "cc".repeat(32)),
             permission: ParticipantPermission::Submission as i32,
             onboarding: Some(hosting_participant::Onboarding {}),
         };

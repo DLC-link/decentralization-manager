@@ -1,17 +1,16 @@
 use canton_proto_rs::com::digitalasset::canton::protocol::v30::DecentralizedNamespaceDefinition;
 use sqlx::SqlitePool;
-use tokio::time;
 
 use crate::{
     canton_id::CantonId,
     config::NodeConfig,
-    consts::{topology_retry_delay_secs, topology_retry_max_attempts},
     error::Result,
     utils,
     workflow::{
+        add_party::ARTIFACTS,
         add_party::AddPartyConfig,
         storage::{WorkflowStorage, artifact_kinds},
-        topology,
+        topology::{self, PollText, Polled},
     },
 };
 
@@ -23,6 +22,15 @@ use crate::{
 /// briefly disappears), both mappings already exist here, so the waits check
 /// membership: DNS until the new member's fingerprint joins the owner set, P2P
 /// until the new participant appears.
+///
+/// # Errors
+///
+/// Returns an error if the synchronizer ID cannot be read, or if a proposal
+/// artefact or peer signature is missing, unreadable or unpaired. Returns an
+/// error if a signing key the P2P adds has not signed it, or if a proposal's
+/// serial moved since it was built. Returns an error if `AddTransactions`
+/// fails, or if the new owners or the new participant do not appear in head
+/// state within the polling budget.
 pub async fn submit_proposals(
     config: &NodeConfig,
     storage: &SqlitePool,
@@ -33,17 +41,8 @@ pub async fn submit_proposals(
 
     let synchronizer_id = utils::get_synchronizer_id(config).await?;
 
-    let (mut dns_transaction, mut p2p_transaction) = topology::aggregate_dns_p2p_signatures(
-        storage,
-        instance_name,
-        topology::DnsP2pArtifactKinds {
-            dns_proposal: artifact_kinds::ADD_PARTY_DNS_PROPOSAL,
-            p2p_proposal: artifact_kinds::ADD_PARTY_P2P_PROPOSAL,
-            signed_dns: artifact_kinds::SIGNED_ADD_PARTY_DNS,
-            signed_p2p: artifact_kinds::SIGNED_ADD_PARTY_P2P,
-        },
-    )
-    .await?;
+    let (mut dns_transaction, mut p2p_transaction) =
+        topology::aggregate_dns_p2p_signatures(storage, instance_name, ARTIFACTS).await?;
 
     // Dedupe by signing fingerprint: the coordinator's own signature is
     // already on the original proposals, and a retried peer may have signed
@@ -138,37 +137,26 @@ async fn wait_for_owners(
     namespace: &str,
     expected_owners: &[String],
 ) -> Result {
-    let max_attempts = topology_retry_max_attempts();
-    let retry_delay = time::Duration::from_secs(topology_retry_delay_secs());
-
-    for attempt in 1..=max_attempts {
+    let total = expected_owners.len();
+    let text = PollText {
+        found: format!("DNS owner set contains all {total} expected owners"),
+        failed: format!("DNS owner set did not contain all {total} expected owners"),
+    };
+    topology::poll_until!(text, || async move {
         let namespace_def =
             topology::fetch_namespace_definition(config, synchronizer_id, namespace).await?;
         let present = expected_owners
             .iter()
             .filter(|owner| namespace_def.owners.contains(owner))
             .count();
-        if present == expected_owners.len() {
-            tracing::info!(
-                "DNS owner set contains all {total} expected owners after {attempt} attempt(s)",
-                total = expected_owners.len()
-            );
-            return Ok(());
+        if present == total {
+            return Ok(Polled::Ready(()));
         }
-        if attempt < max_attempts {
-            tracing::debug!(
-                "DNS has {present}/{total} expected owners, attempt \
-                 {attempt}/{max_attempts}, retrying in {retry_delay:?}...",
-                total = expected_owners.len()
-            );
-            time::sleep(retry_delay).await;
-        }
-    }
-
-    anyhow::bail!(
-        "DNS owner set did not contain all {total} expected owners after {max_attempts} attempts",
-        total = expected_owners.len()
-    )
+        Ok(Polled::Pending(format!(
+            "DNS has {present}/{total} expected owners"
+        )))
+    })
+    .await
 }
 
 /// Poll the synchronizer head state until `participant` shows up in the
@@ -179,33 +167,27 @@ async fn wait_for_participant(
     party_id: &CantonId,
     participant: &CantonId,
 ) -> Result {
-    let max_attempts = topology_retry_max_attempts();
-    let retry_delay = time::Duration::from_secs(topology_retry_delay_secs());
     let participant_str = participant.to_string();
 
-    for attempt in 1..=max_attempts {
-        let p2p = topology::fetch_p2p_mapping(config, synchronizer_id, party_id).await?;
-        if p2p
-            .participants
-            .iter()
-            .any(|p| p.participant_uid == participant_str)
-        {
-            tracing::info!(
-                "Participant {participant} present in P2P mapping after {attempt} attempt(s)"
-            );
-            return Ok(());
+    let text = PollText {
+        found: format!("Participant {participant} present in P2P mapping"),
+        failed: format!("Participant {participant} did not appear in the P2P mapping"),
+    };
+    topology::poll_until!(text, || {
+        let participant_str = &participant_str;
+        async move {
+            let p2p = topology::fetch_p2p_mapping(config, synchronizer_id, party_id).await?;
+            if p2p
+                .participants
+                .iter()
+                .any(|p| p.participant_uid == *participant_str)
+            {
+                return Ok(Polled::Ready(()));
+            }
+            Ok(Polled::Pending(format!(
+                "Participant {participant} not yet in P2P mapping"
+            )))
         }
-        if attempt < max_attempts {
-            tracing::debug!(
-                "Participant {participant} not yet in P2P mapping, attempt \
-                 {attempt}/{max_attempts}, retrying in {retry_delay:?}..."
-            );
-            time::sleep(retry_delay).await;
-        }
-    }
-
-    anyhow::bail!(
-        "Participant {participant} did not appear in the P2P mapping after \
-         {max_attempts} attempts"
-    )
+    })
+    .await
 }

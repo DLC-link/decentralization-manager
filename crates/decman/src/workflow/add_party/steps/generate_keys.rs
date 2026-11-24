@@ -30,6 +30,20 @@ use crate::{
 /// captured BEFORE the party gets activated here, because
 /// `ClearPartyOnboardingFlag` later needs a `begin_offset_exclusive` that
 /// precedes the activation.
+///
+/// # Errors
+///
+/// Returns an error if the Admin API channel cannot be opened, or if a vault
+/// call to list or generate a signing key fails. Returns an error if the
+/// participant or the namespace key is outside KMS while this node's rule
+/// refuses software keys. Returns an error if the namespace delegation
+/// proposal is refused. Returns an error if the synchronizer ID or the party's
+/// head-state mapping cannot be read. Returns an error if this node holds more
+/// than one of the party's keys, if the run's Daml key name cannot be read or
+/// recorded, or if DecMan's key store is off or fails for a key it generates.
+/// Returns an error if `GetId` fails or returns an invalid ID. Returns an
+/// error if an artefact cannot be stored, or if the pre-activation offset
+/// cannot be captured or stored.
 pub async fn generate_keys(
     config: &NodeConfig,
     storage: &SqlitePool,
@@ -147,6 +161,9 @@ mod tests {
             fake_admin_api::{FakeAdminApi, TestNode, VaultKey},
             key_store::KeyStore,
         },
+        workflow::{
+            onboarding::steps::generate_keys::own_new_daml_key, signing_keys::party_daml_key_name,
+        },
     };
 
     /// A refused add leaves nothing in the vault to clean up.
@@ -194,7 +211,7 @@ mod tests {
             &node.config,
             db,
             &mut VaultServiceClient::new(node.config.admin_channel().await?),
-            &crate::workflow::signing_keys::party_daml_key_name("party"),
+            &party_daml_key_name("party"),
             None,
         )
         .await?
@@ -240,7 +257,7 @@ mod tests {
             RUN.to_string(),
         );
         generate_keys(&node.config, db, RUN, &add, None).await?;
-        crate::workflow::onboarding::steps::generate_keys::own_new_daml_key(&node.config, db, RUN)
+        own_new_daml_key(&node.config, db, RUN)
             .await?
             .ok_or_else(|| anyhow::anyhow!("the run recorded no Daml key"))
     }

@@ -5,6 +5,8 @@ use aes_gcm::{
     aead::{Aead, Generate},
 };
 use anyhow::Context;
+use base64::engine::general_purpose::STANDARD;
+use sha2::{Digest, Sha256};
 use zeroize::Zeroizing;
 
 use crate::error::Result;
@@ -23,8 +25,6 @@ static DERIVING_KEY: OnceLock<[u8; 32]> = OnceLock::new();
 /// Initialize the encryption key from a passphrase.
 /// Derives a 32-byte key using SHA-256.
 pub fn init_key(passphrase: &str) {
-    use sha2::{Digest, Sha256};
-
     let key: [u8; 32] = Sha256::digest(passphrase.as_bytes()).into();
     ENCRYPTION_KEY
         .set(key)
@@ -54,8 +54,6 @@ pub fn derive_key(label: &str) -> Option<Zeroizing<[u8; 32]>> {
 }
 
 fn derive_key_from(base: &[u8; 32], label: &str) -> Zeroizing<[u8; 32]> {
-    use sha2::{Digest, Sha256};
-
     // The NUL ends the label, so one label is never a prefix of another's input.
     let mut hasher = Sha256::new();
     hasher.update(label.as_bytes());
@@ -80,10 +78,7 @@ fn encrypt_str_with_key(key: &[u8; 32], plaintext: &str) -> Result<String> {
     combined.extend_from_slice(&nonce_bytes);
     combined.extend_from_slice(&ciphertext);
 
-    Ok(base64::Engine::encode(
-        &base64::engine::general_purpose::STANDARD,
-        &combined,
-    ))
+    Ok(base64::Engine::encode(&STANDARD, &combined))
 }
 
 /// Decrypt a base64-encoded `nonce || ciphertext` string with an explicit key.
@@ -91,7 +86,7 @@ fn encrypt_str_with_key(key: &[u8; 32], plaintext: &str) -> Result<String> {
 /// or when AES-GCM authentication fails (legacy plaintext / wrong-key
 /// compatibility).
 fn decrypt_str_with_key(key: &[u8; 32], stored: &str) -> Result<String> {
-    let decoded = match base64::Engine::decode(&base64::engine::general_purpose::STANDARD, stored) {
+    let decoded = match base64::Engine::decode(&STANDARD, stored) {
         Ok(d) if d.len() > 12 => d,
         _ => return Ok(stored.to_string()), // Not encrypted, return as-is
     };
@@ -111,6 +106,11 @@ fn decrypt_str_with_key(key: &[u8; 32], stored: &str) -> Result<String> {
 
 /// Encrypt a plaintext string. Returns base64-encoded `nonce || ciphertext`.
 /// If encryption is not enabled, returns the plaintext unchanged.
+///
+/// # Errors
+///
+/// Returns an error if the nonce cannot be generated or AES-GCM encryption
+/// fails. It never fails when encryption is off.
 pub fn encrypt(plaintext: &str) -> Result<String> {
     match ENCRYPTION_KEY.get() {
         Some(key) => encrypt_str_with_key(key, plaintext),
@@ -122,6 +122,10 @@ pub fn encrypt(plaintext: &str) -> Result<String> {
 /// If encryption is not enabled, returns the input unchanged.
 /// If decryption fails (e.g. plaintext from before encryption was enabled),
 /// returns the input unchanged for backward compatibility.
+///
+/// # Errors
+///
+/// Returns an error if a value decrypts but is not valid UTF-8.
 pub fn decrypt(stored: &str) -> Result<String> {
     match ENCRYPTION_KEY.get() {
         Some(key) => decrypt_str_with_key(key, stored),
@@ -130,6 +134,10 @@ pub fn decrypt(stored: &str) -> Result<String> {
 }
 
 /// Encrypt an optional field
+///
+/// # Errors
+///
+/// Returns an error if [`encrypt`] fails on a `Some` value.
 pub fn encrypt_opt(value: &Option<String>) -> Result<Option<String>> {
     match value {
         Some(v) => Ok(Some(encrypt(v)?)),
@@ -138,6 +146,10 @@ pub fn encrypt_opt(value: &Option<String>) -> Result<Option<String>> {
 }
 
 /// Decrypt an optional field
+///
+/// # Errors
+///
+/// Returns an error if [`decrypt`] fails on a `Some` value.
 pub fn decrypt_opt(value: Option<String>) -> Result<Option<String>> {
     match value {
         Some(v) => Ok(Some(decrypt(&v)?)),

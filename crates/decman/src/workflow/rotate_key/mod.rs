@@ -3,43 +3,48 @@ pub mod coordinator;
 pub mod peer;
 pub mod steps;
 
-pub use config::RotateKeyConfig;
-
 use crate::{
     noise::MessageType,
     server::WorkflowKind,
-    workflow::{state::WorkflowStep, topology::RETIRED_LEGACY_KEYS_STATUS},
+    workflow::{
+        state::{WorkflowStep, workflow_steps},
+        topology::RETIRED_LEGACY_KEYS_STATUS,
+    },
 };
+
+pub use config::RotateKeyConfig;
 
 /// The status a member sends once it has recorded the coordinator's new key.
 pub const RECORDED_KEY_STATUS: &[u8] = b"RecordRotatedKey completed";
 
-/// Rotate-key workflow steps.
-///
-/// A member replaces its own Daml signing key for a party. The coordinator
-/// creates the new key, in KMS or in DecMan's key store according to its
-/// custody setting. It then proposes a P2P mapping that differs
-/// from the current one only in that key. Every member signs it, the
-/// coordinator submits it, and every member then records the new key, so a
-/// later kick or rotation attributes it to the coordinator.
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub enum RotateKeyStep {
-    /// Waiting for all peers to connect
-    WaitingForPeers,
-    /// Coordinator creates the new key, in KMS or in DecMan's key store
-    GenerateKey,
-    /// Coordinator builds and signs the P2P proposal
-    CreateProposal,
-    /// Members sign the proposal
-    SignProposal,
-    /// Coordinator submits the proposal
-    Submit,
-    /// Members retire the shadowed PartyToKeyMapping after the new topology is effective.
-    RetireLegacyKeys,
-    /// Members record the coordinator's new key
-    RecordKey,
-    /// Workflow complete
-    Complete,
+workflow_steps! {
+    /// Rotate-key workflow steps.
+    ///
+    /// A member replaces its own Daml signing key for a party. The coordinator
+    /// creates the new key, in KMS or in DecMan's key store according to its
+    /// custody setting. It then proposes a P2P mapping that differs
+    /// from the current one only in that key. Every member signs it, the
+    /// coordinator submits it, and every member then records the new key, so a
+    /// later kick or rotation attributes it to the coordinator.
+    #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+    pub enum RotateKeyStep {
+        /// Waiting for all peers to connect
+        WaitingForPeers,
+        /// Coordinator creates the new key, in KMS or in DecMan's key store
+        GenerateKey,
+        /// Coordinator builds and signs the P2P proposal
+        CreateProposal,
+        /// Members sign the proposal
+        SignProposal,
+        /// Coordinator submits the proposal
+        Submit,
+        /// Members retire the shadowed PartyToKeyMapping after the new topology is effective.
+        RetireLegacyKeys,
+        /// Members record the coordinator's new key
+        RecordKey,
+        /// Workflow complete
+        Complete,
+    }
 }
 
 impl WorkflowStep for RotateKeyStep {
@@ -53,19 +58,6 @@ impl WorkflowStep for RotateKeyStep {
         }
     }
 
-    fn next(&self) -> Option<Self> {
-        match self {
-            Self::WaitingForPeers => Some(Self::GenerateKey),
-            Self::GenerateKey => Some(Self::CreateProposal),
-            Self::CreateProposal => Some(Self::SignProposal),
-            Self::SignProposal => Some(Self::Submit),
-            Self::Submit => Some(Self::RetireLegacyKeys),
-            Self::RetireLegacyKeys => Some(Self::RecordKey),
-            Self::RecordKey => Some(Self::Complete),
-            Self::Complete => None,
-        }
-    }
-
     /// Recording waits for every member too. A member that misses it keeps
     /// the old key on record for the coordinator, and then refuses the
     /// coordinator's next rotation.
@@ -75,50 +67,6 @@ impl WorkflowStep for RotateKeyStep {
 
     fn is_waiting_for_peers(&self) -> bool {
         *self == Self::WaitingForPeers
-    }
-
-    fn step_index(&self) -> i64 {
-        match self {
-            Self::WaitingForPeers => 0,
-            Self::GenerateKey => 1,
-            Self::CreateProposal => 2,
-            Self::SignProposal => 3,
-            Self::Submit => 4,
-            Self::RetireLegacyKeys => 5,
-            Self::RecordKey => 6,
-            Self::Complete => 7,
-        }
-    }
-
-    fn step_total() -> i64 {
-        8
-    }
-
-    fn step_name(&self) -> &'static str {
-        match self {
-            Self::WaitingForPeers => "WaitingForPeers",
-            Self::GenerateKey => "GenerateKey",
-            Self::CreateProposal => "CreateProposal",
-            Self::SignProposal => "SignProposal",
-            Self::Submit => "Submit",
-            Self::RetireLegacyKeys => "RetireLegacyKeys",
-            Self::RecordKey => "RecordKey",
-            Self::Complete => "Complete",
-        }
-    }
-
-    fn try_from_step_name(name: &str) -> Option<Self> {
-        Some(match name {
-            "WaitingForPeers" => Self::WaitingForPeers,
-            "GenerateKey" => Self::GenerateKey,
-            "CreateProposal" => Self::CreateProposal,
-            "SignProposal" => Self::SignProposal,
-            "Submit" => Self::Submit,
-            "RetireLegacyKeys" => Self::RetireLegacyKeys,
-            "RecordKey" => Self::RecordKey,
-            "Complete" => Self::Complete,
-            _ => return None,
-        })
     }
 
     fn kind() -> WorkflowKind {

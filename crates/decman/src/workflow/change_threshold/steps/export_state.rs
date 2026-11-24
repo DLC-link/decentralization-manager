@@ -21,6 +21,13 @@ use crate::{
 /// (`CHANGE_THRESHOLD_NAMESPACE_DEF`) for `CreateProposals` to rewrite. Unlike
 /// the kick workflow there is no member to remove — the owner/participant sets
 /// are preserved and only the threshold changes.
+///
+/// # Errors
+///
+/// Returns an error if the synchronizer ID cannot be read, or if
+/// `ListDecentralizedNamespaceDefinition` fails or returns no definition.
+/// Returns an error if `new_threshold` is below 1 or above the current owner
+/// count. Returns an error if the namespace artefact cannot be written.
 pub async fn export_state(
     config: &NodeConfig,
     storage: &SqlitePool,
@@ -88,8 +95,8 @@ pub async fn export_state(
         );
     }
 
-    // Save namespace definition as a length-prefixed protobuf — same byte
-    // shape as the file written by `utils::write_message_to_file`.
+    // Save namespace definition as a length-prefixed protobuf, which
+    // `utils::read_first_message_from_bytes` reads back.
     let namespace_bytes = utils::encode_length_prefixed_message(namespace_def);
     storage
         .write_artifact(

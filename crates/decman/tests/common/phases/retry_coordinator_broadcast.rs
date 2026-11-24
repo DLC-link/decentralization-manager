@@ -7,7 +7,7 @@
 //! /workflows/{instance}/retry on P1. Assert all three workflow_runs rows
 //! reach Completed.
 
-use std::time::Duration;
+use std::{path::Path, time::Duration};
 
 use serde_json::json;
 
@@ -115,7 +115,7 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
 }
 
 async fn wait_for_peer_instance(
-    db_path: &std::path::Path,
+    db_path: &Path,
     coordinator_instance: &str,
 ) -> anyhow::Result<String> {
     use std::time::Instant;

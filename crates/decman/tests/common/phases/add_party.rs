@@ -1,4 +1,4 @@
-use std::time::Duration;
+use std::{collections::HashSet, time::Duration};
 
 use anyhow::Context;
 use common::{
@@ -285,7 +285,7 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
                                 p.contracts
                                     .into_iter()
                                     .map(|c| c.contract_id)
-                                    .collect::<std::collections::HashSet<_>>()
+                                    .collect::<HashSet<_>>()
                             })
                     };
 

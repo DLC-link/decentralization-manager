@@ -5,7 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { authenticatedFetch } from "../api";
 import { SnackbarProvider } from "../contexts";
 import { ExternalPartyList } from "./ExternalPartyList";
-import { UNHOST_RETRY_MS } from "./ExternalPartyUnhost";
+import { UNHOST_RETRY_MS } from "./unhost/StopHostingDialog";
 import type {
   ExternalPartyInfo,
   ExternalPartyUnhostPreview,

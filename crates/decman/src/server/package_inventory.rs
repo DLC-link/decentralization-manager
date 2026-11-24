@@ -17,21 +17,19 @@ use canton_proto_rs::com::digitalasset::canton::{
     },
 };
 use chrono::{DateTime, Utc};
+use common::canton_id::CantonId;
 use prost_types::Timestamp;
 use serde_json::Value;
 use tonic::transport::Channel;
 
-use common::canton_id::CantonId;
-
+use super::{
+    queries::compare_versions,
+    types::{ExpectedPackageVersion, VettedPackageInfo},
+};
 use crate::{
     config::NodeConfig,
     utils,
     workflow::{contracts::DarFile, topology},
-};
-
-use super::{
-    queries::compare_versions,
-    types::{ExpectedPackageVersion, VettedPackageInfo},
 };
 
 /// Derive the stable package-name prefix from a package reference by
@@ -467,6 +465,8 @@ async fn fetch_package_descriptions(
 
 #[cfg(test)]
 mod tests {
+    use canton_proto_rs::com::digitalasset::canton::protocol::v30::VettedPackages;
+
     use super::*;
 
     fn dar(main: &str, name: &str, version: &str) -> DarDescription {
@@ -604,20 +604,18 @@ mod tests {
     ) -> list_vetted_packages_response::Result {
         list_vetted_packages_response::Result {
             context: None,
-            item: Some(
-                canton_proto_rs::com::digitalasset::canton::protocol::v30::VettedPackages {
-                    participant_uid: participant_uid.to_string(),
-                    packages: package_ids
-                        .iter()
-                        .map(|id| VettedPackage {
-                            package_id: (*id).to_string(),
-                            valid_from_inclusive: None,
-                            valid_until_exclusive: None,
-                        })
-                        .collect(),
-                    ..Default::default()
-                },
-            ),
+            item: Some(VettedPackages {
+                participant_uid: participant_uid.to_string(),
+                packages: package_ids
+                    .iter()
+                    .map(|id| VettedPackage {
+                        package_id: (*id).to_string(),
+                        valid_from_inclusive: None,
+                        valid_until_exclusive: None,
+                    })
+                    .collect(),
+                ..Default::default()
+            }),
         }
     }
 
@@ -677,37 +675,35 @@ mod tests {
 
         let results = vec![list_vetted_packages_response::Result {
             context: None,
-            item: Some(
-                canton_proto_rs::com::digitalasset::canton::protocol::v30::VettedPackages {
-                    participant_uid: wanted.clone(),
-                    packages: vec![
-                        VettedPackage {
-                            package_id: "pkg-a".to_string(),
-                            valid_from_inclusive: None,
-                            valid_until_exclusive: None,
-                        },
-                        // duplicate of pkg-a
-                        VettedPackage {
-                            package_id: "pkg-a".to_string(),
-                            valid_from_inclusive: None,
-                            valid_until_exclusive: None,
-                        },
-                        // scheduled for the future, e.g. a Splice upgrade vetting
-                        VettedPackage {
-                            package_id: "pkg-future".to_string(),
-                            valid_from_inclusive: Some(ts(101)),
-                            valid_until_exclusive: None,
-                        },
-                        // already expired
-                        VettedPackage {
-                            package_id: "pkg-expired".to_string(),
-                            valid_from_inclusive: None,
-                            valid_until_exclusive: Some(ts(100)),
-                        },
-                    ],
-                    ..Default::default()
-                },
-            ),
+            item: Some(VettedPackages {
+                participant_uid: wanted.clone(),
+                packages: vec![
+                    VettedPackage {
+                        package_id: "pkg-a".to_string(),
+                        valid_from_inclusive: None,
+                        valid_until_exclusive: None,
+                    },
+                    // duplicate of pkg-a
+                    VettedPackage {
+                        package_id: "pkg-a".to_string(),
+                        valid_from_inclusive: None,
+                        valid_until_exclusive: None,
+                    },
+                    // scheduled for the future, e.g. a Splice upgrade vetting
+                    VettedPackage {
+                        package_id: "pkg-future".to_string(),
+                        valid_from_inclusive: Some(ts(101)),
+                        valid_until_exclusive: None,
+                    },
+                    // already expired
+                    VettedPackage {
+                        package_id: "pkg-expired".to_string(),
+                        valid_from_inclusive: None,
+                        valid_until_exclusive: Some(ts(100)),
+                    },
+                ],
+                ..Default::default()
+            }),
         }];
 
         assert_eq!(
