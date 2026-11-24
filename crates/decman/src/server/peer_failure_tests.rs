@@ -26,8 +26,7 @@ use crate::{
     db::schema::{Commitable, SchemaWrite},
     error::Result,
     noise::{NoiseKeypair, server::NoiseServer},
-    server::handlers::CoordinatorRequest,
-    server::peer_status::LastSeen,
+    server::{handlers::CoordinatorRequest, peer_status::LastSeen},
     workflow::{self, DarsConfig, DarsStep, contracts::DarFile},
 };
 

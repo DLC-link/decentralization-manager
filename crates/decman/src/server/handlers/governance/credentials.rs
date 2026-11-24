@@ -1,7 +1,6 @@
 //! Party token, credential and threshold lookups shared by the endpoints.
 
 use actix_web::web;
-
 use canton_proto_rs::com::digitalasset::canton::topology::admin::v30::{
     BaseQuery, ListDecentralizedNamespaceDefinitionRequest, StoreId, Synchronizer, base_query,
     store_id, synchronizer, topology_manager_read_service_client::TopologyManagerReadServiceClient,

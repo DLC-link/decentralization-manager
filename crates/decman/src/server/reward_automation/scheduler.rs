@@ -3,19 +3,12 @@
 
 //! The reward automation loop and its per-party pass.
 
-use chrono::{DateTime, Utc};
-
-use crate::{
-    canton_id::CantonId,
-    config::{NodeConfig, PackageConfig},
+use std::{
+    collections::{HashMap, HashSet},
+    time::Duration,
 };
 
-use std::collections::{HashMap, HashSet};
-use std::time::Duration;
-
-use crate::server::AppState;
-use crate::server::handlers::{get_party_credentials, packages};
-use crate::server::{package_inventory::fetch_package_id_to_name, queries::read_governance_state};
+use chrono::{DateTime, Utc};
 
 use super::{
     assign::{fold_oldest_expiry, package_absent, run_reassign_once},
@@ -24,6 +17,16 @@ use super::{
     metrics::{
         ASSIGNER_NOT_MEMBER, AUTH_UNREGISTERED, CREDENTIALS_UNAVAILABLE, ENABLEMENT_UNREADABLE,
         EXPIRY_READS, HEARTBEAT, OLDEST_EXPIRES_IN, SWEEP_FAILED, SWEEPS, ensure_outcome_series,
+    },
+};
+use crate::{
+    canton_id::CantonId,
+    config::{NodeConfig, PackageConfig},
+    server::{
+        AppState,
+        handlers::{get_party_credentials, packages},
+        package_inventory::fetch_package_id_to_name,
+        queries::read_governance_state,
     },
 };
 
@@ -636,12 +639,17 @@ async fn read_oldest_expiry(
 
 #[cfg(test)]
 mod tests {
-    use super::super::test_support::{ALICE, BOB, CAROL, DAVE, EVE, GOV, dt};
-    use super::*;
-    use crate::auth::{AuthRegistry, WorkflowAuth};
-    use crate::config::{KeycloakConfig, PartyCredentials};
-    use crate::server::AppState;
     use std::sync::Arc;
+
+    use super::{
+        super::test_support::{ALICE, BOB, CAROL, DAVE, EVE, GOV, dt},
+        *,
+    };
+    use crate::{
+        auth::{AuthRegistry, WorkflowAuth},
+        config::{KeycloakConfig, PartyCredentials},
+        server::AppState,
+    };
 
     #[test]
     fn a_removed_member_is_reported_while_the_delegation_names_it() -> anyhow::Result<()> {
@@ -781,8 +789,10 @@ mod tests {
     /// the one this pass makes.
     #[tokio::test]
     async fn a_failed_token_fetch_is_its_own_outcome() -> anyhow::Result<()> {
-        use wiremock::matchers::{method, path_regex};
-        use wiremock::{Mock, MockServer, ResponseTemplate};
+        use wiremock::{
+            Mock, MockServer, ResponseTemplate,
+            matchers::{method, path_regex},
+        };
 
         let server = MockServer::start().await;
         Mock::given(method("POST"))

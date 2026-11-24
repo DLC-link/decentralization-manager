@@ -2,16 +2,17 @@
 
 use sqlx::SqlitePool;
 
-use crate::db::sqlite::{connect::MIGRATOR, tx::WORKFLOW_BLOCKED_BY_IMPORT};
+use super::fixtures::{TEST_NS, qid};
 use crate::{
     canton_id::CantonId,
-    db::schema::{Commitable, SchemaRead, SchemaWrite},
+    db::{
+        schema::{Commitable, SchemaRead, SchemaWrite},
+        sqlite::{connect::MIGRATOR, tx::WORKFLOW_BLOCKED_BY_IMPORT},
+    },
     error::Result,
     server::{WorkflowKind, WorkflowProgress, WorkflowRole, WorkflowRun},
     workflow::storage::WorkflowStorage,
 };
-
-use super::fixtures::{TEST_NS, qid};
 
 // ====================================================================
 // Workflow runs + artefacts

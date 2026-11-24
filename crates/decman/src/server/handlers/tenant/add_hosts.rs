@@ -4,6 +4,10 @@
 use actix_web::{HttpRequest, HttpResponse, Responder, post, web};
 use base64::{Engine, engine::general_purpose::STANDARD};
 
+use super::{
+    audit::audited_write,
+    wire::{add_hosts_error_response, decode_all, serial_status_after},
+};
 use crate::{
     server::{
         AppState,
@@ -19,11 +23,6 @@ use crate::{
         AddHostsError, ExternalPartyAddHostsPayload, authorize_add_hosts, prepare_add_hosts,
         publish_add_hosts, read_party_to_participant, stage_add_hosts, submit_add_hosts,
     },
-};
-
-use super::{
-    audit::audited_write,
-    wire::{add_hosts_error_response, decode_all, serial_status_after},
 };
 
 // ============================================================================
@@ -432,8 +431,7 @@ pub async fn tenant_add_hosts_publish(
 
 #[cfg(test)]
 mod tests {
-    use super::super::test_support::test_participant;
-    use super::*;
+    use super::{super::test_support::test_participant, *};
 
     /// The wallet crate mirrors these types, so the wire names must not drift.
     /// Anything renamed here fails to deserialize on the other end.

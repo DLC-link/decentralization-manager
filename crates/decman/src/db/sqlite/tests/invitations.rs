@@ -2,15 +2,16 @@
 
 use sqlx::SqlitePool;
 
-use crate::db::sqlite::connect::MIGRATOR;
+use super::fixtures::TEST_NS;
 use crate::{
     canton_id::CantonId,
-    db::schema::{Commitable, SchemaRead, SchemaWrite},
+    db::{
+        schema::{Commitable, SchemaRead, SchemaWrite},
+        sqlite::connect::MIGRATOR,
+    },
     error::Result,
     server::{InvitationOutcome, InvitationType, PendingInvitation},
 };
-
-use super::fixtures::TEST_NS;
 
 // ====================================================================
 // Pending invitations

@@ -6,6 +6,13 @@ use actix_web::{HttpRequest, HttpResponse, Responder, get, post, web};
 use anyhow::Context;
 use sqlx::SqlitePool;
 
+use super::{
+    super::parties::resolve_owner_keys_from_peers,
+    invites::{InviteLabels, Recipients, invite_log, send_invites},
+    launch::{CoordinatorRequest, RunEnd, StatusOrder, launch_coordinator, run_log},
+    preflight::{claim_party_for_start, format_incompatible_peers, preflight_incompatible_peers},
+    runs::{kind_status, now_secs, register_and_persist},
+};
 use crate::{
     canton_id::CantonId,
     config::{NodeConfig, Peer},
@@ -22,14 +29,6 @@ use crate::{
         },
     },
     workflow::{self, ContractsStep},
-};
-
-use super::{
-    super::parties::resolve_owner_keys_from_peers,
-    invites::{InviteLabels, Recipients, invite_log, send_invites},
-    launch::{CoordinatorRequest, RunEnd, StatusOrder, launch_coordinator, run_log},
-    preflight::{claim_party_for_start, format_incompatible_peers, preflight_incompatible_peers},
-    runs::{kind_status, now_secs, register_and_persist},
 };
 
 // ============================================================================
@@ -337,10 +336,11 @@ async fn send_contracts_invites(
 mod tests {
     use actix_web::{App, HttpMessage, http::StatusCode, test as actix_test};
 
+    use super::{
+        super::test_support::{in_progress_run, insert_run, pid, state_on, test_cid},
+        *,
+    };
     use crate::{auth::Principal, db::MIGRATOR};
-
-    use super::super::test_support::{in_progress_run, insert_run, pid, state_on, test_cid};
-    use super::*;
 
     #[test]
     fn contracts_invite_payload_roundtrips_with_defaults() -> anyhow::Result<()> {
@@ -479,14 +479,16 @@ mod start_contracts_tests {
     use actix_web::http::StatusCode;
     use serde_json::json;
 
-    use super::super::{
-        preflight::{format_incompatible_peers, preflight_incompatible_peers},
-        test_support::{
-            Answer, TestNode, cache_hosted_party, closed_port, in_progress_run, insert_peers,
-            insert_run, peer, pid, post_as, post_as_admin, refuse_run_writes, test_node,
+    use super::{
+        super::{
+            preflight::{format_incompatible_peers, preflight_incompatible_peers},
+            test_support::{
+                Answer, TestNode, cache_hosted_party, closed_port, in_progress_run, insert_peers,
+                insert_run, peer, pid, post_as, post_as_admin, refuse_run_writes, test_node,
+            },
         },
+        *,
     };
-    use super::*;
     use crate::db::MIGRATOR;
 
     type Result<T = ()> = anyhow::Result<T>;
@@ -671,8 +673,10 @@ mod plan_contracts_tests {
 
     use common::api::ContractDefinition;
 
-    use super::super::test_support::{peer, pid};
-    use super::*;
+    use super::{
+        super::test_support::{peer, pid},
+        *,
+    };
 
     type Result<T = ()> = anyhow::Result<T>;
 

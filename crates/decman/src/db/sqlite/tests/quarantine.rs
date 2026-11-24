@@ -2,13 +2,14 @@
 
 use sqlx::SqlitePool;
 
-use crate::db::sqlite::connect::MIGRATOR;
+use super::fixtures::qid;
 use crate::{
-    db::schema::{SchemaRead, SchemaWrite},
+    db::{
+        schema::{SchemaRead, SchemaWrite},
+        sqlite::connect::MIGRATOR,
+    },
     error::Result,
 };
-
-use super::fixtures::qid;
 
 /// The quarantine records a fact about a *participant*, so it must outlive
 /// the workflow run that discovered it. This is the bypass the review

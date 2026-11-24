@@ -391,17 +391,18 @@ mod tests {
 
     use actix_web::{App, HttpMessage, http::StatusCode, test as actix_test};
 
+    use super::{
+        super::{
+            cancel::cancel_workflow_instance,
+            listing::retry_workflow,
+            test_support::{admin, in_progress_run, insert_run, pid, state_on},
+        },
+        *,
+    };
     use crate::{
         db::MIGRATOR,
         workflow::{self, AddPartyStep, OnboardingStep},
     };
-
-    use super::super::{
-        cancel::cancel_workflow_instance,
-        listing::retry_workflow,
-        test_support::{admin, in_progress_run, insert_run, pid, state_on},
-    };
-    use super::*;
 
     fn started(kind: WorkflowKind) -> u64 {
         RUNS_STARTED

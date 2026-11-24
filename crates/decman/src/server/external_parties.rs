@@ -173,8 +173,9 @@ impl CacheInner {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use actix_web::{App, http::StatusCode};
+
+    use super::*;
 
     const SECOND: Duration = Duration::from_secs(1);
     const TTL: Duration = Duration::from_secs(300);

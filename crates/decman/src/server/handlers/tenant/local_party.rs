@@ -3,6 +3,10 @@
 use actix_web::{HttpRequest, HttpResponse, Responder, post, web};
 use base64::{Engine, engine::general_purpose::STANDARD};
 
+use super::{
+    audit::audited_write,
+    wire::{add_hosts_error_response, decode_all, decode_public_key, serial_status_after},
+};
 use crate::{
     server::{
         AppState,
@@ -17,11 +21,6 @@ use crate::{
         keys::fingerprint_from_public_key,
         local_party::{LocalPartyAdoptionPayload, prepare_adoption, submit_adoption},
     },
-};
-
-use super::{
-    audit::audited_write,
-    wire::{add_hosts_error_response, decode_all, decode_public_key, serial_status_after},
 };
 
 // ============================================================================

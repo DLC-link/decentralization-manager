@@ -5,6 +5,13 @@ use std::collections::{HashMap, HashSet};
 use actix_web::{HttpRequest, HttpResponse, Responder, get, post, web};
 use sqlx::SqlitePool;
 
+use super::{
+    super::parties::resolve_owner_keys_from_peers,
+    invites::{InviteLabels, Recipients, invite_log, send_invites},
+    launch::{CoordinatorRequest, RunEnd, StatusOrder, launch_coordinator, run_log},
+    preflight::{find_party_with_prefix, format_incompatible_peers, preflight_incompatible_peers},
+    runs::{kind_status, register_and_persist},
+};
 use crate::{
     canton_id::{CantonId, validate_party_id_prefix},
     config::{NetworkConfig, NodeConfig},
@@ -22,14 +29,6 @@ use crate::{
         },
     },
     workflow::{self, OnboardingStep, thresholds::check_confirmation_threshold},
-};
-
-use super::{
-    super::parties::resolve_owner_keys_from_peers,
-    invites::{InviteLabels, Recipients, invite_log, send_invites},
-    launch::{CoordinatorRequest, RunEnd, StatusOrder, launch_coordinator, run_log},
-    preflight::{find_party_with_prefix, format_incompatible_peers, preflight_incompatible_peers},
-    runs::{kind_status, register_and_persist},
 };
 
 // ============================================================================
@@ -657,10 +656,13 @@ mod start_onboarding_tests {
     use common::api::OnboardingMeshErrorResponse;
     use serde_json::json;
 
-    use super::super::test_support::{
-        Answer, TestNode, break_table, cache_hosted_party, pid, post_as, post_as_admin, test_node,
+    use super::{
+        super::test_support::{
+            Answer, TestNode, break_table, cache_hosted_party, pid, post_as, post_as_admin,
+            test_node,
+        },
+        *,
     };
-    use super::*;
     use crate::db::MIGRATOR;
 
     type Result<T = ()> = anyhow::Result<T>;
@@ -830,8 +832,7 @@ mod plan_onboarding_tests {
     //! Calls the pure onboarding plan with the invited peers, and pins each
     //! refusal text.
 
-    use super::super::test_support::pid;
-    use super::*;
+    use super::{super::test_support::pid, *};
 
     type Result<T = ()> = anyhow::Result<T>;
 

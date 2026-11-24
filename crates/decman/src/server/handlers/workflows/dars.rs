@@ -4,6 +4,12 @@ use actix_web::{HttpRequest, HttpResponse, Responder, get, post, web};
 use base64::{Engine, engine::general_purpose::STANDARD};
 use sqlx::SqlitePool;
 
+use super::{
+    invites::{InviteLabels, Recipients, invite_log, send_invites},
+    launch::{CoordinatorRequest, RunEnd, StatusOrder, launch_coordinator, run_log},
+    preflight::{format_incompatible_peers, preflight_incompatible_peers},
+    runs::{kind_status, now_secs, register_and_persist},
+};
 use crate::{
     canton_id::CantonId,
     config::NodeConfig,
@@ -22,13 +28,6 @@ use crate::{
     },
     utils,
     workflow::{self, DarsStep, contracts::DarFile},
-};
-
-use super::{
-    invites::{InviteLabels, Recipients, invite_log, send_invites},
-    launch::{CoordinatorRequest, RunEnd, StatusOrder, launch_coordinator, run_log},
-    preflight::{format_incompatible_peers, preflight_incompatible_peers},
-    runs::{kind_status, now_secs, register_and_persist},
 };
 
 // ============================================================================
@@ -419,10 +418,11 @@ async fn send_dars_invites(
 mod tests {
     use actix_web::{App, HttpMessage, http::StatusCode, test as actix_test};
 
+    use super::{
+        super::test_support::{admin, pid, state_on},
+        *,
+    };
     use crate::db::{MIGRATOR, schema::SchemaRead};
-
-    use super::super::test_support::{admin, pid, state_on};
-    use super::*;
 
     fn dar(filename: &str, len: usize) -> DarFile {
         DarFile {
@@ -664,14 +664,16 @@ mod dar_handler_tests {
     use actix_web::http::StatusCode;
     use serde_json::json;
 
-    use super::super::{
-        preflight::{format_incompatible_peers, preflight_incompatible_peers},
-        test_support::{
-            Answer, TestNode, admin, answer_of, break_table, closed_port, insert_peers, peer, pid,
-            post_as, post_as_admin, test_node,
+    use super::{
+        super::{
+            preflight::{format_incompatible_peers, preflight_incompatible_peers},
+            test_support::{
+                Answer, TestNode, admin, answer_of, break_table, closed_port, insert_peers, peer,
+                pid, post_as, post_as_admin, test_node,
+            },
         },
+        *,
     };
-    use super::*;
     use crate::db::MIGRATOR;
 
     type Result<T = ()> = anyhow::Result<T>;

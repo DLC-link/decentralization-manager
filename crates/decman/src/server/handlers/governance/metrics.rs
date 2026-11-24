@@ -103,21 +103,25 @@ mod action_metrics_tests {
     use actix_web::{
         App,
         http::{StatusCode, header::AUTHORIZATION},
-        test as actix_test,
+        test as actix_test, web,
     };
-
-    use super::super::{
-        actions::{
-            cancel_confirmation, cancel_proposal, confirm_action, execute_action,
-            expire_confirmation,
-        },
-        propose::propose_action,
-    };
-    use super::*;
-    use crate::{auth::MockAuthRegistry, server::middleware::AuthMiddleware};
-    use crate::{auth::WorkflowAuth, canton_id::CantonId, server::AppState};
-    use actix_web::web;
     use anyhow::Context;
+
+    use super::{
+        super::{
+            actions::{
+                cancel_confirmation, cancel_proposal, confirm_action, execute_action,
+                expire_confirmation,
+            },
+            propose::propose_action,
+        },
+        *,
+    };
+    use crate::{
+        auth::{MockAuthRegistry, WorkflowAuth},
+        canton_id::CantonId,
+        server::{AppState, middleware::AuthMiddleware},
+    };
 
     fn party_id() -> Result<CantonId> {
         CantonId::parse(&format!("p::{}", "0".repeat(68)))

@@ -3,9 +3,14 @@
 use actix_web::{HttpRequest, HttpResponse, Responder, get, post, web};
 use base64::{Engine, engine::general_purpose::STANDARD};
 
+use super::{
+    audit::{audited_write, tenant_requester},
+    wire::{add_hosts_error_response, decode_all, serial_status_after},
+};
 use crate::{
     server::{
         AppState,
+        handlers::unhost::run_unhost,
         middleware::tenant_caller,
         tenant_call_audit::TenantEndpoint,
         types::{
@@ -22,13 +27,6 @@ use crate::{
         unhost::UnhostRequest,
         unhost_audit::RequestedVia,
     },
-};
-
-use crate::server::handlers::unhost::run_unhost;
-
-use super::{
-    audit::{audited_write, tenant_requester},
-    wire::{add_hosts_error_response, decode_all, serial_status_after},
 };
 
 // ============================================================================
@@ -350,8 +348,7 @@ pub async fn tenant_unhost(
 
 #[cfg(test)]
 mod tests {
-    use super::super::test_support::test_participant;
-    use super::*;
+    use super::{super::test_support::test_participant, *};
 
     #[test]
     fn unhost_request_keeps_its_wire_shape() {

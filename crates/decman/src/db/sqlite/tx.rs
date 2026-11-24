@@ -2,22 +2,21 @@
 
 use anyhow::Context;
 
-use crate::db::{
-    crypto,
-    rows::{
-        DecPartyContractRow, DecPartyParticipantRow, DecPartyRow, DecPartyTopologyVersion,
-        OwnerKeyRefusal, PartyCredentialsRow, PeerRow, WorkflowRunRow,
-    },
-    schema::Commitable,
-};
+use super::write::{owner_key_refusal, write_invitation};
 use crate::{
     canton_id::{CantonId, Fingerprint},
     config::{PartyCredentials, Peer},
+    db::{
+        crypto,
+        rows::{
+            DecPartyContractRow, DecPartyParticipantRow, DecPartyRow, DecPartyTopologyVersion,
+            OwnerKeyRefusal, PartyCredentialsRow, PeerRow, WorkflowRunRow,
+        },
+        schema::Commitable,
+    },
     error::Result,
     server::{InvitationOutcome, PendingInvitation, WorkflowProgress, WorkflowRun},
 };
-
-use super::write::{owner_key_refusal, write_invitation};
 
 /// A staged tenant import excludes new or resumed workflows on this participant.
 pub(super) const WORKFLOW_BLOCKED_BY_IMPORT: &str = "A tenant ACS import owns this participant. Complete the import before starting another workflow";

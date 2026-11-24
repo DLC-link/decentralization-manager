@@ -2,8 +2,6 @@
 
 use std::collections::{HashMap, HashSet};
 
-use sqlx::SqlitePool;
-
 use canton_proto_rs::com::digitalasset::canton::{
     crypto::{
         admin::v30::{
@@ -17,6 +15,7 @@ use canton_proto_rs::com::digitalasset::canton::{
         topology_manager_read_service_client::TopologyManagerReadServiceClient,
     },
 };
+use sqlx::SqlitePool;
 
 use crate::{
     canton_id::{CantonId, Fingerprint},

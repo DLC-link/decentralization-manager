@@ -6,6 +6,23 @@ use actix_web::{HttpRequest, HttpResponse, Responder, get, post, web};
 use anyhow::Context;
 use sqlx::SqlitePool;
 
+use super::{
+    invites::{InviteLabels, Recipients, invite_log, send_invites},
+    kick_signers::{
+        KickSigners, check_kick_survivor_keys, kick_key_adoption_refusal, kick_key_check_failure,
+        kick_quorum_refusal, kick_signers,
+    },
+    kick_target::{
+        KickTarget, cached_confirmation_threshold, cached_namespace_threshold,
+        kick_threshold_bound, party_member_count, resolve_kick_target,
+    },
+    launch::{CoordinatorRequest, RunEnd, StatusOrder, launch_coordinator, run_log},
+    preflight::{
+        claim_party_for_start, format_incompatible_peers, format_peers_lacking_owner_only_kick,
+        incompatible_versions, lacking_feature, probe_invitee_health,
+    },
+    runs::{kind_status, now_secs, register_and_persist},
+};
 use crate::{
     canton_id::CantonId,
     config::{NodeConfig, Peer},
@@ -26,24 +43,6 @@ use crate::{
         },
     },
     workflow::{self, KickStep},
-};
-
-use super::{
-    invites::{InviteLabels, Recipients, invite_log, send_invites},
-    kick_signers::{
-        KickSigners, check_kick_survivor_keys, kick_key_adoption_refusal, kick_key_check_failure,
-        kick_quorum_refusal, kick_signers,
-    },
-    kick_target::{
-        KickTarget, cached_confirmation_threshold, cached_namespace_threshold,
-        kick_threshold_bound, party_member_count, resolve_kick_target,
-    },
-    launch::{CoordinatorRequest, RunEnd, StatusOrder, launch_coordinator, run_log},
-    preflight::{
-        claim_party_for_start, format_incompatible_peers, format_peers_lacking_owner_only_kick,
-        incompatible_versions, lacking_feature, probe_invitee_health,
-    },
-    runs::{kind_status, now_secs, register_and_persist},
 };
 
 /// Start a kick workflow to remove a participant from a decentralized party
@@ -547,6 +546,17 @@ mod tests {
 
     use actix_web::{App, HttpMessage, http::StatusCode, test as actix_test};
 
+    use super::{
+        super::{
+            super::invitations::insert_peer_run,
+            runs::insert_coordinator_run,
+            test_support::{
+                admin, cache_kick_party, cache_party, host_row, ids, pid, record_signing_keys,
+                state_on, status_and_body,
+            },
+        },
+        *,
+    };
     use crate::{
         db::{
             MIGRATOR,
@@ -558,16 +568,6 @@ mod tests {
             validation::PeerExpectations,
         },
     };
-
-    use super::super::{
-        super::invitations::insert_peer_run,
-        runs::insert_coordinator_run,
-        test_support::{
-            admin, cache_kick_party, cache_party, host_row, ids, pid, record_signing_keys,
-            state_on, status_and_body,
-        },
-    };
-    use super::*;
 
     /// [`state_on`], with `pid(1)` as this node.
     async fn kick_state_on(pool: SqlitePool) -> Result<web::Data<AppState>> {
@@ -1054,15 +1054,17 @@ mod start_kick_tests {
     use actix_web::http::StatusCode;
     use serde_json::json;
 
-    use super::super::{
-        preflight::{format_incompatible_peers, incompatible_versions, probe_invitee_health},
-        test_support::{
-            Answer, TestNode, break_table, cache_hosted_party, closed_port, in_progress_run,
-            insert_peers, insert_run, kick_public_key, peer, pid, post_as, post_as_admin,
-            record_signing_keys, refuse_run_writes, test_node,
+    use super::{
+        super::{
+            preflight::{format_incompatible_peers, incompatible_versions, probe_invitee_health},
+            test_support::{
+                Answer, TestNode, break_table, cache_hosted_party, closed_port, in_progress_run,
+                insert_peers, insert_run, kick_public_key, peer, pid, post_as, post_as_admin,
+                record_signing_keys, refuse_run_writes, test_node,
+            },
         },
+        *,
     };
-    use super::*;
     use crate::{db::MIGRATOR, utils};
 
     type Result<T = ()> = anyhow::Result<T>;
@@ -1545,8 +1547,10 @@ mod plan_kick_tests {
     //! Calls the pure kick checks with members, owners, peers and the
     //! cached namespace threshold, and pins each refusal text.
 
-    use super::super::test_support::{host_row, peer, pid};
-    use super::*;
+    use super::{
+        super::test_support::{host_row, peer, pid},
+        *,
+    };
 
     type Result<T = ()> = anyhow::Result<T>;
 

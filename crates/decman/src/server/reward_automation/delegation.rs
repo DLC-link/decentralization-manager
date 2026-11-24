@@ -3,29 +3,27 @@
 
 //! The CouponReassignmentDelegation read and the reward status.
 
-use anyhow::{Context, anyhow};
-use canton_proto_rs::com::daml::ledger::api::v2::Record;
-
-use crate::{
-    canton_id::CantonId,
-    config::{NodeConfig, PackageConfig},
-};
-
 use std::collections::{HashMap, HashSet};
 
-use crate::server::record::{
-    extract_list, extract_record, field_decimal, field_list_len, field_party_id, field_party_list,
-    get_field,
-};
-use crate::server::{
-    package_inventory::fetch_package_id_to_name,
-    types::{CouponReassignmentDelegationSummary, RewardBeneficiary, RewardStatusResponse},
-};
+use anyhow::{Context, anyhow};
+use canton_proto_rs::com::daml::ledger::api::v2::Record;
 
 use super::{
     assign::package_absent,
     ledger::{ContractFilter, Entity, Module, bounded_created_records, for_each_active_created},
     scheduler::{Role, role_for},
+};
+use crate::{
+    canton_id::CantonId,
+    config::{NodeConfig, PackageConfig},
+    server::{
+        package_inventory::fetch_package_id_to_name,
+        record::{
+            extract_list, extract_record, field_decimal, field_list_len, field_party_id,
+            field_party_list, get_field,
+        },
+        types::{CouponReassignmentDelegationSummary, RewardBeneficiary, RewardStatusResponse},
+    },
 };
 
 // ============================================================================
@@ -356,12 +354,15 @@ fn parse_split(rec: &Record) -> anyhow::Result<Vec<RewardBeneficiary>> {
 
 #[cfg(test)]
 mod tests {
-    use super::super::test_support::{
-        ALICE, BOB, CAROL, GOV, canton_err, field, numeric, party, record, value,
-    };
-    use super::*;
     use anyhow::anyhow;
     use canton_proto_rs::com::daml::ledger::api::v2::{List, Record, Value, value};
+
+    use super::{
+        super::test_support::{
+            ALICE, BOB, CAROL, GOV, canton_err, field, numeric, party, record, value,
+        },
+        *,
+    };
 
     fn beneficiary_record(p: &str, pct: &str) -> Value {
         value(value::Sum::Record(record(vec![

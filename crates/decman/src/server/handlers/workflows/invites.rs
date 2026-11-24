@@ -4,6 +4,7 @@ use std::collections::HashSet;
 
 use sqlx::SqlitePool;
 
+use super::onboarding::interpret_invite_reply;
 use crate::{
     canton_id::CantonId,
     config::{NetworkConfig, NodeConfig, Peer},
@@ -11,8 +12,6 @@ use crate::{
     error::Result,
     noise::{Message, NoiseError, NoiseKeypair, parse_public_key, send_noise_message},
 };
-
-use super::onboarding::interpret_invite_reply;
 
 /// Which peers an invite goes to, and in which order.
 pub(super) enum Recipients<'a> {
@@ -298,12 +297,15 @@ mod tests {
 
     use common::api::{ContractDefinition, ContractDeploymentIntent};
 
-    use super::super::{
-        add_party::add_party_invite, change_threshold::change_threshold_invite,
-        contracts::contracts_invite, dars::dars_invite, kick::kick_invite,
-        kick_signers::KickSigners, onboarding::onboarding_invite, rotate_key::rotate_key_invite,
+    use super::{
+        super::{
+            add_party::add_party_invite, change_threshold::change_threshold_invite,
+            contracts::contracts_invite, dars::dars_invite, kick::kick_invite,
+            kick_signers::KickSigners, onboarding::onboarding_invite,
+            rotate_key::rotate_key_invite,
+        },
+        *,
     };
-    use super::*;
     use crate::{
         noise::MessageType,
         workflow::{

@@ -290,12 +290,11 @@ mod tests {
         protocol::v30::{enums::ParticipantPermission, party_to_participant::HostingParticipant},
     };
 
-    use crate::{db::MIGRATOR, workflow::signing_keys::signing_keys_after_kick};
-
-    use super::super::test_support::{
-        cache_kick_party, ids, kick_public_key, pid, record_signing_keys,
+    use super::{
+        super::test_support::{cache_kick_party, ids, kick_public_key, pid, record_signing_keys},
+        *,
     };
-    use super::*;
+    use crate::{db::MIGRATOR, workflow::signing_keys::signing_keys_after_kick};
 
     fn signers(invitees: &[u8], not_peers: &[u8]) -> anyhow::Result<KickSigners> {
         Ok(KickSigners {

@@ -283,13 +283,23 @@ mod clear_acs_import_quarantine_gate_tests {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::{config::NoiseRetryConfig, config::Peer, db::MIGRATOR, db::schema::Commitable};
+    use std::{
+        collections::HashMap,
+        sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        },
+    };
+
     use http::StatusCode;
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::{collections::HashMap, sync::Arc};
     use tokio::net::TcpListener;
     use tokio_noise::handshakes::nn_psk2::Responder as NoiseResponder;
+
+    use super::*;
+    use crate::{
+        config::{NoiseRetryConfig, Peer},
+        db::{MIGRATOR, schema::Commitable},
+    };
 
     /// A peer listener that answers every request with `status` and `body`
     /// over a real Noise session. Returns its port and how many requests it

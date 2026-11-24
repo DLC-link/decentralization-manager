@@ -7,8 +7,11 @@ use std::{
 };
 
 use actix_cors::Cors;
-use actix_web::dev::{ServiceFactory, ServiceRequest};
-use actix_web::{App, HttpServer, web};
+use actix_web::{
+    App, HttpServer,
+    dev::{ServiceFactory, ServiceRequest},
+    web,
+};
 use anyhow::Context;
 use sqlx::SqlitePool;
 use tokio::sync::{Mutex, RwLock, Semaphore, mpsc};
@@ -16,13 +19,6 @@ use utoipa_actix_web::{AppExt, UtoipaApp};
 use utoipa_swagger_ui::SwaggerUi;
 
 use super::{recovery::recover_in_progress_workflows, state::AppState};
-use crate::server::{
-    HealthCache, PeerJob, WorkflowRegistry, assets, audit, former_parties, governance_poller,
-    handlers, node_health,
-    peer_jobs::run_peer_listener,
-    peer_listener::{WorkflowTriggers, run_heartbeat},
-    peer_status, reward_automation,
-};
 use crate::{
     auth::{
         AuthRegistry, JwtValidator, MockAuthRegistry, MockValidator, TokenValidator, WorkflowAuth,
@@ -31,8 +27,17 @@ use crate::{
     config::{Network, NodeConfig, PartyCredentials},
     db::schema::{SchemaRead, SchemaWrite},
     error::Result,
-    server::middleware::AuthMiddleware,
-    server::peer_status::LastSeen,
+    server::{
+        HealthCache, PeerJob, WorkflowRegistry, assets, audit, former_parties, governance_poller,
+        handlers,
+        middleware::AuthMiddleware,
+        node_health,
+        peer_jobs::run_peer_listener,
+        peer_listener::{WorkflowTriggers, run_heartbeat},
+        peer_status,
+        peer_status::LastSeen,
+        reward_automation,
+    },
     workflow,
 };
 

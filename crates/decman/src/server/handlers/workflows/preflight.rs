@@ -284,6 +284,13 @@ async fn broadcast_simple_message(
 mod tests {
     use actix_web::http::StatusCode;
 
+    use super::{
+        super::{
+            runs::{mark_run_completed, mark_run_failed},
+            test_support::{health_reply, in_progress_run, insert_run, pid, state_on},
+        },
+        *,
+    };
     use crate::{
         consts::OWNER_ONLY_KICK,
         db::{
@@ -292,12 +299,6 @@ mod tests {
         },
         server::{types::WorkflowKind, workflow_exclusion::find_inprogress_run_for_party},
     };
-
-    use super::super::{
-        runs::{mark_run_completed, mark_run_failed},
-        test_support::{health_reply, in_progress_run, insert_run, pid, state_on},
-    };
-    use super::*;
 
     /// The invariant the completion ordering rests on: once a run row is
     /// terminal, the in-flight guard must not see it.

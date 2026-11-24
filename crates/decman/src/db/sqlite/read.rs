@@ -2,19 +2,19 @@
 
 use sqlx::SqlitePool;
 
-use crate::db::{
-    crypto,
-    rows::{
-        ChainAuditCacheRow, DecPartyContractRow, DecPartyIdentityRow, DecPartyOwnerRow,
-        DecPartyParticipantRow, DecPartyRow, FormerDecPartyRow, GovernanceAuditRow,
-        HandledInvitationRow, PartyCredentialsRow, PeerRow, PendingInvitationRow,
-        WorkflowArtifactRow, WorkflowRunRow,
-    },
-    schema::SchemaRead,
-};
 use crate::{
     canton_id::CantonId,
     config::{PartyCredentials, Peer},
+    db::{
+        crypto,
+        rows::{
+            ChainAuditCacheRow, DecPartyContractRow, DecPartyIdentityRow, DecPartyOwnerRow,
+            DecPartyParticipantRow, DecPartyRow, FormerDecPartyRow, GovernanceAuditRow,
+            HandledInvitationRow, PartyCredentialsRow, PeerRow, PendingInvitationRow,
+            WorkflowArtifactRow, WorkflowRunRow,
+        },
+        schema::SchemaRead,
+    },
     error::Result,
     server::{HandledInvitation, PendingInvitation, WorkflowKind, WorkflowRole, WorkflowRun},
 };

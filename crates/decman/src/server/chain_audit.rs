@@ -10,17 +10,16 @@ use decman_lib::catalog::lifecycle::{GovernanceLifecycleEvent, classify_choice a
 use serde_json::{Value as JsonValue, json};
 use sqlx::SqlitePool;
 
-use crate::{
-    canton_id::CantonId,
-    config::{NodeConfig, PackageConfig},
-    utils,
-};
-
 use super::{
     event_filters::{interface_filter, party_event_format, template_filter, wildcard_filter},
     ledger_paging::{FETCH_CHUNK, TransactionPage, fetch_transactions_page},
     package_inventory::{fetch_package_names, matching_names, package_name_prefix},
     types::{AuditScope, ChainAuditEntry},
+};
+use crate::{
+    canton_id::CantonId,
+    config::{NodeConfig, PackageConfig},
+    utils,
 };
 
 struct ChainTemplate {

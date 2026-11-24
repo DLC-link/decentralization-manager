@@ -2,6 +2,7 @@ use actix_web::{App, http::StatusCode, test};
 use serde_json::json;
 use sqlx::SqlitePool;
 
+use super::*;
 use crate::{
     canton_id::CantonId,
     db::MIGRATOR,
@@ -11,8 +12,6 @@ use crate::{
         party_replication::pipe::PipeBlock,
     },
 };
-
-use super::*;
 
 fn state(db: SqlitePool) -> web::Data<AppState> {
     let mut state = std::sync::Arc::try_unwrap(AppState::for_test_on(None, db).into_inner())

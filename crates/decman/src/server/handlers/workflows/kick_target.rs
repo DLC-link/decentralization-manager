@@ -281,10 +281,11 @@ pub(super) async fn cached_confirmation_threshold(
 
 #[cfg(test)]
 mod tests {
+    use super::{
+        super::test_support::{cache_party, host_row, pid},
+        *,
+    };
     use crate::db::MIGRATOR;
-
-    use super::super::test_support::{cache_party, host_row, pid};
-    use super::*;
 
     /// The coordinator signs the proposals, so it is a member of the party it
     /// is changing — but it is absent from its own `peers` table. A member set

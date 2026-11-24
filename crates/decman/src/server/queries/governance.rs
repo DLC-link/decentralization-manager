@@ -14,17 +14,16 @@ use crate::{
     canton_id::CantonId,
     config::{NodeConfig, PackageConfig},
     error::Result,
-    utils,
-};
-
-use crate::server::{
-    chain_audit::record_to_json,
-    event_filters::{interface_filter, party_event_format, template_filter},
-    ledger_paging::{AcsCursor, for_each_active_contract, page_active_contracts},
-    types::{
-        ActionType, DomainConfirmation, DomainGovernanceAction, GovernanceAction,
-        GovernanceConfirmation, GovernanceState, ProposalSummary,
+    server::{
+        chain_audit::record_to_json,
+        event_filters::{interface_filter, party_event_format, template_filter},
+        ledger_paging::{AcsCursor, for_each_active_contract, page_active_contracts},
+        types::{
+            ActionType, DomainConfirmation, DomainGovernanceAction, GovernanceAction,
+            GovernanceConfirmation, GovernanceState, ProposalSummary,
+        },
     },
+    utils,
 };
 
 // ============================================================================
@@ -580,8 +579,10 @@ pub async fn page_proposal_summaries(
 
 /// Compute a deterministic hash of an action for grouping confirmations
 fn compute_action_hash(action: &ActionType) -> String {
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
+    use std::{
+        collections::hash_map::DefaultHasher,
+        hash::{Hash, Hasher},
+    };
 
     // Serialize to JSON for deterministic representation
     let json = serde_json::to_string(action).unwrap_or_default();
@@ -593,11 +594,11 @@ fn compute_action_hash(action: &ActionType) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::super::test_values::*;
-    use super::*;
     use canton_proto_rs::com::daml::ledger::api::v2::{
         CreatedEvent, InterfaceView, Record, TextMap, Value, text_map, value,
     };
+
+    use super::{super::test_values::*, *};
 
     #[test]
     fn self_actions_count_only_executable_member_confirmations() -> Result {

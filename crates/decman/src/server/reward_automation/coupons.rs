@@ -6,14 +6,12 @@
 use canton_proto_rs::com::daml::ledger::api::v2::Record;
 use chrono::{DateTime, Utc};
 
+use super::ledger::{ContractFilter, Entity, Module, for_each_active_created};
 use crate::{
     canton_id::CantonId,
     config::{NodeConfig, PackageConfig},
+    server::record::{field_decimal, field_optional_is_none, field_party_id, field_time},
 };
-
-use crate::server::record::{field_decimal, field_optional_is_none, field_party_id, field_time};
-
-use super::ledger::{ContractFilter, Entity, Module, for_each_active_created};
 
 // ============================================================================
 // Unassigned reward coupons
@@ -196,11 +194,14 @@ pub(crate) fn chunk_size(max_creates: usize, beneficiary_count: usize) -> usize 
 
 #[cfg(test)]
 mod tests {
-    use super::super::test_support::{
-        ALICE, BOB, GOV, coupon, dt, field, numeric, party, record, timestamp, value,
-    };
-    use super::*;
     use canton_proto_rs::com::daml::ledger::api::v2::{Optional, value};
+
+    use super::{
+        super::test_support::{
+            ALICE, BOB, GOV, coupon, dt, field, numeric, party, record, timestamp, value,
+        },
+        *,
+    };
 
     fn optional_none() -> value::Sum {
         value::Sum::Optional(Box::new(Optional { value: None }))

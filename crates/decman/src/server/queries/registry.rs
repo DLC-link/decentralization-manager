@@ -6,21 +6,20 @@ use common::api::{
 };
 use decman_lib::framework::record::{field_party, field_text};
 
-use crate::{
-    canton_id::CantonId,
-    config::{NodeConfig, PackageConfig},
-    error::Result,
-};
-
 use super::templates::{
     TemplateId, fetch_by_template, provider_configuration_template,
     registrar_service_request_template, registrar_service_template,
 };
-use crate::server::{
-    record::{field_record, record_field},
-    types::{
-        BlockListShardInfo, InstrumentInfo, ProviderConfigurationInfo, RegistrarServiceInfo,
-        RegistrarServiceRequestInfo,
+use crate::{
+    canton_id::CantonId,
+    config::{NodeConfig, PackageConfig},
+    error::Result,
+    server::{
+        record::{field_record, record_field},
+        types::{
+            BlockListShardInfo, InstrumentInfo, ProviderConfigurationInfo, RegistrarServiceInfo,
+            RegistrarServiceRequestInfo,
+        },
     },
 };
 
@@ -335,9 +334,9 @@ fn credential_requirements(
 
 #[cfg(test)]
 mod tests {
-    use super::super::test_values::*;
-    use super::*;
     use canton_proto_rs::com::daml::ledger::api::v2::Value;
+
+    use super::{super::test_values::*, *};
 
     // ------------------------------------------------------------------------
     // extract_registrar_service_request_info

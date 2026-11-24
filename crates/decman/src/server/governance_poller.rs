@@ -11,14 +11,13 @@ use actix_web::web;
 use decman_lib::catalog::interpret;
 use prometheus::{GaugeVec, IntCounterVec, IntGaugeVec};
 
-use crate::canton_id::CantonId;
-
 use super::{
     AppState,
     handlers::{get_party_credentials, packages},
     ledger_paging::FETCH_CHUNK,
     queries::{GovernanceQueue, get_governance_confirmations, read_governance_state},
 };
+use crate::canton_id::CantonId;
 
 /// How often each served decparty's queue is read. An open approvals feed reads
 /// the same queue every 10 s, so this costs about a sixth of one viewer.

@@ -6,6 +6,14 @@ use actix_web::{HttpRequest, HttpResponse, Responder, get, post, web};
 use anyhow::Context;
 use sqlx::SqlitePool;
 
+use super::{
+    cancel::cancel_workflow_state,
+    invites::{InviteLabels, Recipients, invite_log, send_invites},
+    kick_target::cached_confirmation_threshold,
+    launch::{CoordinatorRequest, RunEnd, StatusOrder, launch_coordinator, run_log},
+    preflight::{claim_party_for_start, format_incompatible_peers, preflight_incompatible_peers},
+    runs::{kind_status, now_secs, register_and_persist},
+};
 use crate::{
     canton_id::CantonId,
     config::{NodeConfig, Peer},
@@ -23,15 +31,6 @@ use crate::{
         },
     },
     workflow::{self, AddPartyStep},
-};
-
-use super::{
-    cancel::cancel_workflow_state,
-    invites::{InviteLabels, Recipients, invite_log, send_invites},
-    kick_target::cached_confirmation_threshold,
-    launch::{CoordinatorRequest, RunEnd, StatusOrder, launch_coordinator, run_log},
-    preflight::{claim_party_for_start, format_incompatible_peers, preflight_incompatible_peers},
-    runs::{kind_status, now_secs, register_and_persist},
 };
 
 // ============================================================================
@@ -407,15 +406,17 @@ mod tests {
 
     use actix_web::{App, HttpMessage, http::StatusCode, test as actix_test};
 
+    use super::{
+        super::test_support::{
+            admin, cache_party, host_row, in_progress_run, insert_run, pid, state_on,
+            status_and_body,
+        },
+        *,
+    };
     use crate::db::{
         MIGRATOR,
         schema::{Commitable, SchemaWrite},
     };
-
-    use super::super::test_support::{
-        admin, cache_party, host_row, in_progress_run, insert_run, pid, state_on, status_and_body,
-    };
-    use super::*;
 
     async fn error_body(response: HttpResponse) -> anyhow::Result<String> {
         let body = actix_web::body::to_bytes(response.into_body())
@@ -643,14 +644,16 @@ mod start_add_party_tests {
     use actix_web::http::StatusCode;
     use serde_json::json;
 
-    use super::super::{
-        preflight::{format_incompatible_peers, preflight_incompatible_peers},
-        test_support::{
-            Answer, TestNode, break_table, cache_hosted_party, closed_port, in_progress_run,
-            insert_peers, insert_run, peer, pid, post_as, post_as_admin, test_node,
+    use super::{
+        super::{
+            preflight::{format_incompatible_peers, preflight_incompatible_peers},
+            test_support::{
+                Answer, TestNode, break_table, cache_hosted_party, closed_port, in_progress_run,
+                insert_peers, insert_run, peer, pid, post_as, post_as_admin, test_node,
+            },
         },
+        *,
     };
-    use super::*;
     use crate::db::MIGRATOR;
 
     type Result<T = ()> = anyhow::Result<T>;
@@ -903,8 +906,10 @@ mod plan_add_party_tests {
     //! Calls the pure add-party checks with members and peers, and pins each
     //! refusal text.
 
-    use super::super::test_support::{peer, pid};
-    use super::*;
+    use super::{
+        super::test_support::{peer, pid},
+        *,
+    };
 
     type Result<T = ()> = anyhow::Result<T>;
 

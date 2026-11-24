@@ -32,8 +32,10 @@ use crate::{
     canton_id::CantonId,
     config::{Network, NodeConfig},
     error::Result,
-    server::event_filters::{interface_filter, party_event_format, wildcard_filter},
-    server::record::record_field,
+    server::{
+        event_filters::{interface_filter, party_event_format, wildcard_filter},
+        record::record_field,
+    },
     utils,
 };
 

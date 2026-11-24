@@ -2,22 +2,24 @@
 
 use std::sync::Arc;
 
+use common::api::ContractDeploymentIntent;
 use sqlx::SqlitePool;
 use tokio::sync::{RwLock, mpsc};
 
-use crate::server::state::PeerChunkCache;
-use common::api::ContractDeploymentIntent;
-
-use crate::canton_id::CantonId;
-use crate::server::types::{
-    AddPartyInvitePayload, ChangeThresholdInvitePayload, ContractsInvitePayload, DarsInvitePayload,
-    InvitationType, KickInvitePayload, OnboardingInvitePayload, PendingInvitation,
-    RotateKeyInvitePayload, WorkflowProgress, WorkflowRole,
-};
-use crate::server::{PeerJob, WorkflowRegistry, refire_peer, workflow_exclusion};
 use crate::{
+    canton_id::CantonId,
     config::{NodeConfig, PartyCredentials},
     db::schema::{Commitable, SchemaRead, SchemaWrite},
+    server::{
+        PeerJob, WorkflowRegistry, refire_peer,
+        state::PeerChunkCache,
+        types::{
+            AddPartyInvitePayload, ChangeThresholdInvitePayload, ContractsInvitePayload,
+            DarsInvitePayload, InvitationType, KickInvitePayload, OnboardingInvitePayload,
+            PendingInvitation, RotateKeyInvitePayload, WorkflowProgress, WorkflowRole,
+        },
+        workflow_exclusion,
+    },
 };
 
 /// Workflow triggers shared across Noise server handlers
@@ -470,8 +472,10 @@ impl WorkflowTriggers {
 
 #[cfg(test)]
 mod retry_tests {
-    use super::super::replies::tests::serving_a_dar_to_a_peer::{dars_run, pid, save};
-    use super::*;
+    use super::{
+        super::replies::tests::serving_a_dar_to_a_peer::{dars_run, pid, save},
+        *,
+    };
     use crate::{
         db::MIGRATOR,
         server::{AppState, types::WorkflowKind},

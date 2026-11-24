@@ -2,13 +2,12 @@
 
 use actix_web::{HttpResponse, Responder, get, web};
 
-use crate::server::handlers::token_standard::GovernanceQuery;
+use super::credentials::{PartySession, packages};
 use crate::server::{
     AppState,
+    handlers::token_standard::GovernanceQuery,
     types::{ActiveCouponReassignmentDelegation, ErrorResponse, RewardStatusResponse},
 };
-
-use super::credentials::{PartySession, packages};
 
 /// Get the decparty's active CouponReassignmentDelegation contracts, newest first
 ///

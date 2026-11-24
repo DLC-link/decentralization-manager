@@ -2,15 +2,16 @@
 
 use sqlx::SqlitePool;
 
-use crate::db::sqlite::connect::MIGRATOR;
+use super::{fixtures::TEST_NS, runs::test_run};
 use crate::{
     canton_id::CantonId,
-    db::schema::{Commitable, SchemaRead, SchemaWrite},
+    db::{
+        schema::{Commitable, SchemaRead, SchemaWrite},
+        sqlite::connect::MIGRATOR,
+    },
     error::Result,
     server::WorkflowProgress,
 };
-
-use super::{fixtures::TEST_NS, runs::test_run};
 
 fn former(prefix: &str) -> CantonId {
     CantonId::parse(&format!("{prefix}::{TEST_NS}")).unwrap()

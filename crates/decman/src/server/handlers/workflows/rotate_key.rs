@@ -7,6 +7,16 @@ use anyhow::Context;
 use canton_proto_rs::com::digitalasset::canton::crypto::admin::v30::vault_service_client::VaultServiceClient;
 use sqlx::SqlitePool;
 
+use super::{
+    cancel::cancel_workflow_state,
+    invites::{InviteLabels, Recipients, invite_log, send_invites},
+    launch::{CoordinatorRequest, RunEnd, StatusOrder, launch_coordinator, run_log},
+    preflight::{
+        claim_party_for_start, format_incompatible_peers, incompatible_versions, lacking_feature,
+        probe_invitee_health,
+    },
+    runs::{kind_status, now_secs, register_and_persist},
+};
 use crate::{
     canton_id::{CantonId, Fingerprint},
     config::NodeConfig,
@@ -27,17 +37,6 @@ use crate::{
     signing::custody,
     utils,
     workflow::{self, RotateKeyStep},
-};
-
-use super::{
-    cancel::cancel_workflow_state,
-    invites::{InviteLabels, Recipients, invite_log, send_invites},
-    launch::{CoordinatorRequest, RunEnd, StatusOrder, launch_coordinator, run_log},
-    preflight::{
-        claim_party_for_start, format_incompatible_peers, incompatible_versions, lacking_feature,
-        probe_invitee_health,
-    },
-    runs::{kind_status, now_secs, register_and_persist},
 };
 
 // ============================================================================
@@ -452,6 +451,13 @@ mod tests {
 
     use actix_web::{App, HttpMessage, http::StatusCode, test as actix_test};
 
+    use super::{
+        super::{
+            preflight::InviteeHealth,
+            test_support::{cache_party, health_reply, host_row, pid},
+        },
+        *,
+    };
     use crate::{
         auth::Principal,
         consts::OWNER_ONLY_KICK,
@@ -461,12 +467,6 @@ mod tests {
             schema::{Commitable, SchemaWrite},
         },
     };
-
-    use super::super::{
-        preflight::InviteeHealth,
-        test_support::{cache_party, health_reply, host_row, pid},
-    };
-    use super::*;
 
     /// This build lists the rotation, so a peer on it passes the gate. A peer
     /// on an older build, or one that did not answer, blocks the start, and
@@ -685,11 +685,14 @@ mod start_rotate_key_tests {
     };
     use serde_json::json;
 
-    use super::super::test_support::{
-        Answer, TestNode, break_table, cache_hosted_party, closed_port, in_progress_run,
-        insert_peers, insert_run, peer, pid, post_as, post_as_admin, refuse_run_writes, test_node,
+    use super::{
+        super::test_support::{
+            Answer, TestNode, break_table, cache_hosted_party, closed_port, in_progress_run,
+            insert_peers, insert_run, peer, pid, post_as, post_as_admin, refuse_run_writes,
+            test_node,
+        },
+        *,
     };
-    use super::*;
     use crate::{
         db::MIGRATOR,
         signing::{

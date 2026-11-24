@@ -239,9 +239,11 @@ pub(super) async fn with_cached_owner_claims(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db::MIGRATOR;
     use crate::{
-        db::rows::{DecPartyParticipantRow, DecPartyRow},
+        db::{
+            MIGRATOR,
+            rows::{DecPartyParticipantRow, DecPartyRow},
+        },
         server::types::Permission,
     };
 

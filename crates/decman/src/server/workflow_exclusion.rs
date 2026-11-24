@@ -1,8 +1,7 @@
 use sqlx::SqlitePool;
 
-use crate::{canton_id::CantonId, db::schema::SchemaRead, error::Result};
-
 use super::types::{StartClaim, WorkflowKind, WorkflowRegistry};
+use crate::{canton_id::CantonId, db::schema::SchemaRead, error::Result};
 
 #[derive(Debug, thiserror::Error)]
 pub(super) enum PartyStartRefusal {

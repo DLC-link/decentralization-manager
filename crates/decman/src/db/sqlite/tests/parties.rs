@@ -2,7 +2,10 @@
 
 use sqlx::SqlitePool;
 
-use crate::db::sqlite::connect::MIGRATOR;
+use super::{
+    audit::test_party_id,
+    fixtures::{TEST_NS, test_dec_party},
+};
 use crate::{
     canton_id::{CantonId, Fingerprint},
     db::{
@@ -11,13 +14,9 @@ use crate::{
             OwnerKeyRefusal,
         },
         schema::{Commitable, SchemaRead, SchemaWrite},
+        sqlite::connect::MIGRATOR,
     },
     error::Result,
-};
-
-use super::{
-    audit::test_party_id,
-    fixtures::{TEST_NS, test_dec_party},
 };
 
 // ====================================================================

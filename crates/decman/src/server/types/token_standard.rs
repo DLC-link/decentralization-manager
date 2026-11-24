@@ -1,10 +1,10 @@
 //! Token-standard contract views.
 
 use canton_common::decimal::DamlDecimal;
+use decman_lib::catalog::types::BillingParams;
 use serde::Serialize;
 
 use crate::canton_id::CantonId;
-use decman_lib::catalog::types::BillingParams;
 
 /// An open `TransferInstruction` whose `receiver` is this party. Includes
 /// offers waiting on an internal workflow (admin / registrar) so the dropdown
