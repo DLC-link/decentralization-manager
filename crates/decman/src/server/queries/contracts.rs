@@ -2,6 +2,7 @@
 
 use std::{collections::HashMap, future::Future};
 
+use base64::Engine;
 use canton_proto_rs::com::{
     daml::ledger::api::v2::{
         CreatedEvent, Identifier,
@@ -382,8 +383,6 @@ pub async fn query_contracts_by_template(
     token: Option<String>,
     params: &ContractQueryParams,
 ) -> Result<Vec<ContractWithBlob>> {
-    use base64::Engine;
-
     let identifier = Identifier {
         package_id: params.package_id.clone(),
         module_name: params.module_name.clone(),
@@ -422,6 +421,8 @@ pub async fn query_contracts_by_template(
 
 #[cfg(test)]
 mod tests {
+    use std::cmp::Ordering;
+
     use canton_proto_rs::com::daml::ledger::api::v2::{
         InterfaceView, List, Record, RecordField, Value,
         admin::{ObjectMeta, PartyDetails},
@@ -490,7 +491,6 @@ mod tests {
 
     #[test]
     fn compare_versions_handles_numeric_segments() {
-        use std::cmp::Ordering;
         assert_eq!(compare_versions("0.1.18", "0.1.7"), Ordering::Greater);
         assert_eq!(compare_versions("1.0.0", "0.99.99"), Ordering::Greater);
         assert_eq!(compare_versions("1.0.0", "1.0.0"), Ordering::Equal);

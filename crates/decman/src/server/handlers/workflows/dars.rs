@@ -422,7 +422,10 @@ mod tests {
         super::test_support::{admin, pid, state_on},
         *,
     };
-    use crate::db::{MIGRATOR, schema::SchemaRead};
+    use crate::{
+        db::{MIGRATOR, schema::SchemaRead},
+        noise::{CHUNK_SIZE, check_chunked_metadata},
+    };
 
     fn dar(filename: &str, len: usize) -> DarFile {
         DarFile {
@@ -585,8 +588,6 @@ mod tests {
     /// fail after it accepts, which is the fault this check prevents.
     #[test]
     fn the_coordinator_refuses_exactly_what_a_peer_refuses() -> anyhow::Result<()> {
-        use crate::noise::{CHUNK_SIZE, check_chunked_metadata};
-
         for bundle_len in [MAX_CHUNKED_TOTAL_SIZE, MAX_CHUNKED_TOTAL_SIZE + 1] {
             let files = three_dars_of_bundle(bundle_len);
             let bundle = bundle_of(&files)?;

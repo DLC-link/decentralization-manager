@@ -641,6 +641,11 @@ async fn read_oldest_expiry(
 mod tests {
     use std::sync::Arc;
 
+    use wiremock::{
+        Mock, MockServer, ResponseTemplate,
+        matchers::{method, path_regex},
+    };
+
     use super::{
         super::test_support::{ALICE, BOB, CAROL, DAVE, EVE, GOV, dt},
         *,
@@ -789,11 +794,6 @@ mod tests {
     /// the one this pass makes.
     #[tokio::test]
     async fn a_failed_token_fetch_is_its_own_outcome() -> anyhow::Result<()> {
-        use wiremock::{
-            Mock, MockServer, ResponseTemplate,
-            matchers::{method, path_regex},
-        };
-
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path_regex(r".*/token$"))

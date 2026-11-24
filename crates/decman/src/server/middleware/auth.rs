@@ -398,7 +398,27 @@ fn is_always_public(path: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use std::{
+        collections::{HashMap, HashSet},
+        sync::Arc,
+    };
+
+    use actix_web::{
+        App, Responder, get,
+        http::StatusCode,
+        put,
+        test::{self, TestRequest},
+        web::Data,
+    };
+    use sqlx::SqlitePool;
+    use tokio::sync::{Mutex, RwLock};
+
     use super::*;
+    use crate::{
+        auth::{JwtValidator, MockValidator, TokenValidator},
+        config::{NodeConfig, PartyCredentials},
+        server::AppState,
+    };
 
     #[test]
     fn spa_entry_is_public() {
@@ -474,27 +494,6 @@ mod tests {
     // circuit, validator success/failure, header-parsing edge cases, and
     // concurrent-bootstrap rejection.
     // ------------------------------------------------------------------
-
-    use std::{
-        collections::{HashMap, HashSet},
-        sync::Arc,
-    };
-
-    use actix_web::{
-        App, Responder, get,
-        http::StatusCode,
-        put,
-        test::{self, TestRequest},
-        web::Data,
-    };
-    use sqlx::SqlitePool;
-    use tokio::sync::{Mutex, RwLock};
-
-    use crate::{
-        auth::{JwtValidator, MockValidator, TokenValidator},
-        config::{NodeConfig, PartyCredentials},
-        server::AppState,
-    };
 
     /// Stub handler for any path — returns 200 with the matched path so the
     /// test can confirm the middleware passed the request through.

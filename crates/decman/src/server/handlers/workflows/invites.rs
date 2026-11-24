@@ -299,10 +299,17 @@ mod tests {
 
     use super::{
         super::{
-            add_party::add_party_invite, change_threshold::change_threshold_invite,
-            contracts::contracts_invite, dars::dars_invite, kick::kick_invite,
-            kick_signers::KickSigners, onboarding::onboarding_invite,
+            add_party::add_party_invite,
+            change_threshold::change_threshold_invite,
+            contracts::contracts_invite,
+            dars::dars_invite,
+            kick::kick_invite,
+            kick_signers::KickSigners,
+            onboarding::onboarding_invite,
             rotate_key::rotate_key_invite,
+            test_support::{
+                CapturedLogs, assert_lines, closed_port, insert_peers, peer, pid, test_node,
+            },
         },
         *,
     };
@@ -512,8 +519,6 @@ mod tests {
     /// succeeds, for every kind of recipient list.
     #[sqlx::test(migrator = "crate::db::MIGRATOR")]
     async fn unreachable_and_unknown_peers_are_skipped(pool: SqlitePool) -> anyhow::Result<()> {
-        use super::super::test_support::{closed_port, insert_peers, peer, pid, test_node};
-
         let (me, p2, p3, p4) = (pid(1)?, pid(2)?, pid(3)?, pid(4)?);
         let port = closed_port()?;
         insert_peers(&pool, &[peer(&p2, port, true), peer(&p3, port, false)]).await?;
@@ -558,10 +563,6 @@ mod tests {
     /// empty key fails to parse).
     #[sqlx::test(migrator = "crate::db::MIGRATOR")]
     async fn invite_lines_keep_the_callers_target_and_text(pool: SqlitePool) -> anyhow::Result<()> {
-        use super::super::test_support::{
-            CapturedLogs, assert_lines, closed_port, insert_peers, peer, pid, test_node,
-        };
-
         let (me, p2, p3, p4, p5) = (pid(1)?, pid(2)?, pid(3)?, pid(4)?, pid(5)?);
         let port = closed_port()?;
         let mut bad_key = peer(&p5, port, false);
