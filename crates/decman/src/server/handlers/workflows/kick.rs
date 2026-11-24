@@ -26,7 +26,7 @@ use crate::{
 };
 
 use super::{
-    invites::{InviteLabels, Recipients, send_invites},
+    invites::{InviteLabels, Recipients, invite_log, send_invites},
     kick_signers::{
         KickSigners, check_kick_survivor_keys, kick_key_adoption_refusal, kick_key_check_failure,
         kick_quorum_refusal, kick_signers,
@@ -35,7 +35,7 @@ use super::{
         cached_confirmation_threshold, cached_namespace_threshold, kick_threshold_bound,
         party_member_count, resolve_kick_target,
     },
-    launch::{CoordinatorRequest, StatusOrder, launch_coordinator},
+    launch::{CoordinatorRequest, RunEnd, StatusOrder, launch_coordinator, run_log},
     preflight::{
         claim_party_for_start, format_incompatible_peers, format_peers_lacking_owner_only_kick,
         incompatible_versions, lacking_feature, probe_invitee_health,
@@ -359,8 +359,11 @@ async fn start_kick_run(
         CoordinatorRequest::Kick(kick_config),
         None,
         invites,
-        StatusOrder::MemoryFirst,
-        None,
+        RunEnd {
+            order: StatusOrder::MemoryFirst,
+            log: run_log!(),
+            after_success: None,
+        },
     )
     .await;
 
@@ -445,6 +448,7 @@ async fn send_kick_invites(
             address: true,
             empty_key_warning: true,
         },
+        invite_log!(),
         || {
             let invite_message = kick_invite(kick_config, signers, config.participant_id())?;
             tracing::info!(

@@ -31,8 +31,8 @@ use crate::{
 
 use super::{
     cancel::cancel_workflow_state,
-    invites::{InviteLabels, Recipients, send_invites},
-    launch::{CoordinatorRequest, StatusOrder, launch_coordinator},
+    invites::{InviteLabels, Recipients, invite_log, send_invites},
+    launch::{CoordinatorRequest, RunEnd, StatusOrder, launch_coordinator, run_log},
     preflight::{
         claim_party_for_start, format_incompatible_peers, incompatible_versions, lacking_feature,
         probe_invitee_health,
@@ -209,8 +209,11 @@ async fn start_rotate_key_run(
         CoordinatorRequest::RotateKey(rotate_config),
         None,
         invites,
-        StatusOrder::RowFirstLockingEachAlone,
-        None,
+        RunEnd {
+            order: StatusOrder::RowFirstLockingEachAlone,
+            log: run_log!(),
+            after_success: None,
+        },
     )
     .await;
 
@@ -407,6 +410,7 @@ async fn send_rotate_key_invites(
             address: false,
             empty_key_warning: false,
         },
+        invite_log!(),
         || rotate_key_invite(config.participant_id(), rotate_config, invitees),
     )
     .await

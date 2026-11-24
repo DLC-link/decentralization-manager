@@ -26,8 +26,8 @@ use crate::{
 
 use super::{
     super::parties::resolve_owner_keys_from_peers,
-    invites::{InviteLabels, Recipients, send_invites},
-    launch::{CoordinatorRequest, StatusOrder, launch_coordinator},
+    invites::{InviteLabels, Recipients, invite_log, send_invites},
+    launch::{CoordinatorRequest, RunEnd, StatusOrder, launch_coordinator, run_log},
     preflight::{claim_party_for_start, format_incompatible_peers, preflight_incompatible_peers},
     runs::{kind_status, now_secs, register_and_persist},
 };
@@ -230,8 +230,11 @@ async fn start_contracts_run(
         CoordinatorRequest::Contracts(contracts_config),
         workflow_auth,
         invites,
-        StatusOrder::RowFirst,
-        Some(refresh),
+        RunEnd {
+            order: StatusOrder::RowFirst,
+            log: run_log!(),
+            after_success: Some(refresh),
+        },
     )
     .await;
 
@@ -301,6 +304,7 @@ async fn send_contracts_invites(
             address: true,
             empty_key_warning: true,
         },
+        invite_log!(),
         || contracts_invite(contracts_config, invitees),
     )
     .await

@@ -9,7 +9,7 @@ use crate::{
     config::{NetworkConfig, NodeConfig, Peer},
     db::schema::SchemaRead,
     error::Result,
-    noise::{Message, NoiseKeypair, parse_public_key, send_noise_message},
+    noise::{Message, NoiseError, NoiseKeypair, parse_public_key, send_noise_message},
 };
 
 use super::onboarding::interpret_invite_reply;
@@ -45,15 +45,124 @@ pub(super) struct InviteLabels {
     pub(super) empty_key_warning: bool,
 }
 
+/// One log line of an invite send. [`send_invites`] hands each line to the
+/// function that [`invite_log!`] builds in the workflow's module, so the
+/// line keeps that module as its tracing target.
+pub(super) enum InviteLog<'a> {
+    /// A configured peer is checked against the kick's recipients.
+    CheckingPeer {
+        peer: &'a CantonId,
+        self_match: bool,
+        kicked_match: bool,
+    },
+    /// The peer is this node.
+    SkippingSelf { peer: &'a CantonId },
+    /// The peer is the member being kicked.
+    SkippingKicked { peer: &'a CantonId },
+    /// A listed peer is missing from the peer table.
+    NotInPeerTable { peer: &'a CantonId },
+    /// The peer has no Noise key; `skip` is [`InviteLabels::skip`].
+    NoPublicKey {
+        skip: &'static str,
+        peer: &'a CantonId,
+    },
+    /// The peer's Noise key does not parse.
+    InvalidPublicKey {
+        skip: &'static str,
+        peer: &'a CantonId,
+        error: &'a NoiseError,
+    },
+    /// The invite goes out; `kind` is [`InviteLabels::kind`], and `address`
+    /// is [`InviteLabels::address`].
+    Sending {
+        kind: &'static str,
+        peer: &'a Peer,
+        address: bool,
+    },
+    /// The peer could not be reached; `failed` is [`InviteLabels::failed`].
+    SendFailed {
+        failed: &'static str,
+        peer: &'a CantonId,
+        error: &'a NoiseError,
+    },
+}
+
+/// Build the function that writes [`send_invites`]' [`InviteLog`] lines.
+/// The function expands where the macro is called, so each line has the
+/// calling module as its tracing target.
+macro_rules! invite_log {
+    () => {
+        |line: $crate::server::handlers::workflows::invites::InviteLog<'_>| {
+            use $crate::server::handlers::workflows::invites::InviteLog;
+            match line {
+                InviteLog::CheckingPeer {
+                    peer,
+                    self_match,
+                    kicked_match,
+                } => ::tracing::debug!(
+                    "Checking peer {}: self_match={}, kicked_match={}",
+                    peer,
+                    self_match,
+                    kicked_match
+                ),
+                InviteLog::SkippingSelf { peer } => {
+                    ::tracing::debug!("Skipping {} - this is self", peer)
+                }
+                InviteLog::SkippingKicked { peer } => {
+                    ::tracing::info!("Skipping invite to {} - they are being kicked", peer)
+                }
+                InviteLog::NotInPeerTable { peer } => ::tracing::warn!(
+                    "Skipping invite to {} - peer not found in network config",
+                    peer
+                ),
+                InviteLog::NoPublicKey { skip, peer } => ::tracing::warn!(
+                    "Skipping {}invite to {} - no public key configured",
+                    skip,
+                    peer
+                ),
+                InviteLog::InvalidPublicKey { skip, peer, error } => ::tracing::warn!(
+                    "Skipping {}invite to {} - invalid public key: {}",
+                    skip,
+                    peer,
+                    error
+                ),
+                InviteLog::Sending {
+                    kind,
+                    peer,
+                    address: true,
+                } => ::tracing::info!(
+                    "Sending {} invite to {} at {}:{}",
+                    kind,
+                    peer.participant_id,
+                    peer.address,
+                    peer.port
+                ),
+                InviteLog::Sending {
+                    kind,
+                    peer,
+                    address: false,
+                } => ::tracing::info!("Sending {} invite to {}", kind, peer.participant_id),
+                InviteLog::SendFailed {
+                    failed,
+                    peer,
+                    error,
+                } => ::tracing::error!("Failed to send {}invite to {}: {}", failed, peer, error),
+            }
+        }
+    };
+}
+pub(super) use invite_log;
+
 /// Load the peers and this node's Noise key, build the invite with
 /// `message`, and send it to each recipient. A peer that refuses the invite
 /// fails the whole send; a peer that cannot be reached is logged and
-/// skipped.
+/// skipped. `log` writes the log lines; build it with [`invite_log!`].
 pub(super) async fn send_invites(
     config: &NodeConfig,
     db: &SqlitePool,
     recipients: Recipients<'_>,
     labels: InviteLabels,
+    log: fn(InviteLog<'_>),
     message: impl FnOnce() -> Result<Message>,
 ) -> Result {
     let network_config = NetworkConfig::from_peers(db.get_all_peers().await?);
@@ -70,19 +179,18 @@ pub(super) async fn send_invites(
                 {
                     continue;
                 }
-                send_invite(config, &keypair, peer, &invite_message, &labels).await?;
+                send_invite(config, &keypair, peer, &invite_message, &labels, log).await?;
             }
         }
         Recipients::KickSurvivors { invitees, kicked } => {
             let current_participant_id = config.participant_id();
             let invitee_set: HashSet<&CantonId> = invitees.iter().collect();
             for peer in &network_config.peers {
-                tracing::debug!(
-                    "Checking peer {}: self_match={}, kicked_match={}",
-                    peer.participant_id,
-                    peer.participant_id == *current_participant_id,
-                    Some(&peer.participant_id) == kicked
-                );
+                log(InviteLog::CheckingPeer {
+                    peer: &peer.participant_id,
+                    self_match: peer.participant_id == *current_participant_id,
+                    kicked_match: Some(&peer.participant_id) == kicked,
+                });
 
                 // Only invite this run's surviving party members (see start_kick). The
                 // self/kicked skips below are now subsumed by this but kept for clarity.
@@ -92,20 +200,21 @@ pub(super) async fn send_invites(
 
                 // Skip self
                 if peer.participant_id == *current_participant_id {
-                    tracing::debug!("Skipping {} - this is self", peer.participant_id);
+                    log(InviteLog::SkippingSelf {
+                        peer: &peer.participant_id,
+                    });
                     continue;
                 }
 
                 // Skip the peer being kicked (they won't participate in the kick workflow)
                 if Some(&peer.participant_id) == kicked {
-                    tracing::info!(
-                        "Skipping invite to {} - they are being kicked",
-                        peer.participant_id
-                    );
+                    log(InviteLog::SkippingKicked {
+                        peer: &peer.participant_id,
+                    });
                     continue;
                 }
 
-                send_invite(config, &keypair, peer, &invite_message, &labels).await?;
+                send_invite(config, &keypair, peer, &invite_message, &labels, log).await?;
             }
         }
         Recipients::Listed(peer_ids) => {
@@ -115,12 +224,10 @@ pub(super) async fn send_invites(
                     .iter()
                     .find(|p| &p.participant_id == peer_id)
                 else {
-                    tracing::warn!(
-                        "Skipping invite to {peer_id} - peer not found in network config"
-                    );
+                    log(InviteLog::NotInPeerTable { peer: peer_id });
                     continue;
                 };
-                send_invite(config, &keypair, peer, &invite_message, &labels).await?;
+                send_invite(config, &keypair, peer, &invite_message, &labels, log).await?;
             }
         }
     }
@@ -136,24 +243,24 @@ async fn send_invite(
     peer: &Peer,
     message: &Message,
     labels: &InviteLabels,
+    log: fn(InviteLog<'_>),
 ) -> Result {
     if labels.empty_key_warning && peer.public_key.is_empty() {
-        tracing::warn!(
-            "Skipping {}invite to {} - no public key configured",
-            labels.skip,
-            peer.participant_id
-        );
+        log(InviteLog::NoPublicKey {
+            skip: labels.skip,
+            peer: &peer.participant_id,
+        });
         return Ok(());
     }
 
     let peer_pub_key = match parse_public_key(&peer.public_key) {
         Ok(pk) => pk,
         Err(e) => {
-            tracing::warn!(
-                "Skipping {}invite to {} - invalid public key: {e}",
-                labels.skip,
-                peer.participant_id
-            );
+            log(InviteLog::InvalidPublicKey {
+                skip: labels.skip,
+                peer: &peer.participant_id,
+                error: &e,
+            });
             return Ok(());
         }
     };
@@ -162,28 +269,22 @@ async fn send_invite(
     // Use participant_id as identity (must match what server expects in peer_keys lookup)
     let identity = config.participant_id().to_string();
 
-    if labels.address {
-        tracing::info!(
-            "Sending {} invite to {} at {}:{}",
-            labels.kind,
-            peer.participant_id,
-            peer.address,
-            peer.port
-        );
-    } else {
-        tracing::info!("Sending {} invite to {}", labels.kind, peer.participant_id);
-    }
+    log(InviteLog::Sending {
+        kind: labels.kind,
+        peer,
+        address: labels.address,
+    });
 
     match send_noise_message(&peer.address, peer.port, &psk, identity.as_bytes(), message).await {
         Ok(response) => {
             interpret_invite_reply(&peer.participant_id, labels.kind, &response)?;
         }
         Err(e) => {
-            tracing::error!(
-                "Failed to send {}invite to {}: {e}",
-                labels.failed,
-                peer.participant_id
-            );
+            log(InviteLog::SendFailed {
+                failed: labels.failed,
+                peer: &peer.participant_id,
+                error: &e,
+            });
         }
     }
 
@@ -439,6 +540,7 @@ mod tests {
                     &pool,
                     recipients,
                     labels(detailed),
+                    invite_log!(),
                     invite,
                 )
                 .await?;
@@ -447,11 +549,13 @@ mod tests {
         Ok(())
     }
 
-    /// Every line `send_invites` writes, in order, with its level, target
-    /// and text: each recipient list, and both label sets (rotate-key's
-    /// send line has no address, and its empty key fails to parse).
+    /// `send_invites` writes each log line through the caller's
+    /// `invite_log!`, so the line has the caller's module as its target.
+    /// Each line, in order, keeps its level and text: each recipient list,
+    /// and both label sets (rotate-key's send line has no address, and its
+    /// empty key fails to parse).
     #[sqlx::test(migrator = "crate::db::MIGRATOR")]
-    async fn each_invite_line_keeps_its_level_and_text(pool: SqlitePool) -> anyhow::Result<()> {
+    async fn invite_lines_keep_the_callers_target_and_text(pool: SqlitePool) -> anyhow::Result<()> {
         use super::super::test_support::{
             CapturedLogs, assert_lines, closed_port, insert_peers, peer, pid, test_node,
         };
@@ -488,6 +592,7 @@ mod tests {
             &pool,
             Recipients::Listed(&listed),
             labels("add-party", "add-party ", true),
+            invite_log!(),
             invite,
         )
         .await?;
@@ -503,6 +608,7 @@ mod tests {
                 failed: "kick ",
                 ..labels("kick", "", true)
             },
+            invite_log!(),
             invite,
         )
         .await?;
@@ -512,12 +618,13 @@ mod tests {
             &pool,
             Recipients::Members(&members),
             labels("rotate-key", "rotate-key ", false),
+            invite_log!(),
             invite,
         )
         .await?;
 
-        // The lines name the module that holds `send_invites`.
-        let here = module_path!().trim_end_matches("::tests");
+        // The lines name the module that called `send_invites`.
+        let here = module_path!();
         assert_lines(
             &logs.lines_at(here)?,
             &[
