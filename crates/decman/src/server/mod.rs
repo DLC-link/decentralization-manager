@@ -979,20 +979,24 @@ impl WorkflowTriggers {
                     continue;
                 }
             };
-            if let Err(e) = tx
-                .set_workflow_run_status(
-                    &run.instance_name,
-                    WorkflowProgress::InProgress,
-                    None,
-                    now,
-                )
-                .await
-            {
-                tracing::warn!(
-                    "retry_peer_runs_from: status flip failed for {}: {e}",
-                    run.instance_name
-                );
-                continue;
+            // Conditional on Failed: a cancel that landed after the read above
+            // keeps its status, and so does a retry that another request won.
+            match tx.reopen_failed_workflow_run(&run.instance_name, now).await {
+                Ok(true) => {}
+                Ok(false) => {
+                    tracing::info!(
+                        "retry_peer_runs_from: {} is no longer Failed; not re-firing it",
+                        run.instance_name
+                    );
+                    continue;
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        "retry_peer_runs_from: status flip failed for {}: {e}",
+                        run.instance_name
+                    );
+                    continue;
+                }
             }
             if let Err(e) = Commitable::commit(tx).await {
                 tracing::warn!(
@@ -2562,23 +2566,33 @@ async fn finalize_peer_run(
     } else {
         WorkflowProgress::Failed
     };
-    // The first terminal status wins. A peer run that the operator cancelled
-    // stays Cancelled, so a retry cannot restart it.
-    match tx
-        .finish_workflow_run(instance_name, status, error_msg.as_deref(), now)
+    // A task that ends well keeps a run that its coordinator cancelled as
+    // Cancelled: the first terminal status wins. A task that fails still
+    // records Failed, as before. A coordinator retry reopens only Failed peer
+    // rows, so a peer that a decline's teardown cancelled can rejoin the retry.
+    if success {
+        match tx
+            .finish_workflow_run(instance_name, status, error_msg.as_deref(), now)
+            .await
+        {
+            Ok(true) => {}
+            Ok(false) => {
+                tracing::info!(
+                    "finalize_peer_run: {instance_name} already has a terminal status; keeping it"
+                );
+                return;
+            }
+            Err(e) => {
+                tracing::warn!("finalize_peer_run: update failed: {e}");
+                return;
+            }
+        }
+    } else if let Err(e) = tx
+        .set_workflow_run_status(instance_name, status, error_msg.as_deref(), now)
         .await
     {
-        Ok(true) => {}
-        Ok(false) => {
-            tracing::info!(
-                "finalize_peer_run: {instance_name} already has a terminal status; keeping it"
-            );
-            return;
-        }
-        Err(e) => {
-            tracing::warn!("finalize_peer_run: update failed: {e}");
-            return;
-        }
+        tracing::warn!("finalize_peer_run: update failed: {e}");
+        return;
     }
     if let Err(e) = Commitable::commit(tx).await {
         tracing::warn!("finalize_peer_run: commit failed: {e}");
@@ -3036,18 +3050,18 @@ async fn peer_payload_response(
 mod tests {
     use super::{Network, ensure_insecure_allowed};
 
-    /// A peer run that the operator cancelled stays Cancelled when its task
-    /// ends, whatever the task returns. Only a run that is still in progress
-    /// takes the task's outcome.
+    /// A peer run that its coordinator cancelled stays Cancelled when its task
+    /// ends well. A task that fails still records Failed, so a coordinator
+    /// retry can restart the peer. A run in progress takes the task's outcome.
     #[sqlx::test(migrator = "crate::db::MIGRATOR")]
-    async fn a_finished_peer_task_keeps_a_cancelled_run_cancelled(
+    async fn a_peer_task_that_ends_well_keeps_a_cancelled_run_cancelled(
         pool: sqlx::SqlitePool,
     ) -> crate::error::Result {
         use crate::server::WorkflowProgress;
 
         for (start, success, expected) in [
             ("cancelled", true, WorkflowProgress::Cancelled),
-            ("cancelled", false, WorkflowProgress::Cancelled),
+            ("cancelled", false, WorkflowProgress::Failed),
             ("inprogress", true, WorkflowProgress::Completed),
             ("inprogress", false, WorkflowProgress::Failed),
         ] {

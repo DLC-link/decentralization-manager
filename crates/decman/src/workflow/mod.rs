@@ -308,15 +308,14 @@ pub(crate) async fn ensure_run_in_progress(db: &SqlitePool, instance_name: &str)
 }
 
 /// Whether this node's own row for a peer run says `Cancelled`. A missing row
-/// or a failed read answers no, because only the operator's cancel stops a peer.
-pub(crate) async fn peer_run_is_cancelled(db: &SqlitePool, instance_name: &str) -> bool {
-    match SchemaRead::get_workflow_run(db, instance_name).await {
-        Ok(run) => run.is_some_and(|run| run.status == WorkflowProgress::Cancelled),
-        Err(e) => {
-            tracing::warn!("Could not read peer run {instance_name} to check for a cancel: {e:#}");
-            false
-        }
-    }
+/// answers no. Only a coordinator's `CancelInvite` sets this status on a peer.
+///
+/// # Errors
+///
+/// Errors when the row cannot be read.
+pub(crate) async fn peer_run_is_cancelled(db: &SqlitePool, instance_name: &str) -> Result<bool> {
+    let run = SchemaRead::get_workflow_run(db, instance_name).await?;
+    Ok(run.is_some_and(|run| run.status == WorkflowProgress::Cancelled))
 }
 
 /// Run a coordinator topology write for `instance`, if its run is still in
@@ -498,24 +497,33 @@ async fn run_peer(
         let command = message.msg_type;
         let payload = message.payload;
 
-        // A cancelled peer run stops here. The coordinator can keep asking for
-        // signatures and topology writes after its own cancel, and this node's
-        // operator has withdrawn consent for them. `Wait` and `Disconnect`
-        // change nothing.
-        if !matches!(command, MessageType::Wait | MessageType::Disconnect)
-            && peer_run_is_cancelled(&db, &instance_name).await
-        {
-            tracing::info!(
-                "Peer run {instance_name} is cancelled; ignoring {command:?} and stopping"
-            );
-            break;
-        }
-
         // Keep every failure path on the same counter and backoff policy.
         macro_rules! fail_step {
             ($($reason:tt)*) => {
                 retry_peer_step(&mut consecutive_step_failures, command, format!($($reason)*)).await?
             };
+        }
+
+        // A cancelled peer run stops here. The coordinator can keep asking for
+        // signatures and topology writes after its own cancel or its teardown
+        // after a decline, and this node must not sign for a run that the
+        // coordinator cancelled. `Wait` and `Disconnect` change nothing. A
+        // status that cannot be read counts as a failed step, so the command
+        // does not run on a guess.
+        if !matches!(command, MessageType::Wait | MessageType::Disconnect) {
+            match peer_run_is_cancelled(&db, &instance_name).await {
+                Ok(true) => {
+                    tracing::info!(
+                        "Peer run {instance_name} is cancelled; ignoring {command:?} and stopping"
+                    );
+                    break;
+                }
+                Ok(false) => {}
+                Err(e) => {
+                    fail_step!("Could not read the run status before {command:?}: {e:#}");
+                    continue;
+                }
+            }
         }
 
         // Only commands that belong to the accepted workflow kind are
@@ -563,7 +571,10 @@ async fn run_peer(
                 if let Err(e) = retired {
                     // A cancel during a retry backoff is not a step failure:
                     // counting it would end the run as Failed.
-                    if peer_run_is_cancelled(&db, &instance_name).await {
+                    if peer_run_is_cancelled(&db, &instance_name)
+                        .await
+                        .unwrap_or(false)
+                    {
                         tracing::info!(
                             "Peer run {instance_name} was cancelled during legacy key retirement"
                         );

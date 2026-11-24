@@ -155,9 +155,10 @@ rotate-key record step. The wait for the other members to finish the retirement
 is not a write, so a cancel works then too. The proposal-creation steps and the
 DAR upload are not covered, because they write outside this lock.
 
-A peer run that the operator cancelled stops at the next command from its
-coordinator and keeps the status Cancelled. A retry reopens only a run that is
-still Failed.
+A peer run that its coordinator cancelled stops at the next command from that
+coordinator. The coordinator sends the cancel on an operator cancel, and after
+another peer declines. A retry reopens only a run that is still Failed, on the
+coordinator and on its peers.
 
 ## Coordinator / Peer Model
 

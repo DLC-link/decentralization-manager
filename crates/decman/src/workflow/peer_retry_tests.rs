@@ -467,7 +467,7 @@ async fn a_peer_run_not_in_progress_signs_no_legacy_mapping_removal() -> Result 
     Ok(())
 }
 
-/// A peer whose operator cancelled the run stops at the next command, whatever
+/// A peer whose coordinator cancelled the run stops at the next command, whatever
 /// it asks for. The peer signs nothing and does not count the command as a
 /// failed step, so its run cannot end as Failed and be retried.
 #[tokio::test]
@@ -533,6 +533,7 @@ async fn a_peer_cancelled_during_a_retry_backoff_signs_nothing_more() -> Result 
     // The cancel ends the run quietly. A failure would count against the retry
     // budget and finish the run as Failed.
     run.result?;
+    assert_eq!(run.polls.len(), 1, "the peer polled again after its cancel");
     assert!(
         run.reports.is_empty(),
         "a cancelled peer reported a failure"
