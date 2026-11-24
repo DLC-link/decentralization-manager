@@ -21,6 +21,7 @@ use crate::{
     canton_id::{CantonId, Fingerprint},
     config::NodeConfig,
     error::Result,
+    signing::key_store::KeyStore,
     utils::{self, compute_fingerprint},
     workflow,
 };
@@ -219,7 +220,7 @@ async fn generated_party_keys(
     config: &NodeConfig,
     db: &SqlitePool,
 ) -> Result<Vec<(String, Fingerprint)>> {
-    match crate::signing::key_store::KeyStore::open(config, db.clone()).await? {
+    match KeyStore::open(config, db.clone()).await? {
         Some(store) => store.generated_keys().await,
         None => Ok(Vec::new()),
     }

@@ -553,12 +553,16 @@ fn decode_participant_status(
 
 #[cfg(test)]
 mod tests {
+    use std::{collections::HashMap, net::SocketAddr};
+
     use canton_proto_rs::com::digitalasset::canton::admin::{
         health::v30::{ComponentStatus, NotInitialized, Status, TopologyQueueStatus},
         participant::v30::{ConnectedSynchronizer, participant_status_response::*},
     };
+    use tokio::{net::TcpListener, task::JoinHandle};
 
     use super::*;
+    use crate::error::Result;
 
     fn reachable() -> LinkHealth {
         LinkHealth::answered(3, None)
@@ -740,7 +744,7 @@ mod tests {
                         seconds: 3_600,
                         nanos: 0,
                     }),
-                    ports: std::collections::HashMap::new(),
+                    ports: HashMap::new(),
                     active: true,
                     topology_queues: Some(TopologyQueueStatus {
                         manager: 1,
@@ -754,7 +758,7 @@ mod tests {
                                 description: Some("catching up".to_string()),
                             },
                         )),
-                        labels: std::collections::HashMap::new(),
+                        labels: HashMap::new(),
                     }],
                     version: "3.5.8".to_string(),
                 }),
@@ -820,9 +824,8 @@ mod tests {
     /// preface during `connect`, so this hangs channel establishment — the
     /// path that used to escape `PROBE_TIMEOUT` and run to the 10s connect
     /// timeout instead.
-    async fn silent_listener()
-    -> crate::error::Result<(std::net::SocketAddr, tokio::task::JoinHandle<()>)> {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    async fn silent_listener() -> Result<(SocketAddr, JoinHandle<()>)> {
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
         let addr = listener.local_addr()?;
         let server = tokio::spawn(async move {
             let mut accepted = Vec::new();
@@ -839,7 +842,7 @@ mod tests {
     // either shows up as wall-clock — an unbounded connect runs to tonic's 10s
     // timeout, and sequential probes take twice as long as concurrent ones.
     #[tokio::test]
-    async fn a_silent_participant_cannot_outlast_the_probe_timeout() -> crate::error::Result {
+    async fn a_silent_participant_cannot_outlast_the_probe_timeout() -> Result {
         let (addr, server) = silent_listener().await?;
         let mut config = NodeConfig::default();
         config.canton.admin_api_host = addr.ip().to_string();

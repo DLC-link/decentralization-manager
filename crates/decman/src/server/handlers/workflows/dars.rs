@@ -142,7 +142,7 @@ pub async fn start_dars_for_package(
 async fn start_dars_for_package_run(
     data: &web::Data<AppState>,
     body: DistributePackageRequest,
-) -> std::result::Result<HttpResponse, ApiError> {
+) -> Result<HttpResponse, ApiError> {
     if body.peer_ids.is_empty() {
         return Err(ApiError::BadRequest(
             "peer_ids must contain at least one peer".to_string(),
@@ -172,7 +172,7 @@ async fn start_dars_for_package_run(
 /// A peer checks the size only after it accepts the invitation, so the
 /// coordinator checks it first. The bundle frames each file with its name and
 /// two lengths, and those bytes count toward the limit.
-fn dars_bundle_refusal(files: &[DarFile], limit: usize) -> std::result::Result<(), ApiError> {
+fn dars_bundle_refusal(files: &[DarFile], limit: usize) -> Result<(), ApiError> {
     let mut sizes = Vec::with_capacity(files.len());
     for file in files {
         let data = STANDARD.decode(&file.data).map_err(|e| {
@@ -254,7 +254,7 @@ async fn launch_dars(
     data: &web::Data<AppState>,
     dar_files: Vec<DarFile>,
     peer_ids: Vec<CantonId>,
-) -> std::result::Result<HttpResponse, ApiError> {
+) -> Result<HttpResponse, ApiError> {
     dars_bundle_refusal(&dar_files, MAX_CHUNKED_TOTAL_SIZE)?;
 
     // Create DARs config from request
@@ -310,7 +310,7 @@ async fn launch_dars(
             // predates the field", which makes peers fall back to checking
             // filenames only — so a DAR we cannot decode has to fail the run rather
             // than quietly downgrade every peer's check.
-            let dar_hashes: std::result::Result<Vec<String>, _> = dars_config
+            let dar_hashes: Result<Vec<String>, _> = dars_config
                 .dar_files
                 .iter()
                 .map(|f| {
@@ -662,7 +662,7 @@ mod dar_handler_tests {
     //! Pins every answer the DAR upload and distribution endpoints give
     //! before they start a run: the status code and the exact JSON body.
 
-    use actix_web::http::StatusCode;
+    use actix_web::{http::StatusCode, test::TestRequest};
     use serde_json::json;
 
     use super::{
@@ -837,7 +837,7 @@ mod dar_handler_tests {
                 .service(start_dars),
         )
         .await;
-        let request = actix_web::test::TestRequest::post()
+        let request = TestRequest::post()
             .uri("/dars/distribute")
             .set_json(json!({ "dar_files": dar_files, "peer_ids": [pid(2)?.to_string()] }))
             .to_request();

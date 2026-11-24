@@ -17,6 +17,7 @@ use super::governance::{get_party_token, packages};
 use crate::{
     canton_id::CantonId,
     config::{NodeConfig, PackageConfig},
+    error::Result,
     server::{
         AppState,
         middleware::require_admin,
@@ -81,7 +82,7 @@ pub struct ContractQueryParams {
 /// Answer a ledger list read: the rows in their response, or a 500 that
 /// names the list (`what`) and carries the ledger error.
 fn list_response<T, R: serde::Serialize>(
-    rows: crate::error::Result<Vec<T>>,
+    rows: Result<Vec<T>>,
     what: &str,
     wrap: impl FnOnce(Vec<T>) -> R,
 ) -> HttpResponse {
@@ -461,7 +462,7 @@ pub async fn get_transfer_preapprovals_handler(
     };
 
     async fn count(
-        config: &crate::config::NodeConfig,
+        config: &NodeConfig,
         party: &CantonId,
         token: Option<String>,
         params: &QueryContractParams,
@@ -934,6 +935,8 @@ pub async fn get_token_standard_contracts(
 
 #[cfg(test)]
 mod open_mining_round_tests {
+    use std::sync::Arc;
+
     use actix_web::{App, http::StatusCode, test as actix_test};
     use chrono::{Duration, Utc};
     use wiremock::{
@@ -977,7 +980,7 @@ mod open_mining_round_tests {
             .await
             .expect("a test state")
             .into_inner();
-        std::sync::Arc::get_mut(&mut state)
+        Arc::get_mut(&mut state)
             .expect("a fresh test state has one owner")
             .config
             .canton
@@ -1067,6 +1070,8 @@ mod open_mining_round_tests {
 
 #[cfg(test)]
 mod list_endpoint_tests {
+    use std::{net::TcpListener, sync::Arc};
+
     use actix_web::{App, http::StatusCode, test as actix_test};
 
     use super::*;
@@ -1095,11 +1100,9 @@ mod list_endpoint_tests {
 
     /// A test state whose ledger port has nothing listening on it.
     async fn state_with_closed_ledger() -> anyhow::Result<web::Data<AppState>> {
-        let port = std::net::TcpListener::bind("127.0.0.1:0")?
-            .local_addr()?
-            .port();
+        let port = TcpListener::bind("127.0.0.1:0")?.local_addr()?.port();
         let mut state = AppState::for_test(None).await?.into_inner();
-        std::sync::Arc::get_mut(&mut state)
+        Arc::get_mut(&mut state)
             .ok_or_else(|| anyhow::anyhow!("a fresh test state has one owner"))?
             .config
             .canton

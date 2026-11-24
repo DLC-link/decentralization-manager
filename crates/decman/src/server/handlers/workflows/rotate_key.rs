@@ -1,11 +1,12 @@
 //! The rotate-key workflow: start, status, cancel and invites.
 
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashSet};
 
 use actix_web::{HttpRequest, HttpResponse, Responder, get, post, web};
 use anyhow::Context;
 use canton_proto_rs::com::digitalasset::canton::crypto::admin::v30::vault_service_client::VaultServiceClient;
 use sqlx::SqlitePool;
+use tonic::transport;
 
 use super::{
     cancel::cancel_workflow_state,
@@ -79,7 +80,7 @@ pub async fn start_rotate_key(
 async fn start_rotate_key_run(
     data: &web::Data<AppState>,
     body: &RotateKeyRequest,
-) -> std::result::Result<HttpResponse, ApiError> {
+) -> Result<HttpResponse, ApiError> {
     let party = body.decentralized_party_id.clone();
     tracing::info!("Rotate-key request received: party={party}");
 
@@ -285,15 +286,14 @@ struct RotationBaseline {
 fn canton_unreachable(error: &anyhow::Error) -> bool {
     error
         .chain()
-        .any(|cause| cause.is::<tonic::Status>() || cause.is::<tonic::transport::Error>())
+        .any(|cause| cause.is::<tonic::Status>() || cause.is::<transport::Error>())
 }
 
 /// The hosts that differ between the cached members and the chain, or `None`
 /// when both name the same hosts.
 fn stale_members(cached: &HashSet<CantonId>, on_chain: &[String]) -> Option<String> {
-    let cached: std::collections::BTreeSet<String> =
-        cached.iter().map(ToString::to_string).collect();
-    let on_chain: std::collections::BTreeSet<String> = on_chain.iter().cloned().collect();
+    let cached: BTreeSet<String> = cached.iter().map(ToString::to_string).collect();
+    let on_chain: BTreeSet<String> = on_chain.iter().cloned().collect();
     (cached != on_chain).then(|| format!("cache {cached:?}, chain {on_chain:?}"))
 }
 
@@ -460,7 +460,7 @@ mod tests {
     };
     use crate::{
         auth::Principal,
-        consts::OWNER_ONLY_KICK,
+        consts::{FEATURES, OWNER_ONLY_KICK},
         db::{
             MIGRATOR,
             rows::DecPartyParticipantRow,
@@ -473,12 +473,9 @@ mod tests {
     /// the message names it.
     #[test]
     fn a_rotation_needs_every_peer_to_list_the_feature() {
-        assert!(crate::consts::FEATURES.contains(&ROTATE_KEY));
+        assert!(FEATURES.contains(&ROTATE_KEY));
         let replies: Vec<InviteeHealth> = vec![
-            (
-                "p2".to_string(),
-                Ok(health_reply("1.15.0", crate::consts::FEATURES)),
-            ),
+            ("p2".to_string(), Ok(health_reply("1.15.0", FEATURES))),
             (
                 "p3".to_string(),
                 Ok(health_reply("1.14.0", &[OWNER_ONLY_KICK])),
@@ -695,6 +692,7 @@ mod start_rotate_key_tests {
     };
     use crate::{
         db::MIGRATOR,
+        noise::NoiseKeypair,
         signing::{
             custody::SoftwareKeys,
             fake_admin_api::{self, FakeAdminApi, VaultKey},
@@ -721,7 +719,7 @@ mod start_rotate_key_tests {
         let mut files = fake.node(SoftwareKeys::Refused, false).await?;
         files.config.node.participant_id = Some(pid(1)?);
         tokio::fs::create_dir_all(files.config.data_dir()).await?;
-        crate::noise::NoiseKeypair::generate()
+        NoiseKeypair::generate()
             .save_to_file(files.config.key_file_path())
             .await?;
         files.record_daml_key(&pool, &party, &daml).await?;

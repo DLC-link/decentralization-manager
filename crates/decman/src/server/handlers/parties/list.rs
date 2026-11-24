@@ -6,6 +6,7 @@ use actix_web::{HttpResponse, Responder, get, web};
 use canton_proto_rs::com::digitalasset::canton::crypto::admin::v30::vault_service_client::VaultServiceClient;
 use serde::Deserialize;
 use sqlx::SqlitePool;
+use tokio::time::Instant;
 
 use super::{
     cache::load_cached_parties,
@@ -264,10 +265,10 @@ async fn await_in_flight_discovery(
         .await
         .get(prefix)
         .map(|(generation, _)| *generation);
-    let deadline = tokio::time::Instant::now() + SINGLE_FLIGHT_WAIT;
+    let deadline = Instant::now() + SINGLE_FLIGHT_WAIT;
     let mut completed = false;
 
-    while tokio::time::Instant::now() < deadline {
+    while Instant::now() < deadline {
         tokio::time::sleep(Duration::from_millis(100)).await;
 
         let generation_now = data

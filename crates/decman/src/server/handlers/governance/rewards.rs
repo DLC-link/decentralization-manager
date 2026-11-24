@@ -6,6 +6,7 @@ use super::credentials::{PartySession, packages};
 use crate::server::{
     AppState,
     handlers::token_standard::GovernanceQuery,
+    reward_automation::{active_delegations, reward_status},
     types::{ActiveCouponReassignmentDelegation, ErrorResponse, RewardStatusResponse},
 };
 
@@ -40,15 +41,7 @@ pub async fn get_coupon_reassignment_delegation(
         Err(e) => return e.into_response(),
     };
 
-    match crate::server::reward_automation::active_delegations(
-        &data.config,
-        &packages(),
-        data.test_mode,
-        party_id,
-        &token,
-    )
-    .await
-    {
+    match active_delegations(&data.config, &packages(), data.test_mode, party_id, &token).await {
         Ok(active) => HttpResponse::Ok().json(ActiveCouponReassignmentDelegation {
             delegations: active.into_iter().map(Into::into).collect(),
         }),
@@ -98,7 +91,7 @@ pub async fn get_reward_status(
         Err(e) => return e.into_response(),
     };
 
-    match crate::server::reward_automation::reward_status(
+    match reward_status(
         &data.config,
         &packages(),
         data.test_mode,

@@ -1,7 +1,7 @@
 //! Governance read endpoints: confirmations, proposals, state and known members.
 
 use actix_web::{HttpRequest, HttpResponse, Responder, get, web};
-use base64::Engine;
+use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use serde::Deserialize;
 
 use super::credentials::{get_member_party_id, get_party_threshold, get_party_token, packages};
@@ -18,7 +18,7 @@ use crate::{
         middleware::require_admin,
         queries::{
             GovernanceQueue, get_governance_confirmations,
-            get_governance_state as query_governance_state,
+            get_governance_state as query_governance_state, page_proposal_summaries,
         },
         types::{
             DomainGovernanceAction, ErrorResponse, GovernanceResponse, GovernanceStateResponse,
@@ -154,13 +154,11 @@ const PROPOSALS_BATCH_MAX: usize = 200;
 fn encode_cursor(cursor: &AcsCursor) -> Option<String> {
     serde_json::to_vec(cursor)
         .ok()
-        .map(|bytes| base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes))
+        .map(|bytes| URL_SAFE_NO_PAD.encode(bytes))
 }
 
 fn decode_cursor(raw: &str) -> Option<AcsCursor> {
-    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
-        .decode(raw)
-        .ok()?;
+    let bytes = URL_SAFE_NO_PAD.decode(raw).ok()?;
     serde_json::from_slice(&bytes).ok()
 }
 
@@ -214,16 +212,7 @@ pub async fn get_proposals_page(
         .map(|state| state.threshold.max(0) as usize)
         .unwrap_or(0);
 
-    match crate::server::queries::page_proposal_summaries(
-        &data.config,
-        party_id,
-        token,
-        &packages,
-        limit,
-        cursor,
-    )
-    .await
-    {
+    match page_proposal_summaries(&data.config, party_id, token, &packages, limit, cursor).await {
         Ok((proposals, next)) => HttpResponse::Ok().json(ProposalsPageResponse {
             proposals,
             threshold,

@@ -16,7 +16,7 @@ use crate::{
     canton_id::CantonId,
     server::{
         AppState,
-        audit::{AuditEvent, AuditParams, spawn_audit_log},
+        audit::{AuditEvent, AuditParams, action_summary, spawn_audit_log},
         error::ApiError,
         middleware::require_admin,
         scan::ScanNotConfigured,
@@ -135,7 +135,7 @@ pub async fn confirm_action(
     };
 
     let record = AuditRecord {
-        action_summary: crate::server::audit::action_summary(&body.action),
+        action_summary: action_summary(&body.action),
         details: serde_json::to_string(&*body).unwrap_or_default(),
         party_id: party_id.clone(),
         member_party_id: member_party_id.clone(),
@@ -194,7 +194,7 @@ pub async fn execute_action(
         Err(e) => return e.into_response(),
     };
 
-    let action_summary = crate::server::audit::action_summary(&body.action);
+    let action_summary = action_summary(&body.action);
     // Redact disclosed contract blobs (can be very large) before storing in audit
     let mut redacted = body.clone();
     for dc in &mut redacted.disclosed_contracts {
@@ -466,7 +466,7 @@ mod audited_write_tests {
     //! Pins what each governance write answers and audits when its ledger
     //! call fails: the status code, the exact body, and the audit row.
 
-    use std::{sync::Arc, time::Duration};
+    use std::{net::TcpListener, sync::Arc, time::Duration};
 
     use actix_web::{
         App, HttpMessage, body::to_bytes, dev::HttpServiceFactory, http::StatusCode,
@@ -492,9 +492,7 @@ mod audited_write_tests {
     }
 
     fn closed_port() -> Result<u16> {
-        Ok(std::net::TcpListener::bind("127.0.0.1:0")?
-            .local_addr()?
-            .port())
+        Ok(TcpListener::bind("127.0.0.1:0")?.local_addr()?.port())
     }
 
     /// A node with mock credentials for every party, whose Canton ports have

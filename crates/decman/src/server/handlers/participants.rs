@@ -1,9 +1,12 @@
 //! Participant status and the ACS import quarantine endpoints.
 
+use std::time::Instant;
+
 use actix_web::{HttpRequest, HttpResponse, Responder, delete, get, web};
 use sqlx::SqlitePool;
 
 use crate::{
+    build_info::{SEMVER, build_version},
     canton_id::CantonId,
     config::{NetworkConfig, NodeConfig},
     db::schema::{SchemaRead, SchemaWrite},
@@ -127,8 +130,8 @@ async fn check_participants_status(
                     status: ConnectionStatus::CurrentNode,
                     latency_ms: None,
                     workflow: None,
-                    version: Some(crate::build_info::SEMVER.to_string()),
-                    build_version: Some(crate::build_info::build_version().to_string()),
+                    version: Some(SEMVER.to_string()),
+                    build_version: Some(build_version().to_string()),
                     wire_version: Some(WIRE_VERSION),
                 }
             }));
@@ -156,7 +159,7 @@ async fn check_participants_status(
                 };
             };
 
-            let started = std::time::Instant::now();
+            let started = Instant::now();
             match send_noise_message_with_retry(
                 &address,
                 port,
@@ -292,7 +295,7 @@ mod tests {
     };
 
     use http::StatusCode;
-    use tokio::net::TcpListener;
+    use tokio::{net::TcpListener, task::JoinHandle};
     use tokio_noise::handshakes::nn_psk2::Responder as NoiseResponder;
 
     use super::*;
@@ -308,7 +311,7 @@ mod tests {
         psk: [u8; 32],
         status: StatusCode,
         body: Vec<u8>,
-    ) -> anyhow::Result<(u16, Arc<AtomicUsize>, tokio::task::JoinHandle<()>)> {
+    ) -> anyhow::Result<(u16, Arc<AtomicUsize>, JoinHandle<()>)> {
         let listener = TcpListener::bind("127.0.0.1:0").await?;
         let port = listener.local_addr()?.port();
         let served = Arc::new(AtomicUsize::new(0));

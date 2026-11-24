@@ -118,7 +118,7 @@ pub(super) async fn register_and_persist<S, C>(
     config: &C,
     invitees: &[CantonId],
     dec_party_id: Option<CantonId>,
-) -> std::result::Result<(), ApiError>
+) -> Result<(), ApiError>
 where
     S: WorkflowStep,
     C: serde::Serialize,
@@ -390,6 +390,7 @@ mod tests {
     use std::collections::HashSet;
 
     use actix_web::{App, HttpMessage, http::StatusCode, test as actix_test};
+    use tokio::task::JoinHandle;
 
     use super::{
         super::{
@@ -695,7 +696,7 @@ mod tests {
         pool: SqlitePool,
         instance: &str,
         kind: WorkflowKind,
-    ) -> Result<(StatusCode, tokio::task::JoinHandle<()>)> {
+    ) -> Result<(StatusCode, JoinHandle<()>)> {
         let data = state_on(pool).await?;
         let run = WorkflowInstance::new(instance.to_string(), kind, WorkflowRole::Coordinator);
         *run.http.status.write().await = WorkflowProgress::InProgress;

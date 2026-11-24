@@ -40,7 +40,7 @@ pub(super) async fn preflight_incompatible_peers(
 }
 
 /// One invitee's reply to a `Health` probe, or why no reply came.
-pub(super) type InviteeHealth = (String, std::result::Result<HealthReply, String>);
+pub(super) type InviteeHealth = (String, Result<HealthReply, String>);
 
 /// Probe every invitee's `Health` over Noise. An invitee missing from the
 /// peer table, or with a public key that does not parse, is not probed.
@@ -176,7 +176,7 @@ pub(super) fn format_incompatible_peers(incompatible: &[(String, String)]) -> St
 pub(crate) async fn claim_party_for_start(
     data: &web::Data<AppState>,
     party: &CantonId,
-) -> std::result::Result<StartClaim, ApiError> {
+) -> Result<StartClaim, ApiError> {
     claim_party_for_workflow(&data.workflows, &data.db, party)
         .await
         .map_err(|refusal| {
@@ -281,6 +281,7 @@ async fn broadcast_simple_message(
 #[cfg(test)]
 mod tests {
     use actix_web::http::StatusCode;
+    use tokio::sync::oneshot;
 
     use super::{
         super::{
@@ -398,7 +399,7 @@ mod tests {
         let data = state_on(pool).await?;
         let party = pid(67)?;
         let other_party = pid(68)?;
-        let (validating, ready) = tokio::sync::oneshot::channel();
+        let (validating, ready) = oneshot::channel();
         let mut validation = Box::pin(async {
             let _claim = claim_party_for_start(&data, &party)
                 .await

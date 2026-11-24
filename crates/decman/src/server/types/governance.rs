@@ -13,7 +13,7 @@ use decman_lib::catalog::{
 use serde::{Deserialize, Serialize};
 
 use super::proposal::ProposalType;
-use crate::canton_id::CantonId;
+use crate::{canton_id::CantonId, db::rows::ChainAuditCacheRow};
 
 /// Request to propose a governance domain action (creates proposal contract)
 #[derive(Clone, Debug, Deserialize, Serialize, utoipa::ToSchema)]
@@ -351,7 +351,7 @@ impl ChainAuditQuery {
 /// A free function rather than `impl From` because `ChainAuditEntry` now lives
 /// in the `common` crate; the orphan rule forbids implementing the foreign
 /// `From` trait for a foreign type here. Mirrors [`permission_from_proto`].
-pub fn chain_audit_entry_from_row(row: crate::db::rows::ChainAuditCacheRow) -> ChainAuditEntry {
+pub fn chain_audit_entry_from_row(row: ChainAuditCacheRow) -> ChainAuditEntry {
     ChainAuditEntry {
         offset: row.offset,
         timestamp: row.timestamp,

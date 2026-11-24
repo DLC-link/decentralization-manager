@@ -10,6 +10,7 @@ use std::{collections::HashMap, sync::LazyLock, time::Duration};
 use actix_web::web;
 use decman_lib::catalog::interpret;
 use prometheus::{GaugeVec, IntCounterVec, IntGaugeVec};
+use tokio::time::MissedTickBehavior;
 
 use super::{
     AppState,
@@ -337,7 +338,7 @@ async fn poll_once(data: &web::Data<AppState>, state: &mut PollState) -> PollOut
 /// shows as a flat counter rather than as a frozen gauge.
 pub(crate) async fn run_governance_poller(data: web::Data<AppState>) {
     let mut interval = tokio::time::interval(POLL_INTERVAL);
-    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
     let mut state = PollState::default();
     loop {
         interval.tick().await;

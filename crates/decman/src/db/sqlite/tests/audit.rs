@@ -6,6 +6,7 @@ use super::fixtures::TEST_NS;
 use crate::{
     canton_id::CantonId,
     db::{
+        rows::ChainAuditCacheRow,
         schema::SchemaRead,
         sqlite::{connect::MIGRATOR, read::RECENT_GOVERNANCE_AUDIT_SQL},
     },
@@ -254,7 +255,7 @@ async fn seed_chain_audit_trail(pool: &SqlitePool, party_a: &str, party_b: &str)
     Ok(())
 }
 
-fn cached_offsets(rows: &[crate::db::rows::ChainAuditCacheRow]) -> Vec<i64> {
+fn cached_offsets(rows: &[ChainAuditCacheRow]) -> Vec<i64> {
     rows.iter().map(|r| r.offset).collect()
 }
 

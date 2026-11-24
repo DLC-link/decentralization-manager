@@ -5,6 +5,8 @@ use canton_proto_rs::com::digitalasset::canton::topology::admin::v30::{
     BaseQuery, ListDecentralizedNamespaceDefinitionRequest, StoreId, Synchronizer, base_query,
     store_id, synchronizer, topology_manager_read_service_client::TopologyManagerReadServiceClient,
 };
+#[cfg(test)]
+use tokio::sync::Mutex;
 
 use crate::{
     auth::WorkflowAuth,
@@ -132,7 +134,7 @@ impl PartySession {
     pub(super) async fn load(
         data: &web::Data<AppState>,
         party_id: &CantonId,
-    ) -> std::result::Result<Self, ApiError> {
+    ) -> Result<Self, ApiError> {
         match get_party_credentials(data, party_id).await {
             Ok(Some((token, member_party_id))) => Ok(Self {
                 token,
@@ -158,11 +160,15 @@ pub(crate) fn packages() -> PackageConfig {
 /// subscriber; the same log line hit at once from another test's thread can
 /// hide it from the capture.
 #[cfg(test)]
-static TOKEN_FAILURE: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+static TOKEN_FAILURE: Mutex<()> = Mutex::const_new(());
 
 #[cfg(test)]
 mod get_party_credentials_tests {
-    use std::sync::{Arc, Mutex as StdMutex};
+    use std::{
+        io,
+        io::Write,
+        sync::{Arc, Mutex as StdMutex},
+    };
 
     use tracing_subscriber::fmt::MakeWriter;
     use wiremock::{
@@ -179,17 +185,17 @@ mod get_party_credentials_tests {
     #[derive(Clone, Default)]
     struct LogBuffer(Arc<StdMutex<Vec<u8>>>);
 
-    impl std::io::Write for LogBuffer {
-        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+    impl Write for LogBuffer {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
             let mut written = self
                 .0
                 .lock()
-                .map_err(|_| std::io::Error::other("log buffer lock poisoned"))?;
+                .map_err(|_| io::Error::other("log buffer lock poisoned"))?;
             written.extend_from_slice(buf);
             Ok(buf.len())
         }
 
-        fn flush(&mut self) -> std::io::Result<()> {
+        fn flush(&mut self) -> io::Result<()> {
             Ok(())
         }
     }

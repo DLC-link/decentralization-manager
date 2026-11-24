@@ -3,7 +3,10 @@
 
 //! The CouponReassignmentDelegation read and the reward status.
 
-use std::collections::{HashMap, HashSet};
+use std::{
+    cmp::Reverse,
+    collections::{HashMap, HashSet},
+};
 
 use anyhow::{Context, anyhow};
 use canton_proto_rs::com::daml::ledger::api::v2::Record;
@@ -243,7 +246,7 @@ fn delegations_newest_first(
     }
     // Descending offset. `sort_by_key` is stable, so equal offsets — impossible
     // for two creates on one participant, but cheap to pin — keep read order.
-    mine.sort_by_key(|(_, offset, _)| std::cmp::Reverse(*offset));
+    mine.sort_by_key(|(_, offset, _)| Reverse(*offset));
     mine.into_iter().map(|(cid, _, rec)| (cid, rec)).collect()
 }
 

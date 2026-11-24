@@ -76,7 +76,7 @@ pub async fn start_kick(
 async fn start_kick_run(
     data: &web::Data<AppState>,
     body: &KickRequest,
-) -> std::result::Result<HttpResponse, ApiError> {
+) -> Result<HttpResponse, ApiError> {
     tracing::info!(
         "Kick request received: party={}, participant_to_kick={:?}, owner_key={:?}, \
          threshold={}",
@@ -305,7 +305,7 @@ fn kick_target(
     self_id: &CantonId,
     member_rows: &[DecPartyParticipantRow],
     owner_rows: &[DecPartyOwnerRow],
-) -> std::result::Result<KickTarget, ApiError> {
+) -> Result<KickTarget, ApiError> {
     let target = resolve_kick_target(
         request.participant_id.as_ref(),
         request.owner_key.as_deref(),
@@ -373,7 +373,7 @@ fn plan_kick(
     owner_count: usize,
     peers: Vec<Peer>,
     namespace_threshold: Option<usize>,
-) -> std::result::Result<KickPlan, ApiError> {
+) -> Result<KickPlan, ApiError> {
     // The participant that leaves the hosting mapping, if the member hosts.
     let kicked_host = target.participant.clone().filter(|_| target.hosts);
 
@@ -560,6 +560,7 @@ mod tests {
     use crate::{
         db::{
             MIGRATOR,
+            rows::DecPartyTopologyVersion,
             schema::{Commitable, SchemaWrite},
         },
         server::PendingInvitation,
@@ -591,7 +592,7 @@ mod tests {
         let mut tx = pool.begin_transaction().await?;
         tx.replace_dec_party_participants(&party, &hosts).await?;
         tx.replace_dec_party_owners(&party, &keys).await?;
-        tx.insert_peer(&crate::config::Peer {
+        tx.insert_peer(&Peer {
             participant_id: pid(2)?,
             name: "peer-2".to_string(),
             address: "127.0.0.1".to_string(),
@@ -763,7 +764,7 @@ mod tests {
             &party,
             Some(&pid(4)?),
             "k4",
-            crate::db::rows::DecPartyTopologyVersion {
+            DecPartyTopologyVersion {
                 namespace_serial: 2,
                 p2p_serial: 2,
             },

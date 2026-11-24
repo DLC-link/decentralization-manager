@@ -8,7 +8,9 @@ use std::{
     time::Duration,
 };
 
+use actix_web::web;
 use chrono::{DateTime, Utc};
+use tokio::time::{Instant, MissedTickBehavior};
 
 use super::{
     assign::{fold_oldest_expiry, package_absent, run_reassign_once},
@@ -122,10 +124,7 @@ fn enablement_without_a_token(
 /// When no token can read the set, the participant's admin API still lists its
 /// packages without one. A participant without the rewards DAR is then
 /// [`Enablement::Off`]. A failed package list stays [`Enablement::Unreadable`].
-async fn read_enablement(
-    data: &actix_web::web::Data<AppState>,
-    parties: &[CantonId],
-) -> Enablement {
+async fn read_enablement(data: &web::Data<AppState>, parties: &[CantonId]) -> Enablement {
     let pkgs = packages();
     for decparty in parties {
         let Ok(Some((token, member))) = get_party_credentials(data, decparty).await else {
@@ -176,7 +175,7 @@ async fn read_enablement(
 ///
 /// The heartbeat shares this task with the sweep deliberately, so a sweep that
 /// hangs stops the beat and becomes visible.
-pub(crate) async fn run_reward_automation_loop(data: actix_web::web::Data<AppState>) {
+pub(crate) async fn run_reward_automation_loop(data: web::Data<AppState>) {
     let interval_secs = data.config.reward_automation_interval_secs;
     if interval_secs == 0 {
         tracing::warn!("reward_automation_interval_secs is 0; using 1s instead");
@@ -194,11 +193,11 @@ pub(crate) async fn run_reward_automation_loop(data: actix_web::web::Data<AppSta
     // safe for the stall alert, whose `increase < 1 over 15m` is a lower bound.
     let mut heartbeat =
         tokio::time::interval(HEARTBEAT_INTERVAL.min(sweep_interval).min(read_interval));
-    heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    heartbeat.set_missed_tick_behavior(MissedTickBehavior::Skip);
     // Records the wake time, not the tick's own deadline, so scheduling jitter can
     // stretch an interval by up to one heartbeat — benign against a 36h coupon TTL.
-    let mut last_sweep: Option<tokio::time::Instant> = None;
-    let mut last_read: Option<tokio::time::Instant> = None;
+    let mut last_sweep: Option<Instant> = None;
+    let mut last_read: Option<Instant> = None;
     // Recomputed into the gauge on every heartbeat.
     let mut oldest: HashMap<CantonId, DateTime<Utc>> = HashMap::new();
     // The decparties whose delegations name this node, from the last pass that
@@ -211,7 +210,7 @@ pub(crate) async fn run_reward_automation_loop(data: actix_web::web::Data<AppSta
         HEARTBEAT.inc();
         report_oldest_expiry(&oldest, Utc::now());
 
-        let now = tokio::time::Instant::now();
+        let now = Instant::now();
         let Some(pass) = due_pass(
             last_sweep.map(|t| now.duration_since(t)),
             sweep_interval,
@@ -351,7 +350,7 @@ fn assigners_not_members(assigners: &[CantonId], members: &[CantonId]) -> Vec<Ca
 /// a governance member. A failed or slow rules read reports nothing, because
 /// the membership is then unknown.
 async fn report_assigners_not_members(
-    data: &actix_web::web::Data<AppState>,
+    data: &web::Data<AppState>,
     decparty: &CantonId,
     delegation: &ActiveDelegation,
     token: &str,
@@ -517,7 +516,7 @@ fn prune_unserved(oldest: &mut HashMap<CantonId, DateTime<Utc>>, served: &[Canto
 /// registry entry is a third (`SweepOutcome::AuthUnregistered`), and it persists
 /// where a token failure cures itself.
 async fn run_once_for_party(
-    data: &actix_web::web::Data<AppState>,
+    data: &web::Data<AppState>,
     decparty: &CantonId,
     pass: Pass,
 ) -> anyhow::Result<SweepOutcome> {
@@ -639,8 +638,9 @@ async fn read_oldest_expiry(
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
+    use std::{net::TcpListener, sync::Arc};
 
+    use actix_web::web;
     use wiremock::{
         Mock, MockServer, ResponseTemplate,
         matchers::{method, path_regex},
@@ -917,14 +917,14 @@ mod tests {
     async fn a_node_that_can_neither_ask_nor_list_packages_cannot_read_its_enablement()
     -> anyhow::Result<()> {
         let closed_port = {
-            let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
+            let listener = TcpListener::bind("127.0.0.1:0")?;
             listener.local_addr()?.port()
         };
         let mut state = Arc::try_unwrap(AppState::for_test(None).await?.into_inner())
             .map_err(|_| anyhow::anyhow!("the test state is shared"))?;
         state.config.canton.admin_api_host = "127.0.0.1".to_string();
         state.config.canton.admin_api_port = closed_port;
-        let data = actix_web::web::Data::new(state);
+        let data = web::Data::new(state);
         let parties = [CantonId::parse(DAVE)?, CantonId::parse(EVE)?];
 
         assert_eq!(

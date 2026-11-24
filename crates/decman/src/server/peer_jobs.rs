@@ -1,6 +1,9 @@
 //! The peer-side job listener that starts a peer run per accepted invite.
 
-use std::sync::Arc;
+use std::{
+    sync::Arc,
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 use sqlx::SqlitePool;
 use tokio::sync::{RwLock, mpsc};
@@ -26,8 +29,8 @@ async fn finalize_peer_run(
     success: bool,
     error_msg: Option<String>,
 ) {
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0);
     let mut tx = match db.begin_transaction().await {

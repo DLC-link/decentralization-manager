@@ -1,6 +1,29 @@
 //! The governance proposal types and their payloads.
 
 use chrono::Utc;
+use decman_lib::{
+    catalog::proposals::{
+        core::GenericVote,
+        credential::{
+            AcceptFreeCredential, AcceptPaidCredential, OfferFreeCredential, OfferPaidCredential,
+        },
+        custody::{AcceptTransfer, SetupCcPreapproval, SetupTokenPreapproval, Transfer},
+        rewards::{
+            AcceptExternalPartySetup, RevokeCouponReassignmentDelegation,
+            SetupCouponReassignmentDelegation, SetupMintingDelegation,
+        },
+        utility::{
+            AcceptBurnRequest, AcceptMintRequest, Burn, CreateDelegatedBatchedMarkersProxy,
+            CreateProviderConfiguration, CreateProviderServiceRequest,
+            CreateRegistrarServiceRequest, CreateTransferRule, CreateUserServiceRequest, Mint,
+            MintsCredentials, OffboardInstrumentIssuers, OnboardInstrumentIssuers,
+            OnboardRegistrar, ProvisionInstrument, ProvisionProviderService,
+            RequestDevNetFeaturedAppRight, SetEnableResultContracts,
+            SetProviderAppRewardBeneficiaries, SetupUtility, UpdateInstrumentConfiguration,
+        },
+    },
+    framework::{GrpcPayload, Validate},
+};
 use serde::{Deserialize, Serialize};
 
 use crate::canton_id::CantonId;
@@ -15,132 +38,114 @@ use crate::canton_id::CantonId;
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ProposalType {
     /// Set up Canton Coin TransferPreapproval
-    SetupCcPreapproval(decman_lib::catalog::proposals::custody::SetupCcPreapproval),
+    SetupCcPreapproval(SetupCcPreapproval),
     /// Set up utility token TransferPreapproval
-    SetupTokenPreapproval(decman_lib::catalog::proposals::custody::SetupTokenPreapproval),
+    SetupTokenPreapproval(SetupTokenPreapproval),
     /// Transfer tokens via a TransferFactory
-    Transfer(decman_lib::catalog::proposals::custody::Transfer),
+    Transfer(Transfer),
     /// Accept an incoming token transfer
-    AcceptTransfer(decman_lib::catalog::proposals::custody::AcceptTransfer),
+    AcceptTransfer(AcceptTransfer),
     /// Generic text-based vote (no on-chain effect beyond recording the result)
-    GenericVote(decman_lib::catalog::proposals::core::GenericVote),
+    GenericVote(GenericVote),
     /// Provision a Utility-Registry `ProviderService` with
     /// `operator = proposer` and `provider = governanceParty`. Produces the
     /// ProviderService cid consumed by `SetupUtility`.
-    ProvisionProviderService(decman_lib::catalog::proposals::utility::ProvisionProviderService),
+    ProvisionProviderService(ProvisionProviderService),
     /// Run the full Utility-Registry onboarding in one vote. Flags control
     /// whether a `TransferRule` / `AllocationFactory` are created during the
     /// `RegistrarServiceRequest` accept.
-    SetupUtility(decman_lib::catalog::proposals::utility::SetupUtility),
+    SetupUtility(SetupUtility),
     /// Create a `ProviderServiceRequest` for a given `operator` and `provider`.
-    CreateProviderServiceRequest(
-        decman_lib::catalog::proposals::utility::CreateProviderServiceRequest,
-    ),
+    CreateProviderServiceRequest(CreateProviderServiceRequest),
     /// Create a `UserServiceRequest` for a given `operator` and `user`.
-    CreateUserServiceRequest(decman_lib::catalog::proposals::utility::CreateUserServiceRequest),
+    CreateUserServiceRequest(CreateUserServiceRequest),
     /// Set the provider-app reward beneficiaries on an `InstrumentConfiguration`.
     /// `providerAppRewardBeneficiaries = None` clears the current setting.
-    SetProviderAppRewardBeneficiaries(
-        decman_lib::catalog::proposals::utility::SetProviderAppRewardBeneficiaries,
-    ),
+    SetProviderAppRewardBeneficiaries(SetProviderAppRewardBeneficiaries),
     /// Create (or replace) the decparty's on-ledger CouponReassignmentDelegation.
     /// `prior_delegation` is the cid of the delegation being replaced (None for the first).
-    SetupCouponReassignmentDelegation(
-        decman_lib::catalog::proposals::rewards::SetupCouponReassignmentDelegation,
-    ),
+    SetupCouponReassignmentDelegation(SetupCouponReassignmentDelegation),
     /// Revoke (archive) the decparty's CouponReassignmentDelegation.
-    RevokeCouponReassignmentDelegation(
-        decman_lib::catalog::proposals::rewards::RevokeCouponReassignmentDelegation,
-    ),
+    RevokeCouponReassignmentDelegation(RevokeCouponReassignmentDelegation),
     /// Toggle result-contract emission on a `RegistrarService`.
-    SetEnableResultContracts(decman_lib::catalog::proposals::utility::SetEnableResultContracts),
+    SetEnableResultContracts(SetEnableResultContracts),
     /// Create a `TransferRule` on the governance party's `RegistrarService`.
-    CreateTransferRule(decman_lib::catalog::proposals::utility::CreateTransferRule),
+    CreateTransferRule(CreateTransferRule),
     /// Authorize the `operator` to create batched activity markers on behalf
     /// of the governance party via a `DelegatedBatchedMarkersProxy`.
-    CreateDelegatedBatchedMarkersProxy(
-        decman_lib::catalog::proposals::utility::CreateDelegatedBatchedMarkersProxy,
-    ),
+    CreateDelegatedBatchedMarkersProxy(CreateDelegatedBatchedMarkersProxy),
     /// Self-grant a `FeaturedAppRight` to the governance party on DevNet by
     /// exercising `AmuletRules_DevNet_FeatureApp`.
-    RequestDevNetFeaturedAppRight(
-        decman_lib::catalog::proposals::utility::RequestDevNetFeaturedAppRight,
-    ),
+    RequestDevNetFeaturedAppRight(RequestDevNetFeaturedAppRight),
     /// Delegate minting of the governance party's CIP-104 reward coupons to a
     /// validator node's `delegate` party via a `MintingDelegationProposal`.
     /// The delegation beneficiary is always the governance party; the delegate
     /// accepts the proposal out-of-band via the wallet API.
-    SetupMintingDelegation(decman_lib::catalog::proposals::rewards::SetupMintingDelegation),
+    SetupMintingDelegation(SetupMintingDelegation),
     /// Accept a validator-created `ExternalPartySetupProposal` on behalf of the
     /// governance party, creating its `ValidatorRight` + `TransferPreapproval`.
     /// This is the missing prerequisite that makes the validator's built-in
     /// `MintingDelegationCollectRewardsTrigger` start collecting the party's
     /// CIP-104 reward coupons via the established `MintingDelegation`.
-    AcceptExternalPartySetup(decman_lib::catalog::proposals::rewards::AcceptExternalPartySetup),
+    AcceptExternalPartySetup(AcceptExternalPartySetup),
     /// Offer a mint of `amount` tokens to `recipient` via
     /// `AllocationFactory_OfferMint`. The resulting `MintOffer` is accepted
     /// later by the recipient, outside this plugin.
-    Mint(decman_lib::catalog::proposals::utility::Mint),
+    Mint(Mint),
     /// Offer a free credential to a holder via the governance party's
     /// `UserService`. Wraps `UserService_OfferFreeCredential` from the
     /// Utility Credential App.
-    OfferFreeCredential(decman_lib::catalog::proposals::credential::OfferFreeCredential),
+    OfferFreeCredential(OfferFreeCredential),
     /// Offer a paid credential to a holder via the governance party's
     /// `UserService`. Wraps `UserService_OfferPaidCredential`.
-    OfferPaidCredential(decman_lib::catalog::proposals::credential::OfferPaidCredential),
+    OfferPaidCredential(OfferPaidCredential),
     /// Accept a free credential offered to the governance party. Wraps
     /// `UserService_AcceptFreeCredentialOffer`.
-    AcceptFreeCredential(decman_lib::catalog::proposals::credential::AcceptFreeCredential),
+    AcceptFreeCredential(AcceptFreeCredential),
     /// Accept a paid credential offered to the governance party. Wraps
     /// `UserService_AcceptPaidCredentialOffer`, which locks the governance
     /// party's deposit Amulets.
-    AcceptPaidCredential(decman_lib::catalog::proposals::credential::AcceptPaidCredential),
+    AcceptPaidCredential(AcceptPaidCredential),
     /// Offer a burn of `amount` tokens held by `holder` via
     /// `AllocationFactory_OfferBurn`. Holdings are supplied by the holder at
     /// `BurnOffer_Accept` time, not here.
-    Burn(decman_lib::catalog::proposals::utility::Burn),
+    Burn(Burn),
     /// Accept a holder-initiated `MintRequest` via `MintRequest_Accept`. The
     /// `MintRequest` must already exist on-ledger (typically created by the
     /// holder by exercising `AllocationFactory_RequestMint`).
-    AcceptMintRequest(decman_lib::catalog::proposals::utility::AcceptMintRequest),
+    AcceptMintRequest(AcceptMintRequest),
     /// Accept a holder-initiated `BurnRequest` via `BurnRequest_Accept`. The
     /// `BurnRequest` must already exist on-ledger (typically created by the
     /// holder by exercising `AllocationFactory_RequestBurn`).
-    AcceptBurnRequest(decman_lib::catalog::proposals::utility::AcceptBurnRequest),
+    AcceptBurnRequest(AcceptBurnRequest),
     /// Create the provider decparty's `ProviderConfiguration` with
     /// credential requirements for registrars and holders. Executed once by
     /// the provider decparty at platform setup.
-    CreateProviderConfiguration(
-        decman_lib::catalog::proposals::utility::CreateProviderConfiguration,
-    ),
+    CreateProviderConfiguration(CreateProviderConfiguration),
     /// Create a `RegistrarServiceRequest` asking `provider` for registrar
     /// service, with the governance party as the registrar. The provider
     /// accepts later via `OnboardRegistrar` on its own decparty.
-    CreateRegistrarServiceRequest(
-        decman_lib::catalog::proposals::utility::CreateRegistrarServiceRequest,
-    ),
+    CreateRegistrarServiceRequest(CreateRegistrarServiceRequest),
     /// Accept a `RegistrarServiceRequest` on the provider decparty: mint the
     /// registrar credentials the governance party can self-issue against the
     /// `ProviderConfiguration`'s registrar requirements, then accept the
     /// request in the same vote.
-    OnboardRegistrar(decman_lib::catalog::proposals::utility::OnboardRegistrar),
+    OnboardRegistrar(OnboardRegistrar),
     /// Create an `InstrumentConfiguration` on the registrar decparty and
     /// credential the initial instrument issuers against its issuer
     /// requirements. Executed once per instrument.
-    ProvisionInstrument(decman_lib::catalog::proposals::utility::ProvisionInstrument),
+    ProvisionInstrument(ProvisionInstrument),
     /// Replace a live `InstrumentConfiguration` on the registrar decparty
     /// with a full payload, then set its provider app reward beneficiaries
     /// again.
-    UpdateInstrumentConfiguration(
-        decman_lib::catalog::proposals::utility::UpdateInstrumentConfiguration,
-    ),
+    UpdateInstrumentConfiguration(UpdateInstrumentConfiguration),
     /// Credential new instrument issuers against an existing
     /// `InstrumentConfiguration`'s issuer requirements.
-    OnboardInstrumentIssuers(decman_lib::catalog::proposals::utility::OnboardInstrumentIssuers),
+    OnboardInstrumentIssuers(OnboardInstrumentIssuers),
     /// Revoke the credentials the governance party issued for instrument
     /// issuers, removing their issuing privileges. Each row names one issuer
     /// and lists that issuer's credentials.
-    OffboardInstrumentIssuers(decman_lib::catalog::proposals::utility::OffboardInstrumentIssuers),
+    OffboardInstrumentIssuers(OffboardInstrumentIssuers),
 }
 
 impl ProposalType {
@@ -161,7 +166,7 @@ impl ProposalType {
             governance_party,
             now_micros: Utc::now().timestamp_micros(),
         };
-        let payload: &dyn decman_lib::framework::Validate = match self {
+        let payload: &dyn Validate = match self {
             Self::SetupCcPreapproval(p) => p,
             Self::SetupTokenPreapproval(p) => p,
             Self::Transfer(p) => p,
@@ -204,7 +209,7 @@ impl ProposalType {
     /// window, and the on-chain sender party) and so go through their
     /// wrapper structs (`TransferWithContext` /
     /// `AcceptTransferWithContext`) rather than the payload itself.
-    pub fn grpc_payload(&self) -> Option<&dyn decman_lib::framework::GrpcPayload> {
+    pub fn grpc_payload(&self) -> Option<&dyn GrpcPayload> {
         match self {
             Self::Transfer(_) | Self::AcceptTransfer(_) => None,
             Self::SetupCcPreapproval(p) => Some(p),
@@ -244,9 +249,7 @@ impl ProposalType {
     /// The payload of a variant whose template mints governance credentials.
     /// `propose_action` submits these through `WithCredentialIdNonce` with
     /// a fresh nonce, so the request carries no nonce field.
-    pub fn credential_minting_payload(
-        &self,
-    ) -> Option<&dyn decman_lib::catalog::proposals::utility::MintsCredentials> {
+    pub fn credential_minting_payload(&self) -> Option<&dyn MintsCredentials> {
         match self {
             Self::OnboardRegistrar(p) => Some(p),
             Self::ProvisionInstrument(p) => Some(p),

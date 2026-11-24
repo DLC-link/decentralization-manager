@@ -1,6 +1,9 @@
 //! Boot recovery: respawning the workflow runs a shutdown interrupted.
 
-use std::sync::Arc;
+use std::{
+    sync::Arc,
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 use sqlx::SqlitePool;
 use tokio::sync::{RwLock, mpsc};
@@ -226,8 +229,8 @@ async fn set_run_status(
     status: WorkflowProgress,
     error: Option<String>,
 ) -> Result {
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0);
     let mut tx = db.begin_transaction().await?;

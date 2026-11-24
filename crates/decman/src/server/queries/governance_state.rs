@@ -1,7 +1,10 @@
 //! GovernanceRules state reads and contract package lookups.
 
 use canton_proto_rs::com::daml::ledger::api::v2::{GetEventsByContractIdRequest, Identifier};
-use decman_lib::catalog::interpret;
+use decman_lib::{
+    catalog::{interpret, templates::governance_state_templates},
+    framework::TemplateId,
+};
 
 use crate::{
     canton_id::CantonId,
@@ -64,7 +67,7 @@ async fn find_governance_state(
     failure: &mut Option<anyhow::Error>,
 ) -> Option<GovernanceState> {
     // Try each governance template until we find a match
-    for template in decman_lib::catalog::templates::governance_state_templates(packages) {
+    for template in governance_state_templates(packages) {
         match fetch_governance_state_for_template(config, party_id, token.clone(), &template).await
         {
             Ok(Some(mut state)) => {
@@ -121,11 +124,7 @@ async fn fetch_governance_state_fallback(
         if name == configured_name {
             continue;
         }
-        let template = decman_lib::framework::TemplateId::new(
-            format!("#{name}"),
-            "Governance.Rules",
-            "GovernanceRules",
-        );
+        let template = TemplateId::new(format!("#{name}"), "Governance.Rules", "GovernanceRules");
         match fetch_governance_state_for_template(config, party_id, token.clone(), &template).await
         {
             Ok(Some(mut state)) => {
@@ -178,7 +177,7 @@ async fn fetch_governance_state_for_template(
     config: &NodeConfig,
     party_id: &CantonId,
     token: Option<String>,
-    template: &decman_lib::framework::TemplateId,
+    template: &TemplateId,
 ) -> Result<Option<GovernanceState>> {
     let event_format = party_event_format(
         party_id,
@@ -287,6 +286,7 @@ async fn fetch_contract_package_ref(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::default_package_config;
 
     /// With both APIs on port 1, where nothing listens, every rules read fails.
     /// The feed's read still shows no contract; the strict read reports the
@@ -297,7 +297,7 @@ mod tests {
         config.canton.ledger_api_port = 1;
         config.canton.admin_api_port = 1;
         let party = CantonId::parse(&format!("gov::{}", "0".repeat(68)))?;
-        let packages = crate::config::default_package_config();
+        let packages = default_package_config();
 
         assert!(
             get_governance_state(&config, &party, None, &packages)

@@ -94,7 +94,7 @@ pub(super) fn resolve_kick_target(
     owner_key: Option<&str>,
     hosts: &[DecPartyParticipantRow],
     owners: &[DecPartyOwnerRow],
-) -> std::result::Result<KickTarget, KickTargetError> {
+) -> Result<KickTarget, KickTargetError> {
     const REFRESH: &str = "Try refreshing /decentralized-parties first.";
     let host_of = |uid: &CantonId| {
         let uid = uid.to_string();

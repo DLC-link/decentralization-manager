@@ -5,6 +5,7 @@
 use std::{
     collections::HashSet,
     io::{self, Write},
+    net::TcpListener,
     sync::{Arc, Mutex},
 };
 
@@ -28,7 +29,7 @@ use crate::{
     error::Result,
     noise::NoiseKeypair,
     server::{
-        AppState,
+        AppState, ConnectionStatus,
         health::HealthReply,
         types::{ErrorResponse, WorkflowKind, WorkflowProgress, WorkflowRole, WorkflowRun},
     },
@@ -87,7 +88,7 @@ pub fn host_row(uid: &CantonId, owner_key: Option<&str>) -> DecPartyParticipantR
 
 pub fn health_reply(version: &str, features: &[&str]) -> HealthReply {
     HealthReply {
-        status: crate::server::ConnectionStatus::Connected,
+        status: ConnectionStatus::Connected,
         workflow: None,
         version: Some(version.to_string()),
         build_version: None,
@@ -127,7 +128,7 @@ pub async fn cache_kick_party(
     tx.replace_dec_party_participants(party, &host_rows).await?;
     tx.replace_dec_party_owners(party, &keys).await?;
     for tag in peers {
-        tx.insert_peer(&crate::config::Peer {
+        tx.insert_peer(&Peer {
             participant_id: pid(*tag)?,
             name: format!("peer-{tag}"),
             address: "127.0.0.1".to_string(),
@@ -172,7 +173,7 @@ pub async fn cache_party(
     confirmation_threshold: Option<i64>,
 ) -> Result {
     let mut tx = pool.begin_transaction().await?;
-    tx.upsert_dec_party(&crate::db::rows::DecPartyRow {
+    tx.upsert_dec_party(&DecPartyRow {
         party_id: party.to_string(),
         prefix: party.prefix.clone(),
         threshold,
@@ -211,7 +212,7 @@ pub fn admin() -> Principal {
     }
 }
 
-pub async fn status_and_body(response: actix_web::dev::ServiceResponse) -> (StatusCode, String) {
+pub async fn status_and_body(response: ServiceResponse) -> (StatusCode, String) {
     let status = response.status();
     let body = test::read_body(response).await;
     (status, String::from_utf8_lossy(&body).into_owned())
@@ -247,9 +248,7 @@ pub async fn test_node(pool: SqlitePool, self_id: &CantonId) -> anyhow::Result<T
 
 /// A port with nothing listening on it.
 pub fn closed_port() -> anyhow::Result<u16> {
-    Ok(std::net::TcpListener::bind("127.0.0.1:0")?
-        .local_addr()?
-        .port())
+    Ok(TcpListener::bind("127.0.0.1:0")?.local_addr()?.port())
 }
 
 /// A peer on a port where nothing listens. With `reachable_key` its Noise

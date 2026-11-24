@@ -1,6 +1,6 @@
 //! The add-party workflow: start, status, cancel and invites.
 
-use std::{collections::HashSet, time::Duration};
+use std::{collections::HashSet, future::Future, time::Duration};
 
 use actix_web::{HttpRequest, HttpResponse, Responder, get, post, web};
 use anyhow::Context;
@@ -30,7 +30,10 @@ use crate::{
             WorkflowStatusResponse,
         },
     },
-    workflow::{self, AddPartyStep},
+    workflow::{
+        self, AddPartyStep,
+        add_party::{MissingPackages, packages::check_new_member_packages},
+    },
 };
 
 // ============================================================================
@@ -68,7 +71,7 @@ pub async fn start_add_party(
 async fn start_add_party_run(
     data: &web::Data<AppState>,
     body: &AddPartyRequest,
-) -> std::result::Result<HttpResponse, ApiError> {
+) -> Result<HttpResponse, ApiError> {
     tracing::info!(
         "Add-party request received: party={}, new_participant={}, threshold={}",
         body.decentralized_party_id,
@@ -155,11 +158,7 @@ async fn start_add_party_run(
         let auth = data.auth.read().await.clone();
         workflow::add_party::resolve_ledger_token(&auth, &decentralized_party_id).await
     };
-    let check = workflow::add_party::packages::check_new_member_packages(
-        &data.config,
-        &add_party_config,
-        ledger_token.as_deref(),
-    );
+    let check = check_new_member_packages(&data.config, &add_party_config, ledger_token.as_deref());
     if let Err(e) = bounded_package_check(ADD_PARTY_PACKAGE_CHECK_TIMEOUT, check).await {
         return Err(add_party_package_check_failure(&decentralized_party_id, &e));
     }
@@ -215,10 +214,7 @@ async fn start_add_party_run(
 /// Refuse a new member that is not a configured peer. The new member must
 /// be a configured, known peer — invites travel over Noise, so a
 /// participant this node can't reach can't join.
-fn refuse_unknown_peer(
-    peers: &[Peer],
-    new_participant_id: &CantonId,
-) -> std::result::Result<(), ApiError> {
+fn refuse_unknown_peer(peers: &[Peer], new_participant_id: &CantonId) -> Result<(), ApiError> {
     if !peers
         .iter()
         .any(|p| p.participant_id == *new_participant_id)
@@ -237,7 +233,7 @@ fn plan_add_party(
     self_id: &CantonId,
     party_member_ids: &HashSet<CantonId>,
     peers: Vec<Peer>,
-) -> std::result::Result<Vec<CantonId>, ApiError> {
+) -> Result<Vec<CantonId>, ApiError> {
     let decentralized_party_id = &request.decentralized_party_id;
     let new_participant_id = &request.new_participant_id;
     if party_member_ids.is_empty() {
@@ -297,10 +293,7 @@ const ADD_PARTY_PACKAGE_CHECK_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// Run the add-party package check under `limit`. A check that runs out of
 /// time is a check that could not run.
-async fn bounded_package_check(
-    limit: Duration,
-    check: impl std::future::Future<Output = Result>,
-) -> Result {
+async fn bounded_package_check(limit: Duration, check: impl Future<Output = Result>) -> Result {
     match tokio::time::timeout(limit, check).await {
         Ok(result) => result,
         Err(_) => anyhow::bail!(
@@ -314,7 +307,7 @@ async fn bounded_package_check(
 /// package says what to do, so it goes back as it is. Any other failure means
 /// the check could not run, so the add is refused until it can.
 fn add_party_package_check_failure(party: &CantonId, e: &anyhow::Error) -> ApiError {
-    match e.downcast_ref::<workflow::add_party::MissingPackages>() {
+    match e.downcast_ref::<MissingPackages>() {
         Some(missing) => {
             tracing::warn!("Add-party to {party} refused: {missing}");
             ApiError::Conflict(missing.to_string())
@@ -536,7 +529,7 @@ mod tests {
         tx.replace_dec_party_participants(party, &hosts).await?;
         tx.replace_dec_party_owners(party, &keys).await?;
         for tag in [2, 3] {
-            tx.insert_peer(&crate::config::Peer {
+            tx.insert_peer(&Peer {
                 participant_id: pid(tag)?,
                 name: format!("peer-{tag}"),
                 address: "127.0.0.1".to_string(),

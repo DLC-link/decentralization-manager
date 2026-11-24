@@ -4,11 +4,15 @@
 
 use std::{
     collections::HashMap,
+    net::TcpListener as StdTcpListener,
     sync::Arc,
     time::{Duration, Instant},
 };
 
-use hyper::{Body, Request, header::CONNECTION};
+use hyper::{
+    Body, Request,
+    header::{CONNECTION, DATE},
+};
 use sqlx::SqlitePool;
 use tokio::{
     net::{TcpListener, TcpStream},
@@ -146,7 +150,7 @@ impl Harness {
         let headers: Vec<String> = response
             .headers()
             .iter()
-            .filter(|(name, _)| *name != hyper::header::DATE)
+            .filter(|(name, _)| *name != DATE)
             .map(|(name, value)| format!("{name}={}", value.to_str().unwrap_or("?")))
             .collect();
         let bytes = hyper::body::to_bytes(response.into_body()).await?;
@@ -203,9 +207,7 @@ impl Drop for Harness {
 }
 
 fn closed_port() -> Result<u16> {
-    Ok(std::net::TcpListener::bind("127.0.0.1:0")?
-        .local_addr()?
-        .port())
+    Ok(StdTcpListener::bind("127.0.0.1:0")?.local_addr()?.port())
 }
 
 /// A reply body in one line: empty, or the message it decodes to. The

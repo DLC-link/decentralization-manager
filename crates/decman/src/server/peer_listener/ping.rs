@@ -1,14 +1,18 @@
 //! The peer ping loop that records which peers answer.
 
-use std::{collections::HashMap, sync::Arc, time::Duration};
+use std::{
+    collections::HashMap,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use sqlx::SqlitePool;
-use tokio::sync::RwLock;
+use tokio::{sync::RwLock, time::MissedTickBehavior};
 
 use crate::{
     config::NodeConfig,
     db::schema::SchemaRead,
-    noise::{Message, MessageType, NoiseKeypair, parse_public_key},
+    noise::{Message, MessageType, NoiseKeypair, parse_public_key, send_noise_message},
     server::{peer_status, peer_status::LastSeen},
 };
 
@@ -21,7 +25,7 @@ pub(super) async fn run_peer_ping_loop(
     keypair: Arc<NoiseKeypair>,
 ) {
     let mut interval = tokio::time::interval(Duration::from_secs(5));
-    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
     loop {
         interval.tick().await;
@@ -56,7 +60,7 @@ pub(super) async fn run_peer_ping_loop(
                         Err(e) => return (id, Err(format!("malformed public_key: {e}"))),
                     };
 
-                    let now = std::time::Instant::now();
+                    let now = Instant::now();
                     let stale = {
                         let map = last_seen.read().await;
                         peer_status::should_probe(&map, &id, now)
@@ -67,7 +71,7 @@ pub(super) async fn run_peer_ping_loop(
                     }
 
                     let psk = keypair.derive_psk(&peer_pubkey);
-                    let result = crate::noise::send_noise_message(
+                    let result = send_noise_message(
                         &address,
                         port,
                         &psk,
@@ -86,14 +90,14 @@ pub(super) async fn run_peer_ping_loop(
                     };
 
                     if verdict.is_ok() {
-                        let now = std::time::Instant::now();
+                        let now = Instant::now();
                         let mut map = last_seen.write().await;
                         peer_status::bump(&mut map, id.clone(), now);
                     }
 
                     let verdict = {
                         let map = last_seen.read().await;
-                        peer_status::settle_probe(&map, &id, std::time::Instant::now(), verdict)
+                        peer_status::settle_probe(&map, &id, Instant::now(), verdict)
                     };
                     (id, verdict)
                 }

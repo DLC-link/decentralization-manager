@@ -6,7 +6,10 @@ use std::{
 };
 
 use common::types::{WorkflowKind, WorkflowProgress, WorkflowRole};
-use tokio::sync::RwLock;
+use tokio::{
+    sync::{Mutex, RwLock},
+    task::AbortHandle,
+};
 
 use crate::{canton_id::CantonId, noise::server::ActiveWorkflow};
 
@@ -19,7 +22,7 @@ pub trait WorkflowStatus: Default + Copy + Send + Sync {}
 pub struct HttpWorkflowState<S: WorkflowStatus> {
     pub status: RwLock<S>,
     pub error: RwLock<Option<String>>,
-    pub abort_handle: tokio::sync::Mutex<Option<tokio::task::AbortHandle>>,
+    pub abort_handle: Mutex<Option<AbortHandle>>,
     pub invited_peers: RwLock<Vec<CantonId>>,
 }
 
@@ -28,7 +31,7 @@ impl<S: WorkflowStatus> Default for HttpWorkflowState<S> {
         Self {
             status: RwLock::new(S::default()),
             error: RwLock::new(None),
-            abort_handle: tokio::sync::Mutex::new(None),
+            abort_handle: Mutex::new(None),
             invited_peers: RwLock::new(Vec::new()),
         }
     }

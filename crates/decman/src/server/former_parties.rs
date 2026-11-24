@@ -33,6 +33,7 @@ use canton_proto_rs::com::digitalasset::canton::{
 };
 use futures::{StreamExt, TryStreamExt};
 use sqlx::SqlitePool;
+use tokio::sync::Mutex;
 use tonic::transport::Channel;
 
 use crate::{
@@ -59,7 +60,7 @@ use crate::{
 /// Serializes the operations that take the participant off its synchronizer
 /// or put it back. A purge holds it from its start until it records its
 /// outcome. A reconnect takes it, or refuses while a purge holds it.
-static CONNECTIVITY: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+static CONNECTIVITY: Mutex<()> = Mutex::const_new(());
 
 /// How long the removal must have been in force before a purge.
 ///
@@ -381,7 +382,7 @@ pub(crate) async fn check_purge_allowed(
     config: &NodeConfig,
     db: &SqlitePool,
     party: &CantonId,
-) -> Result<std::result::Result<(), Refusal>> {
+) -> Result<Result<(), Refusal>> {
     let refuse = |why: String| Ok(Err(Refusal::Unsafe(why)));
 
     match db.get_former_dec_party(party).await? {
@@ -570,7 +571,7 @@ pub(crate) async fn reconnect_after_failed_purge(
     config: &NodeConfig,
     db: &SqlitePool,
     party: &CantonId,
-) -> Result<std::result::Result<(), Refusal>> {
+) -> Result<Result<(), Refusal>> {
     let refuse = |why: String| Ok(Err(Refusal::Unsafe(why)));
 
     match db.get_former_dec_party(party).await? {
@@ -657,7 +658,7 @@ async fn purge_offered(config: &NodeConfig, alias: &str) -> Result<bool> {
     purge_probe_result(probe.map(drop))
 }
 
-fn purge_probe_result(probe: std::result::Result<(), tonic::Status>) -> Result<bool> {
+fn purge_probe_result(probe: Result<(), tonic::Status>) -> Result<bool> {
     match probe {
         Ok(()) => Ok(true),
         Err(status) => match status.code() {
@@ -800,7 +801,7 @@ mod tests {
             .await
     }
 
-    fn refusal(outcome: std::result::Result<(), Refusal>) -> String {
+    fn refusal(outcome: Result<(), Refusal>) -> String {
         match outcome {
             Err(Refusal::Unsafe(why)) => why,
             other => panic!("expected an unsafe refusal, got {other:?}"),

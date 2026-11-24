@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use actix_web::{App, http::StatusCode, test};
 use serde_json::json;
 use sqlx::SqlitePool;
@@ -14,7 +16,7 @@ use crate::{
 };
 
 fn state(db: SqlitePool) -> web::Data<AppState> {
-    let mut state = std::sync::Arc::try_unwrap(AppState::for_test_on(None, db).into_inner())
+    let mut state = Arc::try_unwrap(AppState::for_test_on(None, db).into_inner())
         .unwrap_or_else(|_| panic!("the test state has no other owner"));
     state.test_mode = false;
     state.config.tenant_api_keys = vec!["relay-test-key".into()];

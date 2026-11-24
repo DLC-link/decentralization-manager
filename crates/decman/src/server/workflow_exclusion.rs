@@ -30,7 +30,7 @@ pub(super) async fn claim_party_for_workflow(
     registry: &WorkflowRegistry,
     db: &SqlitePool,
     party: &CantonId,
-) -> std::result::Result<StartClaim, PartyStartRefusal> {
+) -> Result<StartClaim, PartyStartRefusal> {
     let claim = registry
         .claim_start(party)
         .ok_or_else(|| PartyStartRefusal::Starting {
