@@ -51,9 +51,9 @@ pub(crate) use queries::compare_versions;
 // Reached externally as `dec_party_manager::server::NodeConfigResponse` by the
 // `gen-types` binary (a separate crate from this lib), so it must stay `pub`.
 pub use handlers::NodeConfigResponse;
-pub(crate) use handlers::mark_run_failed;
 #[cfg(test)]
 pub(crate) use handlers::tenant_acs_import as test_tenant_acs_import;
+pub(crate) use handlers::{CoordinatorRequest, mark_run_failed};
 #[cfg(test)]
 pub(crate) use middleware::AuthMiddleware as TestAuthMiddleware;
 pub(crate) use types::*;
