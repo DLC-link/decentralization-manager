@@ -352,6 +352,51 @@ async fn a_run_waiting_for_peers_holds_no_dars(db: SqlitePool) -> Result {
     Ok(())
 }
 
+/// A run resumed mid-transfer serves its DARs on the first poll, so no peer is
+/// sent an empty `UploadDars` after a coordinator restart.
+#[sqlx::test(migrations = "./migrations")]
+async fn a_resumed_transfer_serves_its_dars_on_the_first_poll(db: SqlitePool) -> Result {
+    let coordinator = TestNode::new("coordinator", 'c').await?;
+    let peer = TestNode::new("peer", 'b').await?;
+    let mut tx = db.begin_transaction().await?;
+    tx.insert_peer(&peer.as_peer(1)).await?;
+    Commitable::commit(tx).await?;
+    insert_run(
+        &db,
+        COORDINATOR_RUN,
+        WorkflowRole::Coordinator,
+        "UploadDars",
+        &[peer.id()],
+    )
+    .await?;
+    let dars = store_dars(&db, &peer.id()).await?;
+    let workflows = WorkflowRegistry::new();
+    let last_seen: LastSeen = Arc::new(RwLock::new(HashMap::new()));
+    let coordinating = spawn_coordinator(&coordinator, &db, dars, &workflows, last_seen);
+
+    let server = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if let Some(ActiveWorkflow::Dars(server)) = workflows.route(COORDINATOR_RUN) {
+                return server;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await?;
+    let command = server
+        .handle_command(peer.id(), Message::new_empty(MessageType::GetNextCommand))
+        .await?;
+
+    assert_eq!(command.msg_type, MessageType::UploadDars);
+    assert_eq!(
+        command.payload,
+        bundle_of(vec![("app.dar".into(), DAR.to_vec())])
+    );
+
+    coordinating.abort();
+    Ok(())
+}
+
 /// Peers that never accept fail the run once the join limit passes, so such
 /// runs do not pile up. The error names the peers the run waited on.
 #[sqlx::test(migrations = "./migrations")]

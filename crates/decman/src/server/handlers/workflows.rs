@@ -4062,8 +4062,8 @@ fn bundle_size_refusal(files: &[(&str, usize)], limit: usize) -> Option<String> 
     })
 }
 
-/// Serializes starting DAR runs, so the duplicate check in [`launch_dars`]
-/// sees every run started before it.
+/// Serializes starting and retrying DAR runs, so the duplicate check sees
+/// every run put in progress before it.
 static DARS_LAUNCH: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 /// Refuse a DAR run that repeats one still in progress: the same DAR to the
@@ -5045,7 +5045,7 @@ pub async fn dismiss_workflow(
     responses(
         (status = 200, description = "Retry started", body = MessageResponse),
         (status = 404, description = "Run not found", body = ErrorResponse),
-        (status = 409, description = "Run is not in a retryable state", body = ErrorResponse),
+        (status = 409, description = "Run is not in a retryable state, or a DAR run repeats one in progress", body = ErrorResponse),
         (status = 503, description = "Cannot check running workflows", body = ErrorResponse)
     )
 )]
@@ -5100,6 +5100,26 @@ pub async fn retry_workflow(
         None
     };
 
+    // A retried DAR run sends its DARs again, so it passes the duplicate check
+    // of a new run. The lock is held until the run is back in progress.
+    let launching = if run.kind == WorkflowKind::Dars {
+        let launching = DARS_LAUNCH.lock().await;
+        let config = match serde_json::from_str::<workflow::DarsConfig>(&run.config_json) {
+            Ok(config) => config,
+            Err(e) => {
+                return HttpResponse::InternalServerError().json(ErrorResponse {
+                    error: format!("The config of DAR run {instance_name} does not parse: {e}"),
+                });
+            }
+        };
+        if let Err(resp) = refuse_repeated_dars(&data, &config).await {
+            return resp;
+        }
+        Some(launching)
+    } else {
+        None
+    };
+
     // Flip the row back to InProgress before re-spawning the task. Concurrent
     // same-kind runs are allowed now (no unique index); the registry insert in
     // respawn_coordinator still rejects a same-instance duplicate.
@@ -5129,6 +5149,7 @@ pub async fn retry_workflow(
             error: format!("Failed to commit retry status: {e}"),
         });
     }
+    drop(launching);
     count_run_started(run.kind);
 
     // Re-load the row (now InProgress), broadcast RetryWorkflow to the
@@ -8272,6 +8293,75 @@ mod tests {
                 "{config:?} is not a repeat"
             );
         }
+        Ok(())
+    }
+
+    /// A retry sends the DARs again, so it cannot repeat a run in progress
+    /// either. Once that run ends, the retry goes ahead.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_retry_cannot_repeat_a_dar_run_in_progress(pool: SqlitePool) -> Result {
+        store_dars_run(
+            &pool,
+            "dars-distribute-1",
+            &[("app.dar", b"app")],
+            vec![pid(2)?],
+        )
+        .await?;
+        assert!(
+            finish_run(
+                &pool,
+                "dars-distribute-1",
+                WorkflowProgress::Failed,
+                Some("the peer did not join")
+            )
+            .await?
+        );
+        store_dars_run(
+            &pool,
+            "dars-distribute-2",
+            &[("app.dar", b"app")],
+            vec![pid(2)?],
+        )
+        .await?;
+        let app = actix_test::init_service(
+            App::new()
+                .app_data(state_on(pool.clone()).await?)
+                .service(retry_workflow),
+        )
+        .await;
+        let retry = || {
+            let request = actix_test::TestRequest::post()
+                .uri("/workflows/dars-distribute-1/retry")
+                .to_request();
+            request.extensions_mut().insert(admin());
+            request
+        };
+
+        let response = actix_test::call_service(&app, retry()).await;
+
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        let body: serde_json::Value = actix_test::read_body_json(response).await;
+        let error = body["error"].as_str().unwrap_or_default();
+        assert!(
+            error.contains(&format!("app.dar to {} in run dars-distribute-2", pid(2)?)),
+            "{error}"
+        );
+        assert_eq!(
+            status_of(&pool, "dars-distribute-1").await?,
+            Some(WorkflowProgress::Failed)
+        );
+
+        assert!(
+            finish_run(
+                &pool,
+                "dars-distribute-2",
+                WorkflowProgress::Completed,
+                None
+            )
+            .await?
+        );
+        let response = actix_test::call_service(&app, retry()).await;
+        assert_eq!(response.status(), StatusCode::OK);
         Ok(())
     }
 

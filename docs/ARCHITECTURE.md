@@ -565,8 +565,9 @@ Uploads DAR packages to all participants without deploying contracts.
 
 The run's row holds only the names and hashes of its DARs. The bytes are the
 run's `dars_bundle` artefact, so a waiting run holds none of them in memory,
-and listing runs never loads them. DecMan refuses a run that sends a DAR to a
-peer while another run in progress already sends that DAR to that peer.
+and listing runs never loads them. DecMan refuses to start or retry a run that
+sends a DAR to a peer while another run in progress already sends that DAR to
+that peer.
 
 **Canton API calls:**
 - `PackageService.UploadDarFile` -- Upload DAR packages (step 3)
