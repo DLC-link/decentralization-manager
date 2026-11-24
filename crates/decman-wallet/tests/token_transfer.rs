@@ -18,19 +18,17 @@ use std::{
 
 use base64::{Engine, engine::general_purpose::STANDARD};
 use chrono::{DateTime, SecondsFormat, TimeDelta, Utc};
-use decman_lib::{
-    canton_hash::{HashingScheme, compute_prepared_transaction_hash},
-    canton_proto_rs::com::daml::ledger::api::v2::{
-        Identifier, List, Record, RecordField, TextMap, Value as DamlValue, Variant,
-        interactive::{
-            DamlTransaction, Metadata, PreparedTransaction,
-            daml_transaction::{Node, NodeSeed, node::VersionedNode},
-            metadata::SubmitterInfo,
-            transaction::v1::{self, Exercise, node::NodeType},
-        },
-        text_map,
-        value::Sum,
+use decman_lib::canton_hash::{HashingScheme, compute_prepared_transaction_hash};
+use decman_lib::canton_proto_rs::com::daml::ledger::api::v2::{
+    Identifier, List, Record, RecordField, TextMap, Value as DamlValue, Variant,
+    interactive::{
+        DamlTransaction, Metadata, PreparedTransaction,
+        daml_transaction::{Node, NodeSeed, node::VersionedNode},
+        metadata::SubmitterInfo,
+        transaction::v1::{self, Exercise, node::NodeType},
     },
+    text_map,
+    value::Sum,
 };
 use decman_wallet::{
     AMULET_TRANSFER_INSTRUCTION_TEMPLATE, ClientOptions, Error, ExternalKeyPair, LedgerClient,
