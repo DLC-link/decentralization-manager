@@ -118,14 +118,11 @@ pub struct ConfirmationsQuery {
     pub include_hidden: bool,
 }
 
-/// Mark the actions that cannot be archived, then apply this node's hidden
-/// confirmations to them.
-async fn mark_archival_state(
-    db: &sqlx::SqlitePool,
+/// This node's evidence of what cannot be archived, and what it hid.
+async fn read_archival_state(
+    db: &SqlitePool,
     party_id: &CantonId,
-    queue: &mut GovernanceQueue,
-    include_hidden: bool,
-) -> Result<()> {
+) -> Result<(ExpireTimeouts, HashSet<String>)> {
     let timeouts = expire_timeouts(
         db.get_mediator_timeouts(party_id)
             .await
@@ -138,6 +135,25 @@ async fn mark_archival_state(
         .into_iter()
         .map(|row| row.contract_id)
         .collect();
+    Ok((timeouts, hidden))
+}
+
+/// Mark the actions that cannot be archived, then apply this node's hidden
+/// confirmations to them.
+///
+/// Both come from this node's database. When a read fails, the list goes out
+/// with no marks and nothing hidden: showing a hidden action beats an empty
+/// list. The error stays in the log, not in the response.
+async fn mark_archival_state(
+    db: &SqlitePool,
+    party_id: &CantonId,
+    queue: &mut GovernanceQueue,
+    include_hidden: bool,
+) {
+    let (timeouts, hidden) = read_archival_state(db, party_id).await.unwrap_or_else(|e| {
+        tracing::error!(%party_id, "Listing governance actions without local marks: {e:#}");
+        (ExpireTimeouts::new(), HashSet::new())
+    });
     mark_stuck(
         &mut queue.actions,
         &mut queue.domain_actions,
@@ -150,7 +166,6 @@ async fn mark_archival_state(
         &hidden,
         include_hidden,
     );
-    Ok(())
 }
 
 /// Get governance confirmations with parsed actions
@@ -218,14 +233,7 @@ pub async fn get_governance(
     .await
     {
         Ok(mut queue) => {
-            if let Err(e) =
-                mark_archival_state(&data.db, party_id, &mut queue, query.include_hidden).await
-            {
-                tracing::error!("{e:#}");
-                return HttpResponse::InternalServerError().json(ErrorResponse {
-                    error: format!("{e:#}"),
-                });
-            }
+            mark_archival_state(&data.db, party_id, &mut queue, query.include_hidden).await;
             let GovernanceQueue {
                 actions,
                 mut domain_actions,
@@ -5178,7 +5186,7 @@ mod archival_state_tests {
     /// `hidden` mark.
     async fn listed(pool: &SqlitePool, include_hidden: bool) -> Result<Vec<(String, bool)>> {
         let mut queue = queue()?;
-        mark_archival_state(pool, &party_id("dec")?, &mut queue, include_hidden).await?;
+        mark_archival_state(pool, &party_id("dec")?, &mut queue, include_hidden).await;
         Ok(queue
             .actions
             .into_iter()
@@ -5206,6 +5214,36 @@ mod archival_state_tests {
         pool.unhide_confirmations(&party, &ids[..1]).await?;
 
         assert_eq!(listed(&pool, false).await?, both());
+        Ok(())
+    }
+
+    /// A failed read of this node's marks must not empty the list. The list
+    /// then goes out unmarked, and a hidden action shows again.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_failed_local_read_lists_every_action_unmarked(pool: SqlitePool) -> Result {
+        record_the_stuck_timeout(&pool).await?;
+        pool.hide_confirmations(&party_id("dec")?, &["00stuck".to_string()], "admin")
+            .await?;
+        assert_eq!(listed(&pool, false).await?, [("live".to_string(), false)]);
+
+        for table in [
+            "governance_hidden_confirmation",
+            "governance_mediator_timeout",
+        ] {
+            sqlx::query(&format!("ALTER TABLE {table} RENAME TO {table}_gone"))
+                .execute(&pool)
+                .await?;
+
+            assert_eq!(
+                listed(&pool, false).await?,
+                [("stuck".to_string(), false), ("live".to_string(), false)],
+                "{table}"
+            );
+
+            sqlx::query(&format!("ALTER TABLE {table}_gone RENAME TO {table}"))
+                .execute(&pool)
+                .await?;
+        }
         Ok(())
     }
 
