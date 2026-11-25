@@ -284,6 +284,38 @@ async fn a_run_exactly_at_the_total_cap_is_pulled() -> Result {
     Ok(())
 }
 
+/// The invitation's filenames and pins come from the coordinator. A run
+/// error that shows them must not carry a line break or a direction
+/// override, while the pull still matches the names as they are.
+#[tokio::test]
+async fn a_hash_miss_shows_the_coordinators_fields_escaped() -> Result {
+    let name = "a.dar\nERROR forged\u{202e}.dar".to_string();
+    let dars = vec![(name.clone(), vec![1u8; 100])];
+    let server = DarServer::start(dars, Duration::ZERO).await?;
+    let pin = "00\npinned\u{202e}".to_string();
+    let pull = DarPull::new(&server.coordinator, COORDINATOR_RUN, &[name], &[pin])?
+        .context("no pull planned")?;
+
+    let error = pull
+        .fetch_all(&server.node)
+        .await
+        .expect_err("a wrong pin was accepted");
+
+    let text = format!("{error:#}");
+    assert!(!text.contains('\n') && !text.contains('\u{202e}'), "{text}");
+    assert!(
+        text.contains("DAR a.dar\\nERROR forged\\u{202e}.dar hashes to"),
+        "{text}"
+    );
+    assert!(text.contains("pinned 00\\npinned\\u{202e}."), "{text}");
+    assert_eq!(
+        server.requests()?.len(),
+        1,
+        "the name was not matched as it is"
+    );
+    Ok(())
+}
+
 /// The coordinator keeps one chunked `RequestDar` answer for each peer. Two
 /// fetches at once, such as a run's pull and an invitation preview, would
 /// read each other's chunks. They take turns instead.

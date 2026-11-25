@@ -34,6 +34,10 @@ const PULL_RETRY: NoiseRetryConfig = NoiseRetryConfig {
 /// record.
 const MAX_REFUSAL_LEN: usize = 512;
 
+/// The most bytes of one field a coordinator controls, such as a DAR's
+/// filename or its pinned hash, that reach the log and the run record.
+const MAX_FIELD_LEN: usize = 128;
+
 /// One lock for each coordinator, by its public key. The coordinator keeps
 /// one chunked `RequestDar` answer per requesting node, so a second fetch
 /// from this node would replace the chunks the first is still reading.
@@ -193,23 +197,26 @@ impl DarPull {
                 }
                 Ok(())
             };
+            // The invitation's names and pins come from the coordinator. They
+            // are matched as they are, and shown only escaped.
+            let name = shown(filename, MAX_FIELD_LEN);
             let dar =
                 fetch_dar_from_coordinator(config, &self.coordinator, &request, &PULL_RETRY, admit)
                     .await
-                    .with_context(|| format!("DAR {index} ({filename})"))?;
+                    .with_context(|| format!("DAR {index} ({name})"))?;
             // Stop at the first DAR that misses its pin, before reading the
             // rest. The whole set is checked again before any upload.
             let actual = hash_dar(&dar);
             if actual != *pinned {
                 return Err(PullRefused::HashMiss {
-                    filename: filename.clone(),
+                    filename: name,
                     actual,
-                    pinned: pinned.clone(),
+                    pinned: shown(pinned, MAX_FIELD_LEN),
                 }
                 .into());
             }
             tracing::info!(
-                "Read DAR {position}/{count} from the coordinator: {filename}, {len} bytes",
+                "Read DAR {position}/{count} from the coordinator: {name}, {len} bytes",
                 position = index + 1,
                 len = dar.len()
             );
@@ -279,7 +286,7 @@ pub async fn fetch_dar_from_coordinator(
                 .map_err(|e| anyhow::anyhow!("{e}"))?;
             if size > MAX_CHUNKED_TOTAL_SIZE {
                 return Err(PullRefused::DarTooLarge {
-                    filename: request.filename.clone(),
+                    filename: shown(&request.filename, MAX_FIELD_LEN),
                     size,
                     limit: MAX_CHUNKED_TOTAL_SIZE,
                 }
@@ -313,23 +320,31 @@ pub async fn fetch_dar_from_coordinator(
 /// refusal cannot break a line or reverse the text around it. The text stops
 /// at [`MAX_REFUSAL_LEN`] bytes, and only that much of the refusal is read.
 fn refusal_text(payload: &[u8]) -> String {
-    // Each byte read adds at least one byte of text, so this prefix suffices.
-    let read = &payload[..payload.len().min(MAX_REFUSAL_LEN + 1)];
-    let mut text = String::new();
-    for c in String::from_utf8_lossy(read).chars() {
+    // Each byte adds at least one byte of text, so this prefix suffices.
+    let prefix = &payload[..payload.len().min(MAX_REFUSAL_LEN + 1)];
+    shown(&String::from_utf8_lossy(prefix), MAX_REFUSAL_LEN)
+}
+
+/// `text` as the log and the run record may show it. Only printable ASCII
+/// passes as it is. Every other character is escaped, so text a coordinator
+/// controls cannot break a line or reverse the text around it. The result
+/// stops at `max` bytes and then ends with an ellipsis.
+fn shown(text: &str, max: usize) -> String {
+    let mut out = String::new();
+    for c in text.chars() {
         let printable = c == ' ' || (c.is_ascii_graphic() && c != '\\');
         let piece: String = if printable {
             c.to_string()
         } else {
             c.escape_default().collect()
         };
-        if text.len() + piece.len() > MAX_REFUSAL_LEN {
-            text.push('…');
+        if out.len() + piece.len() > max {
+            out.push('…');
             break;
         }
-        text.push_str(&piece);
+        out.push_str(&piece);
     }
-    text
+    out
 }
 
 #[cfg(test)]
@@ -471,6 +486,15 @@ mod tests {
         let text = refusal_text(&refusal);
 
         assert_eq!(text.len(), MAX_REFUSAL_LEN + "…".len());
+    }
+
+    #[test]
+    fn a_long_field_is_cut_after_escaping() {
+        let field = format!("{}\n", "x".repeat(MAX_FIELD_LEN));
+
+        let text = shown(&field, MAX_FIELD_LEN);
+
+        assert_eq!(text, format!("{}…", "x".repeat(MAX_FIELD_LEN)));
     }
 
     #[test]
