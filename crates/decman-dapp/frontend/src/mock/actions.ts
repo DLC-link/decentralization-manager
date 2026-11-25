@@ -1,6 +1,6 @@
 // The party wallet's simulated parts: holdings, dApp connections and
-// transfer requests. The digests and signature checks they call are the real
-// Rust ones. Party creation is real and lives in ../onboarding.ts.
+// transfer requests. Their digest is this mock's own. The signature checks
+// they call are the real Rust ones. Party creation lives in ../onboarding.ts.
 import { shortUid } from '../format'
 import { isValidSignature } from '../checks'
 import { signDigest, toHex } from './keys'
