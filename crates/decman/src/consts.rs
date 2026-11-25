@@ -134,12 +134,13 @@ pub const ROTATE_KEY: &str = "rotate-key";
 pub const PER_DAR_PULL: &str = "per-dar-pull";
 
 /// The most bytes a peer pulls for one Dars run, summed over the sizes the
-/// coordinator announces for its DARs.
+/// coordinator announces for its DARs. It is far above any real package set.
 ///
-/// Each DAR is held in memory until the whole set passes its hash check, so
-/// this bounds the peer's memory for a run. It is far above any real package
-/// set. The peer refuses the run once the announced sizes pass it, before it
-/// reads the DAR that would cross it.
+/// Each DAR stays in memory until the whole set passes its hash check. The
+/// peer refuses the run once the sum passes this cap. For a chunked DAR it
+/// checks before it reads the chunks of that DAR. An inline DAR, at most
+/// 1 MiB, arrives whole before the check. A run therefore holds at most this
+/// many DAR bytes plus one reply of at most `noise::MAX_REPLY_SIZE`.
 pub const MAX_DAR_PULL_TOTAL: usize = 256 * 1024 * 1024;
 
 /// Workflow features this build supports beyond [`MIN_PEER_VERSION`]. The

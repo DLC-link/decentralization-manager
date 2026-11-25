@@ -6,9 +6,9 @@ use std::os::unix::fs::PermissionsExt;
 use std::{marker::PhantomData, path::Path, time::Duration};
 
 use anyhow::Context;
-use bytes::Bytes;
+use bytes::{Bytes, BytesMut};
 use http::Uri;
-use hyper::{Body, Request, StatusCode};
+use hyper::{Body, Request, StatusCode, body::HttpBody};
 use secp256k1::{PublicKey, Secp256k1, SecretKey, ecdh::SharedSecret};
 use serde::{Deserialize, Serialize};
 #[cfg(unix)]
@@ -194,6 +194,13 @@ pub const MAX_PAYLOAD_SIZE: usize = 1024 * 1024;
 /// auto-fragments them into ~2 KiB frames, so this is not bound by the Noise
 /// frame size — only by `MAX_CHUNKED_TOTAL_SIZE`.
 pub const CHUNK_SIZE: usize = 1024 * 1024;
+
+/// The most bytes one reply body read by [`send_noise_message`] may carry:
+/// a full chunk with its 4-byte index, the 9-byte frame header, and the
+/// longest routing instance. An inline payload is at most
+/// [`MAX_PAYLOAD_SIZE`], no more than a chunk. Reading stops once a body
+/// passes this, so a peer cannot make the reader hold more.
+pub const MAX_REPLY_SIZE: usize = CHUNK_SIZE + 4 + 9 + u16::MAX as usize;
 
 /// Hard ceiling on the assembled size of a chunked response. Bounds peer-supplied
 /// `total_size` so a malicious or buggy peer can't ask the client to allocate
@@ -722,11 +729,25 @@ async fn send_noise_message_with_timeout(
 
     // `send_request` bounds only the reply head. Without this, a body that
     // stalls holds the caller, and any lock it holds, until the peer closes.
-    match tokio::time::timeout(timeout, hyper::body::to_bytes(response.body_mut())).await {
-        Ok(Ok(bytes)) => Ok(bytes),
-        Ok(Err(e)) => Err(NoiseError::from(e)),
+    match tokio::time::timeout(timeout, read_reply(response.body_mut(), MAX_REPLY_SIZE)).await {
+        Ok(result) => result,
         Err(_) => Err(NoiseError::RequestTimeout),
     }
+}
+
+/// Read a reply body of at most `limit` bytes. Reading stops at the first
+/// piece that passes it.
+async fn read_reply(body: &mut Body, limit: usize) -> Result<Bytes, NoiseError> {
+    let mut reply = BytesMut::new();
+    while let Some(piece) = body.data().await {
+        let piece = piece?;
+        let size = reply.len() + piece.len();
+        if size > limit {
+            return Err(NoiseError::PayloadTooLarge { size, limit });
+        }
+        reply.extend_from_slice(&piece);
+    }
+    Ok(reply.freeze())
 }
 
 /// Owned, zeroizing secp256k1 secret-key bytes.

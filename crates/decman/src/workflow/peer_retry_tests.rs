@@ -82,6 +82,8 @@ pub(super) enum DarReply {
     Served,
     /// The reply head, then a body that never ends.
     Stalled,
+    /// The whole DAR in one reply, whatever its size.
+    Inline,
 }
 
 impl Coordinator {
@@ -126,7 +128,7 @@ impl Coordinator {
             let refusal = format!("DAR {} of this run is {filename}", request.index);
             return Ok(Message::new(MessageType::Error, refusal.into_bytes()));
         }
-        if dar.len() <= MAX_PAYLOAD_SIZE {
+        if dar.len() <= MAX_PAYLOAD_SIZE || self.dar_reply == DarReply::Inline {
             return Ok(Message::new(MessageType::Data, dar.clone()));
         }
         *lock(&self.dar_chunks)? = dar.clone();

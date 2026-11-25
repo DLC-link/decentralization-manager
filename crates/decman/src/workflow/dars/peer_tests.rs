@@ -9,7 +9,9 @@ use crate::{
     config::NoiseRetryConfig,
     consts::MAX_CONSECUTIVE_STEP_FAILURES,
     error::Result,
-    noise::{CHUNK_SIZE, MAX_CHUNKED_TOTAL_SIZE, MAX_PAYLOAD_SIZE, Message, MessageType},
+    noise::{
+        CHUNK_SIZE, MAX_CHUNKED_TOTAL_SIZE, MAX_PAYLOAD_SIZE, MAX_REPLY_SIZE, Message, MessageType,
+    },
     server::{RequestDarPayload, WorkflowKind},
     utils,
     workflow::{
@@ -320,6 +322,44 @@ async fn a_reply_body_that_stalls_ends_the_fetch() -> Result {
     let error = outcome.expect_err("a stalled body was read");
     assert!(
         format!("{error:#}").contains("Request timeout"),
+        "{error:#}"
+    );
+    Ok(())
+}
+
+/// An inline reply arrives whole before its size is checked, so the reader
+/// stops once the body passes one frame. A coordinator cannot make the peer
+/// hold more than that for one reply.
+#[tokio::test]
+async fn an_inline_reply_above_one_frame_is_refused_while_read() -> Result {
+    let dars = dars(&[MAX_PAYLOAD_SIZE, MAX_REPLY_SIZE]);
+    let server = DarServer::replying(dars.clone(), DarReply::Inline).await?;
+    let fetch = |index: usize| {
+        let request = RequestDarPayload {
+            workflow_instance: COORDINATOR_RUN.to_string(),
+            index,
+            filename: dars[index].0.clone(),
+        };
+        let server = &server;
+        async move {
+            fetch_dar_from_coordinator(
+                &server.node,
+                &server.coordinator,
+                &request,
+                &server.node.noise_retry,
+                |_| Ok(()),
+            )
+            .await
+        }
+    };
+
+    assert!(fetch(0).await? == dars[0].1, "a full frame was not read");
+    let error = fetch(1)
+        .await
+        .expect_err("a reply above one frame was read");
+
+    assert!(
+        format!("{error:#}").contains("Payload too large"),
         "{error:#}"
     );
     Ok(())
