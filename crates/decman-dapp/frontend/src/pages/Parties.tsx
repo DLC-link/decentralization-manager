@@ -59,7 +59,7 @@ export function PartyDetail({ partyId }: { partyId: string }) {
           </h3>
           <span className="badges">
             {party.simulated && <SimulatedBadge />}
-            <Badge tone="ok">Active</Badge>
+            <Badge tone="ok">Every host reported it</Badge>
           </span>
         </div>
         <div className="chips">
