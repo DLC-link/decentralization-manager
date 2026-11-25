@@ -1,4 +1,8 @@
-use std::{collections::HashSet, sync::LazyLock, time::Duration};
+use std::{
+    collections::HashSet,
+    sync::LazyLock,
+    time::{Duration, Instant},
+};
 
 use actix_web::{HttpRequest, HttpResponse, Responder, get, http::StatusCode, post, web};
 use anyhow::Context;
@@ -757,18 +761,25 @@ fn count_action(step: ActionStep, outcome: ActionOutcome) {
 // Spawned Writes
 // ============================================================================
 
-/// How long a governance submission waits for the ledger. A little above the
-/// 120 seconds the deployment guide asks a proxy to allow. Without a deadline,
-/// a write whose caller hung up waits until Canton stops tracking the command.
+/// How long a governance write waits for the ledger, across all its
+/// submissions. Without a deadline, a write whose caller hung up waits until
+/// Canton stops tracking the command. The deployment guide asks a proxy to
+/// wait longer than this, so DecMan's own answer reaches the caller.
 const SUBMISSION_DEADLINE: Duration = Duration::from_secs(130);
 
-/// A Ledger API request as `token`, with the [`SUBMISSION_DEADLINE`].
-fn ledger_request<T>(message: T, token: &str) -> Result<tonic::Request<T>> {
+/// When a write whose first submission starts now stops waiting.
+fn write_deadline() -> Instant {
+    Instant::now() + SUBMISSION_DEADLINE
+}
+
+/// A Ledger API request as `token` that waits for the ledger until
+/// `deadline`. A write's later submissions get only what is left of it.
+fn ledger_request<T>(message: T, token: &str, deadline: Instant) -> Result<tonic::Request<T>> {
     let mut request = tonic::Request::new(message);
     request
         .metadata_mut()
         .insert("authorization", format!("Bearer {token}").parse()?);
-    request.set_timeout(SUBMISSION_DEADLINE);
+    request.set_timeout(deadline.saturating_duration_since(Instant::now()));
     Ok(request)
 }
 
@@ -1257,6 +1268,9 @@ async fn submit_proposal(
     member_party_id: CantonId,
     body: ProposeActionRequest,
 ) -> Submitted {
+    // Both submissions share one budget, so a propose waits no longer than
+    // any other write.
+    let deadline = write_deadline();
     let channel = match data.config.ledger_channel().await {
         Ok(channel) => channel,
         Err(e) => {
@@ -1276,7 +1290,7 @@ async fn submit_proposal(
         transaction_format: None,
     };
     let created: Result<_> = async {
-        let request = ledger_request(create, &token)?;
+        let request = ledger_request(create, &token, deadline)?;
         Ok(client.submit_and_wait_for_transaction(request).await?)
     }
     .await;
@@ -1348,7 +1362,7 @@ async fn submit_proposal(
     };
     let confirmed: Result = async {
         client
-            .submit_and_wait(ledger_request(confirm, &token)?)
+            .submit_and_wait(ledger_request(confirm, &token, deadline)?)
             .await?;
         Ok(())
     }
@@ -2040,6 +2054,7 @@ async fn execute_confirm_action(
             commands: Some(commands),
         },
         token,
+        write_deadline(),
     )?;
     client.submit_and_wait(request).await?;
 
@@ -2236,6 +2251,7 @@ async fn execute_confirmed_action(
             commands: Some(commands),
         },
         token,
+        write_deadline(),
     )?;
     client.submit_and_wait(request).await?;
 
@@ -2462,6 +2478,7 @@ async fn execute_expire_confirmation(
             commands: Some(commands),
         },
         token,
+        write_deadline(),
     )?;
     client.submit_and_wait(request).await?;
 
@@ -2533,6 +2550,7 @@ async fn execute_cancel_confirmation(
             commands: Some(commands),
         },
         token,
+        write_deadline(),
     )?;
     client.submit_and_wait(request).await?;
 
@@ -2601,6 +2619,7 @@ async fn execute_cancel_proposal(
             commands: Some(commands),
         },
         token,
+        write_deadline(),
     )?;
     client.submit_and_wait(request).await?;
 
@@ -3415,6 +3434,8 @@ mod mediator_timeout_tests {
         submitted: Arc<Notify>,
         release: Arc<Notify>,
         deadlines: Arc<Mutex<Vec<Option<String>>>>,
+        /// How long the answer that creates `created_proposal` takes.
+        create_delay: Duration,
     }
 
     impl RejectingLedger {
@@ -3425,7 +3446,28 @@ mod mediator_timeout_tests {
                 submitted: Arc::new(Notify::new()),
                 release: Arc::new(Notify::new()),
                 deadlines: Arc::default(),
+                create_delay: Duration::ZERO,
             }
+        }
+
+        /// The milliseconds each submission's `grpc-timeout` allowed.
+        fn deadline_millis(&self) -> Result<Vec<u64>> {
+            let deadlines = self.deadlines.lock().map_err(|e| anyhow::anyhow!("{e}"))?;
+            deadlines
+                .iter()
+                .map(|header| {
+                    let header = header.as_deref().context("a submission had no deadline")?;
+                    let (value, unit) = header.split_at(header.len() - 1);
+                    let value: u64 = value.parse()?;
+                    Ok(match unit {
+                        "S" => value * 1_000,
+                        "m" => value,
+                        "u" => value / 1_000,
+                        "n" => value / 1_000_000,
+                        other => anyhow::bail!("unexpected grpc-timeout unit {other}"),
+                    })
+                })
+                .collect()
         }
 
         /// Serves the ledger on a free local port and returns the port.
@@ -3463,6 +3505,7 @@ mod mediator_timeout_tests {
                 }
                 match (method, ledger.created_proposal) {
                     (Some("SubmitAndWaitForTransaction"), Some(contract_id)) => {
+                        tokio::time::sleep(ledger.create_delay).await;
                         let response = created_transaction(contract_id);
                         return Ok(
                             unary(request, move |_: SubmitAndWaitForTransactionRequest| {
@@ -3761,20 +3804,47 @@ mod mediator_timeout_tests {
 
             post_to_writes(&pool, &ledger, uri, body).await?;
 
-            let deadlines = ledger
-                .deadlines
-                .lock()
-                .map_err(|e| anyhow::anyhow!("{e}"))?;
+            let deadlines = ledger.deadline_millis()?;
             let expected = if matches!(event, AuditEvent::Propose) {
                 2
             } else {
                 1
             };
             assert_eq!(deadlines.len(), expected, "{event:?}");
-            for deadline in deadlines.iter() {
-                assert_eq!(deadline.as_deref(), Some("130000m"), "{event:?}");
+            for millis in deadlines {
+                assert!(
+                    (129_000..=130_000).contains(&millis),
+                    "{event:?}: {millis} ms"
+                );
             }
         }
+        Ok(())
+    }
+
+    /// A propose makes two submissions. They share one budget, so the whole
+    /// write waits no longer than any other.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_propose_shares_one_deadline_across_its_submissions(pool: SqlitePool) -> Result {
+        let _serial = super::action_metrics_tests::SERIAL.lock().await;
+        let mut ledger = RejectingLedger::new();
+        ledger.created_proposal = Some("00proposal".to_string());
+        ledger.create_delay = Duration::from_millis(1_500);
+        ledger.release.notify_one();
+        let (_, uri, _, body) = writes()
+            .into_iter()
+            .find(|(event, ..)| matches!(event, AuditEvent::Propose))
+            .context("no propose case")?;
+
+        post_to_writes(&pool, &ledger, uri, body).await?;
+
+        let [create, confirm] = ledger.deadline_millis()?[..] else {
+            anyhow::bail!("expected two submissions");
+        };
+        assert!(create <= 130_000, "{create} ms");
+        assert!(
+            confirm <= 128_500,
+            "the confirmation got a fresh budget: {confirm} ms"
+        );
         Ok(())
     }
 
