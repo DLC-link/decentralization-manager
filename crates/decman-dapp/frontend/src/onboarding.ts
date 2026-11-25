@@ -327,15 +327,16 @@ function checkUntouched(proposal: Proposal): void {
 }
 
 /**
- * Whether every owner's participant answered the last attempt with its own
- * refusal and none ever accepted the bundle. Then no participant holds it,
- * unlike after a timeout or a network error.
+ * Whether every owner's participant refused the last attempt with a 4xx,
+ * none ever accepted the bundle, and no owner call ever ended without a
+ * definite answer.
  */
 export function refusedEverywhere(proposal: Proposal): boolean {
   const owners = proposal.hosts.filter((h) => h.role === 'owner')
   return (
     proposal.status === 'failed' &&
     !proposal.bundleAccepted &&
+    !proposal.ownerAnswerUncertain &&
     owners.length > 0 &&
     owners.every((h) => h.step === 'failed' && h.refusedByParticipant)
   )
@@ -470,6 +471,8 @@ async function sendToHosts(
       return
     }
     refused = true
+    const definite = result.reason instanceof ledger.LedgerError && result.reason.isRefusal
+    if (role === 'owner' && !definite) changeProposal(id, (p) => ({ ...p, ownerAnswerUncertain: true }))
     const said = message(result.reason)
     setHost(
       id,
@@ -478,7 +481,7 @@ async function sendToHosts(
       // Only an owner's participant receives the namespace definition. A
       // covalidator's refusal is shown as the participant wrote it.
       role === 'owner' && refusal === 'namespaceConflict' ? `${NAMESPACE_CONFLICT}\nThe participant said: ${said}` : said,
-      result.reason instanceof ledger.LedgerError,
+      definite,
     )
   })
   if (refused) {

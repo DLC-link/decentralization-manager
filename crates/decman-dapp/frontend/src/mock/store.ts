@@ -34,7 +34,7 @@ export type HostResult = {
   role: 'owner' | 'covalidator'
   step: HostStep
   detail?: string
-  /** The participant itself refused, as opposed to a timeout or a network error. */
+  /** The participant itself refused with a 4xx, as opposed to a 5xx, a timeout or a network error. */
   refusedByParticipant?: boolean
 }
 
@@ -61,6 +61,12 @@ export type Proposal = {
    * the bundle at that moment.
    */
   bundleAccepted?: boolean
+  /**
+   * Whether an owner's call ended without a definite answer, in any attempt:
+   * a timeout, a network error or a 5xx. The bundle may then sit at that
+   * participant.
+   */
+  ownerAnswerUncertain?: boolean
   /** Set at completion when no owner's participant accepted the bundle. */
   unconfirmed?: boolean
   hosts: HostResult[]

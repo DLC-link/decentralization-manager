@@ -16,11 +16,21 @@ export type ConnectedSynchronizer = { synchronizerAlias: string; synchronizerId:
 
 /** A participant's error answer, kept whole so that callers can classify it. */
 export class LedgerError extends Error {
+  readonly status: number
   readonly answer: unknown
 
-  constructor(message: string, answer: unknown) {
+  constructor(message: string, status: number, answer: unknown) {
     super(message)
+    this.status = status
     this.answer = answer
+  }
+
+  /**
+   * Whether the participant itself refused the request. A 5xx can come from
+   * a proxy or a gateway after the request reached the participant.
+   */
+  get isRefusal(): boolean {
+    return this.status >= 400 && this.status < 500
   }
 }
 
@@ -43,7 +53,11 @@ async function call(connection: Connection, method: 'GET' | 'POST', path: string
   }
   const text = await response.text()
   if (!response.ok) {
-    throw new LedgerError(`${method} ${url} failed with ${response.status}: ${participantError(text)}`, parsed(text))
+    throw new LedgerError(
+      `${method} ${url} failed with ${response.status}: ${participantError(text)}`,
+      response.status,
+      parsed(text),
+    )
   }
   return text ? (JSON.parse(text) as unknown) : {}
 }

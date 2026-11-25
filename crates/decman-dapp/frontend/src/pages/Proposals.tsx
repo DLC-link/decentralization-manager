@@ -262,8 +262,8 @@ function ProposalCard({
           {proposal.status === 'failed' &&
             (refused ? (
               <span className="muted">
-                Every owner's participant refused the bundle, so no participant holds it. The proposer can withdraw
-                it, or anyone can try again.
+                Every owner's participant refused the last attempt. The proposer can withdraw the proposal, or any
+                owner can try again.
               </span>
             ) : (
               <span className="muted">
