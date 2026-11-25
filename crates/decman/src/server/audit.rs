@@ -66,8 +66,9 @@ pub struct AuditParams {
     pub error_message: Option<String>,
 }
 
-/// Insert a governance audit row
-async fn log_governance_audit(pool: &SqlitePool, params: AuditParams) {
+/// Insert a governance audit row, and wait for the insert. A failed insert
+/// is logged, not returned.
+pub async fn log_governance_audit(pool: &SqlitePool, params: AuditParams) {
     let gov_type = serde_json::to_value(params.governance_type)
         .ok()
         .and_then(|v| v.as_str().map(String::from))
@@ -264,14 +265,6 @@ async fn try_insert_audit_row<'c>(
     .execute(executor)
     .await?;
     Ok(())
-}
-
-/// Spawn a fire-and-forget audit log write.
-/// This will NOT block the caller and will NOT propagate errors.
-pub fn spawn_audit_log(pool: SqlitePool, params: AuditParams) {
-    tokio::spawn(async move {
-        log_governance_audit(&pool, params).await;
-    });
 }
 
 /// Add the created proposal's contract id to a propose row's details.

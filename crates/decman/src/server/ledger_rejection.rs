@@ -103,14 +103,36 @@ fn unknown_outcome(e: &anyhow::Error) -> Option<&'static str> {
     }
 }
 
+/// A failure's cause in words that hold no internal detail: no address, no
+/// file name, no transport text. Any signed-in user can read the audit trail
+/// that stores it. A ledger answer gives its Canton id or gRPC code; a failed
+/// connection says so. Any other error gives its outermost message, which
+/// DecMan writes, unless that is a bare HTTP client error.
+fn failure_summary(e: &anyhow::Error) -> String {
+    if let Some(status) = e.downcast_ref::<tonic::Status>() {
+        return match canton_error_id(e) {
+            Some(id) => format!("the ledger refused the submission ({id})"),
+            None => format!("the Ledger API answered {:?}", status.code()),
+        };
+    }
+    if e.downcast_ref::<tonic::transport::Error>().is_some() {
+        return "the Ledger API connection failed".to_string();
+    }
+    let outermost: &(dyn std::error::Error + Send + Sync + 'static) = e.as_ref();
+    if outermost.is::<reqwest::Error>() {
+        return "a request to another service failed".to_string();
+    }
+    e.to_string().trim_end_matches('.').to_string()
+}
+
 /// The status and message for a failed governance submission. `context` says
 /// what failed, such as "Failed to expire confirmation".
 ///
 /// A mediator timeout is a 504 that names the unresponsive parties: the
 /// mediator rejected the write. A submission that stopped waiting before the
 /// ledger answered is also a 504, but its write may still complete, so the
-/// message says so. Any other failure is a 500 that carries the whole error
-/// chain.
+/// message says so. Any other failure is a 500 that names its cause without
+/// internal detail; the whole error chain goes to the server log.
 pub(crate) fn submission_failure(context: &str, e: &anyhow::Error) -> (StatusCode, String) {
     if let Some(timeout) = mediator_timeout(e) {
         return (
@@ -128,9 +150,13 @@ pub(crate) fn submission_failure(context: &str, e: &anyhow::Error) -> (StatusCod
             ),
         );
     }
+    tracing::warn!("{context}: {e:#}");
     (
         StatusCode::INTERNAL_SERVER_ERROR,
-        format!("{context}: {e:#}"),
+        format!(
+            "{context}: {}. See the DecMan server log.",
+            failure_summary(e)
+        ),
     )
 }
 
@@ -347,7 +373,49 @@ mod tests {
         assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
         assert_eq!(
             message,
-            "Failed to expire confirmation: Failed to connect to ledger: connection refused"
+            "Failed to expire confirmation: Failed to connect to ledger. See the DecMan server \
+             log."
+        );
+    }
+
+    /// A ledger answer carries its message and metadata. Only the Canton id
+    /// reaches the caller and the audit trail.
+    #[test]
+    fn a_ledger_refusal_gives_only_its_id() {
+        let mut status = tonic::Status::not_found(
+            "CONTRACT_NOT_FOUND(11,5e3c1a7b): Contract could not be found with id 00c0ffee",
+        );
+        status
+            .metadata_mut()
+            .insert("x-upstream", "ledger.internal:5001".parse().expect("ascii"));
+        let e = anyhow::Error::new(status);
+
+        let (status, message) = submission_failure("Failed to expire confirmation", &e);
+
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(
+            message,
+            "Failed to expire confirmation: the ledger refused the submission \
+             (CONTRACT_NOT_FOUND). See the DecMan server log."
+        );
+    }
+
+    /// An HTTP client error names the address it failed to reach.
+    #[tokio::test]
+    async fn a_bare_http_failure_hides_its_address() {
+        let error = reqwest::Client::new()
+            .get("http://127.0.0.1:1/internal")
+            .send()
+            .await
+            .expect_err("nothing listens on port 1");
+        let e = anyhow::Error::new(error);
+
+        let (_, message) = submission_failure("Failed to execute action", &e);
+
+        assert_eq!(
+            message,
+            "Failed to execute action: a request to another service failed. See the DecMan \
+             server log."
         );
     }
 }

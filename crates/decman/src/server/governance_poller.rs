@@ -199,6 +199,8 @@ async fn read_queue(
         &pkgs,
         READ_LIMIT,
         None,
+        // Marks do not change the counts, so the poller reads no evidence.
+        &HashMap::new(),
     )
     .await?;
     anyhow::ensure!(queue.complete, "a ledger read behind the queue failed");

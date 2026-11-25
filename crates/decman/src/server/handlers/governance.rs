@@ -60,8 +60,8 @@ use crate::{
     server::{
         AppState,
         audit::{
-            AuditActor, AuditEvent, AuditParams, HidingAuditEvent, log_hiding_failure,
-            spawn_audit_log, with_proposal_cid, write_hiding_audit,
+            AuditActor, AuditEvent, AuditParams, HidingAuditEvent, log_governance_audit,
+            log_hiding_failure, with_proposal_cid, write_hiding_audit,
         },
         chain_audit,
         ledger_rejection::{mediator_timeout, submission_failure},
@@ -142,32 +142,35 @@ async fn read_archival_state(
     Ok((timeouts, hidden))
 }
 
-/// Mark the actions that cannot be archived, then apply this node's hidden
-/// confirmations to them.
-///
-/// Both come from this node's database. When a read fails, the list goes out
-/// with no marks and nothing hidden: showing a hidden action beats an empty
-/// list. The error stays in the log, not in the response.
-async fn mark_archival_state(
-    db: &SqlitePool,
-    party_id: &CantonId,
-    queue: &mut GovernanceQueue,
-    include_hidden: bool,
-) {
-    let (timeouts, hidden) = read_archival_state(db, party_id).await.unwrap_or_else(|e| {
+/// This node's evidence and hidden confirmations for `party_id`. Both come
+/// from this node's database. When a read fails, the list goes out with no
+/// marks and nothing hidden: showing a hidden action beats an empty list. The
+/// error stays in the log, not in the response.
+async fn archival_state(db: &SqlitePool, party_id: &CantonId) -> (ExpireTimeouts, HashSet<String>) {
+    read_archival_state(db, party_id).await.unwrap_or_else(|e| {
         tracing::error!(%party_id, "Listing governance actions without local marks: {e:#}");
         (ExpireTimeouts::new(), HashSet::new())
-    });
+    })
+}
+
+/// Mark the actions that cannot be archived, then apply this node's hidden
+/// confirmations to them.
+fn apply_archival_state(
+    queue: &mut GovernanceQueue,
+    timeouts: &ExpireTimeouts,
+    hidden: &HashSet<String>,
+    include_hidden: bool,
+) {
     mark_stuck(
         &mut queue.actions,
         &mut queue.domain_actions,
-        &timeouts,
+        timeouts,
         chrono::Utc::now().timestamp(),
     );
     apply_hidden(
         &mut queue.actions,
         &mut queue.domain_actions,
-        &hidden,
+        hidden,
         include_hidden,
     );
 }
@@ -224,6 +227,8 @@ pub async fn get_governance(
         _ => None,
     };
 
+    let (timeouts, hidden) = archival_state(&data.db, party_id).await;
+
     match get_governance_confirmations(
         &data.config,
         party_id,
@@ -233,11 +238,19 @@ pub async fn get_governance(
         &packages,
         batch,
         from,
+        &timeouts,
     )
     .await
     {
+        // A read that left cards out would show as a shorter list with no
+        // warning. Answer it as the failed read it is.
+        Ok(GovernanceQueue {
+            complete: false, ..
+        }) => HttpResponse::InternalServerError().json(ErrorResponse {
+            error: FEED_READ_FAILED.to_string(),
+        }),
         Ok(mut queue) => {
-            mark_archival_state(&data.db, party_id, &mut queue, query.include_hidden).await;
+            apply_archival_state(&mut queue, &timeouts, &hidden, query.include_hidden);
             let GovernanceQueue {
                 actions,
                 mut domain_actions,
@@ -259,13 +272,18 @@ pub async fn get_governance(
             })
         }
         Err(e) => {
-            tracing::error!("Failed to fetch governance confirmations: {e}");
+            tracing::error!("Failed to fetch governance confirmations: {e:#}");
             HttpResponse::InternalServerError().json(ErrorResponse {
-                error: format!("Failed to fetch governance confirmations: {e}"),
+                error: FEED_READ_FAILED.to_string(),
             })
         }
     }
 }
+
+/// The answer to a confirmations read that failed. The cause, which can
+/// name an address, goes to the server log only.
+const FEED_READ_FAILED: &str =
+    "Failed to fetch governance confirmations: a ledger read failed. See the DecMan server log.";
 
 /// Get governance state (GovernanceRules contract state)
 /// Query parameters for the paged proposals feed.
@@ -888,8 +906,9 @@ struct WriteRecord {
 
 impl WriteRecord {
     /// Counts the write, logs its failure, and writes its audit row. Returns
-    /// the failure for the caller.
-    fn finish(self, db: SqlitePool, submitted: Submitted) -> Option<(StatusCode, String)> {
+    /// the failure for the caller once the row is written, so a caller that
+    /// reads the audit trail right after the answer finds it.
+    async fn finish(self, db: SqlitePool, submitted: Submitted) -> Option<(StatusCode, String)> {
         let (outcome, status) = match submitted.failure {
             Some(_) => (ActionOutcome::Error, "failed"),
             None => (ActionOutcome::Ok, "success"),
@@ -902,8 +921,8 @@ impl WriteRecord {
             Some(cid) => with_proposal_cid(&self.details, cid),
             None => self.details,
         };
-        spawn_audit_log(
-            db,
+        log_governance_audit(
+            &db,
             AuditParams {
                 event_type: self.step.audit_event(),
                 party_id: self.party_id,
@@ -914,7 +933,8 @@ impl WriteRecord {
                 status,
                 error_message: submitted.failure.as_ref().map(|(_, error)| error.clone()),
             },
-        );
+        )
+        .await;
         submitted.failure
     }
 }
@@ -972,18 +992,21 @@ where
     let step = record.step.label();
     let write = tokio::spawn(async move {
         let submitted = tokio::spawn(submission).await.unwrap_or_else(|e| {
+            tracing::error!("The {step} submission ended without an outcome: {e}");
             Submitted::failed(
                 StatusCode::INTERNAL_SERVER_ERROR,
-                format!("The {step} submission ended without an outcome: {e}"),
+                format!(
+                    "The {step} submission ended without an outcome. See the DecMan server log."
+                ),
             )
         });
-        record.finish(db, submitted)
+        record.finish(db, submitted).await
     });
     let failure = write.await.unwrap_or_else(|e| {
         tracing::error!("The {step} write ended without an outcome: {e}");
         Some((
             StatusCode::INTERNAL_SERVER_ERROR,
-            format!("The {step} write ended without an outcome: {e}"),
+            format!("The {step} write ended without an outcome. See the DecMan server log."),
         ))
     });
     match failure {
@@ -1349,28 +1372,28 @@ pub async fn propose_action(
         token,
         record.member_party_id.clone(),
         body.into_inner(),
+        write_deadline(),
     );
     run_write(db, record, "Proposal created and confirmed", submission).await
 }
 
 /// Creates a proposal from `commands`, then confirms it as the proposer.
+///
+/// Both submissions, and the ledger read between them, share one budget that
+/// ends at `deadline`, so a propose waits no longer than any other write.
 async fn submit_proposal(
     data: web::Data<AppState>,
     commands: Commands,
     token: String,
     member_party_id: CantonId,
     body: ProposeActionRequest,
+    deadline: Instant,
 ) -> Submitted {
-    // Both submissions share one budget, so a propose waits no longer than
-    // any other write.
-    let deadline = write_deadline();
     let channel = match data.config.ledger_channel().await {
         Ok(channel) => channel,
         Err(e) => {
-            return Submitted::failed(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Failed to connect to ledger API: {e:#}"),
-            );
+            let (status, error) = submission_failure("Failed to create proposal", &e);
+            return Submitted::failed(status, error);
         }
     };
 
@@ -1437,14 +1460,31 @@ async fn submit_proposal(
 
     // The rules contract may be an out-of-date fallback living under an older
     // governance-core package — exercise it under its actual package ref.
-    rules.package_ref = resolve_contract_package_ref(
-        &data.config,
-        &body.party_id,
-        Some(token.clone()),
-        &body.rules_contract_id,
-        &rules.package_ref,
+    let package_ref = tokio::time::timeout(
+        deadline.saturating_duration_since(Instant::now()),
+        resolve_contract_package_ref(
+            &data.config,
+            &body.party_id,
+            Some(token.clone()),
+            &body.rules_contract_id,
+            &rules.package_ref,
+        ),
     )
     .await;
+    rules.package_ref = match package_ref {
+        Ok(package_ref) => package_ref,
+        Err(_) => {
+            return Submitted::failed(
+                StatusCode::GATEWAY_TIMEOUT,
+                format!(
+                    "Proposal created (CID: {proposal_cid}) but not confirmed: DecMan ran out \
+                     of time while it read the governance rules, before it sent the \
+                     confirmation. Confirm proposal {proposal_cid}; do not re-propose."
+                ),
+            )
+            .of_proposal(proposal_cid);
+        }
+    };
 
     let confirm = SubmitAndWaitRequest {
         commands: Some(build_confirm_proposal(
@@ -4327,6 +4367,147 @@ mod mediator_timeout_tests {
             message.starts_with("The execute submission ended without an outcome"),
             "{message}"
         );
+        // The panic text is internal and goes to the server log only.
+        assert!(!message.contains("no handler maps"), "{message}");
+        Ok(())
+    }
+
+    /// A client may read the audit trail as soon as it has the answer, so the
+    /// row must be written by then.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn the_audit_row_is_written_before_the_answer(pool: SqlitePool) -> Result {
+        let _serial = super::action_metrics_tests::SERIAL.lock().await;
+        for (event, uri, _, body) in writes() {
+            let ledger = RejectingLedger::new();
+            ledger.release.notify_one();
+
+            let (status, error) = post_to_writes(&pool, &ledger, uri, body).await?;
+
+            let row: Option<(String, Option<String>)> = sqlx::query_as(
+                "SELECT status, error_message FROM governance_audit WHERE event_type = ?",
+            )
+            .bind(event.as_str())
+            .fetch_optional(&pool)
+            .await?;
+            assert_eq!(status, StatusCode::GATEWAY_TIMEOUT, "{event:?}");
+            assert_eq!(row, Some(("failed".to_string(), Some(error))), "{event:?}");
+        }
+        Ok(())
+    }
+
+    /// The Ledger API error names its address. Any signed-in user can read
+    /// the audit trail, so the answer and the row keep only the category.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_failed_ledger_connection_hides_its_address(pool: SqlitePool) -> Result {
+        let _serial = super::action_metrics_tests::SERIAL.lock().await;
+        for (event, uri, context, body) in writes() {
+            let app = actix_test::init_service(
+                App::new()
+                    .app_data(state(pool.clone(), 1).await?)
+                    .wrap(AuthMiddleware)
+                    .service(propose_action)
+                    .service(confirm_action)
+                    .service(execute_action)
+                    .service(expire_confirmation)
+                    .service(cancel_confirmation)
+                    .service(cancel_proposal),
+            )
+            .await;
+            let request = actix_test::TestRequest::post()
+                .uri(uri)
+                .insert_header((AUTHORIZATION, "Bearer any-token"))
+                .set_json(body)
+                .to_request();
+
+            let response = actix_test::call_service(&app, request).await;
+
+            assert_eq!(
+                response.status(),
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "{event:?}"
+            );
+            let body: serde_json::Value = actix_test::read_body_json(response).await;
+            let error = body["error"].as_str().context("no error in the body")?;
+            let context = if matches!(event, AuditEvent::Propose) {
+                "Failed to create proposal"
+            } else {
+                context
+            };
+            assert_eq!(
+                error,
+                format!("{context}: the Ledger API connection failed. See the DecMan server log."),
+                "{event:?}"
+            );
+            let (_, message) = audit_row(&pool, event).await?;
+            assert_eq!(message.as_deref(), Some(error), "{event:?}");
+        }
+        Ok(())
+    }
+
+    /// The Ledger API event service of a participant that never answers.
+    #[derive(Clone)]
+    struct SilentEvents;
+
+    impl Service<http::Request<Body>> for SilentEvents {
+        type Response = http::Response<Body>;
+        type Error = Infallible;
+        type Future = BoxFuture<Self::Response, Infallible>;
+
+        fn poll_ready(&mut self, _: &mut TaskContext<'_>) -> Poll<Result<(), Infallible>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn call(&mut self, _: http::Request<Body>) -> Self::Future {
+            Box::pin(std::future::pending())
+        }
+    }
+
+    impl NamedService for SilentEvents {
+        const NAME: &'static str = "com.daml.ledger.api.v2.EventQueryService";
+    }
+
+    /// A propose reads the rules contract's package between its two
+    /// submissions. That read shares the write's deadline, so a ledger that
+    /// never answers it cannot stretch the write.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_propose_stops_at_its_deadline_during_the_rules_read(pool: SqlitePool) -> Result {
+        let mut ledger = RejectingLedger::new();
+        ledger.created_proposal = Some("00proposal".to_string());
+        let incoming = TcpIncoming::bind("127.0.0.1:0".parse()?)?;
+        let port = incoming.local_addr()?.port();
+        tokio::spawn(
+            Server::builder()
+                .add_service(ledger)
+                .add_service(SilentEvents)
+                .serve_with_incoming(incoming),
+        );
+        let data = state(pool, port).await?;
+        let body: ProposeActionRequest = serde_json::from_value(serde_json::json!({
+            "party_id": party(),
+            "rules_contract_id": "00rules",
+            "proposal": { "type": "generic_vote", "description": "deadline" },
+        }))?;
+        let member = CantonId::parse(&format!("member::1220{}", "cd".repeat(32)))?;
+
+        let proposing = submit_proposal(
+            data,
+            Commands::default(),
+            "any-token".to_string(),
+            member,
+            body,
+            Instant::now() + Duration::from_millis(500),
+        );
+        let submitted = tokio::time::timeout(Duration::from_secs(5), proposing)
+            .await
+            .context("the propose outlived its deadline")?;
+
+        let (status, error) = submitted.failure.context("the propose succeeded")?;
+        assert_eq!(status, StatusCode::GATEWAY_TIMEOUT, "{error}");
+        assert!(
+            error.ends_with("Confirm proposal 00proposal; do not re-propose."),
+            "{error}"
+        );
+        assert_eq!(submitted.proposal_cid.as_deref(), Some("00proposal"));
         Ok(())
     }
 
@@ -4553,13 +4734,17 @@ mod confirmations_feed_tests {
     /// The Ledger API state service of a participant whose ACS holds
     /// `contracts`. A page read returns, in one page, every contract whose
     /// template matches a template filter of the request. An interface read,
-    /// such as the one for proposals, finds nothing: every proposal is gone.
-    /// A read of the `missing` template fails the way Canton fails it when
-    /// the package is uploaded but lacks the template.
+    /// such as the one for proposals, returns `proposals`, a page of the
+    /// requested size at a time. A read of the `missing` template fails the
+    /// way Canton fails it when the package is uploaded but lacks the
+    /// template. A read of the `refused` template fails with a permission
+    /// error.
     #[derive(Clone, Default)]
     struct AcsLedger {
         contracts: Arc<Vec<CreatedEvent>>,
         missing: Option<&'static str>,
+        proposals: Arc<Vec<CreatedEvent>>,
+        refused: Option<&'static str>,
     }
 
     impl AcsLedger {
@@ -4595,6 +4780,25 @@ mod confirmations_feed_tests {
                     "NO_TEMPLATES_FOR_PACKAGE_NAME_AND_QUALIFIED_NAME(8,0): no template {missing}"
                 )));
             }
+            if let Some(refused) = self.refused.filter(|r| wanted.iter().any(|w| w.1 == *r)) {
+                return Err(tonic::Status::permission_denied(format!(
+                    "PERMISSION_DENIED(7,0): cannot read {refused} at ledger.internal:5001"
+                )));
+            }
+            let reads_proposals = request
+                .event_format
+                .iter()
+                .flat_map(|format| format.filters_by_party.values())
+                .flat_map(|filters| &filters.cumulative)
+                .any(|filter| {
+                    matches!(
+                        filter.identifier_filter,
+                        Some(IdentifierFilter::InterfaceFilter(_))
+                    )
+                });
+            if reads_proposals {
+                return Ok(self.proposal_page(request));
+            }
             let active_contracts = self
                 .contracts
                 .iter()
@@ -4616,6 +4820,35 @@ mod confirmations_feed_tests {
                 active_at_offset: 1,
                 next_page_token: None,
             })
+        }
+
+        /// The page of `proposals` that `request` asks for. The page token is
+        /// the index of its first proposal.
+        fn proposal_page(
+            &self,
+            request: &GetActiveContractsPageRequest,
+        ) -> GetActiveContractsPageResponse {
+            let start = request
+                .page_token
+                .as_deref()
+                .and_then(|token| std::str::from_utf8(token).ok()?.parse().ok())
+                .unwrap_or(0usize);
+            let size = request.max_page_size.unwrap_or(1).max(1) as usize;
+            let end = (start + size).min(self.proposals.len());
+            GetActiveContractsPageResponse {
+                active_contracts: self.proposals[start..end]
+                    .iter()
+                    .map(|c| GetActiveContractsResponse {
+                        contract_entry: Some(ContractEntry::ActiveContract(ActiveContract {
+                            created_event: Some(c.clone()),
+                            ..Default::default()
+                        })),
+                        ..Default::default()
+                    })
+                    .collect(),
+                active_at_offset: 1,
+                next_page_token: (end < self.proposals.len()).then(|| end.to_string().into_bytes()),
+            }
         }
     }
 
@@ -5022,6 +5255,91 @@ mod confirmations_feed_tests {
         Ok(())
     }
 
+    /// A proposal created on the ledger for `party`.
+    fn proposal(contract_id: &str, party: &CantonId, proposer: &CantonId) -> CreatedEvent {
+        contract(
+            contract_id,
+            "Governance.Proposal",
+            "GenericVote",
+            vec![
+                field("governanceParty", value::Sum::Party(party.to_string())),
+                field("proposer", value::Sum::Party(proposer.to_string())),
+            ],
+        )
+    }
+
+    /// #615 asks that an operator can hide an orphan that cannot be archived.
+    /// With more than one page of proposals, no single page proves its
+    /// proposal gone, so the first page checks every active proposal id. An
+    /// orphan that can still be archived stays out, as on one page.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_marked_orphan_is_listed_when_the_proposals_span_pages(pool: SqlitePool) -> Result {
+        let party = id("dec", "ab");
+        let member = id("member-a", "aa");
+        let expired = chrono::Utc::now().timestamp() - 3600;
+        let ledger = AcsLedger {
+            contracts: Arc::new(vec![
+                rules(&party, &[&member]),
+                domain_confirmation("00dom-marked", "00gone", &member, expired),
+                domain_confirmation("00dom-unmarked", "00gone-b", &member, expired),
+            ]),
+            proposals: Arc::new(
+                ["00p1", "00p2", "00p3"]
+                    .iter()
+                    .map(|cid| proposal(cid, &party, &member))
+                    .collect(),
+            ),
+            ..AcsLedger::default()
+        };
+        pool.record_mediator_timeout(&party, "00dom-marked", &[member.to_string()])
+            .await?;
+
+        let first = feed_with(&pool, &ledger, &party, "&limit=2").await?;
+
+        let cursor = first["next_cursor"]
+            .as_str()
+            .context("the proposals fit one page")?;
+        let marked = holding(&first["domain_actions"], "00dom-marked")?;
+        assert_eq!(marked["orphaned"], json!(true));
+        assert_eq!(marked["cannot_be_archived"], json!(true));
+        assert!(holding(&first["domain_actions"], "00dom-unmarked").is_err());
+
+        let second =
+            feed_with(&pool, &ledger, &party, &format!("&limit=2&cursor={cursor}")).await?;
+        assert!(holding(&second["domain_actions"], "00dom-marked").is_err());
+        assert!(holding(&second["domain_actions"], "00dom-unmarked").is_err());
+        Ok(())
+    }
+
+    /// A read that leaves confirmations out must not look like a short list.
+    /// The answer names the failure, and keeps the ledger's text in the log.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_failed_confirmation_read_answers_an_error(pool: SqlitePool) -> Result {
+        let party = id("dec", "ab");
+        let member = id("member-a", "aa");
+        let ledger = AcsLedger {
+            contracts: Arc::new(vec![rules(&party, &[&member])]),
+            refused: Some("GovernanceSelfConfirmation"),
+            ..AcsLedger::default()
+        };
+        let app = actix_test::init_service(
+            App::new()
+                .app_data(state(pool, ledger.serve()?).await?)
+                .service(get_governance),
+        )
+        .await;
+        let request = actix_test::TestRequest::get()
+            .uri(&format!("/governance/confirmations?party_id={party}"))
+            .to_request();
+
+        let response = actix_test::call_service(&app, request).await;
+
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let body: serde_json::Value = actix_test::read_body_json(response).await;
+        assert_eq!(body["error"], json!(FEED_READ_FAILED));
+        Ok(())
+    }
+
     /// A package can be uploaded without one of the governance templates.
     /// The confirmations of the templates it has must still be listed.
     #[sqlx::test(migrator = "MIGRATOR")]
@@ -5037,6 +5355,7 @@ mod confirmations_feed_tests {
                 domain_confirmation("00dom-timeout", "00gone", &member, expired),
             ]),
             missing: Some("GovernanceSelfConfirmation"),
+            ..AcsLedger::default()
         };
         pool.record_mediator_timeout(&party, "00dom-timeout", &[member.to_string()])
             .await?;
@@ -5064,9 +5383,18 @@ mod confirmations_feed_tests {
         let mut packages = packages();
         packages.governance_action = None;
 
-        let queue =
-            get_governance_confirmations(&data.config, &party, 1, None, None, &packages, 25, None)
-                .await?;
+        let queue = get_governance_confirmations(
+            &data.config,
+            &party,
+            1,
+            None,
+            None,
+            &packages,
+            25,
+            None,
+            &ExpireTimeouts::new(),
+        )
+        .await?;
 
         assert!(queue.complete);
         Ok(())
@@ -5457,11 +5785,16 @@ mod paid_accept_disclosure_tests {
         let (status, error) = execute_failure(&anyhow::anyhow!("ledger said no"));
 
         assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
-        assert_eq!(error, "Failed to execute action: ledger said no");
+        assert_eq!(
+            error,
+            "Failed to execute action: ledger said no. See the DecMan server log."
+        );
     }
 
+    /// The answer and the audit row name what failed. What the other service
+    /// said stays in the server log.
     #[test]
-    fn an_execute_failure_names_its_underlying_cause() {
+    fn an_execute_failure_names_its_cause_but_not_the_chain() {
         let error = anyhow::anyhow!("scan answered 403 Forbidden: access denied")
             .context("Failed to fetch the open mining rounds from scan");
 
@@ -5469,8 +5802,8 @@ mod paid_accept_disclosure_tests {
 
         assert_eq!(
             error,
-            "Failed to execute action: Failed to fetch the open mining rounds from scan: \
-             scan answered 403 Forbidden: access denied"
+            "Failed to execute action: Failed to fetch the open mining rounds from scan. See \
+             the DecMan server log."
         );
     }
 }
@@ -5534,7 +5867,8 @@ mod archival_state_tests {
     /// `hidden` mark.
     async fn listed(pool: &SqlitePool, include_hidden: bool) -> Result<Vec<(String, bool)>> {
         let mut queue = queue()?;
-        mark_archival_state(pool, &party_id("dec")?, &mut queue, include_hidden).await;
+        let (timeouts, hidden) = archival_state(pool, &party_id("dec")?).await;
+        apply_archival_state(&mut queue, &timeouts, &hidden, include_hidden);
         Ok(queue
             .actions
             .into_iter()
