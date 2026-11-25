@@ -222,7 +222,11 @@ mod tests {
     #[test]
     fn hosts_are_the_owner_participants_and_covalidators() -> Result<(), Error> {
         let mut proposal = proposal();
-        proposal.covalidators = vec![" covalidator-c ".to_owned(), "participant-a".to_owned()];
+        proposal.covalidators = vec![
+            " covalidator-c ".to_owned(),
+            "participant-a".to_owned(),
+            "  ".to_owned(),
+        ];
         let plan = plan_party(&proposal)?;
         assert_eq!(
             plan.hosts,
@@ -301,37 +305,85 @@ mod tests {
         ));
     }
 
+    /// Two owners and one covalidator: the signing threshold is capped at 2
+    /// owners and the confirmation threshold at 3 hosts.
     #[test]
     fn rejects_thresholds_out_of_range() {
-        for (signing, confirmation) in [(0, 1), (3, 1), (1, 0), (1, 4)] {
+        let cases = [
+            (0, 1, "signing", 2, 0),
+            (3, 1, "signing", 2, 3),
+            (1, 0, "confirmation", 3, 0),
+            (1, 4, "confirmation", 3, 4),
+        ];
+        for (signing, confirmation, kind, max, got) in cases {
             let mut proposal = proposal();
             proposal.signing_threshold = signing;
             proposal.confirmation_threshold = confirmation;
+            let result = plan_party(&proposal);
             assert!(
                 matches!(
-                    plan_party(&proposal),
-                    Err(Error::ThresholdOutOfRange { .. })
+                    &result,
+                    Err(Error::ThresholdOutOfRange { kind: k, max: m, got: g })
+                        if *k == kind && *m == max && *g == got
                 ),
-                "signing {signing}, confirmation {confirmation}"
+                "signing {signing}, confirmation {confirmation} gave {result:?}"
             );
         }
     }
 
     #[test]
-    fn applies_cantons_party_name_rules() {
-        let cases = [
-            ("", "empty"),
-            ("a::b", "delimiter"),
-            ("café", "character"),
-            (&"a".repeat(MAX_HINT_LENGTH + 1), "length"),
-        ];
-        for (hint, label) in cases {
-            let mut proposal = proposal();
-            proposal.party_hint = hint.to_owned();
-            assert!(plan_party(&proposal).is_err(), "{label}");
-        }
+    fn each_threshold_may_reach_its_own_count() -> Result<(), Error> {
         let mut proposal = proposal();
-        proposal.party_hint = "Team treasury-1_a:b".to_owned();
-        assert!(plan_party(&proposal).is_ok());
+        proposal.signing_threshold = 2;
+        // Above the owner count, so only the host count may cap it.
+        proposal.confirmation_threshold = 3;
+        let plan = plan_party(&proposal)?;
+        assert_eq!(plan.signing_threshold, 2);
+        assert_eq!(plan.confirmation_threshold, 3);
+        Ok(())
+    }
+
+    #[test]
+    fn a_covalidator_on_an_owners_participant_adds_no_confirmer() {
+        let mut proposal = proposal();
+        proposal.covalidators = vec!["participant-a".to_owned()];
+        proposal.confirmation_threshold = 3;
+        assert!(matches!(
+            plan_party(&proposal),
+            Err(Error::ThresholdOutOfRange {
+                kind: "confirmation",
+                max: 2,
+                got: 3
+            })
+        ));
+    }
+
+    fn plan_with_hint(hint: &str) -> Result<PartyPlan, Error> {
+        let mut proposal = proposal();
+        proposal.party_hint = hint.to_owned();
+        plan_party(&proposal)
+    }
+
+    #[test]
+    fn applies_cantons_party_name_rules() {
+        assert!(matches!(plan_with_hint(""), Err(Error::EmptyHint)));
+        assert!(matches!(
+            plan_with_hint("a::b"),
+            Err(Error::HintContainsDelimiter)
+        ));
+        for hint in ["café", "a/b", "a.b", "a\tb"] {
+            assert!(
+                matches!(plan_with_hint(hint), Err(Error::InvalidHintCharacter)),
+                "{hint:?}"
+            );
+        }
+        assert!(matches!(
+            plan_with_hint(&"a".repeat(MAX_HINT_LENGTH + 1)),
+            Err(Error::HintTooLong {
+                max: MAX_HINT_LENGTH
+            })
+        ));
+        assert!(plan_with_hint(&"a".repeat(MAX_HINT_LENGTH)).is_ok());
+        assert!(plan_with_hint("Team treasury-1_a:b").is_ok());
     }
 }
