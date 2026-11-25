@@ -10,7 +10,6 @@
 //! The functions marked `#[wasm_bindgen]` are the JavaScript surface. They
 //! take and return strings, and they turn errors into JavaScript exceptions.
 
-mod digest;
 mod error;
 mod onboarding;
 mod party;
@@ -19,7 +18,6 @@ mod signature;
 use serde::de::DeserializeOwned;
 use wasm_bindgen::prelude::*;
 
-pub use digest::payload_digest;
 pub use error::Error;
 pub use onboarding::{
     AllocateRefusal, AllocationRequests, Onboarding, OnboardingTransaction, OwnerSignature,
@@ -99,13 +97,6 @@ pub fn allocate_refusal_js(answer_json: &str, party_id: &str) -> Result<String, 
 #[wasm_bindgen(js_name = partyHostedLocally)]
 pub fn party_hosted_locally_js(response_json: &str, party_id: &str) -> Result<bool, JsError> {
     Ok(party_hosted_locally(&parse(response_json)?, party_id))
-}
-
-/// The digest that owners sign for `payload`, separated by `domain`. Only
-/// the simulated transfer requests use it.
-#[wasm_bindgen(js_name = payloadDigest)]
-pub fn payload_digest_js(domain: &str, payload: &str) -> String {
-    payload_digest(domain, payload)
 }
 
 /// The Canton namespace of a hex-encoded raw Ed25519 public key.

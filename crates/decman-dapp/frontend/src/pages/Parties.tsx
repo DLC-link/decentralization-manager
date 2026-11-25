@@ -11,7 +11,6 @@ import {
   signRequest,
 } from '../mock/actions'
 import { actingWallet, useAppState, type Party, type TransferRequest, type Wallet } from '../mock/store'
-import { shortUid } from '../format'
 import { Avatar, Badge, EmptyState, ErrorText, Hex, PartyId, Person, Section, SimulatedBadge, Uid, useAction } from '../ui'
 
 export function Parties({ onOpenParty }: { onOpenParty: (partyId: string) => void }) {
@@ -308,7 +307,7 @@ function RequestCard({
           )}
           {verified >= party.signingThreshold && (
             <button onClick={() => run(() => executeRequest(party.partyId, request.id, acting))}>
-              Submit through {shortUid(acting.participant.participantId)}
+              Simulate submit
             </button>
           )}
           <button onClick={() => run(() => rejectRequest(party.partyId, request.id, acting))}>Reject</button>

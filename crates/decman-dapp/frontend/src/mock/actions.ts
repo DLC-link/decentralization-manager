@@ -2,11 +2,35 @@
 // transfer requests. The digests and signature checks they call are the real
 // Rust ones. Party creation is real and lives in ../onboarding.ts.
 import { shortUid } from '../format'
-import { isValidSignature, payloadDigest } from '../checks'
-import { signDigest } from './keys'
+import { isValidSignature } from '../checks'
+import { signDigest, toHex } from './keys'
 import { getState, update, type Party, type Signature, type TransferRequest, type Wallet } from './store'
 
 const TRANSFER_DOMAIN = 'decman-dapp/transfer-request/v1'
+
+// Canton's hash inputs start with a 4-byte big-endian purpose, a small
+// number. These four ASCII bytes start with a letter, so no Canton hash
+// input begins with them, and an owner's signature here signs nothing else.
+const DIGEST_PREFIX = 'DMSD'
+
+/**
+ * The digest that owners sign for a simulated request: SHA-256 over the
+ * prefix, the domain's length as 4 big-endian bytes, the domain and the
+ * payload. The length keeps two domains from producing the same bytes.
+ */
+export async function payloadDigest(domain: string, payload: string): Promise<string> {
+  const encoder = new TextEncoder()
+  const domainBytes = encoder.encode(domain)
+  const length = new Uint8Array(4)
+  new DataView(length.buffer).setUint32(0, domainBytes.length)
+  const parts = [encoder.encode(DIGEST_PREFIX), length, domainBytes, encoder.encode(payload)]
+  const data = new Uint8Array(parts.reduce((total, part) => total + part.length, 0))
+  parts.reduce((offset, part) => {
+    data.set(part, offset)
+    return offset + part.length
+  }, 0)
+  return toHex(new Uint8Array(await crypto.subtle.digest('SHA-256', data)))
+}
 
 const now = () => new Date().toISOString()
 const newId = () => crypto.randomUUID()
@@ -103,13 +127,13 @@ export function decideConnection(
   )
 }
 
-export function requestTransfer(
+export async function requestTransfer(
   partyId: string,
   connectionId: string,
   receiver: string,
   instrument: string,
   amount: string,
-): void {
+): Promise<void> {
   const party = findParty(partyId)
   const connection = party.connections.find((c) => c.id === connectionId && c.status === 'connected')
   if (!connection) throw new Error('Only a connected dApp can send a request.')
@@ -139,7 +163,7 @@ export function requestTransfer(
     instrument: instrument.trim(),
     amount: value,
     payload,
-    digest: payloadDigest(TRANSFER_DOMAIN, payload),
+    digest: await payloadDigest(TRANSFER_DOMAIN, payload),
     signatures: [],
     status: 'pending',
     createdAt: now(),
@@ -204,17 +228,17 @@ export function executeRequest(partyId: string, requestId: string, wallet: Walle
   }
   const balance = party.holdings[request.instrument] ?? 0
   if (balance < request.amount) {
-    const result = `Reported to ${request.dappName}: failed, the party holds only ${balance} ${request.instrument}.`
+    const result = `Simulated: reported to ${request.dappName} as failed. The party holds only ${balance} ${request.instrument}.`
     changeRequest(partyId, requestId, (r) => ({ ...r, status: 'failed', result }), result)
     return
   }
   const updateId = newId().slice(0, 8)
-  const result = `Reported to ${request.dappName}: completed in update ${updateId}.`
+  const result = `Simulated: reported to ${request.dappName} as completed in update ${updateId}. Nothing reached the ledger.`
   changeRequest(
     partyId,
     requestId,
     (r) => ({ ...r, status: 'executed', result }),
-    `${wallet.name} submitted the transfer through ${shortUid(wallet.participant.participantId)}. ${result}`,
+    `${wallet.name} simulated the submission through ${shortUid(wallet.participant.participantId)}. ${result}`,
     { ...party.holdings, [request.instrument]: balance - request.amount },
   )
 }

@@ -8,14 +8,13 @@ import init, {
   generateTopologyRequest as generateTopologyRequestJson,
   onboardingTransactions as onboardingTransactionsJson,
   partyHostedLocally as partyHostedLocallyJson,
-  payloadDigest,
   planParty as planPartyJson,
   publicKeyNamespace,
   topologyVersionOfGenerated as topologyVersionOfGeneratedJson,
   verifySignature,
 } from './wasm/decman_dapp'
 
-export { payloadDigest, publicKeyNamespace }
+export { publicKeyNamespace }
 
 export async function loadChecks(): Promise<void> {
   await init()
