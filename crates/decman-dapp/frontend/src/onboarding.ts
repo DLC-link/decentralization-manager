@@ -2,6 +2,7 @@
 // transactions and the request bodies. This file talks to the participants
 // and keeps each one's answer in the proposal.
 import {
+  allocateRefusal,
   allocationRequests,
   generateTopologyRequest,
   isValidSignature,
@@ -31,6 +32,11 @@ import {
 
 const HOSTING_TIMEOUT_MS = 120_000
 const HOSTING_POLL_MS = 2_000
+
+// Canton refuses a namespace definition at serial 1 that differs from the
+// owners' existing one. Only the threshold can differ, as the owners match.
+const NAMESPACE_CONFLICT =
+  'These owners already share a namespace with a different threshold. Use the threshold of their other parties.'
 
 const now = () => new Date().toISOString()
 const newId = () => crypto.randomUUID()
@@ -167,14 +173,15 @@ export async function signProposal(id: string, wallet: Wallet): Promise<void> {
 }
 
 /**
- * Creates the party. Every other host first approves the hosting. Then the
- * submitting owner's participant receives every transaction and the owners'
- * signatures. The party exists once every host reports it as local.
+ * Creates the party. Every owner's participant receives every transaction
+ * and the owners' signatures, which is its consent to host. Then each
+ * covalidator approves the pending hosting. The party exists once every host
+ * reports it as local. A retry skips the hosts that already report it.
  */
 export async function submitProposal(id: string, wallet: Wallet): Promise<void> {
   const proposal = findProposal(id)
   if (!proposal.plan.owners.some((o) => o.publicKey === wallet.publicKey)) {
-    throw new Error(`${wallet.name} is not an owner, so its participant cannot submit.`)
+    throw new Error(`${wallet.name} is not an owner, so it cannot start the creation.`)
   }
   if (getState().parties.some((p) => p.partyId === proposal.plan.partyId)) {
     throw new Error('This party already exists.')
@@ -185,7 +192,6 @@ export async function submitProposal(id: string, wallet: Wallet): Promise<void> 
     proposal.synchronizerId,
     proposal.signatures.map(({ publicKey, signature }) => ({ publicKey, signature })),
   )
-  const submitter = wallet.participant.participantId
   changeProposal(id, (p) => ({
     ...p,
     status: 'submitting',
@@ -194,27 +200,9 @@ export async function submitProposal(id: string, wallet: Wallet): Promise<void> 
   }))
 
   try {
-    const others = proposal.hosts.filter((h) => h.participant !== submitter)
-    const approvals = await Promise.allSettled(
-      others.map((h) => ledger.allocateExternalParty(hostOf(h.participant).link, requests.hostingApproval)),
-    )
-    approvals.forEach((result, index) => {
-      const host = others[index]
-      if (result.status === 'fulfilled') setHost(id, host.participant, 'approved', 'Signed its hosting approval.')
-      else setHost(id, host.participant, 'failed', message(result.reason))
-    })
-    if (approvals.some((result) => result.status === 'rejected')) {
-      throw new Error('A host refused its hosting approval. See its answer below.')
-    }
-
-    try {
-      await ledger.allocateExternalParty(hostOf(submitter).link, requests.allocate)
-      setHost(id, submitter, 'submitted', 'Received every transaction and the owner signatures.')
-    } catch (error) {
-      setHost(id, submitter, 'failed', message(error))
-      throw new Error('The submitting participant refused the party. See its answer below.')
-    }
-
+    await markHostedHosts(id, 'Already hosts the party.')
+    await sendToHosts(id, 'owner', requests.allocate, 'submitted', 'Received every transaction and the owner signatures.')
+    await sendToHosts(id, 'covalidator', requests.hostingApproval, 'approved', 'Signed its hosting approval.')
     await waitUntilHosted(id)
   } catch (error) {
     changeProposal(id, (p) => ({ ...p, status: 'failed', error: message(error) }))
@@ -224,28 +212,72 @@ export async function submitProposal(id: string, wallet: Wallet): Promise<void> 
   addParty(findProposal(id), wallet)
 }
 
-async function waitUntilHosted(id: string): Promise<void> {
-  const deadline = Date.now() + HOSTING_TIMEOUT_MS
-  for (;;) {
-    const proposal = findProposal(id)
-    const pending = proposal.hosts.filter((h) => h.step !== 'hosted')
-    if (pending.length === 0) return
-    await Promise.all(
-      pending.map(async (h) => {
+/** Marks every host that reports the party as local. */
+async function markHostedHosts(id: string, detail: string): Promise<void> {
+  const proposal = findProposal(id)
+  await Promise.all(
+    proposal.hosts
+      .filter((h) => h.step !== 'hosted')
+      .map(async (h) => {
         try {
           const answer = await ledger.getParty(hostOf(h.participant).link, proposal.plan.partyId)
-          if (partyHostedLocally(answer, proposal.plan.partyId)) setHost(id, h.participant, 'hosted', 'Hosts the party.')
+          if (partyHostedLocally(answer, proposal.plan.partyId)) setHost(id, h.participant, 'hosted', detail)
         } catch (error) {
           setHost(id, h.participant, h.step, `Still waiting: ${message(error)}`)
         }
       }),
+  )
+}
+
+/**
+ * Sends `body` to every host with `role` that does not report the party yet.
+ * A participant that says the party already exists counts as a success.
+ */
+async function sendToHosts(
+  id: string,
+  role: HostResult['role'],
+  body: unknown,
+  step: HostStep,
+  detail: string,
+): Promise<void> {
+  const proposal = findProposal(id)
+  const targets = proposal.hosts.filter((h) => h.role === role && h.step !== 'hosted')
+  const results = await Promise.allSettled(
+    targets.map((h) => ledger.allocateExternalParty(hostOf(h.participant).link, body)),
+  )
+  let refused = false
+  results.forEach((result, index) => {
+    const host = targets[index]
+    if (result.status === 'fulfilled') {
+      setHost(id, host.participant, step, detail)
+      return
+    }
+    const answer = result.reason instanceof ledger.LedgerError ? result.reason.answer : undefined
+    const refusal = allocateRefusal(answer, proposal.plan.partyId)
+    if (refusal === 'partyExists') {
+      setHost(id, host.participant, step, 'Says the party already exists.')
+      return
+    }
+    refused = true
+    setHost(id, host.participant, 'failed', refusal === 'namespaceConflict' ? NAMESPACE_CONFLICT : message(result.reason))
+  })
+  if (refused) {
+    throw new Error(
+      role === 'owner'
+        ? "An owner's participant refused the party. See its answer below."
+        : 'A covalidator refused its hosting approval. See its answer below.',
     )
+  }
+}
+
+async function waitUntilHosted(id: string): Promise<void> {
+  const deadline = Date.now() + HOSTING_TIMEOUT_MS
+  for (;;) {
+    await markHostedHosts(id, 'Hosts the party.')
+    const pending = findProposal(id).hosts.filter((h) => h.step !== 'hosted')
+    if (pending.length === 0) return
     if (Date.now() > deadline) {
-      const names = findProposal(id)
-        .hosts.filter((h) => h.step !== 'hosted')
-        .map((h) => h.name)
-      if (names.length === 0) return
-      throw new Error(`Timed out waiting for ${names.join(', ')} to host the party.`)
+      throw new Error(`Timed out waiting for ${pending.map((h) => h.name).join(', ')} to host the party.`)
     }
     await sleep(HOSTING_POLL_MS)
   }

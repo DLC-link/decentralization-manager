@@ -1,7 +1,6 @@
 import { isValidSignature } from '../checks'
 import { actingWallet, useAppState, type HostResult, type Proposal, type Wallet } from '../mock/store'
 import { signProposal, submitProposal, verifiedOwners } from '../onboarding'
-import { shortUid } from '../format'
 import { Badge, EmptyState, ErrorText, Hex, PartyId, Person, Section, Stepper, Uid, useAction, type Tone } from '../ui'
 
 export function Proposals({ onOpenParty }: { onOpenParty: (partyId: string) => void }) {
@@ -166,8 +165,7 @@ function ProposalCard({
           )}
           {canSubmit && (
             <button onClick={() => run(() => submitProposal(proposal.id, acting))}>
-              {proposal.status === 'failed' ? 'Try again' : 'Create the party'} through{' '}
-              {shortUid(acting.participant.participantId)}
+              {proposal.status === 'failed' ? 'Try again' : 'Create the party'}
             </button>
           )}
           {proposal.status === 'submitting' && <span className="muted">Creating the party…</span>}

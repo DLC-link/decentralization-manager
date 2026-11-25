@@ -8,9 +8,14 @@
 //!
 //! Three owners hold one key each: two on P1 and one on P2. P3 is a
 //! covalidator. The three thresholds take three different values, so a swap
-//! between them fails the checks. P2 and P3 approve the hosting first, then P1
-//! receives every transaction. Each host must then host the party, with every
-//! host confirming and the owners' keys as the party's signing keys.
+//! between them fails the checks.
+//!
+//! The order is the dApp's: P1 and P2, the owners' participants, each receive
+//! every transaction with the owners' signatures. Then P3 approves the hosting.
+//! Each host must then host the party, with every host confirming and the
+//! owners' keys as the party's signing keys. Two refusals the dApp relies on
+//! are checked too: a resent bundle for the existing party, and a second party
+//! that tries another threshold on the owners' shared namespace.
 
 use std::time::Duration;
 
@@ -20,9 +25,9 @@ use canton_proto_rs::com::digitalasset::canton::{
     protocol::v30::enums::ParticipantPermission,
 };
 use decman_dapp::{
-    Onboarding, OwnerSignature, PartyProposal, ProposedOwner, allocation_requests,
-    generate_topology_request, onboarding_transactions, party_hosted_locally, plan_party,
-    topology_format_of_generated,
+    AllocateRefusal, Onboarding, OwnerSignature, PartyProposal, ProposedOwner, allocate_refusal,
+    allocation_requests, generate_topology_request, onboarding_transactions, party_hosted_locally,
+    plan_party, topology_format_of_generated,
 };
 use decman_lib::topology::{TopologyFormat, party_signing_key};
 use decman_wallet::ExternalKeyPair;
@@ -121,6 +126,40 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
         .map(|owner| sign(owner, &onboarding))
         .collect::<anyhow::Result<Vec<_>>>()?;
     let requests = allocation_requests(&plan, &onboarding, &synchronizer_id, &signatures)?;
+
+    // Same owners, so the same namespace, but another namespace threshold.
+    let conflicting = PartyProposal {
+        party_hint: fresh_prefix("dapp-party-conflict"),
+        namespace_threshold: NAMESPACE_THRESHOLD - 1,
+        owners: proposal
+            .owners
+            .iter()
+            .map(|owner| ProposedOwner {
+                public_key: owner.public_key.clone(),
+                participant: owner.participant.clone(),
+            })
+            .collect(),
+        covalidators: proposal.covalidators.clone(),
+        ..proposal
+    };
+    let conflicting_plan = plan_party(&conflicting)?;
+    anyhow::ensure!(
+        conflicting_plan.namespace == plan.namespace,
+        "The same owners must share one namespace"
+    );
+    let conflicting_onboarding = onboarding_transactions(&conflicting_plan, format);
+    let conflicting_signatures = owners
+        .iter()
+        .map(|owner| sign(owner, &conflicting_onboarding))
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    let conflicting_allocate = allocation_requests(
+        &conflicting_plan,
+        &conflicting_onboarding,
+        &synchronizer_id,
+        &conflicting_signatures,
+    )?
+    .allocate;
+    let conflicting_party = conflicting_plan.party_id.clone();
     info!(
         "dApp party {} in format {format:?}, combined hash {}",
         plan.party_id, onboarding.combined_hash
@@ -138,19 +177,20 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
         plan.owners.iter().map(|o| o.namespace.clone()).collect();
     owner_namespaces.sort();
 
+    let allocate = requests.allocate;
     Scenario::with_ctx(format!("create dApp party {party_id} on P1+P2+P3"), ())
         .when(
-            "P2 and P3 approve the hosting, then P1 receives every transaction",
+            "P1 and P2 receive every transaction, then P3 approves the hosting",
             {
                 let approval = requests.hosting_approval;
-                let allocate = requests.allocate;
+                let allocate = allocate.clone();
                 move |f, _| {
                     let approval = approval.clone();
                     let allocate = allocate.clone();
                     Box::pin(async move {
-                        allocate_on(f, P2_JSON_API, &approval).await?;
-                        allocate_on(f, P3_JSON_API, &approval).await?;
-                        allocate_on(f, P1_JSON_API, &allocate).await
+                        allocate_on(f, P1_JSON_API, &allocate).await?;
+                        allocate_on(f, P2_JSON_API, &allocate).await?;
+                        allocate_on(f, P3_JSON_API, &approval).await
                     })
                 }
             },
@@ -267,8 +307,62 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
                 }
             },
         )
+        .when(
+            "P1 refuses the bundle again because the party exists, which the dApp counts as success",
+            {
+                let party_id = party_id.clone();
+                move |f, _| {
+                    let allocate = allocate.clone();
+                    let party_id = party_id.clone();
+                    Box::pin(async move {
+                        expect_refusal(f, P1_JSON_API, &allocate, &party_id, AllocateRefusal::PartyExists)
+                            .await
+                    })
+                }
+            },
+        )
+        .when(
+            "P1 refuses another party that tries a new threshold on the shared namespace",
+            move |f, _| {
+                let allocate = conflicting_allocate.clone();
+                let party_id = conflicting_party.clone();
+                Box::pin(async move {
+                    expect_refusal(
+                        f,
+                        P1_JSON_API,
+                        &allocate,
+                        &party_id,
+                        AllocateRefusal::NamespaceConflict,
+                    )
+                    .await
+                })
+            },
+        )
         .run(f)
         .await
+}
+
+/// Sends an allocate body that `port` must refuse, and checks how the dApp
+/// reads the refusal.
+async fn expect_refusal(
+    f: &Fixture,
+    port: u16,
+    body: &Value,
+    party_id: &str,
+    expected: AllocateRefusal,
+) -> anyhow::Result<()> {
+    let (status, text) = f.post_expect_status(port, ALLOCATE, body).await?;
+    anyhow::ensure!(
+        !status.is_success(),
+        "Allocate on {port} succeeded, but {expected:?} was expected"
+    );
+    let answer: Value = serde_json::from_str(&text).unwrap_or_else(|_| Value::String(text.clone()));
+    let refusal = allocate_refusal(&answer, party_id);
+    anyhow::ensure!(
+        refusal == expected,
+        "Allocate on {port} returned {status} {text}, which reads as {refusal:?}, not {expected:?}"
+    );
+    Ok(())
 }
 
 /// The one synchronizer the participant on `port` is connected to.

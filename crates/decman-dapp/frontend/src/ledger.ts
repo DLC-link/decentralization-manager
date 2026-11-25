@@ -6,6 +6,16 @@ export type Connection = { apiUrl: string; token: string }
 
 export type ConnectedSynchronizer = { synchronizerAlias: string; synchronizerId: string }
 
+/** A participant's error answer, kept whole so that callers can classify it. */
+export class LedgerError extends Error {
+  readonly answer: unknown
+
+  constructor(message: string, answer: unknown) {
+    super(message)
+    this.answer = answer
+  }
+}
+
 async function call(connection: Connection, method: 'GET' | 'POST', path: string, body?: unknown): Promise<unknown> {
   if (isSimulated()) return simulatedCall(connection.apiUrl, method, path, body)
   const url = `${connection.apiUrl.replace(/\/+$/, '')}${path}`
@@ -24,9 +34,17 @@ async function call(connection: Connection, method: 'GET' | 'POST', path: string
   }
   const text = await response.text()
   if (!response.ok) {
-    throw new Error(`${method} ${url} failed with ${response.status}: ${participantError(text)}`)
+    throw new LedgerError(`${method} ${url} failed with ${response.status}: ${participantError(text)}`, parsed(text))
   }
   return text ? (JSON.parse(text) as unknown) : {}
+}
+
+function parsed(text: string): unknown {
+  try {
+    return JSON.parse(text) as unknown
+  } catch {
+    return text
+  }
 }
 
 /** The readable part of a JSON Ledger API error. */

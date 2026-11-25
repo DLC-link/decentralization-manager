@@ -3,6 +3,7 @@
 // body in the app comes from here, so it matches what the server and Canton
 // compute.
 import init, {
+  allocateRefusal as allocateRefusalJson,
   allocationRequests as allocationRequestsJson,
   generateTopologyRequest as generateTopologyRequestJson,
   onboardingTransactions as onboardingTransactionsJson,
@@ -52,6 +53,9 @@ export type OwnerSignature = { publicKey: string; signature: string }
 /** The two `POST /v2/parties/external/allocate` bodies. */
 export type AllocationRequests = { hostingApproval: unknown; allocate: unknown }
 
+/** Why a participant refused an allocate body. */
+export type AllocateRefusal = 'partyExists' | 'namespaceConflict' | 'other'
+
 /** Checks the proposal. Throws an Error with a message for the form. */
 export function planParty(proposal: PartyProposal): PartyPlan {
   return JSON.parse(planPartyJson(JSON.stringify(proposal))) as PartyPlan
@@ -89,6 +93,10 @@ export function generateTopologyRequest(synchronizerId: string, publicKey: strin
 /** The topology format, 30 or 31, of a generate-topology answer. */
 export function topologyVersionOfGenerated(response: unknown): number {
   return topologyVersionOfGeneratedJson(JSON.stringify(response))
+}
+
+export function allocateRefusal(answer: unknown, partyId: string): AllocateRefusal {
+  return allocateRefusalJson(JSON.stringify(answer ?? null), partyId) as AllocateRefusal
 }
 
 export function partyHostedLocally(response: unknown, partyId: string): boolean {

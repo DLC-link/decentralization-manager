@@ -24,10 +24,12 @@ export function setSimulated(on: boolean): void {
   }
 }
 
-// One creation round at a time: every host's allocate call marks it, and the
-// submitting owner's call (the one with signatures) completes the round.
+// One creation at a time. Both allocate bodies end with the same
+// party-to-participant transaction, which names the creation. A host reports
+// the party once it sent a body for it and some owner sent the signatures.
+let creation: string | null = null
 const hosting = new Set<string>()
-let roundComplete = false
+let signed = false
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
 
@@ -45,6 +47,12 @@ async function participantIdFor(apiUrl: string): Promise<string> {
 /** A versioned envelope that holds only the format number, which is all the probe reads. */
 function envelopeWithFormat(format: number): string {
   return btoa(String.fromCharCode(0x10, format))
+}
+
+function partyToParticipantOf(body: unknown): string | null {
+  const transactions = (body as { onboardingTransactions?: { transaction?: string }[] } | undefined)
+    ?.onboardingTransactions
+  return transactions?.at(-1)?.transaction ?? null
 }
 
 function hasSignatures(body: unknown): boolean {
@@ -70,17 +78,19 @@ export async function simulatedCall(apiUrl: string, method: string, path: string
     return { topologyTransactions: [envelopeWithFormat(SIMULATED_TOPOLOGY_FORMAT)] }
   }
   if (method === 'POST' && path === '/v2/parties/external/allocate') {
-    if (roundComplete && !hasSignatures(body)) {
+    const sent = partyToParticipantOf(body)
+    if (sent !== creation) {
+      creation = sent
       hosting.clear()
-      roundComplete = false
+      signed = false
     }
     hosting.add(key)
-    if (hasSignatures(body)) roundComplete = true
+    if (hasSignatures(body)) signed = true
     return {}
   }
   if (method === 'GET' && path.startsWith('/v2/parties/')) {
     const party = decodeURIComponent(path.slice('/v2/parties/'.length))
-    const isLocal = roundComplete && hosting.has(key)
+    const isLocal = signed && hosting.has(key)
     return { partyDetails: isLocal ? [{ party, isLocal: true }] : [] }
   }
   throw new Error(`The simulated participant does not answer ${method} ${path}.`)

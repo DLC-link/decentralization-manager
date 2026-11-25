@@ -22,9 +22,14 @@ through the JSON Ledger API:
   never change the threshold of an existing party.
 - Each owner signs one hash that covers every transaction. The browser checks
   each Ed25519 signature before it counts it.
-- Every other host approves the hosting first. Then the submitting owner's
-  participant receives every transaction and the signatures.
+- Every owner's participant receives every transaction and every owner's
+  signature. That submission is the participant's consent to host the party.
+- Then each covalidator approves the pending hosting.
 - The dApp waits until every host reports the party as local.
+- A participant that says the party already exists counts as a success. A
+  retry skips the hosts that already report the party.
+- If the owners already share a namespace with another threshold, Canton
+  refuses the party, and the dApp says so.
 
 The rest is simulated in the browser:
 
