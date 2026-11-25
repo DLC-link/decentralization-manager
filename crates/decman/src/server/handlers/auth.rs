@@ -893,6 +893,7 @@ mod tests {
             admin_role: admin_role.map(str::to_string),
             party_credentials,
             bootstrap_mu: Arc::new(Mutex::new(())),
+            tenant_import_mu: Arc::new(Mutex::new(())),
             relay_sessions: Arc::new(
                 crate::workflow::party_replication::relay::RelaySessions::new(),
             ),

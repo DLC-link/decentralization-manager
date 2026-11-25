@@ -11,10 +11,10 @@ use super::{
     crypto,
     rows::{
         ChainAuditCacheRow, DecPartyContractRow, DecPartyIdentityRow, DecPartyOwnerRow,
-        DecPartyParticipantRow, DecPartyRow, FormerDecPartyRow, GovernanceAuditRow,
-        GovernanceDismissedConfirmationRow, GovernanceMediatorTimeoutRow, HandledInvitationRow,
-        OwnerKeyRefusal, PartyCredentialsRow, PeerRow, PendingInvitationRow, WorkflowArtifactRow,
-        WorkflowRunRow,
+        DecPartyParticipantRow, DecPartyRow, DecPartyTopologyVersion, FormerDecPartyRow,
+        GovernanceAuditRow, GovernanceDismissedConfirmationRow, GovernanceMediatorTimeoutRow,
+        HandledInvitationRow, OwnerKeyRefusal, PartyCredentialsRow, PeerRow, PendingInvitationRow,
+        WorkflowArtifactRow, WorkflowRunRow,
     },
     schema::{Commitable, SchemaRead, SchemaWrite},
 };
@@ -37,6 +37,9 @@ const RECENT_GOVERNANCE_AUDIT_SQL: &str = r"
     ORDER BY created_at DESC, id DESC
     LIMIT ? OFFSET ?
 ";
+
+/// A staged tenant import excludes new or resumed workflows on this participant.
+const WORKFLOW_BLOCKED_BY_IMPORT: &str = "A tenant ACS import owns this participant. Complete the import before starting another workflow";
 
 /// The refusal of a workflow run that would become in progress during a purge
 /// of former-party contracts. The purge takes the participant off its
@@ -531,6 +534,22 @@ impl SchemaRead for SqlitePool {
         row.map(|r| r.into_domain()).transpose()
     }
 
+    async fn get_dars_runs_with_inline_bytes(&self) -> Result<Vec<String>> {
+        // A plain text match, so one malformed row cannot fail the query. A row
+        // it matches by mistake is parsed and left alone.
+        Ok(sqlx::query_scalar(
+            r#"
+            SELECT instance_name FROM workflow_runs
+            WHERE kind = ? AND role = ? AND config_json LIKE '%"data":%'
+            ORDER BY created_at ASC
+            "#,
+        )
+        .bind(WorkflowKind::Dars.as_str())
+        .bind(WorkflowRole::Coordinator.as_str())
+        .fetch_all(self)
+        .await?)
+    }
+
     async fn get_active_workflow_run(
         &self,
         kind: WorkflowKind,
@@ -826,7 +845,8 @@ impl SchemaWrite for SqlitePool {
                  purged_count = NULL, kept_count = NULL, purge_error = NULL \
              WHERE party_id = ? AND dismissed_at IS NULL \
                AND NOT EXISTS (SELECT 1 FROM former_dec_party WHERE purge_status = 'running') \
-               AND NOT EXISTS (SELECT 1 FROM workflow_runs WHERE status = 'inprogress')",
+               AND NOT EXISTS (SELECT 1 FROM workflow_runs WHERE status = 'inprogress') \
+               AND NOT EXISTS (SELECT 1 FROM tenant_import_window)",
         )
         .bind(chrono::Utc::now().timestamp())
         .bind(party_id.to_string())
@@ -920,6 +940,7 @@ async fn write_invitation(
             dar_hashes,
             kicked_participant,
             kicked_owner_key,
+            rotated_key,
             new_participant,
             new_threshold,
             previous_threshold,
@@ -930,7 +951,7 @@ async fn write_invitation(
             workflow_instance,
             status,
             handled_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ",
     )
     .bind(&row.id)
@@ -943,6 +964,7 @@ async fn write_invitation(
     .bind(&row.dar_hashes)
     .bind(&row.kicked_participant)
     .bind(&row.kicked_owner_key)
+    .bind(&row.rotated_key)
     .bind(&row.new_participant)
     .bind(row.new_threshold)
     .bind(row.previous_threshold)
@@ -1133,6 +1155,56 @@ impl Commitable for sqlx::Transaction<'static, sqlx::Sqlite> {
         .await?;
 
         Ok(())
+    }
+
+    async fn advance_dec_party_topology_version(
+        &mut self,
+        party_id: &CantonId,
+        version: DecPartyTopologyVersion,
+    ) -> Result<bool> {
+        let result = sqlx::query(
+            "INSERT INTO dec_party_topology_version (party_id, namespace_serial, p2p_serial) \
+             VALUES (?, ?, ?) ON CONFLICT(party_id) DO UPDATE SET \
+                 namespace_serial = excluded.namespace_serial, p2p_serial = excluded.p2p_serial \
+             WHERE dec_party_topology_version.namespace_serial <= excluded.namespace_serial \
+               AND dec_party_topology_version.p2p_serial <= excluded.p2p_serial",
+        )
+        .bind(party_id.to_string())
+        .bind(version.namespace_serial)
+        .bind(version.p2p_serial)
+        .execute(&mut **self)
+        .await?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    async fn update_dec_party_thresholds_after_kick(
+        &mut self,
+        party_id: &CantonId,
+        confirmed_version: DecPartyTopologyVersion,
+        namespace_threshold: i64,
+        confirmation_threshold: Option<i64>,
+    ) -> Result<bool> {
+        let exists: bool =
+            sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM dec_party WHERE party_id = ?)")
+                .bind(party_id.to_string())
+                .fetch_one(&mut **self)
+                .await?;
+        if !exists
+            || !self
+                .advance_dec_party_topology_version(party_id, confirmed_version)
+                .await?
+        {
+            return Ok(false);
+        }
+        sqlx::query(
+            "UPDATE dec_party SET threshold = ?, confirmation_threshold = ? WHERE party_id = ?",
+        )
+        .bind(namespace_threshold)
+        .bind(confirmation_threshold)
+        .bind(party_id.to_string())
+        .execute(&mut **self)
+        .await?;
+        Ok(true)
     }
 
     async fn replace_dec_party_owners(&mut self, party_id: &CantonId, owners: &[String]) -> Result {
@@ -1551,7 +1623,8 @@ impl Commitable for sqlx::Transaction<'static, sqlx::Sqlite> {
             )
             SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
             WHERE ? != 'inprogress'
-               OR NOT EXISTS (SELECT 1 FROM former_dec_party WHERE purge_status = 'running')
+               OR (NOT EXISTS (SELECT 1 FROM former_dec_party WHERE purge_status = 'running')
+                   AND NOT EXISTS (SELECT 1 FROM tenant_import_window))
             ON CONFLICT(instance_name) DO UPDATE SET
                 kind                     = excluded.kind,
                 role                     = excluded.role,
@@ -1591,7 +1664,14 @@ impl Commitable for sqlx::Transaction<'static, sqlx::Sqlite> {
         .execute(&mut **self)
         .await?;
 
-        anyhow::ensure!(result.rows_affected() > 0, WORKFLOW_BLOCKED_BY_PURGE);
+        if result.rows_affected() == 0 {
+            let (importing,): (bool,) =
+                sqlx::query_as("SELECT EXISTS (SELECT 1 FROM tenant_import_window)")
+                    .fetch_one(&mut **self)
+                    .await?;
+            anyhow::ensure!(!importing, WORKFLOW_BLOCKED_BY_IMPORT);
+            anyhow::bail!(WORKFLOW_BLOCKED_BY_PURGE);
+        }
         Ok(())
     }
 
@@ -1650,7 +1730,8 @@ impl Commitable for sqlx::Transaction<'static, sqlx::Sqlite> {
                 updated_at = ?
             WHERE instance_name = ?
               AND (? != 'inprogress'
-                   OR NOT EXISTS (SELECT 1 FROM former_dec_party WHERE purge_status = 'running'))
+                   OR (NOT EXISTS (SELECT 1 FROM former_dec_party WHERE purge_status = 'running')
+                       AND NOT EXISTS (SELECT 1 FROM tenant_import_window)))
             ",
         )
         .bind(status_str)
@@ -1669,6 +1750,11 @@ impl Commitable for sqlx::Transaction<'static, sqlx::Sqlite> {
             .fetch_one(&mut **self)
             .await?;
             anyhow::ensure!(!purging, WORKFLOW_BLOCKED_BY_PURGE);
+            let (importing,): (bool,) =
+                sqlx::query_as("SELECT EXISTS (SELECT 1 FROM tenant_import_window)")
+                    .fetch_one(&mut **self)
+                    .await?;
+            anyhow::ensure!(!importing, WORKFLOW_BLOCKED_BY_IMPORT);
         }
 
         // Clean up `workflow_artifacts` rows when the run reaches a clean
@@ -1740,6 +1826,15 @@ impl Commitable for sqlx::Transaction<'static, sqlx::Sqlite> {
     ) -> Result {
         sqlx::query("UPDATE workflow_runs SET dec_party_id = ? WHERE instance_name = ?")
             .bind(dec_party_id.to_string())
+            .bind(instance_name)
+            .execute(&mut **self)
+            .await?;
+        Ok(())
+    }
+
+    async fn set_workflow_run_config(&mut self, instance_name: &str, config_json: &str) -> Result {
+        sqlx::query("UPDATE workflow_runs SET config_json = ? WHERE instance_name = ?")
+            .bind(config_json)
             .bind(instance_name)
             .execute(&mut **self)
             .await?;
@@ -3536,6 +3631,7 @@ mod tests {
             dar_hashes: Vec::new(),
             kicked_participant: None,
             kicked_owner_key: None,
+            rotated_key: None,
             new_participant: None,
             new_threshold: None,
             previous_threshold: None,
@@ -3557,6 +3653,7 @@ mod tests {
             dar_hashes: Vec::new(),
             kicked_participant: Some(CantonId::parse(&format!("kicked::{TEST_NS}")).unwrap()),
             kicked_owner_key: Some("1220kicked".to_string()),
+            rotated_key: None,
             new_participant: None,
             new_threshold: Some(2),
             previous_threshold: Some(3),
@@ -3584,6 +3681,7 @@ mod tests {
             dar_hashes: Vec::new(),
             kicked_participant: None,
             kicked_owner_key: None,
+            rotated_key: None,
             new_participant: None,
             new_threshold: None,
             previous_threshold: None,
@@ -3645,6 +3743,7 @@ mod tests {
             dar_hashes: Vec::new(),
             kicked_participant: None,
             kicked_owner_key: None,
+            rotated_key: None,
             new_participant: None,
             new_threshold: None,
             previous_threshold: None,
@@ -3897,6 +3996,7 @@ mod tests {
             dar_hashes: Vec::new(),
             kicked_participant: None,
             kicked_owner_key: None,
+            rotated_key: None,
             new_participant: None,
             new_threshold: None,
             previous_threshold: None,
@@ -3990,6 +4090,60 @@ mod tests {
             created_at: 1000,
             updated_at: 1000,
         }
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn tenant_import_window_blocks_workflow_start_and_purge(pool: SqlitePool) -> Result {
+        let party = qid("former", 9)?;
+        pool.record_former_dec_party(&party, 1000).await?;
+        let mut idle = test_run("waiting", "AddParty", "Coordinator");
+        idle.status = WorkflowProgress::Idle;
+        let mut tx = pool.begin_transaction().await?;
+        tx.upsert_workflow_run(&idle).await?;
+        tx.commit().await?;
+        sqlx::query("INSERT INTO tenant_import_window VALUES ('participant', 'import', 'party')")
+            .execute(&pool)
+            .await?;
+
+        assert!(!pool.claim_former_party_purge(&party).await?);
+        let mut tx = pool.begin_transaction().await?;
+        let error = tx
+            .upsert_workflow_run(&test_run("new", "AddParty", "Coordinator"))
+            .await
+            .expect_err("an import prevents a new workflow");
+        assert!(
+            error
+                .to_string()
+                .contains(super::WORKFLOW_BLOCKED_BY_IMPORT)
+        );
+        let error = tx
+            .set_workflow_run_status("waiting", WorkflowProgress::InProgress, None, 2000)
+            .await
+            .expect_err("an import prevents a resumed workflow");
+        assert!(
+            error
+                .to_string()
+                .contains(super::WORKFLOW_BLOCKED_BY_IMPORT)
+        );
+        tx.commit().await?;
+        assert!(pool.get_workflow_run("new").await?.is_none());
+        assert_eq!(
+            pool.get_workflow_run("waiting").await?.unwrap().status,
+            WorkflowProgress::Idle
+        );
+
+        sqlx::query("DELETE FROM tenant_import_window")
+            .execute(&pool)
+            .await?;
+        let mut tx = pool.begin_transaction().await?;
+        tx.set_workflow_run_status("waiting", WorkflowProgress::InProgress, None, 2001)
+            .await?;
+        tx.commit().await?;
+        assert_eq!(
+            pool.get_workflow_run("waiting").await?.unwrap().status,
+            WorkflowProgress::InProgress
+        );
+        Ok(())
     }
 
     #[sqlx::test(migrator = "MIGRATOR")]
@@ -4503,6 +4657,7 @@ mod tests {
             dar_hashes: Vec::new(),
             kicked_participant: None,
             kicked_owner_key: None,
+            rotated_key: None,
             new_participant: None,
             new_threshold: None,
             previous_threshold: None,
@@ -4524,6 +4679,7 @@ mod tests {
             dar_hashes: Vec::new(),
             kicked_participant: None,
             kicked_owner_key: None,
+            rotated_key: None,
             new_participant: None,
             new_threshold: None,
             previous_threshold: None,

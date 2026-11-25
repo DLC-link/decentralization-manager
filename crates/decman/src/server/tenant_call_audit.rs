@@ -27,7 +27,9 @@ pub enum TenantEndpoint {
     Execute,
     AddHostsAuthorize,
     AddHostsExecute,
-    /// Block 1, which opens an import and disconnects the participant, or
+    AddHostsStage,
+    AddHostsPublish,
+    /// Block 1, which opens an import on the staged participant, or
     /// block 0, which does not exist.
     AcsImportStart,
     /// A final block that no open import took, so it was refused.
@@ -50,6 +52,8 @@ impl TenantEndpoint {
             Self::Execute => "/v0/tenant/execute",
             Self::AddHostsAuthorize => "/v0/tenant/add-hosts/authorize",
             Self::AddHostsExecute => "/v0/tenant/add-hosts/execute",
+            Self::AddHostsStage => "/v0/tenant/add-hosts/stage",
+            Self::AddHostsPublish => "/v0/tenant/add-hosts/publish",
             Self::AcsImportStart => "/v0/tenant/add-hosts/import (start)",
             Self::AcsImportEnd => "/v0/tenant/add-hosts/import (end)",
             Self::AcsImportCompleted => "/v0/tenant/add-hosts/import (completed)",

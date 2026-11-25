@@ -12,7 +12,8 @@ use crate::{
         kick::KickConfig,
         proposal_store,
         signing_keys::{
-            adopt_legacy_signing_keys, known_signing_keys_by_member, signing_keys_after_kick,
+            adopt_legacy_signing_keys, ensure_survivor_keys_preserved, kick_key_claims,
+            known_signing_keys_by_member, requires_signing_key_adoption, signing_keys_after_kick,
         },
         storage::{WorkflowStorage, artifact_kinds},
         thresholds::{PartyThresholds, ensure_carried_from},
@@ -116,6 +117,7 @@ pub async fn create_proposals(
     let head = proposal_store::fetch_party_head(config, &synchronizer_id, &party_id).await?;
     head.ensure_namespace_is(&current_namespace_def)?;
     let current_p2p = head.p2p.clone();
+    let adopting_signing_keys = requires_signing_key_adoption(&current_p2p);
 
     tracing::info!(
         "Current P2P mapping has {count} participant(s)",
@@ -169,12 +171,12 @@ pub async fn create_proposals(
         .iter()
         .map(|p| p.participant_uid.clone())
         .collect();
-    let new_signing_keys = if current_signing_keys.len() < member_count {
-        // A party onboarded before Canton 3.4 keeps its keys in a deprecated
-        // PartyToKeyMapping, and a pre-1.10.0 add leaves a party holding some
-        // inline and the rest there. Adopting the survivors' keys moves them
-        // inline and leaves the departing member's behind in the same step.
-        adopt_legacy_signing_keys(
+    let removed = kick_config.participant_id.as_ref().map_or_else(
+        || kick_config.namespace_fingerprint.clone(),
+        ToString::to_string,
+    );
+    let (new_signing_keys, claims) = if adopting_signing_keys {
+        let keys = adopt_legacy_signing_keys(
             config,
             storage,
             &synchronizer_id,
@@ -182,22 +184,23 @@ pub async fn create_proposals(
             &survivors,
             &current_signing_keys,
         )
-        .await?
-    } else if kicked_host.is_some() || current_signing_keys.len() > member_count {
-        // A member that removes its own hosting entry leaves its key behind,
-        // so an owner that hosts nothing may still hold one. A kick takes out
-        // every such key along with the kicked member's, so one key per host
-        // stays, as the peers require.
-        let removed = kick_config.participant_id.as_ref().map_or_else(
-            || kick_config.namespace_fingerprint.clone(),
-            ToString::to_string,
-        );
+        .await?;
+        let claims = known_signing_keys_by_member(config, storage, &party_id, &keys).await?;
+        (keys, claims)
+    } else {
         let claims =
             known_signing_keys_by_member(config, storage, &party_id, &current_signing_keys).await?;
-        signing_keys_after_kick(&current_signing_keys, &removed, &survivors, &claims)?
-    } else {
-        current_signing_keys
+        let keys = if kicked_host.is_some() || current_signing_keys.len() > member_count {
+            signing_keys_after_kick(&current_signing_keys, &removed, &survivors, &claims)?
+        } else {
+            current_signing_keys
+        };
+        (keys, claims)
     };
+    // Votes have not arrived yet. Any survivor may be absent from the final
+    // quorum, so construction must preserve its recorded authority itself.
+    let claims = kick_key_claims(Some(&removed), &survivors, &claims, &survivors)?;
+    ensure_survivor_keys_preserved(&new_signing_keys, &survivors, &claims)?;
 
     if new_signing_keys.len() != new_participants.len() {
         anyhow::bail!(

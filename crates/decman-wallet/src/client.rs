@@ -10,10 +10,10 @@ use common::{
     api::{
         ExternalPartyUnhostResponse, TenantAcsBlockResponse, TenantAcsImportRequest,
         TenantAcsImportResponse, TenantAddHostsExecuteRequest, TenantAddHostsExecuteResponse,
-        TenantAddHostsPrepareResponse, TenantAddHostsRequest, TenantExecuteRequest,
-        TenantExecuteResponse, TenantPartyStateResponse, TenantPrepareRequest,
-        TenantPrepareResponse, TenantThresholdExecuteRequest, TenantThresholdRequest,
-        TenantUnhostRequest,
+        TenantAddHostsPrepareResponse, TenantAddHostsPublishRequest, TenantAddHostsRequest,
+        TenantAddHostsStageResponse, TenantExecuteRequest, TenantExecuteResponse,
+        TenantPartyStateResponse, TenantPrepareRequest, TenantPrepareResponse,
+        TenantThresholdExecuteRequest, TenantThresholdRequest, TenantUnhostRequest,
     },
     canton_id::CantonId,
     types::WorkflowProgress,
@@ -137,6 +137,22 @@ impl TenantClient {
         req: &TenantAddHostsExecuteRequest,
     ) -> Result<TenantAddHostsExecuteResponse> {
         self.post("/v0/tenant/add-hosts/execute", req).await
+    }
+
+    /// Sign on a joiner and disconnect it before returning its signatures.
+    pub async fn add_hosts_stage(
+        &self,
+        req: &TenantAddHostsRequest,
+    ) -> Result<TenantAddHostsStageResponse> {
+        self.post("/v0/tenant/add-hosts/stage", req).await
+    }
+
+    /// Publish the disconnected joiners' signatures on a current host.
+    pub async fn add_hosts_publish(
+        &self,
+        req: &TenantAddHostsPublishRequest,
+    ) -> Result<TenantAddHostsExecuteResponse> {
+        self.post("/v0/tenant/add-hosts/publish", req).await
     }
 
     /// `GET /v0/tenant/{party}/acs/{target}?seq=` — one block of the party's ACS

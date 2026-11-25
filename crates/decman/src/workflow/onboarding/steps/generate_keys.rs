@@ -26,14 +26,20 @@ use crate::{
     canton_id::Fingerprint,
     config::NodeConfig,
     error::Result,
+    signing::custody,
     utils::{compute_fingerprint, get_participant_id},
     workflow::{
         onboarding::OnboardingConfig,
+        signing_keys,
         storage::{WorkflowStorage, artifact_kinds},
     },
 };
 
 /// Generate cryptographic keys and export them
+///
+/// Refuses a participant that does not keep its keys in KMS, unless this node
+/// allows software keys (see [`custody`]). Under the opt-out, DecMan
+/// generates the Daml key itself.
 ///
 /// Generates:
 /// 1. Namespace signing key (for namespace delegation)
@@ -53,10 +59,17 @@ pub async fn generate_keys(
     tracing::info!("Generating cryptographic keys...");
 
     let mut vault_client = VaultServiceClient::new(config.admin_channel().await?);
+    custody::require_kms_participant(config, storage, &mut vault_client).await?;
 
     // Derive key names from party_id_prefix
     let namespace_key_name = onboarding_config.namespace_key_name();
-    let daml_key_name = onboarding_config.daml_key_name();
+    let daml_key_name = run_daml_key_name(
+        config,
+        storage,
+        instance_name,
+        &onboarding_config.party_id_prefix,
+    )
+    .await?;
 
     // Idempotency: re-use existing keys (matched by name) if a previous run
     // already created them. Re-generating would mint new fingerprints, leaving
@@ -71,6 +84,7 @@ pub async fn generate_keys(
 
     let namespace_fingerprint = compute_fingerprint(&namespace_key);
     tracing::debug!("Namespace key fingerprint: {namespace_fingerprint}");
+    custody::require_kms_key(config, &mut vault_client, &namespace_fingerprint).await?;
 
     // Propose the namespace delegation unless the topology already carries it.
     // Re-proposing an authorized delegation errors, but keying the skip on
@@ -92,9 +106,11 @@ pub async fn generate_keys(
         );
     }
 
-    let (daml_key, _) =
-        get_or_create_signing_key(&mut vault_client, &daml_key_name, SigningKeyUsage::Protocol)
-            .await?;
+    // The party does not exist yet. A member whose key DecMan generated files
+    // it under the party once it learns the party id.
+    let daml_key = custody::new_daml_key(config, storage, &mut vault_client, &daml_key_name, None)
+        .await?
+        .public_key;
 
     // Persist keys + participant id under this node's own canton id so the
     // coordinator can later list every peer's keys/ids.
@@ -186,6 +202,90 @@ pub(crate) async fn get_or_create_signing_key(
         anyhow::bail!("No public key returned from VaultService");
     };
     Ok((spk, false))
+}
+
+/// The name of the Daml key this node creates in the run `instance_name`.
+///
+/// The first call picks a random name and records it with the run, so a
+/// retry or a restart finds the same key. A new run gets a new key, even
+/// when it reuses the instance name, because a finished run's records are
+/// deleted. A run that recorded its keys before runs had their own names
+/// keeps the earlier shared name, so it finds the key it recorded.
+///
+/// # Errors
+///
+/// Errors when the record cannot be read or written, or is not UTF-8.
+pub(crate) async fn run_daml_key_name(
+    config: &NodeConfig,
+    storage: &SqlitePool,
+    instance_name: &str,
+    party_id_prefix: &str,
+) -> Result<String> {
+    let self_id = config.participant_id().to_string();
+    if let Some(name) = storage
+        .read_artifact(instance_name, artifact_kinds::DAML_KEY_NAME, Some(&self_id))
+        .await?
+    {
+        return Ok(String::from_utf8(name)?);
+    }
+    if storage
+        .read_artifact(
+            instance_name,
+            artifact_kinds::PEER_PUBLIC_KEYS,
+            Some(&self_id),
+        )
+        .await?
+        .is_some()
+    {
+        return Ok(signing_keys::party_daml_key_name(party_id_prefix));
+    }
+    let name = signing_keys::run_daml_key_name(
+        party_id_prefix,
+        &uuid::Uuid::new_v4().simple().to_string(),
+    );
+    storage
+        .write_artifact(
+            instance_name,
+            artifact_kinds::DAML_KEY_NAME,
+            Some(&self_id),
+            name.as_bytes(),
+        )
+        .await?;
+    Ok(name)
+}
+
+/// The Daml key this node created for the run `instance_name`, from the key
+/// bundle GenerateKeys recorded. `None` when this node created no keys in the
+/// run, as for an existing member in add-party.
+///
+/// # Errors
+///
+/// Errors when the record cannot be read or does not hold two keys.
+pub(crate) async fn own_new_daml_key(
+    config: &NodeConfig,
+    storage: &SqlitePool,
+    instance_name: &str,
+) -> Result<Option<SigningPublicKey>> {
+    let self_id = config.participant_id().to_string();
+    let Some(payload) = storage
+        .read_artifact(
+            instance_name,
+            artifact_kinds::PEER_PUBLIC_KEYS,
+            Some(&self_id),
+        )
+        .await?
+    else {
+        return Ok(None);
+    };
+    let keys =
+        crate::workflow::onboarding::steps::proposals::create::decode_keys_payload(&payload)?;
+    match <[SigningPublicKey; 2]>::try_from(keys) {
+        Ok([_, daml_key]) => Ok(Some(daml_key)),
+        Err(keys) => anyhow::bail!(
+            "This node's key record for {instance_name} holds {count} keys, not 2",
+            count = keys.len()
+        ),
+    }
 }
 
 /// Encode the namespace + Daml signing keys as two consecutive
@@ -301,4 +401,166 @@ pub(crate) async fn propose_namespace_delegation(
     topology_client.authorize(request).await?;
     tracing::debug!("Namespace delegation proposed successfully");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        db::MIGRATOR,
+        signing::{
+            custody::SoftwareKeys,
+            fake_admin_api::{FakeAdminApi, VaultKey},
+            key_store::STORE_OFF_HINT,
+        },
+    };
+
+    fn onboarding() -> OnboardingConfig {
+        OnboardingConfig::new(
+            "party".to_string(),
+            "party-creation".to_string(),
+            None,
+            None,
+        )
+    }
+
+    async fn refusal(fake: &FakeAdminApi, rule: SoftwareKeys, db: &SqlitePool) -> Result<String> {
+        let node = fake.node(rule, false).await?;
+        match generate_keys(&node.config, db, "party-creation", &onboarding()).await {
+            Ok(()) => anyhow::bail!("onboarding created keys under {rule:?}"),
+            Err(e) => Ok(format!("{e:#}")),
+        }
+    }
+
+    /// A refused onboarding leaves nothing in the vault to clean up.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn refuses_a_participant_without_kms_before_making_a_key(db: SqlitePool) -> Result {
+        let fake = FakeAdminApi::start(vec![VaultKey::wrapped("participant", 1)]).await?;
+
+        let error = refusal(&fake, SoftwareKeys::Refused, &db).await?;
+
+        assert!(error.contains("software vault, not in a KMS"), "{error}");
+        assert!(fake.generated().is_empty());
+        Ok(())
+    }
+
+    /// A run's records refer to its `workflow_runs` row.
+    async fn insert_run(db: &SqlitePool, instance_name: &str) -> Result {
+        sqlx::query(
+            "INSERT INTO workflow_runs (
+                 instance_name, kind, role, status, current_step, step_index, step_total,
+                 config_json, expected_peers_json, completed_peers_json,
+                 created_at, updated_at
+             ) VALUES (?1, 'Onboarding', 'Coordinator', 'inprogress', 'GenerateKeys',
+                       0, 1, '{}', '[]', '[]', 0, 0)",
+        )
+        .bind(instance_name)
+        .execute(db)
+        .await?;
+        Ok(())
+    }
+
+    /// A retry finds the run's Daml key again. A new run with the same
+    /// instance name gets a new key, so a member that a party adds again
+    /// never gets back a key that a rotation replaced.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn each_run_names_its_own_daml_key(db: SqlitePool) -> Result {
+        let fake = FakeAdminApi::start(vec![VaultKey::kms("participant", 1)?]).await?;
+        let node = fake.node(SoftwareKeys::Refused, false).await?;
+        insert_run(&db, "party-creation").await?;
+
+        let first = run_daml_key_name(&node.config, &db, "party-creation", "party").await?;
+        assert!(first.starts_with("party-daml-transactions-run-"), "{first}");
+        assert!(signing_keys::is_party_daml_key_name(&first, "party"));
+        let retried = run_daml_key_name(&node.config, &db, "party-creation", "party").await?;
+        assert_eq!(retried, first);
+
+        // A finished run's records are deleted.
+        sqlx::query("DELETE FROM workflow_artifacts WHERE instance_name = ?")
+            .bind("party-creation")
+            .execute(&db)
+            .await?;
+        let next = run_daml_key_name(&node.config, &db, "party-creation", "party").await?;
+        assert_ne!(next, first);
+        assert!(signing_keys::is_party_daml_key_name(&next, "party"));
+        Ok(())
+    }
+
+    /// A run that recorded its keys before runs had their own names keeps
+    /// the earlier shared name. A new name would make it create a second
+    /// key in the middle of the run.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_run_from_before_run_names_keeps_the_shared_name(db: SqlitePool) -> Result {
+        let fake = FakeAdminApi::start(vec![VaultKey::kms("participant", 1)?]).await?;
+        let node = fake.node(SoftwareKeys::Refused, false).await?;
+        let self_id = node.config.participant_id().to_string();
+        insert_run(&db, "party-creation").await?;
+        db.write_artifact(
+            "party-creation",
+            artifact_kinds::PEER_PUBLIC_KEYS,
+            Some(&self_id),
+            b"keys",
+        )
+        .await?;
+
+        let name = run_daml_key_name(&node.config, &db, "party-creation", "party").await?;
+
+        assert_eq!(name, "party-daml-transactions");
+        Ok(())
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn the_opt_out_without_a_key_store_refuses_before_making_a_key(db: SqlitePool) -> Result {
+        let fake = FakeAdminApi::start(vec![VaultKey::software("participant", 1)]).await?;
+
+        let error = refusal(&fake, SoftwareKeys::Stored, &db).await?;
+
+        assert!(error.contains(STORE_OFF_HINT), "{error}");
+        assert!(fake.generated().is_empty());
+        Ok(())
+    }
+
+    /// Under the opt-out, each onboarding run gets a Daml key that only
+    /// DecMan holds. A retry of the run finds the same key and proposes no
+    /// second delegation. A new run gets a new key. The vault makes only the
+    /// namespace key, because the participant signs topology with it.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn each_onboarding_run_gets_its_own_generated_daml_key(db: SqlitePool) -> Result {
+        let fake = FakeAdminApi::start(vec![]).await?;
+        let node = fake.node(SoftwareKeys::Stored, true).await?;
+        insert_run(&db, "party-creation").await?;
+        insert_run(&db, "party-creation-2").await?;
+        let daml_key = |instance: &'static str| {
+            let config = node.config.clone();
+            let db = db.clone();
+            async move {
+                own_new_daml_key(&config, &db, instance)
+                    .await?
+                    .ok_or_else(|| anyhow::anyhow!("{instance} recorded no Daml key"))
+            }
+        };
+
+        generate_keys(&node.config, &db, "party-creation", &onboarding()).await?;
+        let first = daml_key("party-creation").await?;
+        generate_keys(&node.config, &db, "party-creation", &onboarding()).await?;
+        let retried = daml_key("party-creation").await?;
+        let second_run = OnboardingConfig::new(
+            "party".to_string(),
+            "party-creation-2".to_string(),
+            None,
+            None,
+        );
+        generate_keys(&node.config, &db, "party-creation-2", &second_run).await?;
+        let second = daml_key("party-creation-2").await?;
+
+        assert_eq!(retried, first, "a retry finds the run's key");
+        assert_ne!(second, first, "a new run gets a new key");
+        assert_eq!(fake.generated(), vec!["party-namespace".to_string()]);
+        assert_eq!(fake.authorized().len(), 1, "one namespace delegation");
+        let generated: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM generated_party_keys")
+            .fetch_one(&db)
+            .await?;
+        assert_eq!(generated, 2);
+        Ok(())
+    }
 }

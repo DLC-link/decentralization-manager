@@ -274,3 +274,67 @@ async fn control_messages_preserve_failures_but_completed_steps_reset_them() -> 
     );
     Ok(())
 }
+
+/// A coordinator payload above this node's limit never fits, so the peer stops
+/// at the first poll and tells the coordinator why.
+#[tokio::test]
+async fn an_oversized_command_ends_the_peer_run_at_once() -> Result {
+    let mut meta = MessageType::UploadDars.to_u16().to_be_bytes().to_vec();
+    meta.extend_from_slice(&u32::try_from(crate::noise::MAX_CHUNKED_TOTAL_SIZE + 1)?.to_be_bytes());
+    meta.extend_from_slice(&u32::try_from(crate::noise::MAX_CHUNK_COUNT + 1)?.to_be_bytes());
+    let oversized = Message::new(MessageType::ChunkedCommand, meta);
+
+    let run = run_commands(WorkflowKind::Dars, vec![oversized]).await?;
+
+    let error = run
+        .result
+        .as_ref()
+        .err()
+        .ok_or_else(|| anyhow::anyhow!("the oversized command did not end the run"))?;
+    assert!(
+        format!("{error:#}")
+            .contains("Peer failed on the coordinator's payload: Payload too large"),
+        "{error:#}"
+    );
+    assert_eq!(
+        format!("{error:#}")
+            .to_lowercase()
+            .matches("too large")
+            .count(),
+        1,
+        "{error:#}"
+    );
+    assert_eq!(run.polls.len(), 1, "the peer retried an oversized payload");
+    assert_eq!(run.completions, 0);
+    assert_reported(&run, WorkflowKind::Dars);
+    Ok(())
+}
+
+/// Issue #616: the peer's report must state the size and the limit, so the
+/// coordinator shows the cause and not a protocol fault.
+#[tokio::test]
+async fn an_oversized_upload_reports_its_size_and_the_limit() -> Result {
+    let size: u32 = 20_000_000;
+    let chunks = usize::try_from(size)?.div_ceil(crate::noise::CHUNK_SIZE);
+    let mut meta = MessageType::UploadDars.to_u16().to_be_bytes().to_vec();
+    meta.extend_from_slice(&size.to_be_bytes());
+    meta.extend_from_slice(&u32::try_from(chunks)?.to_be_bytes());
+
+    let run = run_commands(
+        WorkflowKind::Dars,
+        vec![Message::new(MessageType::ChunkedCommand, meta)],
+    )
+    .await?;
+
+    let [report] = run.reports.as_slice() else {
+        anyhow::bail!("expected one failure report, got {}", run.reports.len());
+    };
+    let reason = report.reason.as_deref().unwrap_or_default();
+    assert!(reason.contains("20000000 bytes"), "{reason}");
+    assert!(
+        reason.contains(&crate::noise::MAX_CHUNKED_TOTAL_SIZE.to_string()),
+        "{reason}"
+    );
+    assert!(!reason.contains("Invalid message format"), "{reason}");
+    Ok(())
+}

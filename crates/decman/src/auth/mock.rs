@@ -59,7 +59,7 @@ fn mint_unsafe_token(
     encode(
         &Header::new(Algorithm::HS256),
         &claims,
-        &EncodingKey::from_secret(secret.as_bytes()),
+        &EncodingKey::from_secret(secret.as_bytes())?,
     )
 }
 
@@ -78,8 +78,8 @@ fn mint_credentials(cfg: &InsecureAuthConfig) -> (String, String) {
             );
             (token, cfg.subject.clone())
         }
-        // HS256 encoding effectively never fails, so this only fires on a real
-        // problem. The static fallback is signed with the default `unsafe`
+        // HS256 encoding fails only on an empty secret, which jsonwebtoken
+        // refuses. The static fallback is signed with the default `unsafe`
         // secret, so it substitutes cleanly only when the operator kept that
         // default; with a custom secret it will NOT match Canton and would fail
         // confusingly downstream, so flag that explicitly instead of masking it.

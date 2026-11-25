@@ -319,6 +319,7 @@ pub enum WorkflowKind {
     Dars,
     AddParty,
     ChangeThreshold,
+    RotateKey,
 }
 
 impl WorkflowKind {
@@ -330,6 +331,7 @@ impl WorkflowKind {
             Self::Dars => "Dars",
             Self::AddParty => "AddParty",
             Self::ChangeThreshold => "ChangeThreshold",
+            Self::RotateKey => "RotateKey",
         }
     }
 }
@@ -350,6 +352,7 @@ impl std::str::FromStr for WorkflowKind {
             "Dars" => Ok(Self::Dars),
             "AddParty" => Ok(Self::AddParty),
             "ChangeThreshold" => Ok(Self::ChangeThreshold),
+            "RotateKey" => Ok(Self::RotateKey),
             other => Err(anyhow::anyhow!("unknown workflow kind: {other}")),
         }
     }
@@ -364,6 +367,7 @@ impl From<InvitationType> for WorkflowKind {
             InvitationType::Dars => Self::Dars,
             InvitationType::AddParty => Self::AddParty,
             InvitationType::ChangeThreshold => Self::ChangeThreshold,
+            InvitationType::RotateKey => Self::RotateKey,
         }
     }
 }
@@ -558,6 +562,7 @@ pub enum InvitationType {
     Dars,
     AddParty,
     ChangeThreshold,
+    RotateKey,
 }
 
 impl InvitationType {
@@ -570,6 +575,7 @@ impl InvitationType {
             Self::Dars => "Dars",
             Self::AddParty => "AddParty",
             Self::ChangeThreshold => "ChangeThreshold",
+            Self::RotateKey => "RotateKey",
         }
     }
 }
@@ -591,6 +597,7 @@ impl std::str::FromStr for InvitationType {
             "Dars" => Ok(Self::Dars),
             "AddParty" => Ok(Self::AddParty),
             "ChangeThreshold" => Ok(Self::ChangeThreshold),
+            "RotateKey" => Ok(Self::RotateKey),
             other => Err(anyhow::anyhow!("unknown invitation type: {other}")),
         }
     }
@@ -649,6 +656,10 @@ pub struct PendingInvitation {
     pub package_names: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub contract_intents: Vec<crate::api::ContractDeploymentIntent>,
+    /// RotateKey-only: fingerprint of the coordinator's Daml key that the
+    /// rotation replaces.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rotated_key: Option<String>,
     /// The coordinator's run instance name from the invite payload. Echoed
     /// back on decline so the coordinator only fails the matching run.
     #[serde(default, skip_serializing_if = "Option::is_none")]

@@ -35,7 +35,7 @@ use crate::{
     db::{
         rows::{
             DecPartyContractRow, DecPartyOwnerRow, DecPartyParticipantRow, DecPartyRow,
-            OwnerKeyRefusal,
+            DecPartyTopologyVersion, OwnerKeyRefusal,
         },
         schema::{Commitable, SchemaRead, SchemaWrite},
     },
@@ -282,7 +282,8 @@ pub(crate) async fn discover_and_cache(
         };
 
         return match budgeted_fetch(config, db, prefix, auth, party_credentials, opts).await {
-            Ok(response) => {
+            Ok(discovered) => {
+                let response = discovered.response;
                 // A window that came back with parties proves the whole list is
                 // not empty, so it clears a standing mark even though it writes
                 // no cache and signals no completion. Otherwise the plain call
@@ -345,7 +346,8 @@ pub(crate) async fn discover_and_cache(
     let fetched = budgeted_fetch(config, db, prefix, auth, party_credentials, opts).await;
 
     let outcome = match fetched {
-        Ok(response) => {
+        Ok(discovered) => {
+            let response = discovered.response;
             record_discovery(&gate.completed, prefix, &response.parties).await;
 
             // Read before the store below deletes the parties this discovery
@@ -364,7 +366,9 @@ pub(crate) async fn discover_and_cache(
             )
             .await;
 
-            match store_parties_to_db(db, prefix, &response.parties).await {
+            match store_parties_to_db(db, prefix, &response.parties, &discovered.topology_versions)
+                .await
+            {
                 Ok(()) => {
                     // Signalled last, while the claim still stands, so a
                     // waiter that sees the count move knows the mark and the
@@ -435,6 +439,12 @@ async fn unreturned_parties(
     .collect()
 }
 
+/// Topology serials travel beside the response, never through HTTP DTOs.
+struct DiscoveredParties {
+    response: DecentralizedPartiesResponse,
+    topology_versions: HashMap<String, DecPartyTopologyVersion>,
+}
+
 /// One discovery under [`DISCOVERY_BUDGET`].
 async fn budgeted_fetch(
     config: &NodeConfig,
@@ -443,7 +453,7 @@ async fn budgeted_fetch(
     auth: Option<WorkflowAuth>,
     party_credentials: &[PartyCredentials],
     opts: PartyReadOpts,
-) -> Result<DecentralizedPartiesResponse> {
+) -> Result<DiscoveredParties> {
     match tokio::time::timeout(
         DISCOVERY_BUDGET,
         fetch_decentralized_parties(
@@ -806,16 +816,17 @@ async fn refresh_and_cache_parties(data: &web::Data<AppState>, prefix: &str) {
     }
 }
 
-/// Refresh one party's cached hosts and owner keys before this node checks a
-/// kick of it.
+/// Refresh one party's cached hosts and member keys before this node checks a
+/// kick or a key rotation of it.
 ///
-/// A peer refuses a kick unless it has every host's owner key on record. Its
-/// cache fills only at startup and on a party read, so a party that changed
-/// since then would have no keys to check. A discovery already running for
-/// the prefix is left to finish, and the keys are resolved for the hosts the
+/// A peer refuses a kick unless it has every host's owner key on record, and
+/// a rotation unless it has the coordinator's Daml key on record. Its cache
+/// fills only at startup and on a party read, so a party that changed since
+/// then would have no keys to check. A discovery already running for the
+/// prefix is left to finish, and the keys are resolved for the hosts the
 /// cache holds now. Failures are logged: the check that follows refuses the
-/// kick if a key is still missing.
-pub(crate) async fn refresh_party_for_kick(data: &web::Data<AppState>, party: &CantonId) {
+/// run if a key is still missing.
+pub(crate) async fn refresh_party_members(data: &web::Data<AppState>, party: &CantonId) {
     let auth = data.auth.read().await.clone();
     let party_creds = data.party_credentials.read().await.clone();
     let parties = match discover_and_cache(
@@ -831,7 +842,7 @@ pub(crate) async fn refresh_party_for_kick(data: &web::Data<AppState>, party: &C
     {
         Discovery::Done(response) => response.parties,
         Discovery::Failed(e) => {
-            tracing::warn!("Kick accept: refreshing {party} failed: {e:#}; using the cache");
+            tracing::warn!("Invitation accept: refreshing {party} failed: {e:#}; using the cache");
             cached_parties(&data.db, &party.prefix).await
         }
         Discovery::InFlight | Discovery::Superseded | Discovery::AtCapacity => {
@@ -843,7 +854,7 @@ pub(crate) async fn refresh_party_for_kick(data: &web::Data<AppState>, party: &C
         .filter(|cached| cached.party_id == *party)
         .collect();
     if parties.is_empty() {
-        tracing::warn!("Kick accept: {party} is not in this node's party cache");
+        tracing::warn!("Invitation accept: {party} is not in this node's party cache");
         return;
     }
     resolve_owner_keys_from_peers(&data.config, &data.db, &parties).await;
@@ -989,9 +1000,10 @@ pub async fn resolve_owner_keys_from_peers(
                 }
 
                 // Absent from peers that predate the field. Nothing else can
-                // supply it — the party's signing keys carry no owner — so a
-                // kick coordinated here falls back to elimination until this
-                // peer answers a later refresh.
+                // supply it, because the party's signing keys carry no owner.
+                // A kick coordinated here refuses to start while a remaining
+                // host's key is unknown. Only the kicked member's key may be
+                // found by elimination.
                 let Some(signing_key) = entry["signing_key"].as_str() else {
                     continue;
                 };
@@ -1189,7 +1201,7 @@ fn request_failure_kind(err: &NoiseError) -> OwnerKeysFailureKind {
         }
         NoiseError::WireVersionMismatch { .. } => Kind::WireVersionMismatch,
         NoiseError::BadStatusCode(..) => Kind::Denied,
-        NoiseError::InvalidMessage => Kind::UnparsableReply,
+        NoiseError::InvalidMessage | NoiseError::PayloadTooLarge { .. } => Kind::UnparsableReply,
         NoiseError::JsonSerialization(_) => Kind::BadPayload,
         NoiseError::Io(_) | NoiseError::Hyper(_) => Kind::ConnectionBroken,
         NoiseError::Http(_)
@@ -1595,6 +1607,7 @@ async fn store_parties_to_db(
     db: &SqlitePool,
     prefix: &str,
     parties: &[DecentralizedParty],
+    topology_versions: &HashMap<String, DecPartyTopologyVersion>,
 ) -> Result {
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -1612,6 +1625,20 @@ async fn store_parties_to_db(
             .map(|(p, _)| p)
             .unwrap_or(&party_id_str);
 
+        // Without both serials a stale read cannot be told from a fresh one.
+        // The party keeps its cached rows until a later refresh reads them.
+        let Some(version) = topology_versions.get(&party_id_str).copied() else {
+            tracing::warn!(
+                "Not caching {party_id_str}: the read returned no DNS or P2P serial for it"
+            );
+            continue;
+        };
+        if !tx
+            .advance_dec_party_topology_version(&party.party_id, version)
+            .await?
+        {
+            continue;
+        }
         let row = DecPartyRow {
             party_id: party_id_str.clone(),
             prefix: real_prefix.to_string(),
@@ -1846,6 +1873,7 @@ async fn owned_decentralized_namespaces(
     topology_client: &mut TopologyManagerReadServiceClient<tonic::transport::Channel>,
     synchronizer_id: &str,
     my_fingerprints: &HashSet<String>,
+    namespace_serials: &mut HashMap<String, i64>,
 ) -> Result<Vec<DecentralizedNamespaceDefinition>> {
     let response = bounded_read(
         "list_decentralized_namespace_definition",
@@ -1861,10 +1889,20 @@ async fn owned_decentralized_namespaces(
         .into_iter()
         .filter_map(|result| {
             let item = result.item?;
-            item.owners
+            if !item
+                .owners
                 .iter()
                 .any(|owner| my_fingerprints.contains(owner))
-                .then_some(item)
+            {
+                return None;
+            }
+            if let Some(context) = result.context.filter(|context| context.serial > 0) {
+                namespace_serials.insert(
+                    item.decentralized_namespace.clone(),
+                    i64::from(context.serial),
+                );
+            }
+            Some(item)
         })
         .collect();
     owned.sort_by(|a, b| a.decentralized_namespace.cmp(&b.decentralized_namespace));
@@ -2017,7 +2055,7 @@ async fn fetch_decentralized_parties(
     auth: Option<WorkflowAuth>,
     party_credentials: &[PartyCredentials],
     opts: PartyReadOpts,
-) -> Result<DecentralizedPartiesResponse> {
+) -> Result<DiscoveredParties> {
     let workflow_runs = db.get_visible_workflow_runs().await?;
     let cached_parties = db.get_dec_parties_by_prefix("").await?;
     let known_party_ids = known_party_filters(
@@ -2064,6 +2102,8 @@ async fn fetch_decentralized_parties(
     // prefix: it has to discover instead of issuing no query and reporting
     // nothing.
     let mut discovered_definitions = Vec::new();
+    let mut namespace_serials = HashMap::new();
+    let mut p2p_serials = HashMap::new();
     let party_filters: Vec<String> = if !exact_party_filters.is_empty() {
         exact_party_filters
     } else {
@@ -2071,6 +2111,7 @@ async fn fetch_decentralized_parties(
             &mut topology_client,
             &synchronizer_id,
             &namespace_key_fingerprints,
+            &mut namespace_serials,
         )
         .await?;
 
@@ -2109,7 +2150,7 @@ async fn fetch_decentralized_parties(
         .await?
         .into_inner();
 
-        for (_, party_mapping) in topology::p2p_rows(response.results)? {
+        for (context, party_mapping) in topology::p2p_rows(response.results)? {
             let Some((_, namespace)) = party_mapping.party.rsplit_once("::") else {
                 continue;
             };
@@ -2118,6 +2159,9 @@ async fn fetch_decentralized_parties(
             }
             if !seen_parties.insert(party_mapping.party.clone()) {
                 continue;
+            }
+            if let Some(context) = context.filter(|context| context.serial > 0) {
+                p2p_serials.insert(party_mapping.party.clone(), i64::from(context.serial));
             }
             p2p_by_namespace
                 .entry(namespace.to_string())
@@ -2148,12 +2192,16 @@ async fn fetch_decentralized_parties(
         )
         .await?
         .into_inner();
-        definitions.extend(
-            response
-                .results
-                .into_iter()
-                .filter_map(|result| result.item),
-        );
+        definitions.extend(response.results.into_iter().filter_map(|result| {
+            let item = result.item?;
+            if let Some(context) = result.context.filter(|context| context.serial > 0) {
+                namespace_serials.insert(
+                    item.decentralized_namespace.clone(),
+                    i64::from(context.serial),
+                );
+            }
+            Some(item)
+        }));
     }
 
     // Filter to parties where this participant is a member.
@@ -2299,11 +2347,26 @@ async fn fetch_decentralized_parties(
     )
     .await;
 
-    Ok(DecentralizedPartiesResponse {
-        parties,
-        total,
-        source: ResponseSource::Live,
-        refreshing: false,
+    let topology_versions = parties
+        .iter()
+        .filter_map(|party| {
+            Some((
+                party.party_id.to_string(),
+                DecPartyTopologyVersion {
+                    namespace_serial: *namespace_serials.get(&party.party_id.namespace.to_hex())?,
+                    p2p_serial: *p2p_serials.get(&party.party_id.to_string())?,
+                },
+            ))
+        })
+        .collect();
+    Ok(DiscoveredParties {
+        response: DecentralizedPartiesResponse {
+            parties,
+            total,
+            source: ResponseSource::Live,
+            refreshing: false,
+        },
+        topology_versions,
     })
 }
 
@@ -2644,6 +2707,10 @@ fn peer_failure_hint(err: &NoiseError) -> &'static str {
         NoiseError::InvalidMessage => {
             "the peer answered with something this build cannot parse — most often an empty body \
              from a denied request or an unhealthy proxy, or a peer on an older wire format"
+        }
+        NoiseError::PayloadTooLarge { .. } => {
+            "the peer's reply is larger than this node accepts — the error states its size and \
+             the limit"
         }
         NoiseError::JsonSerialization(_) => {
             "the peer's payload did not deserialize — likely a version skew between the two builds"
@@ -3205,13 +3272,115 @@ mod tests {
         }
     }
 
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn an_older_discovery_cannot_reintroduce_a_completed_kicks_intermediate_state(
+        pool: SqlitePool,
+    ) -> anyhow::Result<()> {
+        let mut confirmed = a_party()?;
+        confirmed.threshold = 2;
+        confirmed.confirmation_threshold = Some(2);
+        confirmed.owners = vec!["surviving-owner".to_string()];
+        let versions = HashMap::from([(
+            confirmed.party_id.to_string(),
+            DecPartyTopologyVersion {
+                namespace_serial: 2,
+                p2p_serial: 2,
+            },
+        )]);
+        store_parties_to_db(&pool, "cbtc", &[confirmed.clone()], &versions).await?;
+        let mut intermediate = confirmed.clone();
+        intermediate.confirmation_threshold = Some(3);
+        intermediate.owners.push("old-owner".to_string());
+        let old = HashMap::from([(
+            confirmed.party_id.to_string(),
+            DecPartyTopologyVersion {
+                namespace_serial: 2,
+                p2p_serial: 1,
+            },
+        )]);
+
+        store_parties_to_db(&pool, "cbtc", &[intermediate], &old).await?;
+
+        let cached = pool.get_dec_parties_by_prefix("cbtc").await?;
+        assert_eq!(cached[0].confirmation_threshold, Some(2));
+        let owners = pool.get_dec_party_owners(&confirmed.party_id).await?;
+        assert_eq!(owners.len(), 1);
+        assert_eq!(owners[0].owner_key, "surviving-owner");
+        Ok(())
+    }
+
+    /// The read returned one party without its serials. That party is
+    /// skipped and keeps the rows it had. Every other party is still cached.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_party_without_serials_does_not_block_the_others(
+        pool: SqlitePool,
+    ) -> anyhow::Result<()> {
+        let unversioned = a_party()?;
+        let mut versioned = a_party()?;
+        versioned.party_id = CantonId::parse(&format!("cbtc::1220{}", "ab".repeat(32)))?;
+        let serials = |party: &DecentralizedParty, serial: i64| {
+            (
+                party.party_id.to_string(),
+                DecPartyTopologyVersion {
+                    namespace_serial: serial,
+                    p2p_serial: serial,
+                },
+            )
+        };
+        store_parties_to_db(
+            &pool,
+            "cbtc",
+            std::slice::from_ref(&unversioned),
+            &HashMap::from([serials(&unversioned, 1)]),
+        )
+        .await?;
+
+        let mut changed = unversioned.clone();
+        changed.threshold = 2;
+        versioned.threshold = 3;
+        store_parties_to_db(
+            &pool,
+            "cbtc",
+            &[changed, versioned.clone()],
+            &HashMap::from([serials(&versioned, 1)]),
+        )
+        .await?;
+
+        let cached: HashMap<String, i64> = pool
+            .get_dec_parties_by_prefix("cbtc")
+            .await?
+            .into_iter()
+            .map(|row| (row.party_id, row.threshold))
+            .collect();
+        assert_eq!(
+            cached,
+            HashMap::from([
+                (unversioned.party_id.to_string(), 1),
+                (versioned.party_id.to_string(), 3),
+            ])
+        );
+        Ok(())
+    }
+
     /// A node that holds one party and is asked about a different prefix has
     /// no exact ID to use, so it must discover under that prefix rather than
     /// issue no query at all and report nothing.
     #[sqlx::test(migrator = "MIGRATOR")]
     async fn a_known_party_does_not_mask_another_prefix(pool: SqlitePool) -> anyhow::Result<()> {
         let config = closed_admin_api(Network::Mainnet);
-        store_parties_to_db(&pool, "cbtc", &[a_party()?]).await?;
+        store_parties_to_db(
+            &pool,
+            "cbtc",
+            &[a_party()?],
+            &HashMap::from([(
+                a_party()?.party_id.to_string(),
+                DecPartyTopologyVersion {
+                    namespace_serial: 1,
+                    p2p_serial: 1,
+                },
+            )]),
+        )
+        .await?;
 
         let result = fetch_decentralized_parties(
             &config,

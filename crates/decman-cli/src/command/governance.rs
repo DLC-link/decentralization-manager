@@ -6,10 +6,7 @@
 //! request bodies the web frontend sends.
 
 use anyhow::{Context, Result, bail};
-use common::api::{
-    CancelConfirmationRequest, CancelProposalRequest, DismissConfirmationsRequest,
-    ExpireConfirmationRequest, GovernanceType,
-};
+use common::api::{DismissConfirmationsRequest, GovernanceType};
 use reqwest::Method;
 use serde_json::{Value, json};
 
@@ -17,12 +14,7 @@ use super::{canton_id, to_body};
 use crate::api::{
     DecmanClient, DomainGovAction, GovAction, GovConfirmation, GovernanceConfirmations,
 };
-
-/// `core_domain` requests carry this action, which the server ignores: it
-/// builds the choice from `proposal_cid`. The web frontend sends the same.
-fn placeholder_action() -> Value {
-    json!({ "type": "governance_set_threshold", "new_threshold": 0 })
-}
+use crate::governance_body::{self, placeholder_action};
 
 /// How the caller names a pending governance action.
 #[derive(Clone, Debug)]
@@ -234,14 +226,6 @@ fn require<'a>(confirmations: &'a GovernanceConfirmations, target: &Target) -> R
     })
 }
 
-/// Merge `extra` fields into the object `base`.
-fn with(mut base: Value, extra: Value) -> Value {
-    if let (Some(base), Value::Object(extra)) = (base.as_object_mut(), extra) {
-        base.extend(extra);
-    }
-    base
-}
-
 /// Body for `POST /governance/confirm`. A self action named by its JSON may be
 /// new: confirming it is how a member starts it, so it need not be pending.
 ///
@@ -254,14 +238,18 @@ pub fn confirm_body(
     rules_contract_id: &str,
     target: &Target,
 ) -> Result<Value> {
-    let base = json!({ "party_id": party_id, "rules_contract_id": rules_contract_id });
-    if let Target::Action(action) = target {
-        return Ok(with(
-            base,
-            json!({ "action": action, "governance_type": "core_self" }),
-        ));
-    }
-    Ok(with(base, require(confirmations, target)?.action_fields()))
+    let fields = if let Target::Action(action) = target {
+        json!({"action": action, "governance_type": "core_self"})
+    } else {
+        require(confirmations, target)?.action_fields()
+    };
+    Ok(governance_body::confirm(
+        party_id,
+        rules_contract_id,
+        &fields["action"],
+        fields["governance_type"].as_str().unwrap(),
+        fields.get("proposal_cid").and_then(Value::as_str),
+    ))
 }
 
 /// Body for `POST /governance/execute`.
@@ -283,13 +271,16 @@ pub fn execute_body(
             confirmations.threshold
         );
     }
-    let base = json!({
-        "party_id": party_id,
-        "rules_contract_id": rules_contract_id,
-        "confirmation_cids": pending.executable_confirmation_cids(),
-        "disclosed_contracts": disclosed_contracts,
-    });
-    Ok(with(base, pending.action_fields()))
+    let fields = pending.action_fields();
+    Ok(governance_body::execute(
+        party_id,
+        rules_contract_id,
+        &fields["action"],
+        fields["governance_type"].as_str().unwrap(),
+        fields.get("proposal_cid").and_then(Value::as_str),
+        &pending.executable_confirmation_cids(),
+        disclosed_contracts,
+    ))
 }
 
 /// This node's own confirmation on `pending`, matched by its member party.
@@ -321,11 +312,12 @@ pub fn revoke_body(
     let pending = require(confirmations, target)?;
     let mine = own_confirmation(confirmations, &pending)
         .context("this node has no confirmation on that action")?;
-    to_body(&CancelConfirmationRequest {
-        party_id: canton_id(party_id)?,
-        confirmation_cid: mine.contract_id.clone(),
-        governance_type: pending.governance_type(),
-    })
+    let party_id = canton_id(party_id)?.to_string();
+    let kind = match pending.governance_type() {
+        GovernanceType::CoreSelf => "core_self",
+        GovernanceType::CoreDomain => "core_domain",
+    };
+    Ok(governance_body::revoke(&party_id, &mine.contract_id, kind))
 }
 
 /// Body for `POST /governance/expire`.
@@ -343,12 +335,17 @@ pub fn expire_body(
         confirmations,
         &Target::Confirmation(confirmation_cid.to_owned()),
     )?;
-    to_body(&ExpireConfirmationRequest {
-        party_id: canton_id(party_id)?,
-        rules_contract_id: rules_contract_id.to_owned(),
-        confirmation_cid: confirmation_cid.to_owned(),
-        governance_type: pending.governance_type(),
-    })
+    let party_id = canton_id(party_id)?.to_string();
+    let kind = match pending.governance_type() {
+        GovernanceType::CoreSelf => "core_self",
+        GovernanceType::CoreDomain => "core_domain",
+    };
+    Ok(governance_body::expire(
+        &party_id,
+        rules_contract_id,
+        confirmation_cid,
+        kind,
+    ))
 }
 
 /// Body for `POST /governance/cancel-proposal`. It carries this node's own
@@ -364,11 +361,12 @@ pub fn cancel_proposal_body(
 ) -> Result<Value> {
     let pending = require(confirmations, &Target::Proposal(proposal_cid.to_owned()))?;
     let mine = own_confirmation(confirmations, &pending).map(|c| c.contract_id.clone());
-    to_body(&CancelProposalRequest {
-        party_id: canton_id(party_id)?,
-        proposal_cid: proposal_cid.to_owned(),
-        confirmation_cid: mine,
-    })
+    let party_id = canton_id(party_id)?.to_string();
+    Ok(governance_body::cancel_proposal(
+        &party_id,
+        proposal_cid,
+        mine.as_deref(),
+    ))
 }
 
 /// Body for `POST /governance/dismiss` or `POST /governance/restore`: every
@@ -454,6 +452,25 @@ mod tests {
             }]
         }))
         .unwrap()
+    }
+
+    #[test]
+    fn typed_commands_preserve_party_normalization() {
+        let party = DEC.to_uppercase().replace("DEC", "dec");
+        let confirmations = confirmations();
+        let bodies = [
+            revoke_body(
+                &confirmations,
+                &party,
+                &Target::Confirmation("c-self-you".into()),
+            )
+            .unwrap(),
+            expire_body(&confirmations, &party, "rules", "c-dom-you").unwrap(),
+            cancel_proposal_body(&confirmations, &party, "p-1").unwrap(),
+        ];
+        for body in bodies {
+            assert_eq!(body["party_id"], DEC);
+        }
     }
 
     #[test]

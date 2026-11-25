@@ -1087,7 +1087,7 @@ fn spawn_archiver(
 /// How long the commitment assertion waits. The synchronizer only compares on
 /// reconciliation ticks, so the budget spans several of them. The real interval
 /// is read at runtime and checked against `MAX_RECONCILIATION`.
-fn commitment_budget() -> Duration {
+pub(super) fn commitment_budget() -> Duration {
     MAX_RECONCILIATION * (PERIODS_REQUIRED + 2)
 }
 
@@ -1110,6 +1110,22 @@ async fn received_commitments(
     config: &NodeConfig,
     since: SystemTime,
 ) -> anyhow::Result<(usize, Vec<String>)> {
+    received_commitments_from(config, since, None).await
+}
+
+/// Read complete commitment periods, optionally restricted to one exact counterparty.
+pub(super) async fn received_commitments_from(
+    config: &NodeConfig,
+    since: SystemTime,
+    counterparty: Option<&str>,
+) -> anyhow::Result<(usize, Vec<String>)> {
+    let counterparty = counterparty.map(|id| {
+        if id.starts_with("PAR::") {
+            id.to_string()
+        } else {
+            format!("PAR::{id}")
+        }
+    });
     // Canton returns overlapping periods, not just periods beginning in this
     // range. Filter the returned intervals below as well as retaining nanos.
     let from = proto_timestamp(since)?;
@@ -1129,7 +1145,7 @@ async fn received_commitments(
                     to_inclusive: Some(to),
                 }),
             }],
-            counter_participant_ids: vec![],
+            counter_participant_ids: counterparty.iter().cloned().collect(),
             commitment_state: vec![],
             verbose: false,
         }))
@@ -1137,7 +1153,15 @@ async fn received_commitments(
         .into_inner();
 
     summarize_commitments(
-        response.received.into_iter().flat_map(|sync| sync.received),
+        response
+            .received
+            .into_iter()
+            .flat_map(|sync| sync.received)
+            .filter(|commitment| {
+                counterparty
+                    .as_ref()
+                    .is_none_or(|id| commitment.origin_counter_participant_uid == *id)
+            }),
         from,
         to,
     )
@@ -1200,7 +1224,7 @@ fn summarize_commitments(
 
 /// The synchronizer's reconciliation interval, which decides how often
 /// commitments are compared at all.
-async fn reconciliation_interval(config: &NodeConfig) -> anyhow::Result<Duration> {
+pub(super) async fn reconciliation_interval(config: &NodeConfig) -> anyhow::Result<Duration> {
     let synchronizer_id = dec_party_manager::utils::get_synchronizer_id(config).await?;
     let mut client = TopologyManagerReadServiceClient::new(config.admin_channel().await?);
     let response = client

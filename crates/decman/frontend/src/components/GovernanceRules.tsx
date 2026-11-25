@@ -11,30 +11,41 @@ import {
 } from "@mui/material";
 import { CopyableText } from "./CopyableText";
 import { cardTableSx, legendSx, zebraRow } from "../styles";
-import { formatMicroseconds } from "../governanceFormat";
+import { sameNamespace } from "../cantonId";
 import type { GovernanceState } from "../types";
 
 interface GovernanceRulesProps {
   state: GovernanceState;
   /** This node's member party; its row is marked when it governs. */
   memberPartyId?: string;
+  /** This node's participant id. A party under its namespace is this node's. */
+  selfParticipantId?: string;
+  /** The party whose page shows these rules; its own id is not repeated. */
+  partyId?: string;
 }
 
 const Fact = ({ label, children }: { label: string; children: ReactNode }) => (
-  <Box sx={{ minWidth: 0 }}>
-    <Typography component="div" sx={legendSx}>
+  <Box sx={{ display: "flex", alignItems: "center", gap: 1.5, minWidth: 0 }}>
+    <Typography component="span" sx={{ ...legendSx, flexShrink: 0 }}>
       {label}
     </Typography>
-    <Box sx={{ mt: 0.5 }}>{children}</Box>
+    {children}
   </Box>
 );
 
 /**
- * The active GovernanceRules contract: who governs the party, how many of
- * them must confirm an action, who else may propose one, and who else may
- * see the contract.
+ * The active GovernanceRules contract: who governs the party, who else may
+ * propose an action, and who else may see the contract. The stat cards above
+ * carry the threshold and the action timeout.
  */
-export const GovernanceRules = ({ state, memberPartyId }: GovernanceRulesProps) => {
+export const GovernanceRules = ({
+  state,
+  memberPartyId,
+  selfParticipantId,
+  partyId,
+}: GovernanceRulesProps) => {
+  const isThisNode = (party: string) =>
+    party === memberPartyId || (!!selfParticipantId && sameNamespace(party, selfParticipantId));
   const rows = [
     ...state.members.map((party) => ({ party, role: "Member" })),
     ...state.additional_proposers.map((party) => ({ party, role: "Additional proposer" })),
@@ -44,40 +55,32 @@ export const GovernanceRules = ({ state, memberPartyId }: GovernanceRulesProps) 
     <>
       <Box
         sx={{
-          display: "grid",
-          gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))",
-          gap: 2,
+          display: "flex",
+          alignItems: "center",
+          flexWrap: "wrap",
+          columnGap: 4,
+          rowGap: 1,
           // The same inset as the table's first column (cardTableSx).
           px: "16px",
-          pb: 2,
+          py: 1.25,
         }}
       >
-        <Fact label="Threshold">
-          <Typography variant="body2" data-testid="governance-threshold">
-            {/* An empty member set is a failed read (getGovernanceMembership
-                treats it so), not a party nobody governs. */}
-            {state.members.length === 0
-              ? "The member set could not be read"
-              : `${state.threshold} of ${state.members.length} member${
-                  state.members.length === 1 ? "" : "s"
-                } must confirm`}
+        {/* An empty member set is a failed read (getGovernanceMembership
+            treats it so), not a party nobody governs. */}
+        {state.members.length === 0 && (
+          <Typography variant="body2" color="warning.main" data-testid="governance-members-unread">
+            The member set could not be read
           </Typography>
-        </Fact>
-        {state.action_confirmation_timeout_microseconds != null && (
-          // Same wording as the Action Timeout stat card above.
-          <Fact label="Action timeout">
-            <Typography variant="body2">
-              {formatMicroseconds(state.action_confirmation_timeout_microseconds)}
-            </Typography>
+        )}
+        {state.governance_party !== partyId && (
+          <Fact label="Governance party">
+            <CopyableText text={state.governance_party} truncate={{ start: 20, end: 12 }} variant="body2" />
           </Fact>
         )}
-        <Fact label="Governance party">
-          <CopyableText text={state.governance_party} truncate={{ start: 20, end: 12 }} variant="body2" />
-        </Fact>
         <Fact label="Rules contract">
           <CopyableText text={state.contract_id} truncate={{ start: 12, end: 8 }} variant="body2" />
           {state.package_ref && (
-            <Typography variant="caption" color="text.secondary" sx={{ display: "block" }}>
+            <Typography variant="body2" color="text.secondary" sx={{ whiteSpace: "nowrap" }}>
               {state.package_ref}
               {state.out_of_date ? " (older package)" : ""}
             </Typography>
@@ -98,7 +101,7 @@ export const GovernanceRules = ({ state, memberPartyId }: GovernanceRulesProps) 
                 <TableCell sx={{ py: 1 }}>
                   <Box sx={{ display: "flex", alignItems: "center", gap: 1 }}>
                     <CopyableText text={party} truncate={{ start: 32, end: 16 }} variant="body2" />
-                    {party === memberPartyId && <Chip label="This node" size="small" />}
+                    {isThisNode(party) && <Chip label="This node" size="small" />}
                   </Box>
                 </TableCell>
                 <TableCell sx={{ py: 1 }}>{role}</TableCell>

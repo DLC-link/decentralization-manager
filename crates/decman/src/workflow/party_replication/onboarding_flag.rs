@@ -21,6 +21,7 @@ use tokio::time;
 use crate::{
     canton_id::CantonId,
     config::NodeConfig,
+    consts::{topology_retry_delay_secs, topology_retry_max_attempts},
     error::Result,
     utils,
     workflow::{
@@ -68,9 +69,33 @@ pub async fn request_onboarding_flag_clear(
     storage: &SqlitePool,
     target: &ReplicationTarget,
 ) -> Result<ClearOutcome> {
-    let synchronizer_id =
-        utils::extract_synchronizer_fingerprint(&utils::get_synchronizer_id(config).await?)?;
+    // A healthy connection can precede replay of the mapping authorized while
+    // this participant was offline. Canton refuses clearance until it hosts the party.
     let self_id = config.participant_id().to_string();
+    let synchronizer = utils::get_synchronizer_id(config).await?;
+    let mut hosting = false;
+    for attempt in 1..=topology_retry_max_attempts() {
+        let mapping = fetch_p2p_mapping(config, &synchronizer, &target.party_id).await?;
+        if let Some(host) = mapping
+            .participants
+            .iter()
+            .find(|host| host.participant_uid == self_id)
+        {
+            if host.onboarding.is_none() {
+                return Ok(ClearOutcome::Cleared);
+            }
+            hosting = true;
+            break;
+        }
+        if attempt < topology_retry_max_attempts() {
+            time::sleep(time::Duration::from_secs(topology_retry_delay_secs())).await;
+        }
+    }
+    anyhow::ensure!(
+        hosting,
+        "the imported party's hosting mapping has not replayed on this participant"
+    );
+    let synchronizer_id = utils::extract_synchronizer_fingerprint(&synchronizer)?;
     let begin_offset_exclusive = offset::persisted_or_derived_offset(
         config,
         storage,
