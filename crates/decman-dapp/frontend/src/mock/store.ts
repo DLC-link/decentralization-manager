@@ -56,13 +56,13 @@ export type Proposal = {
   /** Who withdrew or rejected the proposal. */
   endedBy?: string
   /**
-   * Whether an owner's participant accepted this proposal's full bundle, in
-   * any attempt. Only then do the hosts' reports show that this bundle took
-   * effect.
+   * Whether an owner's participant answered 2xx to this proposal's full
+   * bundle, in any attempt. That shows only that the participant accepted
+   * the bundle at that moment.
    */
   bundleAccepted?: boolean
-  /** Set at completion when no participant accepted the bundle. */
-  alreadyExisted?: boolean
+  /** Set at completion when no owner's participant accepted the bundle. */
+  unconfirmed?: boolean
   hosts: HostResult[]
   error?: string
 }
@@ -97,10 +97,10 @@ export type Party = {
   /** Whether simulated participants host the party. */
   simulated: boolean
   /**
-   * The party existed before this proposal's bundle reached any participant,
-   * so its thresholds and hosts are the proposal's, not read from Canton.
+   * No owner's participant accepted this proposal's bundle. The party may
+   * have existed already, or a reply was lost to a timeout or a reload.
    */
-  alreadyExisted: boolean
+  unconfirmed: boolean
   namespace: string
   owners: PlannedOwner[]
   hosts: Host[]

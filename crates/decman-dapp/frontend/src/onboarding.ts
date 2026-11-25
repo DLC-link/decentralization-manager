@@ -40,8 +40,14 @@ const HOSTING_POLL_MS = 2_000
 const NAMESPACE_CONFLICT =
   "These owners' namespace already exists with a different definition, for example another namespace threshold."
 
-export const ALREADY_EXISTED =
-  "This party already existed. The dApp cannot read its topology yet, so the thresholds and hosts shown are this proposal's, not necessarily the ledger's."
+export const NOT_CONFIRMED = 'Not confirmed as created by this proposal'
+
+export const NOT_CONFIRMED_NOTE =
+  "No owner's participant confirmed that it accepted this proposal's bundle. The party may have existed already, or a reply was lost to a timeout or a reload."
+
+/** Shown on every party page, since the dApp reads no topology yet. */
+export const TOPOLOGY_NOTE =
+  "The thresholds and hosts shown come from this browser's proposal. The dApp cannot read the party's topology yet."
 
 const now = () => new Date().toISOString()
 const newId = () => crypto.randomUUID()
@@ -499,15 +505,15 @@ async function waitUntilHosted(id: string, partyId: string): Promise<void> {
 
 /** Records the party from the plan computed from the proposal itself. */
 function addParty(proposal: Proposal, plan: PartyPlan, wallet: Wallet): void {
-  // Without an accepted bundle, every owner's participant either said the
-  // party exists or already reported it, so another submission made it.
-  const alreadyExisted = !proposal.bundleAccepted
+  // Without an accepted bundle, every owner's participant said the party
+  // exists or already reported it, or its reply was lost.
+  const unconfirmed = !proposal.bundleAccepted
   const party: Party = {
     partyId: plan.partyId,
     namespace: plan.namespace,
     owners: plan.owners,
     simulated: proposal.simulated,
-    alreadyExisted,
+    unconfirmed,
     hosts: plan.hosts.map((participant) => {
       const role = roleOf(plan, participant)
       return {
@@ -530,13 +536,13 @@ function addParty(proposal: Proposal, plan: PartyPlan, wallet: Wallet): void {
     history: [
       {
         at: now(),
-        text: `${alreadyExisted ? `${ALREADY_EXISTED} ` : ''}Every host reports the party.${proposal.simulated ? ' The hosts are simulated.' : ''} ${wallet.name} started the creation.`,
+        text: `${unconfirmed ? `${NOT_CONFIRMED_NOTE} ` : ''}Every host reports the party.${proposal.simulated ? ' The hosts are simulated.' : ''} ${wallet.name} started the creation.`,
       },
     ],
   }
   update((s) => ({
     ...s,
-    proposals: s.proposals.map((p) => (p.id === proposal.id ? { ...p, status: 'submitted', alreadyExisted } : p)),
+    proposals: s.proposals.map((p) => (p.id === proposal.id ? { ...p, status: 'submitted', unconfirmed } : p)),
     parties: [party, ...s.parties],
   }))
 }

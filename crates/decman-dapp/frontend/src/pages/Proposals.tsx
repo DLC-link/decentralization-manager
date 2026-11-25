@@ -1,7 +1,8 @@
 import { isValidSignature } from '../checks'
 import { actingWallet, useAppState, type HostResult, type Proposal, type Wallet } from '../mock/store'
 import {
-  ALREADY_EXISTED,
+  NOT_CONFIRMED,
+  NOT_CONFIRMED_NOTE,
   isOpen,
   refusedEverywhere,
   untouched,
@@ -109,7 +110,7 @@ function ProposalCard({
   const current =
     proposal.status === 'submitted' ? 4 : !allSigned ? 1 : proposal.status === 'collecting' || !hostsApproved ? 2 : 3
   const [tone, label]: [Tone, string] =
-    proposal.status === 'submitted' && proposal.alreadyExisted ? ['warn', 'Already existed'] : STATUS[proposal.status]
+    proposal.status === 'submitted' && proposal.unconfirmed ? ['warn', NOT_CONFIRMED] : STATUS[proposal.status]
 
   return (
     <article className="card">
@@ -216,7 +217,7 @@ function ProposalCard({
           {proposal.status === 'withdrawn' ? 'Withdrawn' : 'Rejected'} by {proposal.endedBy}.
         </p>
       )}
-      {proposal.status === 'submitted' && proposal.alreadyExisted && <p className="warning">{ALREADY_EXISTED}</p>}
+      {proposal.status === 'submitted' && proposal.unconfirmed && <p className="warning">{NOT_CONFIRMED_NOTE}</p>}
       {proposal.status === 'submitted' ? (
         <div className="actions">
           <button onClick={() => onOpenParty(plan.partyId)}>Open party</button>
