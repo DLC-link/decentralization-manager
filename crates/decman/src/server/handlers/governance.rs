@@ -157,9 +157,9 @@ pub async fn get_governance(
     let timeouts = match data.db.get_mediator_timeouts(party_id).await {
         Ok(rows) => expire_timeouts(rows),
         Err(e) => {
-            tracing::error!("Failed to read governance mediator timeouts: {e}");
+            tracing::error!(%party_id, "Failed to read governance mediator timeouts: {e:#}");
             return HttpResponse::InternalServerError().json(ErrorResponse {
-                error: format!("Failed to read governance mediator timeouts: {e}"),
+                error: TIMEOUTS_READ_FAILED.to_string(),
             });
         }
     };
@@ -223,6 +223,11 @@ pub async fn get_governance(
 /// name an address, goes to the server log only.
 const FEED_READ_FAILED: &str =
     "Failed to fetch governance confirmations: a ledger read failed. See the DecMan server log.";
+
+/// The answer to a confirmations read whose own database read failed. The
+/// cause, which can name a table, goes to the server log only.
+const TIMEOUTS_READ_FAILED: &str = "Failed to fetch governance confirmations: a read of the \
+                                    DecMan database failed. See the DecMan server log.";
 
 /// Get governance state (GovernanceRules contract state)
 /// Query parameters for the paged proposals feed.
@@ -5074,6 +5079,37 @@ mod confirmations_feed_tests {
                 "{proposals} proposals: {logs}"
             );
         }
+        Ok(())
+    }
+
+    /// The answer to a failed read of this node's database is a fixed text.
+    /// The database error names a table, so it goes to the log only.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_failed_database_read_answers_a_fixed_text(pool: SqlitePool) -> Result {
+        let party = id("dec", "ab");
+        let member = id("member-a", "aa");
+        let ledger = AcsLedger {
+            contracts: Arc::new(vec![rules(&party, &[&member])]),
+            ..AcsLedger::default()
+        };
+        sqlx::query("DROP TABLE governance_mediator_timeout")
+            .execute(&pool)
+            .await?;
+        let app = actix_test::init_service(
+            App::new()
+                .app_data(state(pool, ledger.serve()?).await?)
+                .service(get_governance),
+        )
+        .await;
+        let request = actix_test::TestRequest::get()
+            .uri(&format!("/governance/confirmations?party_id={party}"))
+            .to_request();
+
+        let response = actix_test::call_service(&app, request).await;
+
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let body: serde_json::Value = actix_test::read_body_json(response).await;
+        assert_eq!(body["error"], json!(TIMEOUTS_READ_FAILED));
         Ok(())
     }
 
