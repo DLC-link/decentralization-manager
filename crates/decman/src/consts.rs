@@ -132,7 +132,7 @@ pub const ROTATE_KEY: &str = "rotate-key";
 /// them it takes the bundle. A coordinator checks every invitee lists this
 /// before it sends a run without the bundle.
 ///
-/// The flag also carries the cap: a peer that lists it accepts at most
+/// The flag also implies the cap: a peer that lists it accepts at most
 /// [`MAX_DAR_PULL_TOTAL`] bytes of DARs in one run. A later change to the cap
 /// therefore needs a new feature name, so a coordinator can tell the peers
 /// apart.

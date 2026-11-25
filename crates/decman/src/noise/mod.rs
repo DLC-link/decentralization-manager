@@ -195,13 +195,14 @@ pub const MAX_PAYLOAD_SIZE: usize = 1024 * 1024;
 /// frame size — only by `MAX_CHUNKED_TOTAL_SIZE`.
 pub const CHUNK_SIZE: usize = 1024 * 1024;
 
-/// The most bytes one reply to a DAR pull or a chunk fetch may carry: a full
-/// chunk with its 4-byte index, the 9-byte frame header, and the longest
-/// routing instance. An inline DAR is at most [`MAX_PAYLOAD_SIZE`], no more
-/// than a chunk. Reading stops once a body passes this, so a coordinator
-/// cannot make the peer hold more. Other replies, such as owner keys and peer
-/// lists, go out inline whatever their size, and their callers read them
-/// whole.
+/// The most bytes one reply to a DAR pull, or to one of its chunk fetches,
+/// may carry: a full chunk with its 4-byte index, the 9-byte frame header,
+/// and the longest routing instance. An inline DAR is at most
+/// [`MAX_PAYLOAD_SIZE`], no more than a chunk. Reading stops once a body
+/// passes this, so a coordinator cannot make the peer hold more. Other
+/// replies, such as owner keys and peer lists, go out inline whatever their
+/// size, and their callers read them whole. So does the chunk fetch of a
+/// workflow command, `NoiseClient::request_chunk`.
 pub const MAX_REPLY_SIZE: usize = CHUNK_SIZE + 4 + 9 + u16::MAX as usize;
 
 /// The most bytes of a refusal body that any caller reads. A refusal is a
@@ -2160,7 +2161,7 @@ mod tests {
     }
 
     /// Owner-key and peer-list replies go out inline whatever their size.
-    /// Only the DAR pull and the chunk fetch bound their replies, so a large
+    /// Only a DAR pull and its chunk fetches bound their replies, so a large
     /// owner-key reply still arrives, with or without retries.
     #[tokio::test]
     async fn an_owner_key_reply_above_one_frame_still_arrives() -> Result {
