@@ -204,6 +204,12 @@ Every command that changes the governance state fails with status 504 when the
 mediator times out. The error names each party whose participant did not
 confirm.
 
+DecMan waits up to 130 seconds for the ledger on a governance write. Each CLI
+request waits 150 seconds by default (`--http-timeout`), so it gets DecMan's
+answer. When DecMan stops waiting first, the command fails with status 504 and
+says that the write may still complete. Run `governance pending` before you
+retry it.
+
 `governance pending` shows one page of proposals. Pass `--limit` for a larger
 page, and `--cursor` with the `next_cursor` of the previous page.
 

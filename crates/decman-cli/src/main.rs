@@ -423,6 +423,13 @@ mod tests {
         Cli::command().debug_assert();
     }
 
+    /// DecMan waits up to 130 seconds for the ledger on a governance write.
+    /// A shorter client timeout would give up before DecMan answers.
+    #[test]
+    fn the_http_timeout_outlasts_a_governance_write() {
+        assert_eq!(parse(&[]).options.http_timeout, 150);
+    }
+
     #[test]
     fn same_node_ignores_case_default_port_and_trailing_slash() {
         assert!(same_node(
