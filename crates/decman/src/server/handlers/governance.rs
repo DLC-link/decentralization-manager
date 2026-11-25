@@ -56,7 +56,7 @@ use crate::{
     noise::{Message, MessageType, NoiseKeypair, parse_public_key, send_noise_message},
     server::{
         AppState,
-        audit::{AuditEvent, AuditParams, spawn_audit_log, with_proposal_cid},
+        audit::{AuditEvent, AuditParams, log_governance_audit, with_proposal_cid},
         chain_audit,
         ledger_rejection::submission_failure,
         middleware::require_admin,
@@ -795,8 +795,9 @@ struct WriteRecord {
 
 impl WriteRecord {
     /// Counts the write, logs its failure, and writes its audit row. Returns
-    /// the failure for the caller.
-    fn finish(self, db: SqlitePool, submitted: Submitted) -> Option<(StatusCode, String)> {
+    /// the failure for the caller once the row is written, so a caller that
+    /// reads the audit trail right after the answer finds it.
+    async fn finish(self, db: SqlitePool, submitted: Submitted) -> Option<(StatusCode, String)> {
         let (outcome, status) = match submitted.failure {
             Some(_) => (ActionOutcome::Error, "failed"),
             None => (ActionOutcome::Ok, "success"),
@@ -809,8 +810,8 @@ impl WriteRecord {
             Some(cid) => with_proposal_cid(&self.details, cid),
             None => self.details,
         };
-        spawn_audit_log(
-            db,
+        log_governance_audit(
+            &db,
             AuditParams {
                 event_type: self.step.audit_event(),
                 party_id: self.party_id,
@@ -821,7 +822,8 @@ impl WriteRecord {
                 status,
                 error_message: submitted.failure.as_ref().map(|(_, error)| error.clone()),
             },
-        );
+        )
+        .await;
         submitted.failure
     }
 }
@@ -884,7 +886,7 @@ where
                 format!("The {step} submission ended without an outcome: {e}"),
             )
         });
-        record.finish(db, submitted)
+        record.finish(db, submitted).await
     });
     let failure = write.await.unwrap_or_else(|e| {
         tracing::error!("The {step} write ended without an outcome: {e}");
@@ -3939,6 +3941,29 @@ mod mediator_timeout_tests {
             message.starts_with("The execute submission ended without an outcome"),
             "{message}"
         );
+        Ok(())
+    }
+
+    /// A client may read the audit trail as soon as it has the answer, so the
+    /// row must be written by then.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn the_audit_row_is_written_before_the_answer(pool: SqlitePool) -> Result {
+        let _serial = super::action_metrics_tests::SERIAL.lock().await;
+        for (event, uri, _, body) in writes() {
+            let ledger = RejectingLedger::new();
+            ledger.release.notify_one();
+
+            let (status, error) = post_to_writes(&pool, &ledger, uri, body).await?;
+
+            let row: Option<(String, Option<String>)> = sqlx::query_as(
+                "SELECT status, error_message FROM governance_audit WHERE event_type = ?",
+            )
+            .bind(event.as_str())
+            .fetch_optional(&pool)
+            .await?;
+            assert_eq!(status, StatusCode::GATEWAY_TIMEOUT, "{event:?}");
+            assert_eq!(row, Some(("failed".to_string(), Some(error))), "{event:?}");
+        }
         Ok(())
     }
 
