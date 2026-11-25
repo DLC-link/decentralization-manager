@@ -83,6 +83,9 @@ export async function createWallet(name: string, apiUrl: string, token: string):
 export async function addCovalidator(name: string, apiUrl: string, token: string): Promise<void> {
   if (!name.trim()) throw new Error('Enter a name.')
   const participant = await linkParticipant(apiUrl, token)
+  if (getState().covalidators.some((c) => c.participant.participantId === participant.participantId)) {
+    throw new Error(`A covalidator for participant ${participant.participantId} is already saved.`)
+  }
   const covalidator: Covalidator = { id: newId(), name: name.trim(), participant }
   update((s) => ({ ...s, covalidators: [...s.covalidators, covalidator] }))
 }
@@ -90,14 +93,16 @@ export async function addCovalidator(name: string, apiUrl: string, token: string
 const modeName = (simulated: boolean) => (simulated ? 'simulated' : 'real')
 
 /**
- * The name and connection of `participant`, taken from the proposal's own
- * owners or covalidators of one mode.
+ * The name of `participant` and the id of the record that reaches it: an
+ * owner wallet of this proposal, or one of the ticked covalidators, of one
+ * mode.
  */
 function bindHost(
   plan: PartyPlan,
   participant: string,
   simulated: boolean,
-): { name: string; connection: ParticipantLink } {
+  covalidatorIds: string[],
+): { name: string; recordId: string } {
   const { wallets, covalidators } = getState()
   if (roleOf(plan, participant) === 'owner') {
     const owners = wallets.filter(
@@ -105,16 +110,30 @@ function bindHost(
         w.participant.simulated === simulated &&
         plan.owners.some((o) => o.publicKey === w.publicKey && o.participant === participant),
     )
-    if (owners.length > 0) {
-      return { name: owners.map((w) => w.name).join(', '), connection: owners[0].participant }
-    }
+    if (owners.length > 0) return { name: owners.map((w) => w.name).join(', '), recordId: owners[0].id }
   } else {
     const covalidator = covalidators.find(
-      (c) => c.participant.participantId === participant && c.participant.simulated === simulated,
+      (c) =>
+        covalidatorIds.includes(c.id) &&
+        c.participant.participantId === participant &&
+        c.participant.simulated === simulated,
     )
-    if (covalidator) return { name: covalidator.name, connection: covalidator.participant }
+    if (covalidator) return { name: covalidator.name, recordId: covalidator.id }
   }
   throw new Error(`No ${modeName(simulated)} owner or covalidator of this proposal uses participant ${participant}.`)
+}
+
+/** The current connection of the record bound to `host`. */
+function connectionOf(host: HostResult): ParticipantLink {
+  const { wallets, covalidators } = getState()
+  const record =
+    host.role === 'owner'
+      ? wallets.find((w) => w.id === host.recordId)
+      : covalidators.find((c) => c.id === host.recordId)
+  if (!record || record.participant.participantId !== host.participant) {
+    throw new Error(`The wallet or covalidator that reaches ${host.name} no longer exists. Propose the party again.`)
+  }
+  return record.participant
 }
 
 /** The parts of a plan that a party record keeps, in one comparable form. */
@@ -179,7 +198,11 @@ function checkOneMode(proposal: PartyProposal, simulated: boolean): void {
  * the proposer's participant, builds the transactions the owners sign, and
  * signs them as the proposer.
  */
-export async function createProposal(proposal: PartyProposal, creator: Wallet): Promise<void> {
+export async function createProposal(
+  proposal: PartyProposal,
+  creator: Wallet,
+  covalidatorIds: string[],
+): Promise<void> {
   const plan = planParty(proposal)
   if (!plan.owners.some((o) => o.publicKey === creator.publicKey)) {
     throw new Error('Act as one of the owners to propose the party.')
@@ -188,8 +211,8 @@ export async function createProposal(proposal: PartyProposal, creator: Wallet): 
   checkOneMode(proposal, simulated)
   checkNoOtherPlan(plan, simulated)
   const hosts = plan.hosts.map((participant): HostResult => {
-    const { name, connection } = bindHost(plan, participant, simulated)
-    return { participant, name, role: roleOf(plan, participant), connection, step: 'waiting' }
+    const { name, recordId } = bindHost(plan, participant, simulated, covalidatorIds)
+    return { participant, name, role: roleOf(plan, participant), recordId, step: 'waiting' }
   })
 
   const synchronizers = await ledger.connectedSynchronizers(creator.participant)
@@ -398,6 +421,8 @@ export async function submitProposal(id: string, wallet: Wallet): Promise<void> 
   if (getState().parties.some((p) => p.partyId === plan.partyId && p.simulated === proposal.simulated)) {
     throw new Error('This party already exists.')
   }
+  // Refuse before any call if a host's bound record is gone.
+  proposal.hosts.forEach(connectionOf)
   const requests = allocationRequests(
     proposal.proposal,
     proposal.topologyVersion,
@@ -432,7 +457,7 @@ async function markHostedHosts(id: string, partyId: string, detail: string): Pro
       .filter((h) => h.step !== 'hosted')
       .map(async (h) => {
         try {
-          const answer = await ledger.getParty(h.connection, partyId)
+          const answer = await ledger.getParty(connectionOf(h), partyId)
           if (partyHostedLocally(answer, partyId)) setHost(id, h.participant, 'hosted', detail)
         } catch (error) {
           setHost(id, h.participant, h.step, `Still waiting: ${message(error)}`)
@@ -456,7 +481,7 @@ async function sendToHosts(
   const proposal = findProposal(id)
   const targets = proposal.hosts.filter((h) => h.role === role && h.step !== 'hosted')
   const results = await Promise.allSettled(
-    targets.map((h) => ledger.allocateExternalParty(h.connection, body)),
+    targets.map(async (h) => ledger.allocateExternalParty(connectionOf(h), body)),
   )
   let refused = false
   results.forEach((result, index) => {

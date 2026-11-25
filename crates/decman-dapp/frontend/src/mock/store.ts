@@ -33,11 +33,11 @@ export type HostResult = {
   name: string
   role: 'owner' | 'covalidator'
   /**
-   * The connection of an owner or covalidator in this proposal, bound when
-   * the proposal is created. A saved wallet outside the proposal never
-   * answers for the host.
+   * The id of the owner wallet or covalidator record in this proposal that
+   * reaches the host, bound when the proposal is created. Each call reads
+   * that record's current connection, so a token update applies here too.
    */
-  connection: ParticipantLink
+  recordId: string
   step: HostStep
   detail?: string
   /** The participant itself refused with a 4xx, as opposed to a 5xx, a timeout or a network error. */
@@ -134,9 +134,9 @@ export type AppState = {
   parties: Party[]
 }
 
-// v3 records on each record whether its participants are simulated. Older
-// data does not load.
-const STORAGE_KEY = 'decman-dapp-v3'
+// v4 binds each proposal's hosts to record ids instead of copied
+// connections. Older data does not load.
+const STORAGE_KEY = 'decman-dapp-v4'
 const EMPTY: AppState = { actingWalletId: null, wallets: [], covalidators: [], proposals: [], parties: [] }
 
 function load(): AppState {

@@ -53,7 +53,7 @@ export function NewParty({ onCreated }: { onCreated: () => void }) {
       if (!acting) throw new Error('Pick the wallet you act as first.')
       setBusy(true)
       try {
-        await createProposal(proposal, acting)
+        await createProposal(proposal, acting, covalidatorIds)
       } finally {
         setBusy(false)
       }
