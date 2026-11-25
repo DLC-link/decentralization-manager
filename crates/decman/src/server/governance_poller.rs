@@ -349,7 +349,10 @@ pub(crate) async fn run_governance_poller(data: web::Data<AppState>) {
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::HashSet, sync::Arc};
+    use std::{
+        collections::{HashMap, HashSet},
+        sync::Arc,
+    };
 
     use anyhow::Context;
 
@@ -518,13 +521,11 @@ mod tests {
             vec![self_action(false, &[NOW])?],
             vec![proposal(false, true, &[NOW - 1])?],
         );
-        mark_stuck(
-            &mut q.actions,
-            &mut q.domain_actions,
-            Some(&HashSet::new()),
-            &HashSet::new(),
-            NOW,
-        );
+        let timeouts = HashMap::from([(
+            "00c".to_string(),
+            HashSet::from([party("member")?.to_string()]),
+        )]);
+        mark_stuck(&mut q.actions, &mut q.domain_actions, &timeouts, NOW);
         assert!(q.actions[0].cannot_be_archived);
         assert!(q.domain_actions[0].cannot_be_archived);
 
@@ -541,13 +542,11 @@ mod tests {
             vec![self_action(true, &[NOW])?],
             vec![proposal(true, true, &[NOW - 1])?],
         );
-        mark_stuck(
-            &mut q.actions,
-            &mut q.domain_actions,
-            Some(&HashSet::new()),
-            &HashSet::new(),
-            NOW,
-        );
+        let timeouts = HashMap::from([(
+            "00c".to_string(),
+            HashSet::from([party("member")?.to_string()]),
+        )]);
+        mark_stuck(&mut q.actions, &mut q.domain_actions, &timeouts, NOW);
         let without_dismissals = summarize(&q, NOW);
 
         apply_dismissals(

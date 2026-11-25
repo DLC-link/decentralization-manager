@@ -749,14 +749,14 @@ pub struct ExecuteActionRequest {
     pub proposal_cid: Option<String>,
 }
 
-/// Why an expired confirmation cannot currently be archived.
+/// Why an expired confirmation cannot currently be archived. An enum so a
+/// later kind of evidence can join without changing the field's type.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
 #[cfg_attr(feature = "typegen", derive(ts_rs::TS))]
 pub enum StuckReason {
-    /// The confirmer no longer belongs to the current governance member set.
-    ConfirmerNotMember,
-    /// A prior expire or cancel attempt received a mediator timeout.
+    /// The latest expire attempt on this node timed out at the mediator, and
+    /// Canton named the confirmer among the parties that did not answer.
     ParticipantUnresponsive,
 }
 

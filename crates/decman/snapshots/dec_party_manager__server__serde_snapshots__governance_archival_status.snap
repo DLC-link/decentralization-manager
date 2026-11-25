@@ -13,7 +13,7 @@ expression: "(self_action, domain_action)"
     },
     "confirmations": [
       {
-        "stuck": "confirmer_not_member",
+        "stuck": "participant_unresponsive",
         "contract_id": "00self",
         "action": {
           "type": "governance_set_threshold",

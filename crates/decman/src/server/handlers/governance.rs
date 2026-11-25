@@ -1,16 +1,17 @@
-use std::{collections::HashSet, sync::LazyLock};
+use std::{collections::HashSet, sync::LazyLock, time::Duration};
 
 use actix_web::{HttpRequest, HttpResponse, Responder, get, http::StatusCode, post, web};
 use anyhow::Context;
 use base64::Engine;
 use prometheus::IntCounterVec;
 use serde::Deserialize;
+use sqlx::SqlitePool;
 
 use crate::server::ledger_paging::AcsCursor;
 use canton_proto_rs::com::{
     daml::ledger::api::v2::{
-        CreatedEvent, DisclosedContract, SubmitAndWaitForTransactionRequest, SubmitAndWaitRequest,
-        command_service_client::CommandServiceClient, value,
+        Commands, CreatedEvent, DisclosedContract, SubmitAndWaitForTransactionRequest,
+        SubmitAndWaitRequest, command_service_client::CommandServiceClient, value,
     },
     digitalasset::canton::topology::admin::v30::{
         BaseQuery, ListDecentralizedNamespaceDefinitionRequest, StoreId, Synchronizer, base_query,
@@ -47,7 +48,7 @@ use crate::{
     canton_id::CantonId,
     config::{NetworkConfig, NodeConfig, PackageConfig, default_package_config},
     db::{
-        rows::ChainAuditCacheRow,
+        rows::{ChainAuditCacheRow, GovernanceMediatorTimeoutRow},
         schema::{SchemaRead, SchemaWrite},
     },
     error::Result,
@@ -62,8 +63,8 @@ use crate::{
         ledger_rejection::{mediator_timeout, submission_failure},
         middleware::require_admin,
         queries::{
-            GovernanceQueue, apply_dismissals, get_governance_confirmations,
-            get_governance_state as query_governance_state, known_governance_members, mark_stuck,
+            ExpireTimeouts, GovernanceQueue, apply_dismissals, get_governance_confirmations,
+            get_governance_state as query_governance_state, mark_stuck,
             resolve_contract_package_ref, select_input_holdings,
         },
         scan::{self, OpenMiningRound, ScanNotConfigured},
@@ -77,7 +78,7 @@ use crate::{
             AuditLogResponse, AuditScope, CancelConfirmationRequest, CancelProposalRequest,
             ChainAuditEntry, ChainAuditQuery, ChainAuditResponse, ConfirmActionRequest,
             DismissConfirmationsRequest, DomainGovernanceAction, ErrorResponse,
-            ExecuteActionRequest, ExpireConfirmationRequest, GovernanceResponse, GovernanceState,
+            ExecuteActionRequest, ExpireConfirmationRequest, GovernanceResponse,
             GovernanceStateResponse, GovernanceType, KnownMember, KnownMembersResponse,
             MAX_RECENT_AUDIT_LIMIT, MessageResponse, ProposalType, ProposalsPageResponse,
             ProposeActionRequest, RewardStatusResponse, chain_audit_entry_from_row,
@@ -122,17 +123,14 @@ pub struct ConfirmationsQuery {
 async fn mark_archival_state(
     db: &sqlx::SqlitePool,
     party_id: &CantonId,
-    rules: Option<&GovernanceState>,
     queue: &mut GovernanceQueue,
     include_dismissed: bool,
 ) -> Result<()> {
-    let timeouts = db
-        .get_mediator_timeouts(party_id)
-        .await
-        .context("Failed to read governance mediator timeouts")?
-        .into_iter()
-        .map(|row| row.contract_id)
-        .collect();
+    let timeouts = expire_timeouts(
+        db.get_mediator_timeouts(party_id)
+            .await
+            .context("Failed to read governance mediator timeouts")?,
+    );
     let dismissed = db
         .get_dismissed_confirmations(party_id)
         .await
@@ -140,11 +138,9 @@ async fn mark_archival_state(
         .into_iter()
         .map(|row| row.contract_id)
         .collect();
-    let members = known_governance_members(rules);
     mark_stuck(
         &mut queue.actions,
         &mut queue.domain_actions,
-        members.as_ref(),
         &timeouts,
         chrono::Utc::now().timestamp(),
     );
@@ -222,14 +218,8 @@ pub async fn get_governance(
     .await
     {
         Ok(mut queue) => {
-            if let Err(e) = mark_archival_state(
-                &data.db,
-                party_id,
-                gov_state.as_ref(),
-                &mut queue,
-                query.include_dismissed,
-            )
-            .await
+            if let Err(e) =
+                mark_archival_state(&data.db, party_id, &mut queue, query.include_dismissed).await
             {
                 tracing::error!("{e:#}");
                 return HttpResponse::InternalServerError().json(ErrorResponse {
@@ -282,6 +272,23 @@ pub struct ProposalsQuery {
 /// asking for a party's whole proposal history in one request (#424).
 const PROPOSALS_BATCH_DEFAULT: usize = 50;
 const PROPOSALS_BATCH_MAX: usize = 200;
+
+/// The stored expire timeouts as the parties each one named. A row whose
+/// list does not decode names nobody, so it marks nothing.
+fn expire_timeouts(rows: Vec<GovernanceMediatorTimeoutRow>) -> ExpireTimeouts {
+    rows.into_iter()
+        .map(|row| {
+            let unresponsive = serde_json::from_str(&row.unresponsive).unwrap_or_else(|e| {
+                tracing::warn!(
+                    contract_id = row.contract_id,
+                    "Unreadable expire timeout: {e}"
+                );
+                HashSet::new()
+            });
+            (row.contract_id, unresponsive)
+        })
+        .collect()
+}
 
 fn encode_cursor(cursor: &AcsCursor) -> Option<String> {
     serde_json::to_vec(cursor)
@@ -778,6 +785,17 @@ impl ActionStep {
             Self::CancelProposal => "cancel_proposal",
         }
     }
+
+    fn audit_event(self) -> AuditEvent {
+        match self {
+            Self::Propose => AuditEvent::Propose,
+            Self::Confirm => AuditEvent::Confirm,
+            Self::Execute => AuditEvent::Execute,
+            Self::Expire => AuditEvent::Expire,
+            Self::CancelConfirmation => AuditEvent::Cancel,
+            Self::CancelProposal => AuditEvent::CancelProposal,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -788,14 +806,6 @@ enum ActionOutcome {
 
 impl ActionOutcome {
     const ALL: [Self; 2] = [Self::Ok, Self::Error];
-
-    fn of<T>(result: &Result<T>) -> Self {
-        if result.is_ok() {
-            Self::Ok
-        } else {
-            Self::Error
-        }
-    }
 
     fn label(self) -> &'static str {
         match self {
@@ -826,6 +836,143 @@ fn count_action(step: ActionStep, outcome: ActionOutcome) {
     ACTIONS
         .with_label_values(&[step.label(), outcome.label()])
         .inc();
+}
+
+// ============================================================================
+// Spawned Writes
+// ============================================================================
+
+/// How long a governance submission waits for the ledger. A little above the
+/// 120 seconds the deployment guide asks a proxy to allow. Without a deadline,
+/// a write whose caller hung up waits until Canton stops tracking the command.
+const SUBMISSION_DEADLINE: Duration = Duration::from_secs(130);
+
+/// A Ledger API request as `token`, with the [`SUBMISSION_DEADLINE`].
+fn ledger_request<T>(message: T, token: &str) -> Result<tonic::Request<T>> {
+    let mut request = tonic::Request::new(message);
+    request
+        .metadata_mut()
+        .insert("authorization", format!("Bearer {token}").parse()?);
+    request.set_timeout(SUBMISSION_DEADLINE);
+    Ok(request)
+}
+
+/// The audit row of a governance write, before its outcome is known.
+struct WriteRecord {
+    step: ActionStep,
+    party_id: CantonId,
+    member_party_id: CantonId,
+    governance_type: GovernanceType,
+    action_summary: String,
+    details: String,
+}
+
+impl WriteRecord {
+    /// Counts the write, logs its failure, and writes its audit row. Returns
+    /// the failure for the caller.
+    fn finish(self, db: SqlitePool, submitted: Submitted) -> Option<(StatusCode, String)> {
+        let (outcome, status) = match submitted.failure {
+            Some(_) => (ActionOutcome::Error, "failed"),
+            None => (ActionOutcome::Ok, "success"),
+        };
+        count_action(self.step, outcome);
+        if let Some((_, error)) = &submitted.failure {
+            tracing::error!("{error}");
+        }
+        let details = match &submitted.proposal_cid {
+            Some(cid) => with_proposal_cid(&self.details, cid),
+            None => self.details,
+        };
+        spawn_audit_log(
+            db,
+            AuditParams {
+                event_type: self.step.audit_event(),
+                party_id: self.party_id,
+                member_party_id: self.member_party_id,
+                governance_type: self.governance_type,
+                action_summary: self.action_summary,
+                details,
+                status,
+                error_message: submitted.failure.as_ref().map(|(_, error)| error.clone()),
+            },
+        );
+        submitted.failure
+    }
+}
+
+/// How a governance write's submission ended.
+struct Submitted {
+    /// The status and message for the caller when the write failed.
+    failure: Option<(StatusCode, String)>,
+    /// The proposal a propose created. Its audit row names it even when the
+    /// proposer's own confirmation failed afterwards.
+    proposal_cid: Option<String>,
+}
+
+impl Submitted {
+    fn failed(status: StatusCode, error: String) -> Self {
+        Self {
+            failure: Some((status, error)),
+            proposal_cid: None,
+        }
+    }
+
+    /// The end of a submission whose error `failure` turns into the caller's
+    /// status and message.
+    fn of(result: Result, failure: impl FnOnce(&anyhow::Error) -> (StatusCode, String)) -> Self {
+        Self {
+            failure: result.err().map(|e| failure(&e)),
+            proposal_cid: None,
+        }
+    }
+
+    fn of_proposal(self, proposal_cid: String) -> Self {
+        Self {
+            proposal_cid: Some(proposal_cid),
+            ..self
+        }
+    }
+}
+
+/// Runs a governance write to its end on its own task, then counts it and
+/// writes its audit row. Answers with `success`, or with the failure.
+///
+/// A proxy can hang up before the mediator decides, and the server then drops
+/// the handler. The write still ends, so its audit row records the cause. The
+/// submission runs on a further task, so a panic in it still leaves a failed
+/// row.
+async fn run_write<F>(
+    db: SqlitePool,
+    record: WriteRecord,
+    success: &'static str,
+    submission: F,
+) -> HttpResponse
+where
+    F: Future<Output = Submitted> + Send + 'static,
+{
+    let step = record.step.label();
+    let write = tokio::spawn(async move {
+        let submitted = tokio::spawn(submission).await.unwrap_or_else(|e| {
+            Submitted::failed(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("The {step} submission ended without an outcome: {e}"),
+            )
+        });
+        record.finish(db, submitted)
+    });
+    let failure = write.await.unwrap_or_else(|e| {
+        tracing::error!("The {step} write ended without an outcome: {e}");
+        Some((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("The {step} write ended without an outcome: {e}"),
+        ))
+    });
+    match failure {
+        None => HttpResponse::Ok().json(MessageResponse {
+            message: success.to_string(),
+        }),
+        Some((status, error)) => HttpResponse::build(status).json(ErrorResponse { error }),
+    }
 }
 
 /// True when this proposal, on a decparty that already has a live
@@ -949,12 +1096,6 @@ pub async fn propose_action(
             }
         }
     }
-
-    let audit_pool = data.db.clone();
-    let audit_summary = crate::server::audit::proposal_summary(&body.proposal);
-    let audit_details = serde_json::to_string(&*body).unwrap_or_default();
-    let audit_party_id = party_id.clone();
-    let audit_member = member_party_id.clone();
 
     let packages = packages();
 
@@ -1174,13 +1315,40 @@ pub async fn propose_action(
         }
     };
 
+    let record = WriteRecord {
+        step: ActionStep::Propose,
+        party_id: party_id.clone(),
+        member_party_id: member_party_id.clone(),
+        governance_type: GovernanceType::CoreDomain,
+        action_summary: crate::server::audit::proposal_summary(&body.proposal),
+        details: serde_json::to_string(&*body).unwrap_or_default(),
+    };
+    let db = data.db.clone();
+    let submission = submit_proposal(
+        data,
+        commands,
+        token,
+        record.member_party_id.clone(),
+        body.into_inner(),
+    );
+    run_write(db, record, "Proposal created and confirmed", submission).await
+}
+
+/// Creates a proposal from `commands`, then confirms it as the proposer.
+async fn submit_proposal(
+    data: web::Data<AppState>,
+    commands: Commands,
+    token: String,
+    member_party_id: CantonId,
+    body: ProposeActionRequest,
+) -> Submitted {
     let channel = match data.config.ledger_channel().await {
         Ok(channel) => channel,
         Err(e) => {
-            count_action(ActionStep::Propose, ActionOutcome::Error);
-            return HttpResponse::InternalServerError().json(ErrorResponse {
-                error: format!("Failed to connect to ledger API: {e:#}"),
-            });
+            return Submitted::failed(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Failed to connect to ledger API: {e:#}"),
+            );
         }
     };
 
@@ -1188,50 +1356,33 @@ pub async fn propose_action(
         CommandServiceClient::new(channel).max_decoding_message_size(utils::MAX_GRPC_MESSAGE_SIZE);
 
     // Step 1: Create the proposal and get the contract ID back
-    let mut create_req = tonic::Request::new(SubmitAndWaitForTransactionRequest {
+    let create = SubmitAndWaitForTransactionRequest {
         commands: Some(commands),
         transaction_format: None,
-    });
-    create_req
-        .metadata_mut()
-        .insert("authorization", format!("Bearer {token}").parse().unwrap());
-
-    let proposal_cid = match client.submit_and_wait_for_transaction(create_req).await {
-        Ok(response) => {
-            // Extract created contract ID from the transaction events
-            match response
-                .into_inner()
-                .transaction
-                .as_ref()
-                .and_then(first_created_contract_id)
-            {
-                Some(cid) => cid,
-                None => {
-                    count_action(ActionStep::Propose, ActionOutcome::Error);
-                    return HttpResponse::InternalServerError().json(ErrorResponse {
-                        error: "Proposal created but could not extract contract ID".to_string(),
-                    });
-                }
+    };
+    let created: Result<_> = async {
+        let request = ledger_request(create, &token)?;
+        Ok(client.submit_and_wait_for_transaction(request).await?)
+    }
+    .await;
+    let proposal_cid = match created {
+        Ok(response) => match response
+            .into_inner()
+            .transaction
+            .as_ref()
+            .and_then(first_created_contract_id)
+        {
+            Some(cid) => cid,
+            None => {
+                return Submitted::failed(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "Proposal created but could not extract contract ID".to_string(),
+                );
             }
-        }
+        },
         Err(e) => {
-            let (status, error) = submission_failure("Failed to create proposal", &e.into());
-            tracing::error!("{error}");
-            count_action(ActionStep::Propose, ActionOutcome::Error);
-            spawn_audit_log(
-                audit_pool,
-                AuditParams {
-                    event_type: AuditEvent::Propose,
-                    party_id: audit_party_id,
-                    member_party_id: audit_member,
-                    governance_type: GovernanceType::CoreDomain,
-                    action_summary: audit_summary,
-                    details: audit_details,
-                    status: "failed",
-                    error_message: Some(error.clone()),
-                },
-            );
-            return HttpResponse::build(status).json(ErrorResponse { error });
+            let (status, error) = submission_failure("Failed to create proposal", &e);
+            return Submitted::failed(status, error);
         }
     };
 
@@ -1244,17 +1395,18 @@ pub async fn propose_action(
     // utility proposal reaches here on a node with no governance_core. The
     // proposal is already on the ledger by this point, so the body has to say
     // so — the caller must not retry into a second proposal.
-    let mut rules = match governance_rules_template(&packages) {
+    let mut rules = match governance_rules_template(&packages()) {
         Ok(rules) => rules,
         Err(_) => {
-            count_action(ActionStep::Propose, ActionOutcome::Error);
-            return HttpResponse::ServiceUnavailable().json(ErrorResponse {
-                error: format!(
+            return Submitted::failed(
+                StatusCode::SERVICE_UNAVAILABLE,
+                format!(
                     "Proposal {proposal_cid} was created but could not be confirmed: \
                      governance_core package not configured. Configure it and confirm \
                      the existing proposal; do not re-propose."
                 ),
-            });
+            )
+            .of_proposal(proposal_cid);
         }
     };
 
@@ -1262,73 +1414,40 @@ pub async fn propose_action(
     // governance-core package — exercise it under its actual package ref.
     rules.package_ref = resolve_contract_package_ref(
         &data.config,
-        party_id,
+        &body.party_id,
         Some(token.clone()),
         &body.rules_contract_id,
         &rules.package_ref,
     )
     .await;
 
-    let confirm_commands = build_confirm_proposal(
-        &rules,
-        &body.rules_contract_id,
-        &member_party_id,
-        party_id,
-        &proposal_cid,
-        uuid::Uuid::new_v4().to_string(),
-    );
-
-    let mut confirm_req = tonic::Request::new(SubmitAndWaitRequest {
-        commands: Some(confirm_commands),
-    });
-    confirm_req
-        .metadata_mut()
-        .insert("authorization", format!("Bearer {token}").parse().unwrap());
-
-    match client.submit_and_wait(confirm_req).await {
-        Ok(_) => {
-            tracing::info!("Proposal {proposal_cid} confirmed by proposer");
-            count_action(ActionStep::Propose, ActionOutcome::Ok);
-            spawn_audit_log(
-                audit_pool,
-                AuditParams {
-                    event_type: AuditEvent::Propose,
-                    party_id: audit_party_id,
-                    member_party_id: audit_member,
-                    governance_type: GovernanceType::CoreDomain,
-                    action_summary: audit_summary,
-                    details: with_proposal_cid(&audit_details, &proposal_cid),
-                    status: "success",
-                    error_message: None,
-                },
-            );
-            HttpResponse::Ok().json(MessageResponse {
-                message: "Proposal created and confirmed".to_string(),
-            })
-        }
-        Err(e) => {
-            let (status, error) = submission_failure(
-                &format!("Proposal created (CID: {proposal_cid}) but confirmation failed"),
-                &e.into(),
-            );
-            tracing::error!("{error}");
-            count_action(ActionStep::Propose, ActionOutcome::Error);
-            spawn_audit_log(
-                audit_pool,
-                AuditParams {
-                    event_type: AuditEvent::Propose,
-                    party_id: audit_party_id,
-                    member_party_id: audit_member,
-                    governance_type: GovernanceType::CoreDomain,
-                    action_summary: audit_summary,
-                    details: with_proposal_cid(&audit_details, &proposal_cid),
-                    status: "failed",
-                    error_message: Some(error.clone()),
-                },
-            );
-            HttpResponse::build(status).json(ErrorResponse { error })
-        }
+    let confirm = SubmitAndWaitRequest {
+        commands: Some(build_confirm_proposal(
+            &rules,
+            &body.rules_contract_id,
+            &member_party_id,
+            &body.party_id,
+            &proposal_cid,
+            uuid::Uuid::new_v4().to_string(),
+        )),
+    };
+    let confirmed: Result = async {
+        client
+            .submit_and_wait(ledger_request(confirm, &token)?)
+            .await?;
+        Ok(())
     }
+    .await;
+    if confirmed.is_ok() {
+        tracing::info!("Proposal {proposal_cid} confirmed by proposer");
+    }
+    Submitted::of(confirmed, |e| {
+        submission_failure(
+            &format!("Proposal created (CID: {proposal_cid}) but confirmation failed"),
+            e,
+        )
+    })
+    .of_proposal(proposal_cid)
 }
 
 /// Reject an inline action the `core_self` path cannot carry, before any
@@ -1408,56 +1527,31 @@ pub async fn confirm_action(
         }
     };
 
-    let audit_pool = data.db.clone();
-    let audit_summary = crate::server::audit::action_summary(&body.action);
-    let audit_details = serde_json::to_string(&*body).unwrap_or_default();
-    let audit_party_id = party_id.clone();
-    let audit_member = member_party_id.clone();
-    let audit_gov_type = body.governance_type;
-
-    let packages = packages();
-
-    let result =
-        execute_confirm_action(&data.config, &body, &token, &member_party_id, &packages).await;
-    count_action(ActionStep::Confirm, ActionOutcome::of(&result));
-    match result {
-        Ok(()) => {
-            spawn_audit_log(
-                audit_pool,
-                AuditParams {
-                    event_type: AuditEvent::Confirm,
-                    party_id: audit_party_id,
-                    member_party_id: audit_member,
-                    governance_type: audit_gov_type,
-                    action_summary: audit_summary,
-                    details: audit_details,
-                    status: "success",
-                    error_message: None,
-                },
-            );
-            HttpResponse::Ok().json(MessageResponse {
-                message: "Confirmation submitted successfully".to_string(),
-            })
-        }
-        Err(e) => {
-            let (status, error) = submission_failure("Failed to submit confirmation", &e);
-            tracing::error!("{error}");
-            spawn_audit_log(
-                audit_pool,
-                AuditParams {
-                    event_type: AuditEvent::Confirm,
-                    party_id: audit_party_id,
-                    member_party_id: audit_member,
-                    governance_type: audit_gov_type,
-                    action_summary: audit_summary,
-                    details: audit_details,
-                    status: "failed",
-                    error_message: Some(error.clone()),
-                },
-            );
-            HttpResponse::build(status).json(ErrorResponse { error })
-        }
-    }
+    let record = WriteRecord {
+        step: ActionStep::Confirm,
+        party_id: party_id.clone(),
+        member_party_id: member_party_id.clone(),
+        governance_type: body.governance_type,
+        action_summary: crate::server::audit::action_summary(&body.action),
+        details: serde_json::to_string(&*body).unwrap_or_default(),
+    };
+    let db = data.db.clone();
+    let body = body.into_inner();
+    let submission = async move {
+        let result =
+            execute_confirm_action(&data.config, &body, &token, &member_party_id, &packages())
+                .await;
+        Submitted::of(result, |e| {
+            submission_failure("Failed to submit confirmation", e)
+        })
+    };
+    run_write(
+        db,
+        record,
+        "Confirmation submitted successfully",
+        submission,
+    )
+    .await
 }
 
 /// Execute a confirmed governance action using structured ActionType
@@ -1505,68 +1599,34 @@ pub async fn execute_action(
         }
     };
 
-    let audit_pool = data.db.clone();
-    let audit_summary = crate::server::audit::action_summary(&body.action);
     // Redact disclosed contract blobs (can be very large) before storing in audit
     let mut redacted = body.clone();
     for dc in &mut redacted.disclosed_contracts {
         dc.blob = format!("<{} bytes>", dc.blob.len());
     }
-    let audit_details = serde_json::to_string(&redacted).unwrap_or_default();
-    let audit_party_id = party_id.clone();
-    let audit_member = member_party_id.clone();
-    let audit_gov_type = body.governance_type;
-
-    let packages = packages();
-
-    let result = execute_confirmed_action(
-        &data.config,
-        &data.http_client,
-        &body,
-        &token,
-        &member_party_id,
-        &packages,
-    )
-    .await;
-    count_action(ActionStep::Execute, ActionOutcome::of(&result));
-    match result {
-        Ok(()) => {
-            spawn_audit_log(
-                audit_pool,
-                AuditParams {
-                    event_type: AuditEvent::Execute,
-                    party_id: audit_party_id,
-                    member_party_id: audit_member,
-                    governance_type: audit_gov_type,
-                    action_summary: audit_summary,
-                    details: audit_details,
-                    status: "success",
-                    error_message: None,
-                },
-            );
-            HttpResponse::Ok().json(MessageResponse {
-                message: "Action executed successfully".to_string(),
-            })
-        }
-        Err(e) => {
-            let (status, error) = execute_failure(&e);
-            tracing::error!("{error}");
-            spawn_audit_log(
-                audit_pool,
-                AuditParams {
-                    event_type: AuditEvent::Execute,
-                    party_id: audit_party_id,
-                    member_party_id: audit_member,
-                    governance_type: audit_gov_type,
-                    action_summary: audit_summary,
-                    details: audit_details,
-                    status: "failed",
-                    error_message: Some(error.clone()),
-                },
-            );
-            HttpResponse::build(status).json(ErrorResponse { error })
-        }
-    }
+    let record = WriteRecord {
+        step: ActionStep::Execute,
+        party_id: party_id.clone(),
+        member_party_id: member_party_id.clone(),
+        governance_type: body.governance_type,
+        action_summary: crate::server::audit::action_summary(&body.action),
+        details: serde_json::to_string(&redacted).unwrap_or_default(),
+    };
+    let db = data.db.clone();
+    let body = body.into_inner();
+    let submission = async move {
+        let result = execute_confirmed_action(
+            &data.config,
+            &data.http_client,
+            &body,
+            &token,
+            &member_party_id,
+            &packages(),
+        )
+        .await;
+        Submitted::of(result, execute_failure)
+    };
+    run_write(db, record, "Action executed successfully", submission).await
 }
 
 /// The execute handler's status and message for a failed execute. A node
@@ -1582,9 +1642,17 @@ fn execute_failure(e: &anyhow::Error) -> (StatusCode, String) {
     (status, error)
 }
 
-/// Preserve timeout evidence inside the detached submission task, even if its
-/// request has gone away. Other failures cannot erase an earlier timeout.
-async fn remember_archival_outcome(
+/// Keeps the outcome of the latest expire attempt on `contract_id`, the
+/// evidence that marks a confirmation as one that cannot be archived.
+///
+/// A success forgets the record. A mediator timeout replaces it with the
+/// parties this timeout named, so a timeout that no longer names the
+/// confirmer clears its mark. Any other failure never reached the mediator
+/// and says nothing about the confirmer, so the record stays.
+///
+/// Only expire records. `_Cancel` is controlled by the confirmer, this node's
+/// own member, so a cancel timeout never shows that the confirmer is gone.
+async fn remember_expire_outcome(
     db: &sqlx::SqlitePool,
     party_id: &CantonId,
     contract_id: &str,
@@ -1601,7 +1669,7 @@ async fn remember_archival_outcome(
         },
     };
     if let Err(e) = persistence {
-        tracing::error!(%party_id, contract_id, "Failed to persist governance archival outcome: {e}");
+        tracing::error!(%party_id, contract_id, "Failed to persist the expire outcome: {e}");
     }
 }
 
@@ -1644,52 +1712,26 @@ pub async fn expire_confirmation(
         }
     };
 
-    let audit_details = serde_json::to_string(&*body).unwrap_or_default();
+    let record = WriteRecord {
+        step: ActionStep::Expire,
+        party_id: party_id.clone(),
+        member_party_id: member_party_id.clone(),
+        governance_type: body.governance_type,
+        action_summary: "expire_confirmation".to_string(),
+        details: serde_json::to_string(&*body).unwrap_or_default(),
+    };
+    let db = data.db.clone();
     let body = body.into_inner();
-
-    // A proxy can hang up before the mediator decides, and the server then
-    // drops this handler. The submission runs on its own task, so it still
-    // ends and its audit row still records the cause.
-    let submission = tokio::spawn(async move {
+    let submission = async move {
         let result =
             execute_expire_confirmation(&data.config, &body, &token, &member_party_id, &packages())
                 .await;
-        remember_archival_outcome(&data.db, &body.party_id, &body.confirmation_cid, &result).await;
-        count_action(ActionStep::Expire, ActionOutcome::of(&result));
-        let failure = result
-            .err()
-            .map(|e| submission_failure("Failed to expire confirmation", &e));
-        if let Some((_, error)) = &failure {
-            tracing::error!("{error}");
-        }
-        let status = failure.as_ref().map_or("success", |_| "failed");
-        spawn_audit_log(
-            data.db.clone(),
-            AuditParams {
-                event_type: AuditEvent::Expire,
-                party_id: body.party_id,
-                member_party_id,
-                governance_type: body.governance_type,
-                action_summary: "expire_confirmation".to_string(),
-                details: audit_details,
-                status,
-                error_message: failure.as_ref().map(|(_, error)| error.clone()),
-            },
-        );
-        failure
-    });
-    match submission.await {
-        Ok(None) => HttpResponse::Ok().json(MessageResponse {
-            message: "Confirmation expired successfully".to_string(),
-        }),
-        Ok(Some((status, error))) => HttpResponse::build(status).json(ErrorResponse { error }),
-        Err(e) => {
-            tracing::error!("The expire task ended without an outcome: {e}");
-            HttpResponse::InternalServerError().json(ErrorResponse {
-                error: format!("Failed to expire confirmation: {e}"),
-            })
-        }
-    }
+        remember_expire_outcome(&data.db, &body.party_id, &body.confirmation_cid, &result).await;
+        Submitted::of(result, |e| {
+            submission_failure("Failed to expire confirmation", e)
+        })
+    };
+    run_write(db, record, "Confirmation expired successfully", submission).await
 }
 
 /// Cancel (revoke) own governance confirmation
@@ -1730,51 +1772,31 @@ pub async fn cancel_confirmation(
         }
     };
 
-    let audit_details = serde_json::to_string(&*body).unwrap_or_default();
+    let record = WriteRecord {
+        step: ActionStep::CancelConfirmation,
+        party_id: party_id.clone(),
+        member_party_id: member_party_id.clone(),
+        governance_type: body.governance_type,
+        action_summary: "cancel_confirmation".to_string(),
+        details: serde_json::to_string(&*body).unwrap_or_default(),
+    };
+    let db = data.db.clone();
     let body = body.into_inner();
-
-    // Runs on its own task for the same reason as the expire handler: a
-    // dropped handler must not cut the submission or its audit row short.
-    let submission = tokio::spawn(async move {
+    let submission = async move {
         let result =
             execute_cancel_confirmation(&data.config, &body, &token, &member_party_id, &packages())
                 .await;
-        remember_archival_outcome(&data.db, &body.party_id, &body.confirmation_cid, &result).await;
-        count_action(ActionStep::CancelConfirmation, ActionOutcome::of(&result));
-        let failure = result
-            .err()
-            .map(|e| submission_failure("Failed to cancel confirmation", &e));
-        if let Some((_, error)) = &failure {
-            tracing::error!("{error}");
-        }
-        let status = failure.as_ref().map_or("success", |_| "failed");
-        spawn_audit_log(
-            data.db.clone(),
-            AuditParams {
-                event_type: AuditEvent::Cancel,
-                party_id: body.party_id,
-                member_party_id,
-                governance_type: body.governance_type,
-                action_summary: "cancel_confirmation".to_string(),
-                details: audit_details,
-                status,
-                error_message: failure.as_ref().map(|(_, error)| error.clone()),
-            },
-        );
-        failure
-    });
-    match submission.await {
-        Ok(None) => HttpResponse::Ok().json(MessageResponse {
-            message: "Confirmation cancelled successfully".to_string(),
-        }),
-        Ok(Some((status, error))) => HttpResponse::build(status).json(ErrorResponse { error }),
-        Err(e) => {
-            tracing::error!("The cancel task ended without an outcome: {e}");
-            HttpResponse::InternalServerError().json(ErrorResponse {
-                error: format!("Failed to cancel confirmation: {e}"),
-            })
-        }
-    }
+        Submitted::of(result, |e| {
+            submission_failure("Failed to cancel confirmation", e)
+        })
+    };
+    run_write(
+        db,
+        record,
+        "Confirmation cancelled successfully",
+        submission,
+    )
+    .await
 }
 
 /// The confirmation ids of a dismiss or restore request, each once.
@@ -1957,54 +1979,25 @@ pub async fn cancel_proposal(
         }
     };
 
-    let audit_pool = data.db.clone();
-    let audit_details = serde_json::to_string(&*body).unwrap_or_default();
-    let audit_party_id = party_id.clone();
-    let audit_member = member_party_id.clone();
-
-    let packages = packages();
-
-    let result =
-        execute_cancel_proposal(&data.config, &body, &token, &member_party_id, &packages).await;
-    count_action(ActionStep::CancelProposal, ActionOutcome::of(&result));
-    match result {
-        Ok(()) => {
-            spawn_audit_log(
-                audit_pool,
-                AuditParams {
-                    event_type: AuditEvent::CancelProposal,
-                    party_id: audit_party_id,
-                    member_party_id: audit_member,
-                    governance_type: GovernanceType::CoreDomain,
-                    action_summary: "cancel_proposal".to_string(),
-                    details: audit_details,
-                    status: "success",
-                    error_message: None,
-                },
-            );
-            HttpResponse::Ok().json(MessageResponse {
-                message: "Proposal cancelled successfully".to_string(),
-            })
-        }
-        Err(e) => {
-            let (status, error) = submission_failure("Failed to cancel proposal", &e);
-            tracing::error!("{error}");
-            spawn_audit_log(
-                audit_pool,
-                AuditParams {
-                    event_type: AuditEvent::CancelProposal,
-                    party_id: audit_party_id,
-                    member_party_id: audit_member,
-                    governance_type: GovernanceType::CoreDomain,
-                    action_summary: "cancel_proposal".to_string(),
-                    details: audit_details,
-                    status: "failed",
-                    error_message: Some(error.clone()),
-                },
-            );
-            HttpResponse::build(status).json(ErrorResponse { error })
-        }
-    }
+    let record = WriteRecord {
+        step: ActionStep::CancelProposal,
+        party_id: party_id.clone(),
+        member_party_id: member_party_id.clone(),
+        governance_type: GovernanceType::CoreDomain,
+        action_summary: "cancel_proposal".to_string(),
+        details: serde_json::to_string(&*body).unwrap_or_default(),
+    };
+    let db = data.db.clone();
+    let body = body.into_inner();
+    let submission = async move {
+        let result =
+            execute_cancel_proposal(&data.config, &body, &token, &member_party_id, &packages())
+                .await;
+        Submitted::of(result, |e| {
+            submission_failure("Failed to cancel proposal", e)
+        })
+    };
+    run_write(db, record, "Proposal cancelled successfully", submission).await
 }
 
 /// Get the decparty's active CouponReassignmentDelegation contracts, newest first
@@ -2301,13 +2294,13 @@ async fn execute_confirm_action(
     let mut client =
         CommandServiceClient::new(channel).max_decoding_message_size(utils::MAX_GRPC_MESSAGE_SIZE);
 
-    let mut req = tonic::Request::new(SubmitAndWaitRequest {
-        commands: Some(commands),
-    });
-    req.metadata_mut()
-        .insert("authorization", format!("Bearer {token}").parse().unwrap());
-
-    client.submit_and_wait(req).await?;
+    let request = ledger_request(
+        SubmitAndWaitRequest {
+            commands: Some(commands),
+        },
+        token,
+    )?;
+    client.submit_and_wait(request).await?;
 
     Ok(())
 }
@@ -2497,13 +2490,13 @@ async fn execute_confirmed_action(
     let mut client =
         CommandServiceClient::new(channel).max_decoding_message_size(utils::MAX_GRPC_MESSAGE_SIZE);
 
-    let mut req = tonic::Request::new(SubmitAndWaitRequest {
-        commands: Some(commands),
-    });
-    req.metadata_mut()
-        .insert("authorization", format!("Bearer {token}").parse().unwrap());
-
-    client.submit_and_wait(req).await?;
+    let request = ledger_request(
+        SubmitAndWaitRequest {
+            commands: Some(commands),
+        },
+        token,
+    )?;
+    client.submit_and_wait(request).await?;
 
     Ok(())
 }
@@ -2723,13 +2716,13 @@ async fn execute_expire_confirmation(
     let mut client =
         CommandServiceClient::new(channel).max_decoding_message_size(utils::MAX_GRPC_MESSAGE_SIZE);
 
-    let mut req = tonic::Request::new(SubmitAndWaitRequest {
-        commands: Some(commands),
-    });
-    req.metadata_mut()
-        .insert("authorization", format!("Bearer {token}").parse().unwrap());
-
-    client.submit_and_wait(req).await?;
+    let request = ledger_request(
+        SubmitAndWaitRequest {
+            commands: Some(commands),
+        },
+        token,
+    )?;
+    client.submit_and_wait(request).await?;
 
     Ok(())
 }
@@ -2794,13 +2787,13 @@ async fn execute_cancel_confirmation(
     let mut client =
         CommandServiceClient::new(channel).max_decoding_message_size(utils::MAX_GRPC_MESSAGE_SIZE);
 
-    let mut req = tonic::Request::new(SubmitAndWaitRequest {
-        commands: Some(commands),
-    });
-    req.metadata_mut()
-        .insert("authorization", format!("Bearer {token}").parse().unwrap());
-
-    client.submit_and_wait(req).await?;
+    let request = ledger_request(
+        SubmitAndWaitRequest {
+            commands: Some(commands),
+        },
+        token,
+    )?;
+    client.submit_and_wait(request).await?;
 
     Ok(())
 }
@@ -2862,13 +2855,13 @@ async fn execute_cancel_proposal(
     let mut client =
         CommandServiceClient::new(channel).max_decoding_message_size(utils::MAX_GRPC_MESSAGE_SIZE);
 
-    let mut req = tonic::Request::new(SubmitAndWaitRequest {
-        commands: Some(commands),
-    });
-    req.metadata_mut()
-        .insert("authorization", format!("Bearer {token}").parse().unwrap());
-
-    client.submit_and_wait(req).await?;
+    let request = ledger_request(
+        SubmitAndWaitRequest {
+            commands: Some(commands),
+        },
+        token,
+    )?;
+    client.submit_and_wait(request).await?;
 
     Ok(())
 }
@@ -3635,7 +3628,11 @@ mod action_metrics_tests {
 
 #[cfg(test)]
 mod mediator_timeout_tests {
-    use std::{convert::Infallible, sync::Arc, time::Duration};
+    use std::{
+        convert::Infallible,
+        sync::{Arc, Mutex},
+        time::Duration,
+    };
 
     use actix_web::{App, http::header::AUTHORIZATION, test as actix_test};
     use canton_proto_rs::com::daml::ledger::api::v2::{
@@ -3666,7 +3663,8 @@ mod mediator_timeout_tests {
     /// `SubmitAndWaitForTransaction` is rejected the same way, unless
     /// `created_proposal` is set: then it answers with a transaction that
     /// creates that contract. Without a `rejection`, every `SubmitAndWait`
-    /// succeeds at once. The router answers every other service as
+    /// succeeds at once. `deadlines` keeps the `grpc-timeout` header of every
+    /// submission. The router answers every other service as
     /// unimplemented, so the package-ref lookup falls back to the configured
     /// package.
     #[derive(Clone)]
@@ -3675,6 +3673,7 @@ mod mediator_timeout_tests {
         created_proposal: Option<String>,
         submitted: Arc<Notify>,
         release: Arc<Notify>,
+        deadlines: Arc<Mutex<Vec<Option<String>>>>,
     }
 
     impl RejectingLedger {
@@ -3684,6 +3683,7 @@ mod mediator_timeout_tests {
                 created_proposal: None,
                 submitted: Arc::new(Notify::new()),
                 release: Arc::new(Notify::new()),
+                deadlines: Arc::default(),
             }
         }
 
@@ -3723,6 +3723,12 @@ mod mediator_timeout_tests {
             Box::pin(async move {
                 let path = request.uri().path().to_string();
                 let method = path.strip_prefix(&format!("/{}/", Self::NAME));
+                if let (Some("SubmitAndWait" | "SubmitAndWaitForTransaction"), Ok(mut deadlines)) =
+                    (method, ledger.deadlines.lock())
+                {
+                    let deadline = request.headers().get("grpc-timeout");
+                    deadlines.push(deadline.and_then(|v| v.to_str().ok()).map(String::from));
+                }
                 match (method, ledger.created_proposal) {
                     (Some("SubmitAndWaitForTransaction"), Some(contract_id)) => {
                         let response = created_transaction(contract_id);
@@ -3796,16 +3802,6 @@ mod mediator_timeout_tests {
             }))
     }
 
-    fn cancel() -> actix_test::TestRequest {
-        actix_test::TestRequest::post()
-            .uri("/governance/cancel")
-            .insert_header((AUTHORIZATION, "Bearer any-token"))
-            .set_json(serde_json::json!({
-                "party_id": party(),
-                "confirmation_cid": "00c0ffee",
-            }))
-    }
-
     /// The `(status, error_message)` of the audit row of `event`, once the
     /// detached write lands.
     async fn audit_row(pool: &SqlitePool, event: AuditEvent) -> Result<(String, Option<String>)> {
@@ -3827,19 +3823,21 @@ mod mediator_timeout_tests {
         .context("no audit row was written")?
     }
 
+    /// The latest expire attempt wins. A failure that never reached the
+    /// mediator says nothing about the confirmer, so it keeps the record.
     #[sqlx::test(migrator = "MIGRATOR")]
-    async fn archival_outcomes_keep_timeouts_until_the_confirmation_is_archived(
+    async fn expire_outcomes_keep_the_latest_timeout_until_the_confirmation_is_archived(
         pool: SqlitePool,
     ) -> Result {
         let party = CantonId::parse(&party())?;
         let timeout = Err(anyhow::Error::new(fixtures::mediator_timeout(
             OFFLINE_MEMBER,
         )));
-        remember_archival_outcome(&pool, &party, "00conf", &timeout).await;
-        remember_archival_outcome(&pool, &party, "00other", &timeout).await;
+        remember_expire_outcome(&pool, &party, "00conf", &timeout).await;
+        remember_expire_outcome(&pool, &party, "00other", &timeout).await;
 
         let unrelated_failure = Err(anyhow::anyhow!("connection refused"));
-        remember_archival_outcome(&pool, &party, "00conf", &unrelated_failure).await;
+        remember_expire_outcome(&pool, &party, "00conf", &unrelated_failure).await;
         let rows = pool.get_mediator_timeouts(&party).await?;
         assert_eq!(rows.len(), 2);
         assert_eq!(rows[0].contract_id, "00conf");
@@ -3848,7 +3846,17 @@ mod mediator_timeout_tests {
             vec![OFFLINE_MEMBER]
         );
 
-        remember_archival_outcome(&pool, &party, "00conf", &Ok(())).await;
+        let later_timeout = Err(anyhow::Error::new(fixtures::mediator_timeout(
+            "member-d::1220dddd",
+        )));
+        remember_expire_outcome(&pool, &party, "00conf", &later_timeout).await;
+        let rows = pool.get_mediator_timeouts(&party).await?;
+        assert_eq!(
+            serde_json::from_str::<Vec<String>>(&rows[0].unresponsive)?,
+            vec!["member-d::1220dddd"]
+        );
+
+        remember_expire_outcome(&pool, &party, "00conf", &Ok(())).await;
 
         let rows = pool.get_mediator_timeouts(&party).await?;
         assert_eq!(rows.len(), 1);
@@ -3888,24 +3896,29 @@ mod mediator_timeout_tests {
         Ok(())
     }
 
-    /// A proxy that hangs up makes the server drop the handler. The expire and
-    /// the cancel still end, and the audit row names the unresponsive party.
+    /// A proxy that hangs up makes the server drop the handler. Every write
+    /// still ends, and its audit row names the unresponsive party.
     #[sqlx::test(migrator = "MIGRATOR")]
     async fn a_dropped_request_still_writes_the_audit_row(pool: SqlitePool) -> Result {
         let _serial = super::action_metrics_tests::SERIAL.lock().await;
-        for (request, event) in [
-            (expire(), AuditEvent::Expire),
-            (cancel(), AuditEvent::Cancel),
-        ] {
+        for (event, uri, _, body) in writes() {
             let ledger = RejectingLedger::new();
             let app = actix_test::init_service(
                 App::new()
                     .app_data(state(pool.clone(), ledger.serve()?).await?)
                     .wrap(AuthMiddleware)
+                    .service(propose_action)
+                    .service(confirm_action)
+                    .service(execute_action)
                     .service(expire_confirmation)
-                    .service(cancel_confirmation),
+                    .service(cancel_confirmation)
+                    .service(cancel_proposal),
             )
             .await;
+            let request = actix_test::TestRequest::post()
+                .uri(uri)
+                .insert_header((AUTHORIZATION, "Bearer any-token"))
+                .set_json(body);
 
             // Dropping the request future is what the server does to a
             // handler whose client hung up.
@@ -3926,6 +3939,11 @@ mod mediator_timeout_tests {
             );
             let party = CantonId::parse(&party())?;
             let rows = pool.get_mediator_timeouts(&party).await?;
+            // Only an expire keeps its timeout.
+            if !matches!(event, AuditEvent::Expire) {
+                assert!(rows.is_empty(), "{event:?}");
+                continue;
+            }
             assert_eq!(rows.len(), 1, "{event:?}");
             assert_eq!(rows[0].contract_id, "00c0ffee", "{event:?}");
             assert_eq!(
@@ -3970,14 +3988,12 @@ mod mediator_timeout_tests {
         Ok((status, error.to_string()))
     }
 
-    /// Issue #615 asks that every governance submission the mediator times
-    /// out names the unresponsive party, not only expire and cancel.
-    #[sqlx::test(migrator = "MIGRATOR")]
-    async fn every_governance_write_names_the_unresponsive_party(pool: SqlitePool) -> Result {
-        let _serial = super::action_metrics_tests::SERIAL.lock().await;
+    /// Every governance write: its audit event, its path, the context its
+    /// failure message starts with, and a body the handler accepts.
+    fn writes() -> [(AuditEvent, &'static str, &'static str, serde_json::Value); 6] {
         let party = party();
         let action = serde_json::json!({ "type": "governance_set_threshold", "new_threshold": 2 });
-        let cases = [
+        [
             (
                 AuditEvent::Propose,
                 "/governance/propose",
@@ -4031,8 +4047,15 @@ mod mediator_timeout_tests {
                 "Failed to cancel proposal",
                 serde_json::json!({ "party_id": party, "proposal_cid": "00p" }),
             ),
-        ];
-        for (event, uri, context, body) in cases {
+        ]
+    }
+
+    /// Issue #615 asks that every governance submission the mediator times
+    /// out names the unresponsive party, not only expire and cancel.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn every_governance_write_names_the_unresponsive_party(pool: SqlitePool) -> Result {
+        let _serial = super::action_metrics_tests::SERIAL.lock().await;
+        for (event, uri, context, body) in writes() {
             let ledger = RejectingLedger::new();
             ledger.release.notify_one();
 
@@ -4052,6 +4075,67 @@ mod mediator_timeout_tests {
             assert_eq!(audit_status, "failed", "{event:?}");
             assert_eq!(audit_message, Some(error), "{event:?}");
         }
+        Ok(())
+    }
+
+    /// A submission without a deadline keeps its task alive until Canton
+    /// stops tracking the command, long after the caller hung up.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn every_governance_submission_carries_a_deadline(pool: SqlitePool) -> Result {
+        let _serial = super::action_metrics_tests::SERIAL.lock().await;
+        for (event, uri, _, body) in writes() {
+            let mut ledger = RejectingLedger::new();
+            // The proposer's confirmation is a second submission; reach it.
+            ledger.created_proposal = Some("00proposal".to_string());
+            ledger.release.notify_one();
+
+            post_to_writes(&pool, &ledger, uri, body).await?;
+
+            let deadlines = ledger
+                .deadlines
+                .lock()
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
+            let expected = if matches!(event, AuditEvent::Propose) {
+                2
+            } else {
+                1
+            };
+            assert_eq!(deadlines.len(), expected, "{event:?}");
+            for deadline in deadlines.iter() {
+                assert_eq!(deadline.as_deref(), Some("130000m"), "{event:?}");
+            }
+        }
+        Ok(())
+    }
+
+    async fn a_panicking_submission() -> Submitted {
+        panic!("the submission failed in a way no handler maps")
+    }
+
+    /// A submission that ends without an outcome still leaves a failed row,
+    /// so the audit trail never misses a write the node attempted.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_submission_that_panics_still_writes_a_failed_audit_row(pool: SqlitePool) -> Result {
+        let _serial = super::action_metrics_tests::SERIAL.lock().await;
+        let record = WriteRecord {
+            step: ActionStep::Execute,
+            party_id: CantonId::parse(&party())?,
+            member_party_id: CantonId::parse(&party())?,
+            governance_type: GovernanceType::CoreSelf,
+            action_summary: "governance_set_threshold".to_string(),
+            details: "{}".to_string(),
+        };
+
+        let response = run_write(pool.clone(), record, "unused", a_panicking_submission()).await;
+
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let (status, message) = audit_row(&pool, AuditEvent::Execute).await?;
+        assert_eq!(status, "failed");
+        let message = message.unwrap_or_default();
+        assert!(
+            message.starts_with("The execute submission ended without an outcome"),
+            "{message}"
+        );
         Ok(())
     }
 
@@ -4097,56 +4181,81 @@ mod mediator_timeout_tests {
         Ok(())
     }
 
-    /// A confirmation whose archive once timed out is archived later, for
-    /// example after its confirmer's participant came back. The handler must
-    /// then forget the timeout, so the confirmation is no longer marked stuck.
+    /// The record follows the latest expire attempt through the handler: a
+    /// timeout that names another party replaces it, and a success, for
+    /// example after the confirmer's participant came back, forgets it.
     #[sqlx::test(migrator = "MIGRATOR")]
-    async fn a_later_successful_archive_clears_the_recorded_timeout(pool: SqlitePool) -> Result {
+    async fn the_latest_expire_attempt_decides_the_recorded_timeout(pool: SqlitePool) -> Result {
         let _serial = super::action_metrics_tests::SERIAL.lock().await;
         let party = CantonId::parse(&party())?;
-        for (uri, body) in [
-            (
-                "/governance/expire",
-                serde_json::json!({
-                    "party_id": party,
-                    "rules_contract_id": "00rules",
-                    "confirmation_cid": "00c0ffee",
-                }),
-            ),
-            (
-                "/governance/cancel",
-                serde_json::json!({ "party_id": party, "confirmation_cid": "00c0ffee" }),
-            ),
-        ] {
-            let offline = RejectingLedger::new();
-            offline.release.notify_one();
-            let (status, _) = post_to_writes(&pool, &offline, uri, body.clone()).await?;
-            assert_eq!(status, StatusCode::GATEWAY_TIMEOUT, "{uri}");
-            let rows = pool.get_mediator_timeouts(&party).await?;
-            assert_eq!(rows.len(), 1, "{uri}");
-            assert_eq!(rows[0].contract_id, "00c0ffee", "{uri}");
+        let body = serde_json::json!({
+            "party_id": party,
+            "rules_contract_id": "00rules",
+            "confirmation_cid": "00c0ffee",
+        });
+        let unresponsive = |rows: &[GovernanceMediatorTimeoutRow]| -> Result<Vec<String>> {
+            let [row] = rows else {
+                anyhow::bail!("expected one record, found {}", rows.len());
+            };
+            assert_eq!(row.contract_id, "00c0ffee");
+            Ok(serde_json::from_str(&row.unresponsive)?)
+        };
 
-            let app = actix_test::init_service(
-                App::new()
-                    .app_data(state(pool.clone(), RejectingLedger::accepting().serve()?).await?)
-                    .wrap(AuthMiddleware)
-                    .service(expire_confirmation)
-                    .service(cancel_confirmation),
-            )
-            .await;
-            let request = actix_test::TestRequest::post()
-                .uri(uri)
-                .insert_header((AUTHORIZATION, "Bearer any-token"))
-                .set_json(body)
-                .to_request();
-            let response = actix_test::call_service(&app, request).await;
+        let offline = RejectingLedger::new();
+        offline.release.notify_one();
+        let (status, _) =
+            post_to_writes(&pool, &offline, "/governance/expire", body.clone()).await?;
+        assert_eq!(status, StatusCode::GATEWAY_TIMEOUT);
+        let rows = pool.get_mediator_timeouts(&party).await?;
+        assert_eq!(unresponsive(&rows)?, vec![OFFLINE_MEMBER]);
 
-            assert_eq!(response.status(), StatusCode::OK, "{uri}");
-            assert!(
-                pool.get_mediator_timeouts(&party).await?.is_empty(),
-                "{uri}"
-            );
-        }
+        let mut another = RejectingLedger::new();
+        another.rejection = Some(fixtures::mediator_timeout("member-d::1220dddd"));
+        another.release.notify_one();
+        let (status, _) =
+            post_to_writes(&pool, &another, "/governance/expire", body.clone()).await?;
+        assert_eq!(status, StatusCode::GATEWAY_TIMEOUT);
+        let rows = pool.get_mediator_timeouts(&party).await?;
+        assert_eq!(unresponsive(&rows)?, vec!["member-d::1220dddd"]);
+
+        let app = actix_test::init_service(
+            App::new()
+                .app_data(state(pool.clone(), RejectingLedger::accepting().serve()?).await?)
+                .wrap(AuthMiddleware)
+                .service(expire_confirmation),
+        )
+        .await;
+        let request = actix_test::TestRequest::post()
+            .uri("/governance/expire")
+            .insert_header((AUTHORIZATION, "Bearer any-token"))
+            .set_json(body)
+            .to_request();
+        let response = actix_test::call_service(&app, request).await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(pool.get_mediator_timeouts(&party).await?.is_empty());
+        Ok(())
+    }
+
+    /// `_Cancel` is controlled by the confirmer, this node's own member. A
+    /// cancel timeout therefore never shows that the confirmer is gone.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_cancel_timeout_is_not_recorded(pool: SqlitePool) -> Result {
+        let _serial = super::action_metrics_tests::SERIAL.lock().await;
+        let party = CantonId::parse(&party())?;
+        let ledger = RejectingLedger::new();
+        ledger.release.notify_one();
+
+        let (status, _) = post_to_writes(
+            &pool,
+            &ledger,
+            "/governance/cancel",
+            serde_json::json!({ "party_id": party, "confirmation_cid": "00c0ffee" }),
+        )
+        .await?;
+
+        assert_eq!(status, StatusCode::GATEWAY_TIMEOUT);
+        assert!(pool.get_mediator_timeouts(&party).await?.is_empty());
         Ok(())
     }
 }
@@ -4182,9 +4291,12 @@ mod confirmations_feed_tests {
     /// `contracts`. A page read returns, in one page, every contract whose
     /// template matches a template filter of the request. An interface read,
     /// such as the one for proposals, finds nothing: every proposal is gone.
-    #[derive(Clone)]
+    /// A read of the `missing` template fails the way Canton fails it when
+    /// the package is uploaded but lacks the template.
+    #[derive(Clone, Default)]
     struct AcsLedger {
         contracts: Arc<Vec<CreatedEvent>>,
+        missing: Option<&'static str>,
     }
 
     impl AcsLedger {
@@ -4200,7 +4312,10 @@ mod confirmations_feed_tests {
             Ok(port)
         }
 
-        fn page(&self, request: &GetActiveContractsPageRequest) -> GetActiveContractsPageResponse {
+        fn page(
+            &self,
+            request: &GetActiveContractsPageRequest,
+        ) -> std::result::Result<GetActiveContractsPageResponse, tonic::Status> {
             let wanted: Vec<(&str, &str)> = request
                 .event_format
                 .iter()
@@ -4212,6 +4327,11 @@ mod confirmations_feed_tests {
                 })
                 .map(|id| (id.module_name.as_str(), id.entity_name.as_str()))
                 .collect();
+            if let Some(missing) = self.missing.filter(|m| wanted.iter().any(|w| w.1 == *m)) {
+                return Err(tonic::Status::invalid_argument(format!(
+                    "NO_TEMPLATES_FOR_PACKAGE_NAME_AND_QUALIFIED_NAME(8,0): no template {missing}"
+                )));
+            }
             let active_contracts = self
                 .contracts
                 .iter()
@@ -4228,11 +4348,11 @@ mod confirmations_feed_tests {
                     ..Default::default()
                 })
                 .collect();
-            GetActiveContractsPageResponse {
+            Ok(GetActiveContractsPageResponse {
                 active_contracts,
                 active_at_offset: 1,
                 next_page_token: None,
-            }
+            })
         }
     }
 
@@ -4261,7 +4381,7 @@ mod confirmations_feed_tests {
                     }
                     Some("GetActiveContractsPage") => {
                         unary(request, move |r: GetActiveContractsPageRequest| {
-                            Ok(ledger.page(&r))
+                            ledger.page(&r)
                         })
                         .await
                     }
@@ -4506,7 +4626,17 @@ mod confirmations_feed_tests {
         ];
         let ledger = AcsLedger {
             contracts: Arc::new(contracts.clone()),
+            ..AcsLedger::default()
         };
+        // Each expire of a former member's confirmation timed out naming it.
+        for (cid, confirmer) in [
+            ("00self-former", &former),
+            ("00dom-former", &former),
+            ("00self-former-b", &other_former),
+        ] {
+            pool.record_mediator_timeout(&party, cid, &[confirmer.to_string()])
+                .await?;
+        }
         let all = ["00self-former", "00self-live", "00dom-former"];
 
         let status = post_ids(&pool, "/governance/dismiss", &party, &all).await?;
@@ -4540,6 +4670,7 @@ mod confirmations_feed_tests {
         )?);
         let ledger_again = AcsLedger {
             contracts: Arc::new(confirmed_again),
+            ..AcsLedger::default()
         };
         let again = feed(&pool, &ledger_again, &party).await?;
         let shown = holding(&again["actions"], "00self-former")
@@ -4558,10 +4689,11 @@ mod confirmations_feed_tests {
         Ok(())
     }
 
-    /// Issue #615: an action whose expired confirmations belong to a former
-    /// member, or to a member whose archive timed out at the mediator, is
-    /// marked as one that cannot be archived. The marks come from the rules
-    /// contract on the ledger and from this party's own timeout records.
+    /// Issue #615: an action whose expired confirmations all failed their
+    /// latest expire with a mediator timeout naming the confirmer is marked as
+    /// one that cannot be archived. A former member without such evidence is
+    /// not marked: its participant may still be online. The evidence comes
+    /// from this party's own timeout records.
     #[sqlx::test(migrator = "MIGRATOR")]
     async fn the_feed_marks_what_cannot_be_archived(pool: SqlitePool) -> Result {
         let party = id("dec", "ab");
@@ -4573,25 +4705,23 @@ mod confirmations_feed_tests {
         );
         let now = chrono::Utc::now().timestamp();
         let (expired, live) = (now - 3600, now + 3600);
+        let threshold = |new_threshold| ActionType::GovernanceSetThreshold { new_threshold };
         let ledger = AcsLedger {
             contracts: Arc::new(vec![
                 rules(&party, &[&member_a, &member_b]),
-                self_confirmation(
-                    "00self-former",
-                    &ActionType::GovernanceSetThreshold { new_threshold: 3 },
-                    &former,
-                    expired,
-                )?,
-                self_confirmation(
-                    "00self-live",
-                    &ActionType::GovernanceSetThreshold { new_threshold: 1 },
-                    &member_a,
-                    live,
-                )?,
+                self_confirmation("00self-former", &threshold(3), &former, expired)?,
+                self_confirmation("00self-live", &threshold(1), &member_a, live)?,
+                self_confirmation("00self-timeout", &threshold(4), &member_b, expired)?,
+                self_confirmation("00self-named-other", &threshold(5), &member_a, expired)?,
                 domain_confirmation("00dom-timeout", "00gone-a", &member_a, expired),
                 domain_confirmation("00dom-elsewhere", "00gone-b", &member_b, expired),
             ]),
+            ..AcsLedger::default()
         };
+        pool.record_mediator_timeout(&party, "00self-timeout", &[member_b.to_string()])
+            .await?;
+        pool.record_mediator_timeout(&party, "00self-named-other", &[member_b.to_string()])
+            .await?;
         pool.record_mediator_timeout(&party, "00dom-timeout", &[member_a.to_string()])
             .await?;
         // The same confirmation id timed out for another party only.
@@ -4600,15 +4730,21 @@ mod confirmations_feed_tests {
 
         let body = feed(&pool, &ledger, &party).await?;
 
-        let former_action = holding(&body["actions"], "00self-former")?;
+        for unmarked in ["00self-former", "00self-live", "00self-named-other"] {
+            let action = holding(&body["actions"], unmarked)?;
+            assert_eq!(
+                action["confirmations"][0]["stuck"],
+                json!(null),
+                "{unmarked}"
+            );
+            assert_eq!(action["cannot_be_archived"], json!(false), "{unmarked}");
+        }
+        let timed_out = holding(&body["actions"], "00self-timeout")?;
         assert_eq!(
-            former_action["confirmations"][0]["stuck"],
-            json!("confirmer_not_member")
+            timed_out["confirmations"][0]["stuck"],
+            json!("participant_unresponsive")
         );
-        assert_eq!(former_action["cannot_be_archived"], json!(true));
-        let live_action = holding(&body["actions"], "00self-live")?;
-        assert_eq!(live_action["confirmations"][0]["stuck"], json!(null));
-        assert_eq!(live_action["cannot_be_archived"], json!(false));
+        assert_eq!(timed_out["cannot_be_archived"], json!(true));
         let timed_out = holding(&body["domain_actions"], "00dom-timeout")?;
         assert_eq!(timed_out["orphaned"], json!(true));
         assert_eq!(
@@ -4616,10 +4752,58 @@ mod confirmations_feed_tests {
             json!("participant_unresponsive")
         );
         assert_eq!(timed_out["cannot_be_archived"], json!(true));
-        let elsewhere = holding(&body["domain_actions"], "00dom-elsewhere")?;
-        assert_eq!(elsewhere["orphaned"], json!(true));
-        assert_eq!(elsewhere["confirmations"][0]["stuck"], json!(null));
-        assert_eq!(elsewhere["cannot_be_archived"], json!(false));
+        // An orphan that can still be archived stays out of the list.
+        assert!(holding(&body["domain_actions"], "00dom-elsewhere").is_err());
+        Ok(())
+    }
+
+    /// A package can be uploaded without one of the governance templates.
+    /// The confirmations of the templates it has must still be listed.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_template_missing_from_its_package_does_not_empty_the_feed(
+        pool: SqlitePool,
+    ) -> Result {
+        let party = id("dec", "ab");
+        let member = id("member-a", "aa");
+        let expired = chrono::Utc::now().timestamp() - 3600;
+        let ledger = AcsLedger {
+            contracts: Arc::new(vec![
+                rules(&party, &[&member]),
+                domain_confirmation("00dom-timeout", "00gone", &member, expired),
+            ]),
+            missing: Some("GovernanceSelfConfirmation"),
+        };
+        pool.record_mediator_timeout(&party, "00dom-timeout", &[member.to_string()])
+            .await?;
+
+        let body = feed(&pool, &ledger, &party).await?;
+
+        let action = holding(&body["domain_actions"], "00dom-timeout")?;
+        assert_eq!(action["cannot_be_archived"], json!(true));
+        Ok(())
+    }
+
+    /// A node without the `GovernableAction` interface has no proposals. The
+    /// read is complete, so the pending-governance poller reports no error.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_node_without_the_proposal_interface_reads_a_complete_queue(
+        pool: SqlitePool,
+    ) -> Result {
+        let party = id("dec", "ab");
+        let member = id("member-a", "aa");
+        let ledger = AcsLedger {
+            contracts: Arc::new(vec![rules(&party, &[&member])]),
+            ..AcsLedger::default()
+        };
+        let data = state(pool, ledger.serve()?).await?;
+        let mut packages = packages();
+        packages.governance_action = None;
+
+        let queue =
+            get_governance_confirmations(&data.config, &party, 1, None, None, &packages, 25, None)
+                .await?;
+
+        assert!(queue.complete);
         Ok(())
     }
 }
@@ -4921,41 +5105,35 @@ mod archival_state_tests {
     }
 
     /// A self action from a former member that expired, and a live one from a
-    /// current member. Only the first cannot be archived.
-    fn queue_and_rules() -> Result<(GovernanceQueue, GovernanceState)> {
+    /// current member. Only the first cannot be archived, once its expire
+    /// timed out naming the former member.
+    fn queue() -> Result<GovernanceQueue> {
         let now = chrono::Utc::now().timestamp();
         let (member, former) = (party_id("member")?, party_id("former")?);
         let actions = vec![
             serde_json::from_value(self_action("stuck", "00stuck", &former, now - 60)?)?,
             serde_json::from_value(self_action("live", "00live", &member, now + 3600)?)?,
         ];
-        let rules = serde_json::from_value(json!({
-            "contract_id": "00rules",
-            "governance_party": party_id("dec")?,
-            "members": [member],
-            "threshold": 1,
-        }))?;
-        let queue = GovernanceQueue {
+        Ok(GovernanceQueue {
             actions,
             domain_actions: vec![],
             next_cursor: None,
             complete: true,
-        };
-        Ok((queue, rules))
+        })
+    }
+
+    /// Records that the expire of `00stuck` timed out naming the former member.
+    async fn record_the_stuck_timeout(pool: &SqlitePool) -> Result {
+        let former = party_id("former")?.to_string();
+        pool.record_mediator_timeout(&party_id("dec")?, "00stuck", &[former])
+            .await
     }
 
     /// The action hashes the confirmations list returns, each with its
     /// `dismissed` mark.
     async fn listed(pool: &SqlitePool, include_dismissed: bool) -> Result<Vec<(String, bool)>> {
-        let (mut queue, rules) = queue_and_rules()?;
-        mark_archival_state(
-            pool,
-            &party_id("dec")?,
-            Some(&rules),
-            &mut queue,
-            include_dismissed,
-        )
-        .await?;
+        let mut queue = queue()?;
+        mark_archival_state(pool, &party_id("dec")?, &mut queue, include_dismissed).await?;
         Ok(queue
             .actions
             .into_iter()
@@ -4966,6 +5144,7 @@ mod archival_state_tests {
     #[sqlx::test(migrator = "MIGRATOR")]
     async fn the_list_hides_a_dismissed_action_until_it_is_restored(pool: SqlitePool) -> Result {
         let party = party_id("dec")?;
+        record_the_stuck_timeout(&pool).await?;
         let both = || vec![("stuck".to_string(), false), ("live".to_string(), false)];
         assert_eq!(listed(&pool, false).await?, both());
 
@@ -4987,6 +5166,7 @@ mod archival_state_tests {
 
     #[sqlx::test(migrator = "MIGRATOR")]
     async fn a_dismissal_for_another_party_hides_nothing(pool: SqlitePool) -> Result {
+        record_the_stuck_timeout(&pool).await?;
         let ids = ["00stuck".to_string()];
         pool.dismiss_confirmations(&party_id("other")?, &ids, "admin")
             .await?;
