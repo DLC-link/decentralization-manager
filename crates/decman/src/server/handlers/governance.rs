@@ -1955,8 +1955,7 @@ async fn change_hidden(
         let mut tx = db.begin_transaction().await?;
         let changed = match event {
             HidingAuditEvent::Hide => {
-                // The `sub` is stable. An email can change hands; the audit
-                // row keeps it as a detail.
+                // The `sub` is stable, while an email can change hands.
                 tx.hide_confirmations(party_id, cids, &actor.sub).await?;
                 cids.len() as u64
             }
