@@ -42,13 +42,17 @@ export type Proposal = {
   simulated: boolean
   createdAt: string
   createdBy: string
+  /** The proposer's public key. Only the proposer may withdraw. */
+  proposerKey: string
   proposal: PartyProposal
   plan: PartyPlan
   synchronizerId: string
   topologyVersion: number
   onboarding: Onboarding
   signatures: Signature[]
-  status: 'collecting' | 'submitting' | 'submitted' | 'failed'
+  status: 'collecting' | 'submitting' | 'submitted' | 'failed' | 'withdrawn' | 'rejected'
+  /** Who withdrew or rejected the proposal. */
+  endedBy?: string
   hosts: HostResult[]
   error?: string
 }

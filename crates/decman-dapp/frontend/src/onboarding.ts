@@ -154,6 +154,7 @@ export async function createProposal(proposal: PartyProposal, creator: Wallet): 
     simulated,
     createdAt: now(),
     createdBy: creator.name,
+    proposerKey: creator.publicKey,
     proposal,
     plan,
     synchronizerId,
@@ -217,10 +218,49 @@ export async function signProposal(id: string, wallet: Wallet): Promise<void> {
   if (!plan.owners.some((o) => o.publicKey === wallet.publicKey)) {
     throw new Error(`${wallet.name} is not an owner of this party.`)
   }
-  if (proposal.signatures.some((s) => s.publicKey === wallet.publicKey)) return
+  checkOpen(proposal)
+  // A stored signature that fails to verify is replaced, not kept.
+  if (verifiedOwners(plan, onboarding, proposal.signatures).has(wallet.publicKey)) return
   const signature = await signDigest(wallet.privateKeyJwk, onboarding.combinedHash)
   const entry: Signature = { publicKey: wallet.publicKey, signature, signedAt: now() }
-  changeProposal(id, (p) => ({ ...p, signatures: [...p.signatures, entry] }))
+  changeProposal(id, (p) => ({
+    ...p,
+    signatures: [...p.signatures.filter((s) => s.publicKey !== wallet.publicKey), entry],
+  }))
+}
+
+/** Whether the proposal can still be signed, withdrawn or rejected. */
+export function isOpen(proposal: Proposal): boolean {
+  return proposal.status === 'collecting' || proposal.status === 'failed'
+}
+
+function checkOpen(proposal: Proposal): void {
+  if (!isOpen(proposal)) throw new Error('The proposal is no longer open.')
+}
+
+/** The proposer ends the proposal before the party exists. */
+export function withdrawProposal(id: string, wallet: Wallet): void {
+  const proposal = findProposal(id)
+  if (proposal.proposerKey !== wallet.publicKey) throw new Error('Only the proposer can withdraw the proposal.')
+  checkOpen(proposal)
+  changeProposal(id, (p) => ({ ...p, status: 'withdrawn', endedBy: wallet.name }))
+}
+
+/**
+ * An owner who has not signed declines. Creation needs every owner, so one
+ * rejection ends the proposal.
+ */
+export function rejectProposal(id: string, wallet: Wallet): void {
+  const proposal = findProposal(id)
+  const { plan, onboarding } = recheckProposal(proposal)
+  if (!plan.owners.some((o) => o.publicKey === wallet.publicKey)) {
+    throw new Error(`${wallet.name} is not an owner of this party.`)
+  }
+  checkOpen(proposal)
+  if (verifiedOwners(plan, onboarding, proposal.signatures).has(wallet.publicKey)) {
+    throw new Error(`${wallet.name} has already signed.`)
+  }
+  changeProposal(id, (p) => ({ ...p, status: 'rejected', endedBy: wallet.name }))
 }
 
 /**
@@ -234,6 +274,7 @@ export async function submitProposal(id: string, wallet: Wallet): Promise<void> 
   if (!proposal.plan.owners.some((o) => o.publicKey === wallet.publicKey)) {
     throw new Error(`${wallet.name} is not an owner, so it cannot start the creation.`)
   }
+  checkOpen(proposal)
   if (wallet.participant.simulated !== proposal.simulated) {
     throw new Error(`This proposal uses ${modeName(proposal.simulated)} participants. Act as an owner of that mode.`)
   }

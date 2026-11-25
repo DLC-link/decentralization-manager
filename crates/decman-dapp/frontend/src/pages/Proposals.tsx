@@ -1,6 +1,14 @@
 import { isValidSignature } from '../checks'
 import { actingWallet, useAppState, type HostResult, type Proposal, type Wallet } from '../mock/store'
-import { recheckProposal, signProposal, submitProposal, verifiedOwners } from '../onboarding'
+import {
+  isOpen,
+  recheckProposal,
+  rejectProposal,
+  signProposal,
+  submitProposal,
+  verifiedOwners,
+  withdrawProposal,
+} from '../onboarding'
 import {
   Badge,
   EmptyState,
@@ -52,6 +60,8 @@ const STATUS: Record<Proposal['status'], [Tone, string]> = {
   submitting: ['accent', 'Creating'],
   submitted: ['ok', 'Created'],
   failed: ['error', 'Failed'],
+  withdrawn: ['muted', 'Withdrawn'],
+  rejected: ['muted', 'Rejected'],
 }
 
 function ProposalCard({
@@ -81,11 +91,15 @@ function ProposalCard({
   }
   const { plan, onboarding } = checked
   const signatureOf = (publicKey: string) => proposal.signatures.find((s) => s.publicKey === publicKey)
-  const verified = verifiedOwners(plan, onboarding, proposal.signatures).size
+  const verifiedKeys = verifiedOwners(plan, onboarding, proposal.signatures)
+  const verified = verifiedKeys.size
   const allSigned = verified === plan.owners.length
+  const open = isOpen(proposal)
   const actingIsOwner = acting && plan.owners.some((o) => o.publicKey === acting.publicKey)
-  const actingSigned = acting && signatureOf(acting.publicKey)
-  const canSubmit = actingIsOwner && allSigned && proposal.status !== 'submitting'
+  const actingVerified = !!acting && verifiedKeys.has(acting.publicKey)
+  const actingStoredBadly = !!acting && !actingVerified && !!signatureOf(acting.publicKey)
+  const actingIsProposer = !!acting && acting.publicKey === proposal.proposerKey
+  const canSubmit = actingIsOwner && allSigned && open
   const hostsApproved = proposal.hosts.every((h) => h.step !== 'waiting' && h.step !== 'failed')
   const current =
     proposal.status === 'submitted' ? 4 : !allSigned ? 1 : proposal.status === 'collecting' || !hostsApproved ? 2 : 3
@@ -191,21 +205,51 @@ function ProposalCard({
       </table>
       {proposal.status !== 'collecting' && <HostResults proposal={proposal} />}
       {proposal.error && <p className="error">{proposal.error}</p>}
+      {proposal.endedBy && (
+        <p className="muted">
+          {proposal.status === 'withdrawn' ? 'Withdrawn' : 'Rejected'} by {proposal.endedBy}.
+        </p>
+      )}
       {proposal.status === 'submitted' ? (
         <div className="actions">
           <button onClick={() => onOpenParty(plan.partyId)}>Open party</button>
         </div>
+      ) : !open ? (
+        proposal.status === 'submitting' && <p className="muted">Creating the party…</p>
       ) : (
         <div className="actions">
-          {actingIsOwner && !actingSigned && (
-            <button onClick={() => run(() => signProposal(proposal.id, acting))}>Sign as {acting.name}</button>
+          {actingIsOwner && !actingVerified && (
+            <button onClick={() => run(() => signProposal(proposal.id, acting))}>
+              {actingStoredBadly ? 'Sign again' : 'Sign'} as {acting.name}
+            </button>
+          )}
+          {actingIsOwner && !actingVerified && !actingIsProposer && (
+            <button
+              className="ghost"
+              onClick={() =>
+                window.confirm('Reject this proposal? The party needs every owner, so this ends it.') &&
+                run(() => rejectProposal(proposal.id, acting))
+              }
+            >
+              Reject
+            </button>
+          )}
+          {actingIsProposer && (
+            <button
+              className="ghost"
+              onClick={() =>
+                window.confirm('Withdraw this proposal? No owner can sign it afterwards.') &&
+                run(() => withdrawProposal(proposal.id, acting))
+              }
+            >
+              Withdraw
+            </button>
           )}
           {canSubmit && (
             <button onClick={() => run(() => submitProposal(proposal.id, acting))}>
               {proposal.status === 'failed' ? 'Try again' : 'Create the party'}
             </button>
           )}
-          {proposal.status === 'submitting' && <span className="muted">Creating the party…</span>}
           {!actingIsOwner && <span className="muted">Act as an owner to sign.</span>}
         </div>
       )}
