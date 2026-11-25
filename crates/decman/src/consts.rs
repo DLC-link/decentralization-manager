@@ -127,7 +127,9 @@ pub const OWNER_ONLY_KICK: &str = "owner-only-kick";
 pub const ROTATE_KEY: &str = "rotate-key";
 
 /// A peer reads each DAR of a Dars run with `RequestDar` and leaves the
-/// bundle on the coordinator. A coordinator checks every invitee lists this
+/// bundle on the coordinator. It pulls only when the accepted invitation
+/// carries the coordinator's run instance and one hash for each DAR; without
+/// them it takes the bundle. A coordinator checks every invitee lists this
 /// before it sends a run without the bundle.
 pub const PER_DAR_PULL: &str = "per-dar-pull";
 

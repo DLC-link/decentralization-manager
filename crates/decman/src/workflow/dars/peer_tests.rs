@@ -201,6 +201,32 @@ async fn an_invitation_that_names_a_dar_twice_is_refused_before_any_pull() -> Re
     Ok(())
 }
 
+/// A coordinator that leaves the bundle behind expects the peer to pull. A
+/// peer whose invitation does not allow a pull says why.
+#[tokio::test]
+async fn an_upload_without_dars_that_the_peer_cannot_pull_names_the_cause() -> Result {
+    let dars = dars(&[100, 200]);
+    let mut script = invited(&dars);
+    script.dar_hashes.clear();
+    script.commands =
+        vec![Message::new_empty(MessageType::UploadDars); MAX_CONSECUTIVE_STEP_FAILURES];
+
+    let run = run_script(WorkflowKind::Dars, script).await?;
+
+    let error = error_of(&run)?;
+    assert!(
+        error.contains(
+            "a pull needs the coordinator's run instance and one hash for each DAR in the \
+             invitation"
+        ),
+        "{error}"
+    );
+    assert!(run.dar_requests.is_empty());
+    assert!(run.uploads.is_empty());
+    assert_reported(&run, WorkflowKind::Dars);
+    Ok(())
+}
+
 /// The announced sizes count toward the run's cap before the DAR that
 /// crosses it is read.
 #[tokio::test]

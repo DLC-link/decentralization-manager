@@ -511,6 +511,14 @@ async fn run_peer(
                             continue;
                         }
                     },
+                    (None, true) if !expectations.dar_filenames.is_empty() => {
+                        fail_step!(
+                            "The coordinator sent UploadDars without its DARs, and this node \
+                             cannot pull them: a pull needs the coordinator's run instance and \
+                             one hash for each DAR in the invitation"
+                        );
+                        continue;
+                    }
                     (None, true) => Vec::new(),
                     (_, false) => match utils::decode_files(&payload) {
                         Ok(files) => files,
