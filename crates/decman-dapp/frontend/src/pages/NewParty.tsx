@@ -6,6 +6,14 @@ import { createProposal } from '../onboarding'
 import { shortUid } from '../format'
 import { ErrorText, Hex, PartyId, Section, Uid, useAction } from '../ui'
 
+// The Rust side reads thresholds as u32. A whole number in that range always
+// parses, so the form shows the Rust range check rather than a parse error.
+const MAX_U32 = 4_294_967_295
+
+function threshold(value: number): number {
+  return Number.isFinite(value) ? Math.min(MAX_U32, Math.max(1, Math.round(value))) : 1
+}
+
 export function NewParty({ onCreated }: { onCreated: () => void }) {
   const state = useAppState()
   const acting = actingWallet(state)
@@ -29,9 +37,9 @@ export function NewParty({ onCreated }: { onCreated: () => void }) {
   const proposal: PartyProposal = {
     partyHint: hint,
     owners: owners.map((w) => ({ publicKey: w.publicKey, participant: w.participant.participantId })),
-    signingThreshold,
-    namespaceThreshold,
-    confirmationThreshold,
+    signingThreshold: threshold(signingThreshold),
+    namespaceThreshold: threshold(namespaceThreshold),
+    confirmationThreshold: threshold(confirmationThreshold),
     covalidators,
   }
   const check = tryPlanParty(proposal)
@@ -94,7 +102,7 @@ export function NewParty({ onCreated }: { onCreated: () => void }) {
               value={signingThreshold}
               onChange={(e) => setSigningThreshold(Number(e.target.value))}
             />
-            {owners.length > 1 && signingThreshold === owners.length && (
+            {owners.length > 1 && proposal.signingThreshold === owners.length && (
               <span className="warning">
                 Every owner must sign each transaction, so one unavailable owner blocks them all.
               </span>
@@ -125,7 +133,7 @@ export function NewParty({ onCreated }: { onCreated: () => void }) {
                 The default is one fewer than the {hostCount} hosts, so one host can be offline.
               </span>
             )}
-            {hostCount > 1 && confirmationThreshold === hostCount && (
+            {hostCount > 1 && proposal.confirmationThreshold === hostCount && (
               <span className="warning">
                 Every host must confirm each transaction, so one offline host blocks them all.
               </span>
