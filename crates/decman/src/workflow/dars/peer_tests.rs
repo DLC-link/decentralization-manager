@@ -218,3 +218,48 @@ async fn an_inline_bundle_is_used_as_sent() -> Result {
     assert_eq!(run.completions, 1);
     Ok(())
 }
+
+/// The limit is inclusive: a DAR of exactly the chunked limit fits one
+/// transfer and is uploaded.
+#[tokio::test]
+async fn a_dar_at_the_chunked_limit_is_pulled() -> Result {
+    let dars = dars(&[100, MAX_CHUNKED_TOTAL_SIZE]);
+    let mut script = invited(&dars);
+    script.commands = vec![chunked_upload(MAX_CHUNKED_TOTAL_SIZE + 200)?];
+
+    let run = run_script(WorkflowKind::Dars, script).await?;
+
+    assert!(run.result.is_ok(), "{:?}", run.result);
+    assert_eq!(run.uploads, uploaded(&dars));
+    assert_eq!(run.completions, 1);
+    Ok(())
+}
+
+/// Issue #616 reports a run of 21 DARs, 26.3 MB in total, that failed on
+/// the peer. Each DAR here is above one frame, so each arrives in chunks,
+/// and the set is far above the chunked limit.
+#[tokio::test]
+async fn the_reported_set_of_twenty_one_dars_uploads_in_index_order() -> Result {
+    let each = MAX_PAYLOAD_SIZE + MAX_PAYLOAD_SIZE / 4;
+    let dars: Vec<(String, Vec<u8>)> = (0..21u8)
+        .map(|i| (format!("pkg-{:02}.dar", 20 - i), vec![i; each]))
+        .collect();
+    let bundle_size = utils::encode_files(&dars).len();
+    assert!(bundle_size > MAX_CHUNKED_TOTAL_SIZE);
+    let mut script = invited(&dars);
+    script.commands = vec![chunked_upload(bundle_size)?];
+
+    let run = run_script(WorkflowKind::Dars, script).await?;
+
+    assert!(run.result.is_ok(), "{:?}", run.result);
+    let expected: Vec<_> = dars
+        .iter()
+        .enumerate()
+        .map(|(index, (name, _))| (COORDINATOR_RUN.to_string(), index, name.clone()))
+        .collect();
+    assert_eq!(requested(&run), expected);
+    assert_eq!(run.command_chunks, 0, "the peer read the bundle");
+    assert_eq!(run.uploads, uploaded(&dars), "not uploaded in index order");
+    assert_eq!(run.completions, 1);
+    Ok(())
+}
