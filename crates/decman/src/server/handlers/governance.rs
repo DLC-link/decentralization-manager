@@ -4159,6 +4159,39 @@ mod mediator_timeout_tests {
         Ok(())
     }
 
+    /// The other tests have the ledger answer with a status. Here the ledger
+    /// never answers, so only DecMan's own deadline ends the submission. The
+    /// gRPC client must stop at that deadline, and its error must read as an
+    /// unknown outcome, not as a failed write.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn decmans_own_deadline_ends_a_silent_submission_as_unknown(pool: SqlitePool) -> Result {
+        let ledger = RejectingLedger::new();
+        let data = state(pool, ledger.serve()?).await?;
+        let mut client = CommandServiceClient::new(data.config.ledger_channel().await?);
+        let request = ledger_request(
+            SubmitAndWaitRequest::default(),
+            "any-token",
+            Instant::now() + Duration::from_millis(300),
+        )?;
+
+        let started = Instant::now();
+        let submitted =
+            tokio::time::timeout(Duration::from_secs(10), client.submit_and_wait(request))
+                .await
+                .context("the submission outlived its deadline")?;
+
+        assert!(started.elapsed() < Duration::from_secs(5));
+        let error = anyhow::Error::new(
+            submitted
+                .err()
+                .context("a ledger that never answers cannot accept")?,
+        );
+        let (status, message) = submission_failure("Failed to expire confirmation", &error);
+        assert_eq!(status, StatusCode::GATEWAY_TIMEOUT, "{message}");
+        assert!(message.contains("the outcome is unknown"), "{message}");
+        Ok(())
+    }
+
     /// The record follows the latest expire attempt through the handler: a
     /// timeout that names another party replaces it, and a success, for
     /// example after the confirmer's participant came back, forgets it.
