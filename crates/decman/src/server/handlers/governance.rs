@@ -3401,23 +3401,32 @@ mod mediator_timeout_tests {
         transport::{Server, server::TcpIncoming},
     };
 
+    use canton_proto_rs::com::daml::ledger::api::v2::{
+        Event, SubmitAndWaitForTransactionResponse, Transaction, event,
+    };
+
     use super::*;
     use crate::{
         auth::MockAuthRegistry,
         db::MIGRATOR,
         server::{ledger_rejection::fixtures, middleware::AuthMiddleware},
+        signing::fake_admin_api::unary,
     };
 
     const OFFLINE_MEMBER: &str = "member-c::1220cccc";
 
     /// The Ledger API command service of a participant whose submissions the
     /// mediator rejects. Each `SubmitAndWait` signals `submitted`, then
-    /// answers with `rejection` once `release` is notified. The router answers
-    /// every other service as unimplemented, so the package-ref lookup falls
-    /// back to the configured package.
+    /// answers with `rejection` once `release` is notified. A
+    /// `SubmitAndWaitForTransaction` is rejected the same way, unless
+    /// `created_proposal` is set: then it answers with a transaction that
+    /// creates that contract. The router answers every other service as
+    /// unimplemented, so the package-ref lookup falls back to the configured
+    /// package.
     #[derive(Clone)]
     struct RejectingLedger {
         rejection: tonic::Status,
+        created_proposal: Option<String>,
         submitted: Arc<Notify>,
         release: Arc<Notify>,
     }
@@ -3426,6 +3435,7 @@ mod mediator_timeout_tests {
         fn new() -> Self {
             Self {
                 rejection: fixtures::mediator_timeout(OFFLINE_MEMBER),
+                created_proposal: None,
                 submitted: Arc::new(Notify::new()),
                 release: Arc::new(Notify::new()),
             }
@@ -3456,8 +3466,20 @@ mod mediator_timeout_tests {
         fn call(&mut self, request: http::Request<Body>) -> Self::Future {
             let ledger = self.clone();
             Box::pin(async move {
-                if request.uri().path() != format!("/{}/SubmitAndWait", Self::NAME) {
-                    return Ok(tonic::Status::unimplemented("").into_http());
+                let path = request.uri().path().to_string();
+                let method = path.strip_prefix(&format!("/{}/", Self::NAME));
+                match (method, ledger.created_proposal) {
+                    (Some("SubmitAndWaitForTransaction"), Some(contract_id)) => {
+                        let response = created_transaction(contract_id);
+                        return Ok(
+                            unary(request, move |_: SubmitAndWaitForTransactionRequest| {
+                                Ok(response.clone())
+                            })
+                            .await,
+                        );
+                    }
+                    (Some("SubmitAndWait" | "SubmitAndWaitForTransaction"), _) => {}
+                    _ => return Ok(tonic::Status::unimplemented("").into_http()),
                 }
                 ledger.submitted.notify_one();
                 ledger.release.notified().await;
@@ -3468,6 +3490,21 @@ mod mediator_timeout_tests {
 
     impl NamedService for RejectingLedger {
         const NAME: &'static str = "com.daml.ledger.api.v2.CommandService";
+    }
+
+    /// The answer to a submission whose transaction creates `contract_id`.
+    fn created_transaction(contract_id: String) -> SubmitAndWaitForTransactionResponse {
+        SubmitAndWaitForTransactionResponse {
+            transaction: Some(Transaction {
+                events: vec![Event {
+                    event: Some(event::Event::Created(CreatedEvent {
+                        contract_id,
+                        ..Default::default()
+                    })),
+                }],
+                ..Default::default()
+            }),
+        }
     }
 
     /// Mock credentials, and the Ledger API at `ledger_port`.
@@ -3598,6 +3635,165 @@ mod mediator_timeout_tests {
                 "{event:?}: {message}"
             );
         }
+        Ok(())
+    }
+
+    /// Posts `body` to `uri` as an admin through all six governance write
+    /// handlers, against `ledger`. Returns the status and the `error` field.
+    async fn post_to_writes(
+        pool: &SqlitePool,
+        ledger: &RejectingLedger,
+        uri: &str,
+        body: serde_json::Value,
+    ) -> Result<(StatusCode, String)> {
+        let app = actix_test::init_service(
+            App::new()
+                .app_data(state(pool.clone(), ledger.serve()?).await?)
+                .wrap(AuthMiddleware)
+                .service(propose_action)
+                .service(confirm_action)
+                .service(execute_action)
+                .service(expire_confirmation)
+                .service(cancel_confirmation)
+                .service(cancel_proposal),
+        )
+        .await;
+        let request = actix_test::TestRequest::post()
+            .uri(uri)
+            .insert_header((AUTHORIZATION, "Bearer any-token"))
+            .set_json(body)
+            .to_request();
+        let response = actix_test::call_service(&app, request).await;
+        let status = response.status();
+        let body: serde_json::Value = actix_test::read_body_json(response).await;
+        let error = body["error"].as_str().context("no error in the body")?;
+        Ok((status, error.to_string()))
+    }
+
+    /// Issue #615 asks that every governance submission the mediator times
+    /// out names the unresponsive party, not only expire and cancel.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn every_governance_write_names_the_unresponsive_party(pool: SqlitePool) -> Result {
+        let _serial = super::action_metrics_tests::SERIAL.lock().await;
+        let party = party();
+        let action = serde_json::json!({ "type": "governance_set_threshold", "new_threshold": 2 });
+        let cases = [
+            (
+                AuditEvent::Propose,
+                "/governance/propose",
+                "Failed to create proposal",
+                serde_json::json!({
+                    "party_id": party,
+                    "rules_contract_id": "00rules",
+                    "proposal": { "type": "generic_vote", "description": "timeout" },
+                }),
+            ),
+            (
+                AuditEvent::Confirm,
+                "/governance/confirm",
+                "Failed to submit confirmation",
+                serde_json::json!({
+                    "party_id": party,
+                    "rules_contract_id": "00rules",
+                    "action": action,
+                }),
+            ),
+            (
+                AuditEvent::Execute,
+                "/governance/execute",
+                "Failed to execute action",
+                serde_json::json!({
+                    "party_id": party,
+                    "rules_contract_id": "00rules",
+                    "action": action,
+                    "confirmation_cids": ["00c0ffee"],
+                }),
+            ),
+            (
+                AuditEvent::Expire,
+                "/governance/expire",
+                "Failed to expire confirmation",
+                serde_json::json!({
+                    "party_id": party,
+                    "rules_contract_id": "00rules",
+                    "confirmation_cid": "00c0ffee",
+                }),
+            ),
+            (
+                AuditEvent::Cancel,
+                "/governance/cancel",
+                "Failed to cancel confirmation",
+                serde_json::json!({ "party_id": party, "confirmation_cid": "00c0ffee" }),
+            ),
+            (
+                AuditEvent::CancelProposal,
+                "/governance/cancel-proposal",
+                "Failed to cancel proposal",
+                serde_json::json!({ "party_id": party, "proposal_cid": "00p" }),
+            ),
+        ];
+        for (event, uri, context, body) in cases {
+            let ledger = RejectingLedger::new();
+            ledger.release.notify_one();
+
+            let (status, error) = post_to_writes(&pool, &ledger, uri, body).await?;
+
+            assert_eq!(status, StatusCode::GATEWAY_TIMEOUT, "{event:?}: {error}");
+            assert_eq!(
+                error,
+                format!(
+                    "{context}: the mediator timed out waiting for confirmations \
+                     (MEDIATOR_SAYS_TX_TIMED_OUT). Unresponsive: {OFFLINE_MEMBER}. The \
+                     participant that hosts each of these parties must be online to confirm."
+                ),
+                "{event:?}"
+            );
+            let (audit_status, audit_message) = audit_row(&pool, event).await?;
+            assert_eq!(audit_status, "failed", "{event:?}");
+            assert_eq!(audit_message, Some(error), "{event:?}");
+        }
+        Ok(())
+    }
+
+    /// The proposer's own confirmation can time out after the proposal is on
+    /// the ledger. The answer must give the new proposal's id, so the operator
+    /// confirms it instead of proposing a second time.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_timed_out_proposer_confirmation_names_the_created_proposal(
+        pool: SqlitePool,
+    ) -> Result {
+        let _serial = super::action_metrics_tests::SERIAL.lock().await;
+        let mut ledger = RejectingLedger::new();
+        ledger.created_proposal = Some("00proposal".to_string());
+        ledger.release.notify_one();
+
+        let (status, error) = post_to_writes(
+            &pool,
+            &ledger,
+            "/governance/propose",
+            serde_json::json!({
+                "party_id": party(),
+                "rules_contract_id": "00rules",
+                "proposal": { "type": "generic_vote", "description": "timeout" },
+            }),
+        )
+        .await?;
+
+        assert_eq!(status, StatusCode::GATEWAY_TIMEOUT, "{error}");
+        assert!(
+            error.starts_with(
+                "Proposal created (CID: 00proposal) but confirmation failed: the mediator \
+                 timed out"
+            ),
+            "{error}"
+        );
+        assert!(
+            error.contains(&format!("Unresponsive: {OFFLINE_MEMBER}.")),
+            "{error}"
+        );
+        let (audit_status, audit_message) = audit_row(&pool, AuditEvent::Propose).await?;
+        assert_eq!(audit_status, "failed");
+        assert_eq!(audit_message, Some(error));
         Ok(())
     }
 }
