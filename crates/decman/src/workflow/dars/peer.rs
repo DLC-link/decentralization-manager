@@ -13,9 +13,10 @@ use crate::{
     consts::MAX_DAR_PULL_TOTAL,
     error::Result,
     noise::{
-        CHUNK_SIZE, MAX_CHUNKED_TOTAL_SIZE, Message, MessageType, NOISE_CHUNK_TIMEOUT,
-        NoiseKeypair, client::CHUNK_FETCH_MAX_ATTEMPTS, parse_chunked_command_metadata,
-        parse_public_key, receive_chunked_response, send_noise_message_with_retry,
+        CHUNK_SIZE, MAX_CHUNKED_TOTAL_SIZE, MAX_REPLY_SIZE, Message, MessageType,
+        NOISE_CHUNK_TIMEOUT, NoiseKeypair, client::CHUNK_FETCH_MAX_ATTEMPTS,
+        parse_chunked_command_metadata, parse_public_key, receive_chunked_response,
+        send_noise_message_within,
     },
     server::RequestDarPayload,
     workflow::validation::hash_dar,
@@ -258,13 +259,14 @@ pub async fn fetch_dar_from_coordinator(
     let identity = config.participant_id().to_string();
 
     let message = Message::new(MessageType::RequestDar, serde_json::to_vec(request)?);
-    let response = send_noise_message_with_retry(
+    let response = send_noise_message_within(
         &coordinator.address,
         coordinator.port,
         &psk,
         identity.as_bytes(),
         &message,
         retry,
+        MAX_REPLY_SIZE,
     )
     .await
     .map_err(|e| anyhow::anyhow!("{e}"))?;

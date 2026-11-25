@@ -195,11 +195,13 @@ pub const MAX_PAYLOAD_SIZE: usize = 1024 * 1024;
 /// frame size — only by `MAX_CHUNKED_TOTAL_SIZE`.
 pub const CHUNK_SIZE: usize = 1024 * 1024;
 
-/// The most bytes one reply body read by [`send_noise_message`] may carry:
-/// a full chunk with its 4-byte index, the 9-byte frame header, and the
-/// longest routing instance. An inline payload is at most
-/// [`MAX_PAYLOAD_SIZE`], no more than a chunk. Reading stops once a body
-/// passes this, so a peer cannot make the reader hold more.
+/// The most bytes one reply to a DAR pull or a chunk fetch may carry: a full
+/// chunk with its 4-byte index, the 9-byte frame header, and the longest
+/// routing instance. An inline DAR is at most [`MAX_PAYLOAD_SIZE`], no more
+/// than a chunk. Reading stops once a body passes this, so a coordinator
+/// cannot make the peer hold more. Other replies, such as owner keys and peer
+/// lists, go out inline whatever their size, and their callers read them
+/// whole.
 pub const MAX_REPLY_SIZE: usize = CHUNK_SIZE + 4 + 9 + u16::MAX as usize;
 
 /// Hard ceiling on the assembled size of a chunked response. Bounds peer-supplied
@@ -668,13 +670,15 @@ pub async fn send_noise_message(
         identity,
         message,
         NOISE_REQUEST_TIMEOUT,
+        None,
     )
     .await
 }
 
 /// Inner implementation of `send_noise_message`, with per-step timeout
 /// threaded through. Used both by the public single-shot entry point above
-/// and by the retry wrapper.
+/// and by the retry wrapper. `reply_limit` bounds the reply body when the
+/// caller sets it; `None` reads the body whole.
 async fn send_noise_message_with_timeout(
     peer_address: &str,
     peer_port: u16,
@@ -682,6 +686,7 @@ async fn send_noise_message_with_timeout(
     identity: &[u8],
     message: &Message,
     timeout: Duration,
+    reply_limit: Option<usize>,
 ) -> Result<Bytes, NoiseError> {
     let socket_addr = format!("{peer_address}:{peer_port}");
 
@@ -729,20 +734,20 @@ async fn send_noise_message_with_timeout(
 
     // `send_request` bounds only the reply head. Without this, a body that
     // stalls holds the caller, and any lock it holds, until the peer closes.
-    match tokio::time::timeout(timeout, read_reply(response.body_mut(), MAX_REPLY_SIZE)).await {
+    match tokio::time::timeout(timeout, read_reply(response.body_mut(), reply_limit)).await {
         Ok(result) => result,
         Err(_) => Err(NoiseError::RequestTimeout),
     }
 }
 
-/// Read a reply body of at most `limit` bytes. Reading stops at the first
-/// piece that passes it.
-async fn read_reply(body: &mut Body, limit: usize) -> Result<Bytes, NoiseError> {
+/// Read a reply body of at most `limit` bytes, or of any size without one.
+/// Reading stops at the first piece that passes the limit.
+async fn read_reply(body: &mut Body, limit: Option<usize>) -> Result<Bytes, NoiseError> {
     let mut reply = BytesMut::new();
     while let Some(piece) = body.data().await {
         let piece = piece?;
         let size = reply.len() + piece.len();
-        if size > limit {
+        if let Some(limit) = limit.filter(|limit| size > *limit) {
             return Err(NoiseError::PayloadTooLarge { size, limit });
         }
         reply.extend_from_slice(&piece);
@@ -1071,6 +1076,51 @@ pub async fn send_noise_message_with_retry(
     message: &Message,
     config: &NoiseRetryConfig,
 ) -> Result<Bytes, NoiseError> {
+    retry_with_reply_limit(
+        peer_address,
+        peer_port,
+        psk,
+        identity,
+        message,
+        config,
+        None,
+    )
+    .await
+}
+
+/// As [`send_noise_message_with_retry`], with each reply body bounded by
+/// `reply_limit`. A reply above it is `PayloadTooLarge`, which no retry
+/// changes.
+pub(crate) async fn send_noise_message_within(
+    peer_address: &str,
+    peer_port: u16,
+    psk: &[u8; 32],
+    identity: &[u8],
+    message: &Message,
+    config: &NoiseRetryConfig,
+    reply_limit: usize,
+) -> Result<Bytes, NoiseError> {
+    retry_with_reply_limit(
+        peer_address,
+        peer_port,
+        psk,
+        identity,
+        message,
+        config,
+        Some(reply_limit),
+    )
+    .await
+}
+
+async fn retry_with_reply_limit(
+    peer_address: &str,
+    peer_port: u16,
+    psk: &[u8; 32],
+    identity: &[u8],
+    message: &Message,
+    config: &NoiseRetryConfig,
+    reply_limit: Option<usize>,
+) -> Result<Bytes, NoiseError> {
     let peer_label = format!("{peer_address}:{peer_port}");
     let timeout = config.per_attempt_timeout();
     // `move || async move` — `&T` references are `Copy`, so each call to the
@@ -1078,8 +1128,16 @@ pub async fn send_noise_message_with_retry(
     // Without `move`, the borrow checker has trouble proving the returned
     // future doesn't outlive the closure's borrow.
     retry_loop(&peer_label, config, move || async move {
-        send_noise_message_with_timeout(peer_address, peer_port, psk, identity, message, timeout)
-            .await
+        send_noise_message_with_timeout(
+            peer_address,
+            peer_port,
+            psk,
+            identity,
+            message,
+            timeout,
+            reply_limit,
+        )
+        .await
     })
     .await
 }
@@ -1173,13 +1231,14 @@ pub(crate) async fn receive_chunked_response(
             MessageType::GetChunk,
             (chunk_index as u32).to_be_bytes().to_vec(),
         );
-        let chunk_response = send_noise_message_with_retry(
+        let chunk_response = send_noise_message_within(
             peer_address,
             peer_port,
             psk,
             identity,
             &chunk_request,
             config,
+            MAX_REPLY_SIZE,
         )
         .await?;
         let chunk_msg =
@@ -2093,6 +2152,44 @@ mod tests {
             max_attempts: 3,
             backoff_ms: 0,
         }
+    }
+
+    /// Owner-key and peer-list replies go out inline whatever their size.
+    /// Only the DAR pull and the chunk fetch bound their replies, so a large
+    /// owner-key reply still arrives, with or without retries.
+    #[tokio::test]
+    async fn an_owner_key_reply_above_one_frame_still_arrives() -> Result {
+        let psk = [5u8; 32];
+        let reply = Message::new(MessageType::OwnerKeys, vec![b'k'; MAX_REPLY_SIZE + 1]).to_bytes();
+        let (port, _, server) = refusing_peer(psk, StatusCode::OK, reply.clone()).await?;
+        let request = Message::new_empty(MessageType::RequestOwnerKeys);
+
+        let once = send_noise_message("127.0.0.1", port, &psk, b"peer", &request).await;
+        let retried = send_noise_message_with_retry(
+            "127.0.0.1",
+            port,
+            &psk,
+            b"peer",
+            &request,
+            &three_attempts(),
+        )
+        .await;
+        let bounded = send_noise_message_within(
+            "127.0.0.1",
+            port,
+            &psk,
+            b"peer",
+            &request,
+            &three_attempts(),
+            MAX_REPLY_SIZE,
+        )
+        .await;
+        server.abort();
+
+        assert_eq!(once?.len(), reply.len());
+        assert_eq!(retried?.len(), reply.len());
+        assert!(matches!(bounded, Err(NoiseError::PayloadTooLarge { .. })));
+        Ok(())
     }
 
     /// The probe path: an older peer refuses with a 503, and the client names

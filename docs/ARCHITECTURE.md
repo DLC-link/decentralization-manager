@@ -434,7 +434,7 @@ Chunk size: 1 MiB (`CHUNK_SIZE`). Chunking is required for payloads exceeding `M
 
 A new peer does not download the chunked bundle of a Dars run. It leaves the bundle on the coordinator and pulls each DAR with `RequestDar`. The 16 MiB cap then applies to each DAR, not to the whole set. Until the coordinator side changes too, a coordinator still refuses a set above 16 MiB with a 413 (#619).
 
-A reply that `send_noise_message` reads may carry at most `MAX_REPLY_SIZE`: one chunk with its index, the frame header and the longest routing instance. The read stops once a reply passes it, and a reply body that stalls ends at the request timeout.
+A reply to a DAR pull or a chunk fetch may carry at most `MAX_REPLY_SIZE`: one chunk with its index, the frame header and the longest routing instance. The read stops once such a reply passes it. Other replies, such as owner keys and peer lists, go out inline whatever their size, and are read whole. Every reply body that stalls ends at the request timeout.
 
 ### Security
 
