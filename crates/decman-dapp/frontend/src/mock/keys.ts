@@ -8,7 +8,9 @@ export function toHex(bytes: Uint8Array): string {
   return Array.from(bytes, (byte) => byte.toString(16).padStart(2, '0')).join('')
 }
 
+/** Throws unless `hex` is an even number of hex characters. */
 export function fromHex(hex: string): Uint8Array<ArrayBuffer> {
+  if (!/^(?:[0-9a-fA-F]{2})*$/.test(hex)) throw new Error('The value is not an even number of hex characters.')
   const bytes = new Uint8Array(hex.length / 2)
   for (let i = 0; i < bytes.length; i++) {
     bytes[i] = Number.parseInt(hex.slice(i * 2, i * 2 + 2), 16)
