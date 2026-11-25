@@ -4,6 +4,10 @@ import { isSimulated, simulatedCall } from './mock/participants'
 
 export type Connection = { apiUrl: string; token: string }
 
+// A participant that never answers would otherwise hold a call, and with it
+// the hosting deadline, forever.
+const CALL_TIMEOUT_MS = 30_000
+
 export type ConnectedSynchronizer = { synchronizerAlias: string; synchronizerId: string }
 
 /** A participant's error answer, kept whole so that callers can classify it. */
@@ -28,6 +32,7 @@ async function call(connection: Connection, method: 'GET' | 'POST', path: string
         ...(body === undefined ? {} : { 'Content-Type': 'application/json' }),
       },
       body: body === undefined ? undefined : JSON.stringify(body),
+      signal: AbortSignal.timeout(CALL_TIMEOUT_MS),
     })
   } catch (error) {
     throw new Error(`Cannot reach ${url}: ${error instanceof Error ? error.message : String(error)}`)
