@@ -11,7 +11,8 @@
 //! between them fails the checks.
 //!
 //! The order is the dApp's: P1 and P2, the owners' participants, each receive
-//! every transaction with the owners' signatures. Then P3 approves the hosting.
+//! every transaction with the owners' signatures, at the same time, as the
+//! browser sends them. Then P3 approves the hosting.
 //! Each host must then host the party, with every host confirming and the
 //! owners' keys as the party's signing keys. Two refusals the dApp relies on
 //! are checked too: a resent bundle for the existing party, and a second party
@@ -180,7 +181,7 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
     let allocate = requests.allocate;
     Scenario::with_ctx(format!("create dApp party {party_id} on P1+P2+P3"), ())
         .when(
-            "P1 and P2 receive every transaction, then P3 approves the hosting",
+            "P1 and P2 receive every transaction at once, then P3 approves the hosting",
             {
                 let approval = requests.hosting_approval;
                 let allocate = allocate.clone();
@@ -188,8 +189,13 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
                     let approval = approval.clone();
                     let allocate = allocate.clone();
                     Box::pin(async move {
-                        allocate_on(f, P1_JSON_API, &allocate).await?;
-                        allocate_on(f, P2_JSON_API, &allocate).await?;
+                        let f = &*f;
+                        let (on_p1, on_p2) = tokio::join!(
+                            allocate_on(f, P1_JSON_API, &allocate),
+                            allocate_on(f, P2_JSON_API, &allocate),
+                        );
+                        on_p1?;
+                        on_p2?;
                         allocate_on(f, P3_JSON_API, &approval).await
                     })
                 }
