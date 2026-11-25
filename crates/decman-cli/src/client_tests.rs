@@ -808,6 +808,75 @@ fn dismiss_reads_dismissed_actions_and_sends_every_confirmation() {
     );
 }
 
+/// A dismissed action is missing from the default list, so restore must read
+/// the list with the dismissed actions to find it.
+#[test]
+fn restore_finds_a_dismissed_action_and_sends_every_confirmation() {
+    // Arrange
+    let fake = Fake::start();
+    fake.token_grant("password", "a-1", 1);
+    fake.mount(
+        Mock::given(method("GET"))
+            .and(path("/decentralized-parties"))
+            .respond_with(party_list(ALPHA, 2, &["PAR::1"]))
+            .expect(1),
+    );
+    fake.mount(
+        Mock::given(method("GET"))
+            .and(path("/governance/confirmations"))
+            .and(query_param("include_dismissed", "true"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "threshold": 2,
+                "rules_contract_id": "rules-1",
+                "actions": [],
+                "domain_actions": [{
+                    "proposal_cid": "p-gone",
+                    "action_label": "GenericVote",
+                    "confirmations": [
+                        { "contract_id": "c-1", "confirming_party": "gone::1220", "expires_at": 1 },
+                        { "contract_id": "c-2", "confirming_party": "gone::1220", "expires_at": 1 },
+                    ],
+                    "orphaned": true,
+                    "cannot_be_archived": true,
+                    "dismissed": true,
+                }],
+            })))
+            .expect(1),
+    );
+    fake.mount(
+        Mock::given(method("POST"))
+            .and(path("/governance/restore"))
+            .and(body_json(json!({
+                "party_id": ALPHA,
+                "confirmation_cids": ["c-1", "c-2"],
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(
+                json!({ "message": "Dismissed confirmations restored on this node: 2." }),
+            ))
+            .expect(1),
+    );
+
+    // Act
+    let outcome = run_command(
+        &fake,
+        parse(&[
+            "governance",
+            "restore",
+            "--party",
+            "alpha",
+            "--proposal",
+            "p-gone",
+        ]),
+    )
+    .unwrap();
+
+    // Assert
+    assert_eq!(
+        outcome.value["message"],
+        "Dismissed confirmations restored on this node: 2."
+    );
+}
+
 #[cfg(unix)]
 #[test]
 fn grant_rights_takes_the_admin_client_from_the_profile() {

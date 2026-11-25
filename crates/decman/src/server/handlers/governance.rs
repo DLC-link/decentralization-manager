@@ -4156,7 +4156,7 @@ mod mediator_timeout_tests {
 mod confirmations_feed_tests {
     use std::{convert::Infallible, sync::Arc};
 
-    use actix_web::{App, test as actix_test};
+    use actix_web::{App, http::header::AUTHORIZATION, test as actix_test};
     use canton_proto_rs::com::daml::ledger::api::v2::{
         ActiveContract, GenMap, GetActiveContractsPageRequest, GetActiveContractsPageResponse,
         GetActiveContractsResponse, GetLedgerEndRequest, GetLedgerEndResponse, Identifier, Record,
@@ -4173,7 +4173,10 @@ mod confirmations_feed_tests {
     };
 
     use super::*;
-    use crate::{auth::MockAuthRegistry, db::MIGRATOR, signing::fake_admin_api::unary};
+    use crate::{
+        auth::MockAuthRegistry, db::MIGRATOR, server::middleware::AuthMiddleware,
+        signing::fake_admin_api::unary,
+    };
 
     /// The Ledger API state service of a participant whose ACS holds
     /// `contracts`. A page read returns, in one page, every contract whose
@@ -4397,14 +4400,29 @@ mod confirmations_feed_tests {
         ledger: &AcsLedger,
         party: &CantonId,
     ) -> Result<serde_json::Value> {
+        feed_with(pool, ledger, party, "").await
+    }
+
+    /// The feed of `party` against `ledger`, read as an admin, with `extra`
+    /// appended to the query string.
+    async fn feed_with(
+        pool: &SqlitePool,
+        ledger: &AcsLedger,
+        party: &CantonId,
+        extra: &str,
+    ) -> Result<serde_json::Value> {
         let app = actix_test::init_service(
             App::new()
                 .app_data(state(pool.clone(), ledger.serve()?).await?)
+                .wrap(AuthMiddleware)
                 .service(get_governance),
         )
         .await;
         let request = actix_test::TestRequest::get()
-            .uri(&format!("/governance/confirmations?party_id={party}"))
+            .uri(&format!(
+                "/governance/confirmations?party_id={party}{extra}"
+            ))
+            .insert_header((AUTHORIZATION, "Bearer any-token"))
             .to_request();
         let response = actix_test::call_service(&app, request).await;
         anyhow::ensure!(
@@ -4425,6 +4443,119 @@ mod confirmations_feed_tests {
             .iter()
             .find(|action| action["confirmations"][0]["contract_id"] == contract_id)
             .with_context(|| format!("no action holds {contract_id}"))
+    }
+
+    /// Whether any entry of `list` holds the confirmation `contract_id`.
+    fn lists(list: &serde_json::Value, contract_id: &str) -> bool {
+        list.as_array().is_some_and(|actions| {
+            actions.iter().any(|action| {
+                action["confirmations"]
+                    .as_array()
+                    .is_some_and(|c| c.iter().any(|c| c["contract_id"] == contract_id))
+            })
+        })
+    }
+
+    /// Posts `confirmation_cids` of `party` to `uri`, the dismiss or the
+    /// restore route, as an admin.
+    async fn post_ids(
+        pool: &SqlitePool,
+        uri: &str,
+        party: &CantonId,
+        confirmation_cids: &[&str],
+    ) -> Result<StatusCode> {
+        let app = actix_test::init_service(
+            App::new()
+                .app_data(AppState::for_test_on(None, pool.clone()))
+                .wrap(AuthMiddleware)
+                .service(dismiss_confirmations)
+                .service(restore_confirmations),
+        )
+        .await;
+        let request = actix_test::TestRequest::post()
+            .uri(uri)
+            .insert_header((AUTHORIZATION, "Bearer any-token"))
+            .set_json(json!({ "party_id": party, "confirmation_cids": confirmation_cids }))
+            .to_request();
+        Ok(actix_test::call_service(&app, request).await.status())
+    }
+
+    /// Issue #615 asks that an operator can dismiss an action that cannot be
+    /// archived, on this node. The feed then leaves it out, `include_dismissed`
+    /// brings it back marked, and a restore or a new confirmation lists it
+    /// again. A dismissal never hides an action that can still be archived.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_dismissed_action_stays_hidden_until_restored_or_confirmed_again(
+        pool: SqlitePool,
+    ) -> Result {
+        let party = id("dec", "ab");
+        let member = id("member-a", "aa");
+        let (former, other_former) = (id("former", "cc"), id("former-b", "dd"));
+        let now = chrono::Utc::now().timestamp();
+        let stuck_action = ActionType::GovernanceSetThreshold { new_threshold: 3 };
+        let contracts = vec![
+            rules(&party, &[&member]),
+            self_confirmation("00self-former", &stuck_action, &former, now - 3600)?,
+            self_confirmation(
+                "00self-live",
+                &ActionType::GovernanceSetThreshold { new_threshold: 1 },
+                &member,
+                now + 3600,
+            )?,
+            domain_confirmation("00dom-former", "00gone", &former, now - 3600),
+        ];
+        let ledger = AcsLedger {
+            contracts: Arc::new(contracts.clone()),
+        };
+        let all = ["00self-former", "00self-live", "00dom-former"];
+
+        let status = post_ids(&pool, "/governance/dismiss", &party, &all).await?;
+        assert_eq!(status, StatusCode::OK);
+
+        let default = feed(&pool, &ledger, &party).await?;
+        assert!(!lists(&default["actions"], "00self-former"), "{default}");
+        assert!(
+            !lists(&default["domain_actions"], "00dom-former"),
+            "{default}"
+        );
+        let live = holding(&default["actions"], "00self-live")?;
+        assert_eq!(live["dismissed"], json!(false));
+
+        let with_dismissed = feed_with(&pool, &ledger, &party, "&include_dismissed=true").await?;
+        let hidden = holding(&with_dismissed["actions"], "00self-former")?;
+        assert_eq!(hidden["dismissed"], json!(true));
+        assert_eq!(hidden["cannot_be_archived"], json!(true));
+        let hidden = holding(&with_dismissed["domain_actions"], "00dom-former")?;
+        assert_eq!(hidden["dismissed"], json!(true));
+        let live = holding(&with_dismissed["actions"], "00self-live")?;
+        assert_eq!(live["dismissed"], json!(false));
+
+        // A second former member's confirmation of the same action arrives.
+        let mut confirmed_again = contracts.clone();
+        confirmed_again.push(self_confirmation(
+            "00self-former-b",
+            &stuck_action,
+            &other_former,
+            now - 60,
+        )?);
+        let ledger_again = AcsLedger {
+            contracts: Arc::new(confirmed_again),
+        };
+        let again = feed(&pool, &ledger_again, &party).await?;
+        let shown = holding(&again["actions"], "00self-former")
+            .or_else(|_| holding(&again["actions"], "00self-former-b"))?;
+        assert!(lists(&again["actions"], "00self-former-b"), "{again}");
+        assert_eq!(shown["dismissed"], json!(false));
+        assert_eq!(shown["cannot_be_archived"], json!(true));
+
+        let status = post_ids(&pool, "/governance/restore", &party, &["00dom-former"]).await?;
+        assert_eq!(status, StatusCode::OK);
+
+        let restored = feed(&pool, &ledger, &party).await?;
+        let shown = holding(&restored["domain_actions"], "00dom-former")?;
+        assert_eq!(shown["dismissed"], json!(false));
+        assert!(!lists(&restored["actions"], "00self-former"), "{restored}");
+        Ok(())
     }
 
     /// Issue #615: an action whose expired confirmations belong to a former
