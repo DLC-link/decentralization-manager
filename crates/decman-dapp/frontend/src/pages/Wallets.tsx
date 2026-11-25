@@ -60,7 +60,7 @@ export function Wallets() {
       />
       <Section title="Covalidators">
         <p className="hint">
-          A covalidator hosts the party but holds no owner key. On localnet the dApp sends its hosting approval itself.
+          A covalidator hosts the party but holds no owner key. The dApp sends its hosting approval itself.
           That stands in for the covalidator's DecMan approval.
         </p>
         {state.covalidators.length === 0 ? (

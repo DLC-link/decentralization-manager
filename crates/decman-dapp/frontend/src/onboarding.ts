@@ -392,7 +392,7 @@ function addParty(proposal: Proposal, wallet: Wallet): void {
         ? 'Approved by a simulated participant.'
         : h.role === 'owner'
           ? 'Approved by its own participant.'
-          : "Approved by the dApp on localnet. This stands in for the covalidator's DecMan approval.",
+          : "Approved by the dApp. This stands in for the covalidator's DecMan approval.",
     })),
     signingThreshold: plan.signingThreshold,
     namespaceThreshold: plan.namespaceThreshold,

@@ -28,6 +28,8 @@ through the JSON Ledger API:
 - The dApp waits until every host reports the party as local.
 - A participant that says the party already exists counts as a success. A
   retry skips the hosts that already report the party.
+- The localnet integration test sends in this order: the owners' participants
+  first, then the covalidator. Other orders are not tested.
 - If the owners already share a namespace with another threshold, Canton
   refuses the party, and the dApp says so.
 
@@ -35,8 +37,10 @@ The rest is simulated in the browser:
 
 - The browser keeps every owner key. A real owner keeps it in a wallet.
 - All owners sign in one browser. Use **Acting as** to switch owner.
-- On localnet the dApp sends each covalidator's hosting approval. This stands
-  in for the covalidator's DecMan approval.
+- The dApp sends each covalidator's hosting approval itself, on any network.
+  This stands in for the covalidator's DecMan approval.
+- Proposals, signatures and the party list live only in this browser. The
+  coordination contract replaces that storage later.
 - Holdings, transfers, history and dApp connections are simulated.
 
 The Rust code is in this crate, compiled to WebAssembly. It shares the
@@ -63,9 +67,13 @@ Then start the dApp:
 ```sh
 rustup target add wasm32-unknown-unknown
 cd crates/decman-dapp/frontend
-npm install
+npm ci
 npm run dev
 ```
+
+`npm ci` installs the exact versions in `package-lock.json`. wasm-pack
+downloads a wasm-bindgen CLI the first time it builds, to match the
+`wasm-bindgen` version in `Cargo.lock`.
 
 Open <http://localhost:5182>. The dev server and `npm run preview` use that
 port and fail if it is taken. `npm run dev` and `npm run build` build the
@@ -82,6 +90,11 @@ the browser needs no CORS:
 
 The forms fill in the localnet token. It is the public `ledger-api-user` token
 from `integration-tests/env.sh`, and it works only on a localnet.
+
+Each host's token needs participant-admin rights, because the dApp sends
+AllocateExternalParty without a user id. Use only localnet tokens in this mock:
+the browser stores them. Real owners will reach their participant through
+their wallet instead.
 
 ## Try it without a localnet
 
