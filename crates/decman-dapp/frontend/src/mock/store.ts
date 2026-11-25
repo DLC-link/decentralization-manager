@@ -32,6 +32,12 @@ export type HostResult = {
   participant: string
   name: string
   role: 'owner' | 'covalidator'
+  /**
+   * The connection of an owner or covalidator in this proposal, bound when
+   * the proposal is created. A saved wallet outside the proposal never
+   * answers for the host.
+   */
+  connection: ParticipantLink
   step: HostStep
   detail?: string
   /** The participant itself refused with a 4xx, as opposed to a 5xx, a timeout or a network error. */

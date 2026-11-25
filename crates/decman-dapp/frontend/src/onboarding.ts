@@ -90,25 +90,31 @@ export async function addCovalidator(name: string, apiUrl: string, token: string
 const modeName = (simulated: boolean) => (simulated ? 'simulated' : 'real')
 
 /**
- * The connection, name and role of the host with `participantId`, among the
- * records of one mode. A record of the other mode never answers for it.
+ * The name and connection of `participant`, taken from the proposal's own
+ * owners or covalidators of one mode.
  */
-function hostOf(
-  participantId: string,
+function bindHost(
+  plan: PartyPlan,
+  participant: string,
   simulated: boolean,
-): { link: ParticipantLink; name: string; role: HostResult['role'] } {
+): { name: string; connection: ParticipantLink } {
   const { wallets, covalidators } = getState()
-  const owners = wallets.filter(
-    (w) => w.participant.participantId === participantId && w.participant.simulated === simulated,
-  )
-  if (owners.length > 0) {
-    return { link: owners[0].participant, name: owners.map((w) => w.name).join(', '), role: 'owner' }
+  if (roleOf(plan, participant) === 'owner') {
+    const owners = wallets.filter(
+      (w) =>
+        w.participant.simulated === simulated &&
+        plan.owners.some((o) => o.publicKey === w.publicKey && o.participant === participant),
+    )
+    if (owners.length > 0) {
+      return { name: owners.map((w) => w.name).join(', '), connection: owners[0].participant }
+    }
+  } else {
+    const covalidator = covalidators.find(
+      (c) => c.participant.participantId === participant && c.participant.simulated === simulated,
+    )
+    if (covalidator) return { name: covalidator.name, connection: covalidator.participant }
   }
-  const covalidator = covalidators.find(
-    (c) => c.participant.participantId === participantId && c.participant.simulated === simulated,
-  )
-  if (covalidator) return { link: covalidator.participant, name: covalidator.name, role: 'covalidator' }
-  throw new Error(`No ${modeName(simulated)} wallet or covalidator uses participant ${participantId}.`)
+  throw new Error(`No ${modeName(simulated)} owner or covalidator of this proposal uses participant ${participant}.`)
 }
 
 /** The parts of a plan that a party record keeps, in one comparable form. */
@@ -182,12 +188,8 @@ export async function createProposal(proposal: PartyProposal, creator: Wallet): 
   checkOneMode(proposal, simulated)
   checkNoOtherPlan(plan, simulated)
   const hosts = plan.hosts.map((participant): HostResult => {
-    const role = roleOf(plan, participant)
-    const ownerNames = getState()
-      .wallets.filter((w) => plan.owners.some((o) => o.publicKey === w.publicKey && o.participant === participant))
-      .map((w) => w.name)
-    const name = role === 'owner' ? ownerNames.join(', ') : hostOf(participant, simulated).name
-    return { participant, name, role, step: 'waiting' }
+    const { name, connection } = bindHost(plan, participant, simulated)
+    return { participant, name, role: roleOf(plan, participant), connection, step: 'waiting' }
   })
 
   const synchronizers = await ledger.connectedSynchronizers(creator.participant)
@@ -430,7 +432,7 @@ async function markHostedHosts(id: string, partyId: string, detail: string): Pro
       .filter((h) => h.step !== 'hosted')
       .map(async (h) => {
         try {
-          const answer = await ledger.getParty(hostOf(h.participant, proposal.simulated).link, partyId)
+          const answer = await ledger.getParty(h.connection, partyId)
           if (partyHostedLocally(answer, partyId)) setHost(id, h.participant, 'hosted', detail)
         } catch (error) {
           setHost(id, h.participant, h.step, `Still waiting: ${message(error)}`)
@@ -454,7 +456,7 @@ async function sendToHosts(
   const proposal = findProposal(id)
   const targets = proposal.hosts.filter((h) => h.role === role && h.step !== 'hosted')
   const results = await Promise.allSettled(
-    targets.map((h) => ledger.allocateExternalParty(hostOf(h.participant, proposal.simulated).link, body)),
+    targets.map((h) => ledger.allocateExternalParty(h.connection, body)),
   )
   let refused = false
   results.forEach((result, index) => {
