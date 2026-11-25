@@ -266,6 +266,24 @@ async fn a_run_above_the_total_cap_is_refused_at_the_dar_that_crosses_it() -> Re
     Ok(())
 }
 
+/// The cap is inclusive: a run whose DARs add up to exactly the cap is
+/// pulled whole.
+#[tokio::test]
+async fn a_run_exactly_at_the_total_cap_is_pulled() -> Result {
+    let dars = dars(&[MAX_PAYLOAD_SIZE + 1, 100]);
+    let server = DarServer::start(dars.clone(), Duration::ZERO).await?;
+    let names: Vec<String> = dars.iter().map(|(name, _)| name.clone()).collect();
+    let hashes: Vec<String> = dars.iter().map(|(_, dar)| hash_dar(dar)).collect();
+    let pull = DarPull::new(&server.coordinator, COORDINATOR_RUN, &names, &hashes)?
+        .context("no pull planned")?;
+    let cap = dars.iter().map(|(_, dar)| dar.len()).sum();
+
+    let pulled = pull.fetch_within(&server.node, cap).await?;
+
+    assert!(pulled == dars, "the pull read other DARs");
+    Ok(())
+}
+
 /// The coordinator keeps one chunked `RequestDar` answer for each peer. Two
 /// fetches at once, such as a run's pull and an invitation preview, would
 /// read each other's chunks. They take turns instead.
