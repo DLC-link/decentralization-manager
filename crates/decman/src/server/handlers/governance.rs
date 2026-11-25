@@ -1,4 +1,4 @@
-use std::{collections::HashSet, sync::LazyLock};
+use std::{collections::HashSet, sync::LazyLock, time::Duration};
 
 use actix_web::{HttpRequest, HttpResponse, Responder, get, http::StatusCode, post, web};
 use anyhow::Context;
@@ -757,12 +757,18 @@ fn count_action(step: ActionStep, outcome: ActionOutcome) {
 // Spawned Writes
 // ============================================================================
 
-/// A Ledger API request as `token`.
+/// How long a governance submission waits for the ledger. A little above the
+/// 120 seconds the deployment guide asks a proxy to allow. Without a deadline,
+/// a write whose caller hung up waits until Canton stops tracking the command.
+const SUBMISSION_DEADLINE: Duration = Duration::from_secs(130);
+
+/// A Ledger API request as `token`, with the [`SUBMISSION_DEADLINE`].
 fn ledger_request<T>(message: T, token: &str) -> Result<tonic::Request<T>> {
     let mut request = tonic::Request::new(message);
     request
         .metadata_mut()
         .insert("authorization", format!("Bearer {token}").parse()?);
+    request.set_timeout(SUBMISSION_DEADLINE);
     Ok(request)
 }
 
@@ -3363,7 +3369,11 @@ mod action_metrics_tests {
 
 #[cfg(test)]
 mod mediator_timeout_tests {
-    use std::{convert::Infallible, sync::Arc, time::Duration};
+    use std::{
+        convert::Infallible,
+        sync::{Arc, Mutex},
+        time::Duration,
+    };
 
     use actix_web::{App, http::header::AUTHORIZATION, test as actix_test};
     use sqlx::SqlitePool;
@@ -3394,7 +3404,8 @@ mod mediator_timeout_tests {
     /// answers with `rejection` once `release` is notified. A
     /// `SubmitAndWaitForTransaction` is rejected the same way, unless
     /// `created_proposal` is set: then it answers with a transaction that
-    /// creates that contract. The router answers every other service as
+    /// creates that contract. `deadlines` keeps the `grpc-timeout` header of
+    /// every submission. The router answers every other service as
     /// unimplemented, so the package-ref lookup falls back to the configured
     /// package.
     #[derive(Clone)]
@@ -3403,6 +3414,7 @@ mod mediator_timeout_tests {
         created_proposal: Option<String>,
         submitted: Arc<Notify>,
         release: Arc<Notify>,
+        deadlines: Arc<Mutex<Vec<Option<String>>>>,
     }
 
     impl RejectingLedger {
@@ -3412,6 +3424,7 @@ mod mediator_timeout_tests {
                 created_proposal: None,
                 submitted: Arc::new(Notify::new()),
                 release: Arc::new(Notify::new()),
+                deadlines: Arc::default(),
             }
         }
 
@@ -3442,6 +3455,12 @@ mod mediator_timeout_tests {
             Box::pin(async move {
                 let path = request.uri().path().to_string();
                 let method = path.strip_prefix(&format!("/{}/", Self::NAME));
+                if let (Some("SubmitAndWait" | "SubmitAndWaitForTransaction"), Ok(mut deadlines)) =
+                    (method, ledger.deadlines.lock())
+                {
+                    let deadline = request.headers().get("grpc-timeout");
+                    deadlines.push(deadline.and_then(|v| v.to_str().ok()).map(String::from));
+                }
                 match (method, ledger.created_proposal) {
                     (Some("SubmitAndWaitForTransaction"), Some(contract_id)) => {
                         let response = created_transaction(contract_id);
@@ -3725,6 +3744,36 @@ mod mediator_timeout_tests {
             let (audit_status, audit_message) = audit_row(&pool, event).await?;
             assert_eq!(audit_status, "failed", "{event:?}");
             assert_eq!(audit_message, Some(error), "{event:?}");
+        }
+        Ok(())
+    }
+
+    /// A submission without a deadline keeps its task alive until Canton
+    /// stops tracking the command, long after the caller hung up.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn every_governance_submission_carries_a_deadline(pool: SqlitePool) -> Result {
+        let _serial = super::action_metrics_tests::SERIAL.lock().await;
+        for (event, uri, _, body) in writes() {
+            let mut ledger = RejectingLedger::new();
+            // The proposer's confirmation is a second submission; reach it.
+            ledger.created_proposal = Some("00proposal".to_string());
+            ledger.release.notify_one();
+
+            post_to_writes(&pool, &ledger, uri, body).await?;
+
+            let deadlines = ledger
+                .deadlines
+                .lock()
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
+            let expected = if matches!(event, AuditEvent::Propose) {
+                2
+            } else {
+                1
+            };
+            assert_eq!(deadlines.len(), expected, "{event:?}");
+            for deadline in deadlines.iter() {
+                assert_eq!(deadline.as_deref(), Some("130000m"), "{event:?}");
+            }
         }
         Ok(())
     }
