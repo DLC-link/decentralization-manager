@@ -1616,8 +1616,8 @@ fn execute_failure(e: &anyhow::Error) -> (StatusCode, String) {
 ///
 /// A success forgets the record. A mediator timeout replaces it with the
 /// parties this timeout named, so a timeout that no longer names the
-/// confirmer clears its mark. Any other failure never reached the mediator
-/// and says nothing about the confirmer, so the record stays.
+/// confirmer clears its mark. Any other failure, an expire whose outcome is
+/// unknown included, says nothing about the confirmer, so the record stays.
 ///
 /// Only expire records. `_Cancel` is controlled by the confirmer, this node's
 /// own member, so a cancel timeout never shows that the confirmer is gone.
