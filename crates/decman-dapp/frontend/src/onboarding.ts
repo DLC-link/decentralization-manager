@@ -122,7 +122,8 @@ function checkOneMode(proposal: PartyProposal, simulated: boolean): void {
 
 /**
  * Checks the proposal, reads the synchronizer and its topology format from
- * the proposer's participant, and builds the transactions the owners sign.
+ * the proposer's participant, builds the transactions the owners sign, and
+ * signs them as the proposer.
  */
 export async function createProposal(proposal: PartyProposal, creator: Wallet): Promise<void> {
   const plan = planParty(proposal)
@@ -164,6 +165,11 @@ export async function createProposal(proposal: PartyProposal, creator: Wallet): 
     status: 'collecting',
     hosts,
   }
+  // Creating the proposal carries the proposer's signature, after the same
+  // check as any other signature.
+  const { onboarding } = recheckProposal(entry)
+  const signature = await signDigest(creator.privateKeyJwk, onboarding.combinedHash)
+  entry.signatures = [{ publicKey: creator.publicKey, signature, signedAt: now() }]
   update((s) => ({ ...s, proposals: [entry, ...s.proposals] }))
 }
 

@@ -185,8 +185,8 @@ export function NewParty({ onCreated }: { onCreated: () => void }) {
           </dl>
         )}
         <p className="hint">
-          Proposing asks the proposer's participant for its synchronizer and topology format. The owners then sign the
-          real topology transactions.
+          Proposing asks the proposer's participant for its synchronizer and topology format. The proposer then signs
+          the real topology transactions, and the other owners sign after.
         </p>
         <button disabled={'error' in check || busy} onClick={create}>
           {busy ? 'Asking the participant…' : `Propose as ${acting?.name ?? '…'}`}
