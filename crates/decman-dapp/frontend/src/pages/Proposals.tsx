@@ -85,6 +85,9 @@ function ProposalCard({
           Signing {plan.signingThreshold} of {plan.owners.length}
         </span>
         <span className="chip">
+          Namespace {plan.namespaceThreshold} of {plan.owners.length}
+        </span>
+        <span className="chip">
           Confirmation {plan.confirmationThreshold} of {plan.hosts.length} hosts
         </span>
         <span className="chip">Topology format v{proposal.topologyVersion}</span>

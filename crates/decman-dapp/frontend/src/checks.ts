@@ -26,6 +26,7 @@ export type PartyProposal = {
   partyHint: string
   owners: ProposedOwner[]
   signingThreshold: number
+  namespaceThreshold: number
   confirmationThreshold: number
   covalidators: string[]
 }
@@ -38,6 +39,7 @@ export type PartyPlan = {
   owners: PlannedOwner[]
   hosts: string[]
   signingThreshold: number
+  namespaceThreshold: number
   confirmationThreshold: number
 }
 

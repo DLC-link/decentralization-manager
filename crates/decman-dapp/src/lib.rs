@@ -142,6 +142,7 @@ mod tests {
                 { "publicKey": public_key(2), "participant": "participant-2::1220b2" },
             ],
             "signingThreshold": 2,
+            "namespaceThreshold": 1,
             "confirmationThreshold": 3,
             "covalidators": ["participant-3::1220c3"],
         })
@@ -173,12 +174,14 @@ mod tests {
                 "confirmationThreshold",
                 "hosts",
                 "namespace",
+                "namespaceThreshold",
                 "owners",
                 "partyId",
                 "signingThreshold"
             ]
         );
         assert_eq!(plan["signingThreshold"], 2);
+        assert_eq!(plan["namespaceThreshold"], 1);
         assert_eq!(plan["confirmationThreshold"], 3);
         assert_eq!(plan["hosts"].as_array().map(Vec::len), Some(3));
         assert_eq!(

@@ -64,6 +64,9 @@ export function PartyDetail({ partyId }: { partyId: string }) {
             Signing {party.signingThreshold} of {party.owners.length} owners
           </span>
           <span className="chip">
+            Namespace {party.namespaceThreshold} of {party.owners.length} owners
+          </span>
+          <span className="chip">
             Confirmation {party.confirmationThreshold} of {party.hosts.length} hosts
           </span>
           <span className="chip">Created {new Date(party.createdAt).toLocaleString()}</span>

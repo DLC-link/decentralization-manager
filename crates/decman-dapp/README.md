@@ -14,6 +14,12 @@ through the JSON Ledger API:
   owner, the decentralized namespace, and the party-to-participant mapping.
 - The mapping names the owners' keys as the party's signing keys. One key per
   owner does both jobs.
+- A party has three thresholds. The signing threshold counts owner keys needed
+  to transact. The namespace threshold counts owners needed to change the
+  topology. The confirmation threshold counts hosts needed to confirm.
+- Every party with the same owners shares one namespace, and so one namespace
+  threshold. The dApp creates the namespace definition at serial 1, so it can
+  never change the threshold of an existing party.
 - Each owner signs one hash that covers every transaction. The browser checks
   each Ed25519 signature before it counts it.
 - Every other host approves the hosting first. Then the submitting owner's

@@ -13,6 +13,7 @@ export function NewParty({ onCreated }: { onCreated: () => void }) {
   const [ownerIds, setOwnerIds] = useState<string[]>([])
   const [covalidatorIds, setCovalidatorIds] = useState<string[]>([])
   const [signingThreshold, setSigningThreshold] = useState(2)
+  const [namespaceThreshold, setNamespaceThreshold] = useState(2)
   const [confirmationThreshold, setConfirmationThreshold] = useState(1)
   const [busy, setBusy] = useState(false)
   const [error, run] = useAction()
@@ -22,6 +23,7 @@ export function NewParty({ onCreated }: { onCreated: () => void }) {
     partyHint: hint,
     owners: owners.map((w) => ({ publicKey: w.publicKey, participant: w.participant.participantId })),
     signingThreshold,
+    namespaceThreshold,
     confirmationThreshold,
     covalidators: state.covalidators
       .filter((c) => covalidatorIds.includes(c.id))
@@ -87,6 +89,18 @@ export function NewParty({ onCreated }: { onCreated: () => void }) {
               value={signingThreshold}
               onChange={(e) => setSigningThreshold(Number(e.target.value))}
             />
+          </label>
+          <label>
+            Namespace threshold: owners needed to change the party's topology
+            <input
+              type="number"
+              min={1}
+              value={namespaceThreshold}
+              onChange={(e) => setNamespaceThreshold(Number(e.target.value))}
+            />
+            <span className="hint">
+              Every party with the same owners shares one namespace, so this threshold applies to all of them.
+            </span>
           </label>
           <label>
             Confirmation threshold: hosts that must confirm each transaction

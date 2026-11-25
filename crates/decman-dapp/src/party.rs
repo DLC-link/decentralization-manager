@@ -22,7 +22,12 @@ const PARTY_ID_DELIMITER: &str = "::";
 pub struct PartyProposal {
     pub party_hint: String,
     pub owners: Vec<ProposedOwner>,
+    /// Owner keys needed to transact as the party.
     pub signing_threshold: u32,
+    /// Owners needed to change the topology. Every party with the same owners
+    /// shares the namespace, and so this threshold.
+    pub namespace_threshold: u32,
+    /// Hosts needed to confirm each transaction.
     pub confirmation_threshold: u32,
     #[serde(default)]
     pub covalidators: Vec<String>,
@@ -48,6 +53,7 @@ pub struct PartyPlan {
     /// The owners' participants and the covalidators, sorted and deduplicated.
     pub hosts: Vec<String>,
     pub signing_threshold: u32,
+    pub namespace_threshold: u32,
     pub confirmation_threshold: u32,
 }
 
@@ -94,6 +100,7 @@ pub fn plan_party(proposal: &PartyProposal) -> Result<PartyPlan, Error> {
         return Err(Error::DuplicateOwner);
     }
     check_threshold("signing", proposal.signing_threshold, owners.len())?;
+    check_threshold("namespace", proposal.namespace_threshold, owners.len())?;
 
     let hosts: BTreeSet<String> = owners
         .iter()
@@ -118,6 +125,7 @@ pub fn plan_party(proposal: &PartyProposal) -> Result<PartyPlan, Error> {
         owners,
         hosts: hosts.into_iter().collect(),
         signing_threshold: proposal.signing_threshold,
+        namespace_threshold: proposal.namespace_threshold,
         confirmation_threshold: proposal.confirmation_threshold,
     })
 }
@@ -203,6 +211,7 @@ mod tests {
                 },
             ],
             signing_threshold: 2,
+            namespace_threshold: 2,
             confirmation_threshold: 2,
             covalidators: vec!["covalidator-c".to_owned()],
         }
@@ -310,19 +319,22 @@ mod tests {
         ));
     }
 
-    /// Two owners and one covalidator: the signing threshold is capped at 2
-    /// owners and the confirmation threshold at 3 hosts.
+    /// Two owners and one covalidator: the signing and namespace thresholds
+    /// are capped at 2 owners, and the confirmation threshold at 3 hosts.
     #[test]
     fn rejects_thresholds_out_of_range() {
         let cases = [
-            (0, 1, "signing", 2, 0),
-            (3, 1, "signing", 2, 3),
-            (1, 0, "confirmation", 3, 0),
-            (1, 4, "confirmation", 3, 4),
+            (0, 1, 1, "signing", 2, 0),
+            (3, 1, 1, "signing", 2, 3),
+            (1, 0, 1, "namespace", 2, 0),
+            (1, 3, 1, "namespace", 2, 3),
+            (1, 1, 0, "confirmation", 3, 0),
+            (1, 1, 4, "confirmation", 3, 4),
         ];
-        for (signing, confirmation, kind, max, got) in cases {
+        for (signing, namespace, confirmation, kind, max, got) in cases {
             let mut proposal = proposal();
             proposal.signing_threshold = signing;
+            proposal.namespace_threshold = namespace;
             proposal.confirmation_threshold = confirmation;
             let result = plan_party(&proposal);
             assert!(
@@ -331,7 +343,8 @@ mod tests {
                     Err(Error::ThresholdOutOfRange { kind: k, max: m, got: g })
                         if *k == kind && *m == max && *g == got
                 ),
-                "signing {signing}, confirmation {confirmation} gave {result:?}"
+                "signing {signing}, namespace {namespace}, confirmation {confirmation} gave \
+                 {result:?}"
             );
         }
     }
@@ -340,10 +353,12 @@ mod tests {
     fn each_threshold_may_reach_its_own_count() -> Result<(), Error> {
         let mut proposal = proposal();
         proposal.signing_threshold = 2;
+        proposal.namespace_threshold = 2;
         // Above the owner count, so only the host count may cap it.
         proposal.confirmation_threshold = 3;
         let plan = plan_party(&proposal)?;
         assert_eq!(plan.signing_threshold, 2);
+        assert_eq!(plan.namespace_threshold, 2);
         assert_eq!(plan.confirmation_threshold, 3);
         Ok(())
     }

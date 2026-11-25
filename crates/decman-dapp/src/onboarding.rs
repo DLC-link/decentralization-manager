@@ -108,9 +108,13 @@ pub fn topology_format(version: u32) -> Result<TopologyFormat, Error> {
 /// The transactions that create `plan`'s party, serialized in `format`.
 ///
 /// One root certificate per owner, the decentralized namespace, and the
-/// `PartyToParticipant`. The namespace and the party's signing keys share the
-/// signing threshold. Every host confirms, and none may submit: the owners
-/// sign every Daml transaction themselves.
+/// `PartyToParticipant`, each created at serial 1. Every host confirms, and
+/// none may submit: the owners sign every Daml transaction themselves.
+///
+/// Every party with the same owners shares the namespace. At serial 1 an
+/// honest creation either repeats the existing definition, which Canton
+/// accepts as a duplicate, or Canton refuses it with a serial mismatch. A
+/// later serial would change the existing parties' namespace threshold.
 pub fn onboarding_transactions(plan: &PartyPlan, format: TopologyFormat) -> Onboarding {
     let signing_keys: Vec<_> = plan
         .owners
@@ -141,7 +145,7 @@ pub fn onboarding_transactions(plan: &PartyPlan, format: TopologyFormat) -> Onbo
         Mapping::DecentralizedNamespaceDefinition(DecentralizedNamespaceDefinition {
             decentralized_namespace: plan.namespace.clone(),
             // plan_party caps the threshold at the owner count.
-            threshold: i32::try_from(plan.signing_threshold).unwrap_or(i32::MAX),
+            threshold: i32::try_from(plan.namespace_threshold).unwrap_or(i32::MAX),
             owners: plan
                 .owners
                 .iter()
@@ -412,6 +416,7 @@ mod tests {
                 })
                 .collect(),
             signing_threshold: 2,
+            namespace_threshold: 2,
             confirmation_threshold: 2,
             covalidators: vec!["covalidator::1220cc".to_owned()],
         }
@@ -618,12 +623,13 @@ mod tests {
         Ok(())
     }
 
-    /// The other tests use one value for both thresholds, so a swap would
+    /// The other tests use one value for every threshold, so a swap would
     /// pass them. Here each threshold has its own value.
     #[test]
     fn each_threshold_lands_in_its_own_field() -> Result<(), Error> {
         let mut proposal = proposal_with(&[1, 2, 3]);
         proposal.signing_threshold = 2;
+        proposal.namespace_threshold = 1;
         proposal.confirmation_threshold = 3;
         let plan = plan_party(&proposal)?;
         for format in [TopologyFormat::V30, TopologyFormat::V31] {
@@ -633,13 +639,32 @@ mod tests {
             else {
                 panic!("expected a decentralized namespace");
             };
-            assert_eq!(namespace.threshold, 2, "{format:?}");
+            assert_eq!(namespace.threshold, 1, "{format:?}");
 
             let p2p = party_to_participant(&onboarding)?;
             assert_eq!(p2p.threshold, 3, "{format:?}");
             let keys = p2p.party_signing_keys.expect("the party has signing keys");
             assert_eq!(keys.threshold, 2, "{format:?}");
             assert_eq!(keys.keys.len(), 3, "{format:?}");
+        }
+        Ok(())
+    }
+
+    /// A later serial on the shared namespace definition would change the
+    /// threshold of every party with these owners. So every mapping, and the
+    /// definition above all, must be created at serial 1.
+    #[test]
+    fn every_mapping_is_created_at_serial_1() -> Result<(), Error> {
+        let plan = plan_with(&[1, 2, 3]);
+        for format in [TopologyFormat::V30, TopologyFormat::V31] {
+            for transaction in &onboarding_transactions(&plan, format).transactions {
+                let bytes = STANDARD
+                    .decode(&transaction.transaction)
+                    .map_err(|e| Error::InvalidParticipantAnswer(e.to_string()))?;
+                let decoded = topology::decode_transaction(&bytes)
+                    .map_err(|e| Error::InvalidParticipantAnswer(e.to_string()))?;
+                assert_eq!(decoded.serial, 1, "{} in {format:?}", transaction.mapping);
+            }
         }
         Ok(())
     }

@@ -6,10 +6,11 @@
 //! browser code does. It proves what the unit tests cannot: Canton accepts our
 //! bytes, our hashes, and one signature per owner over the combined hash.
 //!
-//! Two owners hold one key each, hosted on P1 and P2. P3 is a covalidator. P2
-//! and P3 approve the hosting first, then P1 receives every transaction. Each
-//! host must then host the party, with every host confirming and the owners'
-//! keys as the party's signing keys.
+//! Three owners hold one key each: two on P1 and one on P2. P3 is a
+//! covalidator. The three thresholds take three different values, so a swap
+//! between them fails the checks. P2 and P3 approve the hosting first, then P1
+//! receives every transaction. Each host must then host the party, with every
+//! host confirming and the owners' keys as the party's signing keys.
 
 use std::time::Duration;
 
@@ -44,6 +45,11 @@ use crate::common::{
 /// Canton writes topology transactions in `v31` from this protocol version.
 const FIRST_V31_PROTOCOL_VERSION: u32 = 37;
 
+/// Three owners and three hosts, so each threshold can differ.
+const SIGNING_THRESHOLD: u32 = 2;
+const NAMESPACE_THRESHOLD: u32 = 3;
+const CONFIRMATION_THRESHOLD: u32 = 1;
+
 const ALLOCATE: &str = "/v2/parties/external/allocate";
 
 pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
@@ -65,7 +71,11 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
     }
     let synchronizer_id = connected_synchronizer(f, P1_JSON_API).await?;
 
-    let owners = [ExternalKeyPair::generate(), ExternalKeyPair::generate()];
+    let owners = [
+        ExternalKeyPair::generate(),
+        ExternalKeyPair::generate(),
+        ExternalKeyPair::generate(),
+    ];
     let format = probe_format(f, &synchronizer_id, &owners[0]).await?;
 
     // The probe must name the format of the synchronizer's protocol version.
@@ -94,9 +104,14 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
                 public_key: hex::encode(owners[1].public_key_bytes()),
                 participant: f.p2.participant_id.clone(),
             },
+            ProposedOwner {
+                public_key: hex::encode(owners[2].public_key_bytes()),
+                participant: f.p1.participant_id.clone(),
+            },
         ],
-        signing_threshold: 2,
-        confirmation_threshold: 2,
+        signing_threshold: SIGNING_THRESHOLD,
+        namespace_threshold: NAMESPACE_THRESHOLD,
+        confirmation_threshold: CONFIRMATION_THRESHOLD,
         covalidators: vec![f.p3.participant_id.clone()],
     };
     let plan = plan_party(&proposal)?;
@@ -192,8 +207,8 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
                             if current.serial != 1
                                 || hosts != expected_hosts
                                 || !all_confirm
-                                || mapping.threshold != 2
-                                || keys.threshold != 2
+                                || mapping.threshold != CONFIRMATION_THRESHOLD
+                                || keys.threshold != SIGNING_THRESHOLD
                                 || key_bytes != expected_keys
                                 || !keys.keys.iter().all(signs_for_the_party)
                             {
@@ -237,7 +252,8 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
                             owners.sort();
                             if serial != 1
                                 || owners != owner_namespaces
-                                || definition.threshold != 2
+                                || u32::try_from(definition.threshold).ok()
+                                    != Some(NAMESPACE_THRESHOLD)
                             {
                                 return Some(Err(anyhow::anyhow!(
                                     "{namespace}'s definition differs from the dApp's: serial \

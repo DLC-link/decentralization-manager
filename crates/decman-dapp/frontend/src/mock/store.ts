@@ -82,6 +82,7 @@ export type Party = {
   owners: PlannedOwner[]
   hosts: Host[]
   signingThreshold: number
+  namespaceThreshold: number
   confirmationThreshold: number
   createdAt: string
   holdings: Record<string, number>

@@ -267,6 +267,7 @@ function addParty(proposal: Proposal, wallet: Wallet): void {
           : "Approved by the dApp on localnet. This stands in for the covalidator's DecMan approval.",
     })),
     signingThreshold: plan.signingThreshold,
+    namespaceThreshold: plan.namespaceThreshold,
     confirmationThreshold: plan.confirmationThreshold,
     createdAt: now(),
     holdings: {},
