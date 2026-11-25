@@ -214,10 +214,6 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: wasm32-unknown-unknown
-      - name: Setup Rust target cache
-        uses: Swatinem/rust-cache@v2
-        with:
-          key: wasm
       # A browser app runs decman-lib, so decman-lib must build without the
       # tonic transport and the Ledger API client.
       - name: cargo check decman-lib for wasm32
