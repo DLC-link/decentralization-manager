@@ -1261,21 +1261,23 @@ pub async fn propose_action(
         token,
         record.member_party_id.clone(),
         body.into_inner(),
+        write_deadline(),
     );
     run_write(db, record, "Proposal created and confirmed", submission).await
 }
 
 /// Creates a proposal from `commands`, then confirms it as the proposer.
+///
+/// Both submissions, and the ledger read between them, share one budget that
+/// ends at `deadline`, so a propose waits no longer than any other write.
 async fn submit_proposal(
     data: web::Data<AppState>,
     commands: Commands,
     token: String,
     member_party_id: CantonId,
     body: ProposeActionRequest,
+    deadline: Instant,
 ) -> Submitted {
-    // Both submissions share one budget, so a propose waits no longer than
-    // any other write.
-    let deadline = write_deadline();
     let channel = match data.config.ledger_channel().await {
         Ok(channel) => channel,
         Err(e) => {
@@ -1347,14 +1349,31 @@ async fn submit_proposal(
 
     // The rules contract may be an out-of-date fallback living under an older
     // governance-core package — exercise it under its actual package ref.
-    rules.package_ref = resolve_contract_package_ref(
-        &data.config,
-        &body.party_id,
-        Some(token.clone()),
-        &body.rules_contract_id,
-        &rules.package_ref,
+    let package_ref = tokio::time::timeout(
+        deadline.saturating_duration_since(Instant::now()),
+        resolve_contract_package_ref(
+            &data.config,
+            &body.party_id,
+            Some(token.clone()),
+            &body.rules_contract_id,
+            &rules.package_ref,
+        ),
     )
     .await;
+    rules.package_ref = match package_ref {
+        Ok(package_ref) => package_ref,
+        Err(_) => {
+            return Submitted::failed(
+                StatusCode::GATEWAY_TIMEOUT,
+                format!(
+                    "Proposal created (CID: {proposal_cid}) but not confirmed: DecMan ran out \
+                     of time while it read the governance rules, before it sent the \
+                     confirmation. Confirm proposal {proposal_cid}; do not re-propose."
+                ),
+            )
+            .of_proposal(proposal_cid);
+        }
+    };
 
     let confirm = SubmitAndWaitRequest {
         commands: Some(build_confirm_proposal(
@@ -4016,6 +4035,73 @@ mod mediator_timeout_tests {
             let (_, message) = audit_row(&pool, event).await?;
             assert_eq!(message.as_deref(), Some(error), "{event:?}");
         }
+        Ok(())
+    }
+
+    /// The Ledger API event service of a participant that never answers.
+    #[derive(Clone)]
+    struct SilentEvents;
+
+    impl Service<http::Request<Body>> for SilentEvents {
+        type Response = http::Response<Body>;
+        type Error = Infallible;
+        type Future = BoxFuture<Self::Response, Infallible>;
+
+        fn poll_ready(&mut self, _: &mut TaskContext<'_>) -> Poll<Result<(), Infallible>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn call(&mut self, _: http::Request<Body>) -> Self::Future {
+            Box::pin(std::future::pending())
+        }
+    }
+
+    impl NamedService for SilentEvents {
+        const NAME: &'static str = "com.daml.ledger.api.v2.EventQueryService";
+    }
+
+    /// A propose reads the rules contract's package between its two
+    /// submissions. That read shares the write's deadline, so a ledger that
+    /// never answers it cannot stretch the write.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_propose_stops_at_its_deadline_during_the_rules_read(pool: SqlitePool) -> Result {
+        let mut ledger = RejectingLedger::new();
+        ledger.created_proposal = Some("00proposal".to_string());
+        let incoming = TcpIncoming::bind("127.0.0.1:0".parse()?)?;
+        let port = incoming.local_addr()?.port();
+        tokio::spawn(
+            Server::builder()
+                .add_service(ledger)
+                .add_service(SilentEvents)
+                .serve_with_incoming(incoming),
+        );
+        let data = state(pool, port).await?;
+        let body: ProposeActionRequest = serde_json::from_value(serde_json::json!({
+            "party_id": party(),
+            "rules_contract_id": "00rules",
+            "proposal": { "type": "generic_vote", "description": "deadline" },
+        }))?;
+        let member = CantonId::parse(&format!("member::1220{}", "cd".repeat(32)))?;
+
+        let proposing = submit_proposal(
+            data,
+            Commands::default(),
+            "any-token".to_string(),
+            member,
+            body,
+            Instant::now() + Duration::from_millis(500),
+        );
+        let submitted = tokio::time::timeout(Duration::from_secs(5), proposing)
+            .await
+            .context("the propose outlived its deadline")?;
+
+        let (status, error) = submitted.failure.context("the propose succeeded")?;
+        assert_eq!(status, StatusCode::GATEWAY_TIMEOUT, "{error}");
+        assert!(
+            error.ends_with("Confirm proposal 00proposal; do not re-propose."),
+            "{error}"
+        );
+        assert_eq!(submitted.proposal_cid.as_deref(), Some("00proposal"));
         Ok(())
     }
 
