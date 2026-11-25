@@ -99,11 +99,15 @@ their wallet instead.
 ## Try it without a localnet
 
 Turn on **Simulated participants** to use the dApp without a localnet. The
-browser then answers every JSON Ledger API call itself. The Rust code still
-builds the real topology transactions and checks every signature. The
-participant ids, the synchronizer and the participants' answers are made up,
-and the banner says so. Turn the switch off to talk to real participants
-again.
+switch sets the mode of the wallets and covalidators you add next. Records
+marked Simulated never reach a participant: the browser answers their calls
+itself. The Rust code still builds the real topology transactions and checks
+every signature. The participant ids, the synchronizer and the participants'
+answers are made up.
+
+Each wallet, covalidator, proposal and party keeps the mode it was created
+with. Turning the switch off does not change existing records. The dApp
+refuses a proposal that mixes simulated and real records.
 
 ## Try the flow
 

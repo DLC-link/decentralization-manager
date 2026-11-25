@@ -1,7 +1,8 @@
-// Simulated participants, for trying the dApp without a localnet. When the
-// switch is on, ledger.ts sends every JSON Ledger API call here instead of
-// over the network. The Rust code still builds the real transactions and
-// checks every signature. Only the participants' answers are made up.
+// Simulated participants, for trying the dApp without a localnet. The switch
+// only sets the mode of new wallets and covalidators. ledger.ts sends a call
+// here when its connection was created simulated, whatever the switch says
+// now. The Rust code still builds the real transactions and checks every
+// signature. Only the participants' answers are made up.
 
 const SWITCH_KEY = 'decman-dapp-simulated-participants'
 // Canton writes topology in format v31 on protocol version 37, as the localnet does.

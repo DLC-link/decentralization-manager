@@ -119,8 +119,9 @@ export function App() {
         <div className="page">
           <p className="banner">
             {simulated
-              ? 'The participants are simulated. The dApp builds the real transactions and checks every signature, but no participant receives them.'
-              : 'Party creation is real. The dApp creates the party on your participants through the JSON Ledger API.'}{' '}
+              ? 'New wallets and covalidators use simulated participants.'
+              : 'New wallets and covalidators use real participants through the JSON Ledger API.'}{' '}
+            Records marked Simulated never reach a participant.
             Owner keys stay in this browser and stand in for wallets. Holdings, transfers, history and dApp connections
             are simulated.
           </p>
