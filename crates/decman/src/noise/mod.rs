@@ -97,6 +97,12 @@ pub enum MessageType {
     /// `RequestDarPayload`; the answer is the DAR's bytes, chunked when they
     /// outgrow a frame. Only a peer the run invited is served.
     RequestDar = 0x0027,
+    /// Command: every party member signs the P2P proposal that replaces the
+    /// coordinator's Daml key.
+    SignRotateKey = 0x0028,
+    /// Command: every party member records the coordinator's new Daml key.
+    /// Payload is the new `SigningPublicKey`, length-prefixed.
+    RecordRotatedKey = 0x0029,
 
     // Invites (0x0010 - 0x001F)
     InviteOnboarding = 0x0010,
@@ -119,6 +125,9 @@ pub enum MessageType {
     /// Invite to participate in changing a decentralized party's threshold.
     /// Payload is a JSON `ChangeThresholdInvitePayload`.
     InviteChangeThreshold = 0x0018,
+    /// Invite to sign the rotation of the coordinator's Daml key. Payload is
+    /// a JSON `RotateKeyInvitePayload`.
+    InviteRotateKey = 0x0019,
 
     // Responses (0x0100 - 0x01FF)
     Ack = 0x0101,
@@ -152,6 +161,8 @@ pub enum MessageType {
     AddPartyClearProposal = 0x0209,
     /// Peer → coordinator: signed change-threshold DNS + P2P pair.
     ChangeThresholdSignatures = 0x020A,
+    /// Peer → coordinator: the signed key-rotation P2P proposal.
+    RotateKeySignatures = 0x020B,
 
     // Chunked Transfer (0x0300 - 0x03FF)
     /// Command with chunked payload - payload contains: [command_type (2 bytes)] [total_size (4 bytes)] [chunk_count (4 bytes)]
@@ -186,8 +197,9 @@ pub const CHUNK_SIZE: usize = 1024 * 1024;
 
 /// Hard ceiling on the assembled size of a chunked response. Bounds peer-supplied
 /// `total_size` so a malicious or buggy peer can't ask the client to allocate
-/// arbitrary memory. A DAR that a peer reads before it accepts is the largest
-/// payload served this way; the server refuses one above this cap.
+/// arbitrary memory. The `UploadDars` bundle is the largest payload served this
+/// way: every DAR of one distribution run, encoded by `utils::encode_files`. The
+/// coordinator refuses a run whose bundle exceeds this cap.
 pub const MAX_CHUNKED_TOTAL_SIZE: usize = 16 * 1024 * 1024;
 
 /// Hard ceiling on the chunk count for a chunked response. Equal to
@@ -260,6 +272,9 @@ impl TryFrom<u16> for MessageType {
             0x0025 => Ok(Self::SignChangeThreshold),
             0x0026 => Ok(Self::RetireLegacyKeys),
             0x0027 => Ok(Self::RequestDar),
+            0x0028 => Ok(Self::SignRotateKey),
+            0x0029 => Ok(Self::RecordRotatedKey),
+            0x0019 => Ok(Self::InviteRotateKey),
             0x0018 => Ok(Self::InviteChangeThreshold),
             0x0101 => Ok(Self::Ack),
             0x0102 => Ok(Self::Data),
@@ -282,6 +297,7 @@ impl TryFrom<u16> for MessageType {
             0x0208 => Ok(Self::AddPartyClearSignatures),
             0x0209 => Ok(Self::AddPartyClearProposal),
             0x020A => Ok(Self::ChangeThresholdSignatures),
+            0x020B => Ok(Self::RotateKeySignatures),
             0x0300 => Ok(Self::ChunkedCommand),
             0x0301 => Ok(Self::GetChunk),
             0x0302 => Ok(Self::Chunk),
@@ -557,6 +573,10 @@ pub enum NoiseError {
 
     #[error("Invalid message format")]
     InvalidMessage,
+
+    /// A chunked payload larger than `MAX_CHUNKED_TOTAL_SIZE`.
+    #[error("Payload too large: {size} bytes exceeds the limit of {limit} bytes")]
+    PayloadTooLarge { size: usize, limit: usize },
 
     #[error("General error: {0}")]
     Anyhow(#[from] anyhow::Error),
@@ -924,6 +944,7 @@ pub(crate) fn is_transient(err: &NoiseError) -> bool {
         | NoiseError::WireVersionMismatch { .. }
         | NoiseError::DecryptionError
         | NoiseError::InvalidMessage
+        | NoiseError::PayloadTooLarge { .. }
         | NoiseError::JsonSerialization(_)
         | NoiseError::Http(_)
         | NoiseError::InvalidUri(_)
@@ -1056,6 +1077,27 @@ fn parse_chunked_command_metadata(
     Ok((command_type, total_size, chunk_count))
 }
 
+/// Check the size and chunk count a peer announces for a chunked payload.
+///
+/// A size above `MAX_CHUNKED_TOTAL_SIZE` is `PayloadTooLarge`, so the error
+/// names the cause. A chunk count above `MAX_CHUNK_COUNT`, or one that does not
+/// match the size, is `InvalidMessage`.
+pub(crate) fn check_chunked_metadata(
+    total_size: usize,
+    chunk_count: usize,
+) -> Result<(), NoiseError> {
+    if total_size > MAX_CHUNKED_TOTAL_SIZE {
+        return Err(NoiseError::PayloadTooLarge {
+            size: total_size,
+            limit: MAX_CHUNKED_TOTAL_SIZE,
+        });
+    }
+    if chunk_count > MAX_CHUNK_COUNT || chunk_count != total_size.div_ceil(CHUNK_SIZE) {
+        return Err(NoiseError::InvalidMessage);
+    }
+    Ok(())
+}
+
 /// Send a message that may receive a chunked response.
 ///
 /// First call goes through `send_noise_message_with_retry`. If the response
@@ -1094,27 +1136,15 @@ pub async fn send_noise_message_with_chunked_response(
 
     // Bound peer-supplied metadata before we allocate or loop. A malicious or
     // buggy peer could otherwise advertise multi-GB sizes and trigger an OOM.
-    if total_size > MAX_CHUNKED_TOTAL_SIZE || chunk_count > MAX_CHUNK_COUNT {
+    if let Err(e) = check_chunked_metadata(total_size, chunk_count) {
         tracing::warn!(
             peer = format!("{peer_address}:{peer_port}"),
             total_size,
             chunk_count,
-            "noise: chunked-response metadata exceeds configured caps",
+            expected_chunks = total_size.div_ceil(CHUNK_SIZE),
+            "noise: refused chunked-response metadata: {e}",
         );
-        return Err(NoiseError::InvalidMessage);
-    }
-    // chunk_count must agree with total_size and CHUNK_SIZE; reject mismatch
-    // (e.g. total=10 but chunk_count=1000).
-    let expected_chunks = total_size.div_ceil(CHUNK_SIZE);
-    if chunk_count != expected_chunks {
-        tracing::warn!(
-            peer = format!("{peer_address}:{peer_port}"),
-            total_size,
-            chunk_count,
-            expected_chunks,
-            "noise: chunked-response chunk_count inconsistent with total_size",
-        );
-        return Err(NoiseError::InvalidMessage);
+        return Err(e);
     }
 
     tracing::debug!(
@@ -1230,6 +1260,19 @@ mod tests {
             MessageType::AddPartySignatures,
             MessageType::AddPartyClearSignatures,
             MessageType::AddPartyClearProposal,
+        ] {
+            assert_eq!(MessageType::try_from(mt.to_u16())?, mt);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn rotate_key_message_types_round_trip() -> Result {
+        for mt in [
+            MessageType::SignRotateKey,
+            MessageType::RecordRotatedKey,
+            MessageType::InviteRotateKey,
+            MessageType::RotateKeySignatures,
         ] {
             assert_eq!(MessageType::try_from(mt.to_u16())?, mt);
         }
@@ -1732,6 +1775,61 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn payload_too_large_is_not_retried() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let calls_clone = calls.clone();
+        let result = retry_loop("test-peer", &test_retry_config(), move || {
+            let calls = calls_clone.clone();
+            async move {
+                calls.fetch_add(1, Ordering::SeqCst);
+                Err::<Bytes, _>(NoiseError::PayloadTooLarge { size: 2, limit: 1 })
+            }
+        })
+        .await;
+        assert!(matches!(result, Err(NoiseError::PayloadTooLarge { .. })));
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn an_oversized_chunked_total_is_payload_too_large() {
+        let result = check_chunked_metadata(MAX_CHUNKED_TOTAL_SIZE + 1, MAX_CHUNK_COUNT + 1);
+        assert!(
+            matches!(
+                result,
+                Err(NoiseError::PayloadTooLarge { size, limit })
+                    if size == MAX_CHUNKED_TOTAL_SIZE + 1 && limit == MAX_CHUNKED_TOTAL_SIZE
+            ),
+            "{result:?}"
+        );
+    }
+
+    #[test]
+    fn a_total_at_the_limit_passes() {
+        assert!(check_chunked_metadata(MAX_CHUNKED_TOTAL_SIZE, MAX_CHUNK_COUNT).is_ok());
+    }
+
+    #[test]
+    fn an_inconsistent_chunk_count_stays_invalid_message() {
+        let result = check_chunked_metadata(10, 1000);
+        assert!(
+            matches!(result, Err(NoiseError::InvalidMessage)),
+            "{result:?}"
+        );
+    }
+
+    #[test]
+    fn payload_too_large_states_size_and_limit() {
+        let error = NoiseError::PayloadTooLarge {
+            size: 20_000_000,
+            limit: 16_777_216,
+        };
+        assert_eq!(
+            error.to_string(),
+            "Payload too large: 20000000 bytes exceeds the limit of 16777216 bytes"
+        );
+    }
+
+    #[tokio::test]
     async fn retry_loop_does_not_retry_on_handshake_failed() {
         let calls = Arc::new(AtomicUsize::new(0));
         let calls_clone = calls.clone();
@@ -2144,6 +2242,53 @@ mod tests {
             "got: {result:?}"
         );
         assert_eq!(served.load(Ordering::SeqCst), 1);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn signature_upload_refusals_do_not_expose_payload_bytes() -> Result {
+        let root = tempfile::tempdir()?;
+        let mut config = NodeConfig::default().with_root_dir(root.path());
+        config.node.participant_id =
+            Some(CantonId::parse(&format!("peer::1220{}", "a".repeat(64)))?);
+        let keys = NoiseKeypair::generate();
+        tokio::fs::create_dir_all(config.data_dir()).await?;
+        keys.save_to_file(config.key_file_path()).await?;
+        let coordinator_keys = NoiseKeypair::generate();
+        let psk = *coordinator_keys.derive_psk(&keys.public_key);
+        let signature = b"signature-payload-must-not-appear".to_vec();
+        let refusal = Message::new(MessageType::Error, signature.clone());
+        let (port, served, server) = refusing_peer(psk, StatusCode::OK, refusal.to_bytes()).await?;
+        let coordinator = Peer {
+            participant_id: CantonId::parse(&format!("coordinator::1220{}", "b".repeat(64)))?,
+            name: "Refusing coordinator".into(),
+            address: "127.0.0.1".into(),
+            port,
+            public_key: coordinator_keys.public_key_hex(),
+            party: None,
+        };
+        let client = NoiseClient::new(config, coordinator, "run-1".into()).await?;
+        let outcomes = [
+            client.send_dns_signature(signature.clone()).await,
+            client.send_p2p_signatures(signature.clone()).await,
+            client.send_submission_signatures(signature.clone()).await,
+            client.send_kick_signatures(signature.clone()).await,
+            client
+                .send_change_threshold_signatures(signature.clone())
+                .await,
+            client.send_add_party_signatures(signature.clone()).await,
+            client
+                .send_add_party_clear_proposal(signature.clone())
+                .await,
+            client.send_add_party_clear_signature(signature).await,
+        ];
+        server.abort();
+        for outcome in outcomes {
+            let error = outcome.unwrap_err();
+            assert!(matches!(error, NoiseError::InvalidMessage));
+            assert!(!format!("{error}").contains("signature-payload-must-not-appear"));
+        }
+        assert_eq!(served.load(Ordering::SeqCst), 8);
         Ok(())
     }
 

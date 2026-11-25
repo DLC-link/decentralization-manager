@@ -33,6 +33,8 @@ pub use acs::{
     open_export_session, open_import_window,
 };
 
+pub(crate) use acs::resume_tenant_import_window;
+
 /// Unix milliseconds, saturating at 0 if the clock is before the epoch.
 ///
 /// Progress timestamps only, so a clock that misbehaves costs a wrong elapsed

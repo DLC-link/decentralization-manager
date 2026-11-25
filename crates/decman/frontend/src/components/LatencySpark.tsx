@@ -16,6 +16,8 @@ interface LatencySparkProps {
 const WIDTH = 92;
 const HEIGHT = 22;
 const PAD = 2;
+/** At the 5s poll, the line appears about 20 seconds after the page opens. */
+const MIN_SAMPLES = 5;
 
 /**
  * A latency sparkline: area fill, line, emphasized endpoint.
@@ -25,8 +27,9 @@ const PAD = 2;
  * what makes a link that has sat at 4 ms and is now at 88 ms read as a problem
  * before it crosses any threshold.
  *
- * Below two samples there is no shape to draw, so nothing is rendered rather
- * than a misleading flat line.
+ * Below `MIN_SAMPLES` there is no shape worth drawing, so nothing is rendered.
+ * Two samples scaled to their own min/max always span the full height, which
+ * draws a steep stroke out of a change of a few milliseconds.
  */
 export const LatencySpark = ({
   samples,
@@ -41,7 +44,7 @@ export const LatencySpark = ({
     bad: theme.palette.error.main,
   }[tone];
 
-  if (samples.length < 2) return null;
+  if (samples.length < MIN_SAMPLES) return null;
 
   const lo = Math.min(...samples);
   const hi = Math.max(...samples);

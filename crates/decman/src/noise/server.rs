@@ -5,8 +5,13 @@ use std::{
     time::{Duration, Instant},
 };
 
+use anyhow::Context;
+use bytes::Bytes;
+use canton_proto_rs::com::digitalasset::canton::protocol::v30::{
+    PartyToParticipant, SignedTopologyTransaction,
+};
 use sqlx::SqlitePool;
-use tokio::sync::RwLock;
+use tokio::sync::{Mutex, RwLock};
 
 use common::types::AcsTransferProgress;
 
@@ -20,20 +25,24 @@ use crate::{
         acs_block_size, parse_public_key, send_noise_message,
     },
     server::{
-        DeclineInvitationPayload, WorkflowKind, WorkflowProgress,
+        DeclineInvitationPayload, WorkflowKind, WorkflowProgress, WorkflowRun,
         peer_status::{LastSeen, bump},
     },
     utils,
     workflow::{
         WorkflowState,
-        add_party::AddPartyStep,
+        add_party::{AddPartyConfig, AddPartyStep},
         change_threshold::ChangeThresholdStep,
         contracts::ContractsStep,
         dars::DarsStep,
-        kick::KickStep,
+        kick::{KickConfig, KickStep},
         onboarding::OnboardingStep,
         party_replication::pipe::{PipeBlock, encode_block},
+        rotate_key::RotateKeyStep,
+        signature_pairs::split_signed_pair,
+        signing_keys::requires_signing_key_adoption,
         state::WorkflowStep,
+        storage::{WorkflowStorage, artifact_kinds},
         topology,
     },
 };
@@ -81,6 +90,9 @@ fn decline_matches_run(
 
 /// Coordinator server that accepts connections from peers
 pub struct NoiseServer<S: WorkflowStep + 'static> {
+    db: SqlitePool,
+    /// Serializes the conflict check, write, and completion for concurrent retries.
+    recorded_upload: Mutex<()>,
     node_config: Arc<NodeConfig>,
     keypair: Arc<NoiseKeypair>,
     /// Full peer records (address + port + public_key) kept around so the
@@ -110,6 +122,7 @@ pub enum ActiveWorkflow {
     Dars(Arc<NoiseServer<DarsStep>>),
     AddParty(Arc<NoiseServer<AddPartyStep>>),
     ChangeThreshold(Arc<NoiseServer<ChangeThresholdStep>>),
+    RotateKey(Arc<NoiseServer<RotateKeyStep>>),
 }
 
 impl ActiveWorkflow {
@@ -126,6 +139,7 @@ impl ActiveWorkflow {
             Self::Dars(s) => s.handle_command(peer_id, message).await,
             Self::AddParty(s) => s.handle_command(peer_id, message).await,
             Self::ChangeThreshold(s) => s.handle_command(peer_id, message).await,
+            Self::RotateKey(s) => s.handle_command(peer_id, message).await,
         }
     }
 
@@ -139,6 +153,7 @@ impl ActiveWorkflow {
             Self::Dars(s) => s.wait_until_stranded().await,
             Self::AddParty(s) => s.wait_until_stranded().await,
             Self::ChangeThreshold(s) => s.wait_until_stranded().await,
+            Self::RotateKey(s) => s.wait_until_stranded().await,
         }
     }
 
@@ -153,6 +168,7 @@ impl ActiveWorkflow {
             Self::Dars(s) => s.workflow_state.connected_peers().await,
             Self::AddParty(s) => s.workflow_state.connected_peers().await,
             Self::ChangeThreshold(s) => s.workflow_state.connected_peers().await,
+            Self::RotateKey(s) => s.workflow_state.connected_peers().await,
         }
     }
 
@@ -182,7 +198,7 @@ fn peers_for_party_threshold(m: usize, expected_peers: usize) -> usize {
 async fn resolve_peer_threshold(
     kind: WorkflowKind,
     config: &NodeConfig,
-    dec_party_id: Option<&CantonId>,
+    run: Option<&WorkflowRun>,
     db: &SqlitePool,
     expected_peers: usize,
 ) -> Option<usize> {
@@ -194,21 +210,16 @@ async fn resolve_peer_threshold(
         WorkflowKind::Onboarding
         | WorkflowKind::Dars
         | WorkflowKind::AddParty
-        | WorkflowKind::ChangeThreshold => None,
+        | WorkflowKind::ChangeThreshold
+        | WorkflowKind::RotateKey => None,
         // Existing M-of-N party: a quorum is enough.
         WorkflowKind::Kick | WorkflowKind::Contracts => {
-            let party_id = dec_party_id?;
-            // A kick on a party whose keys are still in the deprecated
-            // `PartyToKeyMapping` moves every survivor's key inline, and
-            // Canton makes each added key sign the transaction that adds it.
-            // A quorum would leave the proposal short of signatures, so that
-            // kick needs every survivor, not a quorum.
-            if kind == WorkflowKind::Kick && party_keys_are_legacy(config, party_id).await {
-                tracing::info!(
-                    "{party_id} keeps its signing keys in a legacy PartyToKeyMapping; this \
-                     kick needs every surviving peer to sign, not a quorum"
-                );
-                return None;
+            let run = run?;
+            let party_id = run.dec_party_id.as_ref()?;
+            if kind == WorkflowKind::Kick {
+                let mapping = kick_party_mapping(config, party_id).await;
+                return kick_peer_threshold_from_mapping(db, run, expected_peers, mapping.as_ref())
+                    .await;
             }
             let m = lookup_party_threshold(db, party_id).await?;
             Some(peers_for_party_threshold(m, expected_peers))
@@ -216,27 +227,62 @@ async fn resolve_peer_threshold(
     }
 }
 
-/// Whether a party still keeps its signing keys in the deprecated
-/// `PartyToKeyMapping` instead of inline on its `PartyToParticipant`.
-///
-/// Answers `true` when the mapping cannot be read at all. The cost of being
-/// wrong that way is a run that waits for every peer; the cost of the other
-/// way is a run that advances without the signatures Canton demands.
-async fn party_keys_are_legacy(config: &NodeConfig, party_id: &CantonId) -> bool {
+/// A kick signs the DNS under the current threshold, then signs the P2P
+/// update under the new one. Missing or invalid saved config requires all
+/// peers rather than allowing the signature gate to advance too soon.
+async fn lookup_kick_peer_threshold(
+    db: &SqlitePool,
+    run: &WorkflowRun,
+    expected_peers: usize,
+) -> Option<usize> {
+    let party_id = run.dec_party_id.as_ref()?;
+    let current = lookup_party_threshold(db, party_id).await?;
+    let config: KickConfig = serde_json::from_str(&run.config_json).ok()?;
+    let proposed = usize::try_from(config.new_threshold)
+        .ok()
+        .filter(|t| *t > 0)?;
+    Some(peers_for_party_threshold(
+        current.max(proposed),
+        expected_peers,
+    ))
+}
+
+/// Fully and partially legacy parties need each added key to sign. Requiring
+/// every invitee prevents an ordinary namespace quorum from skipping one.
+async fn kick_peer_threshold_from_mapping(
+    db: &SqlitePool,
+    run: &WorkflowRun,
+    expected_peers: usize,
+    mapping: Option<&PartyToParticipant>,
+) -> Option<usize> {
+    let mapping = mapping?;
+    if requires_signing_key_adoption(mapping) {
+        tracing::info!(
+            "This kick must move legacy signing keys inline; every invited peer must sign"
+        );
+        return None;
+    }
+    lookup_kick_peer_threshold(db, run, expected_peers).await
+}
+
+/// Read the P2P mapping for the kick's signature gate. An unavailable mapping
+/// requires every invitee rather than risking an unsigned key adoption.
+async fn kick_party_mapping(
+    config: &NodeConfig,
+    party_id: &CantonId,
+) -> Option<PartyToParticipant> {
     let synchronizer_id = match utils::get_synchronizer_id(config).await {
         Ok(id) => id,
         Err(e) => {
             tracing::warn!("Cannot resolve the synchronizer id to classify {party_id}: {e:#}");
-            return true;
+            return None;
         }
     };
     match topology::fetch_p2p_mapping(config, &synchronizer_id, party_id).await {
-        Ok(mapping) => mapping
-            .party_signing_keys
-            .is_none_or(|keys| keys.keys.is_empty()),
+        Ok(mapping) => Some(mapping),
         Err(e) => {
             tracing::warn!("Cannot read the P2P mapping for {party_id}: {e:#}");
-            true
+            None
         }
     }
 }
@@ -328,6 +374,13 @@ impl<S: WorkflowStep + 'static> NoiseServer<S> {
             }
         };
 
+        let restored_payload = match persisted.as_ref() {
+            Some(run) if run.status == WorkflowProgress::InProgress => {
+                Self::signature_command_payload(&db, run).await?
+            }
+            _ => None,
+        };
+
         let expected_peers: Vec<CantonId> = match persisted.as_ref() {
             Some(run) => run.expected_peers.clone(),
             None => network_config
@@ -365,7 +418,7 @@ impl<S: WorkflowStep + 'static> NoiseServer<S> {
         let peer_threshold = resolve_peer_threshold(
             S::kind(),
             &node_config,
-            persisted.as_ref().and_then(|run| run.dec_party_id.as_ref()),
+            persisted.as_ref(),
             &db,
             expected_peers.len(),
         )
@@ -377,6 +430,7 @@ impl<S: WorkflowStep + 'static> NoiseServer<S> {
         // peers instead of starting fresh from `initial_step`. The
         // coordinator workflow loop is naturally driven by `current_step`, so
         // seeding it from the row picks the run back up at the right place.
+        let storage = db.clone();
         let workflow_state = match persisted {
             Some(run) if run.status == WorkflowProgress::InProgress => {
                 match S::try_from_step_name(&run.current_step) {
@@ -422,7 +476,13 @@ impl<S: WorkflowStep + 'static> NoiseServer<S> {
             ),
         };
 
+        if let Some(payload) = restored_payload {
+            workflow_state.set_command_payload(payload).await;
+        }
+
         Ok(Self {
+            db: storage,
+            recorded_upload: Mutex::new(()),
             node_config: Arc::new(node_config),
             keypair: Arc::new(keypair),
             peers,
@@ -432,6 +492,46 @@ impl<S: WorkflowStep + 'static> NoiseServer<S> {
             serving_since: Instant::now(),
             _p: PhantomData,
         })
+    }
+
+    /// Rebuild signature commands before the server can become active.
+    /// The persisted proposals must remain byte-identical across a restart.
+    async fn signature_command_payload(
+        db: &SqlitePool,
+        run: &WorkflowRun,
+    ) -> anyhow::Result<Option<Vec<u8>>> {
+        let command = S::try_from_step_name(&run.current_step).and_then(|step| step.to_command());
+        let kinds: &[&str] = match command {
+            Some(MessageType::SignKick) => &[
+                artifact_kinds::KICK_DNS_PROPOSAL,
+                artifact_kinds::KICK_P2P_PROPOSAL,
+            ],
+            Some(MessageType::SignChangeThreshold) => &[
+                artifact_kinds::CHANGE_THRESHOLD_DNS_PROPOSAL,
+                artifact_kinds::CHANGE_THRESHOLD_P2P_PROPOSAL,
+            ],
+            Some(MessageType::SignAddParty) => &[
+                artifact_kinds::ADD_PARTY_DNS_PROPOSAL,
+                artifact_kinds::ADD_PARTY_P2P_PROPOSAL,
+            ],
+            Some(MessageType::SignClearOnboarding) => &[artifact_kinds::ADD_PARTY_CLEAR_PROPOSAL],
+            _ => return Ok(None),
+        };
+        let mut items = vec![run.config_json.as_bytes().to_vec()];
+        for kind in kinds {
+            let proposal = db
+                .read_artifact(&run.instance_name, kind, None)
+                .await?
+                .with_context(|| {
+                    format!(
+                        "Cannot resume {} at {}: {kind} artifact missing",
+                        run.instance_name, run.current_step
+                    )
+                })?;
+            items.push(proposal);
+        }
+        let slices: Vec<&[u8]> = items.iter().map(Vec::as_slice).collect();
+        Ok(Some(utils::encode_length_prefixed(&slices)))
     }
 
     pub fn get_workflow_state(&self) -> Arc<WorkflowState<S>> {
@@ -533,28 +633,67 @@ impl<S: WorkflowStep + 'static> NoiseServer<S> {
                     .await
             }
             MessageType::KickSignatures => {
-                self.handle_peer_data(peer_id, message.payload, "kick signatures")
-                    .await
+                self.handle_recorded_upload(
+                    peer_id,
+                    &message.payload,
+                    MessageType::SignKick,
+                    artifact_kinds::KICK_SIGNATURE_UPLOAD,
+                )
+                .await
             }
             MessageType::AddPartyKeysUpload => {
-                self.handle_peer_data(peer_id, message.payload, "add-party keys upload")
-                    .await
+                self.handle_recorded_upload(
+                    peer_id,
+                    &message.payload,
+                    MessageType::GenerateAddPartyKeys,
+                    artifact_kinds::ADD_PARTY_KEYS_UPLOAD,
+                )
+                .await
             }
             MessageType::AddPartySignatures => {
-                self.handle_peer_data(peer_id, message.payload, "add-party signatures")
-                    .await
+                self.handle_recorded_upload(
+                    peer_id,
+                    &message.payload,
+                    MessageType::SignAddParty,
+                    artifact_kinds::ADD_PARTY_SIGNATURE_UPLOAD,
+                )
+                .await
             }
             MessageType::AddPartyClearSignatures => {
-                self.handle_peer_data(peer_id, message.payload, "add-party clearing signature")
-                    .await
+                self.handle_recorded_upload(
+                    peer_id,
+                    &message.payload,
+                    MessageType::SignClearOnboarding,
+                    artifact_kinds::SIGNED_ADD_PARTY_CLEAR,
+                )
+                .await
             }
             MessageType::AddPartyClearProposal => {
-                self.handle_peer_data(peer_id, message.payload, "add-party clearing proposal")
-                    .await
+                self.handle_recorded_upload(
+                    peer_id,
+                    &message.payload,
+                    MessageType::ClearOnboardingFlag,
+                    artifact_kinds::ADD_PARTY_CLEAR_PROPOSAL_UPLOAD,
+                )
+                .await
             }
             MessageType::ChangeThresholdSignatures => {
-                self.handle_peer_data(peer_id, message.payload, "change-threshold signatures")
-                    .await
+                self.handle_recorded_upload(
+                    peer_id,
+                    &message.payload,
+                    MessageType::SignChangeThreshold,
+                    artifact_kinds::CHANGE_THRESHOLD_SIGNATURE_UPLOAD,
+                )
+                .await
+            }
+            MessageType::RotateKeySignatures => {
+                self.handle_recorded_upload(
+                    peer_id,
+                    &message.payload,
+                    MessageType::SignRotateKey,
+                    artifact_kinds::SIGNED_ROTATE_KEY_P2P,
+                )
+                .await
             }
             MessageType::StatusUpdate => self.handle_status_update(peer_id, message.payload).await,
             MessageType::DeclineInvitation => Ok(self
@@ -585,19 +724,27 @@ impl<S: WorkflowStep + 'static> NoiseServer<S> {
 
         // Get current command from workflow state
         if let Some(command) = self.workflow_state.current_command().await {
+            // A resumed coordinator re-opens its ACS export inside the SyncAcs
+            // step, and Canton can take minutes to answer. The new member
+            // pulls block 1 as soon as it has the command and gives up if no
+            // export is open, so it waits until the export is there.
+            if command == MessageType::ImportAcs && !self.workflow_state.has_acs_export().await {
+                tracing::debug!("Sending Wait to {peer_id} (ACS export not open yet)");
+                return Ok(Message::new_empty(MessageType::Wait));
+            }
             tracing::info!("Sending command {command:?} to {peer_id}");
             // Include payload only for commands that carry data (e.g. UploadDars,
             // SignDns). See `command_carries_payload` for why Disconnect is excluded.
             let payload = if command_carries_payload(command) {
                 self.workflow_state.get_command_payload().await
             } else {
-                Vec::new()
+                Bytes::new()
             };
             if payload.is_empty() {
                 Ok(Message::new_empty(command))
             } else if payload.len() <= MAX_PAYLOAD_SIZE {
                 // Small payload - send directly
-                Ok(Message::new(command, payload))
+                Ok(Message::new(command, payload.to_vec()))
             } else {
                 // Large payload - use chunked transfer
                 let total_size = payload.len() as u32;
@@ -722,6 +869,108 @@ impl<S: WorkflowStep + 'static> NoiseServer<S> {
         Ok(Message::new_empty(MessageType::Ack))
     }
 
+    /// Persist each upload before completion, because completed peers do not
+    /// upload again after a coordinator restart.
+    async fn handle_recorded_upload(
+        &self,
+        peer_id: CantonId,
+        payload: &[u8],
+        command: MessageType,
+        artifact_kind: &str,
+    ) -> Result<Message, NoiseError> {
+        if self.workflow_state.current_command().await != Some(command) {
+            tracing::warn!(
+                "Ignoring {artifact_kind} from {peer_id}: the run no longer sends {command:?}"
+            );
+            return Ok(Message::new_empty(MessageType::Ack));
+        }
+        if !self.workflow_state.expected_peers().contains(&peer_id) {
+            tracing::warn!("Ignoring {artifact_kind} from unexpected peer {peer_id}");
+            return Ok(Message::new(
+                MessageType::Error,
+                b"The peer is not expected in this workflow".to_vec(),
+            ));
+        }
+        let _upload_guard = self.recorded_upload.lock().await;
+        let new_member_upload = matches!(
+            command,
+            MessageType::GenerateAddPartyKeys | MessageType::ClearOnboardingFlag
+        );
+        let validation: anyhow::Result<()> = async {
+            if new_member_upload {
+                anyhow::ensure!(
+                    S::kind() == WorkflowKind::AddParty,
+                    "Wrong workflow for add-party upload"
+                );
+                let run = self
+                    .db
+                    .get_workflow_run(self.workflow_state.instance_name())
+                    .await?
+                    .ok_or(sqlx::Error::RowNotFound)?;
+                let config: AddPartyConfig = serde_json::from_str(&run.config_json)?;
+                anyhow::ensure!(
+                    peer_id == config.new_participant_id,
+                    "Only the new member may upload"
+                );
+                if command == MessageType::GenerateAddPartyKeys {
+                    utils::decode_length_prefixed(payload, 2)?;
+                } else if !payload.is_empty() {
+                    let _: SignedTopologyTransaction =
+                        utils::read_first_message_from_bytes(payload)?;
+                }
+                if let Some(saved) = self
+                    .db
+                    .read_artifact(
+                        self.workflow_state.instance_name(),
+                        artifact_kind,
+                        Some(&peer_id.to_string()),
+                    )
+                    .await?
+                {
+                    anyhow::ensure!(saved == payload, "Upload conflicts with saved payload");
+                }
+            } else if matches!(
+                command,
+                MessageType::SignKick
+                    | MessageType::SignAddParty
+                    | MessageType::SignChangeThreshold
+            ) {
+                split_signed_pair(payload)?;
+            }
+            Ok(())
+        }
+        .await;
+        if let Err(error) = validation {
+            if error.downcast_ref::<sqlx::Error>().is_some() {
+                tracing::error!(%error, "Failed to read {artifact_kind} storage for {peer_id}");
+                return Ok(Message::new(
+                    MessageType::Error,
+                    b"The coordinator could not store the upload".to_vec(),
+                ));
+            }
+            tracing::warn!(%error, "Invalid {artifact_kind} from {peer_id}");
+            return Ok(Message::new(
+                MessageType::Error,
+                format!("Invalid upload: {error}").into_bytes(),
+            ));
+        }
+        if let Err(e) = self
+            .workflow_state
+            .write_peer_artifact(artifact_kind, &peer_id, payload)
+            .await
+        {
+            tracing::error!("Failed to store {artifact_kind} from {peer_id}: {e:#}");
+            return Ok(Message::new(
+                MessageType::Error,
+                b"The coordinator could not store the upload".to_vec(),
+            ));
+        }
+        self.workflow_state
+            .peer_completed_if(peer_id, |step| step.to_command() == Some(command))
+            .await;
+        Ok(Message::new_empty(MessageType::Ack))
+    }
+
     /// Handle status update from peer
     async fn handle_status_update(
         &self,
@@ -731,8 +980,13 @@ impl<S: WorkflowStep + 'static> NoiseServer<S> {
         let status = String::from_utf8_lossy(&payload);
         tracing::info!("Handling status update from {peer_id}: {status}");
 
-        // Mark peer as completed for this step
-        self.workflow_state.peer_completed(peer_id).await;
+        if !self
+            .workflow_state
+            .peer_completed_if(peer_id.clone(), |step| step.accepts_status(&payload))
+            .await
+        {
+            tracing::warn!("Status update from {peer_id} completes no step: {status}");
+        }
 
         Ok(Message::new_empty(MessageType::Ack))
     }
@@ -847,8 +1101,24 @@ impl<S: WorkflowStep + 'static> NoiseServer<S> {
 }
 
 #[cfg(test)]
+mod recorded_upload_tests;
+
+#[cfg(test)]
 mod tests {
+    use canton_proto_rs::com::digitalasset::canton::{
+        crypto::v30::{SigningKeyUsage, SigningKeysWithThreshold, SigningPublicKey},
+        protocol::v30::{enums::ParticipantPermission, party_to_participant::HostingParticipant},
+    };
+
     use super::*;
+    use crate::{
+        canton_id::{NAMESPACE_LENGTH, Namespace},
+        db::{
+            MIGRATOR,
+            rows::WorkflowRunRow,
+            schema::{Commitable, SchemaWrite},
+        },
+    };
 
     #[test]
     fn disconnect_never_carries_a_payload() {
@@ -930,6 +1200,192 @@ mod tests {
         ));
     }
 
+    fn kick_peer(tag: u8) -> CantonId {
+        CantonId::new(
+            format!("peer-{tag}"),
+            Namespace::new([tag; NAMESPACE_LENGTH]),
+        )
+    }
+
+    async fn saved_kick(
+        pool: &SqlitePool,
+        current: i64,
+        proposed: i32,
+    ) -> anyhow::Result<WorkflowRun> {
+        let party = kick_peer(42);
+        sqlx::query(
+            "INSERT INTO dec_party (party_id, prefix, threshold, updated_at) VALUES (?, ?, ?, 0)",
+        )
+        .bind(party.to_string())
+        .bind(&party.prefix)
+        .bind(current)
+        .execute(pool)
+        .await?;
+        let config = KickConfig::new(
+            party.clone(),
+            Some(kick_peer(9)),
+            "owner-9".to_string(),
+            proposed,
+            None,
+            0,
+            "raised-threshold-kick".to_string(),
+        );
+        let run = WorkflowRunRow {
+            instance_name: config.instance_name.clone(),
+            kind: "Kick".to_string(),
+            role: "Coordinator".to_string(),
+            status: "inprogress".to_string(),
+            current_step: "WaitingForPeers".to_string(),
+            step_index: 0,
+            step_total: KickStep::step_total(),
+            config_json: serde_json::to_string(&config)?,
+            coordinator_pubkey: None,
+            coordinator_instance: None,
+            expected_peers_json: serde_json::to_string(&vec![
+                kick_peer(2),
+                kick_peer(3),
+                kick_peer(4),
+            ])?,
+            completed_peers_json: "[]".to_string(),
+            dec_party_id: Some(party.to_string()),
+            error: None,
+            dismissed: 0,
+            created_at: 0,
+            updated_at: 0,
+        }
+        .into_domain()?;
+        let mut tx = pool.begin_transaction().await?;
+        tx.upsert_workflow_run(&run).await?;
+        Commitable::commit(tx).await?;
+        pool.get_workflow_run(&config.instance_name)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("saved kick missing"))
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_raised_kick_threshold_gates_connections_and_signatures(
+        pool: SqlitePool,
+    ) -> anyhow::Result<()> {
+        let run = saved_kick(&pool, 2, 3).await?;
+        // The display field is not stored; the quorum must read saved config.
+        assert_eq!(run.new_threshold, None);
+        let threshold = lookup_kick_peer_threshold(&pool, &run, 3).await;
+        assert_eq!(threshold, Some(2));
+        let state = WorkflowState::new(
+            pool.clone(),
+            run.instance_name.clone(),
+            KickStep::WaitingForPeers,
+            run.expected_peers,
+            threshold,
+        );
+
+        state.peer_connected(kick_peer(2)).await;
+        assert_eq!(state.current_step().await, KickStep::WaitingForPeers);
+        state.peer_connected(kick_peer(3)).await;
+        assert_eq!(state.current_step().await, KickStep::ExportState);
+        state.advance_step().await;
+        state.advance_step().await;
+        assert_eq!(state.current_step().await, KickStep::SignProposals);
+
+        state.peer_completed(kick_peer(2)).await;
+        assert_eq!(state.current_step().await, KickStep::SignProposals);
+        state.peer_completed(kick_peer(3)).await;
+        assert_eq!(state.current_step().await, KickStep::SubmitKick);
+        let saved = pool
+            .get_workflow_run(&run.instance_name)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("updated kick missing"))?;
+        assert_eq!(saved.current_step, "SubmitKick");
+        Ok(())
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_lowered_kick_threshold_still_needs_the_current_quorum(
+        pool: SqlitePool,
+    ) -> anyhow::Result<()> {
+        let mut run = saved_kick(&pool, 3, 2).await?;
+        assert_eq!(lookup_kick_peer_threshold(&pool, &run, 3).await, Some(2));
+        for invalid_config in ["{}", "not JSON"] {
+            run.config_json = invalid_config.to_string();
+            assert_eq!(lookup_kick_peer_threshold(&pool, &run, 3).await, None);
+        }
+        Ok(())
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_kick_with_an_invalid_saved_threshold_requires_all_peers(
+        pool: SqlitePool,
+    ) -> anyhow::Result<()> {
+        let mut run = saved_kick(&pool, 2, 0).await?;
+        assert_eq!(lookup_kick_peer_threshold(&pool, &run, 3).await, None);
+        let mut config: KickConfig = serde_json::from_str(&run.config_json)?;
+        config.new_threshold = -1;
+        run.config_json = serde_json::to_string(&config)?;
+        assert_eq!(lookup_kick_peer_threshold(&pool, &run, 3).await, None);
+        Ok(())
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_partial_key_adoption_cannot_advance_at_just_namespace_quorum(
+        pool: SqlitePool,
+    ) -> anyhow::Result<()> {
+        let run = saved_kick(&pool, 2, 2).await?;
+        let mut mapping = PartyToParticipant {
+            participants: [1, 2, 3, 4, 9]
+                .into_iter()
+                .map(|tag| HostingParticipant {
+                    participant_uid: kick_peer(tag).to_string(),
+                    permission: ParticipantPermission::Confirmation as i32,
+                    ..Default::default()
+                })
+                .collect(),
+            party_signing_keys: Some(SigningKeysWithThreshold {
+                keys: vec![SigningPublicKey {
+                    public_key: vec![1; 32],
+                    usage: vec![SigningKeyUsage::Protocol as i32],
+                    ..Default::default()
+                }],
+                threshold: 1,
+            }),
+            threshold: 2,
+            ..Default::default()
+        };
+        let threshold = kick_peer_threshold_from_mapping(&pool, &run, 3, Some(&mapping)).await;
+        assert_eq!(threshold, None);
+        let state = WorkflowState::new(
+            pool.clone(),
+            run.instance_name.clone(),
+            KickStep::SignProposals,
+            run.expected_peers.clone(),
+            threshold,
+        );
+        state.peer_completed(kick_peer(2)).await;
+        assert_eq!(state.current_step().await, KickStep::SignProposals);
+        state.peer_completed(kick_peer(3)).await;
+        assert_eq!(state.current_step().await, KickStep::SignProposals);
+        state.peer_completed(kick_peer(4)).await;
+        assert_eq!(state.current_step().await, KickStep::SubmitKick);
+        mapping.party_signing_keys = Some(SigningKeysWithThreshold {
+            keys: (1..=5)
+                .map(|seed| SigningPublicKey {
+                    public_key: vec![seed; 32],
+                    usage: vec![SigningKeyUsage::Protocol as i32],
+                    ..Default::default()
+                })
+                .collect(),
+            threshold: 2,
+        });
+        assert_eq!(
+            kick_peer_threshold_from_mapping(&pool, &run, 3, Some(&mapping)).await,
+            Some(1)
+        );
+        assert_eq!(
+            kick_peer_threshold_from_mapping(&pool, &run, 3, None).await,
+            None
+        );
+        Ok(())
+    }
+
     #[test]
     fn party_threshold_subtracts_the_coordinators_own_signature() {
         assert_eq!(peers_for_party_threshold(2, 2), 1);
@@ -942,5 +1398,283 @@ mod tests {
         assert_eq!(peers_for_party_threshold(1, 3), 1); // M=1 → 0 clamps up to 1
         assert_eq!(peers_for_party_threshold(9, 2), 2); // over-count clamps to all
         assert_eq!(peers_for_party_threshold(5, 0), 0); // no peers
+    }
+
+    /// A rotation coordinator's server, driven through `handle_command` the
+    /// way the Noise listener routes peer messages to it.
+    mod rotate_key_replies {
+        use common::types::WorkflowRole;
+
+        use super::*;
+        use crate::{
+            canton_id::{NAMESPACE_LENGTH, Namespace},
+            error::Result,
+            workflow::{
+                rotate_key::RECORDED_KEY_STATUS, storage::WorkflowStorage,
+                topology::RETIRED_LEGACY_KEYS_STATUS,
+            },
+        };
+
+        const RUN: &str = "rotate-key-run";
+
+        fn peer(n: u8) -> CantonId {
+            CantonId::new(format!("p{n}"), Namespace::new([n; NAMESPACE_LENGTH]))
+        }
+
+        async fn insert_run(db: &SqlitePool, step: RotateKeyStep, peers: &[CantonId]) -> Result {
+            sqlx::query(
+                "INSERT INTO workflow_runs
+                 (instance_name, kind, role, status, current_step, step_index, step_total,
+                  config_json, expected_peers_json, completed_peers_json, created_at, updated_at)
+                 VALUES (?, ?, ?, 'inprogress', ?, ?, ?, '{}', ?, '[]', 0, 0)",
+            )
+            .bind(RUN)
+            .bind(WorkflowKind::RotateKey.as_str())
+            .bind(WorkflowRole::Coordinator.as_str())
+            .bind(step.step_name())
+            .bind(step.step_index())
+            .bind(RotateKeyStep::step_total())
+            .bind(serde_json::to_string(peers)?)
+            .execute(db)
+            .await?;
+            Ok(())
+        }
+
+        /// Start the coordinator's server the way a node does, from its
+        /// persisted row. Calling it again acts as a restart.
+        async fn start(
+            db: &SqlitePool,
+            root: &tempfile::TempDir,
+        ) -> Result<NoiseServer<RotateKeyStep>> {
+            let config = NodeConfig::default().with_root_dir(root.path());
+            if !config.key_file_path().exists() {
+                tokio::fs::create_dir_all(config.data_dir()).await?;
+                NoiseKeypair::generate()
+                    .save_to_file(config.key_file_path())
+                    .await?;
+            }
+            Ok(NoiseServer::new(
+                config,
+                NetworkConfig::default(),
+                db.clone(),
+                RUN.into(),
+                RotateKeyStep::WaitingForPeers,
+                None,
+                Arc::new(RwLock::new(HashMap::new())),
+            )
+            .await?)
+        }
+
+        async fn send(
+            server: &NoiseServer<RotateKeyStep>,
+            from: &CantonId,
+            msg_type: MessageType,
+            payload: &[u8],
+        ) -> Result<MessageType> {
+            let reply = server
+                .handle_command(from.clone(), Message::new(msg_type, payload.to_vec()))
+                .await?;
+            Ok(reply.msg_type)
+        }
+
+        #[sqlx::test(migrations = "./migrations")]
+        async fn a_late_retirement_reply_does_not_complete_record_key(db: SqlitePool) -> Result {
+            let root = tempfile::tempdir()?;
+            insert_run(&db, RotateKeyStep::RecordKey, &[peer(1)]).await?;
+            let server = start(&db, &root).await?;
+
+            let reply = send(
+                &server,
+                &peer(1),
+                MessageType::StatusUpdate,
+                RETIRED_LEGACY_KEYS_STATUS,
+            )
+            .await?;
+            assert_eq!(reply, MessageType::Ack);
+            let state = server.get_workflow_state();
+            assert_eq!(state.current_step().await, RotateKeyStep::RecordKey);
+            assert!(!state.has_peer_completed(&peer(1)).await);
+
+            // The member still gets the command it has not run.
+            let command = send(&server, &peer(1), MessageType::GetNextCommand, &[]).await?;
+            assert_eq!(command, MessageType::RecordRotatedKey);
+
+            send(
+                &server,
+                &peer(1),
+                MessageType::StatusUpdate,
+                RECORDED_KEY_STATUS,
+            )
+            .await?;
+            assert_eq!(state.current_step().await, RotateKeyStep::Complete);
+            Ok(())
+        }
+
+        #[sqlx::test(migrations = "./migrations")]
+        async fn signatures_survive_a_coordinator_restart(db: SqlitePool) -> Result {
+            let root = tempfile::tempdir()?;
+            insert_run(&db, RotateKeyStep::SignProposal, &[peer(1), peer(2)]).await?;
+            let before = start(&db, &root).await?;
+            let reply = send(
+                &before,
+                &peer(1),
+                MessageType::RotateKeySignatures,
+                b"signed by p1",
+            )
+            .await?;
+            assert_eq!(reply, MessageType::Ack);
+            drop(before);
+
+            let after = start(&db, &root).await?;
+            let state = after.get_workflow_state();
+            assert_eq!(state.current_step().await, RotateKeyStep::SignProposal);
+            assert_eq!(
+                send(&after, &peer(1), MessageType::GetNextCommand, &[]).await?,
+                MessageType::Wait,
+                "p1 already signed, so it is not asked again"
+            );
+            send(
+                &after,
+                &peer(2),
+                MessageType::RotateKeySignatures,
+                b"signed by p2",
+            )
+            .await?;
+            assert_eq!(state.current_step().await, RotateKeyStep::Submit);
+
+            let mut stored = db
+                .list_artifacts(RUN, artifact_kinds::SIGNED_ROTATE_KEY_P2P)
+                .await?;
+            stored.sort();
+            let mut expected = vec![
+                (peer(1).to_string(), b"signed by p1".to_vec()),
+                (peer(2).to_string(), b"signed by p2".to_vec()),
+            ];
+            expected.sort();
+            assert_eq!(stored, expected);
+            Ok(())
+        }
+
+        #[sqlx::test(migrations = "./migrations")]
+        async fn a_signature_after_sign_proposal_counts_for_nothing(db: SqlitePool) -> Result {
+            let root = tempfile::tempdir()?;
+            insert_run(&db, RotateKeyStep::RetireLegacyKeys, &[peer(1)]).await?;
+            let server = start(&db, &root).await?;
+
+            let reply = send(
+                &server,
+                &peer(1),
+                MessageType::RotateKeySignatures,
+                b"a late copy",
+            )
+            .await?;
+            assert_eq!(reply, MessageType::Ack);
+            assert!(
+                !server
+                    .get_workflow_state()
+                    .has_peer_completed(&peer(1))
+                    .await
+            );
+            assert!(
+                db.list_artifacts(RUN, artifact_kinds::SIGNED_ROTATE_KEY_P2P)
+                    .await?
+                    .is_empty()
+            );
+            Ok(())
+        }
+
+        #[sqlx::test(migrations = "./migrations")]
+        async fn a_status_does_not_stand_in_for_a_signature(db: SqlitePool) -> Result {
+            let root = tempfile::tempdir()?;
+            insert_run(&db, RotateKeyStep::SignProposal, &[peer(1)]).await?;
+            let server = start(&db, &root).await?;
+
+            send(
+                &server,
+                &peer(1),
+                MessageType::StatusUpdate,
+                RECORDED_KEY_STATUS,
+            )
+            .await?;
+            let state = server.get_workflow_state();
+            assert_eq!(state.current_step().await, RotateKeyStep::SignProposal);
+            assert!(!state.has_peer_completed(&peer(1)).await);
+            Ok(())
+        }
+    }
+
+    mod add_party_resume {
+        use common::types::WorkflowRole;
+
+        use super::*;
+        use crate::{
+            canton_id::{NAMESPACE_LENGTH, Namespace},
+            error::Result,
+        };
+
+        const RUN: &str = "add-party-run";
+
+        fn peer(n: u8) -> CantonId {
+            CantonId::new(format!("p{n}"), Namespace::new([n; NAMESPACE_LENGTH]))
+        }
+
+        /// A coordinator restarted at SyncAcs has no ACS export until its step
+        /// loop re-opens one. Handing out ImportAcs before then makes the new
+        /// member ask for block 1, get refused, and abort the run.
+        #[sqlx::test(migrations = "./migrations")]
+        async fn a_resumed_sync_acs_holds_import_until_the_export_is_open(
+            db: SqlitePool,
+        ) -> Result {
+            let root = tempfile::tempdir()?;
+            sqlx::query(
+                "INSERT INTO workflow_runs
+                 (instance_name, kind, role, status, current_step, step_index, step_total,
+                  config_json, expected_peers_json, completed_peers_json, created_at, updated_at)
+                 VALUES (?, ?, ?, 'inprogress', ?, ?, ?, '{}', ?, '[]', 0, 0)",
+            )
+            .bind(RUN)
+            .bind(WorkflowKind::AddParty.as_str())
+            .bind(WorkflowRole::Coordinator.as_str())
+            .bind(AddPartyStep::SyncAcs.step_name())
+            .bind(AddPartyStep::SyncAcs.step_index())
+            .bind(AddPartyStep::step_total())
+            .bind(serde_json::to_string(&[peer(1)])?)
+            .execute(&db)
+            .await?;
+
+            let config = NodeConfig::default().with_root_dir(root.path());
+            tokio::fs::create_dir_all(config.data_dir()).await?;
+            NoiseKeypair::generate()
+                .save_to_file(config.key_file_path())
+                .await?;
+            let server = NoiseServer::new(
+                config,
+                NetworkConfig::default(),
+                db.clone(),
+                RUN.into(),
+                AddPartyStep::WaitingForPeers,
+                None,
+                Arc::new(RwLock::new(HashMap::new())),
+            )
+            .await?;
+            let state = server.get_workflow_state();
+            assert_eq!(state.current_step().await, AddPartyStep::SyncAcs);
+            assert_eq!(
+                state.current_command().await,
+                Some(MessageType::ImportAcs),
+                "the step itself still maps to ImportAcs"
+            );
+            assert!(!state.has_acs_export().await);
+
+            let reply = server
+                .handle_command(
+                    peer(1),
+                    Message::new(MessageType::GetNextCommand, Vec::new()),
+                )
+                .await?;
+            assert_eq!(reply.msg_type, MessageType::Wait);
+            assert!(!state.has_peer_completed(&peer(1)).await);
+            Ok(())
+        }
     }
 }

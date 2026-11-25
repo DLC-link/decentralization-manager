@@ -3,7 +3,9 @@ use sqlx::SqlitePool;
 use crate::{
     config::NodeConfig,
     error::Result,
-    workflow::{storage::artifact_kinds, topology},
+    workflow::{
+        onboarding::steps::generate_keys::own_new_daml_key, storage::artifact_kinds, topology,
+    },
 };
 
 /// All-peer step: sign both add-party proposals.
@@ -23,6 +25,8 @@ pub async fn sign_proposals(
     instance_name: &str,
     proposal_data: &[u8],
 ) -> Result {
+    // Only the new member created a key in this run.
+    let own_new_key = own_new_daml_key(config, storage, instance_name).await?;
     topology::sign_dns_p2p_proposals(
         config,
         storage,
@@ -31,6 +35,7 @@ pub async fn sign_proposals(
         "add-party",
         artifact_kinds::SIGNED_ADD_PARTY_DNS,
         artifact_kinds::SIGNED_ADD_PARTY_P2P,
+        own_new_key.as_ref(),
     )
     .await
 }

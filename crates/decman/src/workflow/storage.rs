@@ -32,6 +32,10 @@ pub mod artifact_kinds {
     pub const SIGNED_DNS_PROPOSAL: &str = "signed_dns_proposal";
     pub const SIGNED_P2P_PROPOSAL: &str = "signed_p2p_proposal";
     pub const PEER_PUBLIC_KEYS: &str = "peer_public_keys";
+    /// The name of the Daml key this node creates in an onboarding or
+    /// add-party run. Plaintext UTF-8. A retry reads it to find the same
+    /// key, and a new run picks a new name.
+    pub const DAML_KEY_NAME: &str = "daml_key_name";
     pub const PARTICIPANT_ID: &str = "participant_id";
     /// Resolved decentralized party id (`{prefix}::{namespace_fingerprint}`)
     /// produced by onboarding's CreateProposals once all peer namespace
@@ -47,6 +51,18 @@ pub mod artifact_kinds {
     // Contracts (workflow_artifacts during a run)
     pub const PREPARED_SUBMISSION: &str = "prepared_submission";
     pub const SUBMISSION_SIGNATURES: &str = "submission_signatures";
+
+    // DARs (workflow_artifacts during a run)
+    /// The DARs a distribution run sends, encoded as the `UploadDars` payload.
+    /// They live here rather than in the run's `config_json`, which every
+    /// query that lists runs reads. The run loads them once a peer joins.
+    pub const DARS_BUNDLE: &str = "dars_bundle";
+
+    /// Combined DNS/P2P uploads retained until workflow cleanup, so splitting
+    /// can resume after a restart between the two output writes.
+    pub const KICK_SIGNATURE_UPLOAD: &str = "kick_signature_upload";
+    pub const ADD_PARTY_SIGNATURE_UPLOAD: &str = "add_party_signature_upload";
+    pub const CHANGE_THRESHOLD_SIGNATURE_UPLOAD: &str = "change_threshold_signature_upload";
 
     // Kick (workflow_artifacts during a run)
     /// Current (pre-kick) decentralized namespace definition, exported from
@@ -129,16 +145,21 @@ pub mod artifact_kinds {
     /// Tenant add-hosts: durable disconnect-window marker, same contract as
     /// [`ADD_PARTY_ACS_IMPORT_INFLIGHT`].
     pub const TENANT_ADD_HOSTS_IMPORT_INFLIGHT: &str = "tenant_add_hosts_import_inflight";
+    /// The joiner's private signature and the request it signs, before publication.
+    pub const TENANT_ADD_HOSTS_STAGED_SIGNATURES: &str = "tenant_add_hosts_staged_signatures";
+    /// The joiner finishes disconnecting before it makes its signature available.
+    pub const TENANT_ADD_HOSTS_STAGE_READY: &str = "tenant_add_hosts_stage_ready";
+    /// Canton accepts the ACS before reconnect health and marker clearance finish.
+    pub const TENANT_ADD_HOSTS_ACS_IMPORTED: &str = "tenant_add_hosts_acs_imported";
+    /// A verified import releases its participant-wide offline window once.
+    pub const TENANT_ADD_HOSTS_IMPORT_COMPLETED: &str = "tenant_add_hosts_import_completed";
     /// The assembled SyncAcs command payload (config + the package ids the
     /// target's preflight needs). The ACS itself is not in it: the target pulls
     /// the snapshot block by block straight into Canton's import.
     ///
-    /// Persisted because the coordinator only holds it in memory. A resumed run
-    /// does not arrive with an *empty* payload — `run_workflow` seeds one with
-    /// the bare config before its loop starts — it arrives with the wrong one,
-    /// which the target decodes as a two-item command and rejects. So the
-    /// restore compares against what is currently served rather than testing
-    /// for absence.
+    /// Startup seeds the bare config, so a resumed run has a non-empty payload
+    /// without the package IDs. Restoration compares the complete payload
+    /// rather than checking for absence.
     pub const ADD_PARTY_SYNC_ACS_COMMAND: &str = "add_party_sync_acs_command";
     /// JSON `AcsTransferProgress` for the run's ACS transfer, so the UI can
     /// show movement during a step that otherwise looks frozen for minutes.
@@ -153,14 +174,13 @@ pub mod artifact_kinds {
     /// so the API reads that directly and never writes this.
     pub const ADD_PARTY_ACS_PROGRESS: &str = "add_party_acs_progress";
 
-    /// Tenant add-hosts: the package ids the staged snapshot needs, newline
-    /// separated. Computed once when the snapshot is staged, because the scan
-    /// behind it is a ledger query and a ranged transfer would otherwise repeat
-    /// it once per range.
-    /// Unsigned onboarding-flag clearing proposal (P2P update without the
-    /// new member's Onboarding marker) created by the coordinator. Empty
-    /// payload doubles as the "flag already cleared — skip the sign round"
-    /// marker. Length-prefixed proto when non-empty.
+    /// Raw new-member keys and participant identifier, stored before completion.
+    pub const ADD_PARTY_KEYS_UPLOAD: &str = "add_party_keys_upload";
+    /// Raw new-member clearing proposal, including the explicit empty skip marker.
+    pub const ADD_PARTY_CLEAR_PROPOSAL_UPLOAD: &str = "add_party_clear_proposal_upload";
+
+    /// New-member-authored onboarding-flag clearing proposal for the sign round.
+    /// Empty payload marks an already-cleared flag. Nonempty payload is a length-prefixed proto.
     pub const ADD_PARTY_CLEAR_PROPOSAL: &str = "add_party_clear_proposal";
     /// Per-peer signed clearing proposal — single length-prefixed proto.
     pub const SIGNED_ADD_PARTY_CLEAR: &str = "signed_add_party_clear";
@@ -184,6 +204,19 @@ pub mod artifact_kinds {
     pub const SIGNED_CHANGE_THRESHOLD_P2P: &str = "signed_change_threshold_p2p";
     /// Full party id (plaintext) — used by submit to poll the P2P mapping.
     pub const CHANGE_THRESHOLD_PARTY_ID: &str = "change_threshold_party_id";
+
+    // Rotate-key (workflow_artifacts during a run)
+    /// The coordinator's new Daml `SigningPublicKey`, written in GenerateKey.
+    /// Length-prefixed proto.
+    pub const ROTATE_KEY_NEW_KEY: &str = "rotate_key_new_key";
+    /// The P2P proposal that swaps the coordinator's Daml key, signed by the
+    /// coordinator in CreateProposal. Length-prefixed proto.
+    pub const ROTATE_KEY_P2P_PROPOSAL: &str = "rotate_key_p2p_proposal";
+    /// Per-peer signed rotation proposal — single length-prefixed proto.
+    pub const SIGNED_ROTATE_KEY_P2P: &str = "signed_rotate_key_p2p";
+    /// The new key a peer validated in SignProposal, as a UTF-8 fingerprint.
+    /// RecordKey records only this key for the coordinator.
+    pub const ROTATE_KEY_ACCEPTED_NEW_KEY: &str = "rotate_key_accepted_new_key";
 }
 
 /// Identity-table artefact kinds. These survive the originating workflow run's

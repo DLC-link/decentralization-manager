@@ -113,9 +113,9 @@ const PACKAGE_MIN_WIDTH = 260;
 // Local table: the id column fits the truncated id and its copy button, and the
 // name takes what is left, wrapping when it has to. Declared widths keep a
 // 64-character id or a long version from widening the table past the panel.
-// 352 fits the widest form: from md up, CopyableText shows the id as 16…16
-// characters plus the button.
-const PACKAGE_ID_COL_WIDTH = 352;
+// 384 fits the widest form: from md up, CopyableText shows the id as 16…16
+// characters plus the button, inside the last column's 24px right padding.
+const PACKAGE_ID_COL_WIDTH = 384;
 const LOCAL_NAME_MIN_WIDTH = 220;
 const LOCAL_TABLE_MIN_WIDTH =
   LOCAL_NAME_MIN_WIDTH + VERSION_COL_WIDTH + PACKAGE_ID_COL_WIDTH;
@@ -460,7 +460,7 @@ export const PackagesPanel = ({
             size="small"
             multiline
             maxRows={4}
-            placeholder="Search packages — paste several names"
+            placeholder="Search packages or paste names"
             value={search}
             onChange={(e) => setSearch(e.target.value)}
             slotProps={{
@@ -484,14 +484,11 @@ export const PackagesPanel = ({
               color={groupKeys.includes(g.key) ? "primary" : "default"}
               variant={groupKeys.includes(g.key) ? "filled" : "outlined"}
               onClick={() => toggleGroup(g.key)}
+              aria-pressed={groupKeys.includes(g.key)}
               data-testid={`package-group-${g.key}`}
+              sx={{ borderRadius: 999, px: 0.5 }}
             />
           ))}
-          <Typography variant="body2" color="text.secondary" noWrap>
-            {filterActive
-              ? `${comparison ? (selectedPackages?.length ?? 0) : filteredSorted.length} of ${comparison ? comparison.local_packages.length : packages.length} packages`
-              : `${packages.length} packages vetted on this participant`}
-          </Typography>
         </Box>
         <Box sx={{ display: "flex", gap: 1 }}>
           <Button
@@ -557,8 +554,9 @@ export const PackagesPanel = ({
           renderInput={(params) => (
             <TextField
               {...params}
-              label="Participants"
+              label="Compare with"
               placeholder={selected.length === 0 ? "All peers" : undefined}
+              slotProps={{ ...params.slotProps, inputLabel: { ...params.slotProps.inputLabel, shrink: true } }}
             />
           )}
           sx={{ minWidth: 360, flex: 1, maxWidth: 720 }}
@@ -584,6 +582,11 @@ export const PackagesPanel = ({
             label="Differences only"
           />
         )}
+        <Typography variant="body2" color="text.secondary" sx={{ ml: "auto" }}>
+          {filterActive
+            ? `${comparison ? (selectedPackages?.length ?? 0) : filteredSorted.length} of ${comparison ? comparison.local_packages.length : packages.length} packages`
+            : `${packages.length} packages vetted on this participant`}
+        </Typography>
       </Box>
       {comparison && selected.length === 0 && (
         <Alert severity="info" sx={{ mx: "24px", mb: 2, flexShrink: 0 }}>

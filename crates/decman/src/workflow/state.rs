@@ -11,6 +11,7 @@ use std::{
     sync::Arc,
 };
 
+use bytes::Bytes;
 use common::types::{AcsTransferDirection, AcsTransferProgress};
 use sqlx::SqlitePool;
 use tokio::sync::{Mutex, RwLock};
@@ -21,7 +22,10 @@ use crate::{
     error::Result,
     noise::MessageType,
     server::WorkflowKind,
-    workflow::party_replication::pipe::{ExportSession, PipeBlock},
+    workflow::{
+        party_replication::pipe::{ExportSession, PipeBlock},
+        storage::WorkflowStorage,
+    },
 };
 
 /// Trait for workflow steps. Implementations are small `Copy` enums per
@@ -53,6 +57,12 @@ pub trait WorkflowStep:
     /// The workflow kind this step enum belongs to. Used to reject routed
     /// messages (e.g. invitation declines) that target a different kind.
     fn kind() -> WorkflowKind;
+
+    /// Whether a peer's status update completes this step for that peer. A
+    /// step that names its status ignores a late status of an earlier step.
+    fn accepts_status(&self, _status: &[u8]) -> bool {
+        true
+    }
 }
 
 /// Generic workflow state tracker. Reads/writes the matching `workflow_runs`
@@ -73,8 +83,9 @@ pub struct WorkflowState<S> {
     completed_peers: RwLock<HashSet<CantonId>>,
     /// Data received from peers (e.g., keys, signatures)
     peer_data: RwLock<HashMap<CantonId, Vec<u8>>>,
-    /// Payload data to send with the next command (e.g., proposals for signing)
-    command_payload: RwLock<Vec<u8>>,
+    /// Payload data to send with the next command (e.g., proposals for signing).
+    /// Shared so that serving it to a peer does not copy it.
+    command_payload: RwLock<Bytes>,
     /// The source's open ACS export, held between block requests, with the one
     /// participant allowed to pull from it.
     ///
@@ -108,7 +119,7 @@ impl<S: WorkflowStep + 'static> WorkflowState<S> {
             connected_peers: RwLock::new(HashSet::new()),
             completed_peers: RwLock::new(HashSet::new()),
             peer_data: RwLock::new(HashMap::new()),
-            command_payload: RwLock::new(Vec::new()),
+            command_payload: RwLock::new(Bytes::new()),
             acs_export: Mutex::new(None),
             _p: PhantomData,
         })
@@ -134,7 +145,7 @@ impl<S: WorkflowStep + 'static> WorkflowState<S> {
             connected_peers: RwLock::new(HashSet::new()),
             completed_peers: RwLock::new(completed_peers.into_iter().collect()),
             peer_data: RwLock::new(HashMap::new()),
-            command_payload: RwLock::new(Vec::new()),
+            command_payload: RwLock::new(Bytes::new()),
             acs_export: Mutex::new(None),
             _p: PhantomData,
         })
@@ -183,12 +194,13 @@ impl<S: WorkflowStep + 'static> WorkflowState<S> {
 
     /// Set payload data to be sent with the next command
     pub async fn set_command_payload(&self, payload: Vec<u8>) {
-        let mut cmd_payload = self.command_payload.write().await;
-        *cmd_payload = payload;
+        *self.command_payload.write().await = Bytes::from(payload);
     }
 
-    /// Get payload data to send with command (clones the data)
-    pub async fn get_command_payload(&self) -> Vec<u8> {
+    /// The payload to send with the command. A DAR bundle can be 16 MiB and
+    /// every peer poll and chunk request reads it, so this returns a shared
+    /// handle rather than a copy.
+    pub async fn get_command_payload(&self) -> Bytes {
         self.command_payload.read().await.clone()
     }
 
@@ -295,8 +307,7 @@ impl<S: WorkflowStep + 'static> WorkflowState<S> {
 
     /// Clear the command payload
     pub async fn clear_command_payload(&self) {
-        let mut cmd_payload = self.command_payload.write().await;
-        cmd_payload.clear();
+        *self.command_payload.write().await = Bytes::new();
     }
 
     pub async fn current_step(&self) -> S {
@@ -409,31 +420,69 @@ impl<S: WorkflowStep + 'static> WorkflowState<S> {
     }
 
     pub async fn peer_completed(&self, peer_id: CantonId) {
+        self.peer_completed_if(peer_id, |_| true).await;
+    }
+
+    /// Count a completion only while the current step still accepts it.
+    pub(crate) async fn peer_completed_if(
+        &self,
+        peer_id: CantonId,
+        accepts: impl FnOnce(S) -> bool,
+    ) -> bool {
         if !self.expected_peers.contains(&peer_id) {
             tracing::warn!(
                 "ignoring step completion from unexpected peer {peer_id} (not in expected set for {})",
                 self.instance_name
             );
-            return;
+            return false;
         }
 
         {
+            // An advance takes the step lock before the completed set.
+            let current = self.current_step.read().await;
+            if !accepts(*current) {
+                return false;
+            }
             let mut completed = self.completed_peers.write().await;
             completed.insert(peer_id.clone());
-            let current = *self.current_step.read().await;
             let completed_vec: Vec<CantonId> = completed.iter().cloned().collect();
             tracing::info!(
                 "Peer completed step {current:?}: {peer_id} ({}/{})",
                 completed_vec.len(),
-                self.expected_peers.len()
+                self.expected_peers.len(),
+                current = *current
             );
-            // Persist the new completed-peers set. Failures here are logged but
-            // don't abort the workflow — on a future restart the recovery path
-            // re-issues the command, which steps are designed to no-op when the
-            // artefact already exists.
-            self.persist_step_progress(current, completed_vec).await;
+            // A failed progress write leaves the durable upload available for
+            // the peer's retry after a restart.
+            self.persist_step_progress(*current, completed_vec).await;
         }
         self.maybe_advance().await;
+        true
+    }
+
+    /// Store an expected peer's upload before counting its completion.
+    ///
+    /// # Errors
+    /// Returns an error for an unexpected peer or a failed storage write.
+    pub(crate) async fn write_peer_artifact(
+        &self,
+        artifact_kind: &str,
+        peer_id: &CantonId,
+        data: &[u8],
+    ) -> Result {
+        anyhow::ensure!(
+            self.expected_peers.contains(peer_id),
+            "{peer_id} is not a peer of run {}",
+            self.instance_name
+        );
+        self.db
+            .write_artifact(
+                &self.instance_name,
+                artifact_kind,
+                Some(&peer_id.to_string()),
+                data,
+            )
+            .await
     }
 
     /// Unconditional advance, used by the coordinator loop which drives its own

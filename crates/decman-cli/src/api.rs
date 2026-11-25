@@ -15,6 +15,7 @@ use serde_json::{Value, json};
 
 use crate::auth::{AuthTarget, PasswordSource, TokenCache, TokenResponse, TokenSet, now_secs};
 use crate::composer::{PickerOption, PickerSource};
+use crate::governance_body;
 
 /// User credentials and optional IdP overrides for the OAuth2 password grant.
 ///
@@ -768,7 +769,7 @@ pub struct DecmanClient {
     cache: Option<TokenCache>,
     /// Whether `target` came from the cache rather than from discovery.
     target_from_cache: bool,
-    /// Timeout for [`Self::request`]; the TUI calls keep the client default.
+    /// Explicit timeout for [`Self::request`], overriding route defaults.
     request_timeout: Option<Duration>,
     /// When set, [`Self::request`] refuses every non-`GET` with this message.
     writes_blocked: Option<String>,
@@ -1007,14 +1008,25 @@ impl DecmanClient {
         query: &[(String, String)],
         body: Option<&Value>,
     ) -> Result<Response> {
+        self.send_authed_with_timeout(method, path, query, body, self.request_timeout)
+    }
+
+    fn send_authed_with_timeout(
+        &mut self,
+        method: &Method,
+        path: &str,
+        query: &[(String, String)],
+        body: Option<&Value>,
+        timeout: Option<Duration>,
+    ) -> Result<Response> {
         self.authenticate()?;
-        let response = self.send_request(method, path, query, body)?;
+        let response = self.send_request(method, path, query, body, timeout)?;
         if response.status() != StatusCode::UNAUTHORIZED {
             return Ok(response);
         }
         self.drop_access_token();
         self.authenticate()?;
-        self.send_request(method, path, query, body)
+        self.send_request(method, path, query, body, timeout)
     }
 
     fn send_request(
@@ -1023,6 +1035,7 @@ impl DecmanClient {
         path: &str,
         query: &[(String, String)],
         body: Option<&Value>,
+        timeout: Option<Duration>,
     ) -> Result<Response> {
         let url = format!("{base}{path}", base = self.base_url);
         let mut request = self.http.request(method.clone(), &url);
@@ -1035,7 +1048,7 @@ impl DecmanClient {
         if let Some(body) = body {
             request = request.json(body);
         }
-        if let Some(timeout) = self.request_timeout {
+        if let Some(timeout) = timeout {
             request = request.timeout(timeout);
         }
         request
@@ -1243,15 +1256,21 @@ impl DecmanClient {
         new_threshold: i32,
         previous_threshold: i32,
     ) -> Result<()> {
-        self.post(
+        // The server can spend sixty seconds scanning packages before creating the run.
+        let timeout = self.request_timeout.unwrap_or(Duration::from_secs(120));
+        let response = self.send_authed_with_timeout(
+            &Method::POST,
             "/add-party",
-            Some(json!({
+            &[],
+            Some(&json!({
                 "decentralized_party_id": party_id,
                 "new_participant_id": new_participant_id,
                 "new_threshold": new_threshold,
                 "previous_threshold": previous_threshold,
             })),
-        )
+            Some(timeout),
+        )?;
+        success_or_api_error(Method::POST, "/add-party", response).map(drop)
     }
 
     /// Change the signing threshold of an existing decentralized party
@@ -1277,6 +1296,21 @@ impl DecmanClient {
         )
     }
 
+    /// Replace this node's Daml signing key for a decentralized party with a
+    /// new key. The other members sign the change.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if login or the request fails, or the API rejects it
+    /// (e.g. the participant keeps no keys in KMS, or a workflow is already in
+    /// progress for the party).
+    pub fn start_rotate_key(&mut self, party_id: &str) -> Result<()> {
+        self.post(
+            "/rotate-key",
+            Some(json!({ "decentralized_party_id": party_id })),
+        )
+    }
+
     /// Cancel an in-progress workflow run (coordinator side). The cancel
     /// endpoint is selected by the run's [`WorkflowKind`].
     ///
@@ -1291,6 +1325,7 @@ impl DecmanClient {
             WorkflowKind::Dars => "/dars/cancel",
             WorkflowKind::AddParty => "/add-party/cancel",
             WorkflowKind::ChangeThreshold => "/change-threshold/cancel",
+            WorkflowKind::RotateKey => "/rotate-key/cancel",
         };
         self.post(path, None)
     }
@@ -1409,15 +1444,13 @@ impl DecmanClient {
         governance_type: &str,
         proposal_cid: Option<&str>,
     ) -> Result<()> {
-        let mut body = json!({
-            "party_id": party_id,
-            "rules_contract_id": rules_contract_id,
-            "action": action,
-            "governance_type": governance_type,
-        });
-        if let Some(cid) = proposal_cid {
-            body["proposal_cid"] = json!(cid);
-        }
+        let body = governance_body::confirm(
+            party_id,
+            rules_contract_id,
+            action,
+            governance_type,
+            proposal_cid,
+        );
         self.post("/governance/confirm", Some(body))
     }
 
@@ -1437,17 +1470,15 @@ impl DecmanClient {
             .iter()
             .map(|(cid, blob)| json!({ "contract_id": cid, "blob": blob }))
             .collect();
-        let mut body = json!({
-            "party_id": party_id,
-            "rules_contract_id": rules_contract_id,
-            "action": execute.action,
-            "confirmation_cids": execute.confirmation_cids,
-            "disclosed_contracts": disclosed_json,
-            "governance_type": execute.governance_type,
-        });
-        if let Some(cid) = &execute.proposal_cid {
-            body["proposal_cid"] = json!(cid);
-        }
+        let body = governance_body::execute(
+            party_id,
+            rules_contract_id,
+            &execute.action,
+            &execute.governance_type,
+            execute.proposal_cid.as_deref(),
+            &execute.confirmation_cids,
+            json!(disclosed_json),
+        );
         self.post("/governance/execute", Some(body))
     }
 
@@ -1633,11 +1664,11 @@ impl DecmanClient {
     ) -> Result<()> {
         self.post(
             "/governance/cancel",
-            Some(json!({
-                "party_id": party_id,
-                "confirmation_cid": confirmation_cid,
-                "governance_type": governance_type,
-            })),
+            Some(governance_body::revoke(
+                party_id,
+                confirmation_cid,
+                governance_type,
+            )),
         )
     }
 
@@ -1655,12 +1686,12 @@ impl DecmanClient {
     ) -> Result<()> {
         self.post(
             "/governance/expire",
-            Some(json!({
-                "party_id": party_id,
-                "rules_contract_id": rules_contract_id,
-                "confirmation_cid": confirmation_cid,
-                "governance_type": governance_type,
-            })),
+            Some(governance_body::expire(
+                party_id,
+                rules_contract_id,
+                confirmation_cid,
+                governance_type,
+            )),
         )
     }
 

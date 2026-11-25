@@ -249,7 +249,8 @@ function Auth0AuthProvider({ children }: { children: ReactNode }) {
       if (cancelled || !sessionLive.current) return null;
       try {
         const t = await getAccessTokenSilently({ cacheMode: "off" });
-        if (cancelled || !sessionLive.current) return null;
+        // Auth0 resolves undefined once the session passes its absolute lifetime.
+        if (cancelled || !sessionLive.current || !t) return null;
         setToken(t);
         setTokenState(t);
         return t;
@@ -261,6 +262,11 @@ function Auth0AuthProvider({ children }: { children: ReactNode }) {
     getAccessTokenSilently()
       .then((t) => {
         if (cancelled) return;
+        if (!t) {
+          clearToken();
+          setTokenState(null);
+          return;
+        }
         setToken(t);
         setTokenState(t);
       })

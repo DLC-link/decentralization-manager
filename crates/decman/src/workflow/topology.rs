@@ -14,6 +14,7 @@ use std::{
 };
 
 use canton_proto_rs::com::digitalasset::canton::{
+    crypto::v30::SigningPublicKey,
     protocol::v30::{
         DecentralizedNamespaceDefinition, PartyToKeyMapping, PartyToParticipant,
         SignedTopologyTransaction, TopologyTransaction, enums, topology_mapping,
@@ -454,6 +455,9 @@ pub async fn fetch_party_to_key_mapping(
     }))
 }
 
+/// The status a member sends once it has signed the legacy mapping's removal.
+pub const RETIRED_LEGACY_KEYS_STATUS: &[u8] = b"RetireLegacyKeys completed";
+
 /// Contribute this member's namespace signature to retiring the legacy mapping.
 /// Called only after the replacement topology has become effective. Every
 /// member reads the same live mapping and signs the same explicit next serial;
@@ -543,6 +547,15 @@ fn validate_legacy_retirement(p2p: &PartyToParticipant, legacy: &PartyToKeyMappi
     anyhow::ensure!(
         distinct.len() == keys.keys.len(),
         "Inline signing keys contain duplicates"
+    );
+    // A partly migrated party still needs the legacy mapping for the hosts
+    // whose keys are not inline yet.
+    anyhow::ensure!(
+        distinct.len() >= p2p.participants.len(),
+        "Cannot retire legacy keys while {inline} inline keys cover {hosts} hosts. The party \
+         keeps working with its legacy mapping",
+        inline = distinct.len(),
+        hosts = p2p.participants.len()
     );
     Ok(())
 }
@@ -825,6 +838,61 @@ pub async fn check_proposal_standing(
 ) -> Result<Standing> {
     let transaction: TopologyTransaction =
         topology_version::decode_transaction(&proposal.transaction)?;
+    let (what, head) = head_for_proposal(config, synchronizer_id, &transaction).await?;
+    proposal_standing(what, &transaction, head.as_ref())
+}
+
+/// Refuse a proposal that changes a DNS or P2P mapping that already exists.
+///
+/// Onboarding creates a party, so its proposals must create their mappings.
+/// Kick, add-party and change-threshold change an existing party, and their
+/// peers check each change against the chain. An onboarding peer checks no
+/// such change, so it must not sign one. A proposal that equals the head is
+/// already in force, and a retried peer may sign it again.
+///
+/// # Errors
+///
+/// Errors when the proposal is neither a DNS nor a P2P, when the head cannot
+/// be read, or when the mapping exists with other content.
+pub async fn check_creates_mapping(
+    config: &NodeConfig,
+    synchronizer_id: &str,
+    proposal: &SignedTopologyTransaction,
+) -> Result {
+    let transaction: TopologyTransaction =
+        topology_version::decode_transaction(&proposal.transaction)?;
+    let (what, head) = head_for_proposal(config, synchronizer_id, &transaction).await?;
+    creates_mapping(what, &transaction, head.as_ref())
+}
+
+/// See [`check_creates_mapping`]. `head` is `None` when the synchronizer
+/// holds no add-or-replace for the mapping.
+///
+/// # Errors
+///
+/// Errors when the head holds the mapping with other content.
+pub fn creates_mapping(
+    what: &str,
+    proposal: &TopologyTransaction,
+    head: Option<&TopologyTransaction>,
+) -> Result {
+    match head {
+        None => Ok(()),
+        Some(head) if head == proposal => Ok(()),
+        Some(head) => anyhow::bail!(
+            "The {what} mapping already exists at serial {serial}. Onboarding creates a new \
+             party, so this node does not sign a change to an existing one",
+            serial = head.serial
+        ),
+    }
+}
+
+/// The head transaction for a proposal's mapping, and the mapping's name.
+async fn head_for_proposal(
+    config: &NodeConfig,
+    synchronizer_id: &str,
+    transaction: &TopologyTransaction,
+) -> Result<(&'static str, Option<TopologyTransaction>)> {
     let (what, head) = match transaction
         .mapping
         .as_ref()
@@ -856,7 +924,7 @@ pub async fn check_proposal_standing(
         }
         _ => anyhow::bail!("Only a DNS or a P2P proposal can be checked against the head"),
     };
-    proposal_standing(what, &transaction, head.as_ref().map(|(_, head)| head))
+    Ok((what, head.map(|(_, head)| head)))
 }
 
 /// Fetch the current `DecentralizedNamespaceDefinition` from the synchronizer
@@ -969,6 +1037,11 @@ pub async fn fetch_namespace_definition(
 ///
 /// `label` is a short workflow tag (`"kick"`, `"add-party"`,
 /// `"change-threshold"`) included in log lines and the sign-retry diagnostics.
+///
+/// `own_new_key` is this node's Daml key when the P2P adds it, as for the new
+/// member in add-party. A key DecMan generated signs the P2P here, because
+/// the vault does not hold that key.
+#[allow(clippy::too_many_arguments)]
 pub async fn sign_dns_p2p_proposals(
     config: &NodeConfig,
     storage: &SqlitePool,
@@ -977,6 +1050,7 @@ pub async fn sign_dns_p2p_proposals(
     label: &str,
     dns_artifact_kind: &str,
     p2p_artifact_kind: &str,
+    own_new_key: Option<&SigningPublicKey>,
 ) -> Result {
     tracing::info!("Signing {label} proposals...");
 
@@ -998,13 +1072,22 @@ pub async fn sign_dns_p2p_proposals(
     };
 
     tracing::debug!("Calling SignTransactions RPC for {label} proposals...");
-    let response = sign_transactions_with_topology_retry(config, request, label).await?;
+    let mut response = sign_transactions_with_topology_retry(config, request, label).await?;
 
     if response.transactions.len() != 2 {
         anyhow::bail!(
             "Expected 2 signed transactions (DNS and P2P), got {count}",
             count = response.transactions.len()
         );
+    }
+    if let Some(own_new_key) = own_new_key {
+        crate::signing::custody::sign_with_generated_key(
+            config,
+            storage,
+            &mut response.transactions[1],
+            own_new_key,
+        )
+        .await?;
     }
 
     // Persist signed DNS + P2P as separate per-peer artefacts, each
@@ -1344,6 +1427,48 @@ mod tests {
         Ok(())
     }
 
+    /// A partly migrated party still holds some hosts' keys only in the
+    /// legacy mapping, so retiring it would erase them.
+    #[test]
+    fn legacy_retirement_needs_an_inline_key_per_host() -> Result {
+        use canton_proto_rs::com::digitalasset::canton::{
+            crypto::v30::{SigningKeysWithThreshold, SigningPublicKey},
+            protocol::v30::party_to_participant::HostingParticipant,
+        };
+        let legacy = PartyToKeyMapping {
+            party: "party".into(),
+            ..Default::default()
+        };
+        let key = |seed: u8| SigningPublicKey {
+            public_key: vec![seed; 32],
+            ..Default::default()
+        };
+        let host = |name: &str| HostingParticipant {
+            participant_uid: name.into(),
+            ..Default::default()
+        };
+        let mut p2p = PartyToParticipant {
+            party: legacy.party.clone(),
+            participants: vec![host("a"), host("b"), host("c")],
+            party_signing_keys: Some(SigningKeysWithThreshold {
+                keys: vec![key(1)],
+                threshold: 1,
+            }),
+            ..Default::default()
+        };
+        let error = validate_legacy_retirement(&p2p, &legacy)
+            .err()
+            .map(|e| e.to_string())
+            .unwrap_or_default();
+        assert!(error.contains("1 inline keys cover 3 hosts"), "{error}");
+
+        p2p.party_signing_keys = Some(SigningKeysWithThreshold {
+            keys: vec![key(1), key(2), key(3)],
+            threshold: 2,
+        });
+        validate_legacy_retirement(&p2p, &legacy)
+    }
+
     /// Real status text Canton returned from `sign_transactions` on devnet
     /// (2026-05-21 IT run). Code is `NOT_FOUND`, not `FAILED_PRECONDITION` —
     /// this is the exact case the original predicate missed.
@@ -1541,6 +1666,30 @@ mod tests {
             proposal_standing("DNS", &namespace_change(1, 2), None)?,
             Standing::Next
         );
+        Ok(())
+    }
+
+    /// Onboarding creates its mappings. A mapping already on the chain with
+    /// other content belongs to an existing party, and an onboarding peer
+    /// must not sign a change to it. A retried peer may sign the proposal
+    /// that is already in force.
+    #[test]
+    fn onboarding_signs_only_a_mapping_that_does_not_exist_yet() -> Result {
+        let proposal = namespace_change(1, 2);
+        creates_mapping("DNS", &proposal, None)?;
+        creates_mapping("DNS", &proposal, Some(&proposal.clone()))?;
+
+        for head in [namespace_change(1, 1), namespace_change(3, 2)] {
+            let error = match creates_mapping("DNS", &proposal, Some(&head)) {
+                Ok(()) => anyhow::bail!("an existing mapping must be refused"),
+                Err(e) => e.to_string(),
+            };
+            assert!(
+                error.contains("already exists at serial")
+                    && error.contains("does not sign a change to an existing one"),
+                "{error}"
+            );
+        }
         Ok(())
     }
 

@@ -4,31 +4,39 @@
 //!
 //! Setup (runs last, on the shared party): upload the tiny leaf `orphan-marker`
 //! DAR to P1 and P2 ONLY, kick P3, bulk-create `OrphanMarker` contracts for the
-//! party, then re-add P3 — whose participant never received `orphan-marker`. The
-//! party's exported ACS now contains contracts P3 cannot validate.
+//! party. One run starts with compatible packages, then P3 withdraws the leaf
+//! package's vetting while invitations wait. ExportState must reject this run
+//! before topology changes. A later request must reject the same missing package
+//! during initial validation.
 //!
-//! With the preflight fix, the COORDINATOR must fail the run at `ExportState`,
-//! before it creates or submits any proposal, with an actionable
-//! missing-package error. This phase asserts exactly that (coordinator run
-//! `failed`, stopped on `ExportState`, error names the packages), which pins
-//! both the reproduction and the fix: stopping at `ExportState` is what proves
-//! the party was never hosted on P3, so its ACS journal cannot collect
-//! activation-less archives.
+//! The add-party start request must refuse the re-add with a 409 that names the
+//! missing packages, and must create no run. No run means no invite, no keys on
+//! P3, and no topology change, so the party is never hosted on P3 and its ACS
+//! journal cannot collect activation-less archives.
 
 use std::{path::Path, time::Duration};
 
 use anyhow::Context;
 use base64::{Engine, engine::general_purpose::STANDARD as B64};
-use common::types::InvitationType;
+use canton_proto_rs::com::digitalasset::canton::{
+    protocol::v30::topology_mapping,
+    topology::admin::v30::{
+        AuthorizeRequest, ListVettedPackagesRequest, authorize_request,
+        topology_manager_read_service_client::TopologyManagerReadServiceClient,
+    },
+};
+use common::{canton_id::CantonId, types::InvitationType};
+use dec_party_manager::{
+    utils,
+    workflow::{topology, topology_version},
+};
 use serde_json::{Value, json};
 use tracing::info;
 
 use crate::common::{
     Fixture, chaos, db,
     http::probe_workflow_status,
-    invitations::{
-        InvitationIds, post_accept_invitation, probe_pending_invitation, probe_run_invitation,
-    },
+    invitations::{InvitationIds, post_accept_invitation, probe_pending_invitation},
     scenario::Scenario,
 };
 
@@ -202,117 +210,217 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
             })
         },
     )
-    // 4. Re-add P3 — its participant lacks orphan-marker.
-    .when("P1 re-adds P3", |f, ctx| {
-        Box::pin(async move {
-            let party_id = f.party_id()?.to_string();
-            let req = json!({
-                "decentralized_party_id": party_id,
-                "new_participant_id": f.p3.participant_id.clone(),
-                "new_threshold": 2_i64,
-                "previous_threshold": 2_i64,
-            });
-            ctx.run = Some(chaos::start_workflow_on(f, f.p1.http, "/add-party", &req).await?);
-            Ok(())
-        })
-    })
-    .then(
-        "AddParty invitation visible on P2",
-        Duration::from_secs(60),
-        |f, ctx| {
-            Box::pin(async move {
-                let run = ctx.run.as_deref()?;
-                let id = probe_run_invitation(f, f.p2.http, run).await?;
-                ctx.p2 = Some(id);
-                Some(Ok(()))
-            })
+    .when(
+        "initial package validation succeeds, then P3 withdraws leaf vetting",
+        {
+            let upload_req = upload_req.clone();
+            move |f, _| {
+                let upload_req = upload_req.clone();
+                Box::pin(async move { final_package_guard(f, &upload_req).await })
+            }
         },
     )
-    .then(
-        "AddParty invitation visible on P3",
-        Duration::from_secs(60),
-        |f, ctx| {
-            Box::pin(async move {
-                let run = ctx.run.as_deref()?;
-                let id = probe_run_invitation(f, f.p3.http, run).await?;
-                ctx.p3 = Some(id);
-                Some(Ok(()))
-            })
-        },
-    )
-    .when("P2 accepts AddParty invitation", |f, ctx| {
-        Box::pin(async move {
-            let id = ctx
-                .p2
-                .as_deref()
-                .context("P2 addparty invite id not set")?
-                .to_string();
-            post_accept_invitation(f, f.p2.http, &id)
-                .await
-                .context("accept AddParty on P2")
-        })
-    })
-    .when("P3 accepts AddParty invitation", |f, ctx| {
-        Box::pin(async move {
-            let id = ctx
-                .p3
-                .as_deref()
-                .context("P3 addparty invite id not set")?
-                .to_string();
-            post_accept_invitation(f, f.p3.http, &id)
-                .await
-                .context("accept AddParty on P3")
-        })
-    })
-    // 5. The fix must catch it: the coordinator FAILS at ExportState with a
-    //    missing-package error, before any proposal is created or submitted.
-    .then(
-        "the coordinator fails at ExportState with the missing packages",
-        Duration::from_secs(300),
+    // 4. Re-add P3 — it holds orphan-marker but no longer vets it. The start request
+    //    must refuse it before any run, invite, or proposal exists.
+    .when(
+        "P1 re-adds P3 — expect 409 naming the missing packages, and no run",
         |f, _| {
             Box::pin(async move {
                 let p1_db = f.db_path(1);
-                let instance = db::latest_coordinator_instance(&p1_db, "AddParty")
-                    .await
-                    .ok()
-                    .flatten()?;
-                match db::workflow_run_status(&p1_db, &instance, "Coordinator").await {
-                    Ok(Some(s)) if s.eq_ignore_ascii_case("failed") => {
-                        let err = db::workflow_run_error(&p1_db, &instance, "Coordinator")
-                            .await
-                            .ok()
-                            .flatten()
-                            .unwrap_or_default();
-                        let step = db::workflow_run_step(&p1_db, &instance, "Coordinator")
-                            .await
-                            .ok()
-                            .flatten()
-                            .unwrap_or_default();
-                        // The structured tail ("Missing package ids: [...]") is
-                        // emitted only by the preflight, so a generic Canton
-                        // package error cannot satisfy this.
-                        if !err.to_lowercase().contains("missing package ids") {
-                            return Some(Err(anyhow::anyhow!(
-                                "coordinator failed but NOT via the package preflight \
-                                 (expected a 'Missing package ids: [...]' error): {err}"
-                            )));
-                        }
-                        // ExportState precedes CreateProposals and SubmitProposals,
-                        // so stopping here is the proof that no topology was written.
-                        if step != "ExportState" {
-                            return Some(Err(anyhow::anyhow!(
-                                "coordinator failed with the right error but on step \
-                                 {step}, not ExportState — a proposal may already have \
-                                 been submitted"
-                            )));
-                        }
-                        Some(Ok(()))
-                    }
-                    _ => None,
-                }
+                let run_before = db::latest_coordinator_instance(&p1_db, "AddParty").await?;
+
+                let party_id = f.party_id()?.to_string();
+                let req = json!({
+                    "decentralized_party_id": party_id,
+                    "new_participant_id": f.p3.participant_id.clone(),
+                    "new_threshold": 2_i64,
+                    "previous_threshold": 2_i64,
+                });
+                let (status, body) = f.post_expect_status(f.p1.http, "/add-party", &req).await?;
+                anyhow::ensure!(
+                    status.as_u16() == 409,
+                    "expected 409 from the package check, got {status}: {body}"
+                );
+                // The structured tail ("Missing package ids: [...]") is emitted
+                // only by the package check, so a generic Canton package error
+                // cannot satisfy this.
+                anyhow::ensure!(
+                    body.to_lowercase().contains("missing package ids"),
+                    "409 body should name the missing packages: {body}"
+                );
+                // The operator acts on the member and the package the error
+                // names, so both must be the real ones.
+                anyhow::ensure!(
+                    body.contains(&f.p3.participant_id),
+                    "409 body should name the new member {}: {body}",
+                    f.p3.participant_id
+                );
+                let orphan = orphan_package_id(f).await?;
+                anyhow::ensure!(
+                    body.contains(&orphan),
+                    "409 body should list the orphan-marker package {orphan}: {body}"
+                );
+
+                // The run row is written before the 202 returns, so a refused
+                // request that left none behind never sent an invite.
+                let run_after = db::latest_coordinator_instance(&p1_db, "AddParty").await?;
+                anyhow::ensure!(
+                    run_after == run_before,
+                    "the refused add-party left a coordinator run behind: {run_after:?}"
+                );
+                Ok(())
             })
         },
     )
     .run(f)
     .await
+}
+
+/// The id of the `orphan-marker` package, read from P1's vetted packages.
+/// P1 vets it on upload, and the party's `OrphanMarker` contracts use it.
+async fn orphan_package_id(f: &Fixture) -> anyhow::Result<String> {
+    let vetted: Vec<Value> = f.get_json(f.p1.http, "/packages/vetted").await?;
+    vetted
+        .iter()
+        .find(|p| p["package_name"].as_str() == Some("orphan-marker"))
+        .and_then(|p| p["package_id"].as_str())
+        .map(str::to_string)
+        .context("P1 does not report orphan-marker as vetted")
+}
+
+/// Withdraw only the leaf package, preserving the shared standard libraries.
+async fn final_package_guard(f: &Fixture, upload_req: &Value) -> anyhow::Result<()> {
+    let _: Value = f.post_json(f.p3.http, "/dars/upload", upload_req).await?;
+    let orphan = orphan_package_id(f).await?;
+    chaos::poll_until(Duration::from_secs(60), || async {
+        let vetted: Vec<Value> = f.get_json(f.p3.http, "/packages/vetted").await?;
+        Ok(vetted
+            .iter()
+            .any(|p| p["package_id"].as_str() == Some(&orphan)))
+    })
+    .await?;
+
+    let p1 = super::add_party_rehost_disconnect_first::admin_config(f, 1)?;
+    let p3 = super::add_party_rehost_disconnect_first::admin_config(f, 3)?;
+    let synchronizer = utils::get_synchronizer_id(&p1).await?;
+    chaos::poll_until(Duration::from_secs(60), || async {
+        let rows = TopologyManagerReadServiceClient::new(p1.admin_channel().await?)
+            .list_vetted_packages(ListVettedPackagesRequest {
+                base_query: Some(topology::head_state_query(&synchronizer)),
+                filter_participant: f.p3.participant_id.clone(),
+            })
+            .await?
+            .into_inner()
+            .results;
+        Ok(rows.into_iter().filter_map(|r| r.item).any(|v| {
+            v.participant_uid == f.p3.participant_id
+                && v.packages.iter().any(|p| p.package_id == orphan)
+        }))
+    })
+    .await?;
+    let party: CantonId = f.party_id()?.parse()?;
+    let namespace = party.namespace.to_hex();
+    let namespace_before =
+        topology::fetch_namespace_definition(&p1, &synchronizer, &namespace).await?;
+    let hosting_before = topology::fetch_p2p_mapping(&p1, &synchronizer, &party).await?;
+    let request = json!({
+        "decentralized_party_id": f.party_id()?,
+        "new_participant_id": f.p3.participant_id,
+        "new_threshold": 2,
+        "previous_threshold": 2,
+    });
+    let run = chaos::start_workflow_on(f, f.p1.http, "/add-party", &request).await?;
+    let p2_invite =
+        chaos::wait_for_invite_for_instance(f, f.p2.http, &run, Duration::from_secs(60)).await?;
+    let p3_invite =
+        chaos::wait_for_invite_for_instance(f, f.p3.http, &run, Duration::from_secs(60)).await?;
+
+    let mut reader = TopologyManagerReadServiceClient::new(p3.admin_channel().await?);
+    let rows = reader
+        .list_vetted_packages(ListVettedPackagesRequest {
+            base_query: Some(topology::head_state_query(&synchronizer)),
+            filter_participant: f.p3.participant_id.clone(),
+        })
+        .await?
+        .into_inner()
+        .results;
+    let mut vetted = rows
+        .into_iter()
+        .filter_map(|r| r.item)
+        .find(|v| v.participant_uid == f.p3.participant_id)
+        .context("P3 has no vetted-package mapping")?;
+    let count = vetted.packages.len();
+    vetted.packages.retain(|p| p.package_id != orphan);
+    anyhow::ensure!(
+        vetted.packages.len() + 1 == count,
+        "expected exactly one orphan package"
+    );
+    topology::authorize_with_topology_retry(
+        &p3,
+        AuthorizeRequest {
+            r#type: Some(authorize_request::Type::Proposal(
+                topology_version::ProposalFormat::for_synchronizer(&synchronizer)
+                    .proposal(0, topology_mapping::Mapping::VettedPackages(vetted)),
+            )),
+            must_fully_authorize: true,
+            force_changes: vec![],
+            signed_by: vec![],
+            store: Some(topology::synchronizer_store_id(&synchronizer)),
+            wait_to_become_effective: None,
+        },
+        "withdraw orphan-marker vetting",
+    )
+    .await?;
+    // The coordinator reads synchronizer topology, so wait for propagation there.
+    chaos::poll_until(Duration::from_secs(60), || async {
+        let rows = TopologyManagerReadServiceClient::new(p1.admin_channel().await?)
+            .list_vetted_packages(ListVettedPackagesRequest {
+                base_query: Some(topology::head_state_query(&synchronizer)),
+                filter_participant: f.p3.participant_id.clone(),
+            })
+            .await?
+            .into_inner()
+            .results;
+        Ok(rows.into_iter().filter_map(|r| r.item).any(|v| {
+            v.participant_uid == f.p3.participant_id
+                && v.packages.iter().all(|p| p.package_id != orphan)
+        }))
+    })
+    .await?;
+    post_accept_invitation(f, f.p2.http, &p2_invite).await?;
+    post_accept_invitation(f, f.p3.http, &p3_invite).await?;
+    let db_path = f.db_path(1);
+    chaos::poll_until(Duration::from_secs(180), || async {
+        let status = db::workflow_run_status(&db_path, &run, "Coordinator").await?;
+        anyhow::ensure!(
+            status.as_deref() != Some("completed"),
+            "final guard allowed the run to complete"
+        );
+        Ok(status.as_deref() == Some("failed"))
+    })
+    .await?;
+    let error = db::workflow_run_error(&db_path, &run, "Coordinator")
+        .await?
+        .unwrap_or_default();
+    anyhow::ensure!(
+        error.to_lowercase().contains("missing package ids") && error.contains(&orphan),
+        "final guard must report the withheld package: {error}"
+    );
+    anyhow::ensure!(
+        db::workflow_run_step(&db_path, &run, "Coordinator")
+            .await?
+            .as_deref()
+            == Some("ExportState"),
+        "run must fail in ExportState"
+    );
+    anyhow::ensure!(
+        topology::fetch_namespace_definition(&p1, &synchronizer, &namespace).await?
+            == namespace_before,
+        "failed validation changed namespace topology"
+    );
+    anyhow::ensure!(
+        topology::fetch_p2p_mapping(&p1, &synchronizer, &party).await? == hosting_before,
+        "failed validation changed hosting topology"
+    );
+    Ok(())
 }
