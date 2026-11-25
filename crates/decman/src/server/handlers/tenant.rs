@@ -473,8 +473,15 @@ pub async fn tenant_add_hosts_authorize(
         Ok(key) => key,
         Err(resp) => return resp,
     };
-    if let Err(resp) = require_operator_for_own_party(&data.config, key.as_ref(), &body.party_id) {
-        return resp;
+    if let Some(refusal) = refuse_own_party(
+        &data,
+        key.as_ref(),
+        TenantEndpoint::AddHostsAuthorize,
+        &body.party_id,
+    )
+    .await
+    {
+        return refusal;
     }
     let body = body.into_inner();
     let party_id = body.party_id.clone();
@@ -566,8 +573,15 @@ pub async fn tenant_add_hosts_execute(
         Ok(key) => key,
         Err(resp) => return resp,
     };
-    if let Err(resp) = require_operator_for_own_party(&data.config, key.as_ref(), &body.party_id) {
-        return resp;
+    if let Some(refusal) = refuse_own_party(
+        &data,
+        key.as_ref(),
+        TenantEndpoint::AddHostsExecute,
+        &body.party_id,
+    )
+    .await
+    {
+        return refusal;
     }
     let body = body.into_inner();
     let party_id = body.party_id.clone();
@@ -661,8 +675,15 @@ pub async fn tenant_add_hosts_stage(
         Ok(key) => key,
         Err(resp) => return resp,
     };
-    if let Err(resp) = require_operator_for_own_party(&data.config, key.as_ref(), &body.party_id) {
-        return resp;
+    if let Some(refusal) = refuse_own_party(
+        &data,
+        key.as_ref(),
+        TenantEndpoint::AddHostsStage,
+        &body.party_id,
+    )
+    .await
+    {
+        return refusal;
     }
     let body = body.into_inner();
     let party = body.party_id.clone();
@@ -729,8 +750,15 @@ pub async fn tenant_add_hosts_publish(
         Ok(key) => key,
         Err(resp) => return resp,
     };
-    if let Err(resp) = require_operator_for_own_party(&data.config, key.as_ref(), &body.party_id) {
-        return resp;
+    if let Some(refusal) = refuse_own_party(
+        &data,
+        key.as_ref(),
+        TenantEndpoint::AddHostsPublish,
+        &body.party_id,
+    )
+    .await
+    {
+        return refusal;
     }
     let body = body.into_inner();
     let party = body.party_id.clone();
@@ -982,8 +1010,22 @@ pub async fn tenant_acs_import(
         Ok(key) => key,
         Err(resp) => return resp,
     };
-    if let Err(resp) = require_operator_for_own_party(&data.config, key.as_ref(), &body.party_id) {
-        return resp;
+    if let Err(refusal) = require_operator_for_own_party(&data.config, key.as_ref(), &body.party_id)
+    {
+        // A refused block spends budget like any block that fails its checks,
+        // so a key cannot write audit rows past its limit.
+        if let Err(resp) = charge_tenant_key(&data, key.as_ref(), http_req.path()) {
+            return resp;
+        }
+        // As for any block, only one that opens or ends a copy gets a row.
+        let endpoint = if body.seq <= 1 {
+            TenantEndpoint::AcsImportStart
+        } else if body.end {
+            TenantEndpoint::AcsImportEnd
+        } else {
+            return refusal;
+        };
+        return record_refusal(&data, key, endpoint, body.party_id.clone(), refusal).await;
     }
     // A copy this host admitted must never be refused partway, or the
     // staged participant must stay offline until its ACS is complete.
@@ -1388,8 +1430,15 @@ pub async fn tenant_threshold_authorize(
         Ok(key) => key,
         Err(resp) => return resp,
     };
-    if let Err(resp) = require_operator_for_own_party(&data.config, key.as_ref(), &body.party_id) {
-        return resp;
+    if let Some(refusal) = refuse_own_party(
+        &data,
+        key.as_ref(),
+        TenantEndpoint::ThresholdAuthorize,
+        &body.party_id,
+    )
+    .await
+    {
+        return refusal;
     }
     let body = body.into_inner();
     let party_id = body.party_id.clone();
@@ -1468,8 +1517,15 @@ pub async fn tenant_threshold_execute(
         Ok(key) => key,
         Err(resp) => return resp,
     };
-    if let Err(resp) = require_operator_for_own_party(&data.config, key.as_ref(), &body.party_id) {
-        return resp;
+    if let Some(refusal) = refuse_own_party(
+        &data,
+        key.as_ref(),
+        TenantEndpoint::ThresholdExecute,
+        &body.party_id,
+    )
+    .await
+    {
+        return refusal;
     }
     let body = body.into_inner();
     let party_id = body.party_id.clone();
@@ -1750,6 +1806,34 @@ where
     }
 }
 
+/// Record a call that a check refused before its write, and return the
+/// refusal. The row is written the way [`audited_write`] writes one.
+async fn record_refusal(
+    data: &web::Data<AppState>,
+    key: Option<TenantKey>,
+    endpoint: TenantEndpoint,
+    party_id: String,
+    refusal: HttpResponse,
+) -> HttpResponse {
+    let answer = Answer::of(refusal);
+    audited_write(data, key, endpoint, party_id, move |_| async move {
+        answer.into_response()
+    })
+    .await
+}
+
+/// [`require_operator_for_own_party`] for a call that the audit covers. A
+/// refusal gets its audit row.
+async fn refuse_own_party(
+    data: &web::Data<AppState>,
+    key: Option<&TenantKey>,
+    endpoint: TenantEndpoint,
+    party_id: &str,
+) -> Option<HttpResponse> {
+    let refusal = require_operator_for_own_party(&data.config, key, party_id).err()?;
+    Some(record_refusal(data, key.cloned(), endpoint, party_id.to_string(), refusal).await)
+}
+
 /// The answer to a write that did not complete.
 fn write_failed() -> HttpResponse {
     HttpResponse::InternalServerError().json(ErrorResponse {
@@ -1950,8 +2034,15 @@ pub async fn tenant_local_party_adopt_execute(
         Ok(key) => key,
         Err(resp) => return resp,
     };
-    if let Err(resp) = require_operator_for_own_party(&data.config, key.as_ref(), &body.party_id) {
-        return resp;
+    if let Some(refusal) = refuse_own_party(
+        &data,
+        key.as_ref(),
+        TenantEndpoint::LocalPartyAdoptExecute,
+        &body.party_id,
+    )
+    .await
+    {
+        return refusal;
     }
     let body = body.into_inner();
     let party_id = body.party_id.clone();
@@ -3224,6 +3315,11 @@ mod own_party_tests {
 
     /// A node with the tenant key `tenant` and the operator key `operator`.
     fn state(db: SqlitePool) -> web::Data<AppState> {
+        limited_state(db, 0)
+    }
+
+    /// [`state`] with a budget of `limit` calls per minute for each key.
+    fn limited_state(db: SqlitePool, limit: u32) -> web::Data<AppState> {
         let Ok(mut state) =
             std::sync::Arc::try_unwrap(AppState::for_test_on(None, db).into_inner())
         else {
@@ -3232,7 +3328,7 @@ mod own_party_tests {
         state.test_mode = false;
         state.config.tenant_api_keys = vec!["tenant".to_string()];
         state.config.operator_api_keys = vec!["operator".to_string()];
-        state.config.tenant_rate_limit_per_minute = 0;
+        state.config.tenant_rate_limit_per_minute = limit;
         state.config.node.participant_id = CantonId::parse(&this_node()).ok();
         // Nothing listens here, so a Canton call fails at once.
         state.config.canton.admin_api_host = "127.0.0.1".to_string();
@@ -3412,8 +3508,82 @@ mod own_party_tests {
             let error = body["error"].as_str().unwrap_or_default();
             assert!(error.contains("DECPM_OPERATOR_API_KEYS"), "{label}: {body}");
         }
-        // Refused before any write, so no call reached the audit.
-        assert!(tenant_call_audit::list(&db, None, 100).await?.is_empty());
+        // Each call that the audit covers records its refusal. The ACS block
+        // read, adopt-key prepare and unhost are not audited calls.
+        let rows = tenant_call_audit::list(&db, None, 100).await?;
+        let mut endpoints: Vec<&str> = rows.iter().map(|row| row.endpoint.as_str()).collect();
+        endpoints.sort_unstable();
+        assert_eq!(
+            endpoints,
+            [
+                "/v0/tenant/add-hosts/authorize",
+                "/v0/tenant/add-hosts/execute",
+                "/v0/tenant/add-hosts/import (start)",
+                "/v0/tenant/add-hosts/publish",
+                "/v0/tenant/add-hosts/stage",
+                "/v0/tenant/local-party/adopt-key/execute",
+                "/v0/tenant/threshold/authorize",
+                "/v0/tenant/threshold/execute",
+            ]
+        );
+        let tenant = crate::server::middleware::tenant_key_id("tenant");
+        for row in &rows {
+            assert_eq!(row.http_status, Some(403), "{}", row.endpoint);
+            assert_eq!(row.key_index, Some(0), "{}", row.endpoint);
+            assert_eq!(
+                row.key_id.as_deref(),
+                Some(tenant.as_str()),
+                "{}",
+                row.endpoint
+            );
+            assert_eq!(
+                row.party_id.as_deref(),
+                Some(own_party().as_str()),
+                "{}",
+                row.endpoint
+            );
+            let error = row.error.as_deref().unwrap_or_default();
+            assert!(
+                error.contains("DECPM_OPERATOR_API_KEYS"),
+                "{}: {error}",
+                row.endpoint
+            );
+        }
+        Ok(())
+    }
+
+    /// A refused import block spends budget, so a key cannot write audit
+    /// rows past its limit.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_refused_import_block_spends_budget(db: SqlitePool) -> anyhow::Result<()> {
+        let app = actix_test::init_service(
+            App::new()
+                .app_data(limited_state(db.clone(), 1))
+                .wrap(AuthMiddleware)
+                .service(tenant_acs_import),
+        )
+        .await;
+        let import = || {
+            calls(&own_party(), "tenant")
+                .into_iter()
+                .find_map(|(label, request)| (label == "import").then_some(request))
+                .map(actix_test::TestRequest::to_request)
+        };
+        let Some(first) = import() else {
+            anyhow::bail!("calls() has no import");
+        };
+        let first = actix_test::call_service(&app, first).await;
+        assert_eq!(first.status(), StatusCode::FORBIDDEN);
+        let Some(second) = import() else {
+            anyhow::bail!("calls() has no import");
+        };
+        let second = actix_test::call_service(&app, second).await;
+        assert_eq!(second.status(), StatusCode::TOO_MANY_REQUESTS);
+
+        let rows = tenant_call_audit::list(&db, None, 100).await?;
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].endpoint, "/v0/tenant/add-hosts/import (start)");
+        assert_eq!(rows[0].http_status, Some(403));
         Ok(())
     }
 
