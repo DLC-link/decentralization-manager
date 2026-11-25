@@ -399,6 +399,8 @@ pub fn topology_format_of_generated(response: &Value) -> Result<TopologyFormat, 
 /// `EXTERNAL_PARTY_ALREADY_EXISTS`, and a duplicate mapping with
 /// `TOPOLOGY_MAPPING_ALREADY_EXISTS`. The participant passes on only their
 /// text, as an `INVALID_ARGUMENT` error, so the text is what identifies them.
+/// That text prints the party id with its fingerprint cut to 12 characters
+/// and "...", so only the phrases and the party's name are matched.
 /// A namespace definition at serial 1 that differs from the existing one
 /// fails with `TOPOLOGY_SERIAL_MISMATCH`, which also arrives as text.
 pub fn allocate_refusal(answer: &Value, party_id: &str) -> AllocateRefusal {
@@ -407,11 +409,12 @@ pub fn allocate_refusal(answer: &Value, party_id: &str) -> AllocateRefusal {
         .filter_map(|field| answer.get(field).and_then(Value::as_str))
         .collect::<Vec<_>>()
         .join(" ");
-    let party_exists = [
-        format!("Party {party_id} already exists on synchronizer"),
-        format!("Party already exists: party {party_id} is already allocated"),
-    ];
-    if party_exists.iter().any(|phrase| text.contains(phrase)) {
+    let hint = party_id.split_once("::").map_or(party_id, |(hint, _)| hint);
+    let names_the_party =
+        text.contains(&format!("Party {hint}::")) || text.contains(&format!("party {hint}::"));
+    let says_it_exists =
+        text.contains("already exists on synchronizer") || text.contains("is already allocated");
+    if names_the_party && says_it_exists {
         return AllocateRefusal::PartyExists;
     }
     let serial_mismatch = [
@@ -1104,18 +1107,18 @@ mod tests {
         assert!(party_hosted_locally(&several, party));
     }
 
-    const PARTY: &str = "treasury::1220aa";
+    const PARTY: &str =
+        "treasury::1220c73aa2db7c2ad4a12867f55cdfbf67fc1832983b16677583c014fb39a9bfaa33";
 
-    /// The answer Canton's JSON Ledger API gives once the party has an
-    /// authorized mapping on the participant.
+    /// The two texts as Canton 3.7 prints them: its `PartyId.toString` gave
+    /// `treasury::1220c73aa2db...` for `PARTY`, and the participant wraps the
+    /// cause in an `INVALID_ARGUMENT` error.
     #[test]
     fn a_party_that_already_exists_counts_as_success() {
         let exists = json!({
             "code": "INVALID_ARGUMENT",
-            "cause": format!(
-                "The submitted request has invalid arguments: Party {PARTY} already exists on \
-                 synchronizer global-domain::1220bb"
-            ),
+            "cause": "The submitted request has invalid arguments: Party treasury::1220c73aa2db... \
+                      already exists on synchronizer global-domain::1220abababab...",
             "errorCategory": 8,
         });
         assert_eq!(
@@ -1125,13 +1128,24 @@ mod tests {
 
         let duplicate = json!({
             "code": "INVALID_ARGUMENT",
-            "cause": format!(
-                "The submitted request has invalid arguments: Party already exists: party \
-                 {PARTY} is already allocated"
-            ),
+            "cause": "The submitted request has invalid arguments: Party already exists: party \
+                      treasury::1220c73aa2db... is already allocated",
         });
         assert_eq!(
             allocate_refusal(&duplicate, PARTY),
+            AllocateRefusal::PartyExists
+        );
+    }
+
+    /// A Canton that printed the whole id would still match.
+    #[test]
+    fn the_whole_party_id_matches_too() {
+        let exists = json!({
+            "code": "INVALID_ARGUMENT",
+            "cause": format!("Party {PARTY} already exists on synchronizer global-domain::1220ab"),
+        });
+        assert_eq!(
+            allocate_refusal(&exists, PARTY),
             AllocateRefusal::PartyExists
         );
     }
@@ -1140,9 +1154,14 @@ mod tests {
     fn another_partys_existence_is_not_success() {
         let exists = json!({
             "code": "INVALID_ARGUMENT",
-            "cause": "Party other::1220cc already exists on synchronizer global-domain::1220bb",
+            "cause": "Party other::1220c73aa2db... already exists on synchronizer global::1220ab...",
         });
         assert_eq!(allocate_refusal(&exists, PARTY), AllocateRefusal::Other);
+        let allocated = json!({
+            "code": "INVALID_ARGUMENT",
+            "cause": "Party already exists: party treasury-2::1220c73aa2db... is already allocated",
+        });
+        assert_eq!(allocate_refusal(&allocated, PARTY), AllocateRefusal::Other);
     }
 
     /// Without error details, the JSON Ledger API puts the description in
