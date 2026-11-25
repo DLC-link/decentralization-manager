@@ -10,6 +10,7 @@ use base64::Engine;
 use prometheus::IntCounterVec;
 use serde::Deserialize;
 use sqlx::SqlitePool;
+use tracing::Instrument;
 
 use crate::server::ledger_paging::AcsCursor;
 use canton_proto_rs::com::{
@@ -879,6 +880,14 @@ where
     F: Future<Output = Submitted> + Send + 'static,
 {
     let step = record.step.label();
+    // Every line the submission logs, the full error chain among them, then
+    // names the party and the write, so an operator can find it.
+    let span = tracing::warn_span!(
+        "governance_write",
+        party_id = %record.party_id,
+        write = %step
+    );
+    let submission = submission.instrument(span);
     let write = tokio::spawn(async move {
         let submitted = tokio::spawn(submission).await.unwrap_or_else(|e| {
             tracing::error!("The {step} submission ended without an outcome: {e}");
@@ -3099,7 +3108,7 @@ mod get_party_credentials_tests {
     };
 
     #[derive(Clone, Default)]
-    struct LogBuffer(Arc<StdMutex<Vec<u8>>>);
+    pub(super) struct LogBuffer(Arc<StdMutex<Vec<u8>>>);
 
     impl std::io::Write for LogBuffer {
         fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
@@ -3125,7 +3134,7 @@ mod get_party_credentials_tests {
     }
 
     impl LogBuffer {
-        fn captured(&self) -> Result<String> {
+        pub(super) fn captured(&self) -> Result<String> {
             let written = self
                 .0
                 .lock()
@@ -4046,6 +4055,72 @@ mod mediator_timeout_tests {
             );
             let (_, message) = audit_row(&pool, event).await?;
             assert_eq!(message.as_deref(), Some(error), "{event:?}");
+        }
+        Ok(())
+    }
+
+    /// The server log keeps the whole error chain. Its line names the party
+    /// and the write, so an operator can find the failure a caller reports.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn the_logged_failure_names_the_party_and_the_write(pool: SqlitePool) -> Result {
+        let _serial = super::action_metrics_tests::SERIAL.lock().await;
+        for (event, uri, _, body) in writes() {
+            let write = match event {
+                AuditEvent::Propose => "propose",
+                AuditEvent::Confirm => "confirm",
+                AuditEvent::Execute => "execute",
+                AuditEvent::Expire => "expire",
+                AuditEvent::Cancel => "cancel_confirmation",
+                AuditEvent::CancelProposal => "cancel_proposal",
+                other => anyhow::bail!("{other:?} is not a write"),
+            };
+            let app = actix_test::init_service(
+                App::new()
+                    .app_data(state(pool.clone(), 1).await?)
+                    .wrap(AuthMiddleware)
+                    .service(propose_action)
+                    .service(confirm_action)
+                    .service(execute_action)
+                    .service(expire_confirmation)
+                    .service(cancel_confirmation)
+                    .service(cancel_proposal),
+            )
+            .await;
+            let request = actix_test::TestRequest::post()
+                .uri(uri)
+                .insert_header((AUTHORIZATION, "Bearer any-token"))
+                .set_json(body)
+                .to_request();
+
+            let buffer = super::get_party_credentials_tests::LogBuffer::default();
+            let subscriber = tracing_subscriber::fmt()
+                .with_writer(buffer.clone())
+                .with_ansi(false)
+                .finish();
+            let response = {
+                let _guard = tracing::subscriber::set_default(subscriber);
+                actix_test::call_service(&app, request).await
+            };
+
+            assert_eq!(
+                response.status(),
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "{event:?}"
+            );
+            let logs = buffer.captured()?;
+            let line = logs
+                .lines()
+                .find(|line| line.contains("127.0.0.1:1"))
+                .with_context(|| format!("{event:?} logged no error chain: {logs}"))?;
+            assert!(line.contains(" WARN "), "{event:?}: {line}");
+            assert!(
+                line.contains(&format!("party_id={}", party())),
+                "{event:?}: {line}"
+            );
+            assert!(
+                line.contains(&format!("write={write}")),
+                "{event:?}: {line}"
+            );
         }
         Ok(())
     }
