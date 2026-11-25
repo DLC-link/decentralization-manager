@@ -1681,7 +1681,9 @@ fn run_governance(client: &mut DecmanClient, command: GovernanceCommand) -> Resu
         GovernanceCommand::Revoke { party, target } => {
             let target = target.target()?;
             let party = resolve_party(client, &party)?;
-            let pending = governance::fetch(client, &party.id)?;
+            // Hiding an action only takes it off this node's list. Its
+            // confirmations stay on the ledger, so they can still be archived.
+            let pending = governance::fetch_with_hidden(client, &party.id)?;
             let body = governance::revoke_body(&pending, &party.id, &target)?;
             post(client, "/governance/cancel", Some(&body))
         }
@@ -1690,7 +1692,7 @@ fn run_governance(client: &mut DecmanClient, command: GovernanceCommand) -> Resu
             confirmation,
         } => {
             let party = resolve_party(client, &party)?;
-            let pending = governance::fetch(client, &party.id)?;
+            let pending = governance::fetch_with_hidden(client, &party.id)?;
             let rules = governance::rules_contract_id(&pending)?;
             let body = governance::expire_body(&pending, &party.id, &rules, &confirmation)?;
             post(client, "/governance/expire", Some(&body))
