@@ -4221,6 +4221,11 @@ mod mediator_timeout_tests {
     #[sqlx::test(migrator = "MIGRATOR")]
     async fn the_logged_failure_names_the_party_and_the_write(pool: SqlitePool) -> Result {
         let _serial = super::action_metrics_tests::SERIAL.lock().await;
+        // Other tests hit the same log line at the same time. With one live
+        // dispatcher, tracing decides whether a line is on from the default
+        // of the thread that hits it first, and caches "off" for this test
+        // too. A second live dispatcher makes it ask every live one.
+        let _second = tracing::Dispatch::new(tracing_subscriber::registry());
         for (event, uri, _, body) in writes() {
             let write = match event {
                 AuditEvent::Propose => "propose",
