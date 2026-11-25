@@ -532,6 +532,8 @@ where
 /// scrolling does not re-read them.
 ///
 /// `rules` is the live rules contract, or `None` when it could not be read.
+/// `timeouts` is this node's expire evidence. A first batch uses it to find
+/// the orphans that cannot be archived when the proposals span several pages.
 #[allow(clippy::too_many_arguments)]
 pub async fn get_governance_confirmations(
     config: &NodeConfig,
@@ -542,6 +544,7 @@ pub async fn get_governance_confirmations(
     packages: &PackageConfig,
     limit: usize,
     cursor: Option<AcsCursor>,
+    timeouts: &ExpireTimeouts,
 ) -> Result<GovernanceQueue> {
     // Collect confirmations grouped by action hash (core self-management)
     let mut confirmations_by_hash: HashMap<String, (ActionType, Vec<ParsedConfirmation>)> =
@@ -583,7 +586,7 @@ pub async fn get_governance_confirmations(
     // read. That is a complete read, not a failed one.
     let mut proposals_read_ok = true;
     let (batch, next_cursor) =
-        match page_proposal_infos(config, party_id, token, packages, limit, cursor).await {
+        match page_proposal_infos(config, party_id, token.clone(), packages, limit, cursor).await {
             Ok(page) => page,
             Err(e) => {
                 // Warn, not debug: this drops every unconfirmed card from the page,
@@ -596,6 +599,54 @@ pub async fn get_governance_confirmations(
     let proposal_infos_complete = proposals_read_ok;
     proposal_infos.extend(batch);
 
+    let now_seconds = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+
+    // With several pages of proposals, no single page proves that a
+    // confirmation's proposal is gone. An orphan that cannot be archived must
+    // still reach the operator, so the first page checks such orphans against
+    // every active proposal id. Only marked orphans start that scan, and they
+    // are rare.
+    let mut gone = HashSet::new();
+    if first_page
+        && next_cursor.is_some()
+        && proposals_read_ok
+        && decman_lib::catalog::templates::governable_action_interface(packages).is_ok()
+    {
+        let marked: Vec<&String> = cached
+            .1
+            .iter()
+            .filter(|(cid, (_, confirmations))| {
+                !proposal_infos.contains_key(*cid)
+                    && !confirmations.is_empty()
+                    && confirmations.iter().all(|c| {
+                        is_stuck(
+                            &c.contract_id,
+                            &c.confirming_party,
+                            c.expires_at,
+                            timeouts,
+                            now_seconds,
+                        )
+                    })
+            })
+            .map(|(cid, _)| cid)
+            .collect();
+        if !marked.is_empty() {
+            match active_proposal_ids(config, party_id, token, packages).await {
+                Ok(active) => {
+                    gone = marked
+                        .into_iter()
+                        .filter(|cid| !active.contains(*cid))
+                        .cloned()
+                        .collect();
+                }
+                Err(e) => tracing::warn!("Could not check the proposals of marked orphans: {e:#}"),
+            }
+        }
+    }
+
     domain_confirmations.extend(domain_confirmations_for_batch(
         cached.1,
         &proposal_infos,
@@ -603,12 +654,8 @@ pub async fn get_governance_confirmations(
         next_cursor.is_some(),
         proposals_read_ok,
         packages,
+        &gone,
     ));
-
-    let now_seconds = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0);
 
     let members: Option<HashSet<CantonId>> =
         rules.map(|rules| rules.members.iter().cloned().collect());
@@ -654,6 +701,22 @@ pub struct GovernanceQueue {
 /// unresponsive, keyed by confirmation contract id.
 pub(crate) type ExpireTimeouts = HashMap<String, HashSet<String>>;
 
+/// Whether a confirmation has expired and the latest expire attempt on this
+/// node timed out naming its confirmer.
+fn is_stuck(
+    contract_id: &str,
+    confirmer: &CantonId,
+    expires_at: i64,
+    timeouts: &ExpireTimeouts,
+    now: i64,
+) -> bool {
+    let expired = expires_at > 0 && expires_at <= now;
+    expired
+        && timeouts
+            .get(contract_id)
+            .is_some_and(|unresponsive| unresponsive.contains(&confirmer.to_string()))
+}
+
 /// Marks the expired confirmations that cannot be archived, then drops the
 /// orphaned domain actions that can.
 ///
@@ -671,11 +734,8 @@ pub(crate) fn mark_stuck(
     now: i64,
 ) {
     let reason = |contract_id: &str, confirmer: &CantonId, expires_at: i64| {
-        let expired = expires_at > 0 && expires_at <= now;
-        let named = timeouts
-            .get(contract_id)
-            .is_some_and(|unresponsive| unresponsive.contains(&confirmer.to_string()));
-        (expired && named).then_some(StuckReason::ParticipantUnresponsive)
+        is_stuck(contract_id, confirmer, expires_at, timeouts, now)
+            .then_some(StuckReason::ParticipantUnresponsive)
     };
     for action in actions {
         for c in &mut action.confirmations {
@@ -1015,6 +1075,7 @@ type DomainConfirmations = HashMap<String, (String, Vec<ParsedDomainConfirmation
 
 /// Missing proposals prove orphanhood only after a successful complete read.
 /// Off-page proposals and unconfigured interfaces provide no such evidence.
+/// `gone` holds proposals that a scan of every active id proved gone.
 fn domain_confirmations_for_batch(
     confirmations: DomainConfirmations,
     proposals: &HashMap<String, ProposalInfo>,
@@ -1022,6 +1083,7 @@ fn domain_confirmations_for_batch(
     has_next_page: bool,
     read_ok: bool,
     packages: &PackageConfig,
+    gone: &HashSet<String>,
 ) -> DomainConfirmations {
     let include_orphans = first_page
         && !has_next_page
@@ -1029,8 +1091,41 @@ fn domain_confirmations_for_batch(
         && decman_lib::catalog::templates::governable_action_interface(packages).is_ok();
     confirmations
         .into_iter()
-        .filter(|(cid, _)| include_orphans || proposals.contains_key(cid))
+        .filter(|(cid, _)| include_orphans || proposals.contains_key(cid) || gone.contains(cid))
         .collect()
+}
+
+/// The ids of every active proposal of `party_id`, read page by page.
+async fn active_proposal_ids(
+    config: &NodeConfig,
+    party_id: &CantonId,
+    token: Option<String>,
+    packages: &PackageConfig,
+) -> Result<HashSet<String>> {
+    let template = decman_lib::catalog::templates::governable_action_interface(packages)?;
+    let event_format = party_event_format(
+        party_id,
+        vec![interface_filter((&template).into(), false)],
+        false,
+    );
+    let mut ids = HashSet::new();
+    let mut cursor = None;
+    loop {
+        let (page, next) = page_active_contracts(
+            config,
+            token.clone(),
+            event_format.clone(),
+            FETCH_CHUNK as usize,
+            cursor,
+            |created| Some(created.contract_id),
+        )
+        .await?;
+        ids.extend(page);
+        match next {
+            Some(next) => cursor = Some(next),
+            None => return Ok(ids),
+        }
+    }
 }
 
 /// The Canton error ids that mean a template is not on this participant:
@@ -4540,6 +4635,7 @@ mod domain_confirmation_page_tests {
             false,
             true,
             &default_package_config(),
+            &HashSet::new(),
         );
         let mut actions: Vec<_> =
             interpret::assemble_domain_actions(selected, HashMap::new(), true, true, 2, None, NOW)
@@ -4584,6 +4680,7 @@ mod domain_confirmation_page_tests {
                 has_next_page,
                 true,
                 &default_package_config(),
+                &HashSet::new(),
             );
 
             let actions =
@@ -4607,6 +4704,7 @@ mod domain_confirmation_page_tests {
                 false,
                 read_ok,
                 &packages,
+                &HashSet::new(),
             );
 
             assert!(selected.is_empty());

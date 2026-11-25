@@ -153,6 +153,16 @@ pub async fn get_governance(
         _ => None,
     };
 
+    let timeouts = match data.db.get_mediator_timeouts(party_id).await {
+        Ok(rows) => expire_timeouts(rows),
+        Err(e) => {
+            tracing::error!("Failed to read governance mediator timeouts: {e}");
+            return HttpResponse::InternalServerError().json(ErrorResponse {
+                error: format!("Failed to read governance mediator timeouts: {e}"),
+            });
+        }
+    };
+
     match get_governance_confirmations(
         &data.config,
         party_id,
@@ -162,6 +172,7 @@ pub async fn get_governance(
         &packages,
         batch,
         from,
+        &timeouts,
     )
     .await
     {
@@ -171,15 +182,6 @@ pub async fn get_governance(
             next_cursor,
             ..
         }) => {
-            let timeouts = match data.db.get_mediator_timeouts(party_id).await {
-                Ok(rows) => expire_timeouts(rows),
-                Err(e) => {
-                    tracing::error!("Failed to read governance mediator timeouts: {e}");
-                    return HttpResponse::InternalServerError().json(ErrorResponse {
-                        error: format!("Failed to read governance mediator timeouts: {e}"),
-                    });
-                }
-            };
             mark_stuck(
                 &mut actions,
                 &mut domain_actions,
@@ -4464,13 +4466,15 @@ mod confirmations_feed_tests {
     /// The Ledger API state service of a participant whose ACS holds
     /// `contracts`. A page read returns, in one page, every contract whose
     /// template matches a template filter of the request. An interface read,
-    /// such as the one for proposals, finds nothing: every proposal is gone.
-    /// A read of the `missing` template fails the way Canton fails it when
-    /// the package is uploaded but lacks the template.
+    /// such as the one for proposals, returns `proposals`, a page of the
+    /// requested size at a time. A read of the `missing` template fails the
+    /// way Canton fails it when the package is uploaded but lacks the
+    /// template.
     #[derive(Clone, Default)]
     struct AcsLedger {
         contracts: Arc<Vec<CreatedEvent>>,
         missing: Option<&'static str>,
+        proposals: Arc<Vec<CreatedEvent>>,
     }
 
     impl AcsLedger {
@@ -4506,6 +4510,20 @@ mod confirmations_feed_tests {
                     "NO_TEMPLATES_FOR_PACKAGE_NAME_AND_QUALIFIED_NAME(8,0): no template {missing}"
                 )));
             }
+            let reads_proposals = request
+                .event_format
+                .iter()
+                .flat_map(|format| format.filters_by_party.values())
+                .flat_map(|filters| &filters.cumulative)
+                .any(|filter| {
+                    matches!(
+                        filter.identifier_filter,
+                        Some(IdentifierFilter::InterfaceFilter(_))
+                    )
+                });
+            if reads_proposals {
+                return Ok(self.proposal_page(request));
+            }
             let active_contracts = self
                 .contracts
                 .iter()
@@ -4527,6 +4545,35 @@ mod confirmations_feed_tests {
                 active_at_offset: 1,
                 next_page_token: None,
             })
+        }
+
+        /// The page of `proposals` that `request` asks for. The page token is
+        /// the index of its first proposal.
+        fn proposal_page(
+            &self,
+            request: &GetActiveContractsPageRequest,
+        ) -> GetActiveContractsPageResponse {
+            let start = request
+                .page_token
+                .as_deref()
+                .and_then(|token| std::str::from_utf8(token).ok()?.parse().ok())
+                .unwrap_or(0usize);
+            let size = request.max_page_size.unwrap_or(1).max(1) as usize;
+            let end = (start + size).min(self.proposals.len());
+            GetActiveContractsPageResponse {
+                active_contracts: self.proposals[start..end]
+                    .iter()
+                    .map(|c| GetActiveContractsResponse {
+                        contract_entry: Some(ContractEntry::ActiveContract(ActiveContract {
+                            created_event: Some(c.clone()),
+                            ..Default::default()
+                        })),
+                        ..Default::default()
+                    })
+                    .collect(),
+                active_at_offset: 1,
+                next_page_token: (end < self.proposals.len()).then(|| end.to_string().into_bytes()),
+            }
         }
     }
 
@@ -4694,6 +4741,17 @@ mod confirmations_feed_tests {
         ledger: &AcsLedger,
         party: &CantonId,
     ) -> Result<serde_json::Value> {
+        feed_with(pool, ledger, party, "").await
+    }
+
+    /// The feed of `party` against `ledger`, with `extra` appended to the
+    /// query string.
+    async fn feed_with(
+        pool: &SqlitePool,
+        ledger: &AcsLedger,
+        party: &CantonId,
+        extra: &str,
+    ) -> Result<serde_json::Value> {
         let app = actix_test::init_service(
             App::new()
                 .app_data(state(pool.clone(), ledger.serve()?).await?)
@@ -4701,7 +4759,9 @@ mod confirmations_feed_tests {
         )
         .await;
         let request = actix_test::TestRequest::get()
-            .uri(&format!("/governance/confirmations?party_id={party}"))
+            .uri(&format!(
+                "/governance/confirmations?party_id={party}{extra}"
+            ))
             .to_request();
         let response = actix_test::call_service(&app, request).await;
         anyhow::ensure!(
@@ -4792,6 +4852,62 @@ mod confirmations_feed_tests {
         Ok(())
     }
 
+    /// A proposal created on the ledger for `party`.
+    fn proposal(contract_id: &str, party: &CantonId, proposer: &CantonId) -> CreatedEvent {
+        contract(
+            contract_id,
+            "Governance.Proposal",
+            "GenericVote",
+            vec![
+                field("governanceParty", value::Sum::Party(party.to_string())),
+                field("proposer", value::Sum::Party(proposer.to_string())),
+            ],
+        )
+    }
+
+    /// #615 asks that an operator can hide an orphan that cannot be archived.
+    /// With more than one page of proposals, no single page proves its
+    /// proposal gone, so the first page checks every active proposal id. An
+    /// orphan that can still be archived stays out, as on one page.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_marked_orphan_is_listed_when_the_proposals_span_pages(pool: SqlitePool) -> Result {
+        let party = id("dec", "ab");
+        let member = id("member-a", "aa");
+        let expired = chrono::Utc::now().timestamp() - 3600;
+        let ledger = AcsLedger {
+            contracts: Arc::new(vec![
+                rules(&party, &[&member]),
+                domain_confirmation("00dom-marked", "00gone", &member, expired),
+                domain_confirmation("00dom-unmarked", "00gone-b", &member, expired),
+            ]),
+            proposals: Arc::new(
+                ["00p1", "00p2", "00p3"]
+                    .iter()
+                    .map(|cid| proposal(cid, &party, &member))
+                    .collect(),
+            ),
+            ..AcsLedger::default()
+        };
+        pool.record_mediator_timeout(&party, "00dom-marked", &[member.to_string()])
+            .await?;
+
+        let first = feed_with(&pool, &ledger, &party, "&limit=2").await?;
+
+        let cursor = first["next_cursor"]
+            .as_str()
+            .context("the proposals fit one page")?;
+        let marked = holding(&first["domain_actions"], "00dom-marked")?;
+        assert_eq!(marked["orphaned"], json!(true));
+        assert_eq!(marked["cannot_be_archived"], json!(true));
+        assert!(holding(&first["domain_actions"], "00dom-unmarked").is_err());
+
+        let second =
+            feed_with(&pool, &ledger, &party, &format!("&limit=2&cursor={cursor}")).await?;
+        assert!(holding(&second["domain_actions"], "00dom-marked").is_err());
+        assert!(holding(&second["domain_actions"], "00dom-unmarked").is_err());
+        Ok(())
+    }
+
     /// A package can be uploaded without one of the governance templates.
     /// The confirmations of the templates it has must still be listed.
     #[sqlx::test(migrator = "MIGRATOR")]
@@ -4807,6 +4923,7 @@ mod confirmations_feed_tests {
                 domain_confirmation("00dom-timeout", "00gone", &member, expired),
             ]),
             missing: Some("GovernanceSelfConfirmation"),
+            ..AcsLedger::default()
         };
         pool.record_mediator_timeout(&party, "00dom-timeout", &[member.to_string()])
             .await?;
@@ -4834,9 +4951,18 @@ mod confirmations_feed_tests {
         let mut packages = packages();
         packages.governance_action = None;
 
-        let queue =
-            get_governance_confirmations(&data.config, &party, 1, None, None, &packages, 25, None)
-                .await?;
+        let queue = get_governance_confirmations(
+            &data.config,
+            &party,
+            1,
+            None,
+            None,
+            &packages,
+            25,
+            None,
+            &ExpireTimeouts::new(),
+        )
+        .await?;
 
         assert!(queue.complete);
         Ok(())
