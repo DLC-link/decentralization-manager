@@ -1925,6 +1925,16 @@ async fn requested_confirmations(
     Ok(cids)
 }
 
+/// The answer to a hide or unhide from a token without a subject. Both rows
+/// name who made the change, so such a token would name nobody.
+fn without_subject(actor: &AuditActor) -> Option<HttpResponse> {
+    actor.sub.is_empty().then(|| {
+        HttpResponse::Forbidden().json(ErrorResponse {
+            error: "The token has no subject, so the change cannot record who made it.".to_string(),
+        })
+    })
+}
+
 /// Hides or unhides `cids` and writes the audit row in one transaction, so a
 /// failed audit write leaves the hidden set as it was. A failure gets its own
 /// row, written outside the rolled-back transaction. Returns how many
@@ -1989,12 +1999,8 @@ pub async fn hide_confirmations(
         Ok(principal) => AuditActor::from(&principal),
         Err(resp) => return resp,
     };
-    // The hidden row names who hid the action. A token without a subject
-    // would name nobody.
-    if actor.sub.is_empty() {
-        return HttpResponse::Forbidden().json(ErrorResponse {
-            error: "The token has no subject, so the hide cannot record who made it.".to_string(),
-        });
+    if let Some(refusal) = without_subject(&actor) {
+        return refusal;
     }
     let cids = match requested_confirmations(&data, &body).await {
         Ok(cids) => cids,
@@ -2025,7 +2031,7 @@ pub async fn hide_confirmations(
         (status = 200, description = "Confirmations unhidden", body = MessageResponse),
         (status = 400, description = "No confirmation named, more than 100, an empty id, or an id over 256 bytes", body = ErrorResponse),
         (status = 401, description = "Unauthorized", body = ErrorResponse),
-        (status = 403, description = "Forbidden: admin role required", body = ErrorResponse),
+        (status = 403, description = "Forbidden: admin role required, or the token has no subject", body = ErrorResponse),
         (status = 404, description = "This node does not serve the party", body = ErrorResponse),
         (status = 500, description = "Internal server error", body = ErrorResponse)
     )
@@ -2040,6 +2046,9 @@ pub async fn unhide_confirmations(
         Ok(principal) => AuditActor::from(&principal),
         Err(resp) => return resp,
     };
+    if let Some(refusal) = without_subject(&actor) {
+        return refusal;
+    }
     let cids = match requested_confirmations(&data, &body).await {
         Ok(cids) => cids,
         Err(resp) => return resp,
@@ -6182,6 +6191,44 @@ mod hiding_tests {
             "{body}"
         );
         assert!(hidden(&pool).await?.is_empty());
+        assert!(
+            pool.get_governance_audit(&party_id()?, 50, 0)
+                .await?
+                .is_empty()
+        );
+        Ok(())
+    }
+
+    /// The unhide row names who made the change too, so a token without a
+    /// subject cannot unhide anything either.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn an_unhide_by_a_token_without_a_subject_is_refused(pool: SqlitePool) -> Result {
+        pool.hide_confirmations(&party_id()?, &["00a".to_string()], "admin")
+            .await?;
+        let data = served_state(&pool).await?;
+        let roles: Vec<String> = data.admin_role.iter().cloned().collect();
+        let app = actix_test::init_service(
+            App::new()
+                .app_data(data)
+                .wrap_fn(move |request, service| {
+                    request.extensions_mut().insert(Principal {
+                        sub: String::new(),
+                        issuer: "test".to_string(),
+                        roles: roles.clone(),
+                        email: None,
+                    });
+                    service.call(request)
+                })
+                .service(unhide_confirmations),
+        )
+        .await;
+
+        let response =
+            actix_test::call_service(&app, request("/governance/unhide", &["00a"])?.to_request())
+                .await;
+
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        assert_eq!(hidden(&pool).await?, ["00a"]);
         assert!(
             pool.get_governance_audit(&party_id()?, 50, 0)
                 .await?
