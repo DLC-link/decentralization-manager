@@ -791,6 +791,59 @@ mod tests {
         ));
     }
 
+    fn namespace_of(plan: &PartyPlan, seed: u8) -> String {
+        let key = signing_key(seed).verifying_key();
+        plan.owners
+            .iter()
+            .find(|owner| owner.key == key)
+            .map(|owner| owner.namespace.clone())
+            .expect("the seed is an owner")
+    }
+
+    /// A non-owner signs the right hash but names an owner's key.
+    #[test]
+    fn refuses_a_signature_that_the_named_owner_did_not_make() {
+        let plan = plan_with(&[1, 2]);
+        let onboarding = onboarding_transactions(&plan, TopologyFormat::V31);
+        let forged = OwnerSignature {
+            public_key: sign(2, &onboarding).public_key,
+            signature: sign(3, &onboarding).signature,
+        };
+        let signatures = [sign(1, &onboarding), forged];
+        match allocation_requests(&plan, &onboarding, SYNCHRONIZER, &signatures) {
+            Err(Error::OwnerSignatureMismatch { namespace }) => {
+                assert_eq!(namespace, namespace_of(&plan, 2));
+            }
+            other => panic!("expected a signature mismatch, got {other:?}"),
+        }
+    }
+
+    /// Only `multiHashSignatures` carries the owners' signatures, so a
+    /// signature on one transaction's hash would not authorize the others.
+    #[test]
+    fn refuses_a_signature_over_one_transaction_hash() {
+        let plan = plan_with(&[1, 2]);
+        let onboarding = onboarding_transactions(&plan, TopologyFormat::V31);
+        for transaction in &onboarding.transactions {
+            let message = hex::decode(&transaction.hash).expect("the hash is hex");
+            let key = signing_key(2);
+            let single = OwnerSignature {
+                public_key: hex::encode(key.verifying_key().as_bytes()),
+                signature: hex::encode(key.sign(&message).to_bytes()),
+            };
+            let signatures = [sign(1, &onboarding), single];
+            assert!(
+                matches!(
+                    check_owner_signatures(&plan, &onboarding, &signatures),
+                    Err(Error::OwnerSignatureMismatch { namespace })
+                        if namespace == namespace_of(&plan, 2)
+                ),
+                "{}",
+                transaction.mapping
+            );
+        }
+    }
+
     #[test]
     fn refuses_a_second_signature_from_one_owner() {
         let plan = plan_with(&[1, 2]);
