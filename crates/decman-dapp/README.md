@@ -30,8 +30,9 @@ through the JSON Ledger API:
   retry skips the hosts that already report the party.
 - The localnet integration test sends in this order: the owners' participants
   first, then the covalidator. Other orders are not tested.
-- If the owners already share a namespace with another threshold, Canton
-  refuses the party, and the dApp says so.
+- If the owners' namespace already exists with a different definition, for
+  example another namespace threshold, Canton refuses the party. The dApp
+  says so and shows the participant's own text.
 
 The rest is simulated in the browser:
 
@@ -116,12 +117,19 @@ refuses a proposal that mixes simulated and real records.
 2. Optionally, add the SV as a covalidator.
 3. On **New party**, pick the owners, the covalidators and the thresholds. The
    page shows the party id, or the reason the proposal is invalid.
-4. Propose as one of the owners. The dApp asks that owner's participant for its
-   synchronizer and topology format, and builds the transactions.
-5. On **Proposals**, sign as each owner. Every owner must sign.
+4. Propose and sign as one of the owners. The dApp asks that owner's
+   participant for its synchronizer and topology format, builds the
+   transactions, and signs them as the proposer.
+5. On **Proposals**, sign as each other owner. Every owner must sign. Before
+   any host receives the bundle, the proposer can **Withdraw** the proposal,
+   and an owner who has not signed can **Reject** it.
 6. Create the party. The card shows each host's result and any error text from
-   its participant.
-7. Open the party. Simulate an incoming transfer, a dApp connection and a
+   its participant. After a failed attempt the card offers only **Try again**,
+   because the bundle may already sit at participants. If every owner's
+   participant refused it, the proposer can also withdraw it.
+7. If no owner's participant confirmed that it accepted the bundle, the party
+   is marked **Not confirmed as created by this proposal**.
+8. Open the party. Simulate an incoming transfer, a dApp connection and a
    transfer request. Sign the request with enough owners, then submit it.
 
 **Reset browser data** deletes everything that the dApp keeps in the browser.
