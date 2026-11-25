@@ -176,6 +176,13 @@ pub async fn get_governance(
     )
     .await
     {
+        // A read that left cards out would show as a shorter list with no
+        // warning. Answer it as the failed read it is.
+        Ok(GovernanceQueue {
+            complete: false, ..
+        }) => HttpResponse::InternalServerError().json(ErrorResponse {
+            error: FEED_READ_FAILED.to_string(),
+        }),
         Ok(GovernanceQueue {
             mut actions,
             mut domain_actions,
@@ -203,13 +210,18 @@ pub async fn get_governance(
             })
         }
         Err(e) => {
-            tracing::error!("Failed to fetch governance confirmations: {e}");
+            tracing::error!("Failed to fetch governance confirmations: {e:#}");
             HttpResponse::InternalServerError().json(ErrorResponse {
-                error: format!("Failed to fetch governance confirmations: {e}"),
+                error: FEED_READ_FAILED.to_string(),
             })
         }
     }
 }
+
+/// The answer to a confirmations read that failed. The cause, which can
+/// name an address, goes to the server log only.
+const FEED_READ_FAILED: &str =
+    "Failed to fetch governance confirmations: a ledger read failed. See the DecMan server log.";
 
 /// Get governance state (GovernanceRules contract state)
 /// Query parameters for the paged proposals feed.
@@ -4469,12 +4481,14 @@ mod confirmations_feed_tests {
     /// such as the one for proposals, returns `proposals`, a page of the
     /// requested size at a time. A read of the `missing` template fails the
     /// way Canton fails it when the package is uploaded but lacks the
-    /// template.
+    /// template. A read of the `refused` template fails with a permission
+    /// error.
     #[derive(Clone, Default)]
     struct AcsLedger {
         contracts: Arc<Vec<CreatedEvent>>,
         missing: Option<&'static str>,
         proposals: Arc<Vec<CreatedEvent>>,
+        refused: Option<&'static str>,
     }
 
     impl AcsLedger {
@@ -4508,6 +4522,11 @@ mod confirmations_feed_tests {
             if let Some(missing) = self.missing.filter(|m| wanted.iter().any(|w| w.1 == *m)) {
                 return Err(tonic::Status::invalid_argument(format!(
                     "NO_TEMPLATES_FOR_PACKAGE_NAME_AND_QUALIFIED_NAME(8,0): no template {missing}"
+                )));
+            }
+            if let Some(refused) = self.refused.filter(|r| wanted.iter().any(|w| w.1 == *r)) {
+                return Err(tonic::Status::permission_denied(format!(
+                    "PERMISSION_DENIED(7,0): cannot read {refused} at ledger.internal:5001"
                 )));
             }
             let reads_proposals = request
@@ -4905,6 +4924,35 @@ mod confirmations_feed_tests {
             feed_with(&pool, &ledger, &party, &format!("&limit=2&cursor={cursor}")).await?;
         assert!(holding(&second["domain_actions"], "00dom-marked").is_err());
         assert!(holding(&second["domain_actions"], "00dom-unmarked").is_err());
+        Ok(())
+    }
+
+    /// A read that leaves confirmations out must not look like a short list.
+    /// The answer names the failure, and keeps the ledger's text in the log.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_failed_confirmation_read_answers_an_error(pool: SqlitePool) -> Result {
+        let party = id("dec", "ab");
+        let member = id("member-a", "aa");
+        let ledger = AcsLedger {
+            contracts: Arc::new(vec![rules(&party, &[&member])]),
+            refused: Some("GovernanceSelfConfirmation"),
+            ..AcsLedger::default()
+        };
+        let app = actix_test::init_service(
+            App::new()
+                .app_data(state(pool, ledger.serve()?).await?)
+                .service(get_governance),
+        )
+        .await;
+        let request = actix_test::TestRequest::get()
+            .uri(&format!("/governance/confirmations?party_id={party}"))
+            .to_request();
+
+        let response = actix_test::call_service(&app, request).await;
+
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let body: serde_json::Value = actix_test::read_body_json(response).await;
+        assert_eq!(body["error"], json!(FEED_READ_FAILED));
         Ok(())
     }
 
