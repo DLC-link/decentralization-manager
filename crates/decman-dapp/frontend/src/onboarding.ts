@@ -15,7 +15,6 @@ import {
   type PartyPlan,
   type PartyProposal,
 } from './checks'
-import { shortUid } from './format'
 import * as ledger from './ledger'
 import { generateKeyPair, signDigest } from './mock/keys'
 import { isSimulated } from './mock/participants'
@@ -405,7 +404,7 @@ function addParty(proposal: Proposal, wallet: Wallet): void {
     history: [
       {
         at: now(),
-        text: `${proposal.simulated ? 'Party created on simulated participants.' : 'Party created on the ledger.'} ${wallet.name} submitted it through ${shortUid(wallet.participant.participantId)}.`,
+        text: `Every host reports the party.${proposal.simulated ? ' The hosts are simulated.' : ''} ${wallet.name} started the creation.`,
       },
     ],
   }

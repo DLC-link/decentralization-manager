@@ -58,7 +58,7 @@ const HOST_STEP: Record<HostResult['step'], [Tone, string]> = {
 const STATUS: Record<Proposal['status'], [Tone, string]> = {
   collecting: ['warn', 'Collecting signatures'],
   submitting: ['accent', 'Creating'],
-  submitted: ['ok', 'Created'],
+  submitted: ['ok', 'Every host reports the party'],
   failed: ['error', 'Failed'],
   withdrawn: ['muted', 'Withdrawn'],
   rejected: ['muted', 'Rejected'],
@@ -117,7 +117,7 @@ function ProposalCard({
         </span>
       </div>
       <Stepper
-        steps={['Proposed', `Owners signed ${verified}/${plan.owners.length}`, 'Hosts approved', 'Party created']}
+        steps={['Proposed', `Owners signed ${verified}/${plan.owners.length}`, 'Hosts approved', 'Every host reports the party']}
         current={current}
         failed={proposal.status === 'failed'}
       />
