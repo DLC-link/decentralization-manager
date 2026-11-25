@@ -5,7 +5,11 @@
 //! reads each served decparty's queue on its own cadence, through the query the
 //! feed uses, so the gauges agree with what the feed would show.
 
-use std::{collections::HashMap, sync::LazyLock, time::Duration};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::LazyLock,
+    time::Duration,
+};
 
 use actix_web::web;
 use decman_lib::catalog::interpret;
@@ -201,6 +205,7 @@ async fn read_queue(
         None,
         // Marks do not change the counts, so the poller reads no evidence.
         &HashMap::new(),
+        &HashSet::new(),
     )
     .await?;
     anyhow::ensure!(queue.complete, "a ledger read behind the queue failed");

@@ -534,6 +534,8 @@ where
 /// `rules` is the live rules contract, or `None` when it could not be read.
 /// `timeouts` is this node's expire evidence. A first batch uses it to find
 /// the orphans that cannot be archived when the proposals span several pages.
+/// `left_out` holds the hidden confirmations that the caller leaves out. That
+/// search skips an orphan whose confirmations are all in it.
 #[allow(clippy::too_many_arguments)]
 pub async fn get_governance_confirmations(
     config: &NodeConfig,
@@ -545,6 +547,7 @@ pub async fn get_governance_confirmations(
     limit: usize,
     cursor: Option<AcsCursor>,
     timeouts: &ExpireTimeouts,
+    left_out: &HashSet<String>,
 ) -> Result<GovernanceQueue> {
     // Collect confirmations grouped by action hash (core self-management)
     let mut confirmations_by_hash: HashMap<String, (ActionType, Vec<ParsedConfirmation>)> =
@@ -610,7 +613,8 @@ pub async fn get_governance_confirmations(
     // every active proposal id. Only marked orphans start that scan. It runs
     // on every first-page read while one exists, and the web UI reads the
     // first page every 10 s. So it stops after MAX_ORPHAN_SCAN_PAGES pages
-    // of FETCH_CHUNK ids, and then leaves the orphans out.
+    // of FETCH_CHUNK ids, and then leaves the orphans out. A hidden orphan
+    // that the caller leaves out anyway starts no scan.
     let mut gone = HashSet::new();
     if first_page
         && next_cursor.is_some()
@@ -632,6 +636,9 @@ pub async fn get_governance_confirmations(
                             now_seconds,
                         )
                     })
+                    && !confirmations
+                        .iter()
+                        .all(|c| left_out.contains(&c.contract_id))
             })
             .map(|(cid, _)| cid)
             .collect();

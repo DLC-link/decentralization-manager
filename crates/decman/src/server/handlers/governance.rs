@@ -229,6 +229,12 @@ pub async fn get_governance(
     };
 
     let (timeouts, hidden) = archival_state(&data.db, party_id).await;
+    let none_left_out = HashSet::new();
+    let left_out = if query.include_hidden {
+        &none_left_out
+    } else {
+        &hidden
+    };
 
     match get_governance_confirmations(
         &data.config,
@@ -240,6 +246,7 @@ pub async fn get_governance(
         batch,
         from,
         &timeouts,
+        left_out,
     )
     .await
     {
@@ -5200,6 +5207,71 @@ mod confirmations_feed_tests {
         Ok(actix_test::call_service(&app, request).await.status())
     }
 
+    /// A hidden orphan that the feed leaves out anyway starts no scan of the
+    /// active proposal ids. A read with `include_hidden` lists it, so that
+    /// read scans. So does a read with another marked orphan that is shown.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_hidden_orphan_starts_no_proposal_scan(pool: SqlitePool) -> Result {
+        let party = id("dec", "ab");
+        let member = id("member-a", "aa");
+        let expired = chrono::Utc::now().timestamp() - 3600;
+        for cid in ["00dom-hidden", "00dom-shown"] {
+            pool.record_mediator_timeout(&party, cid, &[member.to_string()])
+                .await?;
+        }
+        pool.hide_confirmations(&party, &["00dom-hidden".to_string()], "admin")
+            .await?;
+        // The first page reads the proposals once. A scan reads them again.
+        for (shown, extra, reads, hidden_listed) in [
+            (false, "", 1, false),
+            (false, "&include_hidden=true", 2, true),
+            (true, "", 2, false),
+        ] {
+            let mut contracts = vec![
+                rules(&party, &[&member]),
+                domain_confirmation("00dom-hidden", "00gone", &member, expired),
+            ];
+            if shown {
+                contracts.push(domain_confirmation(
+                    "00dom-shown",
+                    "00gone-b",
+                    &member,
+                    expired,
+                ));
+            }
+            let ledger = AcsLedger {
+                contracts: Arc::new(contracts),
+                proposals: Arc::new(
+                    ["00p1", "00p2", "00p3"]
+                        .iter()
+                        .map(|cid| proposal(cid, &party, &member))
+                        .collect(),
+                ),
+                ..AcsLedger::default()
+            };
+
+            let body = feed_with(&pool, &ledger, &party, &format!("&limit=2{extra}")).await?;
+
+            let case = format!("shown: {shown}, query: {extra}");
+            assert_eq!(
+                ledger.proposal_reads.load(Ordering::SeqCst),
+                reads,
+                "{case}"
+            );
+            assert_eq!(
+                lists(&body["domain_actions"], "00dom-hidden"),
+                hidden_listed,
+                "{case}: {body}"
+            );
+            assert_eq!(
+                lists(&body["domain_actions"], "00dom-shown"),
+                shown,
+                "{case}: {body}"
+            );
+        }
+        Ok(())
+    }
+
     /// Issue #615 asks that an operator can hide an action that cannot be
     /// archived, on this node. The feed then leaves it out, `include_hidden`
     /// brings it back marked, and an unhide or a new confirmation lists it
@@ -5550,6 +5622,7 @@ mod confirmations_feed_tests {
             25,
             None,
             &ExpireTimeouts::new(),
+            &HashSet::new(),
         )
         .await?;
 
