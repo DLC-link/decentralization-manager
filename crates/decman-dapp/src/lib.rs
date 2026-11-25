@@ -22,9 +22,9 @@ use wasm_bindgen::prelude::*;
 pub use digest::payload_digest;
 pub use error::Error;
 pub use onboarding::{
-    AllocationRequests, Onboarding, OnboardingTransaction, OwnerSignature, allocation_requests,
-    check_owner_signatures, generate_topology_request, onboarding_transactions,
-    party_hosted_locally, topology_format, topology_format_of_generated,
+    AllocateRefusal, AllocationRequests, Onboarding, OnboardingTransaction, OwnerSignature,
+    allocate_refusal, allocation_requests, check_owner_signatures, generate_topology_request,
+    onboarding_transactions, party_hosted_locally, topology_format, topology_format_of_generated,
 };
 pub use party::{MAX_OWNERS, PartyPlan, PartyProposal, PlannedOwner, ProposedOwner, plan_party};
 pub use signature::{parse_public_key, verify_signature};
@@ -82,6 +82,17 @@ pub fn generate_topology_request_js(
 pub fn topology_version_of_generated_js(response_json: &str) -> Result<u32, JsError> {
     let format = topology_format_of_generated(&parse(response_json)?)?;
     Ok(format.proto_version().unsigned_abs())
+}
+
+/// Why a participant refused an allocate body for `party_id`:
+/// `"partyExists"`, `"namespaceConflict"` or `"other"`.
+#[wasm_bindgen(js_name = allocateRefusal)]
+pub fn allocate_refusal_js(answer_json: &str, party_id: &str) -> Result<String, JsError> {
+    let refusal = allocate_refusal(&parse(answer_json)?, party_id);
+    Ok(serde_json::to_value(refusal)?
+        .as_str()
+        .unwrap_or("other")
+        .to_owned())
 }
 
 /// Whether a get-party answer says the participant hosts `party_id`.
@@ -257,5 +268,26 @@ mod tests {
             party_hosted_locally_js(&answer.to_string(), "p::1220aa").ok(),
             Some(true)
         );
+    }
+
+    #[test]
+    fn allocate_refusal_returns_the_names_the_frontend_compares() {
+        let party = "treasury::1220aa";
+        let exists = json!({
+            "code": "INVALID_ARGUMENT",
+            "cause": format!("Party {party} already exists on synchronizer global::1220bb"),
+        });
+        let conflict = json!({ "code": "TOPOLOGY_SERIAL_MISMATCH", "cause": "" });
+        let other = json!({ "code": "PERMISSION_DENIED", "cause": "" });
+        for (answer, name) in [
+            (exists, "partyExists"),
+            (conflict, "namespaceConflict"),
+            (other, "other"),
+        ] {
+            assert_eq!(
+                allocate_refusal_js(&answer.to_string(), party).expect("the call succeeds"),
+                name
+            );
+        }
     }
 }

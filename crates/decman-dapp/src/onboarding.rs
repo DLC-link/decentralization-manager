@@ -84,13 +84,28 @@ pub struct OwnerSignature {
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AllocationRequests {
-    /// Every host except the submitting one sends this first. Its one
-    /// transaction is the unsigned `PartyToParticipant`, which the host signs
-    /// as its approval to host the party.
+    /// Each covalidator sends this after the owners' participants. Its one
+    /// transaction is the unsigned `PartyToParticipant`, which the covalidator
+    /// signs as its approval to host the party.
     pub hosting_approval: Value,
-    /// The submitting owner's participant sends this last: every transaction,
-    /// with each owner's signature on the combined hash.
+    /// Each owner's participant sends this first: every transaction, with
+    /// each owner's signature on the combined hash. Sending it is that
+    /// participant's consent to host the party.
     pub allocate: Value,
+}
+
+/// Why a participant refused an allocate body.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum AllocateRefusal {
+    /// The party already exists on the participant. Another submission
+    /// created it first, so this counts as success.
+    PartyExists,
+    /// The owners' shared namespace already has a definition with another
+    /// threshold.
+    NamespaceConflict,
+    /// Any other refusal.
+    Other,
 }
 
 /// The topology format with proto version `version`.
@@ -375,6 +390,39 @@ pub fn topology_format_of_generated(response: &Value) -> Result<TopologyFormat, 
     };
     TopologyFormat::from_proto_version(version)
         .map_err(|_| Error::UnsupportedTopologyFormat(version.to_string()))
+}
+
+/// Classifies a JSON Ledger API error answer to an allocate body for
+/// `party_id`.
+///
+/// Canton refuses a party that already has an authorized mapping with
+/// `EXTERNAL_PARTY_ALREADY_EXISTS`, and a duplicate mapping with
+/// `TOPOLOGY_MAPPING_ALREADY_EXISTS`. The participant passes on only their
+/// text, as an `INVALID_ARGUMENT` error, so the text is what identifies them.
+/// A namespace definition at serial 1 that differs from the existing one
+/// fails with `TOPOLOGY_SERIAL_MISMATCH`, which also arrives as text.
+pub fn allocate_refusal(answer: &Value, party_id: &str) -> AllocateRefusal {
+    let text = ["code", "cause"]
+        .iter()
+        .filter_map(|field| answer.get(field).and_then(Value::as_str))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let party_exists = [
+        format!("Party {party_id} already exists on synchronizer"),
+        format!("Party already exists: party {party_id} is already allocated"),
+    ];
+    if party_exists.iter().any(|phrase| text.contains(phrase)) {
+        return AllocateRefusal::PartyExists;
+    }
+    let serial_mismatch = [
+        "TOPOLOGY_SERIAL_MISMATCH",
+        "did not match the expected serial",
+        "does not match the expected serial",
+    ];
+    if serial_mismatch.iter().any(|phrase| text.contains(phrase)) {
+        return AllocateRefusal::NamespaceConflict;
+    }
+    AllocateRefusal::Other
 }
 
 /// Whether a `GET /v2/parties/{party}` answer says the participant hosts
@@ -1054,5 +1102,81 @@ mod tests {
             { "party": party, "isLocal": true },
         ] });
         assert!(party_hosted_locally(&several, party));
+    }
+
+    const PARTY: &str = "treasury::1220aa";
+
+    /// The answer Canton's JSON Ledger API gives once the party has an
+    /// authorized mapping on the participant.
+    #[test]
+    fn a_party_that_already_exists_counts_as_success() {
+        let exists = json!({
+            "code": "INVALID_ARGUMENT",
+            "cause": format!(
+                "The submitted request has invalid arguments: Party {PARTY} already exists on \
+                 synchronizer global-domain::1220bb"
+            ),
+            "errorCategory": 8,
+        });
+        assert_eq!(
+            allocate_refusal(&exists, PARTY),
+            AllocateRefusal::PartyExists
+        );
+
+        let duplicate = json!({
+            "code": "INVALID_ARGUMENT",
+            "cause": format!(
+                "The submitted request has invalid arguments: Party already exists: party \
+                 {PARTY} is already allocated"
+            ),
+        });
+        assert_eq!(
+            allocate_refusal(&duplicate, PARTY),
+            AllocateRefusal::PartyExists
+        );
+    }
+
+    #[test]
+    fn another_partys_existence_is_not_success() {
+        let exists = json!({
+            "code": "INVALID_ARGUMENT",
+            "cause": "Party other::1220cc already exists on synchronizer global-domain::1220bb",
+        });
+        assert_eq!(allocate_refusal(&exists, PARTY), AllocateRefusal::Other);
+    }
+
+    /// Without error details, the JSON Ledger API puts the description in
+    /// `code` and the status in front of it in `cause`.
+    #[test]
+    fn a_serial_mismatch_is_a_namespace_conflict() {
+        let legacy = json!({
+            "code": "The given serial 1 did not match the expected serial 2.",
+            "cause": "FAILED_PRECONDITION: The given serial 1 did not match the expected serial 2.",
+            "errorCategory": -1,
+        });
+        assert_eq!(
+            allocate_refusal(&legacy, PARTY),
+            AllocateRefusal::NamespaceConflict
+        );
+        let coded = json!({ "code": "TOPOLOGY_SERIAL_MISMATCH", "cause": "anything" });
+        assert_eq!(
+            allocate_refusal(&coded, PARTY),
+            AllocateRefusal::NamespaceConflict
+        );
+    }
+
+    #[test]
+    fn any_other_answer_is_an_other_refusal() {
+        for answer in [
+            json!({ "code": "PERMISSION_DENIED", "cause": "no rights" }),
+            json!("not an object"),
+            json!({}),
+        ] {
+            assert_eq!(
+                allocate_refusal(&answer, PARTY),
+                AllocateRefusal::Other,
+                "{answer}"
+            );
+        }
     }
 }
