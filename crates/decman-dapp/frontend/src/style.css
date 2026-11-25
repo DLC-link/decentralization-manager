@@ -284,6 +284,14 @@ button.link {
   font-size: 0.9rem;
 }
 
+.warning {
+  padding: 6px 10px;
+  font-size: 0.9rem;
+  background: var(--warn-soft);
+  border: 1px solid var(--warn-border);
+  border-radius: 8px;
+}
+
 .error {
   padding: 8px 12px;
   color: var(--error);

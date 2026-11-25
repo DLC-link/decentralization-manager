@@ -14,20 +14,25 @@ export function NewParty({ onCreated }: { onCreated: () => void }) {
   const [covalidatorIds, setCovalidatorIds] = useState<string[]>([])
   const [signingThreshold, setSigningThreshold] = useState(2)
   const [namespaceThreshold, setNamespaceThreshold] = useState(2)
-  const [confirmationThreshold, setConfirmationThreshold] = useState(1)
+  // Null follows the default of one host fewer than the hosts, so that one
+  // host can be offline. A typed value replaces it.
+  const [chosenConfirmation, setChosenConfirmation] = useState<number | null>(null)
   const [busy, setBusy] = useState(false)
   const [error, run] = useAction()
 
   const owners = state.wallets.filter((w) => ownerIds.includes(w.id))
+  const covalidators = state.covalidators
+    .filter((c) => covalidatorIds.includes(c.id))
+    .map((c) => c.participant.participantId)
+  const hostCount = new Set([...owners.map((w) => w.participant.participantId), ...covalidators]).size
+  const confirmationThreshold = chosenConfirmation ?? Math.max(1, hostCount - 1)
   const proposal: PartyProposal = {
     partyHint: hint,
     owners: owners.map((w) => ({ publicKey: w.publicKey, participant: w.participant.participantId })),
     signingThreshold,
     namespaceThreshold,
     confirmationThreshold,
-    covalidators: state.covalidators
-      .filter((c) => covalidatorIds.includes(c.id))
-      .map((c) => c.participant.participantId),
+    covalidators,
   }
   const check = tryPlanParty(proposal)
 
@@ -89,6 +94,11 @@ export function NewParty({ onCreated }: { onCreated: () => void }) {
               value={signingThreshold}
               onChange={(e) => setSigningThreshold(Number(e.target.value))}
             />
+            {owners.length > 1 && signingThreshold === owners.length && (
+              <span className="warning">
+                Every owner must sign each transaction, so one unavailable owner blocks them all.
+              </span>
+            )}
           </label>
           <label>
             Namespace threshold: owners needed to change the party's topology
@@ -108,8 +118,18 @@ export function NewParty({ onCreated }: { onCreated: () => void }) {
               type="number"
               min={1}
               value={confirmationThreshold}
-              onChange={(e) => setConfirmationThreshold(Number(e.target.value))}
+              onChange={(e) => setChosenConfirmation(Number(e.target.value))}
             />
+            {hostCount > 1 && (
+              <span className="hint">
+                The default is one fewer than the {hostCount} hosts, so one host can be offline.
+              </span>
+            )}
+            {hostCount > 1 && confirmationThreshold === hostCount && (
+              <span className="warning">
+                Every host must confirm each transaction, so one offline host blocks them all.
+              </span>
+            )}
           </label>
         </div>
       </Section>
