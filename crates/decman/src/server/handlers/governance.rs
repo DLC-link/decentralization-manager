@@ -4096,9 +4096,12 @@ mod confirmations_feed_tests {
     /// `contracts`. A page read returns, in one page, every contract whose
     /// template matches a template filter of the request. An interface read,
     /// such as the one for proposals, finds nothing: every proposal is gone.
-    #[derive(Clone)]
+    /// A read of the `missing` template fails the way Canton fails it when
+    /// the package is uploaded but lacks the template.
+    #[derive(Clone, Default)]
     struct AcsLedger {
         contracts: Arc<Vec<CreatedEvent>>,
+        missing: Option<&'static str>,
     }
 
     impl AcsLedger {
@@ -4114,7 +4117,10 @@ mod confirmations_feed_tests {
             Ok(port)
         }
 
-        fn page(&self, request: &GetActiveContractsPageRequest) -> GetActiveContractsPageResponse {
+        fn page(
+            &self,
+            request: &GetActiveContractsPageRequest,
+        ) -> std::result::Result<GetActiveContractsPageResponse, tonic::Status> {
             let wanted: Vec<(&str, &str)> = request
                 .event_format
                 .iter()
@@ -4126,6 +4132,11 @@ mod confirmations_feed_tests {
                 })
                 .map(|id| (id.module_name.as_str(), id.entity_name.as_str()))
                 .collect();
+            if let Some(missing) = self.missing.filter(|m| wanted.iter().any(|w| w.1 == *m)) {
+                return Err(tonic::Status::invalid_argument(format!(
+                    "NO_TEMPLATES_FOR_PACKAGE_NAME_AND_QUALIFIED_NAME(8,0): no template {missing}"
+                )));
+            }
             let active_contracts = self
                 .contracts
                 .iter()
@@ -4142,11 +4153,11 @@ mod confirmations_feed_tests {
                     ..Default::default()
                 })
                 .collect();
-            GetActiveContractsPageResponse {
+            Ok(GetActiveContractsPageResponse {
                 active_contracts,
                 active_at_offset: 1,
                 next_page_token: None,
-            }
+            })
         }
     }
 
@@ -4175,7 +4186,7 @@ mod confirmations_feed_tests {
                     }
                     Some("GetActiveContractsPage") => {
                         unary(request, move |r: GetActiveContractsPageRequest| {
-                            Ok(ledger.page(&r))
+                            ledger.page(&r)
                         })
                         .await
                     }
@@ -4371,6 +4382,7 @@ mod confirmations_feed_tests {
                 domain_confirmation("00dom-timeout", "00gone-a", &member_a, expired),
                 domain_confirmation("00dom-elsewhere", "00gone-b", &member_b, expired),
             ]),
+            ..AcsLedger::default()
         };
         pool.record_mediator_timeout(&party, "00self-timeout", &[member_b.to_string()])
             .await?;
@@ -4408,6 +4420,32 @@ mod confirmations_feed_tests {
         assert_eq!(timed_out["cannot_be_archived"], json!(true));
         // An orphan that can still be archived stays out of the list.
         assert!(holding(&body["domain_actions"], "00dom-elsewhere").is_err());
+        Ok(())
+    }
+
+    /// A package can be uploaded without one of the governance templates.
+    /// The confirmations of the templates it has must still be listed.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_template_missing_from_its_package_does_not_empty_the_feed(
+        pool: SqlitePool,
+    ) -> Result {
+        let party = id("dec", "ab");
+        let member = id("member-a", "aa");
+        let expired = chrono::Utc::now().timestamp() - 3600;
+        let ledger = AcsLedger {
+            contracts: Arc::new(vec![
+                rules(&party, &[&member]),
+                domain_confirmation("00dom-timeout", "00gone", &member, expired),
+            ]),
+            missing: Some("GovernanceSelfConfirmation"),
+        };
+        pool.record_mediator_timeout(&party, "00dom-timeout", &[member.to_string()])
+            .await?;
+
+        let body = feed(&pool, &ledger, &party).await?;
+
+        let action = holding(&body["domain_actions"], "00dom-timeout")?;
+        assert_eq!(action["cannot_be_archived"], json!(true));
         Ok(())
     }
 }

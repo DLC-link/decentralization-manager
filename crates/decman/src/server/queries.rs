@@ -1032,10 +1032,22 @@ fn domain_confirmations_for_batch(
         .collect()
 }
 
-/// Optional packages can be absent. Other failures leave a read incomplete.
+/// The Canton error ids that mean a template is not on this participant:
+/// its package name is not uploaded, or the package is but lacks the
+/// template. The other template readers in this module skip both as well.
+const ABSENT_TEMPLATE_ERRORS: [&str; 2] = [
+    "PACKAGE_NAMES_NOT_FOUND",
+    "NO_TEMPLATES_FOR_PACKAGE_NAME_AND_QUALIFIED_NAME",
+];
+
+/// Optional packages and templates can be absent. Other failures leave a
+/// read incomplete.
 fn allow_absent_confirmation_package(result: Result<()>) -> Result<()> {
     match result {
-        Err(error) if canton_error_id(&error).as_deref() == Some("PACKAGE_NAMES_NOT_FOUND") => {
+        Err(error)
+            if canton_error_id(&error)
+                .is_some_and(|id| ABSENT_TEMPLATE_ERRORS.contains(&id.as_str())) =>
+        {
             Ok(())
         }
         other => other,
@@ -4609,6 +4621,19 @@ mod domain_confirmation_page_tests {
 
         assert!(allow_absent_confirmation_package(Err(absent)).is_ok());
         assert!(allow_absent_confirmation_package(Ok(())).is_ok());
+    }
+
+    /// Canton answers this when the package name is uploaded but holds no
+    /// such template, for example an older version of the package.
+    #[test]
+    fn a_template_missing_from_a_present_package_is_not_a_read_failure() {
+        let absent = anyhow::Error::new(tonic::Status::invalid_argument(
+            "NO_TEMPLATES_FOR_PACKAGE_NAME_AND_QUALIFIED_NAME(8,abc): no template \
+             Governance.Confirmation:GovernanceConfirmation in package governance-core",
+        ))
+        .context("reading confirmations");
+
+        assert!(allow_absent_confirmation_package(Err(absent)).is_ok());
     }
 
     #[test]
