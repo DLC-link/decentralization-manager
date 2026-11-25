@@ -653,15 +653,19 @@ pub struct GovernanceQueue {
 /// unresponsive, keyed by confirmation contract id.
 pub(crate) type ExpireTimeouts = HashMap<String, HashSet<String>>;
 
-/// Marks the expired confirmations that cannot be archived.
+/// Marks the expired confirmations that cannot be archived, then drops the
+/// orphaned domain actions that can.
 ///
 /// A confirmation is stuck only on evidence: it has expired, and the latest
 /// expire attempt on this node timed out at the mediator naming its confirmer.
 /// Being a former member is no such evidence: its participant may still be
 /// online and confirm the archive.
+///
+/// An orphan's proposal is gone, so nobody can act on it. It stays listed only
+/// when it cannot be archived, so the operator can hide it.
 pub(crate) fn mark_stuck(
     actions: &mut [GovernanceAction],
-    domain_actions: &mut [DomainGovernanceAction],
+    domain_actions: &mut Vec<DomainGovernanceAction>,
     timeouts: &ExpireTimeouts,
     now: i64,
 ) {
@@ -679,7 +683,7 @@ pub(crate) fn mark_stuck(
         action.cannot_be_archived = !action.confirmations.is_empty()
             && action.confirmations.iter().all(|c| c.stuck.is_some());
     }
-    for action in domain_actions {
+    for action in domain_actions.iter_mut() {
         for c in &mut action.confirmations {
             c.stuck = reason(&c.contract_id, &c.confirming_party, c.expires_at);
         }
@@ -687,6 +691,7 @@ pub(crate) fn mark_stuck(
             && !action.confirmations.is_empty()
             && action.confirmations.iter().all(|c| c.stuck.is_some());
     }
+    domain_actions.retain(|action| !action.orphaned || action.cannot_be_archived);
 }
 
 /// Map an assembled domain proposal onto the wire DTO.
@@ -4548,6 +4553,13 @@ mod domain_confirmation_page_tests {
         assert!(!actions[0].can_execute);
     }
 
+    /// #425 took orphans out of the list: their proposal is gone, so nobody
+    /// can confirm or execute them.
+    #[test]
+    fn an_orphan_that_can_be_archived_stays_out_of_the_list() {
+        assert!(orphans_marked_with(&HashMap::new()).is_empty());
+    }
+
     #[test]
     fn an_active_proposal_outside_the_current_page_is_never_shown_as_an_orphan() {
         for (first_page, has_next_page) in [(true, true), (false, false)] {
@@ -4802,6 +4814,19 @@ mod stuck_tests {
             Some(StuckReason::ParticipantUnresponsive)
         );
         assert!(!domains[0].cannot_be_archived);
+    }
+
+    #[test]
+    fn an_orphan_stays_listed_only_while_it_cannot_be_archived() {
+        let mut domains = vec![domain_action(true, &[NOW - 1]), domain_action(true, &[NOW])];
+        domains[1].proposal_cid = "archivable".to_string();
+        domains[1].confirmations[0].contract_id = "c-archivable".to_string();
+
+        mark_stuck(&mut [], &mut domains, &timed_out(&["c0"], &member()), NOW);
+
+        assert_eq!(domains.len(), 1);
+        assert_eq!(domains[0].proposal_cid, "proposal");
+        assert!(domains[0].cannot_be_archived);
     }
 
     #[test]

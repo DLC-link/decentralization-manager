@@ -4406,10 +4406,8 @@ mod confirmations_feed_tests {
             json!("participant_unresponsive")
         );
         assert_eq!(timed_out["cannot_be_archived"], json!(true));
-        let elsewhere = holding(&body["domain_actions"], "00dom-elsewhere")?;
-        assert_eq!(elsewhere["orphaned"], json!(true));
-        assert_eq!(elsewhere["confirmations"][0]["stuck"], json!(null));
-        assert_eq!(elsewhere["cannot_be_archived"], json!(false));
+        // An orphan that can still be archived stays out of the list.
+        assert!(holding(&body["domain_actions"], "00dom-elsewhere").is_err());
         Ok(())
     }
 }
