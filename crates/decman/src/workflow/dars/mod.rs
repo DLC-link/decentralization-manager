@@ -1,3 +1,4 @@
+pub mod bundle;
 pub mod config;
 pub mod coordinator;
 pub mod peer;
@@ -5,7 +6,8 @@ pub mod peer;
 #[cfg(test)]
 mod peer_tests;
 
-pub use config::DarsConfig;
+pub use bundle::{bundle_of, load_bundle, move_inline_dars};
+pub use config::{DarListing, DarsConfig};
 
 use crate::{noise::MessageType, server::WorkflowKind, workflow::state::WorkflowStep};
 
@@ -14,6 +16,9 @@ use crate::{noise::MessageType, server::WorkflowKind, workflow::state::WorkflowS
 pub enum DarsStep {
     /// Waiting for all peers to connect
     WaitingForPeers,
+    /// The coordinator loads the DARs from its database. A waiting run holds
+    /// none of them in memory, and peers get `Wait` until they are loaded.
+    LoadDars,
     /// Upload DARs
     UploadDars,
     /// Workflow complete
@@ -25,13 +30,14 @@ impl WorkflowStep for DarsStep {
         match self {
             Self::UploadDars => Some(MessageType::UploadDars),
             Self::Complete => Some(MessageType::Disconnect),
-            Self::WaitingForPeers => None,
+            Self::WaitingForPeers | Self::LoadDars => None,
         }
     }
 
     fn next(&self) -> Option<Self> {
         match self {
-            Self::WaitingForPeers => Some(Self::UploadDars),
+            Self::WaitingForPeers => Some(Self::LoadDars),
+            Self::LoadDars => Some(Self::UploadDars),
             Self::UploadDars => Some(Self::Complete),
             Self::Complete => None,
         }
@@ -48,18 +54,20 @@ impl WorkflowStep for DarsStep {
     fn step_index(&self) -> i64 {
         match self {
             Self::WaitingForPeers => 0,
-            Self::UploadDars => 1,
-            Self::Complete => 2,
+            Self::LoadDars => 1,
+            Self::UploadDars => 2,
+            Self::Complete => 3,
         }
     }
 
     fn step_total() -> i64 {
-        3
+        4
     }
 
     fn step_name(&self) -> &'static str {
         match self {
             Self::WaitingForPeers => "WaitingForPeers",
+            Self::LoadDars => "LoadDars",
             Self::UploadDars => "UploadDars",
             Self::Complete => "Complete",
         }
@@ -68,6 +76,7 @@ impl WorkflowStep for DarsStep {
     fn try_from_step_name(name: &str) -> Option<Self> {
         Some(match name {
             "WaitingForPeers" => Self::WaitingForPeers,
+            "LoadDars" => Self::LoadDars,
             "UploadDars" => Self::UploadDars,
             "Complete" => Self::Complete,
             _ => return None,

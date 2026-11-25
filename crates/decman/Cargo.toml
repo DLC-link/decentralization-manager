@@ -1,6 +1,6 @@
 [package]
 name = "decman"
-version = "1.15.0"
+version = "1.17.1"
 edition = "2024"
 license = "Apache-2.0"
 
@@ -84,8 +84,8 @@ uuid = { workspace = true }
 x509-parser = { workspace = true }
 zeroize = { workspace = true }
 
-canton-common = { workspace = true }
-canton-proto-rs = { workspace = true }
+canton-common = { workspace = true, features = ["api-client"] }
+canton-proto-rs = { workspace = true, features = ["transport"] }
 canton-registry = { workspace = true }
 common = { workspace = true, features = ["openapi"] }
 decman-lib = { workspace = true, features = ["openapi"] }
@@ -109,4 +109,7 @@ sqlx = { workspace = true, features = ["postgres"] }
 static_assertions = { workspace = true }
 tempfile = { workspace = true }
 tokio-rustls = { workspace = true }
+# Serves a fake Canton admin API in unit tests (signing/fake_admin_api.rs).
+# canton-proto-rs already builds on it, so this adds no new crate.
+tonic-prost = { workspace = true }
 wiremock = { workspace = true }

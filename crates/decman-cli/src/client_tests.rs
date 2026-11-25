@@ -1015,6 +1015,35 @@ fn set_threshold_keeps_a_confirmation_threshold_that_differs() {
 }
 
 #[test]
+fn rotate_key_posts_only_the_resolved_party() {
+    // Arrange
+    let fake = Fake::start();
+    fake.token_grant("password", "a-1", 1);
+    fake.mount(
+        Mock::given(method("GET"))
+            .and(path("/decentralized-parties"))
+            .respond_with(party_list(ALPHA, 2, &["PAR::1", "PAR::2"]))
+            .expect(1),
+    );
+    fake.mount(
+        Mock::given(method("POST"))
+            .and(path("/rotate-key"))
+            .and(body_json(json!({ "decentralized_party_id": ALPHA })))
+            .respond_with(
+                ResponseTemplate::new(202).set_body_json(json!({ "instance_name": "rk-1" })),
+            )
+            .expect(1),
+    );
+
+    // Act
+    let outcome =
+        run_command(&fake, parse(&["parties", "rotate-key", "--party", "alpha"])).unwrap();
+
+    // Assert
+    assert_eq!(outcome.value["instance_name"], "rk-1");
+}
+
+#[test]
 fn create_sends_the_confirmation_threshold() {
     // Arrange
     let fake = Fake::start();
@@ -1350,4 +1379,75 @@ fn wait_never_sleeps_past_its_timeout() {
     // Assert
     assert!(error.to_string().contains("timed out"), "{error}");
     assert!(started.elapsed() < std::time::Duration::from_secs(10));
+}
+
+#[test]
+fn add_member_returns_validation_error_after_fifteen_seconds() {
+    let fake = Fake::start();
+    fake.token_grant("password", "access", 1);
+    fake.mount(
+        Mock::given(method("POST"))
+            .and(path("/add-party"))
+            .respond_with(
+                ResponseTemplate::new(409)
+                    .set_delay(std::time::Duration::from_secs(16))
+                    .set_body_json(json!({"error": "Missing package ids: [required-package]"})),
+            )
+            .expect(1),
+    );
+
+    let error = fake
+        .client()
+        .start_add_party(ALPHA, NEW_PEER, 1, 1)
+        .unwrap_err();
+
+    let api_error = error
+        .downcast_ref::<crate::api::ApiError>()
+        .expect("the client returns the server response rather than a timeout");
+    assert_eq!(api_error.status, reqwest::StatusCode::CONFLICT);
+    assert!(api_error.body.contains("required-package"));
+}
+
+#[test]
+fn add_member_honors_an_explicit_request_timeout() {
+    let fake = Fake::start();
+    fake.token_grant("password", "access", 1);
+    fake.mount(
+        Mock::given(method("POST"))
+            .and(path("/add-party"))
+            .respond_with(ResponseTemplate::new(202).set_delay(std::time::Duration::from_secs(1)))
+            .expect(1),
+    );
+
+    let error = fake
+        .client()
+        .with_request_timeout(std::time::Duration::from_millis(100))
+        .start_add_party(ALPHA, NEW_PEER, 1, 1)
+        .unwrap_err();
+
+    assert!(error.chain().any(|cause| {
+        cause
+            .downcast_ref::<reqwest::Error>()
+            .is_some_and(reqwest::Error::is_timeout)
+    }));
+}
+
+#[test]
+fn add_member_returns_a_created_run_after_fifteen_seconds() {
+    let fake = Fake::start();
+    fake.token_grant("password", "access", 1);
+    fake.mount(
+        Mock::given(method("POST"))
+            .and(path("/add-party"))
+            .respond_with(
+                ResponseTemplate::new(202)
+                    .set_delay(std::time::Duration::from_secs(16))
+                    .set_body_json(json!({"message": "Add-party workflow started"})),
+            )
+            .expect(1),
+    );
+
+    fake.client()
+        .start_add_party(ALPHA, NEW_PEER, 1, 1)
+        .expect("a slow successful validation must return the created run result");
 }

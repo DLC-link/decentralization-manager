@@ -4,26 +4,29 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use actix_web::{HttpRequest, HttpResponse, Responder, get, post, web};
+use actix_web::{HttpRequest, HttpResponse, Responder, get, http::StatusCode, post, web};
 
 use anyhow::Context;
 use base64::{Engine, engine::general_purpose::STANDARD};
+use canton_proto_rs::com::digitalasset::canton::protocol::v30::PartyToParticipant;
 use prometheus::IntCounterVec;
 use sqlx::SqlitePool;
 
 use super::parties::resolve_owner_keys_from_peers;
+use canton_proto_rs::com::digitalasset::canton::crypto::admin::v30::vault_service_client::VaultServiceClient;
+
 use crate::{
-    canton_id::{CantonId, validate_party_id_prefix},
+    canton_id::{CantonId, Fingerprint, validate_party_id_prefix},
     config::{NetworkConfig, NodeConfig},
-    consts::{MIN_PEER_VERSION, OWNER_ONLY_KICK},
+    consts::{MIN_PEER_VERSION, OWNER_ONLY_KICK, ROTATE_KEY},
     db::{
         rows::{DecPartyOwnerRow, DecPartyParticipantRow},
         schema::{Commitable, SchemaRead, SchemaWrite},
     },
     error::Result,
     noise::{
-        Message, MessageType, NoiseKeypair, parse_public_key, send_noise_message,
-        send_noise_message_with_retry,
+        MAX_CHUNKED_TOTAL_SIZE, Message, MessageType, NoiseKeypair, parse_public_key,
+        send_noise_message, send_noise_message_with_retry,
     },
     server::{
         AppState, external_parties,
@@ -38,21 +41,31 @@ use crate::{
             ErrorResponse, ExternalPartiesResponse, ExternalPartyHost, ExternalPartyInfo,
             KickInvitePayload, KickRequest, KickResponse, KickStatus, MessageResponse,
             MissingEdgeKind, MissingPeerEdge, OnboardingInvitePayload, OnboardingMeshErrorResponse,
-            OnboardingRequest, OnboardingResponse, OnboardingStatus, SuccessResponse,
-            WorkflowGuard, WorkflowInstance, WorkflowKind, WorkflowProgress, WorkflowResponse,
-            WorkflowRole, WorkflowRun, WorkflowRunsResponse, WorkflowStatusResponse,
-            permission_from_proto,
+            OnboardingRequest, OnboardingResponse, OnboardingStatus, RotateKeyInvitePayload,
+            RotateKeyRequest, StartClaim, SuccessResponse, WorkflowGuard, WorkflowInstance,
+            WorkflowKind, WorkflowProgress, WorkflowResponse, WorkflowRole, WorkflowRun,
+            WorkflowRunsResponse, WorkflowStatusResponse, permission_from_proto,
         },
+        workflow_exclusion::{PartyStartRefusal, claim_party_for_workflow},
     },
+    signing::custody,
     utils,
     workflow::{
         self, AddPartyStep, ChangeThresholdStep, ContractsStep, DarsStep, KickStep, OnboardingStep,
+        RotateKeyStep,
         contracts::DarFile,
+        dars::DarListing,
+        signing_keys::{
+            KeyClaimError, ensure_survivor_keys_preserved, kick_key_claims,
+            known_signing_keys_by_member, members_requiring_key_adoption,
+            recorded_signing_keys_by_member, requires_signing_key_adoption,
+        },
         state::WorkflowStep,
-        storage::WorkflowStorage,
+        storage::{WorkflowStorage, artifact_kinds},
         thresholds::{
             PartyThresholds, carried_confirmation_threshold, check_confirmation_threshold,
         },
+        topology,
     },
 };
 
@@ -80,6 +93,10 @@ fn now_secs() -> i64 {
 /// this call (migration 000013 dropped the one-InProgress-per-(kind, role)
 /// unique index — concurrent same-kind runs are allowed); a failure here is a
 /// genuine persistence error and bubbles back as 409.
+///
+/// The run's shared `artifacts` are written in the same transaction, so a run
+/// never exists without them.
+#[allow(clippy::too_many_arguments)]
 async fn insert_coordinator_run<S, C>(
     db: &SqlitePool,
     instance_name: &str,
@@ -88,6 +105,7 @@ async fn insert_coordinator_run<S, C>(
     config: &C,
     invitees: &[CantonId],
     dec_party_id: Option<CantonId>,
+    artifacts: &[(&str, &[u8])],
 ) -> Result
 where
     S: WorkflowStep,
@@ -129,6 +147,10 @@ where
 
     let mut tx = db.begin_transaction().await?;
     tx.upsert_workflow_run(&run).await?;
+    for (artifact_kind, payload) in artifacts {
+        tx.write_workflow_artifact(instance_name, artifact_kind, None, payload)
+            .await?;
+    }
     Commitable::commit(tx).await
 }
 
@@ -156,6 +178,33 @@ where
     S: WorkflowStep,
     C: serde::Serialize,
 {
+    register_and_persist_with_artifacts(
+        data,
+        instance,
+        initial_step,
+        config,
+        invitees,
+        dec_party_id,
+        &[],
+    )
+    .await
+}
+
+/// [`register_and_persist`], persisting the run's shared `artifacts` with its row.
+#[allow(clippy::result_large_err)]
+async fn register_and_persist_with_artifacts<S, C>(
+    data: &web::Data<AppState>,
+    instance: &Arc<WorkflowInstance>,
+    initial_step: S,
+    config: &C,
+    invitees: &[CantonId],
+    dec_party_id: Option<CantonId>,
+    artifacts: &[(&str, &[u8])],
+) -> std::result::Result<(), HttpResponse>
+where
+    S: WorkflowStep,
+    C: serde::Serialize,
+{
     let kind = instance.kind;
     let instance_name = &instance.instance_name;
     let label = match kind {
@@ -165,6 +214,7 @@ where
         WorkflowKind::Dars => "DARs",
         WorkflowKind::AddParty => "add-party",
         WorkflowKind::ChangeThreshold => "change-threshold",
+        WorkflowKind::RotateKey => "rotate-key",
     };
 
     if !data.workflows.insert(instance.clone()) {
@@ -181,6 +231,7 @@ where
         config,
         invitees,
         dec_party_id,
+        artifacts,
     )
     .await
     {
@@ -286,13 +337,14 @@ static RUNS_FINISHED: LazyLock<IntCounterVec> = LazyLock::new(|| {
 
 /// Every kind, for exporting each series at zero. Extend it with
 /// [`run_kind_label`], whose match fails to compile for a new kind.
-const RUN_KINDS: [WorkflowKind; 6] = [
+const RUN_KINDS: [WorkflowKind; 7] = [
     WorkflowKind::Onboarding,
     WorkflowKind::Kick,
     WorkflowKind::Contracts,
     WorkflowKind::Dars,
     WorkflowKind::AddParty,
     WorkflowKind::ChangeThreshold,
+    WorkflowKind::RotateKey,
 ];
 
 /// The `kind` label, fixed per variant so the series stay bounded.
@@ -304,6 +356,7 @@ fn run_kind_label(kind: WorkflowKind) -> &'static str {
         WorkflowKind::Dars => "dars",
         WorkflowKind::AddParty => "add_party",
         WorkflowKind::ChangeThreshold => "change_threshold",
+        WorkflowKind::RotateKey => "rotate_key",
     }
 }
 
@@ -384,6 +437,310 @@ fn kick_threshold_bound(target_hosts: bool, member_count: usize, owner_count: us
         owner_count - 1
     };
     i32::try_from(hosts_left.min(owners_left)).unwrap_or(i32::MAX)
+}
+
+/// The members that stay after a kick, split by whether this node can invite
+/// them. Neither list holds this node or the kicked host.
+#[derive(Debug, PartialEq)]
+struct KickSigners {
+    /// Members that are configured peers. The kick invites these to sign.
+    invitees: Vec<CantonId>,
+    /// Members that are not configured peers. The kick cannot reach these.
+    not_peers: Vec<CantonId>,
+}
+
+/// Split the members that stay after a kick into invitees and members that
+/// are not peers. The kicked host never signs, so its peer entry plays no part.
+fn kick_signers(
+    members: &HashSet<CantonId>,
+    peer_ids: &HashSet<CantonId>,
+    self_id: &CantonId,
+    kicked_host: Option<&CantonId>,
+) -> KickSigners {
+    let (mut invitees, mut not_peers): (Vec<CantonId>, Vec<CantonId>) = members
+        .iter()
+        .filter(|member| *member != self_id && Some(*member) != kicked_host)
+        .cloned()
+        .partition(|member| peer_ids.contains(member));
+    invitees.sort();
+    not_peers.sort();
+    KickSigners {
+        invitees,
+        not_peers,
+    }
+}
+
+/// Why a kick cannot collect enough signatures, or `None` when it can.
+///
+/// This node and each invitee sign. Both the current namespace threshold
+/// (`current`, `None` when the party is not cached) and the requested one
+/// must be reachable, because the P2P mapping is submitted after the new
+/// namespace takes effect.
+fn kick_quorum_refusal(
+    current: Option<usize>,
+    requested: usize,
+    signers: &KickSigners,
+) -> Option<String> {
+    let peers = signers.invitees.len();
+    let available = 1 + peers;
+    let current_limits = current.is_some_and(|threshold| threshold > available);
+    let requested_limits = requested > available;
+    let mut message = if current_limits || requested_limits {
+        let limit = if let Some(threshold) = current.filter(|_| current_limits) {
+            format!("Cannot kick: the party's current namespace threshold is {threshold}.")
+        } else {
+            format!("Cannot kick: the requested new_threshold is {requested}.")
+        };
+        match peers {
+            0 => format!("{limit} Only this node can sign."),
+            1 => format!("{limit} Only 2 members can sign: this node and 1 configured peer."),
+            _ => format!(
+                "{limit} Only {available} members can sign: this node and {peers} configured \
+                 peers."
+            ),
+        }
+    } else if peers == 0 {
+        "Cannot kick: this node has no other hosting member to co-sign the kick.".to_string()
+    } else {
+        return None;
+    };
+    for id in &signers.not_peers {
+        message.push_str(&format!(
+            " {id} is a member of the party but is not a configured peer of this node."
+        ));
+    }
+    // Every member that stays signs once it is a peer. The run also needs a
+    // co-signer besides this node.
+    let reachable = available + signers.not_peers.len();
+    let required = current.unwrap_or(1).max(requested).max(2);
+    if !signers.not_peers.is_empty() && reachable >= required {
+        message.push_str(match signers.not_peers.len() {
+            1 => " Add it as a peer, then retry.",
+            _ => " Add them as peers, then retry.",
+        });
+    } else if current_limits {
+        message.push_str(
+            " Lower the threshold with Change Threshold first, while every host can still sign.",
+        );
+        if requested_limits {
+            message.push_str(&format!(
+                " Then pick a new_threshold of {available} or lower."
+            ));
+        }
+    } else if requested_limits {
+        message.push_str(&format!(" Pick a new_threshold of {available} or lower."));
+    }
+    Some(message)
+}
+
+/// A namespace quorum cannot authorize a new inline signing key on behalf
+/// of an unreachable member. Read topology only when a survivor is not a peer.
+async fn kick_key_adoption_refusal(
+    config: &NodeConfig,
+    db: &SqlitePool,
+    party: &CantonId,
+    not_peers: &[CantonId],
+    removed: &str,
+    kicked: Option<&CantonId>,
+) -> Result<Option<String>> {
+    if not_peers.is_empty() {
+        return Ok(None);
+    }
+    let synchronizer_id = utils::get_synchronizer_id(config).await?;
+    let mapping = topology::fetch_p2p_mapping(config, &synchronizer_id, party).await?;
+    kick_key_adoption_refusal_for_mapping(config, db, party, not_peers, removed, kicked, &mapping)
+        .await
+}
+
+async fn kick_key_adoption_refusal_for_mapping(
+    config: &NodeConfig,
+    db: &SqlitePool,
+    party: &CantonId,
+    not_peers: &[CantonId],
+    removed: &str,
+    kicked: Option<&CantonId>,
+    mapping: &PartyToParticipant,
+) -> Result<Option<String>> {
+    let inline = mapping
+        .party_signing_keys
+        .as_ref()
+        .map_or(&[][..], |keys| keys.keys.as_slice());
+    let kicked = kicked.map(ToString::to_string);
+    let survivors: Vec<String> = mapping
+        .participants
+        .iter()
+        .filter(|host| Some(&host.participant_uid) != kicked.as_ref())
+        .map(|host| host.participant_uid.clone())
+        .collect();
+    let members: Vec<String> = not_peers
+        .iter()
+        .map(ToString::to_string)
+        .filter(|member| survivors.contains(member))
+        .collect();
+    // With no inline keys every missing survivor must sign adoption. No
+    // attribution lookup can make that kick safe to start without them.
+    if inline.is_empty() {
+        return Ok(kick_missing_adopters(&members));
+    }
+    let claims = known_signing_keys_by_member(config, db, party, inline).await?;
+    let claims = kick_key_claims(Some(removed), &survivors, &claims, &members)?;
+    if !requires_signing_key_adoption(mapping) {
+        ensure_survivor_keys_preserved(inline, &survivors, &claims)?;
+        return Ok(None);
+    }
+    let required = members_requiring_key_adoption(mapping, &members, &claims)?;
+    Ok(kick_missing_adopters(&required))
+}
+
+fn kick_missing_adopters(required: &[String]) -> Option<String> {
+    let (owner, add) = match required {
+        [] => return None,
+        [member] => (
+            format!("{member} owns such a key but is not a configured peer of this node."),
+            "Add it as a peer, then retry.",
+        ),
+        several => (
+            format!(
+                "{members} own such keys but are not configured peers of this node.",
+                members = several.join(", ")
+            ),
+            "Add them as peers, then retry.",
+        ),
+    };
+    Some(format!(
+        "Cannot kick: the party still keeps signing keys in the older key mapping. The kick \
+         moves them into the hosting list. The owner of each moved key must sign. {owner} {add}"
+    ))
+}
+
+/// Refuse a kick whose proposal could not keep each remaining member's
+/// signing key. Only a record says which key is whose, so every remaining
+/// host other than this node needs one. This node reads its own key from its
+/// vault when it builds the proposal. Reads only the database.
+///
+/// # Errors
+///
+/// [`KeyClaimError`] when a key is not on record or two remaining members
+/// claim one key. Any other error is a database failure.
+async fn check_kick_survivor_keys(
+    db: &SqlitePool,
+    party: &CantonId,
+    self_id: &CantonId,
+    signers: &KickSigners,
+    removed: &str,
+) -> Result {
+    let claims = recorded_signing_keys_by_member(db, party).await?;
+    let survivors: Vec<String> = signers
+        .invitees
+        .iter()
+        .chain(&signers.not_peers)
+        .chain(std::iter::once(self_id))
+        .map(ToString::to_string)
+        .collect();
+    kick_key_claims(Some(removed), &survivors, &claims, &[])?;
+
+    let unknown = |members: &[CantonId]| -> Vec<String> {
+        members
+            .iter()
+            .map(ToString::to_string)
+            .filter(|member| !claims.contains_key(member))
+            .collect()
+    };
+    let peers = unknown(&signers.invitees);
+    let not_peers = unknown(&signers.not_peers);
+    if peers.is_empty() && not_peers.is_empty() {
+        return Ok(());
+    }
+    let mut message = format!(
+        "Cannot kick: this node has no record of the signing key of {members}. The kick must \
+         keep the key of each member that stays.",
+        members = peers
+            .iter()
+            .chain(&not_peers)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+    match not_peers.as_slice() {
+        [] => message
+            .push_str(" Refresh /decentralized-parties so each peer reports its key, then retry."),
+        [member] => message.push_str(&format!(
+            " {member} is not a configured peer of this node, so a refresh cannot read its \
+             key. Add it as a peer, refresh /decentralized-parties, then retry."
+        )),
+        several => message.push_str(&format!(
+            " {members} are not configured peers of this node, so a refresh cannot read their \
+             keys. Add them as peers, refresh /decentralized-parties, then retry.",
+            members = several.join(", ")
+        )),
+    }
+    Err(KeyClaimError::Unresolved(message).into())
+}
+
+/// The response to a failed signing-key check of a kick. A key-claim refusal
+/// says what to do, so it goes back as it is. Any other failure is logged and
+/// answered with generic text.
+fn kick_key_check_failure(party: &CantonId, e: &anyhow::Error) -> HttpResponse {
+    match e.downcast_ref::<KeyClaimError>() {
+        Some(KeyClaimError::Conflict(error)) => {
+            tracing::warn!("Kick of {party} refused: {error}");
+            HttpResponse::Conflict().json(ErrorResponse {
+                error: error.clone(),
+            })
+        }
+        Some(KeyClaimError::Unresolved(error)) => {
+            tracing::info!("Kick of {party} refused: {error}");
+            HttpResponse::ServiceUnavailable().json(ErrorResponse {
+                error: error.clone(),
+            })
+        }
+        None => {
+            tracing::error!("Cannot check the signing keys of {party} for a kick: {e:#}");
+            HttpResponse::ServiceUnavailable().json(ErrorResponse {
+                error: "Cannot check the party's signing keys right now. Retry later.".to_string(),
+            })
+        }
+    }
+}
+
+/// How long an add-party start waits for the package check. The check streams
+/// the party's active contracts, so a large party needs time. A Canton call
+/// that stalls must still not leave the Add Member dialog waiting forever.
+const ADD_PARTY_PACKAGE_CHECK_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// Run the add-party package check under `limit`. A check that runs out of
+/// time is a check that could not run.
+async fn bounded_package_check(
+    limit: Duration,
+    check: impl std::future::Future<Output = Result>,
+) -> Result {
+    match tokio::time::timeout(limit, check).await {
+        Ok(result) => result,
+        Err(_) => anyhow::bail!(
+            "the check did not finish within {secs}s",
+            secs = limit.as_secs()
+        ),
+    }
+}
+
+/// The response to a failed package check of an add-party start. A missing
+/// package says what to do, so it goes back as it is. Any other failure means
+/// the check could not run, so the add is refused until it can.
+fn add_party_package_check_failure(party: &CantonId, e: &anyhow::Error) -> HttpResponse {
+    match e.downcast_ref::<workflow::add_party::MissingPackages>() {
+        Some(missing) => {
+            tracing::warn!("Add-party to {party} refused: {missing}");
+            HttpResponse::Conflict().json(ErrorResponse {
+                error: missing.to_string(),
+            })
+        }
+        None => {
+            tracing::error!("Cannot check the new member's packages for {party}: {e:#}");
+            HttpResponse::ServiceUnavailable().json(ErrorResponse {
+                error: format!("Cannot check the new member's packages: {e:#}"),
+            })
+        }
+    }
 }
 
 /// The member a kick removes.
@@ -617,8 +974,9 @@ async fn cached_confirmation_threshold(
     responses(
         (status = 202, description = "Kick workflow started", body = WorkflowResponse),
         (status = 400, description = "Bad request", body = ErrorResponse),
-        (status = 409, description = "Workflow already in progress, or owner key not yet resolved for the target participant", body = ErrorResponse),
-        (status = 500, description = "Internal server error", body = ErrorResponse)
+        (status = 409, description = "Workflow already in progress, owner key not yet resolved for the target participant, or two remaining members claim one signing key", body = ErrorResponse),
+        (status = 500, description = "Internal server error", body = ErrorResponse),
+        (status = 503, description = "A remaining member's signing key is not on record, or the party's signing keys cannot be read right now", body = ErrorResponse)
     )
 )]
 #[post("/kick")]
@@ -693,9 +1051,8 @@ pub async fn start_kick(
     // The participant that leaves the hosting mapping, if the member hosts.
     let kicked_host = target.participant.clone().filter(|_| target.hosts);
 
-    // Load peers once: we use the count to bound `new_threshold` per the
-    // audit finding, then filter into `invitees`. A DB error here is fatal
-    // — we can't safely proceed without knowing how many signers remain.
+    // The peer list decides which members the kick can invite. A DB error
+    // here is fatal, because without it the signer count is unknown.
     let peers = match data.db.get_all_peers().await {
         Ok(p) => p,
         Err(e) => {
@@ -732,33 +1089,38 @@ pub async fn start_kick(
             parsed
         }
     };
-    let peers: Vec<_> = peers
-        .into_iter()
-        .filter(|p| party_member_ids.contains(&p.participant_id))
-        .collect();
+    // The target was checked against the membership above. Its peer entry
+    // does not matter, because the kick never contacts it. Each member that
+    // stays has to sign, and the kick reaches a member only through its peer
+    // entry.
+    let peer_ids: HashSet<CantonId> = peers.into_iter().map(|p| p.participant_id).collect();
+    let signers = kick_signers(&party_member_ids, &peer_ids, &self_id, kicked_host.as_ref());
+    let member_count = party_member_count(&party_member_ids, &self_id);
+    let namespace_threshold =
+        match cached_namespace_threshold(&data.db, &decentralized_party_id).await {
+            Ok(threshold) => threshold,
+            Err(e) => {
+                tracing::error!("Failed to read the cached threshold for kick: {e}");
+                return HttpResponse::InternalServerError().json(ErrorResponse {
+                    error: "Failed to read the party's cached thresholds".to_string(),
+                });
+            }
+        };
 
-    // Preconditions for a kick: there must be at least one peer left
-    // after the kick (so the surviving signer set is non-empty), and a host
-    // being kicked must be a known peer. Without these checks
-    // the `post_kick_member_count` below could go negative and produce
-    // a "between 1 and -1" error that obscures the real problem.
-    let co_signers = peers
-        .iter()
-        .filter(|p| Some(&p.participant_id) != kicked_host.as_ref())
-        .count();
-    if co_signers < 1 {
-        return HttpResponse::BadRequest().json(ErrorResponse {
-            error: format!(
-                "Cannot kick: need at least one other hosting member besides this node \
-                 to co-sign, have {co_signers}"
-            ),
-        });
-    }
-    if let Some(host) = &kicked_host
-        && !peers.iter().any(|p| p.participant_id == *host)
+    // Only the hosts sign. An owner that hosts nothing cannot be asked, so
+    // the namespace threshold in force must be reachable without it.
+    if !target.hosts
+        && let Some(threshold) = namespace_threshold
+        && threshold > member_count
     {
         return HttpResponse::BadRequest().json(ErrorResponse {
-            error: format!("Cannot kick {host}: not a member of this decentralized party"),
+            error: format!(
+                "Cannot kick owner key {key}: the party's namespace threshold is \
+                 {threshold}, but only its {member_count} hosting members can sign. \
+                 The owner being removed would have to sign too, and a kick cannot \
+                 ask it",
+                key = target.owner_key
+            ),
         });
     }
 
@@ -769,18 +1131,17 @@ pub async fn start_kick(
     // rollback. The upper bound is the post-kick member count — there
     // must be at least as many remaining signers as the threshold needs.
     //
-    // Counted from the party's OWN member set, not from `peers`. `peers` is
-    // scoped to invitees and so excludes this node, which is itself a member —
-    // it signs the proposals. Bounding by it undercounts by one, and a party
-    // whose threshold already equals its member count then has no acceptable
-    // value at all: the peers reject anything below the current threshold, and
-    // this check rejects anything at or above it. The add-party and
-    // change-threshold bounds below already count the party set.
+    // Counted from the party's OWN member set, not from the invitees. They
+    // exclude this node, which is itself a member — it signs the proposals.
+    // Bounding by them undercounts by one, and a party whose threshold
+    // already equals its member count then has no acceptable value at all:
+    // the peers reject anything below the current threshold, and this check
+    // rejects anything at or above it. The add-party and change-threshold
+    // bounds below already count the party set.
     //
     // The party's signing threshold follows the namespace one and counts the
     // hosts' keys, so the hosts left after the kick bound it as well as the
     // owners left. An owner that hosts nothing leaves every host in place.
-    let member_count = party_member_count(&party_member_ids, &self_id);
     let post_kick_member_count = member_count - usize::from(target.hosts);
     let max_threshold = kick_threshold_bound(target.hosts, member_count, owner_rows.len());
     if body.new_threshold < 1 || body.new_threshold > max_threshold {
@@ -800,29 +1161,24 @@ pub async fn start_kick(
         });
     }
 
-    // Only the hosts sign. An owner that hosts nothing cannot be asked, so
-    // the namespace threshold in force must be reachable without it.
-    if !target.hosts {
-        match cached_namespace_threshold(&data.db, &decentralized_party_id).await {
-            Ok(Some(threshold)) if threshold > member_count => {
-                return HttpResponse::BadRequest().json(ErrorResponse {
-                    error: format!(
-                        "Cannot kick owner key {key}: the party's namespace threshold is \
-                         {threshold}, but only its {member_count} hosting members can sign. \
-                         The owner being removed would have to sign too, and a kick cannot \
-                         ask it",
-                        key = target.owner_key
-                    ),
-                });
-            }
-            Ok(_) => {}
-            Err(e) => {
-                tracing::error!("Failed to read the cached threshold for kick: {e}");
-                return HttpResponse::InternalServerError().json(ErrorResponse {
-                    error: "Failed to read the party's cached thresholds".to_string(),
-                });
-            }
-        }
+    // The DNS changes first. Its signatures satisfy the current threshold,
+    // and the following P2P update must satisfy the proposed threshold too.
+    if let Some(error) =
+        kick_quorum_refusal(namespace_threshold, body.new_threshold as usize, &signers)
+    {
+        return HttpResponse::BadRequest().json(ErrorResponse { error });
+    }
+    if !signers.not_peers.is_empty() {
+        tracing::info!(
+            "Kick of {decentralized_party_id} proceeds without members that are not \
+             configured peers: {ids}",
+            ids = signers
+                .not_peers
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
     }
 
     let confirmation_threshold = match cached_confirmation_threshold(
@@ -841,14 +1197,9 @@ pub async fn start_kick(
         }
     };
 
-    // Compute peers we're going to invite — every peer except self + the kicked participant.
-    // Done before the InProgress flip so a concurrent /kick/cancel cannot observe
-    // InProgress while we're still preparing.
-    let invitees: Vec<CantonId> = peers
-        .into_iter()
-        .map(|p| p.participant_id)
-        .filter(|p| *p != self_id && Some(p) != kicked_host.as_ref())
-        .collect();
+    // Fixed before the InProgress flip so a concurrent /kick/cancel cannot
+    // observe InProgress while we're still preparing.
+    let invitees = signers.invitees.clone();
 
     // Compute instance name + config up-front so the persisted workflow_runs row
     // can carry the same identifier the coordinator task will use.
@@ -879,15 +1230,39 @@ pub async fn start_kick(
     // party's topology mutations must not interleave (two kicks, or a kick
     // racing a contracts deployment, conflict at the Canton layer with
     // confusing step failures).
-    if let Some((run, kind)) =
-        find_inprogress_run_for_party(&data.db, &decentralized_party_id).await
+    let _start = match claim_party_for_start(&data, &decentralized_party_id).await {
+        Ok(claim) => claim,
+        Err(response) => return response,
+    };
+
+    let removed = kick_config.participant_id.as_ref().map_or_else(
+        || kick_config.namespace_fingerprint.clone(),
+        ToString::to_string,
+    );
+    if let Err(e) = check_kick_survivor_keys(
+        &data.db,
+        &decentralized_party_id,
+        &self_id,
+        &signers,
+        &removed,
+    )
+    .await
     {
-        return HttpResponse::Conflict().json(ErrorResponse {
-            error: format!(
-                "Party {decentralized_party_id} already has a {kind} workflow in flight \
-                 (run {run}); wait for it to finish or cancel it first"
-            ),
-        });
+        return kick_key_check_failure(&decentralized_party_id, &e);
+    }
+    match kick_key_adoption_refusal(
+        &data.config,
+        &data.db,
+        &decentralized_party_id,
+        &signers.not_peers,
+        &removed,
+        kick_config.participant_id.as_ref(),
+    )
+    .await
+    {
+        Ok(Some(error)) => return HttpResponse::BadRequest().json(ErrorResponse { error }),
+        Ok(None) => {}
+        Err(e) => return kick_key_check_failure(&decentralized_party_id, &e),
     }
 
     // Refuse to invite any peer that can't speak the concurrent-workflows wire
@@ -925,7 +1300,6 @@ pub async fn start_kick(
         return resp;
     }
 
-    let invitees_for_invites = invitees.clone();
     *kick_state.invited_peers.write().await = invitees;
 
     // Spawn the kick workflow in the background
@@ -950,8 +1324,7 @@ pub async fn start_kick(
         let _workflow_guard = WorkflowGuard::new(workflows, instance_for_task.clone());
 
         // Send kick invites to the surviving party members before starting workflow
-        let invite_result =
-            send_kick_invites(&config, &db, &kick_config, &invitees_for_invites).await;
+        let invite_result = send_kick_invites(&config, &db, &kick_config, &signers).await;
         if let Err(e) = invite_result {
             tracing::error!("Failed to send kick invites: {e}");
             let msg = format!("Failed to send invites: {e}");
@@ -978,6 +1351,7 @@ pub async fn start_kick(
             None, // No dars config
             None, // No add-party config
             None, // No change-threshold config
+            None, // No rotate-key config
             None, // No auth registry for kick
             last_seen,
             instance_for_coord,
@@ -1095,29 +1469,48 @@ async fn kind_status(data: &web::Data<AppState>, kind: WorkflowKind) -> Workflow
     }
 }
 
-/// Send kick invites to all peers using Noise protocol (excluding the peer being kicked)
+/// Pin the complete surviving host set in the accepted invitation. Members
+/// that are not peers remain on the topology even though they cannot sign.
+fn kick_invite_payload(
+    kick_config: &workflow::KickConfig,
+    signers: &KickSigners,
+    coordinator: &CantonId,
+) -> KickInvitePayload {
+    let mut participants: Vec<CantonId> = signers
+        .invitees
+        .iter()
+        .chain(&signers.not_peers)
+        .cloned()
+        .collect();
+    participants.push(coordinator.clone());
+    participants.sort();
+    participants.dedup();
+    KickInvitePayload {
+        dec_party_id: kick_config.decentralized_party_id.clone(),
+        kicked_participant: kick_config.participant_id.clone(),
+        kicked_owner_key: Some(kick_config.namespace_fingerprint.clone()),
+        new_threshold: kick_config.new_threshold,
+        previous_threshold: kick_config.previous_threshold,
+        confirmation_threshold: kick_config.confirmation_threshold,
+        participants,
+        workflow_instance: Some(kick_config.instance_name.clone()),
+    }
+}
+
+/// Send kick invites only to the reachable members selected for this run.
 async fn send_kick_invites(
     config: &NodeConfig,
     db: &SqlitePool,
     kick_config: &workflow::KickConfig,
-    invitees: &[CantonId],
+    signers: &KickSigners,
 ) -> Result {
     let network_config = NetworkConfig::from_peers(db.get_all_peers().await?);
     let keypair = NoiseKeypair::from_file(&config.key_file_path()).await?;
 
     let current_participant_id = config.participant_id();
     let kicked_participant = kick_config.participant_id.as_ref();
-    let invitee_set: HashSet<&CantonId> = invitees.iter().collect();
-    let payload = KickInvitePayload {
-        dec_party_id: kick_config.decentralized_party_id.clone(),
-        kicked_participant: kicked_participant.cloned(),
-        kicked_owner_key: Some(kick_config.namespace_fingerprint.clone()),
-        new_threshold: kick_config.new_threshold,
-        previous_threshold: kick_config.previous_threshold,
-        confirmation_threshold: kick_config.confirmation_threshold,
-        participants: invitees.to_vec(),
-        workflow_instance: Some(kick_config.instance_name.clone()),
-    };
+    let invitee_set: HashSet<&CantonId> = signers.invitees.iter().collect();
+    let payload = kick_invite_payload(kick_config, signers, current_participant_id);
     let payload_bytes = serde_json::to_vec(&payload).context("encode KickInvitePayload")?;
     let invite_message = Message::new(MessageType::InviteKick, payload_bytes);
 
@@ -1218,8 +1611,9 @@ async fn send_kick_invites(
     responses(
         (status = 202, description = "Add-party workflow started", body = WorkflowResponse),
         (status = 400, description = "Bad request", body = ErrorResponse),
-        (status = 409, description = "Workflow already in progress for this party, or the participant is already a member", body = ErrorResponse),
-        (status = 500, description = "Internal server error", body = ErrorResponse)
+        (status = 409, description = "Workflow already in progress for this party, the participant is already a member, or it has not vetted a package the party's contracts need", body = ErrorResponse),
+        (status = 500, description = "Internal server error", body = ErrorResponse),
+        (status = 503, description = "The new member's packages could not be checked", body = ErrorResponse)
     )
 )]
 #[post("/add-party")]
@@ -1379,16 +1773,10 @@ pub async fn start_add_party(
 
     // Refuse a second workflow targeting the SAME decentralized party (see
     // start_kick for the rationale — topology mutations must not interleave).
-    if let Some((run, kind)) =
-        find_inprogress_run_for_party(&data.db, &decentralized_party_id).await
-    {
-        return HttpResponse::Conflict().json(ErrorResponse {
-            error: format!(
-                "Party {decentralized_party_id} already has a {kind} workflow in flight \
-                 (run {run}); wait for it to finish or cancel it first"
-            ),
-        });
-    }
+    let _start = match claim_party_for_start(&data, &decentralized_party_id).await {
+        Ok(claim) => claim,
+        Err(response) => return response,
+    };
 
     // Refuse to invite any peer that can't speak the concurrent-workflows wire
     // format — NO invites are sent if even one invitee fails the version gate.
@@ -1397,6 +1785,21 @@ pub async fn start_add_party(
         return HttpResponse::Conflict().json(ErrorResponse {
             error: format_incompatible_peers(&incompatible),
         });
+    }
+
+    // A missing DAR must stop the add before any invite goes out, so no peer
+    // waits and the new member generates no keys for a run that cannot finish.
+    let ledger_token = {
+        let auth = data.auth.read().await.clone();
+        workflow::add_party::resolve_ledger_token(&auth, &decentralized_party_id).await
+    };
+    let check = workflow::add_party::packages::check_new_member_packages(
+        &data.config,
+        &add_party_config,
+        ledger_token.as_deref(),
+    );
+    if let Err(e) = bounded_package_check(ADD_PARTY_PACKAGE_CHECK_TIMEOUT, check).await {
+        return add_party_package_check_failure(&decentralized_party_id, &e);
     }
 
     // Register + persist atomically w.r.t. duplicates (registry insert dedups
@@ -1466,6 +1869,7 @@ pub async fn start_add_party(
             None, // No dars config
             Some(add_party_config),
             None, // No change-threshold config
+            None, // No rotate-key config
             workflow_auth,
             last_seen,
             instance_for_coord,
@@ -1778,16 +2182,10 @@ pub async fn start_change_threshold(
 
     // Refuse a second workflow targeting the SAME dec party (topology mutations
     // must not interleave — see start_kick).
-    if let Some((run, kind)) =
-        find_inprogress_run_for_party(&data.db, &decentralized_party_id).await
-    {
-        return HttpResponse::Conflict().json(ErrorResponse {
-            error: format!(
-                "Party {decentralized_party_id} already has a {kind} workflow in flight \
-                 (run {run}); wait for it to finish or cancel it first"
-            ),
-        });
-    }
+    let _start = match claim_party_for_start(&data, &decentralized_party_id).await {
+        Ok(claim) => claim,
+        Err(response) => return response,
+    };
 
     // Refuse to invite any peer that can't speak the concurrent-workflows wire
     // format — NO invites are sent if even one invitee fails the version gate.
@@ -1861,6 +2259,7 @@ pub async fn start_change_threshold(
             None, // No dars config
             None, // No add-party config
             Some(change_config),
+            None, // No rotate-key config
             None, // No auth registry for change-threshold
             last_seen,
             instance_for_coord,
@@ -2029,6 +2428,455 @@ async fn send_change_threshold_invites(
         }
     }
 
+    Ok(())
+}
+
+// ============================================================================
+// Rotate-Key Workflow
+// ============================================================================
+
+/// Start a rotate-key workflow: replace this node's Daml signing key for a
+/// decentralized party with a new key.
+///
+/// The vault must keep its keys in KMS, unless this node sets
+/// `DECPM_ALLOW_SOFTWARE_PARTY_KEYS` or runs in insecure mode. The members
+/// and thresholds stay the same, and every member signs.
+#[utoipa::path(
+    tag = "Workflows",
+    request_body = RotateKeyRequest,
+    responses(
+        (status = 202, description = "Rotate-key workflow started", body = WorkflowResponse),
+        (status = 400, description = "Bad request, such as a participant without KMS and without the opt-out", body = ErrorResponse),
+        (status = 409, description = "Workflow already in progress, stale membership, a member on an older build or not a configured peer, or this node's key is not the party's", body = ErrorResponse),
+        (status = 502, description = "Canton's admin API could not be reached", body = ErrorResponse),
+        (status = 500, description = "Internal server error", body = ErrorResponse)
+    )
+)]
+#[post("/rotate-key")]
+pub async fn start_rotate_key(
+    http_req: HttpRequest,
+    data: web::Data<AppState>,
+    body: web::Json<RotateKeyRequest>,
+) -> impl Responder {
+    if let Err(resp) = require_admin(&http_req, data.admin_role.as_deref()) {
+        return resp;
+    }
+    let party = body.decentralized_party_id.clone();
+    tracing::info!("Rotate-key request received: party={party}");
+
+    let members: HashSet<CantonId> = match data.db.get_dec_party_participants(&party).await {
+        Ok(rows) => rows
+            .iter()
+            .filter_map(|r| CantonId::parse(&r.participant_uid).ok())
+            .collect(),
+        Err(e) => {
+            tracing::error!("Failed to load dec party participants for rotate-key: {e}");
+            return HttpResponse::InternalServerError().json(ErrorResponse {
+                error: "Failed to load decentralized party members".to_string(),
+            });
+        }
+    };
+    if members.is_empty() {
+        return HttpResponse::Conflict().json(ErrorResponse {
+            error: format!(
+                "No cached membership for {party}. Try refreshing /decentralized-parties first."
+            ),
+        });
+    }
+    if !members.contains(data.config.participant_id()) {
+        return HttpResponse::BadRequest().json(ErrorResponse {
+            error: format!(
+                "This node does not host {party}, so it holds no Daml key of it to rotate"
+            ),
+        });
+    }
+    if members.len() < 2 {
+        return HttpResponse::BadRequest().json(ErrorResponse {
+            error: format!("Cannot rotate a key of {party}: it has only one member"),
+        });
+    }
+
+    if let Err(e) = require_kms_for_rotation(&data.config, &data.db).await {
+        let error = format!("{e:#}");
+        return if canton_unreachable(&e) {
+            HttpResponse::BadGateway().json(ErrorResponse { error })
+        } else {
+            HttpResponse::BadRequest().json(ErrorResponse { error })
+        };
+    }
+    let rotation = match rotation_baseline(&data.config, &data.db, &party, &members).await {
+        Ok(rotation) => rotation,
+        Err(e) => {
+            return HttpResponse::Conflict().json(ErrorResponse {
+                error: format!("{e:#}"),
+            });
+        }
+    };
+    #[cfg(feature = "test-mode")]
+    let rotation = match injected_rotated_key().await {
+        Some(rotated_key) => RotationBaseline {
+            rotated_key,
+            ..rotation
+        },
+        None => rotation,
+    };
+
+    let invitees: Vec<CantonId> = match data.db.get_all_peers().await {
+        Ok(peers) => peers
+            .into_iter()
+            .map(|p| p.participant_id)
+            .filter(|p| members.contains(p) && p != data.config.participant_id())
+            .collect(),
+        Err(e) => {
+            tracing::error!("Failed to load peers for rotate-key: {e}");
+            return HttpResponse::InternalServerError().json(ErrorResponse {
+                error: "Failed to load peers".to_string(),
+            });
+        }
+    };
+    // Every other member must record the new key. A member that is not a
+    // configured peer would keep the old key on record for this node.
+    let unreachable = members_missing_from_peers(&members, &invitees, data.config.participant_id());
+    if !unreachable.is_empty() {
+        return HttpResponse::Conflict().json(ErrorResponse {
+            error: format!(
+                "Cannot rotate this node's key of {party}: every other member must record the new \
+                 key, but these members are not configured peers: {list}. Add them as peers first",
+                list = unreachable.join(", ")
+            ),
+        });
+    }
+
+    let instance_name = format!("{}-rotate-key-{}", party.prefix, now_secs());
+    let instance = WorkflowInstance::new(
+        instance_name.clone(),
+        WorkflowKind::RotateKey,
+        WorkflowRole::Coordinator,
+    );
+    let rotate_config = workflow::RotateKeyConfig {
+        decentralized_party_id: party.clone(),
+        rotated_key: rotation.rotated_key,
+        threshold: rotation.threshold,
+        confirmation_threshold: rotation.confirmation_threshold,
+        instance_name: instance_name.clone(),
+    };
+
+    let _start = match claim_party_for_start(&data, &party).await {
+        Ok(claim) => claim,
+        Err(response) => return response,
+    };
+    let health = probe_invitee_health(&data.config, &data.db, &invitees).await;
+    let incompatible = incompatible_versions(&health);
+    if !incompatible.is_empty() {
+        return HttpResponse::Conflict().json(ErrorResponse {
+            error: format_incompatible_peers(&incompatible),
+        });
+    }
+    // An older peer cannot decode the invitation, so the run would stall
+    // after the invites went out.
+    let lacking = lacking_feature(&health, ROTATE_KEY);
+    if !lacking.is_empty() {
+        return HttpResponse::Conflict().json(ErrorResponse {
+            error: format_peers_lacking_rotate_key(&lacking),
+        });
+    }
+    if let Err(resp) = register_and_persist(
+        &data,
+        &instance,
+        RotateKeyStep::WaitingForPeers,
+        &rotate_config,
+        &invitees,
+        Some(party.clone()),
+    )
+    .await
+    {
+        return resp;
+    }
+
+    let state = &instance.http;
+    *state.invited_peers.write().await = invitees.clone();
+
+    let config = data.config.clone();
+    let db = data.db.clone();
+    let state_clone = instance.http.clone();
+    let instance_for_coord = instance.clone();
+    let kind = instance.kind;
+    let workflows = data.workflows.clone();
+    let last_seen = data.last_seen.clone();
+    let instance_for_task = instance_name.clone();
+
+    // abort_handle/status/error are flipped under simultaneously-held locks —
+    // see start_dars for the cancel-race rationale.
+    let mut abort_guard = state.abort_handle.lock().await;
+    let mut status_guard = state.status.write().await;
+    let mut error_guard = state.error.write().await;
+
+    let join_handle = tokio::spawn(async move {
+        let _workflow_guard = WorkflowGuard::new(workflows, instance_for_task.clone());
+
+        if let Err(e) = send_rotate_key_invites(&config, &db, &rotate_config, &invitees).await {
+            tracing::error!("Failed to send rotate-key invites: {e}");
+            let msg = format!("Failed to send invites: {e}");
+            mark_run_failed(&db, kind, &instance_for_task, &msg).await;
+            *state_clone.status.write().await = WorkflowProgress::Failed;
+            *state_clone.error.write().await = Some(msg);
+            return;
+        }
+
+        // Give peers time to start their peer workflows
+        tokio::time::sleep(Duration::from_secs(2)).await;
+
+        let result = workflow::start_coordinator(
+            config,
+            db.clone(),
+            workflow::WorkflowType::RotateKey,
+            None, // No onboarding config
+            None, // No kick config
+            None, // No contracts config
+            None, // No dars config
+            None, // No add-party config
+            None, // No change-threshold config
+            Some(rotate_config),
+            None, // No auth registry for rotate-key
+            last_seen,
+            instance_for_coord,
+        )
+        .await;
+
+        // Durable row first, in-memory status second: see start_change_threshold.
+        match result {
+            Ok(_) => {
+                mark_run_completed(&db, kind, &instance_for_task).await;
+                *state_clone.status.write().await = WorkflowProgress::Completed;
+                tracing::info!("Rotate-key workflow completed successfully");
+            }
+            Err(e) => {
+                let msg = format!("{e}");
+                mark_run_failed(&db, kind, &instance_for_task, &msg).await;
+                *state_clone.status.write().await = WorkflowProgress::Failed;
+                *state_clone.error.write().await = Some(msg);
+                tracing::error!("Rotate-key workflow failed: {e}");
+            }
+        }
+    });
+    *abort_guard = Some(join_handle.abort_handle());
+    *status_guard = WorkflowProgress::InProgress;
+    *error_guard = None;
+    drop(error_guard);
+    drop(status_guard);
+    drop(abort_guard);
+
+    HttpResponse::Accepted().json(WorkflowResponse {
+        status: WorkflowProgress::InProgress,
+        message: "Rotate-key workflow started".to_string(),
+        instance_name,
+    })
+}
+
+/// Get the current status of the rotate-key workflow
+#[utoipa::path(
+    tag = "Workflows",
+    responses(
+        (status = 200, description = "Rotate-key workflow status", body = WorkflowStatusResponse)
+    )
+)]
+#[get("/rotate-key/status")]
+pub async fn get_rotate_key_status(data: web::Data<AppState>) -> impl Responder {
+    HttpResponse::Ok().json(kind_status(&data, WorkflowKind::RotateKey).await)
+}
+
+#[utoipa::path(
+    tag = "Workflows",
+    responses(
+        (status = 200, description = "Workflow cancelled", body = MessageResponse),
+        (status = 409, description = "No workflow in progress", body = ErrorResponse)
+    )
+)]
+#[post("/rotate-key/cancel")]
+pub async fn cancel_rotate_key(http_req: HttpRequest, data: web::Data<AppState>) -> impl Responder {
+    if let Err(resp) = require_admin(&http_req, data.admin_role.as_deref()) {
+        return resp;
+    }
+    cancel_workflow_state(&data, "Rotate-key", WorkflowKind::RotateKey).await
+}
+
+/// Refuse a rotation before any invitation goes out when the new key could
+/// not live in KMS.
+async fn require_kms_for_rotation(config: &NodeConfig, db: &SqlitePool) -> Result {
+    let mut vault_client = VaultServiceClient::new(config.admin_channel().await?);
+    custody::require_kms_participant(config, db, &mut vault_client).await
+}
+
+/// Localnet-only fault: name another key as the one this node replaces, so
+/// the e2e suite can show that the peers refuse the proposal. A per-node file
+/// lets the harness set the fault without a restart. The release binary does
+/// not compile this hook.
+#[cfg(feature = "test-mode")]
+async fn injected_rotated_key() -> Option<Fingerprint> {
+    let path = std::env::var_os("DECPM_TEST_ROTATE_KEY_REPLACE_FILE")?;
+    let fingerprint: Fingerprint = tokio::fs::read_to_string(path)
+        .await
+        .ok()?
+        .trim()
+        .parse()
+        .ok()?;
+    tracing::warn!("Test fault: this rotation names {fingerprint} as the key it replaces");
+    Some(fingerprint)
+}
+
+/// What a rotation pins when it starts.
+struct RotationBaseline {
+    rotated_key: Fingerprint,
+    threshold: i32,
+    confirmation_threshold: i32,
+}
+
+/// Whether an error came from reaching Canton, not from a rule refusal.
+fn canton_unreachable(error: &anyhow::Error) -> bool {
+    error
+        .chain()
+        .any(|cause| cause.is::<tonic::Status>() || cause.is::<tonic::transport::Error>())
+}
+
+/// The hosts that differ between the cached members and the chain, or `None`
+/// when both name the same hosts.
+fn stale_members(cached: &HashSet<CantonId>, on_chain: &[String]) -> Option<String> {
+    let cached: std::collections::BTreeSet<String> =
+        cached.iter().map(ToString::to_string).collect();
+    let on_chain: std::collections::BTreeSet<String> = on_chain.iter().cloned().collect();
+    (cached != on_chain).then(|| format!("cache {cached:?}, chain {on_chain:?}"))
+}
+
+/// Read this node's current Daml key for `party` and the party's thresholds.
+///
+/// The invitations go to the cached members, and the peers compare the
+/// proposal with the chain. So the cache must name the chain's hosts, or the
+/// run would fail late, after it created a key.
+///
+/// # Errors
+///
+/// Errors when the topology cannot be read, when the cache names other hosts
+/// than the chain, when this node's key is unknown, or when the party does
+/// not carry it.
+async fn rotation_baseline(
+    config: &NodeConfig,
+    db: &SqlitePool,
+    party: &CantonId,
+    members: &HashSet<CantonId>,
+) -> Result<RotationBaseline> {
+    let synchronizer_id = utils::get_synchronizer_id(config).await?;
+    let (_, p2p) =
+        workflow::topology::fetch_p2p_mapping_at_head(config, &synchronizer_id, party).await?;
+    let hosts: Vec<String> = p2p
+        .participants
+        .iter()
+        .map(|p| p.participant_uid.clone())
+        .collect();
+    if let Some(difference) = stale_members(members, &hosts) {
+        anyhow::bail!(
+            "This node's cached members of {party} differ from the chain ({difference}). \
+             Refresh /decentralized-parties and retry"
+        );
+    }
+
+    workflow::rotate_key::config::require_complete_inline_keys(&p2p, party)?;
+    let own = workflow::contracts::steps::sign::own_daml_key(config, db, party).await?;
+    let mut keys = p2p
+        .party_signing_keys
+        .as_ref()
+        .map(|k| k.keys.clone())
+        .unwrap_or_default();
+    let legacy = if keys.len() < p2p.participants.len() {
+        workflow::topology::fetch_party_to_key_mapping(config, &synchronizer_id, party).await?
+    } else {
+        None
+    };
+    keys.extend(
+        legacy
+            .as_ref()
+            .map(|mapping| mapping.signing_keys.clone())
+            .unwrap_or_default(),
+    );
+    let signing_threshold =
+        workflow::rotate_key::config::signing_threshold_in_force(&p2p, legacy.as_ref())
+            .ok_or_else(|| anyhow::anyhow!("{party} carries no signing keys to rotate"))?;
+    if !keys
+        .iter()
+        .any(|key| utils::compute_fingerprint(key) == own.fingerprint)
+    {
+        anyhow::bail!(
+            "This node's Daml key {fingerprint} is not among {party}'s signing keys, so there \
+             is no key of its to rotate",
+            fingerprint = own.fingerprint
+        );
+    }
+
+    Ok(RotationBaseline {
+        rotated_key: own.fingerprint,
+        threshold: i32::try_from(signing_threshold)?,
+        confirmation_threshold: i32::try_from(p2p.threshold)?,
+    })
+}
+
+/// Send rotate-key invites over Noise to every other member.
+async fn send_rotate_key_invites(
+    config: &NodeConfig,
+    db: &SqlitePool,
+    rotate_config: &workflow::RotateKeyConfig,
+    invitees: &[CantonId],
+) -> Result {
+    let network_config = NetworkConfig::from_peers(db.get_all_peers().await?);
+    let keypair = NoiseKeypair::from_file(&config.key_file_path()).await?;
+
+    let mut participants = invitees.to_vec();
+    participants.push(config.participant_id().clone());
+    let payload = RotateKeyInvitePayload {
+        dec_party_id: rotate_config.decentralized_party_id.clone(),
+        rotated_key: rotate_config.rotated_key.to_string(),
+        threshold: rotate_config.threshold,
+        confirmation_threshold: rotate_config.confirmation_threshold,
+        participants,
+        workflow_instance: Some(rotate_config.instance_name.clone()),
+    };
+    let invite_message = Message::new(
+        MessageType::InviteRotateKey,
+        serde_json::to_vec(&payload).context("encode RotateKeyInvitePayload")?,
+    );
+
+    let invitee_set: HashSet<&CantonId> = invitees.iter().collect();
+    for peer in &network_config.peers {
+        if !invitee_set.contains(&peer.participant_id) {
+            continue;
+        }
+        let peer_pub_key = match parse_public_key(&peer.public_key) {
+            Ok(pk) => pk,
+            Err(e) => {
+                tracing::warn!(
+                    "Skipping rotate-key invite to {} - invalid public key: {e}",
+                    peer.participant_id
+                );
+                continue;
+            }
+        };
+        let psk = keypair.derive_psk(&peer_pub_key);
+        let identity = config.participant_id().to_string();
+        tracing::info!("Sending rotate-key invite to {}", peer.participant_id);
+        match send_noise_message(
+            &peer.address,
+            peer.port,
+            &psk,
+            identity.as_bytes(),
+            &invite_message,
+        )
+        .await
+        {
+            Ok(response) => interpret_invite_reply(&peer.participant_id, "rotate-key", &response)?,
+            Err(e) => tracing::error!(
+                "Failed to send rotate-key invite to {}: {e}",
+                peer.participant_id
+            ),
+        }
+    }
     Ok(())
 }
 
@@ -2292,6 +3140,7 @@ pub async fn start_onboarding(
             None, // No dars config
             None, // No add-party config
             None, // No change-threshold config
+            None, // No rotate-key config
             None, // No auth registry for onboarding
             last_seen,
             instance_for_coord,
@@ -2765,17 +3614,10 @@ pub async fn start_contracts(
     let contracts_state = &instance.http;
     // Refuse a second workflow targeting the SAME decentralized party (see
     // `find_inprogress_run_for_party`).
-    if let Some((run, kind)) =
-        find_inprogress_run_for_party(&data.db, &body.decentralized_party_id).await
-    {
-        return HttpResponse::Conflict().json(ErrorResponse {
-            error: format!(
-                "Party {} already has a {kind} workflow in flight (run {run}); wait for it \
-                 to finish or cancel it first",
-                body.decentralized_party_id
-            ),
-        });
-    }
+    let _start = match claim_party_for_start(&data, &body.decentralized_party_id).await {
+        Ok(claim) => claim,
+        Err(response) => return response,
+    };
 
     // Refuse to invite any peer that can't speak the concurrent-workflows wire
     // format — NO invites are sent if even one invitee fails the version gate.
@@ -2887,6 +3729,7 @@ pub async fn start_contracts(
             None, // No dars config
             None, // No add-party config
             None, // No change-threshold config
+            None, // No rotate-key config
             workflow_auth,
             last_seen,
             instance_for_coord,
@@ -3049,7 +3892,9 @@ pub async fn upload_dars_local(
         (status = 400, description = "Bad request (e.g. empty peer_ids)", body = ErrorResponse),
         (status = 401, description = "Unauthorized", body = ErrorResponse),
         (status = 403, description = "Forbidden: admin role required", body = ErrorResponse),
-        (status = 409, description = "Workflow already in progress", body = ErrorResponse)
+        (status = 409, description = "A run in progress already sends one of these DARs to one of these peers", body = ErrorResponse),
+        (status = 413, description = "The DAR set exceeds the size one run can carry", body = ErrorResponse),
+        (status = 503, description = "Cannot check the DAR runs in progress", body = ErrorResponse)
     )
 )]
 #[post("/dars/distribute")]
@@ -3084,8 +3929,10 @@ pub async fn start_dars(
         (status = 401, description = "Unauthorized", body = ErrorResponse),
         (status = 403, description = "Forbidden: admin role required", body = ErrorResponse),
         (status = 404, description = "No DAR on this node holds the package", body = ErrorResponse),
-        (status = 409, description = "Workflow already in progress", body = ErrorResponse),
-        (status = 500, description = "The DAR could not be read", body = ErrorResponse)
+        (status = 409, description = "A run in progress already sends this DAR to one of these peers", body = ErrorResponse),
+        (status = 413, description = "The DAR exceeds the size one run can carry", body = ErrorResponse),
+        (status = 500, description = "The DAR could not be read", body = ErrorResponse),
+        (status = 503, description = "Cannot check the DAR runs in progress", body = ErrorResponse)
     )
 )]
 #[post("/dars/distribute-package")]
@@ -3123,6 +3970,154 @@ pub async fn start_dars_for_package(
     launch_dars(&data, vec![dar], body.peer_ids).await
 }
 
+/// Why a DAR set is refused: the HTTP status and the reason.
+type DarsRefusal = (StatusCode, String);
+
+/// Decode a DAR set, refusing one whose encoded `UploadDars` bundle exceeds
+/// `limit` bytes.
+///
+/// A peer checks the size only after it accepts the invitation, so the
+/// coordinator checks it first. The bundle frames each file with its name and
+/// two lengths, and those bytes count toward the limit.
+fn decode_dars_within(
+    files: Vec<DarFile>,
+    limit: usize,
+) -> std::result::Result<Vec<(String, Vec<u8>)>, DarsRefusal> {
+    let count = files.len();
+    let mut decoded = Vec::with_capacity(count);
+    for file in files {
+        let data = STANDARD.decode(&file.data).map_err(|e| {
+            (
+                StatusCode::BAD_REQUEST,
+                format!(
+                    "DAR file {name} is not valid base64: {e}",
+                    name = file.filename
+                ),
+            )
+        })?;
+        decoded.push((file.filename, data));
+    }
+    let sizes: Vec<(&str, usize)> = decoded
+        .iter()
+        .map(|(name, data)| (name.as_str(), data.len()))
+        .collect();
+    let Some(error) = bundle_size_refusal(&sizes, limit) else {
+        return Ok(decoded);
+    };
+    tracing::warn!("Refused to distribute {count} DAR file(s): {error}");
+    Err((StatusCode::PAYLOAD_TOO_LARGE, error))
+}
+
+/// Why the bundle of `files`, each a name and a DAR length, does not fit in
+/// `limit` bytes, or `None` when it fits.
+///
+/// A DAR that is over the limit alone can never be distributed, so the
+/// refusal names it and does not suggest several runs.
+fn bundle_size_refusal(files: &[(&str, usize)], limit: usize) -> Option<String> {
+    // A size too large to count is over any limit.
+    let size_of = |files: &[(&str, usize)]| {
+        utils::encoded_files_len(files.iter().map(|(name, len)| (name.len(), *len)))
+            .unwrap_or(usize::MAX)
+    };
+    let size = size_of(files);
+    if size <= limit {
+        return None;
+    }
+    let mib = |bytes: usize| bytes as f64 / (1024.0 * 1024.0);
+    let limit_text = format!("{limit} bytes ({limit_mib:.1} MiB)", limit_mib = mib(limit));
+    let over = |size: usize| {
+        format!(
+            "That is {over} bytes over the limit of {limit_text}.",
+            over = size - limit
+        )
+    };
+    let alone: Vec<(&str, usize)> = files
+        .iter()
+        .map(|file| (file.0, size_of(std::slice::from_ref(file))))
+        .filter(|(_, size)| *size > limit)
+        .collect();
+    Some(match alone.as_slice() {
+        [] => format!(
+            "The DAR set is too large for one run. The files and their names take {size} bytes \
+             ({size_mib:.1} MiB). {over} Send the files in several runs, each within the limit.",
+            size_mib = mib(size),
+            over = over(size),
+        ),
+        [(name, alone_size)] => format!(
+            "{name} is too large to distribute, even on its own. The file and its name take \
+             {alone_size} bytes ({size_mib:.1} MiB). {over} Upload it to each node separately \
+             instead.",
+            size_mib = mib(*alone_size),
+            over = over(*alone_size),
+        ),
+        several => format!(
+            "These DARs are each too large to distribute, even on their own: {names}. The limit \
+             is {limit_text}. Upload them to each node separately instead.",
+            names = several
+                .iter()
+                .map(|(name, _)| *name)
+                .collect::<Vec<_>>()
+                .join(", "),
+        ),
+    })
+}
+
+/// Serializes starting and retrying DAR runs, so the duplicate check sees
+/// every run put in progress before it.
+static DARS_LAUNCH: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+/// Refuse a DAR run that repeats one still in progress: the same DAR to the
+/// same peer.
+///
+/// A peer that has not accepted the first invitation gains nothing from a
+/// second one. Each repeat is one more run that waits on the peer.
+#[allow(clippy::result_large_err)]
+async fn refuse_repeated_dars(
+    data: &web::Data<AppState>,
+    config: &workflow::DarsConfig,
+) -> std::result::Result<(), HttpResponse> {
+    let runs = data.db.get_in_progress_workflow_runs().await.map_err(|e| {
+        HttpResponse::ServiceUnavailable().json(ErrorResponse {
+            error: format!("Cannot check the DAR runs in progress: {e}"),
+        })
+    })?;
+    let mut repeats = Vec::new();
+    for run in runs
+        .iter()
+        .filter(|run| run.kind == WorkflowKind::Dars && run.role == WorkflowRole::Coordinator)
+    {
+        let Ok(running) = serde_json::from_str::<workflow::DarsConfig>(&run.config_json) else {
+            continue;
+        };
+        for dar in &config.dar_files {
+            if !running.dar_files.iter().any(|d| d.hash == dar.hash) {
+                continue;
+            }
+            for peer in config
+                .peer_ids
+                .iter()
+                .filter(|p| running.peer_ids.contains(p))
+            {
+                repeats.push(format!(
+                    "{dar} to {peer} in run {run}",
+                    dar = dar.filename,
+                    run = run.instance_name
+                ));
+            }
+        }
+    }
+    if repeats.is_empty() {
+        return Ok(());
+    }
+    Err(HttpResponse::Conflict().json(ErrorResponse {
+        error: format!(
+            "Runs in progress already send these DARs: {repeats}. Cancel those runs, or wait \
+             until they end.",
+            repeats = repeats.join("; ")
+        ),
+    }))
+}
+
 /// Start a DARs distribution run: register it, invite the peers and run the
 /// coordinator. The caller has checked the admin role and that `peer_ids` is
 /// not empty.
@@ -3131,6 +4126,11 @@ async fn launch_dars(
     dar_files: Vec<DarFile>,
     peer_ids: Vec<CantonId>,
 ) -> HttpResponse {
+    let files = match decode_dars_within(dar_files, MAX_CHUNKED_TOTAL_SIZE) {
+        Ok(files) => files,
+        Err((status, error)) => return HttpResponse::build(status).json(ErrorResponse { error }),
+    };
+
     // Create DARs config from request
     let timestamp = now_secs();
     let instance_name = format!("dars-distribute-{timestamp}");
@@ -3141,10 +4141,14 @@ async fn launch_dars(
     );
     let dars_state = &instance.http;
     let dars_config = workflow::DarsConfig {
-        dar_files,
+        dar_files: files
+            .iter()
+            .map(|(filename, data)| DarListing::of(filename, data))
+            .collect(),
         instance_name: instance_name.clone(),
         peer_ids: peer_ids.clone(),
     };
+    let bundle = workflow::dars::bundle_of(files);
 
     // Refuse to invite any peer that can't speak the concurrent-workflows wire
     // format — NO invites are sent if even one invitee fails the version gate.
@@ -3155,20 +4159,30 @@ async fn launch_dars(
         });
     }
 
+    // Held from the duplicate check through the insert, so two identical
+    // requests cannot both pass the check.
+    let launching = DARS_LAUNCH.lock().await;
+    if let Err(resp) = refuse_repeated_dars(data, &dars_config).await {
+        return resp;
+    }
     // Register + persist atomically w.r.t. duplicates (registry insert dedups
     // before the upsert; a persist failure unregisters so nothing leaks).
-    if let Err(resp) = register_and_persist(
+    if let Err(resp) = register_and_persist_with_artifacts(
         data,
         &instance,
         DarsStep::WaitingForPeers,
         &dars_config,
         &peer_ids,
         None,
+        &[(artifact_kinds::DARS_BUNDLE, &bundle)],
     )
     .await
     {
         return resp;
     }
+    drop(launching);
+    // The run reads its DARs back from the database once a peer joins.
+    drop(bundle);
 
     let config = data.config.clone();
     let db = data.db.clone();
@@ -3208,35 +4222,21 @@ async fn launch_dars(
             .collect();
         // Pin the content, not just the name: the invitation the operator sees
         // carries the hash of the exact bytes the peers will be asked to upload
-        // and vet. An empty hash list is the wire signal for "coordinator
-        // predates the field", which makes peers fall back to checking
-        // filenames only — so a DAR we cannot decode has to fail the run rather
-        // than quietly downgrade every peer's check.
-        let dar_hashes: std::result::Result<Vec<String>, _> = dars_config
+        // and vet.
+        let dar_hashes: Vec<String> = dars_config
             .dar_files
             .iter()
-            .map(|f| {
-                STANDARD
-                    .decode(&f.data)
-                    .map(|bytes| workflow::validation::hash_dar(&bytes))
-            })
+            .map(|f| f.hash.clone())
             .collect();
-        let invite_result = match dar_hashes {
-            Ok(dar_hashes) => {
-                send_dars_invites(
-                    &config,
-                    &db,
-                    &peer_ids,
-                    &dar_filenames,
-                    &dar_hashes,
-                    &dars_config.instance_name,
-                )
-                .await
-            }
-            Err(e) => Err(anyhow::anyhow!(
-                "Could not hash the DARs for the invitation: {e}"
-            )),
-        };
+        let invite_result = send_dars_invites(
+            &config,
+            &db,
+            &peer_ids,
+            &dar_filenames,
+            &dar_hashes,
+            &dars_config.instance_name,
+        )
+        .await;
         if let Err(e) = invite_result {
             tracing::error!("Failed to send DARs invites: {e}");
             let mut status = dars_state_clone.status.write().await;
@@ -3266,6 +4266,7 @@ async fn launch_dars(
             Some(dars_config),
             None, // No add-party config
             None, // No change-threshold config
+            None, // No rotate-key config
             None, // No auth
             last_seen,
             instance_for_coord,
@@ -4044,7 +5045,8 @@ pub async fn dismiss_workflow(
     responses(
         (status = 200, description = "Retry started", body = MessageResponse),
         (status = 404, description = "Run not found", body = ErrorResponse),
-        (status = 409, description = "Run is not in a retryable state", body = ErrorResponse)
+        (status = 409, description = "Run is not in a retryable state, or a DAR run repeats one in progress", body = ErrorResponse),
+        (status = 503, description = "Cannot check running workflows", body = ErrorResponse)
     )
 )]
 #[post("/workflows/{instance_name}/retry")]
@@ -4089,6 +5091,35 @@ pub async fn retry_workflow(
         });
     }
 
+    let _start = if let Some(party) = &run.dec_party_id {
+        match claim_party_for_start(&data, party).await {
+            Ok(claim) => Some(claim),
+            Err(response) => return response,
+        }
+    } else {
+        None
+    };
+
+    // A retried DAR run sends its DARs again, so it passes the duplicate check
+    // of a new run. The lock is held until the run is back in progress.
+    let launching = if run.kind == WorkflowKind::Dars {
+        let launching = DARS_LAUNCH.lock().await;
+        let config = match serde_json::from_str::<workflow::DarsConfig>(&run.config_json) {
+            Ok(config) => config,
+            Err(e) => {
+                return HttpResponse::InternalServerError().json(ErrorResponse {
+                    error: format!("The config of DAR run {instance_name} does not parse: {e}"),
+                });
+            }
+        };
+        if let Err(resp) = refuse_repeated_dars(&data, &config).await {
+            return resp;
+        }
+        Some(launching)
+    } else {
+        None
+    };
+
     // Flip the row back to InProgress before re-spawning the task. Concurrent
     // same-kind runs are allowed now (no unique index); the registry insert in
     // respawn_coordinator still rejects a same-instance duplicate.
@@ -4118,6 +5149,7 @@ pub async fn retry_workflow(
             error: format!("Failed to commit retry status: {e}"),
         });
     }
+    drop(launching);
     count_run_started(run.kind);
 
     // Re-load the row (now InProgress), broadcast RetryWorkflow to the
@@ -4292,6 +5324,36 @@ fn format_peers_lacking_owner_only_kick(lacking: &[(String, String)]) -> String 
     )
 }
 
+/// Operator-facing 409 message naming each peer that cannot take part in a
+/// key rotation.
+fn format_peers_lacking_rotate_key(lacking: &[(String, String)]) -> String {
+    let list = lacking
+        .iter()
+        .map(|(id, reason)| format!("{id} ({reason})"))
+        .collect::<Vec<_>>()
+        .join("; ");
+    format!(
+        "Cannot start the key rotation: every other member must run a DecMan version that \
+         knows the rotate-key workflow, and older builds cannot read its invitation. Blocking \
+         peer(s): {list}. Upgrade them and retry."
+    )
+}
+
+/// The members, other than this node, that are not among the invitees.
+fn members_missing_from_peers(
+    members: &HashSet<CantonId>,
+    invitees: &[CantonId],
+    own_id: &CantonId,
+) -> Vec<String> {
+    let mut missing: Vec<String> = members
+        .iter()
+        .filter(|m| *m != own_id && !invitees.contains(m))
+        .map(ToString::to_string)
+        .collect();
+    missing.sort();
+    missing
+}
+
 /// Operator-facing 409 message naming each peer that blocks the start and why.
 fn format_incompatible_peers(incompatible: &[(String, String)]) -> String {
     let list = incompatible
@@ -4307,23 +5369,27 @@ fn format_incompatible_peers(incompatible: &[(String, String)]) -> String {
     )
 }
 
-/// Any in-progress run on this node (either role) already targeting the given
-/// decentralized party. The old global one-at-a-time gate incidentally
-/// prevented two workflows from mutating the same party's topology
-/// concurrently (e.g. two kicks, or a kick racing a contracts deployment);
-/// with concurrent workflows that protection must be explicit. Local-node
-/// guard only — two DIFFERENT nodes coordinating conflicting workflows on the
-/// same party is a distributed conflict Canton itself surfaces.
-async fn find_inprogress_run_for_party(
-    db: &SqlitePool,
+/// Claim `party` for this start request, and refuse it when a run is in
+/// flight for the party. The handler holds the claim until it returns. So a
+/// second request cannot pass the check before the first registers its run.
+#[allow(clippy::result_large_err)]
+pub(super) async fn claim_party_for_start(
+    data: &web::Data<AppState>,
     party: &CantonId,
-) -> Option<(String, WorkflowKind)> {
-    SchemaRead::get_in_progress_workflow_runs(db)
+) -> std::result::Result<StartClaim, HttpResponse> {
+    claim_party_for_workflow(&data.workflows, &data.db, party)
         .await
-        .unwrap_or_default()
-        .into_iter()
-        .find(|r| r.dec_party_id.as_ref() == Some(party))
-        .map(|r| (r.instance_name, r.kind))
+        .map_err(|refusal| {
+            let status = if matches!(refusal, PartyStartRefusal::Unavailable { .. }) {
+                tracing::error!(error = ?refusal, "Failed to check party workflows");
+                StatusCode::SERVICE_UNAVAILABLE
+            } else {
+                StatusCode::CONFLICT
+            };
+            HttpResponse::build(status).json(ErrorResponse {
+                error: refusal.to_string(),
+            })
+        })
 }
 
 async fn find_party_with_prefix(db: &SqlitePool, prefix: &str) -> Result<Option<String>> {
@@ -4516,9 +5582,23 @@ async fn send_contracts_invites(
 #[cfg(test)]
 mod tests {
     use actix_web::{App, HttpMessage, http::StatusCode, test as actix_test};
+    use canton_proto_rs::com::digitalasset::canton::{
+        crypto::v30::{SigningKeyUsage, SigningKeysWithThreshold, SigningPublicKey},
+        protocol::v30::{enums::ParticipantPermission, party_to_participant::HostingParticipant},
+    };
 
+    use super::super::invitations::insert_peer_run;
     use super::*;
-    use crate::{auth::Principal, db::MIGRATOR, server::AppState};
+    use crate::server::workflow_exclusion::find_inprogress_run_for_party;
+    use crate::{
+        auth::Principal,
+        db::MIGRATOR,
+        server::{AppState, PendingInvitation},
+        workflow::{
+            kick::prune_cached_membership, signing_keys::signing_keys_after_kick,
+            validation::PeerExpectations,
+        },
+    };
 
     /// A minimal coordinator run row for `party`, in progress.
     fn in_progress_run(instance: &str, party: &CantonId) -> WorkflowRun {
@@ -4574,7 +5654,7 @@ mod tests {
 
         // While it runs, a second workflow for the same party is refused — the
         // guard's whole purpose.
-        let found = find_inprogress_run_for_party(&pool, &party).await;
+        let found = find_inprogress_run_for_party(&pool, &party).await?;
         assert_eq!(
             found.map(|(run, _)| run),
             Some("contracts-1".to_string()),
@@ -4584,7 +5664,9 @@ mod tests {
         mark_run_completed(&pool, WorkflowKind::Contracts, "contracts-1").await;
 
         assert!(
-            find_inprogress_run_for_party(&pool, &party).await.is_none(),
+            find_inprogress_run_for_party(&pool, &party)
+                .await?
+                .is_none(),
             "a completed run must not block the next workflow for its party"
         );
         Ok(())
@@ -4604,7 +5686,9 @@ mod tests {
         mark_run_failed(&pool, WorkflowKind::Contracts, "contracts-2", "boom").await;
 
         assert!(
-            find_inprogress_run_for_party(&pool, &party).await.is_none(),
+            find_inprogress_run_for_party(&pool, &party)
+                .await?
+                .is_none(),
             "a failed run must not block the retry it invites"
         );
         Ok(())
@@ -4854,6 +5938,204 @@ mod tests {
         assert!(incompatible_versions(&replies[..2]).is_empty());
     }
 
+    /// This build lists the rotation, so a peer on it passes the gate. A peer
+    /// on an older build, or one that did not answer, blocks the start, and
+    /// the message names it.
+    #[test]
+    fn a_rotation_needs_every_peer_to_list_the_feature() {
+        assert!(crate::consts::FEATURES.contains(&ROTATE_KEY));
+        let replies: Vec<InviteeHealth> = vec![
+            (
+                "p2".to_string(),
+                Ok(health_reply("1.15.0", crate::consts::FEATURES)),
+            ),
+            (
+                "p3".to_string(),
+                Ok(health_reply("1.14.0", &[OWNER_ONLY_KICK])),
+            ),
+            ("p4".to_string(), Err("timed out".to_string())),
+        ];
+        let lacking = lacking_feature(&replies, ROTATE_KEY);
+        assert_eq!(
+            lacking,
+            vec![
+                ("p3".to_string(), "running version 1.14.0".to_string()),
+                ("p4".to_string(), "could not verify: timed out".to_string()),
+            ]
+        );
+        let message = format_peers_lacking_rotate_key(&lacking);
+        assert!(
+            message.contains("p3 (running version 1.14.0)") && message.contains("p4 ("),
+            "{message}"
+        );
+    }
+
+    /// The rotate-key start checks that run before any topology read, on a
+    /// node whose admin API is a fake Canton.
+    mod start_rotate_key_refusals {
+        use super::*;
+        use crate::signing::{
+            custody::SoftwareKeys,
+            fake_admin_api::{FakeAdminApi, TestNode, VaultKey},
+            key_store::STORE_OFF_HINT,
+        };
+
+        /// A node `pid(1)` on `fake`, with `members` cached as the hosts of
+        /// party `pid(9)`. The node's files live as long as the `TestNode`.
+        async fn node(
+            pool: SqlitePool,
+            fake: &FakeAdminApi,
+            rule: SoftwareKeys,
+            members: &[CantonId],
+        ) -> anyhow::Result<(web::Data<AppState>, TestNode)> {
+            let party = pid(9)?;
+            cache_party(&pool, &party, 1, None).await?;
+            let rows: Vec<DecPartyParticipantRow> = members
+                .iter()
+                .map(|member| DecPartyParticipantRow {
+                    dec_party_id: party.to_string(),
+                    ..host_row(member, None)
+                })
+                .collect();
+            let mut tx = pool.begin_transaction().await?;
+            tx.replace_dec_party_participants(&party, &rows).await?;
+            Commitable::commit(tx).await?;
+
+            let mut test_node = fake.node(rule, false).await?;
+            test_node.config.node.participant_id = Some(pid(1)?);
+            let state = Arc::try_unwrap(AppState::for_test(None).await?.into_inner())
+                .map_err(|_| anyhow::anyhow!("a fresh test state has one owner"))?;
+            let data = web::Data::new(AppState {
+                db: pool,
+                config: test_node.config.clone(),
+                ..state
+            });
+            Ok((data, test_node))
+        }
+
+        /// Ask `data` to rotate its key of `pid(9)`, and return the status
+        /// and the error it gives.
+        async fn rotate(data: web::Data<AppState>) -> anyhow::Result<(StatusCode, String)> {
+            let db = data.db.clone();
+            let app =
+                actix_test::init_service(App::new().app_data(data).service(start_rotate_key)).await;
+            let request = actix_test::TestRequest::post()
+                .uri("/rotate-key")
+                .set_json(serde_json::json!({ "decentralized_party_id": pid(9)?.to_string() }))
+                .to_request();
+            request.extensions_mut().insert(Principal {
+                sub: "admin".to_string(),
+                issuer: "test".to_string(),
+                roles: Vec::new(),
+                email: None,
+            });
+
+            let response = actix_test::call_service(&app, request).await;
+            let status = response.status();
+            let body: serde_json::Value = actix_test::read_body_json(response).await;
+
+            let runs: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM workflow_runs")
+                .fetch_one(&db)
+                .await?;
+            assert_eq!(runs, 0, "a refused rotation persisted a run");
+            Ok((
+                status,
+                body["error"].as_str().unwrap_or_default().to_string(),
+            ))
+        }
+
+        /// The vault keeps its keys in KMS, so only the membership can refuse.
+        async fn kms_vault() -> anyhow::Result<FakeAdminApi> {
+            FakeAdminApi::start(vec![VaultKey::kms("participant", 1)?]).await
+        }
+
+        #[sqlx::test(migrator = "MIGRATOR")]
+        async fn refuses_a_node_that_is_not_a_member(pool: SqlitePool) -> anyhow::Result<()> {
+            let fake = kms_vault().await?;
+            let (data, _node) =
+                node(pool, &fake, SoftwareKeys::Refused, &[pid(2)?, pid(3)?]).await?;
+
+            let (status, error) = rotate(data).await?;
+
+            assert_eq!(status, StatusCode::BAD_REQUEST);
+            assert!(error.contains("This node does not host"), "{error}");
+            Ok(())
+        }
+
+        #[sqlx::test(migrator = "MIGRATOR")]
+        async fn refuses_a_party_with_one_member(pool: SqlitePool) -> anyhow::Result<()> {
+            let fake = kms_vault().await?;
+            let (data, _node) = node(pool, &fake, SoftwareKeys::Refused, &[pid(1)?]).await?;
+
+            let (status, error) = rotate(data).await?;
+
+            assert_eq!(status, StatusCode::BAD_REQUEST);
+            assert!(error.contains("it has only one member"), "{error}");
+            Ok(())
+        }
+
+        #[sqlx::test(migrator = "MIGRATOR")]
+        async fn refuses_a_node_without_kms(pool: SqlitePool) -> anyhow::Result<()> {
+            let fake = FakeAdminApi::start(vec![VaultKey::software("participant", 1)]).await?;
+            let (data, _node) =
+                node(pool, &fake, SoftwareKeys::Refused, &[pid(1)?, pid(2)?]).await?;
+
+            let (status, error) = rotate(data).await?;
+
+            assert_eq!(status, StatusCode::BAD_REQUEST);
+            assert!(error.contains("software vault, not in a KMS"), "{error}");
+            Ok(())
+        }
+
+        #[sqlx::test(migrator = "MIGRATOR")]
+        async fn refuses_the_opt_out_without_a_key_store(pool: SqlitePool) -> anyhow::Result<()> {
+            let fake = FakeAdminApi::start(vec![VaultKey::software("participant", 1)]).await?;
+            let (data, _node) =
+                node(pool, &fake, SoftwareKeys::Stored, &[pid(1)?, pid(2)?]).await?;
+
+            let (status, error) = rotate(data).await?;
+
+            assert_eq!(status, StatusCode::BAD_REQUEST);
+            assert!(error.contains(STORE_OFF_HINT), "{error}");
+            Ok(())
+        }
+    }
+
+    /// A member that is not a configured peer gets no invitation, so it could
+    /// not record the new key. This node itself never counts as missing.
+    #[test]
+    fn a_rotation_needs_every_other_member_as_a_peer() -> anyhow::Result<()> {
+        let members: HashSet<CantonId> = [pid(1)?, pid(2)?, pid(3)?].into_iter().collect();
+        assert_eq!(
+            members_missing_from_peers(&members, &[pid(2)?], &pid(1)?),
+            vec![pid(3)?.to_string()]
+        );
+        assert!(members_missing_from_peers(&members, &[pid(2)?, pid(3)?], &pid(1)?).is_empty());
+        Ok(())
+    }
+
+    /// A cache that names other hosts than the chain would send invitations
+    /// to the wrong members, and the peers would refuse late.
+    #[test]
+    fn a_rotation_needs_the_cached_hosts_to_match_the_chain() -> anyhow::Result<()> {
+        let cached: HashSet<CantonId> = [pid(1)?, pid(2)?].into_iter().collect();
+        assert!(stale_members(&cached, &[pid(2)?.to_string(), pid(1)?.to_string()]).is_none());
+        let difference = stale_members(&cached, &[pid(1)?.to_string(), pid(3)?.to_string()])
+            .context("a different host must count as stale")?;
+        assert!(difference.contains("validator-3"), "{difference}");
+        Ok(())
+    }
+
+    /// An unreachable Canton is not the operator's mistake, so it is no 400.
+    #[test]
+    fn only_a_canton_transport_error_counts_as_unreachable() {
+        let refused = anyhow::anyhow!("This participant keeps its keys in Canton's software vault");
+        assert!(!canton_unreachable(&refused));
+        let unreachable = anyhow::Error::from(tonic::Status::unavailable("connection refused"))
+            .context("listing the vault's keys");
+        assert!(canton_unreachable(&unreachable));
+    }
+
     /// Three hosts and four owners. A host's kick leaves two keys to sign
     /// with; an owner-only kick leaves all three.
     #[test]
@@ -4878,6 +6160,925 @@ mod tests {
         let bound = party_member_count(&cached_without_self, &me) as i32 - 1;
         assert_eq!(bound, 3, "a 4-member party leaves 3 after a kick");
         assert!(bound >= 3, "threshold 3 must be expressible");
+        Ok(())
+    }
+
+    fn ids(tags: &[u8]) -> anyhow::Result<HashSet<CantonId>> {
+        tags.iter().map(|tag| pid(*tag)).collect()
+    }
+
+    fn signers(invitees: &[u8], not_peers: &[u8]) -> anyhow::Result<KickSigners> {
+        Ok(KickSigners {
+            invitees: invitees
+                .iter()
+                .map(|tag| pid(*tag))
+                .collect::<anyhow::Result<_>>()?,
+            not_peers: not_peers
+                .iter()
+                .map(|tag| pid(*tag))
+                .collect::<anyhow::Result<_>>()?,
+        })
+    }
+
+    #[test]
+    fn kick_signers_invites_only_members_that_are_peers() -> anyhow::Result<()> {
+        let split = kick_signers(
+            &ids(&[1, 2, 3, 4])?,
+            &ids(&[1, 2, 3, 9])?,
+            &pid(1)?,
+            Some(&pid(4)?),
+        );
+        assert_eq!(split, signers(&[2, 3], &[])?);
+        Ok(())
+    }
+
+    #[test]
+    fn a_kicked_host_that_is_not_a_peer_is_neither_invited_nor_reported() -> anyhow::Result<()> {
+        let split = kick_signers(&ids(&[1, 2, 3])?, &ids(&[2])?, &pid(1)?, Some(&pid(3)?));
+        assert_eq!(split, signers(&[2], &[])?);
+        Ok(())
+    }
+
+    #[test]
+    fn kick_signers_names_surviving_members_that_are_not_peers() -> anyhow::Result<()> {
+        let split = kick_signers(&ids(&[1, 2, 3, 4])?, &ids(&[2])?, &pid(1)?, Some(&pid(4)?));
+        assert_eq!(split, signers(&[2], &[3])?);
+        Ok(())
+    }
+
+    #[test]
+    fn a_kick_below_quorum_names_the_members_that_are_not_peers() -> anyhow::Result<()> {
+        let refusal = kick_quorum_refusal(Some(3), 2, &signers(&[2], &[3, 5])?)
+            .context("a kick two signers short of threshold 3 must be refused")?;
+        assert!(
+            refusal.contains(
+                "the party's current namespace threshold is 3. Only 2 members can sign: this \
+                 node and 1 configured peer."
+            ),
+            "{refusal}"
+        );
+        for tag in [3, 5] {
+            assert!(
+                refusal.contains(&format!(
+                    "{} is a member of the party but is not a configured peer of this node.",
+                    pid(tag)?
+                )),
+                "{refusal}"
+            );
+        }
+        assert!(
+            refusal.ends_with(" Add them as peers, then retry."),
+            "{refusal}"
+        );
+        assert!(!refusal.contains(&pid(2)?.to_string()), "{refusal}");
+        Ok(())
+    }
+
+    /// Adding the members that are not peers would still leave the kick
+    /// short, so the advice is about the threshold instead.
+    #[test]
+    fn a_kick_that_peers_cannot_save_points_to_the_threshold() -> anyhow::Result<()> {
+        let refusal = kick_quorum_refusal(Some(4), 2, &signers(&[2], &[3])?)
+            .context("three reachable signers cannot meet threshold 4")?;
+        assert!(refusal.contains(&pid(3)?.to_string()), "{refusal}");
+        assert!(!refusal.contains("Add it as a peer"), "{refusal}");
+        assert!(
+            refusal.ends_with(
+                " Lower the threshold with Change Threshold first, while every host can still \
+                 sign."
+            ),
+            "{refusal}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn a_short_kick_says_which_threshold_is_the_limit() -> anyhow::Result<()> {
+        let current = kick_quorum_refusal(Some(3), 2, &signers(&[2], &[])?)
+            .context("the current threshold 3 is out of reach")?;
+        assert!(
+            current.starts_with("Cannot kick: the party's current namespace threshold is 3."),
+            "{current}"
+        );
+        assert!(current.contains("Change Threshold"), "{current}");
+        assert!(!current.contains("Pick a new_threshold"), "{current}");
+
+        let requested = kick_quorum_refusal(Some(2), 3, &signers(&[2], &[])?)
+            .context("the requested threshold 3 is out of reach")?;
+        assert!(
+            requested.starts_with("Cannot kick: the requested new_threshold is 3."),
+            "{requested}"
+        );
+        assert!(
+            requested.ends_with(" Pick a new_threshold of 2 or lower."),
+            "{requested}"
+        );
+        assert!(!requested.contains("Change Threshold"), "{requested}");
+
+        let both = kick_quorum_refusal(Some(4), 3, &signers(&[2], &[])?)
+            .context("both thresholds are out of reach")?;
+        assert!(both.contains("current namespace threshold is 4."), "{both}");
+        assert!(
+            both.ends_with(" Then pick a new_threshold of 2 or lower."),
+            "{both}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn the_key_adoption_refusal_names_each_owner_and_the_next_step() -> anyhow::Result<()> {
+        assert_eq!(kick_missing_adopters(&[]), None);
+        let one = kick_missing_adopters(&[pid(3)?.to_string()])
+            .context("one owner that is not a peer must sign")?;
+        assert_eq!(
+            one,
+            format!(
+                "Cannot kick: the party still keeps signing keys in the older key mapping. The \
+                 kick moves them into the hosting list. The owner of each moved key must sign. \
+                 {p3} owns such a key but is not a configured peer of this node. Add it as a \
+                 peer, then retry.",
+                p3 = pid(3)?
+            )
+        );
+        let two = kick_missing_adopters(&[pid(3)?.to_string(), pid(4)?.to_string()])
+            .context("two owners that are not peers must sign")?;
+        assert!(
+            two.ends_with(
+                " own such keys but are not configured peers of this node. Add them as peers, \
+                 then retry."
+            ),
+            "{two}"
+        );
+        assert!(!two.contains("inline"), "{two}");
+        Ok(())
+    }
+
+    #[test]
+    fn a_kick_at_quorum_passes_with_a_member_that_is_not_a_peer() -> anyhow::Result<()> {
+        assert_eq!(kick_quorum_refusal(Some(2), 2, &signers(&[2], &[3])?), None);
+        Ok(())
+    }
+
+    #[test]
+    fn an_uncached_threshold_skips_the_quorum_check() -> anyhow::Result<()> {
+        assert_eq!(kick_quorum_refusal(None, 2, &signers(&[2], &[3])?), None);
+        Ok(())
+    }
+
+    #[test]
+    fn a_kick_with_no_invitee_is_refused() -> anyhow::Result<()> {
+        let alone = kick_quorum_refusal(None, 1, &signers(&[], &[])?)
+            .context("a kick with no co-signer must be refused")?;
+        assert_eq!(
+            alone,
+            "Cannot kick: this node has no other hosting member to co-sign the kick."
+        );
+
+        let refusal = kick_quorum_refusal(Some(1), 1, &signers(&[], &[3])?)
+            .context("a kick whose only survivor is not a peer must be refused")?;
+        assert!(
+            refusal.contains(&format!("{} is a member of the party", pid(3)?)),
+            "{refusal}"
+        );
+        assert!(
+            refusal.ends_with(" Add it as a peer, then retry."),
+            "{refusal}"
+        );
+        Ok(())
+    }
+
+    /// [`state_on`], with `pid(1)` as this node.
+    async fn kick_state_on(pool: SqlitePool) -> Result<web::Data<AppState>> {
+        let state = Arc::try_unwrap(state_on(pool).await?.into_inner())
+            .map_err(|_| anyhow::anyhow!("a fresh test state has one owner"))?;
+        let mut config = NodeConfig::default();
+        config.node.participant_id = Some(pid(1)?);
+        Ok(web::Data::new(AppState { config, ..state }))
+    }
+
+    /// A party hosted by this node and `pid(2..=4)` at namespace threshold 3.
+    /// Each host holds its own owner key. Only `pid(2)` is a configured peer.
+    async fn cache_party_with_one_peer(pool: &SqlitePool) -> Result<CantonId> {
+        let party = pid(40)?;
+        cache_party(pool, &party, 3, None).await?;
+        let keys: Vec<String> = (1..=4).map(|n| format!("k{n}")).collect();
+        let hosts = (1..=4)
+            .zip(&keys)
+            .map(|(tag, key)| Ok(host_row(&pid(tag)?, Some(key))))
+            .collect::<anyhow::Result<Vec<_>>>()?;
+        let mut tx = pool.begin_transaction().await?;
+        tx.replace_dec_party_participants(&party, &hosts).await?;
+        tx.replace_dec_party_owners(&party, &keys).await?;
+        tx.insert_peer(&crate::config::Peer {
+            participant_id: pid(2)?,
+            name: "peer-2".to_string(),
+            address: "127.0.0.1".to_string(),
+            port: 1,
+            public_key: String::new(),
+            party: None,
+        })
+        .await?;
+        Commitable::commit(tx).await?;
+        Ok(party)
+    }
+
+    /// A kick of `target` at threshold 2.
+    fn kick_request(party: &CantonId, target: &CantonId) -> actix_test::TestRequest {
+        actix_test::TestRequest::post()
+            .uri("/kick")
+            .set_json(serde_json::json!({
+                "decentralized_party_id": party,
+                "participant_id": target,
+                "new_threshold": 2,
+            }))
+    }
+
+    async fn status_and_body(response: actix_web::dev::ServiceResponse) -> (StatusCode, String) {
+        let status = response.status();
+        let body = actix_test::read_body(response).await;
+        (status, String::from_utf8_lossy(&body).into_owned())
+    }
+
+    /// The kicked host has no peer entry, which a kick does not need. The
+    /// refusal is about the survivor that is not a peer, so it names that
+    /// survivor. A participant outside the party is still refused as one.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_kick_refused_for_quorum_names_the_survivor_not_the_target(
+        pool: SqlitePool,
+    ) -> Result {
+        let party = cache_party_with_one_peer(&pool).await?;
+        let app = actix_test::init_service(
+            App::new()
+                .app_data(kick_state_on(pool).await?)
+                .service(start_kick),
+        )
+        .await;
+
+        let request = kick_request(&party, &pid(4)?).to_request();
+        request.extensions_mut().insert(admin());
+        let response = actix_test::call_service(&app, request).await;
+        let (status, body) = status_and_body(response).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        assert!(
+            body.contains(&format!(
+                "{} is a member of the party but is not a configured peer of this node",
+                pid(3)?
+            )),
+            "{body}"
+        );
+        assert!(
+            !body.contains("not a member of this decentralized party"),
+            "{body}"
+        );
+
+        let request = kick_request(&party, &pid(9)?).to_request();
+        request.extensions_mut().insert(admin());
+        let response = actix_test::call_service(&app, request).await;
+        let (status, body) = status_and_body(response).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        assert!(
+            body.contains("not a member of this decentralized party"),
+            "{body}"
+        );
+        Ok(())
+    }
+
+    /// Caches `party` at namespace threshold `threshold`, hosted by `hosts`
+    /// (this node is `pid(1)`), each under its own owner key `k{tag}`. The
+    /// keys in `owners_only` own the party without hosting it. Only `peers`
+    /// are configured peers of this node.
+    ///
+    /// The party also gets a run in flight. A kick that passes every check
+    /// then stops at the in-flight guard with a 409, before it probes or
+    /// invites any peer.
+    async fn cache_kick_party(
+        pool: &SqlitePool,
+        party: &CantonId,
+        threshold: i64,
+        hosts: &[u8],
+        owners_only: &[&str],
+        peers: &[u8],
+    ) -> Result {
+        cache_party(pool, party, threshold, None).await?;
+        let mut keys: Vec<String> = hosts.iter().map(|tag| format!("k{tag}")).collect();
+        let host_rows = hosts
+            .iter()
+            .zip(&keys)
+            .map(|(tag, key)| Ok(host_row(&pid(*tag)?, Some(key))))
+            .collect::<anyhow::Result<Vec<_>>>()?;
+        keys.extend(owners_only.iter().map(ToString::to_string));
+        let mut tx = pool.begin_transaction().await?;
+        tx.replace_dec_party_participants(party, &host_rows).await?;
+        tx.replace_dec_party_owners(party, &keys).await?;
+        for tag in peers {
+            tx.insert_peer(&crate::config::Peer {
+                participant_id: pid(*tag)?,
+                name: format!("peer-{tag}"),
+                address: "127.0.0.1".to_string(),
+                port: 1,
+                public_key: String::new(),
+                party: None,
+            })
+            .await?;
+        }
+        Commitable::commit(tx).await?;
+        insert_run(pool, &in_progress_run("contracts-in-flight", party)).await
+    }
+
+    async fn post_kick(pool: SqlitePool, body: serde_json::Value) -> Result<(StatusCode, String)> {
+        let app = actix_test::init_service(
+            App::new()
+                .app_data(kick_state_on(pool).await?)
+                .service(start_kick),
+        )
+        .await;
+        let request = actix_test::TestRequest::post()
+            .uri("/kick")
+            .set_json(body)
+            .to_request();
+        request.extensions_mut().insert(admin());
+        Ok(status_and_body(actix_test::call_service(&app, request).await).await)
+    }
+
+    /// Issue #617: the operator removed a lost host from the peer list, then
+    /// kicked it. The remaining members still reach the threshold, so the
+    /// kick must pass every check. It reaches the in-flight guard, the last
+    /// step before invitations.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_host_removed_from_the_peer_list_can_still_be_kicked(pool: SqlitePool) -> Result {
+        let party = pid(41)?;
+        cache_kick_party(&pool, &party, 2, &[1, 2, 3], &[], &[2]).await?;
+
+        let (status, body) = post_kick(
+            pool,
+            serde_json::json!({
+                "decentralized_party_id": party,
+                "participant_id": pid(3)?,
+                "new_threshold": 2,
+            }),
+        )
+        .await?;
+        assert_eq!(status, StatusCode::CONFLICT, "{body}");
+        assert!(body.contains("already has a"), "{body}");
+        Ok(())
+    }
+
+    /// The bound includes every surviving host, but a higher threshold
+    /// still needs enough configured peers to sign the P2P update.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_raised_threshold_needs_enough_reachable_signers(pool: SqlitePool) -> Result {
+        let party = pid(42)?;
+        cache_kick_party(&pool, &party, 2, &[1, 2, 3, 4], &[], &[2, 3]).await?;
+        let kick = |new_threshold: i64| -> anyhow::Result<serde_json::Value> {
+            Ok(serde_json::json!({
+                "decentralized_party_id": party,
+                "participant_id": pid(3)?,
+                "new_threshold": new_threshold,
+            }))
+        };
+
+        let (status, body) = post_kick(pool.clone(), kick(4)?).await?;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        assert!(
+            body.contains("new_threshold must be between 1 and 3"),
+            "{body}"
+        );
+
+        let (status, body) = post_kick(pool.clone(), kick(3)?).await?;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        assert!(
+            body.contains("the requested new_threshold is 3. Only 2 members can sign"),
+            "{body}"
+        );
+        assert!(body.contains(&pid(4)?.to_string()), "{body}");
+        assert!(body.contains("Add it as a peer, then retry."), "{body}");
+        assert!(!body.contains(&pid(3)?.to_string()), "{body}");
+
+        let (status, body) = post_kick(pool, kick(2)?).await?;
+        assert_eq!(status, StatusCode::CONFLICT, "{body}");
+        assert!(body.contains("already has a"), "{body}");
+        Ok(())
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_raised_threshold_at_reachable_quorum_passes(pool: SqlitePool) -> Result {
+        let party = pid(44)?;
+        cache_kick_party(&pool, &party, 2, &[1, 2, 3, 4], &[], &[2, 4]).await?;
+
+        let (status, body) = post_kick(
+            pool,
+            serde_json::json!({
+                "decentralized_party_id": party,
+                "participant_id": pid(3)?,
+                "new_threshold": 3,
+            }),
+        )
+        .await?;
+        assert_eq!(status, StatusCode::CONFLICT, "{body}");
+        assert!(body.contains("already has a"), "{body}");
+        Ok(())
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_lowered_kick_threshold_allows_an_immediate_second_kick(pool: SqlitePool) -> Result {
+        let party = pid(45)?;
+        cache_kick_party(&pool, &party, 3, &[1, 2, 3, 4], &[], &[2, 3, 4]).await?;
+
+        prune_cached_membership(
+            &pool,
+            &party,
+            Some(&pid(4)?),
+            "k4",
+            crate::db::rows::DecPartyTopologyVersion {
+                namespace_serial: 2,
+                p2p_serial: 2,
+            },
+            PartyThresholds::new(2, None),
+        )
+        .await?;
+
+        let (status, body) = post_kick(
+            pool,
+            serde_json::json!({
+                "decentralized_party_id": party,
+                "participant_id": pid(3)?,
+                "new_threshold": 2,
+            }),
+        )
+        .await?;
+        // The second kick passes quorum and reaches the no-invitations
+        // in-flight guard. A stale cached threshold of 3 refuses it first.
+        assert_eq!(status, StatusCode::CONFLICT, "{body}");
+        assert!(body.contains("already has a"), "{body}");
+        Ok(())
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_quorum_kick_advertises_non_peers_without_waiting_for_them(
+        pool: SqlitePool,
+    ) -> Result {
+        let party = pid(46)?;
+        cache_party(&pool, &party, 2, None).await?;
+        let signers = kick_signers(
+            &ids(&[1, 2, 3, 4])?,
+            &ids(&[2, 5])?,
+            &pid(1)?,
+            Some(&pid(4)?),
+        );
+        assert_eq!(signers.invitees, vec![pid(2)?]);
+        assert_eq!(signers.not_peers, vec![pid(3)?]);
+        let config = workflow::KickConfig::new(
+            party.clone(),
+            Some(pid(4)?),
+            "k4".to_string(),
+            2,
+            None,
+            2,
+            "quorum-kick".to_string(),
+        );
+        let payload = kick_invite_payload(&config, &signers, &pid(1)?);
+        // Exercise the existing wire schema; no new capability is needed.
+        let payload: KickInvitePayload = serde_json::from_slice(&serde_json::to_vec(&payload)?)?;
+        assert_eq!(
+            payload.participants.iter().cloned().collect::<HashSet<_>>(),
+            ids(&[1, 2, 3])?
+        );
+
+        insert_coordinator_run(
+            &pool,
+            &config.instance_name,
+            WorkflowKind::Kick,
+            KickStep::WaitingForPeers,
+            &config,
+            &signers.invitees,
+            Some(party),
+            &[],
+        )
+        .await?;
+        let run = pool
+            .get_workflow_run(&config.instance_name)
+            .await?
+            .context("coordinator run missing")?;
+        assert_eq!(run.expected_peers, vec![pid(2)?]);
+        let state = workflow::WorkflowState::new(
+            pool.clone(),
+            run.instance_name,
+            KickStep::WaitingForPeers,
+            run.expected_peers,
+            Some(1),
+        );
+        state.peer_connected(pid(2)?).await;
+        assert_eq!(state.current_step().await, KickStep::ExportState);
+
+        let mut received = serde_json::to_value(payload)?;
+        received["id"] = "kick-invite".into();
+        received["invitation_type"] = "Kick".into();
+        received["coordinator_pubkey"] = "a1".repeat(32).into();
+        received["received_at"] = 1000.into();
+        let invitation: PendingInvitation = serde_json::from_value(received)?;
+        let peer_instance = insert_peer_run(&pool, &invitation)
+            .await
+            .context("accepted peer run missing")?;
+        let mut node = NodeConfig::default();
+        node.node.participant_id = Some(pid(2)?);
+        let accepted = PeerExpectations::load(&pool, &peer_instance, &node, &pid(1)?).await?;
+        assert_eq!(
+            accepted.members.into_iter().collect::<HashSet<_>>(),
+            ids(&[1, 2, 3])?
+        );
+        assert_eq!(accepted.kicked_participant, Some(pid(4)?));
+        assert_eq!(accepted.threshold, Some(2));
+        Ok(())
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn an_unreadable_key_adoption_preflight_creates_no_kick_run(pool: SqlitePool) -> Result {
+        let party = pid(47)?;
+        cache_kick_party(&pool, &party, 2, &[1, 2, 3, 4], &[], &[2]).await?;
+        record_signing_keys(&pool, &party, &[(2, 2), (3, 3)]).await?;
+        let (state, status, body) = post_kick_without_run_in_flight(&pool, &party, 4).await?;
+
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+        assert_eq!(
+            error_text(&body)?,
+            "Cannot check the party's signing keys right now. Retry later."
+        );
+        assert_no_kick_started(&pool, &state).await
+    }
+
+    /// Posts a kick of `pid(target)` at threshold 2 once the party's run in
+    /// flight is gone. Canton is unreachable, so a ledger read fails at once.
+    async fn post_kick_without_run_in_flight(
+        pool: &SqlitePool,
+        party: &CantonId,
+        target: u8,
+    ) -> Result<(web::Data<AppState>, StatusCode, String)> {
+        sqlx::query("DELETE FROM workflow_runs WHERE instance_name = 'contracts-in-flight'")
+            .execute(pool)
+            .await?;
+        let state = Arc::try_unwrap(kick_state_on(pool.clone()).await?.into_inner())
+            .map_err(|_| anyhow::anyhow!("fresh state has one owner"))?;
+        let mut config = state.config.clone();
+        // Invalid URI fails at the Canton boundary without opening a socket.
+        config.canton.admin_api_host = "[".to_string();
+        let state = web::Data::new(AppState { config, ..state });
+        let app =
+            actix_test::init_service(App::new().app_data(state.clone()).service(start_kick)).await;
+        let request = kick_request(party, &pid(target)?).to_request();
+        request.extensions_mut().insert(admin());
+        let (status, body) = status_and_body(actix_test::call_service(&app, request).await).await;
+        Ok((state, status, body))
+    }
+
+    /// The `error` field of an error response body.
+    fn error_text(body: &str) -> Result<String> {
+        serde_json::from_str::<serde_json::Value>(body)?["error"]
+            .as_str()
+            .map(ToString::to_string)
+            .with_context(|| format!("no error text in {body}"))
+    }
+
+    async fn assert_no_kick_started(pool: &SqlitePool, state: &web::Data<AppState>) -> Result {
+        assert!(
+            pool.get_workflow_runs_by_kind(WorkflowKind::Kick)
+                .await?
+                .is_empty()
+        );
+        assert!(state.workflows.snapshot().is_empty());
+        assert!(state.pending_invitations.read().await.is_empty());
+        Ok(())
+    }
+
+    /// Every remaining host's key must be on record, or the proposal cannot
+    /// keep it. The refusal comes before any run exists. It names the member,
+    /// and a member that is not a peer is told to become one.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_kick_needs_every_remaining_hosts_key_before_any_run(pool: SqlitePool) -> Result {
+        let party = pid(50)?;
+        cache_kick_party(&pool, &party, 2, &[1, 2, 3, 4], &[], &[2]).await?;
+        record_signing_keys(&pool, &party, &[(2, 2)]).await?;
+
+        let (state, status, body) = post_kick_without_run_in_flight(&pool, &party, 4).await?;
+
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+        let error = error_text(&body)?;
+        assert_eq!(
+            error,
+            format!(
+                "Cannot kick: this node has no record of the signing key of {p3}. The kick \
+                 must keep the key of each member that stays. {p3} is not a configured peer \
+                 of this node, so a refresh cannot read its key. Add it as a peer, refresh \
+                 /decentralized-parties, then retry.",
+                p3 = pid(3)?
+            )
+        );
+        assert_no_kick_started(&pool, &state).await
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_peer_without_a_recorded_key_is_asked_to_refresh(pool: SqlitePool) -> Result {
+        let party = pid(51)?;
+        cache_kick_party(&pool, &party, 2, &[1, 2, 3], &[], &[2, 3]).await?;
+        let (state, status, body) = post_kick_without_run_in_flight(&pool, &party, 3).await?;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+        let error = error_text(&body)?;
+        assert!(error.contains(&pid(2)?.to_string()), "{error}");
+        assert!(
+            error.ends_with(
+                " Refresh /decentralized-parties so each peer reports its key, then retry."
+            ),
+            "{error}"
+        );
+        assert!(!error.contains("Add it as a peer"), "{error}");
+        assert_no_kick_started(&pool, &state).await
+    }
+
+    /// Two remaining members that claim one key are a conflict no retry can
+    /// settle. The refusal is a 409 and comes before any run exists.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn two_survivors_that_claim_one_key_are_refused_with_a_conflict(
+        pool: SqlitePool,
+    ) -> Result {
+        let party = pid(52)?;
+        cache_kick_party(&pool, &party, 2, &[1, 2, 3, 4], &[], &[2, 3]).await?;
+        record_signing_keys(&pool, &party, &[(2, 2), (3, 2), (4, 4)]).await?;
+
+        let (state, status, body) = post_kick_without_run_in_flight(&pool, &party, 4).await?;
+
+        assert_eq!(status, StatusCode::CONFLICT, "{body}");
+        let error = error_text(&body)?;
+        assert!(error.contains("both claim signing key"), "{error}");
+        assert!(error.contains(&pid(2)?.to_string()), "{error}");
+        assert!(error.contains(&pid(3)?.to_string()), "{error}");
+        assert_no_kick_started(&pool, &state).await
+    }
+
+    /// The kicked member reports a remaining member's key as its own. That
+    /// claim is ignored, so it cannot block its own kick.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_target_that_claims_a_survivors_key_passes_the_key_check(pool: SqlitePool) -> Result {
+        let party = pid(53)?;
+        cache_kick_party(&pool, &party, 2, &[1, 2, 3, 4], &[], &[2, 3]).await?;
+        record_signing_keys(&pool, &party, &[(2, 2), (3, 3), (4, 2)]).await?;
+        let signers = kick_signers(
+            &ids(&[1, 2, 3, 4])?,
+            &ids(&[2, 3])?,
+            &pid(1)?,
+            Some(&pid(4)?),
+        );
+
+        check_kick_survivor_keys(&pool, &party, &pid(1)?, &signers, &pid(4)?.to_string()).await
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_kick_with_no_missing_peer_skips_the_extra_topology_read(pool: SqlitePool) -> Result {
+        let mut config = NodeConfig::default();
+        config.canton.admin_api_host = "[".to_string();
+        assert_eq!(
+            kick_key_adoption_refusal(&config, &pool, &pid(48)?, &[], "unused", None).await?,
+            None
+        );
+        Ok(())
+    }
+
+    fn kick_public_key(tag: u8) -> SigningPublicKey {
+        SigningPublicKey {
+            public_key: vec![tag; 32],
+            usage: vec![SigningKeyUsage::Protocol as i32],
+            ..Default::default()
+        }
+    }
+
+    /// Records `kick_public_key(key)` as the signing key of host `pid(host)`.
+    async fn record_signing_keys(pool: &SqlitePool, party: &CantonId, keys: &[(u8, u8)]) -> Result {
+        for (host, key) in keys {
+            sqlx::query(
+                "UPDATE dec_party_participant SET signing_key = ? \
+                 WHERE dec_party_id = ? AND participant_uid = ?",
+            )
+            .bind(utils::compute_fingerprint(&kick_public_key(*key)).to_string())
+            .bind(party.to_string())
+            .bind(pid(*host)?.to_string())
+            .execute(pool)
+            .await?;
+        }
+        Ok(())
+    }
+
+    async fn fully_inline_kick_keys(
+        pool: &SqlitePool,
+    ) -> Result<(NodeConfig, CantonId, PartyToParticipant)> {
+        let party = pid(49)?;
+        cache_kick_party(pool, &party, 2, &[1, 2, 3, 4], &[], &[2]).await?;
+        record_signing_keys(pool, &party, &[(1, 1), (2, 2), (3, 3), (4, 4)]).await?;
+        let mut config = NodeConfig::default();
+        config.node.participant_id = Some(pid(1)?);
+        config.canton.admin_api_host = "[".to_string();
+        let mapping = PartyToParticipant {
+            party: party.to_string(),
+            threshold: 2,
+            participants: (1..=4)
+                .map(|tag| -> Result<HostingParticipant> {
+                    Ok(HostingParticipant {
+                        participant_uid: pid(tag)?.to_string(),
+                        permission: ParticipantPermission::Confirmation as i32,
+                        ..Default::default()
+                    })
+                })
+                .collect::<Result<Vec<_>>>()?,
+            party_signing_keys: Some(SigningKeysWithThreshold {
+                keys: (1..=4).map(kick_public_key).collect(),
+                threshold: 2,
+            }),
+        };
+        Ok((config, party, mapping))
+    }
+
+    /// The kicked member claims the key of a remaining member that is not a
+    /// peer. The preflight ignores that claim, and the kick removes the
+    /// target's own key by elimination. A remaining member that claims the
+    /// same key as another one is still refused.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn fully_inline_preflight_ignores_a_target_claiming_a_non_peers_key(
+        pool: SqlitePool,
+    ) -> Result {
+        let (config, party, mapping) = fully_inline_kick_keys(&pool).await?;
+        record_signing_keys(&pool, &party, &[(4, 3)]).await?;
+        let preflight = |pool: SqlitePool| {
+            let (config, party, mapping) = (config.clone(), party.clone(), mapping.clone());
+            async move {
+                kick_key_adoption_refusal_for_mapping(
+                    &config,
+                    &pool,
+                    &party,
+                    &[pid(3)?],
+                    &pid(4)?.to_string(),
+                    Some(&pid(4)?),
+                    &mapping,
+                )
+                .await
+            }
+        };
+
+        assert_eq!(preflight(pool.clone()).await?, None);
+        let keys = &mapping
+            .party_signing_keys
+            .as_ref()
+            .context("inline keys")?
+            .keys;
+        let attributed = known_signing_keys_by_member(&config, &pool, &party, keys).await?;
+        let kept = signing_keys_after_kick(
+            keys,
+            &pid(4)?.to_string(),
+            &[
+                pid(1)?.to_string(),
+                pid(2)?.to_string(),
+                pid(3)?.to_string(),
+            ],
+            &attributed,
+        )?;
+        assert_eq!(kept, keys[..3].to_vec());
+
+        record_signing_keys(&pool, &party, &[(2, 3)]).await?;
+        let error = preflight(pool)
+            .await
+            .expect_err("two remaining members claim one key");
+        assert!(
+            matches!(
+                error.downcast_ref::<KeyClaimError>(),
+                Some(KeyClaimError::Conflict(_))
+            ),
+            "{error:#}"
+        );
+        let response = kick_key_check_failure(&party, &error);
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        Ok(())
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_non_peer_needs_a_unique_known_key_even_on_a_fully_inline_party(
+        pool: SqlitePool,
+    ) -> Result {
+        let (config, party, mut mapping) = fully_inline_kick_keys(&pool).await?;
+        sqlx::query(
+            "UPDATE dec_party_participant SET signing_key = NULL WHERE participant_uid = ?",
+        )
+        .bind(pid(3)?.to_string())
+        .execute(&pool)
+        .await?;
+        let error = kick_key_adoption_refusal_for_mapping(
+            &config,
+            &pool,
+            &party,
+            &[pid(3)?],
+            &pid(4)?.to_string(),
+            Some(&pid(4)?),
+            &mapping,
+        )
+        .await
+        .expect_err("unknown non-peer ownership must request a refresh")
+        .to_string();
+        assert!(error.contains(&pid(3)?.to_string()), "{error}");
+        assert!(error.contains("no record of the signing key"), "{error}");
+        assert!(
+            error.contains("A member that is not a peer must first be added as one."),
+            "{error}"
+        );
+        sqlx::query("UPDATE dec_party_participant SET signing_key = ? WHERE participant_uid = ?")
+            .bind(utils::compute_fingerprint(&kick_public_key(3)).to_string())
+            .bind(pid(3)?.to_string())
+            .execute(&pool)
+            .await?;
+        assert_eq!(
+            kick_key_adoption_refusal_for_mapping(
+                &config,
+                &pool,
+                &party,
+                &[pid(3)?],
+                &pid(4)?.to_string(),
+                Some(&pid(4)?),
+                &mapping,
+            )
+            .await?,
+            None
+        );
+        // A reachable p2 needs adoption, but non-peer p3 is already inline.
+        mapping.party_signing_keys = Some(SigningKeysWithThreshold {
+            keys: vec![kick_public_key(1), kick_public_key(3)],
+            threshold: 2,
+        });
+        assert_eq!(
+            kick_key_adoption_refusal_for_mapping(
+                &config,
+                &pool,
+                &party,
+                &[pid(3)?],
+                &pid(4)?.to_string(),
+                Some(&pid(4)?),
+                &mapping,
+            )
+            .await?,
+            None
+        );
+        Ok(())
+    }
+
+    /// A host kick at a threshold equal to the host count can never collect
+    /// enough signatures, because the kicked host does not sign. The refusal
+    /// comes before any invitation. It is about the signers, so it does not
+    /// name the target, whose peer entry the kick does not need.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_kick_short_of_signers_does_not_blame_the_target(pool: SqlitePool) -> Result {
+        let party = pid(43)?;
+        cache_kick_party(&pool, &party, 3, &[1, 2, 3], &[], &[2]).await?;
+
+        let (status, body) = post_kick(
+            pool,
+            serde_json::json!({
+                "decentralized_party_id": party,
+                "participant_id": pid(3)?,
+                "new_threshold": 2,
+            }),
+        )
+        .await?;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        assert!(
+            body.contains("current namespace threshold is 3. Only 2 members can sign"),
+            "{body}"
+        );
+        assert!(body.contains("Change Threshold"), "{body}");
+        assert!(!body.contains(&pid(3)?.to_string()), "{body}");
+        Ok(())
+    }
+
+    /// An owner-only kick removes no host, so every host stays and has to
+    /// sign. A host that is not a peer cannot be invited. When that leaves
+    /// the run short of the threshold, the refusal names that host.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn an_owner_only_kick_short_of_signers_names_the_host_that_is_not_a_peer(
+        pool: SqlitePool,
+    ) -> Result {
+        let party = pid(44)?;
+        cache_kick_party(&pool, &party, 3, &[1, 2, 3], &["k5"], &[2]).await?;
+
+        let (status, body) = post_kick(
+            pool,
+            serde_json::json!({
+                "decentralized_party_id": party,
+                "owner_key": "k5",
+                "new_threshold": 2,
+            }),
+        )
+        .await?;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        assert!(
+            body.contains(&format!(
+                "{} is a member of the party but is not a configured peer of this node",
+                pid(3)?
+            )),
+            "{body}"
+        );
+        assert!(body.contains("namespace threshold is 3"), "{body}");
         Ok(())
     }
 
@@ -5133,6 +7334,159 @@ mod tests {
         Ok(())
     }
 
+    /// POST a contracts request for `party` to `data`, and return the status
+    /// and the error it gives.
+    async fn start_contracts_for(
+        data: web::Data<AppState>,
+        party: &CantonId,
+    ) -> anyhow::Result<(StatusCode, String)> {
+        let app =
+            actix_test::init_service(App::new().app_data(data).service(start_contracts)).await;
+        let request = actix_test::TestRequest::post()
+            .uri("/contracts")
+            .set_json(serde_json::json!({
+                "decentralized_party_id": party.to_string(),
+                "participant_ids": [pid(10)?.to_string()],
+                "participant_parties": [pid(11)?.to_string()],
+                "operator_party": party.to_string(),
+                "contracts": [{
+                    "id": "rules",
+                    "name": "Rules",
+                    "package_id": "#governance",
+                    "module_name": "Governance",
+                    "entity_name": "Rules",
+                    "fields": [],
+                }],
+            }))
+            .to_request();
+        request.extensions_mut().insert(Principal {
+            sub: "admin".to_string(),
+            issuer: "test".to_string(),
+            roles: Vec::new(),
+            email: None,
+        });
+        let response = actix_test::call_service(&app, request).await;
+        let status = response.status();
+        let body: serde_json::Value = actix_test::read_body_json(response).await;
+        Ok((
+            status,
+            body["error"].as_str().unwrap_or_default().to_string(),
+        ))
+    }
+
+    /// Two start requests for one party could both pass the in-flight check
+    /// before either registers its run. While one request holds the party's
+    /// claim, a second one is refused. A refused request gives the claim
+    /// back.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_start_request_is_refused_while_another_claims_the_party(
+        pool: SqlitePool,
+    ) -> anyhow::Result<()> {
+        let data = state_on(pool.clone()).await?;
+        let party = pid(9)?;
+        let claim = data
+            .workflows
+            .claim_start(&party)
+            .ok_or_else(|| anyhow::anyhow!("a fresh registry has no claims"))?;
+
+        let (status, error) = start_contracts_for(data.clone(), &party).await?;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert!(error.contains("Another request is starting"), "{error}");
+        drop(claim);
+
+        insert_run(&pool, &in_progress_run("contracts-1", &party)).await?;
+        let (status, error) = start_contracts_for(data.clone(), &party).await?;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert!(error.contains("already has a"), "{error}");
+        assert!(
+            data.workflows.claim_start(&party).is_some(),
+            "the refused request released its claim"
+        );
+        Ok(())
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn simultaneous_named_starts_have_one_winner(pool: SqlitePool) -> Result {
+        let data = state_on(pool.clone()).await?;
+        let party = pid(63)?;
+        let start = |name: &'static str| {
+            let data = data.clone();
+            let party = party.clone();
+            async move {
+                let claim = claim_party_for_start(&data, &party).await.ok()?;
+                tokio::task::yield_now().await;
+                insert_run(&data.db, &in_progress_run(name, &party))
+                    .await
+                    .expect("persist winning start");
+                Some(claim)
+            }
+        };
+        let (first, second) = tokio::join!(start("distinct-a"), start("distinct-b"));
+        assert_ne!(first.is_some(), second.is_some());
+        let runs = pool.get_in_progress_workflow_runs().await?;
+        assert_eq!(runs.len(), 1);
+        assert!(matches!(
+            runs[0].instance_name.as_str(),
+            "distinct-a" | "distinct-b"
+        ));
+        drop((first, second));
+        mark_run_failed(
+            &pool,
+            WorkflowKind::Contracts,
+            &runs[0].instance_name,
+            "validation failed",
+        )
+        .await;
+        assert!(claim_party_for_start(&data, &party).await.is_ok());
+        Ok(())
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn cancelled_validation_releases_only_its_party_reservation(pool: SqlitePool) -> Result {
+        let data = state_on(pool).await?;
+        let party = pid(67)?;
+        let other_party = pid(68)?;
+        let (validating, ready) = tokio::sync::oneshot::channel();
+        let mut validation = Box::pin(async {
+            let _claim = claim_party_for_start(&data, &party)
+                .await
+                .expect("a fresh party can start validation");
+            validating.send(()).expect("the test waits for validation");
+            std::future::pending::<()>().await;
+        });
+        tokio::select! {
+            _ = validation.as_mut() => panic!("validation must remain in progress"),
+            result = ready => result.expect("validation reaches the package scan"),
+        }
+        assert!(data.workflows.claim_start(&party).is_none());
+        let other_claim = claim_party_for_start(&data, &other_party)
+            .await
+            .expect("another party can validate concurrently");
+
+        drop(validation);
+
+        assert!(claim_party_for_start(&data, &party).await.is_ok());
+        assert!(data.workflows.claim_start(&other_party).is_none());
+        drop(other_claim);
+        assert!(claim_party_for_start(&data, &other_party).await.is_ok());
+        assert!(data.db.get_in_progress_workflow_runs().await?.is_empty());
+        Ok(())
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn unavailable_workflow_database_refuses_and_releases_start(pool: SqlitePool) -> Result {
+        let data = state_on(pool.clone()).await?;
+        let party = pid(64)?;
+        pool.close().await;
+        let response = claim_party_for_start(&data, &party)
+            .await
+            .err()
+            .ok_or_else(|| anyhow::anyhow!("failed lookup must refuse the start"))?;
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert!(data.workflows.claim_start(&party).is_some());
+        Ok(())
+    }
+
     fn started(kind: WorkflowKind) -> u64 {
         RUNS_STARTED
             .with_label_values(&[run_kind_label(kind)])
@@ -5172,7 +7526,8 @@ mod tests {
                 "contracts",
                 "dars",
                 "add_party",
-                "change_threshold"
+                "change_threshold",
+                "rotate_key"
             ]
         );
     }
@@ -5375,6 +7730,60 @@ mod tests {
         Ok(())
     }
 
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn retry_cannot_bypass_a_start_claim_or_an_active_run(pool: SqlitePool) -> Result {
+        let party = pid(65)?;
+        let run = WorkflowRun {
+            status: WorkflowProgress::Failed,
+            ..in_progress_run("blocked-retry", &party)
+        };
+        insert_run(&pool, &run).await?;
+        let data = state_on(pool.clone()).await?;
+        let claim = data.workflows.claim_start(&party).expect("fresh party");
+        let app =
+            actix_test::init_service(App::new().app_data(data.clone()).service(retry_workflow))
+                .await;
+        for active_run in [false, true] {
+            let request = actix_test::TestRequest::post()
+                .uri("/workflows/blocked-retry/retry")
+                .to_request();
+            request.extensions_mut().insert(admin());
+            let response = actix_test::call_service(&app, request).await;
+            assert_eq!(
+                response.status(),
+                StatusCode::CONFLICT,
+                "active={active_run}"
+            );
+            assert_eq!(
+                status_of(&pool, "blocked-retry").await?,
+                Some(WorkflowProgress::Failed)
+            );
+            if !active_run {
+                insert_run(&pool, &in_progress_run("other-active-run", &party)).await?;
+            }
+        }
+        drop(claim);
+        let request = actix_test::TestRequest::post()
+            .uri("/workflows/blocked-retry/retry")
+            .to_request();
+        request.extensions_mut().insert(admin());
+        let response = actix_test::call_service(&app, request).await;
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        assert_eq!(
+            status_of(&pool, "blocked-retry").await?,
+            Some(WorkflowProgress::Failed)
+        );
+        mark_run_completed(&pool, WorkflowKind::Contracts, "other-active-run").await;
+        let request = actix_test::TestRequest::post()
+            .uri("/workflows/blocked-retry/retry")
+            .to_request();
+        request.extensions_mut().insert(admin());
+        let response = actix_test::call_service(&app, request).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(data.workflows.claim_start(&party).is_some());
+        Ok(())
+    }
+
     fn admin() -> Principal {
         Principal {
             sub: "admin".to_string(),
@@ -5475,6 +7884,701 @@ mod tests {
         assert_eq!(finished(kind, RunOutcome::Failed), failed + 1);
         assert_eq!(finished(kind, RunOutcome::Cancelled), cancelled);
         assert!(task.await.is_err_and(|e| e.is_cancelled()));
+        Ok(())
+    }
+
+    fn dar(filename: &str, len: usize) -> DarFile {
+        DarFile {
+            filename: filename.to_string(),
+            data: STANDARD.encode(vec![0u8; len]),
+        }
+    }
+
+    /// Each file adds its name and 8 bytes of framing, and the set adds 4.
+    /// Two DARs that fit alone but not together can go in two runs.
+    #[test]
+    fn a_set_above_the_limit_states_its_size_and_excess() -> Result {
+        let refusal = decode_dars_within(vec![dar("a.dar", 60), dar("b.dar", 60)], 100).map(drop);
+        let Err((status, error)) = refusal else {
+            anyhow::bail!("a 150-byte bundle must be refused at limit 100");
+        };
+        assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
+        assert!(error.contains("their names take 150 bytes"), "{error}");
+        assert!(
+            error.contains("50 bytes over the limit of 100 bytes"),
+            "{error}"
+        );
+        assert!(error.contains("several runs"), "{error}");
+        Ok(())
+    }
+
+    /// No split helps a DAR that is over the limit alone, so the refusal
+    /// names it and does not suggest several runs.
+    #[test]
+    fn a_dar_over_the_limit_alone_is_named_without_advice_to_split() -> Result {
+        let refusal =
+            decode_dars_within(vec![dar("a.dar", 10), dar("big.dar", 120)], 100).map(drop);
+        let Err((status, error)) = refusal else {
+            anyhow::bail!("a DAR over the limit alone must be refused");
+        };
+        assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
+        assert!(
+            error.starts_with("big.dar is too large to distribute"),
+            "{error}"
+        );
+        assert!(error.contains("its name take 139 bytes"), "{error}");
+        assert!(
+            error.contains("39 bytes over the limit of 100 bytes"),
+            "{error}"
+        );
+        assert!(!error.contains("several runs"), "{error}");
+        Ok(())
+    }
+
+    #[test]
+    fn every_dar_over_the_limit_alone_is_named() {
+        let refusal = bundle_size_refusal(&[("x.dar", 120), ("a.dar", 1), ("y.dar", 130)], 100)
+            .unwrap_or_default();
+        assert!(refusal.contains(": x.dar, y.dar."), "{refusal}");
+        assert!(!refusal.contains("several runs"), "{refusal}");
+    }
+
+    /// A size too large to add up is refused, not wrapped to a small one.
+    #[test]
+    fn a_size_that_overflows_is_refused() {
+        assert!(bundle_size_refusal(&[("a.dar", usize::MAX)], 100).is_some());
+        assert!(bundle_size_refusal(&[("a.dar", usize::MAX - 20), ("b.dar", 10)], 100).is_some());
+    }
+
+    #[test]
+    fn framing_bytes_count_toward_the_limit() {
+        let refusal = decode_dars_within(vec![dar("a.dar", 60), dar("b.dar", 40)], 100).map(drop);
+        assert!(
+            matches!(refusal, Err((StatusCode::PAYLOAD_TOO_LARGE, _))),
+            "100 DAR bytes plus framing must exceed limit 100: {refusal:?}"
+        );
+    }
+
+    #[test]
+    fn a_bundle_at_the_limit_passes() {
+        assert_eq!(
+            decode_dars_within(vec![dar("a.dar", 83)], 100).map(drop),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn an_undecodable_dar_is_a_bad_request() -> Result {
+        let files = [
+            dar("good.dar", 10),
+            DarFile {
+                filename: "broken.dar".to_string(),
+                data: "not base64!".to_string(),
+            },
+        ];
+        let Err((status, error)) = decode_dars_within(files.to_vec(), 100).map(drop) else {
+            anyhow::bail!("a DAR that is not base64 must be refused");
+        };
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(error.contains("broken.dar"), "{error}");
+        Ok(())
+    }
+
+    /// One DAR the size of the limit fails only through its framing. The run
+    /// is refused before it is registered, so no peer is invited.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn an_oversized_distribute_sends_no_invitation(pool: SqlitePool) -> Result {
+        let data = state_on(pool.clone()).await?;
+        let app = actix_test::init_service(
+            App::new()
+                .app_data(web::JsonConfig::default().limit(100 * 1024 * 1024))
+                .app_data(data.clone())
+                .service(start_dars),
+        )
+        .await;
+        let request = actix_test::TestRequest::post()
+            .uri("/dars/distribute")
+            .set_json(serde_json::json!({
+                "dar_files": [dar("big.dar", MAX_CHUNKED_TOTAL_SIZE)],
+                "peer_ids": [pid(2)?],
+            }))
+            .to_request();
+        request.extensions_mut().insert(admin());
+
+        let response = actix_test::call_service(&app, request).await;
+
+        let status = response.status();
+        let body = actix_test::read_body(response).await;
+        let body = String::from_utf8_lossy(&body);
+        assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE, "{body}");
+        assert!(
+            body.contains("big.dar is too large to distribute"),
+            "{body}"
+        );
+        assert!(
+            body.contains(&format!(
+                "19 bytes over the limit of {MAX_CHUNKED_TOTAL_SIZE} bytes"
+            )),
+            "{body}"
+        );
+        assert!(
+            pool.get_workflow_runs_by_kind(WorkflowKind::Dars)
+                .await?
+                .is_empty()
+        );
+        assert!(data.workflows.snapshot().is_empty());
+        Ok(())
+    }
+
+    /// Three DARs whose `UploadDars` bundle is `bundle_len` bytes.
+    fn three_dars_of_bundle(bundle_len: usize) -> Vec<DarFile> {
+        // A 4-byte count, then two 4-byte lengths and a 5-byte name per file.
+        let data_len = bundle_len - 4 - 3 * (8 + 5);
+        vec![
+            dar("a.dar", data_len / 3),
+            dar("b.dar", data_len / 3),
+            dar("c.dar", data_len - 2 * (data_len / 3)),
+        ]
+    }
+
+    /// The bundle the peer receives, built the way the coordinator builds it.
+    fn bundle_of(files: &[DarFile]) -> anyhow::Result<Vec<u8>> {
+        let decoded = files
+            .iter()
+            .map(|file| Ok((file.filename.clone(), STANDARD.decode(&file.data)?)))
+            .collect::<anyhow::Result<Vec<_>>>()?;
+        Ok(utils::encode_files(&decoded))
+    }
+
+    /// The coordinator must refuse exactly the sets a peer would refuse. A
+    /// stricter check blocks runs that would work. A looser one lets the peer
+    /// fail after it accepts, which is the fault this check prevents.
+    #[test]
+    fn the_coordinator_refuses_exactly_what_a_peer_refuses() -> anyhow::Result<()> {
+        use crate::noise::{CHUNK_SIZE, check_chunked_metadata};
+
+        for bundle_len in [MAX_CHUNKED_TOTAL_SIZE, MAX_CHUNKED_TOTAL_SIZE + 1] {
+            let files = three_dars_of_bundle(bundle_len);
+            let bundle = bundle_of(&files)?;
+            assert_eq!(bundle.len(), bundle_len);
+            let peer = check_chunked_metadata(bundle.len(), bundle.len().div_ceil(CHUNK_SIZE));
+            let coordinator = decode_dars_within(files.clone(), MAX_CHUNKED_TOTAL_SIZE).map(drop);
+            assert_eq!(
+                coordinator.is_ok(),
+                peer.is_ok(),
+                "bundle of {bundle_len} bytes: coordinator {coordinator:?}, peer {peer:?}"
+            );
+        }
+        Ok(())
+    }
+
+    /// Issue #616: many DARs, each well below the limit, that exceed it
+    /// together. The refusal states the exact size of the bundle a peer
+    /// would have received.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn many_small_dars_above_the_limit_together_are_refused(pool: SqlitePool) -> Result {
+        let files: Vec<DarFile> = (0..9)
+            .map(|n| dar(&format!("package-{n}.dar"), 2 * 1024 * 1024))
+            .collect();
+        let size = bundle_of(&files)?.len();
+        let data = state_on(pool.clone()).await?;
+        let app = actix_test::init_service(
+            App::new()
+                .app_data(web::JsonConfig::default().limit(100 * 1024 * 1024))
+                .app_data(data.clone())
+                .service(start_dars),
+        )
+        .await;
+        let request = actix_test::TestRequest::post()
+            .uri("/dars/distribute")
+            .set_json(serde_json::json!({
+                "dar_files": files,
+                "peer_ids": [pid(2)?],
+            }))
+            .to_request();
+        request.extensions_mut().insert(admin());
+
+        let response = actix_test::call_service(&app, request).await;
+
+        let status = response.status();
+        let body = actix_test::read_body(response).await;
+        let body = String::from_utf8_lossy(&body);
+        assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE, "{body}");
+        assert!(
+            body.contains(&format!("their names take {size} bytes")),
+            "{body}"
+        );
+        assert!(
+            body.contains(&format!(
+                "{over} bytes over the limit of {MAX_CHUNKED_TOTAL_SIZE} bytes",
+                over = size - MAX_CHUNKED_TOTAL_SIZE
+            )),
+            "{body}"
+        );
+        assert!(body.contains("several runs"), "{body}");
+        assert!(
+            pool.get_workflow_runs_by_kind(WorkflowKind::Dars)
+                .await?
+                .is_empty()
+        );
+        assert!(data.workflows.snapshot().is_empty());
+        Ok(())
+    }
+
+    /// A started run keeps only the names and hashes of its DARs in its row.
+    /// Every query that lists runs reads the row, so the bytes go to the
+    /// bundle the run loads once a peer joins.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_started_run_keeps_its_dars_out_of_its_row(pool: SqlitePool) -> Result {
+        let data = state_on(pool.clone()).await?;
+        let app = actix_test::init_service(
+            App::new()
+                .app_data(web::JsonConfig::default().limit(100 * 1024 * 1024))
+                .app_data(data.clone())
+                .service(start_dars),
+        )
+        .await;
+        let request = actix_test::TestRequest::post()
+            .uri("/dars/distribute")
+            .set_json(serde_json::json!({
+                "dar_files": [dar("b.dar", 30), dar("a.dar", 20)],
+                "peer_ids": [pid(2)?],
+            }))
+            .to_request();
+        request.extensions_mut().insert(admin());
+
+        let response = actix_test::call_service(&app, request).await;
+
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+        let body: serde_json::Value = actix_test::read_body_json(response).await;
+        let instance = body["instance_name"]
+            .as_str()
+            .context("the response names no run")?;
+        let run = pool
+            .get_workflow_run(instance)
+            .await?
+            .context("the run has no row")?;
+        assert!(!run.config_json.contains("\"data\""), "{}", run.config_json);
+        let config: workflow::DarsConfig = serde_json::from_str(&run.config_json)?;
+        assert_eq!(
+            config.dar_files,
+            vec![
+                DarListing::of("b.dar", &[0; 30]),
+                DarListing::of("a.dar", &[0; 20])
+            ]
+        );
+        let bundle = pool
+            .read_artifact(instance, artifact_kinds::DARS_BUNDLE, None)
+            .await?;
+        assert_eq!(
+            bundle,
+            Some(workflow::bundle_of(vec![
+                ("b.dar".to_string(), vec![0; 30]),
+                ("a.dar".to_string(), vec![0; 20]),
+            ]))
+        );
+        Ok(())
+    }
+
+    /// Store a coordinator DAR run that sends `dars`, each a name and its
+    /// bytes, to `peers`.
+    async fn store_dars_run(
+        pool: &SqlitePool,
+        instance: &str,
+        dars: &[(&str, &[u8])],
+        peers: Vec<CantonId>,
+    ) -> Result<workflow::DarsConfig> {
+        let config = workflow::DarsConfig {
+            dar_files: dars
+                .iter()
+                .map(|(name, data)| DarListing::of(name, data))
+                .collect(),
+            instance_name: instance.to_string(),
+            peer_ids: peers.clone(),
+        };
+        insert_coordinator_run(
+            pool,
+            instance,
+            WorkflowKind::Dars,
+            DarsStep::WaitingForPeers,
+            &config,
+            &peers,
+            None,
+            &[],
+        )
+        .await?;
+        Ok(config)
+    }
+
+    /// The incident behind this check: 144 runs, each one DAR to a peer that
+    /// never accepted, many of them repeats. The refusal names each DAR, peer
+    /// and run that repeats, and nothing that does not.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_dar_already_on_its_way_to_a_peer_is_refused(pool: SqlitePool) -> Result {
+        let data = state_on(pool.clone()).await?;
+        store_dars_run(
+            &pool,
+            "dars-distribute-1",
+            &[("app.dar", b"app")],
+            vec![pid(2)?, pid(3)?],
+        )
+        .await?;
+        let repeat = workflow::DarsConfig {
+            dar_files: vec![
+                DarListing::of("app.dar", b"app"),
+                DarListing::of("lib.dar", b"lib"),
+            ],
+            instance_name: "dars-distribute-2".to_string(),
+            peer_ids: vec![pid(3)?, pid(4)?],
+        };
+
+        let Err(response) = refuse_repeated_dars(&data, &repeat).await else {
+            anyhow::bail!("a DAR already on its way to a peer must be refused");
+        };
+
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        let error = error_body(response).await?;
+        assert!(
+            error.contains(&format!("app.dar to {} in run dars-distribute-1", pid(3)?)),
+            "{error}"
+        );
+        assert!(!error.contains(&pid(4)?.to_string()), "{error}");
+        assert!(!error.contains("lib.dar"), "{error}");
+        Ok(())
+    }
+
+    /// The same DAR to another peer, other bytes under the same name, and a
+    /// DAR whose run has ended are not repeats.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn only_a_run_in_progress_with_the_same_dar_and_peer_is_a_repeat(
+        pool: SqlitePool,
+    ) -> Result {
+        let data = state_on(pool.clone()).await?;
+        store_dars_run(
+            &pool,
+            "dars-distribute-1",
+            &[("app.dar", b"app")],
+            vec![pid(2)?],
+        )
+        .await?;
+        store_dars_run(
+            &pool,
+            "dars-distribute-2",
+            &[("lib.dar", b"lib")],
+            vec![pid(3)?],
+        )
+        .await?;
+        assert!(
+            finish_run(
+                &pool,
+                "dars-distribute-2",
+                WorkflowProgress::Completed,
+                None
+            )
+            .await?
+        );
+        let to = |dar: DarListing, peer: CantonId| workflow::DarsConfig {
+            dar_files: vec![dar],
+            instance_name: "dars-distribute-3".to_string(),
+            peer_ids: vec![peer],
+        };
+
+        for config in [
+            to(DarListing::of("app.dar", b"app"), pid(3)?),
+            to(DarListing::of("app.dar", b"app v2"), pid(2)?),
+            to(DarListing::of("lib.dar", b"lib"), pid(3)?),
+        ] {
+            assert!(
+                refuse_repeated_dars(&data, &config).await.is_ok(),
+                "{config:?} is not a repeat"
+            );
+        }
+        Ok(())
+    }
+
+    /// A retry sends the DARs again, so it cannot repeat a run in progress
+    /// either. Once that run ends, the retry goes ahead.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_retry_cannot_repeat_a_dar_run_in_progress(pool: SqlitePool) -> Result {
+        store_dars_run(
+            &pool,
+            "dars-distribute-1",
+            &[("app.dar", b"app")],
+            vec![pid(2)?],
+        )
+        .await?;
+        assert!(
+            finish_run(
+                &pool,
+                "dars-distribute-1",
+                WorkflowProgress::Failed,
+                Some("the peer did not join")
+            )
+            .await?
+        );
+        store_dars_run(
+            &pool,
+            "dars-distribute-2",
+            &[("app.dar", b"app")],
+            vec![pid(2)?],
+        )
+        .await?;
+        let app = actix_test::init_service(
+            App::new()
+                .app_data(state_on(pool.clone()).await?)
+                .service(retry_workflow),
+        )
+        .await;
+        let retry = || {
+            let request = actix_test::TestRequest::post()
+                .uri("/workflows/dars-distribute-1/retry")
+                .to_request();
+            request.extensions_mut().insert(admin());
+            request
+        };
+
+        let response = actix_test::call_service(&app, retry()).await;
+
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        let body: serde_json::Value = actix_test::read_body_json(response).await;
+        let error = body["error"].as_str().unwrap_or_default();
+        assert!(
+            error.contains(&format!("app.dar to {} in run dars-distribute-2", pid(2)?)),
+            "{error}"
+        );
+        assert_eq!(
+            status_of(&pool, "dars-distribute-1").await?,
+            Some(WorkflowProgress::Failed)
+        );
+
+        assert!(
+            finish_run(
+                &pool,
+                "dars-distribute-2",
+                WorkflowProgress::Completed,
+                None
+            )
+            .await?
+        );
+        let response = actix_test::call_service(&app, retry()).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        Ok(())
+    }
+
+    async fn error_body(response: HttpResponse) -> anyhow::Result<String> {
+        let body = actix_web::body::to_bytes(response.into_body())
+            .await
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+        let body: serde_json::Value = serde_json::from_slice(&body)?;
+        body["error"]
+            .as_str()
+            .map(str::to_string)
+            .context("the response has no error text")
+    }
+
+    /// A missing package goes back as a conflict that names the ids, because
+    /// the operator fixes it by uploading the DAR.
+    #[actix_web::test]
+    async fn a_missing_package_refuses_the_add_with_the_missing_ids() -> anyhow::Result<()> {
+        let error = anyhow::Error::from(workflow::add_party::MissingPackages {
+            participant: pid(3)?,
+            missing: vec!["pkg-a".to_string(), "pkg-b".to_string()],
+        });
+
+        let response = add_party_package_check_failure(&pid(1)?, &error);
+
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        let error = error_body(response).await?;
+        assert!(
+            error.contains(&pid(3)?.to_string()),
+            "names the new member: {error}"
+        );
+        assert!(
+            error.contains(r#"Missing package ids: ["pkg-a", "pkg-b"]"#),
+            "lists the missing ids: {error}"
+        );
+        // The add-member guide tells the operator to search for this text.
+        assert!(
+            error.contains("has not vetted 2 package(s)"),
+            "counts the missing ids: {error}"
+        );
+        Ok(())
+    }
+
+    /// A Canton call that stalls ends in a 503, not in a request that never
+    /// answers.
+    #[actix_web::test]
+    async fn a_stalled_package_check_refuses_the_add_as_unavailable() -> anyhow::Result<()> {
+        let stalled = std::future::pending::<Result>();
+
+        let error = bounded_package_check(Duration::from_millis(10), stalled)
+            .await
+            .expect_err("a check that never finishes must fail");
+        let response = add_party_package_check_failure(&pid(1)?, &error);
+
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let error = error_body(response).await?;
+        assert!(error.contains("did not finish within"), "{error}");
+        Ok(())
+    }
+
+    /// A check that finishes in time passes its own result through, so a
+    /// missing package is still a 409 and not a timeout.
+    #[actix_web::test]
+    async fn a_check_that_finishes_in_time_keeps_its_own_answer() -> anyhow::Result<()> {
+        bounded_package_check(Duration::from_secs(5), async { Ok(()) }).await?;
+
+        let missing = anyhow::Error::from(workflow::add_party::MissingPackages {
+            participant: pid(3)?,
+            missing: vec!["pkg-a".to_string()],
+        });
+        let error = bounded_package_check(Duration::from_secs(5), async { Err(missing) })
+            .await
+            .expect_err("the missing package must come through");
+        let response = add_party_package_check_failure(&pid(1)?, &error);
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        Ok(())
+    }
+
+    /// A check that could not run refuses the add as well. Letting it through
+    /// unchecked would send the invites the check exists to hold back.
+    #[actix_web::test]
+    async fn a_check_that_cannot_run_refuses_the_add_as_unavailable() -> anyhow::Result<()> {
+        let error = anyhow::anyhow!("ledger API unreachable");
+
+        let response = add_party_package_check_failure(&pid(1)?, &error);
+
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let error = error_body(response).await?;
+        assert!(
+            error.contains("ledger API unreachable"),
+            "carries the cause: {error}"
+        );
+        Ok(())
+    }
+
+    /// [`state_on`], with `pid(1)` as this node. Its Ledger and Admin API
+    /// addresses do not parse, so every Canton read fails at once.
+    async fn add_party_state_on(pool: SqlitePool) -> Result<web::Data<AppState>> {
+        let state = Arc::try_unwrap(state_on(pool).await?.into_inner())
+            .map_err(|_| anyhow::anyhow!("a fresh test state has one owner"))?;
+        let mut config = NodeConfig::default();
+        config.node.participant_id = Some(pid(1)?);
+        config.canton.ledger_api_host = "[".to_string();
+        config.canton.admin_api_host = "[".to_string();
+        Ok(web::Data::new(AppState { config, ..state }))
+    }
+
+    /// Caches `party` hosted by this node and `pid(2)` at threshold 1. Both
+    /// `pid(2)` and `pid(3)` are configured peers, so `pid(3)` passes every
+    /// request check as the member to add.
+    async fn cache_party_to_grow(pool: &SqlitePool, party: &CantonId) -> Result {
+        cache_party(pool, party, 1, None).await?;
+        let keys = ["k1".to_string(), "k2".to_string()];
+        let hosts = [
+            host_row(&pid(1)?, Some("k1")),
+            host_row(&pid(2)?, Some("k2")),
+        ];
+        let mut tx = pool.begin_transaction().await?;
+        tx.replace_dec_party_participants(party, &hosts).await?;
+        tx.replace_dec_party_owners(party, &keys).await?;
+        for tag in [2, 3] {
+            tx.insert_peer(&crate::config::Peer {
+                participant_id: pid(tag)?,
+                name: format!("peer-{tag}"),
+                address: "127.0.0.1".to_string(),
+                port: 1,
+                public_key: String::new(),
+                party: None,
+            })
+            .await?;
+        }
+        Commitable::commit(tx).await
+    }
+
+    async fn post_add_party(
+        data: web::Data<AppState>,
+        party: &CantonId,
+        new_member: &CantonId,
+    ) -> Result<(StatusCode, String)> {
+        let app =
+            actix_test::init_service(App::new().app_data(data).service(start_add_party)).await;
+        let request = actix_test::TestRequest::post()
+            .uri("/add-party")
+            .set_json(serde_json::json!({
+                "decentralized_party_id": party,
+                "new_participant_id": new_member,
+                "new_threshold": 1,
+                "previous_threshold": 1,
+            }))
+            .to_request();
+        request.extensions_mut().insert(admin());
+        Ok(status_and_body(actix_test::call_service(&app, request).await).await)
+    }
+
+    /// The add passes every request check, but Canton cannot be read. The
+    /// start request must refuse it with 503 and leave no run behind. A run
+    /// is what sends the invites, so no peer is asked to join unchecked.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn an_add_whose_package_check_cannot_run_starts_no_run(pool: SqlitePool) -> Result {
+        let party = pid(60)?;
+        cache_party_to_grow(&pool, &party).await?;
+        let data = add_party_state_on(pool.clone()).await?;
+
+        let (status, body) = post_add_party(data.clone(), &party, &pid(3)?).await?;
+
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+        assert!(
+            body.contains("Cannot check the new member's packages"),
+            "{body}"
+        );
+        assert!(
+            pool.get_workflow_runs_by_kind(WorkflowKind::AddParty)
+                .await?
+                .is_empty(),
+            "a refused add must not persist a run"
+        );
+        assert!(
+            data.workflows.snapshot().is_empty(),
+            "a refused add must not register a run"
+        );
+        let (retry_status, retry_body) = post_add_party(data, &party, &pid(3)?).await?;
+        assert_eq!(
+            retry_status,
+            StatusCode::SERVICE_UNAVAILABLE,
+            "{retry_body}"
+        );
+        assert!(retry_body.contains("Cannot check the new member's packages"));
+        Ok(())
+    }
+
+    /// The request checks run before the package check, which reads the
+    /// party's whole ACS. Canton cannot be read here, so a 503 would mean the
+    /// package check ran first. Each refusal must come from its request check.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn the_request_checks_refuse_an_add_before_the_package_check(pool: SqlitePool) -> Result {
+        let party = pid(61)?;
+        cache_party_to_grow(&pool, &party).await?;
+        let data = add_party_state_on(pool.clone()).await?;
+
+        let (status, body) = post_add_party(data.clone(), &party, &pid(2)?).await?;
+        assert_eq!(status, StatusCode::CONFLICT, "{body}");
+        assert!(body.contains("is already a member of"), "{body}");
+
+        // The in-flight guard is the last request check that needs no peer.
+        // Only the peer version gate runs between it and the package check.
+        insert_run(&pool, &in_progress_run("contracts-in-flight", &party)).await?;
+        let (status, body) = post_add_party(data, &party, &pid(3)?).await?;
+        assert_eq!(status, StatusCode::CONFLICT, "{body}");
+        assert!(
+            body.contains("already has a Contracts workflow in flight"),
+            "{body}"
+        );
+        assert!(
+            pool.get_workflow_runs_by_kind(WorkflowKind::AddParty)
+                .await?
+                .is_empty()
+        );
         Ok(())
     }
 }

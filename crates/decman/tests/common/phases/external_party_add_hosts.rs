@@ -49,7 +49,14 @@ use tracing::info;
 use decman_wallet::ExternalKeyPair;
 
 use crate::common::{
-    Fixture, chaos::fresh_prefix, http::probe_workflow_status, scenario::Scenario,
+    Fixture,
+    chaos::fresh_prefix,
+    http::probe_workflow_status,
+    phases::{
+        add_party_rehost_disconnect_first::connection_state,
+        local_party_decentralization::node_config,
+    },
+    scenario::Scenario,
 };
 
 /// Read side of `/external-parties`. The shipped `ExternalPartiesResponse` is
@@ -154,7 +161,7 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
     // ------------------------------------------------------------------
     Scenario::with_ctx(format!("add P3 as a host of {hint}"), ())
         .when(
-            "every host prepares the same serial-2 bytes, and the new host submits",
+            "every host prepares the same bytes, and P3 disconnects before P1 publishes",
             {
                 let party_id = party_id.clone();
                 move |f, _| {
@@ -219,9 +226,6 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
 
                         let signatures = sign_prepared(first, &seed)?;
 
-                        // Canton needs the party namespace plus the joining
-                        // participant, so P3 alone submits. The current hosts
-                        // do not sign an add.
                         let onboard_req = json!({
                             "party_id": party_id,
                             "base_serial": base_serial,
@@ -232,8 +236,50 @@ pub async fn run(f: &mut Fixture) -> anyhow::Result<()> {
                             "signatures": signatures,
                             "signed_by": ExternalKeyPair::from_seed(seed).fingerprint(),
                         });
-                        let _: Value = f
+                        let refused: anyhow::Result<Value> = f
                             .post_json(f.p3.http, "/v0/tenant/add-hosts/execute", &onboard_req)
+                            .await;
+                        let error = refused.expect_err("a joiner must not publish its signature");
+                        anyhow::ensure!(format!("{error:#}").contains("400"), "{error:#}");
+                        let _: Value = f
+                            .post_json(f.p1.http, "/v0/tenant/add-hosts/execute", &onboard_req)
+                            .await?;
+                        let staged: Value = f
+                            .post_json(f.p3.http, "/v0/tenant/add-hosts/stage", &request)
+                            .await?;
+                        let retry: Value = f
+                            .post_json(f.p3.http, "/v0/tenant/add-hosts/stage", &request)
+                            .await?;
+                        anyhow::ensure!(staged == retry, "staging must return the same signature");
+                        let p3 = node_config(
+                            &f.p3.participant_id,
+                            "P3_CANTON_ADMIN",
+                            "P3_CANTON_LEDGER",
+                        )?;
+                        anyhow::ensure!(
+                            connection_state(&p3).await? == (false, true),
+                            "P3 must disconnect on manual connection before publication"
+                        );
+                        let state: Value = f
+                            .get_json(f.p1.http, &format!("/v0/tenant/{party_id}/state"))
+                            .await?;
+                        anyhow::ensure!(
+                            state.get("serial").and_then(Value::as_u64) == Some(base_serial),
+                            "staging must not activate the new mapping: {state}"
+                        );
+                        let _: Value = f
+                            .post_json(
+                                f.p1.http,
+                                "/v0/tenant/add-hosts/publish",
+                                &json!({
+                                    "party_id": party_id,
+                                    "new_hosts": [&f.p3.participant_id],
+                                    "base_serial": base_serial,
+                                    "signed_topology_transactions": staged
+                                        .get("signed_topology_transactions")
+                                        .context("stage response missing signed topology")?,
+                                }),
+                            )
                             .await?;
                         Ok(())
                     })

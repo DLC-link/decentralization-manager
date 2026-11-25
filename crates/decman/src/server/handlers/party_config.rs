@@ -652,6 +652,7 @@ mod tests {
             admin_role: Some("decman-admin".to_string()),
             party_credentials,
             bootstrap_mu: Arc::new(Mutex::new(())),
+            tenant_import_mu: Arc::new(Mutex::new(())),
             relay_sessions: Arc::new(
                 crate::workflow::party_replication::relay::RelaySessions::new(),
             ),
@@ -732,6 +733,7 @@ mod tests {
             admin_role: Some("decman-admin".to_string()),
             party_credentials,
             bootstrap_mu: Arc::new(Mutex::new(())),
+            tenant_import_mu: Arc::new(Mutex::new(())),
             relay_sessions: Arc::new(
                 crate::workflow::party_replication::relay::RelaySessions::new(),
             ),
@@ -810,6 +812,7 @@ mod tests {
             admin_role: None,
             party_credentials,
             bootstrap_mu: Arc::new(Mutex::new(())),
+            tenant_import_mu: Arc::new(Mutex::new(())),
             relay_sessions: Arc::new(
                 crate::workflow::party_replication::relay::RelaySessions::new(),
             ),

@@ -7,6 +7,11 @@ on:
   workflow_call:
   workflow_dispatch:
 
+# Every job only reads the repository. A job that needs more access asks for
+# it in its own `permissions:` block.
+permissions:
+  contents: read
+
 # One in-flight CI run per PR: Integration Tests holds a 30-minute
 # `ubuntu-very-big` runner, so a superseded commit keeps a big machine busy
 # producing a result nobody reads.
@@ -127,12 +132,12 @@ jobs:
     name: Integration Tests (Splice ${{ matrix.splice }})
     runs-on: ubuntu-very-big
     timeout-minutes: 45
-    # MainNet runs Splice 0.9 until its upgrade, and DevNet and TestNet run
-    # 0.10, so each version gets a full run.
+    # Test every Splice version that a network runs. Add a version before the
+    # first network upgrades to it, and drop a version once no network runs it.
     strategy:
       fail-fast: false
       matrix:
-        splice: ["0.9.4", "0.10.0"]
+        splice: ["0.10.0"]
     steps:
       - uses: actions/checkout@v7
       - uses: ./.github/actions/setup-build-env
@@ -173,18 +178,6 @@ jobs:
           path: it-node-logs/
           retention-days: 7
 
-  cargo-audit:
-    name: Cargo Audit
-    runs-on: ubuntu-latest
-    permissions:
-      checks: write
-      contents: read
-    steps:
-      - uses: actions/checkout@v7
-      - uses: rustsec/audit-check@v2.0.0
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
-
   cargo-deny:
     name: Cargo Deny
     runs-on: ubuntu-latest
@@ -205,7 +198,26 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: bnjbvr/cargo-machete@v0.9.2
+      - uses: bnjbvr/cargo-machete@v0.10.1
+
+  wasm:
+    name: Check wasm32 build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-build-env
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      # A browser app runs decman-lib, so decman-lib must build without the
+      # tonic transport and the Ledger API client.
+      - name: cargo check decman-lib for wasm32
+        run: cargo check -p decman-lib --target wasm32-unknown-unknown
 
   daml:
     name: Daml Build & Test

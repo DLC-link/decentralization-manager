@@ -41,6 +41,14 @@
 //! If Canton reintroduces a cap, the preflight goes here, beside the
 //! active-hosts invariant.
 
+#[path = "add_hosts_relay.rs"]
+mod relay;
+
+pub use relay::{
+    import_onboarding_ready, import_window_owner, publish_add_hosts, release_import_window_owner,
+    stage_add_hosts,
+};
+
 use anyhow::Context;
 use canton_proto_rs::com::digitalasset::canton::{
     protocol::v30::{
@@ -51,8 +59,7 @@ use canton_proto_rs::com::digitalasset::canton::{
     },
     topology::admin::v30::{
         AddTransactionsRequest, AuthorizeRequest, GenerateTransactionsRequest,
-        ListPartyToParticipantRequest, SignTransactionsRequest, authorize_request,
-        generate_transactions_request,
+        ListPartyToParticipantRequest, authorize_request, generate_transactions_request,
         topology_manager_read_service_client::TopologyManagerReadServiceClient,
         topology_manager_write_service_client::TopologyManagerWriteServiceClient,
     },
@@ -183,6 +190,9 @@ pub enum AddHostsError {
     /// The caller's host set or submitted bytes failed validation.
     #[error("{0:#}")]
     Invalid(#[source] anyhow::Error),
+    /// Another operation owns this participant's offline import window.
+    #[error("{0}")]
+    Busy(String),
     /// A Canton RPC failed, or this node could not read its own state.
     #[error("{0:#}")]
     Canton(#[source] anyhow::Error),
@@ -215,6 +225,42 @@ pub struct CurrentPartyTopology {
     pub serial: u32,
     /// The mapping itself.
     pub mapping: PartyToParticipant,
+}
+
+fn require_live_source(config: &NodeConfig, current: &CurrentPartyTopology) -> Result<()> {
+    let self_id = config.participant_id().to_string();
+    anyhow::ensure!(
+        current
+            .mapping
+            .participants
+            .iter()
+            .any(|host| host.participant_uid == self_id && host.onboarding.is_none()),
+        "only a current live host may publish add-hosts topology; a joiner must stage its \
+         signature while disconnected and relay it through a current host"
+    );
+    Ok(())
+}
+
+fn require_namespace_authorizer(
+    config: &NodeConfig,
+    current: &CurrentPartyTopology,
+    new_hosts: &[CantonId],
+) -> Result<()> {
+    anyhow::ensure!(
+        owns_party_namespace(config, &current.mapping.party)
+            && !new_hosts.contains(config.participant_id()),
+        "only a non-joining namespace owner may authorize this proposal; a joiner must stage its signature"
+    );
+    let self_id = config.participant_id().to_string();
+    anyhow::ensure!(
+        !current
+            .mapping
+            .participants
+            .iter()
+            .any(|host| { host.participant_uid == self_id && host.onboarding.is_some() }),
+        "the namespace owner must finish its own onboarding before authorizing another host"
+    );
+    Ok(())
 }
 
 /// Read `party_id`'s authorized `PartyToParticipant` from this node's head state.
@@ -372,6 +418,12 @@ pub async fn prepare_add_hosts(
 
     let mapping = add_hosts_mapping(&current.mapping, new_hosts, permission)
         .map_err(AddHostsError::Invalid)?;
+
+    if new_hosts.contains(config.participant_id()) {
+        let target = replication_target(party_id, config.participant_id(), base_serial)
+            .map_err(AddHostsError::Invalid)?;
+        relay::check_joiner_readiness(config, storage, &target).await?;
+    }
 
     capture_replication_offsets(
         config,
@@ -566,8 +618,7 @@ async fn capture_replication_offsets(
     Ok(())
 }
 
-/// Authorize the add-hosts change with this node's own key, for a party whose
-/// namespace nobody can sign for from outside Canton.
+/// Publish partial authorization from a connected, non-joining namespace owner.
 ///
 /// The wallet-signed path cannot serve such a party. `validate_add_hosts_topology`
 /// requires `signed_by` to be the party's namespace, and for a party that is (or
@@ -577,11 +628,9 @@ async fn capture_replication_offsets(
 /// `party_signing_keys` entry with no `NamespaceDelegation` behind it, so it
 /// signs transactions and authorizes no topology at all.
 ///
-/// A vault key signs only through `Authorize`, so that is what this uses. Canton
-/// wants "party namespace + the new participant namespace" for an add, which no
-/// single node holds: the source node contributes the first half and each joining
-/// node the second. `must_fully_authorize` is therefore false — the write stays a
-/// proposal until the last node calls this, and Canton assembles it.
+/// The joining hosts obtain this proposal before disconnecting. They return
+/// their signatures through `stage_add_hosts`, and the source publishes those
+/// signatures through `publish_add_hosts` after every joiner disconnects.
 ///
 /// Every node builds the mapping itself from its own head-state read, exactly as
 /// [`prepare_add_hosts`] does, so a caller cannot hand one node a different
@@ -607,6 +656,7 @@ pub async fn authorize_add_hosts(
             party: party_id.to_string(),
         });
     };
+    require_namespace_authorizer(config, &current, new_hosts).map_err(AddHostsError::Invalid)?;
     // Before the serial is even looked at. A node that holds neither half must
     // answer the same way whether or not the add has landed: once it is live, a
     // bystander reading head state would otherwise match the retry-as-success
@@ -617,6 +667,11 @@ pub async fn authorize_add_hosts(
              key Canton needs for the add"
         )));
     };
+    if role != AuthorizingRole::NamespaceOwner {
+        return Err(AddHostsError::Invalid(anyhow::anyhow!(
+            "a joining host must stage its signature for publication by the namespace owner"
+        )));
+    }
 
     if base_serial != current.serial {
         // The second node's call is what makes the change live, so by the time a
@@ -666,6 +721,7 @@ pub async fn authorize_add_hosts(
         ))
     })?;
 
+    relay::ensure_connected(config).await?;
     topology::authorize_with_topology_retry(
         config,
         AuthorizeRequest {
@@ -1020,16 +1076,13 @@ fn submitted_mapping_matches(
     })
 }
 
-/// Co-sign the wallet's add-hosts bundle with this node's own topology key and
-/// submit it to this participant's synchronizer store.
+/// Publish the wallet's partial authorization from a current live source host.
 ///
-/// Mirrors [`super::steps::allocate_party`], including the idempotence the
-/// wallet relies on: this host submits only its own authorization, Canton
-/// accumulates the rest, and re-submitting an identical transaction is a no-op,
-/// so a wallet retry converges instead of diverging.
+/// This step contributes no joining signature. Each joiner reads the proposal
+/// before it disconnects and stages its signature for publication by the source.
 ///
-/// The topology is validated against this node's own head-state read before its
-/// key touches anything — see [`validate_add_hosts_topology`].
+/// The source validates the topology against its own head-state read before
+/// publishing it. Canton verifies the wallet's signature.
 ///
 /// # Errors
 /// [`AddHostsError::UnknownParty`] when this node holds no mapping,
@@ -1049,6 +1102,7 @@ pub async fn submit_add_hosts(
             party: bundle.party_id.clone(),
         });
     };
+    require_live_source(config, &current).map_err(AddHostsError::Invalid)?;
     // Split out from the rest of validation: a pin that has moved is a race the
     // caller resolves by re-reading, not malformed input.
     if bundle.base_serial != current.serial {
@@ -1100,22 +1154,7 @@ pub async fn submit_add_hosts(
         })
         .collect();
 
-    // Empty `signed_by` lets the node pick its own key, matching how the
-    // onboarding path and the dec-party workflows call this.
-    let co_signed = topology::sign_transactions_with_topology_retry(
-        config,
-        SignTransactionsRequest {
-            transactions: signed,
-            signed_by: vec![],
-            store: Some(store.clone()),
-            force_flags: vec![],
-        },
-        "external-party add-hosts",
-    )
-    .await
-    .map_err(AddHostsError::Canton)?
-    .transactions;
-
+    relay::ensure_connected(config).await?;
     let mut client = TopologyManagerWriteServiceClient::new(
         config
             .admin_channel()
@@ -1124,7 +1163,7 @@ pub async fn submit_add_hosts(
     );
     client
         .add_transactions(tonic::Request::new(AddTransactionsRequest {
-            transactions: co_signed,
+            transactions: signed,
             force_changes: vec![],
             store: Some(store),
             wait_to_become_effective: None,
@@ -1255,6 +1294,45 @@ mod tests {
             Ok(m) => m,
             Err(e) => panic!("building the add-hosts mapping must succeed: {e}"),
         }
+    }
+
+    #[test]
+    fn only_a_live_existing_host_can_publish_topology() {
+        assert!(require_live_source(&test_config(1), &current()).is_ok());
+        assert!(require_live_source(&test_config(3), &current()).is_err());
+        let proposed = CurrentPartyTopology {
+            serial: 5,
+            mapping: built(),
+        };
+        assert!(require_live_source(&test_config(3), &proposed).is_err());
+    }
+
+    #[test]
+    fn a_namespace_owner_that_unhosted_can_still_authorize_other_joiners() {
+        let owner = test_config(1);
+        let mut topology = current();
+        topology.mapping.party =
+            format!("converted::{}", owner.participant_id().namespace.to_hex());
+        topology
+            .mapping
+            .participants
+            .retain(|host| host.participant_uid != owner.participant_id().to_string());
+        assert!(require_namespace_authorizer(&owner, &topology, &[participant(3)]).is_ok());
+        assert!(require_live_source(&owner, &topology).is_err());
+        assert!(
+            require_namespace_authorizer(&test_config(2), &topology, &[participant(3)]).is_err()
+        );
+    }
+
+    #[test]
+    fn a_namespace_owner_must_stage_when_it_rejoins_or_is_still_onboarding() {
+        let owner = test_config(1);
+        let mut topology = current();
+        topology.mapping.party =
+            format!("converted::{}", owner.participant_id().namespace.to_hex());
+        assert!(require_namespace_authorizer(&owner, &topology, &[participant(1)]).is_err());
+        topology.mapping.participants[0].onboarding = Some(hosting_participant::Onboarding {});
+        assert!(require_namespace_authorizer(&owner, &topology, &[participant(3)]).is_err());
     }
 
     // ------------------------------------------------------------------

@@ -1,0 +1,1 @@
+DROP TABLE dec_party_topology_version;

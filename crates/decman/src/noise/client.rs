@@ -9,9 +9,9 @@ use tokio_noise::handshakes::nn_psk2::Initiator;
 use crate::{
     config::{NodeConfig, Peer},
     noise::{
-        CHUNK_SIZE, MAX_ACS_BLOCK_SIZE, MAX_CHUNK_COUNT, MAX_CHUNKED_TOTAL_SIZE, Message,
-        MessageType, NOISE_ACS_BLOCK_TIMEOUT, NOISE_CHUNK_TIMEOUT, NOISE_REQUEST_TIMEOUT,
-        NoiseError, NoiseKeypair, is_transient, parse_flexible_uri, parse_public_key,
+        MAX_ACS_BLOCK_SIZE, Message, MessageType, NOISE_ACS_BLOCK_TIMEOUT, NOISE_CHUNK_TIMEOUT,
+        NOISE_REQUEST_TIMEOUT, NoiseError, NoiseKeypair, check_chunked_metadata, is_transient,
+        parse_flexible_uri, parse_public_key,
     },
     workflow::party_replication::pipe::{PipeBlock, decode_data, decode_end},
 };
@@ -269,6 +269,19 @@ impl NoiseClient {
         .await
     }
 
+    /// Send the signed rotate-key P2P proposal to the coordinator.
+    pub async fn send_rotate_key_signatures(
+        &self,
+        signatures_data: Vec<u8>,
+    ) -> Result<(), NoiseError> {
+        self.send_and_verify_ack(
+            MessageType::RotateKeySignatures,
+            signatures_data,
+            "Sending rotate-key signatures to coordinator",
+        )
+        .await
+    }
+
     /// Upload the new member's `keys||participant_id` payload to the
     /// coordinator of an add-party run.
     pub async fn upload_add_party_keys(&self, keys_data: Vec<u8>) -> Result<(), NoiseError> {
@@ -412,20 +425,12 @@ impl NoiseClient {
         // (mirrors `receive_chunked_response`): a malicious or
         // buggy coordinator could otherwise advertise multi-GB sizes and OOM
         // us, or send a chunk_count inconsistent with total_size.
-        if total_size > MAX_CHUNKED_TOTAL_SIZE || chunk_count > MAX_CHUNK_COUNT {
+        if let Err(e) = check_chunked_metadata(total_size, chunk_count) {
             tracing::warn!(
-                "chunked-response metadata exceeds caps: total_size={total_size} \
-                 chunk_count={chunk_count}"
+                "Refused chunked {command:?} from the coordinator: total_size={total_size} \
+                 chunk_count={chunk_count}: {e}"
             );
-            return Err(NoiseError::InvalidMessage);
-        }
-        let expected_chunks = total_size.div_ceil(CHUNK_SIZE);
-        if chunk_count != expected_chunks {
-            tracing::warn!(
-                "chunked-response chunk_count {chunk_count} inconsistent with total_size \
-                 {total_size} (expected {expected_chunks})"
-            );
-            return Err(NoiseError::InvalidMessage);
+            return Err(e);
         }
 
         tracing::info!(

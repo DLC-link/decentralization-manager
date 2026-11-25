@@ -122,6 +122,10 @@ pub const MIN_PEER_VERSION: &str = "0.1.9";
 /// refuse one, so a coordinator checks every invitee lists this first.
 pub const OWNER_ONLY_KICK: &str = "owner-only-kick";
 
+/// A peer reads a rotate-key invitation. Older peers cannot decode one, so
+/// a coordinator checks every invitee lists this first.
+pub const ROTATE_KEY: &str = "rotate-key";
+
 /// A peer reads each DAR of a Dars run with `RequestDar` and leaves the
 /// bundle on the coordinator. A coordinator checks every invitee lists this
 /// before it sends a run without the bundle.
@@ -131,7 +135,7 @@ pub const PER_DAR_PULL: &str = "per-dar-pull";
 /// Health reply lists them, so a coordinator can refuse a run that a peer
 /// would refuse, before it invites anyone. Every build reports the same
 /// version until a release bumps it, so the version cannot tell them apart.
-pub const FEATURES: &[&str] = &[OWNER_ONLY_KICK, PER_DAR_PULL];
+pub const FEATURES: &[&str] = &[OWNER_ONLY_KICK, ROTATE_KEY, PER_DAR_PULL];
 
 /// Retry budget for the peer's decline notification to the coordinator.
 ///
@@ -164,6 +168,14 @@ pub const MAX_CONSECUTIVE_NO_WORKFLOW_POLLS: usize = 4;
 /// coordinator never gives up on a peer that has not yet given up on it. It
 /// also outlasts a pod restart, after which a peer resumes its run.
 pub const PEER_SILENCE_LIMIT: std::time::Duration = std::time::Duration::from_secs(600);
+
+/// How long a DAR distribution run waits for its peers to join before it
+/// fails.
+///
+/// A peer's operator accepts the invitation by hand, so the limit covers a
+/// weekend. Without a limit, runs whose peers never accept stay in progress
+/// for good and pile up. A retry starts the wait again.
+pub const DARS_PEER_JOIN_LIMIT: std::time::Duration = std::time::Duration::from_secs(72 * 60 * 60);
 
 /// Delay before a peer re-polls the coordinator after a `Wait` reply, in
 /// milliseconds.

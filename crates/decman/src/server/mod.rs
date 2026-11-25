@@ -27,6 +27,7 @@ pub(crate) mod tenant_call_audit;
 mod tenant_rate_limit;
 mod transfer_context;
 mod types;
+mod workflow_exclusion;
 
 #[cfg(test)]
 mod peer_failure_tests;
@@ -48,7 +49,6 @@ use std::{
 use actix_cors::Cors;
 use actix_web::{App, HttpServer, web};
 use anyhow::{Context, bail};
-use base64::{Engine, engine::general_purpose::STANDARD};
 use canton_proto_rs::com::digitalasset::canton::{
     crypto::{
         admin::v30::{
@@ -91,6 +91,10 @@ use crate::{
 // `gen-types` binary (a separate crate from this lib), so it must stay `pub`.
 pub use handlers::NodeConfigResponse;
 pub(crate) use handlers::mark_run_failed;
+#[cfg(test)]
+pub(crate) use handlers::tenant_acs_import as test_tenant_acs_import;
+#[cfg(test)]
+pub(crate) use middleware::AuthMiddleware as TestAuthMiddleware;
 pub(crate) use types::*;
 // These wire DTOs are likewise reached externally as `dec_party_manager::server::…`,
 // by `gen-types` (TS generation) and, for `GovernanceResponse`, by the integration
@@ -150,6 +154,8 @@ pub struct AppState {
     /// exemption and overwrite each other. Held by the auth middleware for
     /// the lifetime of a bootstrap request.
     pub bootstrap_mu: Arc<Mutex<()>>,
+    /// Serializes admission to participant-wide tenant import windows.
+    pub tenant_import_mu: Arc<Mutex<()>>,
     /// Wallet-relayed ACS transfers this node is part of, as source or joiner.
     ///
     /// Held here rather than per-request because both ends keep a Canton stream
@@ -273,6 +279,7 @@ impl AppState {
             admin_role: None,
             party_credentials: Arc::new(RwLock::new(Vec::new())),
             bootstrap_mu: Arc::new(Mutex::new(())),
+            tenant_import_mu: Arc::new(Mutex::new(())),
             relay_sessions: Arc::new(
                 crate::workflow::party_replication::relay::RelaySessions::new(),
             ),
@@ -330,6 +337,7 @@ enum InvitationMeta {
     Contracts(ContractsInvitePayload),
     AddParty(AddPartyInvitePayload),
     ChangeThreshold(ChangeThresholdInvitePayload),
+    RotateKey(RotateKeyInvitePayload),
 }
 
 /// On boot, re-spawn any InProgress workflow runs that were interrupted by the
@@ -420,6 +428,7 @@ pub(crate) async fn respawn_coordinator(
     let mut dars_config = None;
     let mut add_party_config = None;
     let mut change_threshold_config = None;
+    let mut rotate_key_config = None;
     let parsed = match kind {
         WorkflowKind::Onboarding => {
             serde_json::from_str::<workflow::OnboardingConfig>(&run.config_json)
@@ -440,6 +449,10 @@ pub(crate) async fn respawn_coordinator(
         WorkflowKind::ChangeThreshold => {
             serde_json::from_str::<workflow::ChangeThresholdConfig>(&run.config_json)
                 .map(|c| change_threshold_config = Some(c))
+        }
+        WorkflowKind::RotateKey => {
+            serde_json::from_str::<workflow::RotateKeyConfig>(&run.config_json)
+                .map(|c| rotate_key_config = Some(c))
         }
     };
     if let Err(e) = parsed {
@@ -496,6 +509,7 @@ pub(crate) async fn respawn_coordinator(
         dars_config,
         add_party_config,
         change_threshold_config,
+        rotate_key_config,
         auth_snapshot,
         last_seen,
     );
@@ -519,6 +533,7 @@ fn spawn_coordinator_run(
     dars_config: Option<workflow::DarsConfig>,
     add_party_config: Option<workflow::AddPartyConfig>,
     change_threshold_config: Option<workflow::ChangeThresholdConfig>,
+    rotate_key_config: Option<workflow::RotateKeyConfig>,
     auth: Option<WorkflowAuth>,
     last_seen: LastSeen,
 ) -> tokio::task::JoinHandle<()> {
@@ -529,6 +544,7 @@ fn spawn_coordinator_run(
         WorkflowKind::Dars => WorkflowType::Dars,
         WorkflowKind::AddParty => WorkflowType::AddParty,
         WorkflowKind::ChangeThreshold => WorkflowType::ChangeThreshold,
+        WorkflowKind::RotateKey => WorkflowType::RotateKey,
     };
     tokio::spawn(async move {
         let instance_name = instance.instance_name.clone();
@@ -545,6 +561,7 @@ fn spawn_coordinator_run(
             dars_config,
             add_party_config,
             change_threshold_config,
+            rotate_key_config,
             auth,
             last_seen,
             instance.clone(),
@@ -650,6 +667,7 @@ impl WorkflowTriggers {
         let mut dar_hashes = Vec::new();
         let mut kicked_participant = None;
         let mut kicked_owner_key = None;
+        let mut rotated_key = None;
         let mut new_participant = None;
         let mut new_threshold = None;
         let mut previous_threshold = None;
@@ -707,6 +725,14 @@ impl WorkflowTriggers {
                 participants = p.participants;
                 workflow_instance = p.workflow_instance;
             }
+            InvitationMeta::RotateKey(p) => {
+                rotated_key = Some(p.rotated_key);
+                new_threshold = Some(p.threshold);
+                confirmation_threshold = Some(p.confirmation_threshold);
+                dec_party_id = Some(p.dec_party_id);
+                participants = p.participants;
+                workflow_instance = p.workflow_instance;
+            }
         }
         // Key the id on the coordinator's run instance when available so a
         // NEW run's invite never silently morphs an older card in place — an
@@ -735,6 +761,7 @@ impl WorkflowTriggers {
             dar_hashes,
             kicked_participant,
             kicked_owner_key,
+            rotated_key,
             new_participant,
             new_threshold,
             previous_threshold,
@@ -945,6 +972,26 @@ impl WorkflowTriggers {
                 && r.coordinator_pubkey.as_deref() == Some(coordinator_pubkey)
                 && (instance.is_empty() || r.coordinator_instance.as_deref() == Some(instance))
         }) {
+            let _start = if let Some(party) = &run.dec_party_id {
+                match workflow_exclusion::claim_party_for_workflow(&self.workflows, &self.db, party)
+                    .await
+                {
+                    Ok(claim) => Some(claim),
+                    Err(refusal) => {
+                        if matches!(
+                            refusal,
+                            workflow_exclusion::PartyStartRefusal::Unavailable { .. }
+                        ) {
+                            tracing::error!(error = ?refusal, "Cannot retry peer workflow");
+                        } else {
+                            tracing::warn!(%refusal, "Cannot retry peer workflow");
+                        }
+                        continue;
+                    }
+                }
+            } else {
+                None
+            };
             let mut tx = match self.db.begin_transaction().await {
                 Ok(t) => t,
                 Err(e) => {
@@ -1151,6 +1198,7 @@ pub async fn start_server(
         admin_role,
         party_credentials: party_credentials.clone(),
         bootstrap_mu: Arc::new(Mutex::new(())),
+        tenant_import_mu: Arc::new(Mutex::new(())),
         relay_sessions: relay_sessions.clone(),
         workflows: workflows.clone(),
         // "test_mode" here means the permissive/wildcard-token mode; driven by
@@ -1223,6 +1271,14 @@ pub async fn start_server(
         }
     }
 
+    // Before anything lists runs: older releases kept a DAR run's bytes in its
+    // config, so every listing loaded them.
+    match workflow::dars::move_inline_dars(&db).await {
+        Ok(0) => {}
+        Ok(moved) => tracing::info!("Moved the DARs of {moved} run(s) out of their configs"),
+        Err(e) => tracing::warn!("Could not move DARs out of run configs: {e:#}"),
+    }
+
     // Boot-time workflow recovery. For any `workflow_runs` row that was
     // InProgress when we shut down, re-spawn the coordinator task (which
     // resumes at the persisted `current_step` via `WorkflowState::from_persisted`)
@@ -1278,6 +1334,12 @@ pub async fn start_server(
             reward_automation::run_reward_automation_loop(reward_automation_state).await;
         },
     );
+
+    let custody_config = config.clone();
+    let custody_db = db.clone();
+    tokio::spawn(async move {
+        crate::signing::custody::log_rule_at_boot(&custody_config, &custody_db).await;
+    });
 
     let key_migration_config = config.clone();
     let key_migration_db = db.clone();
@@ -1502,6 +1564,9 @@ pub async fn start_server(
             .service(handlers::start_change_threshold)
             .service(handlers::get_change_threshold_status)
             .service(handlers::cancel_change_threshold)
+            .service(handlers::start_rotate_key)
+            .service(handlers::get_rotate_key_status)
+            .service(handlers::cancel_rotate_key)
             .service(handlers::list_external_parties)
             .service(handlers::unhost_external_party)
             .service(handlers::preview_unhost_external_party)
@@ -1512,6 +1577,8 @@ pub async fn start_server(
             .service(handlers::tenant_add_hosts_prepare)
             .service(handlers::tenant_add_hosts_authorize)
             .service(handlers::tenant_add_hosts_execute)
+            .service(handlers::tenant_add_hosts_stage)
+            .service(handlers::tenant_add_hosts_publish)
             .service(handlers::tenant_acs_snapshot)
             .service(handlers::tenant_acs_import)
             .service(handlers::tenant_threshold_prepare)
@@ -2089,7 +2156,11 @@ async fn handle_incoming_connection(
                             let requested_party_ids: Vec<String> =
                                 serde_json::from_slice(&msg.payload).unwrap_or_default();
                             let payload =
-                                match list_my_owner_keys(&triggers.config, &requested_party_ids)
+                                match list_my_owner_keys(
+                                    &triggers.config,
+                                    &triggers.db,
+                                    &requested_party_ids,
+                                )
                                     .await
                                 {
                                     Ok(data) => data,
@@ -2156,6 +2227,7 @@ async fn handle_incoming_connection(
                         | MessageType::AddPartyClearSignatures
                         | MessageType::AddPartyClearProposal
                         | MessageType::ChangeThresholdSignatures
+                        | MessageType::RotateKeySignatures
                         | MessageType::StatusUpdate
                         | MessageType::DeclineInvitation => {
                             // Route workflow-command traffic to the coordinator
@@ -2199,7 +2271,8 @@ async fn handle_incoming_connection(
                         | MessageType::InviteContracts
                         | MessageType::InviteDars
                         | MessageType::InviteAddParty
-                        | MessageType::InviteChangeThreshold => {
+                        | MessageType::InviteChangeThreshold
+                        | MessageType::InviteRotateKey => {
                             // Invites are accepted unconditionally: workflows are
                             // multi-instance now, so a node already coordinating or
                             // participating in runs can take part in more
@@ -2216,6 +2289,7 @@ async fn handle_incoming_connection(
                                 MessageType::InviteChangeThreshold => {
                                     InvitationType::ChangeThreshold
                                 }
+                                MessageType::InviteRotateKey => InvitationType::RotateKey,
                                 _ => unreachable!(),
                             };
                             tracing::info!(
@@ -2298,6 +2372,19 @@ async fn handle_incoming_connection(
                                             Err(e) => {
                                                 tracing::warn!(
                                                     "Change-threshold invite payload was unparseable: {e}"
+                                                );
+                                                InvitationMeta::None
+                                            }
+                                        }
+                                    }
+                                    InvitationType::RotateKey => {
+                                        match serde_json::from_slice::<RotateKeyInvitePayload>(
+                                            &msg.payload,
+                                        ) {
+                                            Ok(p) => InvitationMeta::RotateKey(p),
+                                            Err(e) => {
+                                                tracing::warn!(
+                                                    "Rotate-key invite payload was unparseable: {e}"
                                                 );
                                                 InvitationMeta::None
                                             }
@@ -2617,6 +2704,7 @@ async fn run_peer_listener(
 /// devnet (~170 parties, never returns within 60s; see #149).
 async fn list_my_owner_keys(
     config: &NodeConfig,
+    db: &SqlitePool,
     requested_party_ids: &[String],
 ) -> Result<Vec<u8>> {
     if requested_party_ids.is_empty() {
@@ -2658,11 +2746,13 @@ async fn list_my_owner_keys(
     // party old enough to predate it can hold the key under any name, and
     // then only the fingerprint identifies it.
     let mut my_protocol_fingerprints: HashSet<Fingerprint> = HashSet::new();
-    // Protocol-usage keys, indexed by the vault name onboarding / add-party
-    // gave them (`<party prefix>-daml-transactions`). The name is how
+    // Protocol-usage keys, with the key name onboarding, add-party or
+    // rotate-key gave them (`<party prefix>-daml-transactions...`). The name is how
     // `get_or_create_signing_key` finds the key again on a retry, so it is
     // also the only local record of which party a protocol key belongs to.
-    let mut my_protocol_keys_by_name: HashMap<String, Fingerprint> = HashMap::new();
+    // A key DecMan generated carries the same kind of name, and a vault key
+    // may share it, so two entries can have one name.
+    let mut my_protocol_keys_by_name: Vec<(String, Fingerprint)> = Vec::new();
     for key_meta in keys_response.private_keys_metadata {
         if let Some(private_key_metadata::PublicKeyWithName::V30(pub_key_with_name)) =
             &key_meta.public_key_with_name
@@ -2679,13 +2769,22 @@ async fn list_my_owner_keys(
                 .usage
                 .contains(&(SigningKeyUsage::Protocol as i32))
             {
-                my_protocol_keys_by_name.insert(
+                my_protocol_keys_by_name.push((
                     pub_key_with_name.name.clone(),
                     compute_fingerprint(signing_key),
-                );
+                ));
                 my_protocol_fingerprints.insert(compute_fingerprint(signing_key));
             }
         }
+    }
+    match generated_party_keys(config, db).await {
+        Ok(generated) => {
+            for (name, fingerprint) in generated {
+                my_protocol_fingerprints.insert(fingerprint.clone());
+                my_protocol_keys_by_name.push((name, fingerprint));
+            }
+        }
+        Err(e) => tracing::warn!("Cannot list the Daml keys DecMan generated: {e:#}"),
     }
 
     // Cached after first call (`get_synchronizer_id` memoises via OnceCell).
@@ -2735,10 +2834,18 @@ async fn list_my_owner_keys(
             continue;
         }
 
+        // A rotation leaves the old key in the vault under the onboarding
+        // name, next to the new one under its own name. Only the party's key
+        // list says which one is in force, so two named keys go to the
+        // fingerprint match below.
         let named = full_party_id.rsplit_once("::").and_then(|(prefix, _)| {
-            my_protocol_keys_by_name
-                .get(&workflow::signing_keys::party_daml_key_name(prefix))
-                .cloned()
+            let mut named = my_protocol_keys_by_name
+                .iter()
+                .filter(|(name, _)| workflow::signing_keys::is_party_daml_key_name(name, prefix));
+            match (named.next(), named.next()) {
+                (Some((_, fingerprint)), None) => Some(fingerprint.clone()),
+                _ => None,
+            }
         });
         // Falling back to the fingerprint matters for the parties that need it
         // most: a peer that reports no key cannot be attributed by a
@@ -2763,11 +2870,24 @@ async fn list_my_owner_keys(
     Ok(serde_json::to_vec(&entries)?)
 }
 
+/// The name and fingerprint of each Daml key DecMan generated, or none when
+/// the key store is off.
+async fn generated_party_keys(
+    config: &NodeConfig,
+    db: &SqlitePool,
+) -> Result<Vec<(String, Fingerprint)>> {
+    match crate::signing::key_store::KeyStore::open(config, db.clone()).await? {
+        Some(store) => store.generated_keys().await,
+        None => Ok(Vec::new()),
+    }
+}
+
 /// This node's Daml signing key for a party, identified by fingerprint rather
 /// than by vault name: the one key in the party's on-chain key list whose
 /// private half this node holds.
 ///
-/// `mine` is every protocol-usage fingerprint in this node's vault. Answers
+/// `mine` is every protocol-usage fingerprint in this node's vault, and every
+/// key DecMan generated. Answers
 /// `None` when the party's keys cannot be read or none of them is ours; the
 /// caller then reports no key, exactly as it did before this fallback existed.
 async fn party_signing_key_by_fingerprint(
@@ -2853,9 +2973,14 @@ async fn dar_for_invited_peer(
             request.filename
         );
     }
-    STANDARD
-        .decode(&file.data)
-        .with_context(|| format!("DAR {} does not decode", file.filename))
+    // The bundle is sorted by name, so the DAR is found by its hash rather
+    // than by its index. The hash also tells apart two DARs with one name.
+    let bundle = workflow::dars::load_bundle(db, &request.workflow_instance).await?;
+    utils::decode_files(&bundle)?
+        .into_iter()
+        .find(|(_, data)| workflow::validation::hash_dar(data) == file.hash)
+        .map(|(_, data)| data)
+        .with_context(|| format!("the stored DARs of this run lack {}", file.filename))
 }
 
 /// Answer a peer request with `payload`: inline while it fits one Noise frame,
@@ -2957,14 +3082,16 @@ mod tests {
             canton_id::CantonId,
             db::{
                 MIGRATOR,
-                schema::{Commitable, SchemaWrite},
+                schema::{Commitable, SchemaRead, SchemaWrite},
             },
             server::types::{
                 RequestDarPayload, WorkflowKind, WorkflowProgress, WorkflowRole, WorkflowRun,
             },
-            workflow::DarsConfig,
+            workflow::{
+                DarListing, DarsConfig, bundle_of,
+                storage::{WorkflowStorage, artifact_kinds},
+            },
         };
-        use base64::{Engine, engine::general_purpose::STANDARD};
         use sqlx::SqlitePool;
 
         const DAR: &[u8] = b"not really a DAR, but bytes are bytes";
@@ -2979,10 +3106,7 @@ mod tests {
 
         fn dars_run(instance: &str, invited: Vec<CantonId>) -> anyhow::Result<WorkflowRun> {
             let config = DarsConfig {
-                dar_files: vec![common::api::DarFile {
-                    filename: "app.dar".to_string(),
-                    data: STANDARD.encode(DAR),
-                }],
+                dar_files: vec![DarListing::of("app.dar", DAR)],
                 peer_ids: invited.clone(),
                 instance_name: instance.to_string(),
             };
@@ -3026,6 +3150,19 @@ mod tests {
             Ok(())
         }
 
+        /// Save a DAR run from [`dars_run`] with the bundle its coordinator stores.
+        async fn save_dars(pool: &SqlitePool, run: &WorkflowRun) -> anyhow::Result<()> {
+            save(pool, run).await?;
+            pool.write_artifact(
+                &run.instance_name,
+                artifact_kinds::DARS_BUNDLE,
+                None,
+                &bundle_of(vec![("app.dar".to_string(), DAR.to_vec())]),
+            )
+            .await?;
+            Ok(())
+        }
+
         fn ask(instance: &str, index: usize, filename: &str) -> anyhow::Result<Vec<u8>> {
             Ok(serde_json::to_vec(&RequestDarPayload {
                 workflow_instance: instance.to_string(),
@@ -3035,9 +3172,65 @@ mod tests {
         }
 
         #[sqlx::test(migrator = "MIGRATOR")]
+        async fn peer_retry_respects_party_exclusion(pool: SqlitePool) -> anyhow::Result<()> {
+            let party = pid("party", 66)?;
+            let mut failed = dars_run("peer-retry", Vec::new())?;
+            failed.kind = WorkflowKind::AddParty;
+            failed.role = WorkflowRole::Peer;
+            failed.status = WorkflowProgress::Failed;
+            failed.dec_party_id = Some(party.clone());
+            failed.coordinator_pubkey = Some("coordinator".to_string());
+            failed.coordinator_instance = Some("remote-run".to_string());
+            save(&pool, &failed).await?;
+            let state = super::super::AppState::for_test_on(None, pool.clone());
+            let (sender, mut jobs) = tokio::sync::mpsc::unbounded_channel();
+            let triggers = super::super::WorkflowTriggers {
+                pending_invitations: state.pending_invitations.clone(),
+                config: state.config.clone(),
+                peer_chunk_cache: Default::default(),
+                db: pool.clone(),
+                party_credentials: state.party_credentials.clone(),
+                workflows: state.workflows.clone(),
+                peer_job_sender: sender,
+            };
+            let claim = state.workflows.claim_start(&party).expect("fresh party");
+            triggers
+                .retry_peer_runs_from("coordinator", "remote-run")
+                .await;
+            assert!(jobs.try_recv().is_err());
+            assert_eq!(
+                pool.get_workflow_run("peer-retry").await?.unwrap().status,
+                WorkflowProgress::Failed
+            );
+            drop(claim);
+            let mut active = dars_run("active-other", Vec::new())?;
+            active.dec_party_id = Some(party);
+            save(&pool, &active).await?;
+            triggers
+                .retry_peer_runs_from("coordinator", "remote-run")
+                .await;
+            assert!(jobs.try_recv().is_err());
+            assert_eq!(
+                pool.get_workflow_run("peer-retry").await?.unwrap().status,
+                WorkflowProgress::Failed
+            );
+            active.status = WorkflowProgress::Completed;
+            save(&pool, &active).await?;
+            triggers
+                .retry_peer_runs_from("coordinator", "remote-run")
+                .await;
+            assert_eq!(jobs.try_recv()?.instance_name, "peer-retry");
+            assert_eq!(
+                pool.get_workflow_run("peer-retry").await?.unwrap().status,
+                WorkflowProgress::InProgress
+            );
+            Ok(())
+        }
+
+        #[sqlx::test(migrator = "MIGRATOR")]
         async fn an_invited_peer_reads_the_dar(pool: SqlitePool) -> anyhow::Result<()> {
             let invited = pid("validator-1", 0xaa)?;
-            save(&pool, &dars_run("dars-1", vec![invited.clone()])?).await?;
+            save_dars(&pool, &dars_run("dars-1", vec![invited.clone()])?).await?;
 
             let served = dar_for_invited_peer(
                 &pool,
@@ -3050,13 +3243,56 @@ mod tests {
             Ok(())
         }
 
+        /// The bundle is sorted by name, but the index follows the invitation.
+        /// Each index must still serve the DAR the invitation named there.
+        #[sqlx::test(migrator = "MIGRATOR")]
+        async fn each_index_serves_its_own_dar_whatever_the_bundle_order(
+            pool: SqlitePool,
+        ) -> anyhow::Result<()> {
+            let invited = pid("validator-1", 0xaa)?;
+            let files = vec![
+                ("z.dar".to_string(), b"last by name".to_vec()),
+                ("a.dar".to_string(), b"first by name".to_vec()),
+            ];
+            let mut run = dars_run("dars-2", vec![invited.clone()])?;
+            run.config_json = serde_json::to_string(&DarsConfig {
+                dar_files: files
+                    .iter()
+                    .map(|(name, data)| DarListing::of(name, data))
+                    .collect(),
+                peer_ids: vec![invited.clone()],
+                instance_name: "dars-2".to_string(),
+            })?;
+            save(&pool, &run).await?;
+            pool.write_artifact(
+                "dars-2",
+                artifact_kinds::DARS_BUNDLE,
+                None,
+                &bundle_of(files),
+            )
+            .await?;
+
+            for (index, name, expected) in
+                [(0, "z.dar", "last by name"), (1, "a.dar", "first by name")]
+            {
+                let served = dar_for_invited_peer(
+                    &pool,
+                    Some(&invited.to_string()),
+                    &ask("dars-2", index, name)?,
+                )
+                .await?;
+                assert_eq!(served, expected.as_bytes(), "index {index}");
+            }
+            Ok(())
+        }
+
         /// The gate this endpoint exists for: the DAR is readable before the
         /// peer accepts, so nothing but the invite list says who may read it.
         #[sqlx::test(migrator = "MIGRATOR")]
         async fn an_uninvited_peer_gets_nothing(pool: SqlitePool) -> anyhow::Result<()> {
             let invited = pid("validator-1", 0xaa)?;
             let stranger = pid("validator-9", 0xbb)?;
-            save(&pool, &dars_run("dars-1", vec![invited])?).await?;
+            save_dars(&pool, &dars_run("dars-1", vec![invited])?).await?;
 
             match dar_for_invited_peer(
                 &pool,
@@ -3074,7 +3310,7 @@ mod tests {
         #[sqlx::test(migrator = "MIGRATOR")]
         async fn an_unidentified_caller_gets_nothing(pool: SqlitePool) -> anyhow::Result<()> {
             let invited = pid("validator-1", 0xaa)?;
-            save(&pool, &dars_run("dars-1", vec![invited])?).await?;
+            save_dars(&pool, &dars_run("dars-1", vec![invited])?).await?;
 
             let refused = dar_for_invited_peer(&pool, None, &ask("dars-1", 0, "app.dar")?).await;
 
@@ -3089,7 +3325,7 @@ mod tests {
             pool: SqlitePool,
         ) -> anyhow::Result<()> {
             let invited = pid("validator-1", 0xaa)?;
-            save(&pool, &dars_run("dars-1", vec![invited.clone()])?).await?;
+            save_dars(&pool, &dars_run("dars-1", vec![invited.clone()])?).await?;
 
             match dar_for_invited_peer(
                 &pool,
@@ -3107,7 +3343,7 @@ mod tests {
         #[sqlx::test(migrator = "MIGRATOR")]
         async fn an_index_past_the_end_is_refused(pool: SqlitePool) -> anyhow::Result<()> {
             let invited = pid("validator-1", 0xaa)?;
-            save(&pool, &dars_run("dars-1", vec![invited.clone()])?).await?;
+            save_dars(&pool, &dars_run("dars-1", vec![invited.clone()])?).await?;
 
             let refused = dar_for_invited_peer(
                 &pool,
