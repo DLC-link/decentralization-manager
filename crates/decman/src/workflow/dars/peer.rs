@@ -28,6 +28,10 @@ const PULL_RETRY: NoiseRetryConfig = NoiseRetryConfig {
     backoff_ms: 1_000,
 };
 
+/// The most bytes of a coordinator's refusal that reach the log and the run
+/// record.
+const MAX_REFUSAL_LEN: usize = 512;
+
 /// One lock for each coordinator, by its public key. The coordinator keeps
 /// one chunked `RequestDar` answer per requesting node, so a second fetch
 /// from this node would replace the chunks the first is still reading.
@@ -229,12 +233,31 @@ pub async fn fetch_dar_from_coordinator(
 
     match response.msg_type {
         MessageType::Data => Ok(response.payload),
-        MessageType::Error => Err(anyhow::anyhow!(
-            "{}",
-            String::from_utf8_lossy(&response.payload)
-        )),
+        MessageType::Error => Err(anyhow::anyhow!("{}", refusal_text(&response.payload))),
         other => Err(anyhow::anyhow!("unexpected answer {other:?}")),
     }
+}
+
+/// A coordinator's refusal as text for the log and the run record. Control
+/// characters are escaped, so a refusal cannot forge log lines, and the text
+/// is cut at [`MAX_REFUSAL_LEN`] bytes.
+fn refusal_text(payload: &[u8]) -> String {
+    let mut escaped = String::new();
+    for c in String::from_utf8_lossy(payload).chars() {
+        if c.is_control() {
+            escaped.extend(c.escape_default());
+        } else {
+            escaped.push(c);
+        }
+    }
+    if escaped.len() <= MAX_REFUSAL_LEN {
+        return escaped;
+    }
+    let mut end = MAX_REFUSAL_LEN;
+    while !escaped.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}…", &escaped[..end])
 }
 
 #[cfg(test)]
@@ -306,5 +329,30 @@ mod tests {
             "{error}"
         );
         Ok(())
+    }
+
+    /// The text goes to the log and the run record, so it must not carry a
+    /// line break or a terminal escape, and must stay short.
+    #[test]
+    fn a_refusal_is_escaped_and_cut() {
+        let refusal = format!("no such DAR\n\u{1b}[31mforged line{}", "x".repeat(2_000));
+
+        let text = refusal_text(refusal.as_bytes());
+
+        assert!(
+            text.starts_with("no such DAR\\n\\u{1b}[31mforged line"),
+            "{text}"
+        );
+        assert!(!text.chars().any(char::is_control), "{text}");
+        assert_eq!(text.len(), MAX_REFUSAL_LEN + "…".len());
+        assert!(text.ends_with('…'));
+    }
+
+    #[test]
+    fn a_short_refusal_is_kept_whole() {
+        assert_eq!(
+            refusal_text(b"run has no DAR at index 2"),
+            "run has no DAR at index 2"
+        );
     }
 }
