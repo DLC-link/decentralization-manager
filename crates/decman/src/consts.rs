@@ -131,6 +131,11 @@ pub const ROTATE_KEY: &str = "rotate-key";
 /// carries the coordinator's run instance and one hash for each DAR; without
 /// them it takes the bundle. A coordinator checks every invitee lists this
 /// before it sends a run without the bundle.
+///
+/// The flag also carries the cap: a peer that lists it accepts at most
+/// [`MAX_DAR_PULL_TOTAL`] bytes of DARs in one run. A later change to the cap
+/// therefore needs a new feature name, so a coordinator can tell the peers
+/// apart.
 pub const PER_DAR_PULL: &str = "per-dar-pull";
 
 /// The most bytes a peer pulls for one Dars run, summed over the sizes the

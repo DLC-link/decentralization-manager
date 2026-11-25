@@ -432,7 +432,9 @@ Minimum message size: 6 bytes (type + length with zero payload).
 
 Chunk size: 1 MiB (`CHUNK_SIZE`). Chunking is required for payloads exceeding `MAX_PAYLOAD_SIZE` (1 MiB). An assembled chunked response is capped at 16 MiB (`MAX_CHUNKED_TOTAL_SIZE`).
 
-A new peer does not download the chunked bundle of a Dars run. It leaves the bundle on the coordinator and pulls each DAR with `RequestDar`. The 16 MiB cap then applies to each DAR, not to the whole set.
+A new peer does not download the chunked bundle of a Dars run. It leaves the bundle on the coordinator and pulls each DAR with `RequestDar`. The 16 MiB cap then applies to each DAR, not to the whole set. Until the coordinator side changes too, a coordinator still refuses a set above 16 MiB with a 413 (#619).
+
+A reply that `send_noise_message` reads may carry at most `MAX_REPLY_SIZE`: one chunk with its index, the frame header and the longest routing instance. The read stops once a reply passes it, and a reply body that stalls ends at the request timeout.
 
 ### Security
 
@@ -579,13 +581,16 @@ A new peer skips the bundle in step 3. It pulls each DAR with `RequestDar`, by
 its index in the invitation, when the invitation carries the coordinator's run
 instance and one hash for each DAR. Otherwise it takes the bundle.
 
-- The peer hashes each DAR on arrival and stops at the first one that misses
-  its pin. It checks the whole set again before any upload.
+- The peer hashes each DAR on arrival and ends the run at the first one that
+  misses its pin. It checks the whole set again before any upload.
 - The peer refuses an invitation that names one DAR twice.
 - The peer adds up the sizes the coordinator announces. It ends the run once
   they pass 256 MiB (`MAX_DAR_PULL_TOTAL`), or when one DAR is above 16 MiB.
+  For a chunked DAR it checks before it reads the chunks of that DAR. An
+  inline DAR, at most 1 MiB, arrives whole before the check.
 - The peer fetches one DAR at a time from a coordinator, because the
-  coordinator keeps one chunked answer per peer.
+  coordinator keeps one chunked answer per peer. A fetch waits at most 425
+  seconds for its turn.
 - The peer uploads the DARs in the invitation's order, on both paths.
 
 **Canton API calls:**
