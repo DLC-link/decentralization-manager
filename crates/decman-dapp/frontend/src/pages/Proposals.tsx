@@ -1,7 +1,20 @@
 import { isValidSignature } from '../checks'
 import { actingWallet, useAppState, type HostResult, type Proposal, type Wallet } from '../mock/store'
 import { signProposal, submitProposal, verifiedOwners } from '../onboarding'
-import { Badge, EmptyState, ErrorText, Hex, PartyId, Person, Section, Stepper, Uid, useAction, type Tone } from '../ui'
+import {
+  Badge,
+  EmptyState,
+  ErrorText,
+  Hex,
+  PartyId,
+  Person,
+  Section,
+  SimulatedBadge,
+  Stepper,
+  Uid,
+  useAction,
+  type Tone,
+} from '../ui'
 
 export function Proposals({ onOpenParty }: { onOpenParty: (partyId: string) => void }) {
   const state = useAppState()
@@ -71,7 +84,10 @@ function ProposalCard({
         <h3>
           <PartyId value={plan.partyId} />
         </h3>
-        <Badge tone={tone}>{label}</Badge>
+        <span className="badges">
+          {proposal.simulated && <SimulatedBadge />}
+          <Badge tone={tone}>{label}</Badge>
+        </span>
       </div>
       <Stepper
         steps={['Proposed', `Owners signed ${verified}/${plan.owners.length}`, 'Hosts approved', 'Party created']}

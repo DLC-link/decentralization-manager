@@ -44,7 +44,7 @@ const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
 const message = (error: unknown) => (error instanceof Error ? error.message : String(error))
 
 async function linkParticipant(apiUrl: string, token: string): Promise<ParticipantLink> {
-  const connection = { apiUrl: apiUrl.trim(), token: token.trim() }
+  const connection = { apiUrl: apiUrl.trim(), token: token.trim(), simulated: isSimulated() }
   if (!connection.apiUrl) throw new Error('Enter the JSON Ledger API URL.')
   return { ...connection, participantId: await ledger.participantId(connection) }
 }
@@ -76,16 +76,44 @@ export async function addCovalidator(name: string, apiUrl: string, token: string
   update((s) => ({ ...s, covalidators: [...s.covalidators, covalidator] }))
 }
 
-/** The connection, name and role of the host with `participantId`. */
-function hostOf(participantId: string): { link: ParticipantLink; name: string; role: HostResult['role'] } {
+const modeName = (simulated: boolean) => (simulated ? 'simulated' : 'real')
+
+/**
+ * The connection, name and role of the host with `participantId`, among the
+ * records of one mode. A record of the other mode never answers for it.
+ */
+function hostOf(
+  participantId: string,
+  simulated: boolean,
+): { link: ParticipantLink; name: string; role: HostResult['role'] } {
   const { wallets, covalidators } = getState()
-  const owners = wallets.filter((w) => w.participant.participantId === participantId)
+  const owners = wallets.filter(
+    (w) => w.participant.participantId === participantId && w.participant.simulated === simulated,
+  )
   if (owners.length > 0) {
     return { link: owners[0].participant, name: owners.map((w) => w.name).join(', '), role: 'owner' }
   }
-  const covalidator = covalidators.find((c) => c.participant.participantId === participantId)
+  const covalidator = covalidators.find(
+    (c) => c.participant.participantId === participantId && c.participant.simulated === simulated,
+  )
   if (covalidator) return { link: covalidator.participant, name: covalidator.name, role: 'covalidator' }
-  throw new Error(`No wallet or covalidator uses participant ${participantId}.`)
+  throw new Error(`No ${modeName(simulated)} wallet or covalidator uses participant ${participantId}.`)
+}
+
+/** Refuses a proposal whose owners or covalidators mix modes. */
+function checkOneMode(proposal: PartyProposal, simulated: boolean): void {
+  const { wallets, covalidators } = getState()
+  const ownersMatch = proposal.owners.every((o) =>
+    wallets.some((w) => w.publicKey === o.publicKey && w.participant.simulated === simulated),
+  )
+  const covalidatorsMatch = proposal.covalidators.every((id) =>
+    covalidators.some((c) => c.participant.participantId === id && c.participant.simulated === simulated),
+  )
+  if (!ownersMatch || !covalidatorsMatch) {
+    throw new Error(
+      `Every owner and covalidator must use ${modeName(simulated)} participants, like the proposer's. Remove the others.`,
+    )
+  }
 }
 
 // ---- Proposals -------------------------------------------------------------
@@ -99,8 +127,10 @@ export async function createProposal(proposal: PartyProposal, creator: Wallet): 
   if (!plan.owners.some((o) => o.publicKey === creator.publicKey)) {
     throw new Error('Act as one of the owners to propose the party.')
   }
+  const { simulated } = creator.participant
+  checkOneMode(proposal, simulated)
   const hosts = plan.hosts.map((participant): HostResult => {
-    const { name, role } = hostOf(participant)
+    const { name, role } = hostOf(participant, simulated)
     return { participant, name, role, step: 'waiting' }
   })
 
@@ -119,6 +149,7 @@ export async function createProposal(proposal: PartyProposal, creator: Wallet): 
 
   const entry: Proposal = {
     id: newId(),
+    simulated,
     createdAt: now(),
     createdBy: creator.name,
     proposal,
@@ -183,7 +214,11 @@ export async function submitProposal(id: string, wallet: Wallet): Promise<void> 
   if (!proposal.plan.owners.some((o) => o.publicKey === wallet.publicKey)) {
     throw new Error(`${wallet.name} is not an owner, so it cannot start the creation.`)
   }
-  if (getState().parties.some((p) => p.partyId === proposal.plan.partyId)) {
+  if (wallet.participant.simulated !== proposal.simulated) {
+    throw new Error(`This proposal uses ${modeName(proposal.simulated)} participants. Act as an owner of that mode.`)
+  }
+  checkOneMode(proposal.proposal, proposal.simulated)
+  if (getState().parties.some((p) => p.partyId === proposal.plan.partyId && p.simulated === proposal.simulated)) {
     throw new Error('This party already exists.')
   }
   const requests = allocationRequests(
@@ -220,7 +255,7 @@ async function markHostedHosts(id: string, detail: string): Promise<void> {
       .filter((h) => h.step !== 'hosted')
       .map(async (h) => {
         try {
-          const answer = await ledger.getParty(hostOf(h.participant).link, proposal.plan.partyId)
+          const answer = await ledger.getParty(hostOf(h.participant, proposal.simulated).link, proposal.plan.partyId)
           if (partyHostedLocally(answer, proposal.plan.partyId)) setHost(id, h.participant, 'hosted', detail)
         } catch (error) {
           setHost(id, h.participant, h.step, `Still waiting: ${message(error)}`)
@@ -243,7 +278,7 @@ async function sendToHosts(
   const proposal = findProposal(id)
   const targets = proposal.hosts.filter((h) => h.role === role && h.step !== 'hosted')
   const results = await Promise.allSettled(
-    targets.map((h) => ledger.allocateExternalParty(hostOf(h.participant).link, body)),
+    targets.map((h) => ledger.allocateExternalParty(hostOf(h.participant, proposal.simulated).link, body)),
   )
   let refused = false
   results.forEach((result, index) => {
@@ -289,10 +324,11 @@ function addParty(proposal: Proposal, wallet: Wallet): void {
     partyId: plan.partyId,
     namespace: plan.namespace,
     owners: plan.owners,
+    simulated: proposal.simulated,
     hosts: proposal.hosts.map((h) => ({
       participant: h.participant,
       role: h.role,
-      approval: isSimulated()
+      approval: proposal.simulated
         ? 'Approved by a simulated participant.'
         : h.role === 'owner'
           ? 'Approved by its own participant.'
@@ -308,7 +344,7 @@ function addParty(proposal: Proposal, wallet: Wallet): void {
     history: [
       {
         at: now(),
-        text: `${isSimulated() ? 'Party created on simulated participants.' : 'Party created on the ledger.'} ${wallet.name} submitted it through ${shortUid(wallet.participant.participantId)}.`,
+        text: `${proposal.simulated ? 'Party created on simulated participants.' : 'Party created on the ledger.'} ${wallet.name} submitted it through ${shortUid(wallet.participant.participantId)}.`,
       },
     ],
   }

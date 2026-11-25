@@ -1,8 +1,12 @@
 // Calls to a participant's JSON Ledger API. Each call names the participant
 // in its error, and keeps the participant's own error text.
-import { isSimulated, simulatedCall } from './mock/participants'
+import { simulatedCall } from './mock/participants'
 
-export type Connection = { apiUrl: string; token: string }
+/**
+ * A participant's JSON Ledger API. `simulated` is fixed when the record is
+ * created, so a switch flipped later cannot send its calls elsewhere.
+ */
+export type Connection = { apiUrl: string; token: string; simulated: boolean }
 
 // A participant that never answers would otherwise hold a call, and with it
 // the hosting deadline, forever.
@@ -21,7 +25,7 @@ export class LedgerError extends Error {
 }
 
 async function call(connection: Connection, method: 'GET' | 'POST', path: string, body?: unknown): Promise<unknown> {
-  if (isSimulated()) return simulatedCall(connection.apiUrl, method, path, body)
+  if (connection.simulated) return simulatedCall(connection.apiUrl, method, path, body)
   const url = `${connection.apiUrl.replace(/\/+$/, '')}${path}`
   let response: Response
   try {

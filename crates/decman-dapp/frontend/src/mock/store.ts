@@ -38,6 +38,8 @@ export type HostResult = {
 
 export type Proposal = {
   id: string
+  /** Whether the proposal uses simulated participants, fixed at creation. */
+  simulated: boolean
   createdAt: string
   createdBy: string
   proposal: PartyProposal
@@ -78,6 +80,8 @@ export type TransferRequest = {
 
 export type Party = {
   partyId: string
+  /** Whether simulated participants host the party. */
+  simulated: boolean
   namespace: string
   owners: PlannedOwner[]
   hosts: Host[]
@@ -99,8 +103,9 @@ export type AppState = {
   parties: Party[]
 }
 
-// v2 links each wallet to a real participant. v1 data does not load.
-const STORAGE_KEY = 'decman-dapp-v2'
+// v3 records on each record whether its participants are simulated. Older
+// data does not load.
+const STORAGE_KEY = 'decman-dapp-v3'
 const EMPTY: AppState = { actingWalletId: null, wallets: [], covalidators: [], proposals: [], parties: [] }
 
 function load(): AppState {

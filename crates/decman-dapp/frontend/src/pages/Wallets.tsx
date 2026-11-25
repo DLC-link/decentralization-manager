@@ -4,7 +4,7 @@ import { LOCALNET_PARTICIPANTS, LOCALNET_TOKEN } from '../localnet'
 import { setActingWallet } from '../mock/actions'
 import { useAppState, type ParticipantLink } from '../mock/store'
 import { addCovalidator, createWallet } from '../onboarding'
-import { Badge, EmptyState, ErrorText, Hex, Person, Section, Uid, useAction } from '../ui'
+import { Badge, EmptyState, ErrorText, Hex, Person, Section, SimulatedBadge, Uid, useAction } from '../ui'
 
 export function Wallets() {
   const state = useAppState()
@@ -101,7 +101,7 @@ export function Wallets() {
 function ParticipantCell({ link }: { link: ParticipantLink }) {
   return (
     <span title={link.apiUrl}>
-      <Uid value={link.participantId} />
+      <Uid value={link.participantId} /> {link.simulated && <SimulatedBadge />}
     </span>
   )
 }

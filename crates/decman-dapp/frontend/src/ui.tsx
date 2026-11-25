@@ -112,6 +112,11 @@ export function Badge({ tone, children }: { tone: Tone; children: ReactNode }) {
   return <span className={`badge ${tone}`}>{children}</span>
 }
 
+/** Marks a record whose participants are simulated. */
+export function SimulatedBadge() {
+  return <Badge tone="warn">Simulated</Badge>
+}
+
 /** Numbered steps. Steps before `current` are done; `failed` marks the current one as failed. */
 export function Stepper({ steps, current, failed }: { steps: string[]; current: number; failed?: boolean }) {
   return (

@@ -12,7 +12,7 @@ import {
 } from '../mock/actions'
 import { actingWallet, useAppState, type Party, type TransferRequest, type Wallet } from '../mock/store'
 import { shortUid } from '../format'
-import { Avatar, Badge, EmptyState, ErrorText, Hex, PartyId, Person, Section, Uid, useAction } from '../ui'
+import { Avatar, Badge, EmptyState, ErrorText, Hex, PartyId, Person, Section, SimulatedBadge, Uid, useAction } from '../ui'
 
 export function Parties({ onOpenParty }: { onOpenParty: (partyId: string) => void }) {
   const state = useAppState()
@@ -26,6 +26,7 @@ export function Parties({ onOpenParty }: { onOpenParty: (partyId: string) => voi
         {state.parties.map((party) => (
           <button key={party.partyId} className="tile" onClick={() => onOpenParty(party.partyId)}>
             <PartyId value={party.partyId} />
+            {party.simulated && <SimulatedBadge />}
             <span className="avatars">
               {party.owners.map((owner) => (
                 <Avatar key={owner.publicKey} name={nameOf(owner.publicKey)} />
@@ -57,7 +58,10 @@ export function PartyDetail({ partyId }: { partyId: string }) {
           <h3>
             <PartyId value={party.partyId} />
           </h3>
-          <Badge tone="ok">Active</Badge>
+          <span className="badges">
+            {party.simulated && <SimulatedBadge />}
+            <Badge tone="ok">Active</Badge>
+          </span>
         </div>
         <div className="chips">
           <span className="chip">

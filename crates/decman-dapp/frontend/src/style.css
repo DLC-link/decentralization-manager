@@ -284,6 +284,13 @@ button.link {
   font-size: 0.9rem;
 }
 
+.badges {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+}
+
 .warning {
   padding: 6px 10px;
   font-size: 0.9rem;
