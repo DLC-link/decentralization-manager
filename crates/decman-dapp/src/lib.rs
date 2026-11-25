@@ -113,3 +113,146 @@ pub fn verify_signature_js(
 ) -> Result<bool, JsError> {
     Ok(verify_signature(public_key_hex, digest_hex, signature_hex)?)
 }
+
+#[cfg(test)]
+mod tests {
+    //! The frontend's `checks.ts` declares these JSON shapes by hand. These
+    //! tests use its field names, so a rename in Rust fails here instead of
+    //! in the browser.
+
+    use base64::{Engine, engine::general_purpose::STANDARD};
+    use ed25519_dalek::{Signer, SigningKey};
+    use serde_json::{Value, json};
+
+    use super::*;
+
+    fn public_key(seed: u8) -> String {
+        hex::encode(
+            SigningKey::from_bytes(&[seed; 32])
+                .verifying_key()
+                .as_bytes(),
+        )
+    }
+
+    fn proposal_json() -> String {
+        json!({
+            "partyHint": "treasury",
+            "owners": [
+                { "publicKey": public_key(1), "participant": "participant-1::1220a1" },
+                { "publicKey": public_key(2), "participant": "participant-2::1220b2" },
+            ],
+            "signingThreshold": 2,
+            "confirmationThreshold": 3,
+            "covalidators": ["participant-3::1220c3"],
+        })
+        .to_string()
+    }
+
+    fn parsed(json: Result<String, JsError>) -> Value {
+        let json = json.expect("the call succeeds");
+        serde_json::from_str(&json).expect("the call returns JSON")
+    }
+
+    fn keys(value: &Value) -> Vec<&str> {
+        let mut keys: Vec<&str> = value
+            .as_object()
+            .expect("an object")
+            .keys()
+            .map(String::as_str)
+            .collect();
+        keys.sort_unstable();
+        keys
+    }
+
+    #[test]
+    fn plan_party_returns_the_fields_the_frontend_reads() {
+        let plan = parsed(plan_party_js(&proposal_json()));
+        assert_eq!(
+            keys(&plan),
+            [
+                "confirmationThreshold",
+                "hosts",
+                "namespace",
+                "owners",
+                "partyId",
+                "signingThreshold"
+            ]
+        );
+        assert_eq!(plan["signingThreshold"], 2);
+        assert_eq!(plan["confirmationThreshold"], 3);
+        assert_eq!(plan["hosts"].as_array().map(Vec::len), Some(3));
+        assert_eq!(
+            keys(&plan["owners"][0]),
+            ["namespace", "participant", "publicKey"]
+        );
+    }
+
+    #[test]
+    fn the_signing_flow_round_trips_through_the_frontends_json() {
+        let onboarding = parsed(onboarding_transactions_js(&proposal_json(), 31));
+        assert_eq!(keys(&onboarding), ["combinedHash", "transactions"]);
+        assert_eq!(
+            keys(&onboarding["transactions"][0]),
+            ["hash", "mapping", "transaction"]
+        );
+
+        let combined_hash = onboarding["combinedHash"].as_str().expect("a string");
+        let message = hex::decode(combined_hash).expect("hex");
+        let signatures: Vec<Value> = [1, 2]
+            .into_iter()
+            .map(|seed| {
+                let key = SigningKey::from_bytes(&[seed; 32]);
+                json!({
+                    "publicKey": public_key(seed),
+                    "signature": hex::encode(key.sign(&message).to_bytes()),
+                })
+            })
+            .collect();
+        let requests = parsed(allocation_requests_js(
+            &proposal_json(),
+            31,
+            "global-domain::1220abcd",
+            &Value::Array(signatures).to_string(),
+        ));
+        assert_eq!(keys(&requests), ["allocate", "hostingApproval"]);
+        assert_eq!(
+            requests["allocate"]["multiHashSignatures"]
+                .as_array()
+                .map(Vec::len),
+            Some(2)
+        );
+    }
+
+    #[test]
+    fn the_format_probe_reads_a_participants_json_answer() {
+        let request = parsed(generate_topology_request_js(
+            "global-domain::1220abcd",
+            &public_key(1),
+        ));
+        assert_eq!(request["partyHint"], "decman-dapp-format-probe");
+        assert_eq!(
+            request["publicKey"]["keyData"]
+                .as_str()
+                .and_then(|data| STANDARD.decode(data).ok())
+                .map(|der| der.len()),
+            Some(44)
+        );
+
+        let onboarding = parsed(onboarding_transactions_js(&proposal_json(), 30));
+        let transaction = onboarding["transactions"][0]["transaction"].clone();
+        let answer = json!({ "partyId": "probe::1220aa", "topologyTransactions": [transaction] });
+        assert_eq!(
+            topology_version_of_generated_js(&answer.to_string()).ok(),
+            Some(30)
+        );
+    }
+
+    #[test]
+    fn party_hosted_locally_reads_a_get_party_answer() {
+        let answer = json!({ "partyDetails": [{ "party": "p::1220aa", "isLocal": true }] });
+        assert_eq!(
+            party_hosted_locally_js(&answer.to_string(), "p::1220aa").ok(),
+            Some(true)
+        );
+    }
+}
