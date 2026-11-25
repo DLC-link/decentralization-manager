@@ -162,6 +162,18 @@ impl DarPull {
     }
 }
 
+/// Put DARs in the order of the invitation's filenames. A pull reads them in
+/// that order, and a bundle uploads in the same order. A name the invitation
+/// does not hold goes last; the set check refuses it anyway.
+pub fn in_invitation_order(dars: &mut [(String, Vec<u8>)], filenames: &[String]) {
+    dars.sort_by_key(|(name, _)| {
+        filenames
+            .iter()
+            .position(|filename| filename == name)
+            .unwrap_or(usize::MAX)
+    });
+}
+
 /// Ask the coordinator for one DAR over Noise, reassembling a chunked answer.
 ///
 /// `admit` sees the DAR's size first: the announced size of a chunked answer,
@@ -329,6 +341,20 @@ mod tests {
             "{error}"
         );
         Ok(())
+    }
+
+    #[test]
+    fn dars_follow_the_invitation_order() {
+        let filenames = vec!["zeta.dar".to_string(), "alpha.dar".to_string()];
+        let mut dars = vec![
+            ("alpha.dar".to_string(), vec![1]),
+            ("zeta.dar".to_string(), vec![2]),
+        ];
+
+        in_invitation_order(&mut dars, &filenames);
+
+        let order: Vec<&str> = dars.iter().map(|(name, _)| name.as_str()).collect();
+        assert_eq!(order, ["zeta.dar", "alpha.dar"]);
     }
 
     /// The text goes to the log and the run record, so it must not carry a

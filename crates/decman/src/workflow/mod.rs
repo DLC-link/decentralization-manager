@@ -42,7 +42,7 @@ use crate::{
     server::{DeclineInvitationPayload, WorkflowInstance, WorkflowKind, peer_status::LastSeen},
     utils,
     workflow::{
-        dars::peer::{DarPull, OversizedPull},
+        dars::peer::{DarPull, OversizedPull, in_invitation_order},
         state::WorkflowStep,
         storage::{WorkflowStorage, artifact_kinds},
         validation::PeerExpectations,
@@ -498,7 +498,7 @@ async fn run_peer(
 
                 // Decode DAR files from payload and upload directly. Without a
                 // payload, the peer reads each DAR the invitation names.
-                let dar_files = match (&dar_pull, payload.is_empty()) {
+                let mut dar_files = match (&dar_pull, payload.is_empty()) {
                     (Some(pull), true) => match pull.fetch_all(&node_config).await {
                         Ok(files) => files,
                         // The coordinator announces the same sizes on every
@@ -535,6 +535,7 @@ async fn run_peer(
                     fail_step!("Refusing the coordinator's DARs: {e}");
                     continue;
                 }
+                in_invitation_order(&mut dar_files, &expectations.dar_filenames);
 
                 if let Err(e) = contracts::upload_dars_from_bytes(&node_config, dar_files).await {
                     fail_step!("Step execution failed: {e}");

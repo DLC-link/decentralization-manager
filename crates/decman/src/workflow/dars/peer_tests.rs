@@ -311,6 +311,26 @@ async fn an_invitation_without_hashes_reads_the_bundle() -> Result {
     Ok(())
 }
 
+/// A bundle may list its DARs in another order. The upload follows the
+/// invitation's order, as a pull does.
+#[tokio::test]
+async fn an_inline_bundle_uploads_in_index_order() -> Result {
+    let dars = dars(&[100, 200, 300]);
+    let mut script = invited(&dars);
+    let mut by_name = dars.clone();
+    by_name.sort();
+    script.commands = vec![Message::new(
+        MessageType::UploadDars,
+        utils::encode_files(&by_name),
+    )];
+
+    let run = run_script(WorkflowKind::Dars, script).await?;
+
+    assert!(run.result.is_ok(), "{:?}", run.result);
+    assert_eq!(run.uploads, uploaded(&dars), "not uploaded in index order");
+    Ok(())
+}
+
 #[tokio::test]
 async fn an_inline_bundle_is_used_as_sent() -> Result {
     let dars = dars(&[100, 200]);
