@@ -1644,14 +1644,14 @@ pub struct CancelConfirmationRequest {
     pub governance_type: GovernanceType,
 }
 
-/// Request to dismiss or restore confirmations on this node only.
+/// Request to hide or unhide confirmations on this node only.
 ///
 /// Name every confirmation of the action. An action is hidden only when it
-/// cannot be archived and every one of its confirmations is dismissed.
+/// cannot be archived and every one of its confirmations is hidden.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
-pub struct DismissConfirmationsRequest {
+pub struct HideConfirmationsRequest {
     pub party_id: CantonId,
     pub confirmation_cids: Vec<String>,
 }

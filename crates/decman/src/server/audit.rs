@@ -17,8 +17,8 @@ pub enum AuditEvent {
     CancelProposal,
     PurgeStart,
     PurgeEnd,
-    Dismiss,
-    Restore,
+    Hide,
+    Unhide,
 }
 
 impl AuditEvent {
@@ -32,8 +32,8 @@ impl AuditEvent {
             AuditEvent::CancelProposal => "cancel_proposal",
             AuditEvent::PurgeStart => "purge_start",
             AuditEvent::PurgeEnd => "purge_end",
-            AuditEvent::Dismiss => "dismiss",
-            AuditEvent::Restore => "restore",
+            AuditEvent::Hide => "hide",
+            AuditEvent::Unhide => "unhide",
         }
     }
 }
@@ -141,29 +141,29 @@ pub async fn log_purge_audit(
     .await;
 }
 
-/// A change to the confirmations dismissed on this node.
+/// A change to the confirmations hidden on this node.
 #[derive(Clone, Copy, Debug)]
-pub enum DismissalAuditEvent {
-    Dismiss,
-    Restore,
+pub enum HidingAuditEvent {
+    Hide,
+    Unhide,
 }
 
-/// Write the row for a dismissal or a restore of confirmations on this node.
+/// Write the row for a hide or an unhide of confirmations on this node.
 /// Neither touches the ledger, so the party is also the "member", as for a
 /// purge. `error` is `None` when the database write succeeded.
 ///
 /// Waits for the write, so the row exists when the response is sent.
-pub async fn log_dismissal_audit(
+pub async fn log_hiding_audit(
     pool: &SqlitePool,
-    event: DismissalAuditEvent,
+    event: HidingAuditEvent,
     party_id: &CantonId,
     confirmation_cids: &[String],
     actor: &AuditActor,
     error: Option<&str>,
 ) {
     let (event_type, action_summary) = match event {
-        DismissalAuditEvent::Dismiss => (AuditEvent::Dismiss, "dismiss_confirmations"),
-        DismissalAuditEvent::Restore => (AuditEvent::Restore, "restore_confirmations"),
+        HidingAuditEvent::Hide => (AuditEvent::Hide, "hide_confirmations"),
+        HidingAuditEvent::Unhide => (AuditEvent::Unhide, "unhide_confirmations"),
     };
     let details = serde_json::json!({
         "confirmation_cids": confirmation_cids,

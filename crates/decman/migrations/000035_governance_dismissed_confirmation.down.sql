@@ -1,1 +1,0 @@
-DROP TABLE governance_dismissed_confirmation;

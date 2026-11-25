@@ -1,12 +1,12 @@
-//! Governance confirm, execute, revoke, expire, cancel-proposal, dismiss and
-//! restore.
+//! Governance confirm, execute, revoke, expire, cancel-proposal, hide and
+//! unhide.
 //!
 //! Each of these needs ids from `GET /governance/confirmations`. The command
 //! reads that list, finds the action the caller names, and builds the same
 //! request bodies the web frontend sends.
 
 use anyhow::{Context, Result, bail};
-use common::api::{DismissConfirmationsRequest, GovernanceType};
+use common::api::{GovernanceType, HideConfirmationsRequest};
 use reqwest::Method;
 use serde_json::{Value, json};
 
@@ -106,7 +106,7 @@ const MAX_PAGES: usize = 50;
 
 /// The full confirmations list for `party_id`, with every page of proposals.
 /// The server sends 25 proposals per page by default, so an older proposal
-/// is only found on a later page. Actions dismissed on this node are left out.
+/// is only found on a later page. Actions hidden on this node are left out.
 ///
 /// # Errors
 ///
@@ -115,12 +115,12 @@ pub fn fetch(client: &mut DecmanClient, party_id: &str) -> Result<GovernanceConf
     read_pages(client, party_id, false)
 }
 
-/// As [`fetch`], with the actions dismissed on this node, marked `dismissed`.
+/// As [`fetch`], with the actions hidden on this node, marked `hidden`.
 ///
 /// # Errors
 ///
 /// Returns an error if a request fails or a response does not parse.
-pub fn fetch_with_dismissed(
+pub fn fetch_with_hidden(
     client: &mut DecmanClient,
     party_id: &str,
 ) -> Result<GovernanceConfirmations> {
@@ -130,7 +130,7 @@ pub fn fetch_with_dismissed(
 fn read_pages(
     client: &mut DecmanClient,
     party_id: &str,
-    include_dismissed: bool,
+    include_hidden: bool,
 ) -> Result<GovernanceConfirmations> {
     let mut cursor: Option<String> = None;
     let mut all: Option<GovernanceConfirmations> = None;
@@ -139,8 +139,8 @@ fn read_pages(
             ("party_id".to_owned(), party_id.to_owned()),
             ("limit".to_owned(), PAGE_SIZE.to_string()),
         ];
-        if include_dismissed {
-            query.push(("include_dismissed".to_owned(), "true".to_owned()));
+        if include_hidden {
+            query.push(("include_hidden".to_owned(), "true".to_owned()));
         }
         if let Some(cursor) = &cursor {
             query.push(("cursor".to_owned(), cursor.clone()));
@@ -369,10 +369,10 @@ pub fn cancel_proposal_body(
     ))
 }
 
-/// Body for `POST /governance/dismiss` or `POST /governance/restore`: every
+/// Body for `POST /governance/hide` or `POST /governance/unhide`: every
 /// confirmation on the action.
 fn confirmation_ids_body(party_id: &str, pending: &Pending<'_>) -> Result<Value> {
-    to_body(&DismissConfirmationsRequest {
+    to_body(&HideConfirmationsRequest {
         party_id: canton_id(party_id)?,
         confirmation_cids: pending
             .confirmations()
@@ -382,13 +382,13 @@ fn confirmation_ids_body(party_id: &str, pending: &Pending<'_>) -> Result<Value>
     })
 }
 
-/// Body for `POST /governance/dismiss`, which hides the action on this node.
+/// Body for `POST /governance/hide`, which hides the action on this node.
 ///
 /// # Errors
 ///
 /// Returns an error if the target is not listed, or if it can still be
 /// archived.
-pub fn dismiss_body(
+pub fn hide_body(
     confirmations: &GovernanceConfirmations,
     party_id: &str,
     target: &Target,
@@ -397,18 +397,18 @@ pub fn dismiss_body(
     if !pending.cannot_be_archived() {
         bail!(
             "this action can still be archived. \
-             Only an action that cannot be archived can be dismissed"
+             Only an action that cannot be archived can be hidden"
         );
     }
     confirmation_ids_body(party_id, &pending)
 }
 
-/// Body for `POST /governance/restore`, which shows the action again.
+/// Body for `POST /governance/unhide`, which shows the action again.
 ///
 /// # Errors
 ///
 /// Returns an error if the target is not listed.
-pub fn restore_body(
+pub fn unhide_body(
     confirmations: &GovernanceConfirmations,
     party_id: &str,
     target: &Target,
@@ -660,15 +660,15 @@ mod tests {
     }
 
     #[test]
-    fn dismiss_takes_every_confirmation_of_the_action() {
+    fn hide_takes_every_confirmation_of_the_action() {
         // Act
-        let by_hash = dismiss_body(
+        let by_hash = hide_body(
             &stuck_confirmations(),
             DEC,
             &Target::ActionHash("h-stuck".to_owned()),
         )
         .unwrap();
-        let by_proposal = dismiss_body(
+        let by_proposal = hide_body(
             &stuck_confirmations(),
             DEC,
             &Target::Proposal("p-orphan".to_owned()),
@@ -684,12 +684,12 @@ mod tests {
     }
 
     #[test]
-    fn dismiss_refuses_an_action_that_can_still_be_archived() {
+    fn hide_refuses_an_action_that_can_still_be_archived() {
         for (confirmations, target) in [
             (stuck_confirmations(), Target::Proposal("p-live".to_owned())),
             (confirmations(), Target::Proposal("p-1".to_owned())),
         ] {
-            let error = dismiss_body(&confirmations, DEC, &target).unwrap_err();
+            let error = hide_body(&confirmations, DEC, &target).unwrap_err();
             assert!(
                 error.to_string().contains("can still be archived"),
                 "{error}"
@@ -698,9 +698,9 @@ mod tests {
     }
 
     #[test]
-    fn restore_takes_every_confirmation_of_the_action() {
+    fn unhide_takes_every_confirmation_of_the_action() {
         // Act
-        let body = restore_body(
+        let body = unhide_body(
             &stuck_confirmations(),
             DEC,
             &Target::ActionHash("h-stuck".to_owned()),
@@ -713,7 +713,7 @@ mod tests {
 
     #[test]
     fn an_unknown_action_hash_is_an_error() {
-        let error = restore_body(
+        let error = unhide_body(
             &stuck_confirmations(),
             DEC,
             &Target::ActionHash("h-missing".to_owned()),

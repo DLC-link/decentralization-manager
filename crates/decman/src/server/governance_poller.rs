@@ -362,7 +362,7 @@ mod tests {
         config::{KeycloakConfig, PackageConfig, PartyCredentials},
         server::{
             ledger_paging::AcsCursor,
-            queries::{apply_dismissals, mark_stuck},
+            queries::{apply_hidden, mark_stuck},
             types::{
                 ActionType, DomainConfirmation, DomainGovernanceAction, GovernanceAction,
                 GovernanceConfirmation,
@@ -401,7 +401,7 @@ mod tests {
         };
         Ok(GovernanceAction {
             cannot_be_archived: false,
-            dismissed: false,
+            hidden: false,
             action_hash: "hash".to_string(),
             confirmations: expiries.iter().copied().map(confirmation).collect(),
             action: action.clone(),
@@ -427,7 +427,7 @@ mod tests {
         };
         Ok(DomainGovernanceAction {
             cannot_be_archived: false,
-            dismissed: false,
+            hidden: false,
             proposal_cid: "00p".to_string(),
             action_label: "GenericVote".to_string(),
             description: None,
@@ -533,11 +533,11 @@ mod tests {
         Ok(())
     }
 
-    /// The poller reads no dismissals. Only an action that cannot be archived
-    /// can be dismissed, and such an action is never pending, so a dismissal
+    /// The poller reads no hidden confirmations. Only an action that cannot be
+    /// archived can be hidden, and such an action is never pending, so hiding
     /// cannot change the counts.
     #[test]
-    fn a_dismissed_action_is_not_pending() -> anyhow::Result<()> {
+    fn a_hidden_action_is_not_pending() -> anyhow::Result<()> {
         let mut q = queue(
             vec![self_action(true, &[NOW])?],
             vec![proposal(true, true, &[NOW - 1])?],
@@ -547,19 +547,19 @@ mod tests {
             HashSet::from([party("member")?.to_string()]),
         )]);
         mark_stuck(&mut q.actions, &mut q.domain_actions, &timeouts, NOW);
-        let without_dismissals = summarize(&q, NOW);
+        let without_hiding = summarize(&q, NOW);
 
-        apply_dismissals(
+        apply_hidden(
             &mut q.actions,
             &mut q.domain_actions,
             &HashSet::from(["00c".to_string()]),
             true,
         );
 
-        assert!(q.actions[0].dismissed);
-        assert!(q.domain_actions[0].dismissed);
-        assert_eq!(summarize(&q, NOW), without_dismissals);
-        assert_eq!(without_dismissals, PendingSummary::default());
+        assert!(q.actions[0].hidden);
+        assert!(q.domain_actions[0].hidden);
+        assert_eq!(summarize(&q, NOW), without_hiding);
+        assert_eq!(without_hiding, PendingSummary::default());
         Ok(())
     }
 

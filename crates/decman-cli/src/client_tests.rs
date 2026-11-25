@@ -705,7 +705,7 @@ fn expire_prints_the_unresponsive_party() {
 }
 
 #[test]
-fn pending_passes_include_dismissed() {
+fn pending_passes_include_hidden() {
     // Arrange
     let fake = Fake::start();
     fake.token_grant("password", "a-1", 1);
@@ -719,7 +719,7 @@ fn pending_passes_include_dismissed() {
         Mock::given(method("GET"))
             .and(path("/governance/confirmations"))
             .and(query_param("party_id", ALPHA))
-            .and(query_param("include_dismissed", "true"))
+            .and(query_param("include_hidden", "true"))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "actions": [] })))
             .expect(1),
     );
@@ -732,7 +732,7 @@ fn pending_passes_include_dismissed() {
             "pending",
             "--party",
             "alpha",
-            "--include-dismissed",
+            "--include-hidden",
         ]),
     )
     .unwrap();
@@ -742,7 +742,7 @@ fn pending_passes_include_dismissed() {
 }
 
 #[test]
-fn dismiss_reads_dismissed_actions_and_sends_every_confirmation() {
+fn hide_reads_hidden_actions_and_sends_every_confirmation() {
     // Arrange
     let fake = Fake::start();
     fake.token_grant("password", "a-1", 1);
@@ -755,7 +755,7 @@ fn dismiss_reads_dismissed_actions_and_sends_every_confirmation() {
     fake.mount(
         Mock::given(method("GET"))
             .and(path("/governance/confirmations"))
-            .and(query_param("include_dismissed", "true"))
+            .and(query_param("include_hidden", "true"))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({
                 "threshold": 2,
                 "rules_contract_id": "rules-1",
@@ -774,15 +774,14 @@ fn dismiss_reads_dismissed_actions_and_sends_every_confirmation() {
     );
     fake.mount(
         Mock::given(method("POST"))
-            .and(path("/governance/dismiss"))
+            .and(path("/governance/hide"))
             .and(body_json(json!({
                 "party_id": ALPHA,
                 "confirmation_cids": ["c-1", "c-2"],
             })))
             .respond_with(
-                ResponseTemplate::new(200).set_body_json(
-                    json!({ "message": "Confirmations dismissed on this node: 2." }),
-                ),
+                ResponseTemplate::new(200)
+                    .set_body_json(json!({ "message": "Confirmations hidden on this node: 2." })),
             )
             .expect(1),
     );
@@ -792,7 +791,7 @@ fn dismiss_reads_dismissed_actions_and_sends_every_confirmation() {
         &fake,
         parse(&[
             "governance",
-            "dismiss",
+            "hide",
             "--party",
             "alpha",
             "--action",
@@ -804,14 +803,14 @@ fn dismiss_reads_dismissed_actions_and_sends_every_confirmation() {
     // Assert
     assert_eq!(
         outcome.value["message"],
-        "Confirmations dismissed on this node: 2."
+        "Confirmations hidden on this node: 2."
     );
 }
 
-/// A dismissed action is missing from the default list, so restore must read
-/// the list with the dismissed actions to find it.
+/// A hidden action is missing from the default list, so unhide must read
+/// the list with the hidden actions to find it.
 #[test]
-fn restore_finds_a_dismissed_action_and_sends_every_confirmation() {
+fn unhide_finds_a_hidden_action_and_sends_every_confirmation() {
     // Arrange
     let fake = Fake::start();
     fake.token_grant("password", "a-1", 1);
@@ -824,7 +823,7 @@ fn restore_finds_a_dismissed_action_and_sends_every_confirmation() {
     fake.mount(
         Mock::given(method("GET"))
             .and(path("/governance/confirmations"))
-            .and(query_param("include_dismissed", "true"))
+            .and(query_param("include_hidden", "true"))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({
                 "threshold": 2,
                 "rules_contract_id": "rules-1",
@@ -838,21 +837,22 @@ fn restore_finds_a_dismissed_action_and_sends_every_confirmation() {
                     ],
                     "orphaned": true,
                     "cannot_be_archived": true,
-                    "dismissed": true,
+                    "hidden": true,
                 }],
             })))
             .expect(1),
     );
     fake.mount(
         Mock::given(method("POST"))
-            .and(path("/governance/restore"))
+            .and(path("/governance/unhide"))
             .and(body_json(json!({
                 "party_id": ALPHA,
                 "confirmation_cids": ["c-1", "c-2"],
             })))
-            .respond_with(ResponseTemplate::new(200).set_body_json(
-                json!({ "message": "Dismissed confirmations restored on this node: 2." }),
-            ))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(json!({ "message": "Confirmations unhidden on this node: 2." })),
+            )
             .expect(1),
     );
 
@@ -861,7 +861,7 @@ fn restore_finds_a_dismissed_action_and_sends_every_confirmation() {
         &fake,
         parse(&[
             "governance",
-            "restore",
+            "unhide",
             "--party",
             "alpha",
             "--proposal",
@@ -873,7 +873,7 @@ fn restore_finds_a_dismissed_action_and_sends_every_confirmation() {
     // Assert
     assert_eq!(
         outcome.value["message"],
-        "Dismissed confirmations restored on this node: 2."
+        "Confirmations unhidden on this node: 2."
     );
 }
 

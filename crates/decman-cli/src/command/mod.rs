@@ -518,10 +518,10 @@ impl TargetArgs {
     }
 }
 
-/// Names one governance action to dismiss or restore.
+/// Names one governance action to hide or unhide.
 #[derive(Debug, Args)]
 #[command(group(ArgGroup::new("target").required(true).args(["proposal", "action"])))]
-pub struct DismissTargetArgs {
+pub struct HideTargetArgs {
     /// Contract id of an on-chain proposal.
     #[arg(long)]
     proposal: Option<String>,
@@ -531,7 +531,7 @@ pub struct DismissTargetArgs {
     action: Option<String>,
 }
 
-impl DismissTargetArgs {
+impl HideTargetArgs {
     fn target(&self) -> Result<Target> {
         match (&self.proposal, &self.action) {
             (Some(cid), _) => Ok(Target::Proposal(cid.clone())),
@@ -559,9 +559,9 @@ pub enum GovernanceCommand {
         /// The next_cursor of the previous page.
         #[arg(long)]
         cursor: Option<String>,
-        /// Also list the actions dismissed on this node.
+        /// Also list the actions hidden on this node.
         #[arg(long)]
-        include_dismissed: bool,
+        include_hidden: bool,
     },
     /// Proposals, one page at a time.
     Proposals {
@@ -645,18 +645,18 @@ pub enum GovernanceCommand {
     },
     /// Hide an action that cannot be archived, on this node only. Nothing is
     /// sent to the ledger.
-    Dismiss {
+    Hide {
         #[command(flatten)]
         party: PartyArg,
         #[command(flatten)]
-        target: DismissTargetArgs,
+        target: HideTargetArgs,
     },
-    /// List a dismissed action again.
-    Restore {
+    /// List a hidden action again.
+    Unhide {
         #[command(flatten)]
         party: PartyArg,
         #[command(flatten)]
-        target: DismissTargetArgs,
+        target: HideTargetArgs,
     },
 }
 
@@ -1593,14 +1593,14 @@ fn run_governance(client: &mut DecmanClient, command: GovernanceCommand) -> Resu
             party,
             limit,
             cursor,
-            include_dismissed,
+            include_hidden,
         } => {
             let party = resolve_party(client, &party)?;
             let mut query = vec![("party_id", party.id)];
             optional(&mut query, "limit", limit.map(|limit| limit.to_string()));
             optional(&mut query, "cursor", cursor);
-            if include_dismissed {
-                query.push(("include_dismissed", "true".to_owned()));
+            if include_hidden {
+                query.push(("include_hidden", "true".to_owned()));
             }
             get(client, "/governance/confirmations", &query)
         }
@@ -1701,19 +1701,19 @@ fn run_governance(client: &mut DecmanClient, command: GovernanceCommand) -> Resu
             let body = governance::cancel_proposal_body(&pending, &party.id, &proposal)?;
             post(client, "/governance/cancel-proposal", Some(&body))
         }
-        GovernanceCommand::Dismiss { party, target } => {
+        GovernanceCommand::Hide { party, target } => {
             let target = target.target()?;
             let party = resolve_party(client, &party)?;
-            let pending = governance::fetch_with_dismissed(client, &party.id)?;
-            let body = governance::dismiss_body(&pending, &party.id, &target)?;
-            post(client, "/governance/dismiss", Some(&body))
+            let pending = governance::fetch_with_hidden(client, &party.id)?;
+            let body = governance::hide_body(&pending, &party.id, &target)?;
+            post(client, "/governance/hide", Some(&body))
         }
-        GovernanceCommand::Restore { party, target } => {
+        GovernanceCommand::Unhide { party, target } => {
             let target = target.target()?;
             let party = resolve_party(client, &party)?;
-            let pending = governance::fetch_with_dismissed(client, &party.id)?;
-            let body = governance::restore_body(&pending, &party.id, &target)?;
-            post(client, "/governance/restore", Some(&body))
+            let pending = governance::fetch_with_hidden(client, &party.id)?;
+            let body = governance::unhide_body(&pending, &party.id, &target)?;
+            post(client, "/governance/unhide", Some(&body))
         }
     }
 }

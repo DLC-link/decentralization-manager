@@ -1,7 +1,7 @@
 use super::rows::{
     ChainAuditCacheRow, DecPartyContractRow, DecPartyOwnerRow, DecPartyParticipantRow, DecPartyRow,
     DecPartyTopologyVersion, FormerDecPartyRow, GovernanceAuditRow,
-    GovernanceDismissedConfirmationRow, GovernanceMediatorTimeoutRow, OwnerKeyRefusal,
+    GovernanceHiddenConfirmationRow, GovernanceMediatorTimeoutRow, OwnerKeyRefusal,
 };
 use crate::{
     canton_id::{CantonId, Fingerprint},
@@ -103,14 +103,14 @@ pub trait SchemaRead {
         party_id: &CantonId,
     ) -> Result<Vec<GovernanceMediatorTimeoutRow>>;
 
-    /// Get the confirmations an operator dismissed on this node, scoped to a party.
+    /// Get the confirmations an operator hid on this node, scoped to a party.
     ///
     /// # Errors
     /// Returns an error if the database read fails.
-    async fn get_dismissed_confirmations(
+    async fn get_hidden_confirmations(
         &self,
         party_id: &CantonId,
-    ) -> Result<Vec<GovernanceDismissedConfirmationRow>>;
+    ) -> Result<Vec<GovernanceHiddenConfirmationRow>>;
 
     /// Get paginated governance audit entries for a party, newest first
     async fn get_governance_audit(
@@ -234,23 +234,23 @@ pub trait SchemaWrite {
     /// Returns an error if the database write fails.
     async fn clear_mediator_timeout(&self, party_id: &CantonId, contract_id: &str) -> Result<()>;
 
-    /// Dismiss confirmations on this node. A confirmation already dismissed
-    /// keeps its first record.
+    /// Hide confirmations on this node. A confirmation already hidden keeps
+    /// its first record.
     ///
     /// # Errors
     /// Returns an error if the database write fails. Then nothing is stored.
-    async fn dismiss_confirmations(
+    async fn hide_confirmations(
         &self,
         party_id: &CantonId,
         contract_ids: &[String],
-        dismissed_by: &str,
+        hidden_by: &str,
     ) -> Result<()>;
 
-    /// Restore dismissed confirmations, and return how many were dismissed.
+    /// Unhide hidden confirmations, and return how many were hidden.
     ///
     /// # Errors
-    /// Returns an error if the database write fails. Then nothing is restored.
-    async fn restore_confirmations(
+    /// Returns an error if the database write fails. Then nothing is unhidden.
+    async fn unhide_confirmations(
         &self,
         party_id: &CantonId,
         contract_ids: &[String],
