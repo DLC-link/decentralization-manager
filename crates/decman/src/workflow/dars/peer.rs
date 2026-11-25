@@ -1,5 +1,10 @@
 //! The peer side of a Dars run: read its DARs from the coordinator.
 
+use std::{
+    collections::HashMap,
+    sync::{Arc, LazyLock, Mutex, PoisonError},
+};
+
 use anyhow::Context;
 
 use crate::{
@@ -20,6 +25,21 @@ const PULL_RETRY: NoiseRetryConfig = NoiseRetryConfig {
     max_attempts: CHUNK_FETCH_MAX_ATTEMPTS,
     backoff_ms: 1_000,
 };
+
+/// One lock for each coordinator, by its public key. The coordinator keeps
+/// one chunked `RequestDar` answer per requesting node, so a second fetch
+/// from this node would replace the chunks the first is still reading.
+static COORDINATOR_TURNS: LazyLock<Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>> =
+    LazyLock::new(Mutex::default);
+
+fn coordinator_turn(public_key: &str) -> Arc<tokio::sync::Mutex<()>> {
+    COORDINATOR_TURNS
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .entry(public_key.to_string())
+        .or_default()
+        .clone()
+}
 
 /// What a peer needs to read the DARs of its accepted invitation one by one.
 #[derive(Debug)]
@@ -78,6 +98,7 @@ impl DarPull {
 }
 
 /// Ask the coordinator for one DAR over Noise, reassembling a chunked answer.
+/// Only one fetch at a time runs against a coordinator.
 ///
 /// # Errors
 ///
@@ -89,6 +110,9 @@ pub async fn fetch_dar_from_coordinator(
     request: &RequestDarPayload,
     retry: &NoiseRetryConfig,
 ) -> Result<Vec<u8>> {
+    let turn = coordinator_turn(&coordinator.public_key);
+    let _turn = turn.lock().await;
+
     let peer_pub_key = parse_public_key(&coordinator.public_key)
         .map_err(|e| anyhow::anyhow!("the coordinator's public key does not parse: {e}"))?;
     let keypair = NoiseKeypair::from_file(&config.key_file_path()).await?;

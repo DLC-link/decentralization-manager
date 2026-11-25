@@ -1,14 +1,17 @@
 //! A peer reads each DAR of a Dars run from a scripted coordinator.
 
+use std::time::Duration;
+
+use super::peer::fetch_dar_from_coordinator;
 use crate::{
     consts::MAX_CONSECUTIVE_STEP_FAILURES,
     error::Result,
     noise::{CHUNK_SIZE, MAX_CHUNKED_TOTAL_SIZE, MAX_PAYLOAD_SIZE, Message, MessageType},
-    server::WorkflowKind,
+    server::{RequestDarPayload, WorkflowKind},
     utils,
     workflow::{
         peer_retry_tests::{
-            COORDINATOR_RUN, PeerRun, Script, assert_reported, chunked_meta, run_script,
+            COORDINATOR_RUN, DarServer, PeerRun, Script, assert_reported, chunked_meta, run_script,
         },
         validation::hash_dar,
     },
@@ -171,6 +174,38 @@ async fn a_dar_above_the_chunked_limit_is_refused_by_name() -> Result {
     assert!(error.contains(&expected), "{error}");
     assert!(run.uploads.is_empty());
     assert_reported(&run, WorkflowKind::Dars);
+    Ok(())
+}
+
+/// The coordinator keeps one chunked `RequestDar` answer for each peer. Two
+/// fetches at once, such as a run's pull and an invitation preview, would
+/// read each other's chunks. They take turns instead.
+#[tokio::test]
+async fn two_fetches_from_one_coordinator_take_turns() -> Result {
+    let dars = dars(&[MAX_PAYLOAD_SIZE + 1, MAX_PAYLOAD_SIZE + 2]);
+    let server = DarServer::start(dars.clone(), Duration::from_millis(300)).await?;
+    let fetch = |index: usize| {
+        let request = RequestDarPayload {
+            workflow_instance: COORDINATOR_RUN.to_string(),
+            index,
+            filename: dars[index].0.clone(),
+        };
+        let server = &server;
+        async move {
+            fetch_dar_from_coordinator(
+                &server.node,
+                &server.coordinator,
+                &request,
+                &server.node.noise_retry,
+            )
+            .await
+        }
+    };
+
+    let (first, second) = tokio::join!(fetch(0), fetch(1));
+
+    assert!(first? == dars[0].1, "the first fetch read other bytes");
+    assert!(second? == dars[1].1, "the second fetch read other bytes");
     Ok(())
 }
 

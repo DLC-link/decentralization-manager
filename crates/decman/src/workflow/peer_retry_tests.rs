@@ -69,6 +69,8 @@ struct Coordinator {
     reports: Mutex<Vec<DeclineInvitationPayload>>,
     dar_requests: Mutex<Vec<RequestDarPayload>>,
     command_chunks: AtomicUsize,
+    /// How long each `RequestDar` answer waits after the DAR is cached.
+    dar_hold: Duration,
 }
 
 impl Coordinator {
@@ -212,6 +214,92 @@ async fn upload_dar(request: hyper::Request<Body>, uploads: Uploads) -> Result<R
         .body(body)?)
 }
 
+/// Give `node` a Noise key, and serve `state` as a coordinator that knows
+/// that key. Returns the peer entry that names the coordinator.
+async fn serve(node: &NodeConfig, state: Arc<Coordinator>) -> Result<(Peer, JoinHandle<Result>)> {
+    let keys = NoiseKeypair::generate();
+    tokio::fs::create_dir_all(node.data_dir()).await?;
+    keys.save_to_file(node.key_file_path()).await?;
+
+    let coordinator_keys = NoiseKeypair::generate();
+    let psk = *coordinator_keys.derive_psk(&keys.public_key);
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let coordinator = Peer {
+        participant_id: CantonId::parse(&format!("coordinator::1220{}", "b".repeat(64)))?,
+        name: "Scripted coordinator".into(),
+        address: "127.0.0.1".into(),
+        port: listener.local_addr()?.port(),
+        public_key: coordinator_keys.public_key_hex(),
+        party: None,
+    };
+    let server = tokio::spawn(async move {
+        loop {
+            let (socket, _) = listener.accept().await?;
+            let served = state.clone();
+            hyper_noise::server::serve_http(
+                socket,
+                Responder::new(move |_: &[u8]| Some(psk)),
+                move |_: &[u8], request: hyper::Request<Body>| {
+                    let served = served.clone();
+                    async move {
+                        let bytes = hyper::body::to_bytes(request.into_body()).await?;
+                        let message = Message::from_bytes(&bytes)?;
+                        let dar_request = message.msg_type == MessageType::RequestDar;
+                        let reply = served.answer(message)?;
+                        if dar_request {
+                            tokio::time::sleep(served.dar_hold).await;
+                        }
+                        Ok::<_, anyhow::Error>(Response::new(Body::from(reply.to_bytes())))
+                    }
+                },
+                Some(Duration::from_secs(5)),
+            )
+            .await?;
+        }
+        #[allow(unreachable_code)]
+        Ok::<(), anyhow::Error>(())
+    });
+    Ok((coordinator, server))
+}
+
+/// A peer node and a scripted coordinator that serves DARs, for tests that
+/// fetch DARs without the peer loop.
+pub(super) struct DarServer {
+    pub(super) node: NodeConfig,
+    pub(super) coordinator: Peer,
+    server: JoinHandle<Result>,
+    _root: tempfile::TempDir,
+}
+
+impl DarServer {
+    /// Serve `dars` by index. Each `RequestDar` answer waits `hold` after
+    /// the coordinator cached the DAR, so a second request can replace the
+    /// cache before the first reads its chunks.
+    pub(super) async fn start(dars: Vec<(String, Vec<u8>)>, hold: Duration) -> Result<Self> {
+        let root = tempfile::tempdir()?;
+        let mut node = NodeConfig::default().with_root_dir(root.path());
+        node.node.participant_id = Some(CantonId::parse(&format!("peer::1220{}", "a".repeat(64)))?);
+        let state = Arc::new(Coordinator {
+            dars,
+            dar_hold: hold,
+            ..Coordinator::default()
+        });
+        let (coordinator, server) = serve(&node, state).await?;
+        Ok(Self {
+            node,
+            coordinator,
+            server,
+            _root: root,
+        })
+    }
+}
+
+impl Drop for DarServer {
+    fn drop(&mut self) {
+        self.server.abort();
+    }
+}
+
 /// Drive the real peer loop through `commands` from a scripted coordinator.
 async fn run_commands(kind: WorkflowKind, commands: Vec<Message>) -> Result<PeerRun> {
     run_script(
@@ -238,21 +326,13 @@ pub(super) async fn run_script(kind: WorkflowKind, script: Script) -> Result<Pee
     node.canton.admin_api_port = participant.port;
     let db = crate::db::connect(&node.db_path()).await?;
     crate::db::MIGRATOR.run(&db).await?;
-    let keys = NoiseKeypair::generate();
-    tokio::fs::create_dir_all(node.data_dir()).await?;
-    keys.save_to_file(node.key_file_path()).await?;
-
-    let coordinator_keys = NoiseKeypair::generate();
-    let psk = *coordinator_keys.derive_psk(&keys.public_key);
-    let listener = TcpListener::bind("127.0.0.1:0").await?;
-    let coordinator = Peer {
-        participant_id: CantonId::parse(&format!("coordinator::1220{}", "b".repeat(64)))?,
-        name: "Scripted coordinator".into(),
-        address: "127.0.0.1".into(),
-        port: listener.local_addr()?.port(),
-        public_key: coordinator_keys.public_key_hex(),
-        party: None,
-    };
+    let state = Arc::new(Coordinator {
+        commands: Mutex::new(script.commands.into()),
+        command_payload: script.command_payload,
+        dars: script.dars,
+        ..Coordinator::default()
+    });
+    let (coordinator, server) = serve(&node, state.clone()).await?;
     let instance = uuid::Uuid::new_v4().to_string();
     let invitation = serde_json::json!({
         "dar_filenames": script.dar_filenames,
@@ -270,35 +350,6 @@ pub(super) async fn run_script(kind: WorkflowKind, script: Script) -> Result<Pee
     .execute(&db)
     .await?;
 
-    let state = Arc::new(Coordinator {
-        commands: Mutex::new(script.commands.into()),
-        command_payload: script.command_payload,
-        dars: script.dars,
-        ..Coordinator::default()
-    });
-    let served = state.clone();
-    let server = tokio::spawn(async move {
-        loop {
-            let (socket, _) = listener.accept().await?;
-            let served = served.clone();
-            hyper_noise::server::serve_http(
-                socket,
-                Responder::new(move |_: &[u8]| Some(psk)),
-                move |_: &[u8], request: hyper::Request<Body>| {
-                    let served = served.clone();
-                    async move {
-                        let bytes = hyper::body::to_bytes(request.into_body()).await?;
-                        let reply = served.answer(Message::from_bytes(&bytes)?)?;
-                        Ok::<_, anyhow::Error>(Response::new(Body::from(reply.to_bytes())))
-                    }
-                },
-                Some(Duration::from_secs(5)),
-            )
-            .await?;
-        }
-        #[allow(unreachable_code)]
-        Ok::<(), anyhow::Error>(())
-    });
     let outcome = tokio::time::timeout(
         Duration::from_secs(30),
         start_peer(
