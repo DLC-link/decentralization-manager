@@ -1934,7 +1934,7 @@ async fn change_hidden(
         (status = 200, description = "Confirmations hidden", body = MessageResponse),
         (status = 400, description = "No confirmation named, more than 100, an empty id, or an id over 256 bytes", body = ErrorResponse),
         (status = 401, description = "Unauthorized", body = ErrorResponse),
-        (status = 403, description = "Forbidden: admin role required", body = ErrorResponse),
+        (status = 403, description = "Forbidden: admin role required, or the token has no subject", body = ErrorResponse),
         (status = 404, description = "This node does not serve the party", body = ErrorResponse),
         (status = 500, description = "Internal server error", body = ErrorResponse)
     )
@@ -1949,6 +1949,13 @@ pub async fn hide_confirmations(
         Ok(principal) => AuditActor::from(&principal),
         Err(resp) => return resp,
     };
+    // The hidden row names who hid the action. A token without a subject
+    // would name nobody.
+    if actor.sub.is_empty() {
+        return HttpResponse::Forbidden().json(ErrorResponse {
+            error: "The token has no subject, so the hide cannot record who made it.".to_string(),
+        });
+    }
     let cids = match requested_confirmations(&data, &body).await {
         Ok(cids) => cids,
         Err(resp) => return resp,
@@ -5435,7 +5442,8 @@ mod archival_state_tests {
 #[cfg(test)]
 mod hiding_tests {
     use actix_web::{
-        App,
+        App, HttpMessage,
+        dev::Service,
         http::{StatusCode, header::AUTHORIZATION},
         test as actix_test,
     };
@@ -5444,7 +5452,7 @@ mod hiding_tests {
 
     use super::*;
     use crate::{
-        auth::mock::MOCK_USER_ID,
+        auth::{Principal, mock::MOCK_USER_ID},
         config::{KeycloakConfig, PartyCredentials},
         db::MIGRATOR,
         server::middleware::AuthMiddleware,
@@ -5630,6 +5638,49 @@ mod hiding_tests {
         let details: Value = serde_json::from_str(&audit[0].details)?;
         assert_eq!(details["admin_sub"], "admin-sub");
         assert_eq!(details["admin_email"], "admin@example.com");
+        Ok(())
+    }
+
+    /// The hidden row names who hid the action, so a token without a subject
+    /// cannot hide anything.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_hide_by_a_token_without_a_subject_is_refused(pool: SqlitePool) -> Result {
+        let data = served_state(&pool).await?;
+        let roles: Vec<String> = data.admin_role.iter().cloned().collect();
+        let app = actix_test::init_service(
+            App::new()
+                .app_data(data)
+                .wrap_fn(move |request, service| {
+                    request.extensions_mut().insert(Principal {
+                        sub: String::new(),
+                        issuer: "test".to_string(),
+                        roles: roles.clone(),
+                        email: Some("admin@example.com".to_string()),
+                    });
+                    service.call(request)
+                })
+                .service(hide_confirmations),
+        )
+        .await;
+
+        let response =
+            actix_test::call_service(&app, request("/governance/hide", &["00a"])?.to_request())
+                .await;
+
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        let body: Value = actix_test::read_body_json(response).await;
+        assert!(
+            body["error"]
+                .as_str()
+                .is_some_and(|e| e.contains("no subject")),
+            "{body}"
+        );
+        assert!(hidden(&pool).await?.is_empty());
+        assert!(
+            pool.get_governance_audit(&party_id()?, 50, 0)
+                .await?
+                .is_empty()
+        );
         Ok(())
     }
 
