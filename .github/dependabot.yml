@@ -16,6 +16,7 @@ updates:
   - package-ecosystem: npm
     directories:
       - "/crates/decman/frontend"
+      - "/crates/decman-dapp/frontend"
       - "/e2e"
     schedule:
       interval: weekly
