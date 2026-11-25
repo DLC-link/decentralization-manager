@@ -881,9 +881,12 @@ where
     let step = record.step.label();
     let write = tokio::spawn(async move {
         let submitted = tokio::spawn(submission).await.unwrap_or_else(|e| {
+            tracing::error!("The {step} submission ended without an outcome: {e}");
             Submitted::failed(
                 StatusCode::INTERNAL_SERVER_ERROR,
-                format!("The {step} submission ended without an outcome: {e}"),
+                format!(
+                    "The {step} submission ended without an outcome. See the DecMan server log."
+                ),
             )
         });
         record.finish(db, submitted).await
@@ -892,7 +895,7 @@ where
         tracing::error!("The {step} write ended without an outcome: {e}");
         Some((
             StatusCode::INTERNAL_SERVER_ERROR,
-            format!("The {step} write ended without an outcome: {e}"),
+            format!("The {step} write ended without an outcome. See the DecMan server log."),
         ))
     });
     match failure {
@@ -1276,10 +1279,8 @@ async fn submit_proposal(
     let channel = match data.config.ledger_channel().await {
         Ok(channel) => channel,
         Err(e) => {
-            return Submitted::failed(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Failed to connect to ledger API: {e:#}"),
-            );
+            let (status, error) = submission_failure("Failed to create proposal", &e);
+            return Submitted::failed(status, error);
         }
     };
 
@@ -3941,6 +3942,8 @@ mod mediator_timeout_tests {
             message.starts_with("The execute submission ended without an outcome"),
             "{message}"
         );
+        // The panic text is internal and goes to the server log only.
+        assert!(!message.contains("no handler maps"), "{message}");
         Ok(())
     }
 
@@ -3963,6 +3966,55 @@ mod mediator_timeout_tests {
             .await?;
             assert_eq!(status, StatusCode::GATEWAY_TIMEOUT, "{event:?}");
             assert_eq!(row, Some(("failed".to_string(), Some(error))), "{event:?}");
+        }
+        Ok(())
+    }
+
+    /// The Ledger API error names its address. Any signed-in user can read
+    /// the audit trail, so the answer and the row keep only the category.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_failed_ledger_connection_hides_its_address(pool: SqlitePool) -> Result {
+        let _serial = super::action_metrics_tests::SERIAL.lock().await;
+        for (event, uri, context, body) in writes() {
+            let app = actix_test::init_service(
+                App::new()
+                    .app_data(state(pool.clone(), 1).await?)
+                    .wrap(AuthMiddleware)
+                    .service(propose_action)
+                    .service(confirm_action)
+                    .service(execute_action)
+                    .service(expire_confirmation)
+                    .service(cancel_confirmation)
+                    .service(cancel_proposal),
+            )
+            .await;
+            let request = actix_test::TestRequest::post()
+                .uri(uri)
+                .insert_header((AUTHORIZATION, "Bearer any-token"))
+                .set_json(body)
+                .to_request();
+
+            let response = actix_test::call_service(&app, request).await;
+
+            assert_eq!(
+                response.status(),
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "{event:?}"
+            );
+            let body: serde_json::Value = actix_test::read_body_json(response).await;
+            let error = body["error"].as_str().context("no error in the body")?;
+            let context = if matches!(event, AuditEvent::Propose) {
+                "Failed to create proposal"
+            } else {
+                context
+            };
+            assert_eq!(
+                error,
+                format!("{context}: the Ledger API connection failed. See the DecMan server log."),
+                "{event:?}"
+            );
+            let (_, message) = audit_row(&pool, event).await?;
+            assert_eq!(message.as_deref(), Some(error), "{event:?}");
         }
         Ok(())
     }
@@ -4328,11 +4380,16 @@ mod paid_accept_disclosure_tests {
         let (status, error) = execute_failure(&anyhow::anyhow!("ledger said no"));
 
         assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
-        assert_eq!(error, "Failed to execute action: ledger said no");
+        assert_eq!(
+            error,
+            "Failed to execute action: ledger said no. See the DecMan server log."
+        );
     }
 
+    /// The answer and the audit row name what failed. What the other service
+    /// said stays in the server log.
     #[test]
-    fn an_execute_failure_names_its_underlying_cause() {
+    fn an_execute_failure_names_its_cause_but_not_the_chain() {
         let error = anyhow::anyhow!("scan answered 403 Forbidden: access denied")
             .context("Failed to fetch the open mining rounds from scan");
 
@@ -4340,8 +4397,8 @@ mod paid_accept_disclosure_tests {
 
         assert_eq!(
             error,
-            "Failed to execute action: Failed to fetch the open mining rounds from scan: \
-             scan answered 403 Forbidden: access denied"
+            "Failed to execute action: Failed to fetch the open mining rounds from scan. See \
+             the DecMan server log."
         );
     }
 }
