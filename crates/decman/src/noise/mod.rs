@@ -720,8 +720,13 @@ async fn send_noise_message_with_timeout(
         return Err(NoiseError::from_refusal(status, &body));
     }
 
-    let resp_body_bytes = hyper::body::to_bytes(response.body_mut()).await?;
-    Ok(resp_body_bytes)
+    // `send_request` bounds only the reply head. Without this, a body that
+    // stalls holds the caller, and any lock it holds, until the peer closes.
+    match tokio::time::timeout(timeout, hyper::body::to_bytes(response.body_mut())).await {
+        Ok(Ok(bytes)) => Ok(bytes),
+        Ok(Err(e)) => Err(NoiseError::from(e)),
+        Err(_) => Err(NoiseError::RequestTimeout),
+    }
 }
 
 /// Owned, zeroizing secp256k1 secret-key bytes.

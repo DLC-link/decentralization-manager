@@ -71,6 +71,17 @@ struct Coordinator {
     command_chunks: AtomicUsize,
     /// How long each `RequestDar` answer waits after the DAR is cached.
     dar_hold: Duration,
+    dar_reply: DarReply,
+}
+
+/// How the scripted coordinator answers a `RequestDar`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(super) enum DarReply {
+    /// Inline while the DAR fits one frame, chunked above that.
+    #[default]
+    Served,
+    /// The reply head, then a body that never ends.
+    Stalled,
 }
 
 impl Coordinator {
@@ -249,6 +260,14 @@ async fn serve(node: &NodeConfig, state: Arc<Coordinator>) -> Result<(Peer, Join
                         if dar_request {
                             tokio::time::sleep(served.dar_hold).await;
                         }
+                        if dar_request && served.dar_reply == DarReply::Stalled {
+                            let (sender, body) = Body::channel();
+                            tokio::spawn(async move {
+                                let _open = sender;
+                                std::future::pending::<()>().await;
+                            });
+                            return Ok(Response::new(body));
+                        }
                         Ok::<_, anyhow::Error>(Response::new(Body::from(reply.to_bytes())))
                     }
                 },
@@ -277,14 +296,29 @@ impl DarServer {
     /// the coordinator cached the DAR, so a second request can replace the
     /// cache before the first reads its chunks.
     pub(super) async fn start(dars: Vec<(String, Vec<u8>)>, hold: Duration) -> Result<Self> {
-        let root = tempfile::tempdir()?;
-        let mut node = NodeConfig::default().with_root_dir(root.path());
-        node.node.participant_id = Some(CantonId::parse(&format!("peer::1220{}", "a".repeat(64)))?);
-        let state = Arc::new(Coordinator {
+        Self::with(Coordinator {
             dars,
             dar_hold: hold,
             ..Coordinator::default()
-        });
+        })
+        .await
+    }
+
+    /// Serve `dars` by index, each `RequestDar` answered as `reply` says.
+    pub(super) async fn replying(dars: Vec<(String, Vec<u8>)>, reply: DarReply) -> Result<Self> {
+        Self::with(Coordinator {
+            dars,
+            dar_reply: reply,
+            ..Coordinator::default()
+        })
+        .await
+    }
+
+    async fn with(state: Coordinator) -> Result<Self> {
+        let root = tempfile::tempdir()?;
+        let mut node = NodeConfig::default().with_root_dir(root.path());
+        node.node.participant_id = Some(CantonId::parse(&format!("peer::1220{}", "a".repeat(64)))?);
+        let state = Arc::new(state);
         let (coordinator, server) = serve(&node, state.clone()).await?;
         Ok(Self {
             node,

@@ -6,6 +6,7 @@ use anyhow::Context;
 
 use super::peer::{DarPull, OversizedPull, fetch_dar_from_coordinator};
 use crate::{
+    config::NoiseRetryConfig,
     consts::MAX_CONSECUTIVE_STEP_FAILURES,
     error::Result,
     noise::{CHUNK_SIZE, MAX_CHUNKED_TOTAL_SIZE, MAX_PAYLOAD_SIZE, Message, MessageType},
@@ -13,7 +14,8 @@ use crate::{
     utils,
     workflow::{
         peer_retry_tests::{
-            COORDINATOR_RUN, DarServer, PeerRun, Script, assert_reported, chunked_meta, run_script,
+            COORDINATOR_RUN, DarReply, DarServer, PeerRun, Script, assert_reported, chunked_meta,
+            run_script,
         },
         validation::hash_dar,
     },
@@ -284,6 +286,42 @@ async fn two_fetches_from_one_coordinator_take_turns() -> Result {
 
     assert!(first? == dars[0].1, "the first fetch read other bytes");
     assert!(second? == dars[1].1, "the second fetch read other bytes");
+    Ok(())
+}
+
+/// The transport bounds only the reply head. A coordinator that sends the
+/// head and then stalls the body must not hold the fetch, and the lock every
+/// other fetch from it waits on, until the node restarts.
+#[tokio::test]
+async fn a_reply_body_that_stalls_ends_the_fetch() -> Result {
+    let dars = dars(&[100]);
+    let server = DarServer::replying(dars.clone(), DarReply::Stalled).await?;
+    let request = RequestDarPayload {
+        workflow_instance: COORDINATOR_RUN.to_string(),
+        index: 0,
+        filename: dars[0].0.clone(),
+    };
+    let retry = NoiseRetryConfig {
+        per_attempt_timeout_secs: 1,
+        max_attempts: 1,
+        backoff_ms: 0,
+    };
+
+    let fetch =
+        fetch_dar_from_coordinator(&server.node, &server.coordinator, &request, &retry, |_| {
+            Ok(())
+        });
+    // Below the scripted server's own 5 second limit, which would end the
+    // body for it.
+    let outcome = tokio::time::timeout(Duration::from_secs(3), fetch)
+        .await
+        .context("the fetch still waits on the stalled body")?;
+
+    let error = outcome.expect_err("a stalled body was read");
+    assert!(
+        format!("{error:#}").contains("Request timeout"),
+        "{error:#}"
+    );
     Ok(())
 }
 
