@@ -49,15 +49,15 @@ use crate::{
     config::{NetworkConfig, NodeConfig, PackageConfig, default_package_config},
     db::{
         rows::{ChainAuditCacheRow, GovernanceMediatorTimeoutRow},
-        schema::{SchemaRead, SchemaWrite},
+        schema::{Commitable, SchemaRead, SchemaWrite},
     },
     error::Result,
     noise::{Message, MessageType, NoiseKeypair, parse_public_key, send_noise_message},
     server::{
         AppState,
         audit::{
-            AuditActor, AuditEvent, AuditParams, HidingAuditEvent, log_hiding_audit,
-            spawn_audit_log, with_proposal_cid,
+            AuditActor, AuditEvent, AuditParams, HidingAuditEvent, log_hiding_failure,
+            spawn_audit_log, with_proposal_cid, write_hiding_audit,
         },
         chain_audit,
         ledger_rejection::{mediator_timeout, submission_failure},
@@ -1858,6 +1858,41 @@ async fn requested_confirmations(
     Ok(cids)
 }
 
+/// Hides or unhides `cids` and writes the audit row in one transaction, so a
+/// failed audit write leaves the hidden set as it was. A failure gets its own
+/// row, written outside the rolled-back transaction. Returns how many
+/// confirmations an unhide found hidden, or how many a hide named.
+async fn change_hidden(
+    db: &SqlitePool,
+    event: HidingAuditEvent,
+    party_id: &CantonId,
+    cids: &[String],
+    actor: &AuditActor,
+) -> std::result::Result<u64, String> {
+    let change = async {
+        let mut tx = db.begin_transaction().await?;
+        let changed = match event {
+            HidingAuditEvent::Hide => {
+                let hidden_by = actor.email.as_deref().unwrap_or(&actor.sub);
+                tx.hide_confirmations(party_id, cids, hidden_by).await?;
+                cids.len() as u64
+            }
+            HidingAuditEvent::Unhide => tx.unhide_confirmations(party_id, cids).await?,
+        };
+        write_hiding_audit(&mut tx, event, party_id, cids, actor).await?;
+        tx.commit().await?;
+        Ok::<_, anyhow::Error>(changed)
+    };
+    match change.await {
+        Ok(changed) => Ok(changed),
+        Err(e) => {
+            let error = format!("{e:#}");
+            log_hiding_failure(db, event, party_id, cids, actor, &error).await;
+            Err(error)
+        }
+    }
+}
+
 /// Hide an action that cannot be archived, on this node only
 ///
 /// Stores the confirmation ids and writes an audit row. Nothing is sent to the
@@ -1891,23 +1926,8 @@ pub async fn hide_confirmations(
         Err(resp) => return resp,
     };
     let party_id = &body.party_id;
-    let hidden_by = actor.email.as_deref().unwrap_or(&actor.sub);
-    let outcome = data
-        .db
-        .hide_confirmations(party_id, &cids, hidden_by)
-        .await
-        .map_err(|e| format!("{e:#}"));
-    log_hiding_audit(
-        &data.db,
-        HidingAuditEvent::Hide,
-        party_id,
-        &cids,
-        &actor,
-        outcome.as_ref().err().map(String::as_str),
-    )
-    .await;
-    match outcome {
-        Ok(()) => HttpResponse::Ok().json(MessageResponse {
+    match change_hidden(&data.db, HidingAuditEvent::Hide, party_id, &cids, &actor).await {
+        Ok(_) => HttpResponse::Ok().json(MessageResponse {
             message: format!("Confirmations hidden on this node: {}.", cids.len()),
         }),
         Err(e) => {
@@ -1950,21 +1970,7 @@ pub async fn unhide_confirmations(
         Err(resp) => return resp,
     };
     let party_id = &body.party_id;
-    let outcome = data
-        .db
-        .unhide_confirmations(party_id, &cids)
-        .await
-        .map_err(|e| format!("{e:#}"));
-    log_hiding_audit(
-        &data.db,
-        HidingAuditEvent::Unhide,
-        party_id,
-        &cids,
-        &actor,
-        outcome.as_ref().err().map(String::as_str),
-    )
-    .await;
-    match outcome {
+    match change_hidden(&data.db, HidingAuditEvent::Unhide, party_id, &cids, &actor).await {
         Ok(unhidden) => HttpResponse::Ok().json(MessageResponse {
             message: format!("Confirmations unhidden on this node: {unhidden}."),
         }),
@@ -5370,6 +5376,25 @@ mod hiding_tests {
         assert!(hidden(&pool).await?.is_empty());
         let audit = pool.get_governance_audit(&party_id()?, 50, 0).await?;
         assert!(audit.is_empty());
+        Ok(())
+    }
+
+    /// A hide or an unhide and its audit row commit together. When the row
+    /// cannot be written, the hidden set stays as it was.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_failed_audit_write_undoes_the_change(pool: SqlitePool) -> Result {
+        pool.hide_confirmations(&party_id()?, &["00kept".to_string()], "admin")
+            .await?;
+        sqlx::query("DROP TABLE governance_audit")
+            .execute(&pool)
+            .await?;
+
+        let (status, body) = send(&pool, "/governance/hide", &["00new"]).await?;
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{body}");
+        let (status, body) = send(&pool, "/governance/unhide", &["00kept"]).await?;
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{body}");
+
+        assert_eq!(hidden(&pool).await?, ["00kept"]);
         Ok(())
     }
 

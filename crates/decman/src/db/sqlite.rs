@@ -720,21 +720,8 @@ impl SchemaWrite for SqlitePool {
         contract_ids: &[String],
         hidden_by: &str,
     ) -> Result<()> {
-        let now = chrono::Utc::now().timestamp();
         let mut tx = self.begin().await?;
-        for contract_id in contract_ids {
-            sqlx::query(
-                "INSERT INTO governance_hidden_confirmation \
-                 (party_id, contract_id, hidden_by, hidden_at) VALUES (?, ?, ?, ?) \
-                 ON CONFLICT(party_id, contract_id) DO NOTHING",
-            )
-            .bind(party_id.to_string())
-            .bind(contract_id)
-            .bind(hidden_by)
-            .bind(now)
-            .execute(&mut *tx)
-            .await?;
-        }
+        Commitable::hide_confirmations(&mut tx, party_id, contract_ids, hidden_by).await?;
         tx.commit().await?;
         Ok(())
     }
@@ -745,18 +732,7 @@ impl SchemaWrite for SqlitePool {
         contract_ids: &[String],
     ) -> Result<u64> {
         let mut tx = self.begin().await?;
-        let mut unhidden = 0;
-        for contract_id in contract_ids {
-            unhidden += sqlx::query(
-                "DELETE FROM governance_hidden_confirmation \
-                 WHERE party_id = ? AND contract_id = ?",
-            )
-            .bind(party_id.to_string())
-            .bind(contract_id)
-            .execute(&mut *tx)
-            .await?
-            .rows_affected();
-        }
+        let unhidden = Commitable::unhide_confirmations(&mut tx, party_id, contract_ids).await?;
         tx.commit().await?;
         Ok(unhidden)
     }
@@ -1050,6 +1026,49 @@ impl Commitable for sqlx::Transaction<'static, sqlx::Sqlite> {
             .await?;
 
         Ok(())
+    }
+
+    async fn hide_confirmations(
+        &mut self,
+        party_id: &CantonId,
+        contract_ids: &[String],
+        hidden_by: &str,
+    ) -> Result {
+        let now = chrono::Utc::now().timestamp();
+        for contract_id in contract_ids {
+            sqlx::query(
+                "INSERT INTO governance_hidden_confirmation \
+                 (party_id, contract_id, hidden_by, hidden_at) VALUES (?, ?, ?, ?) \
+                 ON CONFLICT(party_id, contract_id) DO NOTHING",
+            )
+            .bind(party_id.to_string())
+            .bind(contract_id)
+            .bind(hidden_by)
+            .bind(now)
+            .execute(&mut **self)
+            .await?;
+        }
+        Ok(())
+    }
+
+    async fn unhide_confirmations(
+        &mut self,
+        party_id: &CantonId,
+        contract_ids: &[String],
+    ) -> Result<u64> {
+        let mut unhidden = 0;
+        for contract_id in contract_ids {
+            unhidden += sqlx::query(
+                "DELETE FROM governance_hidden_confirmation \
+                 WHERE party_id = ? AND contract_id = ?",
+            )
+            .bind(party_id.to_string())
+            .bind(contract_id)
+            .execute(&mut **self)
+            .await?
+            .rows_affected();
+        }
+        Ok(unhidden)
     }
 
     async fn insert_peer(&mut self, peer: &Peer) -> Result {

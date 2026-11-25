@@ -1,8 +1,8 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use sqlx::SqlitePool;
+use sqlx::{SqliteConnection, SqliteExecutor, SqlitePool};
 
-use crate::{auth::Principal, canton_id::CantonId};
+use crate::{auth::Principal, canton_id::CantonId, error::Result};
 
 use super::types::GovernanceType;
 
@@ -148,42 +148,70 @@ pub enum HidingAuditEvent {
     Unhide,
 }
 
-/// Write the row for a hide or an unhide of confirmations on this node.
-/// Neither touches the ledger, so the party is also the "member", as for a
-/// purge. `error` is `None` when the database write succeeded.
+/// The row for a hide or an unhide of confirmations on this node. Neither
+/// touches the ledger, so the party is also the "member", as for a purge.
+/// `error` is `None` when the change succeeded.
+fn hiding_row<'a>(
+    event: HidingAuditEvent,
+    party_id: &'a CantonId,
+    details: &'a str,
+    error: Option<&'a str>,
+) -> AuditRow<'a> {
+    let (event_type, action_summary) = match event {
+        HidingAuditEvent::Hide => (AuditEvent::Hide, "hide_confirmations"),
+        HidingAuditEvent::Unhide => (AuditEvent::Unhide, "unhide_confirmations"),
+    };
+    AuditRow {
+        event_type,
+        party_id,
+        member_party_id: party_id,
+        governance_type: NO_GOVERNANCE_TYPE,
+        action_summary,
+        details,
+        status: if error.is_some() { "failed" } else { "success" },
+        error_message: error,
+    }
+}
+
+fn hiding_details(confirmation_cids: &[String], actor: &AuditActor) -> String {
+    serde_json::json!({
+        "confirmation_cids": confirmation_cids,
+        "admin_sub": actor.sub,
+        "admin_email": actor.email,
+    })
+    .to_string()
+}
+
+/// Write the row of a hide or an unhide that succeeded, on the transaction
+/// that made the change. The change and its row then commit together.
+///
+/// # Errors
+/// Returns an error if the insert fails. The caller must then roll back.
+pub async fn write_hiding_audit(
+    tx: &mut SqliteConnection,
+    event: HidingAuditEvent,
+    party_id: &CantonId,
+    confirmation_cids: &[String],
+    actor: &AuditActor,
+) -> Result {
+    let details = hiding_details(confirmation_cids, actor);
+    try_insert_audit_row(tx, hiding_row(event, party_id, &details, None)).await?;
+    Ok(())
+}
+
+/// Write the row of a hide or an unhide that failed with `error`.
 ///
 /// Waits for the write, so the row exists when the response is sent.
-pub async fn log_hiding_audit(
+pub async fn log_hiding_failure(
     pool: &SqlitePool,
     event: HidingAuditEvent,
     party_id: &CantonId,
     confirmation_cids: &[String],
     actor: &AuditActor,
-    error: Option<&str>,
+    error: &str,
 ) {
-    let (event_type, action_summary) = match event {
-        HidingAuditEvent::Hide => (AuditEvent::Hide, "hide_confirmations"),
-        HidingAuditEvent::Unhide => (AuditEvent::Unhide, "unhide_confirmations"),
-    };
-    let details = serde_json::json!({
-        "confirmation_cids": confirmation_cids,
-        "admin_sub": actor.sub,
-        "admin_email": actor.email,
-    });
-    insert_audit_row(
-        pool,
-        AuditRow {
-            event_type,
-            party_id,
-            member_party_id: party_id,
-            governance_type: NO_GOVERNANCE_TYPE,
-            action_summary,
-            details: &details.to_string(),
-            status: if error.is_some() { "failed" } else { "success" },
-            error_message: error,
-        },
-    )
-    .await;
+    let details = hiding_details(confirmation_cids, actor);
+    insert_audit_row(pool, hiding_row(event, party_id, &details, Some(error))).await;
 }
 
 /// One `governance_audit` row as it is bound.
@@ -199,12 +227,21 @@ struct AuditRow<'a> {
 }
 
 async fn insert_audit_row(pool: &SqlitePool, row: AuditRow<'_>) {
+    if let Err(e) = try_insert_audit_row(pool, row).await {
+        tracing::error!("Failed to write governance audit log: {e}");
+    }
+}
+
+async fn try_insert_audit_row<'c>(
+    executor: impl SqliteExecutor<'c>,
+    row: AuditRow<'_>,
+) -> sqlx::Result<()> {
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs() as i64;
 
-    let result = sqlx::query(
+    sqlx::query(
         r"
         INSERT INTO governance_audit (
             timestamp, event_type, party_id, member_party_id,
@@ -223,12 +260,9 @@ async fn insert_audit_row(pool: &SqlitePool, row: AuditRow<'_>) {
     .bind(row.status)
     .bind(row.error_message)
     .bind(now)
-    .execute(pool)
-    .await;
-
-    if let Err(e) = result {
-        tracing::error!("Failed to write governance audit log: {e}");
-    }
+    .execute(executor)
+    .await?;
+    Ok(())
 }
 
 /// Spawn a fire-and-forget audit log write.

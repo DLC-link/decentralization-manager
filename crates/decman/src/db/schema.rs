@@ -323,6 +323,22 @@ pub trait Commitable {
     /// Delete all peers
     async fn delete_all_peers(&mut self) -> Result;
 
+    /// Hide confirmations on this node. A confirmation already hidden keeps
+    /// its first record.
+    async fn hide_confirmations(
+        &mut self,
+        party_id: &CantonId,
+        contract_ids: &[String],
+        hidden_by: &str,
+    ) -> Result;
+
+    /// Unhide hidden confirmations, and return how many were hidden.
+    async fn unhide_confirmations(
+        &mut self,
+        party_id: &CantonId,
+        contract_ids: &[String],
+    ) -> Result<u64>;
+
     /// Insert a single peer
     async fn insert_peer(&mut self, peer: &Peer) -> Result;
 
