@@ -103,6 +103,7 @@ export function NewParty({ onCreated }: { onCreated: () => void }) {
               min={1}
               value={signingThreshold}
               onChange={(e) => setSigningThreshold(Number(e.target.value))}
+              onBlur={() => setSigningThreshold(threshold(signingThreshold))}
             />
             {owners.length > 1 && proposal.signingThreshold === owners.length && (
               <span className="warning">
@@ -117,6 +118,7 @@ export function NewParty({ onCreated }: { onCreated: () => void }) {
               min={1}
               value={namespaceThreshold}
               onChange={(e) => setChosenNamespace(Number(e.target.value))}
+              onBlur={() => chosenNamespace !== null && setChosenNamespace(threshold(chosenNamespace))}
             />
             <span className="hint">
               Every party with the same owners shares one namespace, so this threshold applies to all of them. It
@@ -142,6 +144,7 @@ export function NewParty({ onCreated }: { onCreated: () => void }) {
               min={1}
               value={confirmationThreshold}
               onChange={(e) => setChosenConfirmation(Number(e.target.value))}
+              onBlur={() => chosenConfirmation !== null && setChosenConfirmation(threshold(chosenConfirmation))}
             />
             {hostCount > 1 && (
               <span className="hint">
@@ -174,6 +177,18 @@ export function NewParty({ onCreated }: { onCreated: () => void }) {
                 </div>
               ))}
             </dd>
+            <dt>Thresholds</dt>
+            <dd>
+              <div>
+                Signing {check.plan.signingThreshold} of {check.plan.owners.length} owners
+              </div>
+              <div>
+                Namespace {check.plan.namespaceThreshold} of {check.plan.owners.length} owners
+              </div>
+              <div>
+                Confirmation {check.plan.confirmationThreshold} of {check.plan.hosts.length} hosts
+              </div>
+            </dd>
             <dt>Hosts</dt>
             <dd>
               {check.plan.hosts.map((host) => (
@@ -189,7 +204,7 @@ export function NewParty({ onCreated }: { onCreated: () => void }) {
           the real topology transactions, and the other owners sign after.
         </p>
         <button disabled={'error' in check || busy} onClick={create}>
-          {busy ? 'Asking the participant…' : `Propose as ${acting?.name ?? '…'}`}
+          {busy ? 'Asking the participant…' : `Propose and sign as ${acting?.name ?? '…'}`}
         </button>
         <ErrorText error={error} />
       </Section>
