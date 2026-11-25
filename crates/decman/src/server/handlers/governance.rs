@@ -1799,23 +1799,57 @@ pub async fn cancel_confirmation(
     .await
 }
 
+/// The most confirmation ids one hide or unhide request may name. An action
+/// has at most one confirmation per member, far below this.
+const MAX_HIDDEN_PER_REQUEST: usize = 100;
+
+/// The longest confirmation id a hide or unhide request may name, in bytes.
+/// A Canton contract id is well below this.
+const MAX_CONFIRMATION_ID_LEN: usize = 256;
+
 /// The confirmation ids of a hide or unhide request, each once.
+///
+/// The request is refused unless this node serves the party. That check reads
+/// only the local party list, so the rows stay bounded without a ledger read.
 #[allow(clippy::result_large_err)]
-fn requested_confirmations(
+async fn requested_confirmations(
+    data: &AppState,
     body: &HideConfirmationsRequest,
 ) -> std::result::Result<Vec<String>, HttpResponse> {
+    let refuse = |error: String| Err(HttpResponse::BadRequest().json(ErrorResponse { error }));
     if body.confirmation_cids.is_empty() {
-        return Err(HttpResponse::BadRequest().json(ErrorResponse {
-            error: "Name at least one confirmation.".to_string(),
-        }));
+        return refuse("Name at least one confirmation.".to_string());
+    }
+    if body.confirmation_cids.len() > MAX_HIDDEN_PER_REQUEST {
+        return refuse(format!(
+            "Name at most {MAX_HIDDEN_PER_REQUEST} confirmations in one request."
+        ));
     }
     if body
         .confirmation_cids
         .iter()
         .any(|cid| cid.trim().is_empty())
     {
-        return Err(HttpResponse::BadRequest().json(ErrorResponse {
-            error: "A confirmation id is empty.".to_string(),
+        return refuse("A confirmation id is empty.".to_string());
+    }
+    if body
+        .confirmation_cids
+        .iter()
+        .any(|cid| cid.len() > MAX_CONFIRMATION_ID_LEN)
+    {
+        return refuse(format!(
+            "A confirmation id is longer than {MAX_CONFIRMATION_ID_LEN} bytes."
+        ));
+    }
+    let served = data
+        .party_credentials
+        .read()
+        .await
+        .iter()
+        .any(|credentials| credentials.dec_party_id == body.party_id);
+    if !served {
+        return Err(HttpResponse::NotFound().json(ErrorResponse {
+            error: "This node does not serve the party.".to_string(),
         }));
     }
     let mut cids = body.confirmation_cids.clone();
@@ -1835,9 +1869,10 @@ fn requested_confirmations(
     request_body = HideConfirmationsRequest,
     responses(
         (status = 200, description = "Confirmations hidden", body = MessageResponse),
-        (status = 400, description = "No confirmation named, or an empty id", body = ErrorResponse),
+        (status = 400, description = "No confirmation named, more than 100, an empty id, or an id over 256 bytes", body = ErrorResponse),
         (status = 401, description = "Unauthorized", body = ErrorResponse),
         (status = 403, description = "Forbidden: admin role required", body = ErrorResponse),
+        (status = 404, description = "This node does not serve the party", body = ErrorResponse),
         (status = 500, description = "Internal server error", body = ErrorResponse)
     )
 )]
@@ -1851,7 +1886,7 @@ pub async fn hide_confirmations(
         Ok(principal) => AuditActor::from(&principal),
         Err(resp) => return resp,
     };
-    let cids = match requested_confirmations(&body) {
+    let cids = match requested_confirmations(&data, &body).await {
         Ok(cids) => cids,
         Err(resp) => return resp,
     };
@@ -1893,9 +1928,10 @@ pub async fn hide_confirmations(
     request_body = HideConfirmationsRequest,
     responses(
         (status = 200, description = "Confirmations unhidden", body = MessageResponse),
-        (status = 400, description = "No confirmation named, or an empty id", body = ErrorResponse),
+        (status = 400, description = "No confirmation named, more than 100, an empty id, or an id over 256 bytes", body = ErrorResponse),
         (status = 401, description = "Unauthorized", body = ErrorResponse),
         (status = 403, description = "Forbidden: admin role required", body = ErrorResponse),
+        (status = 404, description = "This node does not serve the party", body = ErrorResponse),
         (status = 500, description = "Internal server error", body = ErrorResponse)
     )
 )]
@@ -1909,7 +1945,7 @@ pub async fn unhide_confirmations(
         Ok(principal) => AuditActor::from(&principal),
         Err(resp) => return resp,
     };
-    let cids = match requested_confirmations(&body) {
+    let cids = match requested_confirmations(&data, &body).await {
         Ok(cids) => cids,
         Err(resp) => return resp,
     };
@@ -4584,9 +4620,11 @@ mod confirmations_feed_tests {
         party: &CantonId,
         confirmation_cids: &[&str],
     ) -> Result<StatusCode> {
+        let data = AppState::for_test_on(None, pool.clone());
+        super::hiding_tests::serve(&data, party).await?;
         let app = actix_test::init_service(
             App::new()
-                .app_data(AppState::for_test_on(None, pool.clone()))
+                .app_data(data)
                 .wrap(AuthMiddleware)
                 .service(hide_confirmations)
                 .service(unhide_confirmations),
@@ -5190,10 +5228,35 @@ mod hiding_tests {
     use sqlx::SqlitePool;
 
     use super::*;
-    use crate::{auth::mock::MOCK_USER_ID, db::MIGRATOR, server::middleware::AuthMiddleware};
+    use crate::{
+        auth::mock::MOCK_USER_ID,
+        config::{KeycloakConfig, PartyCredentials},
+        db::MIGRATOR,
+        server::middleware::AuthMiddleware,
+    };
 
     fn party_id() -> Result<CantonId> {
         CantonId::parse(&format!("dec::1220{}", "ab".repeat(32)))
+    }
+
+    /// Makes `party` one this node serves.
+    pub(super) async fn serve(data: &AppState, party: &CantonId) -> Result {
+        data.party_credentials.write().await.push(PartyCredentials {
+            dec_party_id: party.clone(),
+            member_party_id: CantonId::parse(&format!("member::1220{}", "cd".repeat(32)))?,
+            user_id: "user".to_string(),
+            keycloak: KeycloakConfig::default(),
+            auth0: None,
+            packages: PackageConfig::default(),
+        });
+        Ok(())
+    }
+
+    /// A test state on `pool` that serves the party of these tests.
+    async fn served_state(pool: &SqlitePool) -> Result<web::Data<AppState>> {
+        let data = AppState::for_test_on(None, pool.clone());
+        serve(&data, &party_id()?).await?;
+        Ok(data)
     }
 
     fn request(uri: &str, cids: &[&str]) -> Result<actix_test::TestRequest> {
@@ -5205,9 +5268,18 @@ mod hiding_tests {
 
     /// Sends one request to the hide and unhide routes, as an admin.
     async fn send(pool: &SqlitePool, uri: &str, cids: &[&str]) -> Result<(StatusCode, Value)> {
+        send_to(served_state(pool).await?, uri, cids).await
+    }
+
+    /// Sends one request to the hide and unhide routes of `data`, as an admin.
+    async fn send_to(
+        data: web::Data<AppState>,
+        uri: &str,
+        cids: &[&str],
+    ) -> Result<(StatusCode, Value)> {
         let app = actix_test::init_service(
             App::new()
-                .app_data(AppState::for_test_on(None, pool.clone()))
+                .app_data(data)
                 .wrap(AuthMiddleware)
                 .service(hide_confirmations)
                 .service(unhide_confirmations),
@@ -5245,8 +5317,7 @@ mod hiding_tests {
         Ok(())
     }
 
-    /// The test state has no party credentials and no ledger. Hiding
-    /// needs neither.
+    /// The test state has no ledger. Hiding needs none.
     #[sqlx::test(migrator = "MIGRATOR")]
     async fn a_hide_is_stored_once_per_confirmation_and_audited(pool: SqlitePool) -> Result {
         let (status, body) = send(&pool, "/governance/hide", &["00b", "00a", "00a"]).await?;
@@ -5294,6 +5365,44 @@ mod hiding_tests {
                 let (status, body) = send(&pool, uri, cids).await?;
                 assert_eq!(status, StatusCode::BAD_REQUEST, "{uri} {cids:?}: {body}");
             }
+        }
+
+        assert!(hidden(&pool).await?.is_empty());
+        let audit = pool.get_governance_audit(&party_id()?, 50, 0).await?;
+        assert!(audit.is_empty());
+        Ok(())
+    }
+
+    /// The server stores what it is given, so a request is bounded: at most
+    /// 100 ids, each at most 256 bytes.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_request_over_the_limits_is_refused(pool: SqlitePool) -> Result {
+        let ids: Vec<String> = (0..=100).map(|i| format!("00{i:03}")).collect();
+        let too_many: Vec<&str> = ids.iter().map(String::as_str).collect();
+        let long = "0".repeat(257);
+        for uri in ["/governance/hide", "/governance/unhide"] {
+            for cids in [&too_many[..], &[long.as_str()][..]] {
+                let (status, body) = send(&pool, uri, cids).await?;
+                assert_eq!(status, StatusCode::BAD_REQUEST, "{uri}: {body}");
+            }
+        }
+        assert!(hidden(&pool).await?.is_empty());
+
+        let longest = "0".repeat(256);
+        let mut at_the_limits = too_many[..99].to_vec();
+        at_the_limits.push(&longest);
+        let (status, body) = send(&pool, "/governance/hide", &at_the_limits).await?;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(hidden(&pool).await?.len(), 100);
+        Ok(())
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_party_this_node_does_not_serve_is_refused(pool: SqlitePool) -> Result {
+        for uri in ["/governance/hide", "/governance/unhide"] {
+            let data = AppState::for_test_on(None, pool.clone());
+            let (status, body) = send_to(data, uri, &["00a"]).await?;
+            assert_eq!(status, StatusCode::NOT_FOUND, "{uri}: {body}");
         }
 
         assert!(hidden(&pool).await?.is_empty());
