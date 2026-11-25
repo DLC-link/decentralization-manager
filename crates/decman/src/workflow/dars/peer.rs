@@ -82,22 +82,38 @@ pub enum PullRefused {
         limit: usize,
     },
     #[error(
-        "the DARs of this run add up to {total} bytes so far, above the cap of {cap} bytes \
-         for one run"
+        "the DARs of this run add up to {} MiB so far, above the cap of {} MiB for one run. \
+         Send the DARs in several runs of at most {} MiB each",
+        mib(*total),
+        mib(*cap),
+        mib(*cap)
     )]
     RunTooLarge { total: usize, cap: usize },
-    #[error("DAR {filename} hashes to {actual} but the invitation pinned {pinned}")]
+    #[error(
+        "DAR {filename} hashes to {actual} but the invitation pinned {pinned}. Ask the \
+         coordinator's operator to check this DAR, then start a new run"
+    )]
     HashMiss {
         filename: String,
         actual: String,
         pinned: String,
     },
     #[error(
-        "The coordinator sent UploadDars without its DARs, and this node cannot pull them: \
-         a pull needs the coordinator's run instance and one hash for each DAR in the \
-         invitation"
+        "the coordinator sent no DARs, and this node cannot pull them: a pull needs the \
+         coordinator's run instance and one hash for each DAR in the invitation. The \
+         coordinator must send the bundle or be upgraded"
     )]
     NotPullable,
+}
+
+/// `bytes` in MiB: whole when it divides evenly, else to one decimal.
+fn mib(bytes: usize) -> String {
+    const MIB: usize = 1024 * 1024;
+    if bytes.is_multiple_of(MIB) {
+        (bytes / MIB).to_string()
+    } else {
+        format!("{:.1}", bytes as f64 / MIB as f64)
+    }
 }
 
 /// What a peer needs to read the DARs of its accepted invitation one by one.

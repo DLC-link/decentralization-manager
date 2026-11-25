@@ -132,6 +132,10 @@ async fn a_dar_that_misses_its_hash_stops_every_upload() -> Result {
 
     let error = error_of(&run)?;
     assert!(error.contains("DAR alpha.dar hashes to"), "{error}");
+    assert!(
+        error.ends_with("Ask the coordinator's operator to check this DAR, then start a new run"),
+        "{error}"
+    );
     // The coordinator serves the same bytes on every attempt, so the run ends
     // at once.
     assert_eq!(run.polls.len(), 1, "the peer retried");
@@ -223,8 +227,9 @@ async fn an_upload_without_dars_that_the_peer_cannot_pull_names_the_cause() -> R
     let error = error_of(&run)?;
     assert!(
         error.contains(
-            "a pull needs the coordinator's run instance and one hash for each DAR in the \
-             invitation"
+            "the coordinator sent no DARs, and this node cannot pull them: a pull needs the \
+             coordinator's run instance and one hash for each DAR in the invitation. The \
+             coordinator must send the bundle or be upgraded"
         ),
         "{error}"
     );
@@ -254,11 +259,9 @@ async fn a_run_above_the_total_cap_is_refused_at_the_dar_that_crosses_it() -> Re
         .expect_err("a run above the cap was pulled");
 
     assert!(error.downcast_ref::<PullRefused>().is_some(), "{error:#}");
-    let expected = format!(
-        "the DARs of this run add up to {} bytes so far, above the cap of {cap} bytes",
-        2 * (MAX_PAYLOAD_SIZE + 1)
-    );
-    assert!(format!("{error:#}").contains(&expected), "{error:#}");
+    let expected = "the DARs of this run add up to 2.0 MiB so far, above the cap of 1.5 MiB \
+                    for one run. Send the DARs in several runs of at most 1.5 MiB each";
+    assert!(format!("{error:#}").contains(expected), "{error:#}");
     assert_eq!(server.requests()?.len(), 2, "the peer read past the cap");
     Ok(())
 }
