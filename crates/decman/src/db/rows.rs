@@ -226,7 +226,7 @@ pub struct GovernanceMediatorTimeoutRow {
 pub struct GovernanceHiddenConfirmationRow {
     pub party_id: String,
     pub contract_id: String,
-    /// The admin's email, or their user id when the token carries no email.
+    /// The admin's user id, the token's `sub`.
     pub hidden_by: String,
     pub hidden_at: i64,
 }

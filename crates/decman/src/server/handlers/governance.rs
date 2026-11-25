@@ -1873,8 +1873,9 @@ async fn change_hidden(
         let mut tx = db.begin_transaction().await?;
         let changed = match event {
             HidingAuditEvent::Hide => {
-                let hidden_by = actor.email.as_deref().unwrap_or(&actor.sub);
-                tx.hide_confirmations(party_id, cids, hidden_by).await?;
+                // The `sub` is stable. An email can change hands; the audit
+                // row keeps it as a detail.
+                tx.hide_confirmations(party_id, cids, &actor.sub).await?;
                 cids.len() as u64
             }
             HidingAuditEvent::Unhide => tx.unhide_confirmations(party_id, cids).await?,
@@ -5395,6 +5396,32 @@ mod hiding_tests {
         assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{body}");
 
         assert_eq!(hidden(&pool).await?, ["00kept"]);
+        Ok(())
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_hide_stores_the_admin_sub_and_audits_the_email(pool: SqlitePool) -> Result {
+        let actor = AuditActor {
+            sub: "admin-sub".to_string(),
+            email: Some("admin@example.com".to_string()),
+        };
+
+        change_hidden(
+            &pool,
+            HidingAuditEvent::Hide,
+            &party_id()?,
+            &["00a".to_string()],
+            &actor,
+        )
+        .await
+        .map_err(anyhow::Error::msg)?;
+
+        let rows = pool.get_hidden_confirmations(&party_id()?).await?;
+        assert_eq!(rows[0].hidden_by, "admin-sub");
+        let audit = pool.get_governance_audit(&party_id()?, 50, 0).await?;
+        let details: Value = serde_json::from_str(&audit[0].details)?;
+        assert_eq!(details["admin_sub"], "admin-sub");
+        assert_eq!(details["admin_email"], "admin@example.com");
         Ok(())
     }
 
