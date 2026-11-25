@@ -10,6 +10,7 @@ use base64::Engine;
 use prometheus::IntCounterVec;
 use serde::Deserialize;
 use sqlx::SqlitePool;
+use tracing::Instrument;
 
 use crate::server::ledger_paging::AcsCursor;
 use canton_proto_rs::com::{
@@ -71,7 +72,7 @@ use crate::{
             get_governance_state as query_governance_state, mark_stuck,
             resolve_contract_package_ref, select_input_holdings,
         },
-        scan::{self, OpenMiningRound, ScanNotConfigured},
+        scan::{self, OpenMiningRound, ScanNotConfigured, ScanRefused},
         transfer_context::{
             AcceptTransferContext, ProposeTransferArgs, fetch as fetch_accept_transfer_context,
             fetch_factory_for_propose, fetch_proposal_created_event, has_template,
@@ -990,6 +991,14 @@ where
     F: Future<Output = Submitted> + Send + 'static,
 {
     let step = record.step.label();
+    // Every line the submission logs, the full error chain among them, then
+    // names the party and the write, so an operator can find it.
+    let span = tracing::warn_span!(
+        "governance_write",
+        party_id = %record.party_id,
+        write = %step
+    );
+    let submission = submission.instrument(span);
     let write = tokio::spawn(async move {
         let submitted = tokio::spawn(submission).await.unwrap_or_else(|e| {
             tracing::error!("The {step} submission ended without an outcome: {e}");
@@ -1699,12 +1708,24 @@ pub async fn execute_action(
 /// The execute handler's status and message for a failed execute. A node
 /// without `DECPM_SCAN_URL` cannot disclose what a paid credential accept
 /// reads. That is a setting the caller can fix, so it is a 422, not a server
-/// fault. The message carries the whole error chain, so a scan 403 reads
+/// fault. The message names the cause without internal detail. A scan error
+/// also keeps scan's HTTP status, which is not internal, so a scan 403 reads
 /// differently from a malformed reply or a dropped connection.
 fn execute_failure(e: &anyhow::Error) -> (StatusCode, String) {
     let (status, error) = submission_failure("Failed to execute action", e);
     if e.downcast_ref::<ScanNotConfigured>().is_some() {
         return (StatusCode::UNPROCESSABLE_ENTITY, error);
+    }
+    if let Some(refused) = e.downcast_ref::<ScanRefused>() {
+        let cause = e.to_string();
+        let cause = cause.trim_end_matches('.');
+        return (
+            status,
+            format!(
+                "Failed to execute action: {cause} (scan answered {}). See the DecMan server log.",
+                refused.status
+            ),
+        );
     }
     (status, error)
 }
@@ -3429,7 +3450,7 @@ mod get_party_credentials_tests {
     };
 
     #[derive(Clone, Default)]
-    struct LogBuffer(Arc<StdMutex<Vec<u8>>>);
+    pub(super) struct LogBuffer(Arc<StdMutex<Vec<u8>>>);
 
     impl std::io::Write for LogBuffer {
         fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
@@ -3455,7 +3476,7 @@ mod get_party_credentials_tests {
     }
 
     impl LogBuffer {
-        fn captured(&self) -> Result<String> {
+        pub(super) fn captured(&self) -> Result<String> {
             let written = self
                 .0
                 .lock()
@@ -4451,6 +4472,72 @@ mod mediator_timeout_tests {
         Ok(())
     }
 
+    /// The server log keeps the whole error chain. Its line names the party
+    /// and the write, so an operator can find the failure a caller reports.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn the_logged_failure_names_the_party_and_the_write(pool: SqlitePool) -> Result {
+        let _serial = super::action_metrics_tests::SERIAL.lock().await;
+        for (event, uri, _, body) in writes() {
+            let write = match event {
+                AuditEvent::Propose => "propose",
+                AuditEvent::Confirm => "confirm",
+                AuditEvent::Execute => "execute",
+                AuditEvent::Expire => "expire",
+                AuditEvent::Cancel => "cancel_confirmation",
+                AuditEvent::CancelProposal => "cancel_proposal",
+                other => anyhow::bail!("{other:?} is not a write"),
+            };
+            let app = actix_test::init_service(
+                App::new()
+                    .app_data(state(pool.clone(), 1).await?)
+                    .wrap(AuthMiddleware)
+                    .service(propose_action)
+                    .service(confirm_action)
+                    .service(execute_action)
+                    .service(expire_confirmation)
+                    .service(cancel_confirmation)
+                    .service(cancel_proposal),
+            )
+            .await;
+            let request = actix_test::TestRequest::post()
+                .uri(uri)
+                .insert_header((AUTHORIZATION, "Bearer any-token"))
+                .set_json(body)
+                .to_request();
+
+            let buffer = super::get_party_credentials_tests::LogBuffer::default();
+            let subscriber = tracing_subscriber::fmt()
+                .with_writer(buffer.clone())
+                .with_ansi(false)
+                .finish();
+            let response = {
+                let _guard = tracing::subscriber::set_default(subscriber);
+                actix_test::call_service(&app, request).await
+            };
+
+            assert_eq!(
+                response.status(),
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "{event:?}"
+            );
+            let logs = buffer.captured()?;
+            let line = logs
+                .lines()
+                .find(|line| line.contains("127.0.0.1:1"))
+                .with_context(|| format!("{event:?} logged no error chain: {logs}"))?;
+            assert!(line.contains(" WARN "), "{event:?}: {line}");
+            assert!(
+                line.contains(&format!("party_id={}", party())),
+                "{event:?}: {line}"
+            );
+            assert!(
+                line.contains(&format!("write={write}")),
+                "{event:?}: {line}"
+            );
+        }
+        Ok(())
+    }
+
     /// The Ledger API event service of a participant that never answers.
     #[derive(Clone)]
     struct SilentEvents;
@@ -4712,7 +4799,13 @@ mod mediator_timeout_tests {
 /// `GET /governance/confirmations` read against a participant's ACS.
 #[cfg(test)]
 mod confirmations_feed_tests {
-    use std::{convert::Infallible, sync::Arc};
+    use std::{
+        convert::Infallible,
+        sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        },
+    };
 
     use actix_web::{App, http::header::AUTHORIZATION, test as actix_test};
     use canton_proto_rs::com::daml::ledger::api::v2::{
@@ -4742,15 +4835,16 @@ mod confirmations_feed_tests {
     /// `contracts`. A page read returns, in one page, every contract whose
     /// template matches a template filter of the request. An interface read,
     /// such as the one for proposals, returns `proposals`, a page of the
-    /// requested size at a time. A read of the `missing` template fails the
-    /// way Canton fails it when the package is uploaded but lacks the
-    /// template. A read of the `refused` template fails with a permission
-    /// error.
+    /// requested size at a time, and `proposal_reads` counts those reads. A
+    /// read of the `missing` template fails the way Canton fails it when the
+    /// package is uploaded but lacks the template. A read of the `refused`
+    /// template fails with a permission error.
     #[derive(Clone, Default)]
     struct AcsLedger {
         contracts: Arc<Vec<CreatedEvent>>,
         missing: Option<&'static str>,
         proposals: Arc<Vec<CreatedEvent>>,
+        proposal_reads: Arc<AtomicUsize>,
         refused: Option<&'static str>,
     }
 
@@ -4804,6 +4898,7 @@ mod confirmations_feed_tests {
                     )
                 });
             if reads_proposals {
+                self.proposal_reads.fetch_add(1, Ordering::SeqCst);
                 return Ok(self.proposal_page(request));
             }
             let active_contracts = self
@@ -5318,6 +5413,61 @@ mod confirmations_feed_tests {
         Ok(())
     }
 
+    /// The first page scans the active proposal ids for a marked orphan, on
+    /// every read while the orphan exists. The scan stops after ten pages of
+    /// 1,000 ids. It then leaves the orphan out and logs one warning.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn the_orphan_scan_stops_after_ten_pages(pool: SqlitePool) -> Result {
+        let party = id("dec", "ab");
+        let member = id("member-a", "aa");
+        let expired = chrono::Utc::now().timestamp() - 3600;
+        pool.record_mediator_timeout(&party, "00dom-marked", &[member.to_string()])
+            .await?;
+        // The feed reads one proposal, then the scan reads 1,000 a page.
+        for (proposals, listed) in [(10_000, true), (10_001, false)] {
+            let ledger = AcsLedger {
+                contracts: Arc::new(vec![
+                    rules(&party, &[&member]),
+                    domain_confirmation("00dom-marked", "00gone", &member, expired),
+                ]),
+                proposals: Arc::new(
+                    (0..proposals)
+                        .map(|n| proposal(&format!("00p{n}"), &party, &member))
+                        .collect(),
+                ),
+                ..AcsLedger::default()
+            };
+            let buffer = super::get_party_credentials_tests::LogBuffer::default();
+            let subscriber = tracing_subscriber::fmt()
+                .with_writer(buffer.clone())
+                .with_ansi(false)
+                .finish();
+
+            let body = {
+                let _guard = tracing::subscriber::set_default(subscriber);
+                feed_with(&pool, &ledger, &party, "&limit=1").await?
+            };
+
+            assert_eq!(
+                holding(&body["domain_actions"], "00dom-marked").is_ok(),
+                listed,
+                "{proposals} proposals: {body}"
+            );
+            assert_eq!(
+                ledger.proposal_reads.load(Ordering::SeqCst),
+                11,
+                "{proposals} proposals"
+            );
+            let logs = buffer.captured()?;
+            assert_eq!(
+                logs.matches("Leaving 1 marked orphans out").count(),
+                usize::from(!listed),
+                "{proposals} proposals: {logs}"
+            );
+        }
+        Ok(())
+    }
+
     /// A read that leaves confirmations out must not look like a short list.
     /// The answer names the failure, and keeps the ledger's text in the log.
     #[sqlx::test(migrator = "MIGRATOR")]
@@ -5802,7 +5952,7 @@ mod paid_accept_disclosure_tests {
     /// said stays in the server log.
     #[test]
     fn an_execute_failure_names_its_cause_but_not_the_chain() {
-        let error = anyhow::anyhow!("scan answered 403 Forbidden: access denied")
+        let error = anyhow::anyhow!("the response held no rounds")
             .context("Failed to fetch the open mining rounds from scan");
 
         let (_, error) = execute_failure(&error);
@@ -5811,6 +5961,26 @@ mod paid_accept_disclosure_tests {
             error,
             "Failed to execute action: Failed to fetch the open mining rounds from scan. See \
              the DecMan server log."
+        );
+    }
+
+    /// An HTTP status is not internal, so a scan refusal keeps it. Scan's
+    /// body stays in the server log.
+    #[test]
+    fn a_scan_refusal_keeps_its_status() {
+        let error = anyhow::Error::new(ScanRefused {
+            status: reqwest::StatusCode::FORBIDDEN,
+            body: "access denied for 10.0.0.7".to_string(),
+        })
+        .context("Failed to fetch the open mining rounds from scan");
+
+        let (status, error) = execute_failure(&error);
+
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(
+            error,
+            "Failed to execute action: Failed to fetch the open mining rounds from scan (scan \
+             answered 403 Forbidden). See the DecMan server log."
         );
     }
 }

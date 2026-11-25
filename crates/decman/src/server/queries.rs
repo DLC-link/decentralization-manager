@@ -607,8 +607,10 @@ pub async fn get_governance_confirmations(
     // With several pages of proposals, no single page proves that a
     // confirmation's proposal is gone. An orphan that cannot be archived must
     // still reach the operator, so the first page checks such orphans against
-    // every active proposal id. Only marked orphans start that scan, and they
-    // are rare.
+    // every active proposal id. Only marked orphans start that scan. It runs
+    // on every first-page read while one exists, and the web UI reads the
+    // first page every 10 s. So it stops after MAX_ORPHAN_SCAN_PAGES pages
+    // of FETCH_CHUNK ids, and then leaves the orphans out.
     let mut gone = HashSet::new();
     if first_page
         && next_cursor.is_some()
@@ -635,13 +637,19 @@ pub async fn get_governance_confirmations(
             .collect();
         if !marked.is_empty() {
             match active_proposal_ids(config, party_id, token, packages).await {
-                Ok(active) => {
+                Ok(Some(active)) => {
                     gone = marked
                         .into_iter()
                         .filter(|cid| !active.contains(*cid))
                         .cloned()
                         .collect();
                 }
+                Ok(None) => tracing::warn!(
+                    %party_id,
+                    "Leaving {} marked orphans out: the active proposals fill more than \
+                     {MAX_ORPHAN_SCAN_PAGES} pages",
+                    marked.len()
+                ),
                 Err(e) => tracing::warn!("Could not check the proposals of marked orphans: {e:#}"),
             }
         }
@@ -1133,13 +1141,19 @@ fn domain_confirmations_for_batch(
         .collect()
 }
 
-/// The ids of every active proposal of `party_id`, read page by page.
+/// The most pages of [`FETCH_CHUNK`] proposal ids that one read scans for
+/// marked orphans.
+const MAX_ORPHAN_SCAN_PAGES: usize = 10;
+
+/// The ids of every active proposal of `party_id`, read [`FETCH_CHUNK`] at a
+/// time. `None` when the proposals fill more than [`MAX_ORPHAN_SCAN_PAGES`]
+/// such pages.
 async fn active_proposal_ids(
     config: &NodeConfig,
     party_id: &CantonId,
     token: Option<String>,
     packages: &PackageConfig,
-) -> Result<HashSet<String>> {
+) -> Result<Option<HashSet<String>>> {
     let template = decman_lib::catalog::templates::governable_action_interface(packages)?;
     let event_format = party_event_format(
         party_id,
@@ -1148,7 +1162,7 @@ async fn active_proposal_ids(
     );
     let mut ids = HashSet::new();
     let mut cursor = None;
-    loop {
+    for _ in 0..MAX_ORPHAN_SCAN_PAGES {
         let (page, next) = page_active_contracts(
             config,
             token.clone(),
@@ -1161,9 +1175,10 @@ async fn active_proposal_ids(
         ids.extend(page);
         match next {
             Some(next) => cursor = Some(next),
-            None => return Ok(ids),
+            None => return Ok(Some(ids)),
         }
     }
+    Ok(None)
 }
 
 /// The Canton error ids that mean a template is not on this participant:
