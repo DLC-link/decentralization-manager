@@ -14,6 +14,7 @@ import {
 } from './checks'
 import * as ledger from './ledger'
 import { generateKeyPair, signDigest } from './mock/keys'
+import { isSimulated } from './mock/participants'
 import {
   getState,
   update,
@@ -258,8 +259,9 @@ function addParty(proposal: Proposal, wallet: Wallet): void {
     hosts: proposal.hosts.map((h) => ({
       participant: h.participant,
       role: h.role,
-      approval:
-        h.role === 'owner'
+      approval: isSimulated()
+        ? 'Approved by a simulated participant.'
+        : h.role === 'owner'
           ? 'Approved by its own participant.'
           : "Approved by the dApp on localnet. This stands in for the covalidator's DecMan approval.",
     })),
@@ -272,7 +274,7 @@ function addParty(proposal: Proposal, wallet: Wallet): void {
     history: [
       {
         at: now(),
-        text: `Party created on the ledger. ${wallet.name} submitted it through ${wallet.participant.participantId}.`,
+        text: `${isSimulated() ? 'Party created on simulated participants.' : 'Party created on the ledger.'} ${wallet.name} submitted it through ${wallet.participant.participantId}.`,
       },
     ],
   }

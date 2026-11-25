@@ -71,6 +71,15 @@ the browser needs no CORS:
 The forms fill in the localnet token. It is the public `ledger-api-user` token
 from `integration-tests/env.sh`, and it works only on a localnet.
 
+## Try it without a localnet
+
+Turn on **Simulated participants** to use the dApp without a localnet. The
+browser then answers every JSON Ledger API call itself. The Rust code still
+builds the real topology transactions and checks every signature. The
+participant ids, the synchronizer and the participants' answers are made up,
+and the banner says so. Turn the switch off to talk to real participants
+again.
+
 ## Try the flow
 
 1. On **Wallets**, add two wallets on different participants, for example the

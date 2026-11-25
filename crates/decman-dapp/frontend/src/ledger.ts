@@ -1,11 +1,13 @@
 // Calls to a participant's JSON Ledger API. Each call names the participant
 // in its error, and keeps the participant's own error text.
+import { isSimulated, simulatedCall } from './mock/participants'
 
 export type Connection = { apiUrl: string; token: string }
 
 export type ConnectedSynchronizer = { synchronizerAlias: string; synchronizerId: string }
 
 async function call(connection: Connection, method: 'GET' | 'POST', path: string, body?: unknown): Promise<unknown> {
+  if (isSimulated()) return simulatedCall(connection.apiUrl, method, path, body)
   const url = `${connection.apiUrl.replace(/\/+$/, '')}${path}`
   let response: Response
   try {

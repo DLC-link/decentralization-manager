@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 
 import { setActingWallet } from './mock/actions'
+import { isSimulated, setSimulated } from './mock/participants'
 import { resetState, useAppState } from './mock/store'
 import { NewParty } from './pages/NewParty'
 import { Parties, PartyDetail } from './pages/Parties'
@@ -25,6 +26,7 @@ function useHashRoute(): [string, (route: string) => void] {
 
 export function App() {
   const state = useAppState()
+  const [simulated, setSimulatedState] = useState(isSimulated)
   const [route, navigate] = useHashRoute()
   const openParty = (partyId: string) => navigate(`party/${partyId}`)
   const pending = state.proposals.filter((p) => p.status === 'collecting').length
@@ -41,10 +43,24 @@ export function App() {
       <header>
         <h1>DecMan dApp</h1>
         <p className="banner">
-          Party creation is real. The dApp creates the party on your participants through the JSON Ledger API. Owner keys
-          stay in this browser and stand in for wallets. Holdings, transfers, history and dApp connections are simulated.
+          {simulated
+            ? 'The participants are simulated. The dApp builds the real transactions and checks every signature, but no participant receives them.'
+            : 'Party creation is real. The dApp creates the party on your participants through the JSON Ledger API.'}{' '}
+          Owner keys stay in this browser and stand in for wallets. Holdings, transfers, history and dApp connections are
+          simulated.
         </p>
         <div className="row">
+          <label className="inline">
+            <input
+              type="checkbox"
+              checked={simulated}
+              onChange={(e) => {
+                setSimulated(e.target.checked)
+                setSimulatedState(e.target.checked)
+              }}
+            />
+            Simulated participants
+          </label>
           <label className="inline">
             Acting as
             <select
