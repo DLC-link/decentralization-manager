@@ -121,8 +121,9 @@ refuses a proposal that mixes simulated and real records.
    participant for its synchronizer and topology format, builds the
    transactions, and signs them as the proposer.
 5. On **Proposals**, sign as each other owner. Every owner must sign. Before
-   any host receives the bundle, the proposer can **Withdraw** the proposal,
-   and an owner who has not signed can **Reject** it.
+   any host receives the bundle, an owner who has not signed can **Reject**
+   the proposal. The proposer can **Withdraw** it then too, while at least one
+   owner has not signed yet.
 6. Create the party. The card shows each host's result and any error text from
    its participant. After a failed attempt the card offers only **Try again**,
    because the bundle may already sit at participants. If every owner's
