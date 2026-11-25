@@ -204,6 +204,11 @@ pub const CHUNK_SIZE: usize = 1024 * 1024;
 /// whole.
 pub const MAX_REPLY_SIZE: usize = CHUNK_SIZE + 4 + 9 + u16::MAX as usize;
 
+/// The most bytes of a refusal body that any caller reads. A refusal is a
+/// short `Error` frame. A larger body is dropped, and the refusal then names
+/// only its status.
+const MAX_REFUSAL_BODY: usize = 4 * 1024;
+
 /// Hard ceiling on the assembled size of a chunked response. Bounds peer-supplied
 /// `total_size` so a malicious or buggy peer can't ask the client to allocate
 /// arbitrary memory. The `UploadDars` bundle is the largest payload served this
@@ -722,13 +727,13 @@ async fn send_noise_message_with_timeout(
 
     if response.status() != StatusCode::OK {
         // The refusal body names the peer's reason or its wire version.
-        // Best-effort and bounded by the same timeout as the request.
+        // Best-effort, and bounded in size and by the request's timeout.
         let status = response.status();
-        let body =
-            match tokio::time::timeout(timeout, hyper::body::to_bytes(response.body_mut())).await {
-                Ok(Ok(bytes)) => bytes,
-                _ => Bytes::new(),
-            };
+        let refusal = read_reply(response.body_mut(), Some(MAX_REFUSAL_BODY));
+        let body = match tokio::time::timeout(timeout, refusal).await {
+            Ok(Ok(bytes)) => bytes,
+            _ => Bytes::new(),
+        };
         return Err(NoiseError::from_refusal(status, &body));
     }
 

@@ -84,6 +84,12 @@ pub(super) enum DarReply {
     Stalled,
     /// The whole DAR in one reply, whatever its size.
     Inline,
+    /// A 503 with an `Error` frame on this build's wire version. Its reason
+    /// holds a line break and a direction override, then `pad` bytes.
+    Refused { pad: usize },
+    /// Served as by default, but each chunk fetch of a DAR gets the 503 of
+    /// [`DarReply::Refused`].
+    ChunkRefused { pad: usize },
 }
 
 impl Coordinator {
@@ -258,9 +264,24 @@ async fn serve(node: &NodeConfig, state: Arc<Coordinator>) -> Result<(Peer, Join
                         let bytes = hyper::body::to_bytes(request.into_body()).await?;
                         let message = Message::from_bytes(&bytes)?;
                         let dar_request = message.msg_type == MessageType::RequestDar;
+                        let dar_chunk = message.msg_type == MessageType::GetChunk
+                            && message.instance.is_empty();
                         let reply = served.answer(message)?;
                         if dar_request {
                             tokio::time::sleep(served.dar_hold).await;
+                        }
+                        let refused = match served.dar_reply {
+                            DarReply::Refused { pad } if dar_request => Some(pad),
+                            DarReply::ChunkRefused { pad } if dar_chunk => Some(pad),
+                            _ => None,
+                        };
+                        if let Some(pad) = refused {
+                            let reason =
+                                format!("refused\nERROR forged\u{202e}{}", "x".repeat(pad));
+                            let refusal = Message::new(MessageType::Error, reason.into_bytes());
+                            return Ok(Response::builder()
+                                .status(hyper::StatusCode::SERVICE_UNAVAILABLE)
+                                .body(Body::from(refusal.to_bytes()))?);
                         }
                         if dar_request && served.dar_reply == DarReply::Stalled {
                             let (sender, body) = Body::channel();

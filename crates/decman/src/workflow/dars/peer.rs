@@ -36,7 +36,7 @@ const MAX_REFUSAL_LEN: usize = 512;
 
 /// The most bytes of one field a coordinator controls, such as a DAR's
 /// filename or its pinned hash, that reach the log and the run record.
-const MAX_FIELD_LEN: usize = 128;
+pub(crate) const MAX_FIELD_LEN: usize = 128;
 
 /// One lock for each coordinator, by its public key. The coordinator keeps
 /// one chunked `RequestDar` answer per requesting node, so a second fetch
@@ -292,7 +292,7 @@ pub async fn fetch_dar_from_coordinator(
         MAX_REPLY_SIZE,
     )
     .await
-    .map_err(|e| anyhow::anyhow!("{e}"))?;
+    .map_err(|e| anyhow::anyhow!("{}", shown(&e.to_string(), MAX_REFUSAL_LEN)))?;
     let mut response = Message::from_bytes(&response)
         .map_err(|_| anyhow::anyhow!("the coordinator's answer does not parse"))?;
 
@@ -318,7 +318,7 @@ pub async fn fetch_dar_from_coordinator(
                 retry,
             )
             .await
-            .map_err(|e| anyhow::anyhow!("{e}"))?;
+            .map_err(|e| anyhow::anyhow!("{}", shown(&e.to_string(), MAX_REFUSAL_LEN)))?;
         }
         MessageType::Data => admit(response.payload.len())?,
         _ => {}
@@ -346,7 +346,7 @@ fn refusal_text(payload: &[u8]) -> String {
 /// passes as it is. Every other character is escaped, so text a coordinator
 /// controls cannot break a line or reverse the text around it. The result
 /// stops at `max` bytes and then ends with an ellipsis.
-fn shown(text: &str, max: usize) -> String {
+pub(crate) fn shown(text: &str, max: usize) -> String {
     let mut out = String::new();
     for c in text.chars() {
         let printable = c == ' ' || (c.is_ascii_graphic() && c != '\\');

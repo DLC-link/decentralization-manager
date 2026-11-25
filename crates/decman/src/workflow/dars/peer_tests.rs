@@ -1,8 +1,12 @@
 //! A peer reads each DAR of a Dars run from a scripted coordinator.
 
-use std::time::Duration;
+use std::{
+    sync::{Arc, Mutex},
+    time::Duration,
+};
 
 use anyhow::Context;
+use tracing_subscriber::fmt::MakeWriter;
 
 use super::peer::{DarPull, PullRefused, fetch_dar_from_coordinator};
 use crate::{
@@ -96,6 +100,79 @@ async fn the_peer_reads_each_dar_by_index_and_leaves_the_bundle() -> Result {
     assert_eq!(run.command_chunks, 0, "the peer read the bundle");
     assert_eq!(run.uploads, uploaded(&dars), "not uploaded in index order");
     assert_eq!(run.completions, 1);
+    Ok(())
+}
+
+/// A log the test reads back once the peer has written to it.
+#[derive(Clone, Default)]
+struct Logs(Arc<Mutex<Vec<u8>>>);
+
+impl std::io::Write for Logs {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0
+            .lock()
+            .map_err(|_| std::io::Error::other("the log lock is poisoned"))?
+            .extend_from_slice(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl<'a> MakeWriter<'a> for Logs {
+    type Writer = Self;
+
+    fn make_writer(&'a self) -> Self::Writer {
+        self.clone()
+    }
+}
+
+/// The invitation's filenames come from the coordinator. The upload logs
+/// them escaped, so a name cannot forge a log line.
+#[tokio::test]
+async fn the_upload_logs_the_coordinators_filenames_escaped() -> Result {
+    let dars = vec![(
+        "a.dar\nERROR forged\u{202e}.dar".to_string(),
+        vec![1u8; 100],
+    )];
+    let mut script = invited(&dars);
+    script.commands = vec![Message::new_empty(MessageType::UploadDars)];
+    let logs = Logs::default();
+    let subscriber = tracing_subscriber::fmt()
+        .with_writer(logs.clone())
+        .with_ansi(false)
+        .finish();
+    // Other tests hit the upload's log lines at the same time. With one live
+    // dispatcher, tracing decides whether a line is on from the default of
+    // the thread that hits it first, and caches "off" for this test too. A
+    // second live dispatcher makes it ask every live one.
+    let _second = tracing::Dispatch::new(tracing_subscriber::registry());
+
+    let run = {
+        let _guard = tracing::subscriber::set_default(subscriber);
+        run_script(WorkflowKind::Dars, script).await?
+    };
+
+    assert!(run.result.is_ok(), "{:?}", run.result);
+    assert_eq!(run.uploads.len(), 1);
+    let logs = String::from_utf8(
+        logs.0
+            .lock()
+            .map_err(|_| anyhow::anyhow!("the log lock is poisoned"))?
+            .clone(),
+    )?;
+    let name = "a.dar\\nERROR forged\\u{202e}.dar";
+    assert!(logs.contains(&format!("Uploading {name}...")), "{logs}");
+    assert!(
+        logs.contains(&format!("Successfully uploaded {name}")),
+        "{logs}"
+    );
+    assert!(
+        !logs.contains("\nERROR forged") && !logs.contains('\u{202e}'),
+        "{logs}"
+    );
     Ok(())
 }
 
@@ -404,6 +481,57 @@ async fn a_reply_body_that_stalls_ends_the_fetch() -> Result {
         format!("{error:#}").contains("Request timeout"),
         "{error:#}"
     );
+    Ok(())
+}
+
+/// A coordinator that refuses with an error status may send any body. The
+/// peer reads at most 4 KiB of it. The run error shows the reason escaped
+/// and cut, as it shows an `Error` reply, or only the status when the body is
+/// larger. This holds for the DAR request and for its chunk fetches.
+#[tokio::test]
+async fn a_refusal_with_an_error_status_is_bounded_and_escaped() -> Result {
+    for (reply, size, kept) in [
+        (DarReply::Refused { pad: 2_000 }, 100, true),
+        (DarReply::Refused { pad: 8_000 }, 100, false),
+        (
+            DarReply::ChunkRefused { pad: 2_000 },
+            MAX_PAYLOAD_SIZE + 1,
+            true,
+        ),
+        (
+            DarReply::ChunkRefused { pad: 8_000 },
+            MAX_PAYLOAD_SIZE + 1,
+            false,
+        ),
+    ] {
+        let dars = dars(&[size]);
+        let server = DarServer::replying(dars.clone(), reply).await?;
+        let names: Vec<String> = dars.iter().map(|(name, _)| name.clone()).collect();
+        let hashes: Vec<String> = dars.iter().map(|(_, dar)| hash_dar(dar)).collect();
+        let pull = DarPull::new(&server.coordinator, COORDINATOR_RUN, &names, &hashes)?
+            .context("no pull planned")?;
+
+        let error = pull
+            .fetch_all(&server.node)
+            .await
+            .expect_err("a refusal was read as a DAR");
+
+        let text = format!("{error:#}");
+        assert!(
+            !text.contains('\n') && !text.contains('\u{202e}'),
+            "{reply:?}: {text}"
+        );
+        assert!(
+            text.starts_with("DAR 0 (zeta.dar): Bad status code: 503 Service Unavailable"),
+            "{reply:?}: {text}"
+        );
+        assert_eq!(
+            text.contains("peer said: refused\\nERROR forged\\u{202e}xxx"),
+            kept,
+            "{reply:?}: {text}"
+        );
+        assert!(text.len() < 600, "{reply:?}: {} bytes", text.len());
+    }
     Ok(())
 }
 
