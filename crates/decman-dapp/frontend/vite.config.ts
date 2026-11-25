@@ -25,9 +25,14 @@ const proxy = Object.fromEntries(
   }),
 )
 
+// Not Vite's default 5173, which another dev server may hold. strictPort
+// fails instead of moving to the next free port, so the URL stays known.
+const PORT = 5182
+
 // The WebAssembly module loads through `new URL(..., import.meta.url)` in the
 // wasm-pack output, which Vite serves and bundles without a plugin.
 export default defineConfig({
   plugins: [react()],
-  server: { proxy },
+  server: { port: PORT, strictPort: true, proxy },
+  preview: { port: PORT, strictPort: true },
 })

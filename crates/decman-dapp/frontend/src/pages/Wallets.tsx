@@ -150,7 +150,7 @@ function ParticipantForm({
         </label>
         <label>
           Token (the localnet token by default)
-          <input value={token} onChange={(e) => setToken(e.target.value)} />
+          <input type="password" value={token} onChange={(e) => setToken(e.target.value)} autoComplete="off" />
         </label>
         <button onClick={add}>{button}</button>
       </div>

@@ -67,8 +67,9 @@ npm install
 npm run dev
 ```
 
-`npm run dev` and `npm run build` build the WebAssembly module first, into
-`frontend/src/wasm`.
+Open <http://localhost:5182>. The dev server and `npm run preview` use that
+port and fail if it is taken. `npm run dev` and `npm run build` build the
+WebAssembly module first, into `frontend/src/wasm`.
 
 The Vite dev server proxies the localnet participants' JSON Ledger APIs, so
 the browser needs no CORS:
