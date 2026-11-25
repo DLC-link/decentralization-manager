@@ -579,8 +579,9 @@ pub async fn get_governance_confirmations(
 
     // One batch of proposals, not the party's whole history.
     let first_page = cursor.is_none();
-    let mut proposals_read_ok =
-        decman_lib::catalog::templates::governable_action_interface(packages).is_ok();
+    // A node without the `GovernableAction` interface has no proposals to
+    // read. That is a complete read, not a failed one.
+    let mut proposals_read_ok = true;
     let (batch, next_cursor) =
         match page_proposal_infos(config, party_id, token, packages, limit, cursor).await {
             Ok(page) => page,

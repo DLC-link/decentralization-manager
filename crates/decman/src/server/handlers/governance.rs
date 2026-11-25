@@ -4448,6 +4448,30 @@ mod confirmations_feed_tests {
         assert_eq!(action["cannot_be_archived"], json!(true));
         Ok(())
     }
+
+    /// A node without the `GovernableAction` interface has no proposals. The
+    /// read is complete, so the pending-governance poller reports no error.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_node_without_the_proposal_interface_reads_a_complete_queue(
+        pool: SqlitePool,
+    ) -> Result {
+        let party = id("dec", "ab");
+        let member = id("member-a", "aa");
+        let ledger = AcsLedger {
+            contracts: Arc::new(vec![rules(&party, &[&member])]),
+            ..AcsLedger::default()
+        };
+        let data = state(pool, ledger.serve()?).await?;
+        let mut packages = packages();
+        packages.governance_action = None;
+
+        let queue =
+            get_governance_confirmations(&data.config, &party, 1, None, None, &packages, 25, None)
+                .await?;
+
+        assert!(queue.complete);
+        Ok(())
+    }
 }
 
 #[cfg(test)]
