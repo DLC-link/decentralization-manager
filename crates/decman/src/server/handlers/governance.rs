@@ -4538,7 +4538,13 @@ mod mediator_timeout_tests {
 /// `GET /governance/confirmations` read against a participant's ACS.
 #[cfg(test)]
 mod confirmations_feed_tests {
-    use std::{convert::Infallible, sync::Arc};
+    use std::{
+        convert::Infallible,
+        sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        },
+    };
 
     use actix_web::{App, test as actix_test};
     use canton_proto_rs::com::daml::ledger::api::v2::{
@@ -4566,15 +4572,16 @@ mod confirmations_feed_tests {
     /// `contracts`. A page read returns, in one page, every contract whose
     /// template matches a template filter of the request. An interface read,
     /// such as the one for proposals, returns `proposals`, a page of the
-    /// requested size at a time. A read of the `missing` template fails the
-    /// way Canton fails it when the package is uploaded but lacks the
-    /// template. A read of the `refused` template fails with a permission
-    /// error.
+    /// requested size at a time, and `proposal_reads` counts those reads. A
+    /// read of the `missing` template fails the way Canton fails it when the
+    /// package is uploaded but lacks the template. A read of the `refused`
+    /// template fails with a permission error.
     #[derive(Clone, Default)]
     struct AcsLedger {
         contracts: Arc<Vec<CreatedEvent>>,
         missing: Option<&'static str>,
         proposals: Arc<Vec<CreatedEvent>>,
+        proposal_reads: Arc<AtomicUsize>,
         refused: Option<&'static str>,
     }
 
@@ -4628,6 +4635,7 @@ mod confirmations_feed_tests {
                     )
                 });
             if reads_proposals {
+                self.proposal_reads.fetch_add(1, Ordering::SeqCst);
                 return Ok(self.proposal_page(request));
             }
             let active_contracts = self
@@ -5011,6 +5019,61 @@ mod confirmations_feed_tests {
             feed_with(&pool, &ledger, &party, &format!("&limit=2&cursor={cursor}")).await?;
         assert!(holding(&second["domain_actions"], "00dom-marked").is_err());
         assert!(holding(&second["domain_actions"], "00dom-unmarked").is_err());
+        Ok(())
+    }
+
+    /// The first page scans the active proposal ids for a marked orphan, on
+    /// every read while the orphan exists. The scan stops after ten pages of
+    /// 1,000 ids. It then leaves the orphan out and logs one warning.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn the_orphan_scan_stops_after_ten_pages(pool: SqlitePool) -> Result {
+        let party = id("dec", "ab");
+        let member = id("member-a", "aa");
+        let expired = chrono::Utc::now().timestamp() - 3600;
+        pool.record_mediator_timeout(&party, "00dom-marked", &[member.to_string()])
+            .await?;
+        // The feed reads one proposal, then the scan reads 1,000 a page.
+        for (proposals, listed) in [(10_000, true), (10_001, false)] {
+            let ledger = AcsLedger {
+                contracts: Arc::new(vec![
+                    rules(&party, &[&member]),
+                    domain_confirmation("00dom-marked", "00gone", &member, expired),
+                ]),
+                proposals: Arc::new(
+                    (0..proposals)
+                        .map(|n| proposal(&format!("00p{n}"), &party, &member))
+                        .collect(),
+                ),
+                ..AcsLedger::default()
+            };
+            let buffer = super::get_party_credentials_tests::LogBuffer::default();
+            let subscriber = tracing_subscriber::fmt()
+                .with_writer(buffer.clone())
+                .with_ansi(false)
+                .finish();
+
+            let body = {
+                let _guard = tracing::subscriber::set_default(subscriber);
+                feed_with(&pool, &ledger, &party, "&limit=1").await?
+            };
+
+            assert_eq!(
+                holding(&body["domain_actions"], "00dom-marked").is_ok(),
+                listed,
+                "{proposals} proposals: {body}"
+            );
+            assert_eq!(
+                ledger.proposal_reads.load(Ordering::SeqCst),
+                11,
+                "{proposals} proposals"
+            );
+            let logs = buffer.captured()?;
+            assert_eq!(
+                logs.matches("Leaving 1 marked orphans out").count(),
+                usize::from(!listed),
+                "{proposals} proposals: {logs}"
+            );
+        }
         Ok(())
     }
 
