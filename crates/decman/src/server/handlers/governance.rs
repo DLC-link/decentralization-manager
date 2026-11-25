@@ -48,7 +48,7 @@ use crate::{
     canton_id::CantonId,
     config::{NetworkConfig, NodeConfig, PackageConfig, default_package_config},
     db::{
-        rows::ChainAuditCacheRow,
+        rows::{ChainAuditCacheRow, GovernanceMediatorTimeoutRow},
         schema::{SchemaRead, SchemaWrite},
     },
     error::Result,
@@ -60,8 +60,8 @@ use crate::{
         ledger_rejection::{mediator_timeout, submission_failure},
         middleware::require_admin,
         queries::{
-            GovernanceQueue, get_governance_confirmations,
-            get_governance_state as query_governance_state, known_governance_members, mark_stuck,
+            ExpireTimeouts, GovernanceQueue, get_governance_confirmations,
+            get_governance_state as query_governance_state, mark_stuck,
             resolve_contract_package_ref, select_input_holdings,
         },
         scan::{self, OpenMiningRound, ScanNotConfigured},
@@ -168,7 +168,7 @@ pub async fn get_governance(
             ..
         }) => {
             let timeouts = match data.db.get_mediator_timeouts(party_id).await {
-                Ok(rows) => rows.into_iter().map(|row| row.contract_id).collect(),
+                Ok(rows) => expire_timeouts(rows),
                 Err(e) => {
                     tracing::error!("Failed to read governance mediator timeouts: {e}");
                     return HttpResponse::InternalServerError().json(ErrorResponse {
@@ -176,11 +176,9 @@ pub async fn get_governance(
                     });
                 }
             };
-            let members = known_governance_members(gov_state.as_ref());
             mark_stuck(
                 &mut actions,
                 &mut domain_actions,
-                members.as_ref(),
                 &timeouts,
                 chrono::Utc::now().timestamp(),
             );
@@ -224,6 +222,23 @@ pub struct ProposalsQuery {
 /// asking for a party's whole proposal history in one request (#424).
 const PROPOSALS_BATCH_DEFAULT: usize = 50;
 const PROPOSALS_BATCH_MAX: usize = 200;
+
+/// The stored expire timeouts as the parties each one named. A row whose
+/// list does not decode names nobody, so it marks nothing.
+fn expire_timeouts(rows: Vec<GovernanceMediatorTimeoutRow>) -> ExpireTimeouts {
+    rows.into_iter()
+        .map(|row| {
+            let unresponsive = serde_json::from_str(&row.unresponsive).unwrap_or_else(|e| {
+                tracing::warn!(
+                    contract_id = row.contract_id,
+                    "Unreadable expire timeout: {e}"
+                );
+                HashSet::new()
+            });
+            (row.contract_id, unresponsive)
+        })
+        .collect()
+}
 
 fn encode_cursor(cursor: &AcsCursor) -> Option<String> {
     serde_json::to_vec(cursor)
@@ -1577,9 +1592,17 @@ fn execute_failure(e: &anyhow::Error) -> (StatusCode, String) {
     (status, error)
 }
 
-/// Preserve timeout evidence inside the detached submission task, even if its
-/// request has gone away. Other failures cannot erase an earlier timeout.
-async fn remember_archival_outcome(
+/// Keeps the outcome of the latest expire attempt on `contract_id`, the
+/// evidence that marks a confirmation as one that cannot be archived.
+///
+/// A success forgets the record. A mediator timeout replaces it with the
+/// parties this timeout named, so a timeout that no longer names the
+/// confirmer clears its mark. Any other failure never reached the mediator
+/// and says nothing about the confirmer, so the record stays.
+///
+/// Only expire records. `_Cancel` is controlled by the confirmer, this node's
+/// own member, so a cancel timeout never shows that the confirmer is gone.
+async fn remember_expire_outcome(
     db: &sqlx::SqlitePool,
     party_id: &CantonId,
     contract_id: &str,
@@ -1596,7 +1619,7 @@ async fn remember_archival_outcome(
         },
     };
     if let Err(e) = persistence {
-        tracing::error!(%party_id, contract_id, "Failed to persist governance archival outcome: {e}");
+        tracing::error!(%party_id, contract_id, "Failed to persist the expire outcome: {e}");
     }
 }
 
@@ -1653,7 +1676,7 @@ pub async fn expire_confirmation(
         let result =
             execute_expire_confirmation(&data.config, &body, &token, &member_party_id, &packages())
                 .await;
-        remember_archival_outcome(&data.db, &body.party_id, &body.confirmation_cid, &result).await;
+        remember_expire_outcome(&data.db, &body.party_id, &body.confirmation_cid, &result).await;
         Submitted::of(result, |e| {
             submission_failure("Failed to expire confirmation", e)
         })
@@ -1713,7 +1736,6 @@ pub async fn cancel_confirmation(
         let result =
             execute_cancel_confirmation(&data.config, &body, &token, &member_party_id, &packages())
                 .await;
-        remember_archival_outcome(&data.db, &body.party_id, &body.confirmation_cid, &result).await;
         Submitted::of(result, |e| {
             submission_failure("Failed to cancel confirmation", e)
         })
@@ -3609,19 +3631,21 @@ mod mediator_timeout_tests {
         .context("no audit row was written")?
     }
 
+    /// The latest expire attempt wins. A failure that never reached the
+    /// mediator says nothing about the confirmer, so it keeps the record.
     #[sqlx::test(migrator = "MIGRATOR")]
-    async fn archival_outcomes_keep_timeouts_until_the_confirmation_is_archived(
+    async fn expire_outcomes_keep_the_latest_timeout_until_the_confirmation_is_archived(
         pool: SqlitePool,
     ) -> Result {
         let party = CantonId::parse(&party())?;
         let timeout = Err(anyhow::Error::new(fixtures::mediator_timeout(
             OFFLINE_MEMBER,
         )));
-        remember_archival_outcome(&pool, &party, "00conf", &timeout).await;
-        remember_archival_outcome(&pool, &party, "00other", &timeout).await;
+        remember_expire_outcome(&pool, &party, "00conf", &timeout).await;
+        remember_expire_outcome(&pool, &party, "00other", &timeout).await;
 
         let unrelated_failure = Err(anyhow::anyhow!("connection refused"));
-        remember_archival_outcome(&pool, &party, "00conf", &unrelated_failure).await;
+        remember_expire_outcome(&pool, &party, "00conf", &unrelated_failure).await;
         let rows = pool.get_mediator_timeouts(&party).await?;
         assert_eq!(rows.len(), 2);
         assert_eq!(rows[0].contract_id, "00conf");
@@ -3630,7 +3654,17 @@ mod mediator_timeout_tests {
             vec![OFFLINE_MEMBER]
         );
 
-        remember_archival_outcome(&pool, &party, "00conf", &Ok(())).await;
+        let later_timeout = Err(anyhow::Error::new(fixtures::mediator_timeout(
+            "member-d::1220dddd",
+        )));
+        remember_expire_outcome(&pool, &party, "00conf", &later_timeout).await;
+        let rows = pool.get_mediator_timeouts(&party).await?;
+        assert_eq!(
+            serde_json::from_str::<Vec<String>>(&rows[0].unresponsive)?,
+            vec!["member-d::1220dddd"]
+        );
+
+        remember_expire_outcome(&pool, &party, "00conf", &Ok(())).await;
 
         let rows = pool.get_mediator_timeouts(&party).await?;
         assert_eq!(rows.len(), 1);
@@ -3713,8 +3747,8 @@ mod mediator_timeout_tests {
             );
             let party = CantonId::parse(&party())?;
             let rows = pool.get_mediator_timeouts(&party).await?;
-            // Only an attempt to archive a confirmation keeps its timeout.
-            if !matches!(event, AuditEvent::Expire | AuditEvent::Cancel) {
+            // Only an expire keeps its timeout.
+            if !matches!(event, AuditEvent::Expire) {
                 assert!(rows.is_empty(), "{event:?}");
                 continue;
             }
@@ -3955,56 +3989,81 @@ mod mediator_timeout_tests {
         Ok(())
     }
 
-    /// A confirmation whose archive once timed out is archived later, for
-    /// example after its confirmer's participant came back. The handler must
-    /// then forget the timeout, so the confirmation is no longer marked stuck.
+    /// The record follows the latest expire attempt through the handler: a
+    /// timeout that names another party replaces it, and a success, for
+    /// example after the confirmer's participant came back, forgets it.
     #[sqlx::test(migrator = "MIGRATOR")]
-    async fn a_later_successful_archive_clears_the_recorded_timeout(pool: SqlitePool) -> Result {
+    async fn the_latest_expire_attempt_decides_the_recorded_timeout(pool: SqlitePool) -> Result {
         let _serial = super::action_metrics_tests::SERIAL.lock().await;
         let party = CantonId::parse(&party())?;
-        for (uri, body) in [
-            (
-                "/governance/expire",
-                serde_json::json!({
-                    "party_id": party,
-                    "rules_contract_id": "00rules",
-                    "confirmation_cid": "00c0ffee",
-                }),
-            ),
-            (
-                "/governance/cancel",
-                serde_json::json!({ "party_id": party, "confirmation_cid": "00c0ffee" }),
-            ),
-        ] {
-            let offline = RejectingLedger::new();
-            offline.release.notify_one();
-            let (status, _) = post_to_writes(&pool, &offline, uri, body.clone()).await?;
-            assert_eq!(status, StatusCode::GATEWAY_TIMEOUT, "{uri}");
-            let rows = pool.get_mediator_timeouts(&party).await?;
-            assert_eq!(rows.len(), 1, "{uri}");
-            assert_eq!(rows[0].contract_id, "00c0ffee", "{uri}");
+        let body = serde_json::json!({
+            "party_id": party,
+            "rules_contract_id": "00rules",
+            "confirmation_cid": "00c0ffee",
+        });
+        let unresponsive = |rows: &[GovernanceMediatorTimeoutRow]| -> Result<Vec<String>> {
+            let [row] = rows else {
+                anyhow::bail!("expected one record, found {}", rows.len());
+            };
+            assert_eq!(row.contract_id, "00c0ffee");
+            Ok(serde_json::from_str(&row.unresponsive)?)
+        };
 
-            let app = actix_test::init_service(
-                App::new()
-                    .app_data(state(pool.clone(), RejectingLedger::accepting().serve()?).await?)
-                    .wrap(AuthMiddleware)
-                    .service(expire_confirmation)
-                    .service(cancel_confirmation),
-            )
-            .await;
-            let request = actix_test::TestRequest::post()
-                .uri(uri)
-                .insert_header((AUTHORIZATION, "Bearer any-token"))
-                .set_json(body)
-                .to_request();
-            let response = actix_test::call_service(&app, request).await;
+        let offline = RejectingLedger::new();
+        offline.release.notify_one();
+        let (status, _) =
+            post_to_writes(&pool, &offline, "/governance/expire", body.clone()).await?;
+        assert_eq!(status, StatusCode::GATEWAY_TIMEOUT);
+        let rows = pool.get_mediator_timeouts(&party).await?;
+        assert_eq!(unresponsive(&rows)?, vec![OFFLINE_MEMBER]);
 
-            assert_eq!(response.status(), StatusCode::OK, "{uri}");
-            assert!(
-                pool.get_mediator_timeouts(&party).await?.is_empty(),
-                "{uri}"
-            );
-        }
+        let mut another = RejectingLedger::new();
+        another.rejection = Some(fixtures::mediator_timeout("member-d::1220dddd"));
+        another.release.notify_one();
+        let (status, _) =
+            post_to_writes(&pool, &another, "/governance/expire", body.clone()).await?;
+        assert_eq!(status, StatusCode::GATEWAY_TIMEOUT);
+        let rows = pool.get_mediator_timeouts(&party).await?;
+        assert_eq!(unresponsive(&rows)?, vec!["member-d::1220dddd"]);
+
+        let app = actix_test::init_service(
+            App::new()
+                .app_data(state(pool.clone(), RejectingLedger::accepting().serve()?).await?)
+                .wrap(AuthMiddleware)
+                .service(expire_confirmation),
+        )
+        .await;
+        let request = actix_test::TestRequest::post()
+            .uri("/governance/expire")
+            .insert_header((AUTHORIZATION, "Bearer any-token"))
+            .set_json(body)
+            .to_request();
+        let response = actix_test::call_service(&app, request).await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(pool.get_mediator_timeouts(&party).await?.is_empty());
+        Ok(())
+    }
+
+    /// `_Cancel` is controlled by the confirmer, this node's own member. A
+    /// cancel timeout therefore never shows that the confirmer is gone.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_cancel_timeout_is_not_recorded(pool: SqlitePool) -> Result {
+        let _serial = super::action_metrics_tests::SERIAL.lock().await;
+        let party = CantonId::parse(&party())?;
+        let ledger = RejectingLedger::new();
+        ledger.release.notify_one();
+
+        let (status, _) = post_to_writes(
+            &pool,
+            &ledger,
+            "/governance/cancel",
+            serde_json::json!({ "party_id": party, "confirmation_cid": "00c0ffee" }),
+        )
+        .await?;
+
+        assert_eq!(status, StatusCode::GATEWAY_TIMEOUT);
+        assert!(pool.get_mediator_timeouts(&party).await?.is_empty());
         Ok(())
     }
 }
@@ -4285,10 +4344,11 @@ mod confirmations_feed_tests {
             .with_context(|| format!("no action holds {contract_id}"))
     }
 
-    /// Issue #615: an action whose expired confirmations belong to a former
-    /// member, or to a member whose archive timed out at the mediator, is
-    /// marked as one that cannot be archived. The marks come from the rules
-    /// contract on the ledger and from this party's own timeout records.
+    /// Issue #615: an action whose expired confirmations all failed their
+    /// latest expire with a mediator timeout naming the confirmer is marked as
+    /// one that cannot be archived. A former member without such evidence is
+    /// not marked: its participant may still be online. The evidence comes
+    /// from this party's own timeout records.
     #[sqlx::test(migrator = "MIGRATOR")]
     async fn the_feed_marks_what_cannot_be_archived(pool: SqlitePool) -> Result {
         let party = id("dec", "ab");
@@ -4300,25 +4360,22 @@ mod confirmations_feed_tests {
         );
         let now = chrono::Utc::now().timestamp();
         let (expired, live) = (now - 3600, now + 3600);
+        let threshold = |new_threshold| ActionType::GovernanceSetThreshold { new_threshold };
         let ledger = AcsLedger {
             contracts: Arc::new(vec![
                 rules(&party, &[&member_a, &member_b]),
-                self_confirmation(
-                    "00self-former",
-                    &ActionType::GovernanceSetThreshold { new_threshold: 3 },
-                    &former,
-                    expired,
-                )?,
-                self_confirmation(
-                    "00self-live",
-                    &ActionType::GovernanceSetThreshold { new_threshold: 1 },
-                    &member_a,
-                    live,
-                )?,
+                self_confirmation("00self-former", &threshold(3), &former, expired)?,
+                self_confirmation("00self-live", &threshold(1), &member_a, live)?,
+                self_confirmation("00self-timeout", &threshold(4), &member_b, expired)?,
+                self_confirmation("00self-named-other", &threshold(5), &member_a, expired)?,
                 domain_confirmation("00dom-timeout", "00gone-a", &member_a, expired),
                 domain_confirmation("00dom-elsewhere", "00gone-b", &member_b, expired),
             ]),
         };
+        pool.record_mediator_timeout(&party, "00self-timeout", &[member_b.to_string()])
+            .await?;
+        pool.record_mediator_timeout(&party, "00self-named-other", &[member_b.to_string()])
+            .await?;
         pool.record_mediator_timeout(&party, "00dom-timeout", &[member_a.to_string()])
             .await?;
         // The same confirmation id timed out for another party only.
@@ -4327,15 +4384,21 @@ mod confirmations_feed_tests {
 
         let body = feed(&pool, &ledger, &party).await?;
 
-        let former_action = holding(&body["actions"], "00self-former")?;
+        for unmarked in ["00self-former", "00self-live", "00self-named-other"] {
+            let action = holding(&body["actions"], unmarked)?;
+            assert_eq!(
+                action["confirmations"][0]["stuck"],
+                json!(null),
+                "{unmarked}"
+            );
+            assert_eq!(action["cannot_be_archived"], json!(false), "{unmarked}");
+        }
+        let timed_out = holding(&body["actions"], "00self-timeout")?;
         assert_eq!(
-            former_action["confirmations"][0]["stuck"],
-            json!("confirmer_not_member")
+            timed_out["confirmations"][0]["stuck"],
+            json!("participant_unresponsive")
         );
-        assert_eq!(former_action["cannot_be_archived"], json!(true));
-        let live_action = holding(&body["actions"], "00self-live")?;
-        assert_eq!(live_action["confirmations"][0]["stuck"], json!(null));
-        assert_eq!(live_action["cannot_be_archived"], json!(false));
+        assert_eq!(timed_out["cannot_be_archived"], json!(true));
         let timed_out = holding(&body["domain_actions"], "00dom-timeout")?;
         assert_eq!(timed_out["orphaned"], json!(true));
         assert_eq!(

@@ -550,7 +550,7 @@ fn governance_archival_status_http_json_is_stable() {
     let _guard = bind_snapshot_path();
     let (mut self_action, mut domain_action) = legacy_governance_actions();
     self_action.cannot_be_archived = true;
-    self_action.confirmations[0].stuck = Some(StuckReason::ConfirmerNotMember);
+    self_action.confirmations[0].stuck = Some(StuckReason::ParticipantUnresponsive);
     domain_action.cannot_be_archived = true;
     domain_action.confirmations[0].stuck = Some(StuckReason::ParticipantUnresponsive);
 

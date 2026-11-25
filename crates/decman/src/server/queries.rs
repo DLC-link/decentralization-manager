@@ -649,36 +649,28 @@ pub struct GovernanceQueue {
     pub complete: bool,
 }
 
-/// Valid rules always have members. An empty decoded set means membership
-/// could not be read, so it cannot prove that any confirmer left.
-pub(crate) fn known_governance_members(
-    state: Option<&GovernanceState>,
-) -> Option<HashSet<CantonId>> {
-    state
-        .filter(|state| !state.members.is_empty())
-        .map(|state| state.members.iter().cloned().collect())
-}
+/// The parties each confirmation's latest expire attempt named as
+/// unresponsive, keyed by confirmation contract id.
+pub(crate) type ExpireTimeouts = HashMap<String, HashSet<String>>;
 
-/// Mark archival failures using current membership and previously observed timeouts.
-/// Unknown membership never proves that a confirmer left. An unresolved or future
-/// expiry stays live even when an earlier cancellation timed out.
+/// Marks the expired confirmations that cannot be archived.
+///
+/// A confirmation is stuck only on evidence: it has expired, and the latest
+/// expire attempt on this node timed out at the mediator naming its confirmer.
+/// Being a former member is no such evidence: its participant may still be
+/// online and confirm the archive.
 pub(crate) fn mark_stuck(
     actions: &mut [GovernanceAction],
     domain_actions: &mut [DomainGovernanceAction],
-    members: Option<&HashSet<CantonId>>,
-    timeouts: &HashSet<String>,
+    timeouts: &ExpireTimeouts,
     now: i64,
 ) {
     let reason = |contract_id: &str, confirmer: &CantonId, expires_at: i64| {
-        if expires_at <= 0 || expires_at > now {
-            None
-        } else if members.is_some_and(|members| !members.contains(confirmer)) {
-            Some(StuckReason::ConfirmerNotMember)
-        } else if timeouts.contains(contract_id) {
-            Some(StuckReason::ParticipantUnresponsive)
-        } else {
-            None
-        }
+        let expired = expires_at > 0 && expires_at <= now;
+        let named = timeouts
+            .get(contract_id)
+            .is_some_and(|unresponsive| unresponsive.contains(&confirmer.to_string()));
+        (expired && named).then_some(StuckReason::ParticipantUnresponsive)
     };
     for action in actions {
         for c in &mut action.confirmations {
@@ -4521,8 +4513,8 @@ mod domain_confirmation_page_tests {
         )
     }
 
-    #[test]
-    fn an_archived_proposal_is_included_after_a_complete_single_page() {
+    /// The orphans of a complete single-page read, marked against `timeouts`.
+    fn orphans_marked_with(timeouts: &ExpireTimeouts) -> Vec<DomainGovernanceAction> {
         let selected = domain_confirmations_for_batch(
             HashMap::from([confirmation("00archived")]),
             &HashMap::new(),
@@ -4536,13 +4528,18 @@ mod domain_confirmation_page_tests {
                 .into_iter()
                 .map(|action| domain_action_dto(action, None))
                 .collect();
-        mark_stuck(
-            &mut [],
-            &mut actions,
-            Some(&HashSet::new()),
-            &HashSet::new(),
-            NOW,
-        );
+        mark_stuck(&mut [], &mut actions, timeouts, NOW);
+        actions
+    }
+
+    #[test]
+    fn an_orphan_that_cannot_be_archived_is_listed() {
+        let timeouts = HashMap::from([(
+            "00archived-confirmation".to_string(),
+            HashSet::from([format!("former::1220{}", "ab".repeat(32))]),
+        )]);
+
+        let actions = orphans_marked_with(&timeouts);
 
         assert_eq!(actions.len(), 1);
         assert_eq!(actions[0].proposal_cid, "00archived");
@@ -4629,6 +4626,18 @@ mod stuck_tests {
         CantonId::parse(&format!("member::1220{}", "ab".repeat(32))).expect("valid party")
     }
 
+    fn other_member() -> CantonId {
+        CantonId::parse(&format!("other::1220{}", "cd".repeat(32))).expect("valid party")
+    }
+
+    /// The latest expire of each of `contract_ids` timed out naming `party`.
+    fn timed_out(contract_ids: &[&str], party: &CantonId) -> ExpireTimeouts {
+        contract_ids
+            .iter()
+            .map(|cid| (cid.to_string(), HashSet::from([party.to_string()])))
+            .collect()
+    }
+
     fn self_action(expiries: &[i64]) -> GovernanceAction {
         let action = ActionType::GovernanceSetThreshold { new_threshold: 2 };
         GovernanceAction {
@@ -4687,62 +4696,72 @@ mod stuck_tests {
     }
 
     #[test]
-    fn an_expired_confirmation_from_a_former_member_is_stuck() {
-        let mut actions = [self_action(&[NOW])];
-        let mut domains = [domain_action(true, &[NOW - 1])];
+    fn an_expired_confirmation_whose_expire_timed_out_naming_its_confirmer_is_stuck() {
+        let mut actions = [self_action(&[NOW - 1])];
+        let mut domains = vec![domain_action(true, &[NOW])];
 
         mark_stuck(
             &mut actions,
             &mut domains,
-            Some(&HashSet::new()),
-            &HashSet::new(),
+            &timed_out(&["c0"], &member()),
             NOW,
         );
 
         assert_eq!(
             actions[0].confirmations[0].stuck,
-            Some(StuckReason::ConfirmerNotMember)
+            Some(StuckReason::ParticipantUnresponsive)
         );
         assert_eq!(
             domains[0].confirmations[0].stuck,
-            Some(StuckReason::ConfirmerNotMember)
+            Some(StuckReason::ParticipantUnresponsive)
         );
         assert!(actions[0].cannot_be_archived);
         assert!(domains[0].cannot_be_archived);
     }
 
+    /// A former member's participant may still be online and confirm the
+    /// archive, so leaving the member set is no evidence on its own.
     #[test]
-    fn a_recorded_timeout_marks_an_expired_current_members_confirmation() {
-        let mut actions = [self_action(&[NOW - 1])];
-        let mut domains = [domain_action(true, &[NOW])];
-        let members = HashSet::from([member()]);
-        let timeouts = HashSet::from(["c0".to_string()]);
+    fn an_expired_confirmation_without_a_timeout_is_not_stuck() {
+        let mut actions = [self_action(&[NOW])];
+        let mut domains = vec![domain_action(false, &[NOW - 1])];
 
-        mark_stuck(&mut actions, &mut domains, Some(&members), &timeouts, NOW);
+        mark_stuck(&mut actions, &mut domains, &HashMap::new(), NOW);
 
-        assert_eq!(
-            actions[0].confirmations[0].stuck,
-            Some(StuckReason::ParticipantUnresponsive)
-        );
-        assert_eq!(
-            domains[0].confirmations[0].stuck,
-            Some(StuckReason::ParticipantUnresponsive)
-        );
-        assert!(actions[0].cannot_be_archived);
-        assert!(domains[0].cannot_be_archived);
+        assert_eq!(actions[0].confirmations[0].stuck, None);
+        assert_eq!(domains[0].confirmations[0].stuck, None);
+        assert!(!actions[0].cannot_be_archived);
+        assert!(!domains[0].cannot_be_archived);
+    }
+
+    /// The latest expire attempt wins. A timeout that names someone else, or
+    /// nobody, leaves this confirmer's participant unproven.
+    #[test]
+    fn a_timeout_that_does_not_name_the_confirmer_marks_nothing() {
+        for timeouts in [
+            timed_out(&["c0"], &other_member()),
+            HashMap::from([("c0".to_string(), HashSet::new())]),
+        ] {
+            let mut actions = [self_action(&[NOW - 1])];
+            let mut domains = vec![domain_action(false, &[NOW - 1])];
+
+            mark_stuck(&mut actions, &mut domains, &timeouts, NOW);
+
+            assert_eq!(actions[0].confirmations[0].stuck, None);
+            assert_eq!(domains[0].confirmations[0].stuck, None);
+            assert!(!actions[0].cannot_be_archived);
+        }
     }
 
     #[test]
     fn live_and_unresolved_confirmations_are_never_stuck() {
         let mut actions = [self_action(&[0, NOW + 1])];
-        let mut domains = [domain_action(true, &[0, NOW + 1])];
-        let timeouts = HashSet::from(["c0".to_string(), "c1".to_string()]);
+        let mut domains = vec![domain_action(false, &[0, NOW + 1])];
 
         mark_stuck(
             &mut actions,
             &mut domains,
-            Some(&HashSet::new()),
-            &timeouts,
+            &timed_out(&["c0", "c1"], &member()),
             NOW,
         );
 
@@ -4755,11 +4774,14 @@ mod stuck_tests {
     #[test]
     fn one_archivable_confirmation_keeps_the_action_archivable() {
         let mut actions = [self_action(&[NOW - 1, NOW])];
-        let mut domains = [domain_action(true, &[NOW - 1, NOW])];
-        let members = HashSet::from([member()]);
-        let timeouts = HashSet::from(["c0".to_string()]);
+        let mut domains = vec![domain_action(false, &[NOW - 1, NOW])];
 
-        mark_stuck(&mut actions, &mut domains, Some(&members), &timeouts, NOW);
+        mark_stuck(
+            &mut actions,
+            &mut domains,
+            &timed_out(&["c0"], &member()),
+            NOW,
+        );
 
         assert!(actions[0].confirmations[0].stuck.is_some());
         assert!(domains[0].confirmations[0].stuck.is_some());
@@ -4771,109 +4793,41 @@ mod stuck_tests {
 
     #[test]
     fn a_live_proposal_stays_archivable_even_when_all_its_confirmations_are_stuck() {
-        let mut domains = [domain_action(false, &[NOW - 1])];
+        let mut domains = vec![domain_action(false, &[NOW - 1])];
 
-        mark_stuck(
-            &mut [],
-            &mut domains,
-            Some(&HashSet::new()),
-            &HashSet::new(),
-            NOW,
-        );
+        mark_stuck(&mut [], &mut domains, &timed_out(&["c0"], &member()), NOW);
 
         assert_eq!(
             domains[0].confirmations[0].stuck,
-            Some(StuckReason::ConfirmerNotMember)
+            Some(StuckReason::ParticipantUnresponsive)
         );
         assert!(!domains[0].cannot_be_archived);
     }
 
     #[test]
-    fn unknown_membership_does_not_assume_the_confirmer_left() {
-        let mut actions = [self_action(&[NOW])];
-        let mut domains = [domain_action(true, &[NOW])];
-        let undecoded_members = GovernanceState {
-            contract_id: "00rules".to_string(),
-            governance_party: member(),
-            members: vec![],
-            threshold: 1,
-            additional_proposers: vec![],
-            disclosure_observers: vec![],
-            action_confirmation_timeout_microseconds: None,
-            package_ref: None,
-            out_of_date: false,
-        };
-        for rules in [None, Some(&undecoded_members)] {
-            let members = known_governance_members(rules);
-            mark_stuck(
-                &mut actions,
-                &mut domains,
-                members.as_ref(),
-                &HashSet::new(),
-                NOW,
-            );
-
-            assert_eq!(actions[0].confirmations[0].stuck, None);
-            assert_eq!(domains[0].confirmations[0].stuck, None);
-            assert!(!actions[0].cannot_be_archived);
-            assert!(!domains[0].cannot_be_archived);
-        }
-
-        let members = known_governance_members(Some(&undecoded_members));
-        mark_stuck(
-            &mut actions,
-            &mut domains,
-            members.as_ref(),
-            &HashSet::from(["c0".to_string()]),
-            NOW,
-        );
-        assert_eq!(
-            actions[0].confirmations[0].stuck,
-            Some(StuckReason::ParticipantUnresponsive)
-        );
-        assert_eq!(
-            domains[0].confirmations[0].stuck,
-            Some(StuckReason::ParticipantUnresponsive)
-        );
-    }
-
-    #[test]
     fn an_empty_action_has_no_stuck_confirmations() {
         let mut actions = [self_action(&[])];
-        let mut domains = [domain_action(true, &[])];
+        let mut domains = vec![domain_action(false, &[])];
 
-        mark_stuck(
-            &mut actions,
-            &mut domains,
-            Some(&HashSet::new()),
-            &HashSet::new(),
-            NOW,
-        );
+        mark_stuck(&mut actions, &mut domains, &HashMap::new(), NOW);
 
         assert!(!actions[0].cannot_be_archived);
         assert!(!domains[0].cannot_be_archived);
     }
 
     #[test]
-    fn fresh_membership_and_timeout_evidence_clear_old_marks() {
+    fn fresh_timeout_evidence_clears_old_marks() {
         let mut actions = [self_action(&[NOW])];
-        let mut domains = [domain_action(true, &[NOW])];
+        let mut domains = vec![domain_action(false, &[NOW])];
         mark_stuck(
             &mut actions,
             &mut domains,
-            Some(&HashSet::new()),
-            &HashSet::new(),
+            &timed_out(&["c0"], &member()),
             NOW,
         );
         assert!(actions[0].cannot_be_archived);
 
-        mark_stuck(
-            &mut actions,
-            &mut domains,
-            Some(&HashSet::from([member()])),
-            &HashSet::new(),
-            NOW,
-        );
+        mark_stuck(&mut actions, &mut domains, &HashMap::new(), NOW);
 
         assert_eq!(actions[0].confirmations[0].stuck, None);
         assert_eq!(domains[0].confirmations[0].stuck, None);
