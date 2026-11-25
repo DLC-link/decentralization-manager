@@ -133,7 +133,11 @@ export async function createProposal(proposal: PartyProposal, creator: Wallet): 
   const { simulated } = creator.participant
   checkOneMode(proposal, simulated)
   const hosts = plan.hosts.map((participant): HostResult => {
-    const { name, role } = hostOf(participant, simulated)
+    const role = roleOf(plan, participant)
+    const ownerNames = getState()
+      .wallets.filter((w) => plan.owners.some((o) => o.publicKey === w.publicKey && o.participant === participant))
+      .map((w) => w.name)
+    const name = role === 'owner' ? ownerNames.join(', ') : hostOf(participant, simulated).name
     return { participant, name, role, step: 'waiting' }
   })
 
@@ -198,13 +202,21 @@ function setHost(id: string, participant: string, step: HostStep, detail?: strin
 export function recheckProposal(proposal: Proposal): { plan: PartyPlan; onboarding: Onboarding } {
   const plan = planParty(proposal.proposal)
   const onboarding = onboardingTransactions(proposal.proposal, proposal.topologyVersion)
+  const hosts = proposal.hosts.map((h) => ({ participant: h.participant, role: h.role }))
+  const planned = plan.hosts.map((participant) => ({ participant, role: roleOf(plan, participant) }))
   if (
     JSON.stringify(plan) !== JSON.stringify(proposal.plan) ||
-    JSON.stringify(onboarding) !== JSON.stringify(proposal.onboarding)
+    JSON.stringify(onboarding) !== JSON.stringify(proposal.onboarding) ||
+    JSON.stringify(hosts) !== JSON.stringify(planned)
   ) {
     throw new Error('The stored proposal does not match the transactions it describes. Do not sign it.')
   }
   return { plan, onboarding }
+}
+
+/** A host is an owner's participant or a covalidator. */
+function roleOf(plan: PartyPlan, participant: string): HostResult['role'] {
+  return plan.owners.some((o) => o.participant === participant) ? 'owner' : 'covalidator'
 }
 
 /** The owners whose signature on the combined hash verifies. */
@@ -277,7 +289,8 @@ export function rejectProposal(id: string, wallet: Wallet): void {
  */
 export async function submitProposal(id: string, wallet: Wallet): Promise<void> {
   const proposal = findProposal(id)
-  if (!proposal.plan.owners.some((o) => o.publicKey === wallet.publicKey)) {
+  const { plan } = recheckProposal(proposal)
+  if (!plan.owners.some((o) => o.publicKey === wallet.publicKey)) {
     throw new Error(`${wallet.name} is not an owner, so it cannot start the creation.`)
   }
   checkOpen(proposal)
@@ -285,7 +298,7 @@ export async function submitProposal(id: string, wallet: Wallet): Promise<void> 
     throw new Error(`This proposal uses ${modeName(proposal.simulated)} participants. Act as an owner of that mode.`)
   }
   checkOneMode(proposal.proposal, proposal.simulated)
-  if (getState().parties.some((p) => p.partyId === proposal.plan.partyId && p.simulated === proposal.simulated)) {
+  if (getState().parties.some((p) => p.partyId === plan.partyId && p.simulated === proposal.simulated)) {
     throw new Error('This party already exists.')
   }
   const requests = allocationRequests(
@@ -302,28 +315,28 @@ export async function submitProposal(id: string, wallet: Wallet): Promise<void> 
   }))
 
   try {
-    await markHostedHosts(id, 'Already hosts the party.')
-    await sendToHosts(id, 'owner', requests.allocate, 'submitted', 'Received every transaction and the owner signatures.')
-    await sendToHosts(id, 'covalidator', requests.hostingApproval, 'approved', 'Signed its hosting approval.')
-    await waitUntilHosted(id)
+    await markHostedHosts(id, plan.partyId, 'Already hosts the party.')
+    await sendToHosts(id, plan.partyId, 'owner', requests.allocate, 'submitted', 'Received every transaction and the owner signatures.')
+    await sendToHosts(id, plan.partyId, 'covalidator', requests.hostingApproval, 'approved', 'Signed its hosting approval.')
+    await waitUntilHosted(id, plan.partyId)
   } catch (error) {
     changeProposal(id, (p) => ({ ...p, status: 'failed', error: message(error) }))
     throw error
   }
 
-  addParty(findProposal(id), wallet)
+  addParty(findProposal(id), plan, wallet)
 }
 
 /** Marks every host that reports the party as local. */
-async function markHostedHosts(id: string, detail: string): Promise<void> {
+async function markHostedHosts(id: string, partyId: string, detail: string): Promise<void> {
   const proposal = findProposal(id)
   await Promise.all(
     proposal.hosts
       .filter((h) => h.step !== 'hosted')
       .map(async (h) => {
         try {
-          const answer = await ledger.getParty(hostOf(h.participant, proposal.simulated).link, proposal.plan.partyId)
-          if (partyHostedLocally(answer, proposal.plan.partyId)) setHost(id, h.participant, 'hosted', detail)
+          const answer = await ledger.getParty(hostOf(h.participant, proposal.simulated).link, partyId)
+          if (partyHostedLocally(answer, partyId)) setHost(id, h.participant, 'hosted', detail)
         } catch (error) {
           setHost(id, h.participant, h.step, `Still waiting: ${message(error)}`)
         }
@@ -337,6 +350,7 @@ async function markHostedHosts(id: string, detail: string): Promise<void> {
  */
 async function sendToHosts(
   id: string,
+  partyId: string,
   role: HostResult['role'],
   body: unknown,
   step: HostStep,
@@ -355,7 +369,7 @@ async function sendToHosts(
       return
     }
     const answer = result.reason instanceof ledger.LedgerError ? result.reason.answer : undefined
-    const refusal = allocateRefusal(answer, proposal.plan.partyId)
+    const refusal = allocateRefusal(answer, partyId)
     if (refusal === 'partyExists') {
       setHost(id, host.participant, step, 'Says the party already exists.')
       return
@@ -378,10 +392,10 @@ async function sendToHosts(
   }
 }
 
-async function waitUntilHosted(id: string): Promise<void> {
+async function waitUntilHosted(id: string, partyId: string): Promise<void> {
   const deadline = Date.now() + HOSTING_TIMEOUT_MS
   for (;;) {
-    await markHostedHosts(id, 'Hosts the party.')
+    await markHostedHosts(id, partyId, 'Hosts the party.')
     const pending = findProposal(id).hosts.filter((h) => h.step !== 'hosted')
     if (pending.length === 0) return
     if (Date.now() > deadline) {
@@ -391,22 +405,25 @@ async function waitUntilHosted(id: string): Promise<void> {
   }
 }
 
-function addParty(proposal: Proposal, wallet: Wallet): void {
-  const { plan } = proposal
+/** Records the party from the plan computed from the proposal itself. */
+function addParty(proposal: Proposal, plan: PartyPlan, wallet: Wallet): void {
   const party: Party = {
     partyId: plan.partyId,
     namespace: plan.namespace,
     owners: plan.owners,
     simulated: proposal.simulated,
-    hosts: proposal.hosts.map((h) => ({
-      participant: h.participant,
-      role: h.role,
-      approval: proposal.simulated
-        ? 'Approved by a simulated participant.'
-        : h.role === 'owner'
-          ? 'Approved by its own participant.'
-          : "Approved by the dApp. This stands in for the covalidator's DecMan approval.",
-    })),
+    hosts: plan.hosts.map((participant) => {
+      const role = roleOf(plan, participant)
+      return {
+        participant,
+        role,
+        approval: proposal.simulated
+          ? 'Approved by a simulated participant.'
+          : role === 'owner'
+            ? 'Approved by its own participant.'
+            : "Approved by the dApp. This stands in for the covalidator's DecMan approval.",
+      }
+    }),
     signingThreshold: plan.signingThreshold,
     namespaceThreshold: plan.namespaceThreshold,
     confirmationThreshold: plan.confirmationThreshold,
