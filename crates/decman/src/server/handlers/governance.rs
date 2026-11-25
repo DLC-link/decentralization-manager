@@ -3848,6 +3848,54 @@ mod mediator_timeout_tests {
         Ok(())
     }
 
+    /// A submission that stopped waiting before the ledger answered may still
+    /// land. A propose retried then would create a second proposal, so the
+    /// answer must say that the outcome is unknown.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_submission_that_ran_out_of_time_has_an_unknown_outcome(pool: SqlitePool) -> Result {
+        let _serial = super::action_metrics_tests::SERIAL.lock().await;
+        let rejections = [
+            (
+                tonic::Status::deadline_exceeded("deadline passed"),
+                "DEADLINE_EXCEEDED",
+            ),
+            // The gRPC client's answer when DecMan's own deadline passes.
+            (tonic::Status::cancelled("Timeout expired"), "CANCELLED"),
+            (fixtures::request_timeout(), "REQUEST_TIME_OUT"),
+        ];
+        for (rejection, cause) in rejections {
+            for (event, uri, context, body) in writes() {
+                let mut ledger = RejectingLedger::new();
+                ledger.rejection = rejection.clone();
+                ledger.release.notify_one();
+
+                let (status, error) = post_to_writes(&pool, &ledger, uri, body).await?;
+
+                assert_eq!(
+                    status,
+                    StatusCode::GATEWAY_TIMEOUT,
+                    "{event:?} {cause}: {error}"
+                );
+                assert_eq!(
+                    error,
+                    format!(
+                        "{context}: the outcome is unknown. DecMan stopped waiting before the \
+                         ledger answered ({cause}), and the write may still complete. Run \
+                         `governance pending` before you retry."
+                    ),
+                    "{event:?}"
+                );
+                let (audit_status, audit_message) = audit_row(&pool, event).await?;
+                assert_eq!(audit_status, "failed", "{event:?}");
+                assert_eq!(audit_message, Some(error), "{event:?}");
+                sqlx::query("DELETE FROM governance_audit")
+                    .execute(&pool)
+                    .await?;
+            }
+        }
+        Ok(())
+    }
+
     async fn a_panicking_submission() -> Submitted {
         panic!("the submission failed in a way no handler maps")
     }
