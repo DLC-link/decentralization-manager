@@ -327,10 +327,11 @@ pub async fn fetch_dar_from_coordinator(
     }
 }
 
-/// A coordinator's refusal as text for the log and the run record. Only
-/// printable ASCII passes as it is. Every other character is escaped, so a
-/// refusal cannot break a line or reverse the text around it. The text stops
-/// at [`MAX_REFUSAL_LEN`] bytes, and only that much of the refusal is read.
+/// A coordinator's refusal as text for the log and the run record, escaped
+/// by [`shown`] and cut at [`MAX_REFUSAL_LEN`] bytes. The peer reads and
+/// decodes the whole reply, which the network read bounds at
+/// [`MAX_REPLY_SIZE`]. Only the formatting here stops early: it looks at the
+/// first `MAX_REFUSAL_LEN + 1` bytes of the payload.
 fn refusal_text(payload: &[u8]) -> String {
     // Each byte adds at least one byte of text, so this prefix suffices.
     let prefix = &payload[..payload.len().min(MAX_REFUSAL_LEN + 1)];
