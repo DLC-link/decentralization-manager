@@ -918,6 +918,44 @@ mod tests {
         Ok(())
     }
 
+    /// A participant answers with several transactions, all in one format.
+    #[test]
+    fn the_probe_accepts_several_transactions_in_one_format() -> Result<(), Error> {
+        let plan = plan_with(&[1, 2]);
+        for format in [TopologyFormat::V30, TopologyFormat::V31] {
+            let transactions = onboarding_transactions(&plan, format)
+                .transactions
+                .iter()
+                .map(|t| STANDARD.decode(&t.transaction).expect("base64"))
+                .collect::<Vec<_>>();
+            assert_eq!(
+                topology_format_of_generated(&generated(&transactions))?,
+                format
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn the_probe_refuses_an_answer_it_cannot_decode() {
+        // Valid base64, but the bytes use protobuf wire type 7, which does not exist.
+        let not_an_envelope = generated(&[b"garbage".to_vec()]);
+        let not_a_string = json!({ "topologyTransactions": [42] });
+        let not_a_list = json!({ "topologyTransactions": "CgA=" });
+        assert!(matches!(
+            topology_format_of_generated(&not_an_envelope),
+            Err(Error::InvalidParticipantAnswer(_))
+        ));
+        assert!(matches!(
+            topology_format_of_generated(&not_a_string),
+            Err(Error::InvalidParticipantAnswer(_))
+        ));
+        assert!(matches!(
+            topology_format_of_generated(&not_a_list),
+            Err(Error::NoTopologyToProbe)
+        ));
+    }
+
     #[test]
     fn the_probe_refuses_an_unknown_format() {
         assert!(matches!(
@@ -981,5 +1019,15 @@ mod tests {
         assert!(!party_hosted_locally(&answer(false), party));
         assert!(!party_hosted_locally(&answer(true), "other::1220bb"));
         assert!(!party_hosted_locally(&json!({ "partyDetails": [] }), party));
+        assert!(!party_hosted_locally(&json!({}), party));
+        assert!(!party_hosted_locally(
+            &json!({ "partyDetails": [{ "party": party }] }),
+            party
+        ));
+        let several = json!({ "partyDetails": [
+            { "party": "other::1220bb", "isLocal": true },
+            { "party": party, "isLocal": true },
+        ] });
+        assert!(party_hosted_locally(&several, party));
     }
 }
