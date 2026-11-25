@@ -5140,6 +5140,73 @@ mod confirmations_feed_tests {
         }
         Ok(())
     }
+
+    /// A hide rests on the latest expire attempt. When a later expire times
+    /// out without naming the confirmer, the action may be archivable again,
+    /// so the feed must list it although its confirmation is still hidden.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_hidden_action_returns_when_a_later_expire_no_longer_names_its_confirmer(
+        pool: SqlitePool,
+    ) -> Result {
+        let _serial = super::action_metrics_tests::SERIAL.lock().await;
+        let party = id("dec", "ab");
+        let (member, other) = (id("member-a", "aa"), id("member-b", "bb"));
+        let ledger = AcsLedger {
+            contracts: Arc::new(vec![
+                rules(&party, &[&member, &other]),
+                self_confirmation(
+                    "00self",
+                    &ActionType::GovernanceSetThreshold { new_threshold: 3 },
+                    &member,
+                    chrono::Utc::now().timestamp() - 3600,
+                )?,
+            ]),
+            ..AcsLedger::default()
+        };
+        let expire = |unresponsive: &CantonId| {
+            let mut ledger = super::mediator_timeout_tests::RejectingLedger::new();
+            ledger.rejection = Some(fixtures::mediator_timeout(&unresponsive.to_string()));
+            ledger.release.notify_one();
+            ledger
+        };
+        let body = json!({
+            "party_id": party,
+            "rules_contract_id": "00rules",
+            "confirmation_cid": "00self",
+        });
+
+        let offline = expire(&member);
+        let (status, error) = super::mediator_timeout_tests::post_to_writes(
+            &pool,
+            &offline,
+            "/governance/expire",
+            body.clone(),
+        )
+        .await?;
+        assert_eq!(status, StatusCode::GATEWAY_TIMEOUT, "{error}");
+        assert_eq!(
+            post_ids(&pool, "/governance/hide", &party, &["00self"]).await?,
+            StatusCode::OK
+        );
+        let hidden = feed(&pool, &ledger, &party).await?;
+        assert!(!lists(&hidden["actions"], "00self"), "{hidden}");
+
+        let elsewhere = expire(&other);
+        let (status, error) = super::mediator_timeout_tests::post_to_writes(
+            &pool,
+            &elsewhere,
+            "/governance/expire",
+            body,
+        )
+        .await?;
+        assert_eq!(status, StatusCode::GATEWAY_TIMEOUT, "{error}");
+
+        let listed = feed(&pool, &ledger, &party).await?;
+        let action = holding(&listed["actions"], "00self")?;
+        assert_eq!(action["cannot_be_archived"], json!(false));
+        assert_eq!(action["hidden"], json!(false));
+        Ok(())
+    }
 }
 
 #[cfg(test)]
