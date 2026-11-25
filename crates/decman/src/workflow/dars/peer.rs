@@ -3,6 +3,7 @@
 use std::{
     collections::{BTreeSet, HashMap},
     sync::{Arc, LazyLock, Mutex, PoisonError},
+    time::Duration,
 };
 
 use anyhow::Context;
@@ -12,9 +13,9 @@ use crate::{
     consts::MAX_DAR_PULL_TOTAL,
     error::Result,
     noise::{
-        MAX_CHUNKED_TOTAL_SIZE, Message, MessageType, NOISE_CHUNK_TIMEOUT, NoiseKeypair,
-        client::CHUNK_FETCH_MAX_ATTEMPTS, parse_chunked_command_metadata, parse_public_key,
-        receive_chunked_response, send_noise_message_with_retry,
+        CHUNK_SIZE, MAX_CHUNKED_TOTAL_SIZE, Message, MessageType, NOISE_CHUNK_TIMEOUT,
+        NoiseKeypair, client::CHUNK_FETCH_MAX_ATTEMPTS, parse_chunked_command_metadata,
+        parse_public_key, receive_chunked_response, send_noise_message_with_retry,
     },
     server::RequestDarPayload,
     workflow::validation::hash_dar,
@@ -38,6 +39,14 @@ const MAX_REFUSAL_LEN: usize = 512;
 static COORDINATOR_TURNS: LazyLock<Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>> =
     LazyLock::new(Mutex::default);
 
+/// How long a fetch waits for its turn at a coordinator: as long as one pull
+/// of a 16 MiB DAR takes when each of its requests, the `RequestDar` and 16
+/// chunks, uses the full per-request timeout of a pull. That is 425 seconds.
+/// A waiter past it fails with a clear error instead of waiting forever.
+const TURN_WAIT: Duration = Duration::from_secs(
+    (1 + MAX_CHUNKED_TOTAL_SIZE.div_ceil(CHUNK_SIZE)) as u64 * NOISE_CHUNK_TIMEOUT.as_secs(),
+);
+
 fn coordinator_turn(public_key: &str) -> Arc<tokio::sync::Mutex<()>> {
     COORDINATOR_TURNS
         .lock()
@@ -45,6 +54,20 @@ fn coordinator_turn(public_key: &str) -> Arc<tokio::sync::Mutex<()>> {
         .entry(public_key.to_string())
         .or_default()
         .clone()
+}
+
+/// Wait at most `limit` for `turn`.
+async fn wait_for_turn(
+    turn: &tokio::sync::Mutex<()>,
+    limit: Duration,
+) -> Result<tokio::sync::MutexGuard<'_, ()>> {
+    tokio::time::timeout(limit, turn.lock()).await.map_err(|_| {
+        anyhow::anyhow!(
+            "another DAR fetch from this coordinator has run for {} seconds; try again once \
+             it ends",
+            limit.as_secs()
+        )
+    })
 }
 
 /// A pull that the coordinator's sizes rule out. The sizes are the same on
@@ -193,7 +216,7 @@ pub async fn fetch_dar_from_coordinator(
     admit: impl FnOnce(usize) -> Result,
 ) -> Result<Vec<u8>> {
     let turn = coordinator_turn(&coordinator.public_key);
-    let _turn = turn.lock().await;
+    let _turn = wait_for_turn(&turn, TURN_WAIT).await?;
 
     let peer_pub_key = parse_public_key(&coordinator.public_key)
         .map_err(|e| anyhow::anyhow!("the coordinator's public key does not parse: {e}"))?;
@@ -372,6 +395,27 @@ mod tests {
         assert!(!text.chars().any(char::is_control), "{text}");
         assert_eq!(text.len(), MAX_REFUSAL_LEN + "…".len());
         assert!(text.ends_with('…'));
+    }
+
+    #[tokio::test]
+    async fn a_fetch_stops_waiting_for_its_turn() -> anyhow::Result<()> {
+        let turn = tokio::sync::Mutex::new(());
+        let _held = turn.lock().await;
+
+        let waited = tokio::time::timeout(
+            Duration::from_secs(5),
+            wait_for_turn(&turn, Duration::from_millis(50)),
+        )
+        .await?;
+
+        let error = waited.expect_err("the turn was taken twice");
+        assert!(error.to_string().contains("another DAR fetch"), "{error}");
+        Ok(())
+    }
+
+    #[test]
+    fn the_turn_wait_covers_a_full_pull() {
+        assert_eq!(TURN_WAIT, Duration::from_secs(425));
     }
 
     #[test]
