@@ -10,6 +10,8 @@ pub enum Error {
     InvalidHintCharacter,
     #[error("The party name must not contain '::'.")]
     HintContainsDelimiter,
+    #[error("The party name must not end with ':'.")]
+    HintEndsWithColon,
     #[error("A party needs at least {min} owners. This proposal has {got}.")]
     TooFewOwners { min: usize, got: usize },
     #[error("A party can have at most {max} owners. This proposal has {got}.")]

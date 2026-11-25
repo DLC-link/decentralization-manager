@@ -154,6 +154,11 @@ fn check_hint(hint: &str) -> Result<(), Error> {
     if hint.contains(PARTY_ID_DELIMITER) {
         return Err(Error::HintContainsDelimiter);
     }
+    // Canton splits a party id at its first "::", so "a:" + "::ns" would
+    // read as the name "a" and the namespace ":ns".
+    if hint.ends_with(':') {
+        return Err(Error::HintEndsWithColon);
+    }
     Ok(())
 }
 
@@ -371,6 +376,13 @@ mod tests {
             plan_with_hint("a::b"),
             Err(Error::HintContainsDelimiter)
         ));
+        for hint in ["treasury:", ":", "a:b:"] {
+            assert!(
+                matches!(plan_with_hint(hint), Err(Error::HintEndsWithColon)),
+                "{hint:?}"
+            );
+        }
+        assert!(plan_with_hint(":treasury").is_ok());
         for hint in ["café", "a/b", "a.b", "a\tb"] {
             assert!(
                 matches!(plan_with_hint(hint), Err(Error::InvalidHintCharacter)),
