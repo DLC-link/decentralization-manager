@@ -1925,6 +1925,10 @@ async fn requested_confirmations(
     Ok(cids)
 }
 
+/// The cause a failed hide or unhide gives its caller and its audit row. The
+/// database error, which names tables, goes to the server log only.
+const HIDING_WRITE_FAILED: &str = "the local database write failed. See the DecMan server log.";
+
 /// The answer to a hide or unhide from a token without a subject. Both rows
 /// name who made the change, so such a token would name nobody.
 fn without_subject(actor: &AuditActor) -> Option<HttpResponse> {
@@ -1936,8 +1940,9 @@ fn without_subject(actor: &AuditActor) -> Option<HttpResponse> {
 }
 
 /// Hides or unhides `cids` and writes the audit row in one transaction, so a
-/// failed audit write leaves the hidden set as it was. A failure gets its own
-/// row, written outside the rolled-back transaction. Returns how many
+/// failed audit write leaves the hidden set as it was. On a failure the server
+/// attempts a failure row outside the rolled-back transaction; that write
+/// fails too when the audit table itself is broken. Returns how many
 /// confirmations an unhide found hidden, or how many a hide named.
 async fn change_hidden(
     db: &SqlitePool,
@@ -1945,7 +1950,7 @@ async fn change_hidden(
     party_id: &CantonId,
     cids: &[String],
     actor: &AuditActor,
-) -> std::result::Result<u64, String> {
+) -> std::result::Result<u64, &'static str> {
     let change = async {
         let mut tx = db.begin_transaction().await?;
         let changed = match event {
@@ -1964,9 +1969,9 @@ async fn change_hidden(
     match change.await {
         Ok(changed) => Ok(changed),
         Err(e) => {
-            let error = format!("{e:#}");
-            log_hiding_failure(db, event, party_id, cids, actor, &error).await;
-            Err(error)
+            tracing::error!(%party_id, ?event, "Failed to change hidden confirmations: {e:#}");
+            log_hiding_failure(db, event, party_id, cids, actor, HIDING_WRITE_FAILED).await;
+            Err(HIDING_WRITE_FAILED)
         }
     }
 }
@@ -2011,12 +2016,9 @@ pub async fn hide_confirmations(
         Ok(_) => HttpResponse::Ok().json(MessageResponse {
             message: format!("Confirmations hidden on this node: {}.", cids.len()),
         }),
-        Err(e) => {
-            tracing::error!(%party_id, "Failed to hide governance confirmations: {e}");
-            HttpResponse::InternalServerError().json(ErrorResponse {
-                error: format!("Failed to hide the confirmations: {e}"),
-            })
-        }
+        Err(cause) => HttpResponse::InternalServerError().json(ErrorResponse {
+            error: format!("Failed to hide the confirmations: {cause}"),
+        }),
     }
 }
 
@@ -2058,12 +2060,9 @@ pub async fn unhide_confirmations(
         Ok(unhidden) => HttpResponse::Ok().json(MessageResponse {
             message: format!("Confirmations unhidden on this node: {unhidden}."),
         }),
-        Err(e) => {
-            tracing::error!(%party_id, "Failed to unhide governance confirmations: {e}");
-            HttpResponse::InternalServerError().json(ErrorResponse {
-                error: format!("Failed to unhide the confirmations: {e}"),
-            })
-        }
+        Err(cause) => HttpResponse::InternalServerError().json(ErrorResponse {
+            error: format!("Failed to unhide the confirmations: {cause}"),
+        }),
     }
 }
 
@@ -6234,6 +6233,39 @@ mod hiding_tests {
                 .await?
                 .is_empty()
         );
+        Ok(())
+    }
+
+    /// A failed change answers and records a fixed cause. The database error
+    /// names a table, and any signed-in user can read the audit trail. With
+    /// the audit table writable, the failure row is written.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_failed_change_records_its_cause_without_database_detail(pool: SqlitePool) -> Result {
+        sqlx::query("ALTER TABLE governance_hidden_confirmation RENAME TO broken")
+            .execute(&pool)
+            .await?;
+
+        for (uri, verb) in [
+            ("/governance/hide", "hide"),
+            ("/governance/unhide", "unhide"),
+        ] {
+            let (status, body) = send(&pool, uri, &["00a"]).await?;
+
+            assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{uri}");
+            assert_eq!(
+                body["error"],
+                json!(format!(
+                    "Failed to {verb} the confirmations: {HIDING_WRITE_FAILED}"
+                )),
+                "{uri}"
+            );
+        }
+        let audit = pool.get_governance_audit(&party_id()?, 50, 0).await?;
+        assert_eq!(audit.len(), 2);
+        for row in audit {
+            assert_eq!(row.status, "failed");
+            assert_eq!(row.error_message.as_deref(), Some(HIDING_WRITE_FAILED));
+        }
         Ok(())
     }
 
