@@ -618,6 +618,32 @@ mod tests {
         Ok(())
     }
 
+    /// The other tests use one value for both thresholds, so a swap would
+    /// pass them. Here each threshold has its own value.
+    #[test]
+    fn each_threshold_lands_in_its_own_field() -> Result<(), Error> {
+        let mut proposal = proposal_with(&[1, 2, 3]);
+        proposal.signing_threshold = 2;
+        proposal.confirmation_threshold = 3;
+        let plan = plan_party(&proposal)?;
+        for format in [TopologyFormat::V30, TopologyFormat::V31] {
+            let onboarding = onboarding_transactions(&plan, format);
+            let Mapping::DecentralizedNamespaceDefinition(namespace) =
+                decoded(&onboarding.transactions[3])?
+            else {
+                panic!("expected a decentralized namespace");
+            };
+            assert_eq!(namespace.threshold, 2, "{format:?}");
+
+            let p2p = party_to_participant(&onboarding)?;
+            assert_eq!(p2p.threshold, 3, "{format:?}");
+            let keys = p2p.party_signing_keys.expect("the party has signing keys");
+            assert_eq!(keys.threshold, 2, "{format:?}");
+            assert_eq!(keys.keys.len(), 3, "{format:?}");
+        }
+        Ok(())
+    }
+
     #[test]
     fn changing_the_hosting_changes_only_its_hash() {
         let plan = plan_with(&[1, 2]);
