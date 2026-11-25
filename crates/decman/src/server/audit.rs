@@ -105,8 +105,8 @@ pub enum PurgeAuditEvent {
 /// is written by a restart that found the purge cut off, so no request
 /// carried the admin user.
 ///
-/// Waits for the write, unlike [`spawn_audit_log`], so the start row exists
-/// before the purge disconnects the participant.
+/// Waits for the write, as [`log_governance_audit`] does, so the start row
+/// exists before the purge disconnects the participant.
 pub async fn log_purge_audit(
     pool: &SqlitePool,
     event: PurgeAuditEvent,
