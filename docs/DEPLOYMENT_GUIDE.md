@@ -503,7 +503,16 @@ spec:
 
 Adapt the `ingressClassName` and TLS configuration to your cluster's Ingress controller (nginx, Contour, etc.). Make sure `<your-ui-host>` resolves to the cluster and is registered as a valid redirect URI on your IdP client.
 
-**Proxy timeout.** A governance write waits until the synchronizer decides on it. The mediator rejects the write only after its confirmation timeout when a confirming participant is offline. Set the response timeout of the Ingress or proxy to at least 120 seconds. DecMan then answers with status 504 and a JSON body that names each party that did not confirm. A 504 without a JSON body comes from the proxy. An expire or a cancel still runs to the end in that case. `GET /governance/audit` then shows its cause.
+**Proxy timeout.** A governance write waits until the synchronizer decides on it. The mediator rejects the write only after its confirmation timeout when a confirming participant is offline. Set the response timeout of the Ingress or proxy to at least 120 seconds. DecMan then answers with status 504 and a JSON body that names each party that did not confirm. DecMan stops waiting for the ledger after 130 seconds, so a proxy timeout of 130 seconds always lets DecMan's own answer through. With ingress-nginx, for example, add these annotations to the Ingress:
+
+```yaml
+metadata:
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "130"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "130"
+```
+
+A 504 without a JSON body comes from the proxy. The write still runs to its end in that case, and `GET /governance/audit` then shows its outcome.
 
 ### Apply
 
