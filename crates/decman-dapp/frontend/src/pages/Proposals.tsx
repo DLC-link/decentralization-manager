@@ -3,6 +3,7 @@ import { actingWallet, useAppState, type HostResult, type Proposal, type Wallet 
 import {
   ALREADY_EXISTED,
   isOpen,
+  refusedEverywhere,
   untouched,
   recheckProposal,
   rejectProposal,
@@ -103,6 +104,7 @@ function ProposalCard({
   const actingIsProposer = !!acting && acting.publicKey === proposal.proposerKey
   const canSubmit = actingIsOwner && allSigned && open
   const canEnd = untouched(proposal)
+  const refused = refusedEverywhere(proposal)
   const hostsApproved = proposal.hosts.every((h) => h.step !== 'waiting' && h.step !== 'failed')
   const current =
     proposal.status === 'submitted' ? 4 : !allSigned ? 1 : proposal.status === 'collecting' || !hostsApproved ? 2 : 3
@@ -239,7 +241,7 @@ function ProposalCard({
               Reject
             </button>
           )}
-          {actingIsProposer && canEnd && !allSigned && (
+          {actingIsProposer && ((canEnd && !allSigned) || refused) && (
             <button
               className="ghost"
               onClick={() =>
@@ -256,11 +258,17 @@ function ProposalCard({
             </button>
           )}
           {!actingIsOwner && <span className="muted">Act as an owner to sign.</span>}
-          {proposal.status === 'failed' && (
-            <span className="muted">
-              The signed bundle may already have reached participants, so the proposal can only be tried again.
-            </span>
-          )}
+          {proposal.status === 'failed' &&
+            (refused ? (
+              <span className="muted">
+                Every owner's participant refused the bundle, so no participant holds it. The proposer can withdraw
+                it, or anyone can try again.
+              </span>
+            ) : (
+              <span className="muted">
+                The signed bundle may already have reached participants, so the proposal can only be tried again.
+              </span>
+            ))}
         </div>
       )}
       <ErrorText error={error} />

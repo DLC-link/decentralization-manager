@@ -134,6 +134,7 @@ function checkNoOtherPlan(plan: PartyPlan, simulated: boolean): void {
       p.plan.partyId === plan.partyId &&
       p.simulated === simulated &&
       (isOpen(p) || p.status === 'submitting') &&
+      !refusedEverywhere(p) &&
       planSummary(p.plan) !== wanted,
   )
   if (otherParty || otherProposal) {
@@ -229,10 +230,16 @@ function changeProposal(id: string, change: (proposal: Proposal) => Proposal): v
   update((s) => ({ ...s, proposals: s.proposals.map((p) => (p.id === id ? change(p) : p)) }))
 }
 
-function setHost(id: string, participant: string, step: HostStep, detail?: string): void {
+function setHost(
+  id: string,
+  participant: string,
+  step: HostStep,
+  detail?: string,
+  refusedByParticipant?: boolean,
+): void {
   changeProposal(id, (p) => ({
     ...p,
-    hosts: p.hosts.map((h) => (h.participant === participant ? { ...h, step, detail } : h)),
+    hosts: p.hosts.map((h) => (h.participant === participant ? { ...h, step, detail, refusedByParticipant } : h)),
   }))
 }
 
@@ -313,14 +320,34 @@ function checkUntouched(proposal: Proposal): void {
   }
 }
 
-/** The proposer ends the proposal before every owner has signed it. */
+/**
+ * Whether every owner's participant answered the last attempt with its own
+ * refusal and none ever accepted the bundle. Then no participant holds it,
+ * unlike after a timeout or a network error.
+ */
+export function refusedEverywhere(proposal: Proposal): boolean {
+  const owners = proposal.hosts.filter((h) => h.role === 'owner')
+  return (
+    proposal.status === 'failed' &&
+    !proposal.bundleAccepted &&
+    owners.length > 0 &&
+    owners.every((h) => h.step === 'failed' && h.refusedByParticipant)
+  )
+}
+
+/**
+ * The proposer ends the proposal before every owner has signed it, or after
+ * every owner's participant refused it.
+ */
 export function withdrawProposal(id: string, wallet: Wallet): void {
   const proposal = findProposal(id)
   const { plan, onboarding } = recheckProposal(proposal)
   if (proposal.proposerKey !== wallet.publicKey) throw new Error('Only the proposer can withdraw the proposal.')
-  checkUntouched(proposal)
-  if (verifiedOwners(plan, onboarding, proposal.signatures).size === plan.owners.length) {
-    throw new Error('Every owner has signed, so the proposal can no longer be withdrawn.')
+  if (!refusedEverywhere(proposal)) {
+    checkUntouched(proposal)
+    if (verifiedOwners(plan, onboarding, proposal.signatures).size === plan.owners.length) {
+      throw new Error('Every owner has signed, so the proposal can no longer be withdrawn.')
+    }
   }
   changeProposal(id, (p) => ({ ...p, status: 'withdrawn', endedBy: wallet.name }))
 }
@@ -372,7 +399,7 @@ export async function submitProposal(id: string, wallet: Wallet): Promise<void> 
     ...p,
     status: 'submitting',
     error: undefined,
-    hosts: p.hosts.map((h) => ({ ...h, step: 'waiting', detail: undefined })),
+    hosts: p.hosts.map((h) => ({ ...h, step: 'waiting', detail: undefined, refusedByParticipant: undefined })),
   }))
 
   try {
@@ -443,6 +470,7 @@ async function sendToHosts(
       host.participant,
       'failed',
       refusal === 'namespaceConflict' ? `${NAMESPACE_CONFLICT}\nThe participant said: ${said}` : said,
+      result.reason instanceof ledger.LedgerError,
     )
   })
   if (refused) {

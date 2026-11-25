@@ -34,6 +34,8 @@ export type HostResult = {
   role: 'owner' | 'covalidator'
   step: HostStep
   detail?: string
+  /** The participant itself refused, as opposed to a timeout or a network error. */
+  refusedByParticipant?: boolean
 }
 
 export type Proposal = {
