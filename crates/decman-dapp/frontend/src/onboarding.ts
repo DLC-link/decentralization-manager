@@ -256,11 +256,30 @@ function checkOpen(proposal: Proposal): void {
   if (!isOpen(proposal)) throw new Error('The proposal is no longer open.')
 }
 
-/** The proposer ends the proposal before the party exists. */
+/**
+ * Whether no host has received anything for the proposal. After a
+ * submission the signed bundle may already sit at participants, and ending
+ * the proposal in this browser would not take it back.
+ */
+export function untouched(proposal: Proposal): boolean {
+  return proposal.status === 'collecting' && proposal.hosts.every((h) => h.step === 'waiting')
+}
+
+function checkUntouched(proposal: Proposal): void {
+  if (!untouched(proposal)) {
+    throw new Error('The signed bundle may already have reached participants. The proposal can only be tried again.')
+  }
+}
+
+/** The proposer ends the proposal before every owner has signed it. */
 export function withdrawProposal(id: string, wallet: Wallet): void {
   const proposal = findProposal(id)
+  const { plan, onboarding } = recheckProposal(proposal)
   if (proposal.proposerKey !== wallet.publicKey) throw new Error('Only the proposer can withdraw the proposal.')
-  checkOpen(proposal)
+  checkUntouched(proposal)
+  if (verifiedOwners(plan, onboarding, proposal.signatures).size === plan.owners.length) {
+    throw new Error('Every owner has signed, so the proposal can no longer be withdrawn.')
+  }
   changeProposal(id, (p) => ({ ...p, status: 'withdrawn', endedBy: wallet.name }))
 }
 
@@ -274,7 +293,7 @@ export function rejectProposal(id: string, wallet: Wallet): void {
   if (!plan.owners.some((o) => o.publicKey === wallet.publicKey)) {
     throw new Error(`${wallet.name} is not an owner of this party.`)
   }
-  checkOpen(proposal)
+  checkUntouched(proposal)
   if (verifiedOwners(plan, onboarding, proposal.signatures).has(wallet.publicKey)) {
     throw new Error(`${wallet.name} has already signed.`)
   }

@@ -2,6 +2,7 @@ import { isValidSignature } from '../checks'
 import { actingWallet, useAppState, type HostResult, type Proposal, type Wallet } from '../mock/store'
 import {
   isOpen,
+  untouched,
   recheckProposal,
   rejectProposal,
   signProposal,
@@ -100,6 +101,7 @@ function ProposalCard({
   const actingStoredBadly = !!acting && !actingVerified && !!signatureOf(acting.publicKey)
   const actingIsProposer = !!acting && acting.publicKey === proposal.proposerKey
   const canSubmit = actingIsOwner && allSigned && open
+  const canEnd = untouched(proposal)
   const hostsApproved = proposal.hosts.every((h) => h.step !== 'waiting' && h.step !== 'failed')
   const current =
     proposal.status === 'submitted' ? 4 : !allSigned ? 1 : proposal.status === 'collecting' || !hostsApproved ? 2 : 3
@@ -223,7 +225,7 @@ function ProposalCard({
               {actingStoredBadly ? 'Sign again' : 'Sign'} as {acting.name}
             </button>
           )}
-          {actingIsOwner && !actingVerified && !actingIsProposer && (
+          {actingIsOwner && !actingVerified && !actingIsProposer && canEnd && (
             <button
               className="ghost"
               onClick={() =>
@@ -234,7 +236,7 @@ function ProposalCard({
               Reject
             </button>
           )}
-          {actingIsProposer && (
+          {actingIsProposer && canEnd && !allSigned && (
             <button
               className="ghost"
               onClick={() =>
@@ -251,6 +253,11 @@ function ProposalCard({
             </button>
           )}
           {!actingIsOwner && <span className="muted">Act as an owner to sign.</span>}
+          {proposal.status === 'failed' && (
+            <span className="muted">
+              The signed bundle may already have reached participants, so the proposal can only be tried again.
+            </span>
+          )}
         </div>
       )}
       <ErrorText error={error} />
