@@ -59,7 +59,7 @@ use crate::{
     noise::{Message, MessageType, NoiseKeypair, parse_public_key, send_noise_message},
     server::{
         AppState,
-        audit::{AuditEvent, AuditParams, spawn_audit_log, with_proposal_cid},
+        audit::{AuditEvent, AuditParams, log_governance_audit, with_proposal_cid},
         chain_audit,
         ledger_rejection::{mediator_timeout, submission_failure},
         middleware::require_admin,
@@ -830,8 +830,9 @@ struct WriteRecord {
 
 impl WriteRecord {
     /// Counts the write, logs its failure, and writes its audit row. Returns
-    /// the failure for the caller.
-    fn finish(self, db: SqlitePool, submitted: Submitted) -> Option<(StatusCode, String)> {
+    /// the failure for the caller once the row is written, so a caller that
+    /// reads the audit trail right after the answer finds it.
+    async fn finish(self, db: SqlitePool, submitted: Submitted) -> Option<(StatusCode, String)> {
         let (outcome, status) = match submitted.failure {
             Some(_) => (ActionOutcome::Error, "failed"),
             None => (ActionOutcome::Ok, "success"),
@@ -844,8 +845,8 @@ impl WriteRecord {
             Some(cid) => with_proposal_cid(&self.details, cid),
             None => self.details,
         };
-        spawn_audit_log(
-            db,
+        log_governance_audit(
+            &db,
             AuditParams {
                 event_type: self.step.audit_event(),
                 party_id: self.party_id,
@@ -856,7 +857,8 @@ impl WriteRecord {
                 status,
                 error_message: submitted.failure.as_ref().map(|(_, error)| error.clone()),
             },
-        );
+        )
+        .await;
         submitted.failure
     }
 }
@@ -914,18 +916,21 @@ where
     let step = record.step.label();
     let write = tokio::spawn(async move {
         let submitted = tokio::spawn(submission).await.unwrap_or_else(|e| {
+            tracing::error!("The {step} submission ended without an outcome: {e}");
             Submitted::failed(
                 StatusCode::INTERNAL_SERVER_ERROR,
-                format!("The {step} submission ended without an outcome: {e}"),
+                format!(
+                    "The {step} submission ended without an outcome. See the DecMan server log."
+                ),
             )
         });
-        record.finish(db, submitted)
+        record.finish(db, submitted).await
     });
     let failure = write.await.unwrap_or_else(|e| {
         tracing::error!("The {step} write ended without an outcome: {e}");
         Some((
             StatusCode::INTERNAL_SERVER_ERROR,
-            format!("The {step} write ended without an outcome: {e}"),
+            format!("The {step} write ended without an outcome. See the DecMan server log."),
         ))
     });
     match failure {
@@ -1291,28 +1296,28 @@ pub async fn propose_action(
         token,
         record.member_party_id.clone(),
         body.into_inner(),
+        write_deadline(),
     );
     run_write(db, record, "Proposal created and confirmed", submission).await
 }
 
 /// Creates a proposal from `commands`, then confirms it as the proposer.
+///
+/// Both submissions, and the ledger read between them, share one budget that
+/// ends at `deadline`, so a propose waits no longer than any other write.
 async fn submit_proposal(
     data: web::Data<AppState>,
     commands: Commands,
     token: String,
     member_party_id: CantonId,
     body: ProposeActionRequest,
+    deadline: Instant,
 ) -> Submitted {
-    // Both submissions share one budget, so a propose waits no longer than
-    // any other write.
-    let deadline = write_deadline();
     let channel = match data.config.ledger_channel().await {
         Ok(channel) => channel,
         Err(e) => {
-            return Submitted::failed(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Failed to connect to ledger API: {e:#}"),
-            );
+            let (status, error) = submission_failure("Failed to create proposal", &e);
+            return Submitted::failed(status, error);
         }
     };
 
@@ -1379,14 +1384,31 @@ async fn submit_proposal(
 
     // The rules contract may be an out-of-date fallback living under an older
     // governance-core package — exercise it under its actual package ref.
-    rules.package_ref = resolve_contract_package_ref(
-        &data.config,
-        &body.party_id,
-        Some(token.clone()),
-        &body.rules_contract_id,
-        &rules.package_ref,
+    let package_ref = tokio::time::timeout(
+        deadline.saturating_duration_since(Instant::now()),
+        resolve_contract_package_ref(
+            &data.config,
+            &body.party_id,
+            Some(token.clone()),
+            &body.rules_contract_id,
+            &rules.package_ref,
+        ),
     )
     .await;
+    rules.package_ref = match package_ref {
+        Ok(package_ref) => package_ref,
+        Err(_) => {
+            return Submitted::failed(
+                StatusCode::GATEWAY_TIMEOUT,
+                format!(
+                    "Proposal created (CID: {proposal_cid}) but not confirmed: DecMan ran out \
+                     of time while it read the governance rules, before it sent the \
+                     confirmation. Confirm proposal {proposal_cid}; do not re-propose."
+                ),
+            )
+            .of_proposal(proposal_cid);
+        }
+    };
 
     let confirm = SubmitAndWaitRequest {
         commands: Some(build_confirm_proposal(
@@ -4077,6 +4099,147 @@ mod mediator_timeout_tests {
             message.starts_with("The execute submission ended without an outcome"),
             "{message}"
         );
+        // The panic text is internal and goes to the server log only.
+        assert!(!message.contains("no handler maps"), "{message}");
+        Ok(())
+    }
+
+    /// A client may read the audit trail as soon as it has the answer, so the
+    /// row must be written by then.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn the_audit_row_is_written_before_the_answer(pool: SqlitePool) -> Result {
+        let _serial = super::action_metrics_tests::SERIAL.lock().await;
+        for (event, uri, _, body) in writes() {
+            let ledger = RejectingLedger::new();
+            ledger.release.notify_one();
+
+            let (status, error) = post_to_writes(&pool, &ledger, uri, body).await?;
+
+            let row: Option<(String, Option<String>)> = sqlx::query_as(
+                "SELECT status, error_message FROM governance_audit WHERE event_type = ?",
+            )
+            .bind(event.as_str())
+            .fetch_optional(&pool)
+            .await?;
+            assert_eq!(status, StatusCode::GATEWAY_TIMEOUT, "{event:?}");
+            assert_eq!(row, Some(("failed".to_string(), Some(error))), "{event:?}");
+        }
+        Ok(())
+    }
+
+    /// The Ledger API error names its address. Any signed-in user can read
+    /// the audit trail, so the answer and the row keep only the category.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_failed_ledger_connection_hides_its_address(pool: SqlitePool) -> Result {
+        let _serial = super::action_metrics_tests::SERIAL.lock().await;
+        for (event, uri, context, body) in writes() {
+            let app = actix_test::init_service(
+                App::new()
+                    .app_data(state(pool.clone(), 1).await?)
+                    .wrap(AuthMiddleware)
+                    .service(propose_action)
+                    .service(confirm_action)
+                    .service(execute_action)
+                    .service(expire_confirmation)
+                    .service(cancel_confirmation)
+                    .service(cancel_proposal),
+            )
+            .await;
+            let request = actix_test::TestRequest::post()
+                .uri(uri)
+                .insert_header((AUTHORIZATION, "Bearer any-token"))
+                .set_json(body)
+                .to_request();
+
+            let response = actix_test::call_service(&app, request).await;
+
+            assert_eq!(
+                response.status(),
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "{event:?}"
+            );
+            let body: serde_json::Value = actix_test::read_body_json(response).await;
+            let error = body["error"].as_str().context("no error in the body")?;
+            let context = if matches!(event, AuditEvent::Propose) {
+                "Failed to create proposal"
+            } else {
+                context
+            };
+            assert_eq!(
+                error,
+                format!("{context}: the Ledger API connection failed. See the DecMan server log."),
+                "{event:?}"
+            );
+            let (_, message) = audit_row(&pool, event).await?;
+            assert_eq!(message.as_deref(), Some(error), "{event:?}");
+        }
+        Ok(())
+    }
+
+    /// The Ledger API event service of a participant that never answers.
+    #[derive(Clone)]
+    struct SilentEvents;
+
+    impl Service<http::Request<Body>> for SilentEvents {
+        type Response = http::Response<Body>;
+        type Error = Infallible;
+        type Future = BoxFuture<Self::Response, Infallible>;
+
+        fn poll_ready(&mut self, _: &mut TaskContext<'_>) -> Poll<Result<(), Infallible>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn call(&mut self, _: http::Request<Body>) -> Self::Future {
+            Box::pin(std::future::pending())
+        }
+    }
+
+    impl NamedService for SilentEvents {
+        const NAME: &'static str = "com.daml.ledger.api.v2.EventQueryService";
+    }
+
+    /// A propose reads the rules contract's package between its two
+    /// submissions. That read shares the write's deadline, so a ledger that
+    /// never answers it cannot stretch the write.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_propose_stops_at_its_deadline_during_the_rules_read(pool: SqlitePool) -> Result {
+        let mut ledger = RejectingLedger::new();
+        ledger.created_proposal = Some("00proposal".to_string());
+        let incoming = TcpIncoming::bind("127.0.0.1:0".parse()?)?;
+        let port = incoming.local_addr()?.port();
+        tokio::spawn(
+            Server::builder()
+                .add_service(ledger)
+                .add_service(SilentEvents)
+                .serve_with_incoming(incoming),
+        );
+        let data = state(pool, port).await?;
+        let body: ProposeActionRequest = serde_json::from_value(serde_json::json!({
+            "party_id": party(),
+            "rules_contract_id": "00rules",
+            "proposal": { "type": "generic_vote", "description": "deadline" },
+        }))?;
+        let member = CantonId::parse(&format!("member::1220{}", "cd".repeat(32)))?;
+
+        let proposing = submit_proposal(
+            data,
+            Commands::default(),
+            "any-token".to_string(),
+            member,
+            body,
+            Instant::now() + Duration::from_millis(500),
+        );
+        let submitted = tokio::time::timeout(Duration::from_secs(5), proposing)
+            .await
+            .context("the propose outlived its deadline")?;
+
+        let (status, error) = submitted.failure.context("the propose succeeded")?;
+        assert_eq!(status, StatusCode::GATEWAY_TIMEOUT, "{error}");
+        assert!(
+            error.ends_with("Confirm proposal 00proposal; do not re-propose."),
+            "{error}"
+        );
+        assert_eq!(submitted.proposal_cid.as_deref(), Some("00proposal"));
         Ok(())
     }
 
@@ -4997,11 +5160,16 @@ mod paid_accept_disclosure_tests {
         let (status, error) = execute_failure(&anyhow::anyhow!("ledger said no"));
 
         assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
-        assert_eq!(error, "Failed to execute action: ledger said no");
+        assert_eq!(
+            error,
+            "Failed to execute action: ledger said no. See the DecMan server log."
+        );
     }
 
+    /// The answer and the audit row name what failed. What the other service
+    /// said stays in the server log.
     #[test]
-    fn an_execute_failure_names_its_underlying_cause() {
+    fn an_execute_failure_names_its_cause_but_not_the_chain() {
         let error = anyhow::anyhow!("scan answered 403 Forbidden: access denied")
             .context("Failed to fetch the open mining rounds from scan");
 
@@ -5009,8 +5177,8 @@ mod paid_accept_disclosure_tests {
 
         assert_eq!(
             error,
-            "Failed to execute action: Failed to fetch the open mining rounds from scan: \
-             scan answered 403 Forbidden: access denied"
+            "Failed to execute action: Failed to fetch the open mining rounds from scan. See \
+             the DecMan server log."
         );
     }
 }
