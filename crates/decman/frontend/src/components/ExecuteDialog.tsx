@@ -15,6 +15,7 @@ import {
 } from "@mui/material";
 import DeleteIcon from "@mui/icons-material/Delete";
 import AddIcon from "@mui/icons-material/Add";
+import { isChainError } from "../chainError";
 import { fieldHelpAdornment } from "./FieldHelp";
 import type {
   GovernanceAction,
@@ -50,17 +51,6 @@ const getRequiredContractIds = (action: ActionType): string[] => {
       return [];
   }
 };
-
-/// Heuristic for "this error came from the Canton ledger" — those messages
-/// carry Canton's gRPC error envelope (`code: '...', message: "..."`) and
-/// usually a `DAML_*` error category from the Daml interpreter. Operators
-/// can't fix these from the UI, so we tell them to forward to the BitSafe
-/// team.
-const isChainError = (msg: string): boolean =>
-  msg.includes("DAML_") ||
-  msg.includes("code: ") ||
-  msg.includes("INVALID_GIVEN_CURRENT_SYSTEM_STATE") ||
-  msg.includes("CONTRACT_NOT_FOUND");
 
 interface ExecuteDialogProps {
   open: boolean;
