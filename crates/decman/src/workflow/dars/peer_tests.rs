@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use anyhow::Context;
 
-use super::peer::{DarPull, OversizedPull, fetch_dar_from_coordinator};
+use super::peer::{DarPull, PullRefused, fetch_dar_from_coordinator};
 use crate::{
     config::NoiseRetryConfig,
     consts::MAX_CONSECUTIVE_STEP_FAILURES,
@@ -132,9 +132,12 @@ async fn a_dar_that_misses_its_hash_stops_every_upload() -> Result {
 
     let error = error_of(&run)?;
     assert!(error.contains("DAR alpha.dar hashes to"), "{error}");
+    // The coordinator serves the same bytes on every attempt, so the run ends
+    // at once.
+    assert_eq!(run.polls.len(), 1, "the peer retried");
     assert_eq!(
         run.dar_requests.len(),
-        2 * MAX_CONSECUTIVE_STEP_FAILURES,
+        2,
         "the peer read past the DAR that missed its pin"
     );
     assert!(run.uploads.is_empty(), "uploaded before the check");
@@ -225,6 +228,8 @@ async fn an_upload_without_dars_that_the_peer_cannot_pull_names_the_cause() -> R
         ),
         "{error}"
     );
+    // The invitation does not change, so the run ends at once.
+    assert_eq!(run.polls.len(), 1, "the peer retried");
     assert!(run.dar_requests.is_empty());
     assert!(run.uploads.is_empty());
     assert_reported(&run, WorkflowKind::Dars);
@@ -248,7 +253,7 @@ async fn a_run_above_the_total_cap_is_refused_at_the_dar_that_crosses_it() -> Re
         .await
         .expect_err("a run above the cap was pulled");
 
-    assert!(error.downcast_ref::<OversizedPull>().is_some(), "{error:#}");
+    assert!(error.downcast_ref::<PullRefused>().is_some(), "{error:#}");
     let expected = format!(
         "the DARs of this run add up to {} bytes so far, above the cap of {cap} bytes",
         2 * (MAX_PAYLOAD_SIZE + 1)

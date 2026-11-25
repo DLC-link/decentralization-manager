@@ -70,12 +70,13 @@ async fn wait_for_turn(
     })
 }
 
-/// A pull that the coordinator's sizes rule out. The sizes are the same on
-/// every attempt, so the peer ends the run instead of retrying.
+/// A pull that fails the same way on every attempt: the coordinator serves
+/// the same stored DARs, and the invitation does not change. The peer ends
+/// the run instead of retrying.
 #[derive(Debug, thiserror::Error)]
-pub enum OversizedPull {
+pub enum PullRefused {
     #[error("{filename} is {size} bytes, above the limit of {limit} bytes for one DAR")]
-    Dar {
+    DarTooLarge {
         filename: String,
         size: usize,
         limit: usize,
@@ -84,7 +85,19 @@ pub enum OversizedPull {
         "the DARs of this run add up to {total} bytes so far, above the cap of {cap} bytes \
          for one run"
     )]
-    Run { total: usize, cap: usize },
+    RunTooLarge { total: usize, cap: usize },
+    #[error("DAR {filename} hashes to {actual} but the invitation pinned {pinned}")]
+    HashMiss {
+        filename: String,
+        actual: String,
+        pinned: String,
+    },
+    #[error(
+        "The coordinator sent UploadDars without its DARs, and this node cannot pull them: \
+         a pull needs the coordinator's run instance and one hash for each DAR in the \
+         invitation"
+    )]
+    NotPullable,
 }
 
 /// What a peer needs to read the DARs of its accepted invitation one by one.
@@ -135,7 +148,8 @@ impl DarPull {
     ///
     /// Errors on the first DAR the coordinator does not serve, or that does
     /// not hash to the value pinned at its index, and names it. Errors with
-    /// [`OversizedPull`] once the announced sizes pass a limit.
+    /// [`PullRefused`] once the announced sizes pass a limit or a DAR misses
+    /// its pin.
     pub async fn fetch_all(&self, config: &NodeConfig) -> Result<Vec<(String, Vec<u8>)>> {
         self.fetch_within(config, MAX_DAR_PULL_TOTAL).await
     }
@@ -158,7 +172,7 @@ impl DarPull {
             let admit = |size: usize| {
                 total = total.saturating_add(size);
                 if total > cap {
-                    return Err(OversizedPull::Run { total, cap }.into());
+                    return Err(PullRefused::RunTooLarge { total, cap }.into());
                 }
                 Ok(())
             };
@@ -170,9 +184,12 @@ impl DarPull {
             // rest. The whole set is checked again before any upload.
             let actual = hash_dar(&dar);
             if actual != *pinned {
-                anyhow::bail!(
-                    "DAR {filename} hashes to {actual} but the invitation pinned {pinned}"
-                );
+                return Err(PullRefused::HashMiss {
+                    filename: filename.clone(),
+                    actual,
+                    pinned: pinned.clone(),
+                }
+                .into());
             }
             tracing::info!(
                 "Read DAR {position}/{count} from the coordinator: {filename}, {len} bytes",
@@ -206,7 +223,7 @@ pub fn in_invitation_order(dars: &mut [(String, Vec<u8>)], filenames: &[String])
 /// # Errors
 ///
 /// Errors when the coordinator refuses, when `admit` refuses the size, when
-/// the DAR is larger than `MAX_CHUNKED_TOTAL_SIZE` ([`OversizedPull::Dar`]),
+/// the DAR is larger than `MAX_CHUNKED_TOTAL_SIZE` ([`PullRefused::DarTooLarge`]),
 /// or when the transfer fails.
 pub async fn fetch_dar_from_coordinator(
     config: &NodeConfig,
@@ -243,7 +260,7 @@ pub async fn fetch_dar_from_coordinator(
             let (_, size, _) = parse_chunked_command_metadata(&response.payload)
                 .map_err(|e| anyhow::anyhow!("{e}"))?;
             if size > MAX_CHUNKED_TOTAL_SIZE {
-                return Err(OversizedPull::Dar {
+                return Err(PullRefused::DarTooLarge {
                     filename: request.filename.clone(),
                     size,
                     limit: MAX_CHUNKED_TOTAL_SIZE,

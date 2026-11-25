@@ -42,7 +42,7 @@ use crate::{
     server::{DeclineInvitationPayload, WorkflowInstance, WorkflowKind, peer_status::LastSeen},
     utils,
     workflow::{
-        dars::peer::{DarPull, OversizedPull, in_invitation_order},
+        dars::peer::{DarPull, PullRefused, in_invitation_order},
         state::WorkflowStep,
         storage::{WorkflowStorage, artifact_kinds},
         validation::PeerExpectations,
@@ -501,9 +501,9 @@ async fn run_peer(
                 let mut dar_files = match (&dar_pull, payload.is_empty()) {
                     (Some(pull), true) => match pull.fetch_all(&node_config).await {
                         Ok(files) => files,
-                        // The coordinator announces the same sizes on every
+                        // The coordinator serves the same DARs on every
                         // attempt, so a retry only delays the report.
-                        Err(e) if e.downcast_ref::<OversizedPull>().is_some() => {
+                        Err(e) if e.downcast_ref::<PullRefused>().is_some() => {
                             anyhow::bail!("Peer failed on the coordinator's DARs: {e:#}");
                         }
                         Err(e) => {
@@ -511,13 +511,12 @@ async fn run_peer(
                             continue;
                         }
                     },
+                    // The invitation does not change, so neither does this.
                     (None, true) if !expectations.dar_filenames.is_empty() => {
-                        fail_step!(
-                            "The coordinator sent UploadDars without its DARs, and this node \
-                             cannot pull them: a pull needs the coordinator's run instance and \
-                             one hash for each DAR in the invitation"
+                        anyhow::bail!(
+                            "Peer failed on the coordinator's DARs: {}",
+                            PullRefused::NotPullable
                         );
-                        continue;
                     }
                     (None, true) => Vec::new(),
                     (_, false) => match utils::decode_files(&payload) {
