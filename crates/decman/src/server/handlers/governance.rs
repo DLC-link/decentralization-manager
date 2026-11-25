@@ -65,7 +65,7 @@ use crate::{
             get_governance_state as query_governance_state, resolve_contract_package_ref,
             select_input_holdings,
         },
-        scan::{self, OpenMiningRound, ScanNotConfigured},
+        scan::{self, OpenMiningRound, ScanNotConfigured, ScanRefused},
         transfer_context::{
             AcceptTransferContext, ProposeTransferArgs, fetch as fetch_accept_transfer_context,
             fetch_factory_for_propose, fetch_proposal_created_event, has_template,
@@ -1588,12 +1588,24 @@ pub async fn execute_action(
 /// The execute handler's status and message for a failed execute. A node
 /// without `DECPM_SCAN_URL` cannot disclose what a paid credential accept
 /// reads. That is a setting the caller can fix, so it is a 422, not a server
-/// fault. The message carries the whole error chain, so a scan 403 reads
+/// fault. The message names the cause without internal detail. A scan error
+/// also keeps scan's HTTP status, which is not internal, so a scan 403 reads
 /// differently from a malformed reply or a dropped connection.
 fn execute_failure(e: &anyhow::Error) -> (StatusCode, String) {
     let (status, error) = submission_failure("Failed to execute action", e);
     if e.downcast_ref::<ScanNotConfigured>().is_some() {
         return (StatusCode::UNPROCESSABLE_ENTITY, error);
+    }
+    if let Some(refused) = e.downcast_ref::<ScanRefused>() {
+        let cause = e.to_string();
+        let cause = cause.trim_end_matches('.');
+        return (
+            status,
+            format!(
+                "Failed to execute action: {cause} (scan answered {}). See the DecMan server log.",
+                refused.status
+            ),
+        );
     }
     (status, error)
 }
@@ -4476,7 +4488,7 @@ mod paid_accept_disclosure_tests {
     /// said stays in the server log.
     #[test]
     fn an_execute_failure_names_its_cause_but_not_the_chain() {
-        let error = anyhow::anyhow!("scan answered 403 Forbidden: access denied")
+        let error = anyhow::anyhow!("the response held no rounds")
             .context("Failed to fetch the open mining rounds from scan");
 
         let (_, error) = execute_failure(&error);
@@ -4485,6 +4497,26 @@ mod paid_accept_disclosure_tests {
             error,
             "Failed to execute action: Failed to fetch the open mining rounds from scan. See \
              the DecMan server log."
+        );
+    }
+
+    /// An HTTP status is not internal, so a scan refusal keeps it. Scan's
+    /// body stays in the server log.
+    #[test]
+    fn a_scan_refusal_keeps_its_status() {
+        let error = anyhow::Error::new(ScanRefused {
+            status: reqwest::StatusCode::FORBIDDEN,
+            body: "access denied for 10.0.0.7".to_string(),
+        })
+        .context("Failed to fetch the open mining rounds from scan");
+
+        let (status, error) = execute_failure(&error);
+
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(
+            error,
+            "Failed to execute action: Failed to fetch the open mining rounds from scan (scan \
+             answered 403 Forbidden). See the DecMan server log."
         );
     }
 }
