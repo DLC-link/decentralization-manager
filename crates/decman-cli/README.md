@@ -232,6 +232,11 @@ DecMan marks such an action only on evidence:
    `"cannot_be_archived": true`. A domain action also needs its proposal to be
    gone.
 
+`governance pending` does not list a domain action whose proposal is gone until
+it is marked, so step 1 cannot find its confirmations. Expire them before the
+proposal is cancelled or executed, or call `POST /governance/expire` with the
+confirmation id.
+
 A later expire that succeeds, or that times out without naming the confirmer,
 clears the mark.
 
