@@ -260,7 +260,8 @@ async fn a_dar_above_the_chunked_limit_is_refused_by_name() -> Result {
 
     let error = error_of(&run)?;
     let expected = format!(
-        "alpha.dar is {} bytes, above the limit of {MAX_CHUNKED_TOTAL_SIZE} bytes for one DAR",
+        "alpha.dar is 16.1 MiB ({} bytes), above the limit of 16 MiB for one DAR. Upload this \
+         DAR to each node directly",
         MAX_CHUNKED_TOTAL_SIZE + 1
     );
     assert!(error.contains(&expected), "{error}");
@@ -282,7 +283,13 @@ async fn an_invitation_that_names_a_dar_twice_is_refused_before_any_pull() -> Re
     let run = run_script(WorkflowKind::Dars, script).await?;
 
     let error = error_of(&run)?;
-    assert!(error.contains("names the same DAR twice"), "{error}");
+    assert!(
+        error.contains(
+            "the accepted invitation names DAR zeta.dar twice. Ask the coordinator's operator \
+             to start a run that names each DAR once"
+        ),
+        "{error}"
+    );
     assert!(run.dar_requests.is_empty(), "the peer pulled a DAR");
     assert!(run.uploads.is_empty());
     assert_reported(&run, WorkflowKind::Dars);

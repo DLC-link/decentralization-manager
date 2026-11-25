@@ -84,7 +84,12 @@ async fn wait_for_turn(
 /// the run instead of retrying.
 #[derive(Debug, thiserror::Error)]
 pub enum PullRefused {
-    #[error("{filename} is {size} bytes, above the limit of {limit} bytes for one DAR")]
+    #[error(
+        "{filename} is {} MiB ({size} bytes), above the limit of {} MiB for one DAR. Upload \
+         this DAR to each node directly",
+        mib(*size, Round::Up),
+        mib(*limit, Round::Down)
+    )]
     DarTooLarge {
         filename: String,
         size: usize,
@@ -167,9 +172,16 @@ impl DarPull {
         if !pinned || workflow_instance.is_empty() {
             return Ok(None);
         }
-        let distinct: BTreeSet<&str> = dar_filenames.iter().map(String::as_str).collect();
-        if distinct.len() != dar_filenames.len() {
-            anyhow::bail!("the accepted invitation names the same DAR twice");
+        let mut seen = BTreeSet::new();
+        if let Some(repeated) = dar_filenames
+            .iter()
+            .find(|name| !seen.insert(name.as_str()))
+        {
+            anyhow::bail!(
+                "the accepted invitation names DAR {} twice. Ask the coordinator's operator to \
+                 start a run that names each DAR once",
+                shown(repeated, MAX_FIELD_LEN)
+            );
         }
         Ok(Some(Self {
             coordinator: coordinator.clone(),
@@ -422,15 +434,17 @@ mod tests {
 
     #[test]
     fn an_invitation_that_names_a_dar_twice_is_refused() -> anyhow::Result<()> {
-        let twice = vec!["a.dar".to_string(), "a.dar".to_string()];
-        let hashes = vec!["aa".to_string(), "bb".to_string()];
+        let name = "a.dar\nERROR forged\u{202e}.dar".to_string();
+        let twice = vec!["b.dar".to_string(), name.clone(), name];
+        let hashes = vec!["aa".to_string(), "bb".to_string(), "cc".to_string()];
 
         let error = DarPull::new(&coordinator()?, "run-1", &twice, &hashes)
             .expect_err("a repeated name was accepted");
 
-        assert!(
-            error.to_string().contains("names the same DAR twice"),
-            "{error}"
+        assert_eq!(
+            error.to_string(),
+            "the accepted invitation names DAR a.dar\\nERROR forged\\u{202e}.dar twice. Ask \
+             the coordinator's operator to start a run that names each DAR once"
         );
         Ok(())
     }
