@@ -173,11 +173,12 @@ fn hiding_row<'a>(
     }
 }
 
+/// The details of a hide or unhide row. They name the admin by `sub` only:
+/// any signed-in user can read the audit trail, so an email stays out.
 fn hiding_details(confirmation_cids: &[String], actor: &AuditActor) -> String {
     serde_json::json!({
         "confirmation_cids": confirmation_cids,
         "admin_sub": actor.sub,
-        "admin_email": actor.email,
     })
     .to_string()
 }

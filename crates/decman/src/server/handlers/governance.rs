@@ -5616,7 +5616,7 @@ mod hiding_tests {
     }
 
     #[sqlx::test(migrator = "MIGRATOR")]
-    async fn a_hide_stores_the_admin_sub_and_audits_the_email(pool: SqlitePool) -> Result {
+    async fn a_hide_stores_the_admin_sub_and_no_email(pool: SqlitePool) -> Result {
         let actor = AuditActor {
             sub: "admin-sub".to_string(),
             email: Some("admin@example.com".to_string()),
@@ -5637,7 +5637,8 @@ mod hiding_tests {
         let audit = pool.get_governance_audit(&party_id()?, 50, 0).await?;
         let details: Value = serde_json::from_str(&audit[0].details)?;
         assert_eq!(details["admin_sub"], "admin-sub");
-        assert_eq!(details["admin_email"], "admin@example.com");
+        // Any signed-in user can read the audit trail.
+        assert!(details.get("admin_email").is_none(), "{details}");
         Ok(())
     }
 
