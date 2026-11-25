@@ -469,7 +469,9 @@ async function sendToHosts(
       id,
       host.participant,
       'failed',
-      refusal === 'namespaceConflict' ? `${NAMESPACE_CONFLICT}\nThe participant said: ${said}` : said,
+      // Only an owner's participant receives the namespace definition. A
+      // covalidator's refusal is shown as the participant wrote it.
+      role === 'owner' && refusal === 'namespaceConflict' ? `${NAMESPACE_CONFLICT}\nThe participant said: ${said}` : said,
       result.reason instanceof ledger.LedgerError,
     )
   })
