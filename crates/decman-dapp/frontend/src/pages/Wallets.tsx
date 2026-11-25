@@ -4,7 +4,7 @@ import { LOCALNET_PARTICIPANTS, LOCALNET_TOKEN } from '../localnet'
 import { setActingWallet } from '../mock/actions'
 import { useAppState, type ParticipantLink } from '../mock/store'
 import { addCovalidator, createWallet } from '../onboarding'
-import { ErrorText, Hex, Section, useAction } from '../ui'
+import { Badge, EmptyState, ErrorText, Hex, Person, Section, Uid, useAction } from '../ui'
 
 export function Wallets() {
   const state = useAppState()
@@ -16,7 +16,7 @@ export function Wallets() {
           you can act as each owner in turn. The key stands in for a wallet.
         </p>
         {state.wallets.length === 0 ? (
-          <p>No wallets yet. Add at least two.</p>
+          <EmptyState icon="wallet">No wallets yet. Add at least two owners below.</EmptyState>
         ) : (
           <table>
             <thead>
@@ -30,7 +30,9 @@ export function Wallets() {
             <tbody>
               {state.wallets.map((wallet) => (
                 <tr key={wallet.id}>
-                  <td>{wallet.name}</td>
+                  <td>
+                    <Person name={wallet.name} />
+                  </td>
                   <td>
                     <ParticipantCell link={wallet.participant} />
                   </td>
@@ -39,7 +41,7 @@ export function Wallets() {
                   </td>
                   <td>
                     {wallet.id === state.actingWalletId ? (
-                      <em>acting</em>
+                      <Badge tone="accent">Acting</Badge>
                     ) : (
                       <button onClick={() => setActingWallet(wallet.id)}>Act as</button>
                     )}
@@ -74,7 +76,9 @@ export function Wallets() {
             <tbody>
               {state.covalidators.map((covalidator) => (
                 <tr key={covalidator.id}>
-                  <td>{covalidator.name}</td>
+                  <td>
+                    <Person name={covalidator.name} />
+                  </td>
                   <td>
                     <ParticipantCell link={covalidator.participant} />
                   </td>
@@ -97,7 +101,7 @@ export function Wallets() {
 function ParticipantCell({ link }: { link: ParticipantLink }) {
   return (
     <span title={link.apiUrl}>
-      <Hex value={link.participantId} />
+      <Uid value={link.participantId} />
     </span>
   )
 }

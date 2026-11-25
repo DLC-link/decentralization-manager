@@ -1,7 +1,8 @@
 import { isValidSignature } from '../checks'
 import { actingWallet, useAppState, type HostResult, type Proposal, type Wallet } from '../mock/store'
 import { signProposal, submitProposal, verifiedOwners } from '../onboarding'
-import { ErrorText, Hex, PartyId, Section, useAction } from '../ui'
+import { shortUid } from '../format'
+import { Badge, EmptyState, ErrorText, Hex, PartyId, Person, Section, Stepper, Uid, useAction, type Tone } from '../ui'
 
 export function Proposals({ onOpenParty }: { onOpenParty: (partyId: string) => void }) {
   const state = useAppState()
@@ -12,7 +13,7 @@ export function Proposals({ onOpenParty }: { onOpenParty: (partyId: string) => v
         Each owner signs one hash, which covers every topology transaction that creates the party. The browser checks
         every signature with the Rust code before it counts it. Every owner must sign.
       </p>
-      {state.proposals.length === 0 && <p>No proposals yet.</p>}
+      {state.proposals.length === 0 && <EmptyState icon="signature">No proposals yet. Start one from New party.</EmptyState>}
       {state.proposals.map((proposal) => (
         <ProposalCard
           key={proposal.id}
@@ -26,12 +27,19 @@ export function Proposals({ onOpenParty }: { onOpenParty: (partyId: string) => v
   )
 }
 
-const STEP_TEXT: Record<HostResult['step'], string> = {
-  waiting: 'waiting',
-  approved: 'approved the hosting',
-  submitted: 'received the party',
-  hosted: '✓ hosts the party',
-  failed: '✗ failed',
+const HOST_STEP: Record<HostResult['step'], [Tone, string]> = {
+  waiting: ['muted', 'Waiting'],
+  approved: ['accent', 'Approved hosting'],
+  submitted: ['accent', 'Received the party'],
+  hosted: ['ok', 'Hosts the party'],
+  failed: ['error', 'Failed'],
+}
+
+const STATUS: Record<Proposal['status'], [Tone, string]> = {
+  collecting: ['warn', 'Collecting signatures'],
+  submitting: ['accent', 'Creating'],
+  submitted: ['ok', 'Created'],
+  failed: ['error', 'Failed'],
 }
 
 function ProposalCard({
@@ -49,21 +57,43 @@ function ProposalCard({
   const { plan, onboarding } = proposal
   const signatureOf = (publicKey: string) => proposal.signatures.find((s) => s.publicKey === publicKey)
   const verified = verifiedOwners(proposal).size
+  const allSigned = verified === plan.owners.length
   const actingIsOwner = acting && plan.owners.some((o) => o.publicKey === acting.publicKey)
   const actingSigned = acting && signatureOf(acting.publicKey)
-  const canSubmit = actingIsOwner && verified === plan.owners.length && proposal.status !== 'submitting'
+  const canSubmit = actingIsOwner && allSigned && proposal.status !== 'submitting'
+  const hostsApproved = proposal.hosts.every((h) => h.step !== 'waiting' && h.step !== 'failed')
+  const current =
+    proposal.status === 'submitted' ? 4 : !allSigned ? 1 : proposal.status === 'collecting' || !hostsApproved ? 2 : 3
+  const [tone, label] = STATUS[proposal.status]
 
   return (
     <article className="card">
-      <h3>
-        <PartyId value={plan.partyId} />
-      </h3>
-      <p>
-        Proposed by {proposal.createdBy}. Signing threshold {plan.signingThreshold} of {plan.owners.length}, confirmation
-        threshold {plan.confirmationThreshold} of {plan.hosts.length} hosts.
-      </p>
-      <p>
-        Synchronizer <Hex value={proposal.synchronizerId} />, topology format {proposal.topologyVersion}.
+      <div className="card-head">
+        <h3>
+          <PartyId value={plan.partyId} />
+        </h3>
+        <Badge tone={tone}>{label}</Badge>
+      </div>
+      <Stepper
+        steps={['Proposed', `Owners signed ${verified}/${plan.owners.length}`, 'Hosts approved', 'Party created']}
+        current={current}
+        failed={proposal.status === 'failed'}
+      />
+      <div className="chips">
+        <span className="chip">Proposed by {proposal.createdBy}</span>
+        <span className="chip">
+          Signing {plan.signingThreshold} of {plan.owners.length}
+        </span>
+        <span className="chip">
+          Confirmation {plan.confirmationThreshold} of {plan.hosts.length} hosts
+        </span>
+        <span className="chip">Topology format v{proposal.topologyVersion}</span>
+        <span className="chip">
+          <Uid value={proposal.synchronizerId} />
+        </span>
+      </div>
+      <p className="signs">
+        <span className="muted">Every owner signs</span> <Hex value={onboarding.combinedHash} />
       </p>
       <details>
         <summary>{onboarding.transactions.length} topology transactions</summary>
@@ -86,9 +116,6 @@ function ProposalCard({
           </tbody>
         </table>
       </details>
-      <p>
-        Hash every owner signs: <Hex value={onboarding.combinedHash} />
-      </p>
       <table>
         <thead>
           <tr>
@@ -101,30 +128,34 @@ function ProposalCard({
           {plan.owners.map((owner) => {
             const signature = signatureOf(owner.publicKey)
             const name = wallets.find((w) => w.publicKey === owner.publicKey)?.name ?? owner.namespace
-            const status = !signature
-              ? 'waiting'
-              : isValidSignature(owner.publicKey, onboarding.combinedHash, signature.signature)
-                ? '✓ verified in the browser'
-                : '✗ does not verify'
             return (
               <tr key={owner.publicKey}>
-                <td>{name}</td>
                 <td>
-                  <Hex value={owner.participant} />
+                  <Person name={name} />
                 </td>
-                <td>{status}</td>
+                <td>
+                  <Uid value={owner.participant} />
+                </td>
+                <td>
+                  {!signature ? (
+                    <Badge tone="muted">Waiting</Badge>
+                  ) : isValidSignature(owner.publicKey, onboarding.combinedHash, signature.signature) ? (
+                    <Badge tone="ok">Verified in the browser</Badge>
+                  ) : (
+                    <Badge tone="error">Does not verify</Badge>
+                  )}
+                </td>
               </tr>
             )
           })}
         </tbody>
       </table>
-      <p>
-        {verified} of {plan.owners.length} owners signed.
-      </p>
       {proposal.status !== 'collecting' && <HostResults proposal={proposal} />}
       {proposal.error && <p className="error">{proposal.error}</p>}
       {proposal.status === 'submitted' ? (
-        <button onClick={() => onOpenParty(plan.partyId)}>Open party</button>
+        <div className="actions">
+          <button onClick={() => onOpenParty(plan.partyId)}>Open party</button>
+        </div>
       ) : (
         <div className="actions">
           {actingIsOwner && !actingSigned && (
@@ -132,11 +163,12 @@ function ProposalCard({
           )}
           {canSubmit && (
             <button onClick={() => run(() => submitProposal(proposal.id, acting))}>
-              {proposal.status === 'failed' ? 'Try again' : 'Create the party'} through {acting.participant.participantId}
+              {proposal.status === 'failed' ? 'Try again' : 'Create the party'} through{' '}
+              {shortUid(acting.participant.participantId)}
             </button>
           )}
-          {proposal.status === 'submitting' && <em>Creating the party…</em>}
-          {!actingIsOwner && <em>Act as an owner to sign.</em>}
+          {proposal.status === 'submitting' && <span className="muted">Creating the party…</span>}
+          {!actingIsOwner && <span className="muted">Act as an owner to sign.</span>}
         </div>
       )}
       <ErrorText error={error} />
@@ -156,14 +188,21 @@ function HostResults({ proposal }: { proposal: Proposal }) {
         </tr>
       </thead>
       <tbody>
-        {proposal.hosts.map((host) => (
-          <tr key={host.participant}>
-            <td title={host.participant}>{host.name}</td>
-            <td>{host.role === 'owner' ? 'owner' : "covalidator (the dApp approves for its DecMan)"}</td>
-            <td>{STEP_TEXT[host.step]}</td>
-            <td className={host.step === 'failed' ? 'error' : undefined}>{host.detail ?? ''}</td>
-          </tr>
-        ))}
+        {proposal.hosts.map((host) => {
+          const [tone, label] = HOST_STEP[host.step]
+          return (
+            <tr key={host.participant}>
+              <td title={host.participant}>
+                <Person name={host.name} />
+              </td>
+              <td>{host.role === 'owner' ? 'Owner' : "Covalidator (the dApp approves for its DecMan)"}</td>
+              <td>
+                <Badge tone={tone}>{label}</Badge>
+              </td>
+              <td className={host.step === 'failed' ? 'error' : 'muted'}>{host.detail ?? ''}</td>
+            </tr>
+          )
+        })}
       </tbody>
     </table>
   )

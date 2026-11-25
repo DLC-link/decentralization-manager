@@ -1,6 +1,7 @@
 // The party wallet's simulated parts: holdings, dApp connections and
 // transfer requests. The digests and signature checks they call are the real
 // Rust ones. Party creation is real and lives in ../onboarding.ts.
+import { shortUid } from '../format'
 import { isValidSignature, payloadDigest } from '../checks'
 import { signDigest } from './keys'
 import { getState, update, type Party, type Signature, type TransferRequest, type Wallet } from './store'
@@ -213,7 +214,7 @@ export function executeRequest(partyId: string, requestId: string, wallet: Walle
     partyId,
     requestId,
     (r) => ({ ...r, status: 'executed', result }),
-    `${wallet.name} submitted the transfer through ${wallet.participant.participantId}. ${result}`,
+    `${wallet.name} submitted the transfer through ${shortUid(wallet.participant.participantId)}. ${result}`,
     { ...party.holdings, [request.instrument]: balance - request.amount },
   )
 }

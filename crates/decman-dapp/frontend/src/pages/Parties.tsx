@@ -11,23 +11,33 @@ import {
   signRequest,
 } from '../mock/actions'
 import { actingWallet, useAppState, type Party, type TransferRequest, type Wallet } from '../mock/store'
-import { ErrorText, Hex, PartyId, Section, useAction } from '../ui'
+import { shortUid } from '../format'
+import { Avatar, Badge, EmptyState, ErrorText, Hex, PartyId, Person, Section, Uid, useAction } from '../ui'
 
 export function Parties({ onOpenParty }: { onOpenParty: (partyId: string) => void }) {
   const state = useAppState()
+  const nameOf = (publicKey: string) => state.wallets.find((w) => w.publicKey === publicKey)?.name ?? '?'
   return (
-    <Section title="Parties">
-      {state.parties.length === 0 && <p>No parties yet. Create one from a proposal.</p>}
-      <ul>
+    <Section title="Your parties">
+      {state.parties.length === 0 && (
+        <EmptyState icon="party">No parties yet. A party appears here once its owners create it.</EmptyState>
+      )}
+      <div className="tiles">
         {state.parties.map((party) => (
-          <li key={party.partyId}>
-            <button className="link" onClick={() => onOpenParty(party.partyId)}>
-              <PartyId value={party.partyId} />
-            </button>{' '}
-            — {party.owners.length} owners, {party.hosts.length} hosts
-          </li>
+          <button key={party.partyId} className="tile" onClick={() => onOpenParty(party.partyId)}>
+            <PartyId value={party.partyId} />
+            <span className="avatars">
+              {party.owners.map((owner) => (
+                <Avatar key={owner.publicKey} name={nameOf(owner.publicKey)} />
+              ))}
+            </span>
+            <span className="muted">
+              {party.owners.length} owners · {party.hosts.length} hosts · signing {party.signingThreshold} of{' '}
+              {party.owners.length}
+            </span>
+          </button>
         ))}
-      </ul>
+      </div>
     </Section>
   )
 }
@@ -36,20 +46,28 @@ export function PartyDetail({ partyId }: { partyId: string }) {
   const state = useAppState()
   const party = state.parties.find((p) => p.partyId === partyId)
   const acting = actingWallet(state)
-  if (!party) return <p>This browser does not know this party.</p>
+  if (!party) return <EmptyState icon="party">This browser does not know this party.</EmptyState>
   const actingIsOwner = !!acting && party.owners.some((o) => o.publicKey === acting.publicKey)
   const nameOf = (publicKey: string) => state.wallets.find((w) => w.publicKey === publicKey)?.name ?? '—'
 
   return (
     <>
-      <Section title="Party">
-        <p>
-          <PartyId value={party.partyId} />
-        </p>
-        <p>
-          Signing threshold {party.signingThreshold} of {party.owners.length}. Confirmation threshold{' '}
-          {party.confirmationThreshold} of {party.hosts.length}.
-        </p>
+      <Section title="Overview">
+        <div className="card-head">
+          <h3>
+            <PartyId value={party.partyId} />
+          </h3>
+          <Badge tone="ok">Active</Badge>
+        </div>
+        <div className="chips">
+          <span className="chip">
+            Signing {party.signingThreshold} of {party.owners.length} owners
+          </span>
+          <span className="chip">
+            Confirmation {party.confirmationThreshold} of {party.hosts.length} hosts
+          </span>
+          <span className="chip">Created {new Date(party.createdAt).toLocaleString()}</span>
+        </div>
         <h3>Owners</h3>
         <table>
           <thead>
@@ -62,11 +80,15 @@ export function PartyDetail({ partyId }: { partyId: string }) {
           <tbody>
             {party.owners.map((owner) => (
               <tr key={owner.publicKey}>
-                <td>{nameOf(owner.publicKey)}</td>
+                <td>
+                  <Person name={nameOf(owner.publicKey)} />
+                </td>
                 <td>
                   <Hex value={owner.namespace} />
                 </td>
-                <td>{owner.participant}</td>
+                <td>
+                  <Uid value={owner.participant} />
+                </td>
               </tr>
             ))}
           </tbody>
@@ -83,8 +105,14 @@ export function PartyDetail({ partyId }: { partyId: string }) {
           <tbody>
             {party.hosts.map((host) => (
               <tr key={host.participant}>
-                <td>{host.participant}</td>
-                <td>{host.role}</td>
+                <td>
+                  <Uid value={host.participant} />
+                </td>
+                <td>
+                  <Badge tone={host.role === 'owner' ? 'accent' : 'muted'}>
+                    {host.role === 'owner' ? 'Owner' : 'Covalidator'}
+                  </Badge>
+                </td>
                 <td>{host.approval}</td>
               </tr>
             ))}
@@ -273,7 +301,7 @@ function RequestCard({
           )}
           {verified >= party.signingThreshold && (
             <button onClick={() => run(() => executeRequest(party.partyId, request.id, acting))}>
-              Submit through {acting.participant.participantId}
+              Submit through {shortUid(acting.participant.participantId)}
             </button>
           )}
           <button onClick={() => run(() => rejectRequest(party.partyId, request.id, acting))}>Reject</button>

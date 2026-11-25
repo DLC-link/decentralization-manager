@@ -3,7 +3,8 @@ import { useState } from 'react'
 import { tryPlanParty, type PartyProposal } from '../checks'
 import { actingWallet, useAppState } from '../mock/store'
 import { createProposal } from '../onboarding'
-import { ErrorText, Hex, PartyId, Section, useAction } from '../ui'
+import { shortUid } from '../format'
+import { ErrorText, Hex, PartyId, Section, Uid, useAction } from '../ui'
 
 export function NewParty({ onCreated }: { onCreated: () => void }) {
   const state = useAppState()
@@ -60,7 +61,7 @@ export function NewParty({ onCreated }: { onCreated: () => void }) {
                   checked={ownerIds.includes(wallet.id)}
                   onChange={() => setOwnerIds((ids) => toggle(ids, wallet.id))}
                 />
-                {wallet.name} ({wallet.participant.participantId})
+                {wallet.name} ({shortUid(wallet.participant.participantId)})
               </label>
             ))}
           </fieldset>
@@ -74,7 +75,7 @@ export function NewParty({ onCreated }: { onCreated: () => void }) {
                   checked={covalidatorIds.includes(covalidator.id)}
                   onChange={() => setCovalidatorIds((ids) => toggle(ids, covalidator.id))}
                 />
-                {covalidator.name} ({covalidator.participant.participantId})
+                {covalidator.name} ({shortUid(covalidator.participant.participantId)})
               </label>
             ))}
           </fieldset>
@@ -117,7 +118,13 @@ export function NewParty({ onCreated }: { onCreated: () => void }) {
               ))}
             </dd>
             <dt>Hosts</dt>
-            <dd>{check.plan.hosts.join(', ')}</dd>
+            <dd>
+              {check.plan.hosts.map((host) => (
+                <div key={host}>
+                  <Uid value={host} />
+                </div>
+              ))}
+            </dd>
           </dl>
         )}
         <p className="hint">

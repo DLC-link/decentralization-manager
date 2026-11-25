@@ -12,6 +12,7 @@ import {
   topologyVersionOfGenerated,
   type PartyProposal,
 } from './checks'
+import { shortUid } from './format'
 import * as ledger from './ledger'
 import { generateKeyPair, signDigest } from './mock/keys'
 import { isSimulated } from './mock/participants'
@@ -274,7 +275,7 @@ function addParty(proposal: Proposal, wallet: Wallet): void {
     history: [
       {
         at: now(),
-        text: `${isSimulated() ? 'Party created on simulated participants.' : 'Party created on the ledger.'} ${wallet.name} submitted it through ${wallet.participant.participantId}.`,
+        text: `${isSimulated() ? 'Party created on simulated participants.' : 'Party created on the ledger.'} ${wallet.name} submitted it through ${shortUid(wallet.participant.participantId)}.`,
       },
     ],
   }
