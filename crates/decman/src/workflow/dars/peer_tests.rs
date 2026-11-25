@@ -259,10 +259,32 @@ async fn a_run_above_the_total_cap_is_refused_at_the_dar_that_crosses_it() -> Re
         .expect_err("a run above the cap was pulled");
 
     assert!(error.downcast_ref::<PullRefused>().is_some(), "{error:#}");
-    let expected = "the DARs of this run add up to 2.0 MiB so far, above the cap of 1.5 MiB \
-                    for one run. Send the DARs in several runs of at most 1.5 MiB each";
+    let expected = "the DARs of this run add up to 2.1 MiB (2097154 bytes) so far, above the cap \
+                    of 1.5 MiB for one run. Send the DARs in several runs of at most 1.5 MiB each";
     assert!(format!("{error:#}").contains(expected), "{error:#}");
     assert_eq!(server.requests()?.len(), 2, "the peer read past the cap");
+    Ok(())
+}
+
+/// One byte above the cap must not read as equal to it: the total rounds up
+/// and names its exact bytes.
+#[tokio::test]
+async fn a_run_one_byte_above_the_cap_reads_as_above_it() -> Result {
+    let dars = dars(&[MAX_PAYLOAD_SIZE + 1]);
+    let server = DarServer::start(dars.clone(), Duration::ZERO).await?;
+    let names: Vec<String> = dars.iter().map(|(name, _)| name.clone()).collect();
+    let hashes: Vec<String> = dars.iter().map(|(_, dar)| hash_dar(dar)).collect();
+    let pull = DarPull::new(&server.coordinator, COORDINATOR_RUN, &names, &hashes)?
+        .context("no pull planned")?;
+
+    let error = pull
+        .fetch_within(&server.node, MAX_PAYLOAD_SIZE)
+        .await
+        .expect_err("a run above the cap was pulled");
+
+    let expected = "the DARs of this run add up to 1.1 MiB (1048577 bytes) so far, above the cap \
+                    of 1 MiB for one run. Send the DARs in several runs of at most 1 MiB each";
+    assert!(format!("{error:#}").contains(expected), "{error:#}");
     Ok(())
 }
 

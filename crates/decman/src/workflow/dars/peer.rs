@@ -87,11 +87,11 @@ pub enum PullRefused {
         limit: usize,
     },
     #[error(
-        "the DARs of this run add up to {} MiB so far, above the cap of {} MiB for one run. \
-         Send the DARs in several runs of at most {} MiB each",
-        mib(*total),
-        mib(*cap),
-        mib(*cap)
+        "the DARs of this run add up to {} MiB ({total} bytes) so far, above the cap of {} \
+         MiB for one run. Send the DARs in several runs of at most {} MiB each",
+        mib(*total, Round::Up),
+        mib(*cap, Round::Down),
+        mib(*cap, Round::Down)
     )]
     RunTooLarge { total: usize, cap: usize },
     #[error(
@@ -111,14 +111,26 @@ pub enum PullRefused {
     NotPullable,
 }
 
-/// `bytes` in MiB: whole when it divides evenly, else to one decimal.
-fn mib(bytes: usize) -> String {
+/// Which way [`mib`] rounds a size that does not fill its last tenth.
+#[derive(Clone, Copy, Debug)]
+enum Round {
+    Up,
+    Down,
+}
+
+/// `bytes` in MiB: whole when it divides evenly, else to one decimal. A
+/// total rounds up and a cap rounds down, so a total above the cap never
+/// reads as equal to it.
+fn mib(bytes: usize, round: Round) -> String {
     const MIB: usize = 1024 * 1024;
     if bytes.is_multiple_of(MIB) {
-        (bytes / MIB).to_string()
-    } else {
-        format!("{:.1}", bytes as f64 / MIB as f64)
+        return (bytes / MIB).to_string();
     }
+    let tenths = match round {
+        Round::Up => (bytes * 10).div_ceil(MIB),
+        Round::Down => bytes * 10 / MIB,
+    };
+    format!("{}.{}", tenths / 10, tenths % 10)
 }
 
 /// What a peer needs to read the DARs of its accepted invitation one by one.
@@ -486,6 +498,21 @@ mod tests {
         let text = refusal_text(&refusal);
 
         assert_eq!(text.len(), MAX_REFUSAL_LEN + "…".len());
+    }
+
+    #[test]
+    fn the_real_cap_plus_one_byte_reads_as_above_it() {
+        let error = PullRefused::RunTooLarge {
+            total: MAX_DAR_PULL_TOTAL + 1,
+            cap: MAX_DAR_PULL_TOTAL,
+        };
+
+        assert!(
+            error
+                .to_string()
+                .starts_with("the DARs of this run add up to 256.1 MiB (268435457 bytes) so far, above the cap of 256 MiB"),
+            "{error}"
+        );
     }
 
     #[test]
