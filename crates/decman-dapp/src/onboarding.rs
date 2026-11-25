@@ -420,6 +420,10 @@ pub fn allocate_refusal(answer: &Value, party_id: &str) -> AllocateRefusal {
     if names_the_party && says_it_exists {
         return AllocateRefusal::PartyExists;
     }
+    // Canton's SerialMismatch answer carries only the two serials and no
+    // mapping name, so the dApp cannot narrow it to one mapping. The design
+    // doc explains it as a conflict on the owners' shared namespace. The page
+    // shows that as the likely cause, with the participant's own text.
     let serial_mismatch = [
         "TOPOLOGY_SERIAL_MISMATCH",
         "did not match the expected serial",
@@ -1199,6 +1203,31 @@ mod tests {
         let coded = json!({ "code": "TOPOLOGY_SERIAL_MISMATCH", "cause": "anything" });
         assert_eq!(
             allocate_refusal(&coded, PARTY),
+            AllocateRefusal::NamespaceConflict
+        );
+    }
+
+    /// The whole answer the JSON Ledger API gives for a SerialMismatch: the
+    /// participant passes on only the text, so no field names the mapping.
+    /// The dApp still reads it as the namespace conflict, as the design says.
+    #[test]
+    fn a_serial_mismatch_without_a_mapping_name_is_the_namespace_conflict() {
+        let answer = json!({
+            "code": "The given serial 1 did not match the expected serial 2.",
+            "cause": "FAILED_PRECONDITION: The given serial 1 did not match the expected serial 2.",
+            "correlationId": null,
+            "traceId": null,
+            "context": {},
+            "resources": [],
+            "errorCategory": -1,
+            "grpcCodeValue": 9,
+            "retryInfo": null,
+            "definiteAnswer": null,
+        });
+        let text = answer.to_string();
+        assert!(!text.contains("DecentralizedNamespace") && !text.contains("Namespace"));
+        assert_eq!(
+            allocate_refusal(&answer, PARTY),
             AllocateRefusal::NamespaceConflict
         );
     }
