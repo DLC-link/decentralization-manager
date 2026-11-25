@@ -11,6 +11,7 @@ import {
   signRequest,
 } from '../mock/actions'
 import { actingWallet, useAppState, type Party, type TransferRequest, type Wallet } from '../mock/store'
+import { ALREADY_EXISTED } from '../onboarding'
 import { Avatar, Badge, EmptyState, ErrorText, Hex, PartyId, Person, Section, SimulatedBadge, Uid, useAction } from '../ui'
 
 export function Parties({ onOpenParty }: { onOpenParty: (partyId: string) => void }) {
@@ -26,6 +27,7 @@ export function Parties({ onOpenParty }: { onOpenParty: (partyId: string) => voi
           <button key={party.partyId} className="tile" onClick={() => onOpenParty(party.partyId)}>
             <PartyId value={party.partyId} />
             {party.simulated && <SimulatedBadge />}
+            {party.alreadyExisted && <Badge tone="warn">Already existed</Badge>}
             <span className="avatars">
               {party.owners.map((owner) => (
                 <Avatar key={owner.publicKey} name={nameOf(owner.publicKey)} />
@@ -59,9 +61,14 @@ export function PartyDetail({ partyId }: { partyId: string }) {
           </h3>
           <span className="badges">
             {party.simulated && <SimulatedBadge />}
-            <Badge tone="ok">Every host reported it</Badge>
+            {party.alreadyExisted ? (
+              <Badge tone="warn">Already existed</Badge>
+            ) : (
+              <Badge tone="ok">Every host reported it</Badge>
+            )}
           </span>
         </div>
+        {party.alreadyExisted && <p className="warning">{ALREADY_EXISTED}</p>}
         <div className="chips">
           <span className="chip">
             Signing {party.signingThreshold} of {party.owners.length} owners

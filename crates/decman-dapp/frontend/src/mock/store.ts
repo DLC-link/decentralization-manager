@@ -53,6 +53,14 @@ export type Proposal = {
   status: 'collecting' | 'submitting' | 'submitted' | 'failed' | 'withdrawn' | 'rejected'
   /** Who withdrew or rejected the proposal. */
   endedBy?: string
+  /**
+   * Whether an owner's participant accepted this proposal's full bundle, in
+   * any attempt. Only then do the hosts' reports show that this bundle took
+   * effect.
+   */
+  bundleAccepted?: boolean
+  /** Set at completion when no participant accepted the bundle. */
+  alreadyExisted?: boolean
   hosts: HostResult[]
   error?: string
 }
@@ -86,6 +94,11 @@ export type Party = {
   partyId: string
   /** Whether simulated participants host the party. */
   simulated: boolean
+  /**
+   * The party existed before this proposal's bundle reached any participant,
+   * so its thresholds and hosts are the proposal's, not read from Canton.
+   */
+  alreadyExisted: boolean
   namespace: string
   owners: PlannedOwner[]
   hosts: Host[]

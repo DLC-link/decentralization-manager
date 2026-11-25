@@ -40,6 +40,9 @@ const HOSTING_POLL_MS = 2_000
 const NAMESPACE_CONFLICT =
   "These owners' namespace already exists with a different definition, for example another namespace threshold."
 
+export const ALREADY_EXISTED =
+  "This party already existed. The dApp cannot read its topology yet, so the thresholds and hosts shown are this proposal's, not necessarily the ledger's."
+
 const now = () => new Date().toISOString()
 const newId = () => crypto.randomUUID()
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
@@ -102,6 +105,44 @@ function hostOf(
   throw new Error(`No ${modeName(simulated)} wallet or covalidator uses participant ${participantId}.`)
 }
 
+/** The parts of a plan that a party record keeps, in one comparable form. */
+function planSummary(plan: Pick<PartyPlan, 'owners' | 'signingThreshold' | 'namespaceThreshold' | 'confirmationThreshold'> & { hosts: string[] }): string {
+  return JSON.stringify([
+    plan.owners.map((o) => o.publicKey),
+    plan.hosts,
+    plan.signingThreshold,
+    plan.namespaceThreshold,
+    plan.confirmationThreshold,
+  ])
+}
+
+/**
+ * Refuses a party id that this browser already holds, as a party or an open
+ * proposal, with another plan. A party id names one party.
+ */
+function checkNoOtherPlan(plan: PartyPlan, simulated: boolean): void {
+  const { parties, proposals } = getState()
+  const wanted = planSummary(plan)
+  const otherParty = parties.some(
+    (p) =>
+      p.partyId === plan.partyId &&
+      p.simulated === simulated &&
+      planSummary({ ...p, hosts: p.hosts.map((h) => h.participant) }) !== wanted,
+  )
+  const otherProposal = proposals.some(
+    (p) =>
+      p.plan.partyId === plan.partyId &&
+      p.simulated === simulated &&
+      (isOpen(p) || p.status === 'submitting') &&
+      planSummary(p.plan) !== wanted,
+  )
+  if (otherParty || otherProposal) {
+    throw new Error(
+      'This browser already holds this party id with other owners, hosts or thresholds. A party id names one party.',
+    )
+  }
+}
+
 /** Refuses a proposal whose owners or covalidators mix modes. */
 function checkOneMode(proposal: PartyProposal, simulated: boolean): void {
   const { wallets, covalidators } = getState()
@@ -132,6 +173,7 @@ export async function createProposal(proposal: PartyProposal, creator: Wallet): 
   }
   const { simulated } = creator.participant
   checkOneMode(proposal, simulated)
+  checkNoOtherPlan(plan, simulated)
   const hosts = plan.hosts.map((participant): HostResult => {
     const role = roleOf(plan, participant)
     const ownerNames = getState()
@@ -385,6 +427,7 @@ async function sendToHosts(
     const host = targets[index]
     if (result.status === 'fulfilled') {
       setHost(id, host.participant, step, detail)
+      if (role === 'owner') changeProposal(id, (p) => ({ ...p, bundleAccepted: true }))
       return
     }
     const answer = result.reason instanceof ledger.LedgerError ? result.reason.answer : undefined
@@ -426,11 +469,15 @@ async function waitUntilHosted(id: string, partyId: string): Promise<void> {
 
 /** Records the party from the plan computed from the proposal itself. */
 function addParty(proposal: Proposal, plan: PartyPlan, wallet: Wallet): void {
+  // Without an accepted bundle, every owner's participant either said the
+  // party exists or already reported it, so another submission made it.
+  const alreadyExisted = !proposal.bundleAccepted
   const party: Party = {
     partyId: plan.partyId,
     namespace: plan.namespace,
     owners: plan.owners,
     simulated: proposal.simulated,
+    alreadyExisted,
     hosts: plan.hosts.map((participant) => {
       const role = roleOf(plan, participant)
       return {
@@ -453,13 +500,13 @@ function addParty(proposal: Proposal, plan: PartyPlan, wallet: Wallet): void {
     history: [
       {
         at: now(),
-        text: `Every host reports the party.${proposal.simulated ? ' The hosts are simulated.' : ''} ${wallet.name} started the creation.`,
+        text: `${alreadyExisted ? `${ALREADY_EXISTED} ` : ''}Every host reports the party.${proposal.simulated ? ' The hosts are simulated.' : ''} ${wallet.name} started the creation.`,
       },
     ],
   }
   update((s) => ({
     ...s,
-    proposals: s.proposals.map((p) => (p.id === proposal.id ? { ...p, status: 'submitted' } : p)),
+    proposals: s.proposals.map((p) => (p.id === proposal.id ? { ...p, status: 'submitted', alreadyExisted } : p)),
     parties: [party, ...s.parties],
   }))
 }
