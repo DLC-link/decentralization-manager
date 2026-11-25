@@ -1,4 +1,8 @@
-use std::{collections::HashSet, sync::LazyLock, time::Duration};
+use std::{
+    collections::HashSet,
+    sync::LazyLock,
+    time::{Duration, Instant},
+};
 
 use actix_web::{HttpRequest, HttpResponse, Responder, get, http::StatusCode, post, web};
 use anyhow::Context;
@@ -850,18 +854,25 @@ fn count_action(step: ActionStep, outcome: ActionOutcome) {
 // Spawned Writes
 // ============================================================================
 
-/// How long a governance submission waits for the ledger. A little above the
-/// 120 seconds the deployment guide asks a proxy to allow. Without a deadline,
-/// a write whose caller hung up waits until Canton stops tracking the command.
+/// How long a governance write waits for the ledger, across all its
+/// submissions. Without a deadline, a write whose caller hung up waits until
+/// Canton stops tracking the command. The deployment guide asks a proxy to
+/// wait longer than this, so DecMan's own answer reaches the caller.
 const SUBMISSION_DEADLINE: Duration = Duration::from_secs(130);
 
-/// A Ledger API request as `token`, with the [`SUBMISSION_DEADLINE`].
-fn ledger_request<T>(message: T, token: &str) -> Result<tonic::Request<T>> {
+/// When a write whose first submission starts now stops waiting.
+fn write_deadline() -> Instant {
+    Instant::now() + SUBMISSION_DEADLINE
+}
+
+/// A Ledger API request as `token` that waits for the ledger until
+/// `deadline`. A write's later submissions get only what is left of it.
+fn ledger_request<T>(message: T, token: &str, deadline: Instant) -> Result<tonic::Request<T>> {
     let mut request = tonic::Request::new(message);
     request
         .metadata_mut()
         .insert("authorization", format!("Bearer {token}").parse()?);
-    request.set_timeout(SUBMISSION_DEADLINE);
+    request.set_timeout(deadline.saturating_duration_since(Instant::now()));
     Ok(request)
 }
 
@@ -1350,6 +1361,9 @@ async fn submit_proposal(
     member_party_id: CantonId,
     body: ProposeActionRequest,
 ) -> Submitted {
+    // Both submissions share one budget, so a propose waits no longer than
+    // any other write.
+    let deadline = write_deadline();
     let channel = match data.config.ledger_channel().await {
         Ok(channel) => channel,
         Err(e) => {
@@ -1369,25 +1383,28 @@ async fn submit_proposal(
         transaction_format: None,
     };
     let created: Result<_> = async {
-        let request = ledger_request(create, &token)?;
+        let request = ledger_request(create, &token, deadline)?;
         Ok(client.submit_and_wait_for_transaction(request).await?)
     }
     .await;
     let proposal_cid = match created {
-        Ok(response) => match response
-            .into_inner()
-            .transaction
-            .as_ref()
-            .and_then(first_created_contract_id)
-        {
-            Some(cid) => cid,
-            None => {
-                return Submitted::failed(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "Proposal created but could not extract contract ID".to_string(),
-                );
+        Ok(response) => {
+            let transaction = response.into_inner().transaction;
+            match transaction.as_ref().and_then(first_created_contract_id) {
+                Some(cid) => cid,
+                None => {
+                    let update_id = transaction.map(|t| t.update_id).unwrap_or_default();
+                    return Submitted::failed(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        format!(
+                            "Proposal created in update {update_id} but could not extract \
+                             its contract ID. Find it in `governance pending` and confirm it \
+                             there; do not re-propose."
+                        ),
+                    );
+                }
             }
-        },
+        }
         Err(e) => {
             let (status, error) = submission_failure("Failed to create proposal", &e);
             return Submitted::failed(status, error);
@@ -1441,7 +1458,7 @@ async fn submit_proposal(
     };
     let confirmed: Result = async {
         client
-            .submit_and_wait(ledger_request(confirm, &token)?)
+            .submit_and_wait(ledger_request(confirm, &token, deadline)?)
             .await?;
         Ok(())
     }
@@ -1450,10 +1467,12 @@ async fn submit_proposal(
         tracing::info!("Proposal {proposal_cid} confirmed by proposer");
     }
     Submitted::of(confirmed, |e| {
-        submission_failure(
+        let (status, error) = submission_failure(
             &format!("Proposal created (CID: {proposal_cid}) but confirmation failed"),
             e,
-        )
+        );
+        let advice = format!("Confirm proposal {proposal_cid}; do not re-propose.");
+        (status, format!("{error} {advice}"))
     })
     .of_proposal(proposal_cid)
 }
@@ -1655,8 +1674,8 @@ fn execute_failure(e: &anyhow::Error) -> (StatusCode, String) {
 ///
 /// A success forgets the record. A mediator timeout replaces it with the
 /// parties this timeout named, so a timeout that no longer names the
-/// confirmer clears its mark. Any other failure never reached the mediator
-/// and says nothing about the confirmer, so the record stays.
+/// confirmer clears its mark. Any other failure, an expire whose outcome is
+/// unknown included, says nothing about the confirmer, so the record stays.
 ///
 /// Only expire records. `_Cancel` is controlled by the confirmer, this node's
 /// own member, so a cancel timeout never shows that the confirmer is gone.
@@ -2350,6 +2369,7 @@ async fn execute_confirm_action(
             commands: Some(commands),
         },
         token,
+        write_deadline(),
     )?;
     client.submit_and_wait(request).await?;
 
@@ -2546,6 +2566,7 @@ async fn execute_confirmed_action(
             commands: Some(commands),
         },
         token,
+        write_deadline(),
     )?;
     client.submit_and_wait(request).await?;
 
@@ -2772,6 +2793,7 @@ async fn execute_expire_confirmation(
             commands: Some(commands),
         },
         token,
+        write_deadline(),
     )?;
     client.submit_and_wait(request).await?;
 
@@ -2843,6 +2865,7 @@ async fn execute_cancel_confirmation(
             commands: Some(commands),
         },
         token,
+        write_deadline(),
     )?;
     client.submit_and_wait(request).await?;
 
@@ -2911,6 +2934,7 @@ async fn execute_cancel_proposal(
             commands: Some(commands),
         },
         token,
+        write_deadline(),
     )?;
     client.submit_and_wait(request).await?;
 
@@ -3725,6 +3749,11 @@ mod mediator_timeout_tests {
         submitted: Arc<Notify>,
         release: Arc<Notify>,
         deadlines: Arc<Mutex<Vec<Option<String>>>>,
+        /// How long the answer that creates `created_proposal` takes.
+        create_delay: Duration,
+        /// Whether that answer leaves out the created contract, as a
+        /// transaction without events does.
+        hide_created_contract: bool,
     }
 
     impl RejectingLedger {
@@ -3735,6 +3764,8 @@ mod mediator_timeout_tests {
                 submitted: Arc::new(Notify::new()),
                 release: Arc::new(Notify::new()),
                 deadlines: Arc::default(),
+                create_delay: Duration::ZERO,
+                hide_created_contract: false,
             }
         }
 
@@ -3745,6 +3776,26 @@ mod mediator_timeout_tests {
                 rejection: None,
                 ..Self::new()
             }
+        }
+
+        /// The milliseconds each submission's `grpc-timeout` allowed.
+        fn deadline_millis(&self) -> Result<Vec<u64>> {
+            let deadlines = self.deadlines.lock().map_err(|e| anyhow::anyhow!("{e}"))?;
+            deadlines
+                .iter()
+                .map(|header| {
+                    let header = header.as_deref().context("a submission had no deadline")?;
+                    let (value, unit) = header.split_at(header.len() - 1);
+                    let value: u64 = value.parse()?;
+                    Ok(match unit {
+                        "S" => value * 1_000,
+                        "m" => value,
+                        "u" => value / 1_000,
+                        "n" => value / 1_000_000,
+                        other => anyhow::bail!("unexpected grpc-timeout unit {other}"),
+                    })
+                })
+                .collect()
         }
 
         /// Serves the ledger on a free local port and returns the port.
@@ -3782,7 +3833,13 @@ mod mediator_timeout_tests {
                 }
                 match (method, ledger.created_proposal) {
                     (Some("SubmitAndWaitForTransaction"), Some(contract_id)) => {
-                        let response = created_transaction(contract_id);
+                        tokio::time::sleep(ledger.create_delay).await;
+                        let mut response = created_transaction(contract_id);
+                        if let (true, Some(transaction)) =
+                            (ledger.hide_created_contract, response.transaction.as_mut())
+                        {
+                            transaction.events.clear();
+                        }
                         return Ok(
                             unary(request, move |_: SubmitAndWaitForTransactionRequest| {
                                 Ok(response.clone())
@@ -3814,6 +3871,7 @@ mod mediator_timeout_tests {
     fn created_transaction(contract_id: String) -> SubmitAndWaitForTransactionResponse {
         SubmitAndWaitForTransactionResponse {
             transaction: Some(Transaction {
+                update_id: "00update".to_string(),
                 events: vec![Event {
                     event: Some(event::Event::Created(CreatedEvent {
                         contract_id,
@@ -4142,18 +4200,93 @@ mod mediator_timeout_tests {
 
             post_to_writes(&pool, &ledger, uri, body).await?;
 
-            let deadlines = ledger
-                .deadlines
-                .lock()
-                .map_err(|e| anyhow::anyhow!("{e}"))?;
+            let deadlines = ledger.deadline_millis()?;
             let expected = if matches!(event, AuditEvent::Propose) {
                 2
             } else {
                 1
             };
             assert_eq!(deadlines.len(), expected, "{event:?}");
-            for deadline in deadlines.iter() {
-                assert_eq!(deadline.as_deref(), Some("130000m"), "{event:?}");
+            for millis in deadlines {
+                assert!(
+                    (129_000..=130_000).contains(&millis),
+                    "{event:?}: {millis} ms"
+                );
+            }
+        }
+        Ok(())
+    }
+
+    /// A propose makes two submissions. They share one budget, so the whole
+    /// write waits no longer than any other.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_propose_shares_one_deadline_across_its_submissions(pool: SqlitePool) -> Result {
+        let _serial = super::action_metrics_tests::SERIAL.lock().await;
+        let mut ledger = RejectingLedger::new();
+        ledger.created_proposal = Some("00proposal".to_string());
+        ledger.create_delay = Duration::from_millis(1_500);
+        ledger.release.notify_one();
+        let (_, uri, _, body) = writes()
+            .into_iter()
+            .find(|(event, ..)| matches!(event, AuditEvent::Propose))
+            .context("no propose case")?;
+
+        post_to_writes(&pool, &ledger, uri, body).await?;
+
+        let [create, confirm] = ledger.deadline_millis()?[..] else {
+            anyhow::bail!("expected two submissions");
+        };
+        assert!(create <= 130_000, "{create} ms");
+        assert!(
+            confirm <= 128_500,
+            "the confirmation got a fresh budget: {confirm} ms"
+        );
+        Ok(())
+    }
+
+    /// A submission that stopped waiting before the ledger answered may still
+    /// land. A propose retried then would create a second proposal, so the
+    /// answer must say that the outcome is unknown.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_submission_that_ran_out_of_time_has_an_unknown_outcome(pool: SqlitePool) -> Result {
+        let _serial = super::action_metrics_tests::SERIAL.lock().await;
+        let rejections = [
+            (
+                tonic::Status::deadline_exceeded("deadline passed"),
+                "DEADLINE_EXCEEDED",
+            ),
+            // The gRPC client's answer when DecMan's own deadline passes.
+            (tonic::Status::cancelled("Timeout expired"), "CANCELLED"),
+            (fixtures::request_timeout(), "REQUEST_TIME_OUT"),
+        ];
+        for (rejection, cause) in rejections {
+            for (event, uri, context, body) in writes() {
+                let mut ledger = RejectingLedger::new();
+                ledger.rejection = Some(rejection.clone());
+                ledger.release.notify_one();
+
+                let (status, error) = post_to_writes(&pool, &ledger, uri, body).await?;
+
+                assert_eq!(
+                    status,
+                    StatusCode::GATEWAY_TIMEOUT,
+                    "{event:?} {cause}: {error}"
+                );
+                assert_eq!(
+                    error,
+                    format!(
+                        "{context}: the outcome is unknown. DecMan stopped waiting before the \
+                         ledger answered ({cause}), and the write may still complete. Run \
+                         `governance pending` before you retry."
+                    ),
+                    "{event:?}"
+                );
+                let (audit_status, audit_message) = audit_row(&pool, event).await?;
+                assert_eq!(audit_status, "failed", "{event:?}");
+                assert_eq!(audit_message, Some(error), "{event:?}");
+                sqlx::query("DELETE FROM governance_audit")
+                    .execute(&pool)
+                    .await?;
             }
         }
         Ok(())
@@ -4225,6 +4358,43 @@ mod mediator_timeout_tests {
         assert!(
             error.contains(&format!("Unresponsive: {OFFLINE_MEMBER}.")),
             "{error}"
+        );
+        assert!(
+            error.ends_with("Confirm proposal 00proposal; do not re-propose."),
+            "{error}"
+        );
+        let (audit_status, audit_message) = audit_row(&pool, AuditEvent::Propose).await?;
+        assert_eq!(audit_status, "failed");
+        assert_eq!(audit_message, Some(error));
+        Ok(())
+    }
+
+    /// The proposal exists even when the answer does not name it, so the
+    /// operator must find it rather than propose again.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_created_proposal_without_its_id_says_not_to_re_propose(pool: SqlitePool) -> Result {
+        let _serial = super::action_metrics_tests::SERIAL.lock().await;
+        let mut ledger = RejectingLedger::new();
+        ledger.created_proposal = Some("00proposal".to_string());
+        ledger.hide_created_contract = true;
+
+        let (status, error) = post_to_writes(
+            &pool,
+            &ledger,
+            "/governance/propose",
+            serde_json::json!({
+                "party_id": party(),
+                "rules_contract_id": "00rules",
+                "proposal": { "type": "generic_vote", "description": "no id" },
+            }),
+        )
+        .await?;
+
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{error}");
+        assert_eq!(
+            error,
+            "Proposal created in update 00update but could not extract its contract ID. Find \
+             it in `governance pending` and confirm it there; do not re-propose."
         );
         let (audit_status, audit_message) = audit_row(&pool, AuditEvent::Propose).await?;
         assert_eq!(audit_status, "failed");

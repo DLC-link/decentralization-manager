@@ -503,16 +503,18 @@ spec:
 
 Adapt the `ingressClassName` and TLS configuration to your cluster's Ingress controller (nginx, Contour, etc.). Make sure `<your-ui-host>` resolves to the cluster and is registered as a valid redirect URI on your IdP client.
 
-**Proxy timeout.** A governance write waits until the synchronizer decides on it. The mediator rejects the write only after its confirmation timeout when a confirming participant is offline. Set the response timeout of the Ingress or proxy to at least 120 seconds. DecMan then answers with status 504 and a JSON body that names each party that did not confirm. DecMan stops waiting for the ledger after 130 seconds, so a proxy timeout of 130 seconds always lets DecMan's own answer through. With ingress-nginx, for example, add these annotations to the Ingress:
+**Proxy timeout.** A governance write waits until the synchronizer decides on it. The mediator rejects the write only after its confirmation timeout when a confirming participant is offline. DecMan then answers with status 504 and a JSON body that names each party that did not confirm.
+
+DecMan stops waiting for the ledger 130 seconds after a write's first submission. A write with two submissions, such as a propose, shares those 130 seconds. When DecMan stops waiting, it answers with status 504 and says that the write may still complete. Set the response timeout of the Ingress or proxy to at least 150 seconds for every governance write, so DecMan's own answer reaches the caller. With ingress-nginx, for example, add these annotations to the Ingress:
 
 ```yaml
 metadata:
   annotations:
-    nginx.ingress.kubernetes.io/proxy-read-timeout: "130"
-    nginx.ingress.kubernetes.io/proxy-send-timeout: "130"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "150"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "150"
 ```
 
-A 504 without a JSON body comes from the proxy. The write still runs to its end in that case, and `GET /governance/audit` then shows its outcome.
+A shorter proxy timeout only hides DecMan's answer. The write and its audit row still complete. A 504 without a JSON body comes from the proxy, and `GET /governance/audit` then shows the outcome.
 
 ### Apply
 

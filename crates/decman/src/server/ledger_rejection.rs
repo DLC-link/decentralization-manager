@@ -8,12 +8,17 @@
 use actix_web::http::StatusCode;
 use canton_proto_rs::google::rpc::{ErrorInfo, Status as RpcStatus};
 use prost::Message;
+use tonic::Code;
 
 /// The id of a rejection for confirmations the mediator never received.
 const MEDIATOR_TIMEOUT_ID: &str = "MEDIATOR_SAYS_TX_TIMED_OUT";
 
 /// The `ErrorInfo` metadata key that lists the parties that did not confirm.
 const UNRESPONSIVE_PARTIES_KEY: &str = "unresponsiveParties";
+
+/// The id of a rejection for a command that Canton stopped tracking before it
+/// knew the outcome.
+const REQUEST_TIMEOUT_ID: &str = "REQUEST_TIME_OUT";
 
 /// The Canton error id a failed submission carries, i.e. the message prefix
 /// before `(`. `None` when the error is not a ledger rejection at all.
@@ -84,22 +89,49 @@ fn unresponsive_parties(details: &[u8]) -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// Why the outcome of a failed submission is unknown, or `None` when the
+/// failure is definite. DecMan's own deadline reaches the caller as a
+/// `CANCELLED` status from the gRPC client.
+fn unknown_outcome(e: &anyhow::Error) -> Option<&'static str> {
+    if canton_error_id(e).as_deref() == Some(REQUEST_TIMEOUT_ID) {
+        return Some(REQUEST_TIMEOUT_ID);
+    }
+    match e.downcast_ref::<tonic::Status>()?.code() {
+        Code::DeadlineExceeded => Some("DEADLINE_EXCEEDED"),
+        Code::Cancelled => Some("CANCELLED"),
+        _ => None,
+    }
+}
+
 /// The status and message for a failed governance submission. `context` says
 /// what failed, such as "Failed to expire confirmation".
 ///
-/// A mediator timeout is a 504 that names the unresponsive parties. Any other
-/// failure is a 500 that carries the whole error chain.
+/// A mediator timeout is a 504 that names the unresponsive parties: the
+/// mediator rejected the write. A submission that stopped waiting before the
+/// ledger answered is also a 504, but its write may still complete, so the
+/// message says so. Any other failure is a 500 that carries the whole error
+/// chain.
 pub(crate) fn submission_failure(context: &str, e: &anyhow::Error) -> (StatusCode, String) {
-    match mediator_timeout(e) {
-        Some(timeout) => (
+    if let Some(timeout) = mediator_timeout(e) {
+        return (
             StatusCode::GATEWAY_TIMEOUT,
             format!("{context}: {}", timeout.explanation()),
-        ),
-        None => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("{context}: {e:#}"),
-        ),
+        );
     }
+    if let Some(cause) = unknown_outcome(e) {
+        return (
+            StatusCode::GATEWAY_TIMEOUT,
+            format!(
+                "{context}: the outcome is unknown. DecMan stopped waiting before the ledger \
+                 answered ({cause}), and the write may still complete. Run `governance pending` \
+                 before you retry."
+            ),
+        );
+    }
+    (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        format!("{context}: {e:#}"),
+    )
 }
 
 /// Rejections in the shape Canton sends them.
@@ -121,6 +153,15 @@ pub(crate) mod fixtures {
             type_url: format!("type.googleapis.com/{type_name}"),
             value: message.encode_to_vec(),
         }
+    }
+
+    /// Canton's rejection for a command it stopped tracking before it knew
+    /// the outcome.
+    pub(crate) fn request_timeout() -> tonic::Status {
+        tonic::Status::deadline_exceeded(
+            "REQUEST_TIME_OUT(3,5e3c1a7b): The request was not processed in time; its \
+             outcome is unknown.",
+        )
     }
 
     /// A mediator timeout whose `ErrorInfo` lists `unresponsive` as Canton
@@ -271,6 +312,30 @@ mod tests {
             message.ends_with("Canton did not name the unresponsive party."),
             "{message}"
         );
+    }
+
+    /// Canton names the id in the message whatever the gRPC code, so the id
+    /// alone marks the outcome as unknown.
+    #[test]
+    fn a_request_time_out_has_an_unknown_outcome_under_any_code() {
+        let e = anyhow::Error::new(tonic::Status::unavailable(
+            "REQUEST_TIME_OUT(3,5e3c1a7b): The request was not processed in time.",
+        ));
+
+        let (status, message) = submission_failure("Failed to cancel proposal", &e);
+
+        assert_eq!(status, StatusCode::GATEWAY_TIMEOUT);
+        assert!(message.contains("(REQUEST_TIME_OUT)"), "{message}");
+    }
+
+    /// A mediator timeout is a rejection: the write did not land.
+    #[test]
+    fn a_mediator_timeout_is_not_an_unknown_outcome() {
+        let e = anyhow::Error::new(fixtures::mediator_timeout(ALICE));
+
+        let (_, message) = submission_failure("Failed to expire confirmation", &e);
+
+        assert!(!message.contains("outcome is unknown"), "{message}");
     }
 
     #[test]
