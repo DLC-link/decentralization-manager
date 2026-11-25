@@ -48,6 +48,10 @@ static COORDINATOR_TURNS: LazyLock<Mutex<HashMap<String, Arc<tokio::sync::Mutex<
 /// of a 16 MiB DAR takes when each of its requests, the `RequestDar` and 16
 /// chunks, uses the full per-request timeout of a pull. That is 425 seconds.
 /// A waiter past it fails with a clear error instead of waiting forever.
+///
+/// The wait covers one attempt per request. A fetch that retries its
+/// requests can hold the turn longer. A pull that waits past this then fails
+/// its step, and the step retries.
 const TURN_WAIT: Duration = Duration::from_secs(
     (1 + MAX_CHUNKED_TOTAL_SIZE.div_ceil(CHUNK_SIZE)) as u64 * NOISE_CHUNK_TIMEOUT.as_secs(),
 );
