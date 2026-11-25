@@ -1295,20 +1295,23 @@ async fn submit_proposal(
     }
     .await;
     let proposal_cid = match created {
-        Ok(response) => match response
-            .into_inner()
-            .transaction
-            .as_ref()
-            .and_then(first_created_contract_id)
-        {
-            Some(cid) => cid,
-            None => {
-                return Submitted::failed(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "Proposal created but could not extract contract ID".to_string(),
-                );
+        Ok(response) => {
+            let transaction = response.into_inner().transaction;
+            match transaction.as_ref().and_then(first_created_contract_id) {
+                Some(cid) => cid,
+                None => {
+                    let update_id = transaction.map(|t| t.update_id).unwrap_or_default();
+                    return Submitted::failed(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        format!(
+                            "Proposal created in update {update_id} but could not extract \
+                             its contract ID. Find it in `governance pending` and confirm it \
+                             there; do not re-propose."
+                        ),
+                    );
+                }
             }
-        },
+        }
         Err(e) => {
             let (status, error) = submission_failure("Failed to create proposal", &e);
             return Submitted::failed(status, error);
@@ -1371,10 +1374,12 @@ async fn submit_proposal(
         tracing::info!("Proposal {proposal_cid} confirmed by proposer");
     }
     Submitted::of(confirmed, |e| {
-        submission_failure(
+        let (status, error) = submission_failure(
             &format!("Proposal created (CID: {proposal_cid}) but confirmation failed"),
             e,
-        )
+        );
+        let advice = format!("Confirm proposal {proposal_cid}; do not re-propose.");
+        (status, format!("{error} {advice}"))
     })
     .of_proposal(proposal_cid)
 }
@@ -3436,6 +3441,9 @@ mod mediator_timeout_tests {
         deadlines: Arc<Mutex<Vec<Option<String>>>>,
         /// How long the answer that creates `created_proposal` takes.
         create_delay: Duration,
+        /// Whether that answer leaves out the created contract, as a
+        /// transaction without events does.
+        hide_created_contract: bool,
     }
 
     impl RejectingLedger {
@@ -3447,6 +3455,7 @@ mod mediator_timeout_tests {
                 release: Arc::new(Notify::new()),
                 deadlines: Arc::default(),
                 create_delay: Duration::ZERO,
+                hide_created_contract: false,
             }
         }
 
@@ -3506,7 +3515,12 @@ mod mediator_timeout_tests {
                 match (method, ledger.created_proposal) {
                     (Some("SubmitAndWaitForTransaction"), Some(contract_id)) => {
                         tokio::time::sleep(ledger.create_delay).await;
-                        let response = created_transaction(contract_id);
+                        let mut response = created_transaction(contract_id);
+                        if let (true, Some(transaction)) =
+                            (ledger.hide_created_contract, response.transaction.as_mut())
+                        {
+                            transaction.events.clear();
+                        }
                         return Ok(
                             unary(request, move |_: SubmitAndWaitForTransactionRequest| {
                                 Ok(response.clone())
@@ -3532,6 +3546,7 @@ mod mediator_timeout_tests {
     fn created_transaction(contract_id: String) -> SubmitAndWaitForTransactionResponse {
         SubmitAndWaitForTransactionResponse {
             transaction: Some(Transaction {
+                update_id: "00update".to_string(),
                 events: vec![Event {
                     event: Some(event::Event::Created(CreatedEvent {
                         contract_id,
@@ -3962,6 +3977,43 @@ mod mediator_timeout_tests {
         assert!(
             error.contains(&format!("Unresponsive: {OFFLINE_MEMBER}.")),
             "{error}"
+        );
+        assert!(
+            error.ends_with("Confirm proposal 00proposal; do not re-propose."),
+            "{error}"
+        );
+        let (audit_status, audit_message) = audit_row(&pool, AuditEvent::Propose).await?;
+        assert_eq!(audit_status, "failed");
+        assert_eq!(audit_message, Some(error));
+        Ok(())
+    }
+
+    /// The proposal exists even when the answer does not name it, so the
+    /// operator must find it rather than propose again.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_created_proposal_without_its_id_says_not_to_re_propose(pool: SqlitePool) -> Result {
+        let _serial = super::action_metrics_tests::SERIAL.lock().await;
+        let mut ledger = RejectingLedger::new();
+        ledger.created_proposal = Some("00proposal".to_string());
+        ledger.hide_created_contract = true;
+
+        let (status, error) = post_to_writes(
+            &pool,
+            &ledger,
+            "/governance/propose",
+            serde_json::json!({
+                "party_id": party(),
+                "rules_contract_id": "00rules",
+                "proposal": { "type": "generic_vote", "description": "no id" },
+            }),
+        )
+        .await?;
+
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{error}");
+        assert_eq!(
+            error,
+            "Proposal created in update 00update but could not extract its contract ID. Find \
+             it in `governance pending` and confirm it there; do not re-propose."
         );
         let (audit_status, audit_message) = audit_row(&pool, AuditEvent::Propose).await?;
         assert_eq!(audit_status, "failed");
