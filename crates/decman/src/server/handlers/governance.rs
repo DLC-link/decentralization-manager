@@ -3500,11 +3500,11 @@ mod mediator_timeout_tests {
     /// unimplemented, so the package-ref lookup falls back to the configured
     /// package.
     #[derive(Clone)]
-    struct RejectingLedger {
-        rejection: Option<tonic::Status>,
+    pub(super) struct RejectingLedger {
+        pub(super) rejection: Option<tonic::Status>,
         created_proposal: Option<String>,
         submitted: Arc<Notify>,
-        release: Arc<Notify>,
+        pub(super) release: Arc<Notify>,
         deadlines: Arc<Mutex<Vec<Option<String>>>>,
         /// How long the answer that creates `created_proposal` takes.
         create_delay: Duration,
@@ -3514,7 +3514,7 @@ mod mediator_timeout_tests {
     }
 
     impl RejectingLedger {
-        fn new() -> Self {
+        pub(super) fn new() -> Self {
             Self {
                 rejection: Some(fixtures::mediator_timeout(OFFLINE_MEMBER)),
                 created_proposal: None,
@@ -3824,7 +3824,7 @@ mod mediator_timeout_tests {
 
     /// Posts `body` to `uri` as an admin through all six governance write
     /// handlers, against `ledger`. Returns the status and the `error` field.
-    async fn post_to_writes(
+    pub(super) async fn post_to_writes(
         pool: &SqlitePool,
         ledger: &RejectingLedger,
         uri: &str,
@@ -4293,7 +4293,10 @@ mod confirmations_feed_tests {
     };
 
     use super::*;
-    use crate::{auth::MockAuthRegistry, db::MIGRATOR, signing::fake_admin_api::unary};
+    use crate::{
+        auth::MockAuthRegistry, db::MIGRATOR, server::ledger_rejection::fixtures,
+        signing::fake_admin_api::unary,
+    };
 
     /// The Ledger API state service of a participant whose ACS holds
     /// `contracts`. A page read returns, in one page, every contract whose
@@ -4673,6 +4676,75 @@ mod confirmations_feed_tests {
                 .await?;
 
         assert!(queue.complete);
+        Ok(())
+    }
+
+    /// The operator flow of #615 from end to end: an expire times out at the
+    /// mediator, which names the confirmer as Canton writes a party id. The
+    /// feed then marks the confirmation, and lists the orphan it belongs to.
+    /// The other tests store the record directly, so only this one shows that
+    /// the stored names match the confirmers the feed reads from the ledger.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn an_expire_that_times_out_naming_the_confirmer_marks_its_action(
+        pool: SqlitePool,
+    ) -> Result {
+        let _serial = super::action_metrics_tests::SERIAL.lock().await;
+        let party = id("dec", "ab");
+        let confirmer = format!("member-a::1220{}", "aa".repeat(32));
+        let member = CantonId::parse(&confirmer)?;
+        let expired = chrono::Utc::now().timestamp() - 3600;
+        let ledger = AcsLedger {
+            contracts: Arc::new(vec![
+                rules(&party, &[&member]),
+                self_confirmation(
+                    "00self",
+                    &ActionType::GovernanceSetThreshold { new_threshold: 3 },
+                    &member,
+                    expired,
+                )?,
+                domain_confirmation("00dom", "00gone", &member, expired),
+            ]),
+            ..AcsLedger::default()
+        };
+
+        let before = feed(&pool, &ledger, &party).await?;
+        assert_eq!(
+            holding(&before["actions"], "00self")?["cannot_be_archived"],
+            json!(false)
+        );
+        assert!(
+            holding(&before["domain_actions"], "00dom").is_err(),
+            "{before}"
+        );
+
+        for confirmation_cid in ["00self", "00dom"] {
+            let mut offline = super::mediator_timeout_tests::RejectingLedger::new();
+            offline.rejection = Some(fixtures::mediator_timeout(&confirmer));
+            offline.release.notify_one();
+            let (status, error) = super::mediator_timeout_tests::post_to_writes(
+                &pool,
+                &offline,
+                "/governance/expire",
+                json!({
+                    "party_id": party,
+                    "rules_contract_id": "00rules",
+                    "confirmation_cid": confirmation_cid,
+                }),
+            )
+            .await?;
+            assert_eq!(status, StatusCode::GATEWAY_TIMEOUT, "{error}");
+        }
+
+        let after = feed(&pool, &ledger, &party).await?;
+        for (list, cid) in [("actions", "00self"), ("domain_actions", "00dom")] {
+            let action = holding(&after[list], cid)?;
+            assert_eq!(
+                action["confirmations"][0]["stuck"],
+                json!("participant_unresponsive"),
+                "{cid}"
+            );
+            assert_eq!(action["cannot_be_archived"], json!(true), "{cid}");
+        }
         Ok(())
     }
 }
