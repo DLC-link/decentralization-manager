@@ -683,6 +683,7 @@ pub async fn get_invitation_dar(
             filename: filename.clone(),
         },
         &data.config.noise_retry,
+        |_| Ok(()),
     )
     .await
     {

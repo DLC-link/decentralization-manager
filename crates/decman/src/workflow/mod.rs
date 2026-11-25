@@ -42,7 +42,7 @@ use crate::{
     server::{DeclineInvitationPayload, WorkflowInstance, WorkflowKind, peer_status::LastSeen},
     utils,
     workflow::{
-        dars::peer::DarPull,
+        dars::peer::{DarPull, OversizedPull},
         state::WorkflowStep,
         storage::{WorkflowStorage, artifact_kinds},
         validation::PeerExpectations,
@@ -313,16 +313,22 @@ pub async fn start_peer(
 
     let kind = expectations.kind;
     let reporter = client.clone();
-    let result = run_peer(
-        node_config,
-        client,
-        db,
-        instance_name,
-        expectations,
-        dar_pull,
-        workflow_auth,
-    )
-    .await;
+    // A refused pull is reported like any failure of the run.
+    let result = match dar_pull {
+        Ok(dar_pull) => {
+            run_peer(
+                node_config,
+                client,
+                db,
+                instance_name,
+                expectations,
+                dar_pull,
+                workflow_auth,
+            )
+            .await
+        }
+        Err(e) => Err(e),
+    };
     if let Err(e) = &result {
         let report = DeclineInvitationPayload {
             kind,
@@ -495,6 +501,11 @@ async fn run_peer(
                 let dar_files = match (&dar_pull, payload.is_empty()) {
                     (Some(pull), true) => match pull.fetch_all(&node_config).await {
                         Ok(files) => files,
+                        // The coordinator announces the same sizes on every
+                        // attempt, so a retry only delays the report.
+                        Err(e) if e.downcast_ref::<OversizedPull>().is_some() => {
+                            anyhow::bail!("Peer failed on the coordinator's DARs: {e:#}");
+                        }
                         Err(e) => {
                             fail_step!("Failed to read the DARs from the coordinator: {e:#}");
                             continue;

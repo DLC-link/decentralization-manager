@@ -2,7 +2,9 @@
 
 use std::time::Duration;
 
-use super::peer::fetch_dar_from_coordinator;
+use anyhow::Context;
+
+use super::peer::{DarPull, OversizedPull, fetch_dar_from_coordinator};
 use crate::{
     consts::MAX_CONSECUTIVE_STEP_FAILURES,
     error::Result,
@@ -112,22 +114,24 @@ async fn a_set_above_the_chunked_limit_uploads_when_each_dar_fits() -> Result {
     Ok(())
 }
 
+/// Each DAR is checked against its pin as it arrives. The peer stops at the
+/// first miss and reads none of the DARs after it.
 #[tokio::test]
 async fn a_dar_that_misses_its_hash_stops_every_upload() -> Result {
     let dars = dars(&[100, 200, 300]);
     let mut script = invited(&dars);
-    // The coordinator serves other bytes under the last name.
-    script.dars[2].1 = b"not the accepted DAR".to_vec();
+    // The coordinator serves other bytes under the middle name.
+    script.dars[1].1 = b"not the accepted DAR".to_vec();
     script.commands = vec![chunked_upload(MAX_PAYLOAD_SIZE + 1)?; MAX_CONSECUTIVE_STEP_FAILURES];
 
     let run = run_script(WorkflowKind::Dars, script).await?;
 
     let error = error_of(&run)?;
-    assert!(error.contains("DAR mid.dar hashes to"), "{error}");
+    assert!(error.contains("DAR alpha.dar hashes to"), "{error}");
     assert_eq!(
         run.dar_requests.len(),
-        dars.len() * MAX_CONSECUTIVE_STEP_FAILURES,
-        "the peer did not read every DAR before it checked them"
+        2 * MAX_CONSECUTIVE_STEP_FAILURES,
+        "the peer read past the DAR that missed its pin"
     );
     assert!(run.uploads.is_empty(), "uploaded before the check");
     assert_eq!(run.completions, 0);
@@ -172,8 +176,55 @@ async fn a_dar_above_the_chunked_limit_is_refused_by_name() -> Result {
         MAX_CHUNKED_TOTAL_SIZE + 1
     );
     assert!(error.contains(&expected), "{error}");
+    // The size is the same on every attempt, so the run ends at once.
+    assert_eq!(run.polls.len(), 1, "the peer retried");
+    assert_eq!(run.dar_requests.len(), 2, "the peer retried");
     assert!(run.uploads.is_empty());
     assert_reported(&run, WorkflowKind::Dars);
+    Ok(())
+}
+
+#[tokio::test]
+async fn an_invitation_that_names_a_dar_twice_is_refused_before_any_pull() -> Result {
+    let dars = dars(&[100, 200]);
+    let mut script = invited(&dars);
+    script.dar_filenames[1] = script.dar_filenames[0].clone();
+    script.commands = vec![chunked_upload(MAX_PAYLOAD_SIZE + 1)?; MAX_CONSECUTIVE_STEP_FAILURES];
+
+    let run = run_script(WorkflowKind::Dars, script).await?;
+
+    let error = error_of(&run)?;
+    assert!(error.contains("names the same DAR twice"), "{error}");
+    assert!(run.dar_requests.is_empty(), "the peer pulled a DAR");
+    assert!(run.uploads.is_empty());
+    assert_reported(&run, WorkflowKind::Dars);
+    Ok(())
+}
+
+/// The announced sizes count toward the run's cap before the DAR that
+/// crosses it is read.
+#[tokio::test]
+async fn a_run_above_the_total_cap_is_refused_at_the_dar_that_crosses_it() -> Result {
+    let dars = dars(&[MAX_PAYLOAD_SIZE + 1, MAX_PAYLOAD_SIZE + 1, 100]);
+    let server = DarServer::start(dars.clone(), Duration::ZERO).await?;
+    let names: Vec<String> = dars.iter().map(|(name, _)| name.clone()).collect();
+    let hashes: Vec<String> = dars.iter().map(|(_, dar)| hash_dar(dar)).collect();
+    let pull = DarPull::new(&server.coordinator, COORDINATOR_RUN, &names, &hashes)?
+        .context("no pull planned")?;
+    let cap = 3 * MAX_PAYLOAD_SIZE / 2;
+
+    let error = pull
+        .fetch_within(&server.node, cap)
+        .await
+        .expect_err("a run above the cap was pulled");
+
+    assert!(error.downcast_ref::<OversizedPull>().is_some(), "{error:#}");
+    let expected = format!(
+        "the DARs of this run add up to {} bytes so far, above the cap of {cap} bytes",
+        2 * (MAX_PAYLOAD_SIZE + 1)
+    );
+    assert!(format!("{error:#}").contains(&expected), "{error:#}");
+    assert_eq!(server.requests()?.len(), 2, "the peer read past the cap");
     Ok(())
 }
 
@@ -197,6 +248,7 @@ async fn two_fetches_from_one_coordinator_take_turns() -> Result {
                 &server.coordinator,
                 &request,
                 &server.node.noise_retry,
+                |_| Ok(()),
             )
             .await
         }

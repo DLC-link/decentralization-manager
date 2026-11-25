@@ -267,6 +267,7 @@ async fn serve(node: &NodeConfig, state: Arc<Coordinator>) -> Result<(Peer, Join
 pub(super) struct DarServer {
     pub(super) node: NodeConfig,
     pub(super) coordinator: Peer,
+    state: Arc<Coordinator>,
     server: JoinHandle<Result>,
     _root: tempfile::TempDir,
 }
@@ -284,13 +285,19 @@ impl DarServer {
             dar_hold: hold,
             ..Coordinator::default()
         });
-        let (coordinator, server) = serve(&node, state).await?;
+        let (coordinator, server) = serve(&node, state.clone()).await?;
         Ok(Self {
             node,
             coordinator,
+            state,
             server,
             _root: root,
         })
+    }
+
+    /// The DARs asked for so far, in order.
+    pub(super) fn requests(&self) -> Result<Vec<RequestDarPayload>> {
+        Ok(lock(&self.state.dar_requests)?.clone())
     }
 }
 

@@ -131,6 +131,15 @@ pub const ROTATE_KEY: &str = "rotate-key";
 /// before it sends a run without the bundle.
 pub const PER_DAR_PULL: &str = "per-dar-pull";
 
+/// The most bytes a peer pulls for one Dars run, summed over the sizes the
+/// coordinator announces for its DARs.
+///
+/// Each DAR is held in memory until the whole set passes its hash check, so
+/// this bounds the peer's memory for a run. It is far above any real package
+/// set. The peer refuses the run once the announced sizes pass it, before it
+/// reads the DAR that would cross it.
+pub const MAX_DAR_PULL_TOTAL: usize = 256 * 1024 * 1024;
+
 /// Workflow features this build supports beyond [`MIN_PEER_VERSION`]. The
 /// Health reply lists them, so a coordinator can refuse a run that a peer
 /// would refuse, before it invites anyone. Every build reports the same
