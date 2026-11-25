@@ -14,6 +14,16 @@ const CALL_TIMEOUT_MS = 30_000
 
 export type ConnectedSynchronizer = { synchronizerAlias: string; synchronizerId: string }
 
+/**
+ * Whether an HTTP status shows that the participant refused the request. A
+ * 5xx can come from a proxy or a gateway after the request reached the
+ * participant. So can 408, a gateway's timeout, and 429, a gateway's rate
+ * limit. Any other 4xx is the participant's own answer.
+ */
+export function isDefiniteRefusal(status: number): boolean {
+  return status >= 400 && status < 500 && status !== 408 && status !== 429
+}
+
 /** A participant's error answer, kept whole so that callers can classify it. */
 export class LedgerError extends Error {
   readonly status: number
@@ -25,12 +35,9 @@ export class LedgerError extends Error {
     this.answer = answer
   }
 
-  /**
-   * Whether the participant itself refused the request. A 5xx can come from
-   * a proxy or a gateway after the request reached the participant.
-   */
+  /** Whether the participant itself refused the request. */
   get isRefusal(): boolean {
-    return this.status >= 400 && this.status < 500
+    return isDefiniteRefusal(this.status)
   }
 }
 
