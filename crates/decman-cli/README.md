@@ -208,14 +208,37 @@ confirm.
 `governance pending` shows one page of proposals. Pass `--limit` for a larger
 page, and `--cursor` with the `next_cursor` of the previous page.
 
+#### Actions that cannot be archived
+
+A confirmation is archived only when its confirmer's participant confirms the
+archive. When that participant is gone for good, the confirmation stays on the
+ledger, and its action stays in `governance pending`.
+
+DecMan marks such an action only on evidence:
+
+1. Run `governance expire --confirmation <cid>` on each expired confirmation.
+2. When the confirmer's participant does not answer, the call fails with
+   status 504. The error names the confirmer's party.
+3. `governance pending` now shows `"stuck": "participant_unresponsive"` on that
+   confirmation. The name means the latest expire on this node timed out, and
+   Canton named the confirmer as a party that did not answer.
+4. When every confirmation of an action is stuck, the action shows
+   `"cannot_be_archived": true`. A domain action also needs its proposal to be
+   gone.
+
+A later expire that succeeds, or that times out without naming the confirmer,
+clears the mark.
+
 `governance hide` hides an action that cannot be archived. It acts on this
 node only and sends nothing to the ledger. Other nodes still list the action.
 Name the action with `--proposal <cid>`, or with `--action <hash>`. Here
 `--action` takes the `action_hash` that `governance pending` shows, not the
 action JSON. The CLI refuses an action that can still be archived.
+
 `governance unhide` takes the same flags and lists the action again.
 `governance pending --include-hidden` also lists the hidden actions. A new
-confirmation on a hidden action lists it again.
+confirmation on a hidden action lists it again. `governance expire` and
+`governance revoke` still find a hidden action.
 
 ### Governance Core
 

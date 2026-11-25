@@ -396,8 +396,9 @@ pub fn hide_body(
     let pending = require(confirmations, target)?;
     if !pending.cannot_be_archived() {
         bail!(
-            "this action can still be archived. \
-             Only an action that cannot be archived can be hidden"
+            "this action can still be archived, so it cannot be hidden. If a \
+             confirmer's participant is gone for good, run `governance expire` on each \
+             expired confirmation first"
         );
     }
     confirmation_ids_body(party_id, &pending)
@@ -692,6 +693,10 @@ mod tests {
             let error = hide_body(&confirmations, DEC, &target).unwrap_err();
             assert!(
                 error.to_string().contains("can still be archived"),
+                "{error}"
+            );
+            assert!(
+                error.to_string().contains("run `governance expire`"),
                 "{error}"
             );
         }
