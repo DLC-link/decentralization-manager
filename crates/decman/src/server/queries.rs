@@ -697,10 +697,12 @@ pub(crate) fn mark_stuck(
 
 /// Apply this node's hidden confirmations after [`mark_stuck`].
 ///
-/// An action is hidden only when it cannot be archived and every one of its
-/// confirmations is in `hidden`. A new confirmation therefore shows it again,
-/// and hiding never removes an action that can still be archived. A hidden
-/// action leaves the lists, unless `include` keeps it marked.
+/// An action is hidden only when it could not be archived at the last expire
+/// attempt and every one of its confirmations is in `hidden`. A new
+/// confirmation therefore shows it again. That evidence does not age: an
+/// action whose confirmer's participant came back stays hidden until someone
+/// runs expire again. A hidden action leaves the lists, unless `include`
+/// keeps it marked.
 pub(crate) fn apply_hidden(
     actions: &mut Vec<GovernanceAction>,
     domain_actions: &mut Vec<DomainGovernanceAction>,
