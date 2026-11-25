@@ -696,28 +696,31 @@ mod tests {
 
         let requests = allocation_requests(&plan, &onboarding, SYNCHRONIZER, &signatures)?;
 
-        let approval = &requests.hosting_approval;
-        assert_eq!(approval["synchronizer"], SYNCHRONIZER);
-        assert_eq!(approval["multiHashSignatures"], json!([]));
+        // The whole body, so a missing or extra field fails too.
         assert_eq!(
-            approval["onboardingTransactions"],
-            json!([{ "transaction": onboarding.transactions[3].transaction, "signatures": [] }])
+            requests.hosting_approval,
+            json!({
+                "synchronizer": SYNCHRONIZER,
+                "onboardingTransactions": [
+                    { "transaction": onboarding.transactions[3].transaction, "signatures": [] }
+                ],
+                "multiHashSignatures": [],
+                "identityProviderId": "",
+            })
         );
 
         let allocate = &requests.allocate;
         assert_eq!(allocate["synchronizer"], SYNCHRONIZER);
-        let sent: Vec<&str> = allocate["onboardingTransactions"]
-            .as_array()
-            .expect("an array")
-            .iter()
-            .map(|t| t["transaction"].as_str().expect("base64"))
-            .collect();
-        let built: Vec<&str> = onboarding
+        assert_eq!(allocate["identityProviderId"], "");
+        let expected_transactions: Vec<Value> = onboarding
             .transactions
             .iter()
-            .map(|t| t.transaction.as_str())
+            .map(|t| json!({ "transaction": t.transaction, "signatures": [] }))
             .collect();
-        assert_eq!(sent, built);
+        assert_eq!(
+            allocate["onboardingTransactions"],
+            Value::Array(expected_transactions)
+        );
 
         let multi = allocate["multiHashSignatures"]
             .as_array()
@@ -725,6 +728,7 @@ mod tests {
         assert_eq!(multi.len(), 2);
         let message = hex::decode(&onboarding.combined_hash).expect("hex");
         for (owner, signature) in plan.owners.iter().zip(multi) {
+            assert_eq!(signature.as_object().map(|s| s.len()), Some(4));
             assert_eq!(signature["signedBy"], owner.namespace.as_str());
             assert_eq!(signature["format"], "SIGNATURE_FORMAT_CONCAT");
             assert_eq!(
