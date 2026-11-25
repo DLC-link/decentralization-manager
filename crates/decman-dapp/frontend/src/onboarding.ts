@@ -11,6 +11,8 @@ import {
   planParty,
   publicKeyNamespace,
   topologyVersionOfGenerated,
+  type Onboarding,
+  type PartyPlan,
   type PartyProposal,
 } from './checks'
 import { shortUid } from './format'
@@ -181,24 +183,42 @@ function setHost(id: string, participant: string, step: HostStep, detail?: strin
   }))
 }
 
+/**
+ * The plan and transactions, computed again from the proposal itself. The
+ * stored copies are only a hint: an honest client checks them against what
+ * it computes, and refuses to sign if they differ.
+ */
+export function recheckProposal(proposal: Proposal): { plan: PartyPlan; onboarding: Onboarding } {
+  const plan = planParty(proposal.proposal)
+  const onboarding = onboardingTransactions(proposal.proposal, proposal.topologyVersion)
+  if (
+    JSON.stringify(plan) !== JSON.stringify(proposal.plan) ||
+    JSON.stringify(onboarding) !== JSON.stringify(proposal.onboarding)
+  ) {
+    throw new Error('The stored proposal does not match the transactions it describes. Do not sign it.')
+  }
+  return { plan, onboarding }
+}
+
 /** The owners whose signature on the combined hash verifies. */
-export function verifiedOwners(proposal: Proposal): Set<string> {
-  const owners = proposal.plan.owners.map((o) => o.publicKey)
+export function verifiedOwners(plan: PartyPlan, onboarding: Onboarding, signatures: Signature[]): Set<string> {
+  const owners = plan.owners.map((o) => o.publicKey)
   return new Set(
-    proposal.signatures
+    signatures
       .filter((s) => owners.includes(s.publicKey))
-      .filter((s) => isValidSignature(s.publicKey, proposal.onboarding.combinedHash, s.signature))
+      .filter((s) => isValidSignature(s.publicKey, onboarding.combinedHash, s.signature))
       .map((s) => s.publicKey),
   )
 }
 
 export async function signProposal(id: string, wallet: Wallet): Promise<void> {
   const proposal = findProposal(id)
-  if (!proposal.plan.owners.some((o) => o.publicKey === wallet.publicKey)) {
+  const { plan, onboarding } = recheckProposal(proposal)
+  if (!plan.owners.some((o) => o.publicKey === wallet.publicKey)) {
     throw new Error(`${wallet.name} is not an owner of this party.`)
   }
   if (proposal.signatures.some((s) => s.publicKey === wallet.publicKey)) return
-  const signature = await signDigest(wallet.privateKeyJwk, proposal.onboarding.combinedHash)
+  const signature = await signDigest(wallet.privateKeyJwk, onboarding.combinedHash)
   const entry: Signature = { publicKey: wallet.publicKey, signature, signedAt: now() }
   changeProposal(id, (p) => ({ ...p, signatures: [...p.signatures, entry] }))
 }

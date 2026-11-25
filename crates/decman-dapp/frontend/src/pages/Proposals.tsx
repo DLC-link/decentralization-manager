@@ -1,6 +1,6 @@
 import { isValidSignature } from '../checks'
 import { actingWallet, useAppState, type HostResult, type Proposal, type Wallet } from '../mock/store'
-import { signProposal, submitProposal, verifiedOwners } from '../onboarding'
+import { recheckProposal, signProposal, submitProposal, verifiedOwners } from '../onboarding'
 import {
   Badge,
   EmptyState,
@@ -66,9 +66,22 @@ function ProposalCard({
   onOpenParty: (partyId: string) => void
 }) {
   const [error, run] = useAction()
-  const { plan, onboarding } = proposal
+  let checked: ReturnType<typeof recheckProposal>
+  try {
+    checked = recheckProposal(proposal)
+  } catch (mismatch) {
+    return (
+      <article className="card">
+        <h3>
+          <PartyId value={proposal.plan.partyId} />
+        </h3>
+        <p className="error">{mismatch instanceof Error ? mismatch.message : String(mismatch)}</p>
+      </article>
+    )
+  }
+  const { plan, onboarding } = checked
   const signatureOf = (publicKey: string) => proposal.signatures.find((s) => s.publicKey === publicKey)
-  const verified = verifiedOwners(proposal).size
+  const verified = verifiedOwners(plan, onboarding, proposal.signatures).size
   const allSigned = verified === plan.owners.length
   const actingIsOwner = acting && plan.owners.some((o) => o.publicKey === acting.publicKey)
   const actingSigned = acting && signatureOf(acting.publicKey)
@@ -109,6 +122,14 @@ function ProposalCard({
         <span className="chip">
           <Uid value={proposal.synchronizerId} />
         </span>
+      </div>
+      <div className="hosts">
+        <span className="muted">Hosts</span>
+        {plan.hosts.map((host) => (
+          <span key={host} className="chip">
+            <Uid value={host} />
+          </span>
+        ))}
       </div>
       <p className="signs">
         <span className="muted">Every owner signs</span> <Hex value={onboarding.combinedHash} />

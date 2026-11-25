@@ -284,6 +284,14 @@ button.link {
   font-size: 0.9rem;
 }
 
+.hosts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+  margin: 8px 0;
+}
+
 .badges {
   display: inline-flex;
   flex-wrap: wrap;
