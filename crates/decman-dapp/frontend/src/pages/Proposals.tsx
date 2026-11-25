@@ -281,7 +281,7 @@ function HostResults({ proposal }: { proposal: Proposal }) {
               <td>
                 <Badge tone={tone}>{label}</Badge>
               </td>
-              <td className={host.step === 'failed' ? 'error' : 'muted'}>{host.detail ?? ''}</td>
+              <td className={`detail ${host.step === 'failed' ? 'error' : 'muted'}`}>{host.detail ?? ''}</td>
             </tr>
           )
         })}

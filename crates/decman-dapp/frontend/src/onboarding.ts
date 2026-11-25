@@ -34,10 +34,11 @@ import {
 const HOSTING_TIMEOUT_MS = 120_000
 const HOSTING_POLL_MS = 2_000
 
-// Canton refuses a namespace definition at serial 1 that differs from the
-// owners' existing one. Only the threshold can differ, as the owners match.
+// Canton refuses a namespace definition at serial 1 that differs from the one
+// these owners already have. The cause is often another threshold, but the
+// participant's own text says what Canton found.
 const NAMESPACE_CONFLICT =
-  'These owners already share a namespace with a different threshold. Use the threshold of their other parties.'
+  "These owners' namespace already exists with a different definition, for example another namespace threshold."
 
 const now = () => new Date().toISOString()
 const newId = () => crypto.randomUUID()
@@ -354,7 +355,13 @@ async function sendToHosts(
       return
     }
     refused = true
-    setHost(id, host.participant, 'failed', refusal === 'namespaceConflict' ? NAMESPACE_CONFLICT : message(result.reason))
+    const said = message(result.reason)
+    setHost(
+      id,
+      host.participant,
+      'failed',
+      refusal === 'namespaceConflict' ? `${NAMESPACE_CONFLICT}\nThe participant said: ${said}` : said,
+    )
   })
   if (refused) {
     throw new Error(

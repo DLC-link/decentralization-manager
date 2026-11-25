@@ -284,6 +284,10 @@ button.link {
   font-size: 0.9rem;
 }
 
+.detail {
+  white-space: pre-line;
+}
+
 .hosts {
   display: flex;
   flex-wrap: wrap;
