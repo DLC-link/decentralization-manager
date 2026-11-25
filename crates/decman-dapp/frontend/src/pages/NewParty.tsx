@@ -21,7 +21,8 @@ export function NewParty({ onCreated }: { onCreated: () => void }) {
   const [ownerIds, setOwnerIds] = useState<string[]>([])
   const [covalidatorIds, setCovalidatorIds] = useState<string[]>([])
   const [signingThreshold, setSigningThreshold] = useState(2)
-  const [namespaceThreshold, setNamespaceThreshold] = useState(2)
+  // Null follows the signing threshold. A typed value replaces it.
+  const [chosenNamespace, setChosenNamespace] = useState<number | null>(null)
   // Null follows the default of one host fewer than the hosts, so that one
   // host can be offline. A typed value replaces it.
   const [chosenConfirmation, setChosenConfirmation] = useState<number | null>(null)
@@ -33,6 +34,7 @@ export function NewParty({ onCreated }: { onCreated: () => void }) {
     .filter((c) => covalidatorIds.includes(c.id))
     .map((c) => c.participant.participantId)
   const hostCount = new Set([...owners.map((w) => w.participant.participantId), ...covalidators]).size
+  const namespaceThreshold = chosenNamespace ?? signingThreshold
   const confirmationThreshold = chosenConfirmation ?? Math.max(1, hostCount - 1)
   const proposal: PartyProposal = {
     partyHint: hint,
@@ -114,11 +116,24 @@ export function NewParty({ onCreated }: { onCreated: () => void }) {
               type="number"
               min={1}
               value={namespaceThreshold}
-              onChange={(e) => setNamespaceThreshold(Number(e.target.value))}
+              onChange={(e) => setChosenNamespace(Number(e.target.value))}
             />
             <span className="hint">
-              Every party with the same owners shares one namespace, so this threshold applies to all of them.
+              Every party with the same owners shares one namespace, so this threshold applies to all of them. It
+              follows the signing threshold until you change it.
             </span>
+            {owners.length > 1 && proposal.namespaceThreshold === 1 && (
+              <span className="warning">Any single owner can change the owners and the party's keys.</span>
+            )}
+            {owners.length > 1 && proposal.namespaceThreshold === owners.length && (
+              <span className="warning">One lost owner key blocks replacing an owner.</span>
+            )}
+            {proposal.namespaceThreshold < proposal.signingThreshold && (
+              <span className="warning">
+                Owners at the namespace threshold can rewrite the signing keys, so the signing threshold protects no
+                more than this one.
+              </span>
+            )}
           </label>
           <label>
             Confirmation threshold: hosts that must confirm each transaction
