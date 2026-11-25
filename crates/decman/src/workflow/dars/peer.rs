@@ -273,26 +273,28 @@ pub async fn fetch_dar_from_coordinator(
     }
 }
 
-/// A coordinator's refusal as text for the log and the run record. Control
-/// characters are escaped, so a refusal cannot forge log lines, and the text
-/// is cut at [`MAX_REFUSAL_LEN`] bytes.
+/// A coordinator's refusal as text for the log and the run record. Only
+/// printable ASCII passes as it is. Every other character is escaped, so a
+/// refusal cannot break a line or reverse the text around it. The text stops
+/// at [`MAX_REFUSAL_LEN`] bytes, and only that much of the refusal is read.
 fn refusal_text(payload: &[u8]) -> String {
-    let mut escaped = String::new();
-    for c in String::from_utf8_lossy(payload).chars() {
-        if c.is_control() {
-            escaped.extend(c.escape_default());
+    // Each byte read adds at least one byte of text, so this prefix suffices.
+    let read = &payload[..payload.len().min(MAX_REFUSAL_LEN + 1)];
+    let mut text = String::new();
+    for c in String::from_utf8_lossy(read).chars() {
+        let printable = c == ' ' || (c.is_ascii_graphic() && c != '\\');
+        let piece: String = if printable {
+            c.to_string()
         } else {
-            escaped.push(c);
+            c.escape_default().collect()
+        };
+        if text.len() + piece.len() > MAX_REFUSAL_LEN {
+            text.push('…');
+            break;
         }
+        text.push_str(&piece);
     }
-    if escaped.len() <= MAX_REFUSAL_LEN {
-        return escaped;
-    }
-    let mut end = MAX_REFUSAL_LEN;
-    while !escaped.is_char_boundary(end) {
-        end -= 1;
-    }
-    format!("{}…", &escaped[..end])
+    text
 }
 
 #[cfg(test)]
@@ -416,6 +418,24 @@ mod tests {
     #[test]
     fn the_turn_wait_covers_a_full_pull() {
         assert_eq!(TURN_WAIT, Duration::from_secs(425));
+    }
+
+    /// `char::is_control` passes these, and they can break or reverse a
+    /// line in the log and the UI.
+    #[test]
+    fn a_refusal_escapes_line_separators_and_direction_overrides() {
+        let text = refusal_text("a\u{2028}b\u{2029}c\u{202e}d".as_bytes());
+
+        assert_eq!(text, "a\\u{2028}b\\u{2029}c\\u{202e}d");
+    }
+
+    #[test]
+    fn a_large_refusal_is_cut_without_reading_it_all() {
+        let refusal = vec![b'x'; 16 * 1024 * 1024];
+
+        let text = refusal_text(&refusal);
+
+        assert_eq!(text.len(), MAX_REFUSAL_LEN + "…".len());
     }
 
     #[test]
