@@ -22,6 +22,7 @@ import {
 import ArrowBackIcon from "@mui/icons-material/ArrowBack";
 import EditIcon from "@mui/icons-material/Edit";
 import TuneIcon from "@mui/icons-material/Tune";
+import KeyIcon from "@mui/icons-material/Key";
 import PersonAddIcon from "@mui/icons-material/PersonAdd";
 import PersonRemoveIcon from "@mui/icons-material/PersonRemove";
 import UploadFileIcon from "@mui/icons-material/UploadFile";
@@ -35,6 +36,7 @@ import { usePagination } from "../usePagination";
 import { TextHelp } from "./FieldHelp";
 import { AddPartyDialog } from "./AddPartyDialog";
 import { ChangeThresholdDialog } from "./ChangeThresholdDialog";
+import { RotateKeyDialog } from "./RotateKeyDialog";
 import { KickDialog } from "./KickDialog";
 import { ContractsDialog } from "./ContractsDialog";
 import { PartyConfigDialog } from "./PartyConfigDialog";
@@ -191,6 +193,7 @@ export const PartyDetail = ({
   const [addDialogOpen, setAddDialogOpen] = useState(false);
   const [changeThresholdDialogOpen, setChangeThresholdDialogOpen] =
     useState(false);
+  const [rotateKeyDialogOpen, setRotateKeyDialogOpen] = useState(false);
   const [contractsDialogOpen, setContractsDialogOpen] = useState(false);
   const [configDialogOpen, setConfigDialogOpen] = useState(false);
   const [selectedParticipant, setSelectedParticipant] = useState("");
@@ -398,6 +401,13 @@ export const PartyDetail = ({
       disabled: !ADMIN_ACCESS,
       onClick: () => setChangeThresholdDialogOpen(true),
     },
+    isOwner && {
+      key: "rotate-key",
+      icon: <KeyIcon fontSize="small" />,
+      label: "Rotate My Daml Key",
+      disabled: !ADMIN_ACCESS,
+      onClick: () => setRotateKeyDialogOpen(true),
+    },
     isOwner &&
       rulesContract && {
         key: "gov",
@@ -412,7 +422,7 @@ export const PartyDetail = ({
     onCheckDars && {
       key: "check-dars",
       icon: <CompareArrowsIcon fontSize="small" />,
-      label: "Check DARs",
+      label: "Check Peer DARs",
       disabled: false,
       onClick: onCheckDars,
     },
@@ -524,7 +534,10 @@ export const PartyDetail = ({
           <StatCard
             label="Gov Threshold"
             value={governanceState.threshold}
+            // An empty member set is a failed read, not zero members.
+            unit={governanceState.members.length > 0 ? `of ${governanceState.members.length}` : undefined}
             helpText="Number of governance-member confirmations required to execute a governance action on this party."
+            testId="party-gov-threshold"
           />
         )}
         {governanceState?.action_confirmation_timeout_microseconds != null && (
@@ -579,6 +592,8 @@ export const PartyDetail = ({
           <GovernanceRules
             state={governanceState}
             memberPartyId={authStatus?.member_party_id}
+            selfParticipantId={selfParticipantId}
+            partyId={party.party_id}
           />
         </CollapsibleSection>
       )}
@@ -994,6 +1009,17 @@ export const PartyDetail = ({
         currentOwnerCount={party.owners.length}
         currentConfirmationThreshold={party.confirmation_threshold}
         currentHostCount={party.participants.length}
+      />
+
+      <RotateKeyDialog
+        open={rotateKeyDialogOpen}
+        onClose={() => setRotateKeyDialogOpen(false)}
+        onComplete={() => {
+          onRefresh();
+          onNavigateToNotifications();
+        }}
+        partyId={party.party_id}
+        memberCount={party.participants.length}
       />
 
       <ContractsDialog

@@ -343,6 +343,16 @@ pub struct ChangeThresholdRequest {
     pub previous_threshold: i32,
 }
 
+/// Request to replace this node's Daml signing key for a decentralized party
+/// with a new key. The members and thresholds stay the same.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
+pub struct RotateKeyRequest {
+    pub decentralized_party_id: CantonId,
+}
+
 /// Request to create a new decentralized party
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
@@ -705,6 +715,31 @@ pub struct TenantAddHostsExecuteResponse {
     /// The serial this host now has for the party. Advances once the change is
     /// authorized; still the base serial while it is a proposal.
     pub serial: u32,
+}
+
+/// Joining-host signatures returned only after the participant disconnects.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
+pub struct TenantAddHostsStageResponse {
+    pub party_id: String,
+    pub base_serial: u32,
+    /// Base64-encoded versioned SignedTopologyTransaction envelopes.
+    pub signed_topology_transactions: Vec<String>,
+}
+
+/// Relay the disconnected joiners' signatures through a current hosting participant.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
+pub struct TenantAddHostsPublishRequest {
+    pub party_id: String,
+    #[serde(default)]
+    pub permission: HostPermission,
+    pub new_hosts: Vec<CantonId>,
+    pub base_serial: u32,
+    /// Base64-encoded versioned SignedTopologyTransaction envelopes from stage.
+    pub signed_topology_transactions: Vec<String>,
 }
 
 /// One block of the party's ACS, plus the packages needed to validate it.
@@ -1225,6 +1260,28 @@ pub struct ChangeThresholdInvitePayload {
     pub confirmation_threshold: Option<i32>,
     /// The party's member set, so the peer card renders the same participant
     /// list the coordinator shows.
+    #[serde(default)]
+    pub participants: Vec<CantonId>,
+    /// The coordinator's run instance name (see `OnboardingInvitePayload`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workflow_instance: Option<String>,
+}
+
+/// Payload sent inside an `InviteRotateKey` Noise message. It names the key
+/// the coordinator replaces, and the thresholds the proposal keeps, so the
+/// peer can check the proposal against what its operator accepted.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[cfg_attr(feature = "typegen", derive(ts_rs::TS), ts(optional_fields))]
+pub struct RotateKeyInvitePayload {
+    pub dec_party_id: CantonId,
+    /// Fingerprint of the coordinator's Daml key that leaves the party.
+    pub rotated_key: String,
+    /// The namespace threshold, which the party's signing keys also use.
+    pub threshold: i32,
+    /// The confirmation threshold of the party's P2P mapping.
+    pub confirmation_threshold: i32,
+    /// The party's member set, the coordinator included.
     #[serde(default)]
     pub participants: Vec<CantonId>,
     /// The coordinator's run instance name (see `OnboardingInvitePayload`).

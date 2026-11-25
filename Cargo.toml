@@ -14,8 +14,19 @@ resolver = "2"
 # crates.io block first, then a blank line and the git/path deps.
 [workspace.dependencies]
 actix-cors = { version = "0.7" }
-actix-web = { version = "4" }
-aes-gcm = { version = "0.11" }
+# Every default feature except `cookies`. DecMan sets no cookies, and the
+# cookie 0.16 that actix-web 4 uses has RUSTSEC-2026-0594.
+actix-web = { version = "4", default-features = false, features = [
+  "compat",
+  "compress-brotli",
+  "compress-gzip",
+  "compress-zstd",
+  "http2",
+  "macros",
+  "unicode",
+  "ws",
+] }
+aes-gcm = { version = "0.11", features = ["zeroize"] }
 anyhow = { version = "1.0.98" }
 async-trait = { version = "0.1" }
 aws-config = { version = "1", default-features = false, features = ["behavior-version-latest", "default-https-client", "rt-tokio", "sso"] }
@@ -36,7 +47,7 @@ http = { version = "0.2" }
 hyper = { version = "0.14", features = ["full"] }
 hyper-noise = { version = "0.0.3" }
 insta = { version = "1", features = ["json"] }
-jsonwebtoken = { version = "11.0", features = ["aws_lc_rs"] }
+jsonwebtoken = { version = "12.0", features = ["aws_lc_rs"] }
 mime_guess = { version = "2.0" }
 p256 = { version = "0.14", default-features = false, features = ["ecdsa", "pkcs8", "std"] }
 prometheus = { version = "0.14", default-features = false }
@@ -53,7 +64,7 @@ ratatui = { version = "0.30.2" }
 # -0195), and a terminal app has no Wayland window handle to parent a dialog to
 # anyway. The portal backend (`xdg-portal`) is the appropriate Linux dialog.
 rcgen = { version = "0.14" }
-rfd = { version = "0.17.2", default-features = false, features = ["xdg-portal"] }
+rfd = { version = "0.18.0", default-features = false, features = ["xdg-portal"] }
 rust-embed = { version = "8.5" }
 secp256k1 = { version = "0.29.1", features = ["rand-std"] }
 semver = { version = "1.0" }
@@ -102,13 +113,13 @@ wiremock = { version = "0.6" }
 x509-parser = { version = "0.18" }
 zeroize = { version = "1.8", features = ["derive"] }
 
-canton-common = { package = "common", git = "https://github.com/DLC-link/canton-lib", rev = "4e2a0f110164890d6eb87235f4d2d9ea3797a421" }
-canton-proto-rs = { git = "https://github.com/DLC-link/canton-lib", rev = "4e2a0f110164890d6eb87235f4d2d9ea3797a421" }
-canton-registry = { package = "registry", git = "https://github.com/DLC-link/canton-lib", rev = "4e2a0f110164890d6eb87235f4d2d9ea3797a421" }
+canton-common = { package = "common", git = "https://github.com/DLC-link/canton-lib", rev = "849cf2430434e5a3b05d93ef5ffffe61124a9000", default-features = false }
+canton-proto-rs = { git = "https://github.com/DLC-link/canton-lib", rev = "849cf2430434e5a3b05d93ef5ffffe61124a9000", default-features = false }
+canton-registry = { package = "registry", git = "https://github.com/DLC-link/canton-lib", rev = "849cf2430434e5a3b05d93ef5ffffe61124a9000" }
 common = { path = "crates/common" }
 decman-lib = { path = "crates/decman-lib" }
 decman-wallet = { path = "crates/decman-wallet" }
-keycloak = { git = "https://github.com/DLC-link/canton-lib", rev = "4e2a0f110164890d6eb87235f4d2d9ea3797a421" }
+keycloak = { git = "https://github.com/DLC-link/canton-lib", rev = "849cf2430434e5a3b05d93ef5ffffe61124a9000" }
 penelope = { git = "https://github.com/DLC-link/penelope", rev = "8f36b2dfda5932c8310ec6891ff3b72d416118dc" }
 
 [patch.crates-io]

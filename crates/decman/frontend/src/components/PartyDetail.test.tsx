@@ -1,4 +1,4 @@
-import { act, render, screen, waitFor } from "@testing-library/react";
+import { act, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { authenticatedFetch } from "../api";
@@ -96,6 +96,10 @@ describe("PartyDetail read-only sections", () => {
 });
 
 describe("PartyDetail thresholds", () => {
+  afterEach(() => {
+    vi.mocked(authenticatedFetch).mockImplementation(() => new Promise(() => {}));
+  });
+
   it("shows the confirmation threshold beside the threshold", () => {
     const host = (tag: string) => ({
       participant_uid: `${tag}::${ns}`,
@@ -120,9 +124,34 @@ describe("PartyDetail thresholds", () => {
 
     expect(screen.queryByTestId("party-confirmation-threshold")).toBeNull();
   });
+
+  it("shows the governance threshold against the member count", async () => {
+    const governance: GovernanceStateResponse = {
+      state: {
+        contract_id: "00rules",
+        governance_party: party.party_id,
+        members: [`m1::${ns}`, `m2::${ns}`, `m3::${ns}`],
+        threshold: 1,
+        additional_proposers: [],
+        disclosure_observers: [],
+        out_of_date: false,
+      },
+    };
+    vi.mocked(authenticatedFetch).mockImplementation((url) =>
+      String(url).includes("/governance/state")
+        ? Promise.resolve(new Response(JSON.stringify(governance)))
+        : new Promise(() => {}),
+    );
+
+    renderDetail(authStatus());
+
+    const value = await screen.findByTestId("party-gov-threshold");
+    expect(value.textContent).toBe("1");
+    expect(within(value.parentElement!).getByText("of 3")).toBeTruthy();
+  });
 });
 
-describe("PartyDetail Check DARs", () => {
+describe("PartyDetail Check Peer DARs", () => {
   it("opens the package comparison for this party", () => {
     const onCheckDars = vi.fn();
     render(
@@ -138,7 +167,7 @@ describe("PartyDetail Check DARs", () => {
       </SnackbarProvider>,
     );
 
-    screen.getByRole("button", { name: "Check DARs" }).click();
+    screen.getByRole("button", { name: "Check Peer DARs" }).click();
 
     expect(onCheckDars).toHaveBeenCalledTimes(1);
   });

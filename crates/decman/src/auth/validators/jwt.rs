@@ -879,7 +879,7 @@ mod tests {
             "azp": "decman",
             "exp": unix_now()? + 3600,
         });
-        let key = EncodingKey::from_secret(b"attacker-chosen-secret");
+        let key = EncodingKey::from_secret(b"attacker-chosen-secret")?;
         let token = encode(&header, &claims, &key).map_err(|e| anyhow::anyhow!("{e}"))?;
         assert!(matches!(
             validator.validate(&token).await,

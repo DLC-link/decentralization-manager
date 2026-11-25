@@ -246,6 +246,19 @@ everything that follows (`workflow::validation::PeerExpectations`).
   mapping is refused, and so is every serial but the head serial + 1: Canton
   checks the serial only on submission, so a signature on a later serial could
   be held back and submitted against a state the peer never checked.
+- For rotate-key, the peer reads the party's current `PartyToParticipant`.
+  The proposal must keep every host entry as it is, including its permission
+  and onboarding state. It must also keep the confirmation threshold and the
+  signing threshold in force. The inline keys' threshold is in force, or the
+  legacy mapping's when the party has no inline keys. It may remove only the key its invitation names, and it must add
+  exactly one new key. The peer must have a key on record for every other
+  host, and each of those keys must stay. Its records must name the removed
+  key as the coordinator's. The one key left over is the coordinator's new
+  key, and the peer later records only that key for the coordinator. Without
+  these checks, a coordinator could swap or drop another member's key, or
+  keep a departed member's key. Before the coordinator invites anyone, it
+  requires every other member to be a configured peer and to list the
+  `rotate-key` feature in its Health reply.
 - Prepared ledger submissions are re-hashed locally from the transaction that
   accompanies them (`canton_hash`), so a signature can only ever authorize the
   transaction the peer can inspect, and that transaction must act as the
@@ -469,14 +482,39 @@ lists the workflow features it supports in its Health reply. The coordinator
 refuses such a kick before it sends any invitation when an invited peer does
 not list `owner-only-kick`.
 
+The kicked member is checked against the party's hosts and owners, not against
+the peer list, and it is never contacted. The coordinator invites each
+remaining member that is a configured peer. A remaining member that is not a
+peer stays in the invitation's member list but is not asked to sign.
+
+Before it sends any invitation, the coordinator refuses a kick in these cases:
+
+- This node and the invited peers cannot meet both the current and the
+  requested namespace threshold. The refusal says which threshold is the limit.
+- A remaining member that is not a peer must sign, because the kick moves its
+  key from the older `PartyToKeyMapping` into the hosting list.
+- A remaining host's signing key is not on record (`503`), or two remaining
+  members claim one key (`409`).
+
+Each member reports its own signing key, and nothing checks the report. A
+remaining member's claim always wins. When the kicked member claims a
+remaining member's key, its claim is ignored and its key is the one no
+remaining member claims. The proposal keeps every key a remaining member
+claims, and each signing peer checks the same rule against its own records.
+
+A refresh can read a party's namespace and hosting records on either side of
+the kick. The cache stores both topology serials per party and accepts a write
+only when neither serial is lower, so a stale refresh cannot write the removed
+member back.
+
 **Steps:**
 
 | # | Step | Actor | Description |
 |---|------|-------|-------------|
-| 1 | WaitingForPeers | Coordinator | Wait for remaining members to connect |
+| 1 | WaitingForPeers | Coordinator | Wait for the invited remaining members to connect |
 | 2 | ExportState | Coordinator | Export current DNS and P2P topology state |
 | 3 | CreateProposals | Coordinator | Create new DNS (reduced owners) and P2P (removed member, or the mapping in force when it does not change) proposals |
-| 4 | SignProposals | All remaining | Each remaining member signs the kick proposals |
+| 4 | SignProposals | Invited members | Each invited member checks and signs the kick proposals. A quorum is enough, unless the kick moves legacy keys into the hosting list |
 | 5 | SubmitKick | Coordinator | Submit signed proposals to Canton |
 | 6 | RetireLegacyKeys | All | Remove the party's obsolete `PartyToKeyMapping`, if it has one (see [Legacy party-key retirement](DEPLOYMENT_GUIDE.md#legacy-party-key-retirement)) |
 | 7 | Complete | All | Disconnect peers |
@@ -520,12 +558,19 @@ Uploads DAR packages to all participants without deploying contracts.
 
 | # | Step | Actor | Description |
 |---|------|-------|-------------|
-| 1 | WaitingForPeers | Coordinator | Wait for all participants to connect |
-| 2 | UploadDars | All | Each participant uploads DAR files to their local Canton node |
-| 3 | Complete | All | Disconnect peers |
+| 1 | WaitingForPeers | Coordinator | Wait for all participants to connect. The run fails if they have not all joined within 72 hours |
+| 2 | LoadDars | Coordinator | Load the DARs from the database. Peers get `Wait` until they are loaded |
+| 3 | UploadDars | All | Each participant uploads DAR files to their local Canton node |
+| 4 | Complete | All | Disconnect peers |
+
+The run's row holds only the names and hashes of its DARs. The bytes are the
+run's `dars_bundle` artefact, so a waiting run holds none of them in memory,
+and listing runs never loads them. DecMan refuses to start or retry a run that
+sends a DAR to a peer while another run in progress already sends that DAR to
+that peer.
 
 **Canton API calls:**
-- `PackageService.UploadDarFile` -- Upload DAR packages (step 2)
+- `PackageService.UploadDarFile` -- Upload DAR packages (step 3)
 
 **Minimum participants:** 2
 

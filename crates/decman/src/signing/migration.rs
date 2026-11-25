@@ -242,6 +242,83 @@ mod tests {
         Ok(())
     }
 
+    /// `migrate_party` against a fake participant: a node under the opt-out
+    /// with its key store on.
+    mod migrate_party {
+        use super::*;
+        use crate::signing::{
+            custody::SoftwareKeys,
+            fake_admin_api::{FakeAdminApi, VaultKey},
+        };
+
+        fn party() -> Result<CantonId> {
+            CantonId::parse(&format!("party::{NS}"))
+        }
+
+        /// Copy this node's key for one party, as the copy task does for each.
+        async fn copy_party_key(
+            config: &NodeConfig,
+            db: &SqlitePool,
+            party: &CantonId,
+        ) -> Result<Outcome> {
+            let store = KeyStore::open(config, db.clone())
+                .await?
+                .ok_or_else(|| anyhow::anyhow!("the key store is off"))?;
+            let channel = config.admin_channel().await?;
+            let protocol_version = export_protocol_version(config).await?;
+            super::super::migrate_party(config, db, &store, (&channel, protocol_version), party)
+                .await
+        }
+
+        #[sqlx::test(migrator = "MIGRATOR")]
+        async fn stores_a_software_key_once(db: SqlitePool) -> Result {
+            let key = VaultKey::software("party-daml-transactions", 7);
+            let fake = FakeAdminApi::start(vec![key.clone()]).await?;
+            let node = fake.node(SoftwareKeys::Stored, true).await?;
+            node.record_daml_key(&db, &party()?, &key).await?;
+
+            let first = copy_party_key(&node.config, &db, &party()?).await?;
+            let second = copy_party_key(&node.config, &db, &party()?).await?;
+
+            assert_eq!((first, second), (Outcome::Stored, Outcome::AlreadyStored));
+            assert_eq!(fake.exported(), vec![key.fingerprint()]);
+            let store = KeyStore::open(&node.config, db.clone())
+                .await?
+                .ok_or_else(|| anyhow::anyhow!("the key store is off"))?;
+            let seed = store.get(&party()?, &key.fingerprint()).await?;
+            assert_eq!(seed.map(|seed| *seed), key.seed);
+            Ok(())
+        }
+
+        #[sqlx::test(migrator = "MIGRATOR")]
+        async fn leaves_a_kms_key_in_kms(db: SqlitePool) -> Result {
+            let key = VaultKey::kms("party-daml-transactions", 7)?;
+            let fake = FakeAdminApi::start(vec![key.clone()]).await?;
+            let node = fake.node(SoftwareKeys::Stored, true).await?;
+            node.record_daml_key(&db, &party()?, &key).await?;
+
+            let outcome = copy_party_key(&node.config, &db, &party()?).await?;
+
+            assert_eq!(outcome, Outcome::KmsHeld);
+            assert!(fake.exported().is_empty());
+            Ok(())
+        }
+
+        #[sqlx::test(migrator = "MIGRATOR")]
+        async fn reports_a_refused_export(db: SqlitePool) -> Result {
+            let key = VaultKey::software("party-daml-transactions", 7);
+            let fake = FakeAdminApi::start(vec![key.clone()]).await?;
+            fake.turn_off_key_download();
+            let node = fake.node(SoftwareKeys::Stored, true).await?;
+            node.record_daml_key(&db, &party()?, &key).await?;
+
+            let outcome = copy_party_key(&node.config, &db, &party()?).await?;
+
+            assert_eq!(outcome, Outcome::ExportRefused);
+            Ok(())
+        }
+    }
+
     #[test]
     fn a_failed_run_is_retried_sooner_and_backs_off_to_the_interval() {
         let mut retry = FIRST_RETRY;

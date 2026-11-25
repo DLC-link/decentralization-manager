@@ -7,6 +7,7 @@ mod client_tests;
 mod command;
 mod composer;
 mod config;
+mod governance_body;
 mod logo;
 mod ui;
 

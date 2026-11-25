@@ -118,6 +118,20 @@ DECPM_CANTON_NETWORK=devnet
 
 For P2P to work, the Noise port must be reachable by the other participants.
 
+## Limits
+
+A DAR distribution run carries at most 16 MiB to each peer. The file names
+and a few bytes per file count toward the limit. DecMan refuses a larger set
+before it sends any invitation. Send such a set in several runs, each within
+the limit. Each run sends the peer its own invitation. A single DAR above the
+limit cannot be distributed. Upload it to each node separately instead.
+
+A DAR distribution run waits for every invited peer to accept its invitation.
+The run fails if a peer has not joined within 72 hours. Retry it after the
+peer accepts. DecMan refuses to send a DAR to a peer while another run in
+progress already sends that DAR to that peer. The same check applies when you
+retry a run. Cancel the other run first, or wait until it ends.
+
 ## Next Steps
 
 - **Walk through onboarding, deploying contracts, and kicking a participant** —

@@ -39,7 +39,7 @@ use crate::{
     utils,
     workflow::{
         party_replication::{
-            ReplicationTarget, now_ms, offset,
+            ArtifactStore, ReplicationTarget, now_ms, offset,
             pipe::{ExportSession, PipeBlock, PipeTrailer},
         },
         storage::{WorkflowStorage, artifact_kinds},
@@ -253,10 +253,10 @@ pub async fn open_export_session(
 ///   disconnect window, up to [`acs_import_attempts_in_window`] times; the
 ///   participant reconnects exactly once, after the import succeeded or the
 ///   last attempt failed, never between attempts;
-/// - the participant is never left disconnected: that single reconnect runs
-///   even when the import fails, and success is reported only once the
-///   synchronizer is confirmed healthy again (not merely that
-///   `ReconnectSynchronizers` was accepted);
+/// - a failed staged tenant import stays disconnected until completion or
+///   operator repair; other callers reconnect after either outcome;
+/// - a successful tenant import records durable proof before reconnect, so a
+///   retry can finish reconnect without importing the ACS again;
 /// - a participant that can't be brought back to a healthy connected state
 ///   yields an actionable error naming the likely orphan-row corruption instead
 ///   of a cryptic retry-abort.
@@ -272,12 +272,9 @@ where
     F: FnMut(u64) -> Fut,
     Fut: Future<Output = Result<PipeBlock>>,
 {
-    // The marker is durable (never cleared), so its presence means the
-    // disconnect window was entered on a prior attempt of this run — the
-    // participant may have been left disconnected (DecMan died mid-window) or
-    // crash-looping (unclean participant shutdown). Recover conservatively:
-    // reconnect and verify health before doing anything else. This is a no-op
-    // when the participant is already connected and healthy.
+    // A durable window marker lets an interrupted import continue while still
+    // offline. An unhealthy connected participant must settle without a forced
+    // reconnect that could replay incomplete state.
     // Through the target, not the pool: a tenant replication has no workflow
     // run, so its artefacts live in a table without the run foreign key.
     let window_marker = target
@@ -324,6 +321,7 @@ where
         // A window opened before the authorization is closed all the same: the
         // participant is off the synchronizer and on manual connection.
         if opened_before_authorization {
+            record_tenant_imported(storage, target).await?;
             close_import_window(config, true).await?;
         }
         return Ok(());
@@ -426,10 +424,8 @@ where
         "Disconnecting from {} synchronizer(s) for the ACS import...",
         connected.len()
     );
-    // Disconnect + import as one fallible unit. Whatever its outcome — including
-    // a `DisconnectSynchronizer` failing partway through the loop — the
-    // reconnect/health-verify bracket below ALWAYS runs, so the participant is
-    // never left (partially) disconnected.
+    // A staged tenant failure stays offline: reconnecting before its ACS lands
+    // could replay archives whose activation history it does not yet hold.
     let import_result = async {
         for s in &connected {
             connectivity
@@ -485,9 +481,22 @@ where
     }
     .await;
 
-    // The one reconnect of the step, after the import succeeded or the last
-    // attempt failed. A participant left disconnected (or half-reconnected) is
-    // a worse failure mode than a failed import, so it runs on both outcomes.
+    if opened_before_authorization
+        && matches!(target.store, ArtifactStore::Tenant)
+        && let Err(error) = import_result
+    {
+        return Err(error.context(
+            "the staged participant stays disconnected with manual connection enabled; \
+             complete this import or repair the participant before reconnecting it",
+        ));
+    }
+
+    if import_result.is_ok() && opened_before_authorization {
+        record_tenant_imported(storage, target).await?;
+    }
+
+    // A successful staged tenant import reconnects here. Other callers retain
+    // their existing reconnect behavior on both success and failure.
     // Prioritise an unhealthy participant: that's the critical, operator-
     // actionable failure and must not be masked by the import error when both
     // fail. A failed import with a HEALTHY participant is reported after it.
@@ -507,6 +516,41 @@ where
     tracing::info!("ACS snapshot imported successfully");
 
     Ok(())
+}
+
+async fn record_tenant_imported(storage: &SqlitePool, target: &ReplicationTarget) -> Result {
+    if matches!(target.store, ArtifactStore::Tenant) {
+        target
+            .write_artifact_if_absent(
+                storage,
+                artifact_kinds::TENANT_ADD_HOSTS_ACS_IMPORTED,
+                None,
+                b"1",
+            )
+            .await?;
+    }
+    Ok(())
+}
+
+/// Resume reconnect after Canton accepts a tenant ACS without importing it again.
+///
+/// # Errors
+/// Returns a storage or connectivity error and retains the import owner.
+pub(crate) async fn resume_tenant_import_window(
+    config: &NodeConfig,
+    storage: &SqlitePool,
+    target: &ReplicationTarget,
+) -> Result<bool> {
+    if !matches!(target.store, ArtifactStore::Tenant)
+        || target
+            .read_artifact(storage, artifact_kinds::TENANT_ADD_HOSTS_ACS_IMPORTED, None)
+            .await?
+            .is_none()
+    {
+        return Ok(false);
+    }
+    close_import_window(config, true).await?;
+    Ok(true)
 }
 
 /// Close the window: reconnect, confirm the synchronizer is healthy, and hand

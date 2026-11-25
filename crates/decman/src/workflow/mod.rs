@@ -7,6 +7,8 @@ pub mod kick;
 pub mod onboarding;
 pub mod party_replication;
 pub mod proposal_store;
+pub mod rotate_key;
+pub(crate) mod signature_pairs;
 pub mod signing_keys;
 pub mod state;
 pub mod storage;
@@ -49,9 +51,10 @@ use crate::{
 pub use add_party::{AddPartyConfig, AddPartyStep};
 pub use change_threshold::{ChangeThresholdConfig, ChangeThresholdStep};
 pub use contracts::{ContractsConfig, ContractsStep};
-pub use dars::{DarsConfig, DarsStep};
+pub use dars::{DarListing, DarsConfig, DarsStep, bundle_of};
 pub use kick::{KickConfig, KickStep};
 pub use onboarding::{OnboardingConfig, OnboardingStep};
+pub use rotate_key::{RotateKeyConfig, RotateKeyStep};
 pub use state::WorkflowState;
 
 /// Workflow types that can be run
@@ -63,6 +66,7 @@ pub enum WorkflowType {
     Kick,
     AddParty,
     ChangeThreshold,
+    RotateKey,
 }
 
 /// Result from a coordinator workflow, optionally containing the created party ID
@@ -83,6 +87,7 @@ pub async fn start_coordinator(
     dars_config: Option<DarsConfig>,
     add_party_config: Option<AddPartyConfig>,
     change_threshold_config: Option<ChangeThresholdConfig>,
+    rotate_key_config: Option<RotateKeyConfig>,
     workflow_auth: Option<WorkflowAuth>,
     last_seen: LastSeen,
     instance: Arc<WorkflowInstance>,
@@ -183,6 +188,23 @@ pub async fn start_coordinator(
                 anyhow::anyhow!("ChangeThresholdConfig is required for ChangeThreshold workflow")
             })?;
             change_threshold::coordinator::start_coordinator(
+                node_config,
+                network_config,
+                config,
+                db,
+                last_seen,
+                instance,
+            )
+            .await?;
+            Ok(CoordinatorResult {
+                created_party_id: None,
+            })
+        }
+        WorkflowType::RotateKey => {
+            let config = rotate_key_config.ok_or_else(|| {
+                anyhow::anyhow!("RotateKeyConfig is required for RotateKey workflow")
+            })?;
+            rotate_key::coordinator::start_coordinator(
                 node_config,
                 network_config,
                 config,
@@ -321,6 +343,7 @@ async fn run_peer(
     let mut consecutive_errors = 0;
     let mut consecutive_no_workflow = 0;
     let mut consecutive_step_failures = 0;
+    let mut consecutive_upload_failures = 0;
     loop {
         // Poll coordinator for next command (with payload for commands that need data)
         let message = match client.get_next_command_with_payload().await {
@@ -358,6 +381,13 @@ async fn run_peer(
                     );
                     tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
                     continue;
+                }
+
+                // The coordinator serves the same payload on every poll, so
+                // one above this node's limit never fits. A retry only delays
+                // the report.
+                if matches!(e, NoiseError::PayloadTooLarge { .. }) {
+                    anyhow::bail!("Peer failed on the coordinator's payload: {e}");
                 }
 
                 consecutive_errors += 1;
@@ -417,14 +447,25 @@ async fn run_peer(
             }
             MessageType::RetireLegacyKeys => {
                 // The target comes from the accepted invitation, never this command's payload.
-                let party = expectations.dec_party_id.as_ref().ok_or_else(|| {
-                    anyhow::anyhow!("No accepted party for legacy key retirement")
-                })?;
-                let synchronizer_id = utils::get_synchronizer_id(&node_config).await?;
-                topology::retire_legacy_keys(&node_config, &synchronizer_id, party).await?;
+                let Some(party) = expectations.dec_party_id.as_ref() else {
+                    fail_step!("No accepted party for legacy key retirement");
+                    continue;
+                };
+                // A failure retries like any other step. Ending the run here
+                // would skip RecordKey, and this node would keep the old key
+                // on record for the coordinator.
+                let retired = async {
+                    let synchronizer_id = utils::get_synchronizer_id(&node_config).await?;
+                    topology::retire_legacy_keys(&node_config, &synchronizer_id, party).await
+                }
+                .await;
+                if let Err(e) = retired {
+                    fail_step!("Failed to retire the legacy key mapping: {e:#}");
+                    continue;
+                }
                 consecutive_step_failures = 0;
                 client
-                    .send_status(b"RetireLegacyKeys completed".to_vec())
+                    .send_status(topology::RETIRED_LEGACY_KEYS_STATUS.to_vec())
                     .await?;
             }
             MessageType::Disconnect => {
@@ -552,16 +593,18 @@ async fn run_peer(
                     continue;
                 }
                 consecutive_step_failures = 0;
-                if let Err(e) = onboarding::peer::send_dns_signature_to_coordinator(
-                    &client,
-                    &db,
-                    &instance_name,
-                    &node_config,
+                record_signature_upload(
+                    &mut consecutive_upload_failures,
+                    command,
+                    onboarding::peer::send_dns_signature_to_coordinator(
+                        &client,
+                        &db,
+                        &instance_name,
+                        &node_config,
+                    )
+                    .await,
                 )
-                .await
-                {
-                    tracing::error!("Failed to send DNS signature to coordinator: {e}");
-                }
+                .await?;
             }
             MessageType::SignP2p => {
                 tracing::info!("Executing: Sign P2P proposals");
@@ -616,23 +659,25 @@ async fn run_peer(
                     continue;
                 }
                 if let Err(e) =
-                    onboarding::sign_p2p_proposals(&node_config, &db, &instance_name, &payload)
+                    onboarding::file_key_and_sign_p2p(&node_config, &db, &instance_name, &payload)
                         .await
                 {
-                    fail_step!("Step execution failed: {e}");
+                    fail_step!("{e:#}");
                     continue;
                 }
                 consecutive_step_failures = 0;
-                if let Err(e) = onboarding::peer::send_p2p_signatures_to_coordinator(
-                    &client,
-                    &db,
-                    &instance_name,
-                    &node_config,
+                record_signature_upload(
+                    &mut consecutive_upload_failures,
+                    command,
+                    onboarding::peer::send_p2p_signatures_to_coordinator(
+                        &client,
+                        &db,
+                        &instance_name,
+                        &node_config,
+                    )
+                    .await,
                 )
-                .await
-                {
-                    tracing::error!("Failed to send P2P signatures to coordinator: {e}");
-                }
+                .await?;
 
                 // Identity hook (peer side): the SignP2p payload is a
                 // SignedTopologyTransaction whose PartyToParticipant mapping
@@ -719,16 +764,18 @@ async fn run_peer(
                     continue;
                 }
                 consecutive_step_failures = 0;
-                if let Err(e) = contracts::peer::send_submission_signatures_to_coordinator(
-                    &client,
-                    &db,
-                    &instance_name,
-                    &node_config,
+                record_signature_upload(
+                    &mut consecutive_upload_failures,
+                    command,
+                    contracts::peer::send_submission_signatures_to_coordinator(
+                        &client,
+                        &db,
+                        &instance_name,
+                        &node_config,
+                    )
+                    .await,
                 )
-                .await
-                {
-                    tracing::error!("Failed to send submission signatures to coordinator: {e}");
-                }
+                .await?;
             }
             MessageType::SignKick => {
                 tracing::info!("Executing: Sign kick proposals");
@@ -769,16 +816,18 @@ async fn run_peer(
                     continue;
                 }
                 consecutive_step_failures = 0;
-                if let Err(e) = kick::peer::send_kick_signatures_to_coordinator(
-                    &client,
-                    &db,
-                    &instance_name,
-                    &node_config,
+                record_signature_upload(
+                    &mut consecutive_upload_failures,
+                    command,
+                    kick::peer::send_kick_signatures_to_coordinator(
+                        &client,
+                        &db,
+                        &instance_name,
+                        &node_config,
+                    )
+                    .await,
                 )
-                .await
-                {
-                    tracing::error!("Failed to send kick signatures to coordinator: {e}");
-                }
+                .await?;
             }
             MessageType::SignChangeThreshold => {
                 tracing::info!("Executing: Sign change-threshold proposals");
@@ -825,19 +874,129 @@ async fn run_peer(
                     continue;
                 }
                 consecutive_step_failures = 0;
-                if let Err(e) =
+                record_signature_upload(
+                    &mut consecutive_upload_failures,
+                    command,
                     change_threshold::peer::send_change_threshold_signatures_to_coordinator(
                         &client,
                         &db,
                         &instance_name,
                         &node_config,
                     )
+                    .await,
+                )
+                .await?;
+            }
+            MessageType::SignRotateKey => {
+                tracing::info!("Executing: Sign rotate-key proposal");
+                let items = match utils::decode_length_prefixed(&payload, 2) {
+                    Ok(items) => items,
+                    Err(e) => {
+                        fail_step!("Failed to decode SignRotateKey payload: {e}");
+                        continue;
+                    }
+                };
+                if let Err(e) = serde_json::from_slice::<rotate_key::RotateKeyConfig>(&items[0]) {
+                    fail_step!("Failed to deserialize rotate-key config: {e}");
+                    continue;
+                }
+                let new_key = match expectations
+                    .check_rotation_proposal(&node_config, &db, &instance_name, &items[1])
                     .await
                 {
-                    tracing::error!(
-                        "Failed to send change-threshold signatures to coordinator: {e}"
-                    );
+                    Ok(new_key) => new_key,
+                    Err(e) => {
+                        fail_step!("Refusing the coordinator's rotate-key proposal: {e}");
+                        continue;
+                    }
+                };
+                // RecordKey later records only the key checked here.
+                if let Err(e) = db
+                    .write_artifact(
+                        &instance_name,
+                        artifact_kinds::ROTATE_KEY_ACCEPTED_NEW_KEY,
+                        None,
+                        new_key.as_str().as_bytes(),
+                    )
+                    .await
+                {
+                    fail_step!("Failed to record the checked rotation key: {e}");
+                    continue;
                 }
+                if let Err(e) =
+                    rotate_key::steps::sign_proposal(&node_config, &db, &instance_name, &items[1])
+                        .await
+                {
+                    fail_step!("Step execution failed: {e}");
+                    continue;
+                }
+                consecutive_step_failures = 0;
+                if let Err(e) = rotate_key::peer::send_rotate_key_signatures_to_coordinator(
+                    &client,
+                    &db,
+                    &instance_name,
+                    &node_config,
+                )
+                .await
+                {
+                    tracing::error!("Failed to send rotate-key signatures to coordinator: {e}");
+                }
+            }
+            MessageType::RecordRotatedKey => {
+                tracing::info!("Executing: Record the coordinator's new Daml key");
+                // The party, the coordinator and the replaced key all come
+                // from the accepted invitation. The payload names the new
+                // key, which must be the one this node checked in
+                // SignProposal, and which the topology must already carry.
+                let accepted = db
+                    .read_artifact(
+                        &instance_name,
+                        artifact_kinds::ROTATE_KEY_ACCEPTED_NEW_KEY,
+                        None,
+                    )
+                    .await;
+                let recorded = match (
+                    expectations.dec_party_id.as_ref(),
+                    expectations.rotated_key.as_ref(),
+                    accepted,
+                ) {
+                    (_, _, Err(e)) => Err(e),
+                    (_, _, Ok(None)) => Err(anyhow::anyhow!(
+                        "this node checked no proposal of this run, so it records no key"
+                    )),
+                    (Some(party), Some(rotated_key), Ok(Some(accepted))) => {
+                        match (
+                            rotate_key::steps::decode_recorded_key(&payload),
+                            String::from_utf8(accepted)
+                                .map_err(anyhow::Error::from)
+                                .and_then(|key| key.parse::<crate::canton_id::Fingerprint>()),
+                        ) {
+                            (Ok(new_key), Ok(accepted)) => {
+                                rotate_key::steps::record_peer_key(
+                                    &node_config,
+                                    &db,
+                                    party,
+                                    &expectations.coordinator_id,
+                                    (rotated_key, &accepted),
+                                    new_key,
+                                )
+                                .await
+                            }
+                            (Err(e), _) | (_, Err(e)) => Err(e),
+                        }
+                    }
+                    (_, _, Ok(Some(_))) => Err(anyhow::anyhow!(
+                        "the accepted rotate-key invitation names no party or no replaced key"
+                    )),
+                };
+                if let Err(e) = recorded {
+                    fail_step!("Failed to record the coordinator's new key: {e}");
+                    continue;
+                }
+                consecutive_step_failures = 0;
+                client
+                    .send_status(rotate_key::RECORDED_KEY_STATUS.to_vec())
+                    .await?;
             }
             MessageType::GenerateAddPartyKeys => {
                 tracing::info!("Executing: Generate add-party keys");
@@ -980,16 +1139,18 @@ async fn run_peer(
                     continue;
                 }
                 consecutive_step_failures = 0;
-                if let Err(e) = add_party::peer::send_add_party_signatures_to_coordinator(
-                    &client,
-                    &db,
-                    &instance_name,
-                    &node_config,
+                record_signature_upload(
+                    &mut consecutive_upload_failures,
+                    command,
+                    add_party::peer::send_add_party_signatures_to_coordinator(
+                        &client,
+                        &db,
+                        &instance_name,
+                        &node_config,
+                    )
+                    .await,
                 )
-                .await
-                {
-                    tracing::error!("Failed to send add-party signatures to coordinator: {e}");
-                }
+                .await?;
 
                 // Identity hook (new member): same point in the protocol
                 // where onboarding peers persist their identity — the party
@@ -1128,22 +1289,24 @@ async fn run_peer(
                         {
                             Ok(Some(proposal)) => {
                                 consecutive_step_failures = 0;
-                                if let Err(e) = client.send_add_party_clear_proposal(proposal).await
-                                {
-                                    tracing::error!(
-                                        "Failed to send clearing proposal to coordinator: {e}"
-                                    );
-                                }
+                                record_signature_upload(
+                                    &mut consecutive_upload_failures,
+                                    command,
+                                    client
+                                        .send_add_party_clear_proposal(proposal)
+                                        .await
+                                        .map_err(Into::into),
+                                )
+                                .await?;
                             }
                             Ok(None) => {
                                 // Flag dropped between the poll and the
                                 // authoring — report as cleared.
                                 consecutive_step_failures = 0;
-                                if let Err(e) = client
-                                    .send_status(b"ClearOnboardingFlag: Cleared".to_vec())
-                                    .await
+                                if let Err(e) =
+                                    client.send_add_party_clear_proposal(Vec::new()).await
                                 {
-                                    tracing::error!("Failed to send completion status: {e}");
+                                    tracing::error!("Failed to send cleared marker: {e}");
                                 }
                             }
                             Err(e) => {
@@ -1153,11 +1316,8 @@ async fn run_peer(
                     }
                     Ok(party_replication::ClearOutcome::Cleared) => {
                         consecutive_step_failures = 0;
-                        if let Err(e) = client
-                            .send_status(b"ClearOnboardingFlag: Cleared".to_vec())
-                            .await
-                        {
-                            tracing::error!("Failed to send completion status: {e}");
+                        if let Err(e) = client.send_add_party_clear_proposal(Vec::new()).await {
+                            tracing::error!("Failed to send cleared marker: {e}");
                         }
                     }
                     Err(e) => {
@@ -1195,16 +1355,18 @@ async fn run_peer(
                     continue;
                 }
                 consecutive_step_failures = 0;
-                if let Err(e) = add_party::peer::send_clear_signature_to_coordinator(
-                    &client,
-                    &db,
-                    &instance_name,
-                    &node_config,
+                record_signature_upload(
+                    &mut consecutive_upload_failures,
+                    command,
+                    add_party::peer::send_clear_signature_to_coordinator(
+                        &client,
+                        &db,
+                        &instance_name,
+                        &node_config,
+                    )
+                    .await,
                 )
-                .await
-                {
-                    tracing::error!("Failed to send clearing signature to coordinator: {e}");
-                }
+                .await?;
             }
             _ => {
                 tracing::warn!("Unexpected message type: {command:?}");
@@ -1258,6 +1420,11 @@ async fn report_departure(client: NoiseClient, report: DeclineInvitationPayload)
 /// Pause between attempts to report a peer's failure.
 const FAILURE_REPORT_BACKOFF: std::time::Duration = std::time::Duration::from_secs(10);
 
+// Five pauses give uploads a sixty-second recovery window before the sixth attempt.
+const SIGNATURE_UPLOAD_BACKOFF: std::time::Duration = std::time::Duration::from_secs(12);
+
+const PEER_RETRY_BACKOFF: std::time::Duration = std::time::Duration::from_secs(2);
+
 /// Apply one retry budget to decoding, authorization, and execution failures.
 /// Control messages do not reset it; only completing (or legitimately skipping)
 /// a step does. The last failure returns immediately without another delay.
@@ -1281,7 +1448,40 @@ async fn retry_peer_step(
              ({command:?}): {reason}"
         );
     }
-    tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+    tokio::time::sleep(PEER_RETRY_BACKOFF).await;
+    Ok(())
+}
+
+/// Upload failures have their own budget: successful polling or signing cannot reset it.
+async fn record_signature_upload(
+    consecutive_failures: &mut usize,
+    command: MessageType,
+    outcome: Result,
+) -> Result {
+    let Err(error) = outcome else {
+        *consecutive_failures = 0;
+        return Ok(());
+    };
+    *consecutive_failures += 1;
+    tracing::warn!(
+        ?command,
+        attempt = *consecutive_failures,
+        error = %error,
+        "Signature upload failed"
+    );
+    if *consecutive_failures >= MAX_CONSECUTIVE_STEP_FAILURES {
+        anyhow::bail!(
+            "Peer failed: signature upload failed after {} consecutive attempts ({command:?}): {error}",
+            *consecutive_failures
+        );
+    }
+    tracing::warn!(
+        ?command,
+        attempt = *consecutive_failures,
+        backoff_seconds = SIGNATURE_UPLOAD_BACKOFF.as_secs(),
+        "Retrying signature upload"
+    );
+    tokio::time::sleep(SIGNATURE_UPLOAD_BACKOFF).await;
     Ok(())
 }
 
@@ -1311,7 +1511,7 @@ async fn send_skip_status(client: &NoiseClient, step: &str) {
 /// `transaction.mapping` is a `PartyToParticipant` mapping carrying `party`
 /// (i.e. `{prefix}::{namespace_fingerprint}`). We pull that out so the
 /// peer's identity hook can key its `dec_party_identity` rows.
-fn extract_party_id_from_p2p_payload(payload: &[u8]) -> Result<CantonId> {
+pub(crate) fn extract_party_id_from_p2p_payload(payload: &[u8]) -> Result<CantonId> {
     let signed: SignedTopologyTransaction = utils::read_first_message_from_bytes(payload)?;
 
     let tx = topology_version::decode_transaction(&signed.transaction)
@@ -1420,6 +1620,20 @@ fn peer_step_for_command(
                 step.step_name(),
                 step.step_index(),
                 ChangeThresholdStep::step_total(),
+            ))
+        }
+        WorkflowKind::RotateKey => {
+            let step = match command {
+                MessageType::SignRotateKey => RotateKeyStep::SignProposal,
+                MessageType::RetireLegacyKeys => RotateKeyStep::RetireLegacyKeys,
+                MessageType::RecordRotatedKey => RotateKeyStep::RecordKey,
+                MessageType::Disconnect => RotateKeyStep::Complete,
+                _ => return None,
+            };
+            Some((
+                step.step_name(),
+                step.step_index(),
+                RotateKeyStep::step_total(),
             ))
         }
     }
@@ -1643,5 +1857,61 @@ mod tests {
         // Empty and non-proto payloads must error, not panic.
         assert!(extract_party_id_from_p2p_payload(b"").is_err());
         assert!(extract_party_id_from_p2p_payload(b"not-a-valid-proto-blob").is_err());
+    }
+
+    #[tokio::test]
+    async fn signature_upload_recovers_and_resets_budget() {
+        let mut failures = 0;
+        let start = tokio::time::Instant::now();
+        record_signature_upload(
+            &mut failures,
+            MessageType::SignAddParty,
+            Err(anyhow::anyhow!("temporary storage outage")),
+        )
+        .await
+        .unwrap();
+        assert_eq!(failures, 1);
+        assert!(start.elapsed() >= SIGNATURE_UPLOAD_BACKOFF);
+        record_signature_upload(&mut failures, MessageType::SignAddParty, Ok(()))
+            .await
+            .unwrap();
+        assert_eq!(failures, 0);
+        record_signature_upload(
+            &mut failures,
+            MessageType::SignAddParty,
+            Err(anyhow::anyhow!("another outage")),
+        )
+        .await
+        .unwrap();
+        assert_eq!(failures, 1);
+    }
+
+    #[tokio::test]
+    async fn signature_upload_exhaustion_reports_cause() {
+        let mut failures = 0;
+        let start = tokio::time::Instant::now();
+        for attempt in 1..MAX_CONSECUTIVE_STEP_FAILURES {
+            record_signature_upload(
+                &mut failures,
+                MessageType::SignChangeThreshold,
+                Err(anyhow::anyhow!("local artifact missing")),
+            )
+            .await
+            .unwrap();
+            assert_eq!(failures, attempt);
+        }
+        let error = record_signature_upload(
+            &mut failures,
+            MessageType::SignChangeThreshold,
+            Err(anyhow::anyhow!("local artifact missing")),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(failures, MAX_CONSECUTIVE_STEP_FAILURES);
+        assert!(start.elapsed() >= std::time::Duration::from_secs(60));
+        let report = format!("{error:#}");
+        assert!(report.contains("SignChangeThreshold"));
+        assert!(report.contains(&failures.to_string()));
+        assert!(report.contains("local artifact missing"));
     }
 }

@@ -160,7 +160,7 @@ Run `decman-cli <command> --help` for every option.
 | `node config \| health \| keys \| operator \| network-info` | Read this node's configuration and health |
 | `peers status \| config \| set-config` | Read and set the peer list |
 | `parties list \| external` | List decentralized and external parties |
-| `parties create \| add-member \| remove-member \| set-threshold` | Start the onboarding, add-party, kick, and change-threshold workflows |
+| `parties create \| add-member \| remove-member \| set-threshold \| rotate-key` | Start the onboarding, add-party, kick, change-threshold, and rotate-key workflows |
 | `packages vetted \| expected \| compare \| config` | Read packages and compare them with peers |
 | `dars upload \| distribute \| distribute-package` | Upload DARs to this node, or distribute them to peers |
 | `invitations list \| handled \| accept \| decline \| dar` | Handle invitations from other nodes; `dar` downloads a DAR of an invitation before you accept it |
@@ -229,6 +229,8 @@ the secret out of the body and use the node settings above.
 
 ```bash
 # Distribute a DAR to two peers and wait for the run to end.
+# One run carries at most 16 MiB, and the file names count toward it.
+# Split a larger set into several runs.
 decman-cli -p devnet dars distribute my-app-1.0.0.dar \
   --peer PAR::1220aa... --peer PAR::1220bb... --wait
 

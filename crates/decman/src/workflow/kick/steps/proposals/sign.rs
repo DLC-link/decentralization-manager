@@ -26,6 +26,7 @@ pub async fn sign_proposals(
         "kick",
         artifact_kinds::SIGNED_KICK_DNS,
         artifact_kinds::SIGNED_KICK_P2P,
+        None,
     )
     .await
 }
