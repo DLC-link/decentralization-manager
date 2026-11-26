@@ -791,7 +791,10 @@ async fn add_party_clear_rejects_malformed_and_conflicting_uploads(db: SqlitePoo
         )
         .await?;
     assert_eq!(conflict.msg_type, MessageType::Error);
-    assert_eq!(conflict.payload, b"Invalid upload");
+    assert_eq!(
+        conflict.payload,
+        b"Invalid upload: Upload conflicts with saved payload"
+    );
     assert_eq!(
         db.read_artifact(
             RUN,
@@ -1054,4 +1057,36 @@ async fn invalid_threshold_pair_allows_corrected_replay_after_restart(db: Sqlite
         PAIR,
     )
     .await
+}
+
+#[sqlx::test(migrator = "MIGRATOR")]
+async fn invalid_clear_proposal_returns_generic_error_before_correction(db: SqlitePool) -> Result {
+    let root = tempfile::tempdir()?;
+    let step = AddPartyStep::ProposeClearOnboarding;
+    add_party_upload_run(&db, step).await?;
+    let server = start(&db, &root, step).await?;
+    let invalid = b"\xffprivate-upload-marker";
+    let mut payload = vec![invalid.len() as u8];
+    payload.extend_from_slice(invalid);
+    let response = server
+        .handle_command(
+            peer(1),
+            Message::new(MessageType::AddPartyClearProposal, payload),
+        )
+        .await?;
+    assert_eq!(response.msg_type, MessageType::Error);
+    assert_eq!(response.payload, b"Invalid upload");
+    assert!(!server.workflow_state.has_peer_completed(&peer(1)).await);
+    assert!(
+        db.list_artifacts(RUN, artifact_kinds::ADD_PARTY_CLEAR_PROPOSAL_UPLOAD)
+            .await?
+            .is_empty()
+    );
+    let corrected = utils::encode_length_prefixed_message(&SignedTopologyTransaction::default());
+    assert_eq!(
+        send(&server, 1, MessageType::AddPartyClearProposal, &corrected).await?,
+        MessageType::Ack
+    );
+    assert!(server.workflow_state.has_peer_completed(&peer(1)).await);
+    Ok(())
 }

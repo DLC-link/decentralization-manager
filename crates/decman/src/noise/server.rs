@@ -52,6 +52,10 @@ use crate::{
 /// need to show movement in production logs.
 const ACS_PROGRESS_EVERY_BLOCKS: u64 = 64;
 
+#[derive(Debug, thiserror::Error)]
+#[error("Invalid signature protobuf")]
+struct InvalidSignatureProtobuf;
+
 /// How often a coordinator checks whether its peers can still finish the run.
 const PEER_CHECK_INTERVAL: Duration = Duration::from_secs(5);
 
@@ -916,7 +920,8 @@ impl<S: WorkflowStep + 'static> NoiseServer<S> {
                     utils::decode_length_prefixed(payload, 2)?;
                 } else if !payload.is_empty() {
                     let _: SignedTopologyTransaction =
-                        utils::read_first_message_from_bytes(payload)?;
+                        utils::read_first_message_from_bytes(payload)
+                            .context(InvalidSignatureProtobuf)?;
                 }
                 if let Some(saved) = self
                     .db
@@ -936,10 +941,13 @@ impl<S: WorkflowStep + 'static> NoiseServer<S> {
                     | MessageType::SignChangeThreshold
             ) {
                 let (dns, p2p) = split_signed_pair(payload)?;
-                let _: SignedTopologyTransaction = utils::read_first_message_from_bytes(&dns)?;
-                let _: SignedTopologyTransaction = utils::read_first_message_from_bytes(&p2p)?;
+                let _: SignedTopologyTransaction =
+                    utils::read_first_message_from_bytes(&dns).context(InvalidSignatureProtobuf)?;
+                let _: SignedTopologyTransaction =
+                    utils::read_first_message_from_bytes(&p2p).context(InvalidSignatureProtobuf)?;
             } else if command == MessageType::SignClearOnboarding {
-                let _: SignedTopologyTransaction = utils::read_first_message_from_bytes(payload)?;
+                let _: SignedTopologyTransaction = utils::read_first_message_from_bytes(payload)
+                    .context(InvalidSignatureProtobuf)?;
             }
             Ok(())
         }
@@ -952,8 +960,13 @@ impl<S: WorkflowStep + 'static> NoiseServer<S> {
                     b"The coordinator could not store the upload".to_vec(),
                 ));
             }
-            tracing::warn!("Invalid {artifact_kind} from {peer_id}");
-            return Ok(Message::new(MessageType::Error, b"Invalid upload".to_vec()));
+            tracing::warn!(error = %format_args!("{error:#}"), "Invalid {artifact_kind} from {peer_id}");
+            let response = if error.downcast_ref::<InvalidSignatureProtobuf>().is_some() {
+                b"Invalid upload".to_vec()
+            } else {
+                format!("Invalid upload: {error}").into_bytes()
+            };
+            return Ok(Message::new(MessageType::Error, response));
         }
         if let Err(e) = self
             .workflow_state
