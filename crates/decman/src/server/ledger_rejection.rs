@@ -31,6 +31,19 @@ const CONTRACT_REFUSAL_IDS: [&str; 3] = [
 /// The most bytes of a contract's refusal message that a failure keeps.
 const MAX_CONTRACT_MESSAGE_LEN: usize = 512;
 
+/// A governance write could not open its Ledger API channel. The cause can
+/// name a certificate file or an address, so the answer gives only this text.
+/// The server log keeps the cause.
+#[derive(Debug, thiserror::Error)]
+#[error("the Ledger API connection failed")]
+pub(crate) struct LedgerConnectionFailed;
+
+/// A read that a governance write needs did not answer before the write's
+/// deadline. DecMan sent nothing to the ledger.
+#[derive(Debug, thiserror::Error)]
+#[error("a read that the write needs did not answer in time")]
+pub(crate) struct ReadTimedOut;
+
 /// The Canton error id a failed submission carries, i.e. the message prefix
 /// before `(`. `None` when the error is not a ledger rejection at all.
 pub(crate) fn canton_error_id(e: &anyhow::Error) -> Option<String> {
@@ -137,8 +150,10 @@ fn failure_summary(e: &anyhow::Error) -> String {
             None => format!("the Ledger API answered {:?}", status.code()),
         };
     }
-    if e.downcast_ref::<tonic::transport::Error>().is_some() {
-        return "the Ledger API connection failed".to_string();
+    if e.downcast_ref::<tonic::transport::Error>().is_some()
+        || e.downcast_ref::<LedgerConnectionFailed>().is_some()
+    {
+        return LedgerConnectionFailed.to_string();
     }
     let outermost: &(dyn std::error::Error + Send + Sync + 'static) = e.as_ref();
     if outermost.is::<reqwest::Error>() {
@@ -173,9 +188,13 @@ fn printable(text: &str, max: usize) -> String {
 /// A mediator timeout is a 504 that names the unresponsive parties: the
 /// mediator rejected the write. A submission that stopped waiting before the
 /// ledger answered is also a 504, but its write may still complete, so the
-/// message says so. Any other failure is a 500 that names its cause without
-/// internal detail; the whole error chain goes to the server log.
+/// message says so. A read that ran out of time before the write is a 504
+/// too, and DecMan sent nothing. Any other failure is a 500 that names its
+/// cause without internal detail. Every failure logs its whole error chain, because the
+/// answer leaves the detail out. For a timeout, that chain holds Canton's
+/// correlation id.
 pub(crate) fn submission_failure(context: &str, e: &anyhow::Error) -> (StatusCode, String) {
+    tracing::warn!("{context}: {e:#}");
     if let Some(timeout) = mediator_timeout(e) {
         return (
             StatusCode::GATEWAY_TIMEOUT,
@@ -192,7 +211,14 @@ pub(crate) fn submission_failure(context: &str, e: &anyhow::Error) -> (StatusCod
             ),
         );
     }
-    tracing::warn!("{context}: {e:#}");
+    if e.downcast_ref::<ReadTimedOut>().is_some() {
+        return (
+            StatusCode::GATEWAY_TIMEOUT,
+            format!(
+                "{context}: {ReadTimedOut}. DecMan sent nothing to the ledger, so you can retry."
+            ),
+        );
+    }
     (
         StatusCode::INTERNAL_SERVER_ERROR,
         format!(

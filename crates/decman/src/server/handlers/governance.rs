@@ -65,7 +65,9 @@ use crate::{
             log_hiding_failure, with_proposal_cid, write_hiding_audit,
         },
         chain_audit,
-        ledger_rejection::{mediator_timeout, submission_failure},
+        ledger_rejection::{
+            LedgerConnectionFailed, ReadTimedOut, mediator_timeout, submission_failure,
+        },
         middleware::require_admin,
         queries::{
             ExpireTimeouts, GovernanceQueue, apply_hidden, get_governance_confirmations,
@@ -162,6 +164,14 @@ fn apply_archival_state(
     hidden: &HashSet<String>,
     include_hidden: bool,
 ) {
+    // A capped read may have missed a live confirmation, so it marks
+    // nothing. Its orphans then stay out, as on `main`.
+    let no_timeouts = ExpireTimeouts::new();
+    let timeouts = if queue.confirmations_capped {
+        &no_timeouts
+    } else {
+        timeouts
+    };
     mark_stuck(
         &mut queue.actions,
         &mut queue.domain_actions,
@@ -880,15 +890,23 @@ fn count_action(step: ActionStep, outcome: ActionOutcome) {
 // Spawned Writes
 // ============================================================================
 
-/// How long a governance write waits for the ledger, across all its
-/// submissions. Without a deadline, a write whose caller hung up waits until
+/// How long a governance write waits for the ledger, across the reads before
+/// it and all its submissions. Without a deadline, a write whose caller hung up waits until
 /// Canton stops tracking the command. The deployment guide asks a proxy to
 /// wait longer than this, so DecMan's own answer reaches the caller.
 const SUBMISSION_DEADLINE: Duration = Duration::from_secs(130);
 
-/// When a write whose first submission starts now stops waiting.
+/// When a write that starts now stops waiting.
 fn write_deadline() -> Instant {
     Instant::now() + SUBMISSION_DEADLINE
+}
+
+/// `read` bounded by what is left of the write's `deadline`. A read that does
+/// not answer in time ends the write before it sends anything.
+async fn read_before_write<T>(deadline: Instant, read: impl Future<Output = T>) -> Result<T> {
+    tokio::time::timeout(deadline.saturating_duration_since(Instant::now()), read)
+        .await
+        .map_err(|_| ReadTimedOut.into())
 }
 
 /// A Ledger API request as `token` that waits for the ledger until
@@ -1405,7 +1423,12 @@ async fn submit_proposal(
     body: ProposeActionRequest,
     deadline: Instant,
 ) -> Submitted {
-    let channel = match data.config.ledger_channel().await {
+    let channel = match data
+        .config
+        .ledger_channel()
+        .await
+        .context(LedgerConnectionFailed)
+    {
         Ok(channel) => channel,
         Err(e) => {
             let (status, error) = submission_failure("Failed to create proposal", &e);
@@ -1620,10 +1643,17 @@ pub async fn confirm_action(
     };
     let db = data.db.clone();
     let body = body.into_inner();
+    let deadline = write_deadline();
     let submission = async move {
-        let result =
-            execute_confirm_action(&data.config, &body, &token, &member_party_id, &packages())
-                .await;
+        let result = execute_confirm_action(
+            &data.config,
+            &body,
+            &token,
+            &member_party_id,
+            &packages(),
+            deadline,
+        )
+        .await;
         Submitted::of(result, |e| {
             submission_failure("Failed to submit confirmation", e)
         })
@@ -1697,6 +1727,7 @@ pub async fn execute_action(
     };
     let db = data.db.clone();
     let body = body.into_inner();
+    let deadline = write_deadline();
     let submission = async move {
         let result = execute_confirmed_action(
             &data.config,
@@ -1705,6 +1736,7 @@ pub async fn execute_action(
             &token,
             &member_party_id,
             &packages(),
+            deadline,
         )
         .await;
         Submitted::of(result, execute_failure)
@@ -1716,8 +1748,10 @@ pub async fn execute_action(
 /// without `DECPM_SCAN_URL` cannot disclose what a paid credential accept
 /// reads. That is a setting the caller can fix, so it is a 422, not a server
 /// fault. The message names the cause without internal detail. A scan error
-/// also keeps scan's HTTP status, which is not internal, so a scan 403 reads
-/// differently from a malformed reply or a dropped connection.
+/// also names scan's HTTP status in the message, because that status is not
+/// internal. A scan 403 then reads differently from a malformed reply or a
+/// dropped connection. The answer itself stays a 500: scan refused DecMan,
+/// not the caller.
 fn execute_failure(e: &anyhow::Error) -> (StatusCode, String) {
     let (status, error) = submission_failure("Failed to execute action", e);
     if e.downcast_ref::<ScanNotConfigured>().is_some() {
@@ -1817,10 +1851,17 @@ pub async fn expire_confirmation(
     };
     let db = data.db.clone();
     let body = body.into_inner();
+    let deadline = write_deadline();
     let submission = async move {
-        let result =
-            execute_expire_confirmation(&data.config, &body, &token, &member_party_id, &packages())
-                .await;
+        let result = execute_expire_confirmation(
+            &data.config,
+            &body,
+            &token,
+            &member_party_id,
+            &packages(),
+            deadline,
+        )
+        .await;
         remember_expire_outcome(&data.db, &body.party_id, &body.confirmation_cid, &result).await;
         Submitted::of(result, |e| {
             submission_failure("Failed to expire confirmation", e)
@@ -1877,10 +1918,17 @@ pub async fn cancel_confirmation(
     };
     let db = data.db.clone();
     let body = body.into_inner();
+    let deadline = write_deadline();
     let submission = async move {
-        let result =
-            execute_cancel_confirmation(&data.config, &body, &token, &member_party_id, &packages())
-                .await;
+        let result = execute_cancel_confirmation(
+            &data.config,
+            &body,
+            &token,
+            &member_party_id,
+            &packages(),
+            deadline,
+        )
+        .await;
         Submitted::of(result, |e| {
             submission_failure("Failed to cancel confirmation", e)
         })
@@ -2141,10 +2189,17 @@ pub async fn cancel_proposal(
     };
     let db = data.db.clone();
     let body = body.into_inner();
+    let deadline = write_deadline();
     let submission = async move {
-        let result =
-            execute_cancel_proposal(&data.config, &body, &token, &member_party_id, &packages())
-                .await;
+        let result = execute_cancel_proposal(
+            &data.config,
+            &body,
+            &token,
+            &member_party_id,
+            &packages(),
+            deadline,
+        )
+        .await;
         Submitted::of(result, |e| {
             submission_failure("Failed to cancel proposal", e)
         })
@@ -2391,6 +2446,7 @@ async fn execute_confirm_action(
     token: &str,
     member_party_id: &CantonId,
     packages: &PackageConfig,
+    deadline: Instant,
 ) -> Result {
     let command_id = uuid::Uuid::new_v4().to_string();
     let commands = match request.governance_type {
@@ -2399,14 +2455,17 @@ async fn execute_confirm_action(
             // The rules contract may be an out-of-date fallback living under an
             // older governance-core package — exercise it under its actual
             // package ref.
-            rules.package_ref = resolve_contract_package_ref(
-                config,
-                &request.party_id,
-                Some(token.to_string()),
-                &request.rules_contract_id,
-                &rules.package_ref,
+            rules.package_ref = read_before_write(
+                deadline,
+                resolve_contract_package_ref(
+                    config,
+                    &request.party_id,
+                    Some(token.to_string()),
+                    &request.rules_contract_id,
+                    &rules.package_ref,
+                ),
             )
-            .await;
+            .await?;
             build_confirm_self_action(
                 &rules,
                 &request.rules_contract_id,
@@ -2422,14 +2481,17 @@ async fn execute_confirm_action(
                 .proposal_cid
                 .as_deref()
                 .context("proposal_cid required for core_domain confirm")?;
-            rules.package_ref = resolve_contract_package_ref(
-                config,
-                &request.party_id,
-                Some(token.to_string()),
-                &request.rules_contract_id,
-                &rules.package_ref,
+            rules.package_ref = read_before_write(
+                deadline,
+                resolve_contract_package_ref(
+                    config,
+                    &request.party_id,
+                    Some(token.to_string()),
+                    &request.rules_contract_id,
+                    &rules.package_ref,
+                ),
             )
-            .await;
+            .await?;
             build_confirm_proposal(
                 &rules,
                 &request.rules_contract_id,
@@ -2441,7 +2503,10 @@ async fn execute_confirm_action(
         }
     };
 
-    let channel = config.ledger_channel().await?;
+    let channel = config
+        .ledger_channel()
+        .await
+        .context(LedgerConnectionFailed)?;
 
     let mut client =
         CommandServiceClient::new(channel).max_decoding_message_size(utils::MAX_GRPC_MESSAGE_SIZE);
@@ -2451,7 +2516,7 @@ async fn execute_confirm_action(
             commands: Some(commands),
         },
         token,
-        write_deadline(),
+        deadline,
     )?;
     client.submit_and_wait(request).await?;
 
@@ -2466,6 +2531,7 @@ async fn execute_confirmed_action(
     token: &str,
     member_party_id: &CantonId,
     packages: &PackageConfig,
+    deadline: Instant,
 ) -> Result {
     // The executor's submission must carry the contracts the proposal's
     // execute step reads but no member can see. `AcceptTransferProposal` needs
@@ -2478,13 +2544,16 @@ async fn execute_confirmed_action(
     let mut registry_disclosed: Vec<DisclosedContract> = Vec::new();
     let mut proposal_event: Option<CreatedEvent> = None;
     if let Some(proposal_cid) = request.proposal_cid.as_deref() {
-        match fetch_proposal_created_event(
-            config,
-            Some(token.to_string()),
-            &request.party_id,
-            proposal_cid,
+        match read_before_write(
+            deadline,
+            fetch_proposal_created_event(
+                config,
+                Some(token.to_string()),
+                &request.party_id,
+                proposal_cid,
+            ),
         )
-        .await
+        .await?
         {
             Ok(event) => proposal_event = event,
             // Don't hard-fail on ledger hiccups here; the submission below
@@ -2495,13 +2564,16 @@ async fn execute_confirmed_action(
     if let (Some(proposal_cid), Some(created)) =
         (request.proposal_cid.as_deref(), proposal_event.as_ref())
     {
-        match maybe_fetch_for_proposal_event(
-            config,
-            Some(token.to_string()),
-            &request.party_id,
-            created,
+        match read_before_write(
+            deadline,
+            maybe_fetch_for_proposal_event(
+                config,
+                Some(token.to_string()),
+                &request.party_id,
+                created,
+            ),
         )
-        .await
+        .await?
         {
             Ok(Some(ctx)) => match to_proto_disclosed_contracts(&ctx.disclosed_contracts) {
                 Ok(dcs) => registry_disclosed = dcs,
@@ -2537,8 +2609,8 @@ async fn execute_confirmed_action(
                     value::Sum::ContractId(cid) => Some(cid.as_str()),
                     _ => None,
                 });
-            let current = fetch_amulet_rules(http_client, config)
-                .await
+            let current = read_before_write(deadline, fetch_amulet_rules(http_client, config))
+                .await?
                 .context("Failed to fetch AmuletRules from the DSO API")?;
             registry_disclosed.push(amulet_rules_disclosure(proposed_cid, &current)?);
         }
@@ -2554,8 +2626,13 @@ async fn execute_confirmed_action(
                 .iter()
                 .map(|dc| dc.contract_id.as_str())
                 .collect();
-            registry_disclosed
-                .extend(paid_accept_disclosures(http_client, config, &pins, &requested).await?);
+            registry_disclosed.extend(
+                read_before_write(
+                    deadline,
+                    paid_accept_disclosures(http_client, config, &pins, &requested),
+                )
+                .await??,
+            );
         }
     }
 
@@ -2592,14 +2669,17 @@ async fn execute_confirmed_action(
             // The rules contract may be an out-of-date fallback living under an
             // older governance-core package — exercise it under its actual
             // package ref.
-            rules.package_ref = resolve_contract_package_ref(
-                config,
-                &request.party_id,
-                Some(token.to_string()),
-                &request.rules_contract_id,
-                &rules.package_ref,
+            rules.package_ref = read_before_write(
+                deadline,
+                resolve_contract_package_ref(
+                    config,
+                    &request.party_id,
+                    Some(token.to_string()),
+                    &request.rules_contract_id,
+                    &rules.package_ref,
+                ),
             )
-            .await;
+            .await?;
             build_execute_self_action(
                 &rules,
                 &request.rules_contract_id,
@@ -2617,14 +2697,17 @@ async fn execute_confirmed_action(
                 .proposal_cid
                 .as_deref()
                 .context("proposal_cid required for core_domain execute")?;
-            rules.package_ref = resolve_contract_package_ref(
-                config,
-                &request.party_id,
-                Some(token.to_string()),
-                &request.rules_contract_id,
-                &rules.package_ref,
+            rules.package_ref = read_before_write(
+                deadline,
+                resolve_contract_package_ref(
+                    config,
+                    &request.party_id,
+                    Some(token.to_string()),
+                    &request.rules_contract_id,
+                    &rules.package_ref,
+                ),
             )
-            .await;
+            .await?;
             build_execute_proposal(
                 &rules,
                 &request.rules_contract_id,
@@ -2638,7 +2721,10 @@ async fn execute_confirmed_action(
         }
     };
 
-    let channel = config.ledger_channel().await?;
+    let channel = config
+        .ledger_channel()
+        .await
+        .context(LedgerConnectionFailed)?;
 
     let mut client =
         CommandServiceClient::new(channel).max_decoding_message_size(utils::MAX_GRPC_MESSAGE_SIZE);
@@ -2648,7 +2734,7 @@ async fn execute_confirmed_action(
             commands: Some(commands),
         },
         token,
-        write_deadline(),
+        deadline,
     )?;
     client.submit_and_wait(request).await?;
 
@@ -2813,6 +2899,7 @@ async fn execute_expire_confirmation(
     token: &str,
     member_party_id: &CantonId,
     packages: &PackageConfig,
+    deadline: Instant,
 ) -> Result {
     // All three flows take the same argument shape ({ member,
     // staleConfirmationCid }); only the template and the choice differ.
@@ -2823,14 +2910,17 @@ async fn execute_expire_confirmation(
             // The rules contract may be an out-of-date fallback living under an
             // older governance-core package — exercise it under its actual
             // package ref.
-            rules.package_ref = resolve_contract_package_ref(
-                config,
-                &request.party_id,
-                Some(token.to_string()),
-                &request.rules_contract_id,
-                &rules.package_ref,
+            rules.package_ref = read_before_write(
+                deadline,
+                resolve_contract_package_ref(
+                    config,
+                    &request.party_id,
+                    Some(token.to_string()),
+                    &request.rules_contract_id,
+                    &rules.package_ref,
+                ),
             )
-            .await;
+            .await?;
             build_expire_self_confirmation(
                 &rules,
                 &request.rules_contract_id,
@@ -2846,14 +2936,17 @@ async fn execute_expire_confirmation(
             // `GovernanceConfirmation` template (domain action confirmations)
             // rather than `GovernanceSelfConfirmation`.
             let mut rules = governance_rules_template(packages)?;
-            rules.package_ref = resolve_contract_package_ref(
-                config,
-                &request.party_id,
-                Some(token.to_string()),
-                &request.rules_contract_id,
-                &rules.package_ref,
+            rules.package_ref = read_before_write(
+                deadline,
+                resolve_contract_package_ref(
+                    config,
+                    &request.party_id,
+                    Some(token.to_string()),
+                    &request.rules_contract_id,
+                    &rules.package_ref,
+                ),
             )
-            .await;
+            .await?;
             build_expire_domain_confirmation(
                 &rules,
                 &request.rules_contract_id,
@@ -2865,7 +2958,10 @@ async fn execute_expire_confirmation(
         }
     };
 
-    let channel = config.ledger_channel().await?;
+    let channel = config
+        .ledger_channel()
+        .await
+        .context(LedgerConnectionFailed)?;
 
     let mut client =
         CommandServiceClient::new(channel).max_decoding_message_size(utils::MAX_GRPC_MESSAGE_SIZE);
@@ -2875,7 +2971,7 @@ async fn execute_expire_confirmation(
             commands: Some(commands),
         },
         token,
-        write_deadline(),
+        deadline,
     )?;
     client.submit_and_wait(request).await?;
 
@@ -2889,6 +2985,7 @@ async fn execute_cancel_confirmation(
     token: &str,
     member_party_id: &CantonId,
     packages: &PackageConfig,
+    deadline: Instant,
 ) -> Result {
     // Every `_Cancel` choice is controller=confirmer and takes no arguments;
     // only the confirmation template differs.
@@ -2899,14 +2996,17 @@ async fn execute_cancel_confirmation(
             // The confirmation contract is created by the rules contract's
             // choice, so it shares the rules contract's (possibly out-of-date)
             // package — exercise it under its actual package ref.
-            confirmation.package_ref = resolve_contract_package_ref(
-                config,
-                &request.party_id,
-                Some(token.to_string()),
-                &request.confirmation_cid,
-                &confirmation.package_ref,
+            confirmation.package_ref = read_before_write(
+                deadline,
+                resolve_contract_package_ref(
+                    config,
+                    &request.party_id,
+                    Some(token.to_string()),
+                    &request.confirmation_cid,
+                    &confirmation.package_ref,
+                ),
             )
-            .await;
+            .await?;
             build_cancel_self_confirmation(
                 &confirmation,
                 &request.confirmation_cid,
@@ -2919,14 +3019,17 @@ async fn execute_cancel_confirmation(
             // Domain confirmations live in their own template
             // `GovernanceConfirmation` (module `Governance.Confirmation`).
             let mut confirmation = domain_confirmation_template(packages)?;
-            confirmation.package_ref = resolve_contract_package_ref(
-                config,
-                &request.party_id,
-                Some(token.to_string()),
-                &request.confirmation_cid,
-                &confirmation.package_ref,
+            confirmation.package_ref = read_before_write(
+                deadline,
+                resolve_contract_package_ref(
+                    config,
+                    &request.party_id,
+                    Some(token.to_string()),
+                    &request.confirmation_cid,
+                    &confirmation.package_ref,
+                ),
             )
-            .await;
+            .await?;
             build_cancel_domain_confirmation(
                 &confirmation,
                 &request.confirmation_cid,
@@ -2937,7 +3040,10 @@ async fn execute_cancel_confirmation(
         }
     };
 
-    let channel = config.ledger_channel().await?;
+    let channel = config
+        .ledger_channel()
+        .await
+        .context(LedgerConnectionFailed)?;
 
     let mut client =
         CommandServiceClient::new(channel).max_decoding_message_size(utils::MAX_GRPC_MESSAGE_SIZE);
@@ -2947,7 +3053,7 @@ async fn execute_cancel_confirmation(
             commands: Some(commands),
         },
         token,
-        write_deadline(),
+        deadline,
     )?;
     client.submit_and_wait(request).await?;
 
@@ -2967,6 +3073,7 @@ async fn execute_cancel_proposal(
     token: &str,
     member_party_id: &CantonId,
     packages: &PackageConfig,
+    deadline: Instant,
 ) -> Result {
     // `GovernableAction_ProposerCancel` is declared on the interface rather
     // than on any one template, so the exercise carries the `GovernableAction`
@@ -2981,14 +3088,17 @@ async fn execute_cancel_proposal(
             let mut confirmation = domain_confirmation_template(packages)?;
             // The confirmation is created by the rules contract's choice, so it
             // shares that contract's possibly out-of-date package.
-            confirmation.package_ref = resolve_contract_package_ref(
-                config,
-                &request.party_id,
-                Some(token.to_string()),
-                cid,
-                &confirmation.package_ref,
+            confirmation.package_ref = read_before_write(
+                deadline,
+                resolve_contract_package_ref(
+                    config,
+                    &request.party_id,
+                    Some(token.to_string()),
+                    cid,
+                    &confirmation.package_ref,
+                ),
             )
-            .await;
+            .await?;
             Some(confirmation)
         }
         None => None,
@@ -3006,7 +3116,10 @@ async fn execute_cancel_proposal(
         uuid::Uuid::new_v4().to_string(),
     );
 
-    let channel = config.ledger_channel().await?;
+    let channel = config
+        .ledger_channel()
+        .await
+        .context(LedgerConnectionFailed)?;
 
     let mut client =
         CommandServiceClient::new(channel).max_decoding_message_size(utils::MAX_GRPC_MESSAGE_SIZE);
@@ -3016,7 +3129,7 @@ async fn execute_cancel_proposal(
             commands: Some(commands),
         },
         token,
-        write_deadline(),
+        deadline,
     )?;
     client.submit_and_wait(request).await?;
 
@@ -4550,6 +4663,81 @@ mod mediator_timeout_tests {
         Ok(())
     }
 
+    /// A timeout's answer names only the Canton error id. The server log keeps
+    /// the whole rejection, with Canton's correlation id, on a line that
+    /// names the party and the write.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_timed_out_write_logs_the_whole_rejection(pool: SqlitePool) -> Result {
+        let _serial = super::action_metrics_tests::SERIAL.lock().await;
+        // As in `the_logged_failure_names_the_party_and_the_write`.
+        let _second = tracing::Dispatch::new(tracing_subscriber::registry());
+        let (_, uri, _, body) = writes()
+            .into_iter()
+            .find(|(event, ..)| matches!(event, AuditEvent::Expire))
+            .context("no expire write")?;
+        let ledger = RejectingLedger::new();
+        ledger.release.notify_one();
+
+        let buffer = super::get_party_credentials_tests::LogBuffer::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(buffer.clone())
+            .with_ansi(false)
+            .finish();
+        let (status, error) = {
+            let _guard = tracing::subscriber::set_default(subscriber);
+            post_to_writes(&pool, &ledger, uri, body).await?
+        };
+
+        assert_eq!(status, StatusCode::GATEWAY_TIMEOUT, "{error}");
+        assert!(!error.contains("5e3c1a7b"), "{error}");
+        let logs = buffer.captured()?;
+        let line = logs
+            .lines()
+            .find(|line| line.contains("MEDIATOR_SAYS_TX_TIMED_OUT(2,5e3c1a7b)"))
+            .with_context(|| format!("the timeout logged no rejection: {logs}"))?;
+        assert!(line.contains(" WARN "), "{line}");
+        assert!(line.contains(&format!("party_id={}", party())), "{line}");
+        assert!(line.contains("write=expire"), "{line}");
+        Ok(())
+    }
+
+    /// A Ledger API TLS file that DecMan cannot read fails every write. Its
+    /// path stays out of the answer and the audit row, which any signed-in
+    /// user can read.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn an_unreadable_tls_file_stays_out_of_the_answer(pool: SqlitePool) -> Result {
+        let _serial = super::action_metrics_tests::SERIAL.lock().await;
+        let mut state = state(pool.clone(), 1).await?.into_inner();
+        let tls = &mut Arc::get_mut(&mut state)
+            .context("a fresh test state has one owner")?
+            .config
+            .canton
+            .ledger_api_tls;
+        tls.enabled = true;
+        tls.ca_cert = Some("/nonexistent/decman-test/ca.pem".to_string());
+        let app = actix_test::init_service(
+            App::new()
+                .app_data(web::Data::from(state))
+                .wrap(AuthMiddleware)
+                .service(expire_confirmation),
+        )
+        .await;
+
+        let response = actix_test::call_service(&app, expire().to_request()).await;
+
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let body: serde_json::Value = actix_test::read_body_json(response).await;
+        let error = body["error"].as_str().context("no error in the body")?;
+        assert_eq!(
+            error,
+            "Failed to expire confirmation: the Ledger API connection failed. See the DecMan \
+             server log."
+        );
+        let (_, audit_message) = audit_row(&pool, AuditEvent::Expire).await?;
+        assert_eq!(audit_message.as_deref(), Some(error));
+        Ok(())
+    }
+
     /// The Ledger API event service of a participant that never answers.
     #[derive(Clone)]
     struct SilentEvents;
@@ -4614,6 +4802,124 @@ mod mediator_timeout_tests {
             "{error}"
         );
         assert_eq!(submitted.proposal_cid.as_deref(), Some("00proposal"));
+        Ok(())
+    }
+
+    /// Confirm, execute, expire and both cancels read a contract's package
+    /// before they submit. That read shares the write's deadline, so a ledger
+    /// that never answers it ends the write at its deadline, before anything
+    /// is sent.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_write_stops_at_its_deadline_during_a_read_before_it(pool: SqlitePool) -> Result {
+        let ledger = RejectingLedger::new();
+        let incoming = TcpIncoming::bind("127.0.0.1:0".parse()?)?;
+        let port = incoming.local_addr()?.port();
+        tokio::spawn(
+            Server::builder()
+                .add_service(ledger.clone())
+                .add_service(SilentEvents)
+                .serve_with_incoming(incoming),
+        );
+        let data = state(pool, port).await?;
+        let config = &data.config;
+        let package_config = packages();
+        let member = CantonId::parse(&format!("member::1220{}", "cd".repeat(32)))?;
+        let token = "any-token";
+
+        for (event, _, context, mut body) in writes() {
+            if matches!(event, AuditEvent::Propose) {
+                continue;
+            }
+            let deadline = Instant::now() + Duration::from_millis(300);
+            let writing = async {
+                match event {
+                    AuditEvent::Confirm => {
+                        let request = serde_json::from_value(body)?;
+                        execute_confirm_action(
+                            config,
+                            &request,
+                            token,
+                            &member,
+                            &package_config,
+                            deadline,
+                        )
+                        .await
+                    }
+                    AuditEvent::Execute => {
+                        let request = serde_json::from_value(body)?;
+                        execute_confirmed_action(
+                            config,
+                            &data.http_client,
+                            &request,
+                            token,
+                            &member,
+                            &package_config,
+                            deadline,
+                        )
+                        .await
+                    }
+                    AuditEvent::Expire => {
+                        let request = serde_json::from_value(body)?;
+                        execute_expire_confirmation(
+                            config,
+                            &request,
+                            token,
+                            &member,
+                            &package_config,
+                            deadline,
+                        )
+                        .await
+                    }
+                    AuditEvent::Cancel => {
+                        let request = serde_json::from_value(body)?;
+                        execute_cancel_confirmation(
+                            config,
+                            &request,
+                            token,
+                            &member,
+                            &package_config,
+                            deadline,
+                        )
+                        .await
+                    }
+                    AuditEvent::CancelProposal => {
+                        // Without its own confirmation, a cancel reads nothing first.
+                        body["confirmation_cid"] = serde_json::json!("00c0ffee");
+                        let request = serde_json::from_value(body)?;
+                        execute_cancel_proposal(
+                            config,
+                            &request,
+                            token,
+                            &member,
+                            &package_config,
+                            deadline,
+                        )
+                        .await
+                    }
+                    other => anyhow::bail!("{other:?} is not a write"),
+                }
+            };
+            let written = tokio::time::timeout(Duration::from_secs(5), writing)
+                .await
+                .with_context(|| format!("{event:?} outlived its deadline"))?;
+
+            let error = written
+                .err()
+                .with_context(|| format!("{event:?} succeeded"))?;
+            let (status, message) = submission_failure(context, &error);
+            assert_eq!(status, StatusCode::GATEWAY_TIMEOUT, "{event:?}: {message}");
+            assert_eq!(
+                message,
+                format!(
+                    "{context}: a read that the write needs did not answer in time. DecMan sent \
+                     nothing to the ledger, so you can retry."
+                )
+            );
+        }
+        assert!(
+            ledger.deadline_millis()?.is_empty(),
+            "a write reached the ledger"
+        );
         Ok(())
     }
 
@@ -4850,13 +5156,15 @@ mod confirmations_feed_tests {
     /// requested size at a time, and `proposal_reads` counts those reads. A
     /// read of the `missing` template fails the way Canton fails it when the
     /// package is uploaded but lacks the template. A read of the `refused`
-    /// template fails with a permission error.
+    /// template fails with a permission error. Each proposal read after the
+    /// first `proposal_reads_served` fails the same way.
     #[derive(Clone, Default)]
     struct AcsLedger {
         contracts: Arc<Vec<CreatedEvent>>,
         missing: Option<&'static str>,
         proposals: Arc<Vec<CreatedEvent>>,
         proposal_reads: Arc<AtomicUsize>,
+        proposal_reads_served: Option<usize>,
         refused: Option<&'static str>,
     }
 
@@ -4910,7 +5218,15 @@ mod confirmations_feed_tests {
                     )
                 });
             if reads_proposals {
-                self.proposal_reads.fetch_add(1, Ordering::SeqCst);
+                let read = self.proposal_reads.fetch_add(1, Ordering::SeqCst) + 1;
+                if self
+                    .proposal_reads_served
+                    .is_some_and(|served| read > served)
+                {
+                    return Err(tonic::Status::permission_denied(
+                        "PERMISSION_DENIED(7,0): cannot read the proposals at ledger.internal:5001",
+                    ));
+                }
                 return Ok(self.proposal_page(request));
             }
             let active_contracts = self
@@ -5490,6 +5806,97 @@ mod confirmations_feed_tests {
         Ok(())
     }
 
+    /// The listed action holds each party's newest confirmation only. The
+    /// scan must judge an orphan on the same confirmations, or a multi-page
+    /// feed would leave out an orphan that one page lists as marked.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn the_orphan_scan_judges_each_partys_newest_confirmation(pool: SqlitePool) -> Result {
+        let party = id("dec", "ab");
+        let member = id("member-a", "aa");
+        let expired = chrono::Utc::now().timestamp() - 3600;
+        let mut older = domain_confirmation("00dom-older", "00gone", &member, expired - 60);
+        older.created_at = Some(prost_types::Timestamp {
+            seconds: 100,
+            nanos: 0,
+        });
+        let mut newer = domain_confirmation("00dom-newer", "00gone", &member, expired);
+        newer.created_at = Some(prost_types::Timestamp {
+            seconds: 200,
+            nanos: 0,
+        });
+        pool.record_mediator_timeout(&party, "00dom-newer", &[member.to_string()])
+            .await?;
+        for proposals in [1, 3] {
+            let ledger = AcsLedger {
+                contracts: Arc::new(vec![
+                    rules(&party, &[&member]),
+                    older.clone(),
+                    newer.clone(),
+                ]),
+                proposals: Arc::new(
+                    (0..proposals)
+                        .map(|n| proposal(&format!("00p{n}"), &party, &member))
+                        .collect(),
+                ),
+                ..AcsLedger::default()
+            };
+
+            let body = feed_with(&pool, &ledger, &party, "&limit=2").await?;
+
+            let action = holding(&body["domain_actions"], "00dom-newer")
+                .with_context(|| format!("{proposals} proposals: {body}"))?;
+            assert_eq!(
+                action["cannot_be_archived"],
+                json!(true),
+                "{proposals} proposals"
+            );
+        }
+        Ok(())
+    }
+
+    /// The confirmation read stops at 5,000 contracts. A read that reached
+    /// that bound may have missed a live confirmation, so it marks nothing and
+    /// leaves its orphans out. One contract fewer still marks the orphan.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_capped_confirmation_read_marks_nothing(pool: SqlitePool) -> Result {
+        const MAX_CONFIRMATIONS_SCANNED: usize = 5_000;
+        let party = id("dec", "ab");
+        let member = id("member-a", "aa");
+        let expired = chrono::Utc::now().timestamp() - 3600;
+        pool.record_mediator_timeout(&party, "00dom-marked", &[member.to_string()])
+            .await?;
+        for (confirmations, marked) in [
+            (MAX_CONFIRMATIONS_SCANNED - 1, true),
+            (MAX_CONFIRMATIONS_SCANNED, false),
+        ] {
+            let mut contracts = vec![
+                rules(&party, &[&member]),
+                domain_confirmation("00dom-marked", "00gone", &member, expired),
+            ];
+            contracts.extend((1..confirmations).map(|n| {
+                domain_confirmation(
+                    &format!("00dom-{n}"),
+                    &format!("00gone-{n}"),
+                    &member,
+                    expired,
+                )
+            }));
+            let ledger = AcsLedger {
+                contracts: Arc::new(contracts),
+                ..AcsLedger::default()
+            };
+
+            let body = feed(&pool, &ledger, &party).await?;
+
+            let listed = holding(&body["domain_actions"], "00dom-marked");
+            assert_eq!(listed.is_ok(), marked, "{confirmations} confirmations");
+            if let Ok(action) = listed {
+                assert_eq!(action["cannot_be_archived"], json!(true));
+            }
+        }
+        Ok(())
+    }
+
     /// The first page scans the active proposal ids for a marked orphan, on
     /// every read while the orphan exists. The scan stops after ten pages of
     /// 1,000 ids. It then leaves the orphan out and logs one warning.
@@ -5542,6 +5949,51 @@ mod confirmations_feed_tests {
                 "{proposals} proposals: {logs}"
             );
         }
+        Ok(())
+    }
+
+    /// A scan that fails cannot tell which marked orphans to list, so it
+    /// leaves them all out. The feed answers that as the failed read it is,
+    /// not as a shorter list.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_failed_orphan_scan_answers_an_error(pool: SqlitePool) -> Result {
+        let party = id("dec", "ab");
+        let member = id("member-a", "aa");
+        let expired = chrono::Utc::now().timestamp() - 3600;
+        let ledger = AcsLedger {
+            contracts: Arc::new(vec![
+                rules(&party, &[&member]),
+                domain_confirmation("00dom-marked", "00gone", &member, expired),
+            ]),
+            proposals: Arc::new(
+                ["00p1", "00p2", "00p3"]
+                    .iter()
+                    .map(|cid| proposal(cid, &party, &member))
+                    .collect(),
+            ),
+            proposal_reads_served: Some(1),
+            ..AcsLedger::default()
+        };
+        pool.record_mediator_timeout(&party, "00dom-marked", &[member.to_string()])
+            .await?;
+        let app = actix_test::init_service(
+            App::new()
+                .app_data(state(pool, ledger.serve()?).await?)
+                .service(get_governance),
+        )
+        .await;
+        let request = actix_test::TestRequest::get()
+            .uri(&format!(
+                "/governance/confirmations?party_id={party}&limit=2"
+            ))
+            .to_request();
+
+        let response = actix_test::call_service(&app, request).await;
+
+        assert_eq!(ledger.proposal_reads.load(Ordering::SeqCst), 2);
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let body: serde_json::Value = actix_test::read_body_json(response).await;
+        assert_eq!(body["error"], json!(FEED_READ_FAILED));
         Ok(())
     }
 
@@ -6042,10 +6494,11 @@ mod paid_accept_disclosure_tests {
         );
     }
 
-    /// An HTTP status is not internal, so a scan refusal keeps it. Scan's
-    /// body stays in the server log.
+    /// An HTTP status is not internal, so a scan refusal's message names it.
+    /// The answer stays a 500, because scan refused DecMan, not the caller.
+    /// Scan's body stays in the server log.
     #[test]
-    fn a_scan_refusal_keeps_its_status() {
+    fn a_scan_refusal_names_scans_status() {
         let error = anyhow::Error::new(ScanRefused {
             status: reqwest::StatusCode::FORBIDDEN,
             body: "access denied for 10.0.0.7".to_string(),
@@ -6108,6 +6561,7 @@ mod archival_state_tests {
             domain_actions: vec![],
             next_cursor: None,
             complete: true,
+            confirmations_capped: false,
         })
     }
 

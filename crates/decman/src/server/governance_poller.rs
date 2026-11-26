@@ -192,6 +192,7 @@ async fn read_queue(
             domain_actions: Vec::new(),
             next_cursor: None,
             complete: true,
+            confirmations_capped: false,
         });
     };
     let queue = get_governance_confirmations(
@@ -463,6 +464,7 @@ mod tests {
             domain_actions,
             next_cursor: None,
             complete: true,
+            confirmations_capped: false,
         }
     }
 

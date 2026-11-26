@@ -573,14 +573,22 @@ pub async fn get_governance_confirmations(
     let mut domain_confirmations_complete = true;
 
     // Bounded, not cached: see read_domain_confirmations.
-    let cached = match read_domain_confirmations(config, party_id, token.clone(), packages).await {
-        Ok(read) => read,
-        Err(e) => {
-            tracing::warn!("Could not read confirmations: {e}");
-            domain_confirmations_complete = false;
-            (HashMap::new(), HashMap::new())
-        }
-    };
+    let (cached, confirmations_capped) =
+        match read_domain_confirmations(config, party_id, token.clone(), packages).await {
+            Ok(read) => read,
+            Err(e) => {
+                tracing::warn!("Could not read confirmations: {e}");
+                domain_confirmations_complete = false;
+                ((HashMap::new(), HashMap::new()), false)
+            }
+        };
+    if confirmations_capped {
+        tracing::warn!(
+            %party_id,
+            "The confirmation read stopped at {MAX_CONFIRMATIONS_SCANNED} contracts, so no \
+             action is marked as one that cannot be archived"
+        );
+    }
     confirmations_by_hash.extend(cached.0.clone());
 
     // One batch of proposals, not the party's whole history.
@@ -613,21 +621,30 @@ pub async fn get_governance_confirmations(
     // every active proposal id. Only marked orphans start that scan. It runs
     // on every first-page read while one exists, and the web UI reads the
     // first page every 10 s. So it stops after MAX_ORPHAN_SCAN_PAGES pages
-    // of FETCH_CHUNK ids, and then leaves the orphans out. A hidden orphan
-    // that the caller leaves out anyway starts no scan.
+    // of FETCH_CHUNK ids, and then leaves the orphans out. A scan that fails
+    // leaves them out too, so the batch is then incomplete. An orphan is
+    // marked on each party's newest confirmation, as the listed action is. A
+    // hidden orphan that the caller leaves out anyway starts no scan.
     let mut gone = HashSet::new();
+    let mut orphan_scan_ok = true;
     if first_page
         && next_cursor.is_some()
         && proposals_read_ok
+        && !confirmations_capped
         && decman_lib::catalog::templates::governable_action_interface(packages).is_ok()
     {
         let marked: Vec<&String> = cached
             .1
             .iter()
             .filter(|(cid, (_, confirmations))| {
+                let newest = interpret::dedupe_newest_per_party(
+                    confirmations.iter().collect(),
+                    |c| &c.confirming_party,
+                    |c| c.created_at,
+                );
                 !proposal_infos.contains_key(*cid)
-                    && !confirmations.is_empty()
-                    && confirmations.iter().all(|c| {
+                    && !newest.is_empty()
+                    && newest.iter().all(|c| {
                         is_stuck(
                             &c.contract_id,
                             &c.confirming_party,
@@ -657,7 +674,10 @@ pub async fn get_governance_confirmations(
                      {MAX_ORPHAN_SCAN_PAGES} pages",
                     marked.len()
                 ),
-                Err(e) => tracing::warn!("Could not check the proposals of marked orphans: {e:#}"),
+                Err(e) => {
+                    tracing::warn!("Could not check the proposals of marked orphans: {e:#}");
+                    orphan_scan_ok = false;
+                }
             }
         }
     }
@@ -698,7 +718,8 @@ pub async fn get_governance_confirmations(
         actions,
         domain_actions,
         next_cursor,
-        complete: proposal_infos_complete && domain_confirmations_complete,
+        complete: proposal_infos_complete && domain_confirmations_complete && orphan_scan_ok,
+        confirmations_capped,
     })
 }
 
@@ -710,6 +731,10 @@ pub struct GovernanceQueue {
     /// False when a read behind the batch failed and left cards out. A caller
     /// that counts the queue must not take an incomplete batch as empty.
     pub complete: bool,
+    /// True when the confirmation read reached [`MAX_CONFIRMATIONS_SCANNED`].
+    /// It may have left out a live confirmation, so the batch gives no
+    /// "cannot be archived" marks.
+    pub confirmations_capped: bool,
 }
 
 /// The parties each confirmation's latest expire attempt named as
@@ -738,7 +763,9 @@ fn is_stuck(
 /// A confirmation is stuck only on evidence: it has expired, and the latest
 /// expire attempt on this node timed out at the mediator naming its confirmer.
 /// Being a former member is no such evidence: its participant may still be
-/// online and confirm the archive.
+/// online and confirm the archive. The actions hold each party's newest
+/// confirmation only. An older one from the same party needs the same
+/// participant, so the newest one decides.
 ///
 /// An orphan's proposal is gone, so nobody can act on it. It stays listed only
 /// when it cannot be archived, so the operator can hide it.
@@ -945,7 +972,8 @@ fn domain_confirmation_dto(parsed: ParsedDomainConfirmation) -> DomainConfirmati
     }
 }
 
-/// Fetch governance confirmations for a specific template
+/// Fetch governance confirmations for a specific template. Returns whether
+/// the read reached [`MAX_CONFIRMATIONS_SCANNED`].
 async fn fetch_governance_for_template(
     config: &NodeConfig,
     party_id: &CantonId,
@@ -953,19 +981,21 @@ async fn fetch_governance_for_template(
     template: &decman_lib::framework::TemplateId,
     confirmations_by_hash: &mut HashMap<String, (ActionType, Vec<ParsedConfirmation>)>,
     domain_confirmations: &mut HashMap<String, (String, Vec<ParsedDomainConfirmation>)>,
-) -> Result {
+) -> Result<bool> {
     let event_format = party_event_format(
         party_id,
         vec![template_filter(template.into(), false)],
         true,
     );
 
+    let mut seen = 0usize;
     for_each_active_contract(
         config,
         token,
         event_format,
         Some(MAX_CONFIRMATIONS_SCANNED),
         |created| {
+            seen += 1;
             if created.template_id.as_ref().is_some_and(|t| {
                 t.module_name == "Governance.Confirmation"
                     && t.entity_name == "GovernanceConfirmation"
@@ -995,7 +1025,7 @@ async fn fetch_governance_for_template(
     )
     .await?;
 
-    Ok(())
+    Ok(seen >= MAX_CONFIRMATIONS_SCANNED)
 }
 
 /// Resolve each `TransferInstruction` cid captured on
@@ -1198,19 +1228,21 @@ const ABSENT_TEMPLATE_ERRORS: [&str; 2] = [
 
 /// Optional packages and templates can be absent. Other failures leave a
 /// read incomplete.
-fn allow_absent_confirmation_package(result: Result<()>) -> Result<()> {
+fn allow_absent_confirmation_package<T: Default>(result: Result<T>) -> Result<T> {
     match result {
         Err(error)
             if canton_error_id(&error)
                 .is_some_and(|id| ABSENT_TEMPLATE_ERRORS.contains(&id.as_str())) =>
         {
-            Ok(())
+            Ok(T::default())
         }
         other => other,
     }
 }
 
-/// Read a party's confirmations, bounded by [`MAX_CONFIRMATIONS_SCANNED`].
+/// Read a party's confirmations, bounded by [`MAX_CONFIRMATIONS_SCANNED`]
+/// for each template. Also says whether a template's read reached that bound,
+/// and so may have left confirmations out.
 ///
 /// Deliberately uncached. These are small — a few hundred bytes each — and a
 /// confirmation has to show up on the next read, not once a TTL lapses: caching
@@ -1221,11 +1253,12 @@ async fn read_domain_confirmations(
     party_id: &CantonId,
     token: Option<String>,
     packages: &PackageConfig,
-) -> Result<ParsedConfirmations> {
+) -> Result<(ParsedConfirmations, bool)> {
     let mut by_hash: HashMap<String, (ActionType, Vec<ParsedConfirmation>)> = HashMap::new();
     let mut domain: HashMap<String, (String, Vec<ParsedDomainConfirmation>)> = HashMap::new();
+    let mut capped = false;
     for t in &decman_lib::catalog::templates::governance_templates(packages) {
-        allow_absent_confirmation_package(
+        capped |= allow_absent_confirmation_package(
             fetch_governance_for_template(
                 config,
                 party_id,
@@ -1238,7 +1271,7 @@ async fn read_domain_confirmations(
         )?;
     }
 
-    Ok((by_hash, domain))
+    Ok(((by_hash, domain), capped))
 }
 
 /// One batch of a party's open proposals, plus where to resume.
@@ -1287,6 +1320,7 @@ pub async fn page_proposal_summaries(
         .unwrap_or(0);
     let confirmations = read_domain_confirmations(config, party_id, token_for_counts, packages)
         .await
+        .map(|(read, _)| read)
         .unwrap_or_default();
     let summaries = summaries
         .into_iter()
@@ -4778,7 +4812,7 @@ mod domain_confirmation_page_tests {
         ))
         .context("reading confirmations");
 
-        assert!(allow_absent_confirmation_package(Err(absent)).is_ok());
+        assert!(allow_absent_confirmation_package::<()>(Err(absent)).is_ok());
         assert!(allow_absent_confirmation_package(Ok(())).is_ok());
     }
 
@@ -4792,7 +4826,7 @@ mod domain_confirmation_page_tests {
         ))
         .context("reading confirmations");
 
-        assert!(allow_absent_confirmation_package(Err(absent)).is_ok());
+        assert!(allow_absent_confirmation_package::<()>(Err(absent)).is_ok());
     }
 
     #[test]
@@ -4804,7 +4838,7 @@ mod domain_confirmation_page_tests {
         ] {
             let expected = format!("{error:#}");
 
-            let error = allow_absent_confirmation_package(Err(error))
+            let error = allow_absent_confirmation_package::<()>(Err(error))
                 .expect_err("a failed confirmation read must not return a partial result");
 
             assert_eq!(format!("{error:#}"), expected);
