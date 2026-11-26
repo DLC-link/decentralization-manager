@@ -59,7 +59,7 @@ use crate::{
         AppState,
         audit::{AuditEvent, AuditParams, log_governance_audit, with_proposal_cid},
         chain_audit,
-        ledger_rejection::submission_failure,
+        ledger_rejection::{LedgerConnectionFailed, submission_failure},
         middleware::require_admin,
         queries::{
             GovernanceQueue, get_governance_confirmations,
@@ -1287,7 +1287,12 @@ async fn submit_proposal(
     body: ProposeActionRequest,
     deadline: Instant,
 ) -> Submitted {
-    let channel = match data.config.ledger_channel().await {
+    let channel = match data
+        .config
+        .ledger_channel()
+        .await
+        .context(LedgerConnectionFailed)
+    {
         Ok(channel) => channel,
         Err(e) => {
             let (status, error) = submission_failure("Failed to create proposal", &e);
@@ -2092,7 +2097,10 @@ async fn execute_confirm_action(
         }
     };
 
-    let channel = config.ledger_channel().await?;
+    let channel = config
+        .ledger_channel()
+        .await
+        .context(LedgerConnectionFailed)?;
 
     let mut client =
         CommandServiceClient::new(channel).max_decoding_message_size(utils::MAX_GRPC_MESSAGE_SIZE);
@@ -2289,7 +2297,10 @@ async fn execute_confirmed_action(
         }
     };
 
-    let channel = config.ledger_channel().await?;
+    let channel = config
+        .ledger_channel()
+        .await
+        .context(LedgerConnectionFailed)?;
 
     let mut client =
         CommandServiceClient::new(channel).max_decoding_message_size(utils::MAX_GRPC_MESSAGE_SIZE);
@@ -2516,7 +2527,10 @@ async fn execute_expire_confirmation(
         }
     };
 
-    let channel = config.ledger_channel().await?;
+    let channel = config
+        .ledger_channel()
+        .await
+        .context(LedgerConnectionFailed)?;
 
     let mut client =
         CommandServiceClient::new(channel).max_decoding_message_size(utils::MAX_GRPC_MESSAGE_SIZE);
@@ -2588,7 +2602,10 @@ async fn execute_cancel_confirmation(
         }
     };
 
-    let channel = config.ledger_channel().await?;
+    let channel = config
+        .ledger_channel()
+        .await
+        .context(LedgerConnectionFailed)?;
 
     let mut client =
         CommandServiceClient::new(channel).max_decoding_message_size(utils::MAX_GRPC_MESSAGE_SIZE);
@@ -2657,7 +2674,10 @@ async fn execute_cancel_proposal(
         uuid::Uuid::new_v4().to_string(),
     );
 
-    let channel = config.ledger_channel().await?;
+    let channel = config
+        .ledger_channel()
+        .await
+        .context(LedgerConnectionFailed)?;
 
     let mut client =
         CommandServiceClient::new(channel).max_decoding_message_size(utils::MAX_GRPC_MESSAGE_SIZE);
@@ -4165,6 +4185,43 @@ mod mediator_timeout_tests {
         assert!(line.contains(" WARN "), "{line}");
         assert!(line.contains(&format!("party_id={}", party())), "{line}");
         assert!(line.contains("write=expire"), "{line}");
+        Ok(())
+    }
+
+    /// A Ledger API TLS file that DecMan cannot read fails every write. Its
+    /// path stays out of the answer and the audit row, which any signed-in
+    /// user can read.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn an_unreadable_tls_file_stays_out_of_the_answer(pool: SqlitePool) -> Result {
+        let _serial = super::action_metrics_tests::SERIAL.lock().await;
+        let mut state = state(pool.clone(), 1).await?.into_inner();
+        let tls = &mut Arc::get_mut(&mut state)
+            .context("a fresh test state has one owner")?
+            .config
+            .canton
+            .ledger_api_tls;
+        tls.enabled = true;
+        tls.ca_cert = Some("/nonexistent/decman-test/ca.pem".to_string());
+        let app = actix_test::init_service(
+            App::new()
+                .app_data(web::Data::from(state))
+                .wrap(AuthMiddleware)
+                .service(expire_confirmation),
+        )
+        .await;
+
+        let response = actix_test::call_service(&app, expire().to_request()).await;
+
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let body: serde_json::Value = actix_test::read_body_json(response).await;
+        let error = body["error"].as_str().context("no error in the body")?;
+        assert_eq!(
+            error,
+            "Failed to expire confirmation: the Ledger API connection failed. See the DecMan \
+             server log."
+        );
+        let (_, audit_message) = audit_row(&pool, AuditEvent::Expire).await?;
+        assert_eq!(audit_message.as_deref(), Some(error));
         Ok(())
     }
 

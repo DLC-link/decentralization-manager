@@ -31,6 +31,13 @@ const CONTRACT_REFUSAL_IDS: [&str; 3] = [
 /// The most bytes of a contract's refusal message that a failure keeps.
 const MAX_CONTRACT_MESSAGE_LEN: usize = 512;
 
+/// A governance write could not open its Ledger API channel. The cause can
+/// name a certificate file or an address, so the answer gives only this text.
+/// The server log keeps the cause.
+#[derive(Debug, thiserror::Error)]
+#[error("the Ledger API connection failed")]
+pub(crate) struct LedgerConnectionFailed;
+
 /// The Canton error id a failed submission carries, i.e. the message prefix
 /// before `(`. `None` when the error is not a ledger rejection at all.
 pub(crate) fn canton_error_id(e: &anyhow::Error) -> Option<String> {
@@ -137,8 +144,10 @@ fn failure_summary(e: &anyhow::Error) -> String {
             None => format!("the Ledger API answered {:?}", status.code()),
         };
     }
-    if e.downcast_ref::<tonic::transport::Error>().is_some() {
-        return "the Ledger API connection failed".to_string();
+    if e.downcast_ref::<tonic::transport::Error>().is_some()
+        || e.downcast_ref::<LedgerConnectionFailed>().is_some()
+    {
+        return LedgerConnectionFailed.to_string();
     }
     let outermost: &(dyn std::error::Error + Send + Sync + 'static) = e.as_ref();
     if outermost.is::<reqwest::Error>() {
