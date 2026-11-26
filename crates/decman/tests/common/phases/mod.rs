@@ -16,6 +16,7 @@ pub mod contracts_quorum_completes;
 pub mod coupon_reassignment;
 pub mod coupon_reassignment_deployed;
 pub mod create_dec_party;
+pub mod dapp_party_onboarding;
 pub mod deploy_gov_core;
 pub mod dismiss_failed_cleans_artifacts;
 pub mod distribute_dars;

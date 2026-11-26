@@ -1,0 +1,158 @@
+# decman-dapp
+
+`decman-dapp` is the browser-only DecMan dApp. Owners use it to create a party
+that several owners control, and to approve the requests that connected dApps
+send to that party.
+
+## What is real and what is simulated
+
+Party creation is real. The dApp creates the party on Canton participants
+through the JSON Ledger API:
+
+- The party id is the decentralized namespace of the owners' keys.
+- The dApp builds the topology transactions in Rust: a root certificate per
+  owner, the decentralized namespace, and the party-to-participant mapping.
+- The mapping names the owners' keys as the party's signing keys. One key per
+  owner does both jobs.
+- A party has three thresholds. The signing threshold counts owner keys needed
+  to transact. The namespace threshold counts owners needed to change the
+  topology. The confirmation threshold counts hosts needed to confirm.
+- Every party with the same owners shares one namespace, and so one namespace
+  threshold. The dApp creates the namespace definition at serial 1, so it can
+  never change the threshold of an existing party.
+- Each owner signs one hash that covers every transaction. The browser checks
+  each Ed25519 signature before it counts it.
+- Every owner's participant receives every transaction and every owner's
+  signature. That submission is the participant's consent to host the party.
+- Then each covalidator approves the pending hosting.
+- The dApp waits until every host reports the party as local.
+- A participant that says the party already exists counts as a success. A
+  retry skips the hosts that already report the party.
+- The localnet integration test sends in this order: the owners' participants
+  first, then the covalidator. Other orders are not tested.
+- If the owners' namespace already exists with a different definition, for
+  example another namespace threshold, Canton refuses the party. The dApp
+  says so and shows the participant's own text.
+
+The rest is simulated in the browser:
+
+- The browser keeps every owner key. A real owner keeps it in a wallet.
+- All owners sign in one browser. Use **Acting as** to switch owner.
+- The dApp sends each covalidator's hosting approval itself, on any network.
+  This stands in for the covalidator's DecMan approval.
+- Proposals, signatures and the party list live only in this browser. The
+  coordination contract replaces that storage later.
+- Holdings, transfers, history and dApp connections are simulated.
+
+The Rust code is in this crate, compiled to WebAssembly. It shares the
+namespace, topology format and hash code with the server through the `common`
+and `decman-lib` crates.
+
+## Run it against a localnet
+
+You need Node 20.19 or later, the `wasm32-unknown-unknown` Rust target,
+[`wasm-pack`](https://rustwasm.github.io/wasm-pack/) and Docker.
+
+Start a Splice localnet. The integration suite's helpers download and start
+the same localnet that CI uses:
+
+```sh
+bash -c 'source integration-tests/env.sh && download_localnet && start_localnet'
+```
+
+Run the commands in this README from the repository root. Stop the localnet
+with `bash -c 'source integration-tests/env.sh && stop_localnet'`.
+
+Then start the dApp:
+
+```sh
+rustup target add wasm32-unknown-unknown
+cd crates/decman-dapp/frontend
+npm ci
+npm run dev
+```
+
+`npm ci` installs the exact versions in `package-lock.json`. wasm-pack
+downloads a wasm-bindgen CLI the first time it builds, to match the
+`wasm-bindgen` version in `Cargo.lock`.
+
+Open <http://localhost:5182>. The dev server and `npm run preview` use that
+port and fail if it is taken. `npm run dev` and `npm run build` build the
+WebAssembly module first, into `frontend/src/wasm`.
+
+The Vite dev server proxies the localnet participants' JSON Ledger APIs, so
+the browser needs no CORS:
+
+| Path in the dApp              | Participant  | JSON Ledger API          |
+| ----------------------------- | ------------ | ------------------------ |
+| `/participants/app-provider`  | App provider | `http://localhost:3975`  |
+| `/participants/app-user`      | App user     | `http://localhost:2975`  |
+| `/participants/sv`            | SV           | `http://localhost:4975`  |
+
+The forms fill in the localnet token. It is the public `ledger-api-user` token
+from `integration-tests/env.sh`, and it works only on a localnet.
+
+Each host's token needs participant-admin rights, because the dApp sends
+AllocateExternalParty without a user id. The browser stores the tokens as plain
+text. Use the localnet token, or a short-lived token from a test network.
+Never use a production token. Real owners will reach their participant through
+their wallet instead.
+
+A token that expires does not end a proposal. Use **Replace token** on the
+wallet or covalidator. It changes the token of every wallet and covalidator
+with the same URL, and every later call reads the new token. The check confirms
+the participant only. A token without participant-admin rights still saves, and
+the next submission to that participant then fails with 403.
+
+The URL and token fields, Replace token and their checks exist only for this
+stand-in. They go away when owners connect their wallets, and the dApp requests
+hosting through each covalidator's tenant API.
+
+## Try it without a localnet
+
+Turn on **Simulated participants** to use the dApp without a localnet. The
+switch sets the mode of the wallets and covalidators you add next. Records
+marked Simulated never reach a participant: the browser answers their calls
+itself. The Rust code still builds the real topology transactions and checks
+every signature. The participant ids, the synchronizer and the participants'
+answers are made up.
+
+Each wallet, covalidator, proposal and party keeps the mode it was created
+with. Turning the switch off does not change existing records. The dApp
+refuses a proposal that mixes simulated and real records.
+
+## Try the flow
+
+1. On **Wallets**, add two wallets on different participants, for example the
+   app provider and the app user. The dApp reads each participant's id.
+2. Optionally, add the SV as a covalidator.
+3. On **New party**, pick the owners, the covalidators and the thresholds. The
+   page shows the party id, or the reason the proposal is invalid.
+4. Propose and sign as one of the owners. The dApp asks that owner's
+   participant for its synchronizer and topology format, builds the
+   transactions, and signs them as the proposer.
+5. On **Proposals**, sign as each other owner. Every owner must sign. Before
+   any host receives the bundle, an owner who has not signed can **Reject**
+   the proposal. The proposer can **Withdraw** it then too, while at least one
+   owner has not signed yet.
+6. Create the party. The card shows each host's result and any error text from
+   its participant. After a failed attempt the card offers only **Try again**,
+   because the bundle may already sit at participants. If every owner's
+   participant refused it, the proposer can also withdraw it.
+7. If no owner's participant confirmed that it accepted the bundle, the party
+   is marked **Not confirmed as created by this proposal**.
+8. Open the party. Simulate an incoming transfer, a dApp connection and a
+   transfer request. Sign the request with enough owners, then submit it.
+
+**Reset browser data** deletes everything that the dApp keeps in the browser.
+It does not touch the ledger.
+
+## Layout
+
+- `src/` holds the Rust code. `cargo test -p decman-dapp` runs its tests.
+- `frontend/src/checks.ts` wraps the WebAssembly exports with TypeScript types.
+- `frontend/src/ledger.ts` calls the JSON Ledger API.
+- `frontend/src/onboarding.ts` creates the party on the participants.
+- `frontend/src/mock/` holds the browser keys, the stored state and the
+  simulated party wallet.
+- `frontend/src/pages/` holds one file per page.

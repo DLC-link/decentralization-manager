@@ -1792,6 +1792,7 @@ dependencies = [
  "clap",
  "common 0.1.0",
  "common 0.13.0",
+ "decman-dapp",
  "decman-lib",
  "decman-wallet",
  "dotenvy",
@@ -1863,6 +1864,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "decman-dapp"
+version = "0.1.0"
+dependencies = [
+ "base64 0.23.1",
+ "common 0.1.0",
+ "decman-lib",
+ "ed25519-dalek",
+ "hex",
+ "prost",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.21",
+ "wasm-bindgen",
+]
+
+[[package]]
 name = "decman-lib"
 version = "0.1.0"
 dependencies = [
@@ -1873,6 +1890,7 @@ dependencies = [
  "common 0.13.0",
  "hex",
  "insta",
+ "prost",
  "prost-types",
  "serde",
  "sha2 0.11.1",

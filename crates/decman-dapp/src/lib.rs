@@ -1,0 +1,284 @@
+//! Browser-side Rust for the DecMan dApp.
+//!
+//! The dApp's TypeScript makes every network call and talks to the owners'
+//! wallets. This crate computes what must match the server and Canton: the
+//! party id that a set of owners derives, the topology transactions that
+//! create the party, the hash every owner signs, the signature checks, and
+//! the JSON Ledger API bodies. It does no I/O, so the native tests run the
+//! same code as the browser.
+//!
+//! The functions marked `#[wasm_bindgen]` are the JavaScript surface. They
+//! take and return strings, and they turn errors into JavaScript exceptions.
+
+mod error;
+mod onboarding;
+mod party;
+mod signature;
+
+use serde::de::DeserializeOwned;
+use wasm_bindgen::prelude::*;
+
+pub use error::Error;
+pub use onboarding::{
+    AllocateRefusal, AllocationRequests, Onboarding, OnboardingTransaction, OwnerSignature,
+    allocate_refusal, allocation_requests, check_owner_signatures, generate_topology_request,
+    onboarding_transactions, party_hosted_locally, topology_format, topology_format_of_generated,
+};
+pub use party::{MAX_OWNERS, PartyPlan, PartyProposal, PlannedOwner, ProposedOwner, plan_party};
+pub use signature::{parse_public_key, verify_signature};
+
+fn parse<T: DeserializeOwned>(json: &str) -> Result<T, Error> {
+    Ok(serde_json::from_str(json)?)
+}
+
+/// Checks a party proposal and returns its plan, both as JSON.
+#[wasm_bindgen(js_name = planParty)]
+pub fn plan_party_js(proposal_json: &str) -> Result<String, JsError> {
+    let plan = plan_party(&parse(proposal_json)?)?;
+    Ok(serde_json::to_string(&plan)?)
+}
+
+/// The onboarding transactions and the hash every owner signs, as JSON.
+#[wasm_bindgen(js_name = onboardingTransactions)]
+pub fn onboarding_transactions_js(
+    proposal_json: &str,
+    topology_version: u32,
+) -> Result<String, JsError> {
+    let plan = plan_party(&parse(proposal_json)?)?;
+    let onboarding = onboarding_transactions(&plan, topology_format(topology_version)?);
+    Ok(serde_json::to_string(&onboarding)?)
+}
+
+/// The two `AllocateExternalParty` bodies, as JSON. Throws unless every owner
+/// signed the combined hash.
+#[wasm_bindgen(js_name = allocationRequests)]
+pub fn allocation_requests_js(
+    proposal_json: &str,
+    topology_version: u32,
+    synchronizer_id: &str,
+    signatures_json: &str,
+) -> Result<String, JsError> {
+    let plan = plan_party(&parse(proposal_json)?)?;
+    let onboarding = onboarding_transactions(&plan, topology_format(topology_version)?);
+    let signatures: Vec<OwnerSignature> = parse(signatures_json)?;
+    let requests = allocation_requests(&plan, &onboarding, synchronizer_id, &signatures)?;
+    Ok(serde_json::to_string(&requests)?)
+}
+
+/// The generate-topology body that probes a participant's topology format.
+#[wasm_bindgen(js_name = generateTopologyRequest)]
+pub fn generate_topology_request_js(
+    synchronizer_id: &str,
+    public_key_hex: &str,
+) -> Result<String, JsError> {
+    let request = generate_topology_request(synchronizer_id, public_key_hex)?;
+    Ok(serde_json::to_string(&request)?)
+}
+
+/// The topology format (30 or 31) of a generate-topology answer.
+#[wasm_bindgen(js_name = topologyVersionOfGenerated)]
+pub fn topology_version_of_generated_js(response_json: &str) -> Result<u32, JsError> {
+    let format = topology_format_of_generated(&parse(response_json)?)?;
+    Ok(format.proto_version().unsigned_abs())
+}
+
+/// Why a participant refused an allocate body for `party_id`:
+/// `"partyExists"`, `"namespaceConflict"` or `"other"`.
+#[wasm_bindgen(js_name = allocateRefusal)]
+pub fn allocate_refusal_js(answer_json: &str, party_id: &str) -> Result<String, JsError> {
+    let refusal = allocate_refusal(&parse(answer_json)?, party_id);
+    Ok(serde_json::to_value(refusal)?
+        .as_str()
+        .unwrap_or("other")
+        .to_owned())
+}
+
+/// Whether a get-party answer says the participant hosts `party_id`.
+#[wasm_bindgen(js_name = partyHostedLocally)]
+pub fn party_hosted_locally_js(response_json: &str, party_id: &str) -> Result<bool, JsError> {
+    Ok(party_hosted_locally(&parse(response_json)?, party_id))
+}
+
+/// The Canton namespace of a hex-encoded raw Ed25519 public key.
+#[wasm_bindgen(js_name = publicKeyNamespace)]
+pub fn public_key_namespace_js(public_key_hex: &str) -> Result<String, JsError> {
+    let key = parse_public_key(public_key_hex)?;
+    Ok(common::fingerprint::fingerprint_from_public_key(key.as_bytes()).to_string())
+}
+
+/// Whether `signature_hex` is a valid Ed25519 signature of `digest_hex`.
+#[wasm_bindgen(js_name = verifySignature)]
+pub fn verify_signature_js(
+    public_key_hex: &str,
+    digest_hex: &str,
+    signature_hex: &str,
+) -> Result<bool, JsError> {
+    Ok(verify_signature(public_key_hex, digest_hex, signature_hex)?)
+}
+
+#[cfg(test)]
+mod tests {
+    //! The frontend's `checks.ts` declares these JSON shapes by hand. These
+    //! tests use its field names, so a rename in Rust fails here instead of
+    //! in the browser.
+
+    use base64::{Engine, engine::general_purpose::STANDARD};
+    use ed25519_dalek::{Signer, SigningKey};
+    use serde_json::{Value, json};
+
+    use super::*;
+
+    fn public_key(seed: u8) -> String {
+        hex::encode(
+            SigningKey::from_bytes(&[seed; 32])
+                .verifying_key()
+                .as_bytes(),
+        )
+    }
+
+    fn proposal_json() -> String {
+        json!({
+            "partyHint": "treasury",
+            "owners": [
+                { "publicKey": public_key(1), "participant": "participant-1::1220a1" },
+                { "publicKey": public_key(2), "participant": "participant-2::1220b2" },
+            ],
+            "signingThreshold": 2,
+            "namespaceThreshold": 1,
+            "confirmationThreshold": 3,
+            "covalidators": ["participant-3::1220c3"],
+        })
+        .to_string()
+    }
+
+    fn parsed(json: Result<String, JsError>) -> Value {
+        let json = json.expect("the call succeeds");
+        serde_json::from_str(&json).expect("the call returns JSON")
+    }
+
+    fn keys(value: &Value) -> Vec<&str> {
+        let mut keys: Vec<&str> = value
+            .as_object()
+            .expect("an object")
+            .keys()
+            .map(String::as_str)
+            .collect();
+        keys.sort_unstable();
+        keys
+    }
+
+    #[test]
+    fn plan_party_returns_the_fields_the_frontend_reads() {
+        let plan = parsed(plan_party_js(&proposal_json()));
+        assert_eq!(
+            keys(&plan),
+            [
+                "confirmationThreshold",
+                "hosts",
+                "namespace",
+                "namespaceThreshold",
+                "owners",
+                "partyId",
+                "signingThreshold"
+            ]
+        );
+        assert_eq!(plan["signingThreshold"], 2);
+        assert_eq!(plan["namespaceThreshold"], 1);
+        assert_eq!(plan["confirmationThreshold"], 3);
+        assert_eq!(plan["hosts"].as_array().map(Vec::len), Some(3));
+        assert_eq!(
+            keys(&plan["owners"][0]),
+            ["namespace", "participant", "publicKey"]
+        );
+    }
+
+    #[test]
+    fn the_signing_flow_round_trips_through_the_frontends_json() {
+        let onboarding = parsed(onboarding_transactions_js(&proposal_json(), 31));
+        assert_eq!(keys(&onboarding), ["combinedHash", "transactions"]);
+        assert_eq!(
+            keys(&onboarding["transactions"][0]),
+            ["hash", "mapping", "transaction"]
+        );
+
+        let combined_hash = onboarding["combinedHash"].as_str().expect("a string");
+        let message = hex::decode(combined_hash).expect("hex");
+        let signatures: Vec<Value> = [1, 2]
+            .into_iter()
+            .map(|seed| {
+                let key = SigningKey::from_bytes(&[seed; 32]);
+                json!({
+                    "publicKey": public_key(seed),
+                    "signature": hex::encode(key.sign(&message).to_bytes()),
+                })
+            })
+            .collect();
+        let requests = parsed(allocation_requests_js(
+            &proposal_json(),
+            31,
+            "global-domain::1220abcd",
+            &Value::Array(signatures).to_string(),
+        ));
+        assert_eq!(keys(&requests), ["allocate", "hostingApproval"]);
+        assert_eq!(
+            requests["allocate"]["multiHashSignatures"]
+                .as_array()
+                .map(Vec::len),
+            Some(2)
+        );
+    }
+
+    #[test]
+    fn the_format_probe_reads_a_participants_json_answer() {
+        let request = parsed(generate_topology_request_js(
+            "global-domain::1220abcd",
+            &public_key(1),
+        ));
+        assert_eq!(request["partyHint"], "decman-dapp-format-probe");
+        assert_eq!(
+            request["publicKey"]["keyData"]
+                .as_str()
+                .and_then(|data| STANDARD.decode(data).ok())
+                .map(|der| der.len()),
+            Some(44)
+        );
+
+        let onboarding = parsed(onboarding_transactions_js(&proposal_json(), 30));
+        let transaction = onboarding["transactions"][0]["transaction"].clone();
+        let answer = json!({ "partyId": "probe::1220aa", "topologyTransactions": [transaction] });
+        assert_eq!(
+            topology_version_of_generated_js(&answer.to_string()).ok(),
+            Some(30)
+        );
+    }
+
+    #[test]
+    fn party_hosted_locally_reads_a_get_party_answer() {
+        let answer = json!({ "partyDetails": [{ "party": "p::1220aa", "isLocal": true }] });
+        assert_eq!(
+            party_hosted_locally_js(&answer.to_string(), "p::1220aa").ok(),
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn allocate_refusal_returns_the_names_the_frontend_compares() {
+        let party = "treasury::1220aa";
+        let exists = json!({
+            "code": "INVALID_ARGUMENT",
+            "cause": format!("Party {party} already exists on synchronizer global::1220bb"),
+        });
+        let conflict = json!({ "code": "TOPOLOGY_SERIAL_MISMATCH", "cause": "" });
+        let other = json!({ "code": "PERMISSION_DENIED", "cause": "" });
+        for (answer, name) in [
+            (exists, "partyExists"),
+            (conflict, "namespaceConflict"),
+            (other, "other"),
+        ] {
+            assert_eq!(
+                allocate_refusal_js(&answer.to_string(), party).expect("the call succeeds"),
+                name
+            );
+        }
+    }
+}

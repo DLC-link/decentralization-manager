@@ -1,0 +1,215 @@
+import { useId, useState } from 'react'
+
+import { LOCALNET_PARTICIPANTS, LOCALNET_TOKEN } from '../localnet'
+import { setActingWallet } from '../mock/actions'
+import { useAppState, type ParticipantLink } from '../mock/store'
+import { addCovalidator, createWallet, replaceToken } from '../onboarding'
+import { Badge, EmptyState, ErrorText, Hex, Person, Section, SimulatedBadge, Uid, useAction } from '../ui'
+
+export function Wallets() {
+  const state = useAppState()
+  return (
+    <>
+      <Section title="Owner wallets">
+        <p className="hint">
+          Each owner has an Ed25519 key and a participant that hosts the party for them. The browser keeps every key, so
+          you can act as each owner in turn. The key stands in for a wallet.
+        </p>
+        {state.wallets.length === 0 ? (
+          <EmptyState icon="wallet">No wallets yet. Add at least two owners below.</EmptyState>
+        ) : (
+          <table>
+            <thead>
+              <tr>
+                <th>Name</th>
+                <th>Participant</th>
+                <th>Namespace</th>
+                <th />
+              </tr>
+            </thead>
+            <tbody>
+              {state.wallets.map((wallet) => (
+                <tr key={wallet.id}>
+                  <td>
+                    <Person name={wallet.name} />
+                  </td>
+                  <td>
+                    <ParticipantCell link={wallet.participant} />
+                  </td>
+                  <td>
+                    <Hex value={wallet.namespace} />
+                  </td>
+                  <td>
+                    <div className="row">
+                      {wallet.id === state.actingWalletId ? (
+                        <Badge tone="accent">Acting</Badge>
+                      ) : (
+                        <button onClick={() => setActingWallet(wallet.id)}>Act as</button>
+                      )}
+                      {!wallet.participant.simulated && <ReplaceToken recordId={wallet.id} />}
+                    </div>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </Section>
+      <ParticipantForm
+        title="Add a wallet"
+        namePlaceholder="Alice"
+        button="Generate key and add"
+        onAdd={createWallet}
+      />
+      <Section title="Covalidators">
+        <p className="hint">
+          A covalidator hosts the party but holds no owner key. The dApp sends its hosting approval itself.
+          That stands in for the covalidator's DecMan approval.
+        </p>
+        {state.covalidators.length === 0 ? (
+          <p>No covalidators. They are optional.</p>
+        ) : (
+          <table>
+            <thead>
+              <tr>
+                <th>Name</th>
+                <th>Participant</th>
+                <th />
+              </tr>
+            </thead>
+            <tbody>
+              {state.covalidators.map((covalidator) => (
+                <tr key={covalidator.id}>
+                  <td>
+                    <Person name={covalidator.name} />
+                  </td>
+                  <td>
+                    <ParticipantCell link={covalidator.participant} />
+                  </td>
+                  <td>{!covalidator.participant.simulated && <ReplaceToken recordId={covalidator.id} />}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </Section>
+      <ParticipantForm
+        title="Add a covalidator"
+        namePlaceholder="Covalidator 1"
+        button="Add covalidator"
+        onAdd={addCovalidator}
+      />
+    </>
+  )
+}
+
+/** Swaps in a fresh token. Proposals read the record's token at each call. */
+function ReplaceToken({ recordId }: { recordId: string }) {
+  const [open, setOpen] = useState(false)
+  if (!open) return <button onClick={() => setOpen(true)}>Replace token</button>
+  // The editor mounts fresh on each open, so no old token or error comes back.
+  return <TokenEditor recordId={recordId} onClose={() => setOpen(false)} />
+}
+
+function TokenEditor({ recordId, onClose }: { recordId: string; onClose: () => void }) {
+  const [token, setToken] = useState('')
+  const [saving, setSaving] = useState(false)
+  const [error, run] = useAction()
+
+  const save = async () => {
+    setSaving(true)
+    let saved = false
+    await run(async () => {
+      await replaceToken(recordId, token)
+      saved = true
+    })
+    if (saved) onClose()
+    else setSaving(false)
+  }
+
+  return (
+    <div className="token-editor">
+      <input
+        type="password"
+        value={token}
+        onChange={(e) => setToken(e.target.value)}
+        disabled={saving}
+        autoComplete="off"
+        placeholder="New token"
+        aria-label="New token"
+      />
+      <button onClick={save} disabled={saving}>
+        {saving ? 'Checking…' : 'Save'}
+      </button>
+      <button className="ghost" onClick={onClose} disabled={saving}>
+        Cancel
+      </button>
+      <ErrorText error={error} />
+    </div>
+  )
+}
+
+function ParticipantCell({ link }: { link: ParticipantLink }) {
+  return (
+    <span title={link.apiUrl}>
+      <Uid value={link.participantId} /> {link.simulated && <SimulatedBadge />}
+    </span>
+  )
+}
+
+/** Name, JSON Ledger API URL and token. Adding reads the participant id. */
+function ParticipantForm({
+  title,
+  namePlaceholder,
+  button,
+  onAdd,
+}: {
+  title: string
+  namePlaceholder: string
+  button: string
+  onAdd: (name: string, apiUrl: string, token: string) => Promise<void>
+}) {
+  const [name, setName] = useState('')
+  const [apiUrl, setApiUrl] = useState(LOCALNET_PARTICIPANTS[0].apiUrl)
+  const [token, setToken] = useState(LOCALNET_TOKEN)
+  const [error, run] = useAction()
+  const listId = useId()
+
+  const add = () =>
+    run(async () => {
+      await onAdd(name, apiUrl, token)
+      setName('')
+    })
+
+  return (
+    <Section title={title}>
+      <div className="form">
+        <label>
+          Name
+          <input value={name} onChange={(e) => setName(e.target.value)} placeholder={namePlaceholder} />
+        </label>
+        <label>
+          Participant JSON Ledger API URL
+          <input value={apiUrl} onChange={(e) => setApiUrl(e.target.value)} list={`${listId}-participants`} />
+          <datalist id={`${listId}-participants`}>
+            {LOCALNET_PARTICIPANTS.map((p) => (
+              <option key={p.apiUrl} value={p.apiUrl}>
+                {p.name}
+              </option>
+            ))}
+          </datalist>
+        </label>
+        <label>
+          Token (the localnet token by default)
+          <input type="password" value={token} onChange={(e) => setToken(e.target.value)} autoComplete="off" />
+        </label>
+        <button onClick={add}>{button}</button>
+      </div>
+      <p className="hint">
+        The dApp reads the participant id from the participant when you add it. If a token expires, use Replace token in
+        the list above. It changes the token of every wallet and covalidator with the same URL.
+      </p>
+      <ErrorText error={error} />
+    </Section>
+  )
+}

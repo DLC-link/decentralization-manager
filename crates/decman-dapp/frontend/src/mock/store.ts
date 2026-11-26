@@ -1,0 +1,195 @@
+// The dApp's state in localStorage: wallets, covalidators, proposals and
+// parties. Party creation is real, so a proposal records what each
+// participant answered. The party's holdings, history and dApp connections
+// stay simulated.
+import { useSyncExternalStore } from 'react'
+
+import type { Onboarding, PartyPlan, PartyProposal, PlannedOwner } from '../checks'
+import type { Connection as LedgerConnection } from '../ledger'
+
+/** A participant's JSON Ledger API and the id it reported. */
+export type ParticipantLink = LedgerConnection & { participantId: string }
+
+/** An owner. The browser key stands in for a wallet. */
+export type Wallet = {
+  id: string
+  name: string
+  participant: ParticipantLink
+  publicKey: string
+  namespace: string
+  privateKeyJwk: JsonWebKey
+}
+
+/** A participant that hosts parties but holds no owner key. */
+export type Covalidator = { id: string; name: string; participant: ParticipantLink }
+
+export type Signature = { publicKey: string; signature: string; signedAt: string }
+
+export type HostStep = 'waiting' | 'approved' | 'submitted' | 'hosted' | 'failed'
+
+/** What one hosting participant did during the submission. */
+export type HostResult = {
+  participant: string
+  name: string
+  role: 'owner' | 'covalidator'
+  /**
+   * The id of the owner wallet or covalidator record in this proposal that
+   * reaches the host, bound when the proposal is created. Each call reads
+   * that record's current connection, so a token update applies here too.
+   */
+  recordId: string
+  step: HostStep
+  detail?: string
+  /** The participant itself refused with a 4xx, as opposed to a 5xx, a timeout or a network error. */
+  refusedByParticipant?: boolean
+}
+
+export type Proposal = {
+  id: string
+  /** Whether the proposal uses simulated participants, fixed at creation. */
+  simulated: boolean
+  createdAt: string
+  createdBy: string
+  /** The proposer's public key. Only the proposer may withdraw. */
+  proposerKey: string
+  proposal: PartyProposal
+  plan: PartyPlan
+  synchronizerId: string
+  topologyVersion: number
+  onboarding: Onboarding
+  signatures: Signature[]
+  status: 'collecting' | 'submitting' | 'submitted' | 'failed' | 'withdrawn' | 'rejected'
+  /** Who withdrew or rejected the proposal. */
+  endedBy?: string
+  /**
+   * Whether an owner's participant answered 2xx to this proposal's full
+   * bundle, in any attempt. That shows only that the participant accepted
+   * the bundle at that moment.
+   */
+  bundleAccepted?: boolean
+  /**
+   * Whether an owner's call ended without a definite answer, in any attempt:
+   * a timeout, a network error or a 5xx. The bundle may then sit at that
+   * participant.
+   */
+  ownerAnswerUncertain?: boolean
+  /** Set at completion when no owner's participant accepted the bundle. */
+  unconfirmed?: boolean
+  hosts: HostResult[]
+  error?: string
+}
+
+export type Host = { participant: string; role: 'owner' | 'covalidator'; approval: string }
+
+export type Connection = {
+  id: string
+  dappName: string
+  dappUrl: string
+  status: 'pending' | 'connected' | 'rejected'
+  createdAt: string
+}
+
+export type TransferRequest = {
+  id: string
+  connectionId: string
+  dappName: string
+  receiver: string
+  instrument: string
+  amount: number
+  payload: string
+  digest: string
+  signatures: Signature[]
+  status: 'pending' | 'executed' | 'rejected' | 'failed'
+  result?: string
+  createdAt: string
+}
+
+export type Party = {
+  partyId: string
+  /** Whether simulated participants host the party. */
+  simulated: boolean
+  /**
+   * No owner's participant accepted this proposal's bundle. The party may
+   * have existed already, or a reply was lost to a timeout or a reload.
+   */
+  unconfirmed: boolean
+  namespace: string
+  owners: PlannedOwner[]
+  hosts: Host[]
+  signingThreshold: number
+  namespaceThreshold: number
+  confirmationThreshold: number
+  createdAt: string
+  holdings: Record<string, number>
+  connections: Connection[]
+  requests: TransferRequest[]
+  history: { at: string; text: string }[]
+}
+
+export type AppState = {
+  actingWalletId: string | null
+  wallets: Wallet[]
+  covalidators: Covalidator[]
+  proposals: Proposal[]
+  parties: Party[]
+}
+
+// v4 binds each proposal's hosts to record ids instead of copied
+// connections. Older data does not load.
+const STORAGE_KEY = 'decman-dapp-v4'
+const EMPTY: AppState = { actingWalletId: null, wallets: [], covalidators: [], proposals: [], parties: [] }
+
+function load(): AppState {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY)
+    const loaded: AppState = raw ? { ...EMPTY, ...(JSON.parse(raw) as Partial<AppState>) } : EMPTY
+    // A reload stops a running submission, so it can no longer finish.
+    return {
+      ...loaded,
+      proposals: loaded.proposals.map((p) =>
+        p.status === 'submitting'
+          ? { ...p, status: 'failed', error: 'The page reloaded during the submission. Try again.' }
+          : p,
+      ),
+    }
+  } catch {
+    return EMPTY
+  }
+}
+
+let state = load()
+const listeners = new Set<() => void>()
+
+export function getState(): AppState {
+  return state
+}
+
+export function update(change: (current: AppState) => AppState): void {
+  state = change(state)
+  try {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(state))
+  } catch {
+    // Storage can be blocked, for example in a private window. The state then
+    // lasts until the page reloads.
+  }
+  listeners.forEach((listener) => listener())
+}
+
+export function resetState(): void {
+  update(() => EMPTY)
+}
+
+function subscribe(listener: () => void): () => void {
+  listeners.add(listener)
+  return () => {
+    listeners.delete(listener)
+  }
+}
+
+export function useAppState(): AppState {
+  return useSyncExternalStore(subscribe, getState)
+}
+
+export function actingWallet(current: AppState): Wallet | undefined {
+  return current.wallets.find((wallet) => wallet.id === current.actingWalletId)
+}

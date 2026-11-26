@@ -243,7 +243,7 @@ pub fn history_query(synchronizer_id: &str) -> BaseQuery {
 pub fn p2p_v30(item: P2pItem) -> Result<PartyToParticipant> {
     match item {
         P2pItem::V30(mapping) => Ok(mapping),
-        P2pItem::V31(mapping) => topology_version::p2p_from_v31(mapping),
+        P2pItem::V31(mapping) => Ok(topology_version::p2p_from_v31(mapping)?),
     }
 }
 

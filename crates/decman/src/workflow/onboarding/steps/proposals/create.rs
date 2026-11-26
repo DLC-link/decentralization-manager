@@ -18,7 +18,7 @@ use crate::{
     canton_id::CantonId,
     config::NodeConfig,
     error::Result,
-    utils::{self, MULTIHASH_SHA256_PREFIX},
+    utils,
     workflow::{
         onboarding::{OnboardingConfig, steps::generate_keys::own_new_daml_key},
         storage::{WorkflowStorage, artifact_kinds, identity_kinds},
@@ -379,54 +379,7 @@ pub(crate) fn decode_keys_payload(payload: &[u8]) -> Result<Vec<SigningPublicKey
     Ok(keys)
 }
 
-/// Compute decentralized namespace from individual namespaces
-///
-/// Canton uses domain-separated hashing with HashPurpose.DecentralizedNamespaceNamespace = 37.
-/// Following Canton's HashBuilder protocol, each namespace string is added with a length prefix
-/// to prevent hash collisions from concatenation.
-///
-/// The algorithm:
-/// 1. Hash the purpose ID (37) as 4-byte big-endian
-/// 2. For each sorted namespace (as hex string):
-///    - Hash the length of the UTF-8 encoded string as 4-byte big-endian
-///    - Hash the UTF-8 bytes of the string itself
-///
-/// The decentralized namespace is returned in multihash format with "1220" prefix
-pub(crate) fn compute_decentralized_namespace(namespaces: &HashSet<String>) -> String {
-    use sha2::{Digest, Sha256};
-
-    // HashPurpose.DecentralizedNamespaceNamespace = 37
-    const PURPOSE_DECENTRALIZED_NAMESPACE: i32 = 37;
-
-    let mut hasher = Sha256::new();
-
-    // Add purpose ID as 4-byte big-endian integer (domain separation)
-    hasher.update(PURPOSE_DECENTRALIZED_NAMESPACE.to_be_bytes());
-
-    // Sort namespaces for deterministic hashing (lexicographic string order)
-    let mut sorted_namespaces: Vec<_> = namespaces.iter().collect();
-    sorted_namespaces.sort();
-
-    for namespace in sorted_namespaces {
-        // Convert namespace string to UTF-8 bytes
-        let namespace_bytes = namespace.as_bytes();
-
-        // Add length prefix (4-byte big-endian integer)
-        let length = namespace_bytes.len() as i32;
-        hasher.update(length.to_be_bytes());
-
-        // Add the namespace string bytes
-        hasher.update(namespace_bytes);
-    }
-
-    let hash_result = hasher.finalize();
-
-    // Return multihash format: prefix + hex-encoded hash
-    format!(
-        "{MULTIHASH_SHA256_PREFIX}{hash}",
-        hash = hex::encode(hash_result)
-    )
-}
+pub(crate) use common::fingerprint::compute_decentralized_namespace;
 
 #[cfg(test)]
 mod tests {

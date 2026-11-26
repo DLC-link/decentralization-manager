@@ -218,6 +218,27 @@ jobs:
       # tonic transport and the Ledger API client.
       - name: cargo check decman-lib for wasm32
         run: cargo check -p decman-lib --target wasm32-unknown-unknown
+      - name: cargo check decman-dapp for wasm32
+        run: cargo check -p decman-dapp --target wasm32-unknown-unknown
+      # The dApp's build script runs wasm-pack. wasm-pack then downloads the
+      # wasm-bindgen CLI at the version in Cargo.lock.
+      - name: Install wasm-pack
+        env:
+          WASM_PACK_VERSION: 0.15.1
+          WASM_PACK_SHA256: 410101009739b9d01c7d5affaaad6e9c9a24b4cba6791a4805db8e89b9bf7af2
+        run: |
+          name="wasm-pack-v${WASM_PACK_VERSION}-x86_64-unknown-linux-musl"
+          curl --silent --show-error --fail -L -o wasm-pack.tar.gz \
+            "https://github.com/wasm-bindgen/wasm-pack/releases/download/v${WASM_PACK_VERSION}/${name}.tar.gz"
+          echo "${WASM_PACK_SHA256}  wasm-pack.tar.gz" | sha256sum --check -
+          sudo tar -xzf wasm-pack.tar.gz --strip-components=1 -C /usr/local/bin "${name}/wasm-pack"
+          rm wasm-pack.tar.gz
+          wasm-pack --version
+      - name: Build the dApp frontend
+        working-directory: crates/decman-dapp/frontend
+        run: |
+          npm ci
+          npm run build
 
   daml:
     name: Daml Build & Test

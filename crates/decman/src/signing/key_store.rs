@@ -37,9 +37,9 @@ use base64::{Engine, engine::general_purpose::STANDARD};
 use canton_proto_rs::com::digitalasset::canton::crypto::v30::{
     CryptoKeyFormat, Signature, SigningKeySpec, SigningKeyUsage, SigningPublicKey,
 };
+pub use decman_lib::topology::topology_transaction_hash;
 use ed25519_dalek::SigningKey;
 use prost::Message;
-use sha2::{Digest, Sha256};
 use sqlx::SqlitePool;
 use zeroize::Zeroizing;
 
@@ -70,12 +70,6 @@ const AAD_LABEL: &str = "decman-party-key-v1";
 
 /// Domain label in the associated data of a key DecMan generated.
 const GENERATED_AAD_LABEL: &str = "decman-generated-party-key-v1";
-
-/// Canton's hash purpose for a signature on a topology transaction.
-const TOPOLOGY_TRANSACTION_HASH_PURPOSE: u32 = 11;
-
-/// The multihash prefix of a SHA-256 digest: code 0x12, length 0x20.
-const SHA256_MULTIHASH_PREFIX: [u8; 2] = [0x12, 0x20];
 
 /// DER prefix of an Ed25519 `SubjectPublicKeyInfo`. The 32-byte key follows.
 const ED25519_SPKI_PREFIX: [u8; 12] = [
@@ -487,17 +481,6 @@ pub fn ed25519_signing_public_key(seed: &[u8; 32]) -> SigningPublicKey {
     }
 }
 
-/// Canton's hash of a serialized versioned topology transaction, which each
-/// signature on the transaction covers: a SHA-256 multihash over the 4-byte
-/// hash purpose and the transaction bytes.
-pub fn topology_transaction_hash(transaction: &[u8]) -> Vec<u8> {
-    let digest = Sha256::new()
-        .chain_update(TOPOLOGY_TRANSACTION_HASH_PURPOSE.to_be_bytes())
-        .chain_update(transaction)
-        .finalize();
-    [SHA256_MULTIHASH_PREFIX.as_slice(), digest.as_slice()].concat()
-}
-
 /// Sign a serialized versioned topology transaction with an Ed25519 seed.
 ///
 /// # Errors
@@ -894,18 +877,6 @@ mod tests {
 
         assert!(store(db, 1).generated_seed(&fingerprint).await?.is_some());
         Ok(())
-    }
-
-    /// The vector comes from an independent computation of Canton's rule:
-    /// SHA-256 over the big-endian purpose 11 and the bytes, behind `1220`.
-    #[test]
-    fn the_topology_hash_follows_cantons_rule() {
-        assert_eq!(
-            hex::encode(topology_transaction_hash(
-                b"a serialized topology transaction"
-            )),
-            "1220ddc8a584bebf95ead3cf2ce22f591ed98c41643025e3ad5ae99399ad6a4a46fa"
-        );
     }
 
     #[test]
