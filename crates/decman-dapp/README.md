@@ -105,8 +105,10 @@ the participant only. A token without participant-admin rights still saves, and
 the next submission to that participant then fails with 403.
 
 The URL and token fields, Replace token and their checks exist only for this
-stand-in. They go away when owners connect their wallets, and the dApp requests
-hosting through each covalidator's tenant API.
+stand-in. They go away when owners connect their wallets. The covalidator
+approvals that the dApp sends go away too. Each covalidator's DecMan node will
+find the pending hosting request itself and approve it under its operator's
+rules. The dApp needs no connection to that node.
 
 ## Try it without a localnet
 
