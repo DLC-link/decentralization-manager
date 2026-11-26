@@ -635,6 +635,75 @@ fn governance_confirm_resolves_the_party_and_sends_the_frontend_body() {
     assert_eq!(outcome.value, json!({ "message": "confirmed" }));
 }
 
+#[test]
+fn expire_prints_the_unresponsive_party() {
+    // Arrange
+    let offline = "member-c::1220cccc";
+    let fake = Fake::start();
+    fake.token_grant("password", "a-1", 1);
+    fake.mount(
+        Mock::given(method("GET"))
+            .and(path("/decentralized-parties"))
+            .respond_with(party_list(ALPHA, 2, &["PAR::1"]))
+            .expect(1),
+    );
+    fake.mount(
+        Mock::given(method("GET"))
+            .and(path("/governance/confirmations"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "threshold": 2,
+                "rules_contract_id": "rules-1",
+                "actions": [],
+                "domain_actions": [{
+                    "proposal_cid": "p-1",
+                    "action_label": "SetupUtility",
+                    "confirmations": [
+                        { "contract_id": "c-1", "confirming_party": offline, "expires_at": 1 },
+                    ],
+                    "confirmation_count": 1,
+                    "can_execute": false,
+                }],
+            })))
+            .expect(1),
+    );
+    let error = format!(
+        "Failed to expire confirmation: the mediator timed out waiting for confirmations \
+         (MEDIATOR_SAYS_TX_TIMED_OUT). Unresponsive: {offline}. The participant that hosts \
+         each of these parties must be online to confirm."
+    );
+    fake.mount(
+        Mock::given(method("POST"))
+            .and(path("/governance/expire"))
+            .and(body_json(json!({
+                "party_id": ALPHA,
+                "rules_contract_id": "rules-1",
+                "confirmation_cid": "c-1",
+                "governance_type": "core_domain",
+            })))
+            .respond_with(ResponseTemplate::new(504).set_body_json(json!({ "error": error })))
+            .expect(1),
+    );
+
+    // Act
+    let failure = run_command(
+        &fake,
+        parse(&[
+            "governance",
+            "expire",
+            "--party",
+            "alpha",
+            "--confirmation",
+            "c-1",
+        ]),
+    )
+    .unwrap_err();
+
+    // Assert
+    let api = failure.downcast_ref::<crate::api::ApiError>().unwrap();
+    assert_eq!(api.status, reqwest::StatusCode::GATEWAY_TIMEOUT);
+    assert!(failure.to_string().contains(&error), "{failure}");
+}
+
 #[cfg(unix)]
 #[test]
 fn grant_rights_takes_the_admin_client_from_the_profile() {

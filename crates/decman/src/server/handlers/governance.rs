@@ -1,16 +1,22 @@
-use std::{collections::HashSet, sync::LazyLock};
+use std::{
+    collections::HashSet,
+    sync::LazyLock,
+    time::{Duration, Instant},
+};
 
-use actix_web::{HttpRequest, HttpResponse, Responder, get, post, web};
+use actix_web::{HttpRequest, HttpResponse, Responder, get, http::StatusCode, post, web};
 use anyhow::Context;
 use base64::Engine;
 use prometheus::IntCounterVec;
 use serde::Deserialize;
+use sqlx::SqlitePool;
+use tracing::Instrument;
 
 use crate::server::ledger_paging::AcsCursor;
 use canton_proto_rs::com::{
     daml::ledger::api::v2::{
-        CreatedEvent, DisclosedContract, SubmitAndWaitForTransactionRequest, SubmitAndWaitRequest,
-        command_service_client::CommandServiceClient, value,
+        Commands, CreatedEvent, DisclosedContract, SubmitAndWaitForTransactionRequest,
+        SubmitAndWaitRequest, command_service_client::CommandServiceClient, value,
     },
     digitalasset::canton::topology::admin::v30::{
         BaseQuery, ListDecentralizedNamespaceDefinitionRequest, StoreId, Synchronizer, base_query,
@@ -51,15 +57,16 @@ use crate::{
     noise::{Message, MessageType, NoiseKeypair, parse_public_key, send_noise_message},
     server::{
         AppState,
-        audit::{AuditEvent, AuditParams, spawn_audit_log, with_proposal_cid},
+        audit::{AuditEvent, AuditParams, log_governance_audit, with_proposal_cid},
         chain_audit,
+        ledger_rejection::{LedgerConnectionFailed, ReadTimedOut, submission_failure},
         middleware::require_admin,
         queries::{
             GovernanceQueue, get_governance_confirmations,
             get_governance_state as query_governance_state, resolve_contract_package_ref,
             select_input_holdings,
         },
-        scan::{self, OpenMiningRound, ScanNotConfigured},
+        scan::{self, OpenMiningRound, ScanNotConfigured, ScanRefused},
         transfer_context::{
             AcceptTransferContext, ProposeTransferArgs, fetch as fetch_accept_transfer_context,
             fetch_factory_for_propose, fetch_proposal_created_event, has_template,
@@ -698,6 +705,17 @@ impl ActionStep {
             Self::CancelProposal => "cancel_proposal",
         }
     }
+
+    fn audit_event(self) -> AuditEvent {
+        match self {
+            Self::Propose => AuditEvent::Propose,
+            Self::Confirm => AuditEvent::Confirm,
+            Self::Execute => AuditEvent::Execute,
+            Self::Expire => AuditEvent::Expire,
+            Self::CancelConfirmation => AuditEvent::Cancel,
+            Self::CancelProposal => AuditEvent::CancelProposal,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -708,14 +726,6 @@ enum ActionOutcome {
 
 impl ActionOutcome {
     const ALL: [Self; 2] = [Self::Ok, Self::Error];
-
-    fn of<T>(result: &Result<T>) -> Self {
-        if result.is_ok() {
-            Self::Ok
-        } else {
-            Self::Error
-        }
-    }
 
     fn label(self) -> &'static str {
         match self {
@@ -746,6 +756,171 @@ fn count_action(step: ActionStep, outcome: ActionOutcome) {
     ACTIONS
         .with_label_values(&[step.label(), outcome.label()])
         .inc();
+}
+
+// ============================================================================
+// Spawned Writes
+// ============================================================================
+
+/// How long a governance write waits for the ledger, across the reads before
+/// it and all its submissions. Without a deadline, a write whose caller hung up waits until
+/// Canton stops tracking the command. The deployment guide asks a proxy to
+/// wait longer than this, so DecMan's own answer reaches the caller.
+const SUBMISSION_DEADLINE: Duration = Duration::from_secs(130);
+
+/// When a write that starts now stops waiting.
+fn write_deadline() -> Instant {
+    Instant::now() + SUBMISSION_DEADLINE
+}
+
+/// `read` bounded by what is left of the write's `deadline`. A read that does
+/// not answer in time ends the write before it sends anything.
+async fn read_before_write<T>(deadline: Instant, read: impl Future<Output = T>) -> Result<T> {
+    tokio::time::timeout(deadline.saturating_duration_since(Instant::now()), read)
+        .await
+        .map_err(|_| ReadTimedOut.into())
+}
+
+/// A Ledger API request as `token` that waits for the ledger until
+/// `deadline`. A write's later submissions get only what is left of it.
+fn ledger_request<T>(message: T, token: &str, deadline: Instant) -> Result<tonic::Request<T>> {
+    let mut request = tonic::Request::new(message);
+    request
+        .metadata_mut()
+        .insert("authorization", format!("Bearer {token}").parse()?);
+    request.set_timeout(deadline.saturating_duration_since(Instant::now()));
+    Ok(request)
+}
+
+/// The audit row of a governance write, before its outcome is known.
+struct WriteRecord {
+    step: ActionStep,
+    party_id: CantonId,
+    member_party_id: CantonId,
+    governance_type: GovernanceType,
+    action_summary: String,
+    details: String,
+}
+
+impl WriteRecord {
+    /// Counts the write, logs its failure, and writes its audit row. Returns
+    /// the failure for the caller once the row is written, so a caller that
+    /// reads the audit trail right after the answer finds it.
+    async fn finish(self, db: SqlitePool, submitted: Submitted) -> Option<(StatusCode, String)> {
+        let (outcome, status) = match submitted.failure {
+            Some(_) => (ActionOutcome::Error, "failed"),
+            None => (ActionOutcome::Ok, "success"),
+        };
+        count_action(self.step, outcome);
+        if let Some((_, error)) = &submitted.failure {
+            tracing::error!("{error}");
+        }
+        let details = match &submitted.proposal_cid {
+            Some(cid) => with_proposal_cid(&self.details, cid),
+            None => self.details,
+        };
+        log_governance_audit(
+            &db,
+            AuditParams {
+                event_type: self.step.audit_event(),
+                party_id: self.party_id,
+                member_party_id: self.member_party_id,
+                governance_type: self.governance_type,
+                action_summary: self.action_summary,
+                details,
+                status,
+                error_message: submitted.failure.as_ref().map(|(_, error)| error.clone()),
+            },
+        )
+        .await;
+        submitted.failure
+    }
+}
+
+/// How a governance write's submission ended.
+struct Submitted {
+    /// The status and message for the caller when the write failed.
+    failure: Option<(StatusCode, String)>,
+    /// The proposal a propose created. Its audit row names it even when the
+    /// proposer's own confirmation failed afterwards.
+    proposal_cid: Option<String>,
+}
+
+impl Submitted {
+    fn failed(status: StatusCode, error: String) -> Self {
+        Self {
+            failure: Some((status, error)),
+            proposal_cid: None,
+        }
+    }
+
+    /// The end of a submission whose error `failure` turns into the caller's
+    /// status and message.
+    fn of(result: Result, failure: impl FnOnce(&anyhow::Error) -> (StatusCode, String)) -> Self {
+        Self {
+            failure: result.err().map(|e| failure(&e)),
+            proposal_cid: None,
+        }
+    }
+
+    fn of_proposal(self, proposal_cid: String) -> Self {
+        Self {
+            proposal_cid: Some(proposal_cid),
+            ..self
+        }
+    }
+}
+
+/// Runs a governance write to its end on its own task, then counts it and
+/// writes its audit row. Answers with `success`, or with the failure.
+///
+/// A proxy can hang up before the mediator decides, and the server then drops
+/// the handler. The write still ends, so its audit row records the cause. The
+/// submission runs on a further task, so a panic in it still leaves a failed
+/// row.
+async fn run_write<F>(
+    db: SqlitePool,
+    record: WriteRecord,
+    success: &'static str,
+    submission: F,
+) -> HttpResponse
+where
+    F: Future<Output = Submitted> + Send + 'static,
+{
+    let step = record.step.label();
+    // Every line the submission logs, the full error chain among them, then
+    // names the party and the write, so an operator can find it.
+    let span = tracing::warn_span!(
+        "governance_write",
+        party_id = %record.party_id,
+        write = %step
+    );
+    let submission = submission.instrument(span);
+    let write = tokio::spawn(async move {
+        let submitted = tokio::spawn(submission).await.unwrap_or_else(|e| {
+            tracing::error!("The {step} submission ended without an outcome: {e}");
+            Submitted::failed(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!(
+                    "The {step} submission ended without an outcome. See the DecMan server log."
+                ),
+            )
+        });
+        record.finish(db, submitted).await
+    });
+    let failure = write.await.unwrap_or_else(|e| {
+        tracing::error!("The {step} write ended without an outcome: {e}");
+        Some((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("The {step} write ended without an outcome. See the DecMan server log."),
+        ))
+    });
+    match failure {
+        None => HttpResponse::Ok().json(MessageResponse {
+            message: success.to_string(),
+        }),
+        Some((status, error)) => HttpResponse::build(status).json(ErrorResponse { error }),
+    }
 }
 
 /// True when this proposal, on a decparty that already has a live
@@ -794,7 +969,8 @@ fn credential_id_nonce() -> String {
         (status = 404, description = "No credentials configured for party", body = ErrorResponse),
         (status = 409, description = "A CouponReassignmentDelegation is already active; set prior_delegation to replace it", body = ErrorResponse),
         (status = 500, description = "Internal server error", body = ErrorResponse),
-        (status = 503, description = "Node not provisioned for this proposal: the target package is not configured (the response says so, and whether the proposal was already created), or it cannot be confirmed whether a CouponReassignmentDelegation is already active", body = ErrorResponse)
+        (status = 503, description = "Node not provisioned for this proposal: the target package is not configured (the response says so, and whether the proposal was already created), or it cannot be confirmed whether a CouponReassignmentDelegation is already active", body = ErrorResponse),
+        (status = 504, description = "The mediator timed out waiting for confirmations; the error names the parties that did not answer", body = ErrorResponse)
     )
 )]
 #[post("/governance/propose")]
@@ -868,12 +1044,6 @@ pub async fn propose_action(
             }
         }
     }
-
-    let audit_pool = data.db.clone();
-    let audit_summary = crate::server::audit::proposal_summary(&body.proposal);
-    let audit_details = serde_json::to_string(&*body).unwrap_or_default();
-    let audit_party_id = party_id.clone();
-    let audit_member = member_party_id.clone();
 
     let packages = packages();
 
@@ -1093,13 +1263,48 @@ pub async fn propose_action(
         }
     };
 
-    let channel = match data.config.ledger_channel().await {
+    let record = WriteRecord {
+        step: ActionStep::Propose,
+        party_id: party_id.clone(),
+        member_party_id: member_party_id.clone(),
+        governance_type: GovernanceType::CoreDomain,
+        action_summary: crate::server::audit::proposal_summary(&body.proposal),
+        details: serde_json::to_string(&*body).unwrap_or_default(),
+    };
+    let db = data.db.clone();
+    let submission = submit_proposal(
+        data,
+        commands,
+        token,
+        record.member_party_id.clone(),
+        body.into_inner(),
+        write_deadline(),
+    );
+    run_write(db, record, "Proposal created and confirmed", submission).await
+}
+
+/// Creates a proposal from `commands`, then confirms it as the proposer.
+///
+/// Both submissions, and the ledger read between them, share one budget that
+/// ends at `deadline`, so a propose waits no longer than any other write.
+async fn submit_proposal(
+    data: web::Data<AppState>,
+    commands: Commands,
+    token: String,
+    member_party_id: CantonId,
+    body: ProposeActionRequest,
+    deadline: Instant,
+) -> Submitted {
+    let channel = match data
+        .config
+        .ledger_channel()
+        .await
+        .context(LedgerConnectionFailed)
+    {
         Ok(channel) => channel,
         Err(e) => {
-            count_action(ActionStep::Propose, ActionOutcome::Error);
-            return HttpResponse::InternalServerError().json(ErrorResponse {
-                error: format!("Failed to connect to ledger API: {e:#}"),
-            });
+            let (status, error) = submission_failure("Failed to create proposal", &e);
+            return Submitted::failed(status, error);
         }
     };
 
@@ -1107,51 +1312,36 @@ pub async fn propose_action(
         CommandServiceClient::new(channel).max_decoding_message_size(utils::MAX_GRPC_MESSAGE_SIZE);
 
     // Step 1: Create the proposal and get the contract ID back
-    let mut create_req = tonic::Request::new(SubmitAndWaitForTransactionRequest {
+    let create = SubmitAndWaitForTransactionRequest {
         commands: Some(commands),
         transaction_format: None,
-    });
-    create_req
-        .metadata_mut()
-        .insert("authorization", format!("Bearer {token}").parse().unwrap());
-
-    let proposal_cid = match client.submit_and_wait_for_transaction(create_req).await {
+    };
+    let created: Result<_> = async {
+        let request = ledger_request(create, &token, deadline)?;
+        Ok(client.submit_and_wait_for_transaction(request).await?)
+    }
+    .await;
+    let proposal_cid = match created {
         Ok(response) => {
-            // Extract created contract ID from the transaction events
-            match response
-                .into_inner()
-                .transaction
-                .as_ref()
-                .and_then(first_created_contract_id)
-            {
+            let transaction = response.into_inner().transaction;
+            match transaction.as_ref().and_then(first_created_contract_id) {
                 Some(cid) => cid,
                 None => {
-                    count_action(ActionStep::Propose, ActionOutcome::Error);
-                    return HttpResponse::InternalServerError().json(ErrorResponse {
-                        error: "Proposal created but could not extract contract ID".to_string(),
-                    });
+                    let update_id = transaction.map(|t| t.update_id).unwrap_or_default();
+                    return Submitted::failed(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        format!(
+                            "Proposal created in update {update_id} but could not extract \
+                             its contract ID. Find it in `governance pending` and confirm it \
+                             there; do not re-propose."
+                        ),
+                    );
                 }
             }
         }
         Err(e) => {
-            tracing::error!("Failed to create proposal: {e}");
-            count_action(ActionStep::Propose, ActionOutcome::Error);
-            spawn_audit_log(
-                audit_pool,
-                AuditParams {
-                    event_type: AuditEvent::Propose,
-                    party_id: audit_party_id,
-                    member_party_id: audit_member,
-                    governance_type: GovernanceType::CoreDomain,
-                    action_summary: audit_summary,
-                    details: audit_details,
-                    status: "failed",
-                    error_message: Some(format!("Failed to create proposal: {e}")),
-                },
-            );
-            return HttpResponse::InternalServerError().json(ErrorResponse {
-                error: format!("Failed to create proposal: {e}"),
-            });
+            let (status, error) = submission_failure("Failed to create proposal", &e);
+            return Submitted::failed(status, error);
         }
     };
 
@@ -1164,91 +1354,78 @@ pub async fn propose_action(
     // utility proposal reaches here on a node with no governance_core. The
     // proposal is already on the ledger by this point, so the body has to say
     // so — the caller must not retry into a second proposal.
-    let mut rules = match governance_rules_template(&packages) {
+    let mut rules = match governance_rules_template(&packages()) {
         Ok(rules) => rules,
         Err(_) => {
-            count_action(ActionStep::Propose, ActionOutcome::Error);
-            return HttpResponse::ServiceUnavailable().json(ErrorResponse {
-                error: format!(
+            return Submitted::failed(
+                StatusCode::SERVICE_UNAVAILABLE,
+                format!(
                     "Proposal {proposal_cid} was created but could not be confirmed: \
                      governance_core package not configured. Configure it and confirm \
                      the existing proposal; do not re-propose."
                 ),
-            });
+            )
+            .of_proposal(proposal_cid);
         }
     };
 
     // The rules contract may be an out-of-date fallback living under an older
     // governance-core package — exercise it under its actual package ref.
-    rules.package_ref = resolve_contract_package_ref(
-        &data.config,
-        party_id,
-        Some(token.clone()),
-        &body.rules_contract_id,
-        &rules.package_ref,
+    let package_ref = tokio::time::timeout(
+        deadline.saturating_duration_since(Instant::now()),
+        resolve_contract_package_ref(
+            &data.config,
+            &body.party_id,
+            Some(token.clone()),
+            &body.rules_contract_id,
+            &rules.package_ref,
+        ),
     )
     .await;
-
-    let confirm_commands = build_confirm_proposal(
-        &rules,
-        &body.rules_contract_id,
-        &member_party_id,
-        party_id,
-        &proposal_cid,
-        uuid::Uuid::new_v4().to_string(),
-    );
-
-    let mut confirm_req = tonic::Request::new(SubmitAndWaitRequest {
-        commands: Some(confirm_commands),
-    });
-    confirm_req
-        .metadata_mut()
-        .insert("authorization", format!("Bearer {token}").parse().unwrap());
-
-    match client.submit_and_wait(confirm_req).await {
-        Ok(_) => {
-            tracing::info!("Proposal {proposal_cid} confirmed by proposer");
-            count_action(ActionStep::Propose, ActionOutcome::Ok);
-            spawn_audit_log(
-                audit_pool,
-                AuditParams {
-                    event_type: AuditEvent::Propose,
-                    party_id: audit_party_id,
-                    member_party_id: audit_member,
-                    governance_type: GovernanceType::CoreDomain,
-                    action_summary: audit_summary,
-                    details: with_proposal_cid(&audit_details, &proposal_cid),
-                    status: "success",
-                    error_message: None,
-                },
-            );
-            HttpResponse::Ok().json(MessageResponse {
-                message: "Proposal created and confirmed".to_string(),
-            })
-        }
-        Err(e) => {
-            tracing::error!("Proposal created but confirmation failed: {e}");
-            count_action(ActionStep::Propose, ActionOutcome::Error);
-            spawn_audit_log(
-                audit_pool,
-                AuditParams {
-                    event_type: AuditEvent::Propose,
-                    party_id: audit_party_id,
-                    member_party_id: audit_member,
-                    governance_type: GovernanceType::CoreDomain,
-                    action_summary: audit_summary,
-                    details: with_proposal_cid(&audit_details, &proposal_cid),
-                    status: "failed",
-                    error_message: Some(format!("Proposal created but confirmation failed: {e}")),
-                },
-            );
-            HttpResponse::InternalServerError().json(ErrorResponse {
-                error: format!(
-                    "Proposal created (CID: {proposal_cid}) but confirmation failed: {e}"
+    rules.package_ref = match package_ref {
+        Ok(package_ref) => package_ref,
+        Err(_) => {
+            return Submitted::failed(
+                StatusCode::GATEWAY_TIMEOUT,
+                format!(
+                    "Proposal created (CID: {proposal_cid}) but not confirmed: DecMan ran out \
+                     of time while it read the governance rules, before it sent the \
+                     confirmation. Confirm proposal {proposal_cid}; do not re-propose."
                 ),
-            })
+            )
+            .of_proposal(proposal_cid);
         }
+    };
+
+    let confirm = SubmitAndWaitRequest {
+        commands: Some(build_confirm_proposal(
+            &rules,
+            &body.rules_contract_id,
+            &member_party_id,
+            &body.party_id,
+            &proposal_cid,
+            uuid::Uuid::new_v4().to_string(),
+        )),
+    };
+    let confirmed: Result = async {
+        client
+            .submit_and_wait(ledger_request(confirm, &token, deadline)?)
+            .await?;
+        Ok(())
     }
+    .await;
+    if confirmed.is_ok() {
+        tracing::info!("Proposal {proposal_cid} confirmed by proposer");
+    }
+    Submitted::of(confirmed, |e| {
+        let (status, error) = submission_failure(
+            &format!("Proposal created (CID: {proposal_cid}) but confirmation failed"),
+            e,
+        );
+        let advice = format!("Confirm proposal {proposal_cid}; do not re-propose.");
+        (status, format!("{error} {advice}"))
+    })
+    .of_proposal(proposal_cid)
 }
 
 /// Reject an inline action the `core_self` path cannot carry, before any
@@ -1294,7 +1471,8 @@ fn validate_inline_action(
         (status = 401, description = "Unauthorized", body = ErrorResponse),
         (status = 403, description = "Forbidden: admin role required", body = ErrorResponse),
         (status = 404, description = "No credentials configured for party", body = ErrorResponse),
-        (status = 500, description = "Internal server error", body = ErrorResponse)
+        (status = 500, description = "Internal server error", body = ErrorResponse),
+        (status = 504, description = "The mediator timed out waiting for confirmations; the error names the parties that did not answer", body = ErrorResponse)
     )
 )]
 #[post("/governance/confirm")]
@@ -1327,57 +1505,38 @@ pub async fn confirm_action(
         }
     };
 
-    let audit_pool = data.db.clone();
-    let audit_summary = crate::server::audit::action_summary(&body.action);
-    let audit_details = serde_json::to_string(&*body).unwrap_or_default();
-    let audit_party_id = party_id.clone();
-    let audit_member = member_party_id.clone();
-    let audit_gov_type = body.governance_type;
-
-    let packages = packages();
-
-    let result =
-        execute_confirm_action(&data.config, &body, &token, &member_party_id, &packages).await;
-    count_action(ActionStep::Confirm, ActionOutcome::of(&result));
-    match result {
-        Ok(()) => {
-            spawn_audit_log(
-                audit_pool,
-                AuditParams {
-                    event_type: AuditEvent::Confirm,
-                    party_id: audit_party_id,
-                    member_party_id: audit_member,
-                    governance_type: audit_gov_type,
-                    action_summary: audit_summary,
-                    details: audit_details,
-                    status: "success",
-                    error_message: None,
-                },
-            );
-            HttpResponse::Ok().json(MessageResponse {
-                message: "Confirmation submitted successfully".to_string(),
-            })
-        }
-        Err(e) => {
-            tracing::error!("Failed to submit confirmation: {e}");
-            spawn_audit_log(
-                audit_pool,
-                AuditParams {
-                    event_type: AuditEvent::Confirm,
-                    party_id: audit_party_id,
-                    member_party_id: audit_member,
-                    governance_type: audit_gov_type,
-                    action_summary: audit_summary,
-                    details: audit_details,
-                    status: "failed",
-                    error_message: Some(format!("{e}")),
-                },
-            );
-            HttpResponse::InternalServerError().json(ErrorResponse {
-                error: format!("Failed to submit confirmation: {e}"),
-            })
-        }
-    }
+    let record = WriteRecord {
+        step: ActionStep::Confirm,
+        party_id: party_id.clone(),
+        member_party_id: member_party_id.clone(),
+        governance_type: body.governance_type,
+        action_summary: crate::server::audit::action_summary(&body.action),
+        details: serde_json::to_string(&*body).unwrap_or_default(),
+    };
+    let db = data.db.clone();
+    let body = body.into_inner();
+    let deadline = write_deadline();
+    let submission = async move {
+        let result = execute_confirm_action(
+            &data.config,
+            &body,
+            &token,
+            &member_party_id,
+            &packages(),
+            deadline,
+        )
+        .await;
+        Submitted::of(result, |e| {
+            submission_failure("Failed to submit confirmation", e)
+        })
+    };
+    run_write(
+        db,
+        record,
+        "Confirmation submitted successfully",
+        submission,
+    )
+    .await
 }
 
 /// Execute a confirmed governance action using structured ActionType
@@ -1391,7 +1550,8 @@ pub async fn confirm_action(
         (status = 403, description = "Forbidden: admin role required", body = ErrorResponse),
         (status = 404, description = "No credentials configured for party", body = ErrorResponse),
         (status = 422, description = "A paid credential accept needs DECPM_SCAN_URL, which is not set", body = ErrorResponse),
-        (status = 500, description = "Internal server error", body = ErrorResponse)
+        (status = 500, description = "Internal server error", body = ErrorResponse),
+        (status = 504, description = "The mediator timed out waiting for confirmations; the error names the parties that did not answer", body = ErrorResponse)
     )
 )]
 #[post("/governance/execute")]
@@ -1424,83 +1584,63 @@ pub async fn execute_action(
         }
     };
 
-    let audit_pool = data.db.clone();
-    let audit_summary = crate::server::audit::action_summary(&body.action);
     // Redact disclosed contract blobs (can be very large) before storing in audit
     let mut redacted = body.clone();
     for dc in &mut redacted.disclosed_contracts {
         dc.blob = format!("<{} bytes>", dc.blob.len());
     }
-    let audit_details = serde_json::to_string(&redacted).unwrap_or_default();
-    let audit_party_id = party_id.clone();
-    let audit_member = member_party_id.clone();
-    let audit_gov_type = body.governance_type;
-
-    let packages = packages();
-
-    let result = execute_confirmed_action(
-        &data.config,
-        &data.http_client,
-        &body,
-        &token,
-        &member_party_id,
-        &packages,
-    )
-    .await;
-    count_action(ActionStep::Execute, ActionOutcome::of(&result));
-    match result {
-        Ok(()) => {
-            spawn_audit_log(
-                audit_pool,
-                AuditParams {
-                    event_type: AuditEvent::Execute,
-                    party_id: audit_party_id,
-                    member_party_id: audit_member,
-                    governance_type: audit_gov_type,
-                    action_summary: audit_summary,
-                    details: audit_details,
-                    status: "success",
-                    error_message: None,
-                },
-            );
-            HttpResponse::Ok().json(MessageResponse {
-                message: "Action executed successfully".to_string(),
-            })
-        }
-        Err(e) => {
-            tracing::error!("Failed to execute action: {e:#}");
-            spawn_audit_log(
-                audit_pool,
-                AuditParams {
-                    event_type: AuditEvent::Execute,
-                    party_id: audit_party_id,
-                    member_party_id: audit_member,
-                    governance_type: audit_gov_type,
-                    action_summary: audit_summary,
-                    details: audit_details,
-                    status: "failed",
-                    error_message: Some(format!("{e:#}")),
-                },
-            );
-            execute_failure_response(&e)
-        }
-    }
+    let record = WriteRecord {
+        step: ActionStep::Execute,
+        party_id: party_id.clone(),
+        member_party_id: member_party_id.clone(),
+        governance_type: body.governance_type,
+        action_summary: crate::server::audit::action_summary(&body.action),
+        details: serde_json::to_string(&redacted).unwrap_or_default(),
+    };
+    let db = data.db.clone();
+    let body = body.into_inner();
+    let deadline = write_deadline();
+    let submission = async move {
+        let result = execute_confirmed_action(
+            &data.config,
+            &data.http_client,
+            &body,
+            &token,
+            &member_party_id,
+            &packages(),
+            deadline,
+        )
+        .await;
+        Submitted::of(result, execute_failure)
+    };
+    run_write(db, record, "Action executed successfully", submission).await
 }
 
-/// The execute handler's answer to a failed execute. A node without
-/// `DECPM_SCAN_URL` cannot disclose what a paid credential accept reads. That
-/// is a setting the caller can fix, so it is a 422, not a server fault. The
-/// message carries the whole error chain, so a scan 403 reads differently from
-/// a malformed reply or a dropped connection.
-fn execute_failure_response(e: &anyhow::Error) -> HttpResponse {
-    let mut response = if e.downcast_ref::<ScanNotConfigured>().is_some() {
-        HttpResponse::UnprocessableEntity()
-    } else {
-        HttpResponse::InternalServerError()
-    };
-    response.json(ErrorResponse {
-        error: format!("Failed to execute action: {e:#}"),
-    })
+/// The execute handler's status and message for a failed execute. A node
+/// without `DECPM_SCAN_URL` cannot disclose what a paid credential accept
+/// reads. That is a setting the caller can fix, so it is a 422, not a server
+/// fault. The message names the cause without internal detail. A scan error
+/// also names scan's HTTP status in the message, because that status is not
+/// internal. A scan 403 then reads differently from a malformed reply or a
+/// dropped connection. The answer itself stays a 500: scan refused DecMan,
+/// not the caller.
+fn execute_failure(e: &anyhow::Error) -> (StatusCode, String) {
+    let (status, error) = submission_failure("Failed to execute action", e);
+    if e.downcast_ref::<ScanNotConfigured>().is_some() {
+        return (StatusCode::UNPROCESSABLE_ENTITY, error);
+    }
+    if let Some(refused) = e.downcast_ref::<ScanRefused>() {
+        let cause = e.to_string();
+        let cause = cause.trim_end_matches('.');
+        return (
+            status,
+            format!(
+                "Failed to execute action: {cause} (scan answered {}). See the DecMan server log.",
+                refused.status
+            ),
+        );
+    }
+    (status, error)
 }
 
 /// Expire a stale governance confirmation
@@ -1512,7 +1652,8 @@ fn execute_failure_response(e: &anyhow::Error) -> HttpResponse {
         (status = 401, description = "Unauthorized", body = ErrorResponse),
         (status = 403, description = "Forbidden: admin role required", body = ErrorResponse),
         (status = 404, description = "No credentials configured for party", body = ErrorResponse),
-        (status = 500, description = "Internal server error", body = ErrorResponse)
+        (status = 500, description = "Internal server error", body = ErrorResponse),
+        (status = 504, description = "The mediator timed out waiting for confirmations; the error names the parties that did not answer", body = ErrorResponse)
     )
 )]
 #[post("/governance/expire")]
@@ -1541,56 +1682,32 @@ pub async fn expire_confirmation(
         }
     };
 
-    let audit_pool = data.db.clone();
-    let audit_details = serde_json::to_string(&*body).unwrap_or_default();
-    let audit_party_id = party_id.clone();
-    let audit_member = member_party_id.clone();
-    let audit_gov_type = body.governance_type;
-
-    let packages = packages();
-
-    let result =
-        execute_expire_confirmation(&data.config, &body, &token, &member_party_id, &packages).await;
-    count_action(ActionStep::Expire, ActionOutcome::of(&result));
-    match result {
-        Ok(()) => {
-            spawn_audit_log(
-                audit_pool,
-                AuditParams {
-                    event_type: AuditEvent::Expire,
-                    party_id: audit_party_id,
-                    member_party_id: audit_member,
-                    governance_type: audit_gov_type,
-                    action_summary: "expire_confirmation".to_string(),
-                    details: audit_details,
-                    status: "success",
-                    error_message: None,
-                },
-            );
-            HttpResponse::Ok().json(MessageResponse {
-                message: "Confirmation expired successfully".to_string(),
-            })
-        }
-        Err(e) => {
-            tracing::error!("Failed to expire confirmation: {e}");
-            spawn_audit_log(
-                audit_pool,
-                AuditParams {
-                    event_type: AuditEvent::Expire,
-                    party_id: audit_party_id,
-                    member_party_id: audit_member,
-                    governance_type: audit_gov_type,
-                    action_summary: "expire_confirmation".to_string(),
-                    details: audit_details,
-                    status: "failed",
-                    error_message: Some(format!("{e}")),
-                },
-            );
-            HttpResponse::InternalServerError().json(ErrorResponse {
-                error: format!("Failed to expire confirmation: {e}"),
-            })
-        }
-    }
+    let record = WriteRecord {
+        step: ActionStep::Expire,
+        party_id: party_id.clone(),
+        member_party_id: member_party_id.clone(),
+        governance_type: body.governance_type,
+        action_summary: "expire_confirmation".to_string(),
+        details: serde_json::to_string(&*body).unwrap_or_default(),
+    };
+    let db = data.db.clone();
+    let body = body.into_inner();
+    let deadline = write_deadline();
+    let submission = async move {
+        let result = execute_expire_confirmation(
+            &data.config,
+            &body,
+            &token,
+            &member_party_id,
+            &packages(),
+            deadline,
+        )
+        .await;
+        Submitted::of(result, |e| {
+            submission_failure("Failed to expire confirmation", e)
+        })
+    };
+    run_write(db, record, "Confirmation expired successfully", submission).await
 }
 
 /// Cancel (revoke) own governance confirmation
@@ -1602,7 +1719,8 @@ pub async fn expire_confirmation(
         (status = 401, description = "Unauthorized", body = ErrorResponse),
         (status = 403, description = "Forbidden: admin role required", body = ErrorResponse),
         (status = 404, description = "No credentials configured for party", body = ErrorResponse),
-        (status = 500, description = "Internal server error", body = ErrorResponse)
+        (status = 500, description = "Internal server error", body = ErrorResponse),
+        (status = 504, description = "The mediator timed out waiting for confirmations; the error names the parties that did not answer", body = ErrorResponse)
     )
 )]
 #[post("/governance/cancel")]
@@ -1630,56 +1748,38 @@ pub async fn cancel_confirmation(
         }
     };
 
-    let audit_pool = data.db.clone();
-    let audit_details = serde_json::to_string(&*body).unwrap_or_default();
-    let audit_party_id = party_id.clone();
-    let audit_member = member_party_id.clone();
-    let audit_gov_type = body.governance_type;
-
-    let packages = packages();
-
-    let result =
-        execute_cancel_confirmation(&data.config, &body, &token, &member_party_id, &packages).await;
-    count_action(ActionStep::CancelConfirmation, ActionOutcome::of(&result));
-    match result {
-        Ok(()) => {
-            spawn_audit_log(
-                audit_pool,
-                AuditParams {
-                    event_type: AuditEvent::Cancel,
-                    party_id: audit_party_id,
-                    member_party_id: audit_member,
-                    governance_type: audit_gov_type,
-                    action_summary: "cancel_confirmation".to_string(),
-                    details: audit_details,
-                    status: "success",
-                    error_message: None,
-                },
-            );
-            HttpResponse::Ok().json(MessageResponse {
-                message: "Confirmation cancelled successfully".to_string(),
-            })
-        }
-        Err(e) => {
-            tracing::error!("Failed to cancel confirmation: {e}");
-            spawn_audit_log(
-                audit_pool,
-                AuditParams {
-                    event_type: AuditEvent::Cancel,
-                    party_id: audit_party_id,
-                    member_party_id: audit_member,
-                    governance_type: audit_gov_type,
-                    action_summary: "cancel_confirmation".to_string(),
-                    details: audit_details,
-                    status: "failed",
-                    error_message: Some(format!("{e}")),
-                },
-            );
-            HttpResponse::InternalServerError().json(ErrorResponse {
-                error: format!("Failed to cancel confirmation: {e}"),
-            })
-        }
-    }
+    let record = WriteRecord {
+        step: ActionStep::CancelConfirmation,
+        party_id: party_id.clone(),
+        member_party_id: member_party_id.clone(),
+        governance_type: body.governance_type,
+        action_summary: "cancel_confirmation".to_string(),
+        details: serde_json::to_string(&*body).unwrap_or_default(),
+    };
+    let db = data.db.clone();
+    let body = body.into_inner();
+    let deadline = write_deadline();
+    let submission = async move {
+        let result = execute_cancel_confirmation(
+            &data.config,
+            &body,
+            &token,
+            &member_party_id,
+            &packages(),
+            deadline,
+        )
+        .await;
+        Submitted::of(result, |e| {
+            submission_failure("Failed to cancel confirmation", e)
+        })
+    };
+    run_write(
+        db,
+        record,
+        "Confirmation cancelled successfully",
+        submission,
+    )
+    .await
 }
 
 /// Retract a proposal the caller proposed
@@ -1691,7 +1791,8 @@ pub async fn cancel_confirmation(
         (status = 401, description = "Unauthorized", body = ErrorResponse),
         (status = 403, description = "Forbidden: admin role required", body = ErrorResponse),
         (status = 404, description = "No credentials configured for party", body = ErrorResponse),
-        (status = 500, description = "Internal server error", body = ErrorResponse)
+        (status = 500, description = "Internal server error", body = ErrorResponse),
+        (status = 504, description = "The mediator timed out waiting for confirmations; the error names the parties that did not answer", body = ErrorResponse)
     )
 )]
 #[post("/governance/cancel-proposal")]
@@ -1719,55 +1820,32 @@ pub async fn cancel_proposal(
         }
     };
 
-    let audit_pool = data.db.clone();
-    let audit_details = serde_json::to_string(&*body).unwrap_or_default();
-    let audit_party_id = party_id.clone();
-    let audit_member = member_party_id.clone();
-
-    let packages = packages();
-
-    let result =
-        execute_cancel_proposal(&data.config, &body, &token, &member_party_id, &packages).await;
-    count_action(ActionStep::CancelProposal, ActionOutcome::of(&result));
-    match result {
-        Ok(()) => {
-            spawn_audit_log(
-                audit_pool,
-                AuditParams {
-                    event_type: AuditEvent::CancelProposal,
-                    party_id: audit_party_id,
-                    member_party_id: audit_member,
-                    governance_type: GovernanceType::CoreDomain,
-                    action_summary: "cancel_proposal".to_string(),
-                    details: audit_details,
-                    status: "success",
-                    error_message: None,
-                },
-            );
-            HttpResponse::Ok().json(MessageResponse {
-                message: "Proposal cancelled successfully".to_string(),
-            })
-        }
-        Err(e) => {
-            tracing::error!("Failed to cancel proposal: {e}");
-            spawn_audit_log(
-                audit_pool,
-                AuditParams {
-                    event_type: AuditEvent::CancelProposal,
-                    party_id: audit_party_id,
-                    member_party_id: audit_member,
-                    governance_type: GovernanceType::CoreDomain,
-                    action_summary: "cancel_proposal".to_string(),
-                    details: audit_details,
-                    status: "failed",
-                    error_message: Some(format!("{e}")),
-                },
-            );
-            HttpResponse::InternalServerError().json(ErrorResponse {
-                error: format!("Failed to cancel proposal: {e}"),
-            })
-        }
-    }
+    let record = WriteRecord {
+        step: ActionStep::CancelProposal,
+        party_id: party_id.clone(),
+        member_party_id: member_party_id.clone(),
+        governance_type: GovernanceType::CoreDomain,
+        action_summary: "cancel_proposal".to_string(),
+        details: serde_json::to_string(&*body).unwrap_or_default(),
+    };
+    let db = data.db.clone();
+    let body = body.into_inner();
+    let deadline = write_deadline();
+    let submission = async move {
+        let result = execute_cancel_proposal(
+            &data.config,
+            &body,
+            &token,
+            &member_party_id,
+            &packages(),
+            deadline,
+        )
+        .await;
+        Submitted::of(result, |e| {
+            submission_failure("Failed to cancel proposal", e)
+        })
+    };
+    run_write(db, record, "Proposal cancelled successfully", submission).await
 }
 
 /// Get the decparty's active CouponReassignmentDelegation contracts, newest first
@@ -2009,6 +2087,7 @@ async fn execute_confirm_action(
     token: &str,
     member_party_id: &CantonId,
     packages: &PackageConfig,
+    deadline: Instant,
 ) -> Result {
     let command_id = uuid::Uuid::new_v4().to_string();
     let commands = match request.governance_type {
@@ -2017,14 +2096,17 @@ async fn execute_confirm_action(
             // The rules contract may be an out-of-date fallback living under an
             // older governance-core package — exercise it under its actual
             // package ref.
-            rules.package_ref = resolve_contract_package_ref(
-                config,
-                &request.party_id,
-                Some(token.to_string()),
-                &request.rules_contract_id,
-                &rules.package_ref,
+            rules.package_ref = read_before_write(
+                deadline,
+                resolve_contract_package_ref(
+                    config,
+                    &request.party_id,
+                    Some(token.to_string()),
+                    &request.rules_contract_id,
+                    &rules.package_ref,
+                ),
             )
-            .await;
+            .await?;
             build_confirm_self_action(
                 &rules,
                 &request.rules_contract_id,
@@ -2040,14 +2122,17 @@ async fn execute_confirm_action(
                 .proposal_cid
                 .as_deref()
                 .context("proposal_cid required for core_domain confirm")?;
-            rules.package_ref = resolve_contract_package_ref(
-                config,
-                &request.party_id,
-                Some(token.to_string()),
-                &request.rules_contract_id,
-                &rules.package_ref,
+            rules.package_ref = read_before_write(
+                deadline,
+                resolve_contract_package_ref(
+                    config,
+                    &request.party_id,
+                    Some(token.to_string()),
+                    &request.rules_contract_id,
+                    &rules.package_ref,
+                ),
             )
-            .await;
+            .await?;
             build_confirm_proposal(
                 &rules,
                 &request.rules_contract_id,
@@ -2059,18 +2144,22 @@ async fn execute_confirm_action(
         }
     };
 
-    let channel = config.ledger_channel().await?;
+    let channel = config
+        .ledger_channel()
+        .await
+        .context(LedgerConnectionFailed)?;
 
     let mut client =
         CommandServiceClient::new(channel).max_decoding_message_size(utils::MAX_GRPC_MESSAGE_SIZE);
 
-    let mut req = tonic::Request::new(SubmitAndWaitRequest {
-        commands: Some(commands),
-    });
-    req.metadata_mut()
-        .insert("authorization", format!("Bearer {token}").parse().unwrap());
-
-    client.submit_and_wait(req).await?;
+    let request = ledger_request(
+        SubmitAndWaitRequest {
+            commands: Some(commands),
+        },
+        token,
+        deadline,
+    )?;
+    client.submit_and_wait(request).await?;
 
     Ok(())
 }
@@ -2083,6 +2172,7 @@ async fn execute_confirmed_action(
     token: &str,
     member_party_id: &CantonId,
     packages: &PackageConfig,
+    deadline: Instant,
 ) -> Result {
     // The executor's submission must carry the contracts the proposal's
     // execute step reads but no member can see. `AcceptTransferProposal` needs
@@ -2095,13 +2185,16 @@ async fn execute_confirmed_action(
     let mut registry_disclosed: Vec<DisclosedContract> = Vec::new();
     let mut proposal_event: Option<CreatedEvent> = None;
     if let Some(proposal_cid) = request.proposal_cid.as_deref() {
-        match fetch_proposal_created_event(
-            config,
-            Some(token.to_string()),
-            &request.party_id,
-            proposal_cid,
+        match read_before_write(
+            deadline,
+            fetch_proposal_created_event(
+                config,
+                Some(token.to_string()),
+                &request.party_id,
+                proposal_cid,
+            ),
         )
-        .await
+        .await?
         {
             Ok(event) => proposal_event = event,
             // Don't hard-fail on ledger hiccups here; the submission below
@@ -2112,13 +2205,16 @@ async fn execute_confirmed_action(
     if let (Some(proposal_cid), Some(created)) =
         (request.proposal_cid.as_deref(), proposal_event.as_ref())
     {
-        match maybe_fetch_for_proposal_event(
-            config,
-            Some(token.to_string()),
-            &request.party_id,
-            created,
+        match read_before_write(
+            deadline,
+            maybe_fetch_for_proposal_event(
+                config,
+                Some(token.to_string()),
+                &request.party_id,
+                created,
+            ),
         )
-        .await
+        .await?
         {
             Ok(Some(ctx)) => match to_proto_disclosed_contracts(&ctx.disclosed_contracts) {
                 Ok(dcs) => registry_disclosed = dcs,
@@ -2154,8 +2250,8 @@ async fn execute_confirmed_action(
                     value::Sum::ContractId(cid) => Some(cid.as_str()),
                     _ => None,
                 });
-            let current = fetch_amulet_rules(http_client, config)
-                .await
+            let current = read_before_write(deadline, fetch_amulet_rules(http_client, config))
+                .await?
                 .context("Failed to fetch AmuletRules from the DSO API")?;
             registry_disclosed.push(amulet_rules_disclosure(proposed_cid, &current)?);
         }
@@ -2171,8 +2267,13 @@ async fn execute_confirmed_action(
                 .iter()
                 .map(|dc| dc.contract_id.as_str())
                 .collect();
-            registry_disclosed
-                .extend(paid_accept_disclosures(http_client, config, &pins, &requested).await?);
+            registry_disclosed.extend(
+                read_before_write(
+                    deadline,
+                    paid_accept_disclosures(http_client, config, &pins, &requested),
+                )
+                .await??,
+            );
         }
     }
 
@@ -2209,14 +2310,17 @@ async fn execute_confirmed_action(
             // The rules contract may be an out-of-date fallback living under an
             // older governance-core package — exercise it under its actual
             // package ref.
-            rules.package_ref = resolve_contract_package_ref(
-                config,
-                &request.party_id,
-                Some(token.to_string()),
-                &request.rules_contract_id,
-                &rules.package_ref,
+            rules.package_ref = read_before_write(
+                deadline,
+                resolve_contract_package_ref(
+                    config,
+                    &request.party_id,
+                    Some(token.to_string()),
+                    &request.rules_contract_id,
+                    &rules.package_ref,
+                ),
             )
-            .await;
+            .await?;
             build_execute_self_action(
                 &rules,
                 &request.rules_contract_id,
@@ -2234,14 +2338,17 @@ async fn execute_confirmed_action(
                 .proposal_cid
                 .as_deref()
                 .context("proposal_cid required for core_domain execute")?;
-            rules.package_ref = resolve_contract_package_ref(
-                config,
-                &request.party_id,
-                Some(token.to_string()),
-                &request.rules_contract_id,
-                &rules.package_ref,
+            rules.package_ref = read_before_write(
+                deadline,
+                resolve_contract_package_ref(
+                    config,
+                    &request.party_id,
+                    Some(token.to_string()),
+                    &request.rules_contract_id,
+                    &rules.package_ref,
+                ),
             )
-            .await;
+            .await?;
             build_execute_proposal(
                 &rules,
                 &request.rules_contract_id,
@@ -2255,18 +2362,22 @@ async fn execute_confirmed_action(
         }
     };
 
-    let channel = config.ledger_channel().await?;
+    let channel = config
+        .ledger_channel()
+        .await
+        .context(LedgerConnectionFailed)?;
 
     let mut client =
         CommandServiceClient::new(channel).max_decoding_message_size(utils::MAX_GRPC_MESSAGE_SIZE);
 
-    let mut req = tonic::Request::new(SubmitAndWaitRequest {
-        commands: Some(commands),
-    });
-    req.metadata_mut()
-        .insert("authorization", format!("Bearer {token}").parse().unwrap());
-
-    client.submit_and_wait(req).await?;
+    let request = ledger_request(
+        SubmitAndWaitRequest {
+            commands: Some(commands),
+        },
+        token,
+        deadline,
+    )?;
+    client.submit_and_wait(request).await?;
 
     Ok(())
 }
@@ -2429,6 +2540,7 @@ async fn execute_expire_confirmation(
     token: &str,
     member_party_id: &CantonId,
     packages: &PackageConfig,
+    deadline: Instant,
 ) -> Result {
     // All three flows take the same argument shape ({ member,
     // staleConfirmationCid }); only the template and the choice differ.
@@ -2439,14 +2551,17 @@ async fn execute_expire_confirmation(
             // The rules contract may be an out-of-date fallback living under an
             // older governance-core package — exercise it under its actual
             // package ref.
-            rules.package_ref = resolve_contract_package_ref(
-                config,
-                &request.party_id,
-                Some(token.to_string()),
-                &request.rules_contract_id,
-                &rules.package_ref,
+            rules.package_ref = read_before_write(
+                deadline,
+                resolve_contract_package_ref(
+                    config,
+                    &request.party_id,
+                    Some(token.to_string()),
+                    &request.rules_contract_id,
+                    &rules.package_ref,
+                ),
             )
-            .await;
+            .await?;
             build_expire_self_confirmation(
                 &rules,
                 &request.rules_contract_id,
@@ -2462,14 +2577,17 @@ async fn execute_expire_confirmation(
             // `GovernanceConfirmation` template (domain action confirmations)
             // rather than `GovernanceSelfConfirmation`.
             let mut rules = governance_rules_template(packages)?;
-            rules.package_ref = resolve_contract_package_ref(
-                config,
-                &request.party_id,
-                Some(token.to_string()),
-                &request.rules_contract_id,
-                &rules.package_ref,
+            rules.package_ref = read_before_write(
+                deadline,
+                resolve_contract_package_ref(
+                    config,
+                    &request.party_id,
+                    Some(token.to_string()),
+                    &request.rules_contract_id,
+                    &rules.package_ref,
+                ),
             )
-            .await;
+            .await?;
             build_expire_domain_confirmation(
                 &rules,
                 &request.rules_contract_id,
@@ -2481,18 +2599,22 @@ async fn execute_expire_confirmation(
         }
     };
 
-    let channel = config.ledger_channel().await?;
+    let channel = config
+        .ledger_channel()
+        .await
+        .context(LedgerConnectionFailed)?;
 
     let mut client =
         CommandServiceClient::new(channel).max_decoding_message_size(utils::MAX_GRPC_MESSAGE_SIZE);
 
-    let mut req = tonic::Request::new(SubmitAndWaitRequest {
-        commands: Some(commands),
-    });
-    req.metadata_mut()
-        .insert("authorization", format!("Bearer {token}").parse().unwrap());
-
-    client.submit_and_wait(req).await?;
+    let request = ledger_request(
+        SubmitAndWaitRequest {
+            commands: Some(commands),
+        },
+        token,
+        deadline,
+    )?;
+    client.submit_and_wait(request).await?;
 
     Ok(())
 }
@@ -2504,6 +2626,7 @@ async fn execute_cancel_confirmation(
     token: &str,
     member_party_id: &CantonId,
     packages: &PackageConfig,
+    deadline: Instant,
 ) -> Result {
     // Every `_Cancel` choice is controller=confirmer and takes no arguments;
     // only the confirmation template differs.
@@ -2514,14 +2637,17 @@ async fn execute_cancel_confirmation(
             // The confirmation contract is created by the rules contract's
             // choice, so it shares the rules contract's (possibly out-of-date)
             // package — exercise it under its actual package ref.
-            confirmation.package_ref = resolve_contract_package_ref(
-                config,
-                &request.party_id,
-                Some(token.to_string()),
-                &request.confirmation_cid,
-                &confirmation.package_ref,
+            confirmation.package_ref = read_before_write(
+                deadline,
+                resolve_contract_package_ref(
+                    config,
+                    &request.party_id,
+                    Some(token.to_string()),
+                    &request.confirmation_cid,
+                    &confirmation.package_ref,
+                ),
             )
-            .await;
+            .await?;
             build_cancel_self_confirmation(
                 &confirmation,
                 &request.confirmation_cid,
@@ -2534,14 +2660,17 @@ async fn execute_cancel_confirmation(
             // Domain confirmations live in their own template
             // `GovernanceConfirmation` (module `Governance.Confirmation`).
             let mut confirmation = domain_confirmation_template(packages)?;
-            confirmation.package_ref = resolve_contract_package_ref(
-                config,
-                &request.party_id,
-                Some(token.to_string()),
-                &request.confirmation_cid,
-                &confirmation.package_ref,
+            confirmation.package_ref = read_before_write(
+                deadline,
+                resolve_contract_package_ref(
+                    config,
+                    &request.party_id,
+                    Some(token.to_string()),
+                    &request.confirmation_cid,
+                    &confirmation.package_ref,
+                ),
             )
-            .await;
+            .await?;
             build_cancel_domain_confirmation(
                 &confirmation,
                 &request.confirmation_cid,
@@ -2552,18 +2681,22 @@ async fn execute_cancel_confirmation(
         }
     };
 
-    let channel = config.ledger_channel().await?;
+    let channel = config
+        .ledger_channel()
+        .await
+        .context(LedgerConnectionFailed)?;
 
     let mut client =
         CommandServiceClient::new(channel).max_decoding_message_size(utils::MAX_GRPC_MESSAGE_SIZE);
 
-    let mut req = tonic::Request::new(SubmitAndWaitRequest {
-        commands: Some(commands),
-    });
-    req.metadata_mut()
-        .insert("authorization", format!("Bearer {token}").parse().unwrap());
-
-    client.submit_and_wait(req).await?;
+    let request = ledger_request(
+        SubmitAndWaitRequest {
+            commands: Some(commands),
+        },
+        token,
+        deadline,
+    )?;
+    client.submit_and_wait(request).await?;
 
     Ok(())
 }
@@ -2581,6 +2714,7 @@ async fn execute_cancel_proposal(
     token: &str,
     member_party_id: &CantonId,
     packages: &PackageConfig,
+    deadline: Instant,
 ) -> Result {
     // `GovernableAction_ProposerCancel` is declared on the interface rather
     // than on any one template, so the exercise carries the `GovernableAction`
@@ -2595,14 +2729,17 @@ async fn execute_cancel_proposal(
             let mut confirmation = domain_confirmation_template(packages)?;
             // The confirmation is created by the rules contract's choice, so it
             // shares that contract's possibly out-of-date package.
-            confirmation.package_ref = resolve_contract_package_ref(
-                config,
-                &request.party_id,
-                Some(token.to_string()),
-                cid,
-                &confirmation.package_ref,
+            confirmation.package_ref = read_before_write(
+                deadline,
+                resolve_contract_package_ref(
+                    config,
+                    &request.party_id,
+                    Some(token.to_string()),
+                    cid,
+                    &confirmation.package_ref,
+                ),
             )
-            .await;
+            .await?;
             Some(confirmation)
         }
         None => None,
@@ -2620,18 +2757,22 @@ async fn execute_cancel_proposal(
         uuid::Uuid::new_v4().to_string(),
     );
 
-    let channel = config.ledger_channel().await?;
+    let channel = config
+        .ledger_channel()
+        .await
+        .context(LedgerConnectionFailed)?;
 
     let mut client =
         CommandServiceClient::new(channel).max_decoding_message_size(utils::MAX_GRPC_MESSAGE_SIZE);
 
-    let mut req = tonic::Request::new(SubmitAndWaitRequest {
-        commands: Some(commands),
-    });
-    req.metadata_mut()
-        .insert("authorization", format!("Bearer {token}").parse().unwrap());
-
-    client.submit_and_wait(req).await?;
+    let request = ledger_request(
+        SubmitAndWaitRequest {
+            commands: Some(commands),
+        },
+        token,
+        deadline,
+    )?;
+    client.submit_and_wait(request).await?;
 
     Ok(())
 }
@@ -3070,7 +3211,7 @@ mod get_party_credentials_tests {
     };
 
     #[derive(Clone, Default)]
-    struct LogBuffer(Arc<StdMutex<Vec<u8>>>);
+    pub(super) struct LogBuffer(Arc<StdMutex<Vec<u8>>>);
 
     impl std::io::Write for LogBuffer {
         fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
@@ -3096,7 +3237,7 @@ mod get_party_credentials_tests {
     }
 
     impl LogBuffer {
-        fn captured(&self) -> Result<String> {
+        pub(super) fn captured(&self) -> Result<String> {
             let written = self
                 .0
                 .lock()
@@ -3270,9 +3411,10 @@ mod action_metrics_tests {
         Ok(())
     }
 
-    // The handler tests below read and move the same series, so they take
-    // turns: every test in this binary shares one registry and runs in parallel.
-    static SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+    // Every test that posts to a write handler moves the same series, so they
+    // take turns: every test in this binary shares one registry and runs in
+    // parallel.
+    pub(super) static SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
     /// Posts `body` as an admin through all six governance write handlers.
     async fn post(uri: &str, body: serde_json::Value) -> Result<StatusCode> {
@@ -3396,6 +3538,1075 @@ mod action_metrics_tests {
 }
 
 #[cfg(test)]
+mod mediator_timeout_tests {
+    use std::{
+        convert::Infallible,
+        sync::{Arc, Mutex},
+        time::Duration,
+    };
+
+    use actix_web::{App, http::header::AUTHORIZATION, test as actix_test};
+    use sqlx::SqlitePool;
+    use tokio::sync::Notify;
+    use tonic::{
+        body::Body,
+        codegen::{BoxFuture, Context as TaskContext, Poll, Service, http},
+        server::NamedService,
+        transport::{Server, server::TcpIncoming},
+    };
+
+    use canton_proto_rs::com::daml::ledger::api::v2::{
+        Event, SubmitAndWaitForTransactionResponse, Transaction, event,
+    };
+
+    use super::*;
+    use crate::{
+        auth::MockAuthRegistry,
+        db::MIGRATOR,
+        server::{ledger_rejection::fixtures, middleware::AuthMiddleware},
+        signing::fake_admin_api::unary,
+    };
+
+    const OFFLINE_MEMBER: &str = "member-c::1220cccc";
+
+    /// The Ledger API command service of a participant whose submissions the
+    /// mediator rejects. Each `SubmitAndWait` signals `submitted`, then
+    /// answers with `rejection` once `release` is notified. A
+    /// `SubmitAndWaitForTransaction` is rejected the same way, unless
+    /// `created_proposal` is set: then it answers with a transaction that
+    /// creates that contract. `deadlines` keeps the `grpc-timeout` header of
+    /// every submission. The router answers every other service as
+    /// unimplemented, so the package-ref lookup falls back to the configured
+    /// package.
+    #[derive(Clone)]
+    struct RejectingLedger {
+        rejection: tonic::Status,
+        created_proposal: Option<String>,
+        submitted: Arc<Notify>,
+        release: Arc<Notify>,
+        deadlines: Arc<Mutex<Vec<Option<String>>>>,
+        /// How long the answer that creates `created_proposal` takes.
+        create_delay: Duration,
+        /// Whether that answer leaves out the created contract, as a
+        /// transaction without events does.
+        hide_created_contract: bool,
+    }
+
+    impl RejectingLedger {
+        fn new() -> Self {
+            Self {
+                rejection: fixtures::mediator_timeout(OFFLINE_MEMBER),
+                created_proposal: None,
+                submitted: Arc::new(Notify::new()),
+                release: Arc::new(Notify::new()),
+                deadlines: Arc::default(),
+                create_delay: Duration::ZERO,
+                hide_created_contract: false,
+            }
+        }
+
+        /// The milliseconds each submission's `grpc-timeout` allowed.
+        fn deadline_millis(&self) -> Result<Vec<u64>> {
+            let deadlines = self.deadlines.lock().map_err(|e| anyhow::anyhow!("{e}"))?;
+            deadlines
+                .iter()
+                .map(|header| {
+                    let header = header.as_deref().context("a submission had no deadline")?;
+                    let (value, unit) = header.split_at(header.len() - 1);
+                    let value: u64 = value.parse()?;
+                    Ok(match unit {
+                        "S" => value * 1_000,
+                        "m" => value,
+                        "u" => value / 1_000,
+                        "n" => value / 1_000_000,
+                        other => anyhow::bail!("unexpected grpc-timeout unit {other}"),
+                    })
+                })
+                .collect()
+        }
+
+        /// Serves the ledger on a free local port and returns the port.
+        fn serve(&self) -> Result<u16> {
+            let incoming = TcpIncoming::bind("127.0.0.1:0".parse()?)?;
+            let port = incoming.local_addr()?.port();
+            tokio::spawn(
+                Server::builder()
+                    .add_service(self.clone())
+                    .serve_with_incoming(incoming),
+            );
+            Ok(port)
+        }
+    }
+
+    impl Service<http::Request<Body>> for RejectingLedger {
+        type Response = http::Response<Body>;
+        type Error = Infallible;
+        type Future = BoxFuture<Self::Response, Infallible>;
+
+        fn poll_ready(&mut self, _: &mut TaskContext<'_>) -> Poll<Result<(), Infallible>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn call(&mut self, request: http::Request<Body>) -> Self::Future {
+            let ledger = self.clone();
+            Box::pin(async move {
+                let path = request.uri().path().to_string();
+                let method = path.strip_prefix(&format!("/{}/", Self::NAME));
+                if let (Some("SubmitAndWait" | "SubmitAndWaitForTransaction"), Ok(mut deadlines)) =
+                    (method, ledger.deadlines.lock())
+                {
+                    let deadline = request.headers().get("grpc-timeout");
+                    deadlines.push(deadline.and_then(|v| v.to_str().ok()).map(String::from));
+                }
+                match (method, ledger.created_proposal) {
+                    (Some("SubmitAndWaitForTransaction"), Some(contract_id)) => {
+                        tokio::time::sleep(ledger.create_delay).await;
+                        let mut response = created_transaction(contract_id);
+                        if let (true, Some(transaction)) =
+                            (ledger.hide_created_contract, response.transaction.as_mut())
+                        {
+                            transaction.events.clear();
+                        }
+                        return Ok(
+                            unary(request, move |_: SubmitAndWaitForTransactionRequest| {
+                                Ok(response.clone())
+                            })
+                            .await,
+                        );
+                    }
+                    (Some("SubmitAndWait" | "SubmitAndWaitForTransaction"), _) => {}
+                    _ => return Ok(tonic::Status::unimplemented("").into_http()),
+                }
+                ledger.submitted.notify_one();
+                ledger.release.notified().await;
+                Ok(ledger.rejection.into_http())
+            })
+        }
+    }
+
+    impl NamedService for RejectingLedger {
+        const NAME: &'static str = "com.daml.ledger.api.v2.CommandService";
+    }
+
+    /// The answer to a submission whose transaction creates `contract_id`.
+    fn created_transaction(contract_id: String) -> SubmitAndWaitForTransactionResponse {
+        SubmitAndWaitForTransactionResponse {
+            transaction: Some(Transaction {
+                update_id: "00update".to_string(),
+                events: vec![Event {
+                    event: Some(event::Event::Created(CreatedEvent {
+                        contract_id,
+                        ..Default::default()
+                    })),
+                }],
+                ..Default::default()
+            }),
+        }
+    }
+
+    /// Mock credentials, and the Ledger API at `ledger_port`.
+    async fn state(pool: SqlitePool, ledger_port: u16) -> Result<web::Data<AppState>> {
+        let mut state = AppState::for_test_on(None, pool).into_inner();
+        Arc::get_mut(&mut state)
+            .context("a fresh test state has one owner")?
+            .config
+            .canton
+            .ledger_api_port = ledger_port;
+        let mock = MockAuthRegistry::new(state.party_credentials.clone());
+        *state.auth.write().await = Some(WorkflowAuth::Mock(Arc::new(mock)));
+        Ok(web::Data::from(state))
+    }
+
+    fn party() -> String {
+        format!("dec::1220{}", "ab".repeat(32))
+    }
+
+    fn expire() -> actix_test::TestRequest {
+        actix_test::TestRequest::post()
+            .uri("/governance/expire")
+            .insert_header((AUTHORIZATION, "Bearer any-token"))
+            .set_json(serde_json::json!({
+                "party_id": party(),
+                "rules_contract_id": "00rules",
+                "confirmation_cid": "00c0ffee",
+            }))
+    }
+
+    /// The `(status, error_message)` of the audit row of `event`, once the
+    /// detached write lands.
+    async fn audit_row(pool: &SqlitePool, event: AuditEvent) -> Result<(String, Option<String>)> {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let row = sqlx::query_as(
+                    "SELECT status, error_message FROM governance_audit WHERE event_type = ?",
+                )
+                .bind(event.as_str())
+                .fetch_optional(pool)
+                .await?;
+                if let Some(row) = row {
+                    return Ok(row);
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .context("no audit row was written")?
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_mediator_timeout_answers_504_and_names_the_party(pool: SqlitePool) -> Result {
+        let _serial = super::action_metrics_tests::SERIAL.lock().await;
+        let ledger = RejectingLedger::new();
+        ledger.release.notify_one();
+        let app = actix_test::init_service(
+            App::new()
+                .app_data(state(pool.clone(), ledger.serve()?).await?)
+                .wrap(AuthMiddleware)
+                .service(expire_confirmation),
+        )
+        .await;
+
+        let response = actix_test::call_service(&app, expire().to_request()).await;
+
+        assert_eq!(response.status(), StatusCode::GATEWAY_TIMEOUT);
+        let body: serde_json::Value = actix_test::read_body_json(response).await;
+        let error = body["error"].as_str().context("no error in the body")?;
+        assert!(
+            error.starts_with("Failed to expire confirmation: the mediator timed out"),
+            "{error}"
+        );
+        assert!(
+            error.contains(&format!("Unresponsive: {OFFLINE_MEMBER}.")),
+            "{error}"
+        );
+        let (status, message) = audit_row(&pool, AuditEvent::Expire).await?;
+        assert_eq!(status, "failed");
+        assert_eq!(message.as_deref(), Some(error));
+        Ok(())
+    }
+
+    /// A proxy that hangs up makes the server drop the handler. Every write
+    /// still ends, and its audit row names the unresponsive party.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_dropped_request_still_writes_the_audit_row(pool: SqlitePool) -> Result {
+        let _serial = super::action_metrics_tests::SERIAL.lock().await;
+        for (event, uri, _, body) in writes() {
+            let ledger = RejectingLedger::new();
+            let app = actix_test::init_service(
+                App::new()
+                    .app_data(state(pool.clone(), ledger.serve()?).await?)
+                    .wrap(AuthMiddleware)
+                    .service(propose_action)
+                    .service(confirm_action)
+                    .service(execute_action)
+                    .service(expire_confirmation)
+                    .service(cancel_confirmation)
+                    .service(cancel_proposal),
+            )
+            .await;
+            let request = actix_test::TestRequest::post()
+                .uri(uri)
+                .insert_header((AUTHORIZATION, "Bearer any-token"))
+                .set_json(body);
+
+            // Dropping the request future is what the server does to a
+            // handler whose client hung up.
+            tokio::select! {
+                _ = actix_test::call_service(&app, request.to_request()) => {
+                    anyhow::bail!("{event:?} answered before the ledger did");
+                }
+                () = ledger.submitted.notified() => {}
+            }
+            ledger.release.notify_one();
+
+            let (status, message) = audit_row(&pool, event).await?;
+            assert_eq!(status, "failed", "{event:?}");
+            let message = message.unwrap_or_default();
+            assert!(
+                message.contains(&format!("Unresponsive: {OFFLINE_MEMBER}.")),
+                "{event:?}: {message}"
+            );
+        }
+        Ok(())
+    }
+
+    /// Posts `body` to `uri` as an admin through all six governance write
+    /// handlers, against `ledger`. Returns the status and the `error` field.
+    async fn post_to_writes(
+        pool: &SqlitePool,
+        ledger: &RejectingLedger,
+        uri: &str,
+        body: serde_json::Value,
+    ) -> Result<(StatusCode, String)> {
+        let app = actix_test::init_service(
+            App::new()
+                .app_data(state(pool.clone(), ledger.serve()?).await?)
+                .wrap(AuthMiddleware)
+                .service(propose_action)
+                .service(confirm_action)
+                .service(execute_action)
+                .service(expire_confirmation)
+                .service(cancel_confirmation)
+                .service(cancel_proposal),
+        )
+        .await;
+        let request = actix_test::TestRequest::post()
+            .uri(uri)
+            .insert_header((AUTHORIZATION, "Bearer any-token"))
+            .set_json(body)
+            .to_request();
+        let response = actix_test::call_service(&app, request).await;
+        let status = response.status();
+        let body: serde_json::Value = actix_test::read_body_json(response).await;
+        let error = body["error"].as_str().context("no error in the body")?;
+        Ok((status, error.to_string()))
+    }
+
+    /// Every governance write: its audit event, its path, the context its
+    /// failure message starts with, and a body the handler accepts.
+    fn writes() -> [(AuditEvent, &'static str, &'static str, serde_json::Value); 6] {
+        let party = party();
+        let action = serde_json::json!({ "type": "governance_set_threshold", "new_threshold": 2 });
+        [
+            (
+                AuditEvent::Propose,
+                "/governance/propose",
+                "Failed to create proposal",
+                serde_json::json!({
+                    "party_id": party,
+                    "rules_contract_id": "00rules",
+                    "proposal": { "type": "generic_vote", "description": "timeout" },
+                }),
+            ),
+            (
+                AuditEvent::Confirm,
+                "/governance/confirm",
+                "Failed to submit confirmation",
+                serde_json::json!({
+                    "party_id": party,
+                    "rules_contract_id": "00rules",
+                    "action": action,
+                }),
+            ),
+            (
+                AuditEvent::Execute,
+                "/governance/execute",
+                "Failed to execute action",
+                serde_json::json!({
+                    "party_id": party,
+                    "rules_contract_id": "00rules",
+                    "action": action,
+                    "confirmation_cids": ["00c0ffee"],
+                }),
+            ),
+            (
+                AuditEvent::Expire,
+                "/governance/expire",
+                "Failed to expire confirmation",
+                serde_json::json!({
+                    "party_id": party,
+                    "rules_contract_id": "00rules",
+                    "confirmation_cid": "00c0ffee",
+                }),
+            ),
+            (
+                AuditEvent::Cancel,
+                "/governance/cancel",
+                "Failed to cancel confirmation",
+                serde_json::json!({ "party_id": party, "confirmation_cid": "00c0ffee" }),
+            ),
+            (
+                AuditEvent::CancelProposal,
+                "/governance/cancel-proposal",
+                "Failed to cancel proposal",
+                serde_json::json!({ "party_id": party, "proposal_cid": "00p" }),
+            ),
+        ]
+    }
+
+    /// Issue #615 asks that every governance submission the mediator times
+    /// out names the unresponsive party, not only expire and cancel.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn every_governance_write_names_the_unresponsive_party(pool: SqlitePool) -> Result {
+        let _serial = super::action_metrics_tests::SERIAL.lock().await;
+        for (event, uri, context, body) in writes() {
+            let ledger = RejectingLedger::new();
+            ledger.release.notify_one();
+
+            let (status, error) = post_to_writes(&pool, &ledger, uri, body).await?;
+
+            assert_eq!(status, StatusCode::GATEWAY_TIMEOUT, "{event:?}: {error}");
+            assert_eq!(
+                error,
+                format!(
+                    "{context}: the mediator timed out waiting for confirmations \
+                     (MEDIATOR_SAYS_TX_TIMED_OUT). Unresponsive: {OFFLINE_MEMBER}. The \
+                     participant that hosts each of these parties must be online to confirm."
+                ),
+                "{event:?}"
+            );
+            let (audit_status, audit_message) = audit_row(&pool, event).await?;
+            assert_eq!(audit_status, "failed", "{event:?}");
+            assert_eq!(audit_message, Some(error), "{event:?}");
+        }
+        Ok(())
+    }
+
+    /// A submission without a deadline keeps its task alive until Canton
+    /// stops tracking the command, long after the caller hung up.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn every_governance_submission_carries_a_deadline(pool: SqlitePool) -> Result {
+        let _serial = super::action_metrics_tests::SERIAL.lock().await;
+        for (event, uri, _, body) in writes() {
+            let mut ledger = RejectingLedger::new();
+            // The proposer's confirmation is a second submission; reach it.
+            ledger.created_proposal = Some("00proposal".to_string());
+            ledger.release.notify_one();
+
+            post_to_writes(&pool, &ledger, uri, body).await?;
+
+            let deadlines = ledger.deadline_millis()?;
+            let expected = if matches!(event, AuditEvent::Propose) {
+                2
+            } else {
+                1
+            };
+            assert_eq!(deadlines.len(), expected, "{event:?}");
+            for millis in deadlines {
+                assert!(
+                    (129_000..=130_000).contains(&millis),
+                    "{event:?}: {millis} ms"
+                );
+            }
+        }
+        Ok(())
+    }
+
+    /// A propose makes two submissions. They share one budget, so the whole
+    /// write waits no longer than any other.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_propose_shares_one_deadline_across_its_submissions(pool: SqlitePool) -> Result {
+        let _serial = super::action_metrics_tests::SERIAL.lock().await;
+        let mut ledger = RejectingLedger::new();
+        ledger.created_proposal = Some("00proposal".to_string());
+        ledger.create_delay = Duration::from_millis(1_500);
+        ledger.release.notify_one();
+        let (_, uri, _, body) = writes()
+            .into_iter()
+            .find(|(event, ..)| matches!(event, AuditEvent::Propose))
+            .context("no propose case")?;
+
+        post_to_writes(&pool, &ledger, uri, body).await?;
+
+        let [create, confirm] = ledger.deadline_millis()?[..] else {
+            anyhow::bail!("expected two submissions");
+        };
+        assert!(create <= 130_000, "{create} ms");
+        assert!(
+            confirm <= 128_500,
+            "the confirmation got a fresh budget: {confirm} ms"
+        );
+        Ok(())
+    }
+
+    /// A submission that stopped waiting before the ledger answered may still
+    /// land. A propose retried then would create a second proposal, so the
+    /// answer must say that the outcome is unknown.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_submission_that_ran_out_of_time_has_an_unknown_outcome(pool: SqlitePool) -> Result {
+        let _serial = super::action_metrics_tests::SERIAL.lock().await;
+        let rejections = [
+            (
+                tonic::Status::deadline_exceeded("deadline passed"),
+                "DEADLINE_EXCEEDED",
+            ),
+            // The gRPC client's answer when DecMan's own deadline passes.
+            (tonic::Status::cancelled("Timeout expired"), "CANCELLED"),
+            (fixtures::request_timeout(), "REQUEST_TIME_OUT"),
+        ];
+        for (rejection, cause) in rejections {
+            for (event, uri, context, body) in writes() {
+                let mut ledger = RejectingLedger::new();
+                ledger.rejection = rejection.clone();
+                ledger.release.notify_one();
+
+                let (status, error) = post_to_writes(&pool, &ledger, uri, body).await?;
+
+                assert_eq!(
+                    status,
+                    StatusCode::GATEWAY_TIMEOUT,
+                    "{event:?} {cause}: {error}"
+                );
+                assert_eq!(
+                    error,
+                    format!(
+                        "{context}: the outcome is unknown. DecMan stopped waiting before the \
+                         ledger answered ({cause}), and the write may still complete. Run \
+                         `governance pending` before you retry."
+                    ),
+                    "{event:?}"
+                );
+                let (audit_status, audit_message) = audit_row(&pool, event).await?;
+                assert_eq!(audit_status, "failed", "{event:?}");
+                assert_eq!(audit_message, Some(error), "{event:?}");
+                sqlx::query("DELETE FROM governance_audit")
+                    .execute(&pool)
+                    .await?;
+            }
+        }
+        Ok(())
+    }
+
+    async fn a_panicking_submission() -> Submitted {
+        panic!("the submission failed in a way no handler maps")
+    }
+
+    /// A submission that ends without an outcome still leaves a failed row,
+    /// so the audit trail never misses a write the node attempted.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_submission_that_panics_still_writes_a_failed_audit_row(pool: SqlitePool) -> Result {
+        let _serial = super::action_metrics_tests::SERIAL.lock().await;
+        let record = WriteRecord {
+            step: ActionStep::Execute,
+            party_id: CantonId::parse(&party())?,
+            member_party_id: CantonId::parse(&party())?,
+            governance_type: GovernanceType::CoreSelf,
+            action_summary: "governance_set_threshold".to_string(),
+            details: "{}".to_string(),
+        };
+
+        let response = run_write(pool.clone(), record, "unused", a_panicking_submission()).await;
+
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let (status, message) = audit_row(&pool, AuditEvent::Execute).await?;
+        assert_eq!(status, "failed");
+        let message = message.unwrap_or_default();
+        assert!(
+            message.starts_with("The execute submission ended without an outcome"),
+            "{message}"
+        );
+        // The panic text is internal and goes to the server log only.
+        assert!(!message.contains("no handler maps"), "{message}");
+        Ok(())
+    }
+
+    /// A client may read the audit trail as soon as it has the answer, so the
+    /// row must be written by then.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn the_audit_row_is_written_before_the_answer(pool: SqlitePool) -> Result {
+        let _serial = super::action_metrics_tests::SERIAL.lock().await;
+        for (event, uri, _, body) in writes() {
+            let ledger = RejectingLedger::new();
+            ledger.release.notify_one();
+
+            let (status, error) = post_to_writes(&pool, &ledger, uri, body).await?;
+
+            let row: Option<(String, Option<String>)> = sqlx::query_as(
+                "SELECT status, error_message FROM governance_audit WHERE event_type = ?",
+            )
+            .bind(event.as_str())
+            .fetch_optional(&pool)
+            .await?;
+            assert_eq!(status, StatusCode::GATEWAY_TIMEOUT, "{event:?}");
+            assert_eq!(row, Some(("failed".to_string(), Some(error))), "{event:?}");
+        }
+        Ok(())
+    }
+
+    /// The Ledger API error names its address. Any signed-in user can read
+    /// the audit trail, so the answer and the row keep only the category.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_failed_ledger_connection_hides_its_address(pool: SqlitePool) -> Result {
+        let _serial = super::action_metrics_tests::SERIAL.lock().await;
+        for (event, uri, context, body) in writes() {
+            let app = actix_test::init_service(
+                App::new()
+                    .app_data(state(pool.clone(), 1).await?)
+                    .wrap(AuthMiddleware)
+                    .service(propose_action)
+                    .service(confirm_action)
+                    .service(execute_action)
+                    .service(expire_confirmation)
+                    .service(cancel_confirmation)
+                    .service(cancel_proposal),
+            )
+            .await;
+            let request = actix_test::TestRequest::post()
+                .uri(uri)
+                .insert_header((AUTHORIZATION, "Bearer any-token"))
+                .set_json(body)
+                .to_request();
+
+            let response = actix_test::call_service(&app, request).await;
+
+            assert_eq!(
+                response.status(),
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "{event:?}"
+            );
+            let body: serde_json::Value = actix_test::read_body_json(response).await;
+            let error = body["error"].as_str().context("no error in the body")?;
+            let context = if matches!(event, AuditEvent::Propose) {
+                "Failed to create proposal"
+            } else {
+                context
+            };
+            assert_eq!(
+                error,
+                format!("{context}: the Ledger API connection failed. See the DecMan server log."),
+                "{event:?}"
+            );
+            let (_, message) = audit_row(&pool, event).await?;
+            assert_eq!(message.as_deref(), Some(error), "{event:?}");
+        }
+        Ok(())
+    }
+
+    /// The server log keeps the whole error chain. Its line names the party
+    /// and the write, so an operator can find the failure a caller reports.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn the_logged_failure_names_the_party_and_the_write(pool: SqlitePool) -> Result {
+        let _serial = super::action_metrics_tests::SERIAL.lock().await;
+        // Other tests hit the same log line at the same time. With one live
+        // dispatcher, tracing decides whether a line is on from the default
+        // of the thread that hits it first, and caches "off" for this test
+        // too. A second live dispatcher makes it ask every live one.
+        let _second = tracing::Dispatch::new(tracing_subscriber::registry());
+        for (event, uri, _, body) in writes() {
+            let write = match event {
+                AuditEvent::Propose => "propose",
+                AuditEvent::Confirm => "confirm",
+                AuditEvent::Execute => "execute",
+                AuditEvent::Expire => "expire",
+                AuditEvent::Cancel => "cancel_confirmation",
+                AuditEvent::CancelProposal => "cancel_proposal",
+                other => anyhow::bail!("{other:?} is not a write"),
+            };
+            let app = actix_test::init_service(
+                App::new()
+                    .app_data(state(pool.clone(), 1).await?)
+                    .wrap(AuthMiddleware)
+                    .service(propose_action)
+                    .service(confirm_action)
+                    .service(execute_action)
+                    .service(expire_confirmation)
+                    .service(cancel_confirmation)
+                    .service(cancel_proposal),
+            )
+            .await;
+            let request = actix_test::TestRequest::post()
+                .uri(uri)
+                .insert_header((AUTHORIZATION, "Bearer any-token"))
+                .set_json(body)
+                .to_request();
+
+            let buffer = super::get_party_credentials_tests::LogBuffer::default();
+            let subscriber = tracing_subscriber::fmt()
+                .with_writer(buffer.clone())
+                .with_ansi(false)
+                .finish();
+            let response = {
+                let _guard = tracing::subscriber::set_default(subscriber);
+                actix_test::call_service(&app, request).await
+            };
+
+            assert_eq!(
+                response.status(),
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "{event:?}"
+            );
+            let logs = buffer.captured()?;
+            let line = logs
+                .lines()
+                .find(|line| line.contains("127.0.0.1:1"))
+                .with_context(|| format!("{event:?} logged no error chain: {logs}"))?;
+            assert!(line.contains(" WARN "), "{event:?}: {line}");
+            assert!(
+                line.contains(&format!("party_id={}", party())),
+                "{event:?}: {line}"
+            );
+            assert!(
+                line.contains(&format!("write={write}")),
+                "{event:?}: {line}"
+            );
+        }
+        Ok(())
+    }
+
+    /// A timeout's answer names only the Canton error id. The server log keeps
+    /// the whole rejection, with Canton's correlation id, on a line that
+    /// names the party and the write.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_timed_out_write_logs_the_whole_rejection(pool: SqlitePool) -> Result {
+        let _serial = super::action_metrics_tests::SERIAL.lock().await;
+        // As in `the_logged_failure_names_the_party_and_the_write`.
+        let _second = tracing::Dispatch::new(tracing_subscriber::registry());
+        let (_, uri, _, body) = writes()
+            .into_iter()
+            .find(|(event, ..)| matches!(event, AuditEvent::Expire))
+            .context("no expire write")?;
+        let ledger = RejectingLedger::new();
+        ledger.release.notify_one();
+
+        let buffer = super::get_party_credentials_tests::LogBuffer::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(buffer.clone())
+            .with_ansi(false)
+            .finish();
+        let (status, error) = {
+            let _guard = tracing::subscriber::set_default(subscriber);
+            post_to_writes(&pool, &ledger, uri, body).await?
+        };
+
+        assert_eq!(status, StatusCode::GATEWAY_TIMEOUT, "{error}");
+        assert!(!error.contains("5e3c1a7b"), "{error}");
+        let logs = buffer.captured()?;
+        let line = logs
+            .lines()
+            .find(|line| line.contains("MEDIATOR_SAYS_TX_TIMED_OUT(2,5e3c1a7b)"))
+            .with_context(|| format!("the timeout logged no rejection: {logs}"))?;
+        assert!(line.contains(" WARN "), "{line}");
+        assert!(line.contains(&format!("party_id={}", party())), "{line}");
+        assert!(line.contains("write=expire"), "{line}");
+        Ok(())
+    }
+
+    /// A Ledger API TLS file that DecMan cannot read fails every write. Its
+    /// path stays out of the answer and the audit row, which any signed-in
+    /// user can read.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn an_unreadable_tls_file_stays_out_of_the_answer(pool: SqlitePool) -> Result {
+        let _serial = super::action_metrics_tests::SERIAL.lock().await;
+        let mut state = state(pool.clone(), 1).await?.into_inner();
+        let tls = &mut Arc::get_mut(&mut state)
+            .context("a fresh test state has one owner")?
+            .config
+            .canton
+            .ledger_api_tls;
+        tls.enabled = true;
+        tls.ca_cert = Some("/nonexistent/decman-test/ca.pem".to_string());
+        let app = actix_test::init_service(
+            App::new()
+                .app_data(web::Data::from(state))
+                .wrap(AuthMiddleware)
+                .service(expire_confirmation),
+        )
+        .await;
+
+        let response = actix_test::call_service(&app, expire().to_request()).await;
+
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let body: serde_json::Value = actix_test::read_body_json(response).await;
+        let error = body["error"].as_str().context("no error in the body")?;
+        assert_eq!(
+            error,
+            "Failed to expire confirmation: the Ledger API connection failed. See the DecMan \
+             server log."
+        );
+        let (_, audit_message) = audit_row(&pool, AuditEvent::Expire).await?;
+        assert_eq!(audit_message.as_deref(), Some(error));
+        Ok(())
+    }
+
+    /// The Ledger API event service of a participant that never answers.
+    #[derive(Clone)]
+    struct SilentEvents;
+
+    impl Service<http::Request<Body>> for SilentEvents {
+        type Response = http::Response<Body>;
+        type Error = Infallible;
+        type Future = BoxFuture<Self::Response, Infallible>;
+
+        fn poll_ready(&mut self, _: &mut TaskContext<'_>) -> Poll<Result<(), Infallible>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn call(&mut self, _: http::Request<Body>) -> Self::Future {
+            Box::pin(std::future::pending())
+        }
+    }
+
+    impl NamedService for SilentEvents {
+        const NAME: &'static str = "com.daml.ledger.api.v2.EventQueryService";
+    }
+
+    /// A propose reads the rules contract's package between its two
+    /// submissions. That read shares the write's deadline, so a ledger that
+    /// never answers it cannot stretch the write.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_propose_stops_at_its_deadline_during_the_rules_read(pool: SqlitePool) -> Result {
+        let mut ledger = RejectingLedger::new();
+        ledger.created_proposal = Some("00proposal".to_string());
+        let incoming = TcpIncoming::bind("127.0.0.1:0".parse()?)?;
+        let port = incoming.local_addr()?.port();
+        tokio::spawn(
+            Server::builder()
+                .add_service(ledger)
+                .add_service(SilentEvents)
+                .serve_with_incoming(incoming),
+        );
+        let data = state(pool, port).await?;
+        let body: ProposeActionRequest = serde_json::from_value(serde_json::json!({
+            "party_id": party(),
+            "rules_contract_id": "00rules",
+            "proposal": { "type": "generic_vote", "description": "deadline" },
+        }))?;
+        let member = CantonId::parse(&format!("member::1220{}", "cd".repeat(32)))?;
+
+        let proposing = submit_proposal(
+            data,
+            Commands::default(),
+            "any-token".to_string(),
+            member,
+            body,
+            Instant::now() + Duration::from_millis(500),
+        );
+        let submitted = tokio::time::timeout(Duration::from_secs(5), proposing)
+            .await
+            .context("the propose outlived its deadline")?;
+
+        let (status, error) = submitted.failure.context("the propose succeeded")?;
+        assert_eq!(status, StatusCode::GATEWAY_TIMEOUT, "{error}");
+        assert!(
+            error.ends_with("Confirm proposal 00proposal; do not re-propose."),
+            "{error}"
+        );
+        assert_eq!(submitted.proposal_cid.as_deref(), Some("00proposal"));
+        Ok(())
+    }
+
+    /// Confirm, execute, expire and both cancels read a contract's package
+    /// before they submit. That read shares the write's deadline, so a ledger
+    /// that never answers it ends the write at its deadline, before anything
+    /// is sent.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_write_stops_at_its_deadline_during_a_read_before_it(pool: SqlitePool) -> Result {
+        let ledger = RejectingLedger::new();
+        let incoming = TcpIncoming::bind("127.0.0.1:0".parse()?)?;
+        let port = incoming.local_addr()?.port();
+        tokio::spawn(
+            Server::builder()
+                .add_service(ledger.clone())
+                .add_service(SilentEvents)
+                .serve_with_incoming(incoming),
+        );
+        let data = state(pool, port).await?;
+        let config = &data.config;
+        let package_config = packages();
+        let member = CantonId::parse(&format!("member::1220{}", "cd".repeat(32)))?;
+        let token = "any-token";
+
+        for (event, _, context, mut body) in writes() {
+            if matches!(event, AuditEvent::Propose) {
+                continue;
+            }
+            let deadline = Instant::now() + Duration::from_millis(300);
+            let writing = async {
+                match event {
+                    AuditEvent::Confirm => {
+                        let request = serde_json::from_value(body)?;
+                        execute_confirm_action(
+                            config,
+                            &request,
+                            token,
+                            &member,
+                            &package_config,
+                            deadline,
+                        )
+                        .await
+                    }
+                    AuditEvent::Execute => {
+                        let request = serde_json::from_value(body)?;
+                        execute_confirmed_action(
+                            config,
+                            &data.http_client,
+                            &request,
+                            token,
+                            &member,
+                            &package_config,
+                            deadline,
+                        )
+                        .await
+                    }
+                    AuditEvent::Expire => {
+                        let request = serde_json::from_value(body)?;
+                        execute_expire_confirmation(
+                            config,
+                            &request,
+                            token,
+                            &member,
+                            &package_config,
+                            deadline,
+                        )
+                        .await
+                    }
+                    AuditEvent::Cancel => {
+                        let request = serde_json::from_value(body)?;
+                        execute_cancel_confirmation(
+                            config,
+                            &request,
+                            token,
+                            &member,
+                            &package_config,
+                            deadline,
+                        )
+                        .await
+                    }
+                    AuditEvent::CancelProposal => {
+                        // Without its own confirmation, a cancel reads nothing first.
+                        body["confirmation_cid"] = serde_json::json!("00c0ffee");
+                        let request = serde_json::from_value(body)?;
+                        execute_cancel_proposal(
+                            config,
+                            &request,
+                            token,
+                            &member,
+                            &package_config,
+                            deadline,
+                        )
+                        .await
+                    }
+                    other => anyhow::bail!("{other:?} is not a write"),
+                }
+            };
+            let written = tokio::time::timeout(Duration::from_secs(5), writing)
+                .await
+                .with_context(|| format!("{event:?} outlived its deadline"))?;
+
+            let error = written
+                .err()
+                .with_context(|| format!("{event:?} succeeded"))?;
+            let (status, message) = submission_failure(context, &error);
+            assert_eq!(status, StatusCode::GATEWAY_TIMEOUT, "{event:?}: {message}");
+            assert_eq!(
+                message,
+                format!(
+                    "{context}: a read that the write needs did not answer in time. DecMan sent \
+                     nothing to the ledger, so you can retry."
+                )
+            );
+        }
+        assert!(
+            ledger.deadline_millis()?.is_empty(),
+            "a write reached the ledger"
+        );
+        Ok(())
+    }
+
+    /// The proposer's own confirmation can time out after the proposal is on
+    /// the ledger. The answer must give the new proposal's id, so the operator
+    /// confirms it instead of proposing a second time.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_timed_out_proposer_confirmation_names_the_created_proposal(
+        pool: SqlitePool,
+    ) -> Result {
+        let _serial = super::action_metrics_tests::SERIAL.lock().await;
+        let mut ledger = RejectingLedger::new();
+        ledger.created_proposal = Some("00proposal".to_string());
+        ledger.release.notify_one();
+
+        let (status, error) = post_to_writes(
+            &pool,
+            &ledger,
+            "/governance/propose",
+            serde_json::json!({
+                "party_id": party(),
+                "rules_contract_id": "00rules",
+                "proposal": { "type": "generic_vote", "description": "timeout" },
+            }),
+        )
+        .await?;
+
+        assert_eq!(status, StatusCode::GATEWAY_TIMEOUT, "{error}");
+        assert!(
+            error.starts_with(
+                "Proposal created (CID: 00proposal) but confirmation failed: the mediator \
+                 timed out"
+            ),
+            "{error}"
+        );
+        assert!(
+            error.contains(&format!("Unresponsive: {OFFLINE_MEMBER}.")),
+            "{error}"
+        );
+        assert!(
+            error.ends_with("Confirm proposal 00proposal; do not re-propose."),
+            "{error}"
+        );
+        let (audit_status, audit_message) = audit_row(&pool, AuditEvent::Propose).await?;
+        assert_eq!(audit_status, "failed");
+        assert_eq!(audit_message, Some(error));
+        Ok(())
+    }
+
+    /// The proposal exists even when the answer does not name it, so the
+    /// operator must find it rather than propose again.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_created_proposal_without_its_id_says_not_to_re_propose(pool: SqlitePool) -> Result {
+        let _serial = super::action_metrics_tests::SERIAL.lock().await;
+        let mut ledger = RejectingLedger::new();
+        ledger.created_proposal = Some("00proposal".to_string());
+        ledger.hide_created_contract = true;
+
+        let (status, error) = post_to_writes(
+            &pool,
+            &ledger,
+            "/governance/propose",
+            serde_json::json!({
+                "party_id": party(),
+                "rules_contract_id": "00rules",
+                "proposal": { "type": "generic_vote", "description": "no id" },
+            }),
+        )
+        .await?;
+
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{error}");
+        assert_eq!(
+            error,
+            "Proposal created in update 00update but could not extract its contract ID. Find \
+             it in `governance pending` and confirm it there; do not re-propose."
+        );
+        let (audit_status, audit_message) = audit_row(&pool, AuditEvent::Propose).await?;
+        assert_eq!(audit_status, "failed");
+        assert_eq!(audit_message, Some(error));
+        Ok(())
+    }
+
+    /// The other tests have the ledger answer with a status. Here the ledger
+    /// never answers, so only DecMan's own deadline ends the submission. The
+    /// gRPC client must stop at that deadline, and its error must read as an
+    /// unknown outcome, not as a failed write.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn decmans_own_deadline_ends_a_silent_submission_as_unknown(pool: SqlitePool) -> Result {
+        let ledger = RejectingLedger::new();
+        let data = state(pool, ledger.serve()?).await?;
+        let mut client = CommandServiceClient::new(data.config.ledger_channel().await?);
+        let request = ledger_request(
+            SubmitAndWaitRequest::default(),
+            "any-token",
+            Instant::now() + Duration::from_millis(300),
+        )?;
+
+        let started = Instant::now();
+        let submitted =
+            tokio::time::timeout(Duration::from_secs(10), client.submit_and_wait(request))
+                .await
+                .context("the submission outlived its deadline")?;
+
+        assert!(started.elapsed() < Duration::from_secs(5));
+        let error = anyhow::Error::new(
+            submitted
+                .err()
+                .context("a ledger that never answers cannot accept")?,
+        );
+        let (status, message) = submission_failure("Failed to expire confirmation", &error);
+        assert_eq!(status, StatusCode::GATEWAY_TIMEOUT, "{message}");
+        assert!(message.contains("the outcome is unknown"), "{message}");
+        Ok(())
+    }
+}
+
+#[cfg(test)]
 mod cancel_confirmation_gate_tests {
     use actix_web::{
         App,
@@ -3453,7 +4664,6 @@ mod cancel_confirmation_gate_tests {
 
 #[cfg(test)]
 mod paid_accept_disclosure_tests {
-    use actix_web::{body::to_bytes, http::StatusCode};
     use decman_lib::catalog::types::AppTransferContextInput;
     use decman_lib::framework::DamlProtoEncode;
     use wiremock::{
@@ -3591,8 +4801,8 @@ mod paid_accept_disclosure_tests {
             .expect_err("the round must come from scan");
 
         assert!(err.downcast_ref::<ScanNotConfigured>().is_some(), "{err:#}");
-        let response = execute_failure_response(&err);
-        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let (status, _) = execute_failure(&err);
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
     }
 
     #[tokio::test]
@@ -3639,34 +4849,51 @@ mod paid_accept_disclosure_tests {
         assert!(message.contains("00gone"), "{message}");
     }
 
-    #[actix_web::test]
-    async fn any_other_execute_failure_stays_a_500() -> Result<()> {
-        let response = execute_failure_response(&anyhow::anyhow!("ledger said no"));
+    #[test]
+    fn any_other_execute_failure_stays_a_500() {
+        let (status, error) = execute_failure(&anyhow::anyhow!("ledger said no"));
 
-        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
-        let body = to_bytes(response.into_body())
-            .await
-            .map_err(|e| anyhow::anyhow!("{e}"))?;
-        let body: serde_json::Value = serde_json::from_slice(&body)?;
-        assert_eq!(body["error"], "Failed to execute action: ledger said no");
-        Ok(())
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(
+            error,
+            "Failed to execute action: ledger said no. See the DecMan server log."
+        );
     }
 
-    #[actix_web::test]
-    async fn an_execute_failure_names_its_underlying_cause() -> Result<()> {
-        let error = anyhow::anyhow!("scan answered 403 Forbidden: access denied")
+    /// The answer and the audit row name what failed. What the other service
+    /// said stays in the server log.
+    #[test]
+    fn an_execute_failure_names_its_cause_but_not_the_chain() {
+        let error = anyhow::anyhow!("the response held no rounds")
             .context("Failed to fetch the open mining rounds from scan");
-        let response = execute_failure_response(&error);
 
-        let body = to_bytes(response.into_body())
-            .await
-            .map_err(|e| anyhow::anyhow!("{e}"))?;
-        let body: serde_json::Value = serde_json::from_slice(&body)?;
+        let (_, error) = execute_failure(&error);
+
         assert_eq!(
-            body["error"],
-            "Failed to execute action: Failed to fetch the open mining rounds from scan: \
-             scan answered 403 Forbidden: access denied"
+            error,
+            "Failed to execute action: Failed to fetch the open mining rounds from scan. See \
+             the DecMan server log."
         );
-        Ok(())
+    }
+
+    /// An HTTP status is not internal, so a scan refusal's message names it.
+    /// The answer stays a 500, because scan refused DecMan, not the caller.
+    /// Scan's body stays in the server log.
+    #[test]
+    fn a_scan_refusal_names_scans_status() {
+        let error = anyhow::Error::new(ScanRefused {
+            status: reqwest::StatusCode::FORBIDDEN,
+            body: "access denied for 10.0.0.7".to_string(),
+        })
+        .context("Failed to fetch the open mining rounds from scan");
+
+        let (status, error) = execute_failure(&error);
+
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(
+            error,
+            "Failed to execute action: Failed to fetch the open mining rounds from scan (scan \
+             answered 403 Forbidden). See the DecMan server log."
+        );
     }
 }

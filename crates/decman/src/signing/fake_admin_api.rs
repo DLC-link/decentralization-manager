@@ -614,7 +614,7 @@ impl TestNode {
 }
 
 /// Answer one unary call with `handler`.
-async fn unary<Req, Resp>(
+pub(crate) async fn unary<Req, Resp>(
     request: http::Request<Body>,
     handler: impl FnMut(Req) -> Result<Resp, Status> + Send + 'static,
 ) -> http::Response<Body>

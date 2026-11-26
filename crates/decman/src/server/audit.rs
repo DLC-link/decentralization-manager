@@ -62,8 +62,9 @@ pub struct AuditParams {
     pub error_message: Option<String>,
 }
 
-/// Insert a governance audit row
-async fn log_governance_audit(pool: &SqlitePool, params: AuditParams) {
+/// Insert a governance audit row, and wait for the insert. A failed insert
+/// is logged, not returned.
+pub async fn log_governance_audit(pool: &SqlitePool, params: AuditParams) {
     let gov_type = serde_json::to_value(params.governance_type)
         .ok()
         .and_then(|v| v.as_str().map(String::from))
@@ -100,8 +101,8 @@ pub enum PurgeAuditEvent {
 /// is written by a restart that found the purge cut off, so no request
 /// carried the admin user.
 ///
-/// Waits for the write, unlike [`spawn_audit_log`], so the start row exists
-/// before the purge disconnects the participant.
+/// Waits for the write, as [`log_governance_audit`] does, so the start row
+/// exists before the purge disconnects the participant.
 pub async fn log_purge_audit(
     pool: &SqlitePool,
     event: PurgeAuditEvent,
@@ -180,14 +181,6 @@ async fn insert_audit_row(pool: &SqlitePool, row: AuditRow<'_>) {
     if let Err(e) = result {
         tracing::error!("Failed to write governance audit log: {e}");
     }
-}
-
-/// Spawn a fire-and-forget audit log write.
-/// This will NOT block the caller and will NOT propagate errors.
-pub fn spawn_audit_log(pool: SqlitePool, params: AuditParams) {
-    tokio::spawn(async move {
-        log_governance_audit(&pool, params).await;
-    });
 }
 
 /// Add the created proposal's contract id to a propose row's details.

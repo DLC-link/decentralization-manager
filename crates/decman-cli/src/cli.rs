@@ -144,7 +144,8 @@ pub struct CommandOptions {
     #[arg(long, global = true)]
     pub no_token_cache: bool,
 
-    /// Seconds before one API request times out.
-    #[arg(long, value_name = "SECONDS", default_value_t = 120, global = true)]
+    /// Seconds before one API request times out. The default outlasts the
+    /// 130 seconds DecMan waits for the ledger on a governance write.
+    #[arg(long, value_name = "SECONDS", default_value_t = 150, global = true)]
     pub http_timeout: u64,
 }

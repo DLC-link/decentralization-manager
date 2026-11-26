@@ -181,6 +181,15 @@ pub(crate) async fn fetch_featured_app_right(
     Ok(response.featured_app_right)
 }
 
+/// Scan answered with an error status. A failure shown to the caller keeps
+/// the status, which is not internal. The body goes to the log only.
+#[derive(Debug, thiserror::Error)]
+#[error("Scan API returned {status}: {body}")]
+pub(crate) struct ScanRefused {
+    pub(crate) status: reqwest::StatusCode,
+    pub(crate) body: String,
+}
+
 async fn success_body(res: reqwest::Response) -> anyhow::Result<String> {
     let status = res.status();
     let body = res
@@ -188,7 +197,7 @@ async fn success_body(res: reqwest::Response) -> anyhow::Result<String> {
         .await
         .context("Failed to read the scan response")?;
     if !status.is_success() {
-        anyhow::bail!("Scan API returned {status}: {body}");
+        return Err(ScanRefused { status, body }.into());
     }
     Ok(body)
 }
