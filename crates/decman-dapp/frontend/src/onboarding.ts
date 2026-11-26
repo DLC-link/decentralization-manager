@@ -54,15 +54,29 @@ const newId = () => crypto.randomUUID()
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
 const message = (error: unknown) => (error instanceof Error ? error.message : String(error))
 
+/** The text of a failed call. A refused token most likely expired, so the text says what to do. */
+const failureText = (error: unknown) =>
+  error instanceof ledger.LedgerError && error.status === 401
+    ? `${message(error)}\nThe token may have expired. Use Replace token on the Wallets page.`
+    : message(error)
+
 // Text copied from a terminal or a document can bring a space or a symbol
 // along. The participant then answers 404 or 401, which hides the cause.
 const NOT_PRINTABLE_ASCII = /[^\x21-\x7e]/gu
 
+/** `c` named for a person. A character that may look like nothing gets its code point. */
+function characterName(c: string): string {
+  if (c === ' ') return 'a space'
+  if (c === '\t') return 'a tab'
+  if (c === '\n' || c === '\r') return 'a line break'
+  const code = `U+${(c.codePointAt(0) ?? 0).toString(16).toUpperCase().padStart(4, '0')}`
+  return /[\p{L}\p{N}\p{P}\p{S}]/u.test(c) ? `"${c}" (${code})` : `the character ${code}`
+}
+
 /** The characters of `value` that a URL or a token cannot have, named for a person. */
 function badCharacters(value: string): string | null {
-  const found = [...new Set(value.match(NOT_PRINTABLE_ASCII) ?? [])]
-  if (found.length === 0) return null
-  const names = found.map((c) => (c === ' ' ? 'a space' : /\s/u.test(c) ? 'a tab or a line break' : `"${c}"`))
+  const names = [...new Set((value.match(NOT_PRINTABLE_ASCII) ?? []).map(characterName))]
+  if (names.length === 0) return null
   return names.length === 1 ? names[0] : `${names.slice(0, -1).join(', ')} and ${names[names.length - 1]}`
 }
 
@@ -71,12 +85,15 @@ function checkedUrl(apiUrl: string): string {
   if (!url) throw new Error('Enter the JSON Ledger API URL.')
   const bad = badCharacters(url)
   if (bad) throw new Error(`The URL contains ${bad}, which a URL cannot have. Correct the URL and try again.`)
-  if (!/^(https?:\/\/|\/)/u.test(url)) throw new Error('The URL must start with http://, https:// or /.')
-  return url
+  if (/^https?:\/\//iu.test(url)) return url
+  // The browser reads "//host" and "/\host" as another site, not as a path on this one.
+  if (url.startsWith('/') && new URL(url, location.href).origin === location.origin) return url
+  throw new Error('The URL must start with http://, https:// or a path on this site, such as /participants/sv.')
 }
 
 function checkedToken(token: string): string {
   const value = token.trim()
+  if (/^bearer\s/iu.test(value)) throw new Error('Remove the word "Bearer" from the start of the token.')
   const bad = badCharacters(value)
   if (bad) throw new Error(`The token contains ${bad}, which a token cannot have. Paste it again.`)
   return value
@@ -118,25 +135,31 @@ export async function addCovalidator(name: string, apiUrl: string, token: string
 }
 
 /**
- * Replaces the token of a wallet or a covalidator, for participants whose
- * tokens expire. The participant must accept the new token and report the
- * same participant id, so the hosts that proposals bound to the record stay
- * valid.
+ * Replaces the token of every real wallet and covalidator on the participant
+ * of `recordId`, for participants whose tokens expire. A proposal reaches a
+ * shared participant through whichever of those records it bound first.
+ *
+ * The participant must accept the new token and report the same participant
+ * id. Any valid token passes that check, so it does not prove the token has
+ * participant-admin rights.
  */
 export async function replaceToken(recordId: string, token: string): Promise<void> {
   const { wallets, covalidators } = getState()
   const record = wallets.find((w) => w.id === recordId) ?? covalidators.find((c) => c.id === recordId)
   if (!record) throw new Error('This wallet or covalidator no longer exists.')
-  const participant: ParticipantLink = { ...record.participant, token: checkedToken(token) }
-  const participantId = await ledger.participantId(participant)
-  if (participantId !== record.participant.participantId) {
-    throw new Error(`The new token reaches participant ${participantId}, not ${record.participant.participantId}.`)
+  const { participantId: expected, apiUrl } = record.participant
+  const newToken = checkedToken(token)
+  const participantId = await ledger.participantId({ ...record.participant, token: newToken })
+  if (participantId !== expected) {
+    throw new Error(
+      `The participant at ${apiUrl} now reports id ${participantId}, not ${expected}. Add it again as a new wallet or covalidator.`,
+    )
   }
-  update((s) => ({
-    ...s,
-    wallets: s.wallets.map((w) => (w.id === recordId ? { ...w, participant } : w)),
-    covalidators: s.covalidators.map((c) => (c.id === recordId ? { ...c, participant } : c)),
-  }))
+  const withToken = <T extends { participant: ParticipantLink }>(r: T): T =>
+    !r.participant.simulated && r.participant.participantId === expected
+      ? { ...r, participant: { ...r.participant, token: newToken } }
+      : r
+  update((s) => ({ ...s, wallets: s.wallets.map(withToken), covalidators: s.covalidators.map(withToken) }))
 }
 
 const modeName = (simulated: boolean) => (simulated ? 'simulated' : 'real')
@@ -509,7 +532,7 @@ async function markHostedHosts(id: string, partyId: string, detail: string): Pro
           const answer = await ledger.getParty(connectionOf(h), partyId)
           if (partyHostedLocally(answer, partyId)) setHost(id, h.participant, 'hosted', detail)
         } catch (error) {
-          setHost(id, h.participant, h.step, `Still waiting: ${message(error)}`)
+          setHost(id, h.participant, h.step, `Still waiting: ${failureText(error)}`)
         }
       }),
   )
@@ -549,7 +572,7 @@ async function sendToHosts(
     refused = true
     const definite = result.reason instanceof ledger.LedgerError && result.reason.isRefusal
     if (role === 'owner' && !definite) changeProposal(id, (p) => ({ ...p, ownerAnswerUncertain: true }))
-    const said = message(result.reason)
+    const said = failureText(result.reason)
     setHost(
       id,
       host.participant,

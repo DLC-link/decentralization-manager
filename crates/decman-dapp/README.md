@@ -93,12 +93,20 @@ The forms fill in the localnet token. It is the public `ledger-api-user` token
 from `integration-tests/env.sh`, and it works only on a localnet.
 
 Each host's token needs participant-admin rights, because the dApp sends
-AllocateExternalParty without a user id. Use only localnet tokens in this mock:
-the browser stores them. Real owners will reach their participant through
+AllocateExternalParty without a user id. The browser stores the tokens as plain
+text. Use the localnet token, or a short-lived token from a test network.
+Never use a production token. Real owners will reach their participant through
 their wallet instead.
 
 A token that expires does not end a proposal. Use **Replace token** on the
-wallet or covalidator. Every later call reads the record's current token.
+wallet or covalidator. It changes the token of every wallet and covalidator on
+that participant, and every later call reads the new token. The check confirms
+the participant only. A token without participant-admin rights still saves, and
+the next submission to that participant then fails with 403.
+
+The URL and token fields, Replace token and their checks exist only for this
+stand-in. They go away when owners connect their wallets, and the dApp requests
+hosting through each covalidator's tenant API.
 
 ## Try it without a localnet
 

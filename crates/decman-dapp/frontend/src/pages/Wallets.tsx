@@ -106,20 +106,26 @@ export function Wallets() {
 /** Swaps in a fresh token. Proposals read the record's token at each call. */
 function ReplaceToken({ recordId }: { recordId: string }) {
   const [open, setOpen] = useState(false)
+  if (!open) return <button onClick={() => setOpen(true)}>Replace token</button>
+  // The editor mounts fresh on each open, so no old token or error comes back.
+  return <TokenEditor recordId={recordId} onClose={() => setOpen(false)} />
+}
+
+function TokenEditor({ recordId, onClose }: { recordId: string; onClose: () => void }) {
   const [token, setToken] = useState('')
+  const [saving, setSaving] = useState(false)
   const [error, run] = useAction()
 
-  if (!open) return <button onClick={() => setOpen(true)}>Replace token</button>
-
-  const close = () => {
-    setToken('')
-    setOpen(false)
-  }
-  const save = () =>
-    run(async () => {
+  const save = async () => {
+    setSaving(true)
+    let saved = false
+    await run(async () => {
       await replaceToken(recordId, token)
-      close()
+      saved = true
     })
+    if (saved) onClose()
+    else setSaving(false)
+  }
 
   return (
     <div className="token-editor">
@@ -127,12 +133,15 @@ function ReplaceToken({ recordId }: { recordId: string }) {
         type="password"
         value={token}
         onChange={(e) => setToken(e.target.value)}
+        disabled={saving}
         autoComplete="off"
         placeholder="New token"
         aria-label="New token"
       />
-      <button onClick={save}>Save</button>
-      <button className="ghost" onClick={close}>
+      <button onClick={save} disabled={saving}>
+        {saving ? 'Checking…' : 'Save'}
+      </button>
+      <button className="ghost" onClick={onClose} disabled={saving}>
         Cancel
       </button>
       <ErrorText error={error} />
@@ -198,7 +207,7 @@ function ParticipantForm({
       </div>
       <p className="hint">
         The dApp reads the participant id from the participant when you add it. If a token expires, use Replace token in
-        the list above.
+        the list above. It changes the token of every wallet and covalidator on that participant.
       </p>
       <ErrorText error={error} />
     </Section>
