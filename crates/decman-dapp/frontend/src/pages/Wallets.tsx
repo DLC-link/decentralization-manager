@@ -207,7 +207,7 @@ function ParticipantForm({
       </div>
       <p className="hint">
         The dApp reads the participant id from the participant when you add it. If a token expires, use Replace token in
-        the list above. It changes the token of every wallet and covalidator on that participant.
+        the list above. It changes the token of every wallet and covalidator with the same URL.
       </p>
       <ErrorText error={error} />
     </Section>

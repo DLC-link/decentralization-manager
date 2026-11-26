@@ -329,6 +329,7 @@ button.link {
 }
 
 .error {
+  white-space: pre-line;
   padding: 8px 12px;
   color: var(--error);
   background: var(--error-soft);

@@ -99,8 +99,8 @@ Never use a production token. Real owners will reach their participant through
 their wallet instead.
 
 A token that expires does not end a proposal. Use **Replace token** on the
-wallet or covalidator. It changes the token of every wallet and covalidator on
-that participant, and every later call reads the new token. The check confirms
+wallet or covalidator. It changes the token of every wallet and covalidator
+with the same URL, and every later call reads the new token. The check confirms
 the participant only. A token without participant-admin rights still saves, and
 the next submission to that participant then fails with 403.
 

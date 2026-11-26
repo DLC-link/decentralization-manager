@@ -60,6 +60,25 @@ const failureText = (error: unknown) =>
     ? `${message(error)}\nThe token may have expired. Use Replace token on the Wallets page.`
     : message(error)
 
+/** Runs `call`. A refused token gets the same hint as on the proposal card. */
+async function withTokenHint<T>(call: Promise<T>): Promise<T> {
+  try {
+    return await call
+  } catch (error) {
+    if (error instanceof ledger.LedgerError && error.status === 401) throw new Error(failureText(error))
+    throw error
+  }
+}
+
+/** Whether `url`, a path, stays on this site. */
+function onThisSite(url: string): boolean {
+  try {
+    return new URL(url, location.href).origin === location.origin
+  } catch {
+    return false
+  }
+}
+
 // Text copied from a terminal or a document can bring a space or a symbol
 // along. The participant then answers 404 or 401, which hides the cause.
 const NOT_PRINTABLE_ASCII = /[^\x21-\x7e]/gu
@@ -87,7 +106,7 @@ function checkedUrl(apiUrl: string): string {
   if (bad) throw new Error(`The URL contains ${bad}, which a URL cannot have. Correct the URL and try again.`)
   if (/^https?:\/\//iu.test(url)) return url
   // The browser reads "//host" and "/\host" as another site, not as a path on this one.
-  if (url.startsWith('/') && new URL(url, location.href).origin === location.origin) return url
+  if (url.startsWith('/') && onThisSite(url)) return url
   throw new Error('The URL must start with http://, https:// or a path on this site, such as /participants/sv.')
 }
 
@@ -135,9 +154,11 @@ export async function addCovalidator(name: string, apiUrl: string, token: string
 }
 
 /**
- * Replaces the token of every real wallet and covalidator on the participant
- * of `recordId`, for participants whose tokens expire. A proposal reaches a
- * shared participant through whichever of those records it bound first.
+ * Replaces the token of every real wallet and covalidator with the URL and the
+ * participant of `recordId`, for participants whose tokens expire. A proposal
+ * reaches a shared participant through whichever of those records it bound
+ * first. Only that URL checked the new token, so records at other URLs keep
+ * theirs.
  *
  * The participant must accept the new token and report the same participant
  * id. Any valid token passes that check, so it does not prove the token has
@@ -155,8 +176,9 @@ export async function replaceToken(recordId: string, token: string): Promise<voi
       `The participant at ${apiUrl} now reports id ${participantId}, not ${expected}. Add it again as a new wallet or covalidator.`,
     )
   }
+  const sameUrl = (other: string) => other.replace(/\/+$/u, '') === apiUrl.replace(/\/+$/u, '')
   const withToken = <T extends { participant: ParticipantLink }>(r: T): T =>
-    !r.participant.simulated && r.participant.participantId === expected
+    !r.participant.simulated && r.participant.participantId === expected && sameUrl(r.participant.apiUrl)
       ? { ...r, participant: { ...r.participant, token: newToken } }
       : r
   update((s) => ({ ...s, wallets: s.wallets.map(withToken), covalidators: s.covalidators.map(withToken) }))
@@ -287,16 +309,15 @@ export async function createProposal(
     return { participant, name, role: roleOf(plan, participant), recordId, step: 'waiting' }
   })
 
-  const synchronizers = await ledger.connectedSynchronizers(creator.participant)
+  const synchronizers = await withTokenHint(ledger.connectedSynchronizers(creator.participant))
   if (synchronizers.length !== 1) {
     throw new Error(
       `${creator.name}'s participant is connected to ${synchronizers.length} synchronizers. The dApp needs exactly one.`,
     )
   }
   const { synchronizerId } = synchronizers[0]
-  const generated = await ledger.generateTopology(
-    creator.participant,
-    generateTopologyRequest(synchronizerId, creator.publicKey),
+  const generated = await withTokenHint(
+    ledger.generateTopology(creator.participant, generateTopologyRequest(synchronizerId, creator.publicKey)),
   )
   const topologyVersion = topologyVersionOfGenerated(generated)
 
