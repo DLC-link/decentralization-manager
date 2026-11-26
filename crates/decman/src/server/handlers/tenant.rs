@@ -3233,7 +3233,7 @@ mod approve_hosting_tests {
         server::{middleware::AuthMiddleware, tenant_call_audit::TenantCallAuditRow},
         signing::{
             custody::SoftwareKeys,
-            fake_admin_api::{FakeAdminApi, TestNode},
+            fake_admin_api::{FakeAdminApi, TestNode, VaultKey},
             key_store::topology_transaction_hash,
         },
         workflow::external_party::steps::party_signing_key,
@@ -3311,14 +3311,17 @@ mod approve_hosting_tests {
         STANDARD.encode(topology_transaction_hash(&proposal.transaction))
     }
 
+    /// The party's namespace, owned by two keys outside this node.
     fn definition() -> DecentralizedNamespaceDefinition {
+        owned_by(format!("1220{}", "e1".repeat(32)))
+    }
+
+    /// The party's namespace, owned by `owner` and one key outside this node.
+    fn owned_by(owner: String) -> DecentralizedNamespaceDefinition {
         DecentralizedNamespaceDefinition {
             decentralized_namespace: namespace(),
             threshold: 2,
-            owners: vec![
-                format!("1220{}", "e1".repeat(32)),
-                format!("1220{}", "e2".repeat(32)),
-            ],
+            owners: vec![owner, format!("1220{}", "e2".repeat(32))],
         }
     }
 
@@ -3332,7 +3335,16 @@ mod approve_hosting_tests {
 
     impl Host {
         async fn start(db: SqlitePool, limit: u32) -> anyhow::Result<Self> {
-            let fake = FakeAdminApi::start(vec![]).await?;
+            Self::with_vault(db, limit, vec![]).await
+        }
+
+        /// A host whose participant's vault holds `keys`.
+        async fn with_vault(
+            db: SqlitePool,
+            limit: u32,
+            keys: Vec<VaultKey>,
+        ) -> anyhow::Result<Self> {
+            let fake = FakeAdminApi::start(keys).await?;
             let node = fake.node(SoftwareKeys::Refused, false).await?;
             let Ok(mut state) = Arc::try_unwrap(AppState::for_test_on(None, db).into_inner())
             else {
@@ -3552,6 +3564,74 @@ mod approve_hosting_tests {
                 .is_some_and(|e| e.contains("Confirmation")),
             "{row:?}"
         );
+        Ok(())
+    }
+
+    /// A covalidator is not an owner. When the vault holds a key that owns
+    /// the namespace, the node's signature would also be that owner's, so the
+    /// node refuses before it signs or submits anything.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_namespace_this_node_co_owns_is_refused_before_signing(
+        db: SqlitePool,
+    ) -> anyhow::Result<()> {
+        let owner_key = VaultKey::software("dapp-party-namespace", 9);
+        let host = Host::with_vault(db.clone(), 0, vec![owner_key.clone()]).await?;
+        host.fake
+            .publish_namespace(1, owned_by(owner_key.fingerprint().to_string()));
+        let pending = proposal(host.onboarding());
+        host.fake.propose(pending.clone());
+
+        let (status, body) = host.call("key", &hash_of(&pending)).await;
+
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        assert!(host.fake.sign_requests().is_empty());
+        assert!(host.fake.add_requests().is_empty());
+        let row = only_row(&db, StatusCode::BAD_REQUEST).await?;
+        assert!(
+            row.error
+                .as_deref()
+                .is_some_and(|e| e.contains(owner_key.fingerprint().as_str())
+                    && e.contains("owns the namespace")),
+            "{row:?}"
+        );
+        Ok(())
+    }
+
+    /// The node can sign for its own participant namespace even when the
+    /// root key is not in the vault, so that namespace counts as held too.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_namespace_its_participant_co_owns_is_refused(db: SqlitePool) -> anyhow::Result<()> {
+        let host = Host::start(db.clone(), 0).await?;
+        let participant_namespace = host.state.config.participant_id().namespace.to_hex();
+        host.fake
+            .publish_namespace(1, owned_by(participant_namespace));
+        let pending = proposal(host.onboarding());
+        host.fake.propose(pending.clone());
+
+        let (status, body) = host.call("key", &hash_of(&pending)).await;
+
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        assert!(host.fake.sign_requests().is_empty());
+        assert!(host.fake.add_requests().is_empty());
+        Ok(())
+    }
+
+    /// Keys of its own that own nothing here do not stop the node.
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn a_namespace_owned_only_by_outside_keys_still_signs(
+        db: SqlitePool,
+    ) -> anyhow::Result<()> {
+        let unrelated = VaultKey::software("another-party-namespace", 9);
+        let host = Host::with_vault(db.clone(), 0, vec![unrelated]).await?;
+        host.fake.publish_namespace(1, definition());
+        let pending = proposal(host.onboarding());
+        host.fake.propose(pending.clone());
+
+        let (status, body) = host.call("key", &hash_of(&pending)).await;
+
+        assert_eq!(status, StatusCode::ACCEPTED, "{body}");
+        assert_eq!(host.fake.sign_requests().len(), 1);
+        assert_eq!(host.fake.add_requests().len(), 1);
         Ok(())
     }
 

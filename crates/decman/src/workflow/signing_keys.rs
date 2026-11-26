@@ -171,6 +171,43 @@ pub async fn own_namespace_key(
     Ok(None)
 }
 
+/// The namespaces in `owners` that this node can sign for: its own
+/// participant namespace, and any namespace whose root key is in its vault.
+///
+/// Every vault key counts, whatever usage it declares. A key whose
+/// fingerprint is a namespace is that namespace's root key.
+///
+/// # Errors
+///
+/// Errors when the vault cannot be listed.
+pub async fn namespaces_held(config: &NodeConfig, owners: &[String]) -> Result<Vec<String>> {
+    let own_namespace = config.participant_id().namespace.to_hex();
+    let mut vault_client = VaultServiceClient::new(config.admin_channel().await?);
+    let response = vault_client
+        .list_my_keys(tonic::Request::new(ListMyKeysRequest {
+            filters: None,
+            base_request: None,
+        }))
+        .await?
+        .into_inner();
+
+    let mut vault = BTreeSet::new();
+    for meta in response.private_keys_metadata {
+        if let Some(private_key_metadata::PublicKeyWithName::V30(named)) = meta.public_key_with_name
+            && let Some(pk) = named.public_key
+            && let Some(public_key::Key::SigningPublicKey(signing_key)) = pk.key
+        {
+            vault.insert(utils::compute_fingerprint(&signing_key).to_string());
+        }
+    }
+
+    Ok(owners
+        .iter()
+        .filter(|owner| **owner == own_namespace || vault.contains(owner.as_str()))
+        .cloned()
+        .collect())
+}
+
 /// This node's own Daml signing-key fingerprint for a party: from its
 /// long-lived identity row, then the one vault key named for the party, then —
 /// for any `candidates` the caller already holds — the one whose private half

@@ -33,6 +33,10 @@ It signs the proposal only when every rule below holds:
 - The signing threshold is between 1 and the number of signing keys.
 - The party's namespace has a `DecentralizedNamespaceDefinition` in force.
 - No other `PartyToParticipant` is in force for the party.
+- This node holds no key for any owner of the party's namespace.
+
+DecMan refuses to co-validate a party whose namespace this node co-owns. Its
+signature would then also count as an owner's approval of the party.
 
 DecMan then signs the proposal with the node's topology key and submits it.
 Canton puts the mapping in force once every host has signed.

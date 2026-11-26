@@ -9,6 +9,10 @@
 //!
 //! The node never signs bytes the caller sends. It signs only what its own store
 //! holds, and only after [`check_hosting_proposal`] accepts it.
+//!
+//! A covalidator is never an owner. When this node holds a key for one of the
+//! party's owner namespaces, its signature would also count as that owner's
+//! approval. It refuses such a party, before it signs anything.
 
 use std::collections::HashSet;
 
@@ -36,7 +40,7 @@ use crate::{
     config::NodeConfig,
     signing::key_store::topology_transaction_hash,
     utils,
-    workflow::{topology, topology_version},
+    workflow::{signing_keys::namespaces_held, topology, topology_version},
 };
 
 /// Why this node did not approve hosting. Each variant is a different answer
@@ -228,6 +232,14 @@ pub async fn approve_hosting(
         },
         &transaction,
     )?;
+    let owners = definition
+        .as_ref()
+        .map(|definition| definition.owners.as_slice())
+        .unwrap_or_default();
+    let held = namespaces_held(config, owners)
+        .await
+        .map_err(ApproveHostingError::Canton)?;
+    refuse_co_owned(party_id, &held)?;
 
     sign_and_submit(config, &synchronizer_id, proposal)
         .await
@@ -255,6 +267,19 @@ pub async fn approve_hosting(
         }
     };
     Ok(Approval::Approved { hosted })
+}
+
+/// Refuse a party when this node holds a key for one of its owner
+/// namespaces. `held` lists those namespaces.
+fn refuse_co_owned(party_id: &str, held: &[String]) -> Result<(), ApproveHostingError> {
+    match held.first() {
+        None => Ok(()),
+        Some(owner) => Err(ApproveHostingError::Invalid(anyhow::anyhow!(
+            "this node holds a key for {owner}, which owns the namespace of {party_id}; its \
+             signature would also count as that owner's approval, so it does not approve \
+             hosting as a covalidator"
+        ))),
+    }
 }
 
 /// Why no pending proposal has the requested hash.
