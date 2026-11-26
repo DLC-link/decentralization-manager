@@ -1620,8 +1620,10 @@ pub async fn execute_action(
 /// without `DECPM_SCAN_URL` cannot disclose what a paid credential accept
 /// reads. That is a setting the caller can fix, so it is a 422, not a server
 /// fault. The message names the cause without internal detail. A scan error
-/// also keeps scan's HTTP status, which is not internal, so a scan 403 reads
-/// differently from a malformed reply or a dropped connection.
+/// also names scan's HTTP status in the message, because that status is not
+/// internal. A scan 403 then reads differently from a malformed reply or a
+/// dropped connection. The answer itself stays a 500: scan refused DecMan,
+/// not the caller.
 fn execute_failure(e: &anyhow::Error) -> (StatusCode, String) {
     let (status, error) = submission_failure("Failed to execute action", e);
     if e.downcast_ref::<ScanNotConfigured>().is_some() {
@@ -4874,10 +4876,11 @@ mod paid_accept_disclosure_tests {
         );
     }
 
-    /// An HTTP status is not internal, so a scan refusal keeps it. Scan's
-    /// body stays in the server log.
+    /// An HTTP status is not internal, so a scan refusal's message names it.
+    /// The answer stays a 500, because scan refused DecMan, not the caller.
+    /// Scan's body stays in the server log.
     #[test]
-    fn a_scan_refusal_keeps_its_status() {
+    fn a_scan_refusal_names_scans_status() {
         let error = anyhow::Error::new(ScanRefused {
             status: reqwest::StatusCode::FORBIDDEN,
             body: "access denied for 10.0.0.7".to_string(),
