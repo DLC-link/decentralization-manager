@@ -18,7 +18,7 @@ use std::collections::HashSet;
 
 use anyhow::Context;
 use canton_proto_rs::com::digitalasset::canton::{
-    crypto::v30::SigningKeysWithThreshold,
+    crypto::v30::{SigningKeyUsage, SigningKeysWithThreshold},
     protocol::v30::{
         DecentralizedNamespaceDefinition, PartyToParticipant, SignedTopologyTransaction,
         TopologyTransaction, topology_mapping,
@@ -32,7 +32,8 @@ use canton_proto_rs::com::digitalasset::canton::{
 use super::{
     add_hosts::pending_proposals,
     steps::{
-        HostOnboardingStatus, OnboardingParty, check_onboarding_mapping, host_onboarding_status,
+        HostOnboardingStatus, OnboardingParty, check_key_usage, check_onboarding_mapping,
+        host_onboarding_status,
     },
 };
 use crate::{
@@ -140,8 +141,8 @@ pub fn check_hosting_proposal<'t>(
     Ok(p2p)
 }
 
-/// A decentralized party's signing keys: at least one, none twice, at a
-/// threshold the keys can meet.
+/// A decentralized party's signing keys: at least one, none twice, each able
+/// to sign transactions, at a threshold the keys can meet.
 fn check_signing_keys(p2p: &PartyToParticipant) -> anyhow::Result<&SigningKeysWithThreshold> {
     let Some(keys) = p2p
         .party_signing_keys
@@ -156,6 +157,14 @@ fn check_signing_keys(p2p: &PartyToParticipant) -> anyhow::Result<&SigningKeysWi
         if !seen.insert(fingerprint.clone()) {
             anyhow::bail!("the proposal lists the party signing key {fingerprint} twice");
         }
+        // Without Protocol usage the key can never sign for the party, as on
+        // the single-key route.
+        check_key_usage(
+            "the proposal",
+            &format!("the party signing key {fingerprint}"),
+            key,
+            &[SigningKeyUsage::Protocol],
+        )?;
     }
     let max_threshold = u32::try_from(keys.keys.len()).unwrap_or(u32::MAX);
     if keys.threshold < 1 || keys.threshold > max_threshold {
@@ -598,6 +607,18 @@ mod tests {
             keys.keys[1] = copy;
         }
         assert!(refusal(&p2p(twice)).contains("twice"));
+    }
+
+    /// A key without Protocol usage cannot sign a transaction, so the party
+    /// would exist and never transact.
+    #[test]
+    fn refuses_a_signing_key_without_protocol_usage() {
+        let mut namespace_only = mapping(3, 2);
+        if let Some(keys) = namespace_only.party_signing_keys.as_mut() {
+            keys.keys[1].usage = vec![SigningKeyUsage::Namespace as i32];
+        }
+        let reason = refusal(&p2p(namespace_only));
+        assert!(reason.contains("missing Protocol"), "{reason}");
     }
 
     #[test]

@@ -30,6 +30,7 @@ It signs the proposal only when every rule below holds:
 - The confirmation threshold is between 1 and one less than the number of
   hosts, so a host can still leave later.
 - The party has at least one signing key, and no key twice.
+- Every signing key has Protocol usage, so it can sign transactions.
 - The signing threshold is between 1 and the number of signing keys.
 - The party's namespace has a `DecentralizedNamespaceDefinition` in force.
 - No other `PartyToParticipant` is in force for the party.

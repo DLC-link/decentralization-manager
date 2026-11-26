@@ -173,15 +173,12 @@ fn validate_onboarding_topology(
         // The floor still matters: without `Protocol` the party could never
         // authorize a transaction, and without `Namespace` it could not authorize
         // its own topology.
-        for required in [SigningKeyUsage::Namespace, SigningKeyUsage::Protocol] {
-            if !key.usage.contains(&(required as i32)) {
-                anyhow::bail!(
-                    "topology transaction {index} declares usage {usage:?} on the party's signing \
-                     key, which is missing {required:?}",
-                    usage = key.usage
-                );
-            }
-        }
+        check_key_usage(
+            &format!("topology transaction {index}"),
+            "the party's signing key",
+            key,
+            &[SigningKeyUsage::Namespace, SigningKeyUsage::Protocol],
+        )?;
 
         // Everything above checked a field at a time; this refuses anything the
         // mapping might carry that the checks above do not know about, so a future
@@ -206,6 +203,30 @@ fn validate_onboarding_topology(
         }
     }
 
+    Ok(())
+}
+
+/// Refuse a party signing key that lacks one of the `required` usages.
+/// `label` names the transaction and `key_label` the key in a refusal.
+///
+/// Usage is a floor, not an exact match: Canton adds usages of its own.
+///
+/// # Errors
+/// Returns the reason the key is refused.
+pub(super) fn check_key_usage(
+    label: &str,
+    key_label: &str,
+    key: &SigningPublicKey,
+    required: &[SigningKeyUsage],
+) -> Result<()> {
+    for &required in required {
+        if !key.usage.contains(&(required as i32)) {
+            anyhow::bail!(
+                "{label} declares usage {usage:?} on {key_label}, which is missing {required:?}",
+                usage = key.usage
+            );
+        }
+    }
     Ok(())
 }
 
